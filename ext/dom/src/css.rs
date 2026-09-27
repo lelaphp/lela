@@ -23,15 +23,7 @@ use php_ext_libxml::ffi::{Kind, Node, Quirks};
 
 use crate::object::Code;
 use crate::private::{HTML_NS, html_in_html_document, ns_is};
-use crate::{Entry, arity, bytes_arg, dom, object_for, this_node};
-
-/// The natives of this file.
-pub(crate) const METHODS: &[(&str, Entry)] = &[
-    ("Dom\\Element::querySelector", query_selector),
-    ("Dom\\Element::querySelectorAll", query_selector_all),
-    ("Dom\\Element::matches", matches),
-    ("Dom\\Element::closest", closest),
-];
+use crate::{dom, fetch, object_for};
 
 /// `lxb_status_t` as the engine answers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1509,45 +1501,30 @@ fn raise(req: &mut Request, status: Status, blank: bool) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// The selector argument and the receiver, `php_dom_dispatch_query_selector`'s
-/// and `dom_element_matches`' parameter parsing.
-fn selector_call(req: &mut Request) -> Result<(PhpObject, Node, List, Options), Thrown> {
-    arity(req, 1, 1)?;
-    let text = bytes_arg(req, 1)?;
-    let (this, node) = this_node(req)?;
-    let list = parse(req, &text)?;
+/// The receiver's node, the selector list parsed and the matching options,
+/// `php_dom_dispatch_query_selector`'s and `dom_element_matches`' start.
+fn selector_call(
+    req: &mut Request,
+    this: PhpObject,
+    text: &[u8],
+) -> Result<(Node, List, Options), Thrown> {
+    let node = fetch(req, this)?;
+    let list = parse(req, text)?;
     let options = Options {
         match_first: true,
         quirks: quirks(req, this),
     };
-    Ok((this, node, list, options))
+    Ok((node, list, options))
 }
 
-/// `Dom\ParentNode::querySelector(string $selectors): ?Dom\Element`,
 /// `dom_parent_node_query_selector`: the first element below the node in
 /// tree order that the list matches.
-///
-/// ```php
-/// $d = Dom\HTMLDocument::createFromString('<div id="a"><p class="x">1</p><P CLASS="y">2</P></div>', LIBXML_NOERROR);
-/// echo $d->querySelector('p.y')->textContent, ' ', $d->querySelector('DIV > P:last-child')->textContent, "\n";
-/// var_dump($d->querySelector('span'));
-/// echo $d->getElementById('a')->querySelector('#a p, .x')->textContent, "\n";
-/// $f = $d->createDocumentFragment();
-/// $f->append($d->createElement('b'));
-/// echo $f->querySelector(':root')->tagName, "\n";
-/// try { $d->querySelector('p >'); } catch (DOMException $e) { echo $e->getCode(), ' ', $e->getMessage(), "\n"; }
-/// try { $d->querySelector('p || p'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// 2 2
-/// NULL
-/// 1
-/// B
-/// 12 Invalid selector (Selectors. Unexpected token: END-OF-FILE)
-/// Dom\Document::querySelector(): Argument #1 ($selectors) contains an unsupported selector
-/// ```
-fn query_selector(req: &mut Request) -> Result<Value, Thrown> {
-    let (this, node, list, options) = selector_call(req)?;
+pub(crate) fn query_selector(
+    req: &mut Request,
+    this: PhpObject,
+    selectors: &[u8],
+) -> Result<Value, Thrown> {
+    let (node, list, options) = selector_call(req, this, selectors)?;
     let answer = find(node, &list, options, Sink::First(None));
     raise(req, answer.status, answer.blank)?;
     match answer.sink {
@@ -1556,34 +1533,14 @@ fn query_selector(req: &mut Request) -> Result<Value, Thrown> {
     }
 }
 
-/// `Dom\ParentNode::querySelectorAll(string $selectors): Dom\NodeList`,
 /// `dom_parent_node_query_selector_all`: every element below the node in
 /// tree order, once for each complex selector of the list it matches.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r><a class="x y"/><b id="i"><a/><c lang="en-GB"/></b><a class="Y"/></r>');
-/// foreach (['a', 'a, a.x', 'b > *', 'a ~ a', ':is(b) a', '[lang|=en]', '[class~=y i]', 'r :nth-child(2 of a)', ':not(a)', 'b:has(> c)', ':empty'] as $s) {
-///     $l = $d->querySelectorAll($s);
-///     echo get_class($l), ' ', $s, ':';
-///     foreach ($l as $n) echo ' ', $n->tagName;
-///     echo "\n";
-/// }
-/// ```
-/// ```expect
-/// Dom\NodeList a: a a a
-/// Dom\NodeList a, a.x: a a a a
-/// Dom\NodeList b > *: a c
-/// Dom\NodeList a ~ a: a
-/// Dom\NodeList :is(b) a: a
-/// Dom\NodeList [lang|=en]: c
-/// Dom\NodeList [class~=y i]: a a
-/// Dom\NodeList r :nth-child(2 of a): a
-/// Dom\NodeList :not(a): r b c
-/// Dom\NodeList b:has(> c): b
-/// Dom\NodeList :empty: a a c a
-/// ```
-fn query_selector_all(req: &mut Request) -> Result<Value, Thrown> {
-    let (this, node, list, options) = selector_call(req)?;
+pub(crate) fn query_selector_all(
+    req: &mut Request,
+    this: PhpObject,
+    selectors: &[u8],
+) -> Result<Value, Thrown> {
+    let (node, list, options) = selector_call(req, this, selectors)?;
     let options = Options {
         match_first: false,
         ..options
@@ -1608,51 +1565,26 @@ fn query_selector_all(req: &mut Request) -> Result<Value, Thrown> {
     crate::node_set(req, "Dom\\NodeList", array)
 }
 
-/// `Dom\Element::matches(string $selectors): bool`, `dom_element_matches`.
-///
-/// ```php
-/// $d = Dom\HTMLDocument::createFromString('<!DOCTYPE html><form><input type=CHECKBOX checked><input disabled></form>', LIBXML_NOERROR);
-/// $c = $d->querySelector('input');
-/// $x = $d->querySelector('input + input');
-/// var_dump($c->matches(':checked'), $c->matches('form > input:first-of-type'), $x->matches(':enabled'), $x->matches(':disabled'), $x->matches('[DISABLED]'));
-/// try { $c->matches(':blank'); } catch (DOMException $e) { echo $e->getCode(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// bool(true)
-/// bool(true)
-/// 9
-/// ```
-fn matches(req: &mut Request) -> Result<Value, Thrown> {
-    let (_, node, list, options) = selector_call(req)?;
+/// `dom_element_matches`: whether the list matches the element.
+pub(crate) fn matches(
+    req: &mut Request,
+    this: PhpObject,
+    selectors: &[u8],
+) -> Result<bool, Thrown> {
+    let (node, list, options) = selector_call(req, this, selectors)?;
     let answer = match_node(node, &list, options);
     raise(req, answer.status, answer.blank)?;
-    Ok(Value::bool(matches!(
-        answer.sink,
-        Sink::Matches { found: true, .. }
-    )))
+    Ok(matches!(answer.sink, Sink::Matches { found: true, .. }))
 }
 
-/// `Dom\Element::closest(string $selectors): ?Dom\Element`,
 /// `dom_element_closest`: the element itself or its nearest ancestor that
 /// the list matches.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r><s class="a"><t><u/></t></s></r>');
-/// $u = $d->getElementsByTagName('u')->item(0);
-/// echo $u->closest('u')->tagName, ' ', $u->closest('.a')->tagName, ' ', $u->closest('r > *')->tagName, "\n";
-/// var_dump($u->closest('v'));
-/// try { $u->closest('<'); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// u s s
-/// NULL
-/// Invalid selector (Selectors. Unexpected token: <)
-/// ```
-fn closest(req: &mut Request) -> Result<Value, Thrown> {
-    let (this, node, list, options) = selector_call(req)?;
+pub(crate) fn closest(
+    req: &mut Request,
+    this: PhpObject,
+    selectors: &[u8],
+) -> Result<Value, Thrown> {
+    let (node, list, options) = selector_call(req, this, selectors)?;
     let mut blank = false;
     let mut at = Some(node);
     while let Some(current) = at {

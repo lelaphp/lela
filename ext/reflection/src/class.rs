@@ -6,24 +6,29 @@
 //! `_class_string` renders (`linked_methods`, `linked_interfaces`,
 //! `linked_constants`, `linked_properties`).
 //!
-//! What stands beside `stub::unbuilt` still: `getTraitAliases`, whose
-//! `use ... as ...` list the declaration model does not carry; and the
-//! eight lazy-object entries, each of which takes
-//! a `Closure` (#415).
+//! What still shares the entry of the methods not yet served:
+//! `getTraitAliases`, whose `use ... as ...` list the declaration model
+//! does not carry.
 
-use php_ext::call::{instantiate, read_class_prop_silent, write_static_prop};
+use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
+use php_ext::attr::php_class;
+use php_ext::call::{
+    eval_const_expr, initialize_lazy, instantiate, mark_lazy_initialized, read_class_prop_silent,
+    write_static_prop,
+};
 use php_ext::decl::{ClassKind, MethodDecl, Visibility};
-use php_ext::raising::{Thrown, arg_count_error, throw};
+use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
+use super::lazy::{Strategy, new_lazy, object_of};
 use super::{
-    at_most_arguments, class_chain, class_constant_named, class_is, class_name_of, class_named,
-    closure_invoke, dynamic_properties, exactly_arguments, is_closure_invoke, is_constructor, keep,
-    kept_closure, kept_object, linked_constants, linked_interfaces, linked_methods,
-    linked_properties, lookup_class, method_or_invoke, new_object, one_string_argument,
-    property_named, reflection_class_factory, set_name, set_string_prop, string_argument,
-    string_value, this_class,
+    answer, attr, class_chain, class_constant_named, class_extension_name, class_is, class_name_of,
+    class_named, class_of, class_string, closure_invoke, constant_value, dynamic_properties,
+    is_closure_invoke, is_constructor, is_internal, keep, kept_closure, kept_object,
+    linked_constants, linked_interfaces, linked_methods, linked_properties, lookup_class,
+    method_or_invoke, namespace_end, new_object, property_named, reflection_class_factory,
+    set_name, set_string_prop, string_value, this_class, user_line,
 };
 
 /// `ZEND_ACC_INTERFACE`, `ZEND_ACC_TRAIT` and `ZEND_ACC_ENUM`.
@@ -123,339 +128,32 @@ fn class_constant_factory(
     Ok(object)
 }
 
-/// `ReflectionClass::isInterface()`: `ZEND_ACC_INTERFACE`.
-///
-/// ```php
-/// var_dump((new ReflectionClass('JsonSerializable'))->isInterface());
-/// var_dump((new ReflectionClass('Exception'))->isInterface());
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_is_interface(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    Ok(Value::bool(kind_of(req, class) == ClassKind::Interface))
-}
-
-/// `ReflectionClass::isTrait()`: `ZEND_ACC_TRAIT`.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->isTrait());
-/// ```
-/// ```expect
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_is_trait(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    Ok(Value::bool(kind_of(req, class) == ClassKind::Trait))
-}
-
-/// `ReflectionClass::isEnum()`: `ZEND_ACC_ENUM`.
-///
-/// ```php
-/// var_dump((new ReflectionClass('PropertyHookType'))->isEnum());
-/// var_dump((new ReflectionClass('Exception'))->isEnum());
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_is_enum(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    Ok(Value::bool(kind_of(req, class) == ClassKind::Enum))
-}
-
-/// `ReflectionClass::isFinal()`: `ZEND_ACC_FINAL`.
-///
-/// ```php
-/// var_dump((new ReflectionClass('ReflectionGenerator'))->isFinal());
-/// var_dump((new ReflectionClass('Exception'))->isFinal());
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_is_final(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let final_ = req
-        .class_decl(class)
-        .is_some_and(|decl| decl.flags.is_final);
-    Ok(Value::bool(final_))
-}
-
-/// `ReflectionClass::isReadOnly()`: `ZEND_ACC_READONLY_CLASS`.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->isReadOnly());
-/// ```
-/// ```expect
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_is_read_only(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let readonly = req
-        .class_decl(class)
-        .is_some_and(|decl| decl.flags.is_readonly);
-    Ok(Value::bool(readonly))
-}
-
-/// `ReflectionClass::isAnonymous()`: `ZEND_ACC_ANON_CLASS`, which a
-/// class declared by `new class` carries.
-///
-/// ```php
-/// class Named {}
-/// var_dump((new ReflectionClass('Exception'))->isAnonymous(), (new ReflectionClass('Named'))->isAnonymous());
-/// $r = new ReflectionClass(new class extends Named {});
-/// var_dump($r->isAnonymous(), $r->getShortName() === $r->getName(), strstr($r->getName(), "\0", true));
-/// ```
-/// ```expect
-/// bool(false)
-/// bool(false)
-/// bool(true)
-/// bool(true)
-/// string(15) "Named@anonymous"
-/// ```
-pub(super) fn reflection_class_is_anonymous(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let anonymous = req
-        .class_decl(class)
-        .is_some_and(|decl| decl.flags.is_anonymous);
-    Ok(Value::bool(anonymous))
-}
-
-/// `ReflectionClass::getModifiers()`: the `ZEND_ACC_FINAL`,
-/// `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS` and `ZEND_ACC_READONLY_CLASS`
-/// bits of `ce_flags`, the numbers the stub's `IS_*` constants name.
-///
-/// ```php
-/// var_dump((new ReflectionClass('ReflectionGenerator'))->getModifiers());
-/// var_dump((new ReflectionClass('ReflectionFunctionAbstract'))->getModifiers());
-/// ```
-/// ```expect
-/// int(32)
-/// int(64)
-/// ```
-pub(super) fn reflection_class_get_modifiers(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let Some(flags) = req.class_decl(class).map(|decl| decl.flags) else {
-        return Ok(Value::int(0));
-    };
-    let mut bits = 0;
-    if flags.is_final {
-        bits |= 32;
-    }
-    if flags.is_abstract {
-        bits |= 64;
-    }
-    if flags.is_readonly {
-        bits |= 65536;
-    }
-    Ok(Value::int(bits))
-}
-
-/// `ReflectionClass::isInstantiable()`: an interface, a trait, an enum
-/// or an abstract class is not; anything else is, unless its
-/// constructor is not public.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->isInstantiable());
-/// var_dump((new ReflectionClass('JsonSerializable'))->isInstantiable());
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_is_instantiable(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    if cannot_instantiate(req, class) {
-        return Ok(Value::bool(false));
-    }
-    let public =
-        constructor_of(req, class).is_none_or(|(decl, _)| decl.visibility == Visibility::Public);
-    Ok(Value::bool(public))
-}
-
-/// `ReflectionClass::isCloneable()`: an interface, a trait, an enum or
-/// an abstract class is not; a class with a `__clone` is cloneable
-/// while that method is public; anything else is, since every object
-/// here has php's `clone_obj`.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->isCloneable());
-/// var_dump((new ReflectionClass('ReflectionClass'))->isCloneable());
-/// ```
-/// ```expect
-/// bool(false)
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_is_cloneable(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    if cannot_instantiate(req, class) {
-        return Ok(Value::bool(false));
-    }
-    let clone = linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.eq_ignore_ascii_case(b"__clone"));
-    Ok(Value::bool(
-        clone.is_none_or(|m| m.decl.visibility == Visibility::Public),
-    ))
-}
-
-/// `ReflectionClass::isIterable()` and its old spelling
-/// `isIterateable()`: whether the class implements `Traversable` and
-/// can be instantiated.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->isIterable());
-/// var_dump((new ReflectionClass('Exception'))->isIterateable());
-/// ```
-/// ```expect
-/// bool(false)
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_is_iterable(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    if cannot_instantiate(req, class) {
-        return Ok(Value::bool(false));
-    }
-    let Some(traversable) = lookup_class(req, b"Traversable")? else {
-        return Ok(Value::bool(false));
-    };
-    Ok(Value::bool(class_is(req, class, traversable, 0)))
-}
-
-/// `ReflectionClass::getDocComment()`: `ce->doc_comment`, and `false`
-/// where there is none.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->getDocComment());
-/// ```
-/// ```expect
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_get_doc_comment(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let Some(doc) = req.class_decl(class).and_then(|d| d.doc_comment.clone()) else {
-        return Ok(Value::bool(false));
-    };
-    string_value(req, &doc)
-}
-
-/// `ReflectionClass::getParentClass()`:
-/// `zend_reflection_class_factory` over `ce->parent`, and `false`
-/// where the class extends nothing.
-///
-/// ```php
-/// var_dump((new ReflectionClass('JsonException'))->getParentClass()->getName());
-/// var_dump((new ReflectionClass('Exception'))->getParentClass());
-/// ```
-/// ```expect
-/// string(9) "Exception"
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_get_parent_class(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let Some(parent) = class_chain(req, class).get(1).copied() else {
-        return Ok(Value::bool(false));
-    };
-    let object = reflection_class_factory(req, parent)?;
-    Ok(object.as_value())
-}
-
-/// `ReflectionClass::isInstance(object $object)`:
-/// `instanceof_function` over the object's class.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->isInstance(new JsonException));
-/// var_dump((new ReflectionClass('JsonException'))->isInstance(new Exception));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_is_instance(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default();
-    let given = php_ext::coerce::coerce_param(req, &given, &php_ext::decl::Type::Object, 1)?;
-    let Some(object) = given.as_object() else {
-        return Ok(Value::bool(false));
-    };
-    let of = object.class();
-    let class = this_class(req)?;
-    Ok(Value::bool(class_is(req, of, class, 0)))
-}
-
-/// `ReflectionClass::implementsInterface(string|ReflectionClass
-/// $interface)`: `instanceof_function` again, with php's `ReflectionException` for
-/// a name that is not an interface.
-///
-/// ```php
-/// var_dump((new ReflectionClass('JsonException'))->implementsInterface('Throwable'));
-/// ```
-/// ```expect
-/// bool(true)
-/// ```
-///
-/// ```php
-/// (new ReflectionClass('JsonException'))->implementsInterface('Exception');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Exception is not an interface in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->implementsInterface('Exception')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-pub(super) fn reflection_class_implements_interface(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 1)?;
-    let interface = reflector_argument(req, 1, "Interface")?;
-    if kind_of(req, interface) != ClassKind::Interface {
-        let name = class_name_of(req, interface);
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!("{} is not an interface", String::from_utf8_lossy(&name)),
-        ));
-    }
-    let class = this_class(req)?;
-    Ok(Value::bool(class_is(req, class, interface, 0)))
-}
-
-/// `Z_PARAM_OBJ_OF_CLASS_OR_STR(reflection_class_ptr)`: a
+/// `Z_PARAM_OBJ_OF_CLASS_OR_STR(reflection_class_ptr)`'s value: a
 /// `ReflectionClass` is the class it names, a string is
 /// `zend_lookup_class`, and a miss is php's `ReflectionException`,
 /// `Interface` or `Class` naming which it wanted.
-fn reflector_argument(req: &mut Request, position: u32, what: &str) -> Result<ClassId, Thrown> {
-    if let Some(given) = req.argument(position)
-        && let ValueRef::Object(object) = given.deref().as_ref()
-    {
-        let object = *object;
-        let Some(name) = object
-            .prop(req, b"name")
-            .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-        else {
-            return Err(throw(
-                req,
-                "Error",
-                "Internal error: Failed to retrieve the argument's reflection object",
-            ));
-        };
-        return class_named(req, &name);
-    }
-    let name = string_argument(req, position)?;
+fn reflector_class(
+    req: &mut Request,
+    given: Union<Instance<ReflectionClass>, PhpString>,
+    what: &str,
+) -> Result<ClassId, Thrown> {
+    let name = match given {
+        Union::A(reflector) => {
+            let Some(name) = reflector
+                .object()
+                .prop(req, b"name")
+                .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
+            else {
+                return Err(throw(
+                    req,
+                    "Error",
+                    "Internal error: Failed to retrieve the argument's reflection object",
+                ));
+            };
+            return class_named(req, &name);
+        }
+        Union::B(name) => name.as_bytes().to_vec(),
+    };
     let bare = name.strip_prefix(b"\\").unwrap_or(&name);
     match lookup_class(req, bare)? {
         Some(class) => Ok(class),
@@ -470,215 +168,7 @@ fn reflector_argument(req: &mut Request, position: u32, what: &str) -> Result<Cl
     }
 }
 
-/// `ReflectionClass::getInterfaceNames()`: `ce->interfaces`, the
-/// linked list in php's order.
-///
-/// ```php
-/// var_dump((new ReflectionClass('JsonException'))->getInterfaceNames());
-/// ```
-/// ```expect
-/// array(2) {
-///   [0]=>
-///   string(9) "Throwable"
-///   [1]=>
-///   string(10) "Stringable"
-/// }
-/// ```
-pub(super) fn reflection_class_get_interface_names(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let mut names = PhpArray::new(req)?;
-    for interface in linked_interfaces(req, class) {
-        let name = class_name_of(req, interface);
-        let value = string_value(req, &name)?;
-        names.append(req, value)?;
-    }
-    Ok(Value::array(names))
-}
-
-/// `ReflectionClass::getInterfaces()`: the same list, each name a
-/// `ReflectionClass`, keyed by the interface's name.
-///
-/// ```php
-/// var_dump((new ReflectionClass('JsonException'))->getInterfaces());
-/// ```
-/// ```expect
-/// array(2) {
-///   ["Throwable"]=>
-///   object(ReflectionClass)#2 (1) {
-///     ["name"]=>
-///     string(9) "Throwable"
-///   }
-///   ["Stringable"]=>
-///   object(ReflectionClass)#3 (1) {
-///     ["name"]=>
-///     string(10) "Stringable"
-///   }
-/// }
-/// ```
-pub(super) fn reflection_class_get_interfaces(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let mut interfaces = PhpArray::new(req)?;
-    for interface in linked_interfaces(req, class) {
-        let name = class_name_of(req, interface);
-        let object = reflection_class_factory(req, interface)?;
-        let key = PhpString::new(req, &name)?;
-        interfaces.set(req, Key::Str(key), object.as_value())?;
-    }
-    Ok(Value::array(interfaces))
-}
-
-/// `ReflectionClass::getTraitNames()`: `ce->trait_names`, the traits
-/// the class itself uses.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->getTraitNames());
-/// ```
-/// ```expect
-/// array(0) {
-/// }
-/// ```
-pub(super) fn reflection_class_get_trait_names(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let traits = req
-        .class_decl(class)
-        .map(|decl| decl.traits.clone())
-        .unwrap_or_default();
-    let mut names = PhpArray::new(req)?;
-    for trait_ in traits {
-        let found = lookup_class(req, &trait_.0)?;
-        let name = found.map_or_else(|| trait_.0.to_vec(), |found| class_name_of(req, found));
-        let value = string_value(req, &name)?;
-        names.append(req, value)?;
-    }
-    Ok(Value::array(names))
-}
-
-/// `ReflectionClass::getTraits()`: the same list, each name a
-/// `ReflectionClass`, keyed by the trait's name.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->getTraits());
-/// ```
-/// ```expect
-/// array(0) {
-/// }
-/// ```
-pub(super) fn reflection_class_get_traits(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let traits = req
-        .class_decl(class)
-        .map(|decl| decl.traits.clone())
-        .unwrap_or_default();
-    let mut found = PhpArray::new(req)?;
-    for trait_ in traits {
-        let Some(at) = lookup_class(req, &trait_.0)? else {
-            continue;
-        };
-        let name = class_name_of(req, at);
-        let object = reflection_class_factory(req, at)?;
-        let key = PhpString::new(req, &name)?;
-        found.set(req, Key::Str(key), object.as_value())?;
-    }
-    Ok(Value::array(found))
-}
-
 // -------------------------------------------------------- the tables
-
-/// `ReflectionClass::hasMethod(string $name)`:
-/// `zend_hash_exists(&ce->function_table, lc_name)`.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->hasMethod('getCode'));
-/// var_dump((new ReflectionClass('Exception'))->hasMethod('nope'));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_has_method(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let class = this_class(req)?;
-    let lowered = name.to_ascii_lowercase();
-    let found = linked_methods(req, class)
-        .into_iter()
-        .any(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered);
-    Ok(Value::bool(
-        found || is_closure_invoke(req, class, &lowered),
-    ))
-}
-
-/// `ReflectionClass::getMethod(string $name)`:
-/// `reflection_method_factory` over the function table's entry, and
-/// php's `ReflectionException` for a name it has not.
-///
-/// ```php
-/// var_dump((new ReflectionClass('JsonException'))->getMethod('getCode')->getName());
-/// ```
-/// ```expect
-/// string(7) "getCode"
-/// ```
-///
-/// ```php
-/// (new ReflectionClass('Exception'))->getMethod('nope');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Method Exception::nope() does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->getMethod('nope')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-pub(super) fn reflection_class_get_method(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let class = this_class(req)?;
-    let kept = req.this().and_then(|this| kept_closure(req, this));
-    let Some(found) = method_or_invoke(req, class, &name, kept) else {
-        let named = class_name_of(req, class);
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Method {}::{}() does not exist",
-                String::from_utf8_lossy(&named),
-                String::from_utf8_lossy(&name)
-            ),
-        ));
-    };
-    let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
-    // The `__invoke` php makes keeps the closure it was made over.
-    if found.via_handler
-        && let Some(kept) = kept
-    {
-        keep(req, object, class, Some(kept));
-    }
-    Ok(object.as_value())
-}
-
-/// `ReflectionClass::getConstructor()`:
-/// `reflection_method_factory` over `ce->constructor`, and `null`
-/// where the class has none.
-///
-/// ```php
-/// var_dump((new ReflectionClass('Exception'))->getConstructor()->getName());
-/// var_dump((new ReflectionClass('JsonSerializable'))->getConstructor());
-/// ```
-/// ```expect
-/// string(11) "__construct"
-/// NULL
-/// ```
-pub(super) fn reflection_class_get_constructor(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let Some((decl, scope)) = constructor_of(req, class) else {
-        return Ok(Value::null());
-    };
-    let object = method_factory(req, &decl.function.name.0, scope, class)?;
-    Ok(object.as_value())
-}
 
 /// `_addmethod`'s filter: the default is
 /// `ZEND_ACC_PPP_MASK | ABSTRACT | FINAL | STATIC`, which every method
@@ -701,370 +191,7 @@ fn method_bits(decl: &MethodDecl) -> i64 {
     bits
 }
 
-/// The `?int $filter` argument the three table readers share, `null`
-/// being the default mask php substitutes.
-fn filter_argument(req: &mut Request, default: i64) -> Result<i64, Thrown> {
-    let given = req.argument(1).unwrap_or_default().deref();
-    if matches!(given.as_ref(), ValueRef::Null | ValueRef::Undef) {
-        return Ok(default);
-    }
-    php_ext::coerce::to_long(req, &given)
-}
-
-/// `ReflectionClass::getMethods(?int $filter = null)`: one
-/// `ReflectionMethod` per row of the function table whose flags the
-/// filter keeps, a parent's private method skipped as `_addmethod`
-/// skips it.
-///
-/// ```php
-/// var_dump(count((new ReflectionClass('JsonSerializable'))->getMethods()));
-/// ```
-/// ```expect
-/// int(1)
-/// ```
-pub(super) fn reflection_class_get_methods(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 1)?;
-    let filter = filter_argument(req, 1 | 2 | 4 | 16 | 32 | 64)?;
-    let class = this_class(req)?;
-    let mut methods = PhpArray::new(req)?;
-    for found in linked_methods(req, class) {
-        if found.decl.visibility == Visibility::Private && found.scope != class {
-            continue;
-        }
-        if method_bits(&found.decl) & filter == 0 {
-            continue;
-        }
-        let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
-        methods.append(req, object.as_value())?;
-    }
-    // `zend_get_closure_invoke_method` over the kept closure, or a fresh
-    // one, appended where the filter keeps a public instance method.
-    let is_closure = lookup_class(req, b"Closure")?.is_some_and(|c| c == class);
-    let kept = req.this().and_then(|this| kept_closure(req, this));
-    if is_closure
-        && filter & 1 != 0
-        && let Some(invoke) = closure_invoke(req, kept)
-    {
-        let object = method_factory(req, &invoke.decl.function.name.0, invoke.scope, class)?;
-        if let Some(kept) = kept {
-            keep(req, object, class, Some(kept));
-        }
-        methods.append(req, object.as_value())?;
-    }
-    Ok(Value::array(methods))
-}
-
-/// `ReflectionClass::getProperty(string $name)`:
-/// `reflection_property_factory` over the property info, and php's
-/// `ReflectionException` for a name the class has not.
-///
-/// ```php
-/// var_dump((new ReflectionClass('JsonException'))->getProperty('message'));
-/// ```
-/// ```expect
-/// object(ReflectionProperty)#2 (2) {
-///   ["name"]=>
-///   string(7) "message"
-///   ["class"]=>
-///   string(9) "Exception"
-/// }
-/// ```
-///
-/// ```php
-/// (new ReflectionClass('Exception'))->getProperty('nope');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Property Exception::$nope does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->getProperty('nope')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// A `ReflectionObject` finds the object's dynamic properties too, with
-/// `$class` the object's class, and a `Base::name` spelling reaches the
-/// property through a class the reflected one extends:
-///
-/// ```php
-/// class A { public $a = 1; } class B extends A {}
-/// $o = new B; $o->d = 2;
-/// var_dump((new ReflectionObject($o))->getProperty('d')->class, (new ReflectionClass('B'))->getProperty('A::a')->class);
-/// try { (new ReflectionClass('A'))->getProperty('B::a'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Deprecated: Creation of dynamic property B::$d is deprecated in %s on line 3
-/// string(1) "B"
-/// string(1) "A"
-/// Fully qualified property name B::$a does not specify a base class of A
-/// ```
-pub(super) fn reflection_class_get_property(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let class = this_class(req)?;
-    if let Some((scope, _)) = property_named(req, class, &name) {
-        return Ok(property_factory(req, &name, scope, class)?.as_value());
-    }
-    if let Some(object) = req.this().and_then(|this| kept_object(req, this))
-        && dynamic_properties(req, class, object).contains(&name)
-    {
-        return Ok(property_factory(req, &name, class, class)?.as_value());
-    }
-    // `Base::name`: the property of a class the reflected one is, or
-    // the exception below naming the part after the colons.
-    let (mut ce, mut short) = (class, name.clone());
-    if let Some(at) = name.windows(2).position(|pair| pair == b"::") {
-        short = name[at + 2..].to_vec();
-        let base = class_named(req, &name[..at])?;
-        if !class_is(req, class, base, 0) {
-            let (base, named) = (class_name_of(req, base), class_name_of(req, class));
-            return Err(throw(
-                req,
-                "ReflectionException",
-                &format!(
-                    "Fully qualified property name {}::${} does not specify a base class of {}",
-                    String::from_utf8_lossy(&base),
-                    String::from_utf8_lossy(&short),
-                    String::from_utf8_lossy(&named)
-                ),
-            ));
-        }
-        ce = base;
-        if let Some((scope, _)) = property_named(req, ce, &short) {
-            return Ok(property_factory(req, &short, scope, ce)?.as_value());
-        }
-    }
-    let named = class_name_of(req, ce);
-    Err(throw(
-        req,
-        "ReflectionException",
-        &format!(
-            "Property {}::${} does not exist",
-            String::from_utf8_lossy(&named),
-            String::from_utf8_lossy(&short)
-        ),
-    ))
-}
-
-/// `ReflectionClass::getProperties(?int $filter = null)`: one
-/// `ReflectionProperty` per row of `ce->properties_info` whose flags
-/// the filter keeps, a parent's private property skipped as
-/// `_addproperty` skips it.
-///
-/// ```php
-/// var_dump(count((new ReflectionClass('Exception'))->getProperties()));
-/// ```
-/// ```expect
-/// int(7)
-/// ```
-pub(super) fn reflection_class_get_properties(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 1)?;
-    let filter = filter_argument(req, 1 | 2 | 4 | 16)?;
-    let class = this_class(req)?;
-    let mut properties = PhpArray::new(req)?;
-    for (decl, scope) in linked_properties(req, class) {
-        if decl.visibility == Visibility::Private && scope != class {
-            continue;
-        }
-        let bits = super::member::property_flags(req, scope, &decl.name.0, &decl);
-        if bits & filter == 0 {
-            continue;
-        }
-        let object = property_factory(req, &decl.name.0, scope, class)?;
-        properties.append(req, object.as_value())?;
-    }
-    // `_adddynproperty` over the kept object's table, where the filter
-    // keeps public ones: a dynamic property is public.
-    if filter & 1 != 0
-        && let Some(object) = req.this().and_then(|this| kept_object(req, this))
-    {
-        for name in dynamic_properties(req, class, object) {
-            let object = property_factory(req, &name, class, class)?;
-            properties.append(req, object.as_value())?;
-        }
-    }
-    Ok(Value::array(properties))
-}
-
-/// `ReflectionClass::getConstants(?int $filter = null)`: the constants
-/// table as an array keyed by name, each value the constant
-/// expression evaluated in its declaring class.
-///
-/// ```php
-/// var_dump((new ReflectionClass('ReflectionFunction'))->getConstants());
-/// ```
-/// ```expect
-/// array(1) {
-///   ["IS_DEPRECATED"]=>
-///   int(2048)
-/// }
-/// ```
-pub(super) fn reflection_class_get_constants(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 1)?;
-    let filter = filter_argument(req, 1 | 2 | 4)?;
-    let class = this_class(req)?;
-    let mut constants = PhpArray::new(req)?;
-    for (decl, scope) in linked_constants(req, class) {
-        let bits = match decl.visibility {
-            Visibility::Public => 1,
-            Visibility::Protected => 2,
-            Visibility::Private => 4,
-        };
-        if bits & filter == 0 {
-            continue;
-        }
-        let value = super::constant_value(req, &decl, scope)?;
-        let key = PhpString::new(req, &decl.name.0)?;
-        constants.set(req, Key::Str(key), value)?;
-    }
-    Ok(Value::array(constants))
-}
-
-/// `ReflectionClass::getReflectionConstants(?int $filter = null)`: the
-/// same table, each row a `ReflectionClassConstant`.
-///
-/// ```php
-/// var_dump(count((new ReflectionClass('ReflectionFunction'))->getReflectionConstants()));
-/// ```
-/// ```expect
-/// int(1)
-/// ```
-pub(super) fn reflection_class_get_reflection_constants(
-    req: &mut Request,
-) -> Result<Value, Thrown> {
-    at_most_arguments(req, 1)?;
-    let filter = filter_argument(req, 1 | 2 | 4)?;
-    let class = this_class(req)?;
-    let mut constants = PhpArray::new(req)?;
-    for (decl, scope) in linked_constants(req, class) {
-        let bits = match decl.visibility {
-            Visibility::Public => 1,
-            Visibility::Protected => 2,
-            Visibility::Private => 4,
-        };
-        if bits & filter == 0 {
-            continue;
-        }
-        let object = class_constant_factory(req, &decl.name.0, scope)?;
-        constants.append(req, object.as_value())?;
-    }
-    Ok(Value::array(constants))
-}
-
-/// `ReflectionClass::getReflectionConstant(string $name)`: one
-/// `ReflectionClassConstant`, and `false` for a name the table has
-/// not.
-///
-/// ```php
-/// var_dump((new ReflectionClass('ReflectionFunction'))->getReflectionConstant('IS_DEPRECATED'));
-/// var_dump((new ReflectionClass('ReflectionFunction'))->getReflectionConstant('nope'));
-/// ```
-/// ```expect
-/// object(ReflectionClassConstant)#2 (2) {
-///   ["name"]=>
-///   string(13) "IS_DEPRECATED"
-///   ["class"]=>
-///   string(18) "ReflectionFunction"
-/// }
-/// bool(false)
-/// ```
-pub(super) fn reflection_class_get_reflection_constant(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let class = this_class(req)?;
-    let Some((scope, decl)) = class_constant_named(req, class, &name) else {
-        return Ok(Value::bool(false));
-    };
-    let object = class_constant_factory(req, &decl.name.0, scope)?;
-    Ok(object.as_value())
-}
-
 // ------------------------------------------------------ making one
-
-/// `ReflectionClass::newInstance(mixed ...$args)`: `object_init_ex`
-/// and the constructor served over the arguments, php's
-/// `ReflectionException` for a class that cannot be instantiated.
-///
-/// ```php
-/// var_dump((new ReflectionClass('JsonException'))->newInstance('x')->getMessage());
-/// ```
-/// ```expect
-/// string(1) "x"
-/// ```
-pub(super) fn reflection_class_new_instance(req: &mut Request) -> Result<Value, Thrown> {
-    let class = this_class(req)?;
-    let mut arguments = Vec::new();
-    for position in 1..=req.argument_count() {
-        let at = u32::try_from(position).unwrap_or(u32::MAX);
-        arguments.push(req.argument(at).unwrap_or_default());
-    }
-    new_instance(req, class, &arguments)
-}
-
-/// `ReflectionClass::newInstanceArgs(array $args = [])`: the same,
-/// over the array's values in order.
-///
-/// ```php
-/// var_dump((new ReflectionClass('JsonException'))->newInstanceArgs(['x'])->getMessage());
-/// ```
-/// ```expect
-/// string(1) "x"
-/// ```
-///
-/// What is no array is php's `TypeError`, whose tail names the value as
-/// `zend_zval_value_name` does and not as `zend_zval_type_name` does, so
-/// `true` stands where the type alone would read `bool` (#462):
-///
-/// ```php
-/// (new ReflectionClass('JsonException'))->newInstanceArgs(true);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: ReflectionClass::newInstanceArgs(): Argument #1 ($args) must be of type array, true given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->newInstanceArgs(true)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-pub(super) fn reflection_class_new_instance_args(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 1)?;
-    let class = this_class(req)?;
-    let mut arguments = Vec::new();
-    if let Some(given) = req.argument(1) {
-        let given = php_ext::coerce::coerce_param(req, &given, &php_ext::decl::Type::Array, 1)?;
-        if let ValueRef::Array(array) = given.as_ref() {
-            let mut cursor = array.iter();
-            while cursor.advance() {
-                if let Some(value) = cursor.value() {
-                    arguments.push(*value);
-                }
-            }
-        }
-    }
-    new_instance(req, class, &arguments)
-}
-
-/// `ReflectionClass::newInstanceWithoutConstructor()`:
-/// `object_init_ex` alone, refused for a native class php gives a
-/// `create_object` handler of its own. The object's inherited
-/// properties hold no default until the linker places them (#419), so
-/// a read of one is `null` here where php's is the declared default.
-///
-/// ```php
-/// var_dump((new ReflectionClass('JsonException'))->newInstanceWithoutConstructor() instanceof JsonException);
-/// enum Foo { case Bar; }
-/// try { (new ReflectionClass('Foo'))->newInstanceWithoutConstructor(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// Cannot instantiate enum Foo
-/// ```
-pub(super) fn reflection_class_new_instance_without_constructor(
-    req: &mut Request,
-) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    // `object_init_ex`, whose own refusal of what cannot be instantiated
-    // is the `Error` `new` raises, not a `ReflectionException`.
-    let object = new_object(req, class)?;
-    Ok(object.as_value())
-}
 
 /// php's `zend_throw_exception_ex(reflection_exception_ptr, ...)` for
 /// a class `new` refuses, the message `ReflectionClass` gives before
@@ -1128,281 +255,2357 @@ fn instantiable(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
     ))
 }
 
-/// `ReflectionClass::getStaticProperties()`: `CE_STATIC_MEMBERS(ce)` as
-/// an array, one slot per `static` property of `properties_info` under
-/// its own name, in that table's order, the slots laid down from their
-/// defaults on first use (`zend_class_init_statics`). php skips a
-/// property a class above declared private, one declared as an
-/// instance property, and a typed one nothing has written, whose slot
-/// stands `IS_UNDEF`; each value is handed back deref'd, with one more
-/// owner, which is what "enforce read only access" comes to.
-///
-/// ```php
-/// class A { public static int $n; public static $p = 1; private static $q = 2; protected static $r = 3; public $i = 4; }
-/// class B extends A { private static $q = 5; }
-/// var_dump((new ReflectionClass('A'))->getStaticProperties(), (new ReflectionClass('B'))->getStaticProperties());
-/// ```
-/// ```expect
-/// array(3) {
-///   ["p"]=>
-///   int(1)
-///   ["q"]=>
-///   int(2)
-///   ["r"]=>
-///   int(3)
-/// }
-/// array(3) {
-///   ["q"]=>
-///   int(5)
-///   ["p"]=>
-///   int(1)
-///   ["r"]=>
-///   int(3)
-/// }
-/// ```
-///
-/// ```php
-/// (new ReflectionClass('Exception'))->getStaticProperties(1);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionClass::getStaticProperties() expects exactly 0 arguments, 1 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->getStaticProperties(1)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-pub(super) fn reflection_class_get_static_properties(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let mut properties = PhpArray::new(req)?;
-    for (property, declaring) in linked_properties(req, class) {
-        if property.is_instance
-            || (property.visibility == Visibility::Private && declaring != class)
-        {
-            continue;
+/// `ReflectionClass` as the stub declares it.
+#[php_class(implements(crate::Reflector), not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+pub(crate) struct ReflectionClass;
+
+#[php_class]
+impl ReflectionClass {
+    const IS_IMPLICIT_ABSTRACT: i64 = 16;
+    const IS_EXPLICIT_ABSTRACT: i64 = 64;
+    const IS_FINAL: i64 = 32;
+    const IS_READONLY: i64 = 65536;
+    const SKIP_INITIALIZATION_ON_SERIALIZE: i64 = 8;
+    const SKIP_DESTRUCTOR: i64 = 16;
+    #[php(property)]
+    const name: PhpString;
+
+    #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
+    fn __clone(_this: This<Self>);
+
+    /// `reflection_class_object_ctor` with `is_object` off,
+    /// `ReflectionClass::__construct(object|string $objectOrClass)`: an
+    /// object's class or the class named, its declared name kept as
+    /// `$name`.
+    ///
+    /// ```php
+    /// $r = new ReflectionClass('reflectionexception'); var_dump($r, (new ReflectionClass(new ReflectionException))->name);
+    /// ```
+    /// ```expect
+    /// object(ReflectionClass)#1 (1) {
+    ///   ["name"]=>
+    ///   string(19) "ReflectionException"
+    /// }
+    /// string(19) "ReflectionException"
+    /// ```
+    ///
+    /// ```php
+    /// new ReflectionClass('Nope');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ReflectionException: Class "Nope" does not exist in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->__construct('Nope')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// The `TypeError` for an array, `must be of type object|string, array
+    /// given`, has no fence until the compiler reads an array expression.
+    ///
+    /// ```php
+    /// new ReflectionClass(null);
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: ReflectionClass::__construct(): Passing null to parameter #1 ($objectOrClass) of type object|string is deprecated in %s on line 2
+    ///
+    /// Fatal error: Uncaught ReflectionException: Class "" does not exist in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->__construct('')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// new ReflectionClass();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: ReflectionClass::__construct() expects exactly 1 argument, 0 given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->__construct()
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        _this: This<Self>,
+        objectOrClass: Union<PhpObject, PhpString>,
+    ) -> Result<(), Thrown> {
+        let (class, _) = class_of(req, objectOrClass)?;
+        let name = class_name_of(req, class);
+        if let Some(this) = req.this() {
+            set_name(req, this, &name)?;
         }
-        let Some(value) = read_class_prop_silent(req, class, &property.name.0)? else {
-            continue;
+        Ok(())
+    }
+
+    /// `ReflectionClass::__toString()`: `_class_string` over the class
+    /// `$name` names, no object, indent empty. `JsonException` is the
+    /// first class of the bundle with inherited members: `Exception`'s
+    /// four protected properties, its three private ones shadowed and
+    /// skipped, and ten of its eleven methods, the private `__clone`
+    /// skipped, each `inherits Exception` with the prototype the interface
+    /// gave it and `ctor` on the constructor.
+    ///
+    /// ```php
+    /// echo new ReflectionClass('JsonException');
+    /// ```
+    /// ```expect
+    /// Class [ <internal:json> class JsonException extends Exception implements Throwable, Stringable ] {
+    ///
+    ///   - Constants [0] {
+    ///   }
+    ///
+    ///   - Static properties [0] {
+    ///   }
+    ///
+    ///   - Static methods [0] {
+    ///   }
+    ///
+    ///   - Properties [4] {
+    ///     Property [ protected $message = '' ]
+    ///     Property [ protected $code = 0 ]
+    ///     Property [ protected string $file = '' ]
+    ///     Property [ protected int $line = 0 ]
+    ///   }
+    ///
+    ///   - Methods [10] {
+    ///     Method [ <internal:Core, inherits Exception, ctor> public method __construct ] {
+    ///
+    ///       - Parameters [3] {
+    ///         Parameter #0 [ <optional> string $message = "" ]
+    ///         Parameter #1 [ <optional> int $code = 0 ]
+    ///         Parameter #2 [ <optional> ?Throwable $previous = null ]
+    ///       }
+    ///     }
+    ///
+    ///     Method [ <internal:Core, inherits Exception> public method __wakeup ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Tentative return [ void ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getMessage ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ string ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getCode ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///     }
+    ///
+    ///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getFile ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ string ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getLine ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ int ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getTrace ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ array ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getPrevious ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ ?Throwable ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getTraceAsString ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ string ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core, inherits Exception, prototype Stringable> public method __toString ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ string ]
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// echo new ReflectionClass('Throwable');
+    /// ```
+    /// ```expect
+    /// Interface [ <internal:Core> interface Throwable extends Stringable ] {
+    ///
+    ///   - Constants [0] {
+    ///   }
+    ///
+    ///   - Static properties [0] {
+    ///   }
+    ///
+    ///   - Static methods [0] {
+    ///   }
+    ///
+    ///   - Properties [0] {
+    ///   }
+    ///
+    ///   - Methods [8] {
+    ///     Method [ <internal:Core> abstract public method getMessage ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ string ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core> abstract public method getCode ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///     }
+    ///
+    ///     Method [ <internal:Core> abstract public method getFile ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ string ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core> abstract public method getLine ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ int ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core> abstract public method getTrace ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ array ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core> abstract public method getPrevious ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ ?Throwable ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core> abstract public method getTraceAsString ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ string ]
+    ///     }
+    ///
+    ///     Method [ <internal:Core, inherits Stringable> abstract public method __toString ] {
+    ///
+    ///       - Parameters [0] {
+    ///       }
+    ///       - Return [ string ]
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// A user class with a parent and an interface renders the same way,
+    /// with no `getParentClass()` asked for it (#388): the header carries
+    /// `extends P implements I`, the class's own constants and properties
+    /// come before the ones it inherits, and an interface's constant is in
+    /// the table too.
+    ///
+    /// ```php
+    /// interface I { const J = 3; }
+    /// class P { const A = 1; public $x = 1; }
+    /// class C extends P implements I { const B = 2; public $y = 2; }
+    /// echo new ReflectionClass('C');
+    /// ```
+    /// ```expect
+    /// Class [ <user> class C extends P implements I ] {
+    ///   @@ %s 4-4
+    ///
+    ///   - Constants [3] {
+    ///     Constant [ public int B ] { 2 }
+    ///     Constant [ public int A ] { 1 }
+    ///     Constant [ public int J ] { 3 }
+    ///   }
+    ///
+    ///   - Static properties [0] {
+    ///   }
+    ///
+    ///   - Static methods [0] {
+    ///   }
+    ///
+    ///   - Properties [2] {
+    ///     Property [ public $y = 2 ]
+    ///     Property [ public $x = 1 ]
+    ///   }
+    ///
+    ///   - Methods [0] {
+    ///   }
+    /// }
+    /// ```
+    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        let class = this_class(req)?;
+        // `_class_string(&str, ce, &intern->obj, "")`: the object reflector
+        // hands the instance it kept, and the class reflector php's null
+        // zval, which is what puts `Object of class` and the `Dynamic
+        // properties` block on the one and not the other.
+        let object = req.this().and_then(|this| kept_object(req, this));
+        let text = class_string(req, class, object, "")?;
+        PhpString::new(req, text.as_bytes())
+    }
+
+    /// `ReflectionClass::getName()`: `ce->name`. `ReflectionObject` has no
+    /// `getName` of its own and answers with this one, as php's inherited
+    /// function table does.
+    ///
+    /// ```php
+    /// class C {} var_dump((new ReflectionClass('c'))->getName(), (new ReflectionObject(new C))->getName());
+    /// ```
+    /// ```expect
+    /// string(1) "C"
+    /// string(1) "C"
+    /// ```
+    ///
+    /// ```php
+    /// ReflectionObject::getName();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Non-static method ReflectionClass::getName() cannot be called statically in %s:2
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// $r = new ReflectionClass('ReflectionException'); var_dump($r->getName(1));
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: ReflectionClass::getName() expects exactly 0 arguments, 1 given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->getName(1)
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    #[php(tentative)]
+    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        let class = this_class(req)?;
+        let name = class_name_of(req, class);
+        PhpString::new(req, &name)
+    }
+
+    /// `ReflectionClass::isInternal()`: `ce->type == ZEND_INTERNAL_CLASS`,
+    /// which for the declaration model is a class with no file.
+    ///
+    /// ```php
+    /// class C {} var_dump((new ReflectionClass('C'))->isInternal(), (new ReflectionClass('ReflectionClass'))->isInternal(), (new ReflectionClass('C'))->isUserDefined(), (new ReflectionObject(new ReflectionProperty('Exception', 'message')))->isUserDefined());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isInternal(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        Ok(is_internal(req, class))
+    }
+
+    /// `ReflectionClass::isUserDefined()`: `ce->type == ZEND_USER_CLASS`.
+    ///
+    /// ```php
+    /// class C {}
+    /// var_dump((new ReflectionClass('ArrayObject'))->isUserDefined(), (new ReflectionClass('C'))->isUserDefined());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    #[php(tentative)]
+    fn isUserDefined(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        Ok(!is_internal(req, class))
+    }
+
+    /// `ReflectionClass::isAnonymous()`: `ZEND_ACC_ANON_CLASS`, which a
+    /// class declared by `new class` carries.
+    ///
+    /// ```php
+    /// class Named {}
+    /// var_dump((new ReflectionClass('Exception'))->isAnonymous(), (new ReflectionClass('Named'))->isAnonymous());
+    /// $r = new ReflectionClass(new class extends Named {});
+    /// var_dump($r->isAnonymous(), $r->getShortName() === $r->getName(), strstr($r->getName(), "\0", true));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// string(15) "Named@anonymous"
+    /// ```
+    #[php(tentative)]
+    fn isAnonymous(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        let anonymous = req
+            .class_decl(class)
+            .is_some_and(|decl| decl.flags.is_anonymous);
+        Ok(anonymous)
+    }
+
+    /// `ReflectionClass::isInstantiable()`: an interface, a trait, an enum
+    /// or an abstract class is not; anything else is, unless its
+    /// constructor is not public.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->isInstantiable());
+    /// var_dump((new ReflectionClass('JsonSerializable'))->isInstantiable());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isInstantiable(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        if cannot_instantiate(req, class) {
+            return Ok(false);
+        }
+        let public = constructor_of(req, class)
+            .is_none_or(|(decl, _)| decl.visibility == Visibility::Public);
+        Ok(public)
+    }
+
+    /// `ReflectionClass::isCloneable()`: an interface, a trait, an enum or
+    /// an abstract class is not; a class with a `__clone` is cloneable
+    /// while that method is public; anything else is, since every object
+    /// here has php's `clone_obj`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->isCloneable());
+    /// var_dump((new ReflectionClass('ReflectionClass'))->isCloneable());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isCloneable(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        if cannot_instantiate(req, class) {
+            return Ok(false);
+        }
+        let clone = linked_methods(req, class)
+            .into_iter()
+            .find(|m| m.decl.function.name.0.eq_ignore_ascii_case(b"__clone"));
+        Ok(clone.is_none_or(|m| m.decl.visibility == Visibility::Public))
+    }
+
+    /// `ReflectionClass::getFileName()`: `ce->info.user.filename` for a
+    /// user class, `false` for an internal one. The three site accessors
+    /// share this witness; the name is the file's as the runner names
+    /// it, a path under the oracle and `witness.php` here.
+    ///
+    /// ```php
+    /// $r = new ReflectionClass('C'); var_dump($r->getFileName(), $r->getStartLine(), $r->getEndLine()); $r = new ReflectionClass('Exception'); var_dump($r->getFileName(), $r->getStartLine(), $r->getEndLine()); class C { public $a; }
+    /// ```
+    /// ```expect
+    /// string(%d) "%s.php"
+    /// int(2)
+    /// int(2)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn getFileName(req: &mut Request, _this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let class = this_class(req)?;
+        let file = req
+            .class_decl(class)
+            .filter(|decl| !decl.file.0.is_empty())
+            .map(|decl| decl.file.0.to_vec());
+        match file {
+            Some(file) => PhpString::new(req, &file).map(OrFalse::Value),
+            None => Ok(OrFalse::False),
+        }
+    }
+
+    /// `ReflectionClass::getStartLine()`: `ce->info.user.line_start`, or
+    /// `false` for an internal class.
+    ///
+    /// ```php
+    /// class C
+    /// {
+    /// }
+    /// $c = new ReflectionClass('C');
+    /// $i = new ReflectionClass('ArrayObject');
+    /// var_dump($c->getStartLine(), $i->getStartLine());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn getStartLine(req: &mut Request, _this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
+        let class = this_class(req)?;
+        Ok(user_line(req, class, |decl| decl.line))
+    }
+
+    /// `ReflectionClass::getEndLine()`: `ce->info.user.line_end`, the line
+    /// of the closing brace, or `false` for an internal class.
+    ///
+    /// ```php
+    /// class C
+    /// {
+    /// }
+    /// var_dump((new ReflectionClass('C'))->getEndLine(), (new ReflectionClass('ArrayObject'))->getEndLine());
+    /// ```
+    /// ```expect
+    /// int(4)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn getEndLine(req: &mut Request, _this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
+        let class = this_class(req)?;
+        Ok(user_line(req, class, |decl| decl.end_line))
+    }
+
+    /// `ReflectionClass::getDocComment()`: `ce->doc_comment`, and `false`
+    /// where there is none.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->getDocComment());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn getDocComment(req: &mut Request, _this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let class = this_class(req)?;
+        let Some(doc) = req.class_decl(class).and_then(|d| d.doc_comment.clone()) else {
+            return Ok(OrFalse::False);
         };
-        if matches!(value.as_ref(), ValueRef::Undef) {
-            continue;
+        PhpString::new(req, &doc).map(OrFalse::Value)
+    }
+
+    /// `ReflectionClass::getConstructor()`:
+    /// `reflection_method_factory` over `ce->constructor`, and `null`
+    /// where the class has none.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->getConstructor()->getName());
+    /// var_dump((new ReflectionClass('JsonSerializable'))->getConstructor());
+    /// ```
+    /// ```expect
+    /// string(11) "__construct"
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    fn getConstructor(
+        req: &mut Request,
+        _this: This<Self>,
+    ) -> Result<Option<Instance<crate::func::ReflectionMethod>>, Thrown> {
+        let class = this_class(req)?;
+        let Some((decl, scope)) = constructor_of(req, class) else {
+            return Ok(None);
+        };
+        let object = method_factory(req, &decl.function.name.0, scope, class)?;
+        Ok(Some(Instance::of(object)))
+    }
+
+    /// `ReflectionClass::hasMethod(string $name)`:
+    /// `zend_hash_exists(&ce->function_table, lc_name)`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->hasMethod('getCode'));
+    /// var_dump((new ReflectionClass('Exception'))->hasMethod('nope'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn hasMethod(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_class(req)?;
+        let lowered = name.to_ascii_lowercase();
+        let found = linked_methods(req, class)
+            .into_iter()
+            .any(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered);
+        Ok(found || is_closure_invoke(req, class, &lowered))
+    }
+
+    /// `ReflectionClass::getMethod(string $name)`:
+    /// `reflection_method_factory` over the function table's entry, and
+    /// php's `ReflectionException` for a name it has not.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('JsonException'))->getMethod('getCode')->getName());
+    /// ```
+    /// ```expect
+    /// string(7) "getCode"
+    /// ```
+    ///
+    /// ```php
+    /// (new ReflectionClass('Exception'))->getMethod('nope');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ReflectionException: Method Exception::nope() does not exist in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->getMethod('nope')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    #[php(tentative)]
+    fn getMethod(
+        req: &mut Request,
+        _this: This<Self>,
+        name: PhpString,
+    ) -> Result<Instance<crate::func::ReflectionMethod>, Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_class(req)?;
+        let kept = req.this().and_then(|this| kept_closure(req, this));
+        let Some(found) = method_or_invoke(req, class, &name, kept) else {
+            let named = class_name_of(req, class);
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "Method {}::{}() does not exist",
+                    String::from_utf8_lossy(&named),
+                    String::from_utf8_lossy(&name)
+                ),
+            ));
+        };
+        let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
+        // The `__invoke` php makes keeps the closure it was made over.
+        if found.via_handler
+            && let Some(kept) = kept
+        {
+            keep(req, object, class, Some(kept));
         }
-        let key = Key::Str(PhpString::new(req, &property.name.0)?);
-        properties.set(req, key, value)?;
+        Ok(Instance::of(object))
     }
-    Ok(Value::array(properties))
-}
 
-/// `ReflectionClass::getStaticPropertyValue(string $name, mixed
-/// $default = UNKNOWN)`: the slot addressed under `BP_VAR_IS` with the
-/// fake scope set to the class ([`read_class_prop_silent`]), so a
-/// property the class itself declared private is reached and one a
-/// class above did is not. A slot holding a value is that value, one
-/// more owner taken (`RETURN_COPY_DEREF`); otherwise `$default` where
-/// the call gave one, which php hands back before it looks at why the
-/// slot was empty; otherwise php's `Error` for a typed property
-/// nothing has written, whose text here is `Typed property` and not
-/// the engine's `Typed static property`, and php's
-/// `ReflectionException` for a name the class does not have.
-///
-/// ```php
-/// class A { private static $q = 'a'; protected static $r = 'b'; public static $p = 'c'; }
-/// class B extends A { private static $q = 'd'; }
-/// $a = new ReflectionClass('A'); $b = new ReflectionClass('B');
-/// var_dump($a->getStaticPropertyValue('q'), $a->getStaticPropertyValue('r'), $a->getStaticPropertyValue('p'));
-/// var_dump($b->getStaticPropertyValue('q'), $b->getStaticPropertyValue('r'), $b->getStaticPropertyValue('nope', 'default value'));
-/// ```
-/// ```expect
-/// string(1) "a"
-/// string(1) "b"
-/// string(1) "c"
-/// string(1) "d"
-/// string(1) "b"
-/// string(13) "default value"
-/// ```
-///
-/// A typed property nothing has written is the `Error`, and a default
-/// stands before it.
-///
-/// ```php
-/// class A { public static int $n; }
-/// var_dump((new ReflectionClass('A'))->getStaticPropertyValue('n', 'd'));
-/// (new ReflectionClass('A'))->getStaticPropertyValue('n');
-/// ```
-/// ```expect exit=255
-/// string(1) "d"
-///
-/// Fatal error: Uncaught Error: Typed property A::$n must not be accessed before initialization in %s:4
-/// Stack trace:
-/// #0 %s(4): ReflectionClass->getStaticPropertyValue('n')
-/// #1 {main}
-///   thrown in %s on line 4
-/// ```
-///
-/// An instance property is a name the class does not have, as php's
-/// `BP_VAR_IS` hands back nothing for one.
-///
-/// ```php
-/// class A { public $i = 1; }
-/// (new ReflectionClass('A'))->getStaticPropertyValue('i');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Property A::$i does not exist in %s:3
-/// Stack trace:
-/// #0 %s(3): ReflectionClass->getStaticPropertyValue('i')
-/// #1 {main}
-///   thrown in %s on line 3
-/// ```
-///
-/// ```php
-/// (new ReflectionClass('Exception'))->getStaticPropertyValue();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionClass::getStaticPropertyValue() expects at least 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->getStaticPropertyValue()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-pub(super) fn reflection_class_get_static_property_value(
-    req: &mut Request,
-) -> Result<Value, Thrown> {
-    at_most_arguments(req, 2)?;
-    if req.argument_count() == 0 {
-        return Err(arg_count_error(req, "at least 1 argument, 0 given"));
+    /// `ReflectionClass::getMethods(?int $filter = null)`: one
+    /// `ReflectionMethod` per row of the function table whose flags the
+    /// filter keeps, a parent's private method skipped as `_addmethod`
+    /// skips it.
+    ///
+    /// ```php
+    /// var_dump(count((new ReflectionClass('JsonSerializable'))->getMethods()));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn getMethods(
+        req: &mut Request,
+        _this: This<Self>,
+        #[php(default = null)] filter: Option<i64>,
+    ) -> Result<PhpArray, Thrown> {
+        let filter = filter.unwrap_or(1 | 2 | 4 | 16 | 32 | 64);
+        let class = this_class(req)?;
+        let mut methods = PhpArray::new(req)?;
+        for found in linked_methods(req, class) {
+            if found.decl.visibility == Visibility::Private && found.scope != class {
+                continue;
+            }
+            if method_bits(&found.decl) & filter == 0 {
+                continue;
+            }
+            let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
+            methods.append(req, object.as_value())?;
+        }
+        // `zend_get_closure_invoke_method` over the kept closure, or a fresh
+        // one, appended where the filter keeps a public instance method.
+        let is_closure = lookup_class(req, b"Closure")?.is_some_and(|c| c == class);
+        let kept = req.this().and_then(|this| kept_closure(req, this));
+        if is_closure
+            && filter & 1 != 0
+            && let Some(invoke) = closure_invoke(req, kept)
+        {
+            let object = method_factory(req, &invoke.decl.function.name.0, invoke.scope, class)?;
+            if let Some(kept) = kept {
+                keep(req, object, class, Some(kept));
+            }
+            methods.append(req, object.as_value())?;
+        }
+        Ok(methods)
     }
-    let name = string_argument(req, 1)?;
-    let class = this_class(req)?;
-    let held = read_class_prop_silent(req, class, &name)?;
-    if let Some(value) = held
-        && !matches!(value.as_ref(), ValueRef::Undef)
-    {
-        return Ok(value);
-    }
-    if let Some(default) = req.argument(2) {
-        let default = default.deref();
-        req.addref(&default);
-        return Ok(default);
-    }
-    let shown = class_name_of(req, class);
-    let shown = String::from_utf8_lossy(&shown).into_owned();
-    let name = String::from_utf8_lossy(&name).into_owned();
-    if held.is_some() {
-        return Err(throw(
-            req,
-            "Error",
-            &format!("Typed property {shown}::${name} must not be accessed before initialization"),
-        ));
-    }
-    Err(throw(
-        req,
-        "ReflectionException",
-        &format!("Property {shown}::${name} does not exist"),
-    ))
-}
 
-/// `ReflectionClass::setStaticPropertyValue(string $name, mixed
-/// $value)`: the slot addressed under `BP_VAR_W` with the fake scope
-/// set to the class, which is [`read_class_prop_silent`]'s test with
-/// the typed-and-unwritten slot standing as a slot; a name the class
-/// does not have is php's `ReflectionException` in words of its own,
-/// `Class C does not have a property named p`, and never the engine's
-/// `Access to undeclared static property`. The write is
-/// `zend_update_static_property_ex` ([`write_static_prop`]), which
-/// writes through a slot holding a reference.
-///
-/// php verifies the value against a typed property
-/// (`zend_verify_property_type`) and this engine does not yet, here or
-/// on `ReflectionProperty::setValue`; a value of the property's own
-/// type is written the same either way.
-///
-/// ```php
-/// class A { private static $q = 'a'; public static $p = 'b'; }
-/// class B extends A { private static $q = 'c'; }
-/// $a = new ReflectionClass('A'); $b = new ReflectionClass('B');
-/// $a->setStaticPropertyValue('q', 'one'); $a->setStaticPropertyValue('p', 'two'); $b->setStaticPropertyValue('q', 'three');
-/// var_dump($a->getStaticProperties(), $b->getStaticProperties());
-/// ```
-/// ```expect
-/// array(2) {
-///   ["q"]=>
-///   string(3) "one"
-///   ["p"]=>
-///   string(3) "two"
-/// }
-/// array(2) {
-///   ["q"]=>
-///   string(5) "three"
-///   ["p"]=>
-///   string(3) "two"
-/// }
-/// ```
-///
-/// A property with a declared type is held to it, the write being
-/// `zend_update_static_property_ex`'s: the weak rule's coercion however
-/// the file was declared, and php's `TypeError` for a value that
-/// neither satisfies the type nor coerces.
-///
-/// ```php
-/// class T { public static int $n = 1; }
-/// $r = new ReflectionClass('T');
-/// $r->setStaticPropertyValue('n', "9"); var_dump($r->getStaticPropertyValue('n'));
-/// $r->setStaticPropertyValue('n', "x");
-/// ```
-/// ```expect exit=255
-/// int(9)
-///
-/// Fatal error: Uncaught TypeError: Cannot assign string to property T::$n of type int in %s:5
-/// Stack trace:
-/// #0 %s(5): ReflectionClass->setStaticPropertyValue('n', 'x')
-/// #1 {main}
-///   thrown in %s on line 5
-/// ```
-///
-/// ```php
-/// class A { public $i = 1; }
-/// (new ReflectionClass('A'))->setStaticPropertyValue('i', 2);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Class A does not have a property named i in %s:3
-/// Stack trace:
-/// #0 %s(3): ReflectionClass->setStaticPropertyValue('i', 2)
-/// #1 {main}
-///   thrown in %s on line 3
-/// ```
-///
-/// ```php
-/// (new ReflectionClass('Exception'))->setStaticPropertyValue('p');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionClass::setStaticPropertyValue() expects exactly 2 arguments, 1 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->setStaticPropertyValue('p')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-pub(super) fn reflection_class_set_static_property_value(
-    req: &mut Request,
-) -> Result<Value, Thrown> {
-    exactly_arguments(req, 2)?;
-    let name = string_argument(req, 1)?;
-    let class = this_class(req)?;
-    let held = read_class_prop_silent(req, class, &name)?;
-    let Some(held) = held else {
-        let shown = class_name_of(req, class);
-        return Err(throw(
+    /// `ReflectionClass::hasProperty(string $name)`: the name in
+    /// `ce->properties_info`, the class's own properties and every
+    /// parent's, a parent's private one excluded as php's
+    /// `property_info->ce == ce` test excludes it. php then asks a
+    /// `ReflectionObject`'s instance for a dynamic property of that name;
+    /// the reflector here keeps no instance, so that branch is `false`
+    /// until it does.
+    ///
+    /// ```php
+    /// class C { public $a; protected $b; private $c; public static $d; } $r = new ReflectionClass('C'); $e = new ReflectionClass('ReflectionException'); var_dump($r->hasProperty('a'), $r->hasProperty('b'), $r->hasProperty('c'), $r->hasProperty('d'), $r->hasProperty('e'), $r->hasProperty(1.5), $e->hasProperty('message'), $e->hasProperty('string'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn hasProperty(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_class(req)?;
+        if property_named(req, class, &name).is_some() {
+            return Ok(true);
+        }
+        // `has_property(obj, name, ZEND_PROPERTY_EXISTS)` on the object a
+        // `ReflectionObject` kept: its dynamic properties.
+        let dynamic = match req.this().and_then(|this| kept_object(req, this)) {
+            Some(object) => dynamic_properties(req, class, object).contains(&name),
+            None => false,
+        };
+        Ok(dynamic)
+    }
+
+    /// `ReflectionClass::getProperty(string $name)`:
+    /// `reflection_property_factory` over the property info, and php's
+    /// `ReflectionException` for a name the class has not.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('JsonException'))->getProperty('message'));
+    /// ```
+    /// ```expect
+    /// object(ReflectionProperty)#2 (2) {
+    ///   ["name"]=>
+    ///   string(7) "message"
+    ///   ["class"]=>
+    ///   string(9) "Exception"
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// (new ReflectionClass('Exception'))->getProperty('nope');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ReflectionException: Property Exception::$nope does not exist in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->getProperty('nope')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// A `ReflectionObject` finds the object's dynamic properties too, with
+    /// `$class` the object's class, and a `Base::name` spelling reaches the
+    /// property through a class the reflected one extends:
+    ///
+    /// ```php
+    /// class A { public $a = 1; } class B extends A {}
+    /// $o = new B; $o->d = 2;
+    /// var_dump((new ReflectionObject($o))->getProperty('d')->class, (new ReflectionClass('B'))->getProperty('A::a')->class);
+    /// try { (new ReflectionClass('A'))->getProperty('B::a'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Deprecated: Creation of dynamic property B::$d is deprecated in %s on line 3
+    /// string(1) "B"
+    /// string(1) "A"
+    /// Fully qualified property name B::$a does not specify a base class of A
+    /// ```
+    #[php(tentative)]
+    fn getProperty(
+        req: &mut Request,
+        _this: This<Self>,
+        name: PhpString,
+    ) -> Result<Raw<Instance<crate::member::ReflectionProperty>>, Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_class(req)?;
+        if let Some((scope, _)) = property_named(req, class, &name) {
+            return answer(
+                Ok(property_factory(req, &name, scope, class)?.as_value()),
+                req,
+            );
+        }
+        if let Some(object) = req.this().and_then(|this| kept_object(req, this))
+            && dynamic_properties(req, class, object).contains(&name)
+        {
+            return answer(
+                Ok(property_factory(req, &name, class, class)?.as_value()),
+                req,
+            );
+        }
+        // `Base::name`: the property of a class the reflected one is, or
+        // the exception below naming the part after the colons.
+        let (mut ce, mut short) = (class, name.clone());
+        if let Some(at) = name.windows(2).position(|pair| pair == b"::") {
+            short = name[at + 2..].to_vec();
+            let base = class_named(req, &name[..at])?;
+            if !class_is(req, class, base, 0) {
+                let (base, named) = (class_name_of(req, base), class_name_of(req, class));
+                return Err(throw(
+                    req,
+                    "ReflectionException",
+                    &format!(
+                        "Fully qualified property name {}::${} does not specify a base class of {}",
+                        String::from_utf8_lossy(&base),
+                        String::from_utf8_lossy(&short),
+                        String::from_utf8_lossy(&named)
+                    ),
+                ));
+            }
+            ce = base;
+            if let Some((scope, _)) = property_named(req, ce, &short) {
+                return answer(
+                    Ok(property_factory(req, &short, scope, ce)?.as_value()),
+                    req,
+                );
+            }
+        }
+        let named = class_name_of(req, ce);
+        Err(throw(
             req,
             "ReflectionException",
             &format!(
-                "Class {} does not have a property named {}",
-                String::from_utf8_lossy(&shown),
-                String::from_utf8_lossy(&name)
+                "Property {}::${} does not exist",
+                String::from_utf8_lossy(&named),
+                String::from_utf8_lossy(&short)
             ),
-        ));
-    };
-    req.release(held);
-    let value = req.argument(2).unwrap_or_default().deref();
-    req.addref(&value);
-    write_static_prop(req, class, &name, value)?;
-    Ok(Value::null())
+        ))
+    }
+
+    /// `ReflectionClass::getProperties(?int $filter = null)`: one
+    /// `ReflectionProperty` per row of `ce->properties_info` whose flags
+    /// the filter keeps, a parent's private property skipped as
+    /// `_addproperty` skips it.
+    ///
+    /// ```php
+    /// var_dump(count((new ReflectionClass('Exception'))->getProperties()));
+    /// ```
+    /// ```expect
+    /// int(7)
+    /// ```
+    #[php(tentative)]
+    fn getProperties(
+        req: &mut Request,
+        _this: This<Self>,
+        #[php(default = null)] filter: Option<i64>,
+    ) -> Result<PhpArray, Thrown> {
+        let filter = filter.unwrap_or(1 | 2 | 4 | 16);
+        let class = this_class(req)?;
+        let mut properties = PhpArray::new(req)?;
+        for (decl, scope) in linked_properties(req, class) {
+            if decl.visibility == Visibility::Private && scope != class {
+                continue;
+            }
+            let bits = super::member::property_flags(req, scope, &decl.name.0, &decl);
+            if bits & filter == 0 {
+                continue;
+            }
+            let object = property_factory(req, &decl.name.0, scope, class)?;
+            properties.append(req, object.as_value())?;
+        }
+        // `_adddynproperty` over the kept object's table, where the filter
+        // keeps public ones: a dynamic property is public.
+        if filter & 1 != 0
+            && let Some(object) = req.this().and_then(|this| kept_object(req, this))
+        {
+            for name in dynamic_properties(req, class, object) {
+                let object = property_factory(req, &name, class, class)?;
+                properties.append(req, object.as_value())?;
+            }
+        }
+        Ok(properties)
+    }
+
+    /// `ReflectionClass::hasConstant(string $name)`:
+    /// `zend_hash_exists(&ce->constants_table, name)`, the table php fills
+    /// with the class's own constants and every parent's but the private
+    /// ones (`do_inherit_class_constant`). A scalar is the string it
+    /// coerces to, so `hasConstant(1)` asks for `"1"`.
+    ///
+    /// ```php
+    /// class Foo { const c1 = 1; } $r = new ReflectionClass('Foo'); var_dump($r->hasConstant('c1'), $r->hasConstant('c2'), $r->hasConstant(1), (new ReflectionClass('ReflectionClass'))->hasConstant('IS_FINAL'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    #[php(tentative)]
+    fn hasConstant(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_class(req)?;
+        Ok(class_constant_named(req, class, &name).is_some())
+    }
+
+    /// `ReflectionClass::getConstants(?int $filter = null)`: the constants
+    /// table as an array keyed by name, each value the constant
+    /// expression evaluated in its declaring class.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('ReflectionFunction'))->getConstants());
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   ["IS_DEPRECATED"]=>
+    ///   int(2048)
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getConstants(
+        req: &mut Request,
+        _this: This<Self>,
+        #[php(default = null)] filter: Option<i64>,
+    ) -> Result<PhpArray, Thrown> {
+        let filter = filter.unwrap_or(1 | 2 | 4);
+        let class = this_class(req)?;
+        let mut constants = PhpArray::new(req)?;
+        for (decl, scope) in linked_constants(req, class) {
+            let bits = match decl.visibility {
+                Visibility::Public => 1,
+                Visibility::Protected => 2,
+                Visibility::Private => 4,
+            };
+            if bits & filter == 0 {
+                continue;
+            }
+            let value = super::constant_value(req, &decl, scope)?;
+            let key = PhpString::new(req, &decl.name.0)?;
+            constants.set(req, Key::Str(key), value)?;
+        }
+        Ok(constants)
+    }
+
+    /// `ReflectionClass::getReflectionConstants(?int $filter = null)`: the
+    /// same table, each row a `ReflectionClassConstant`.
+    ///
+    /// ```php
+    /// var_dump(count((new ReflectionClass('ReflectionFunction'))->getReflectionConstants()));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn getReflectionConstants(
+        req: &mut Request,
+        _this: This<Self>,
+        #[php(default = null)] filter: Option<i64>,
+    ) -> Result<PhpArray, Thrown> {
+        let filter = filter.unwrap_or(1 | 2 | 4);
+        let class = this_class(req)?;
+        let mut constants = PhpArray::new(req)?;
+        for (decl, scope) in linked_constants(req, class) {
+            let bits = match decl.visibility {
+                Visibility::Public => 1,
+                Visibility::Protected => 2,
+                Visibility::Private => 4,
+            };
+            if bits & filter == 0 {
+                continue;
+            }
+            let object = class_constant_factory(req, &decl.name.0, scope)?;
+            constants.append(req, object.as_value())?;
+        }
+        Ok(constants)
+    }
+
+    ///
+    /// ```php
+    /// class C { const A = 1; }
+    /// var_dump((new ReflectionClass('ReflectionClass'))->getConstant('IS_FINAL'), (new ReflectionClass('C'))->getConstant('A'));
+    /// var_dump((new ReflectionClass('C'))->getConstant('NOPE'));
+    /// ```
+    /// ```expect
+    /// int(32)
+    /// int(1)
+    ///
+    /// Deprecated: ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists in %s on line %d
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn getConstant(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<Value, Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_class(req)?;
+        if let Some((declaring, constant)) = class_constant_named(req, class, &name) {
+            return constant_value(req, &constant, declaring);
+        }
+        deprecated(
+            req,
+            "ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists",
+        );
+        Ok(Value::bool(false))
+    }
+
+    /// `ReflectionClass::getReflectionConstant(string $name)`: one
+    /// `ReflectionClassConstant`, and `false` for a name the table has
+    /// not.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('ReflectionFunction'))->getReflectionConstant('IS_DEPRECATED'));
+    /// var_dump((new ReflectionClass('ReflectionFunction'))->getReflectionConstant('nope'));
+    /// ```
+    /// ```expect
+    /// object(ReflectionClassConstant)#2 (2) {
+    ///   ["name"]=>
+    ///   string(13) "IS_DEPRECATED"
+    ///   ["class"]=>
+    ///   string(18) "ReflectionFunction"
+    /// }
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn getReflectionConstant(
+        req: &mut Request,
+        _this: This<Self>,
+        name: PhpString,
+    ) -> Result<OrFalse<Instance<crate::member::ReflectionClassConstant>>, Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_class(req)?;
+        let Some((scope, decl)) = class_constant_named(req, class, &name) else {
+            return Ok(OrFalse::False);
+        };
+        let object = class_constant_factory(req, &decl.name.0, scope)?;
+        Ok(OrFalse::Value(Instance::of(object)))
+    }
+
+    /// `ReflectionClass::getInterfaces()`: the same list, each name a
+    /// `ReflectionClass`, keyed by the interface's name.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('JsonException'))->getInterfaces());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   ["Throwable"]=>
+    ///   object(ReflectionClass)#2 (1) {
+    ///     ["name"]=>
+    ///     string(9) "Throwable"
+    ///   }
+    ///   ["Stringable"]=>
+    ///   object(ReflectionClass)#3 (1) {
+    ///     ["name"]=>
+    ///     string(10) "Stringable"
+    ///   }
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getInterfaces(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req)?;
+        let mut interfaces = PhpArray::new(req)?;
+        for interface in linked_interfaces(req, class) {
+            let name = class_name_of(req, interface);
+            let object = reflection_class_factory(req, interface)?;
+            let key = PhpString::new(req, &name)?;
+            interfaces.set(req, Key::Str(key), object.as_value())?;
+        }
+        Ok(interfaces)
+    }
+
+    /// `ReflectionClass::getInterfaceNames()`: `ce->interfaces`, the
+    /// linked list in php's order.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('JsonException'))->getInterfaceNames());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   string(9) "Throwable"
+    ///   [1]=>
+    ///   string(10) "Stringable"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getInterfaceNames(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req)?;
+        let mut names = PhpArray::new(req)?;
+        for interface in linked_interfaces(req, class) {
+            let name = class_name_of(req, interface);
+            let value = string_value(req, &name)?;
+            names.append(req, value)?;
+        }
+        Ok(names)
+    }
+
+    /// `ReflectionClass::isInterface()`: `ZEND_ACC_INTERFACE`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('JsonSerializable'))->isInterface());
+    /// var_dump((new ReflectionClass('Exception'))->isInterface());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isInterface(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        Ok(kind_of(req, class) == ClassKind::Interface)
+    }
+
+    /// `ReflectionClass::getTraits()`: the same list, each name a
+    /// `ReflectionClass`, keyed by the trait's name.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->getTraits());
+    /// ```
+    /// ```expect
+    /// array(0) {
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getTraits(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req)?;
+        let traits = req
+            .class_decl(class)
+            .map(|decl| decl.traits.clone())
+            .unwrap_or_default();
+        let mut found = PhpArray::new(req)?;
+        for trait_ in traits {
+            let Some(at) = lookup_class(req, &trait_.0)? else {
+                continue;
+            };
+            let name = class_name_of(req, at);
+            let object = reflection_class_factory(req, at)?;
+            let key = PhpString::new(req, &name)?;
+            found.set(req, Key::Str(key), object.as_value())?;
+        }
+        Ok(found)
+    }
+
+    /// `ReflectionClass::getTraitNames()`: `ce->trait_names`, the traits
+    /// the class itself uses.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->getTraitNames());
+    /// ```
+    /// ```expect
+    /// array(0) {
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getTraitNames(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req)?;
+        let traits = req
+            .class_decl(class)
+            .map(|decl| decl.traits.clone())
+            .unwrap_or_default();
+        let mut names = PhpArray::new(req)?;
+        for trait_ in traits {
+            let found = lookup_class(req, &trait_.0)?;
+            let name = found.map_or_else(|| trait_.0.to_vec(), |found| class_name_of(req, found));
+            let value = string_value(req, &name)?;
+            names.append(req, value)?;
+        }
+        Ok(names)
+    }
+
+    #[php(tentative, implementation = crate::func::ReflectionFiber::getExecutingLine)]
+    fn getTraitAliases(_this: This<Self>) -> PhpArray;
+
+    /// `ReflectionClass::isTrait()`: `ZEND_ACC_TRAIT`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->isTrait());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isTrait(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        Ok(kind_of(req, class) == ClassKind::Trait)
+    }
+
+    /// `ReflectionClass::isEnum()`: `ZEND_ACC_ENUM`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('PropertyHookType'))->isEnum());
+    /// var_dump((new ReflectionClass('Exception'))->isEnum());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    fn isEnum(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        Ok(kind_of(req, class) == ClassKind::Enum)
+    }
+
+    /// `ReflectionClass::isAbstract()`: `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS`
+    /// or `ZEND_ACC_IMPLICIT_ABSTRACT_CLASS`, so an interface and a class
+    /// with an abstract method both read `true`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('ReflectionFunctionAbstract'))->isAbstract());
+    /// var_dump((new ReflectionClass('Exception'))->isAbstract());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isAbstract(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = super::this_class(req)?;
+        Ok(super::class::class_is_abstract(req, class))
+    }
+
+    /// `ReflectionClass::isFinal()`: `ZEND_ACC_FINAL`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('ReflectionGenerator'))->isFinal());
+    /// var_dump((new ReflectionClass('Exception'))->isFinal());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isFinal(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        let final_ = req
+            .class_decl(class)
+            .is_some_and(|decl| decl.flags.is_final);
+        Ok(final_)
+    }
+
+    /// `ReflectionClass::isReadOnly()`: `ZEND_ACC_READONLY_CLASS`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->isReadOnly());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
+    fn isReadOnly(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        let readonly = req
+            .class_decl(class)
+            .is_some_and(|decl| decl.flags.is_readonly);
+        Ok(readonly)
+    }
+
+    /// `ReflectionClass::getModifiers()`: the `ZEND_ACC_FINAL`,
+    /// `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS` and `ZEND_ACC_READONLY_CLASS`
+    /// bits of `ce_flags`, the numbers the stub's `IS_*` constants name.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('ReflectionGenerator'))->getModifiers());
+    /// var_dump((new ReflectionClass('ReflectionFunctionAbstract'))->getModifiers());
+    /// ```
+    /// ```expect
+    /// int(32)
+    /// int(64)
+    /// ```
+    #[php(tentative)]
+    fn getModifiers(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
+        let class = this_class(req)?;
+        let Some(flags) = req.class_decl(class).map(|decl| decl.flags) else {
+            return Ok(0);
+        };
+        let mut bits = 0;
+        if flags.is_final {
+            bits |= 32;
+        }
+        if flags.is_abstract {
+            bits |= 64;
+        }
+        if flags.is_readonly {
+            bits |= 65536;
+        }
+        Ok(bits)
+    }
+
+    /// `ReflectionClass::isInstance(object $object)`:
+    /// `instanceof_function` over the object's class.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->isInstance(new JsonException));
+    /// var_dump((new ReflectionClass('JsonException'))->isInstance(new Exception));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isInstance(req: &mut Request, _this: This<Self>, object: PhpObject) -> Result<bool, Thrown> {
+        let of = object.class();
+        let class = this_class(req)?;
+        Ok(class_is(req, of, class, 0))
+    }
+
+    /// `ReflectionClass::newInstance(mixed ...$args)`: `object_init_ex`
+    /// and the constructor served over the arguments, php's
+    /// `ReflectionException` for a class that cannot be instantiated.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('JsonException'))->newInstance('x')->getMessage());
+    /// ```
+    /// ```expect
+    /// string(1) "x"
+    /// ```
+    #[php(tentative)]
+    fn newInstance(
+        req: &mut Request,
+        _this: This<Self>,
+        args: NamedVariadic<Value>,
+    ) -> Result<Raw<PhpObject>, Thrown> {
+        let class = this_class(req)?;
+        answer(new_instance(req, class, &args.positional), req)
+    }
+
+    /// `ReflectionClass::newInstanceWithoutConstructor()`:
+    /// `object_init_ex` alone, refused for a native class php gives a
+    /// `create_object` handler of its own. The object's inherited
+    /// properties hold no default until the linker places them (#419), so
+    /// a read of one is `null` here where php's is the declared default.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('JsonException'))->newInstanceWithoutConstructor() instanceof JsonException);
+    /// enum Foo { case Bar; }
+    /// try { (new ReflectionClass('Foo'))->newInstanceWithoutConstructor(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// Cannot instantiate enum Foo
+    /// ```
+    #[php(tentative)]
+    fn newInstanceWithoutConstructor(
+        req: &mut Request,
+        _this: This<Self>,
+    ) -> Result<PhpObject, Thrown> {
+        let class = this_class(req)?;
+        // `object_init_ex`, whose own refusal of what cannot be instantiated
+        // is the `Error` `new` raises, not a `ReflectionException`.
+        let object = new_object(req, class)?;
+        Ok(object)
+    }
+
+    /// `ReflectionClass::newInstanceArgs(array $args = [])`: the same,
+    /// over the array's values in order.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('JsonException'))->newInstanceArgs(['x'])->getMessage());
+    /// ```
+    /// ```expect
+    /// string(1) "x"
+    /// ```
+    ///
+    /// What is no array is php's `TypeError`, whose tail names the value as
+    /// `zend_zval_value_name` does and not as `zend_zval_type_name` does, so
+    /// `true` stands where the type alone would read `bool` (#462):
+    ///
+    /// ```php
+    /// (new ReflectionClass('JsonException'))->newInstanceArgs(true);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught TypeError: ReflectionClass::newInstanceArgs(): Argument #1 ($args) must be of type array, true given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->newInstanceArgs(true)
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    #[php(tentative)]
+    fn newInstanceArgs(
+        req: &mut Request,
+        _this: This<Self>,
+        #[php(default = [])] args: PhpArray,
+    ) -> Result<Raw<Option<PhpObject>>, Thrown> {
+        let class = this_class(req)?;
+        let mut arguments = Vec::new();
+        let mut cursor = args.iter();
+        while cursor.advance() {
+            if let Some(value) = cursor.value() {
+                arguments.push(*value);
+            }
+        }
+        answer(new_instance(req, class, &arguments), req)
+    }
+
+    /// `ReflectionClass::newLazyGhost(callable $initializer, int $options = 0): object`:
+    /// an object of the class whose properties wait for the initializer,
+    /// served with the object in place the first time one is touched.
+    ///
+    /// ```php
+    /// class C { public int $a; public $b = 2; public function __construct() { echo "init\n"; $this->a = 1; } }
+    /// $o = (new ReflectionClass('C'))->newLazyGhost(function (C $o) { $o->__construct(); });
+    /// var_dump($o);
+    /// var_dump($o->a);
+    /// var_dump($o);
+    /// ```
+    /// ```expect
+    /// lazy ghost object(C)#3 (0) {
+    ///   ["a"]=>
+    ///   uninitialized(int)
+    /// }
+    /// init
+    /// int(1)
+    /// object(C)#3 (2) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   ["b"]=>
+    ///   int(2)
+    /// }
+    /// ```
+    fn newLazyGhost(
+        req: &mut Request,
+        _this: This<Self>,
+        initializer: Callable,
+        #[php(default = 0)] options: i64,
+    ) -> Result<Raw<PhpObject>, Thrown> {
+        answer(
+            new_lazy(req, Strategy::Ghost, None, &initializer, options),
+            req,
+        )
+    }
+
+    /// `ReflectionClass::newLazyProxy(callable $factory, int $options = 0): object`:
+    /// an object of the class whose accesses, once one is made, go to the
+    /// instance the factory returns.
+    ///
+    /// ```php
+    /// class C { public $a = 1; }
+    /// $r = new ReflectionClass('C');
+    /// $p = $r->newLazyProxy(function () { echo "factory\n"; $c = new C; $c->a = 5; return $c; });
+    /// var_dump($p->a);
+    /// $i = $r->initializeLazyObject($p);
+    /// var_dump($i === $p, $i->a);
+    /// $p->a = 7;
+    /// var_dump($i->a, $p);
+    /// ```
+    /// ```expect
+    /// factory
+    /// int(5)
+    /// bool(false)
+    /// int(5)
+    /// int(7)
+    /// lazy proxy object(C)#3 (1) {
+    ///   ["instance"]=>
+    ///   object(C)#4 (1) {
+    ///     ["a"]=>
+    ///     int(7)
+    ///   }
+    /// }
+    /// ```
+    fn newLazyProxy(
+        req: &mut Request,
+        _this: This<Self>,
+        factory: Callable,
+        #[php(default = 0)] options: i64,
+    ) -> Result<Raw<PhpObject>, Thrown> {
+        answer(new_lazy(req, Strategy::Proxy, None, &factory, options), req)
+    }
+
+    /// `ReflectionClass::resetAsLazyGhost(object $object, callable $initializer, int $options = 0): void`:
+    /// the object's destructor served unless `SKIP_DESTRUCTOR`, its
+    /// properties unset, and the object left a ghost of the class.
+    ///
+    /// ```php
+    /// class C { public $a = 1; function __destruct() { echo "destruct\n"; } }
+    /// $r = new ReflectionClass('C');
+    /// $o = new C;
+    /// $r->resetAsLazyGhost($o, function ($o) { echo "init\n"; $o->a = 3; });
+    /// var_dump($r->isUninitializedLazyObject($o));
+    /// try { $r->resetAsLazyGhost($o, fn () => null); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($o->a);
+    /// $r->resetAsLazyGhost($o, function () {}, ReflectionClass::SKIP_DESTRUCTOR);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// destruct
+    /// bool(true)
+    /// Object is already lazy
+    /// init
+    /// int(3)
+    /// end
+    /// ```
+    fn resetAsLazyGhost(
+        req: &mut Request,
+        _this: This<Self>,
+        object: PhpObject,
+        initializer: Callable,
+        #[php(default = 0)] options: i64,
+    ) -> Result<(), Thrown> {
+        new_lazy(req, Strategy::Ghost, Some(object), &initializer, options).map(drop)
+    }
+
+    /// `ReflectionClass::resetAsLazyProxy(object $object, callable $factory, int $options = 0): void`:
+    /// the same reset, the object left a proxy.
+    ///
+    /// ```php
+    /// class C { public $a = 1; }
+    /// $r = new ReflectionClass('C');
+    /// $o = new C;
+    /// $r->resetAsLazyProxy($o, function ($o) { echo "factory\n"; return new C; });
+    /// var_dump($o);
+    /// $o->a = 2;
+    /// var_dump($o);
+    /// ```
+    /// ```expect
+    /// lazy proxy object(C)#2 (0) {
+    /// }
+    /// factory
+    /// lazy proxy object(C)#2 (1) {
+    ///   ["instance"]=>
+    ///   object(C)#4 (1) {
+    ///     ["a"]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// ```
+    fn resetAsLazyProxy(
+        req: &mut Request,
+        _this: This<Self>,
+        object: PhpObject,
+        factory: Callable,
+        #[php(default = 0)] options: i64,
+    ) -> Result<(), Thrown> {
+        new_lazy(req, Strategy::Proxy, Some(object), &factory, options).map(drop)
+    }
+
+    /// `ReflectionClass::initializeLazyObject(object $object): object`: a
+    /// lazy object initialised now, and the object its properties live on,
+    /// the ghost itself or the proxy's instance.
+    ///
+    /// ```php
+    /// class C { public $a = 1; public int $b; }
+    /// $r = new ReflectionClass('C');
+    /// $o = $r->newLazyGhost(function ($o) { $o->a = 2; $o->b = 3; $o->dyn = 4; throw new Exception('no'); });
+    /// try { $r->initializeLazyObject($o); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($r->isUninitializedLazyObject($o), $o);
+    /// ```
+    /// ```expect
+    ///
+    /// Deprecated: Creation of dynamic property C::$dyn is deprecated in %s on line 4
+    /// no
+    /// bool(true)
+    /// lazy ghost object(C)#3 (0) {
+    ///   ["b"]=>
+    ///   uninitialized(int)
+    /// }
+    /// ```
+    fn initializeLazyObject(
+        req: &mut Request,
+        _this: This<Self>,
+        object: PhpObject,
+    ) -> Result<PhpObject, Thrown> {
+        let class = this_class(req)?;
+        let object = object_of(req, object, class, 1)?;
+        let instance = initialize_lazy(req, &object)?;
+        req.addref(&instance.as_value());
+        Ok(instance)
+    }
+
+    /// `ReflectionClass::isUninitializedLazyObject(object $object): bool`.
+    ///
+    /// ```php
+    /// class C { public $a = 1; }
+    /// $r = new ReflectionClass('C');
+    /// $o = $r->newLazyGhost(function () {});
+    /// var_dump($r->isUninitializedLazyObject($o), $r->isUninitializedLazyObject(new C));
+    /// $o->a;
+    /// var_dump($r->isUninitializedLazyObject($o));
+    /// try { $r->isUninitializedLazyObject(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// ReflectionClass::isUninitializedLazyObject(): Argument #1 ($object) must be of type C, stdClass given
+    /// ```
+    fn isUninitializedLazyObject(
+        req: &mut Request,
+        _this: This<Self>,
+        object: PhpObject,
+    ) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        let object = object_of(req, object, class, 1)?;
+        Ok(object.is_lazy())
+    }
+
+    /// `ReflectionClass::markLazyObjectAsInitialized(object $object): object`:
+    /// each waiting property takes its default, the initializer is never
+    /// served, and the answer is `initializeLazyObject`'s.
+    ///
+    /// ```php
+    /// class C { public $a = 1; public int $b; public $c; }
+    /// $r = new ReflectionClass('C');
+    /// $o = $r->newLazyGhost(function () { echo "never\n"; });
+    /// $r->getProperty('c')->setRawValueWithoutLazyInitialization($o, 3);
+    /// var_dump($r->markLazyObjectAsInitialized($o) === $o, $o);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// object(C)#3 (2) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   ["b"]=>
+    ///   uninitialized(int)
+    ///   ["c"]=>
+    ///   int(3)
+    /// }
+    /// ```
+    fn markLazyObjectAsInitialized(
+        req: &mut Request,
+        _this: This<Self>,
+        object: PhpObject,
+    ) -> Result<PhpObject, Thrown> {
+        let class = this_class(req)?;
+        let object = object_of(req, object, class, 1)?;
+        let instance = mark_lazy_initialized(req, &object)?;
+        req.addref(&instance.as_value());
+        Ok(instance)
+    }
+
+    /// `ReflectionClass::getLazyInitializer(object $object): ?callable`:
+    /// the initializer as it was given, while nothing has initialised the
+    /// object, and `null` otherwise.
+    ///
+    /// ```php
+    /// class C { public $a = 1; }
+    /// function init($o) {}
+    /// $r = new ReflectionClass('C');
+    /// $o = $r->newLazyGhost('init');
+    /// var_dump($r->getLazyInitializer($o));
+    /// $r->initializeLazyObject($o);
+    /// var_dump($r->getLazyInitializer($o), $r->getLazyInitializer(new C));
+    /// ```
+    /// ```expect
+    /// string(4) "init"
+    /// NULL
+    /// NULL
+    /// ```
+    fn getLazyInitializer(
+        req: &mut Request,
+        _this: This<Self>,
+        object: PhpObject,
+    ) -> Result<Raw<Option<Callable>>, Thrown> {
+        let class = this_class(req)?;
+        let object = object_of(req, object, class, 1)?;
+        let Some(initializer) = object.lazy_initializer(req) else {
+            return answer(Ok(Value::null()), req);
+        };
+        req.addref(&initializer);
+        answer(Ok(initializer), req)
+    }
+
+    /// `ReflectionClass::getParentClass()`:
+    /// `zend_reflection_class_factory` over `ce->parent`, and `false`
+    /// where the class extends nothing.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('JsonException'))->getParentClass()->getName());
+    /// var_dump((new ReflectionClass('Exception'))->getParentClass());
+    /// ```
+    /// ```expect
+    /// string(9) "Exception"
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn getParentClass(
+        req: &mut Request,
+        _this: This<Self>,
+    ) -> Result<OrFalse<Instance<ReflectionClass>>, Thrown> {
+        let class = this_class(req)?;
+        let Some(parent) = class_chain(req, class).get(1).copied() else {
+            return Ok(OrFalse::False);
+        };
+        let object = reflection_class_factory(req, parent)?;
+        Ok(OrFalse::Value(Instance::of(object)))
+    }
+
+    /// `ReflectionClass::isSubclassOf(ReflectionClass|string $class)`:
+    /// `ce != class_ce && instanceof_function(ce, class_ce)`, so a class
+    /// is not a subclass of itself and is one of every parent and every
+    /// interface up the chain. A `ReflectionClass` argument is the class
+    /// it reflects; a string is looked up, a miss php's `ReflectionException`.
+    ///
+    /// ```php
+    /// class A {} $a = new ReflectionClass('A'); $e = new ReflectionClass('ReflectionException'); var_dump($a->isSubclassOf($a), $e->isSubclassOf('exception'), $e->isSubclassOf(new ReflectionClass('Throwable')), $e->isSubclassOf('Stringable'), $e->isSubclassOf('ReflectionException'), $a->isSubclassOf('ReflectionException'));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    ///
+    /// ```php
+    /// class A {} (new ReflectionClass('A'))->isSubclassOf('X');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ReflectionException: Class "X" does not exist in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->isSubclassOf('X')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    /// The `TypeError` for an array has no fence until the compiler reads
+    /// an array expression.
+    #[php(tentative)]
+    fn isSubclassOf(
+        req: &mut Request,
+        _this: This<Self>,
+        class: Union<Instance<ReflectionClass>, PhpString>,
+    ) -> Result<bool, Thrown> {
+        let this = this_class(req)?;
+        let of = reflector_class(req, class, "Class")?;
+        Ok(this != of && class_is(req, this, of, 0))
+    }
+
+    /// `ReflectionClass::getStaticProperties()`: `CE_STATIC_MEMBERS(ce)` as
+    /// an array, one slot per `static` property of `properties_info` under
+    /// its own name, in that table's order, the slots laid down from their
+    /// defaults on first use (`zend_class_init_statics`). php skips a
+    /// property a class above declared private, one declared as an
+    /// instance property, and a typed one nothing has written, whose slot
+    /// stands `IS_UNDEF`; each value is handed back deref'd, with one more
+    /// owner, which is what "enforce read only access" comes to.
+    ///
+    /// ```php
+    /// class A { public static int $n; public static $p = 1; private static $q = 2; protected static $r = 3; public $i = 4; }
+    /// class B extends A { private static $q = 5; }
+    /// var_dump((new ReflectionClass('A'))->getStaticProperties(), (new ReflectionClass('B'))->getStaticProperties());
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   ["p"]=>
+    ///   int(1)
+    ///   ["q"]=>
+    ///   int(2)
+    ///   ["r"]=>
+    ///   int(3)
+    /// }
+    /// array(3) {
+    ///   ["q"]=>
+    ///   int(5)
+    ///   ["p"]=>
+    ///   int(1)
+    ///   ["r"]=>
+    ///   int(3)
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// (new ReflectionClass('Exception'))->getStaticProperties(1);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: ReflectionClass::getStaticProperties() expects exactly 0 arguments, 1 given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->getStaticProperties(1)
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    #[php(tentative)]
+    fn getStaticProperties(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req)?;
+        let mut properties = PhpArray::new(req)?;
+        for (property, declaring) in linked_properties(req, class) {
+            if property.is_instance
+                || (property.visibility == Visibility::Private && declaring != class)
+            {
+                continue;
+            }
+            let Some(value) = read_class_prop_silent(req, class, &property.name.0)? else {
+                continue;
+            };
+            if matches!(value.as_ref(), ValueRef::Undef) {
+                continue;
+            }
+            let key = Key::Str(PhpString::new(req, &property.name.0)?);
+            properties.set(req, key, value)?;
+        }
+        Ok(properties)
+    }
+
+    /// `ReflectionClass::getStaticPropertyValue(string $name, mixed
+    /// $default = UNKNOWN)`: the slot addressed under `BP_VAR_IS` with the
+    /// fake scope set to the class ([`read_class_prop_silent`]), so a
+    /// property the class itself declared private is reached and one a
+    /// class above did is not. A slot holding a value is that value, one
+    /// more owner taken (`RETURN_COPY_DEREF`); otherwise `$default` where
+    /// the call gave one, which php hands back before it looks at why the
+    /// slot was empty; otherwise php's `Error` for a typed property
+    /// nothing has written, whose text here is `Typed property` and not
+    /// the engine's `Typed static property`, and php's
+    /// `ReflectionException` for a name the class does not have.
+    ///
+    /// ```php
+    /// class A { private static $q = 'a'; protected static $r = 'b'; public static $p = 'c'; }
+    /// class B extends A { private static $q = 'd'; }
+    /// $a = new ReflectionClass('A'); $b = new ReflectionClass('B');
+    /// var_dump($a->getStaticPropertyValue('q'), $a->getStaticPropertyValue('r'), $a->getStaticPropertyValue('p'));
+    /// var_dump($b->getStaticPropertyValue('q'), $b->getStaticPropertyValue('r'), $b->getStaticPropertyValue('nope', 'default value'));
+    /// ```
+    /// ```expect
+    /// string(1) "a"
+    /// string(1) "b"
+    /// string(1) "c"
+    /// string(1) "d"
+    /// string(1) "b"
+    /// string(13) "default value"
+    /// ```
+    ///
+    /// A typed property nothing has written is the `Error`, and a default
+    /// stands before it.
+    ///
+    /// ```php
+    /// class A { public static int $n; }
+    /// var_dump((new ReflectionClass('A'))->getStaticPropertyValue('n', 'd'));
+    /// (new ReflectionClass('A'))->getStaticPropertyValue('n');
+    /// ```
+    /// ```expect exit=255
+    /// string(1) "d"
+    ///
+    /// Fatal error: Uncaught Error: Typed property A::$n must not be accessed before initialization in %s:4
+    /// Stack trace:
+    /// #0 %s(4): ReflectionClass->getStaticPropertyValue('n')
+    /// #1 {main}
+    ///   thrown in %s on line 4
+    /// ```
+    ///
+    /// An instance property is a name the class does not have, as php's
+    /// `BP_VAR_IS` hands back nothing for one.
+    ///
+    /// ```php
+    /// class A { public $i = 1; }
+    /// (new ReflectionClass('A'))->getStaticPropertyValue('i');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ReflectionException: Property A::$i does not exist in %s:3
+    /// Stack trace:
+    /// #0 %s(3): ReflectionClass->getStaticPropertyValue('i')
+    /// #1 {main}
+    ///   thrown in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// (new ReflectionClass('Exception'))->getStaticPropertyValue();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: ReflectionClass::getStaticPropertyValue() expects at least 1 argument, 0 given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->getStaticPropertyValue()
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    #[php(tentative)]
+    fn getStaticPropertyValue(
+        req: &mut Request,
+        _this: This<Self>,
+        name: PhpString,
+        default: Passed<Value>,
+    ) -> Result<Value, Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_class(req)?;
+        let held = read_class_prop_silent(req, class, &name)?;
+        if let Some(value) = held
+            && !matches!(value.as_ref(), ValueRef::Undef)
+        {
+            return Ok(value);
+        }
+        if let Passed::Given(default) = default {
+            req.addref(&default);
+            return Ok(default);
+        }
+        let shown = class_name_of(req, class);
+        let shown = String::from_utf8_lossy(&shown).into_owned();
+        let name = String::from_utf8_lossy(&name).into_owned();
+        if held.is_some() {
+            return Err(throw(
+                req,
+                "Error",
+                &format!(
+                    "Typed property {shown}::${name} must not be accessed before initialization"
+                ),
+            ));
+        }
+        Err(throw(
+            req,
+            "ReflectionException",
+            &format!("Property {shown}::${name} does not exist"),
+        ))
+    }
+
+    /// `ReflectionClass::setStaticPropertyValue(string $name, mixed
+    /// $value)`: the slot addressed under `BP_VAR_W` with the fake scope
+    /// set to the class, which is [`read_class_prop_silent`]'s test with
+    /// the typed-and-unwritten slot standing as a slot; a name the class
+    /// does not have is php's `ReflectionException` in words of its own,
+    /// `Class C does not have a property named p`, and never the engine's
+    /// `Access to undeclared static property`. The write is
+    /// `zend_update_static_property_ex` ([`write_static_prop`]), which
+    /// writes through a slot holding a reference.
+    ///
+    /// php verifies the value against a typed property
+    /// (`zend_verify_property_type`) and this engine does not yet, here or
+    /// on `ReflectionProperty::setValue`; a value of the property's own
+    /// type is written the same either way.
+    ///
+    /// ```php
+    /// class A { private static $q = 'a'; public static $p = 'b'; }
+    /// class B extends A { private static $q = 'c'; }
+    /// $a = new ReflectionClass('A'); $b = new ReflectionClass('B');
+    /// $a->setStaticPropertyValue('q', 'one'); $a->setStaticPropertyValue('p', 'two'); $b->setStaticPropertyValue('q', 'three');
+    /// var_dump($a->getStaticProperties(), $b->getStaticProperties());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   ["q"]=>
+    ///   string(3) "one"
+    ///   ["p"]=>
+    ///   string(3) "two"
+    /// }
+    /// array(2) {
+    ///   ["q"]=>
+    ///   string(5) "three"
+    ///   ["p"]=>
+    ///   string(3) "two"
+    /// }
+    /// ```
+    ///
+    /// A property with a declared type is held to it, the write being
+    /// `zend_update_static_property_ex`'s: the weak rule's coercion however
+    /// the file was declared, and php's `TypeError` for a value that
+    /// neither satisfies the type nor coerces.
+    ///
+    /// ```php
+    /// class T { public static int $n = 1; }
+    /// $r = new ReflectionClass('T');
+    /// $r->setStaticPropertyValue('n', "9"); var_dump($r->getStaticPropertyValue('n'));
+    /// $r->setStaticPropertyValue('n', "x");
+    /// ```
+    /// ```expect exit=255
+    /// int(9)
+    ///
+    /// Fatal error: Uncaught TypeError: Cannot assign string to property T::$n of type int in %s:5
+    /// Stack trace:
+    /// #0 %s(5): ReflectionClass->setStaticPropertyValue('n', 'x')
+    /// #1 {main}
+    ///   thrown in %s on line 5
+    /// ```
+    ///
+    /// ```php
+    /// class A { public $i = 1; }
+    /// (new ReflectionClass('A'))->setStaticPropertyValue('i', 2);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ReflectionException: Class A does not have a property named i in %s:3
+    /// Stack trace:
+    /// #0 %s(3): ReflectionClass->setStaticPropertyValue('i', 2)
+    /// #1 {main}
+    ///   thrown in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// (new ReflectionClass('Exception'))->setStaticPropertyValue('p');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: ReflectionClass::setStaticPropertyValue() expects exactly 2 arguments, 1 given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->setStaticPropertyValue('p')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    #[php(tentative)]
+    fn setStaticPropertyValue(
+        req: &mut Request,
+        _this: This<Self>,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_class(req)?;
+        let held = read_class_prop_silent(req, class, &name)?;
+        let Some(held) = held else {
+            let shown = class_name_of(req, class);
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "Class {} does not have a property named {}",
+                    String::from_utf8_lossy(&shown),
+                    String::from_utf8_lossy(&name)
+                ),
+            ));
+        };
+        req.release(held);
+        req.addref(&value);
+        write_static_prop(req, class, &name, value)?;
+        Ok(())
+    }
+
+    /// `ReflectionClass::getDefaultProperties()`: `add_class_vars` twice,
+    /// the `static` properties then the instance ones, each in
+    /// `properties_info` order, the class's own before the inherited, a
+    /// parent's private ones skipped, and a typed property with no
+    /// default skipped as its `UNDEF` slot is; each default is the
+    /// expression it was written as, evaluated in the declaring class.
+    ///
+    /// ```php
+    /// class Foo { protected static $s = 'foo'; protected $i = 'foo'; public $n; } var_dump((new ReflectionClass('Foo'))->getDefaultProperties(), (new ReflectionClass('ReflectionException'))->getDefaultProperties());
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   ["s"]=>
+    ///   string(3) "foo"
+    ///   ["i"]=>
+    ///   string(3) "foo"
+    ///   ["n"]=>
+    ///   NULL
+    /// }
+    /// array(4) {
+    ///   ["message"]=>
+    ///   string(0) ""
+    ///   ["code"]=>
+    ///   int(0)
+    ///   ["file"]=>
+    ///   string(0) ""
+    ///   ["line"]=>
+    ///   int(0)
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getDefaultProperties(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req)?;
+        let mut defaults = PhpArray::new(req)?;
+        let table = linked_properties(req, class);
+        for statics in [true, false] {
+            for (property, at) in &table {
+                if property.is_instance == statics
+                    || (*at != class && property.visibility == Visibility::Private)
+                {
+                    continue;
+                }
+                let value = match &property.default {
+                    Some(expr) => eval_const_expr(req, expr, Some(*at))?,
+                    None if property.ty.is_some() => continue,
+                    None => Value::null(),
+                };
+                let key = Key::Str(PhpString::new(req, &property.name.0)?);
+                defaults.set(req, key, value)?;
+            }
+        }
+        Ok(defaults)
+    }
+
+    /// `ReflectionClass::isIterable()` and its old spelling
+    /// `isIterateable()`: whether the class implements `Traversable` and
+    /// can be instantiated.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('Exception'))->isIterable());
+    /// var_dump((new ReflectionClass('Exception'))->isIterateable());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isIterable(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        if cannot_instantiate(req, class) {
+            return Ok(false);
+        }
+        let Some(traversable) = lookup_class(req, b"Traversable")? else {
+            return Ok(false);
+        };
+        Ok(class_is(req, class, traversable, 0))
+    }
+
+    #[php(tentative, implementation = ReflectionClass::isIterable)]
+    fn isIterateable(_this: This<Self>) -> bool;
+
+    /// `ReflectionClass::implementsInterface(string|ReflectionClass
+    /// $interface)`: `instanceof_function` again, with php's `ReflectionException` for
+    /// a name that is not an interface.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionClass('JsonException'))->implementsInterface('Throwable'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// ```
+    ///
+    /// ```php
+    /// (new ReflectionClass('JsonException'))->implementsInterface('Exception');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ReflectionException: Exception is not an interface in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->implementsInterface('Exception')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    #[php(tentative)]
+    fn implementsInterface(
+        req: &mut Request,
+        _this: This<Self>,
+        interface: Union<Instance<ReflectionClass>, PhpString>,
+    ) -> Result<bool, Thrown> {
+        let interface = reflector_class(req, interface, "Interface")?;
+        if kind_of(req, interface) != ClassKind::Interface {
+            let name = class_name_of(req, interface);
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!("{} is not an interface", String::from_utf8_lossy(&name)),
+            ));
+        }
+        let class = this_class(req)?;
+        Ok(class_is(req, class, interface, 0))
+    }
+
+    /// `ReflectionClass::getExtension()`: `ce->info.internal.module` as a
+    /// `ReflectionExtension`, made as `reflection_extension_factory` makes
+    /// it, `object_init_ex` and the name written, no constructor served;
+    /// `null` for a user class. A class Zend declares itself is php's
+    /// `Core` `zend_module_entry`, which this engine has no `Extension` value for yet
+    /// (#379), so `Exception` answers `null` here and `Core` there; the
+    /// fence stays off that class until the bundle names it.
+    ///
+    /// ```php
+    /// class C {} var_dump((new ReflectionClass('ReflectionException'))->getExtension(), (new ReflectionClass('ReflectionException'))->getExtensionName(), (new ReflectionClass('C'))->getExtension(), (new ReflectionClass('C'))->getExtensionName());
+    /// ```
+    /// ```expect
+    /// object(ReflectionExtension)#2 (1) {
+    ///   ["name"]=>
+    ///   string(10) "Reflection"
+    /// }
+    /// string(10) "Reflection"
+    /// NULL
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn getExtension(
+        req: &mut Request,
+        _this: This<Self>,
+    ) -> Result<Option<Instance<crate::ReflectionExtension>>, Thrown> {
+        let class = this_class(req)?;
+        let Some(name) = class_extension_name(req, class) else {
+            return Ok(None);
+        };
+        let Some(reflector) = lookup_class(req, b"ReflectionExtension")? else {
+            return Ok(None);
+        };
+        let object = new_object(req, reflector)?;
+        set_name(req, object, name.as_bytes())?;
+        Ok(Some(Instance::of(object)))
+    }
+
+    /// `ReflectionClass::getExtensionName()`: the extension's name, or `false`
+    /// for a user class.
+    ///
+    /// ```php
+    /// class C {}
+    /// var_dump((new ReflectionClass('ArrayObject'))->getExtensionName(), (new ReflectionClass('C'))->getExtensionName());
+    /// ```
+    /// ```expect
+    /// string(3) "SPL"
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn getExtensionName(
+        req: &mut Request,
+        _this: This<Self>,
+    ) -> Result<OrFalse<PhpString>, Thrown> {
+        let class = this_class(req)?;
+        match class_extension_name(req, class) {
+            Some(name) => PhpString::new(req, name.as_bytes()).map(OrFalse::Value),
+            None => Ok(OrFalse::False),
+        }
+    }
+
+    /// `ReflectionClass::inNamespace()`: whether `ce->name` has a `\`.
+    ///
+    /// ```php
+    /// $r = new ReflectionClass('ReflectionException'); var_dump($r->inNamespace(), $r->getNamespaceName(), $r->getShortName());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(0) ""
+    /// string(19) "ReflectionException"
+    /// ```
+    #[php(tentative)]
+    fn inNamespace(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req)?;
+        let name = class_name_of(req, class);
+        Ok(namespace_end(&name).is_some())
+    }
+
+    /// `ReflectionClass::getNamespaceName()`: the name up to its last `\`,
+    /// empty without one.
+    ///
+    /// ```php
+    /// namespace N { class D {} }
+    /// namespace { $d = new ReflectionClass('N\D'); $s = new ReflectionClass('stdClass');
+    /// var_dump($d->getNamespaceName(), $s->getNamespaceName()); }
+    /// ```
+    /// ```expect
+    /// string(1) "N"
+    /// string(0) ""
+    /// ```
+    #[php(tentative)]
+    fn getNamespaceName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        let class = this_class(req)?;
+        let name = class_name_of(req, class);
+        let end = namespace_end(&name).unwrap_or(0);
+        PhpString::new(req, &name[..end])
+    }
+
+    /// `ReflectionClass::getShortName()`: the name after its last `\`, the
+    /// whole name without one.
+    ///
+    /// ```php
+    /// namespace N { class D {} }
+    /// namespace { var_dump((new ReflectionClass('N\D'))->getShortName(), (new ReflectionClass('stdClass'))->getShortName()); }
+    /// ```
+    /// ```expect
+    /// string(1) "D"
+    /// string(8) "stdClass"
+    /// ```
+    #[php(tentative)]
+    fn getShortName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        let class = this_class(req)?;
+        let name = class_name_of(req, class);
+        let start = namespace_end(&name).map_or(0, |end| end + 1);
+        PhpString::new(req, &name[start..])
+    }
+
+    /// `ReflectionClass::getAttributes(?string $name = null, int $flags =
+    /// 0)`: `reflect_attributes` over `ce->attributes` with
+    /// `ZEND_ATTRIBUTE_TARGET_CLASS`, an empty array for a class with none.
+    ///
+    /// ```php
+    /// class C {} var_dump((new ReflectionClass('C'))->getAttributes(), (new ReflectionClass('ReflectionClass'))->getAttributes());
+    /// try { (new ReflectionClass('C'))->getAttributes(null, 4); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// try { (new ReflectionClass('C'))->getAttributes('Nope', ReflectionAttribute::IS_INSTANCEOF); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// array(0) {
+    /// }
+    /// array(0) {
+    /// }
+    /// ValueError: ReflectionClass::getAttributes(): Argument #2 ($flags) must be a valid attribute filter flag
+    /// Error: Class "Nope" not found
+    /// ```
+    ///
+    /// ```php
+    /// (new ReflectionClass('ReflectionException'))->getAttributes(1, 2, 3);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: ReflectionClass::getAttributes() expects at most 2 arguments, 3 given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionClass->getAttributes(1, 2, 3)
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    fn getAttributes(
+        req: &mut Request,
+        _this: This<Self>,
+        #[php(default = null)] name: Option<PhpString>,
+        #[php(default = 0)] flags: i64,
+    ) -> Result<PhpArray, Thrown> {
+        let class = this_class(req)?;
+        let attributes = req
+            .class_decl(class)
+            .map_or_else(Vec::new, |decl| decl.attributes.clone());
+        attr::reflect_attributes(
+            req,
+            &attributes,
+            Some(class),
+            attr::TARGET_CLASS,
+            name,
+            flags,
+        )
+    }
+}
+
+/// `ReflectionObject` as the stub declares it.
+#[php_class(extends(ReflectionClass), payload = crate::Reflected, handlers = crate::HANDLERS)]
+pub(crate) struct ReflectionObject;
+
+#[php_class]
+impl ReflectionObject {
+    /// `reflection_class_object_ctor` with `is_object` on,
+    /// `ReflectionObject::__construct(object $object)`: the object's class
+    /// as `$name`, and the object itself as `intern->obj`, one more owner,
+    /// which the `Dynamic properties` block of `__toString` reads and
+    /// `free_obj` gives back.
+    ///
+    /// ```php
+    /// $t = new stdClass; $t->b = 2;
+    /// echo new ReflectionObject($t);
+    /// ```
+    /// ```expect
+    /// Object of class [ <internal:Core> class stdClass ] {
+    ///
+    ///   - Constants [0] {
+    ///   }
+    ///
+    ///   - Static properties [0] {
+    ///   }
+    ///
+    ///   - Static methods [0] {
+    ///   }
+    ///
+    ///   - Properties [0] {
+    ///   }
+    ///
+    ///   - Dynamic properties [1] {
+    ///     Property [ <dynamic> public $b ]
+    ///   }
+    ///
+    ///   - Methods [0] {
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// var_dump(new ReflectionObject(new ReflectionException));
+    /// ```
+    /// ```expect
+    /// object(ReflectionObject)#1 (1) {
+    ///   ["name"]=>
+    ///   string(19) "ReflectionException"
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// new ReflectionObject('x');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught TypeError: ReflectionObject::__construct(): Argument #1 ($object) must be of type object, string given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionObject->__construct('x')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    fn __construct(req: &mut Request, _this: This<Self>, object: PhpObject) -> Result<(), Thrown> {
+        let name = class_name_of(req, object.class());
+        if let Some(this) = req.this() {
+            set_name(req, this, &name)?;
+            keep(req, this, object.class(), Some(object));
+        }
+        Ok(())
+    }
 }

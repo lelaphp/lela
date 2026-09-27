@@ -8,7 +8,7 @@
 
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{PhpObject, Value};
+use php_ext::values::{PhpObject, PhpString};
 use php_ext_lexbor::ffi::encoding::{
     DECODE_CONTINUE, Decoder, Encoder, Encoding, MAX_CODEPOINT, REPLACEMENT_BYTES, Status,
 };
@@ -17,7 +17,7 @@ use php_ext_libxml::ffi::{Kind, Node, Ns};
 use crate::document::{XML_NS, XMLNS_NS};
 use crate::object::Code;
 use crate::private::{HTML_NS, MATHML_NS, Private, SVG_NS, XLINK_NS, ns_is};
-use crate::{Entry, arity, dom_throw, fetch, object_arg, path_arg, string, this_node};
+use crate::{dom_throw, fetch};
 
 /// Where the serialisation's pieces go, each piece written as it is made
 /// (`write_string_len`); `false` where the sink refused one.
@@ -546,29 +546,13 @@ pub(crate) fn templates_of(req: &Request, object: PhpObject, node: Node) -> Temp
     Templates::under(private, node)
 }
 
-/// `Dom\HTMLDocument::saveHtml(?Dom\Node $node = null): string`.
-///
-/// ```php
-/// $d = Dom\HTMLDocument::createEmpty();
-/// $html = $d->appendChild($d->createElement('html'));
-/// $p = $html->appendChild($d->createElement('p'));
-/// $p->setAttribute('title', "a\"b&\u{a0}<");
-/// $p->append("x<y> & \u{a0}", $d->createElement('br'), $d->createComment('c'));
-/// $s = $html->appendChild($d->createElement('script'));
-/// $s->append('if (a < b) {}');
-/// echo $d->saveHtml(), "\n", $d->saveHtml($p), "\n";
-/// $x = Dom\XMLDocument::createEmpty();
-/// try { $d->saveHtml($x->createElement('q')); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// <html><p title="a&quot;b&amp;&nbsp;<">x&lt;y&gt; &amp; &nbsp;<br><!--c--></p><script>if (a < b) {}</script></html>
-/// <p title="a&quot;b&amp;&nbsp;<">x&lt;y&gt; &amp; &nbsp;<br><!--c--></p>
-/// Wrong Document Error
-/// ```
-fn save_html(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 1)?;
-    let given = object_arg(req, 1)?;
-    let (this, doc) = this_node(req)?;
+/// `Dom\HTMLDocument::saveHtml`'s body: the node given, or the document.
+pub(crate) fn save_html(
+    req: &mut Request,
+    this: PhpObject,
+    given: Option<PhpObject>,
+) -> Result<PhpString, Thrown> {
+    let doc = fetch(req, this)?;
     let node = match given {
         Some(given) => {
             let node = fetch(req, given)?;
@@ -583,35 +567,23 @@ fn save_html(req: &mut Request) -> Result<Value, Thrown> {
     let encoding = doc.doc_encoding().unwrap_or_default();
     let mut bytes = Vec::new();
     common_save(&mut bytes, &templates, node, &encoding);
-    string(req, &bytes)
+    PhpString::new(req, &bytes)
 }
 
-/// `Dom\HTMLDocument::saveHtmlFile(string $filename): int|false`: the
-/// document written through php's streams, each piece as it is made.
-///
-/// ```php
-/// $d = Dom\HTMLDocument::createEmpty();
-/// $d->appendChild($d->createElement('p'))->append("\u{e9}");
-/// $f = tempnam(sys_get_temp_dir(), 'dom');
-/// var_dump($d->saveHtmlFile($f), file_get_contents($f));
-/// unlink($f);
-/// try { $d->saveHtmlFile(''); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(9)
-/// string(9) "<p>é</p>"
-/// Dom\HTMLDocument::saveHtmlFile(): Argument #1 ($filename) must not be empty
-/// ```
-fn save_html_file(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let file = path_arg(req, 1)?;
+/// `Dom\HTMLDocument::saveHtmlFile`'s body: the bytes written, none where
+/// the stream would not open or refused a piece.
+pub(crate) fn save_html_file(
+    req: &mut Request,
+    this: PhpObject,
+    file: &[u8],
+) -> Result<Option<i64>, Thrown> {
     if file.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
-    let Some(stream) = req.open_stream(&file, b"wb", false)? else {
-        return Ok(Value::bool(false));
+    let Some(stream) = req.open_stream(file, b"wb", false)? else {
+        return Ok(None);
     };
-    let (this, doc) = match this_node(req) {
+    let doc = match fetch(req, this) {
         Ok(found) => found,
         Err(thrown) => {
             stream.close(req);
@@ -626,15 +598,9 @@ fn save_html_file(req: &mut Request) -> Result<Value, Thrown> {
     };
     if !saved {
         stream.close(req);
-        return Ok(Value::bool(false));
+        return Ok(None);
     }
     let written = stream.tell(req);
     stream.close(req);
-    Ok(Value::int(written))
+    Ok(Some(written))
 }
-
-/// The methods, `Class::method` to entry.
-pub(crate) const METHODS: &[(&str, Entry)] = &[
-    ("Dom\\HTMLDocument::saveHtml", save_html),
-    ("Dom\\HTMLDocument::saveHtmlFile", save_html_file),
-];

@@ -5,24 +5,26 @@
 //! and normalisation, and canonicalisation over `xmlns` attributes turned
 //! back into declarations for the length of the call.
 
+use php_ext::abi::{Instance, OrFalse, Path, Raw, This, Union, Untyped};
+use php_ext::attr::php_class;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value};
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{C14nOut, C14nSelect, C14nTarget, Kind, Node, Ns, Object, Save, XPath};
 
 use crate::document::{XML_NS, XMLNS_NS};
 use crate::modern::follows_spec;
-use crate::object::Code;
-use crate::parent::{is_parent_invalid, replace_validity};
+use crate::object::{Code, Dom};
+use crate::parent::replace_validity;
 use crate::private::{Mapper, Private};
 use crate::{
-    Entry, arg, arity, array_get, bool_arg, bytes_arg, children_valid, class_name, clone_node,
-    copy_document_ref, dom_error, dom_error_message, fetch, has_feature, hierarchy_ok, instance_of,
-    invalidate, is_equal_attr, is_equal_node, is_read_only, normalize, nullable_bytes_arg,
-    nullable_object, object_arg, object_for, path_arg, reconcile_attribute_namespace, reconcile_ns,
-    reconcile_ns_list, set_document_ref_pointers, shared_doc, strict, string, this, this_node,
+    array_get, children_valid, class_name, clone_node, copy_document_ref, dom_error,
+    dom_error_message, fetch, has_feature, hierarchy_ok, instance_of, invalidate, is_equal_attr,
+    is_equal_node, is_read_only, normalize, nullable_object, object_for,
+    reconcile_attribute_namespace, reconcile_ns, reconcile_ns_list, returned,
+    set_document_ref_pointers, shared_doc, strict,
 };
 
 /// `dom_insert_fragment`: the fragment's children moved in between
@@ -109,14 +111,16 @@ fn existing_attr(parent: Node, child: Node) -> Option<Node> {
 /// `dom_node_replace_child`: the standard's checks where `modern`, the
 /// legacy ones otherwise, and the namespaces reconciled only for the
 /// latter.
-fn replace_child_common(req: &mut Request, modern: bool) -> Result<Value, Thrown> {
-    arity(req, 2, 2)?;
-    let (this, parent) = this_node(req)?;
-    let (Some(new_obj), Some(old_obj)) = (object_arg(req, 1)?, object_arg(req, 2)?) else {
-        return Ok(Value::bool(false));
-    };
-    let new_child = fetch(req, new_obj)?;
-    let old_child = fetch(req, old_obj)?;
+pub(crate) fn replace_child(
+    req: &mut Request,
+    this: PhpObject,
+    node: PhpObject,
+    child: PhpObject,
+    modern: bool,
+) -> Result<Value, Thrown> {
+    let parent = fetch(req, this)?;
+    let new_child = fetch(req, node)?;
+    let old_child = fetch(req, child)?;
     let strict = strict(req, this);
     if new_child.doc() != parent.doc() && new_child.doc().is_some() {
         dom_error(req, Code::WrongDocument, strict)?;
@@ -167,68 +171,6 @@ fn replace_child_common(req: &mut Request, modern: bool) -> Result<Value, Thrown
     }
     invalidate(req, this);
     object_for(req, old_child, Some(this))
-}
-
-/// `DOMNode::replaceChild(DOMNode $node, DOMNode $child): DOMNode|false`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a/><b/></r>');
-/// $r = $d->documentElement;
-/// $first = $r->firstChild;
-/// $old = $r->replaceChild($d->createElement('x'), $first);
-/// echo $old->nodeName, ' ', $d->saveXML($r), "\n";
-/// ```
-/// ```expect
-/// a <r><x/><b/></r>
-/// ```
-fn replace_child(req: &mut Request) -> Result<Value, Thrown> {
-    replace_child_common(req, false)
-}
-
-/// `Dom\Node::replaceChild(Dom\Node $node, Dom\Node $child): Dom\Node`.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<!DOCTYPE r><r><a/><b/></r>');
-/// $r = $d->documentElement;
-/// $a = $r->firstChild;
-/// $b = $r->lastChild;
-/// $old = $r->replaceChild($b, $a);
-/// echo $old->nodeName, ' ', $r->childNodes->length, ' ', $r->firstChild->nodeName, "\n";
-/// $t = $d->createTextNode('t');
-/// $c = $b->cloneNode();
-/// $dt = $d->doctype;
-/// foreach ([fn() => $d->replaceChild($t, $r), fn() => $d->replaceChild($c, $dt), fn() => $r->replaceChild($r, $b)] as $f) {
-///     try { $f(); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// }
-/// ```
-/// ```expect
-/// a 1 b
-/// Cannot insert text as a child of a document
-/// Cannot have more than one element child in a document
-/// Hierarchy Request Error
-/// ```
-fn modern_replace_child(req: &mut Request) -> Result<Value, Thrown> {
-    replace_child_common(req, true)
-}
-
-/// `DOMNode::hasChildNodes(): bool`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a/></r>');
-/// var_dump($d->documentElement->hasChildNodes(), $d->documentElement->firstChild->hasChildNodes());
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-fn has_child_nodes(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (_, node) = this_node(req)?;
-    Ok(Value::bool(
-        children_valid(node) && node.children().is_some(),
-    ))
 }
 
 // ---- cloning through the namespace mapper
@@ -423,81 +365,6 @@ fn modern_document_class(doc: Node) -> &'static str {
     }
 }
 
-/// `DOMNode::cloneNode(bool $deep = false): DOMNode|false`, and
-/// `Dom\Node::cloneNode`, which clones through the document's namespace
-/// mapper and gives a copied document private data of its own.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r a="1"><c/></r>');
-/// $r = $d->documentElement;
-/// echo $d->saveXML($r->cloneNode()), ' ', $d->saveXML($r->cloneNode(true)), "\n";
-/// $copy = $d->cloneNode(true);
-/// var_dump($copy === $d, $copy->saveXML() === $d->saveXML());
-/// $m = Dom\XMLDocument::createFromString('<!DOCTYPE r><r xmlns:p="urn:p" p:a="1"><p:c>t</p:c></r>');
-/// $copy = $m->cloneNode(true);
-/// $e = $copy->documentElement;
-/// var_dump(get_class($copy), $copy->doctype->name, $e->attributes->length, $e->firstChild->namespaceURI, $e->textContent);
-/// $shallow = $m->documentElement->cloneNode();
-/// var_dump(get_class($shallow), $shallow->attributes->length, $shallow->hasChildNodes(), $shallow->ownerDocument === $m);
-/// var_dump(get_class($m->cloneNode()), $m->cloneNode()->hasChildNodes());
-/// ```
-/// ```expect
-/// <r a="1"/> <r a="1"><c/></r>
-/// bool(false)
-/// bool(true)
-/// string(15) "Dom\XMLDocument"
-/// string(1) "r"
-/// int(2)
-/// string(5) "urn:p"
-/// string(1) "t"
-/// string(11) "Dom\Element"
-/// int(2)
-/// bool(false)
-/// bool(true)
-/// string(15) "Dom\XMLDocument"
-/// bool(false)
-/// ```
-fn clone_node_method(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 1)?;
-    let recursive = bool_arg(req, 1, false)?;
-    let (this, n) = this_node(req)?;
-    let is_document = n.kind().is_document();
-    if follows_spec(req, this) {
-        if is_document {
-            let mut private = Private::default();
-            let Some(node) = clone_node_modern(&mut private.mapper, n, n.doc(), recursive) else {
-                return Ok(Value::bool(false));
-            };
-            let copy = crate::modern::document_object(req, modern_document_class(n), node)?;
-            copy_document_ref(req, this, copy);
-            if let Some(d) = crate::dom_mut(req, copy) {
-                d.obj.set_private_data(Box::new(private));
-            }
-            return Ok(copy.as_value());
-        }
-        let cloned = match crate::dom_mut(req, this).and_then(|d| crate::private::of(&mut d.obj)) {
-            Some(private) => clone_node_modern(&mut private.mapper, n, n.doc(), recursive),
-            None => clone_node(n, n.doc(), recursive),
-        };
-        let Some(node) = cloned else {
-            return Ok(Value::bool(false));
-        };
-        return cloned_object(req, this, n, node);
-    }
-    let Some(node) = clone_node(n, n.doc(), recursive) else {
-        return Ok(Value::bool(false));
-    };
-    if is_document {
-        let value = object_for(req, node, None)?;
-        if let Some(copy) = value.as_object().copied() {
-            copy_document_ref(req, this, copy);
-        }
-        return Ok(value);
-    }
-    cloned_object(req, this, n, node)
-}
-
 /// The object for a node's copy: a copied attribute keeps the original's
 /// namespace for reconciliation to settle, which libxml does not dare set.
 fn cloned_object(
@@ -510,48 +377,6 @@ fn cloned_object(
         node.set_ns(original.ns());
     }
     object_for(req, node, Some(this))
-}
-
-/// `DOMNode::normalize(): void`: `php_dom_normalize_modern` for a
-/// document that follows the standard, `php_dom_normalize_legacy`
-/// otherwise, which also normalises attributes' children.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $r = $d->appendChild($d->createElement('r'));
-/// $r->appendChild($d->createTextNode('a'));
-/// $r->appendChild($d->createElement('x'));
-/// $last = $r->lastChild;
-/// $r->insertBefore($d->createTextNode('b'), $last);
-/// $r->normalize();
-/// var_dump($r->childNodes->length, $r->firstChild->data);
-/// $m = Dom\XMLDocument::createFromString('<r>a<x/></r>');
-/// $r = $m->documentElement;
-/// $a = $r->firstChild;
-/// $x = $r->lastChild;
-/// $r->insertBefore($m->createTextNode(''), $a);
-/// $r->insertBefore($m->createTextNode('b'), $x);
-/// $r->insertBefore($m->createTextNode('c'), $x);
-/// var_dump($r->childNodes->length);
-/// $r->normalize();
-/// var_dump($r->childNodes->length, $r->firstChild->data);
-/// ```
-/// ```expect
-/// int(2)
-/// string(2) "ab"
-/// int(5)
-/// int(2)
-/// string(3) "abc"
-/// ```
-fn normalize_method(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (this, node) = this_node(req)?;
-    if follows_spec(req, this) {
-        normalize_modern(node);
-    } else {
-        normalize(node);
-    }
-    Ok(Value::null())
 }
 
 /// `php_dom_normalize_modern`: every descendant text node that is empty
@@ -590,120 +415,38 @@ fn normalize_modern(this: Node) {
     }
 }
 
-/// `DOMNode::isSupported(string $feature, string $version): bool`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// var_dump($d->isSupported('xml', '2.0'), $d->isSupported('Core', '2.0'), $d->isSupported('Events', '1.0'));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// ```
-fn is_supported(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 2, 2)?;
-    let feature = bytes_arg(req, 1)?;
-    let version = bytes_arg(req, 2)?;
-    Ok(Value::bool(has_feature(&feature, &version)))
-}
-
-/// `DOMNode::hasAttributes(): bool`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r a="1"><c/></r>');
-/// var_dump($d->documentElement->hasAttributes(), $d->documentElement->firstChild->hasAttributes());
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-fn has_attributes(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (_, node) = this_node(req)?;
-    Ok(Value::bool(
-        node.kind() == Kind::Element && node.properties().is_some(),
-    ))
-}
-
-/// `DOMNode::isSameNode(DOMNode $otherNode): bool`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r/>');
-/// $root = $d->documentElement;
-/// $first = $d->firstChild;
-/// var_dump($root->isSameNode($first), $d->isSameNode($root));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-fn is_same_node(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let (_, node) = this_node(req)?;
-    let Some(other) = object_arg(req, 1)? else {
-        return Ok(Value::bool(false));
-    };
-    let other = fetch(req, other)?;
-    Ok(Value::bool(node == other))
-}
-
 /// `dom_node_is_equal_node_common`: the standard's equality where
 /// `modern`, which leaves namespace declarations out.
-fn is_equal_node_common(req: &mut Request, modern: bool) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let Some(other) = object_arg(req, 1)? else {
-        return Ok(Value::bool(false));
+pub(crate) fn is_equal_node_of(
+    req: &mut Request,
+    this: PhpObject,
+    other: Option<PhpObject>,
+    modern: bool,
+) -> Result<bool, Thrown> {
+    let Some(other) = other else {
+        return Ok(false);
     };
     let other = fetch(req, other)?;
-    let (_, node) = this_node(req)?;
+    let node = fetch(req, this)?;
     if node == other {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
-    Ok(Value::bool(is_equal_node(node, other, modern)))
+    Ok(is_equal_node(node, other, modern))
 }
 
-/// `DOMNode::isEqualNode(?DOMNode $otherNode): bool`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a x="1">t</a><a x="1">t</a><a x="2">t</a></r>');
-/// $all = iterator_to_array($d->getElementsByTagName('a'));
-/// $a = $all[0];
-/// $b = $all[1];
-/// $c = $all[2];
-/// var_dump($a->isEqualNode($b), $a->isEqualNode($c), $a->isEqualNode(null));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// ```
-fn is_equal_node_method(req: &mut Request) -> Result<Value, Thrown> {
-    is_equal_node_common(req, false)
-}
-
-/// `Dom\Node::isEqualNode(?Dom\Node $otherNode): bool`.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r><a xmlns:p="urn:p" x="1">t</a><a x="1">t</a><a x="1" xmlns:p="urn:p">t</a></r>');
-/// $r = $d->documentElement;
-/// $a = $r->childNodes[0];
-/// $b = $r->childNodes[1];
-/// $c = $r->childNodes[2];
-/// $copy = $d->cloneNode(true);
-/// var_dump($a->isEqualNode($b), $a->isEqualNode($c), $a->isEqualNode(null), $d->isEqualNode($copy));
-/// ```
-/// ```expect
-/// bool(false)
-/// bool(true)
-/// bool(false)
-/// bool(true)
-/// ```
-fn modern_is_equal_node(req: &mut Request) -> Result<Value, Thrown> {
-    is_equal_node_common(req, true)
+/// `DOMNode::isSameNode`'s body, `Dom\Node::isSameNode`'s too, where the
+/// other node may be `null`.
+pub(crate) fn is_same_node(
+    req: &mut Request,
+    this: PhpObject,
+    other: Option<PhpObject>,
+) -> Result<bool, Thrown> {
+    let node = fetch(req, this)?;
+    let Some(other) = other else {
+        return Ok(false);
+    };
+    let other = fetch(req, other)?;
+    Ok(node == other)
 }
 
 /// The node `lookupPrefix` starts from: an element itself, a document's
@@ -749,15 +492,19 @@ fn locate_namespace_prefix(mut elem: Node, uri: &[u8]) -> Option<Vec<u8>> {
 
 /// `dom_node_lookup_prefix`: libxml's search by href where the legacy
 /// classes ask, the standard's lookup where `modern`.
-fn lookup_prefix_common(req: &mut Request, modern: bool) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let uri = nullable_bytes_arg(req, 1)?.unwrap_or_default();
-    let (_, node) = this_node(req)?;
+pub(crate) fn lookup_prefix(
+    req: &mut Request,
+    this: PhpObject,
+    namespace: Option<PhpString>,
+    modern: bool,
+) -> Result<Option<PhpString>, Thrown> {
+    let uri = namespace.map(|n| n.as_bytes().to_vec()).unwrap_or_default();
+    let node = fetch(req, this)?;
     if uri.is_empty() {
-        return Ok(Value::null());
+        return Ok(None);
     }
     let Some(lookup) = prefix_lookup_start(node) else {
-        return Ok(Value::null());
+        return Ok(None);
     };
     let found = if modern {
         locate_namespace_prefix(lookup, &uri)
@@ -767,98 +514,9 @@ fn lookup_prefix_common(req: &mut Request, modern: bool) -> Result<Value, Thrown
             .and_then(Ns::prefix)
     };
     match found {
-        Some(prefix) => string(req, &prefix),
-        None => Ok(Value::null()),
+        Some(prefix) => PhpString::new(req, &prefix).map(Some),
+        None => Ok(None),
     }
-}
-
-/// `DOMNode::lookupPrefix(string $namespace): ?string`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r xmlns:p="urn:p"><c/></r>');
-/// var_dump($d->documentElement->firstChild->lookupPrefix('urn:p'), $d->lookupPrefix('urn:x'), $d->lookupPrefix(''));
-/// ```
-/// ```expect
-/// string(1) "p"
-/// NULL
-/// NULL
-/// ```
-fn lookup_prefix(req: &mut Request) -> Result<Value, Thrown> {
-    lookup_prefix_common(req, false)
-}
-
-/// `Dom\Node::lookupPrefix(?string $namespace): ?string`.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p" xmlns:q="urn:q"><q:c a="1"/></r>');
-/// $c = $d->documentElement->firstChild;
-/// $a = $c->attributes[0];
-/// var_dump($c->lookupPrefix('urn:p'), $c->lookupPrefix('urn:q'), $a->lookupPrefix('urn:p'), $d->lookupPrefix(null), $d->lookupPrefix('urn:x'));
-/// ```
-/// ```expect
-/// string(1) "p"
-/// string(1) "q"
-/// string(1) "p"
-/// NULL
-/// NULL
-/// ```
-fn modern_lookup_prefix(req: &mut Request) -> Result<Value, Thrown> {
-    lookup_prefix_common(req, true)
-}
-
-/// `DOMNode::isDefaultNamespace(string $namespace): bool`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r xmlns="urn:d"><c/></r>');
-/// var_dump($d->isDefaultNamespace('urn:d'), $d->documentElement->firstChild->isDefaultNamespace('urn:x'));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-fn is_default_namespace(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let uri = bytes_arg(req, 1)?;
-    let (_, mut node) = this_node(req)?;
-    if uri.is_empty() {
-        return Ok(Value::bool(false));
-    }
-    if node.kind().is_document() {
-        match node.root() {
-            Some(r) => node = r,
-            None => return Ok(Value::bool(false)),
-        }
-    }
-    let found = node.search_ns(None).and_then(Ns::href);
-    let uri = &uri[..uri.iter().position(|b| *b == 0).unwrap_or(uri.len())];
-    Ok(Value::bool(found.as_deref() == Some(uri)))
-}
-
-/// `Dom\Node::isDefaultNamespace(?string $namespace): bool`: the default
-/// namespace the standard locates, null and the empty string alike.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r xmlns="urn:d"><c xmlns=""/></r>');
-/// $c = $d->documentElement->firstChild;
-/// var_dump($d->isDefaultNamespace('urn:d'), $c->isDefaultNamespace(null), $c->isDefaultNamespace(''), $c->isDefaultNamespace('urn:d'));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// ```
-fn modern_is_default_namespace(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let uri = nullable_bytes_arg(req, 1)?.filter(|u| !u.is_empty());
-    let (_, node) = this_node(req)?;
-    let located = locate_namespace(node, None);
-    let uri = uri
-        .as_deref()
-        .map(|u| &u[..u.iter().position(|b| *b == 0).unwrap_or(u.len())]);
-    Ok(Value::bool(located.as_deref() == uri))
 }
 
 /// `dom_locate_a_namespace`: the namespace `prefix` stands for where the
@@ -930,269 +588,6 @@ pub(crate) fn locate_namespace(node: Node, prefix: Option<&[u8]>) -> Option<Vec<
             _ => None,
         },
     }
-}
-
-/// `DOMNode::lookupNamespaceURI(?string $prefix): ?string`: libxml's
-/// search for the legacy classes, the standard's locate for a document
-/// that follows it, where the empty prefix is none.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r xmlns="urn:d" xmlns:p="urn:p"><c/></r>');
-/// $c = $d->documentElement->firstChild;
-/// var_dump($c->lookupNamespaceURI('p'), $c->lookupNamespaceURI(null), $d->lookupNamespaceURI('q'));
-/// $m = Dom\XMLDocument::createFromString('<r xmlns="urn:d" xmlns:p="urn:p"><c/></r>');
-/// $c = $m->documentElement->firstChild;
-/// var_dump($c->lookupNamespaceURI('p'), $c->lookupNamespaceURI(''), $c->lookupNamespaceURI('q'), $c->lookupNamespaceURI('XML'), $m->lookupNamespaceURI('xmlns'));
-/// ```
-/// ```expect
-/// string(5) "urn:p"
-/// string(5) "urn:d"
-/// NULL
-/// string(5) "urn:p"
-/// string(5) "urn:d"
-/// NULL
-/// string(36) "http://www.w3.org/XML/1998/namespace"
-/// string(29) "http://www.w3.org/2000/xmlns/"
-/// ```
-fn lookup_namespace_uri(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let prefix = nullable_bytes_arg(req, 1)?;
-    let (this, mut node) = this_node(req)?;
-    if follows_spec(req, this) {
-        let prefix = prefix.filter(|p| !p.is_empty());
-        return match locate_namespace(node, prefix.as_deref()) {
-            Some(uri) => string(req, &uri),
-            None => Ok(Value::null()),
-        };
-    }
-    if node.kind().is_document() {
-        match node.root() {
-            Some(r) => node = r,
-            None => return Ok(Value::null()),
-        }
-    }
-    match node.search_ns(prefix.as_deref()).and_then(Ns::href) {
-        Some(href) => string(req, &href),
-        None => Ok(Value::null()),
-    }
-}
-
-/// `dom_node_get_node_path`: `null` where libxml answers none, thrown as
-/// an invalid state where `throw`.
-fn get_node_path_common(req: &mut Request, throw: bool) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (_, node) = this_node(req)?;
-    match node.path() {
-        Some(p) => string(req, &p),
-        None if throw => Err(crate::dom_throw(req, Code::InvalidState)),
-        None => Ok(Value::null()),
-    }
-}
-
-/// `DOMNode::getNodePath(): ?string`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a/><a><b/></a></r>');
-/// echo $d->getElementsByTagName('b')->item(0)->getNodePath(), "\n";
-/// ```
-/// ```expect
-/// /r/a[2]/b
-/// ```
-fn get_node_path(req: &mut Request) -> Result<Value, Thrown> {
-    get_node_path_common(req, false)
-}
-
-/// `Dom\Node::getNodePath(): string`.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p"><a/><p:a><b x="1"/></p:a></r>');
-/// $b = $d->documentElement->lastChild->firstChild;
-/// echo $b->getNodePath(), ' ', $b->attributes[0]->getNodePath(), ' ', $d->getNodePath(), "\n";
-/// ```
-/// ```expect
-/// /r/p:a/b /r/p:a/b/@x /
-/// ```
-fn modern_get_node_path(req: &mut Request) -> Result<Value, Thrown> {
-    get_node_path_common(req, true)
-}
-
-/// `DOMNode::getLineNo(): int`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML("<r>\n<a/>\n</r>");
-/// var_dump($d->getElementsByTagName('a')->item(0)->getLineNo());
-/// ```
-/// ```expect
-/// int(2)
-/// ```
-fn get_line_no(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (_, node) = this_node(req)?;
-    Ok(Value::int(node.line_no()))
-}
-
-/// `DOMNode::getRootNode(?array $options = null): DOMNode`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a/></r>');
-/// var_dump($d->documentElement->firstChild->getRootNode() === $d);
-/// $e = $d->createElement('x');
-/// var_dump($e->getRootNode() === $e);
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// ```
-fn get_root_node(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 1)?;
-    let _ = arg(req, 1)?;
-    let (this, mut node) = this_node(req)?;
-    while let Some(p) = node.parent() {
-        node = p;
-    }
-    object_for(req, node, Some(this))
-}
-
-/// `DOMNode::compareDocumentPosition(DOMNode $other): int`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a/><b/></r>');
-/// $a = $d->documentElement->firstChild;
-/// $b = $a->nextSibling;
-/// var_dump($a->compareDocumentPosition($b), $b->compareDocumentPosition($a), $d->documentElement->compareDocumentPosition($a), $a->compareDocumentPosition($a));
-/// ```
-/// ```expect
-/// int(4)
-/// int(2)
-/// int(20)
-/// int(0)
-/// ```
-#[allow(clippy::too_many_lines)] // php's function, one step per clause of the specification
-fn compare_document_position(req: &mut Request) -> Result<Value, Thrown> {
-    const DISCONNECTED: i64 = 0x01;
-    const PRECEDING: i64 = 0x02;
-    const FOLLOWING: i64 = 0x04;
-    const CONTAINS: i64 = 0x08;
-    const CONTAINED_BY: i64 = 0x10;
-    const IMPLEMENTATION_SPECIFIC: i64 = 0x20;
-    arity(req, 1, 1)?;
-    let (this_obj, this) = this_node(req)?;
-    let Some(other_obj) = object_arg(req, 1)? else {
-        return Ok(Value::int(0));
-    };
-    let other = fetch(req, other_obj)?;
-    if this == other {
-        return Ok(Value::int(0));
-    }
-    let mut node1 = Some(other);
-    let mut node2 = Some(this);
-    let mut attr1 = None;
-    let mut attr2 = None;
-    if other.kind() == Kind::Attribute {
-        attr1 = Some(other);
-        node1 = other.parent();
-    }
-    if this.kind() == Kind::Attribute {
-        attr2 = Some(this);
-        node2 = this.parent();
-        if let (Some(a1), Some(n1)) = (attr1, node1)
-            && node2 == Some(n1)
-        {
-            let mut attr = n1.properties();
-            while let Some(a) = attr {
-                if is_equal_attr(a, a1) {
-                    return Ok(Value::int(IMPLEMENTATION_SPECIFIC | PRECEDING));
-                } else if is_equal_attr(a, this) {
-                    return Ok(Value::int(IMPLEMENTATION_SPECIFIC | FOLLOWING));
-                }
-                attr = a.next();
-            }
-        }
-    }
-    let disconnected = |req: &Request, node1: Option<Node>, node2: Option<Node>| -> i64 {
-        let ordering = if let (Some(a), Some(b)) = (node1, node2) {
-            if a < b { PRECEDING } else { FOLLOWING }
-        } else {
-            let _ = req;
-            if other_obj.index() < this_obj.index() {
-                PRECEDING
-            } else {
-                FOLLOWING
-            }
-        };
-        DISCONNECTED | IMPLEMENTATION_SPECIFIC | ordering
-    };
-    let (Some(mut n1), Some(mut n2)) = (node1, node2) else {
-        return Ok(Value::int(disconnected(req, node1, node2)));
-    };
-    let mut n2_ancestor_of_n1 = false;
-    let mut depth1 = 0usize;
-    let mut root1 = n1;
-    while let Some(p) = root1.parent() {
-        root1 = p;
-        if p == n2 {
-            n2_ancestor_of_n1 = true;
-        }
-        depth1 += 1;
-    }
-    let mut n1_ancestor_of_n2 = false;
-    let mut depth2 = 0usize;
-    let mut root2 = n2;
-    while let Some(p) = root2.parent() {
-        root2 = p;
-        if p == n1 {
-            n1_ancestor_of_n2 = true;
-        }
-        depth2 += 1;
-    }
-    if root1 != root2 {
-        return Ok(Value::int(disconnected(req, Some(n1), Some(n2))));
-    }
-    if (n1_ancestor_of_n2 && attr1.is_none()) || (n1 == n2 && attr2.is_some()) {
-        return Ok(Value::int(CONTAINS | PRECEDING));
-    }
-    if (n2_ancestor_of_n1 && attr2.is_none()) || (n1 == n2 && attr1.is_some()) {
-        return Ok(Value::int(CONTAINED_BY | FOLLOWING));
-    }
-    if n1_ancestor_of_n2 {
-        return Ok(Value::int(PRECEDING));
-    } else if n2_ancestor_of_n1 {
-        return Ok(Value::int(FOLLOWING));
-    }
-    while depth1 > depth2 {
-        if let Some(p) = n1.parent() {
-            n1 = p;
-        }
-        depth1 -= 1;
-    }
-    while depth2 > depth1 {
-        if let Some(p) = n2.parent() {
-            n2 = p;
-        }
-        depth2 -= 1;
-    }
-    while n1.parent() != n2.parent() {
-        match (n1.parent(), n2.parent()) {
-            (Some(a), Some(b)) => {
-                n1 = a;
-                n2 = b;
-            }
-            _ => break,
-        }
-    }
-    let mut at = n1.next();
-    while let Some(n) = at {
-        if n == n2 {
-            return Ok(Value::int(PRECEDING));
-        }
-        at = n.next();
-    }
-    Ok(Value::int(FOLLOWING))
 }
 
 // ---- C14N
@@ -1371,19 +766,16 @@ impl Drop for NsLinks {
 }
 
 /// `dom_canonicalization`: `C14N` into a string, `C14NFile` into a file.
-fn canonicalization(req: &mut Request, to_file: bool) -> Result<Value, Thrown> {
-    let base = u32::from(to_file);
-    arity(req, usize::from(to_file), 4 + usize::from(to_file))?;
-    let file = if to_file {
-        Some(path_arg(req, 1)?)
-    } else {
-        None
-    };
-    let exclusive = bool_arg(req, base + 1, false)?;
-    let with_comments = bool_arg(req, base + 2, false)?;
-    let xpath = arg(req, base + 3)?.and_then(|v| v.as_array().copied());
-    let prefixes = arg(req, base + 4)?.and_then(|v| v.as_array().copied());
-    let (this, node) = this_node(req)?;
+fn canonicalization(
+    req: &mut Request,
+    this: PhpObject,
+    file: Option<&[u8]>,
+    (exclusive, with_comments): (bool, bool),
+    xpath: Option<PhpArray>,
+    prefixes: Option<PhpArray>,
+) -> Result<C14nOut, Thrown> {
+    let base = u32::from(file.is_some());
+    let node = fetch(req, this)?;
     let links = if follows_spec(req, this) {
         let mut root = node;
         while let Some(p) = root.parent() {
@@ -1432,7 +824,7 @@ fn canonicalization(req: &mut Request, to_file: bool) -> Result<Value, Thrown> {
             );
         }
     }
-    let target = match &file {
+    let target = match file {
         Some(f) => C14nTarget::File(f),
         None => C14nTarget::Memory,
     };
@@ -1448,82 +840,25 @@ fn canonicalization(req: &mut Request, to_file: bool) -> Result<Value, Thrown> {
     drop(query_holder);
     drop(links);
     Errors::settle(req, raised, thrown)?;
-    match out {
-        C14nOut::Bytes(bytes) => string(req, &bytes),
-        C14nOut::Written(n) => Ok(Value::int(n)),
-        C14nOut::Failed => Ok(Value::bool(false)),
+    Ok(out)
+}
+
+/// `dom_node_contains`: whether `node` is `other` or one of its ancestors.
+pub(crate) fn contains_node(node: Node, other: Node) -> bool {
+    let mut at = Some(other);
+    while let Some(n) = at {
+        if n == node {
+            return true;
+        }
+        at = n.parent();
     }
+    false
 }
 
-/// `DOMNode::C14N(bool $exclusive = false, bool $withComments = false, ?array $xpath = null, ?array $nsPrefixes = null): string|false`,
-/// which for a document that follows the standard lends C14N its `xmlns`
-/// attributes as declarations ([`NsLinks`]) and refuses a node no document
-/// holds.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r b="2" a="1"><!-- c --><x/></r>');
-/// echo $d->C14N(), "\n", $d->C14N(false, true), "\n", $d->documentElement->firstChild->nextSibling->C14N(), "\n";
-/// $m = Dom\XMLDocument::createFromString('<r xmlns="urn:r" xmlns:p="urn:p" p:b="2" a="1"><p:c/><c/></r>');
-/// $r = $m->documentElement;
-/// echo $m->C14N(), "\n", $r->firstChild->C14N(), "\n", $r->firstChild->C14N(true), "\n", $r->attributes->length, "\n";
-/// $lone = $r->cloneNode();
-/// try { $lone->C14N(); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// <r a="1" b="2"><x></x></r>
-/// <r a="1" b="2"><!-- c --><x></x></r>
-/// <x></x>
-/// <r xmlns="urn:r" xmlns:p="urn:p" a="1" p:b="2"><p:c></p:c><c></c></r>
-/// <p:c xmlns="urn:r" xmlns:p="urn:p"></p:c>
-/// <p:c xmlns:p="urn:p"></p:c>
-/// 4
-/// Canonicalization can only happen on nodes attached to a document.
-/// ```
-fn c14n(req: &mut Request) -> Result<Value, Thrown> {
-    canonicalization(req, false)
-}
-
-/// `DOMNode::C14NFile(string $uri, ...): int|false`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r/>');
-/// $f = tempnam(sys_get_temp_dir(), 'c14n');
-/// var_dump($d->C14NFile($f), file_get_contents($f));
-/// unlink($f);
-/// ```
-/// ```expect
-/// int(7)
-/// string(7) "<r></r>"
-/// ```
-fn c14n_file(req: &mut Request) -> Result<Value, Thrown> {
-    canonicalization(req, true)
-}
-
-/// `DOMNode::appendChild(DOMNode $node): DOMNode|false`, `dom_node_append_child_legacy`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $r = $d->appendChild($d->createElement('r'));
-/// $r->appendChild($d->createTextNode('a'));
-/// $t = $r->appendChild($d->createTextNode('b'));
-/// var_dump($r->childNodes->length, $t->textContent, $d->saveXML($r));
-/// try { $r->appendChild($r); } catch (DOMException $e) { echo $e->getMessage(), ' ', $e->getCode(), "\n"; }
-/// ```
-/// ```expect
-/// int(2)
-/// string(1) "b"
-/// string(9) "<r>ab</r>"
-/// Hierarchy Request Error 3
-/// ```
-fn append_child(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let (this, parent) = this_node(req)?;
-    let Some(child_obj) = object_arg(req, 1)? else {
-        return Ok(Value::bool(false));
-    };
-    let child = fetch(req, child_obj)?;
+/// `dom_node_append_child_legacy`, `DOMNode::appendChild`'s body.
+fn append_child(req: &mut Request, this: PhpObject, child: PhpObject) -> Result<Value, Thrown> {
+    let parent = fetch(req, this)?;
+    let child = fetch(req, child)?;
     if !children_valid(parent) {
         return Ok(Value::bool(false));
     }
@@ -1607,31 +942,16 @@ fn append_child(req: &mut Request) -> Result<Value, Thrown> {
     object_for(req, new_child, Some(this))
 }
 
-/// `DOMNode::insertBefore(DOMNode $node, ?DOMNode $child = null): DOMNode|false`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><b/></r>');
-/// $r = $d->documentElement;
-/// $first = $r->firstChild;
-/// $r->insertBefore($d->createElement('a'), $first);
-/// $r->insertBefore($d->createElement('c'));
-/// echo $d->saveXML($r), "\n";
-/// try { $r->insertBefore($d->createElement('x'), $d->createElement('y')); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// <r><a/><b/><c/></r>
-/// Not Found Error
-/// ```
+/// `DOMNode::insertBefore`'s body, the legacy insertion.
 #[allow(clippy::too_many_lines)] // php's function, one step per clause of the specification
-fn insert_before(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 2)?;
-    let (this, parent) = this_node(req)?;
-    let Some(child_obj) = object_arg(req, 1)? else {
-        return Ok(Value::bool(false));
-    };
-    let child = fetch(req, child_obj)?;
-    let reference = object_arg(req, 2)?;
+fn insert_before(
+    req: &mut Request,
+    this: PhpObject,
+    child: PhpObject,
+    reference: Option<PhpObject>,
+) -> Result<Value, Thrown> {
+    let parent = fetch(req, this)?;
+    let child = fetch(req, child)?;
     if !children_valid(parent) {
         return Ok(Value::bool(false));
     }
@@ -1779,117 +1099,10 @@ fn insert_before(req: &mut Request) -> Result<Value, Thrown> {
     nullable_object(req, new_child, Some(this))
 }
 
-/// `Dom\Node::appendChild(Dom\Node $node): Dom\Node`: the standard's
-/// append, which checks what a document may hold and merges no text.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r>a</r>');
-/// $r = $d->documentElement;
-/// $t = $r->appendChild($d->createTextNode('b'));
-/// $first = $r->firstChild;
-/// var_dump($r->childNodes->length, $t->data, $r->appendChild($first) === $first, $r->lastChild->data);
-/// $text = $d->createTextNode('t');
-/// $copy = $r->cloneNode();
-/// $comment = $d->createComment('c');
-/// foreach ([fn() => $d->appendChild($text), fn() => $d->appendChild($copy), fn() => $r->appendChild($r), fn() => $t->appendChild($comment)] as $f) {
-///     try { $f(); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// }
-/// ```
-/// ```expect
-/// int(2)
-/// string(1) "b"
-/// bool(true)
-/// string(1) "a"
-/// Cannot insert text as a child of a document
-/// Cannot have more than one element child in a document
-/// Hierarchy Request Error
-/// Hierarchy Request Error
-/// ```
-fn modern_append_child(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let (this, parent) = this_node(req)?;
-    let Some(child_obj) = object_arg(req, 1)? else {
-        return Ok(Value::bool(false));
-    };
-    let child = fetch(req, child_obj)?;
-    if is_parent_invalid(parent) {
-        return Err(crate::dom_throw(req, Code::HierarchyRequest));
-    }
-    invalidate(req, this);
-    crate::parent::pre_insert(req, this, child, parent, None)?;
-    object_for(req, child, Some(this))
-}
-
-/// `Dom\Node::insertBefore(Dom\Node $node, ?Dom\Node $child): Dom\Node`:
-/// the standard's pre-insert.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<!DOCTYPE r><r><b/></r>');
-/// $r = $d->documentElement;
-/// $b = $r->firstChild;
-/// $r->insertBefore($d->createComment('a'), $b);
-/// $r->insertBefore($d->createTextNode('c'), null);
-/// $a = $r->firstChild;
-/// $r->insertBefore($a, null);
-/// foreach ($r->childNodes as $n) echo $n->nodeName, "\n";
-/// $x = $d->createComment('x');
-/// $dt = $d->doctype;
-/// foreach ([fn() => $d->insertBefore($x, $b), fn() => $d->insertBefore($x, $dt), fn() => $d->insertBefore($dt, $r), fn() => $d->insertBefore($r->cloneNode(), $dt)] as $f) {
-///     try { $f(); echo "ok\n"; } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// }
-/// ```
-/// ```expect
-/// b
-/// #text
-/// #comment
-/// Not Found Error
-/// ok
-/// Cannot have more than one document type
-/// Cannot have more than one element child in a document
-/// ```
-fn modern_insert_before(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 2, 2)?;
-    let (this, parent) = this_node(req)?;
-    let Some(child_obj) = object_arg(req, 1)? else {
-        return Ok(Value::bool(false));
-    };
-    let child = fetch(req, child_obj)?;
-    let reference = object_arg(req, 2)?;
-    if is_parent_invalid(parent) {
-        return Err(crate::dom_throw(req, Code::HierarchyRequest));
-    }
-    let point = match reference {
-        Some(r) => Some(fetch(req, r)?),
-        None => None,
-    };
-    invalidate(req, this);
-    crate::parent::pre_insert(req, this, child, parent, point)?;
-    object_for(req, child, Some(this))
-}
-
-/// `DOMNode::removeChild(DOMNode $child): DOMNode|false`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a/><b/></r>');
-/// $r = $d->documentElement;
-/// $first = $r->firstChild;
-/// $a = $r->removeChild($first);
-/// var_dump($a->parentNode, $d->saveXML($r));
-/// try { $r->removeChild($a); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// NULL
-/// string(11) "<r><b/></r>"
-/// Not Found Error
-/// ```
-fn remove_child(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let (this, parent) = this_node(req)?;
-    let Some(child_obj) = object_arg(req, 1)? else {
-        return Ok(Value::bool(false));
-    };
-    let child = fetch(req, child_obj)?;
+/// `DOMNode::removeChild`'s body, which `Dom\Node::removeChild` shares.
+fn remove_child(req: &mut Request, this: PhpObject, child: PhpObject) -> Result<Value, Thrown> {
+    let parent = fetch(req, this)?;
+    let child = fetch(req, child)?;
     let strict = strict(req, this);
     if parent.children().is_none() || child.parent() != Some(parent) {
         dom_error(req, Code::NotFound, strict)?;
@@ -1904,163 +1117,876 @@ fn remove_child(req: &mut Request) -> Result<Value, Thrown> {
     object_for(req, child, Some(this))
 }
 
-/// `DOMNode::contains(DOMNode|DOMNameSpaceNode|null $other): bool`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a/></r>');
-/// $first = $d->documentElement->firstChild;
-/// var_dump($d->contains($first), $first->contains($d), $d->contains(null));
-/// try { $d->contains(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// DOMNode::contains(): Argument #1 ($other) must be of type DOMNode|DOMNameSpaceNode|null, stdClass given
-/// ```
-fn contains(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let Some(other) = object_arg(req, 1)? else {
-        return Ok(Value::bool(false));
-    };
-    if !instance_of(req, other, "DOMNode") && !instance_of(req, other, "DOMNameSpaceNode") {
-        let name = class_name(req, other.class());
-        return Err(php_ext::raising::arg_type_error(
-            req,
-            1,
-            &format!("be of type DOMNode|DOMNameSpaceNode|null, {name} given"),
-        ));
-    }
-    let other = fetch(req, other)?;
-    let (_, node) = this_node(req)?;
-    Ok(Value::bool(contains_node(node, other)))
-}
-
-/// `dom_node_contains`: whether `node` is `other` or one of its ancestors.
-fn contains_node(node: Node, other: Node) -> bool {
-    let mut at = Some(other);
-    while let Some(n) = at {
-        if n == node {
-            return true;
+/// `DOMNode::cloneNode`'s body, which `Dom\Node::cloneNode` shares.
+fn clone_node_of(req: &mut Request, this: PhpObject, recursive: bool) -> Result<Value, Thrown> {
+    let n = fetch(req, this)?;
+    let is_document = n.kind().is_document();
+    if follows_spec(req, this) {
+        if is_document {
+            let mut private = Private::default();
+            let Some(node) = clone_node_modern(&mut private.mapper, n, n.doc(), recursive) else {
+                return Ok(Value::bool(false));
+            };
+            let copy = crate::modern::document_object(req, modern_document_class(n), node)?;
+            copy_document_ref(req, this, copy);
+            if let Some(d) = crate::dom_mut(req, copy) {
+                d.obj.set_private_data(Box::new(private));
+            }
+            return Ok(copy.as_value());
         }
-        at = n.parent();
+        let cloned = match crate::dom_mut(req, this).and_then(|d| crate::private::of(&mut d.obj)) {
+            Some(private) => clone_node_modern(&mut private.mapper, n, n.doc(), recursive),
+            None => clone_node(n, n.doc(), recursive),
+        };
+        let Some(node) = cloned else {
+            return Ok(Value::bool(false));
+        };
+        return cloned_object(req, this, n, node);
     }
-    false
-}
-
-/// `Dom\Node::contains(?Dom\Node $other): bool`.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r><a/></r>');
-/// $a = $d->documentElement->firstChild;
-/// var_dump($d->contains($a), $a->contains($d), $a->contains($a), $d->contains(null));
-/// try { $d->contains(new DOMDocument); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// bool(true)
-/// bool(false)
-/// Dom\Node::contains(): Argument #1 ($other) must be of type ?Dom\Node, DOMDocument given
-/// ```
-fn modern_contains(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let Some(other) = object_arg(req, 1)? else {
+    let Some(node) = clone_node(n, n.doc(), recursive) else {
         return Ok(Value::bool(false));
     };
-    let other = fetch(req, other)?;
-    let (_, node) = this_node(req)?;
-    Ok(Value::bool(contains_node(node, other)))
+    if is_document {
+        let value = object_for(req, node, None)?;
+        if let Some(copy) = value.as_object().copied() {
+            copy_document_ref(req, this, copy);
+        }
+        return Ok(value);
+    }
+    cloned_object(req, this, n, node)
 }
 
-/// `DOMNode::__sleep(): array`: php's refusal, unless a subclass
-/// serialises itself.
-///
-/// ```php
-/// try { serialize(new DOMDocument); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Serialization of 'DOMDocument' is not allowed, unless serialization methods are implemented in a subclass
-/// ```
-fn sleep(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let this = this(req)?;
-    let name = class_name(req, this.class());
-    Err(throw(
-        req,
-        "Exception",
-        &format!(
-            "Serialization of '{name}' is not allowed, unless serialization methods are implemented in a subclass"
-        ),
-    ))
+/// `class DOMNode`, `php_dom.stub.php`'s: the six position constants,
+/// its eighteen properties, every one `@virtual` and served by
+/// [`crate::object::NODE_HANDLERS`], and its methods; every node class
+/// of the legacy namespace extends it, over one payload, [`Dom`].
+#[php_class(payload = Dom, handlers = crate::object::NODE_HANDLERS)]
+pub(crate) struct DOMNode;
+
+#[php_class]
+impl DOMNode {
+    const DOCUMENT_POSITION_DISCONNECTED: i64 = 0x01;
+    const DOCUMENT_POSITION_PRECEDING: i64 = 0x02;
+    const DOCUMENT_POSITION_FOLLOWING: i64 = 0x04;
+    const DOCUMENT_POSITION_CONTAINS: i64 = 0x08;
+    const DOCUMENT_POSITION_CONTAINED_BY: i64 = 0x10;
+    const DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC: i64 = 0x20;
+    #[php(property, virtual)]
+    const nodeName: PhpString;
+    #[php(property, virtual)]
+    const nodeValue: Option<PhpString>;
+    #[php(property, virtual)]
+    const nodeType: i64;
+    #[php(property, virtual)]
+    const parentNode: Option<Instance<DOMNode>>;
+    #[php(property, virtual)]
+    const parentElement: Option<Instance<crate::element::DOMElement>>;
+    #[php(property, virtual)]
+    const childNodes: Instance<crate::map::DOMNodeList>;
+    #[php(property, virtual)]
+    const firstChild: Option<Instance<DOMNode>>;
+    #[php(property, virtual)]
+    const lastChild: Option<Instance<DOMNode>>;
+    #[php(property, virtual)]
+    const previousSibling: Option<Instance<DOMNode>>;
+    #[php(property, virtual)]
+    const nextSibling: Option<Instance<DOMNode>>;
+    #[php(property, virtual)]
+    const attributes: Option<Instance<crate::map::DOMNamedNodeMap>>;
+    #[php(property, virtual)]
+    const isConnected: bool;
+    #[php(property, virtual)]
+    const ownerDocument: Option<Instance<crate::document::DOMDocument>>;
+    #[php(property, virtual)]
+    const namespaceURI: Option<PhpString>;
+    #[php(property, virtual)]
+    const prefix: PhpString;
+    #[php(property, virtual)]
+    const localName: Option<PhpString>;
+    #[php(property, virtual)]
+    const baseURI: Option<PhpString>;
+    #[php(property, virtual)]
+    const textContent: PhpString;
+
+    /// `DOMNode::appendChild(DOMNode $node): DOMNode|false`, `dom_node_append_child_legacy`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $r = $d->appendChild($d->createElement('r'));
+    /// $r->appendChild($d->createTextNode('a'));
+    /// $t = $r->appendChild($d->createTextNode('b'));
+    /// var_dump($r->childNodes->length, $t->textContent, $d->saveXML($r));
+    /// try { $r->appendChild($r); } catch (DOMException $e) { echo $e->getMessage(), ' ', $e->getCode(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// string(1) "b"
+    /// string(9) "<r>ab</r>"
+    /// Hierarchy Request Error 3
+    /// ```
+    fn appendChild(
+        req: &mut Request,
+        this: This<Self>,
+        node: Instance<DOMNode>,
+    ) -> Result<Untyped<Value>, Thrown> {
+        append_child(req, this.object(), node.object()).map(Untyped)
+    }
+
+    /// `DOMNode::C14N(bool $exclusive = false, bool $withComments = false, ?array $xpath = null, ?array $nsPrefixes = null): string|false`,
+    /// which for a document that follows the standard lends C14N its `xmlns`
+    /// attributes as declarations ([`NsLinks`]) and refuses a node no document
+    /// holds.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r b="2" a="1"><!-- c --><x/></r>');
+    /// echo $d->C14N(), "\n", $d->C14N(false, true), "\n", $d->documentElement->firstChild->nextSibling->C14N(), "\n";
+    /// $m = Dom\XMLDocument::createFromString('<r xmlns="urn:r" xmlns:p="urn:p" p:b="2" a="1"><p:c/><c/></r>');
+    /// $r = $m->documentElement;
+    /// echo $m->C14N(), "\n", $r->firstChild->C14N(), "\n", $r->firstChild->C14N(true), "\n", $r->attributes->length, "\n";
+    /// $lone = $r->cloneNode();
+    /// try { $lone->C14N(); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// <r a="1" b="2"><x></x></r>
+    /// <r a="1" b="2"><!-- c --><x></x></r>
+    /// <x></x>
+    /// <r xmlns="urn:r" xmlns:p="urn:p" a="1" p:b="2"><p:c></p:c><c></c></r>
+    /// <p:c xmlns="urn:r" xmlns:p="urn:p"></p:c>
+    /// <p:c xmlns:p="urn:p"></p:c>
+    /// 4
+    /// Canonicalization can only happen on nodes attached to a document.
+    /// ```
+    #[php(tentative)]
+    fn C14N(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = false)] exclusive: bool,
+        #[php(default = false)] withComments: bool,
+        #[php(default = null)] xpath: Option<PhpArray>,
+        #[php(default = null)] nsPrefixes: Option<PhpArray>,
+    ) -> Result<OrFalse<PhpString>, Thrown> {
+        let out = canonicalization(
+            req,
+            this.object(),
+            None,
+            (exclusive, withComments),
+            xpath,
+            nsPrefixes,
+        )?;
+        Ok(match out {
+            C14nOut::Bytes(bytes) => OrFalse::Value(PhpString::new(req, &bytes)?),
+            C14nOut::Written(_) | C14nOut::Failed => OrFalse::False,
+        })
+    }
+
+    /// `DOMNode::C14NFile(string $uri, ...): int|false`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r/>');
+    /// $f = tempnam(sys_get_temp_dir(), 'c14n');
+    /// var_dump($d->C14NFile($f), file_get_contents($f));
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// int(7)
+    /// string(7) "<r></r>"
+    /// ```
+    #[php(tentative)]
+    fn C14NFile(
+        req: &mut Request,
+        this: This<Self>,
+        uri: Path,
+        #[php(default = false)] exclusive: bool,
+        #[php(default = false)] withComments: bool,
+        #[php(default = null)] xpath: Option<PhpArray>,
+        #[php(default = null)] nsPrefixes: Option<PhpArray>,
+    ) -> Result<OrFalse<i64>, Thrown> {
+        let out = canonicalization(
+            req,
+            this.object(),
+            Some(uri.0.as_bytes()),
+            (exclusive, withComments),
+            xpath,
+            nsPrefixes,
+        )?;
+        Ok(match out {
+            C14nOut::Written(n) => OrFalse::Value(n),
+            C14nOut::Bytes(_) | C14nOut::Failed => OrFalse::False,
+        })
+    }
+
+    /// `DOMNode::cloneNode(bool $deep = false): DOMNode|false`, and
+    /// `Dom\Node::cloneNode`, which clones through the document's namespace
+    /// mapper and gives a copied document private data of its own.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r a="1"><c/></r>');
+    /// $r = $d->documentElement;
+    /// echo $d->saveXML($r->cloneNode()), ' ', $d->saveXML($r->cloneNode(true)), "\n";
+    /// $copy = $d->cloneNode(true);
+    /// var_dump($copy === $d, $copy->saveXML() === $d->saveXML());
+    /// $m = Dom\XMLDocument::createFromString('<!DOCTYPE r><r xmlns:p="urn:p" p:a="1"><p:c>t</p:c></r>');
+    /// $copy = $m->cloneNode(true);
+    /// $e = $copy->documentElement;
+    /// var_dump(get_class($copy), $copy->doctype->name, $e->attributes->length, $e->firstChild->namespaceURI, $e->textContent);
+    /// $shallow = $m->documentElement->cloneNode();
+    /// var_dump(get_class($shallow), $shallow->attributes->length, $shallow->hasChildNodes(), $shallow->ownerDocument === $m);
+    /// var_dump(get_class($m->cloneNode()), $m->cloneNode()->hasChildNodes());
+    /// ```
+    /// ```expect
+    /// <r a="1"/> <r a="1"><c/></r>
+    /// bool(false)
+    /// bool(true)
+    /// string(15) "Dom\XMLDocument"
+    /// string(1) "r"
+    /// int(2)
+    /// string(5) "urn:p"
+    /// string(1) "t"
+    /// string(11) "Dom\Element"
+    /// int(2)
+    /// bool(false)
+    /// bool(true)
+    /// string(15) "Dom\XMLDocument"
+    /// bool(false)
+    /// ```
+    fn cloneNode(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = false)] deep: bool,
+    ) -> Result<Untyped<Value>, Thrown> {
+        clone_node_of(req, this.object(), deep).map(Untyped)
+    }
+
+    /// `DOMNode::getLineNo(): int`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML("<r>\n<a/>\n</r>");
+    /// var_dump($d->getElementsByTagName('a')->item(0)->getLineNo());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// ```
+    #[php(tentative)]
+    fn getLineNo(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        Ok(fetch(req, this.object())?.line_no())
+    }
+
+    /// `DOMNode::getNodePath(): ?string`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a/><a><b/></a></r>');
+    /// echo $d->getElementsByTagName('b')->item(0)->getNodePath(), "\n";
+    /// ```
+    /// ```expect
+    /// /r/a[2]/b
+    /// ```
+    #[php(tentative)]
+    fn getNodePath(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+        match fetch(req, this.object())?.path() {
+            Some(p) => PhpString::new(req, &p).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// `DOMNode::hasAttributes(): bool`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r a="1"><c/></r>');
+    /// var_dump($d->documentElement->hasAttributes(), $d->documentElement->firstChild->hasAttributes());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn hasAttributes(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let node = fetch(req, this.object())?;
+        Ok(node.kind() == Kind::Element && node.properties().is_some())
+    }
+
+    /// `DOMNode::hasChildNodes(): bool`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a/></r>');
+    /// var_dump($d->documentElement->hasChildNodes(), $d->documentElement->firstChild->hasChildNodes());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn hasChildNodes(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let node = fetch(req, this.object())?;
+        Ok(children_valid(node) && node.children().is_some())
+    }
+
+    /// `DOMNode::insertBefore(DOMNode $node, ?DOMNode $child = null): DOMNode|false`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><b/></r>');
+    /// $r = $d->documentElement;
+    /// $first = $r->firstChild;
+    /// $r->insertBefore($d->createElement('a'), $first);
+    /// $r->insertBefore($d->createElement('c'));
+    /// echo $d->saveXML($r), "\n";
+    /// try { $r->insertBefore($d->createElement('x'), $d->createElement('y')); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// <r><a/><b/><c/></r>
+    /// Not Found Error
+    /// ```
+    #[allow(clippy::too_many_lines)] // php's function, one step per clause of the specification
+    fn insertBefore(
+        req: &mut Request,
+        this: This<Self>,
+        node: Instance<DOMNode>,
+        #[php(default = null)] child: Option<Instance<DOMNode>>,
+    ) -> Result<Untyped<Value>, Thrown> {
+        let reference = child.map(|c| c.object());
+        insert_before(req, this.object(), node.object(), reference).map(Untyped)
+    }
+
+    /// `DOMNode::isDefaultNamespace(string $namespace): bool`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r xmlns="urn:d"><c/></r>');
+    /// var_dump($d->isDefaultNamespace('urn:d'), $d->documentElement->firstChild->isDefaultNamespace('urn:x'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isDefaultNamespace(
+        req: &mut Request,
+        this: This<Self>,
+        namespace: PhpString,
+    ) -> Result<bool, Thrown> {
+        let uri = namespace.as_bytes();
+        let mut node = fetch(req, this.object())?;
+        if uri.is_empty() {
+            return Ok(false);
+        }
+        if node.kind().is_document() {
+            match node.root() {
+                Some(r) => node = r,
+                None => return Ok(false),
+            }
+        }
+        let found = node.search_ns(None).and_then(Ns::href);
+        let uri = &uri[..uri.iter().position(|b| *b == 0).unwrap_or(uri.len())];
+        Ok(found.as_deref() == Some(uri))
+    }
+
+    /// `DOMNode::isSameNode(DOMNode $otherNode): bool`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r/>');
+    /// $root = $d->documentElement;
+    /// $first = $d->firstChild;
+    /// var_dump($root->isSameNode($first), $d->isSameNode($root));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isSameNode(
+        req: &mut Request,
+        this: This<Self>,
+        otherNode: Instance<DOMNode>,
+    ) -> Result<bool, Thrown> {
+        is_same_node(req, this.object(), Some(otherNode.object()))
+    }
+
+    /// `DOMNode::isEqualNode(?DOMNode $otherNode): bool`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a x="1">t</a><a x="1">t</a><a x="2">t</a></r>');
+    /// $all = iterator_to_array($d->getElementsByTagName('a'));
+    /// $a = $all[0];
+    /// $b = $all[1];
+    /// $c = $all[2];
+    /// var_dump($a->isEqualNode($b), $a->isEqualNode($c), $a->isEqualNode(null));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    fn isEqualNode(
+        req: &mut Request,
+        this: This<Self>,
+        otherNode: Option<Instance<DOMNode>>,
+    ) -> Result<bool, Thrown> {
+        is_equal_node_of(req, this.object(), otherNode.map(|o| o.object()), false)
+    }
+
+    /// `DOMNode::isSupported(string $feature, string $version): bool`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// var_dump($d->isSupported('xml', '2.0'), $d->isSupported('Core', '2.0'), $d->isSupported('Events', '1.0'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isSupported(_this: This<Self>, feature: PhpString, version: PhpString) -> bool {
+        has_feature(feature.as_bytes(), version.as_bytes())
+    }
+
+    /// `DOMNode::lookupNamespaceURI(?string $prefix): ?string`: libxml's
+    /// search for the legacy classes, the standard's locate for a document
+    /// that follows it, where the empty prefix is none.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r xmlns="urn:d" xmlns:p="urn:p"><c/></r>');
+    /// $c = $d->documentElement->firstChild;
+    /// var_dump($c->lookupNamespaceURI('p'), $c->lookupNamespaceURI(null), $d->lookupNamespaceURI('q'));
+    /// $m = Dom\XMLDocument::createFromString('<r xmlns="urn:d" xmlns:p="urn:p"><c/></r>');
+    /// $c = $m->documentElement->firstChild;
+    /// var_dump($c->lookupNamespaceURI('p'), $c->lookupNamespaceURI(''), $c->lookupNamespaceURI('q'), $c->lookupNamespaceURI('XML'), $m->lookupNamespaceURI('xmlns'));
+    /// ```
+    /// ```expect
+    /// string(5) "urn:p"
+    /// string(5) "urn:d"
+    /// NULL
+    /// string(5) "urn:p"
+    /// string(5) "urn:d"
+    /// NULL
+    /// string(36) "http://www.w3.org/XML/1998/namespace"
+    /// string(29) "http://www.w3.org/2000/xmlns/"
+    /// ```
+    #[php(tentative)]
+    fn lookupNamespaceURI(
+        req: &mut Request,
+        this: This<Self>,
+        prefix: Option<PhpString>,
+    ) -> Result<Option<PhpString>, Thrown> {
+        let prefix = prefix.map(|p| p.as_bytes().to_vec());
+        let this = this.object();
+        let mut node = fetch(req, this)?;
+        if follows_spec(req, this) {
+            let prefix = prefix.filter(|p| !p.is_empty());
+            return match locate_namespace(node, prefix.as_deref()) {
+                Some(uri) => PhpString::new(req, &uri).map(Some),
+                None => Ok(None),
+            };
+        }
+        if node.kind().is_document() {
+            match node.root() {
+                Some(r) => node = r,
+                None => return Ok(None),
+            }
+        }
+        match node.search_ns(prefix.as_deref()).and_then(Ns::href) {
+            Some(href) => PhpString::new(req, &href).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// `DOMNode::lookupPrefix(string $namespace): ?string`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r xmlns:p="urn:p"><c/></r>');
+    /// var_dump($d->documentElement->firstChild->lookupPrefix('urn:p'), $d->lookupPrefix('urn:x'), $d->lookupPrefix(''));
+    /// ```
+    /// ```expect
+    /// string(1) "p"
+    /// NULL
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    fn lookupPrefix(
+        req: &mut Request,
+        this: This<Self>,
+        namespace: PhpString,
+    ) -> Result<Option<PhpString>, Thrown> {
+        lookup_prefix(req, this.object(), Some(namespace), false)
+    }
+
+    /// `DOMNode::normalize(): void`: `php_dom_normalize_modern` for a
+    /// document that follows the standard, `php_dom_normalize_legacy`
+    /// otherwise, which also normalises attributes' children.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $r = $d->appendChild($d->createElement('r'));
+    /// $r->appendChild($d->createTextNode('a'));
+    /// $r->appendChild($d->createElement('x'));
+    /// $last = $r->lastChild;
+    /// $r->insertBefore($d->createTextNode('b'), $last);
+    /// $r->normalize();
+    /// var_dump($r->childNodes->length, $r->firstChild->data);
+    /// $m = Dom\XMLDocument::createFromString('<r>a<x/></r>');
+    /// $r = $m->documentElement;
+    /// $a = $r->firstChild;
+    /// $x = $r->lastChild;
+    /// $r->insertBefore($m->createTextNode(''), $a);
+    /// $r->insertBefore($m->createTextNode('b'), $x);
+    /// $r->insertBefore($m->createTextNode('c'), $x);
+    /// var_dump($r->childNodes->length);
+    /// $r->normalize();
+    /// var_dump($r->childNodes->length, $r->firstChild->data);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// string(2) "ab"
+    /// int(5)
+    /// int(2)
+    /// string(3) "abc"
+    /// ```
+    #[php(tentative)]
+    fn normalize(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let this = this.object();
+        let node = fetch(req, this)?;
+        if follows_spec(req, this) {
+            normalize_modern(node);
+        } else {
+            normalize(node);
+        }
+        Ok(())
+    }
+
+    /// `DOMNode::removeChild(DOMNode $child): DOMNode|false`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a/><b/></r>');
+    /// $r = $d->documentElement;
+    /// $first = $r->firstChild;
+    /// $a = $r->removeChild($first);
+    /// var_dump($a->parentNode, $d->saveXML($r));
+    /// try { $r->removeChild($a); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// NULL
+    /// string(11) "<r><b/></r>"
+    /// Not Found Error
+    /// ```
+    fn removeChild(
+        req: &mut Request,
+        this: This<Self>,
+        child: Instance<DOMNode>,
+    ) -> Result<Untyped<Value>, Thrown> {
+        remove_child(req, this.object(), child.object()).map(Untyped)
+    }
+
+    /// `DOMNode::replaceChild(DOMNode $node, DOMNode $child): DOMNode|false`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a/><b/></r>');
+    /// $r = $d->documentElement;
+    /// $first = $r->firstChild;
+    /// $old = $r->replaceChild($d->createElement('x'), $first);
+    /// echo $old->nodeName, ' ', $d->saveXML($r), "\n";
+    /// ```
+    /// ```expect
+    /// a <r><x/><b/></r>
+    /// ```
+    fn replaceChild(
+        req: &mut Request,
+        this: This<Self>,
+        node: Instance<DOMNode>,
+        child: Instance<DOMNode>,
+    ) -> Result<Untyped<Value>, Thrown> {
+        replace_child(req, this.object(), node.object(), child.object(), false).map(Untyped)
+    }
+
+    /// `DOMNode::contains(DOMNode|DOMNameSpaceNode|null $other): bool`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a/></r>');
+    /// $first = $d->documentElement->firstChild;
+    /// var_dump($d->contains($first), $first->contains($d), $d->contains(null));
+    /// try { $d->contains(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// DOMNode::contains(): Argument #1 ($other) must be of type DOMNode|DOMNameSpaceNode|null, stdClass given
+    /// ```
+    fn contains(
+        req: &mut Request,
+        this: This<Self>,
+        other: Option<Union<Instance<DOMNode>, Instance<DOMNameSpaceNode>>>,
+    ) -> Result<bool, Thrown> {
+        let Some(other) = other.map(|o| match o {
+            Union::A(node) => node.object(),
+            Union::B(namespace) => namespace.object(),
+        }) else {
+            return Ok(false);
+        };
+        if !instance_of(req, other, "DOMNode") && !instance_of(req, other, "DOMNameSpaceNode") {
+            let name = class_name(req, other.class());
+            return Err(php_ext::raising::arg_type_error(
+                req,
+                1,
+                &format!("be of type DOMNode|DOMNameSpaceNode|null, {name} given"),
+            ));
+        }
+        let other = fetch(req, other)?;
+        let node = fetch(req, this.object())?;
+        Ok(contains_node(node, other))
+    }
+
+    /// `DOMNode::getRootNode(?array $options = null): DOMNode`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a/></r>');
+    /// var_dump($d->documentElement->firstChild->getRootNode() === $d);
+    /// $e = $d->createElement('x');
+    /// var_dump($e->getRootNode() === $e);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    fn getRootNode(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] options: Option<PhpArray>,
+    ) -> Result<Raw<Instance<DOMNode>>, Thrown> {
+        let _ = options;
+        let this = this.object();
+        let mut node = fetch(req, this)?;
+        while let Some(p) = node.parent() {
+            node = p;
+        }
+        let root = object_for(req, node, Some(this))?;
+        returned(req, root)
+    }
+
+    /// `DOMNode::compareDocumentPosition(DOMNode $other): int`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a/><b/></r>');
+    /// $a = $d->documentElement->firstChild;
+    /// $b = $a->nextSibling;
+    /// var_dump($a->compareDocumentPosition($b), $b->compareDocumentPosition($a), $d->documentElement->compareDocumentPosition($a), $a->compareDocumentPosition($a));
+    /// ```
+    /// ```expect
+    /// int(4)
+    /// int(2)
+    /// int(20)
+    /// int(0)
+    /// ```
+    #[allow(clippy::too_many_lines)] // php's function, one step per clause of the specification
+    fn compareDocumentPosition(
+        req: &mut Request,
+        this: This<Self>,
+        other: Instance<DOMNode>,
+    ) -> Result<i64, Thrown> {
+        const DISCONNECTED: i64 = DOMNode::DOCUMENT_POSITION_DISCONNECTED;
+        const PRECEDING: i64 = DOMNode::DOCUMENT_POSITION_PRECEDING;
+        const FOLLOWING: i64 = DOMNode::DOCUMENT_POSITION_FOLLOWING;
+        const CONTAINS: i64 = DOMNode::DOCUMENT_POSITION_CONTAINS;
+        const CONTAINED_BY: i64 = DOMNode::DOCUMENT_POSITION_CONTAINED_BY;
+        const IMPLEMENTATION_SPECIFIC: i64 = DOMNode::DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC;
+        let this_obj = this.object();
+        let this = fetch(req, this_obj)?;
+        let other_obj = other.object();
+        let other = fetch(req, other_obj)?;
+        if this == other {
+            return Ok(0);
+        }
+        let mut node1 = Some(other);
+        let mut node2 = Some(this);
+        let mut attr1 = None;
+        let mut attr2 = None;
+        if other.kind() == Kind::Attribute {
+            attr1 = Some(other);
+            node1 = other.parent();
+        }
+        if this.kind() == Kind::Attribute {
+            attr2 = Some(this);
+            node2 = this.parent();
+            if let (Some(a1), Some(n1)) = (attr1, node1)
+                && node2 == Some(n1)
+            {
+                let mut attr = n1.properties();
+                while let Some(a) = attr {
+                    if is_equal_attr(a, a1) {
+                        return Ok(IMPLEMENTATION_SPECIFIC | PRECEDING);
+                    } else if is_equal_attr(a, this) {
+                        return Ok(IMPLEMENTATION_SPECIFIC | FOLLOWING);
+                    }
+                    attr = a.next();
+                }
+            }
+        }
+        let disconnected = |req: &Request, node1: Option<Node>, node2: Option<Node>| -> i64 {
+            let ordering = if let (Some(a), Some(b)) = (node1, node2) {
+                if a < b { PRECEDING } else { FOLLOWING }
+            } else {
+                let _ = req;
+                if other_obj.index() < this_obj.index() {
+                    PRECEDING
+                } else {
+                    FOLLOWING
+                }
+            };
+            DISCONNECTED | IMPLEMENTATION_SPECIFIC | ordering
+        };
+        let (Some(mut n1), Some(mut n2)) = (node1, node2) else {
+            return Ok(disconnected(req, node1, node2));
+        };
+        let mut n2_ancestor_of_n1 = false;
+        let mut depth1 = 0usize;
+        let mut root1 = n1;
+        while let Some(p) = root1.parent() {
+            root1 = p;
+            if p == n2 {
+                n2_ancestor_of_n1 = true;
+            }
+            depth1 += 1;
+        }
+        let mut n1_ancestor_of_n2 = false;
+        let mut depth2 = 0usize;
+        let mut root2 = n2;
+        while let Some(p) = root2.parent() {
+            root2 = p;
+            if p == n1 {
+                n1_ancestor_of_n2 = true;
+            }
+            depth2 += 1;
+        }
+        if root1 != root2 {
+            return Ok(disconnected(req, Some(n1), Some(n2)));
+        }
+        if (n1_ancestor_of_n2 && attr1.is_none()) || (n1 == n2 && attr2.is_some()) {
+            return Ok(CONTAINS | PRECEDING);
+        }
+        if (n2_ancestor_of_n1 && attr2.is_none()) || (n1 == n2 && attr1.is_some()) {
+            return Ok(CONTAINED_BY | FOLLOWING);
+        }
+        if n1_ancestor_of_n2 {
+            return Ok(PRECEDING);
+        } else if n2_ancestor_of_n1 {
+            return Ok(FOLLOWING);
+        }
+        while depth1 > depth2 {
+            if let Some(p) = n1.parent() {
+                n1 = p;
+            }
+            depth1 -= 1;
+        }
+        while depth2 > depth1 {
+            if let Some(p) = n2.parent() {
+                n2 = p;
+            }
+            depth2 -= 1;
+        }
+        while n1.parent() != n2.parent() {
+            match (n1.parent(), n2.parent()) {
+                (Some(a), Some(b)) => {
+                    n1 = a;
+                    n2 = b;
+                }
+                _ => break,
+            }
+        }
+        let mut at = n1.next();
+        while let Some(n) = at {
+            if n == n2 {
+                return Ok(PRECEDING);
+            }
+            at = n.next();
+        }
+        Ok(FOLLOWING)
+    }
+
+    /// `DOMNode::__sleep(): array`: php's refusal, unless a subclass
+    /// serialises itself.
+    ///
+    /// ```php
+    /// try { serialize(new DOMDocument); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Serialization of 'DOMDocument' is not allowed, unless serialization methods are implemented in a subclass
+    /// ```
+    fn __sleep(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let name = class_name(req, this.object().class());
+        Err(throw(
+            req,
+            "Exception",
+            &format!(
+                "Serialization of '{name}' is not allowed, unless serialization methods are implemented in a subclass"
+            ),
+        ))
+    }
+
+    /// `DOMNode::__wakeup(): void`: php's refusal.
+    ///
+    /// ```php
+    /// try { unserialize('O:10:"DOMElement":0:{}'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Unserialization of 'DOMElement' is not allowed, unless unserialization methods are implemented in a subclass
+    /// ```
+    fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let name = class_name(req, this.object().class());
+        Err(throw(
+            req,
+            "Exception",
+            &format!(
+                "Unserialization of '{name}' is not allowed, unless unserialization methods are implemented in a subclass"
+            ),
+        ))
+    }
 }
 
-/// `DOMNode::__wakeup(): void`: php's refusal.
-///
-/// ```php
-/// try { unserialize('O:10:"DOMElement":0:{}'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Unserialization of 'DOMElement' is not allowed, unless unserialization methods are implemented in a subclass
-/// ```
-fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let this = this(req)?;
-    let name = class_name(req, this.class());
-    Err(throw(
-        req,
-        "Exception",
-        &format!(
-            "Unserialization of '{name}' is not allowed, unless unserialization methods are implemented in a subclass"
-        ),
-    ))
-}
+/// `class DOMNameSpaceNode`: a namespace declaration answered as a node,
+/// its ten properties `@virtual`, and `DOMNode`'s `__sleep` and
+/// `__wakeup` as its own (`@implementation-alias`).
+#[php_class(payload = Dom, handlers = crate::object::NODE_HANDLERS)]
+pub(crate) struct DOMNameSpaceNode;
 
-/// The methods `DOMNode` declares, `DOMNameSpaceNode`'s, which are
-/// `DOMNode`'s own (`@implementation-alias`), and those `Dom\Node`
-/// declares apart from the legacy class.
-pub(crate) const METHODS: &[(&str, Entry)] = &[
-    ("DOMNode::appendChild", append_child),
-    ("DOMNode::C14N", c14n),
-    ("DOMNode::C14NFile", c14n_file),
-    ("DOMNode::cloneNode", clone_node_method),
-    ("DOMNode::getLineNo", get_line_no),
-    ("DOMNode::getNodePath", get_node_path),
-    ("DOMNode::hasAttributes", has_attributes),
-    ("DOMNode::hasChildNodes", has_child_nodes),
-    ("DOMNode::insertBefore", insert_before),
-    ("DOMNode::isDefaultNamespace", is_default_namespace),
-    ("DOMNode::isSameNode", is_same_node),
-    ("DOMNode::isEqualNode", is_equal_node_method),
-    ("DOMNode::isSupported", is_supported),
-    ("DOMNode::lookupNamespaceURI", lookup_namespace_uri),
-    ("DOMNode::lookupPrefix", lookup_prefix),
-    ("DOMNode::normalize", normalize_method),
-    ("DOMNode::removeChild", remove_child),
-    ("DOMNode::replaceChild", replace_child),
-    ("DOMNode::contains", contains),
-    ("DOMNode::getRootNode", get_root_node),
-    (
-        "DOMNode::compareDocumentPosition",
-        compare_document_position,
-    ),
-    ("DOMNode::__sleep", sleep),
-    ("DOMNode::__wakeup", wakeup),
-    ("DOMNameSpaceNode::__sleep", sleep),
-    ("DOMNameSpaceNode::__wakeup", wakeup),
-    ("Dom\\Node::appendChild", modern_append_child),
-    ("Dom\\Node::insertBefore", modern_insert_before),
-    ("Dom\\Node::replaceChild", modern_replace_child),
-    ("Dom\\Node::removeChild", remove_child),
-    ("Dom\\Node::isEqualNode", modern_is_equal_node),
-    ("Dom\\Node::isSameNode", is_same_node),
-    ("Dom\\Node::lookupPrefix", modern_lookup_prefix),
-    ("Dom\\Node::isDefaultNamespace", modern_is_default_namespace),
-    ("Dom\\Node::getNodePath", modern_get_node_path),
-    ("Dom\\Node::contains", modern_contains),
-    (
-        "Dom\\Node::compareDocumentPosition",
-        compare_document_position,
-    ),
-];
+#[php_class]
+impl DOMNameSpaceNode {
+    #[php(property, virtual)]
+    const nodeName: PhpString;
+    #[php(property, virtual)]
+    const nodeValue: Option<PhpString>;
+    #[php(property, virtual)]
+    const nodeType: i64;
+    #[php(property, virtual)]
+    const prefix: PhpString;
+    #[php(property, virtual)]
+    const localName: Option<PhpString>;
+    #[php(property, virtual)]
+    const namespaceURI: Option<PhpString>;
+    #[php(property, virtual)]
+    const isConnected: bool;
+    #[php(property, virtual)]
+    const ownerDocument: Option<Instance<crate::document::DOMDocument>>;
+    #[php(property, virtual)]
+    const parentNode: Option<Instance<DOMNode>>;
+    #[php(property, virtual)]
+    const parentElement: Option<Instance<crate::element::DOMElement>>;
+    #[php(implementation = DOMNode::__sleep)]
+    fn __sleep(this: This<Self>) -> PhpArray;
+    #[php(implementation = DOMNode::__wakeup)]
+    fn __wakeup(this: This<Self>);
+}

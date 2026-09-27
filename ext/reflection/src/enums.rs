@@ -7,16 +7,18 @@
 //! gives every enum, `cases`, `from` and `tryFrom`, are the engine's,
 //! which links them onto every enum, a native's and a program's alike.
 
+use php_ext::abi::{Instance, Raw, This, Union};
+use php_ext::attr::php_class;
 use php_ext::call::class_constant;
 use php_ext::decl::{ClassKind, EnumBacking, Type};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpArray, PhpObject, Value};
+use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString};
 
 use super::signature::type_factory;
 use super::{
-    class_argument, class_constant_named, class_name_of, class_named, exactly_arguments,
-    new_object, one_string_argument, set_name, set_string_prop, string_argument, this_name,
+    answer, class_constant_named, class_name_of, class_named, class_of, new_object, set_name,
+    set_string_prop, this_name,
 };
 
 /// `ce->enum_backing_type`: the type of a backed enum's `value`, and
@@ -70,169 +72,6 @@ fn case_names(req: &Request, class: ClassId) -> Vec<Vec<u8>> {
     })
 }
 
-/// `ReflectionEnum::__construct(object|string $objectOrClass)`:
-/// `reflection_class_object_ctor` and then php's own refusal for a
-/// class that is no enum.
-///
-/// ```php
-/// var_dump(new ReflectionEnum('PropertyHookType'));
-/// try { new ReflectionEnum('Exception'); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(ReflectionEnum)#1 (1) {
-///   ["name"]=>
-///   string(16) "PropertyHookType"
-/// }
-/// ReflectionException: Class "Exception" is not an enum
-/// ```
-pub(super) fn reflection_enum_construct(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 1)?;
-    let (class, _) = class_argument(req, 1)?;
-    held_to_enum(req, class)?;
-    let name = class_name_of(req, class);
-    if let Some(this) = req.this() {
-        set_name(req, this, &name)?;
-    }
-    Ok(Value::null())
-}
-
-/// `ReflectionEnum::isBacked(): bool`: `ce->enum_backing_type != IS_UNDEF`.
-///
-/// ```php
-/// var_dump((new ReflectionEnum('PropertyHookType'))->isBacked());
-/// ```
-/// ```expect
-/// bool(true)
-/// ```
-pub(super) fn reflection_enum_is_backed(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_enum(req)?;
-    Ok(Value::bool(backing_of(req, class).is_some()))
-}
-
-/// `ReflectionEnum::getBackingType(): ?ReflectionNamedType`: the
-/// backing type as a type reflector, and `null` for a pure enum.
-///
-/// ```php
-/// var_dump((string) (new ReflectionEnum('PropertyHookType'))->getBackingType());
-/// ```
-/// ```expect
-/// string(6) "string"
-/// ```
-pub(super) fn reflection_enum_get_backing_type(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_enum(req)?;
-    match backing_of(req, class) {
-        Some(backing) => {
-            let object = type_factory(req, &backing, false)?;
-            Ok(object.as_value())
-        }
-        None => Ok(Value::null()),
-    }
-}
-
-/// `ReflectionEnum::hasCase(string $name): bool`: whether the
-/// constants table holds a case of that name.
-///
-/// ```php
-/// $e = new ReflectionEnum('PropertyHookType');
-/// var_dump($e->hasCase('Get'), $e->hasCase('Nope'));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-pub(super) fn reflection_enum_has_case(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let class = this_enum(req)?;
-    Ok(Value::bool(case_names(req, class).contains(&name)))
-}
-
-/// `ReflectionEnum::getCase(string $name): ReflectionEnumUnitCase`: the
-/// case reflector for that name, php's `ReflectionException` for a name
-/// the enum has no case under.
-///
-/// ```php
-/// $e = new ReflectionEnum('PropertyHookType');
-/// var_dump($e->getCase('Get'));
-/// try { $e->getCase('Nope'); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
-/// enum F { case A; const C = 1; }
-/// try { (new ReflectionEnum('F'))->getCase('C'); } catch (ReflectionException $t) { echo $t->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(ReflectionEnumBackedCase)#2 (2) {
-///   ["name"]=>
-///   string(3) "Get"
-///   ["class"]=>
-///   string(16) "PropertyHookType"
-/// }
-/// ReflectionException: Case PropertyHookType::Nope does not exist
-/// F::C is not a case
-/// ```
-pub(super) fn reflection_enum_get_case(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let class = this_enum(req)?;
-    if !case_names(req, class).contains(&name) {
-        let held = class_name_of(req, class);
-        // A constant of that name that is no case is php's second
-        // refusal, `ZEND_CLASS_CONST_IS_CASE` unset.
-        let format = if class_constant_named(req, class, &name).is_some() {
-            "{}::{} is not a case"
-        } else {
-            "Case {}::{} does not exist"
-        };
-        let message = format
-            .replacen("{}", &String::from_utf8_lossy(&held), 1)
-            .replacen("{}", &String::from_utf8_lossy(&name), 1);
-        return Err(throw(req, "ReflectionException", &message));
-    }
-    let object = case_factory(req, class, &name)?;
-    Ok(object.as_value())
-}
-
-/// `ReflectionEnum::getCases(): array`: one case reflector per case, in
-/// declaration order.
-///
-/// ```php
-/// var_dump(count((new ReflectionEnum('PropertyHookType'))->getCases()));
-/// ```
-/// ```expect
-/// int(2)
-/// ```
-///
-/// A program's enum, pure and backed, its own constant no case:
-///
-/// ```php
-/// enum Suit: int { case Hearts = 1; case Spades = 2; const Wild = self::Spades; }
-/// enum Pure { case A; }
-/// $s = new ReflectionEnum('Suit');
-/// foreach ($s->getCases() as $case) echo get_class($case), ' ', $case->name, '=', $case->getBackingValue(), "\n";
-/// var_dump($s->isBacked(), (string) $s->getBackingType(), $s->hasCase('Wild'));
-/// $p = new ReflectionEnum('Pure');
-/// var_dump($p->isBacked(), $p->getBackingType(), get_class($p->getCases()[0]), $p->getCase('A')->getValue());
-/// ```
-/// ```expect
-/// ReflectionEnumBackedCase Hearts=1
-/// ReflectionEnumBackedCase Spades=2
-/// bool(true)
-/// string(3) "int"
-/// bool(false)
-/// bool(false)
-/// NULL
-/// string(22) "ReflectionEnumUnitCase"
-/// enum(Pure::A)
-/// ```
-pub(super) fn reflection_enum_get_cases(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_enum(req)?;
-    let mut out = PhpArray::new(req)?;
-    for name in case_names(req, class) {
-        let object = case_factory(req, class, &name)?;
-        out.append(req, object.as_value())?;
-    }
-    Ok(Value::array(out))
-}
-
 /// php's `reflection_enum_case_factory`: a `ReflectionEnumBackedCase`
 /// for a backed enum and a `ReflectionEnumUnitCase` for a pure one,
 /// with `$name` and `$class` written as
@@ -269,147 +108,345 @@ fn this_case(req: &mut Request) -> Result<(ClassId, Vec<u8>), Thrown> {
     Ok((class, name))
 }
 
-/// `ReflectionEnumUnitCase::__construct(object|string $class, string
-/// $constant)`: `ReflectionClassConstant`'s constructor and then php's
-/// refusals for a class that is no enum and a constant that is no case.
-///
-/// ```php
-/// var_dump(new ReflectionEnumUnitCase('PropertyHookType', 'Set'));
-/// try { new ReflectionEnumUnitCase('Nope', 'Set'); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(ReflectionEnumUnitCase)#1 (2) {
-///   ["name"]=>
-///   string(3) "Set"
-///   ["class"]=>
-///   string(16) "PropertyHookType"
-/// }
-/// ReflectionException: Class "Nope" does not exist
-/// ```
-///
-/// A constant of an enum that is no case, and a pure enum's case under
-/// `ReflectionEnumBackedCase`, are php's two refusals after it:
-///
-/// ```php
-/// enum E { case A; const C = 1; }
-/// try { new ReflectionEnumUnitCase('E', 'C'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-/// try { new ReflectionEnumBackedCase('E', 'A'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-/// try { new ReflectionEnumUnitCase('E', 'Q'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Constant E::C is not a case
-/// Enum case E::A is not a backed case
-/// Constant E::Q does not exist
-/// ```
-pub(super) fn reflection_enum_case_construct(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 2)?;
-    let (class, _) = class_argument(req, 1)?;
-    let name = string_argument(req, 2)?;
-    held_to_enum(req, class)?;
-    if class_constant_named(req, class, &name).is_none() {
-        // `ReflectionClassConstant::__construct`'s refusal, which the
-        // case constructor runs first.
+/// `ReflectionEnum` as the stub declares it.
+#[php_class(extends(crate::class::ReflectionClass))]
+pub(crate) struct ReflectionEnum;
+
+#[php_class]
+impl ReflectionEnum {
+    /// `ReflectionEnum::__construct(object|string $objectOrClass)`:
+    /// `reflection_class_object_ctor` and then php's own refusal for a
+    /// class that is no enum.
+    ///
+    /// ```php
+    /// var_dump(new ReflectionEnum('PropertyHookType'));
+    /// try { new ReflectionEnum('Exception'); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(ReflectionEnum)#1 (1) {
+    ///   ["name"]=>
+    ///   string(16) "PropertyHookType"
+    /// }
+    /// ReflectionException: Class "Exception" is not an enum
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        _this: This<Self>,
+        objectOrClass: Union<PhpObject, PhpString>,
+    ) -> Result<(), Thrown> {
+        let (class, _) = class_of(req, objectOrClass)?;
+        held_to_enum(req, class)?;
+        let name = class_name_of(req, class);
+        if let Some(this) = req.this() {
+            set_name(req, this, &name)?;
+        }
+        Ok(())
+    }
+
+    /// `ReflectionEnum::hasCase(string $name): bool`: whether the
+    /// constants table holds a case of that name.
+    ///
+    /// ```php
+    /// $e = new ReflectionEnum('PropertyHookType');
+    /// var_dump($e->hasCase('Get'), $e->hasCase('Nope'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    fn hasCase(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_enum(req)?;
+        Ok(case_names(req, class).contains(&name))
+    }
+
+    /// `ReflectionEnum::getCase(string $name): ReflectionEnumUnitCase`: the
+    /// case reflector for that name, php's `ReflectionException` for a name
+    /// the enum has no case under.
+    ///
+    /// ```php
+    /// $e = new ReflectionEnum('PropertyHookType');
+    /// var_dump($e->getCase('Get'));
+    /// try { $e->getCase('Nope'); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
+    /// enum F { case A; const C = 1; }
+    /// try { (new ReflectionEnum('F'))->getCase('C'); } catch (ReflectionException $t) { echo $t->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(ReflectionEnumBackedCase)#2 (2) {
+    ///   ["name"]=>
+    ///   string(3) "Get"
+    ///   ["class"]=>
+    ///   string(16) "PropertyHookType"
+    /// }
+    /// ReflectionException: Case PropertyHookType::Nope does not exist
+    /// F::C is not a case
+    /// ```
+    fn getCase(
+        req: &mut Request,
+        _this: This<Self>,
+        name: PhpString,
+    ) -> Result<Instance<ReflectionEnumUnitCase>, Thrown> {
+        let name = name.as_bytes().to_vec();
+        let class = this_enum(req)?;
+        if !case_names(req, class).contains(&name) {
+            let held = class_name_of(req, class);
+            // A constant of that name that is no case is php's second
+            // refusal, `ZEND_CLASS_CONST_IS_CASE` unset.
+            let format = if class_constant_named(req, class, &name).is_some() {
+                "{}::{} is not a case"
+            } else {
+                "Case {}::{} does not exist"
+            };
+            let message = format
+                .replacen("{}", &String::from_utf8_lossy(&held), 1)
+                .replacen("{}", &String::from_utf8_lossy(&name), 1);
+            return Err(throw(req, "ReflectionException", &message));
+        }
+        let object = case_factory(req, class, &name)?;
+        Ok(Instance::of(object))
+    }
+
+    /// `ReflectionEnum::getCases(): array`: one case reflector per case, in
+    /// declaration order.
+    ///
+    /// ```php
+    /// var_dump(count((new ReflectionEnum('PropertyHookType'))->getCases()));
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// ```
+    ///
+    /// A program's enum, pure and backed, its own constant no case:
+    ///
+    /// ```php
+    /// enum Suit: int { case Hearts = 1; case Spades = 2; const Wild = self::Spades; }
+    /// enum Pure { case A; }
+    /// $s = new ReflectionEnum('Suit');
+    /// foreach ($s->getCases() as $case) echo get_class($case), ' ', $case->name, '=', $case->getBackingValue(), "\n";
+    /// var_dump($s->isBacked(), (string) $s->getBackingType(), $s->hasCase('Wild'));
+    /// $p = new ReflectionEnum('Pure');
+    /// var_dump($p->isBacked(), $p->getBackingType(), get_class($p->getCases()[0]), $p->getCase('A')->getValue());
+    /// ```
+    /// ```expect
+    /// ReflectionEnumBackedCase Hearts=1
+    /// ReflectionEnumBackedCase Spades=2
+    /// bool(true)
+    /// string(3) "int"
+    /// bool(false)
+    /// bool(false)
+    /// NULL
+    /// string(22) "ReflectionEnumUnitCase"
+    /// enum(Pure::A)
+    /// ```
+    fn getCases(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_enum(req)?;
+        let mut out = PhpArray::new(req)?;
+        for name in case_names(req, class) {
+            let object = case_factory(req, class, &name)?;
+            out.append(req, object.as_value())?;
+        }
+        Ok(out)
+    }
+
+    /// `ReflectionEnum::isBacked(): bool`: `ce->enum_backing_type != IS_UNDEF`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionEnum('PropertyHookType'))->isBacked());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// ```
+    fn isBacked(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_enum(req)?;
+        Ok(backing_of(req, class).is_some())
+    }
+
+    /// `ReflectionEnum::getBackingType(): ?ReflectionNamedType`: the
+    /// backing type as a type reflector, and `null` for a pure enum.
+    ///
+    /// ```php
+    /// var_dump((string) (new ReflectionEnum('PropertyHookType'))->getBackingType());
+    /// ```
+    /// ```expect
+    /// string(6) "string"
+    /// ```
+    fn getBackingType(
+        req: &mut Request,
+        _this: This<Self>,
+    ) -> Result<Option<Instance<crate::signature::ReflectionNamedType>>, Thrown> {
+        let class = this_enum(req)?;
+        match backing_of(req, class) {
+            Some(backing) => Ok(Some(Instance::of(type_factory(req, &backing, false)?))),
+            None => Ok(None),
+        }
+    }
+}
+
+/// `ReflectionEnumUnitCase` as the stub declares it.
+#[php_class(extends(crate::member::ReflectionClassConstant))]
+pub(crate) struct ReflectionEnumUnitCase;
+
+#[php_class]
+impl ReflectionEnumUnitCase {
+    /// `ReflectionEnumUnitCase::__construct(object|string $class, string
+    /// $constant)`: `ReflectionClassConstant`'s constructor and then php's
+    /// refusals for a class that is no enum and a constant that is no case.
+    ///
+    /// ```php
+    /// var_dump(new ReflectionEnumUnitCase('PropertyHookType', 'Set'));
+    /// try { new ReflectionEnumUnitCase('Nope', 'Set'); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(ReflectionEnumUnitCase)#1 (2) {
+    ///   ["name"]=>
+    ///   string(3) "Set"
+    ///   ["class"]=>
+    ///   string(16) "PropertyHookType"
+    /// }
+    /// ReflectionException: Class "Nope" does not exist
+    /// ```
+    ///
+    /// A constant of an enum that is no case, and a pure enum's case under
+    /// `ReflectionEnumBackedCase`, are php's two refusals after it:
+    ///
+    /// ```php
+    /// enum E { case A; const C = 1; }
+    /// try { new ReflectionEnumUnitCase('E', 'C'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// try { new ReflectionEnumBackedCase('E', 'A'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// try { new ReflectionEnumUnitCase('E', 'Q'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Constant E::C is not a case
+    /// Enum case E::A is not a backed case
+    /// Constant E::Q does not exist
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        _this: This<Self>,
+        class: Union<PhpObject, PhpString>,
+        constant: PhpString,
+    ) -> Result<(), Thrown> {
+        let (class, _) = class_of(req, class)?;
+        let name = constant.as_bytes().to_vec();
+        held_to_enum(req, class)?;
+        if class_constant_named(req, class, &name).is_none() {
+            // `ReflectionClassConstant::__construct`'s refusal, which the
+            // case constructor runs first.
+            let held = class_name_of(req, class);
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "Constant {}::{} does not exist",
+                    String::from_utf8_lossy(&held),
+                    String::from_utf8_lossy(&name)
+                ),
+            ));
+        }
         let held = class_name_of(req, class);
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Constant {}::{} does not exist",
-                String::from_utf8_lossy(&held),
-                String::from_utf8_lossy(&name)
-            ),
-        ));
+        if let Some(this) = req.this() {
+            set_name(req, this, &name)?;
+            set_string_prop(req, this, b"class", &held)?;
+        }
+        let shown = format!(
+            "{}::{}",
+            String::from_utf8_lossy(&held),
+            String::from_utf8_lossy(&name)
+        );
+        if !case_names(req, class).contains(&name) {
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!("Constant {shown} is not a case"),
+            ));
+        }
+        // `ReflectionEnumBackedCase::__construct` after the unit case's.
+        let backed_reflector = req.this().is_some_and(|this| {
+            class_name_of(req, this.class()).eq_ignore_ascii_case(b"ReflectionEnumBackedCase")
+        });
+        if backed_reflector && backing_of(req, class).is_none() {
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!("Enum case {shown} is not a backed case"),
+            ));
+        }
+        Ok(())
     }
-    let held = class_name_of(req, class);
-    if let Some(this) = req.this() {
-        set_name(req, this, &name)?;
-        set_string_prop(req, this, b"class", &held)?;
+
+    /// `ReflectionEnumUnitCase::getEnum(): ReflectionEnum`: the enum the
+    /// case belongs to.
+    ///
+    /// ```php
+    /// $c = (new ReflectionEnum('PropertyHookType'))->getCase('Get');
+    /// var_dump($c->getEnum());
+    /// ```
+    /// ```expect
+    /// object(ReflectionEnum)#1 (1) {
+    ///   ["name"]=>
+    ///   string(16) "PropertyHookType"
+    /// }
+    /// ```
+    fn getEnum(req: &mut Request, _this: This<Self>) -> Result<Instance<ReflectionEnum>, Thrown> {
+        let (class, _) = this_case(req)?;
+        let reflector = class_named(req, b"ReflectionEnum")?;
+        let object = new_object(req, reflector)?;
+        let name = class_name_of(req, class);
+        set_name(req, object, &name)?;
+        Ok(Instance::of(object))
     }
-    let shown = format!(
-        "{}::{}",
-        String::from_utf8_lossy(&held),
-        String::from_utf8_lossy(&name)
-    );
-    if !case_names(req, class).contains(&name) {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!("Constant {shown} is not a case"),
-        ));
+
+    /// `ReflectionEnumUnitCase::getValue(): UnitEnum`: the one instance the
+    /// engine keeps for the case, `zend_enum_get_case`.
+    ///
+    /// ```php
+    /// $c = (new ReflectionEnum('PropertyHookType'))->getCase('Get');
+    /// var_dump($c->getValue(), $c->getValue() === PropertyHookType::Get);
+    /// ```
+    /// ```expect
+    /// enum(PropertyHookType::Get)
+    /// bool(true)
+    /// ```
+    fn getValue(
+        req: &mut Request,
+        _this: This<Self>,
+    ) -> Result<Raw<Instance<crate::UnitEnum>>, Thrown> {
+        let (class, name) = this_case(req)?;
+        answer(class_constant(req, class, &name), req)
     }
-    // `ReflectionEnumBackedCase::__construct` after the unit case's.
-    let backed_reflector = req.this().is_some_and(|this| {
-        class_name_of(req, this.class()).eq_ignore_ascii_case(b"ReflectionEnumBackedCase")
-    });
-    if backed_reflector && backing_of(req, class).is_none() {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!("Enum case {shown} is not a backed case"),
-        ));
-    }
-    Ok(Value::null())
 }
 
-/// `ReflectionEnumUnitCase::getEnum(): ReflectionEnum`: the enum the
-/// case belongs to.
-///
-/// ```php
-/// $c = (new ReflectionEnum('PropertyHookType'))->getCase('Get');
-/// var_dump($c->getEnum());
-/// ```
-/// ```expect
-/// object(ReflectionEnum)#1 (1) {
-///   ["name"]=>
-///   string(16) "PropertyHookType"
-/// }
-/// ```
-pub(super) fn reflection_enum_case_get_enum(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let (class, _) = this_case(req)?;
-    let reflector = class_named(req, b"ReflectionEnum")?;
-    let object = new_object(req, reflector)?;
-    let name = class_name_of(req, class);
-    set_name(req, object, &name)?;
-    Ok(object.as_value())
-}
+/// `ReflectionEnumBackedCase` as the stub declares it.
+#[php_class(extends(ReflectionEnumUnitCase))]
+pub(crate) struct ReflectionEnumBackedCase;
 
-/// `ReflectionEnumUnitCase::getValue(): UnitEnum`: the one instance the
-/// engine keeps for the case, `zend_enum_get_case`.
-///
-/// ```php
-/// $c = (new ReflectionEnum('PropertyHookType'))->getCase('Get');
-/// var_dump($c->getValue(), $c->getValue() === PropertyHookType::Get);
-/// ```
-/// ```expect
-/// enum(PropertyHookType::Get)
-/// bool(true)
-/// ```
-pub(super) fn reflection_enum_case_get_value(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let (class, name) = this_case(req)?;
-    class_constant(req, class, &name)
-}
+#[php_class]
+impl ReflectionEnumBackedCase {
+    #[php(implementation = ReflectionEnumUnitCase::__construct)]
+    fn __construct(_this: This<Self>, class: Union<PhpObject, PhpString>, constant: PhpString);
 
-/// `ReflectionEnumBackedCase::getBackingValue(): int|string`: the
-/// case's `value`, `zend_enum_fetch_case_value`.
-///
-/// ```php
-/// $c = (new ReflectionEnum('PropertyHookType'))->getCase('Set');
-/// var_dump($c->getBackingValue());
-/// ```
-/// ```expect
-/// string(3) "set"
-/// ```
-pub(super) fn reflection_enum_case_get_backing_value(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let (class, name) = this_case(req)?;
-    let case = class_constant(req, class, &name)?;
-    let value = case
-        .as_object()
-        .and_then(|object| object.prop(req, b"value"))
-        .unwrap_or_default();
-    req.addref(&value);
-    req.release(case);
-    Ok(value)
+    /// `ReflectionEnumBackedCase::getBackingValue(): int|string`: the
+    /// case's `value`, `zend_enum_fetch_case_value`.
+    ///
+    /// ```php
+    /// $c = (new ReflectionEnum('PropertyHookType'))->getCase('Set');
+    /// var_dump($c->getBackingValue());
+    /// ```
+    /// ```expect
+    /// string(3) "set"
+    /// ```
+    fn getBackingValue(
+        req: &mut Request,
+        _this: This<Self>,
+    ) -> Result<Raw<Union<i64, PhpString>>, Thrown> {
+        let (class, name) = this_case(req)?;
+        let case = class_constant(req, class, &name)?;
+        let value = case
+            .as_object()
+            .and_then(|object| object.prop(req, b"value"))
+            .unwrap_or_default();
+        req.addref(&value);
+        req.release(case);
+        answer(Ok(value), req)
+    }
 }

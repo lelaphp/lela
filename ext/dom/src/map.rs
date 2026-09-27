@@ -3,8 +3,11 @@
 //! children, its attributes, the elements under it of one name, a DTD's
 //! entities or notations, or the node set an `XPath` query answered.
 
-use php_ext::abi::CloneObj;
-use php_ext::abi::{DimensionRead, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
+use php_ext::abi::{
+    CloneObj, DimensionRead, Instance, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest,
+    Raw, This, Union, Untyped,
+};
+use php_ext::attr::php_class;
 use php_ext::coerce::{numeric_string, to_long};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -12,10 +15,7 @@ use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{DtdTable, Kind, Node};
 
 use crate::object::{Dom, Extra};
-use crate::{
-    Entry, arity, class_name, dom, dom_mut, long_arg, node_of, nullable_bytes_arg, object_for,
-    string, this,
-};
+use crate::{class_name, dom, dom_mut, node_of, object_for, string};
 
 /// What a map lists: `dom_nnodemap_object`'s handler and the fields it
 /// reads.
@@ -437,36 +437,6 @@ fn collection_named(req: &mut Request, object: PhpObject, key: &[u8]) -> Result<
     Ok(Value::null())
 }
 
-/// `Dom\HTMLCollection::namedItem(string $key): ?Dom\Element`. php's
-/// walk of a child-element collection never moves past the first child
-/// element (`dom_map_collection_named_item_elements_iter` advances only
-/// from a candidate that is not the first child), so a key the first
-/// element does not carry loops forever there; this walk moves on.
-///
-/// ```php
-/// $d = Dom\HTMLDocument::createEmpty();
-/// $r = $d->appendChild($d->createElement('div'));
-/// $a = $r->appendChild($d->createElement('p'));
-/// $a->setAttribute('name', 'n');
-/// $a->setAttribute('id', 'i');
-/// $c = $r->children;
-/// var_dump($c->length, $c->namedItem('n') === $a, $c['i'] === $a, $c->namedItem(''), $c[0] === $a, isset($c['n']));
-/// ```
-/// ```expect
-/// int(1)
-/// bool(true)
-/// bool(true)
-/// NULL
-/// bool(true)
-/// bool(true)
-/// ```
-fn named_item(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let key = crate::bytes_arg(req, 1)?;
-    let this = this(req)?;
-    collection_named(req, this, &key)
-}
-
 /// `dom_modern_nodelist_get_index`: an index, a name, or neither.
 enum Index {
     Long(i64),
@@ -566,111 +536,6 @@ fn offset(req: &mut Request, value: &Value) -> Result<Result<i64, PhpString>, Th
     }
     Ok(Ok(to_long(req, &v)?))
 }
-
-// ---- the methods
-
-/// `DOMNodeList::count(): int`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a/><b/></r>');
-/// $l = $d->documentElement->childNodes;
-/// var_dump(count($l), $l->count(), $l->length, $l->item(5), $l->item(-1));
-/// foreach ($l as $k => $n) echo $k, '=', $n->nodeName, ' ';
-/// echo $l[1]->nodeName, ' ', isset($l[1]) ? 'y' : 'n', isset($l[2]) ? 'y' : 'n', "\n";
-/// ```
-/// ```expect
-/// int(2)
-/// int(2)
-/// int(2)
-/// NULL
-/// NULL
-/// 0=a 1=b b yn
-/// ```
-fn count(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let this = this(req)?;
-    Ok(Value::int(length(req, this)))
-}
-
-/// `DOMNodeList::item(int $index)`.
-fn list_item(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let index = long_arg(req, 1, 0)?;
-    let this = this(req)?;
-    item(req, this, index)
-}
-
-/// `DOMNodeList::getIterator(): Iterator`, `zend_create_internal_iterator_zval`.
-fn get_iterator(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let this = this(req)?;
-    Ok(php_ext::call::internal_iterator(req, &this)?.as_value())
-}
-
-/// `DOMNamedNodeMap::getNamedItem(string $qualifiedName): ?DOMNode`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r xmlns:p="urn:p" a="1" p:b="2"/>');
-/// $m = $d->documentElement->attributes;
-/// var_dump($m->length, $m->getNamedItem('a')->value, $m->getNamedItemNS('urn:p', 'b')->value, $m->getNamedItem('z'), $m['a']->value, $m[1]->name);
-/// foreach ($m as $k => $v) echo $k, '=', $v->value, ';';
-/// try { $m->item(-1); } catch (ValueError $e) { echo "\n", $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(2)
-/// string(1) "1"
-/// string(1) "2"
-/// NULL
-/// string(1) "1"
-/// string(1) "b"
-/// a=1;b=2;
-/// DOMNamedNodeMap::item(): Argument #1 ($index) must be between 0 and 2147483647
-/// ```
-fn get_named_item(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let name = crate::bytes_arg(req, 1)?;
-    let this = this(req)?;
-    named(req, this, &name, None)
-}
-
-/// `DOMNamedNodeMap::getNamedItemNS(?string $namespace, string $localName): ?DOMNode`.
-fn get_named_item_ns(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 2, 2)?;
-    let ns = nullable_bytes_arg(req, 1)?;
-    let name = crate::bytes_arg(req, 2)?;
-    let this = this(req)?;
-    named(req, this, &name, ns.as_deref())
-}
-
-/// `DOMNamedNodeMap::item(int $index): ?DOMNode`.
-fn map_item(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let index = long_arg(req, 1, 0)?;
-    if !(0..=i64::from(i32::MAX)).contains(&index) {
-        return Err(php_ext::raising::arg_value_error(
-            req,
-            1,
-            "be between 0 and 2147483647",
-        ));
-    }
-    let this = this(req)?;
-    item(req, this, index)
-}
-
-/// The methods, `Class::method` to entry.
-pub(crate) const METHODS: &[(&str, Entry)] = &[
-    ("DOMNodeList::count", count),
-    ("DOMNodeList::getIterator", get_iterator),
-    ("DOMNodeList::item", list_item),
-    ("DOMNamedNodeMap::getNamedItem", get_named_item),
-    ("DOMNamedNodeMap::getNamedItemNS", get_named_item_ns),
-    ("DOMNamedNodeMap::item", map_item),
-    ("DOMNamedNodeMap::count", count),
-    ("DOMNamedNodeMap::getIterator", get_iterator),
-    ("Dom\\HTMLCollection::namedItem", named_item),
-];
 
 /// `dom_nodelist_length_read` and `dom_namednodemap_length_read`.
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
@@ -900,4 +765,283 @@ impl ObjectHandlers for MapHandlers {
             }
         }
     }
+}
+
+/// `class DOMNodeList implements IteratorAggregate, Countable`: a live
+/// list, its `length` `@virtual`, read through [`HANDLERS`].
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r><a/><b/></r>');
+/// $l = $d->documentElement->childNodes;
+/// var_dump(count($l), $l->count(), $l->length, $l->item(5), $l->item(-1));
+/// foreach ($l as $k => $n) echo $k, '=', $n->nodeName, ' ';
+/// echo $l[1]->nodeName, ' ', isset($l[1]) ? 'y' : 'n', isset($l[2]) ? 'y' : 'n', "\n";
+/// $i = $l->getIterator();
+/// var_dump(get_class($i), $i->current()->nodeName);
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+/// int(2)
+/// NULL
+/// NULL
+/// 0=a 1=b b yn
+/// string(16) "InternalIterator"
+/// string(1) "a"
+/// ```
+#[php_class(
+    implements(crate::IteratorAggregate, crate::Countable),
+    payload = Dom,
+    handlers = HANDLERS
+)]
+pub(crate) struct DOMNodeList;
+
+#[php_class]
+impl DOMNodeList {
+    #[php(property, virtual)]
+    const length: i64;
+
+    /// `DOMNodeList::count(): int`.
+    #[php(tentative)]
+    fn count(req: &mut Request, this: This<Self>) -> i64 {
+        length(req, this.object())
+    }
+
+    /// `DOMNodeList::getIterator(): Iterator`, `zend_create_internal_iterator_zval`.
+    fn getIterator(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Instance<crate::Iterator>, Thrown> {
+        php_ext::call::internal_iterator(req, &this.object()).map(Instance::of)
+    }
+
+    /// `DOMNodeList::item(int $index)`.
+    fn item(req: &mut Request, this: This<Self>, index: i64) -> Result<Untyped<Value>, Thrown> {
+        item(req, this.object(), index).map(Untyped)
+    }
+}
+
+/// `DOMNamedNodeMap::getNamedItem(string $qualifiedName): ?DOMNode`.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r xmlns:p="urn:p" a="1" p:b="2"/>');
+/// $m = $d->documentElement->attributes;
+/// var_dump($m->length, $m->getNamedItem('a')->value, $m->getNamedItemNS('urn:p', 'b')->value, $m->getNamedItem('z'), $m['a']->value, $m[1]->name);
+/// foreach ($m as $k => $v) echo $k, '=', $v->value, ';';
+/// try { $m->item(-1); } catch (ValueError $e) { echo "\n", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(2)
+/// string(1) "1"
+/// string(1) "2"
+/// NULL
+/// string(1) "1"
+/// string(1) "b"
+/// a=1;b=2;
+/// DOMNamedNodeMap::item(): Argument #1 ($index) must be between 0 and 2147483647
+/// ```
+#[php_class(
+    implements(crate::IteratorAggregate, crate::Countable),
+    payload = Dom,
+    handlers = HANDLERS
+)]
+pub(crate) struct DOMNamedNodeMap;
+
+#[php_class]
+impl DOMNamedNodeMap {
+    #[php(property, virtual)]
+    const length: i64;
+
+    /// `DOMNamedNodeMap::getNamedItem(string $qualifiedName): ?DOMNode`.
+    #[php(tentative)]
+    fn getNamedItem(
+        req: &mut Request,
+        this: This<Self>,
+        qualifiedName: PhpString,
+    ) -> Result<Raw<Option<Instance<crate::node::DOMNode>>>, Thrown> {
+        let found = named(req, this.object(), qualifiedName.as_bytes(), None)?;
+        crate::returned(req, found)
+    }
+
+    /// `DOMNamedNodeMap::getNamedItemNS(?string $namespace, string $localName): ?DOMNode`.
+    #[php(tentative)]
+    fn getNamedItemNS(
+        req: &mut Request,
+        this: This<Self>,
+        namespace: Option<PhpString>,
+        localName: PhpString,
+    ) -> Result<Raw<Option<Instance<crate::node::DOMNode>>>, Thrown> {
+        let ns = namespace.as_ref().map(PhpString::as_bytes);
+        let found = named(req, this.object(), localName.as_bytes(), ns)?;
+        crate::returned(req, found)
+    }
+
+    /// `DOMNamedNodeMap::item(int $index): ?DOMNode`.
+    #[php(tentative)]
+    fn item(
+        req: &mut Request,
+        this: This<Self>,
+        index: i64,
+    ) -> Result<Raw<Option<Instance<crate::node::DOMNode>>>, Thrown> {
+        if !(0..=i64::from(i32::MAX)).contains(&index) {
+            return Err(php_ext::raising::arg_value_error(
+                req,
+                1,
+                "be between 0 and 2147483647",
+            ));
+        }
+        let found = item(req, this.object(), index)?;
+        crate::returned(req, found)
+    }
+
+    #[php(tentative, implementation = DOMNodeList::count)]
+    fn count(this: This<Self>) -> i64;
+    #[php(implementation = DOMNodeList::getIterator)]
+    fn getIterator(this: This<Self>) -> Instance<crate::Iterator>;
+}
+
+/// `class Dom\NodeList`, `DOMNodeList`'s methods as its own
+/// (`@implementation-alias`).
+#[php_class(
+    namespace(Dom),
+    implements(crate::IteratorAggregate, crate::Countable),
+    payload = Dom,
+    handlers = HANDLERS
+)]
+pub(crate) struct NodeList;
+
+#[php_class]
+impl NodeList {
+    #[php(property, virtual)]
+    const length: i64;
+    #[php(implementation = DOMNodeList::count)]
+    fn count(this: This<Self>) -> i64;
+    #[php(implementation = DOMNodeList::getIterator)]
+    fn getIterator(this: This<Self>) -> Instance<crate::Iterator>;
+    #[php(implementation = DOMNodeList::item)]
+    fn item(this: This<Self>, index: i64) -> Option<Instance<crate::modern::Node>>;
+}
+
+/// `class Dom\NamedNodeMap`, `DOMNamedNodeMap`'s methods as its own.
+#[php_class(
+    namespace(Dom),
+    implements(crate::IteratorAggregate, crate::Countable),
+    payload = Dom,
+    handlers = HANDLERS
+)]
+pub(crate) struct NamedNodeMap;
+
+#[php_class]
+impl NamedNodeMap {
+    #[php(property, virtual)]
+    const length: i64;
+    #[php(implementation = DOMNamedNodeMap::item)]
+    fn item(this: This<Self>, index: i64) -> Option<Instance<crate::modern::Attr>>;
+    #[php(implementation = DOMNamedNodeMap::getNamedItem)]
+    fn getNamedItem(
+        this: This<Self>,
+        qualifiedName: PhpString,
+    ) -> Option<Instance<crate::modern::Attr>>;
+    #[php(implementation = DOMNamedNodeMap::getNamedItemNS)]
+    fn getNamedItemNS(
+        this: This<Self>,
+        namespace: Option<PhpString>,
+        localName: PhpString,
+    ) -> Option<Instance<crate::modern::Attr>>;
+    #[php(implementation = DOMNodeList::count)]
+    fn count(this: This<Self>) -> i64;
+    #[php(implementation = DOMNodeList::getIterator)]
+    fn getIterator(this: This<Self>) -> Instance<crate::Iterator>;
+}
+
+/// `class Dom\DtdNamedNodeMap`, a doctype's entities or notations.
+#[php_class(
+    namespace(Dom),
+    implements(crate::IteratorAggregate, crate::Countable),
+    payload = Dom,
+    handlers = HANDLERS
+)]
+pub(crate) struct DtdNamedNodeMap;
+
+#[php_class]
+impl DtdNamedNodeMap {
+    #[php(property, virtual)]
+    const length: i64;
+    #[php(implementation = DOMNamedNodeMap::item)]
+    fn item(
+        this: This<Self>,
+        index: i64,
+    ) -> Option<Union<Instance<crate::classes::Entity>, Instance<crate::classes::Notation>>>;
+    #[php(implementation = DOMNamedNodeMap::getNamedItem)]
+    fn getNamedItem(
+        this: This<Self>,
+        qualifiedName: PhpString,
+    ) -> Option<Union<Instance<crate::classes::Entity>, Instance<crate::classes::Notation>>>;
+    #[php(implementation = DOMNamedNodeMap::getNamedItemNS)]
+    fn getNamedItemNS(
+        this: This<Self>,
+        namespace: Option<PhpString>,
+        localName: PhpString,
+    ) -> Option<Union<Instance<crate::classes::Entity>, Instance<crate::classes::Notation>>>;
+    #[php(implementation = DOMNodeList::count)]
+    fn count(this: This<Self>) -> i64;
+    #[php(implementation = DOMNodeList::getIterator)]
+    fn getIterator(this: This<Self>) -> Instance<crate::Iterator>;
+}
+
+/// `class Dom\HTMLCollection`, a live list of elements, named items
+/// looked up by `id` and `name`.
+#[php_class(
+    namespace(Dom),
+    implements(crate::IteratorAggregate, crate::Countable),
+    payload = Dom,
+    handlers = HANDLERS
+)]
+pub(crate) struct HTMLCollection;
+
+#[php_class]
+impl HTMLCollection {
+    #[php(property, virtual)]
+    const length: i64;
+    #[php(implementation = DOMNodeList::item)]
+    fn item(this: This<Self>, index: i64) -> Option<Instance<crate::element::Element>>;
+
+    /// `Dom\HTMLCollection::namedItem(string $key): ?Dom\Element`. php's
+    /// walk of a child-element collection never moves past the first child
+    /// element (`dom_map_collection_named_item_elements_iter` advances only
+    /// from a candidate that is not the first child), so a key the first
+    /// element does not carry loops forever there; this walk moves on.
+    ///
+    /// ```php
+    /// $d = Dom\HTMLDocument::createEmpty();
+    /// $r = $d->appendChild($d->createElement('div'));
+    /// $a = $r->appendChild($d->createElement('p'));
+    /// $a->setAttribute('name', 'n');
+    /// $a->setAttribute('id', 'i');
+    /// $c = $r->children;
+    /// var_dump($c->length, $c->namedItem('n') === $a, $c['i'] === $a, $c->namedItem(''), $c[0] === $a, isset($c['n']));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// bool(true)
+    /// bool(true)
+    /// NULL
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    fn namedItem(
+        req: &mut Request,
+        this: This<Self>,
+        key: PhpString,
+    ) -> Result<Raw<Option<Instance<crate::element::Element>>>, Thrown> {
+        let found = collection_named(req, this.object(), key.as_bytes())?;
+        crate::returned(req, found)
+    }
+
+    #[php(implementation = DOMNodeList::count)]
+    fn count(this: This<Self>) -> i64;
+    #[php(implementation = DOMNodeList::getIterator)]
+    fn getIterator(this: This<Self>) -> Instance<crate::Iterator>;
 }

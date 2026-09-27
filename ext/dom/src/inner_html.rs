@@ -13,13 +13,11 @@ use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{Fragment, Kind, Node, Ns, Parser};
 
 use crate::document::XMLNS_NS;
+use crate::element::AdjacentPosition;
 use crate::object::Code;
 use crate::private::{HTML_NS, html_in_html_document, ns_is};
 use crate::props::Prop;
-use crate::{
-    Entry, Read, arity, bytes_arg, dom_mut, dom_throw, dom_throw_message, object_arg, prop_node,
-    string, this_node,
-};
+use crate::{Read, dom_mut, dom_throw, dom_throw_message, fetch, prop_node, string};
 
 /// `dom_element_html_fragment_serialize` for `innerHTML` (`outer` false:
 /// the element's children) and `outerHTML` (`outer`: the element alone).
@@ -340,58 +338,21 @@ pub(crate) const OUTER_HTML: Prop = Prop {
     write: Some(set_outer_html),
 };
 
-/// Where `insertAdjacentHTML` puts what it parsed, a `Dom\AdjacentPosition`
-/// case.
-#[derive(Clone, Copy)]
-enum Position {
-    BeforeBegin,
-    AfterBegin,
-    BeforeEnd,
-    AfterEnd,
-}
-
-/// `Dom\Element::insertAdjacentHTML(Dom\AdjacentPosition $where, string $string): void`.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p"><m/></r>');
-/// $m = $d->documentElement->firstChild;
-/// $m->insertAdjacentHTML(Dom\AdjacentPosition::BeforeBegin, '<a/>t');
-/// $m->insertAdjacentHTML(Dom\AdjacentPosition::AfterEnd, '<p:z/>');
-/// $m->insertAdjacentHTML(Dom\AdjacentPosition::AfterBegin, '<i/>');
-/// $m->insertAdjacentHTML(Dom\AdjacentPosition::BeforeEnd, '<j/>');
-/// echo $d->saveXml(), "\n";
-/// try { $m->insertAdjacentHTML(Dom\AdjacentPosition::BeforeEnd, '<x>'); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// $root = $d->documentElement;
-/// try { $root->insertAdjacentHTML(Dom\AdjacentPosition::AfterEnd, '<x/>'); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// <?xml version="1.0" encoding="UTF-8"?>
-/// <r xmlns:p="urn:p"><a/>t<m><i/><j/></m><p:z/></r>
-/// XML fragment is not well-formed
-/// No Modification Allowed Error
-/// ```
-fn insert_adjacent_html(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 2, 2)?;
-    let case = object_arg(req, 1)?;
-    let markup = bytes_arg(req, 2)?;
-    let (this, element) = this_node(req)?;
-    let name = case
-        .and_then(|c| c.prop(req, b"name"))
-        .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-        .unwrap_or_default();
-    let position = match name.as_slice() {
-        b"BeforeBegin" => Position::BeforeBegin,
-        b"AfterBegin" => Position::AfterBegin,
-        b"BeforeEnd" => Position::BeforeEnd,
-        b"AfterEnd" => Position::AfterEnd,
-        _ => return Ok(Value::null()),
-    };
+/// `Dom\Element::insertAdjacentHTML`'s body: the markup parsed under the
+/// element `position` names and inserted there.
+pub(crate) fn insert_adjacent_html(
+    req: &mut Request,
+    this: PhpObject,
+    position: AdjacentPosition,
+    markup: &[u8],
+) -> Result<(), Thrown> {
+    let element = fetch(req, this)?;
     let mut context = match position {
-        Position::BeforeBegin | Position::AfterEnd => match element.parent() {
+        AdjacentPosition::BeforeBegin | AdjacentPosition::AfterEnd => match element.parent() {
             Some(parent) if !parent.kind().is_document() => parent,
             _ => return Err(dom_throw(req, Code::NoModificationAllowed)),
         },
-        Position::AfterBegin | Position::BeforeEnd => element,
+        AdjacentPosition::AfterBegin | AdjacentPosition::BeforeEnd => element,
     };
     let mut created = None;
     if context.kind() != Kind::Element
@@ -407,14 +368,14 @@ fn insert_adjacent_html(req: &mut Request) -> Result<Value, Thrown> {
         created = Some(body);
         context = body;
     }
-    let inserted = match parse_fragment(req, this, context, &markup) {
+    let inserted = match parse_fragment(req, this, context, markup) {
         Ok(Some(fragment)) => {
             crate::invalidate(req, this);
             let (parent, point) = match position {
-                Position::BeforeBegin => (element.parent(), Some(element)),
-                Position::AfterEnd => (element.parent(), element.next()),
-                Position::AfterBegin => (Some(element), element.children()),
-                Position::BeforeEnd => (Some(element), None),
+                AdjacentPosition::BeforeBegin => (element.parent(), Some(element)),
+                AdjacentPosition::AfterEnd => (element.parent(), element.next()),
+                AdjacentPosition::AfterBegin => (Some(element), element.children()),
+                AdjacentPosition::BeforeEnd => (Some(element), None),
             };
             match parent {
                 Some(parent) => crate::parent::pre_insert(req, this, fragment, parent, point),
@@ -427,9 +388,5 @@ fn insert_adjacent_html(req: &mut Request) -> Result<Value, Thrown> {
     if let Some(body) = created {
         body.free();
     }
-    inserted.map(|_| Value::null())
+    inserted.map(|_| ())
 }
-
-/// The methods, `Class::method` to entry.
-pub(crate) const METHODS: &[(&str, Entry)] =
-    &[("Dom\\Element::insertAdjacentHTML", insert_adjacent_html)];
