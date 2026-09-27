@@ -68,15 +68,31 @@ impl Storage {
     }
 
     fn here(&self) -> Option<(PhpObject, Value)> {
+        self.row_at(self.pos).map(|(_, object, inf)| (object, inf))
+    }
+
+    /// The first live row at or after `from` and where it stands, views:
+    /// one step of a walk that reads the table again at every row, as
+    /// `SPL_SAFE_HASH_FOREACH_PTR` and `zend_hash_get_current_data_ptr_ex`
+    /// read it, so a row the user code an earlier row reached detached
+    /// is not visited and one it attached is.
+    fn row_at(&self, from: usize) -> Option<(usize, PhpObject, Value)> {
+        let at = self.valid_from(from);
         self.rows
-            .get(self.valid_from(self.pos))
-            .and_then(|row| row.as_ref())
-            .map(|(_, object, inf)| (*object, *inf))
+            .get(at)
+            .and_then(Option::as_ref)
+            .map(|(_, object, inf)| (at, *object, *inf))
     }
 
     fn forward(&mut self) {
-        let at = self.valid_from(self.pos);
-        self.pos = self.valid_from(at + 1);
+        self.pos = self.forward_from(self.pos);
+    }
+
+    /// `zend_hash_move_forward_ex` over a position: past the live row at
+    /// or after `pos`, as the table stands now, so where user code
+    /// detached the row at `pos` the step passes the row after it.
+    fn forward_from(&self, pos: usize) -> usize {
+        self.valid_from(self.valid_from(pos) + 1)
     }
 
     fn backward(&mut self) {
@@ -109,6 +125,36 @@ impl Storage {
             .get_mut(at)
             .and_then(Option::take)
             .map(|(_, object, inf)| (object, inf))
+    }
+}
+
+/// One more owner of a row's object or information across a call that
+/// can reach PHP code: php's `GC_ADDREF(obj)` or `ZVAL_COPY(&zv,
+/// &element->inf)` before the call and its `OBJ_RELEASE` or
+/// `zval_ptr_dtor` after. The call may detach the row and give up every
+/// other owner; what is held stands until [`Held::let_go`]. Neither
+/// `Copy` nor `Clone`, so one taken is one given back.
+#[must_use = "a held value is an owner, given back through Held::let_go"]
+struct Held(Value);
+
+impl Held {
+    fn take(req: &Request, value: Value) -> Held {
+        req.addref(&value);
+        Held(value)
+    }
+
+    /// What is held; the copy owns nothing of its own.
+    fn value(&self) -> Value {
+        self.0
+    }
+
+    /// The owner given back, `OBJ_RELEASE` or `zval_ptr_dtor`: at the
+    /// last one the value is freed, its destructor served.
+    // Taking the hold is the point: one given back cannot be given back
+    // again.
+    #[allow(clippy::needless_pass_by_value)]
+    fn let_go(self, req: &mut Request) {
+        req.release(self.0);
     }
 }
 
@@ -305,6 +351,45 @@ impl SplObjectStorage {
     /// int(1)
     /// int(0)
     /// ```
+    ///
+    /// The source is walked live and each row held across its attach, so
+    /// a `getHash` that detaches the row, and the one after it, from the
+    /// source frees nothing the walk still reads; `key()` is reset
+    /// whether the walk finished or threw.
+    ///
+    /// ```php
+    /// class Evil extends SplObjectStorage {
+    ///     public $throw = false;
+    ///     public function getHash($o): string {
+    ///         global $src;
+    ///         if ($this->throw) throw new Exception("no hash for {$o->n}");
+    ///         echo "getHash {$o->n}\n";
+    ///         unset($src[$o]);
+    ///         if ($o->n == 1) foreach ($src as $p) { unset($src[$p]); break; }
+    ///         return spl_object_hash($o);
+    ///     }
+    /// }
+    /// $src = new SplObjectStorage;
+    /// foreach ([1, 2, 3] as $n) { $o = new stdClass; $o->n = $n; $src[$o] = "i$n"; }
+    /// unset($o);
+    /// $e = new Evil;
+    /// var_dump($e->addAll($src), count($src));
+    /// foreach ($e as $i => $o) echo $i, $o->n, $e->getInfo(), "\n";
+    /// $src[$o] = 'again'; $e->next(); $e->throw = true;
+    /// try { $e->addAll($src); } catch (Exception $x) { echo $x->getMessage(), "\n"; }
+    /// var_dump(count($e), $e->key());
+    /// ```
+    /// ```expect
+    /// getHash 1
+    /// getHash 3
+    /// int(2)
+    /// int(0)
+    /// 01i1
+    /// 13i3
+    /// no hash for 3
+    /// int(2)
+    /// int(0)
+    /// ```
     #[php(tentative)]
     fn addAll(
         req: &mut Request,
@@ -312,18 +397,56 @@ impl SplObjectStorage {
         storage: Instance<SplObjectStorage>,
     ) -> Result<i64, Thrown> {
         let this = this.object();
-        let rows = with(req, storage.object(), |s| s.live())?;
-        for (object, inf) in rows {
-            storage_attach(req, this, object, inf)?;
-        }
-        let n = with(req, this, |s| {
-            s.index = 0;
-            s.len()
-        })?;
+        add_all(req, this, storage.object())?;
+        let n = with(req, this, |s| s.len())?;
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }
 
-    /// `removeAll(SplObjectStorage $storage): int`; the witness is `addAll`'s.
+    /// `removeAll(SplObjectStorage $storage): int`.
+    ///
+    /// The source is walked live by its own position, so a row detached
+    /// here is asked for once more before the walk moves on, and a row a
+    /// `getHash` detached from the source is never asked for.
+    ///
+    /// ```php
+    /// class Seen extends SplObjectStorage {
+    ///     public $src;
+    ///     public function getHash($o): string {
+    ///         echo "getHash {$o->n}\n";
+    ///         if ($this->src && $o->n == 1) foreach ($this->src as $p) if ($p->n == 2) { unset($this->src[$p]); break; }
+    ///         return spl_object_hash($o);
+    ///     }
+    /// }
+    /// $s = new Seen; $src = new SplObjectStorage;
+    /// foreach ([1, 2, 3, 4] as $n) { $o = new stdClass; $o->n = $n; $src[$o] = $n; if ($n != 2) $s[$o] = $n; }
+    /// unset($o, $p);
+    /// echo "--\n";
+    /// $s->src = $src;
+    /// var_dump($s->removeAll($src), count($src));
+    /// $s->src = null; foreach ([5, 6] as $n) { $o = new stdClass; $o->n = $n; $s[$o] = $n; }
+    /// echo "--\n";
+    /// var_dump($s->removeAll($s));
+    /// ```
+    /// ```expect
+    /// getHash 1
+    /// getHash 3
+    /// getHash 4
+    /// --
+    /// getHash 1
+    /// getHash 1
+    /// getHash 3
+    /// getHash 3
+    /// getHash 4
+    /// getHash 4
+    /// int(0)
+    /// int(3)
+    /// getHash 5
+    /// getHash 6
+    /// --
+    /// getHash 5
+    /// getHash 6
+    /// int(0)
+    /// ```
     #[php(tentative)]
     fn removeAll(
         req: &mut Request,
@@ -331,20 +454,54 @@ impl SplObjectStorage {
         storage: Instance<SplObjectStorage>,
     ) -> Result<i64, Thrown> {
         let this = this.object();
-        let rows = with(req, storage.object(), |s| s.live())?;
-        for (object, _) in rows {
-            storage_detach(req, this, object)?;
-        }
+        let walked = remove_all(req, this, storage.object());
         let n = with(req, this, |s| {
             s.reset();
             s.index = 0;
             s.len()
         })?;
+        walked?;
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }
 
-    /// `removeAllExcept(SplObjectStorage $storage): int`; the witness is
-    /// `addAll`'s.
+    /// `removeAllExcept(SplObjectStorage $storage): int`.
+    ///
+    /// The storage is walked live and each row's object held across the
+    /// `getHash` of the storage it is tested against, so one that detaches
+    /// a later row frees nothing the walk still reads; the position is
+    /// reset whether the walk finished or threw.
+    ///
+    /// ```php
+    /// class Evil extends SplObjectStorage {
+    ///     public $throw = false;
+    ///     public function getHash($o): string {
+    ///         global $s;
+    ///         if ($this->throw) throw new Exception("no hash for {$o->n}");
+    ///         echo "getHash {$o->n}\n";
+    ///         if ($o->n == 1) foreach ($s as $p) if ($p->n == 2) { unset($s[$p]); break; }
+    ///         return spl_object_hash($o);
+    ///     }
+    /// }
+    /// $s = new SplObjectStorage; $keep = new Evil;
+    /// foreach ([1, 2, 3] as $n) { $o = new stdClass; $o->n = $n; $s[$o] = $n; }
+    /// $keep[$o] = 'kept';
+    /// unset($o, $p);
+    /// var_dump($s->removeAllExcept($keep), count($s));
+    /// $s->next(); $keep->throw = true;
+    /// try { $s->removeAllExcept($keep); } catch (Exception $x) { echo $x->getMessage(), "\n"; }
+    /// var_dump(count($s), $s->key(), $s->current()->n);
+    /// ```
+    /// ```expect
+    /// getHash 3
+    /// getHash 1
+    /// getHash 3
+    /// int(1)
+    /// int(1)
+    /// no hash for 3
+    /// int(1)
+    /// int(0)
+    /// int(3)
+    /// ```
     #[php(tentative)]
     fn removeAllExcept(
         req: &mut Request,
@@ -352,23 +509,13 @@ impl SplObjectStorage {
         storage: Instance<SplObjectStorage>,
     ) -> Result<i64, Thrown> {
         let this = this.object();
-        let rows = with(req, this, |s| s.live())?;
-        for (object, _) in rows {
-            req.addref(&object.as_value());
-            let kept = storage_contains(req, storage.object(), object);
-            let done = match kept {
-                Ok(false) => storage_detach(req, this, object).map(|_| ()),
-                Ok(true) => Ok(()),
-                Err(thrown) => Err(thrown),
-            };
-            req.release(object.as_value());
-            done?;
-        }
+        let walked = remove_all_except(req, this, storage.object());
         let n = with(req, this, |s| {
             s.reset();
             s.index = 0;
             s.len()
         })?;
+        walked?;
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }
 
@@ -574,6 +721,20 @@ impl SplObjectStorage {
     /// ```expect
     /// string(47) "x:i:2;O:1:"C":0:{},O:8:"stdClass":0:{};m:a:0:{}"
     /// int(0)
+    /// ```
+    ///
+    /// A row whose `__serialize` detaches that row moves the walk past
+    /// the row after it, as `zend_hash_move_forward_ex` steps.
+    ///
+    /// ```php
+    /// class C { function __construct(public $n) {} function __serialize(): array { global $s; if ($this->n == 1) unset($s[$this]); return ['n' => $this->n]; } }
+    /// $s = new SplObjectStorage; $keep = [];
+    /// foreach ([1, 2, 3] as $n) { $keep[] = $o = new C($n); $s[$o] = $n; }
+    /// echo $s->serialize(), "\n", count($s), "\n";
+    /// ```
+    /// ```expect
+    /// x:i:3;O:1:"C":1:{s:1:"n";i:1;},i:1;;O:1:"C":1:{s:1:"n";i:3;},i:3;;m:a:0:{}
+    /// 2
     /// ```
     #[php(tentative)]
     fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
@@ -964,18 +1125,23 @@ impl MultipleIterator {
     /// any under `MIT_NEED_ANY`, `false` with none attached.
     #[php(tentative)]
     fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
-        let (rows, flags) = with(req, this.object(), |s| (s.live(), s.flags))?;
-        if rows.is_empty() {
+        let this = this.object();
+        let (len, flags) = with(req, this, |s| (s.len(), s.flags))?;
+        if len == 0 {
             return Ok(false);
         }
         let expect = flags & Self::MIT_NEED_ALL != 0;
-        for (iterator, _) in rows {
-            let answered = crate::method(req, iterator, b"valid")?;
+        with(req, this, Storage::reset)?;
+        while let Some((iterator, held, _)) = held_here(req, this)? {
+            let answered = crate::method(req, iterator, b"valid");
+            held.let_go(req);
+            let answered = answered?;
             let valid = answered.as_bool() == Some(true);
             req.release(answered);
             if expect != valid {
                 return Ok(!expect);
             }
+            with(req, this, Storage::forward)?;
         }
         Ok(expect)
     }
@@ -987,6 +1153,54 @@ impl MultipleIterator {
     }
 
     /// `MultipleIterator::current(): array`.
+    ///
+    /// The sub-iterators are walked by the storage's own position and each
+    /// held across its calls, so one that detaches another frees nothing
+    /// the walk still reads, and a `detachIterator` resets the position
+    /// the walk goes on from.
+    ///
+    /// ```php
+    /// class It extends ArrayIterator {
+    ///     public $drop = null;
+    ///     function __construct(public $name) { parent::__construct([$name]); }
+    ///     function valid(): bool {
+    ///         global $m;
+    ///         echo "valid {$this->name}\n";
+    ///         if ($this->drop) { $m->detachIterator($this->drop === 'self' ? $this : $this->drop); $this->drop = null; }
+    ///         return parent::valid();
+    ///     }
+    ///     function __destruct() { echo "gone {$this->name}\n"; }
+    /// }
+    /// $m = new MultipleIterator(MultipleIterator::MIT_NEED_ANY | MultipleIterator::MIT_KEYS_ASSOC);
+    /// foreach (['a', 'b', 'c', 'd'] as $n) $m->attachIterator(new It($n), $n);
+    /// foreach ($m->__debugInfo()["\0SplObjectStorage\0storage"] as $row) $its[$row['inf']] = $row['obj'];
+    /// $its['a']->drop = $its['b']; $its['c']->drop = 'self';
+    /// unset($its, $row);
+    /// var_dump($m->current());
+    /// echo "--\n";
+    /// var_dump($m->valid(), $m->countIterators());
+    /// ```
+    /// ```expect
+    /// valid a
+    /// gone b
+    /// valid c
+    /// gone c
+    /// valid d
+    /// array(3) {
+    ///   ["a"]=>
+    ///   string(1) "a"
+    ///   ["c"]=>
+    ///   string(1) "c"
+    ///   ["d"]=>
+    ///   string(1) "d"
+    /// }
+    /// --
+    /// valid a
+    /// bool(true)
+    /// int(2)
+    /// gone a
+    /// gone d
+    /// ```
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         get_all(req, this.object(), "current")
@@ -1035,6 +1249,77 @@ fn row_key(req: &mut Request, this: PhpObject, object: PhpObject) -> Result<RowK
         "TypeError",
         &format!("{class}::getHash(): Return value must be of type string, {name} returned"),
     ))
+}
+
+/// `spl_object_storage_addall`: every row of `other` attached to `this`,
+/// `other` walked live as `SPL_SAFE_HASH_FOREACH_PTR` walks it, each
+/// row's object and a copy of its information held across the attach,
+/// whose `getHash` may detach the row from `other`; then `intern->index`
+/// reset, whether the walk finished or a `getHash` threw. php goes on
+/// past a failed attach, but with a throwable pending every later
+/// `getHash` call is skipped and attaches nothing, so the walk stops
+/// there.
+fn add_all(req: &mut Request, this: PhpObject, other: PhpObject) -> Result<(), Thrown> {
+    let mut from = 0;
+    let walked = loop {
+        let row = match with(req, other, |s| s.row_at(from)) {
+            Ok(Some(row)) => row,
+            Ok(None) => break Ok(()),
+            Err(thrown) => break Err(thrown),
+        };
+        let (at, object, inf) = row;
+        from = at + 1;
+        let held_object = Held::take(req, object.as_value());
+        let inf = Held::take(req, inf);
+        let attached = storage_attach(req, this, object, inf.value());
+        inf.let_go(req);
+        held_object.let_go(req);
+        if let Err(thrown) = attached {
+            break Err(thrown);
+        }
+    };
+    with(req, this, |s| s.index = 0)?;
+    walked
+}
+
+/// `SplObjectStorage::removeAll`'s walk: each row of `other` detached from
+/// `this`, `other` walked by a position of its own, php's
+/// `nInternalPointer` read through `zend_hash_get_current_data_ptr`.
+/// The position moves on, `zend_hash_move_forward`, only where the
+/// detach found no row, so a row detached here is asked for once more,
+/// and read again it is the row after it where `this` is `other`. php
+/// holds nothing here and neither does the walk: the row's object is
+/// handed to `getHash` alone, whose frame owns it for the call, and the
+/// row is read again after. A throwing `getHash` stops the walk, as in
+/// [`add_all`].
+fn remove_all(req: &mut Request, this: PhpObject, other: PhpObject) -> Result<(), Thrown> {
+    let mut pos = 0;
+    while let Some((_, object, _)) = with(req, other, |s| s.row_at(pos))? {
+        if !storage_detach(req, this, object)? {
+            pos = with(req, other, |s| s.forward_from(pos))?;
+        }
+    }
+    Ok(())
+}
+
+/// `SplObjectStorage::removeAllExcept`'s walk: each row of `this` that
+/// `other` does not contain detached, `this` walked live as
+/// `SPL_SAFE_HASH_FOREACH_PTR` walks it and each row's object held,
+/// `GC_ADDREF(elem_obj)`, across the `getHash` of either storage. A
+/// throwing `getHash` stops the walk, as in [`add_all`].
+fn remove_all_except(req: &mut Request, this: PhpObject, other: PhpObject) -> Result<(), Thrown> {
+    let mut from = 0;
+    while let Some((at, object, _)) = with(req, this, |s| s.row_at(from))? {
+        from = at + 1;
+        let held = Held::take(req, object.as_value());
+        let tested = match storage_contains(req, other, object) {
+            Ok(false) => storage_detach(req, this, object).map(|_| ()),
+            kept => kept.map(|_| ()),
+        };
+        held.let_go(req);
+        tested?;
+    }
+    Ok(())
 }
 
 /// `spl_object_storage_attach`: the information of a row replaced, or a
@@ -1211,6 +1496,37 @@ impl ObjectHandlers for Handlers {
         }
     }
 
+    /// `spl_object_storage_compare_objects`: two `SplObjectStorage`s of
+    /// the class itself compared row by row, `zend_hash_compare` over
+    /// `spl_object_storage_compare_info`; a row the comparison of an
+    /// earlier one detached is not compared.
+    ///
+    /// ```php
+    /// class T {
+    ///     function __construct(public $s, public $drop = null) {}
+    ///     function __toString(): string {
+    ///         global $l;
+    ///         echo "toString {$this->s}\n";
+    ///         if ($this->drop) { unset($l[$this->drop]); $this->drop = null; }
+    ///         return $this->s;
+    ///     }
+    ///     function __destruct() { echo "gone {$this->s}\n"; }
+    /// }
+    /// $a = new stdClass; $b = new stdClass; $c = new stdClass;
+    /// $l = new SplObjectStorage; $r = new SplObjectStorage;
+    /// $l[$a] = new T('x', $b); $l[$b] = new T('y'); $l[$c] = new T('z');
+    /// $r[$a] = 'x'; $r[$b] = 'y'; $r[$c] = 'z';
+    /// var_dump($l == $r, count($l));
+    /// ```
+    /// ```expect
+    /// toString x
+    /// gone y
+    /// toString z
+    /// bool(true)
+    /// int(2)
+    /// gone x
+    /// gone z
+    /// ```
     fn compare(
         &self,
         req: &mut Request,
@@ -1227,28 +1543,39 @@ impl ObjectHandlers for Handlers {
         if Some(l.class()) != base || Some(r.class()) != base {
             return Ok(None);
         }
-        let a = with(req, l, |s| {
-            s.rows
-                .iter()
-                .flatten()
-                .map(|(k, _, i)| (k.clone(), *i))
-                .collect::<Vec<_>>()
-        })?;
-        let b = with(req, r, |s| s.places.clone())?;
-        let b_rows = with(req, r, |s| {
-            s.rows
-                .iter()
-                .map(|row| row.as_ref().map(|x| x.2))
-                .collect::<Vec<_>>()
-        })?;
-        if a.len() != b.len() {
-            return Ok(Some(a.len().cmp(&b.len())));
+        let (left_len, right_len) = (with(req, l, |s| s.len())?, with(req, r, |s| s.len())?);
+        if left_len != right_len {
+            return Ok(Some(left_len.cmp(&right_len)));
         }
-        for (key, inf) in a {
-            let Some(other) = b.get(&key).and_then(|at| b_rows[*at]) else {
+        // `zend_hash_compare` walks the left table live, reading each slot
+        // as it stands, and finds each row's key in the right one again;
+        // the two informations are held across `zend_compare`, which can
+        // reach PHP code that detaches either row.
+        let mut from = 0;
+        while let Some((at, key, inf)) = with(req, l, |s| {
+            let at = s.valid_from(from);
+            s.rows
+                .get(at)
+                .and_then(Option::as_ref)
+                .map(|(key, _, inf)| (at, key.clone(), *inf))
+        })? {
+            from = at + 1;
+            let other = with(req, r, |s| {
+                s.places
+                    .get(&key)
+                    .and_then(|at| s.rows.get(*at))
+                    .and_then(Option::as_ref)
+                    .map(|row| row.2)
+            })?;
+            let Some(other) = other else {
                 return Ok(Some(std::cmp::Ordering::Greater));
             };
-            let ordering = compare(req, &inf, &other)?;
+            let inf = Held::take(req, inf);
+            let other = Held::take(req, other);
+            let ordering = compare(req, &inf.value(), &other.value());
+            other.let_go(req);
+            inf.let_go(req);
+            let ordering = ordering?;
             if ordering != std::cmp::Ordering::Equal {
                 return Ok(Some(ordering));
             }
@@ -1326,11 +1653,13 @@ fn clone_storage(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
     clone_with(req, &object, copy)
 }
 
-/// `SplObjectStorage::serialize`'s walk over the storage, live by
-/// position as `zend_hash_move_forward_ex` walks it, so a row an
-/// earlier row's `__serialize` detached is not written and one it
-/// attached is. Each row's information is held across its write, php's
-/// `inf_copy`, and each object from its row on, in `held`, which the
+/// `SplObjectStorage::serialize`'s walk over the storage, live by a
+/// position of its own as `zend_hash_move_forward_ex` walks it, so a row
+/// an earlier row's `__serialize` detached is not written and one it
+/// attached is, and where a row's `__serialize` detached that row the
+/// step passes the row after it too. Each row's information is held
+/// across its write, php's `inf_copy`, given back after the step as php
+/// gives it back, and each object from its row on, in `held`, which the
 /// caller gives up once the walk is done.
 fn serialize_rows(
     req: &mut Request,
@@ -1338,31 +1667,23 @@ fn serialize_rows(
     out: &mut Vec<u8>,
     held: &mut Vec<PhpObject>,
 ) -> Result<(), Thrown> {
-    let mut from = 0;
-    loop {
-        let row = with(req, this, |s| {
-            let at = s.valid_from(from);
-            s.rows
-                .get(at)
-                .and_then(Option::as_ref)
-                .map(|(_, object, inf)| (at, *object, *inf))
-        })?;
-        let Some((at, object, inf)) = row else {
-            return Ok(());
-        };
+    let mut pos = 0;
+    while let Some((_, object, inf)) = with(req, this, |s| s.row_at(pos))? {
         req.addref(&object.as_value());
         held.push(object);
-        req.addref(&inf);
+        let inf = Held::take(req, inf);
         let written = crate::serialized(req, object.as_value()).and_then(|object| {
             out.extend(object);
             out.push(b',');
-            crate::serialized(req, inf)
+            crate::serialized(req, inf.value())
         });
-        req.release(inf);
+        let next = with(req, this, |s| s.forward_from(pos));
+        inf.let_go(req);
         out.extend(written?);
         out.push(b';');
-        from = at + 1;
+        pos = next?;
     }
+    Ok(())
 }
 
 /// The body of `SplObjectStorage::unserialize` over one reader: `None`
@@ -1439,20 +1760,39 @@ fn read_storage(
     Ok(None)
 }
 
-/// Each sub-iterator served `method`, in order, until one throws.
+/// The sub-iterator at the storage's position, held across what is
+/// served on it, and its information, a view: one step of php's walks
+/// over `intern->pos`, which read the row at the position as it stands,
+/// `zend_hash_get_current_data_ptr_ex`, and take `GC_ADDREF(it)`. The
+/// position is the storage's own, so a `detachIterator` the call
+/// reaches resets it and the walk goes on from the first row, as in
+/// php.
+fn held_here(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<Option<(PhpObject, Held, Value)>, Thrown> {
+    let here = with(req, this, |s| s.here())?;
+    Ok(here.map(|(iterator, inf)| (iterator, Held::take(req, iterator.as_value()), inf)))
+}
+
+/// Each sub-iterator served `method`, from the first row by the
+/// storage's position, until one throws.
 fn each(req: &mut Request, this: PhpObject, method: &[u8]) -> Result<(), Thrown> {
-    let rows = with(req, this, |s| s.live())?;
-    for (iterator, _) in rows {
-        crate::effect(req, iterator, method)?;
+    with(req, this, Storage::reset)?;
+    while let Some((iterator, held, _)) = held_here(req, this)? {
+        let served = crate::effect(req, iterator, method);
+        held.let_go(req);
+        served?;
+        with(req, this, Storage::forward)?;
     }
     Ok(())
 }
 
 /// `spl_multiple_iterator_get_all`: each sub-iterator's current or key,
-/// keyed by its information under `MultipleIterator::MIT_KEYS_ASSOC`.
+/// keyed by its information under `MultipleIterator::MIT_KEYS_ASSOC`,
+/// the flags read after each row's calls as php reads them.
 fn get_all(req: &mut Request, this: PhpObject, method: &str) -> Result<PhpArray, Thrown> {
-    let (rows, flags) = with(req, this, |s| (s.live(), s.flags))?;
-    if rows.is_empty() {
+    if with(req, this, |s| s.len())? == 0 {
         return Err(throw(
             req,
             "RuntimeException",
@@ -1460,45 +1800,77 @@ fn get_all(req: &mut Request, this: PhpObject, method: &str) -> Result<PhpArray,
         ));
     }
     let mut out = PhpArray::new(req)?;
-    for (iterator, inf) in rows {
-        let answered = crate::method(req, iterator, b"valid")?;
-        let valid = answered.as_bool() == Some(true);
-        req.release(answered);
-        let value = if valid {
-            crate::method(req, iterator, method.as_bytes())?
-        } else if flags & MultipleIterator::MIT_NEED_ALL != 0 {
-            req.release(Value::array(out));
-            return Err(throw(
-                req,
-                "RuntimeException",
-                &format!("Called {method}() with non valid sub iterator"),
-            ));
-        } else {
-            Value::null()
-        };
-        if flags & MultipleIterator::MIT_KEYS_ASSOC != 0 {
-            let key = match inf.as_ref() {
-                ValueRef::Int(n) => Key::Int(n),
-                ValueRef::Str(s) => Key::from_string(
-                    crate::copied(req, Value::string(*s))
-                        .as_php_string()
-                        .copied()
-                        .unwrap_or(*s),
-                ),
-                _ => {
-                    req.release(value);
-                    req.release(Value::array(out));
-                    return Err(throw(
-                        req,
-                        "InvalidArgumentException",
-                        "Sub-Iterator is associated with NULL",
-                    ));
-                }
-            };
-            out.set(req, key, value)?;
-        } else {
-            out.append(req, value)?;
-        }
+    let walked = get_all_rows(req, this, method, &mut out);
+    if let Err(thrown) = walked {
+        req.release(Value::array(out));
+        return Err(thrown);
     }
     Ok(out)
+}
+
+/// `spl_multiple_iterator_get_all`'s walk onto `out`, each row's
+/// sub-iterator and a copy of its information held across its calls,
+/// given back as `OBJ_RELEASE(it)` and then `zval_ptr_dtor(&inf)`.
+fn get_all_rows(
+    req: &mut Request,
+    this: PhpObject,
+    method: &str,
+    out: &mut PhpArray,
+) -> Result<(), Thrown> {
+    with(req, this, Storage::reset)?;
+    while let Some((iterator, held, inf)) = held_here(req, this)? {
+        let inf = Held::take(req, inf);
+        let row = get_one(req, this, iterator, inf.value(), method, out);
+        held.let_go(req);
+        inf.let_go(req);
+        row?;
+        with(req, this, Storage::forward)?;
+    }
+    Ok(())
+}
+
+/// One row of `spl_multiple_iterator_get_all` onto `out`.
+fn get_one(
+    req: &mut Request,
+    this: PhpObject,
+    iterator: PhpObject,
+    inf: Value,
+    method: &str,
+    out: &mut PhpArray,
+) -> Result<(), Thrown> {
+    let answered = crate::method(req, iterator, b"valid")?;
+    let valid = answered.as_bool() == Some(true);
+    req.release(answered);
+    let value = if valid {
+        crate::method(req, iterator, method.as_bytes())?
+    } else if with(req, this, |s| s.flags)? & MultipleIterator::MIT_NEED_ALL != 0 {
+        return Err(throw(
+            req,
+            "RuntimeException",
+            &format!("Called {method}() with non valid sub iterator"),
+        ));
+    } else {
+        Value::null()
+    };
+    if with(req, this, |s| s.flags)? & MultipleIterator::MIT_KEYS_ASSOC == 0 {
+        return out.append(req, value);
+    }
+    let key = match inf.as_ref() {
+        ValueRef::Int(n) => Key::Int(n),
+        ValueRef::Str(s) => Key::from_string(
+            crate::copied(req, Value::string(*s))
+                .as_php_string()
+                .copied()
+                .unwrap_or(*s),
+        ),
+        _ => {
+            req.release(value);
+            return Err(throw(
+                req,
+                "InvalidArgumentException",
+                "Sub-Iterator is associated with NULL",
+            ));
+        }
+    };
+    out.set(req, key, value)
 }
