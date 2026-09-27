@@ -196,7 +196,14 @@ pub fn fatal(req: &mut Request, message: &str) -> Thrown {
 /// the request, already recorded, and the `Thrown` says so.
 pub fn throw(req: &mut Request, class: &str, message: &str) -> Thrown {
     match new_throwable(req, class, message) {
-        Ok(throwable) => throw_value(req, &throwable),
+        // The instance's one owner is the pending slot's, as
+        // `zend_throw_error` hands `zend_throw_exception_internal` the
+        // object it made.
+        Ok(throwable) => {
+            let thrown = throw_value(req, &throwable);
+            req.release(throwable);
+            thrown
+        }
         Err(fatal) => fatal,
     }
 }
