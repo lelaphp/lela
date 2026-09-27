@@ -4142,6 +4142,29 @@ pub(crate) fn value_name(req: &Request, value: &Value) -> String {
     }
 }
 
+/// `zend_zval_type_name` (`Z/Zend/zend_API.c:174`): an object is its
+/// class's name as `%s` prints it, and every other value its type's.
+///
+/// ```php
+/// try { $r = new stdClass + 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $r = 1 | new ArrayObject; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $r = [] - true; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Unsupported operand types: stdClass + int
+/// Unsupported operand types: ArrayObject | int
+/// Unsupported operand types: array - bool
+/// ```
+fn zval_type_name(req: &Request, value: &Value) -> String {
+    match value.as_ref() {
+        ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
+            || String::from("object"),
+            |decl| php_unit::decl::shown(&decl.name.0).into_owned(),
+        ),
+        _ => String::from(value.type_name()),
+    }
+}
+
 /// `ZSTR_MAX_LEN` (`Z/Zend/zend_string.h:108`): `SIZE_MAX` less the
 /// aligned header and terminator of a `zend_string`, 32 bytes on the
 /// oracle's platform.
@@ -4195,8 +4218,8 @@ fn numbers(
             "TypeError",
             &format!(
                 "Unsupported operand types: {} {operator} {}",
-                left.type_name(),
-                right.type_name()
+                zval_type_name(req, left),
+                zval_type_name(req, right)
             ),
         )
     };
@@ -4226,8 +4249,8 @@ fn longs(
             "TypeError",
             &format!(
                 "Unsupported operand types: {} {operator} {}",
-                left.type_name(),
-                right.type_name()
+                zval_type_name(req, left),
+                zval_type_name(req, right)
             ),
         )
     };
