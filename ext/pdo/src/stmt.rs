@@ -4,7 +4,11 @@
 //! bound parameters and columns with the connector's binding callback, and
 //! the methods that start, bind and describe.
 
-use php_ext::abi::{CloneObj, CloneObjWith, ObjectHandlers, PropertyPurpose, Std};
+use php_ext::abi::{
+    CloneObj, CloneObjWith, Instance, ObjectHandlers, OrFalse, Passed, PropertyPurpose, Raw, Ref,
+    Std, This, True, Union, Variadic,
+};
+use php_ext::attr::php_class;
 use php_ext::call::internal_iterator;
 use php_ext::coerce::to_string;
 use php_ext::raising::{Thrown, argument_error, throw};
@@ -15,10 +19,9 @@ use crate::connector::{
     BindEvent, BindKind, BindType, Binding, Cause, Failure, Placeholders, Prepared, SqlState,
     Statement,
 };
-use crate::dbh::{self, Dbh};
+use crate::dbh::{self, Dbh, PDO};
 use crate::error::{self, On};
 use crate::fetch::{self, Target};
-use crate::{Entry, arity, long_arg, this};
 
 /// How the statement reaches its connection: `stmt->dbh` with the owner
 /// `database_object_handle` takes, or, for the statement a failed
@@ -335,30 +338,6 @@ fn free_bound(req: &mut Request, driver: Option<&mut dyn Statement>, mut bound: 
     req.release(bound.driver_params);
 }
 
-/// The methods, `Class::method` to entry, for the stub reader.
-pub(crate) const METHODS: [(&str, Entry); 20] = [
-    ("PDOStatement::bindColumn", bind_column),
-    ("PDOStatement::bindParam", bind_param),
-    ("PDOStatement::bindValue", bind_value),
-    ("PDOStatement::closeCursor", close_cursor),
-    ("PDOStatement::columnCount", column_count),
-    ("PDOStatement::debugDumpParams", debug_dump_params),
-    ("PDOStatement::errorCode", error_code),
-    ("PDOStatement::errorInfo", error_info),
-    ("PDOStatement::execute", execute),
-    ("PDOStatement::fetch", fetch::fetch),
-    ("PDOStatement::fetchAll", fetch::fetch_all),
-    ("PDOStatement::fetchColumn", fetch::fetch_column),
-    ("PDOStatement::fetchObject", fetch::fetch_object),
-    ("PDOStatement::getAttribute", get_attribute),
-    ("PDOStatement::getColumnMeta", get_column_meta),
-    ("PDOStatement::nextRowset", next_rowset),
-    ("PDOStatement::rowCount", row_count),
-    ("PDOStatement::setAttribute", set_attribute),
-    ("PDOStatement::setFetchMode", fetch::set_fetch_mode),
-    ("PDOStatement::getIterator", get_iterator),
-];
-
 // ---- the statement's state, lent and read
 
 pub(super) fn read<R>(
@@ -397,8 +376,10 @@ pub(super) fn handle(req: &mut Request, object: PhpObject) -> Result<PhpObject, 
 }
 
 /// `$this` with `PHP_STMT_GET_OBJ`.
-pub(super) fn this_stmt(req: &mut Request) -> Result<(PhpObject, PhpObject), Thrown> {
-    let stmt = this(req)?;
+pub(super) fn this_stmt(
+    req: &mut Request,
+    stmt: PhpObject,
+) -> Result<(PhpObject, PhpObject), Thrown> {
     let dbh = handle(req, stmt)?;
     Ok((stmt, dbh))
 }
@@ -794,31 +775,68 @@ pub(super) fn replace_inner(req: &mut Request, value: &mut Value, new: Value) {
 /// `register_bound_param` and `bindValue()`'s body: the position or
 /// name, checked; the value, a copy; the type; for a parameter or a
 /// column bound by reference, the length and the connector's options.
-fn bind(req: &mut Request, is_parameter: bool, by_ref: bool) -> Result<Value, Thrown> {
-    if by_ref {
-        arity(req, 2, 5)?;
-    } else {
-        arity(req, 2, 3)?;
+/// What a bind method was given: the key, the value (the caller's
+/// reference for a by-reference bind), the type, and for `bindParam` and
+/// `bindColumn` the length and the connector's options.
+#[derive(Clone, Copy)]
+pub(super) struct Asked {
+    key: Union<PhpString, i64>,
+    value: Value,
+    ty: i64,
+    max_len: i64,
+    driver_params: Value,
+}
+
+impl Asked {
+    /// A by-reference bind's: the caller's reference itself where the call
+    /// passed one, the value where it passed a value.
+    fn by_ref(
+        key: Union<PhpString, i64>,
+        var: &Ref<Value>,
+        ty: i64,
+        (max_len, driver_params): (i64, Value),
+    ) -> Asked {
+        let value = match var.reference() {
+            Some(cell) => Value::reference(cell),
+            None => var.get().copied().unwrap_or_default(),
+        };
+        let driver_params = if crate::is_null(&driver_params) {
+            Value::default()
+        } else {
+            driver_params
+        };
+        Asked {
+            key,
+            value,
+            ty,
+            max_len,
+            driver_params,
+        }
     }
-    let key = crate::arg(req, 1)?.unwrap_or_default();
-    let value = req.argument(2).unwrap_or_default();
-    let ty = BindType::of(long_arg(req, 3, 2)?);
-    let max_len = if by_ref { long_arg(req, 4, 0)? } else { 0 };
-    let driver_params = if by_ref {
-        crate::arg(req, 5)?
-            .filter(|v| !crate::is_null(v))
-            .unwrap_or_default()
-    } else {
-        Value::null()
-    };
-    let (stmt, _) = this_stmt(req)?;
-    let (name, position) = if let ValueRef::Str(name) = key.as_ref() {
+}
+
+fn bind(
+    req: &mut Request,
+    stmt: PhpObject,
+    is_parameter: bool,
+    asked: Asked,
+) -> Result<bool, Thrown> {
+    let Asked {
+        key,
+        value,
+        ty,
+        max_len,
+        driver_params,
+    } = asked;
+    let ty = BindType::of(ty);
+    let (stmt, _) = this_stmt(req, stmt)?;
+    let (name, position) = if let Union::A(name) = key {
         if name.is_empty() {
             return Err(argument_error(req, "ValueError", 1, "must not be empty"));
         }
         (Some(name.as_bytes().to_vec()), -1)
     } else {
-        let n = key.as_int().unwrap_or(0);
+        let n = if let Union::B(n) = key { n } else { 0 };
         if n <= 0 {
             return Err(argument_error(
                 req,
@@ -829,7 +847,6 @@ fn bind(req: &mut Request, is_parameter: bool, by_ref: bool) -> Result<Value, Th
         }
         (None, n - 1)
     };
-    let value = if by_ref { value } else { value.deref() };
     req.addref(&value);
     req.addref(&driver_params);
     let bound = Bound {
@@ -842,264 +859,10 @@ fn bind(req: &mut Request, is_parameter: bool, by_ref: bool) -> Result<Value, Th
         max_len,
         is_parameter,
     };
-    register(req, stmt, bound).map(Value::bool)
-}
-
-/// `PDOStatement::bindValue(string|int $param, mixed $value, int $type = PDO::PARAM_STR): bool`:
-/// the value copied now, converted to the type.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->prepare('SELECT :a, typeof(:b), ?3');
-/// var_dump($s->bindValue(':a', 5), $s->bindValue('b', true, PDO::PARAM_INT), $s->bindValue(3, null, PDO::PARAM_NULL));
-/// $s->execute();
-/// var_dump($s->fetch(PDO::FETCH_NUM));
-/// try { $s->bindValue(0, 1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// bool(true)
-/// array(3) {
-///   [0]=>
-///   string(1) "5"
-///   [1]=>
-///   string(7) "integer"
-///   [2]=>
-///   NULL
-/// }
-/// PDOStatement::bindValue(): Argument #1 ($param) must be greater than or equal to 1
-/// ```
-fn bind_value(req: &mut Request) -> Result<Value, Thrown> {
-    bind(req, true, false)
-}
-
-/// `PDOStatement::bindParam(string|int $param, mixed &$var, ...): bool`:
-/// the variable read at each start, and converted in place where the
-/// type asks.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->prepare('SELECT ? * 2');
-/// $n = 1;
-/// $s->bindParam(1, $n, PDO::PARAM_INT);
-/// foreach ([2, 3] as $n) { $s->execute(); echo $s->fetchColumn(), "\n"; }
-/// $b = true; $s->bindParam(1, $b, PDO::PARAM_INT); var_dump($b);
-/// ```
-/// ```expect
-/// 4
-/// 6
-/// int(1)
-/// ```
-fn bind_param(req: &mut Request) -> Result<Value, Thrown> {
-    bind(req, true, true)
-}
-
-/// `PDOStatement::bindColumn(string|int $column, mixed &$var, ...): bool`:
-/// the variable written at each fetch.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->query('SELECT 1 AS a, 2 AS b UNION SELECT 3, 4');
-/// $s->bindColumn('a', $a); $s->bindColumn(2, $b, PDO::PARAM_STR);
-/// while ($s->fetch(PDO::FETCH_BOUND)) var_dump($a, $b);
-/// $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_WARNING);
-/// var_dump($s->bindColumn('nope', $c));
-/// ```
-/// ```expect
-/// string(1) "1"
-/// string(1) "2"
-/// string(1) "3"
-/// string(1) "4"
-///
-/// Warning: PDOStatement::bindColumn(): SQLSTATE[HY000]: General error: Did not find column name 'nope' in the defined columns; it will not be bound in %s on line 7
-/// bool(true)
-/// ```
-fn bind_column(req: &mut Request) -> Result<Value, Thrown> {
-    bind(req, false, true)
+    register(req, stmt, bound)
 }
 
 // ---- executing
-
-/// `PDOStatement::execute(?array $params = null): bool`: the array's
-/// values bound in its place by key, then the connector started.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $db->exec('CREATE TABLE t (a, b)');
-/// $s = $db->prepare('INSERT INTO t VALUES (:a, :b)');
-/// var_dump($s->execute([':a' => 1, 'b' => 'x']), $s->rowCount());
-/// $s = $db->prepare('SELECT * FROM t WHERE a = ?');
-/// var_dump($s->execute([1]), $s->fetch(PDO::FETCH_NUM));
-/// $s = $db->prepare('INSERT INTO t VALUES (?, ?)');
-/// try { $s->execute([1]); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// int(1)
-/// bool(true)
-/// array(2) {
-///   [0]=>
-///   string(1) "1"
-///   [1]=>
-///   string(1) "x"
-/// }
-/// ```
-fn execute(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 1)?;
-    let input = crate::array_arg(req, 1)?;
-    let (stmt, dbh) = this_stmt(req)?;
-    clear_error(req, stmt);
-    if let Some(input) = input {
-        let old = write(req, stmt, |s| std::mem::take(&mut s.params)).unwrap_or_default();
-        for bound in old {
-            free_bound_through(req, stmt, bound)?;
-        }
-        for (key, value) in input.snapshot() {
-            let (name, position) = match key {
-                Key::Str(name) => (Some(name.as_bytes().to_vec()), -1),
-                Key::Int(n) => (None, n),
-            };
-            let value = crate::copied(req, value);
-            let bound = Bound {
-                key: BoundKey::Position(position),
-                position,
-                name,
-                ty: BindType::STR,
-                value,
-                driver_params: Value::null(),
-                max_len: 0,
-                is_parameter: true,
-            };
-            if !register(req, stmt, bound)? {
-                return Ok(Value::bool(false));
-            }
-        }
-    }
-    let emulated = read(req, stmt, |s| {
-        s.placeholders == Some(Placeholders::Emulated)
-    })
-    .unwrap_or(false);
-    if emulated {
-        let query = read(req, stmt, |s| s.query.clone()).unwrap_or_default();
-        match crate::parser::parse_params(req, stmt, dbh, &query)? {
-            crate::parser::Parsed::Unchanged => {
-                write(req, stmt, |s| s.active = Active::Sent(s.query.clone()));
-            }
-            crate::parser::Parsed::Rewritten(sent) => {
-                write(req, stmt, |s| s.active = Active::Sent(sent));
-            }
-            crate::parser::Parsed::Failed => return Ok(Value::bool(false)),
-        }
-    } else if !dispatch(req, stmt, BindEvent::ExecPre)? {
-        handle_error(req, stmt, false)?;
-        return Ok(Value::bool(false));
-    }
-    match run(req, stmt) {
-        Ok(()) => {}
-        Err(Some(thrown)) => return Err(thrown),
-        Err(None) => {
-            handle_error(req, stmt, false)?;
-            return Ok(Value::bool(false));
-        }
-    }
-    if !dispatch(req, stmt, BindEvent::ExecPost)? {
-        handle_error(req, stmt, false)?;
-        return Ok(Value::bool(false));
-    }
-    Ok(Value::bool(true))
-}
-
-/// `PDOStatement::rowCount(): int`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $db->exec('CREATE TABLE t (a)');
-/// $s = $db->prepare('INSERT INTO t VALUES (1), (2), (3)');
-/// var_dump($s->rowCount()); $s->execute(); var_dump($s->rowCount());
-/// ```
-/// ```expect
-/// int(0)
-/// int(3)
-/// ```
-fn row_count(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (stmt, _) = this_stmt(req)?;
-    Ok(Value::int(read(req, stmt, |s| s.row_count).unwrap_or(0)))
-}
-
-/// `PDOStatement::columnCount(): int`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->prepare('SELECT 1, 2, 3');
-/// var_dump($s->columnCount()); $s->execute(); var_dump($s->columnCount());
-/// ```
-/// ```expect
-/// int(0)
-/// int(3)
-/// ```
-fn column_count(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (stmt, _) = this_stmt(req)?;
-    let count = read(req, stmt, |s| s.column_count).unwrap_or(0);
-    Ok(Value::int(i64::try_from(count).unwrap_or(i64::MAX)))
-}
-
-/// `PDOStatement::errorCode(): ?string`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
-/// $s = $db->prepare('SELECT * FROM sqlite_master');
-/// var_dump($s->errorCode()); $s->execute(); var_dump($s->errorCode());
-/// ```
-/// ```expect
-/// NULL
-/// string(5) "00000"
-/// ```
-fn error_code(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (stmt, _) = this_stmt(req)?;
-    match read(req, stmt, |s| s.error_code).flatten() {
-        Some(state) => crate::string(req, state.as_str().as_bytes()),
-        None => Ok(Value::null()),
-    }
-}
-
-/// `PDOStatement::errorInfo(): array`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
-/// $db->exec('CREATE TABLE t (a UNIQUE)');
-/// $s = $db->prepare('INSERT INTO t VALUES (1)');
-/// $s->execute(); $s->execute();
-/// var_dump($s->errorInfo());
-/// ```
-/// ```expect
-/// array(3) {
-///   [0]=>
-///   string(5) "23000"
-///   [1]=>
-///   int(19)
-///   [2]=>
-///   string(29) "UNIQUE constraint failed: t.a"
-/// }
-/// ```
-fn error_info(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (stmt, dbh) = this_stmt(req)?;
-    let state = read(req, stmt, |s| s.error_code).flatten();
-    let mut out = PhpArray::new(req)?;
-    let made = crate::string(req, state.as_ref().map_or("", SqlState::as_str).as_bytes())?;
-    out.append(req, made)?;
-    if state != Some(SqlState::NONE) {
-        error::fetch_error(req, dbh, &mut out)?;
-    }
-    while out.len() < 3 {
-        out.append(req, Value::null())?;
-    }
-    Ok(Value::array(out))
-}
 
 // ---- attributes, metadata and cursors
 
@@ -1109,9 +872,8 @@ fn unsupported(
     stmt: PhpObject,
     dbh: PhpObject,
     supp: &str,
-) -> Result<Value, Thrown> {
-    error::raise_impl(req, dbh, On::Stmt(stmt), SqlState(*b"IM001"), Some(supp))?;
-    Ok(Value::bool(false))
+) -> Result<(), Thrown> {
+    error::raise_impl(req, dbh, On::Stmt(stmt), SqlState(*b"IM001"), Some(supp))
 }
 
 /// A connector slot on the statement, its failure handled on it:
@@ -1137,321 +899,862 @@ fn on_driver<T>(
     }
 }
 
-/// `PDOStatement::setAttribute(int $attribute, mixed $value): bool`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->prepare('SELECT 1');
-/// var_dump($s->setAttribute(PDO::ATTR_CURSOR, 1));
-/// ```
-/// ```expect
-/// bool(false)
-/// ```
-fn set_attribute(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 2, 2)?;
-    let attr = long_arg(req, 1, 0)?;
-    let value = crate::arg(req, 2)?.unwrap_or_default();
-    let (stmt, dbh) = this_stmt(req)?;
-    clear_error(req, stmt);
-    match on_driver(req, stmt, |req, driver| {
-        driver.set_attribute(req, attr, &value)
-    })? {
-        Ok(Some(())) => Ok(Value::bool(true)),
-        Ok(None) => Ok(Value::bool(false)),
-        Err(()) => unsupported(
-            req,
-            stmt,
-            dbh,
-            "This driver doesn't support setting attributes",
-        ),
-    }
-}
+// ---- the class
 
-/// `PDOStatement::getAttribute(int $name): mixed`: the connector's, then
-/// `generic_stmt_attr_get`'s `ATTR_EMULATE_PREPARES`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->prepare('SELECT 1');
-/// var_dump($s->getAttribute(PDO::ATTR_EMULATE_PREPARES));
-/// try { $s->getAttribute(PDO::ATTR_CURSOR); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(false)
-/// SQLSTATE[IM001]: Driver does not support this function: driver doesn't support getting that attribute
-/// ```
-fn get_attribute(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let attr = long_arg(req, 1, 0)?;
-    let (stmt, dbh) = this_stmt(req)?;
-    let generic = |req: &Request| {
-        (attr == dbh::ATTR_EMULATE_PREPARES).then(|| {
-            Value::bool(
-                read(req, stmt, |s| {
-                    s.placeholders == Some(Placeholders::Emulated)
-                })
-                .unwrap_or(false),
-            )
-        })
-    };
-    clear_error(req, stmt);
-    match on_driver(req, stmt, |req, driver| driver.attribute(req, attr))? {
-        Ok(Some(Some(value))) => Ok(value),
-        Ok(Some(None)) => match generic(req) {
-            Some(value) => Ok(value),
-            None => unsupported(
-                req,
-                stmt,
-                dbh,
-                "driver doesn't support getting that attribute",
-            ),
-        },
-        Ok(None) => Ok(Value::bool(false)),
-        Err(()) => match generic(req) {
-            Some(value) => Ok(value),
-            None => unsupported(
-                req,
-                stmt,
-                dbh,
-                "This driver doesn't support getting attributes",
-            ),
-        },
-    }
-}
+/// `interface IteratorAggregate`, Core's, which `PDOStatement` implements.
+#[php_class(extern)]
+pub(crate) struct IteratorAggregate;
 
-/// `PDOStatement::getColumnMeta(int $column): array|false`: the
-/// connector's rows, then `name`, `len` and `precision`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $db->exec('CREATE TABLE t (a INTEGER)');
-/// $db->exec('INSERT INTO t VALUES (1)');
-/// $s = $db->query('SELECT a FROM t');
-/// var_dump($s->getColumnMeta(0));
-/// try { $s->getColumnMeta(1); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
-/// try { $s->getColumnMeta(-1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// array(8) {
-///   ["native_type"]=>
-///   string(7) "integer"
-///   ["pdo_type"]=>
-///   int(1)
-///   ["sqlite:decl_type"]=>
-///   string(7) "INTEGER"
-///   ["table"]=>
-///   string(1) "t"
-///   ["flags"]=>
-///   array(0) {
-///   }
-///   ["name"]=>
-///   string(1) "a"
-///   ["len"]=>
-///   int(-1)
-///   ["precision"]=>
-///   int(0)
-/// }
-/// SQLSTATE[HY000]: General error: 100 another row available
-/// PDOStatement::getColumnMeta(): Argument #1 ($column) must be greater than or equal to 0
-/// ```
-fn get_column_meta(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let column = long_arg(req, 1, 0)?;
-    let (stmt, dbh) = this_stmt(req)?;
-    let Ok(at) = usize::try_from(column) else {
-        return Err(argument_error(
-            req,
-            "ValueError",
-            1,
-            "must be greater than or equal to 0",
-        ));
-    };
-    clear_error(req, stmt);
-    let executed = read(req, stmt, |s| s.executed).unwrap_or(false);
-    let meta = match on_driver(req, stmt, |req, driver| {
-        driver.column_meta(req, at, executed)
-    })? {
-        Ok(Some(meta)) => meta,
-        Ok(None) => return Ok(Value::bool(false)),
-        Err(()) => return unsupported(req, stmt, dbh, "driver doesn't support meta data"),
-    };
-    let info = read(req, stmt, |s| {
-        s.columns.as_ref().and_then(|c| c.get(at).cloned())
-    })
-    .flatten();
-    let mut meta = meta;
-    if let Some(info) = info {
-        let key = PhpString::new(req, b"name")?;
-        let made = crate::string(req, &info.name)?;
-        meta.set(req, Key::Str(key), made)?;
-        let key = PhpString::new(req, b"len")?;
-        // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
-        #[allow(clippy::cast_possible_wrap)]
-        meta.set(req, Key::Str(key), Value::int(info.max_len as i64))?;
-        let key = PhpString::new(req, b"precision")?;
-        #[allow(clippy::cast_possible_wrap)]
-        meta.set(req, Key::Str(key), Value::int(info.precision as i64))?;
-    }
-    Ok(Value::array(meta))
-}
+/// `interface Iterator`, Core's, what `getIterator()` answers.
+#[php_class(extern)]
+pub(crate) struct Iterator;
 
-/// `PDOStatement::nextRowset(): bool`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->query('SELECT 1');
-/// try { $s->nextRowset(); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// SQLSTATE[IM001]: Driver does not support this function: driver does not support multiple rowsets
-/// ```
-fn next_rowset(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (stmt, dbh) = this_stmt(req)?;
-    write(req, stmt, |s| {
-        s.columns = None;
-        s.column_count = 0;
-    });
-    clear_error(req, stmt);
-    match on_driver(req, stmt, |req, driver| driver.next_rowset(req))? {
-        Ok(Some(count)) => {
-            set_column_count(req, stmt, count);
-            describe_columns(req, stmt)?;
-            Ok(Value::bool(true))
+/// `@not-serializable class PDOStatement implements IteratorAggregate`, as
+/// `pdo_stmt.stub.php` declares it, over the statement as its payload and
+/// `pdo_dbh_stmt_handlers`.
+#[php_class(not_serializable, implements(IteratorAggregate), payload = Stmt, handlers = HANDLERS)]
+pub(crate) struct PDOStatement;
+
+/// `public string $queryString`, then the methods in the stub's order.
+#[php_class]
+impl PDOStatement {
+    #[php(property)]
+    const queryString: PhpString;
+
+    /// `PDOStatement::bindColumn(string|int $column, mixed &$var, ...): bool`:
+    /// the variable written at each fetch.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->query('SELECT 1 AS a, 2 AS b UNION SELECT 3, 4');
+    /// $s->bindColumn('a', $a); $s->bindColumn(2, $b, PDO::PARAM_STR);
+    /// while ($s->fetch(PDO::FETCH_BOUND)) var_dump($a, $b);
+    /// $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_WARNING);
+    /// var_dump($s->bindColumn('nope', $c));
+    /// ```
+    /// ```expect
+    /// string(1) "1"
+    /// string(1) "2"
+    /// string(1) "3"
+    /// string(1) "4"
+    ///
+    /// Warning: PDOStatement::bindColumn(): SQLSTATE[HY000]: General error: Did not find column name 'nope' in the defined columns; it will not be bound in %s on line 7
+    /// bool(true)
+    /// ```
+    #[php(tentative)]
+    fn bindColumn(
+        req: &mut Request,
+        this: This<Self>,
+        column: Union<PhpString, i64>,
+        var: Ref<Value>,
+        #[php(default = PDO::PARAM_STR)] r#type: i64,
+        #[php(default = 0)] maxLength: i64,
+        #[php(default = null)] driverOptions: Value,
+    ) -> Result<bool, Thrown> {
+        let asked = Asked::by_ref(column, &var, r#type, (maxLength, driverOptions));
+        bind(req, this.object(), false, asked)
+    }
+
+    /// `PDOStatement::bindParam(string|int $param, mixed &$var, ...): bool`:
+    /// the variable read at each start, and converted in place where the
+    /// type asks.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->prepare('SELECT ? * 2');
+    /// $n = 1;
+    /// $s->bindParam(1, $n, PDO::PARAM_INT);
+    /// foreach ([2, 3] as $n) { $s->execute(); echo $s->fetchColumn(), "\n"; }
+    /// $b = true; $s->bindParam(1, $b, PDO::PARAM_INT); var_dump($b);
+    /// ```
+    /// ```expect
+    /// 4
+    /// 6
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn bindParam(
+        req: &mut Request,
+        this: This<Self>,
+        param: Union<PhpString, i64>,
+        var: Ref<Value>,
+        #[php(default = PDO::PARAM_STR)] r#type: i64,
+        #[php(default = 0)] maxLength: i64,
+        #[php(default = null)] driverOptions: Value,
+    ) -> Result<bool, Thrown> {
+        let asked = Asked::by_ref(param, &var, r#type, (maxLength, driverOptions));
+        bind(req, this.object(), true, asked)
+    }
+
+    /// `PDOStatement::bindValue(string|int $param, mixed $value, int $type = PDO::PARAM_STR): bool`:
+    /// the value copied now, converted to the type.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->prepare('SELECT :a, typeof(:b), ?3');
+    /// var_dump($s->bindValue(':a', 5), $s->bindValue('b', true, PDO::PARAM_INT), $s->bindValue(3, null, PDO::PARAM_NULL));
+    /// $s->execute();
+    /// var_dump($s->fetch(PDO::FETCH_NUM));
+    /// try { $s->bindValue(0, 1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// array(3) {
+    ///   [0]=>
+    ///   string(1) "5"
+    ///   [1]=>
+    ///   string(7) "integer"
+    ///   [2]=>
+    ///   NULL
+    /// }
+    /// PDOStatement::bindValue(): Argument #1 ($param) must be greater than or equal to 1
+    /// ```
+    #[php(tentative)]
+    fn bindValue(
+        req: &mut Request,
+        this: This<Self>,
+        param: Union<PhpString, i64>,
+        value: Value,
+        #[php(default = PDO::PARAM_STR)] r#type: i64,
+    ) -> Result<bool, Thrown> {
+        let asked = Asked {
+            key: param,
+            value,
+            ty: r#type,
+            max_len: 0,
+            driver_params: Value::null(),
+        };
+        bind(req, this.object(), true, asked)
+    }
+
+    /// `PDOStatement::closeCursor(): bool`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->prepare('SELECT 1 UNION SELECT 2');
+    /// $s->execute(); var_dump($s->fetchColumn(), $s->closeCursor());
+    /// $s->execute(); var_dump($s->fetchColumn());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// bool(true)
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn closeCursor(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (stmt, _) = this_stmt(req, this.object())?;
+        clear_error(req, stmt);
+        match on_driver(req, stmt, |req, driver| driver.close_cursor(req))? {
+            Ok(Some(())) => {}
+            Ok(None) => return Ok(false),
+            Err(()) => {
+                while with_driver(req, stmt, |req, driver| {
+                    driver.fetch(req, crate::connector::Orientation::Forward, 0)
+                })?
+                .unwrap_or(false)
+                {}
+            }
         }
-        Ok(None) => {
-            write(req, stmt, |s| s.executed = false);
-            Ok(Value::bool(false))
-        }
-        Err(()) => unsupported(req, stmt, dbh, "driver does not support multiple rowsets"),
+        write(req, stmt, |s| s.executed = false);
+        Ok(true)
     }
-}
 
-/// `PDOStatement::closeCursor(): bool`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->prepare('SELECT 1 UNION SELECT 2');
-/// $s->execute(); var_dump($s->fetchColumn(), $s->closeCursor());
-/// $s->execute(); var_dump($s->fetchColumn());
-/// ```
-/// ```expect
-/// int(1)
-/// bool(true)
-/// int(1)
-/// ```
-fn close_cursor(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (stmt, _) = this_stmt(req)?;
-    clear_error(req, stmt);
-    match on_driver(req, stmt, |req, driver| driver.close_cursor(req))? {
-        Ok(Some(())) => {}
-        Ok(None) => return Ok(Value::bool(false)),
-        Err(()) => {
-            while with_driver(req, stmt, |req, driver| {
-                driver.fetch(req, crate::connector::Orientation::Forward, 0)
-            })?
-            .unwrap_or(false)
-            {}
-        }
+    /// `PDOStatement::columnCount(): int`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->prepare('SELECT 1, 2, 3');
+    /// var_dump($s->columnCount()); $s->execute(); var_dump($s->columnCount());
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// int(3)
+    /// ```
+    #[php(tentative)]
+    fn columnCount(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let (stmt, _) = this_stmt(req, this.object())?;
+        let count = read(req, stmt, |s| s.column_count).unwrap_or(0);
+        Ok(i64::try_from(count).unwrap_or(i64::MAX))
     }
-    write(req, stmt, |s| s.executed = false);
-    Ok(Value::bool(true))
-}
 
-/// `PDOStatement::debugDumpParams(): ?bool`: the query, the query sent
-/// where PDO rewrote it, and each bound parameter.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->prepare('SELECT :a, :b');
-/// $s->bindValue(':a', 1, PDO::PARAM_INT); $s->bindValue('b', 'x');
-/// var_dump($s->debugDumpParams());
-/// ```
-/// ```expect
-/// SQL: [13] SELECT :a, :b
-/// Params:  2
-/// Key: Name: [2] :a
-/// paramno=-1
-/// name=[2] ":a"
-/// is_param=1
-/// param_type=1
-/// Key: Name: [2] :b
-/// paramno=-1
-/// name=[2] ":b"
-/// is_param=1
-/// param_type=2
-/// NULL
-/// ```
-fn debug_dump_params(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let (stmt, _) = this_stmt(req)?;
-    let Some((query, active, params)) = read(req, stmt, |s| {
-        (s.query.clone(), s.active.clone(), s.params.clone())
-    }) else {
-        return Ok(Value::null());
-    };
-    let mut out = format!("SQL: [{}] ", query.len()).into_bytes();
-    out.extend_from_slice(&query);
-    out.push(b'\n');
-    if let Active::Sent(sent) = active {
-        out.extend_from_slice(format!("Sent SQL: [{}] ", sent.len()).as_bytes());
-        out.extend_from_slice(&sent);
+    /// `PDOStatement::debugDumpParams(): ?bool`: the query, the query sent
+    /// where PDO rewrote it, and each bound parameter.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->prepare('SELECT :a, :b');
+    /// $s->bindValue(':a', 1, PDO::PARAM_INT); $s->bindValue('b', 'x');
+    /// var_dump($s->debugDumpParams());
+    /// ```
+    /// ```expect
+    /// SQL: [13] SELECT :a, :b
+    /// Params:  2
+    /// Key: Name: [2] :a
+    /// paramno=-1
+    /// name=[2] ":a"
+    /// is_param=1
+    /// param_type=1
+    /// Key: Name: [2] :b
+    /// paramno=-1
+    /// name=[2] ":b"
+    /// is_param=1
+    /// param_type=2
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    fn debugDumpParams(req: &mut Request, this: This<Self>) -> Result<Option<bool>, Thrown> {
+        let (stmt, _) = this_stmt(req, this.object())?;
+        let Some((query, active, params)) = read(req, stmt, |s| {
+            (s.query.clone(), s.active.clone(), s.params.clone())
+        }) else {
+            return Ok(None);
+        };
+        let mut out = format!("SQL: [{}] ", query.len()).into_bytes();
+        out.extend_from_slice(&query);
         out.push(b'\n');
-    }
-    out.extend_from_slice(format!("Params:  {}\n", params.len()).as_bytes());
-    for bound in &params {
-        match &bound.key {
-            BoundKey::Name(name) => {
-                out.extend_from_slice(format!("Key: Name: [{}] ", name.len()).as_bytes());
-                out.extend_from_slice(name);
-                out.push(b'\n');
+        if let Active::Sent(sent) = active {
+            out.extend_from_slice(format!("Sent SQL: [{}] ", sent.len()).as_bytes());
+            out.extend_from_slice(&sent);
+            out.push(b'\n');
+        }
+        out.extend_from_slice(format!("Params:  {}\n", params.len()).as_bytes());
+        for bound in &params {
+            match &bound.key {
+                BoundKey::Name(name) => {
+                    out.extend_from_slice(format!("Key: Name: [{}] ", name.len()).as_bytes());
+                    out.extend_from_slice(name);
+                    out.push(b'\n');
+                }
+                BoundKey::Position(n) => {
+                    out.extend_from_slice(format!("Key: Position #{n}:\n").as_bytes());
+                }
             }
-            BoundKey::Position(n) => {
-                out.extend_from_slice(format!("Key: Position #{n}:\n").as_bytes());
+            let name = bound.name.clone().unwrap_or_default();
+            out.extend_from_slice(
+                format!("paramno={}\nname=[{}] \"", bound.position, name.len()).as_bytes(),
+            );
+            out.extend_from_slice(&name);
+            out.extend_from_slice(
+                format!(
+                    "\"\nis_param={}\nparam_type={}\n",
+                    i32::from(bound.is_parameter),
+                    bound.ty.raw()
+                )
+                .as_bytes(),
+            );
+        }
+        req.write(&out);
+        Ok(None)
+    }
+
+    /// `PDOStatement::errorCode(): ?string`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+    /// $s = $db->prepare('SELECT * FROM sqlite_master');
+    /// var_dump($s->errorCode()); $s->execute(); var_dump($s->errorCode());
+    /// ```
+    /// ```expect
+    /// NULL
+    /// string(5) "00000"
+    /// ```
+    #[php(tentative)]
+    fn errorCode(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+        let (stmt, _) = this_stmt(req, this.object())?;
+        match read(req, stmt, |s| s.error_code).flatten() {
+            Some(state) => PhpString::new(req, state.as_str().as_bytes()).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// `PDOStatement::errorInfo(): array`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+    /// $db->exec('CREATE TABLE t (a UNIQUE)');
+    /// $s = $db->prepare('INSERT INTO t VALUES (1)');
+    /// $s->execute(); $s->execute();
+    /// var_dump($s->errorInfo());
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   string(5) "23000"
+    ///   [1]=>
+    ///   int(19)
+    ///   [2]=>
+    ///   string(29) "UNIQUE constraint failed: t.a"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn errorInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let (stmt, dbh) = this_stmt(req, this.object())?;
+        let state = read(req, stmt, |s| s.error_code).flatten();
+        let mut out = PhpArray::new(req)?;
+        let made = crate::string(req, state.as_ref().map_or("", SqlState::as_str).as_bytes())?;
+        out.append(req, made)?;
+        if state != Some(SqlState::NONE) {
+            error::fetch_error(req, dbh, &mut out)?;
+        }
+        while out.len() < 3 {
+            out.append(req, Value::null())?;
+        }
+        Ok(out)
+    }
+
+    /// `PDOStatement::execute(?array $params = null): bool`: the array's
+    /// values bound in its place by key, then the connector started.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $db->exec('CREATE TABLE t (a, b)');
+    /// $s = $db->prepare('INSERT INTO t VALUES (:a, :b)');
+    /// var_dump($s->execute([':a' => 1, 'b' => 'x']), $s->rowCount());
+    /// $s = $db->prepare('SELECT * FROM t WHERE a = ?');
+    /// var_dump($s->execute([1]), $s->fetch(PDO::FETCH_NUM));
+    /// $s = $db->prepare('INSERT INTO t VALUES (?, ?)');
+    /// try { $s->execute([1]); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(1)
+    /// bool(true)
+    /// array(2) {
+    ///   [0]=>
+    ///   string(1) "1"
+    ///   [1]=>
+    ///   string(1) "x"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn execute(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] params: Option<PhpArray>,
+    ) -> Result<bool, Thrown> {
+        let input = params;
+        let (stmt, dbh) = this_stmt(req, this.object())?;
+        clear_error(req, stmt);
+        if let Some(input) = input {
+            let old = write(req, stmt, |s| std::mem::take(&mut s.params)).unwrap_or_default();
+            for bound in old {
+                free_bound_through(req, stmt, bound)?;
+            }
+            for (key, value) in input.snapshot() {
+                let (name, position) = match key {
+                    Key::Str(name) => (Some(name.as_bytes().to_vec()), -1),
+                    Key::Int(n) => (None, n),
+                };
+                let value = crate::copied(req, value);
+                let bound = Bound {
+                    key: BoundKey::Position(position),
+                    position,
+                    name,
+                    ty: BindType::STR,
+                    value,
+                    driver_params: Value::null(),
+                    max_len: 0,
+                    is_parameter: true,
+                };
+                if !register(req, stmt, bound)? {
+                    return Ok(false);
+                }
             }
         }
-        let name = bound.name.clone().unwrap_or_default();
-        out.extend_from_slice(
-            format!("paramno={}\nname=[{}] \"", bound.position, name.len()).as_bytes(),
-        );
-        out.extend_from_slice(&name);
-        out.extend_from_slice(
-            format!(
-                "\"\nis_param={}\nparam_type={}\n",
-                i32::from(bound.is_parameter),
-                bound.ty.raw()
-            )
-            .as_bytes(),
-        );
+        let emulated = read(req, stmt, |s| {
+            s.placeholders == Some(Placeholders::Emulated)
+        })
+        .unwrap_or(false);
+        if emulated {
+            let query = read(req, stmt, |s| s.query.clone()).unwrap_or_default();
+            match crate::parser::parse_params(req, stmt, dbh, &query)? {
+                crate::parser::Parsed::Unchanged => {
+                    write(req, stmt, |s| s.active = Active::Sent(s.query.clone()));
+                }
+                crate::parser::Parsed::Rewritten(sent) => {
+                    write(req, stmt, |s| s.active = Active::Sent(sent));
+                }
+                crate::parser::Parsed::Failed => return Ok(false),
+            }
+        } else if !dispatch(req, stmt, BindEvent::ExecPre)? {
+            handle_error(req, stmt, false)?;
+            return Ok(false);
+        }
+        match run(req, stmt) {
+            Ok(()) => {}
+            Err(Some(thrown)) => return Err(thrown),
+            Err(None) => {
+                handle_error(req, stmt, false)?;
+                return Ok(false);
+            }
+        }
+        if !dispatch(req, stmt, BindEvent::ExecPost)? {
+            handle_error(req, stmt, false)?;
+            return Ok(false);
+        }
+        Ok(true)
     }
-    req.write(&out);
-    Ok(Value::null())
-}
 
-/// `PDOStatement::getIterator(): Iterator`: an `InternalIterator` over
-/// the statement, its first row fetched now, as `pdo_stmt_iter_get`
-/// fetches it.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->query('SELECT 1 AS n UNION SELECT 2');
-/// $it = $s->getIterator();
-/// var_dump(get_class($it));
-/// foreach ($it as $k => $row) echo $k, ':', $row['n'], "\n";
-/// class S extends PDOStatement { function __construct() {} }
-/// try { foreach (new S as $row) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(16) "InternalIterator"
-/// 0:1
-/// 1:2
-/// S object is uninitialized
-/// ```
-fn get_iterator(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let stmt = this(req)?;
-    handle(req, stmt)?;
-    fetch_ahead(req, stmt, 0, 0)?;
-    internal_iterator(req, &stmt).map(|it| it.as_value())
+    /// `PDOStatement::fetch(int $mode = PDO::FETCH_DEFAULT, int $cursorOrientation = PDO::FETCH_ORI_NEXT, int $cursorOffset = 0): mixed`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->query("SELECT 1 AS a, 'x' AS b, NULL AS c");
+    /// var_dump($s->fetch());
+    /// $s = $db->query("SELECT 1 AS a, 2 AS a");
+    /// var_dump($s->fetch(PDO::FETCH_NAMED), $s->fetch());
+    /// $s = $db->query("SELECT 1 AS a");
+    /// var_dump($s->fetch(PDO::FETCH_OBJ));
+    /// try { $s->fetch(13); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// array(6) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   [0]=>
+    ///   int(1)
+    ///   ["b"]=>
+    ///   string(1) "x"
+    ///   [1]=>
+    ///   string(1) "x"
+    ///   ["c"]=>
+    ///   NULL
+    ///   [2]=>
+    ///   NULL
+    /// }
+    /// array(1) {
+    ///   ["a"]=>
+    ///   array(2) {
+    ///     [0]=>
+    ///     int(1)
+    ///     [1]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// bool(false)
+    /// object(stdClass)#3 (1) {
+    ///   ["a"]=>
+    ///   int(1)
+    /// }
+    /// PDOStatement::fetch(): Argument #1 ($mode) must be a bitmask of PDO::FETCH_* constants
+    /// ```
+    #[php(tentative)]
+    fn fetch(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = PDO::FETCH_DEFAULT)] mode: i64,
+        #[php(default = PDO::FETCH_ORI_NEXT)] cursorOrientation: i64,
+        #[php(default = 0)] cursorOffset: i64,
+    ) -> Result<Value, Thrown> {
+        fetch::fetch(req, this.object(), mode, (cursorOrientation, cursorOffset))
+    }
+
+    /// `PDOStatement::fetchAll(int $mode = PDO::FETCH_DEFAULT, mixed ...$args): array`:
+    /// every row, grouped or keyed where the bits ask.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $db->exec("CREATE TABLE t (k, v)");
+    /// $db->exec("INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3)");
+    /// var_dump($db->query('SELECT v FROM t')->fetchAll(PDO::FETCH_COLUMN));
+    /// var_dump($db->query('SELECT k, v FROM t')->fetchAll(PDO::FETCH_KEY_PAIR));
+    /// var_dump($db->query('SELECT k, v FROM t')->fetchAll(PDO::FETCH_COLUMN | PDO::FETCH_GROUP));
+    /// var_dump($db->query('SELECT k, v FROM t')->fetchAll(PDO::FETCH_FUNC, fn ($k, $v) => "$k$v"));
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    ///   [2]=>
+    ///   int(3)
+    /// }
+    /// array(2) {
+    ///   ["a"]=>
+    ///   int(2)
+    ///   ["b"]=>
+    ///   int(3)
+    /// }
+    /// array(2) {
+    ///   ["a"]=>
+    ///   array(2) {
+    ///     [0]=>
+    ///     int(1)
+    ///     [1]=>
+    ///     int(2)
+    ///   }
+    ///   ["b"]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     int(3)
+    ///   }
+    /// }
+    /// array(3) {
+    ///   [0]=>
+    ///   string(2) "a1"
+    ///   [1]=>
+    ///   string(2) "a2"
+    ///   [2]=>
+    ///   string(2) "b3"
+    /// }
+    /// ```
+    ///
+    /// `ZEND_PARSE_PARAMETERS_START(0, 3)` under the stub's variadic, so
+    /// the body counts, then holds `$mode`.
+    #[php(tentative, arity = manual)]
+    fn fetchAll(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = PDO::FETCH_DEFAULT)] mode: Raw<i64>,
+        args: Variadic<Value>,
+    ) -> Result<PhpArray, Thrown> {
+        fetch::fetch_all(req, this.object(), mode, &args.0)
+    }
+
+    /// `PDOStatement::fetchColumn(int $column = 0): mixed`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->query("SELECT 'a', 'b' UNION SELECT 'c', 'd'");
+    /// var_dump($s->fetchColumn(1), $s->fetchColumn(), $s->fetchColumn());
+    /// $s = $db->query('SELECT 1');
+    /// try { $s->fetchColumn(3); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(1) "b"
+    /// string(1) "c"
+    /// bool(false)
+    /// Invalid column index
+    /// ```
+    #[php(tentative)]
+    fn fetchColumn(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = 0)] column: i64,
+    ) -> Result<Value, Thrown> {
+        fetch::fetch_column(req, this.object(), column)
+    }
+
+    /// `PDOStatement::fetchObject(?string $class = "stdClass", array $constructorArgs = []): object|false`.
+    ///
+    /// ```php
+    /// class P { public $a; function __construct(public $tag = 'none') {} }
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->query('SELECT 1 AS a UNION SELECT 2');
+    /// var_dump($s->fetchObject('P', ['t']), $s->fetchObject(), $s->fetchObject());
+    /// try { $s->fetchObject('Nope'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(P)#3 (2) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   ["tag"]=>
+    ///   string(1) "t"
+    /// }
+    /// object(stdClass)#4 (1) {
+    ///   ["a"]=>
+    ///   int(2)
+    /// }
+    /// bool(false)
+    /// PDOStatement::fetchObject(): Argument #1 ($class) must be a valid class name, Nope given
+    /// ```
+    #[php(tentative)]
+    fn fetchObject(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = "stdClass")] class: Option<PhpString>,
+        #[php(default = [])] constructorArgs: Passed<PhpArray>,
+    ) -> Result<OrFalse<PhpObject>, Thrown> {
+        let args = match constructorArgs {
+            Passed::Given(args) => Some(args),
+            Passed::Omitted => None,
+        };
+        fetch::fetch_object(req, this.object(), class, args)
+    }
+
+    /// `PDOStatement::getAttribute(int $name): mixed`: the connector's, then
+    /// `generic_stmt_attr_get`'s `ATTR_EMULATE_PREPARES`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->prepare('SELECT 1');
+    /// var_dump($s->getAttribute(PDO::ATTR_EMULATE_PREPARES));
+    /// try { $s->getAttribute(PDO::ATTR_CURSOR); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// SQLSTATE[IM001]: Driver does not support this function: driver doesn't support getting that attribute
+    /// ```
+    #[php(tentative)]
+    fn getAttribute(req: &mut Request, this: This<Self>, name: i64) -> Result<Value, Thrown> {
+        let attr = name;
+        let (stmt, dbh) = this_stmt(req, this.object())?;
+        let generic = |req: &Request| {
+            (attr == PDO::ATTR_EMULATE_PREPARES).then(|| {
+                Value::bool(
+                    read(req, stmt, |s| {
+                        s.placeholders == Some(Placeholders::Emulated)
+                    })
+                    .unwrap_or(false),
+                )
+            })
+        };
+        clear_error(req, stmt);
+        match on_driver(req, stmt, |req, driver| driver.attribute(req, attr))? {
+            Ok(Some(Some(value))) => Ok(value),
+            Ok(Some(None)) => match generic(req) {
+                Some(value) => Ok(value),
+                None => unsupported(
+                    req,
+                    stmt,
+                    dbh,
+                    "driver doesn't support getting that attribute",
+                )
+                .map(|()| Value::bool(false)),
+            },
+            Ok(None) => Ok(Value::bool(false)),
+            Err(()) => match generic(req) {
+                Some(value) => Ok(value),
+                None => unsupported(
+                    req,
+                    stmt,
+                    dbh,
+                    "This driver doesn't support getting attributes",
+                )
+                .map(|()| Value::bool(false)),
+            },
+        }
+    }
+
+    /// `PDOStatement::getColumnMeta(int $column): array|false`: the
+    /// connector's rows, then `name`, `len` and `precision`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $db->exec('CREATE TABLE t (a INTEGER)');
+    /// $db->exec('INSERT INTO t VALUES (1)');
+    /// $s = $db->query('SELECT a FROM t');
+    /// var_dump($s->getColumnMeta(0));
+    /// try { $s->getColumnMeta(1); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+    /// try { $s->getColumnMeta(-1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// array(8) {
+    ///   ["native_type"]=>
+    ///   string(7) "integer"
+    ///   ["pdo_type"]=>
+    ///   int(1)
+    ///   ["sqlite:decl_type"]=>
+    ///   string(7) "INTEGER"
+    ///   ["table"]=>
+    ///   string(1) "t"
+    ///   ["flags"]=>
+    ///   array(0) {
+    ///   }
+    ///   ["name"]=>
+    ///   string(1) "a"
+    ///   ["len"]=>
+    ///   int(-1)
+    ///   ["precision"]=>
+    ///   int(0)
+    /// }
+    /// SQLSTATE[HY000]: General error: 100 another row available
+    /// PDOStatement::getColumnMeta(): Argument #1 ($column) must be greater than or equal to 0
+    /// ```
+    #[php(tentative)]
+    fn getColumnMeta(
+        req: &mut Request,
+        this: This<Self>,
+        column: i64,
+    ) -> Result<OrFalse<PhpArray>, Thrown> {
+        let (stmt, dbh) = this_stmt(req, this.object())?;
+        let Ok(at) = usize::try_from(column) else {
+            return Err(argument_error(
+                req,
+                "ValueError",
+                1,
+                "must be greater than or equal to 0",
+            ));
+        };
+        clear_error(req, stmt);
+        let executed = read(req, stmt, |s| s.executed).unwrap_or(false);
+        let meta = match on_driver(req, stmt, |req, driver| {
+            driver.column_meta(req, at, executed)
+        })? {
+            Ok(Some(meta)) => meta,
+            Ok(None) => return Ok(OrFalse::False),
+            Err(()) => {
+                unsupported(req, stmt, dbh, "driver doesn't support meta data")?;
+                return Ok(OrFalse::False);
+            }
+        };
+        let info = read(req, stmt, |s| {
+            s.columns.as_ref().and_then(|c| c.get(at).cloned())
+        })
+        .flatten();
+        let mut meta = meta;
+        if let Some(info) = info {
+            let key = PhpString::new(req, b"name")?;
+            let made = crate::string(req, &info.name)?;
+            meta.set(req, Key::Str(key), made)?;
+            let key = PhpString::new(req, b"len")?;
+            // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
+            #[allow(clippy::cast_possible_wrap)]
+            meta.set(req, Key::Str(key), Value::int(info.max_len as i64))?;
+            let key = PhpString::new(req, b"precision")?;
+            #[allow(clippy::cast_possible_wrap)]
+            meta.set(req, Key::Str(key), Value::int(info.precision as i64))?;
+        }
+        Ok(OrFalse::Value(meta))
+    }
+
+    /// `PDOStatement::nextRowset(): bool`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->query('SELECT 1');
+    /// try { $s->nextRowset(); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// SQLSTATE[IM001]: Driver does not support this function: driver does not support multiple rowsets
+    /// ```
+    #[php(tentative)]
+    fn nextRowset(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (stmt, dbh) = this_stmt(req, this.object())?;
+        write(req, stmt, |s| {
+            s.columns = None;
+            s.column_count = 0;
+        });
+        clear_error(req, stmt);
+        match on_driver(req, stmt, |req, driver| driver.next_rowset(req))? {
+            Ok(Some(count)) => {
+                set_column_count(req, stmt, count);
+                describe_columns(req, stmt)?;
+                Ok(true)
+            }
+            Ok(None) => {
+                write(req, stmt, |s| s.executed = false);
+                Ok(false)
+            }
+            Err(()) => unsupported(req, stmt, dbh, "driver does not support multiple rowsets")
+                .map(|()| false),
+        }
+    }
+
+    /// `PDOStatement::rowCount(): int`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $db->exec('CREATE TABLE t (a)');
+    /// $s = $db->prepare('INSERT INTO t VALUES (1), (2), (3)');
+    /// var_dump($s->rowCount()); $s->execute(); var_dump($s->rowCount());
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// int(3)
+    /// ```
+    #[php(tentative)]
+    fn rowCount(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let (stmt, _) = this_stmt(req, this.object())?;
+        Ok(read(req, stmt, |s| s.row_count).unwrap_or(0))
+    }
+
+    /// `PDOStatement::setAttribute(int $attribute, mixed $value): bool`.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->prepare('SELECT 1');
+    /// var_dump($s->setAttribute(PDO::ATTR_CURSOR, 1));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn setAttribute(
+        req: &mut Request,
+        this: This<Self>,
+        attribute: i64,
+        value: Value,
+    ) -> Result<bool, Thrown> {
+        let attr = attribute;
+        let (stmt, dbh) = this_stmt(req, this.object())?;
+        clear_error(req, stmt);
+        match on_driver(req, stmt, |req, driver| {
+            driver.set_attribute(req, attr, &value)
+        })? {
+            Ok(Some(())) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(()) => unsupported(
+                req,
+                stmt,
+                dbh,
+                "This driver doesn't support setting attributes",
+            )
+            .map(|()| false),
+        }
+    }
+
+    /// `PDOStatement::setFetchMode(int $mode, mixed ...$args): true`.
+    ///
+    /// ```php
+    /// class Row { public $a; }
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->query('SELECT 1 AS a');
+    /// var_dump($s->setFetchMode(PDO::FETCH_CLASS, 'Row'));
+    /// var_dump($s->fetch());
+    /// try { $s->setFetchMode(PDO::FETCH_COLUMN); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+    /// $o = new stdClass;
+    /// $s = $db->query('SELECT 2 AS b');
+    /// $s->setFetchMode(PDO::FETCH_INTO, $o); $s->fetch(); var_dump($o);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// object(Row)#3 (1) {
+    ///   ["a"]=>
+    ///   int(1)
+    /// }
+    /// PDOStatement::setFetchMode() expects exactly 2 arguments for the fetch mode provided, 1 given
+    /// object(stdClass)#4 (1) {
+    ///   ["b"]=>
+    ///   int(2)
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn setFetchMode(
+        req: &mut Request,
+        this: This<Self>,
+        mode: i64,
+        args: Variadic<Value>,
+    ) -> Result<True, Thrown> {
+        fetch::set_fetch_mode(req, this.object(), mode, &args.0)
+    }
+
+    /// `PDOStatement::getIterator(): Iterator`: an `InternalIterator` over
+    /// the statement, its first row fetched now, as `pdo_stmt_iter_get`
+    /// fetches it.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->query('SELECT 1 AS n UNION SELECT 2');
+    /// $it = $s->getIterator();
+    /// var_dump(get_class($it));
+    /// foreach ($it as $k => $row) echo $k, ':', $row['n'], "\n";
+    /// class S extends PDOStatement { function __construct() {} }
+    /// try { foreach (new S as $row) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(16) "InternalIterator"
+    /// 0:1
+    /// 1:2
+    /// S object is uninitialized
+    /// ```
+    fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
+        let stmt = this.object();
+        handle(req, stmt)?;
+        fetch_ahead(req, stmt, 0, 0)?;
+        internal_iterator(req, &stmt).map(Instance::of)
+    }
 }

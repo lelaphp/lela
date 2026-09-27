@@ -6,7 +6,7 @@
 //! `fetch()`, `fetchAll()`, `fetchColumn()`, `fetchObject()` and
 //! `setFetchMode()` over it.
 
-use php_ext::abi::Callable;
+use php_ext::abi::{Callable, OrFalse, Raw, True};
 use php_ext::call::{call, call_array, known_method, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name};
 use php_ext::decl::Name;
@@ -18,7 +18,6 @@ use crate::connector::{BindEvent, BindKind, Orientation, SqlState};
 use crate::dbh::{Dbh, Nulls};
 use crate::error::{self, On};
 use crate::stmt;
-use crate::{arity, long_arg};
 
 /// `enum pdo_fetch_type`, the style without its bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1024,55 +1023,15 @@ fn has_constructor(req: &mut Request, class: ClassId) -> bool {
 
 // ---- the methods
 
-/// `PDOStatement::fetch(int $mode = PDO::FETCH_DEFAULT, int $cursorOrientation = PDO::FETCH_ORI_NEXT, int $cursorOffset = 0): mixed`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->query("SELECT 1 AS a, 'x' AS b, NULL AS c");
-/// var_dump($s->fetch());
-/// $s = $db->query("SELECT 1 AS a, 2 AS a");
-/// var_dump($s->fetch(PDO::FETCH_NAMED), $s->fetch());
-/// $s = $db->query("SELECT 1 AS a");
-/// var_dump($s->fetch(PDO::FETCH_OBJ));
-/// try { $s->fetch(13); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// array(6) {
-///   ["a"]=>
-///   int(1)
-///   [0]=>
-///   int(1)
-///   ["b"]=>
-///   string(1) "x"
-///   [1]=>
-///   string(1) "x"
-///   ["c"]=>
-///   NULL
-///   [2]=>
-///   NULL
-/// }
-/// array(1) {
-///   ["a"]=>
-///   array(2) {
-///     [0]=>
-///     int(1)
-///     [1]=>
-///     int(2)
-///   }
-/// }
-/// bool(false)
-/// object(stdClass)#3 (1) {
-///   ["a"]=>
-///   int(1)
-/// }
-/// PDOStatement::fetch(): Argument #1 ($mode) must be a bitmask of PDO::FETCH_* constants
-/// ```
-pub(super) fn fetch(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 3)?;
-    let how = long_arg(req, 1, 0)?;
-    let orientation = Orientation::of(long_arg(req, 2, 0)?);
-    let offset = long_arg(req, 3, 0)?;
-    let (object, _) = stmt::this_stmt(req)?;
+/// `PDOStatement::fetch`'s body, its arguments held by the method.
+pub(super) fn fetch(
+    req: &mut Request,
+    this: PhpObject,
+    how: i64,
+    (orientation, offset): (i64, i64),
+) -> Result<Value, Thrown> {
+    let orientation = Orientation::of(orientation);
+    let (object, _) = stmt::this_stmt(req, this)?;
     stmt::clear_error(req, object);
     let default = stmt::read(req, object, |s| s.default_fetch).unwrap_or(4);
     verify(req, default, how, 1, false)?;
@@ -1101,33 +1060,14 @@ pub(super) fn fetch(req: &mut Request) -> Result<Value, Thrown> {
     }
 }
 
-/// `PDOStatement::fetchObject(?string $class = "stdClass", array $constructorArgs = []): object|false`.
-///
-/// ```php
-/// class P { public $a; function __construct(public $tag = 'none') {} }
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->query('SELECT 1 AS a UNION SELECT 2');
-/// var_dump($s->fetchObject('P', ['t']), $s->fetchObject(), $s->fetchObject());
-/// try { $s->fetchObject('Nope'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(P)#3 (2) {
-///   ["a"]=>
-///   int(1)
-///   ["tag"]=>
-///   string(1) "t"
-/// }
-/// object(stdClass)#4 (1) {
-///   ["a"]=>
-///   int(2)
-/// }
-/// bool(false)
-/// PDOStatement::fetchObject(): Argument #1 ($class) must be a valid class name, Nope given
-/// ```
-pub(super) fn fetch_object(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 2)?;
-    let named = crate::nullable_bytes_arg(req, 1)?;
-    let args = crate::array_arg(req, 2)?;
+/// `PDOStatement::fetch_object`'s body, its arguments held by the method.
+pub(super) fn fetch_object(
+    req: &mut Request,
+    this: PhpObject,
+    class: Option<PhpString>,
+    args: Option<PhpArray>,
+) -> Result<OrFalse<PhpObject>, Thrown> {
+    let named = class.map(|name| name.as_bytes().to_vec());
     let class = match named {
         Some(name) => {
             if let Some(class) = lookup_class(req, &name)? {
@@ -1144,10 +1084,10 @@ pub(super) fn fetch_object(req: &mut Request) -> Result<Value, Thrown> {
         }
         None => match lookup_class(req, b"stdClass")? {
             Some(class) => class,
-            None => return Ok(Value::bool(false)),
+            None => return Ok(OrFalse::False),
         },
     };
-    let (object, _) = stmt::this_stmt(req)?;
+    let (object, _) = stmt::this_stmt(req, this)?;
     stmt::clear_error(req, object);
     if args.is_some_and(|a| !a.is_empty()) && !has_constructor(req, class) {
         return Err(argument_error(
@@ -1162,32 +1102,28 @@ pub(super) fn fetch_object(req: &mut Request) -> Result<Value, Thrown> {
         func: None,
     };
     if let Some((value, _)) = shaped(req, object, 8, Orientation::Forward, 0, false, &with)? {
-        Ok(value)
+        if let Some(made) = value.as_object().copied() {
+            Ok(OrFalse::Value(made))
+        } else {
+            req.release(value);
+            Err(php_ext::raising::fatal(
+                req,
+                "InternalError: PDOStatement::fetchObject() made no object",
+            ))
+        }
     } else {
         stmt::handle_error(req, object, false)?;
-        Ok(Value::bool(false))
+        Ok(OrFalse::False)
     }
 }
 
-/// `PDOStatement::fetchColumn(int $column = 0): mixed`.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->query("SELECT 'a', 'b' UNION SELECT 'c', 'd'");
-/// var_dump($s->fetchColumn(1), $s->fetchColumn(), $s->fetchColumn());
-/// $s = $db->query('SELECT 1');
-/// try { $s->fetchColumn(3); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(1) "b"
-/// string(1) "c"
-/// bool(false)
-/// Invalid column index
-/// ```
-pub(super) fn fetch_column(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 1)?;
-    let column = long_arg(req, 1, 0)?;
-    let (object, _) = stmt::this_stmt(req)?;
+/// `PDOStatement::fetch_column`'s body, its arguments held by the method.
+pub(super) fn fetch_column(
+    req: &mut Request,
+    this: PhpObject,
+    column: i64,
+) -> Result<Value, Thrown> {
+    let (object, _) = stmt::this_stmt(req, this)?;
     stmt::clear_error(req, object);
     if !common(req, object, Orientation::Forward, 0)? {
         stmt::handle_error(req, object, false)?;
@@ -1334,57 +1270,13 @@ fn all_arguments(
     Ok(with)
 }
 
-/// `PDOStatement::fetchAll(int $mode = PDO::FETCH_DEFAULT, mixed ...$args): array`:
-/// every row, grouped or keyed where the bits ask.
-///
-/// ```php
-/// $db = new PDO('sqlite::memory:');
-/// $db->exec("CREATE TABLE t (k, v)");
-/// $db->exec("INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3)");
-/// var_dump($db->query('SELECT v FROM t')->fetchAll(PDO::FETCH_COLUMN));
-/// var_dump($db->query('SELECT k, v FROM t')->fetchAll(PDO::FETCH_KEY_PAIR));
-/// var_dump($db->query('SELECT k, v FROM t')->fetchAll(PDO::FETCH_COLUMN | PDO::FETCH_GROUP));
-/// var_dump($db->query('SELECT k, v FROM t')->fetchAll(PDO::FETCH_FUNC, fn ($k, $v) => "$k$v"));
-/// ```
-/// ```expect
-/// array(3) {
-///   [0]=>
-///   int(1)
-///   [1]=>
-///   int(2)
-///   [2]=>
-///   int(3)
-/// }
-/// array(2) {
-///   ["a"]=>
-///   int(2)
-///   ["b"]=>
-///   int(3)
-/// }
-/// array(2) {
-///   ["a"]=>
-///   array(2) {
-///     [0]=>
-///     int(1)
-///     [1]=>
-///     int(2)
-///   }
-///   ["b"]=>
-///   array(1) {
-///     [0]=>
-///     int(3)
-///   }
-/// }
-/// array(3) {
-///   [0]=>
-///   string(2) "a1"
-///   [1]=>
-///   string(2) "a2"
-///   [2]=>
-///   string(2) "b3"
-/// }
-/// ```
-pub(super) fn fetch_all(req: &mut Request) -> Result<Value, Thrown> {
+/// `PDOStatement::fetch_all`'s body, its arguments held by the method.
+pub(super) fn fetch_all(
+    req: &mut Request,
+    this: PhpObject,
+    mode: Raw<i64>,
+    args: &[Value],
+) -> Result<PhpArray, Thrown> {
     let given = req.argument_count();
     if given > 3 {
         return Err(arg_count_error(
@@ -1392,16 +1284,13 @@ pub(super) fn fetch_all(req: &mut Request) -> Result<Value, Thrown> {
             &format!("at most 3 arguments, {given} given"),
         ));
     }
-    let how = long_arg(req, 1, 0)?;
-    let second = req
-        .argument(2)
-        .map(|v| v.deref())
-        .filter(|v| !matches!(v.as_ref(), ValueRef::Undef));
-    let third = req
-        .argument(3)
-        .map(|v| v.deref())
-        .filter(|v| !matches!(v.as_ref(), ValueRef::Undef | ValueRef::Null));
-    let (object, _) = stmt::this_stmt(req)?;
+    let how = mode.hold(req)?;
+    let second = args.first().map(Value::deref);
+    let third = args
+        .get(1)
+        .map(Value::deref)
+        .filter(|v| !matches!(v.as_ref(), ValueRef::Null));
+    let (object, _) = stmt::this_stmt(req, this)?;
     let default = stmt::read(req, object, |s| s.default_fetch).unwrap_or(4);
     verify(req, default, how, 1, true)?;
     let kind = Kind::of(how);
@@ -1419,7 +1308,7 @@ pub(super) fn fetch_all(req: &mut Request) -> Result<Value, Thrown> {
     if kind == Some(Kind::KeyPair) {
         while key_pair(req, object, Orientation::Forward, 0, &mut out)? {}
         stmt::handle_error(req, object, false)?;
-        return Ok(Value::array(out));
+        return Ok(out);
     }
     if flags.has(Flag::Group) || flags.has(Flag::Unique) {
         grouped_rows(req, object, how | flags.0, flags, &with, &mut out)?;
@@ -1433,9 +1322,9 @@ pub(super) fn fetch_all(req: &mut Request) -> Result<Value, Thrown> {
     if state != Some(SqlState::NONE) {
         req.release(Value::array(out));
         stmt::handle_error(req, object, false)?;
-        return Ok(Value::array(PhpArray::new(req)?));
+        return PhpArray::new(req);
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `fetchAll()` under `FETCH_GROUP` or `FETCH_UNIQUE`: each row under
@@ -1491,44 +1380,15 @@ fn grouped_rows(
     Ok(())
 }
 
-/// `PDOStatement::setFetchMode(int $mode, mixed ...$args): true`.
-///
-/// ```php
-/// class Row { public $a; }
-/// $db = new PDO('sqlite::memory:');
-/// $s = $db->query('SELECT 1 AS a');
-/// var_dump($s->setFetchMode(PDO::FETCH_CLASS, 'Row'));
-/// var_dump($s->fetch());
-/// try { $s->setFetchMode(PDO::FETCH_COLUMN); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
-/// $o = new stdClass;
-/// $s = $db->query('SELECT 2 AS b');
-/// $s->setFetchMode(PDO::FETCH_INTO, $o); $s->fetch(); var_dump($o);
-/// ```
-/// ```expect
-/// bool(true)
-/// object(Row)#3 (1) {
-///   ["a"]=>
-///   int(1)
-/// }
-/// PDOStatement::setFetchMode() expects exactly 2 arguments for the fetch mode provided, 1 given
-/// object(stdClass)#4 (1) {
-///   ["b"]=>
-///   int(2)
-/// }
-/// ```
-pub(super) fn set_fetch_mode(req: &mut Request) -> Result<Value, Thrown> {
-    let given = req.argument_count();
-    if given < 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("at least 1 argument, {given} given"),
-        ));
-    }
-    let mode = long_arg(req, 1, 0)?;
-    let args: Vec<Value> = (2..=u32::try_from(given).unwrap_or(u32::MAX))
-        .map(|at| req.argument(at).unwrap_or_default().deref())
-        .collect();
-    let (object, _) = stmt::this_stmt(req)?;
+/// `PDOStatement::set_fetch_mode`'s body, its arguments held by the method.
+pub(super) fn set_fetch_mode(
+    req: &mut Request,
+    this: PhpObject,
+    mode: i64,
+    args: &[Value],
+) -> Result<True, Thrown> {
+    let args: Vec<Value> = args.iter().map(Value::deref).collect();
+    let (object, _) = stmt::this_stmt(req, this)?;
     if stmt::read(req, object, |s| s.in_fetch).unwrap_or(false) {
         return Err(throw(
             req,
@@ -1537,5 +1397,5 @@ pub(super) fn set_fetch_mode(req: &mut Request) -> Result<Value, Thrown> {
         ));
     }
     setup_mode(req, object, mode, 1, &args)?;
-    Ok(Value::bool(true))
+    Ok(True)
 }
