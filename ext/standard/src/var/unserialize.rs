@@ -406,6 +406,7 @@ impl<'a> State<'a> {
 /// var_dump(unserialize('O:1:"W":0:{}', ['allowed_classes' => ['w']]) instanceof W, unserialize('a:1:{i:0;a:1:{i:0;i:1;}}', ['max_depth' => 1]));
 /// try { unserialize('i:1;', ['allowed_classes' => 1]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// try { unserialize('i:1;', ['max_depth' => -1]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { unserialize('i:1;', ['allowed_classes' => ["have\0nul"]]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// class W { function __wakeup() {} }
 /// ```
 /// ```expect
@@ -416,6 +417,7 @@ impl<'a> State<'a> {
 /// bool(false)
 /// unserialize(): Option "allowed_classes" must be of type array|bool, int given
 /// unserialize(): Option "max_depth" must be greater than or equal to 0
+/// unserialize(): Option "allowed_classes" must be an array of class names, "have" given
 /// ```
 ///
 /// An enum case is `E:` and its name, the case itself read back.
@@ -704,7 +706,10 @@ fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown
                     }
                     let name = php_ext::coerce::to_string(req, &entry)?.as_bytes().to_vec();
                     if !valid_class_name(&name) {
-                        let shown = String::from_utf8_lossy(&name).into_owned();
+                        // php prints the name as a C string, up to its
+                        // first NUL byte.
+                        let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+                        let shown = String::from_utf8_lossy(&name[..end]).into_owned();
                         return Err(throw(
                             req,
                             "ValueError",
