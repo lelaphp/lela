@@ -31,6 +31,12 @@
 //! judged, `run == 0`, is the run the pinned oracle was absent for, and is
 //! a skip that says so.
 //!
+//! **Which process serves it.** Not the one the command line started:
+//! that one starts this binary again over the crates the run is for and
+//! watches it, so a run that dies on a signal still leaves a failing
+//! reading naming the signal and the snippets in flight ([`watch`]; #1037).
+//! The engine is the same linked one either way.
+//!
 //! **What a feature row reads.** Nothing here. The bundle the harness
 //! links carries every extension feature `php_bundle` declares, so a crate
 //! the manifest marks `feature =` is held to its witnesses under
@@ -80,6 +86,7 @@ pub(crate) mod fence;
 mod judge;
 #[cfg(test)]
 mod tests;
+mod watch;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -97,6 +104,7 @@ use crate::reading::{Reading, Status, Store, listed};
 use crate::sources;
 use crate::tally::{self, Outcome};
 use fence::Extracted;
+use watch::{Journal, Watch};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "witness";
@@ -339,6 +347,18 @@ pub fn run(
     registry: &Registry,
     ask: &Ask,
 ) -> Result<Vec<Reading>> {
+    run_in(root, manifest, registry, ask, None)
+}
+
+/// [`run`], each snippet's start and end and each crate's reading
+/// appended to `journal` where there is one ([`watch`]).
+fn run_in(
+    root: &Path,
+    manifest: &Manifest,
+    registry: &Registry,
+    ask: &Ask,
+    journal: Option<&Journal>,
+) -> Result<Vec<Reading>> {
     for name in &ask.crates {
         if manifest.crate_named(name).is_none() {
             bail!("the manifest has no crate named {name:?}");
@@ -398,7 +418,8 @@ pub fn run(
         for problem in &found.problems {
             println!("bork {}", problem.at_line());
         }
-        let tally = judge(&oracle, registry, ask, &found)?;
+        let watch = journal.map(|j| j.over(&krate.name));
+        let tally = judge(&oracle, registry, ask, &found, watch)?;
         for missing in &tally.missing {
             println!("missing {missing}");
         }
@@ -428,7 +449,11 @@ pub fn run(
                 tally.witnesses.judged.len()
             );
         }
-        readings.push(reading(&tally, root, krate, rule)?);
+        let judged = reading(&tally, root, krate, rule)?;
+        if let Some(journal) = journal {
+            journal.judged(&judged)?;
+        }
+        readings.push(judged);
     }
     Ok(readings)
 }
@@ -483,6 +508,7 @@ pub(crate) fn judge(
     registry: &Registry,
     ask: &Ask,
     found: &Extracted,
+    watch: Option<Watch<'_>>,
 ) -> Result<Tally> {
     // Coverage is a count over the source and needs no php; the digest is
     // asserted once, here, before the first snippet, and a mismatch refuses
@@ -532,6 +558,9 @@ pub(crate) fn judge(
     } else {
         wall = runnable.iter().filter_map(|(w, _)| w.wall).sum();
         tally::Tally::judge_beside(&runnable, |(witness, regime)| {
+            if let Some(watch) = watch {
+                watch.serving(witness)?;
+            }
             let mut mine = Vec::new();
             let mut natives = Vec::new();
             let judged = judge::one(
@@ -551,6 +580,9 @@ pub(crate) fn judge(
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(witness.id(), natives);
+            if let Some(watch) = watch {
+                watch.served(witness)?;
+            }
             Ok(judged)
         })?
     };
@@ -628,21 +660,26 @@ pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
     Ok(())
 }
 
-/// The command line's entry: run what the two flags asked for and write
-/// every reading.
+/// The command line's entry. Without `journal`, the run is served in a
+/// process of its own and watched, and every reading is written here
+/// ([`watch`]); with one, this is that process: the run served, and
+/// what it judged appended to the journal for the watching process to
+/// write.
 pub(crate) fn command(
     root: &Path,
     manifest: &Manifest,
     store: &Store,
-    crates: Vec<String>,
-    accept: bool,
-    staged: bool,
+    asked: crate::cli::Witness,
 ) -> Result<()> {
-    let registry = Registry::load(root)?;
     let ask = Ask {
-        crates,
-        accept,
-        staged,
+        crates: asked.crates,
+        accept: asked.accept,
+        staged: asked.staged,
     };
-    crate::record(store, &run(root, manifest, &registry, &ask)?)
+    let Some(journal) = asked.journal else {
+        return watch::watch(root, manifest, store, &ask);
+    };
+    let registry = Registry::load(root)?;
+    let journal = Journal::open(&journal)?;
+    run_in(root, manifest, &registry, &ask, Some(&journal)).map(|_| ())
 }

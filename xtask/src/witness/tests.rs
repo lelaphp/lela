@@ -69,7 +69,7 @@ fn judged(file: &Path, text: &str, registry: &Registry, accept: bool) -> Tally {
         staged: false,
     };
     let manifest = manifest();
-    let tally = judge(&manifest.pin.oracle(), registry, &ask, &found).unwrap();
+    let tally = judge(&manifest.pin.oracle(), registry, &ask, &found, None).unwrap();
     if accept {
         capture(&workspace(), &tally.captured).unwrap();
     }
@@ -109,7 +109,7 @@ fn the_digest_is_asserted_once_over_a_run_of_three_witnesses() {
     let manifest = manifest();
     assert_eq!(manifest.pin.digests_asserted(), 0);
     let oracle = manifest.pin.oracle();
-    let tally = judge(&oracle, &registry(""), &Ask::default(), &found).unwrap();
+    let tally = judge(&oracle, &registry(""), &Ask::default(), &found, None).unwrap();
     assert_eq!(tally.witnesses.judged.len(), 3, "{tally:#?}");
     assert!(
         tally
@@ -138,7 +138,7 @@ fn an_absent_oracle_leaves_the_coverage_half_judged_and_the_witness_unrun() {
     let mut manifest = manifest();
     manifest.pin.oracle.path = PathBuf::from("/no-php-here");
     let oracle = manifest.pin.oracle();
-    let tally = judge(&oracle, &registry(""), &Ask::default(), &found).unwrap();
+    let tally = judge(&oracle, &registry(""), &Ask::default(), &found, None).unwrap();
     assert!(tally.failed(), "{tally:#?}");
     assert_eq!(tally.missing.len(), 1, "{tally:#?}");
     assert!(tally.witnesses.judged.is_empty(), "{tally:#?}");
@@ -174,6 +174,7 @@ fn a_digest_mismatch_refuses_the_run_and_is_not_a_bork_per_witness() {
         &registry(""),
         &Ask::default(),
         &found,
+        None,
     )
     .unwrap_err()
     .to_string();
@@ -288,6 +289,7 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_is_a_block_the_lane_cannot_run
             &registry(""),
             &Ask::default(),
             &found,
+            None,
         )
         .unwrap();
         assert!(tally.failed(), "absent={absent}: {tally:#?}");
@@ -397,6 +399,7 @@ fn the_fixture_whose_fence_the_oracle_does_not_meet_fails_naming_the_oracle() {
         &registry(""),
         &Ask::default(),
         &found,
+        None,
     )
     .unwrap();
     let (judgement, note) = only(&tally);
@@ -511,6 +514,7 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
         &Registry::default(),
         &Ask::default(),
         &found,
+        None,
     )
     .unwrap();
     assert!(tally.failed(), "{tally:#?}");

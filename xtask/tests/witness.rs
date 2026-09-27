@@ -21,7 +21,7 @@ use std::process::{Command, Stdio};
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
 use xtask::oracle::Promise;
-use xtask::reading::{Number, Reading, Status};
+use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::witness::{self, Ask};
 
@@ -969,4 +969,54 @@ fn staged_narrows_the_run_to_the_crates_with_a_staged_change() {
     assert_eq!(readings.len(), 1, "{readings:#?}");
     assert_eq!(readings[0].scope, "ext/fixture");
     assert_ne!(readings[0].status, Status::Fail, "{:#?}", readings[0]);
+}
+
+/// A run that dies on a signal says so (#1037, #1043, #1060): the
+/// fixture's one witness sends `SIGABRT` to the process serving it, and
+/// the command still ends with a line naming the signal and a failing
+/// reading for the crate that names it and the snippet being served. The
+/// fixture is laid over a scratch workspace, whose registry and pin the
+/// served process reads.
+#[test]
+fn a_run_that_dies_on_a_signal_leaves_a_failing_reading_naming_it() {
+    if oracle().is_none() {
+        return;
+    }
+    let fixture = fixture_at("witness", "abort");
+    let root = Tree::new("witness-abort").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    let pin = manifest().oracle.pin;
+    let seams = fs::read_to_string(fixture.join("seams.toml"))
+        .unwrap()
+        .replace("../../../../oracle.toml", &pin);
+    fs::write(root.join("seams.toml"), seams).unwrap();
+    fs::create_dir_all(root.join("ext/pcre/src")).unwrap();
+    for file in ["ext/pcre/Cargo.toml", "ext/pcre/src/lib.rs"] {
+        fs::copy(fixture.join(file), root.join(file)).unwrap();
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(root.path())
+        .args(["witness", "--crate", "ext/pcre"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("witness: the served run died on SIGABRT (signal 6); being served: ext/pcre at ext/pcre/src/lib.rs:17"),
+        "{stderr}"
+    );
+    let reading = Store::of_workspace(root.path())
+        .read("witness", "ext/pcre")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(&reading, "signal"), 6, "{reading:#?}");
+    assert!(
+        reading.message.starts_with(
+            "ext/pcre: the witness run died on SIGABRT (signal 6) while serving ext/pcre/src/lib.rs:17;"
+        ),
+        "{}",
+        reading.message
+    );
 }
