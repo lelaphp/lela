@@ -320,6 +320,15 @@ fn class_body(p: &mut Parser<'_>) {
     m.complete(p, K::CLASS_BODY);
 }
 
+/// One member of a class body. A method's body is `;` or a block, and
+/// php names both where neither stands:
+///
+/// ```php
+/// interface I { function f(): int }
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token "}", expecting ";" or "{" in %s on line 2
+/// ```
 fn class_member(p: &mut Parser<'_>) {
     let m = p.start();
     attribute_groups(p);
@@ -358,7 +367,10 @@ fn class_member(p: &mut Parser<'_>) {
             if p.peek_at(K::L_CURLY) {
                 block(p);
             } else {
-                semicolon(p);
+                // `method_body: ';' | '{' …`: php lists both where the
+                // body was due (`function f(): ?A&B;`, `function f() x`,
+                // probed 8.5.9).
+                super::semicolon_expecting(p, Some("\";\" or \"{\""));
             }
             m.complete(p, K::METHOD_DECL);
         }
