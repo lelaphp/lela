@@ -3480,10 +3480,26 @@ pub(crate) fn recv<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op:
 /// object against a class the type names (`instanceof_function`), then
 /// `zend_verify_scalar_type_hint` under the caller's `strict_types`
 /// ([`crate::api::coerce::scalar_type_hint`]). A coercion replaces the
-/// argument where it stands, as php converts the zval in the frame; what
-/// does not convert is `zend_verify_arg_error`, the `TypeError` naming
-/// the function, the parameter, the declared type, the value's kind and,
+/// argument where it stands, as php converts the zval in the frame, and
+/// a by-reference parameter's in the cell it is bound to; what does not
+/// convert is `zend_verify_arg_error`, the `TypeError` naming the
+/// function, the parameter, the declared type, the value's kind and,
 /// where the caller is user code, its file and line.
+///
+/// ```php
+/// function to_int(int &$x) {}
+/// function to_string(string &$x) {}
+/// class C { public float $f = 1.5; }
+/// $x = 1.0; to_int($x); var_dump($x);
+/// to_string($x); var_dump($x);
+/// $c = new C; $r = &$c->f;
+/// try { to_int($r); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "1"
+/// to_int(): Argument #1 ($x) must be of type int, float given, called in %s on line 8
+/// ```
 fn verify_arg_type(
     req: &mut Request,
     frame: FrameRef,
@@ -3491,7 +3507,7 @@ fn verify_arg_type(
     slot: u32,
 ) -> Result<(), Thrown> {
     let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
-    let argument = req.slot(frame, slot).deref();
+    let argument = req.slot(frame, slot);
     if let Some(coerced) = verified_arg(req, frame, number, at, &argument)? {
         let previous = req.set_slot(frame, slot, coerced);
         req.release(previous);
@@ -3505,14 +3521,19 @@ fn verify_arg_type(
 /// collects, while `number` is the argument's own position, which is
 /// what php's error says. `Some` is the value the coercion outside
 /// `strict_types` made of it, which the caller writes where the value
-/// stood; `None` is a value the type contains as it is.
+/// stood; `None` is a value the type contains as it is, or a reference,
+/// whose coercion is written into the cell here, as `zend_check_type`
+/// converts the value the reference holds. A cell some typed property
+/// is a source of converts nothing ("We cannot have conversions for
+/// typed refs"), so what the type does not hold is the error.
 fn verified_arg(
     req: &mut Request,
     frame: FrameRef,
     number: u32,
     at: usize,
-    argument: &Value,
+    raw: &Value,
 ) -> Result<Option<Value>, Thrown> {
+    let argument = &raw.deref();
     let function = req.vm().at(frame).and_then(|state| state.function);
     let Some(ty) = function
         .and_then(|function| req.function_decl(function))
@@ -3525,8 +3546,17 @@ fn verified_arg(
         return Ok(None);
     }
     let strict = req.caller_strict_types(frame);
-    if let Some(coerced) = crate::api::coerce::scalar_type_hint(req, argument, ty.mask(), strict)? {
-        return Ok(Some(coerced));
+    let cell = raw.as_php_ref().copied();
+    let typed_cell = cell.is_some_and(|cell| !req.ref_type_sources(cell.heap()).is_empty());
+    if !typed_cell
+        && let Some(coerced) =
+            crate::api::coerce::scalar_type_hint(req, argument, ty.mask(), strict)?
+    {
+        let Some(cell) = cell else {
+            return Ok(Some(coerced));
+        };
+        req.reference_set(cell.heap(), coerced);
+        return Ok(None);
     }
     Err(arg_type_error(req, frame, number, at, &ty, argument))
 }
