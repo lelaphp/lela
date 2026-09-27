@@ -35,6 +35,9 @@ enum Type {
 /// `spl_filesystem_object`.
 #[derive(Default)]
 pub(crate) struct Fs {
+    /// `oth` with its `oth_handler`: what a class extending these lays on
+    /// the object ([`Other`]).
+    oth: Option<Box<dyn Other>>,
     kind: Type,
     path: Option<Vec<u8>>,
     file_name: Option<Vec<u8>>,
@@ -62,6 +65,88 @@ pub(crate) struct Fs {
 /// What `FilesystemIterator::current()` answers by its flags: the path
 /// name, an `SplFileInfo`, or the iterator itself.
 type FsCurrent = Union<PhpString, Union<Instance<SplFileInfo>, Instance<FilesystemIterator>>>;
+
+/// `spl_other_handler` with the `oth` it serves (`spl_directory.h`): what
+/// a class extending one of these lays on the object, as phar lays its
+/// open archive on a `Phar`, freed with the object (`dtor`) and copied
+/// with a clone (`clone`). Exported to ext/phar (design §4.10, the `spl`
+/// → `phar` row).
+pub trait Other: std::any::Any + Send {
+    /// `oth_handler->dtor`, served as the object is freed, before
+    /// anything else of it.
+    fn dtor(self: Box<Self>, req: &mut Request);
+    /// What a clone holds: `intern->oth = source->oth`, then
+    /// `oth_handler->clone` where the class set one.
+    fn clone_other(&self, req: &mut Request) -> Box<dyn Other>;
+}
+
+/// `intern->oth` and `intern->oth_handler` set on a filesystem object,
+/// as `Phar::__construct` sets them; `false` for an object without the
+/// payload.
+pub fn set_other(req: &mut Request, object: PhpObject, other: Box<dyn Other>) -> bool {
+    match object.native_mut::<Fs>(req) {
+        Some(it) => {
+            it.oth = Some(other);
+            true
+        }
+        None => false,
+    }
+}
+
+/// `intern->oth = NULL`: what the object holds taken off it, as
+/// `PharFileInfo::__destruct` lets its entry go.
+pub fn take_other(req: &mut Request, object: PhpObject) -> Option<Box<dyn Other>> {
+    object.native_mut::<Fs>(req)?.oth.take()
+}
+
+/// `intern->oth` as the class that laid it down reads it: `None` where
+/// the object has none or one of another type.
+pub fn other_mut<T: Other>(req: &mut Request, object: PhpObject) -> Option<&mut T> {
+    let other: &mut dyn Other = object.native_mut::<Fs>(req)?.oth.as_deref_mut()?;
+    (other as &mut dyn std::any::Any).downcast_mut::<T>()
+}
+
+/// `intern->info_class`: the class `getFileInfo()`, `current()` and
+/// phar's `offsetGet()` make, `None` for `SplFileInfo`.
+pub fn info_class_of(req: &mut Request, object: PhpObject) -> Option<ClassId> {
+    object.native_mut::<Fs>(req)?.info_class
+}
+
+/// `intern->info_class = class`, as `Phar::__construct` sets
+/// `PharFileInfo`.
+pub fn set_info_class(req: &mut Request, object: PhpObject, class: ClassId) {
+    if let Some(it) = object.native_mut::<Fs>(req) {
+        it.info_class = Some(class);
+    }
+}
+
+/// What `phar_build` reads of an `SplFileInfo` its iterator hands it:
+/// `intern->type`, and a directory's `spl_filesystem_object_get_path`
+/// with its entry's `d_name`, or an info's and a file's `file_name`.
+pub enum Filesystem {
+    Dir {
+        path: Option<Vec<u8>>,
+        entry: Vec<u8>,
+    },
+    File {
+        file_name: Option<Vec<u8>>,
+    },
+}
+
+/// The [`Filesystem`] of an object, `None` for one without the payload.
+pub fn filesystem(req: &mut Request, object: PhpObject) -> Option<Filesystem> {
+    let path = object_path(req, object).ok()?;
+    let it = object.native_mut::<Fs>(req)?;
+    Some(match it.kind {
+        Type::Dir => Filesystem::Dir {
+            path,
+            entry: it.entry.clone(),
+        },
+        Type::Info | Type::File => Filesystem::File {
+            file_name: it.file_name.clone(),
+        },
+    })
+}
 
 /// `spl_filesystem_object_handlers`.
 pub(crate) struct Handlers;
@@ -1910,6 +1995,9 @@ fn extension(name: &[u8]) -> Vec<u8> {
 
 impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        if let Some(other) = object.native_mut::<Fs>(req).and_then(|it| it.oth.take()) {
+            other.dtor(req);
+        }
         let held = object
             .native_mut::<Fs>(req)
             .map(|it| (it.dir.take(), it.stream.take(), it.csv.take()));
@@ -1963,7 +2051,11 @@ fn clone_fs(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
             "Trying to clone an uncloneable object of class SplFileObject",
         ));
     }
+    let other = fs(req, object, |it| it.oth.take())?;
+    let copied = other.as_ref().map(|other| other.clone_other(req));
+    fs(req, object, |it| it.oth = other)?;
     let copy = Fs {
+        oth: copied,
         kind: Type::Info,
         path: path.clone(),
         file_name: name,

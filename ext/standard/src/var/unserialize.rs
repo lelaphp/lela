@@ -450,11 +450,29 @@ fn unserialize(
     #[php(default = [])] options: Passed<PhpArray>,
 ) -> Result<Value, Thrown> {
     let data = data.as_bytes().to_vec();
-    let given = self::options(req, options)?;
+    let options = match options {
+        Passed::Given(options) => Some(options),
+        Passed::Omitted => None,
+    };
+    php_unserialize_with_options(req, &data, options, "unserialize")
+}
+
+/// `php_unserialize_with_options`, `PHPAPI` in `php_var.h`: `data`
+/// unserialised under the `allowed_classes` and `max_depth` of `options`,
+/// the options' refusals naming `function`, as phar's `getMetadata()`
+/// reads its archive's serialised value (design §4.10, the `standard` →
+/// `phar` row); `false` for empty data, before the options are read.
+pub fn php_unserialize_with_options(
+    req: &mut Request,
+    data: &[u8],
+    options: Option<PhpArray>,
+    function: &str,
+) -> Result<Value, Thrown> {
     if data.is_empty() {
         return Ok(Value::bool(false));
     }
-    let mut state = State::open(req, &data);
+    let given = self::options(req, options, function)?;
+    let mut state = State::open(req, data);
     let previous = (
         state.hash.allowed.clone(),
         state.hash.max_depth,
@@ -684,8 +702,8 @@ struct Options {
 
 /// The `allowed_classes` and `max_depth` options, held to their types
 /// as php holds them.
-fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown> {
-    let Passed::Given(options) = given else {
+fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result<Options, Thrown> {
+    let Some(options) = given else {
         return Ok(Options {
             allowed: None,
             max_depth: None,
@@ -707,7 +725,7 @@ fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown
                             req,
                             "TypeError",
                             &format!(
-                                "unserialize(): Option \"allowed_classes\" must be an array of class names, {name} given"
+                                "{function}(): Option \"allowed_classes\" must be an array of class names, {name} given"
                             ),
                         ));
                     }
@@ -721,7 +739,7 @@ fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown
                             req,
                             "ValueError",
                             &format!(
-                                "unserialize(): Option \"allowed_classes\" must be an array of class names, \"{shown}\" given"
+                                "{function}(): Option \"allowed_classes\" must be an array of class names, \"{shown}\" given"
                             ),
                         ));
                     }
@@ -735,7 +753,7 @@ fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown
                     req,
                     "TypeError",
                     &format!(
-                        "unserialize(): Option \"allowed_classes\" must be of type array|bool, {name} given"
+                        "{function}(): Option \"allowed_classes\" must be of type array|bool, {name} given"
                     ),
                 ));
             }
@@ -749,14 +767,14 @@ fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown
             return Err(throw(
                 req,
                 "TypeError",
-                &format!("unserialize(): Option \"max_depth\" must be of type int, {name} given"),
+                &format!("{function}(): Option \"max_depth\" must be of type int, {name} given"),
             ));
         };
         if n < 0 {
             return Err(throw(
                 req,
                 "ValueError",
-                "unserialize(): Option \"max_depth\" must be greater than or equal to 0",
+                &format!("{function}(): Option \"max_depth\" must be greater than or equal to 0"),
             ));
         }
         depth = Some(n);

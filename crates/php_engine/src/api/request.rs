@@ -909,14 +909,17 @@ pub struct StreamWrapper {
 
 /// The `options` of `php_stream_open_wrapper_ex` a wrapper's opener
 /// reads and hands on to an open of its own, [`Request::open_stream_with`]:
-/// `USE_PATH`, the path looked for along `include_path` first, and
-/// `REPORT_ERRORS`, a refusal a warning. The engine clears `warn` before
-/// it asks an opener, as php does, so what fails inside one is the
-/// generic `operation failed` alone unless the opener warns of it.
+/// `USE_PATH`, the path looked for along `include_path` first;
+/// `REPORT_ERRORS`, a refusal a warning; and `STREAM_OPEN_FOR_INCLUDE`,
+/// the open an `include` makes. The engine clears `warn` before it asks
+/// an opener, as php does, so what fails inside one is what the opener
+/// logged ([`Request::wrapper_log_error`]), or the generic `operation
+/// failed`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Opening {
     pub use_path: bool,
     pub warn: bool,
+    pub for_include: bool,
 }
 
 /// A wrapper whose kinds the engine keeps, which the extension that
@@ -1499,6 +1502,10 @@ pub struct Request {
     /// The streams an operation holds while it serves PHP code on them,
     /// php's `PHP_STREAM_FLAG_NO_FCLOSE`, which `fclose` refuses.
     pub(crate) held_streams: Vec<Resource>,
+    /// `FG(wrapper_errors)` of the extension wrapper whose opener is
+    /// running: what [`Request::wrapper_log_error`] logged, which
+    /// `php_stream_display_wrapper_errors` prints where the open fails.
+    pub(crate) wrapper_errors: Vec<String>,
     /// The filter call in progress, whose stream is out of its resource
     /// while the filter runs.
     pub(crate) filtering: Option<crate::streams::FilterCall>,
@@ -2052,6 +2059,7 @@ impl Request {
             stream_thrown: None,
             filtering: None,
             held_streams: Vec::new(),
+            wrapper_errors: Vec::new(),
             filter_type,
             error_handler: None,
             error_handler_levels: 0,
@@ -17761,6 +17769,29 @@ impl Request {
     #[must_use]
     pub fn stream_ctx(&self) -> Option<Resource> {
         self.stream_ctx
+    }
+
+    /// `php_stream_wrapper_log_error` from a wrapper's opener, which php's
+    /// streams layer hands `options` without `REPORT_ERRORS`: `message`
+    /// kept for `php_stream_display_wrapper_errors`, which prints what
+    /// the opener logged, one message a line, after `Failed to open
+    /// stream: ` or `Failed to open directory: ` where it opened nothing,
+    /// and drops it where it opened something. An operation php hands
+    /// `REPORT_ERRORS`, as `unlink` and `mkdir` do, warns instead.
+    ///
+    /// ```php
+    /// var_dump(@fopen('phar://nope.phar/a', 'r'), error_get_last()['message']);
+    /// var_dump(@opendir('phar://nope'), error_get_last()['message']);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(%d) "fopen(phar://nope.phar/a): Failed to open stream: phar error: invalid url or non-existent phar "phar://nope.phar/a""
+    /// bool(false)
+    /// string(%d) "opendir(phar://nope): Failed to open directory: phar error: no directory in "phar://nope", must have at least phar://nope/ for root directory (always use full path to a new phar)
+    /// phar url "phar://nope" is unknown"
+    /// ```
+    pub fn wrapper_log_error(&mut self, message: &str) {
+        self.wrapper_errors.push(message.to_string());
     }
 
     /// `php_stream_fopen_tmpfile`, what `tmpfile()` is: a new file in the

@@ -24,7 +24,7 @@ pub(crate) mod serialize;
 pub(crate) mod unserialize;
 
 pub use serialize::Serializer;
-pub use unserialize::Unserializer;
+pub use unserialize::{Unserializer, php_unserialize_with_options};
 
 /// `BG(serialize_lock)`, `BG(serialize)` and `BG(unserialize)`
 /// (`Z/ext/standard/basic_functions.h`): the var hash every serializer

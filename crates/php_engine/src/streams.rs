@@ -3066,19 +3066,20 @@ impl Request {
                 let wrapper = &self.wrappers[at];
                 let (label, open) = (wrapper.label, wrapper.open);
                 match open {
-                    Some(open) => (
-                        label,
-                        open(
-                            self,
-                            &path_to_open,
-                            mode,
-                            crate::api::request::Opening {
-                                use_path,
-                                warn: false,
-                            },
-                        )?
-                        .ok_or_else(|| String::from("operation failed")),
-                    ),
+                    Some(open) => {
+                        let opening = crate::api::request::Opening {
+                            use_path,
+                            warn: false,
+                            for_include: options.for_include,
+                        };
+                        let outer = std::mem::take(&mut self.wrapper_errors);
+                        let opened = open(self, &path_to_open, mode, opening);
+                        let logged = std::mem::replace(&mut self.wrapper_errors, outer);
+                        (
+                            label,
+                            opened?.ok_or_else(|| self.wrapper_errors_text(&logged)),
+                        )
+                    }
                     None => (
                         label,
                         Err(String::from("wrapper does not support stream open")),
@@ -3159,8 +3160,11 @@ impl Request {
             Located::Ext(at) => {
                 let wrapper = &self.wrappers[at];
                 let (label, open_dir) = (wrapper.label, wrapper.open_dir);
-                match open_dir {
-                    Some(open_dir) => match open_dir(self, &path_to_open)? {
+                let outer = std::mem::take(&mut self.wrapper_errors);
+                let opened = open_dir.map(|open_dir| open_dir(self, &path_to_open));
+                let logged = std::mem::replace(&mut self.wrapper_errors, outer);
+                match opened {
+                    Some(opened) => match opened? {
                         Some(entries) => {
                             let kind = Listing {
                                 label,
@@ -3172,7 +3176,7 @@ impl Request {
                                 Ok(self.stream_alloc(PhpStream::new(Box::new(kind), b"r"))?),
                             )
                         }
-                        None => (label, Err(String::from("operation failed"))),
+                        None => (label, Err(self.wrapper_errors_text(&logged))),
                     },
                     None => (label, Err(String::from("not implemented"))),
                 }
@@ -3266,6 +3270,20 @@ impl Request {
             out.set(self, key, value)?;
         }
         Ok(out)
+    }
+
+    /// The message `php_stream_display_wrapper_errors` prints for an
+    /// extension's wrapper: what its opener logged, a line each, `<br />`
+    /// before each break under `html_errors`, or `operation failed` where
+    /// it logged nothing.
+    fn wrapper_errors_text(&self, logged: &[String]) -> String {
+        if logged.is_empty() {
+            return String::from("operation failed");
+        }
+        let html = self
+            .ini_get(b"html_errors")
+            .is_some_and(Request::ini_parse_bool);
+        logged.join(if html { "<br />\n" } else { "\n" })
     }
 
     /// `php_stream_display_wrapper_errors` (`Z/main/streams/streams.c:175`)
