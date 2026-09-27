@@ -542,6 +542,11 @@ fn make_dirstream(a: &archive::Archive, dir: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     out.sort();
+    // `phar_dir_read` answers no entry for a name `d_name[MAXPATHLEN]`
+    // cannot hold with its NUL, so `readdir()` meets `false` there.
+    if let Some(long) = out.iter().position(|n| n.len() >= archive::MAXPATHLEN) {
+        out.truncate(long);
+    }
     out
 }
 
