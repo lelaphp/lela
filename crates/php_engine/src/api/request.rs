@@ -1028,6 +1028,16 @@ impl Interrupt {
         self.0.timed_out.store(false, Ordering::Relaxed);
     }
 
+    /// Hand this interrupt to the process's signal record, which raises
+    /// it at every signal the process takes until the [`Receiving`] is
+    /// dropped: php's `pcntl_signal_handler` storing `EG(vm_interrupt)`
+    /// under `pcntl_async_signals(true)` (design §5.8). `None` when the
+    /// record holds as many interrupts as it can.
+    #[must_use]
+    pub fn receive_signals(&self) -> Option<Receiving> {
+        crate::signal::receive(Arc::clone(&self.0))
+    }
+
     /// What a check that found it raised reads: it is cleared, and the
     /// seconds come back when the execution timer was what raised it,
     /// both as php clears them (`Z/Zend/zend_vm_def.h:10526`, `:10537`).
@@ -1035,16 +1045,6 @@ impl Interrupt {
     /// text names are the ones the timer was armed with; the loop's own
     /// test stays a relaxed load, because this is where the two threads
     /// meet.
-    /// Hand this interrupt to the process's signal post, which raises it
-    /// at every signal the process takes until the [`Receiving`] is
-    /// dropped: php's `pcntl_signal_handler` storing `EG(vm_interrupt)`
-    /// under `pcntl_async_signals(true)` (design §5.8). `None` when the
-    /// post holds as many interrupts as it can.
-    #[must_use]
-    pub fn receive_signals(&self) -> Option<Receiving> {
-        php_heap::signal::receive(Arc::clone(&self.0))
-    }
-
     pub(crate) fn taken(&self) -> Option<i64> {
         self.0.raised.swap(false, Ordering::Acquire);
         self.0
@@ -1067,20 +1067,20 @@ struct State {
 }
 
 impl AsRef<AtomicBool> for State {
-    /// The word the signal post raises: the one the loop tests.
+    /// The word a posted signal raises: the one the loop tests.
     fn as_ref(&self) -> &AtomicBool {
         &self.raised
     }
 }
 
-/// The process's signal post (design §5.8, §7.2 revision 35), for the
-/// extension that installs signal handlers: [`signal_handler`] is the
-/// handler it hands `sigaction` with `SA_SIGINFO`, [`take_signals`] what
+/// The process's signal record (design §5.8, revision 37), for the
+/// extension that installs signal handlers: [`SIGNAL_POST`] is what its
+/// `src/ffi/` handler posts a [`Siginfo`] through, [`take_signals`] what
 /// its dispatch takes, and [`Interrupt::receive_signals`] how its
-/// asynchronous delivery raises this request's interrupt. The post is
+/// asynchronous delivery raises this request's interrupt. The record is
 /// the engine's, since signal dispositions are the process's and an
 /// extension holds no atomic (ADR-0005).
-pub use php_heap::signal::{Posted, Receiving, post as signal_handler, take as take_signals};
+pub use crate::signal::{Receiving, SIGNAL_POST, Siginfo, take_signals};
 
 /// The fatal the request is ending in, when it is one: `E_ERROR` and
 /// its kin, or a source that did not compile. An `exit` is not one:

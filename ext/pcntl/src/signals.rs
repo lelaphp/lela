@@ -1,9 +1,9 @@
 //! The signal natives (`pcntl.c`'s `pcntl_signal` to
 //! `pcntl_async_signals`) and the dispatch the engine's interrupt check
-//! serves. What a signal handler does is the engine's signal post's
-//! (design §5.8); what is here is php's handler table, the dispatch that
-//! calls into it, and the switch that hands this request's interrupt to
-//! the post.
+//! serves. What a signal handler does is `ffi`'s, posting to the
+//! engine's signal record (design §5.8, revision 37); what is here is
+//! php's handler table, the dispatch that calls into it, and the switch
+//! that hands this request's interrupt to the record.
 
 use std::collections::BTreeMap;
 
@@ -15,7 +15,7 @@ use php_ext::coerce::{is_callable, to_callable, value_name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, fatal,
 };
-use php_ext::request::{Posted, Receiving, Request, take_signals};
+use php_ext::request::{Receiving, Request, Siginfo, take_signals};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::{self, Disposition};
@@ -41,23 +41,23 @@ pub(crate) struct Table {
     dispatching: bool,
 }
 
-/// How the signals the post took reach this request's handlers.
+/// How the signals the record took reach this request's handlers.
 #[derive(Default)]
 enum Delivery {
     /// At `pcntl_signal_dispatch()` alone.
     #[default]
     Explicit,
-    /// At the loop's next interrupt check as well, the post raising this
+    /// At the loop's next interrupt check as well, the record raising this
     /// request's interrupt while the [`Receiving`] stands; `None` where
-    /// the post had no room for one more. Held, and read by nothing: its
-    /// drop is what takes the interrupt off the post.
+    /// the record had no room for one more. Held, and read by nothing: its
+    /// drop is what takes the interrupt off the record.
     Asynchronous { _receiving: Option<Receiving> },
 }
 
 /// `pcntl_signal(int $signal, callable|int $handler, bool
 /// $restart_syscalls = true): bool`: the handler recorded for the
 /// signal, and the signal's disposition set, `SIG_DFL` and `SIG_IGN`
-/// as given and anything callable as the engine's signal post with
+/// as given and anything callable as `ffi`'s handler with
 /// every signal blocked while it runs (`php_signal4(.., 1)`).
 /// `SIGALRM` defaults to interrupting system calls, as it always did.
 ///
@@ -220,7 +220,7 @@ pub(crate) fn pcntl_signal_dispatch(req: &mut Request) -> Result<bool, Thrown> {
 }
 
 /// `pcntl_signal_dispatch()` the function (`pcntl.c:1366`): every signal
-/// posted under a number the table holds, taken off the post in the
+/// posted under a number the table holds, taken off the record in the
 /// order it arrived, and its handler called with the number and the
 /// `siginfo_t` array where the table holds a callable; one the table
 /// holds `SIG_DFL` or `SIG_IGN` for is dropped. Every signal is blocked
@@ -254,7 +254,7 @@ pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
 }
 
 /// Each signal's handler called in turn, until one throws.
-fn play(req: &mut Request, taken: &[Posted]) -> Result<(), Thrown> {
+fn play(req: &mut Request, taken: &[Siginfo]) -> Result<(), Thrown> {
     for posted in taken {
         let Some(handler) = req
             .state::<State>()
@@ -279,7 +279,7 @@ fn play(req: &mut Request, taken: &[Posted]) -> Result<(), Thrown> {
 
 /// `call_user_function(NULL, NULL, handle, &retval, 2, params)`, the
 /// value it answers given up.
-fn call_handler(req: &mut Request, handler: Value, posted: &Posted) -> Result<(), Thrown> {
+fn call_handler(req: &mut Request, handler: Value, posted: &Siginfo) -> Result<(), Thrown> {
     let info = siginfo(req, posted.number, posted)?;
     let called = to_callable(req, &handler).and_then(|callable| {
         call(
@@ -296,7 +296,11 @@ fn call_handler(req: &mut Request, handler: Value, posted: &Posted) -> Result<()
 /// `pcntl_siginfo_to_zval(signo, siginfo, zv)` (`pcntl.c:1122`): `signo`,
 /// `errno` and `code`, and the members the signal's number says the
 /// kernel filled.
-pub(crate) fn siginfo(req: &mut Request, number: i32, posted: &Posted) -> Result<PhpArray, Thrown> {
+pub(crate) fn siginfo(
+    req: &mut Request,
+    number: i32,
+    posted: &Siginfo,
+) -> Result<PhpArray, Thrown> {
     let mut info = PhpArray::new(req)?;
     put(req, &mut info, b"signo", Value::int(posted.number.into()))?;
     put(req, &mut info, b"errno", Value::int(posted.errno.into()))?;
