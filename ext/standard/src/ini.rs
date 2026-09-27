@@ -10,18 +10,14 @@ use php_ext::request::Request;
 use php_ext::syntax::{IniEvent as Event, IniScanner, IniValue as Scalar};
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-/// `ZEND_INI_SCANNER_NORMAL`, `_RAW` and `_TYPED`, the numbers
-/// `INI_SCANNER_*` name.
-pub(super) const SCANNER_NORMAL: i64 = 0;
-pub(super) const SCANNER_RAW: i64 = 1;
-pub(super) const SCANNER_TYPED: i64 = 2;
+use crate::basic_functions::{INI_SCANNER_NORMAL, INI_SCANNER_RAW, INI_SCANNER_TYPED};
 
 /// The scanner an `INI_SCANNER_*` number names, or none.
 pub(super) fn scanner(mode: i64) -> Option<IniScanner> {
     match mode {
-        SCANNER_NORMAL => Some(IniScanner::Normal),
-        SCANNER_RAW => Some(IniScanner::Raw),
-        SCANNER_TYPED => Some(IniScanner::Typed),
+        INI_SCANNER_NORMAL => Some(IniScanner::Normal),
+        INI_SCANNER_RAW => Some(IniScanner::Raw),
+        INI_SCANNER_TYPED => Some(IniScanner::Typed),
         _ => None,
     }
 }

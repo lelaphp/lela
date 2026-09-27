@@ -126,12 +126,9 @@ pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
-use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
-use php_ext::raising::{
-    Level, Thrown, arg_count_error, arg_value_error, docref, too_few_arguments,
-};
+use php_ext::raising::{Level, Thrown, arg_count_error, arg_value_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
 
@@ -272,7 +269,14 @@ pub fn extension() -> Extension {
         .functions(exec::natives())
         .functions(file::natives())
         .functions(filestat::natives())
-        .functions(basic_natives())
+        .functions(vec![
+            basic_functions::constant::declared(),
+            basic_functions::sleep::declared(),
+            basic_functions::call_user_func::declared(),
+            basic_functions::call_user_func_array::declared(),
+            basic_functions::forward_static_call::declared(),
+            basic_functions::forward_static_call_array::declared(),
+        ])
         .functions(file_natives())
         .functions(vec![
             math::abs::declared(),
@@ -398,6 +402,7 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 /// the order the modules landed: `string.c`, `url.c`, `html.c`, the
 /// digests, `pack.c`, `http.c`, the small files and `basic_functions.c`'s
 /// environment and ini natives.
+#[allow(clippy::too_many_lines)] // one line per native, in the stub's order
 fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
     [
         string::natives(),
@@ -421,7 +426,49 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         ],
         vec![hrtime::hrtime::declared()],
         versioning::natives(),
-        basic_functions::natives(),
+        vec![
+            basic_functions::ip2long::declared(),
+            basic_functions::long2ip::declared(),
+            basic_functions::getenv::declared(),
+            basic_functions::putenv::declared(),
+            basic_functions::getopt::declared(),
+            basic_functions::time_nanosleep::declared(),
+            basic_functions::error_get_last::declared(),
+            basic_functions::error_clear_last::declared(),
+            basic_functions::set_include_path::declared(),
+            basic_functions::get_include_path::declared(),
+            basic_functions::getservbyname::declared(),
+            basic_functions::getservbyport::declared(),
+            basic_functions::getprotobyname::declared(),
+            basic_functions::getprotobynumber::declared(),
+            basic_functions::parse_ini_file::declared(),
+            basic_functions::parse_ini_string::declared(),
+            basic_functions::flush::declared(),
+            basic_functions::highlight_file::declared(),
+            basic_functions::show_source::declared(),
+            basic_functions::php_strip_whitespace::declared(),
+            basic_functions::highlight_string::declared(),
+            basic_functions::usleep::declared(),
+            basic_functions::time_sleep_until::declared(),
+            basic_functions::get_current_user::declared(),
+            basic_functions::get_cfg_var::declared(),
+            basic_functions::error_log::declared(),
+            basic_functions::ini_get_all::declared(),
+            basic_functions::ini_restore::declared(),
+            basic_functions::ini_parse_quantity::declared(),
+            basic_functions::connection_aborted::declared(),
+            basic_functions::connection_status::declared(),
+            basic_functions::ignore_user_abort::declared(),
+            basic_functions::register_tick_function::declared(),
+            basic_functions::unregister_tick_function::declared(),
+            basic_functions::is_uploaded_file::declared(),
+            basic_functions::move_uploaded_file::declared(),
+            basic_functions::sys_getloadavg::declared(),
+            basic_functions::ftok::declared(),
+            basic_functions::inet_ntop::declared(),
+            basic_functions::inet_pton::declared(),
+            basic_functions::header_register_callback::declared(),
+        ],
         dir::natives(),
         link::natives(),
         vec![dl::dl::declared()],
@@ -468,7 +515,7 @@ fn file_constants() -> Vec<ConstDecl> {
         string::constants(),
         url::constants(),
         html::constants(),
-        basic_functions::constants(),
+        basic_functions::constants::declared(),
         dir::constants(),
         streamsfuncs::constants(),
         crypt::constants(),
@@ -504,75 +551,6 @@ fn dependencies() -> Vec<Dependency> {
             rel: None,
             version: None,
         },
-    ]
-}
-
-/// The natives of `basic_functions.c` itself declared so far, in the
-/// stub's order.
-fn basic_natives() -> Vec<(FunctionDecl, output::Entry)> {
-    vec![
-        (
-            declared(
-                b"constant",
-                &[parameter(b"name", Type::String)],
-                Type::Mixed,
-            ),
-            constant_of,
-        ),
-        (
-            declared(b"sleep", &[parameter(b"seconds", Type::Int)], Type::Int),
-            sleep,
-        ),
-        (
-            declared(
-                b"call_user_func",
-                &[
-                    parameter(b"callback", Type::Callable),
-                    Parameter {
-                        variadic: true,
-                        ..parameter(b"args", Type::Mixed)
-                    },
-                ],
-                Type::Mixed,
-            ),
-            call_user_func,
-        ),
-        (
-            declared(
-                b"call_user_func_array",
-                &[
-                    parameter(b"callback", Type::Callable),
-                    parameter(b"args", Type::Array),
-                ],
-                Type::Mixed,
-            ),
-            call_user_func_array,
-        ),
-        (
-            declared(
-                b"forward_static_call",
-                &[
-                    parameter(b"callback", Type::Callable),
-                    Parameter {
-                        variadic: true,
-                        ..parameter(b"args", Type::Mixed)
-                    },
-                ],
-                Type::Mixed,
-            ),
-            forward_static_call,
-        ),
-        (
-            declared(
-                b"forward_static_call_array",
-                &[
-                    parameter(b"callback", Type::Callable),
-                    parameter(b"args", Type::Array),
-                ],
-                Type::Mixed,
-            ),
-            forward_static_call_array,
-        ),
     ]
 }
 
@@ -859,381 +837,6 @@ fn chr(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::string(PhpString::new(req, &[byte])?))
 }
 
-/// `call_user_func(callable $callback, mixed ...$args): mixed`, php's
-/// `PHP_FUNCTION(call_user_func)` (`Z/ext/standard/basic_functions.c:1473`):
-/// `Z_PARAM_FUNC` and then `Z_PARAM_VARIADIC_WITH_NAMED`, the
-/// positional arguments and the extra named ones off this call's own
-/// frame, handed to `zend_call_function` as `fci.params` and
-/// `fci.named_params`, which is the engine's `call_named`. The callee's
-/// return is this call's. php's compiler serves the spelling
-/// `call_user_func(...)` as a dynamic call of the callback itself
-/// (`zend_compile_func_cuf`) and this native is what the spelling
-/// `$f('call_user_func')` and every other reaches; this compiler serves
-/// every spelling through the native, and what differs is the frame a
-/// trace prints for a raise at the boundary, so the witnesses that pin
-/// a trace spell the call the way the oracle serves through the native
-/// too.
-///
-/// ```php
-/// function greet($who, $punct = '!') { return "hi $who$punct"; }
-/// class W { static function s($x) { return "s:$x"; } function i($x) { return "i:$x"; } }
-/// var_dump(call_user_func('strtoupper', 'abc'), call_user_func('greet', 'bob'), call_user_func(['W', 's'], 1), call_user_func([new W, 'i'], 2), call_user_func(fn($n) => $n * 2, 21), call_user_func('W::s', 3));
-/// ```
-/// ```expect
-/// string(3) "ABC"
-/// string(7) "hi bob!"
-/// string(3) "s:1"
-/// string(3) "i:2"
-/// int(42)
-/// string(3) "s:3"
-/// ```
-///
-/// The declarations, as `basic_functions.stub.php` has them.
-///
-/// ```php
-/// echo new ReflectionFunction('call_user_func'), new ReflectionFunction('call_user_func_array');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function call_user_func ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> callable $callback ]
-///     Parameter #1 [ <optional> mixed ...$args ]
-///   }
-///   - Return [ mixed ]
-/// }
-/// Function [ <internal:standard> function call_user_func_array ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> callable $callback ]
-///     Parameter #1 [ <required> array $args ]
-///   }
-///   - Return [ mixed ]
-/// }
-/// ```
-///
-/// A callback that is none is `Z_PARAM_FUNC`'s `TypeError`, with the
-/// sentence `zend_is_callable_ex` wrote for the miss; a call with no
-/// callback at all is the arity's `ArgumentCountError`.
-///
-/// ```php
-/// $f = 'call_user_func'; $f('nope');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: call_user_func(): Argument #1 ($callback) must be a valid callback, function "nope" not found or invalid function name in %s:2
-/// Stack trace:
-/// #0 %s(2): call_user_func('nope')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// call_user_func();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: call_user_func() expects at least 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): call_user_func()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// The extra named arguments this call carries are the callee's named
-/// ones: `call_user_func_array` places `length` on this native's frame,
-/// since `call_user_func` declares no parameter of that name and
-/// collects into a variadic, and this native hands it on to `str_pad`,
-/// where it lands at the parameter of that name. A trace prints them
-/// after the positional arguments, `name: value`, on the frame that
-/// holds them.
-///
-/// ```php
-/// $f = 'call_user_func_array';
-/// var_dump($f('call_user_func', ['str_pad', 'abc', 'length' => 6, 'pad_string' => '-']));
-/// $f('call_user_func', ['str_pad', 'abc', 'pad_type' => 0, 'pad_string' => ' ', 'length' => 'x']);
-/// ```
-/// ```expect exit=255
-/// string(6) "abc---"
-///
-/// Fatal error: Uncaught TypeError: str_pad(): Argument #2 ($length) must be of type int, string given in %s:4
-/// Stack trace:
-/// #0 [internal function]: str_pad('abc', 'x', ' ', 0)
-/// #1 [internal function]: call_user_func('str_pad', 'abc', pad_type: 0, pad_string: ' ', length: 'x')
-/// #2 %s(4): call_user_func_array('call_user_func', Array)
-/// #3 {main}
-///   thrown in %s on line 4
-/// ```
-fn call_user_func(req: &mut Request) -> Result<Value, Thrown> {
-    if req.argument_count() < 1 {
-        return Err(too_few_arguments(req, 1, 0));
-    }
-    let callback = callable_argument(req, 1)?;
-    let arguments: Vec<Value> = (2..=req.argument_count())
-        .filter_map(|position| u32::try_from(position).ok())
-        .filter_map(|position| req.argument(position))
-        .collect();
-    let named = req.named_arguments();
-    call_named(req, &callback, &arguments, &named)
-}
-
-/// `call_user_func_array(callable $callback, array $args): mixed`, php's
-/// `PHP_FUNCTION(call_user_func_array)`
-/// (`Z/ext/standard/basic_functions.c:1497`): `Z_PARAM_FUNC` and
-/// `Z_PARAM_ARRAY_HT`, then `zend_call_function` with the array as
-/// `fci.named_params` and nothing in `fci.params`, which is the
-/// engine's `call_array`: an integer-keyed element is the next
-/// positional argument whatever its key, and a string-keyed one is
-/// placed at the parameter of that name by `zend_handle_named_arg`,
-/// the slots between left for the callee. php's compiler serves the
-/// spelling `call_user_func_array(...)` as `SEND_ARRAY` on a dynamic
-/// call (`zend_compile_func_cufa`), so a raise at the boundary prints
-/// one frame fewer there than through this native; the witnesses that
-/// pin a trace spell the call through a variable, which the oracle
-/// serves through the native too.
-///
-/// ```php
-/// function greet($who, $punct = '!') { return "hi $who$punct"; }
-/// var_dump(call_user_func_array('str_pad', ['abc', 'length' => 6]), call_user_func_array('str_pad', [1 => 'abc', 5 => 6, 'pad_string' => '-', 'pad_type' => STR_PAD_LEFT]), call_user_func_array('greet', ['punct' => '?', 'who' => 'ann']), call_user_func_array('strtoupper', ['abc']));
-/// ```
-/// ```expect
-/// string(6) "abc   "
-/// string(6) "---abc"
-/// string(7) "hi ann?"
-/// string(3) "ABC"
-/// ```
-///
-/// A name the callee declares no parameter for, and a name whose slot
-/// a positional argument filled, are `zend_handle_named_arg`'s two
-/// `Error`s, raised before the callee is entered, so the trace ends at
-/// this native's frame; a positional element after a named one is
-/// `zend_call_function`'s own, raised where the walk meets it, after
-/// an earlier name's.
-///
-/// ```php
-/// try { call_user_func_array('str_pad', ['abc', 'nope' => 6]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// try { call_user_func_array('str_pad', ['abc', 6, 'length' => 7]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// try { call_user_func_array('str_pad', ['abc', 'length' => 6, 7]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// try { call_user_func_array('str_pad', ['x' => 1, 2]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// function f($a) {} try { call_user_func_array('f', ['b' => 1]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Error: Unknown named parameter $nope
-/// Error: Named parameter $length overwrites previous argument
-/// Error: Cannot use positional argument after named argument
-/// Error: Unknown named parameter $x
-/// Error: Unknown named parameter $b
-/// ```
-///
-/// ```php
-/// $f = 'call_user_func_array'; $f('str_pad', ['abc', 'nope' => 6]);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught Error: Unknown named parameter $nope in %s:2
-/// Stack trace:
-/// #0 %s(2): call_user_func_array('str_pad', Array)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// $f = 'call_user_func_array'; $f('str_pad', ['abc', 6, 'length' => 7]);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught Error: Named parameter $length overwrites previous argument in %s:2
-/// Stack trace:
-/// #0 %s(2): call_user_func_array('str_pad', Array)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// A name a variadic callee does not declare rides on the callee's
-/// frame as an extra named argument (`ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`):
-/// a user function's `RECV_VARIADIC` takes it into the variadic's array
-/// under its name, after the positional extras, held to the declared
-/// type under the number after the last positional argument; and a
-/// trace prints it `name: value` after the positional arguments.
-///
-/// ```php
-/// function v($a, int ...$rest) { var_dump($rest); }
-/// call_user_func_array('v', [1, 2, 'x' => "3", 'y' => 4]);
-/// call_user_func_array('v', ['y' => 4, 'a' => 1]);
-/// function w(...$rest) { throw new Exception('x'); }
-/// $f = 'call_user_func_array'; $f('w', [1, 'x' => 5, 'y' => 'str']);
-/// ```
-/// ```expect exit=255
-/// array(3) {
-///   [0]=>
-///   int(2)
-///   ["x"]=>
-///   int(3)
-///   ["y"]=>
-///   int(4)
-/// }
-/// array(1) {
-///   ["y"]=>
-///   int(4)
-/// }
-///
-/// Fatal error: Uncaught Exception: x in %s:5
-/// Stack trace:
-/// #0 [internal function]: w(1, x: 5, y: 'str')
-/// #1 %s(6): call_user_func_array('w', Array)
-/// #2 {main}
-///   thrown in %s on line 5
-/// ```
-///
-/// ```php
-/// function v(int ...$rest) {}
-/// $f = 'call_user_func_array';
-/// try { $f('v', ['x' => 1, 'y' => 'a']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// $f('v', [1, 'x' => 'a']);
-/// ```
-/// ```expect exit=255
-/// v(): Argument #1 must be of type int, string given
-///
-/// Fatal error: Uncaught TypeError: v(): Argument #2 must be of type int, string given in %s:2
-/// Stack trace:
-/// #0 [internal function]: v(1, x: 'a')
-/// #1 %s(5): call_user_func_array('v', Array)
-/// #2 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// A variadic native meets them where its parameter parsing reads the
-/// variadic, `Z_PARAM_VARIADIC`, and that is
-/// `zend_unexpected_extra_named_error`'s `ArgumentCountError`, raised
-/// inside the callee's frame after the checks before it: the arity's
-/// own error comes first.
-///
-/// ```php
-/// try { call_user_func_array('array_merge', ['a' => [1]]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// try { call_user_func_array('sprintf', ['%d', 'a' => 1]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// try { call_user_func_array('sprintf', ['a' => 1]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// ArgumentCountError: array_merge() does not accept unknown named parameters
-/// ArgumentCountError: sprintf() does not accept unknown named parameters
-/// ArgumentCountError: sprintf() expects at least 1 argument, 0 given
-/// ```
-///
-/// ```php
-/// $f = 'call_user_func_array'; $f('array_merge', [[1], 'a' => [1]]);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: array_merge() does not accept unknown named parameters in %s:2
-/// Stack trace:
-/// #0 [internal function]: array_merge(Array, a: Array)
-/// #1 %s(2): call_user_func_array('array_merge', Array)
-/// #2 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// The two parameters' refusals.
-///
-/// ```php
-/// $f = 'call_user_func_array'; $f('strlen', 'x');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: call_user_func_array(): Argument #2 ($args) must be of type array, string given in %s:2
-/// Stack trace:
-/// #0 %s(2): call_user_func_array('strlen', 'x')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// $f = 'call_user_func_array'; $f('strlen');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: call_user_func_array() expects exactly 2 arguments, 1 given in %s:2
-/// Stack trace:
-/// #0 %s(2): call_user_func_array('strlen')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn call_user_func_array(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let callback = callable_argument(req, 1)?;
-    let given = req.argument(2).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Array, 2)?;
-    let array = match coerced.deref().as_array().copied() {
-        Some(array) => array,
-        None => PhpArray::new(req)?,
-    };
-    call_array(req, &callback, array)
-}
-
-/// `forward_static_call(callable $callback, mixed ...$args): mixed`,
-/// php's `PHP_FUNCTION(forward_static_call)`
-/// (`Z/ext/standard/basic_functions.c:1522`): `call_user_func` from
-/// inside a class, the callee served with the caller's called scope as
-/// its own where that scope is the callee's class or extends it
-/// ([`Callable::with_called_scope`]). Outside a class scope it is
-/// php's `Error`, raised before the callee is entered.
-///
-/// ```php
-/// class A { const NAME = 'A'; public static function test() { echo static::NAME, ' ', implode(',', func_get_args()), "\n"; } }
-/// class B extends A { const NAME = 'B'; public static function test() { forward_static_call(['A', 'test'], 'more', 'args'); forward_static_call('printf', "%s\n", 'fn'); } }
-/// B::test();
-/// function outside() { forward_static_call(['A', 'test']); }
-/// try { outside(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// B more,args
-/// fn
-/// Cannot call forward_static_call() when no class scope is active
-/// ```
-fn forward_static_call(req: &mut Request) -> Result<Value, Thrown> {
-    if req.argument_count() < 1 {
-        return Err(too_few_arguments(req, 1, 0));
-    }
-    let callback = callable_argument(req, 1)?;
-    let arguments = req.variadic_arguments(2)?;
-    if req.scope().is_none() {
-        return Err(php_ext::raising::throw(
-            req,
-            "Error",
-            "Cannot call forward_static_call() when no class scope is active",
-        ));
-    }
-    let callback = forwarded(req, &callback);
-    call(req, &callback, &arguments)
-}
-
-/// `forward_static_call_array(callable $callback, array $args): mixed`,
-/// php's `PHP_FUNCTION(forward_static_call_array)`: the array handed
-/// over as `call_user_func_array` hands it, `fci.named_params`, with the
-/// called scope forwarded as [`forward_static_call`] forwards it and no
-/// class scope asked for.
-///
-/// ```php
-/// class A { public static function who($a, $b = 'b') { echo static::class, " $a $b\n"; } }
-/// class B extends A { public static function test() { forward_static_call_array(['A', 'who'], ['x', 'b' => 'y']); } }
-/// B::test();
-/// forward_static_call_array(['A', 'who'], ['z']);
-/// try { forward_static_call_array(['A', 'who'], ['a' => 1, 2]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// B x y
-/// A z b
-/// Cannot use positional argument after named argument
-/// ```
-fn forward_static_call_array(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let callback = callable_argument(req, 1)?;
-    let array = zpp::array_argument(req, 2)?;
-    let callback = forwarded(req, &callback);
-    call_array(req, &callback, array)
-}
-
-/// The callable with the called scope of the native being served
-/// forwarded to it, `zend_get_called_scope(execute_data)`.
-fn forwarded(req: &Request, callback: &Callable) -> Callable {
-    match req.called_scope() {
-        Some(called) => callback.with_called_scope(req, called),
-        None => callback.clone(),
-    }
-}
-
 /// One `Z_PARAM_FUNC` of a native, php's `"F"`: the argument at
 /// `position` resolved into the callee it names, `zend_parse_arg_func`
 /// over `zend_is_callable_ex`, so a callback is held to being one where
@@ -1252,165 +855,6 @@ fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Throw
 /// `php_error_docref(NULL, E_DEPRECATED, ...)`.
 fn docref_deprecated(req: &mut Request, what: &str) {
     docref(req, Level::Deprecated, what);
-}
-
-/// `constant(string $name): mixed`, php's `PHP_FUNCTION(constant)`
-/// (`Z/ext/standard/basic_functions.c:501`): one `Z_PARAM_STR`, then
-/// `zend_get_constant_ex` under `ZEND_FETCH_CLASS_EXCEPTION` with the
-/// executed scope, which is the engine's `fetch_constant`, and its
-/// answer one more owner (`ZVAL_COPY_OR_DUP`). Every arm of the name is
-/// the engine's: a leading `\` dropped, a `::` read through the class
-/// with `self`, `parent` and `static` against the scopes, a namespace
-/// lowered, the table and then `true`, `false` and `null` in any case.
-/// What `define()` wrote is what this reads back.
-///
-/// ```php
-/// echo new ReflectionFunction('constant');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function constant ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $name ]
-///   }
-///   - Return [ mixed ]
-/// }
-/// ```
-///
-/// ```php
-/// define("DEMO", 1); class E { const C = 3; } class A { const X = 1; private const P = 2; }
-/// var_dump(constant("DEMO"), constant("\\PHP_EOL"), constant("E::C"), constant("a::X"), constant("\\A::X"), constant("TRUE"), constant("nUlL"), constant("E_ALL"), constant("\\E_STRICT"));
-/// ```
-/// ```expect
-/// Deprecated: Constant E_STRICT is deprecated since 8.4, the error level was removed in %s on line 3
-/// int(1)
-/// string(1) "
-/// "
-/// int(3)
-/// int(1)
-/// int(1)
-/// bool(true)
-/// NULL
-/// int(30719)
-/// int(2048)
-/// ```
-///
-/// The refusals, each `zend_get_constant_ex`'s or `zend_fetch_class`'s
-/// `Error`, the class named as the string spelled it.
-///
-/// ```php
-/// class A { const X = 1; private const P = 2; }
-/// foreach (["a::Y", "A::P", "Nope::X", "self::X", "parent::X", "static::X", "foo\\BAR", "", "::X", "A::", "\\"] as $n) { try { constant($n); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
-/// ```
-/// ```expect
-/// Undefined constant a::Y
-/// Cannot access private constant A::P
-/// Class "Nope" not found
-/// Cannot access "self" when no class scope is active
-/// Cannot access "parent" when no class scope is active
-/// Cannot access "static" when no class scope is active
-/// Undefined constant "foo\BAR"
-/// Undefined constant ""
-/// Class "" not found
-/// Undefined constant A::
-/// Undefined constant ""
-/// ```
-///
-/// `self`, `parent` and `static` are read against the scope of the
-/// method that called this native, `zend_get_executed_scope` walking
-/// past the native's own frame, so a private constant of the scope is
-/// reachable and `static` is the called class.
-///
-/// ```php
-/// class M { const K = 7; private const P = 8; function f() { return constant("self::P"); } static function g() { return constant("static::K"); } }
-/// class N extends M { const K = 9; function p() { return [constant("parent::K"), constant("self::K"), constant("static::K")]; } }
-/// var_dump((new M)->f(), N::g(), (new N)->p());
-/// ```
-/// ```expect
-/// int(8)
-/// int(9)
-/// array(3) {
-///   [0]=>
-///   int(7)
-///   [1]=>
-///   int(9)
-///   [2]=>
-///   int(9)
-/// }
-/// ```
-///
-/// ```php
-/// constant("NOPE");
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught Error: Undefined constant "NOPE" in %s:2
-/// Stack trace:
-/// #0 %s(2): constant('NOPE')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// var_dump(constant(null));
-/// ```
-/// ```expect exit=255
-/// Deprecated: constant(): Passing null to parameter #1 ($name) of type string is deprecated in %s on line 2
-///
-/// Fatal error: Uncaught Error: Undefined constant "" in %s:2
-/// Stack trace:
-/// #0 %s(2): constant('')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// constant("A", "B");
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: constant() expects exactly 1 argument, 2 given in %s:2
-/// Stack trace:
-/// #0 %s(2): constant('A', 'B')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn constant_of(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let name = string_argument(req, 1)?;
-    fetch_constant(req, name.as_bytes())
-}
-
-/// `sleep(int $seconds): int`, php's `PHP_FUNCTION(sleep)`
-/// (`Z/ext/standard/basic_functions.c:1122`): php's `ValueError` for a
-/// negative count, then `php_sleep`, which is the CLI's `sleep(3)`, and
-/// its answer, the seconds left unslept, zero when nothing woke it.
-///
-/// ```php
-/// var_dump(sleep(0), sleep("0"), sleep(false));
-/// ```
-/// ```expect
-/// int(0)
-/// int(0)
-/// int(0)
-/// ```
-///
-/// ```php
-/// sleep(-1);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ValueError: sleep(): Argument #1 ($seconds) must be greater than or equal to 0 in %s:2
-/// Stack trace:
-/// #0 %s(2): sleep(-1)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn sleep(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let seconds = long_argument(req, 1)?;
-    let Ok(seconds) = u64::try_from(seconds) else {
-        return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
-    };
-    std::thread::sleep(std::time::Duration::from_secs(seconds));
-    Ok(Value::int(0))
 }
 
 /// One `REGISTER_LONG_CONSTANT`.

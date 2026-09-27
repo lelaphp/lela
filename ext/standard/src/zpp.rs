@@ -29,13 +29,6 @@ pub(super) fn optional_long(req: &mut Request, position: u32, default: i64) -> R
     }
 }
 
-/// `Z_PARAM_DOUBLE` at `position`.
-pub(super) fn double_argument(req: &mut Request, position: u32) -> Result<f64, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Float, position)?;
-    Ok(coerced.as_float().unwrap_or(0.0))
-}
-
 /// `Z_PARAM_BOOL` after `Z_PARAM_OPTIONAL`.
 pub(super) fn optional_bool(
     req: &mut Request,
