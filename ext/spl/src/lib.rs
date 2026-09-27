@@ -37,6 +37,7 @@ mod observer;
 mod stub;
 
 use php_ext::abi::{Extension, ExtensionBuilder, ObjectHandlers, Std};
+use php_ext::attr::php_class;
 use php_ext::call::{call_method, lookup_class};
 use php_ext::coerce::{coerce_param, key_of, truthy};
 use php_ext::decl::{ClassKind, Name, Type};
@@ -68,9 +69,8 @@ struct State {
 /// bool(true)
 /// ```
 pub fn extension() -> Extension {
-    let mut builder = ExtensionBuilder::default()
-        .functions(functions::natives())
-        .classes(exceptions::classes());
+    let mut builder =
+        exceptions::register(ExtensionBuilder::default().functions(functions::natives()));
     for ((decl, methods), payload) in iterators::classes() {
         builder = match payload {
             iterators::Payload::Dual => {
@@ -111,6 +111,12 @@ pub fn extension() -> Extension {
     }
     builder.request_state::<State>().info(spl_info).build("SPL")
 }
+
+// ---- Core's classes, named for `extends` and `implements`
+
+/// Core's `Exception`.
+#[php_class(extern)]
+pub(crate) struct Exception;
 
 /// `PHP_MINFO_FUNCTION(spl)`: `SPL support => enabled`.
 fn spl_info(req: &mut Request) {

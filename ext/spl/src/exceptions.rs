@@ -2,25 +2,12 @@
 //! under `Exception`, and their eleven children, as
 //! `PHP_MINIT_FUNCTION(spl_exceptions)` registers them, in its order.
 
-use crate::stub::{self, Declared};
+use php_ext::abi::ExtensionBuilder;
+use php_ext::attr::php_class;
 
-const STUB: &str = "
-class LogicException extends Exception {}
-class BadFunctionCallException extends LogicException {}
-class BadMethodCallException extends BadFunctionCallException {}
-class DomainException extends LogicException {}
-class InvalidArgumentException extends LogicException {}
-class LengthException extends LogicException {}
-class OutOfRangeException extends LogicException {}
-class RuntimeException extends Exception {}
-class OutOfBoundsException extends RuntimeException {}
-class OverflowException extends RuntimeException {}
-class RangeException extends RuntimeException {}
-class UnderflowException extends RuntimeException {}
-class UnexpectedValueException extends RuntimeException {}
-";
+use crate::Exception;
 
-/// The thirteen classes.
+/// The thirteen classes onto `builder`, in php's order.
 ///
 /// ```php
 /// try { throw new OutOfBoundsException("past the end", 3); }
@@ -38,6 +25,101 @@ class UnexpectedValueException extends RuntimeException {}
 /// #0 {main}
 ///   thrown in %s on line 5
 /// ```
-pub(crate) fn classes() -> Vec<Declared> {
-    stub::classes(STUB, &[])
+pub(crate) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
+    builder
+        .class::<LogicException>()
+        .class::<BadFunctionCallException>()
+        .class::<BadMethodCallException>()
+        .class::<DomainException>()
+        .class::<InvalidArgumentException>()
+        .class::<LengthException>()
+        .class::<OutOfRangeException>()
+        .class::<RuntimeException>()
+        .class::<OutOfBoundsException>()
+        .class::<OverflowException>()
+        .class::<RangeException>()
+        .class::<UnderflowException>()
+        .class::<UnexpectedValueException>()
 }
+
+/// `class LogicException extends Exception`, the root of the errors in
+/// a program's logic.
+#[php_class(extends(Exception))]
+pub(crate) struct LogicException;
+
+#[php_class]
+impl LogicException {}
+
+#[php_class(extends(LogicException))]
+pub(crate) struct BadFunctionCallException;
+
+#[php_class]
+impl BadFunctionCallException {}
+
+#[php_class(extends(BadFunctionCallException))]
+pub(crate) struct BadMethodCallException;
+
+#[php_class]
+impl BadMethodCallException {}
+
+#[php_class(extends(LogicException))]
+pub(crate) struct DomainException;
+
+#[php_class]
+impl DomainException {}
+
+#[php_class(extends(LogicException))]
+pub(crate) struct InvalidArgumentException;
+
+#[php_class]
+impl InvalidArgumentException {}
+
+#[php_class(extends(LogicException))]
+pub(crate) struct LengthException;
+
+#[php_class]
+impl LengthException {}
+
+#[php_class(extends(LogicException))]
+pub(crate) struct OutOfRangeException;
+
+#[php_class]
+impl OutOfRangeException {}
+
+/// `class RuntimeException extends Exception`, the root of the errors
+/// no reading of the program would have found.
+#[php_class(extends(Exception))]
+pub(crate) struct RuntimeException;
+
+#[php_class]
+impl RuntimeException {}
+
+#[php_class(extends(RuntimeException))]
+pub(crate) struct OutOfBoundsException;
+
+#[php_class]
+impl OutOfBoundsException {}
+
+#[php_class(extends(RuntimeException))]
+pub(crate) struct OverflowException;
+
+#[php_class]
+impl OverflowException {}
+
+#[php_class(extends(RuntimeException))]
+pub(crate) struct RangeException;
+
+#[php_class]
+impl RangeException {}
+
+#[php_class(extends(RuntimeException))]
+pub(crate) struct UnderflowException;
+
+#[php_class]
+impl UnderflowException {}
+
+#[php_class(extends(RuntimeException))]
+pub(crate) struct UnexpectedValueException;
+
+#[php_class]
+impl UnexpectedValueException {}
