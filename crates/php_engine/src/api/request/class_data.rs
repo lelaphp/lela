@@ -204,6 +204,35 @@ impl Request {
         Ok(value)
     }
 
+    /// `zend_update_class_constant` over the constant `name` of `class`
+    /// (`Z/Zend/zend_API.c:1504`), found as the constants table has it:
+    /// the case's instance for an enum's case, and otherwise the value
+    /// [`Request::evaluated_class_constant`] keeps, with no access
+    /// checked. `Undefined constant` where the class has no such
+    /// constant.
+    pub(crate) fn updated_class_constant(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Result<Value, Thrown> {
+        let Some((declaring, constant)) = self.class_constant_of(class, name, 0) else {
+            let class_name = self.class_name(class);
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!(
+                    "Undefined constant {class_name}::{}",
+                    String::from_utf8_lossy(name)
+                ),
+            ));
+        };
+        self.update_enum_constants(declaring)?;
+        if constant.is_case {
+            return self.enum_case(declaring, name).map(|case| case.as_value());
+        }
+        self.evaluated_class_constant(declaring, name, &constant)
+    }
+
     /// `zend_get_class_constant_ex`'s update of the constant `name` that
     /// `declaring` declares (`Z/Zend/zend_constants.c:400`): one not
     /// yet evaluated is marked while its expression is, and one found

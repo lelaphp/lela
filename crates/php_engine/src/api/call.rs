@@ -1364,13 +1364,40 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
     })
 }
 
-/// `zend_fetch_class_constant`: a class constant, its expression
-/// evaluated on first use in the scope that declared it, and php's
-/// `Error` for one the class has not or the scope may not reach. A
-/// constant of an enum is a case, so what comes back is the enum's one
-/// instance for that case (`zend_enum_get_case`), by identity.
+/// `zend_update_class_constants` (`Z/Zend/zend_API.c:1535`): the
+/// constants, the `static` properties and the defaults of `class` and of
+/// its parents evaluated once in the request, each held to its type, as
+/// `new` and a `static` property's first read ask for it. A failure is the
+/// throwable it raised, and the next call tries again where it failed.
+pub fn update_class_constants(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
+    req.update_class_constants(class)
+}
+
+/// `zend_update_class_constant` over the constant `name` of `class`, as
+/// Reflection reads one: its expression evaluated on first use in the
+/// scope that declared it and held to its type, with no access checked
+/// and no deprecation raised, and php's `Error` for a name the class has
+/// not. A constant of an enum is a case, so what comes back is the
+/// enum's one instance for that case (`zend_enum_get_case`), by
+/// identity. One owner is the caller's.
+///
+/// ```php
+/// class A { const array CONST1 = C; }
+/// class B { private const object CONST1 = C; }
+/// define("C", new stdClass());
+/// $rc = new ReflectionClassConstant(A::class, 'CONST1');
+/// try { $rc->getValue(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { echo $rc; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump((new ReflectionClass('B'))->getConstant('CONST1'));
+/// ```
+/// ```expect
+/// Cannot assign stdClass to class constant A::CONST1 of type array
+/// Cannot assign stdClass to class constant A::CONST1 of type array
+/// object(stdClass)#1 (0) {
+/// }
+/// ```
 pub fn class_constant(req: &mut Request, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
-    req.class_constant(class, name)
+    req.updated_class_constant(class, name)
 }
 
 /// Evaluate a constant expression in `scope`, `zval_update_constant_ex`:

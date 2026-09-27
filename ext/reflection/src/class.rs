@@ -14,7 +14,7 @@ use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This
 use php_ext::attr::php_class;
 use php_ext::call::{
     eval_const_expr, initialize_lazy, instantiate, instantiate_named, mark_lazy_initialized,
-    read_class_prop_silent, write_static_prop,
+    read_class_prop_silent, update_class_constants, write_static_prop,
 };
 use php_ext::decl::{ClassKind, MethodDecl, Visibility};
 use php_ext::raising::{Thrown, deprecated, throw};
@@ -2108,7 +2108,19 @@ impl ReflectionClass {
     /// property a class above declared private, one declared as an
     /// instance property, and a typed one nothing has written, whose slot
     /// stands `IS_UNDEF`; each value is handed back deref'd, with one more
-    /// owner, which is what "enforce read only access" comes to.
+    /// owner, which is what "enforce read only access" comes to. The
+    /// class is updated first (`zend_update_class_constants`), so a
+    /// constant or a default that does not evaluate is the throwable it
+    /// raised, whether or not a static property reads it.
+    ///
+    /// ```php
+    /// class Foo { const int CONST1 = C; public int $prop1 = Foo::CONST1; }
+    /// define("C", "bar");
+    /// try { (new ReflectionClass(Foo::class))->getStaticProperties(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot assign string to class constant Foo::CONST1 of type int
+    /// ```
     ///
     /// ```php
     /// class A { public static int $n; public static $p = 1; private static $q = 2; protected static $r = 3; public $i = 4; }
@@ -2147,6 +2159,7 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getStaticProperties(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let class = this_class(req, this.object())?;
+        update_class_constants(req, class)?;
         let mut properties = PhpArray::new(req)?;
         for (property, declaring) in linked_properties(req, class) {
             if property.is_instance
@@ -2246,6 +2259,7 @@ impl ReflectionClass {
     ) -> Result<Value, Thrown> {
         let name = name.as_bytes().to_vec();
         let class = this_class(req, this.object())?;
+        update_class_constants(req, class)?;
         let held = read_class_prop_silent(req, class, &name)?;
         if let Some(value) = held
             && !matches!(value.as_ref(), ValueRef::Undef)
@@ -2364,6 +2378,7 @@ impl ReflectionClass {
     ) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
         let class = this_class(req, this.object())?;
+        update_class_constants(req, class)?;
         let held = read_class_prop_silent(req, class, &name)?;
         let Some(held) = held else {
             let shown = class_name_of(req, class);

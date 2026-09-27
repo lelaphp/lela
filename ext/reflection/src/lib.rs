@@ -5125,18 +5125,16 @@ fn class_constant_named(
 /// bool(false)
 /// ```
 /// A class constant's value as the constants table holds it once it is
-/// updated: an enum's case is the enum's instance for it
-/// (`zend_enum_get_case`), and every other constant the expression it
-/// was written as, evaluated in the scope that declared it.
+/// updated (`zend_update_class_constant`): an enum's case is the enum's
+/// instance for it (`zend_enum_get_case`), and every other constant the
+/// expression it was written as, evaluated in the scope that declared
+/// it and held to its type.
 fn constant_value(
     req: &mut Request,
     constant: &php_ext::decl::ClassConstDecl,
     scope: ClassId,
 ) -> Result<Value, Thrown> {
-    if constant.is_case {
-        return php_ext::call::class_constant(req, scope, &constant.name.0);
-    }
-    eval_const_expr(req, &constant.value, Some(scope))
+    php_ext::call::class_constant(req, scope, &constant.name.0)
 }
 
 /// The property `name` names in the class's info table: the class's
@@ -5800,10 +5798,10 @@ fn class_const_string(
     // A case of an enum holds the enum's own instance, so
     // `zend_zval_type_name` names the enum and the `IS_OBJECT` arm
     // writes `Object` in place of the value.
-    // `zval_update_constant_ex(&c->value, c->ce)`: evaluated in the
-    // class that declared it, a failure the exception it raised and no
-    // rendering.
-    let value = eval_const_expr(req, &constant.value, Some(scope))?;
+    // `zend_update_class_constant(c, name, c->ce)`: evaluated in the
+    // class that declared it and held to its type, a failure the
+    // exception it raised and no rendering.
+    let value = constant_value(req, constant, scope)?;
     let ty = match (&constant.ty, enum_of) {
         (Some(ty), _) => type_to_string(ty),
         (None, Some(name)) => String::from_utf8_lossy(name).into_owned(),
