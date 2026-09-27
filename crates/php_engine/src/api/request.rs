@@ -986,8 +986,9 @@ impl Resources {
 /// the thread that raises it sees it: `Send` and `Sync`, and cloned so
 /// that the engine's execution timer and the thread serving the request
 /// share one. Raising is all a setter does; acting on it is the loop's,
-/// at a back-edge, at a frame's activation and after every
-/// `Flow::Resume`, and nothing else touches it.
+/// at a back-edge, at a frame's activation, after every `Flow::Resume`
+/// and after an internal call returns (design §5.8), and nothing else
+/// touches it.
 #[derive(Debug, Clone, Default)]
 pub struct Interrupt(Arc<State>);
 
@@ -999,8 +1000,8 @@ impl Interrupt {
         self.0.raised.store(true, Ordering::Release);
     }
 
-    /// Whether it is raised: what the loop tests at its three safepoints
-    /// and what compiled code tests once per loop iteration through the
+    /// Whether it is raised: what the loop tests at its four sites and
+    /// what compiled code tests once per loop iteration through the
     /// tier's `ExitCtx` (`jit-design.md` §4.3).
     #[must_use]
     pub fn raised(&self) -> &AtomicBool {
@@ -16190,8 +16191,8 @@ impl Request {
     }
 
     /// This request's interrupt (design §5.8): what the loop tests at a
-    /// back-edge, at a frame's activation and after every
-    /// `Flow::Resume`, and what the engine's execution timer and signal
+    /// back-edge, at a frame's activation, after every `Flow::Resume` and
+    /// after an internal call returns, and what the engine's execution timer and signal
     /// delivery raise. A `tier.lock` item, because compiled code tests
     /// the same atomic once per loop iteration through the tier's
     /// `ExitCtx` (`jit-design.md` §4.3).

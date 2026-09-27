@@ -122,7 +122,7 @@ The opaque two-atomic slot the engine allocates per safepoint of a function, and
 _Avoid_: feedback (the per-request `MapPtr<[Feedback]>` of `research/third-engine-design.r2.md` §5.14, which the next engine revision deletes), counter, flag
 
 **Interrupt**:
-The one flag on a request that the execution timer and signal delivery set and nothing else touches. The loop tests it at a back-edge, at a frame's activation and after every `Resume`; compiled code tests it once per loop iteration and exits when it is set; the interrupt helper that runs at the check raises the timeout fatal or dispatches the pending signals.
+The one flag on a request that the execution timer and signal delivery set and nothing else touches. The loop tests it at a back-edge, at a frame's activation, after every `Resume` and after an internal call returns; compiled code tests it once per loop iteration and exits when it is set; the interrupt helper that runs at the check raises the timeout fatal or dispatches the pending signals.
 _Avoid_: vm_interrupt (php's field), timeout flag, pending signal, tick (php's `register_tick_function`, `unregister_tick_function`)
 
 **Trace**:

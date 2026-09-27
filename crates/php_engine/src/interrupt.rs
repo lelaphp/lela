@@ -6,10 +6,14 @@
 //! same atomic once per loop iteration through its `ExitCtx`
 //! (`jit-design.md` §4.3).
 //!
-//! What is here is [`check`], the one the loop performs at a back-edge
-//! `JMP*`, at a frame's activation and after every `Flow::Resume` and
-//! nowhere else, [`interrupted`], what a check that finds it raised
-//! does, and [`Timer`], the execution timer `max_execution_time` arms.
+//! What is here is [`check`], the one the loop performs at its four
+//! sites and nowhere else (design §5.8, revision 36): at a back-edge
+//! `JMP*`, at a frame's activation, after every `Flow::Resume`, and
+//! after an internal call returns, which is php's
+//! `ZEND_VM_FCALL_INTERRUPT_CHECK` in the call handlers; [`interrupted`],
+//! what a check that finds it raised does, which `call_function` also
+//! runs after a native a native called, as `zend_call_function` does;
+//! and [`Timer`], the execution timer `max_execution_time` arms.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -23,7 +27,7 @@ use php_heap::Fatal;
 use crate::api::request::{Interrupt, Request};
 
 /// The interrupt check (design §5.8): one relaxed load and a branch, at
-/// the loop's sites and nowhere else. php's check costs the same load,
+/// the loop's four sites and nowhere else. php's check costs the same load,
 /// and an interrupt nobody raised costs nothing beyond it. `Ok(true)`
 /// is a check whose extension hooks left a throwable pending, which the
 /// site hands to the loop as thrown where it stands, as `zend_interrupt_helper`
