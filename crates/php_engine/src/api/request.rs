@@ -2124,6 +2124,18 @@ impl Request {
         self.stack_limit
     }
 
+    /// `zend_call_stack_overflowed(EG(stack_limit))`: whether the
+    /// machine stack has come down to the limit request start worked
+    /// out, `zend.max_allowed_stack_size` less `zend.reserved_stack_size`.
+    /// A native that walks a nest by recursing asks it at each level and
+    /// raises its own refusal, as `php_url_encode_hash_ex` raises
+    /// `Maximum call stack size reached.`; the one php's engine raises is
+    /// [`crate::api::raising::call_stack_limit`].
+    #[must_use]
+    pub fn stack_overflowed(&self) -> bool {
+        self.stack_limit.overflowed()
+    }
+
     /// `zend_unset_timeout` then `zend_set_timeout` over
     /// `max_execution_time` as the ini table has it now: at request
     /// start, and again whenever the entry moves, which is php's

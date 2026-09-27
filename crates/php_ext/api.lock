@@ -453,6 +453,7 @@ request::Request::set_response_code
 request::Request::set_shutdown_function
 request::Request::set_time_limit
 request::Request::set_umask
+request::Request::stack_overflowed
 request::Request::state
 request::Request::status_line
 request::Request::stdin
