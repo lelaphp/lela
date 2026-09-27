@@ -10779,8 +10779,10 @@ fn assign_property(
                 Ok(value) => value,
                 Err(thrown) => return Ok(Err(thrown)),
             };
-            write_out(req, frame, code, op, &value);
-            req.assign_declared_slot(object.heap(), slot, value);
+            match req.assign_declared_slot(object.heap(), slot, value, strict) {
+                Ok(landed) => write_out(req, frame, code, op, &landed),
+                Err(thrown) => return Ok(Err(thrown)),
+            }
             // `Z_PROP_FLAG_P(property_val) &= ~IS_PROP_REINITABLE`: a
             // readonly property `__clone` wrote is locked again.
             object
@@ -10789,9 +10791,10 @@ fn assign_property(
             Ok(Ok(()))
         }
         Some((slot, false)) => {
-            write_out(req, frame, code, op, &value);
-            req.assign_declared_slot(object.heap(), slot, value);
-            Ok(Ok(()))
+            let strict = req.frame_strict_types(frame);
+            Ok(req
+                .assign_declared_slot(object.heap(), slot, value, strict)
+                .map(|landed| write_out(req, frame, code, op, &landed)))
         }
         None => {
             let Some(key) = name.as_php_string().copied() else {
@@ -11212,6 +11215,22 @@ fn vacate(req: &mut Request, at: Option<php_heap::ZvalRef>) {
 /// Cannot assign string to property C::$n of type int
 /// int(1)
 /// ```
+///
+/// A slot bound to a cell a typed property is a source of is
+/// `zend_binary_assign_op_typed_ref`, held to the cell's types whatever
+/// the slot's own declaration:
+///
+/// ```php
+/// class T { public static int $i = 123; public static $p; }
+/// T::$p = &T::$i;
+/// try { T::$p .= "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// T::$p .= "4";
+/// var_dump(T::$i);
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property T::$i of type int
+/// int(1234)
+/// ```
 pub(crate) fn assign_static_prop_op<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -11293,6 +11312,19 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let strict = req.frame_strict_types(frame);
+    // `ZEND_REF_HAS_TYPE_SOURCES` ahead of the property's own type:
+    // `zend_binary_assign_op_typed_ref` over the cell the slot holds.
+    if let Some(cell) = req
+        .static_slot_cell(declaring, &name)
+        .filter(|cell| !req.ref_type_sources(cell.heap()).is_empty())
+    {
+        if let Err(thrown) = req.assign_to_reference(cell.heap(), stepped, strict) {
+            return threw(req, frame, &thrown);
+        }
+        write_out(req, frame, code, op, &cell.get());
+        req.vm_mut().jump(frame, at.saturating_add(2));
+        return Ok(Stepped::Same(frame));
+    }
     let stepped = match ty {
         None => stepped,
         Some(ty) => match verified_op(req, &stepped, &ty, declaring, &name, strict) {
@@ -12635,6 +12667,21 @@ fn binary_assign_op_obj_dim(
 /// string(2) "ab"
 /// <r>ab</r>
 /// ```
+///
+/// A slot bound to a cell a typed property is a source of is
+/// `zend_binary_assign_op_typed_ref`:
+///
+/// ```php
+/// $a = new class { public int $foo = 1; public $_; };
+/// $a->_ = &$a->foo;
+/// try { $a->_ .= "e50"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($a->_ .= "1", $a->foo);
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property class@anonymous::$foo of type int
+/// int(11)
+/// int(11)
+/// ```
 pub(crate) fn assign_obj_op<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -12803,32 +12850,56 @@ fn step_property(
             return Ok(Err(thrown));
         }
     };
-    if !typed {
-        write_out(req, frame, code, op, &stepped);
-        req.assign_declared_slot(object.heap(), slot, stepped);
-        return Ok(Ok(()));
+    land_step(req, frame, code, op, object, (slot, typed), &bytes, stepped)
+}
+
+/// What a compound step made, written back into the declared slot it
+/// read. `ZEND_REF_HAS_TYPE_SOURCES` stands ahead of the property's own
+/// type: a slot holding a cell some typed property is a source of is
+/// `zend_binary_assign_op_typed_ref`, which the slot's write serves
+/// ([`Request::assign_declared_slot`]); only a slot holding none is
+/// held to its own declaration first, `zend_binary_assign_op_typed_prop`,
+/// under this frame's own regime. What landed is what the temporary
+/// takes.
+#[allow(clippy::too_many_arguments)] // the handler's frame, the slot and the value, each one fact
+fn land_step(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    object: PhpObject,
+    (slot, typed): (u32, bool),
+    bytes: &[u8],
+    stepped: Value,
+) -> Result<Result<(), Thrown>, Fatal> {
+    let bound = object
+        .heap()
+        .slot(slot)
+        .as_reference()
+        .is_some_and(|cell| cell.sources() != 0);
+    let strict = req.caller_strict_types(frame);
+    if !typed || bound {
+        return Ok(req
+            .assign_declared_slot(object.heap(), slot, stepped, strict)
+            .map(|landed| write_out(req, frame, code, op, &landed)));
     }
-    // `zend_binary_assign_op_typed_prop`: what the kernel made is held
-    // to the declared type under this frame's own regime, and what
-    // landed is what the temporary takes.
-    let Some(typed) = req.declared_typed_property(object.class(), &bytes) else {
+    let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
         req.release(stepped);
-        let shown = String::from_utf8_lossy(&bytes);
+        let shown = String::from_utf8_lossy(bytes);
         return Err(Fatal::Error(format!(
             "InternalError: ZEND_ASSIGN_OBJ_OP placed the typed property ${shown}, whose declared type the class does not carry"
         )));
     };
-    let strict = req.caller_strict_types(frame);
-    let landed = match req.hold_to_property_type(&typed, &bytes, stepped, strict) {
+    let landed = match req.hold_to_property_type(&typed, bytes, stepped, strict) {
         Ok(landed) => landed,
         Err(thrown) => {
             write_out(req, frame, code, op, &Value::null());
             return Ok(Err(thrown));
         }
     };
-    write_out(req, frame, code, op, &landed);
-    req.assign_declared_slot(object.heap(), slot, landed);
-    Ok(Ok(()))
+    Ok(req
+        .assign_declared_slot(object.heap(), slot, landed, strict)
+        .map(|landed| write_out(req, frame, code, op, &landed)))
 }
 
 /// `ZEND_ASSIGN_OBJ_OP` over the place `zend_std_get_property_ptr_ptr`
@@ -13375,8 +13446,10 @@ fn incdec_property(
         if step.post { &held } else { &landed },
     );
     req.release(held);
-    req.assign_declared_slot(object.heap(), slot, landed);
-    Ok(Ok(()))
+    let strict = req.frame_strict_types(frame);
+    Ok(req
+        .assign_declared_slot(object.heap(), slot, landed, strict)
+        .map(|_| ()))
 }
 
 /// The property step over a slot bound to a reference other properties
@@ -13452,8 +13525,12 @@ fn typed_step(
             step.increment,
         );
         req.release(stepped);
-        req.assign_declared_slot(object.heap(), slot, limit);
-        return Ok(Err(thrown));
+        // The slot holds no cell another property types, which the
+        // caller took to `zend_incdec_typed_ref` first, so the store is
+        // the property's own.
+        let strict = req.frame_strict_types(frame);
+        let stored = req.assign_declared_slot(object.heap(), slot, limit, strict);
+        return Ok(stored.and(Err(thrown)));
     }
     // A refusal is `ZVAL_COPY_VALUE(var_ptr, copy)`: the slot keeps
     // what it held.

@@ -7855,13 +7855,40 @@ impl Request {
     /// last, after the write, which is where a destructor is served; a
     /// slot holding a reference is written through the cell
     /// (`Z_ISREF_P(variable_ptr)`), so every holder of the cell reads
-    /// the new value.
-    pub(crate) fn assign_declared_slot(&mut self, o: Obj, i: u32, value: Value) {
+    /// the new value. A cell some typed property is a source of is
+    /// `zend_assign_to_typed_ref`, held to each of their types under
+    /// `strict` ([`Request::assign_to_reference`]), whatever the slot's
+    /// own property declares. What landed comes back, a view: the
+    /// coercion where the cell's types made one.
+    ///
+    /// ```php
+    /// class C { public int $foo = 1; public $_; }
+    /// $a = new C; $a->_ = &$a->foo;
+    /// try { $a->_ = []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($a->_ = "5", $a->foo);
+    /// ```
+    /// ```expect
+    /// Cannot assign array to reference held by property C::$foo of type int
+    /// int(5)
+    /// int(5)
+    /// ```
+    pub(crate) fn assign_declared_slot(
+        &mut self,
+        o: Obj,
+        i: u32,
+        value: Value,
+        strict: bool,
+    ) -> Result<Value, Thrown> {
         if let Some(r) = o.slot(i).as_reference() {
-            self.reference_set(r, value);
-        } else {
-            Heap::object_set_slot(&mut Hooks(self), o, i, value.into_zval());
+            if r.sources() != 0 {
+                self.assign_to_reference(r, value, strict)?;
+            } else {
+                self.reference_set(r, value);
+            }
+            return Ok(PhpRef::of(r).get());
         }
+        Heap::object_set_slot(&mut Hooks(self), o, i, value.into_zval());
+        Ok(Value::of_zval(o.slot(i)))
     }
 
     /// `OBJ_PROP_NUM(obj, i)` written with no name in hand, what a
@@ -8158,7 +8185,12 @@ impl Request {
             } else {
                 value
             };
-            self.assign_declared_slot(o, placed.slot, value);
+            if let Err(thrown) =
+                self.assign_declared_slot(o, placed.slot, value, self.property_strict_types())
+            {
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
         } else {
             let key = php_heap::Key::Str(name.heap());
             // `zend_array_dup` over a table a clone or a cast shares,
