@@ -206,6 +206,8 @@ pub fn extension() -> Extension {
             posix_mkfifo::declared(),
             posix_mknod::declared(),
             posix_access::declared(),
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            posix_eaccess::declared(),
             posix_getgrnam::declared(),
             posix_getgrgid::declared(),
             posix_getpwnam::declared(),
@@ -991,6 +993,49 @@ fn posix_access(req: &mut Request, filename: PhpString, #[php(default = 0)] flag
         Ok(()) => true,
         Err(errno) => failed(req, errno),
     }
+}
+
+/// `posix_eaccess(string $filename, int $flags = 0): bool`: `eaccess(3)`,
+/// [`posix_access`] by the effective ids, declared where php's build finds
+/// the call (`HAVE_EACCESS`: Linux and FreeBSD, not Darwin); the empty path
+/// is the `ValueError`, where `posix_access` answers `EIO`. The fence holds
+/// the declaration to that condition, and where the function is declared,
+/// each of its answers.
+///
+/// ```php
+/// $declared = function_exists('posix_eaccess');
+/// var_dump($declared === in_array(PHP_OS, ['Linux', 'FreeBSD'], true));
+/// $held = [];
+/// if ($declared) {
+///     $held[] = posix_eaccess(__FILE__, POSIX_R_OK) === posix_access(__FILE__, POSIX_R_OK);
+///     $held[] = posix_eaccess('nope', POSIX_F_OK) === false && posix_get_last_error() === 2;
+///     try { posix_eaccess(''); } catch (ValueError $e) { $held[] = $e->getMessage() === 'posix_eaccess(): Argument #1 ($filename) must not be empty'; }
+///     $held[] = count($held) === 3;
+/// }
+/// var_dump(!in_array(false, $held, true));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[php_function]
+fn posix_eaccess(
+    req: &mut Request,
+    filename: php_ext::abi::Path,
+    #[php(default = 0)] flags: i64,
+) -> Result<bool, Thrown> {
+    let php_ext::abi::Path(filename) = filename;
+    let Some(path) = expanded(req, filename.as_bytes()) else {
+        return Err(arg_value_error(req, 1, "not be empty"));
+    };
+    let Ok(path) = CString::new(path) else {
+        return Ok(failed(req, Errno::ENOENT));
+    };
+    Ok(match ffi::eaccess(&path, flags) {
+        Ok(()) => true,
+        Err(errno) => failed(req, errno),
+    })
 }
 
 /// `php_posix_group_to_array`: name, passwd, members and gid.

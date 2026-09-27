@@ -108,6 +108,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use crate::cfg::Target;
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest, Rule};
 use crate::oracle::{Oracle, Pin, Regime, Runner};
@@ -416,7 +417,7 @@ fn run_in(
             readings.push(unrun);
             continue;
         }
-        let found = match extract(root, krate, rule) {
+        let found = match extract(root, krate, rule, Target::built()) {
             Ok(found) => found,
             // A source the grammar could not read: the crate's reading
             // fails and names it, since `done` asks the crate for a
@@ -481,9 +482,15 @@ pub(crate) fn coverage_rule(manifest: &Manifest) -> Option<&Rule> {
 
 /// Every witness in a crate's sources, and every kernel or native the
 /// coverage rule's scope covers there: the natives the attributes declare
-/// where the crate's covered sources carry one ([`anchor`]), and
-/// [`fence::Subject`]'s count where they carry none.
-pub(crate) fn extract(root: &Path, krate: &Crate, rule: Option<&Rule>) -> Result<Extracted> {
+/// where the crate's covered sources carry one, less those `target`'s
+/// `#[cfg]` compiles out ([`anchor`]), and [`fence::Subject`]'s count
+/// where they carry none.
+pub(crate) fn extract(
+    root: &Path,
+    krate: &Crate,
+    rule: Option<&Rule>,
+    target: &Target,
+) -> Result<Extracted> {
     let mut out = Extracted::default();
     let mut anchored = anchor::Anchored::default();
     for path in sources::rust(root, krate)? {
@@ -492,12 +499,18 @@ pub(crate) fn extract(root: &Path, krate: &Crate, rule: Option<&Rule>) -> Result
             .with_context(|| format!("{path} is not a source the fence grammar can read"))?;
         let mut found = fence::extract(Path::new(&path), &text);
         if covered(rule, Path::new(&path)) {
-            anchored.take(anchor::scan(Path::new(&path), &text, &found.witnesses));
+            anchored.take(anchor::scan(
+                Path::new(&path),
+                &text,
+                &found.witnesses,
+                target,
+            ));
         } else {
             found.subjects.clear();
         }
         out.take(found);
     }
+    anchored.settle();
     // A crate whose natives stand on the attributes is counted by them,
     // once the fences have run.
     if anchored.declares() {

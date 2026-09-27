@@ -5,9 +5,10 @@
 //! Apple's targets; `sysconf`, `pathconf`, `fpathconf`, `getrlimit` and
 //! `setrlimit` take the number a program passed, which `nix`'s enums cannot
 //! carry for a number the platform does not name; `strerror_r` is the C
-//! library's own text, which `posix_strerror` prints; and `isatty` and
+//! library's own text, which `posix_strerror` prints; `isatty` and
 //! `ttyname_r` take a number a program passed, which need not be an open
-//! fd `nix`'s `AsFd` could borrow.
+//! fd `nix`'s `AsFd` could borrow; and `eaccess` is the C library's call
+//! php makes, which `nix` reaches only through `faccessat`'s `AT_EACCESS`.
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
@@ -238,6 +239,18 @@ pub(crate) fn strerror(error: i64) -> Vec<u8> {
     unsafe { CStr::from_ptr(buffer.as_ptr()) }
         .to_bytes()
         .to_vec()
+}
+
+/// `eaccess(path, mode)`: `access(2)` by the effective ids, where the C
+/// library has it (`HAVE_EACCESS`: Linux and FreeBSD); the errno where the
+/// answer is no.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub(crate) fn eaccess(path: &CStr, mode: i64) -> Result<(), Errno> {
+    // SAFETY: `path` is NUL-terminated and outlives the call.
+    if unsafe { libc::eaccess(path.as_ptr(), as_c_int(mode)) } == 0 {
+        return Ok(());
+    }
+    Err(Errno::last())
 }
 
 /// `isatty(fd)`: whether the fd is a terminal, and the errno where it is
