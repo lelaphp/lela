@@ -50,9 +50,11 @@ pub(crate) const ENT_PERM_MASK: u32 = 0x0000_01FF;
 pub(crate) const ENT_PERM_DEF_FILE: u32 = 0x0000_01B6;
 pub(crate) const ENT_PERM_DEF_DIR: u32 = 0x0000_01FF;
 
-/// `TAR_FILE` and `TAR_DIR`, the type bytes a tar header carries and a
-/// tar entry keeps.
+/// `TAR_FILE`, `TAR_LINK`, `TAR_SYMLINK` and `TAR_DIR`, the type bytes a
+/// tar header carries and a tar entry keeps.
 pub(crate) const TAR_FILE: u8 = b'0';
+pub(crate) const TAR_LINK: u8 = b'1';
+pub(crate) const TAR_SYMLINK: u8 = b'2';
 pub(crate) const TAR_DIR: u8 = b'5';
 
 /// `MAXPATHLEN` on the host.

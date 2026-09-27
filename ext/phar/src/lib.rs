@@ -40,8 +40,10 @@ mod signature;
 mod stream;
 mod stub;
 mod table;
+mod tar;
 mod web;
 mod write;
+mod zip;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::decl::{IniDecl, Name};

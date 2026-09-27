@@ -1459,9 +1459,43 @@ impl Phar {
 /// zip archive.
 ///
 /// ```php
+/// foreach (['tar' => Phar::TAR, 'zip' => Phar::ZIP] as $ext => $format) {
+///     $p = __DIR__ . "/phardata-witness.$ext";
+///     $d = new PharData($p);
+///     $d['a.txt'] = 'data';
+///     $d->addEmptyDir('dir');
+///     $d['a.txt']->setMetadata(['k' => 1]);
+///     var_dump($d->isFileFormat($format), count($d), $d->getAlias(), $d->getSignature());
+///     unset($d);
+///     $e = new PharData($p);
+///     var_dump($e['a.txt']->getContent(), $e['a.txt']->getMetadata(), is_dir("phar://$p/dir"), $e->getStub());
+///     unset($e); unlink($p);
+/// }
 /// try { new PharData(__DIR__ . '/phardata-witness.phar'); } catch (UnexpectedValueException $e) { echo str_replace(__DIR__, 'D', $e->getMessage()), "\n"; }
 /// ```
 /// ```expect
+/// bool(true)
+/// int(3)
+/// NULL
+/// bool(false)
+/// string(4) "data"
+/// array(1) {
+///   ["k"]=>
+///   int(1)
+/// }
+/// bool(true)
+/// string(0) ""
+/// bool(true)
+/// int(2)
+/// NULL
+/// bool(false)
+/// string(4) "data"
+/// array(1) {
+///   ["k"]=>
+///   int(1)
+/// }
+/// bool(true)
+/// string(0) ""
 /// Cannot create phar 'D/phardata-witness.phar', file extension (or combination) not recognised or the directory does not exist
 /// ```
 #[php_class(

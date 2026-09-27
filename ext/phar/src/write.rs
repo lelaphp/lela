@@ -13,7 +13,7 @@ use php_ext::request::{Opening, Request, Stream};
 use crate::archive::{
     self, API_VERSION_NODIR, API_VERSION_NUM, ArchiveId, Content, ENT_COMPRESSED_GZ,
     ENT_COMPRESSION_MASK, ENT_PERM_DEF_DIR, ENT_PERM_DEF_FILE, Entry, FILE_COMPRESSED_BZ2,
-    FILE_COMPRESSED_GZ, HDR_SIGNATURE, Metadata, SIG_OPENSSL, SIG_OPENSSL_SHA256,
+    FILE_COMPRESSED_GZ, Format, HDR_SIGNATURE, Metadata, SIG_OPENSSL, SIG_OPENSSL_SHA256,
     SIG_OPENSSL_SHA512, TAR_DIR, TAR_FILE, archives, lossy,
 };
 use crate::entry::{self, Dir, EntryData, Target};
@@ -78,7 +78,11 @@ pub(crate) fn flush_ex(
         return Ok(None);
     }
     a.virtual_dirs.clear();
-    let _ = is_default_stub;
+    match a.format {
+        Format::Zip => return crate::zip::flush(req, id, user_stub, is_default_stub),
+        Format::Tar => return crate::tar::flush(req, id, user_stub, is_default_stub),
+        Format::Phar => {}
+    }
     if readonly(req) {
         return Ok(None);
     }

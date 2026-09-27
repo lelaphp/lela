@@ -175,6 +175,12 @@ pub(crate) fn open_from_fp(
             }
             continue;
         }
+        if first.starts_with(b"PK\x03\x04") {
+            return crate::zip::parse(req, bytes, fname, alias);
+        }
+        if first.len() >= 512 && crate::tar::is_tar(first, fname) {
+            return crate::tar::parse(req, bytes, fname, alias, compression);
+        }
         break;
     }
     let Some(halt) = find_halt(&bytes) else {
@@ -638,7 +644,21 @@ pub(crate) fn open_or_create(
         Err(Some(error)) => return Ok(Err(Some(error))),
         Err(None) => {}
     }
-    let _ = ext;
+    let (at, len) = ext;
+    let ext = &fname[at..at + len];
+    let names = |letter: u8, rest: &[u8]| {
+        ext.len() > 3
+            && ext
+                .iter()
+                .position(|b| *b == letter)
+                .is_some_and(|z| ext.len() - z >= 2 && ext[z + 1..].starts_with(rest))
+    };
+    if names(b'z', b"ip") {
+        return crate::zip::open_or_create(req, fname, alias, is_data, report);
+    }
+    if names(b't', b"ar") {
+        return crate::tar::open_or_create(req, fname, alias, is_data, report);
+    }
     create_or_parse(req, fname, alias, is_data, report)
 }
 
