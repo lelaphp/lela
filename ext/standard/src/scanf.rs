@@ -6,12 +6,11 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::{Ref, Union, Variadic};
+use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
-
-use crate::string_argument;
-use crate::zpp::{assign_ref, string_value};
+use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 /// `SCAN_MAX_ARGS`.
 const SCAN_MAX_ARGS: u64 = 0xff;
@@ -394,18 +393,19 @@ fn strtol(buf: &[u8], base: u32, unsigned: bool) -> i64 {
 /// Unmatched [ in format string
 /// int(1)
 /// ```
-pub(super) fn sscanf(req: &mut Request) -> Result<Value, Thrown> {
-    let given = req.argument_count();
-    if given < 2 {
-        return Err(php_ext::raising::too_few_arguments(
-            req,
-            2,
-            u32::try_from(given).unwrap_or(0),
-        ));
-    }
-    let string = string_argument(req, 1)?;
-    let format = string_argument(req, 2)?;
-    php_sscanf_internal(req, string.as_bytes(), format.as_bytes(), 3, given - 2)
+#[php_function]
+pub(super) fn sscanf(
+    req: &mut Request,
+    string: PhpString,
+    format: PhpString,
+    vars: Variadic<Ref<Value>>,
+) -> Result<Option<Union<PhpArray, i64>>, Thrown> {
+    let scanned = php_sscanf_internal(req, string.as_bytes(), format.as_bytes(), 3, vars.0.len())?;
+    Ok(match scanned.as_ref() {
+        ValueRef::Array(array) => Some(Union::A(*array)),
+        ValueRef::Int(n) => Some(Union::B(n)),
+        _ => None,
+    })
 }
 
 /// `php_sscanf_internal(string, format, argCount, args, varStart,
@@ -592,7 +592,7 @@ fn scan(
                     }
                 }
                 if !suppress {
-                    let value = string_value(req, &input[s..end])?;
+                    let value = Value::string(PhpString::new(req, &input[s..end])?);
                     put(req, &mut target, &mut obj_index, value)?;
                 }
                 s = end;
@@ -616,7 +616,7 @@ fn scan(
                     break 'scan;
                 }
                 if !suppress {
-                    let value = string_value(req, &input[s..end])?;
+                    let value = Value::string(PhpString::new(req, &input[s..end])?);
                     put(req, &mut target, &mut obj_index, value)?;
                 }
                 s = end;
@@ -816,8 +816,7 @@ fn put(
             }
             let position = *first + u32::try_from(*index).unwrap_or(0);
             *index += 1;
-            assign_ref(req, position, value)?;
-            Ok(())
+            assign_at(req, position, value)
         }
         Target::Array(array) => {
             let key = Key::Int(i64::try_from(*index).unwrap_or(0));
@@ -825,6 +824,20 @@ fn put(
             array.set(req, key, value)
         }
     }
+}
+
+/// `ZEND_TRY_ASSIGN_REF_*` on `args + objIndex`, the calling native's
+/// argument at `position`: `value` written through the reference the
+/// argument is, held to the types of the properties that reference is
+/// typed by, and given up where it is not one. The positions are the
+/// caller's, `sscanf`'s, `fscanf`'s or `SplFileObject::fscanf`'s.
+fn assign_at(req: &mut Request, position: u32, value: Value) -> Result<(), Thrown> {
+    let given = req.argument(position).unwrap_or_default();
+    if let ValueRef::Reference(reference) = given.as_ref() {
+        return reference.set(req, value);
+    }
+    req.release(value);
+    Ok(())
 }
 
 /// `zend_strtod(buf, NULL)` over what the float scan gathered: the

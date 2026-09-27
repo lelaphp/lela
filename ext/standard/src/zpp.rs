@@ -169,14 +169,6 @@ pub(super) fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thr
     Ok(Value::string(PhpString::new(req, bytes)?))
 }
 
-/// `RETURN_STR_COPY(str)`: the argument's own string handed back, one
-/// more reference to it.
-pub(super) fn same(req: &mut Request, string: PhpString) -> Value {
-    let value = Value::string(string);
-    req.addref(&value);
-    value
-}
-
 /// A count as php's `zend_long`.
 pub(super) fn long_of(n: usize) -> Value {
     Value::int(i64::try_from(n).unwrap_or(i64::MAX))

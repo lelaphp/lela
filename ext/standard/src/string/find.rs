@@ -2,13 +2,13 @@
 //! with its alias and `stristr`, `strrchr`, and `str_starts_with` and
 //! `str_ends_with`. Case folding is `zend_tolower_ascii`.
 
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::Value;
+use php_ext::values::PhpString;
 
 use super::{long, lower, memnstr};
-use crate::zpp::{optional_bool, optional_long, string_value};
-use crate::{argument_count_between, string_argument};
 
 /// `zend_memnrstr`: the last offset of `needle` inside
 /// `haystack[from..to]`, the empty needle found at `to`.
@@ -24,16 +24,6 @@ fn memnrstr(haystack: &[u8], needle: &[u8], from: usize, to: usize) -> Option<us
         .windows(needle.len())
         .rposition(|w| w == needle)
         .map(|at| at + from)
-}
-
-/// The two strings of a search and its optional third argument.
-fn search_arguments(
-    req: &mut Request,
-) -> Result<(php_ext::values::PhpString, php_ext::values::PhpString), Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let haystack = string_argument(req, 1)?;
-    let needle = string_argument(req, 2)?;
-    Ok((haystack, needle))
 }
 
 /// `zend_argument_value_error(3, "must be contained in argument #1
@@ -68,8 +58,14 @@ fn outside(req: &mut Request) -> Thrown {
 /// strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// ```
-pub(super) fn strpos(req: &mut Request) -> Result<Value, Thrown> {
-    positioned(req, false)
+#[php_function]
+pub(super) fn strpos(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    #[php(default = 0)] offset: i64,
+) -> Result<OrFalse<i64>, Thrown> {
+    positioned(req, (haystack, needle, offset), false)
 }
 
 /// `stripos(...)`, `php_memnistr` over the same window.
@@ -86,13 +82,21 @@ pub(super) fn strpos(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// ```
-pub(super) fn stripos(req: &mut Request) -> Result<Value, Thrown> {
-    positioned(req, true)
+#[php_function]
+pub(super) fn stripos(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    #[php(default = 0)] offset: i64,
+) -> Result<OrFalse<i64>, Thrown> {
+    positioned(req, (haystack, needle, offset), true)
 }
 
-fn positioned(req: &mut Request, fold: bool) -> Result<Value, Thrown> {
-    let (haystack, needle) = search_arguments(req)?;
-    let mut offset = optional_long(req, 3, 0)?;
+fn positioned(
+    req: &mut Request,
+    (haystack, needle, mut offset): (PhpString, PhpString, i64),
+    fold: bool,
+) -> Result<OrFalse<i64>, Thrown> {
     let len = long(haystack.len());
     if offset < 0 {
         offset += len;
@@ -108,7 +112,7 @@ fn positioned(req: &mut Request, fold: bool) -> Result<Value, Thrown> {
     } else {
         memnstr(haystack.as_bytes(), needle.as_bytes(), from)
     };
-    Ok(found.map_or(Value::bool(false), |at| Value::int(long(at))))
+    Ok(found.map_or(OrFalse::False, |at| OrFalse::Value(long(at))))
 }
 
 /// `strrpos(string $haystack, string $needle, int $offset = 0):
@@ -140,14 +144,18 @@ fn positioned(req: &mut Request, fold: bool) -> Result<Value, Thrown> {
 /// strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// ```
-pub(super) fn strrpos(req: &mut Request) -> Result<Value, Thrown> {
-    let (haystack, needle) = search_arguments(req)?;
-    let offset = optional_long(req, 3, 0)?;
+#[php_function]
+pub(super) fn strrpos(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    #[php(default = 0)] offset: i64,
+) -> Result<OrFalse<i64>, Thrown> {
     let (h, n) = (haystack.as_bytes(), needle.as_bytes());
     let Some((from, to)) = reverse_window(h.len(), n.len(), offset) else {
         return Err(outside(req));
     };
-    Ok(memnrstr(h, n, from, to).map_or(Value::bool(false), |at| Value::int(long(at))))
+    Ok(memnrstr(h, n, from, to).map_or(OrFalse::False, |at| OrFalse::Value(long(at))))
 }
 
 /// `strrpos`'s window, `p` and `e`: `None` for an offset outside the
@@ -188,9 +196,13 @@ fn reverse_window(hlen: usize, nlen: usize, offset: i64) -> Option<(usize, usize
 /// strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// ```
-pub(super) fn strripos(req: &mut Request) -> Result<Value, Thrown> {
-    let (haystack, needle) = search_arguments(req)?;
-    let offset = optional_long(req, 3, 0)?;
+#[php_function]
+pub(super) fn strripos(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    #[php(default = 0)] offset: i64,
+) -> Result<OrFalse<i64>, Thrown> {
     let h: Vec<u8> = haystack.as_bytes().iter().map(|c| lower(*c)).collect();
     let n: Vec<u8> = needle.as_bytes().iter().map(|c| lower(*c)).collect();
     if n.len() == 1 {
@@ -214,12 +226,12 @@ pub(super) fn strripos(req: &mut Request) -> Result<Value, Thrown> {
         let found = h
             .get(p..end.min(h.len()))
             .and_then(|span| span.iter().rposition(|c| *c == n[0]));
-        return Ok(found.map_or(Value::bool(false), |at| Value::int(long(at + p))));
+        return Ok(found.map_or(OrFalse::False, |at| OrFalse::Value(long(at + p))));
     }
     let Some((from, to)) = reverse_window(h.len(), n.len(), offset) else {
         return Err(outside(req));
     };
-    Ok(memnrstr(&h, &n, from, to).map_or(Value::bool(false), |at| Value::int(long(at))))
+    Ok(memnrstr(&h, &n, from, to).map_or(OrFalse::False, |at| OrFalse::Value(long(at))))
 }
 
 /// `strstr(string $haystack, string $needle, bool $before_needle =
@@ -238,8 +250,14 @@ pub(super) fn strripos(req: &mut Request) -> Result<Value, Thrown> {
 /// string(2) "US"
 /// bool(false)
 /// ```
-pub(super) fn strstr(req: &mut Request) -> Result<Value, Thrown> {
-    found_part(req, false)
+#[php_function(aliases(strchr))]
+pub(super) fn strstr(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    #[php(default = false)] before_needle: bool,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    found_part(req, (haystack, needle, before_needle), false)
 }
 
 /// `stristr(...)`.
@@ -253,13 +271,21 @@ pub(super) fn strstr(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// string(3) "abc"
 /// ```
-pub(super) fn stristr(req: &mut Request) -> Result<Value, Thrown> {
-    found_part(req, true)
+#[php_function]
+pub(super) fn stristr(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    #[php(default = false)] before_needle: bool,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    found_part(req, (haystack, needle, before_needle), true)
 }
 
-fn found_part(req: &mut Request, fold: bool) -> Result<Value, Thrown> {
-    let (haystack, needle) = search_arguments(req)?;
-    let part = optional_bool(req, 3, false)?;
+fn found_part(
+    req: &mut Request,
+    (haystack, needle, part): (PhpString, PhpString, bool),
+    fold: bool,
+) -> Result<OrFalse<PhpString>, Thrown> {
     let h = haystack.as_bytes();
     let found = if fold {
         let lh: Vec<u8> = h.iter().map(|c| lower(*c)).collect();
@@ -269,9 +295,9 @@ fn found_part(req: &mut Request, fold: bool) -> Result<Value, Thrown> {
         memnstr(h, needle.as_bytes(), 0)
     };
     match found {
-        None => Ok(Value::bool(false)),
-        Some(at) if part => string_value(req, &h[..at]),
-        Some(at) => string_value(req, &h[at..]),
+        None => Ok(OrFalse::False),
+        Some(at) if part => PhpString::new(req, &h[..at]).map(OrFalse::Value),
+        Some(at) => PhpString::new(req, &h[at..]).map(OrFalse::Value),
     }
 }
 
@@ -289,15 +315,20 @@ fn found_part(req: &mut Request, fold: bool) -> Result<Value, Thrown> {
 /// bool(false)
 /// string(4) "0062"
 /// ```
-pub(super) fn strrchr(req: &mut Request) -> Result<Value, Thrown> {
-    let (haystack, needle) = search_arguments(req)?;
-    let part = optional_bool(req, 3, false)?;
+#[php_function]
+pub(super) fn strrchr(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    #[php(default = false)] before_needle: bool,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let part = before_needle;
     let h = haystack.as_bytes();
     let c = needle.as_bytes().first().copied().unwrap_or(0);
     match h.iter().rposition(|b| *b == c) {
-        None => Ok(Value::bool(false)),
-        Some(at) if part => string_value(req, &h[..at]),
-        Some(at) => string_value(req, &h[at..]),
+        None => Ok(OrFalse::False),
+        Some(at) if part => PhpString::new(req, &h[..at]).map(OrFalse::Value),
+        Some(at) => PhpString::new(req, &h[at..]).map(OrFalse::Value),
     }
 }
 
@@ -316,13 +347,9 @@ pub(super) fn strrchr(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-pub(super) fn str_starts_with(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let haystack = string_argument(req, 1)?;
-    let needle = string_argument(req, 2)?;
-    Ok(Value::bool(
-        haystack.as_bytes().starts_with(needle.as_bytes()),
-    ))
+#[php_function]
+pub(super) fn str_starts_with(haystack: PhpString, needle: PhpString) -> bool {
+    haystack.as_bytes().starts_with(needle.as_bytes())
 }
 
 /// `str_ends_with(...)`.
@@ -337,11 +364,7 @@ pub(super) fn str_starts_with(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-pub(super) fn str_ends_with(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let haystack = string_argument(req, 1)?;
-    let needle = string_argument(req, 2)?;
-    Ok(Value::bool(
-        haystack.as_bytes().ends_with(needle.as_bytes()),
-    ))
+#[php_function]
+pub(super) fn str_ends_with(haystack: PhpString, needle: PhpString) -> bool {
+    haystack.as_bytes().ends_with(needle.as_bytes())
 }

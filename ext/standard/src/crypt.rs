@@ -11,14 +11,10 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::{Attribute, ConstDecl, FunctionDecl, Name};
+use php_ext::attr::{php_const, php_function};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::{argument_count_between, constant, string_argument};
+use php_ext::values::PhpString;
 
 mod blowfish;
 mod freesec;
@@ -110,46 +106,17 @@ fn crypt_string(string: &[u8], salt: &[u8]) -> Vec<u8> {
 /// int(1)
 /// int(1)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    vec![
-        constant(
-            b"CRYPT_SALT_LENGTH",
-            i64::try_from(PHP_MAX_SALT_LEN).unwrap_or(0),
-        ),
-        constant(b"CRYPT_STD_DES", 1),
-        constant(b"CRYPT_EXT_DES", 1),
-        constant(b"CRYPT_MD5", 1),
-        constant(b"CRYPT_BLOWFISH", 1),
-        constant(b"CRYPT_SHA256", 1),
-        constant(b"CRYPT_SHA512", 1),
-    ]
-}
-
-/// The one native, `$string` under `#[\SensitiveParameter]` as the
-/// stub marks it.
-///
-/// ```php
-/// echo new ReflectionFunction('crypt');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function crypt ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $string ]
-///     Parameter #1 [ <required> string $salt ]
-///   }
-///   - Return [ string ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let mut decl = stub("crypt(string $string, string $salt): string");
-    if let Some(string) = decl.parameters.first_mut() {
-        string.attributes.push(Attribute {
-            name: Name(b"SensitiveParameter".as_slice().into()),
-            arguments: Vec::new(),
-        });
+#[php_const]
+pub(crate) mod constants {
+    pub(crate) fn CRYPT_SALT_LENGTH() -> i64 {
+        i64::try_from(super::PHP_MAX_SALT_LEN).unwrap_or(0)
     }
-    vec![(decl, crypt as Entry)]
+    pub(crate) const CRYPT_STD_DES: i64 = 1;
+    pub(crate) const CRYPT_EXT_DES: i64 = 1;
+    pub(crate) const CRYPT_MD5: i64 = 1;
+    pub(crate) const CRYPT_BLOWFISH: i64 = 1;
+    pub(crate) const CRYPT_SHA256: i64 = 1;
+    pub(crate) const CRYPT_SHA512: i64 = 1;
 }
 
 /// `crypt(string $string, string $salt): string`, `PHP_FUNCTION(crypt)`
@@ -183,10 +150,28 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// $2a$05$abcdefghijklmnopqrstuuS4MQfWavlhc6PZtLZxy3d/FQNIPTs2e
 /// crypt() expects exactly 2 arguments, 1 given
 /// ```
-fn crypt(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let string = string_argument(req, 1)?;
-    let salt = string_argument(req, 2)?;
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('crypt');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function crypt ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <required> string $salt ]
+///   }
+///   - Return [ string ]
+/// }
+/// ```
+#[php_function]
+fn crypt(
+    req: &mut Request,
+    #[php(sensitive)] string: PhpString,
+    salt: PhpString,
+) -> Result<PhpString, Thrown> {
     let hash = crypt_string(string.as_bytes(), salt.as_bytes());
-    Ok(Value::string(PhpString::new(req, &hash)?))
+    PhpString::new(req, &hash)
 }

@@ -8,21 +8,16 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::{coerce_param, to_long};
-use php_ext::decl::{Attribute, ConstDecl, ConstExpr, FunctionDecl, Name, Type};
+use php_ext::abi::Union;
+use php_ext::attr::{php_const, php_function};
+use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::given;
-use crate::{argument_count_between, constant, string_argument};
+use constants::PASSWORD_BCRYPT_DEFAULT_COST as BCRYPT_COST;
 
 mod argon2;
-
-/// `PHP_PASSWORD_BCRYPT_COST` (`Z/ext/standard/php_password.h:24`).
-const BCRYPT_COST: i64 = 12;
 
 /// One of the registered algorithms, `php_password_algo`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -105,137 +100,33 @@ fn identify(hash: &[u8], default: Option<Algo>) -> Option<Algo> {
 /// int(4)
 /// int(1)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    let string = |name: &[u8], value: &[u8]| ConstDecl {
-        name: Name(name.into()),
-        value: ConstExpr::Str(value.into()),
-        attributes: Vec::new(),
-    };
-    vec![
-        string(b"PASSWORD_DEFAULT", b"2y"),
-        string(b"PASSWORD_BCRYPT", b"2y"),
-        constant(b"PASSWORD_BCRYPT_DEFAULT_COST", BCRYPT_COST),
-        string(b"PASSWORD_ARGON2I", b"argon2i"),
-        string(b"PASSWORD_ARGON2ID", b"argon2id"),
-        string(b"PASSWORD_ARGON2_PROVIDER", b"standard"),
-        constant(
-            b"PASSWORD_ARGON2_DEFAULT_MEMORY_COST",
-            argon2::DEFAULT_MEMORY_COST,
-        ),
-        constant(
-            b"PASSWORD_ARGON2_DEFAULT_TIME_COST",
-            argon2::DEFAULT_TIME_COST,
-        ),
-        constant(b"PASSWORD_ARGON2_DEFAULT_THREADS", argon2::DEFAULT_THREADS),
-    ]
+#[php_const]
+pub(crate) mod constants {
+    use super::argon2;
+
+    pub(crate) const PASSWORD_DEFAULT: &str = "2y";
+    pub(crate) const PASSWORD_BCRYPT: &str = "2y";
+    /// `PHP_PASSWORD_BCRYPT_COST` (`Z/ext/standard/php_password.h:24`).
+    pub(crate) const PASSWORD_BCRYPT_DEFAULT_COST: i64 = 12;
+    pub(crate) const PASSWORD_ARGON2I: &str = "argon2i";
+    pub(crate) const PASSWORD_ARGON2ID: &str = "argon2id";
+    pub(crate) const PASSWORD_ARGON2_PROVIDER: &str = "standard";
+    pub(crate) const PASSWORD_ARGON2_DEFAULT_MEMORY_COST: i64 = argon2::DEFAULT_MEMORY_COST;
+    pub(crate) const PASSWORD_ARGON2_DEFAULT_TIME_COST: i64 = argon2::DEFAULT_TIME_COST;
+    pub(crate) const PASSWORD_ARGON2_DEFAULT_THREADS: i64 = argon2::DEFAULT_THREADS;
 }
 
-/// The natives, `$password` under `#[\SensitiveParameter]` where the
-/// stub marks it.
-///
-/// ```php
-/// foreach (['password_get_info', 'password_hash', 'password_needs_rehash', 'password_verify', 'password_algos'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function password_get_info ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $hash ]
-///   }
-///   - Return [ array ]
-/// }
-/// Function [ <internal:standard> function password_hash ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $password ]
-///     Parameter #1 [ <required> string|int|null $algo ]
-///     Parameter #2 [ <optional> array $options = [] ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function password_needs_rehash ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $hash ]
-///     Parameter #1 [ <required> string|int|null $algo ]
-///     Parameter #2 [ <optional> array $options = [] ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function password_verify ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $password ]
-///     Parameter #1 [ <required> string $hash ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function password_algos ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ array ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let sensitive = |mut decl: FunctionDecl| {
-        if let Some(password) = decl.parameters.first_mut() {
-            password.attributes.push(Attribute {
-                name: Name(b"SensitiveParameter".as_slice().into()),
-                arguments: Vec::new(),
-            });
-        }
-        decl
-    };
-    vec![
-        (
-            stub("password_get_info(string $hash): array"),
-            password_get_info as Entry,
-        ),
-        (
-            sensitive(stub(
-                "password_hash(string $password, string|int|null $algo, array $options = []): string",
-            )),
-            password_hash,
-        ),
-        (
-            stub(
-                "password_needs_rehash(string $hash, string|int|null $algo, array $options = []): bool",
-            ),
-            password_needs_rehash,
-        ),
-        (
-            sensitive(stub(
-                "password_verify(string $password, string $hash): bool",
-            )),
-            password_verify,
-        ),
-        (stub("password_algos(): array"), password_algos),
-    ]
-}
-
-/// `Z_PARAM_STR_OR_LONG_OR_NULL` then `php_password_algo_find_zval`
-/// (`Z/ext/standard/password.c:475`): `null` and `0` the default, bcrypt;
-/// `1` bcrypt, `2` and `3` the two argon2; a string the algorithm
-/// registered under it; `None` for anything else.
-fn algo_argument(req: &mut Request, position: u32) -> Result<Option<Algo>, Thrown> {
-    let value = req.argument(position).unwrap_or_default();
-    let ty = Type::Union(vec![Type::String, Type::Int, Type::Null]);
-    let value = coerce_param(req, &value, &ty, position)?;
-    Ok(match value.deref().as_ref() {
-        ValueRef::Null | ValueRef::Int(0 | 1) => Some(Algo::Bcrypt),
-        ValueRef::Str(ident) => Algo::find(ident.as_bytes()),
-        ValueRef::Int(2) => Some(Algo::Argon2(argon2::Variant::I)),
-        ValueRef::Int(3) => Some(Algo::Argon2(argon2::Variant::Id)),
-        _ => None,
-    })
-}
-
-/// `Z_PARAM_ARRAY_HT(options)` after `Z_PARAM_OPTIONAL`.
-fn options_argument(req: &mut Request, position: u32) -> Result<Option<PhpArray>, Thrown> {
-    match given(req, position) {
-        Some(_) => crate::zpp::array_argument(req, position).map(Some),
-        None => Ok(None),
+/// `php_password_algo_find_zval` (`Z/ext/standard/password.c:475`) over
+/// what `Z_PARAM_STR_OR_LONG_OR_NULL` held: `null` and `0` the default,
+/// bcrypt; `1` bcrypt, `2` and `3` the two argon2; a string the
+/// algorithm registered under it; `None` for anything else.
+fn algo_of(algo: Option<Union<PhpString, i64>>) -> Option<Algo> {
+    match algo {
+        None | Some(Union::B(0 | 1)) => Some(Algo::Bcrypt),
+        Some(Union::A(ident)) => Algo::find(ident.as_bytes()),
+        Some(Union::B(2)) => Some(Algo::Argon2(argon2::Variant::I)),
+        Some(Union::B(3)) => Some(Algo::Argon2(argon2::Variant::Id)),
+        Some(Union::B(_)) => None,
     }
 }
 
@@ -331,12 +222,15 @@ fn make_salt(
 /// Invalid number of threads
 /// Memory cost is too small
 /// ```
-fn password_hash(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let password = string_argument(req, 1)?;
-    let algo = algo_argument(req, 2)?;
-    let options = options_argument(req, 3)?;
-    let Some(algo) = algo else {
+#[php_function]
+fn password_hash(
+    req: &mut Request,
+    #[php(sensitive)] password: PhpString,
+    algo: Option<Union<PhpString, i64>>,
+    #[php(default = [])] options: PhpArray,
+) -> Result<PhpString, Thrown> {
+    let options = Some(options);
+    let Some(algo) = algo_of(algo) else {
         return Err(arg_value_error(
             req,
             2,
@@ -392,7 +286,7 @@ fn password_hash(req: &mut Request) -> Result<Value, Thrown> {
             "Password hashing failed for unknown reason",
         ));
     };
-    Ok(Value::string(PhpString::new(req, &digest)?))
+    PhpString::new(req, &digest)
 }
 
 /// `password_verify(string $password, string $hash): bool`,
@@ -414,17 +308,14 @@ fn password_hash(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn password_verify(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let password = string_argument(req, 1)?;
-    let hash = string_argument(req, 2)?;
+#[php_function]
+fn password_verify(#[php(sensitive)] password: PhpString, hash: PhpString) -> bool {
     let (password, hash) = (password.as_bytes(), hash.as_bytes());
-    let verified = match identify(hash, Some(Algo::Bcrypt)) {
+    match identify(hash, Some(Algo::Bcrypt)) {
         Some(Algo::Argon2(variant)) => argon2::verify(hash, password, variant),
         _ => crate::crypt::php_crypt(password, hash, true)
             .is_some_and(|out| hash.len() >= 13 && out == hash),
-    };
-    Ok(Value::bool(verified))
+    }
 }
 
 /// `password_get_info(string $hash): array`,
@@ -488,9 +379,55 @@ fn password_verify(req: &mut Request) -> Result<Value, Thrown> {
 ///   }
 /// }
 /// ```
-fn password_get_info(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let hash = string_argument(req, 1)?;
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// foreach (['password_get_info', 'password_hash', 'password_needs_rehash', 'password_verify', 'password_algos'] as $f) echo new ReflectionFunction($f);
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function password_get_info ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $hash ]
+///   }
+///   - Return [ array ]
+/// }
+/// Function [ <internal:standard> function password_hash ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $password ]
+///     Parameter #1 [ <required> string|int|null $algo ]
+///     Parameter #2 [ <optional> array $options = [] ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function password_needs_rehash ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $hash ]
+///     Parameter #1 [ <required> string|int|null $algo ]
+///     Parameter #2 [ <optional> array $options = [] ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function password_verify ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $password ]
+///     Parameter #1 [ <required> string $hash ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function password_algos ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ array ]
+/// }
+/// ```
+#[php_function]
+fn password_get_info(req: &mut Request, hash: PhpString) -> Result<PhpArray, Thrown> {
     let hash = hash.as_bytes();
     let mut array = PhpArray::new(req)?;
     let mut options = PhpArray::new(req)?;
@@ -531,7 +468,7 @@ fn password_get_info(req: &mut Request) -> Result<Value, Thrown> {
         set(req, &mut array, "algoName", unknown)?;
     }
     set(req, &mut array, "options", Value::array(options))?;
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `password_needs_rehash(string $hash, string|int|null $algo, array $options = []): bool`,
@@ -554,18 +491,21 @@ fn password_get_info(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn password_needs_rehash(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let hash = string_argument(req, 1)?;
-    let new_algo = algo_argument(req, 2)?;
-    let options = options_argument(req, 3)?;
-    let Some(new_algo) = new_algo else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn password_needs_rehash(
+    req: &mut Request,
+    hash: PhpString,
+    algo: Option<Union<PhpString, i64>>,
+    #[php(default = [])] options: PhpArray,
+) -> Result<bool, Thrown> {
+    let options = Some(options);
+    let Some(new_algo) = algo_of(algo) else {
+        return Ok(false);
     };
     let hash = hash.as_bytes();
     let old_algo = identify(hash, None);
     if old_algo != Some(new_algo) {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
     let rehash = match new_algo {
         Algo::Bcrypt => {
@@ -582,7 +522,7 @@ fn password_needs_rehash(req: &mut Request) -> Result<Value, Thrown> {
             argon2::needs_rehash(hash, memory, time, threads)
         }
     };
-    Ok(Value::bool(rehash))
+    Ok(rehash)
 }
 
 /// `password_algos(): array`, `PHP_FUNCTION(password_algos)`
@@ -601,12 +541,12 @@ fn password_needs_rehash(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(8) "argon2id"
 /// }
 /// ```
-fn password_algos(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+#[php_function]
+fn password_algos(req: &mut Request) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     for ident in IDENTS {
         let ident = Value::string(PhpString::new(req, ident.as_bytes())?);
         array.append(req, ident)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }

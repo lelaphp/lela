@@ -9,103 +9,92 @@
 //! answers for every other name is the host's locale table, and
 //! passing a name through to it is #640's.
 
+use php_ext::abi::{OrFalse, Untyped, Variadic};
+use php_ext::attr::php_function;
 use php_ext::coerce::to_string;
-use php_ext::decl::ConstDecl;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
-use crate::zpp::{long_of, string_value};
-use crate::{argument_count_between, constant, long_argument, string_argument};
+use super::constants::{
+    self, CHAR_MAX, CODESET, LC_ALL, LC_COLLATE, LC_CTYPE, LC_MESSAGES, LC_MONETARY, LC_NUMERIC,
+    LC_TIME,
+};
 
 /// `LC_ALL` and the six categories, the values of the pinned build's
 /// `<locale.h>`, in `setlocale(LC_ALL, NULL)`'s composite order.
-const LC_ALL: i64 = 0;
 const CATEGORIES: [(&[u8], i64); 7] = [
-    (b"LC_CTYPE", 2),
-    (b"LC_NUMERIC", 4),
-    (b"LC_TIME", 5),
-    (b"LC_COLLATE", 1),
-    (b"LC_MONETARY", 3),
+    (b"LC_CTYPE", LC_CTYPE),
+    (b"LC_NUMERIC", LC_NUMERIC),
+    (b"LC_TIME", LC_TIME),
+    (b"LC_COLLATE", LC_COLLATE),
+    (b"LC_MONETARY", LC_MONETARY),
     (b"LC_ALL", LC_ALL),
-    (b"LC_MESSAGES", 6),
+    (b"LC_MESSAGES", LC_MESSAGES),
 ];
 
 /// `nl_langinfo`'s items under the C locale, indexed by the pinned
 /// build's `<langinfo.h>` values, `CODESET` (0) aside since it follows
 /// `LC_CTYPE`.
-const LANGINFO: [(&[u8], &[u8]); 57] = [
-    (b"CODESET", b""),
-    (b"D_T_FMT", b"%a %b %e %H:%M:%S %Y"),
-    (b"D_FMT", b"%m/%d/%y"),
-    (b"T_FMT", b"%H:%M:%S"),
-    (b"T_FMT_AMPM", b"%I:%M:%S %p"),
-    (b"AM_STR", b"AM"),
-    (b"PM_STR", b"PM"),
-    (b"DAY_1", b"Sunday"),
-    (b"DAY_2", b"Monday"),
-    (b"DAY_3", b"Tuesday"),
-    (b"DAY_4", b"Wednesday"),
-    (b"DAY_5", b"Thursday"),
-    (b"DAY_6", b"Friday"),
-    (b"DAY_7", b"Saturday"),
-    (b"ABDAY_1", b"Sun"),
-    (b"ABDAY_2", b"Mon"),
-    (b"ABDAY_3", b"Tue"),
-    (b"ABDAY_4", b"Wed"),
-    (b"ABDAY_5", b"Thu"),
-    (b"ABDAY_6", b"Fri"),
-    (b"ABDAY_7", b"Sat"),
-    (b"MON_1", b"January"),
-    (b"MON_2", b"February"),
-    (b"MON_3", b"March"),
-    (b"MON_4", b"April"),
-    (b"MON_5", b"May"),
-    (b"MON_6", b"June"),
-    (b"MON_7", b"July"),
-    (b"MON_8", b"August"),
-    (b"MON_9", b"September"),
-    (b"MON_10", b"October"),
-    (b"MON_11", b"November"),
-    (b"MON_12", b"December"),
-    (b"ABMON_1", b"Jan"),
-    (b"ABMON_2", b"Feb"),
-    (b"ABMON_3", b"Mar"),
-    (b"ABMON_4", b"Apr"),
-    (b"ABMON_5", b"May"),
-    (b"ABMON_6", b"Jun"),
-    (b"ABMON_7", b"Jul"),
-    (b"ABMON_8", b"Aug"),
-    (b"ABMON_9", b"Sep"),
-    (b"ABMON_10", b"Oct"),
-    (b"ABMON_11", b"Nov"),
-    (b"ABMON_12", b"Dec"),
-    (b"ERA", b""),
-    (b"ERA_D_FMT", b""),
-    (b"ERA_D_T_FMT", b""),
-    (b"ERA_T_FMT", b""),
-    (b"ALT_DIGITS", b""),
-    (b"RADIXCHAR", b"."),
-    (b"THOUSEP", b""),
-    (b"YESEXPR", b"^[yY]"),
-    (b"NOEXPR", b"^[nN]"),
-    (b"YESSTR", b"yes"),
-    (b"NOSTR", b"no"),
-    (b"CRNCYSTR", b""),
+const LANGINFO: [(i64, &[u8]); 57] = [
+    (constants::CODESET, b""),
+    (constants::D_T_FMT, b"%a %b %e %H:%M:%S %Y"),
+    (constants::D_FMT, b"%m/%d/%y"),
+    (constants::T_FMT, b"%H:%M:%S"),
+    (constants::T_FMT_AMPM, b"%I:%M:%S %p"),
+    (constants::AM_STR, b"AM"),
+    (constants::PM_STR, b"PM"),
+    (constants::DAY_1, b"Sunday"),
+    (constants::DAY_2, b"Monday"),
+    (constants::DAY_3, b"Tuesday"),
+    (constants::DAY_4, b"Wednesday"),
+    (constants::DAY_5, b"Thursday"),
+    (constants::DAY_6, b"Friday"),
+    (constants::DAY_7, b"Saturday"),
+    (constants::ABDAY_1, b"Sun"),
+    (constants::ABDAY_2, b"Mon"),
+    (constants::ABDAY_3, b"Tue"),
+    (constants::ABDAY_4, b"Wed"),
+    (constants::ABDAY_5, b"Thu"),
+    (constants::ABDAY_6, b"Fri"),
+    (constants::ABDAY_7, b"Sat"),
+    (constants::MON_1, b"January"),
+    (constants::MON_2, b"February"),
+    (constants::MON_3, b"March"),
+    (constants::MON_4, b"April"),
+    (constants::MON_5, b"May"),
+    (constants::MON_6, b"June"),
+    (constants::MON_7, b"July"),
+    (constants::MON_8, b"August"),
+    (constants::MON_9, b"September"),
+    (constants::MON_10, b"October"),
+    (constants::MON_11, b"November"),
+    (constants::MON_12, b"December"),
+    (constants::ABMON_1, b"Jan"),
+    (constants::ABMON_2, b"Feb"),
+    (constants::ABMON_3, b"Mar"),
+    (constants::ABMON_4, b"Apr"),
+    (constants::ABMON_5, b"May"),
+    (constants::ABMON_6, b"Jun"),
+    (constants::ABMON_7, b"Jul"),
+    (constants::ABMON_8, b"Aug"),
+    (constants::ABMON_9, b"Sep"),
+    (constants::ABMON_10, b"Oct"),
+    (constants::ABMON_11, b"Nov"),
+    (constants::ABMON_12, b"Dec"),
+    (constants::ERA, b""),
+    (constants::ERA_D_FMT, b""),
+    (constants::ERA_D_T_FMT, b""),
+    (constants::ERA_T_FMT, b""),
+    (constants::ALT_DIGITS, b""),
+    (constants::RADIXCHAR, b"."),
+    (constants::THOUSEP, b""),
+    (constants::YESEXPR, b"^[yY]"),
+    (constants::NOEXPR, b"^[nN]"),
+    (constants::YESSTR, b"yes"),
+    (constants::NOSTR, b"no"),
+    (constants::CRNCYSTR, b""),
 ];
-
-/// The constants of `string.c`'s locale natives: `CHAR_MAX`, the
-/// `LC_*` categories and the `nl_langinfo` items.
-pub(super) fn constants() -> Vec<ConstDecl> {
-    let mut out = vec![constant(b"CHAR_MAX", 127)];
-    for (name, value) in CATEGORIES {
-        out.push(constant(name, value));
-    }
-    for (value, (name, _)) in LANGINFO.iter().enumerate() {
-        out.push(constant(name, i64::try_from(value).unwrap_or(0)));
-    }
-    out
-}
 
 /// Each category's current name, by `<locale.h>` value, `LC_ALL`'s
 /// slot unused.
@@ -232,20 +221,18 @@ fn try_setlocale(req: &mut Request, category: i64, loc: &[u8]) -> Option<Vec<u8>
 /// setlocale(): Argument #2 ($locales) must be of type array|string|null, stdClass given
 /// setlocale() expects at least 2 arguments, 1 given
 /// ```
-pub(super) fn setlocale(req: &mut Request) -> Result<Value, Thrown> {
-    let given = req.argument_count();
-    if given < 2 {
-        return Err(php_ext::raising::too_few_arguments(
-            req,
-            2,
-            u32::try_from(given).unwrap_or(0),
-        ));
-    }
-    let category = long_argument(req, 1)?;
-    let mut candidates: Vec<Value> = Vec::with_capacity(given - 1);
-    for position in 2..=given {
-        let position = u32::try_from(position).unwrap_or(u32::MAX);
-        let value = req.argument(position).unwrap_or_default();
+#[php_function]
+pub(super) fn setlocale(
+    req: &mut Request,
+    category: i64,
+    locales: Untyped<Value>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let given: Vec<Value> = std::iter::once(locales.0)
+        .chain(rest.0.into_iter().map(|rest| rest.0))
+        .collect();
+    let mut candidates: Vec<Value> = Vec::with_capacity(given.len());
+    for (value, position) in given.into_iter().zip(2u32..) {
         let ty = php_ext::decl::Type::Union(vec![
             php_ext::decl::Type::Array,
             php_ext::decl::Type::String,
@@ -267,11 +254,11 @@ pub(super) fn setlocale(req: &mut Request) -> Result<Value, Thrown> {
         };
         for name in names {
             if let Some(answer) = try_setlocale(req, category, &name) {
-                return string_value(req, &answer);
+                return PhpString::new(req, &answer).map(OrFalse::Value);
             }
         }
     }
-    Ok(Value::bool(false))
+    Ok(OrFalse::False)
 }
 
 /// `localeconv(): array`: the C locale's `struct lconv`, `CHAR_MAX` in
@@ -322,8 +309,8 @@ pub(super) fn setlocale(req: &mut Request) -> Result<Value, Thrown> {
 ///   }
 /// }
 /// ```
-pub(super) fn localeconv(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+#[php_function]
+pub(super) fn localeconv(req: &mut Request) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     let strings: [(&[u8], &[u8]); 8] = [
         (b"decimal_point", b"."),
@@ -337,7 +324,7 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Value, Thrown> {
     ];
     for (name, value) in strings {
         let key = Key::Str(PhpString::new(req, name)?);
-        let value = string_value(req, value)?;
+        let value = Value::string(PhpString::new(req, value)?);
         array.set(req, key, value)?;
     }
     for name in [
@@ -351,14 +338,14 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Value, Thrown> {
         b"n_sign_posn",
     ] {
         let key = Key::Str(PhpString::new(req, name)?);
-        array.set(req, key, long_of(127))?;
+        array.set(req, key, Value::int(CHAR_MAX))?;
     }
     for name in [&b"grouping"[..], b"mon_grouping"] {
         let key = Key::Str(PhpString::new(req, name)?);
         let empty = PhpArray::new(req)?;
         array.set(req, key, Value::array(empty))?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `nl_langinfo(int $item): string|false`: the C locale's answer for
@@ -382,18 +369,17 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Value, Thrown> {
 /// string(8) "US-ASCII"
 /// bool(false)
 /// ```
-pub(super) fn nl_langinfo(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let item = long_argument(req, 1)?;
-    let Some((_, answer)) = usize::try_from(item).ok().and_then(|i| LANGINFO.get(i)) else {
+#[php_function]
+pub(super) fn nl_langinfo(req: &mut Request, item: i64) -> Result<OrFalse<PhpString>, Thrown> {
+    let Some((_, answer)) = LANGINFO.iter().find(|(id, _)| *id == item) else {
         docref(req, Level::Warning, &format!("Item '{item}' is not valid"));
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
-    if item == 0 {
+    if item == CODESET {
         let utf8 = req.state::<crate::State>().string.locale.names[2] == b"C.UTF-8";
-        return string_value(req, if utf8 { b"UTF-8" } else { b"US-ASCII" });
+        return PhpString::new(req, if utf8 { b"UTF-8" } else { b"US-ASCII" }).map(OrFalse::Value);
     }
-    string_value(req, answer)
+    PhpString::new(req, answer).map(OrFalse::Value)
 }
 
 /// `strcoll(string $string1, string $string2): int`: the C locale's
@@ -413,10 +399,9 @@ pub(super) fn nl_langinfo(req: &mut Request) -> Result<Value, Thrown> {
 /// int(158)
 /// int(0)
 /// ```
-pub(super) fn strcoll(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let s1 = string_argument(req, 1)?;
-    let s2 = string_argument(req, 2)?;
+#[php_function]
+pub(super) fn strcoll(string1: PhpString, string2: PhpString) -> i64 {
+    let (s1, s2) = (string1, string2);
     let c_str = |s: &[u8]| -> Vec<u8> { s.split(|c| *c == 0).next().unwrap_or(&[]).to_vec() };
     let (left, right) = (c_str(s1.as_bytes()), c_str(s2.as_bytes()));
     let mut at = 0;
@@ -424,7 +409,7 @@ pub(super) fn strcoll(req: &mut Request) -> Result<Value, Thrown> {
         let x = left.get(at).copied().unwrap_or(0);
         let y = right.get(at).copied().unwrap_or(0);
         if x != y || x == 0 {
-            return Ok(Value::int(i64::from(x) - i64::from(y)));
+            return i64::from(x) - i64::from(y);
         }
         at += 1;
     }

@@ -3,52 +3,13 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::FunctionDecl;
+use php_ext::abi::{OrFalse, Path};
+use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::Value;
+use php_ext::values::PhpString;
 
-use crate::md5::{digest_value, file_bytes, path_argument};
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::optional_bool;
-use crate::{argument_count_between, string_argument};
-
-/// The two, in the stub's order.
-///
-/// ```php
-/// echo new ReflectionFunction('sha1'), new ReflectionFunction('sha1_file');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function sha1 ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $string ]
-///     Parameter #1 [ <optional> bool $binary = false ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function sha1_file ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $filename ]
-///     Parameter #1 [ <optional> bool $binary = false ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("sha1(string $string, bool $binary = false): string"),
-            sha1 as Entry,
-        ),
-        (
-            stub("sha1_file(string $filename, bool $binary = false): string|false"),
-            sha1_file,
-        ),
-    ]
-}
+use crate::md5::{digest_value, file_bytes};
 
 /// `PHP_SHA1Init`, `PHP_SHA1Update` and `PHP_SHA1Final` over one
 /// buffer: the twenty bytes.
@@ -143,10 +104,36 @@ pub fn transform(h: &mut [u32; 5], block: &[u8]) {
 /// string(40) "291e9a6c66994949b57ba5e650361e98fc36b1ba"
 /// string(40) "a9993e364706816aba3e25717850c26c9cd0d89d"
 /// ```
-fn sha1(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let binary = optional_bool(req, 2, false)?;
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('sha1'), new ReflectionFunction('sha1_file');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function sha1 ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> bool $binary = false ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function sha1_file ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $filename ]
+///     Parameter #1 [ <optional> bool $binary = false ]
+///   }
+///   - Return [ string|false ]
+/// }
+/// ```
+#[php_function]
+fn sha1(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = false)] binary: bool,
+) -> Result<PhpString, Thrown> {
     let digest = digest(string.as_bytes());
     digest_value(req, &digest, binary)
 }
@@ -164,13 +151,15 @@ fn sha1(req: &mut Request) -> Result<Value, Thrown> {
 /// string(40) "13d726010b8b0a0cec871360a41b7bc5ba1e5045"
 /// bool(false)
 /// ```
-fn sha1_file(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let filename = path_argument(req, 1)?;
-    let binary = optional_bool(req, 2, false)?;
-    let Some(bytes) = file_bytes(req, filename)? else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn sha1_file(
+    req: &mut Request,
+    filename: Path,
+    #[php(default = false)] binary: bool,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let Some(bytes) = file_bytes(req, filename.0)? else {
+        return Ok(OrFalse::False);
     };
     let digest = digest(&bytes);
-    digest_value(req, &digest, binary)
+    digest_value(req, &digest, binary).map(OrFalse::Value)
 }

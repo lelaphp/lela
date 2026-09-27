@@ -10,18 +10,13 @@
 
 mod tables;
 
-use php_ext::decl::{ConstDecl, FunctionDecl};
+use php_ext::abi::Passed;
+use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
 
-use crate::output::Entry;
-use crate::string::next_utf8_char;
-use crate::stub::stub;
-use crate::zpp::{
-    nullable_string, optional_bool, optional_long, optional_string, same, string_value,
-};
-use crate::{argument_count_between, constant, string_argument};
+use crate::string::{next_utf8_char, str_copy};
 use tables::Row;
 
 /// `ENT_HTML_QUOTE_SINGLE` and the rest of `html.h`'s `$flags` bits.
@@ -35,11 +30,10 @@ const DOC_XML1: i64 = 16;
 const DOC_XHTML: i64 = 32;
 const DOC_HTML5: i64 = 16 | 32;
 const SUBSTITUTE_DISALLOWED: i64 = 128;
-/// `ENT_QUOTES | ENT_SUBSTITUTE`, every native's default `$flags`.
-const DEFAULT_FLAGS: i64 = QUOTE_SINGLE | QUOTE_DOUBLE | SUBSTITUTE_ERRORS;
-/// The same flags as `url_scanner_ex.re` hands `php_escape_html_entities_ex`
-/// for a rewrite variable's name and value.
-pub(super) const QUOTES_SUBSTITUTE: i64 = DEFAULT_FLAGS;
+/// `ENT_QUOTES | ENT_SUBSTITUTE`, the flags `url_scanner_ex.re` hands
+/// `php_escape_html_entities_ex` for a rewrite variable's name and value,
+/// and every native's default `$flags` beside `ENT_HTML401`, which is 0.
+pub(super) const QUOTES_SUBSTITUTE: i64 = QUOTE_SINGLE | QUOTE_DOUBLE | SUBSTITUTE_ERRORS;
 /// `LONGEST_ENTITY_LENGTH`.
 const LONGEST_ENTITY_LENGTH: usize = 31;
 
@@ -62,109 +56,25 @@ const LONGEST_ENTITY_LENGTH: usize = 31;
 /// int(32)
 /// int(48)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    vec![
-        constant(b"HTML_SPECIALCHARS", 0),
-        constant(b"HTML_ENTITIES", 1),
-        constant(b"ENT_COMPAT", QUOTE_DOUBLE),
-        constant(b"ENT_QUOTES", QUOTE_SINGLE | QUOTE_DOUBLE),
-        constant(b"ENT_NOQUOTES", 0),
-        constant(b"ENT_IGNORE", IGNORE_ERRORS),
-        constant(b"ENT_SUBSTITUTE", SUBSTITUTE_ERRORS),
-        constant(b"ENT_DISALLOWED", SUBSTITUTE_DISALLOWED),
-        constant(b"ENT_HTML401", DOC_HTML401),
-        constant(b"ENT_XML1", DOC_XML1),
-        constant(b"ENT_XHTML", DOC_XHTML),
-        constant(b"ENT_HTML5", DOC_HTML5),
-    ]
-}
+#[php_const]
+pub(crate) mod constants {
+    use super::{
+        DOC_HTML5, DOC_HTML401, DOC_XHTML, DOC_XML1, IGNORE_ERRORS, QUOTE_DOUBLE, QUOTE_SINGLE,
+        SUBSTITUTE_DISALLOWED, SUBSTITUTE_ERRORS,
+    };
 
-/// The five, in the stub's order.
-///
-/// ```php
-/// foreach (['htmlspecialchars', 'htmlspecialchars_decode', 'html_entity_decode', 'htmlentities', 'get_html_translation_table'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function htmlspecialchars ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> string $string ]
-///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
-///     Parameter #2 [ <optional> ?string $encoding = null ]
-///     Parameter #3 [ <optional> bool $double_encode = true ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function htmlspecialchars_decode ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $string ]
-///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function html_entity_decode ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $string ]
-///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
-///     Parameter #2 [ <optional> ?string $encoding = null ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function htmlentities ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> string $string ]
-///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
-///     Parameter #2 [ <optional> ?string $encoding = null ]
-///     Parameter #3 [ <optional> bool $double_encode = true ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function get_html_translation_table ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <optional> int $table = HTML_SPECIALCHARS ]
-///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
-///     Parameter #2 [ <optional> string $encoding = "UTF-8" ]
-///   }
-///   - Return [ array ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub(
-                "htmlspecialchars(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null, bool $double_encode = true): string",
-            ),
-            htmlspecialchars as Entry,
-        ),
-        (
-            stub(
-                "htmlspecialchars_decode(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401): string",
-            ),
-            htmlspecialchars_decode,
-        ),
-        (
-            stub(
-                "html_entity_decode(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null): string",
-            ),
-            html_entity_decode,
-        ),
-        (
-            stub(
-                "htmlentities(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null, bool $double_encode = true): string",
-            ),
-            htmlentities,
-        ),
-        (
-            stub(
-                "get_html_translation_table(int $table = HTML_SPECIALCHARS, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, string $encoding = \"UTF-8\"): array",
-            ),
-            get_html_translation_table,
-        ),
-    ]
+    pub(crate) const HTML_SPECIALCHARS: i64 = 0;
+    pub(crate) const HTML_ENTITIES: i64 = 1;
+    pub(crate) const ENT_COMPAT: i64 = QUOTE_DOUBLE;
+    pub(crate) const ENT_QUOTES: i64 = QUOTE_SINGLE | QUOTE_DOUBLE;
+    pub(crate) const ENT_NOQUOTES: i64 = 0;
+    pub(crate) const ENT_IGNORE: i64 = IGNORE_ERRORS;
+    pub(crate) const ENT_SUBSTITUTE: i64 = SUBSTITUTE_ERRORS;
+    pub(crate) const ENT_DISALLOWED: i64 = SUBSTITUTE_DISALLOWED;
+    pub(crate) const ENT_HTML401: i64 = DOC_HTML401;
+    pub(crate) const ENT_XML1: i64 = DOC_XML1;
+    pub(crate) const ENT_XHTML: i64 = DOC_XHTML;
+    pub(crate) const ENT_HTML5: i64 = DOC_HTML5;
 }
 
 /// `enum entity_charset`, in php's order, which the three
@@ -712,10 +622,10 @@ fn unescape(
     all: bool,
     flags: i64,
     hint: Option<&[u8]>,
-) -> Result<Value, Thrown> {
+) -> Result<PhpString, Thrown> {
     let s = string.as_bytes();
     if !s.contains(&b'&') {
-        return Ok(same(req, string));
+        return Ok(str_copy(req, string));
     }
     let charset = if all {
         determine_charset(req, hint, false)
@@ -723,7 +633,7 @@ fn unescape(
         Charset::Iso88591
     };
     let out = traverse_for_entities(s, all, flags, charset);
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// The encode table `determine_entity_table(all, doctype)` picks.
@@ -911,15 +821,15 @@ pub fn escape(
     out
 }
 
-/// `php_html_entities(INTERNAL_FUNCTION_PARAM_PASSTHRU, all)`.
-fn entities(req: &mut Request, all: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 4)?;
-    let string = string_argument(req, 1)?;
-    let flags = optional_long(req, 2, DEFAULT_FLAGS)?;
-    let hint = nullable_string(req, 3)?;
-    let double_encode = optional_bool(req, 4, true)?;
+/// `php_html_entities(INTERNAL_FUNCTION_PARAM_PASSTHRU, all)`, over
+/// the four arguments the entry held.
+fn entities(
+    req: &mut Request,
+    (string, flags, hint, double_encode): (PhpString, i64, Option<PhpString>, bool),
+    all: bool,
+) -> Result<PhpString, Thrown> {
     if string.is_empty() {
-        return string_value(req, b"");
+        return PhpString::new(req, b"");
     }
     let out = escape(
         req,
@@ -929,7 +839,7 @@ fn entities(req: &mut Request, all: bool) -> Result<Value, Thrown> {
         hint.as_ref().map(PhpString::as_bytes),
         double_encode,
     );
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `htmlspecialchars(string $string, int $flags = ENT_QUOTES |
@@ -957,8 +867,69 @@ fn entities(req: &mut Request, all: bool) -> Result<Value, Thrown> {
 /// string(6) "��"
 /// string(1) "x"
 /// ```
-fn htmlspecialchars(req: &mut Request) -> Result<Value, Thrown> {
-    entities(req, false)
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// foreach (['htmlspecialchars', 'htmlspecialchars_decode', 'html_entity_decode', 'htmlentities', 'get_html_translation_table'] as $f) echo new ReflectionFunction($f);
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function htmlspecialchars ] {
+///
+///   - Parameters [4] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+///     Parameter #2 [ <optional> ?string $encoding = null ]
+///     Parameter #3 [ <optional> bool $double_encode = true ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function htmlspecialchars_decode ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function html_entity_decode ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+///     Parameter #2 [ <optional> ?string $encoding = null ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function htmlentities ] {
+///
+///   - Parameters [4] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+///     Parameter #2 [ <optional> ?string $encoding = null ]
+///     Parameter #3 [ <optional> bool $double_encode = true ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function get_html_translation_table ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <optional> int $table = HTML_SPECIALCHARS ]
+///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+///     Parameter #2 [ <optional> string $encoding = "UTF-8" ]
+///   }
+///   - Return [ array ]
+/// }
+/// ```
+#[php_function]
+fn htmlspecialchars(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
+    #[php(default = null)] encoding: Option<PhpString>,
+    #[php(default = true)] double_encode: bool,
+) -> Result<PhpString, Thrown> {
+    entities(req, (string, flags, encoding, double_encode), false)
 }
 
 /// `htmlentities(...)`: every character the document type names, as
@@ -981,8 +952,15 @@ fn htmlspecialchars(req: &mut Request) -> Result<Value, Thrown> {
 /// Notice: htmlentities(): Only basic entities substitution is supported for multi-byte encodings other than UTF-8; functionality is equivalent to htmlspecialchars in %s on line 3
 /// string(0) ""
 /// ```
-fn htmlentities(req: &mut Request) -> Result<Value, Thrown> {
-    entities(req, true)
+#[php_function]
+fn htmlentities(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
+    #[php(default = null)] encoding: Option<PhpString>,
+    #[php(default = true)] double_encode: bool,
+) -> Result<PhpString, Thrown> {
+    entities(req, (string, flags, encoding, double_encode), true)
 }
 
 /// `htmlspecialchars_decode(string $string, int $flags = ENT_QUOTES |
@@ -999,10 +977,12 @@ fn htmlentities(req: &mut Request) -> Result<Value, Thrown> {
 /// string(4) "&amp"
 /// string(9) "no entity"
 /// ```
-fn htmlspecialchars_decode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let flags = optional_long(req, 2, DEFAULT_FLAGS)?;
+#[php_function]
+fn htmlspecialchars_decode(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
+) -> Result<PhpString, Thrown> {
     unescape(req, string, false, flags, None)
 }
 
@@ -1023,17 +1003,19 @@ fn htmlspecialchars_decode(req: &mut Request) -> Result<Value, Thrown> {
 /// string(11) "&quot;&#39;"
 /// string(2) "a1"
 /// ```
-fn html_entity_decode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let string = string_argument(req, 1)?;
-    let flags = optional_long(req, 2, DEFAULT_FLAGS)?;
-    let hint = nullable_string(req, 3)?;
+#[php_function]
+fn html_entity_decode(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
+    #[php(default = null)] encoding: Option<PhpString>,
+) -> Result<PhpString, Thrown> {
     unescape(
         req,
         string,
         true,
         flags,
-        hint.as_ref().map(PhpString::as_bytes),
+        encoding.as_ref().map(PhpString::as_bytes),
     )
 }
 
@@ -1053,7 +1035,7 @@ fn write_row(
         entity.extend_from_slice(name.as_bytes());
         entity.push(b';');
         let key = php_ext::values::Key::from_string(PhpString::new(req, key)?);
-        let value = string_value(req, &entity)?;
+        let value = Value::string(PhpString::new(req, &entity)?);
         array.set(req, key, value)
     };
     match row {
@@ -1122,11 +1104,20 @@ fn write_row(
 /// 1318 5c3e4860155f13a6163e6e8f79e1ac59
 /// 1289 0d3ed27bb00aa7cf7011fbaa31282b12
 /// ```
-fn get_html_translation_table(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 3)?;
-    let all = optional_long(req, 1, 0)?;
-    let flags = optional_long(req, 2, DEFAULT_FLAGS)?;
-    let hint = optional_string(req, 3)?;
+#[php_function]
+fn get_html_translation_table(
+    req: &mut Request,
+    #[php(default = HTML_SPECIALCHARS)] table: i64,
+    #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
+    #[php(default = "UTF-8")] encoding: Passed<PhpString>,
+) -> Result<PhpArray, Thrown> {
+    let all = table;
+    // php's `charset_hint` stays NULL where the call gave no `$encoding`,
+    // so the ini's charset and not the shown default is what it reads.
+    let hint = match encoding {
+        Passed::Given(hint) => Some(hint),
+        Passed::Omitted => None,
+    };
     let charset = determine_charset(req, hint.as_ref().map(PhpString::as_bytes), false);
     let doctype = flags & DOC_TYPE_MASK;
     let all = all != 0 && !charset.partial() && doctype != DOC_XML1;
@@ -1173,5 +1164,5 @@ fn get_html_translation_table(req: &mut Request) -> Result<Value, Thrown> {
             write_row(req, &mut array, row, &key, Charset::Iso88591)?;
         }
     }
-    Ok(Value::array(array))
+    Ok(array)
 }

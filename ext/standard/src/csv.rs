@@ -7,12 +7,14 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::Passed;
+use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
 
-use crate::zpp::{given, optional_string, string_value};
-use crate::{argument_count_between, string_argument};
+use crate::string_argument;
+use crate::zpp::given;
 
 /// `PHP_CSV_NO_ESCAPE`: the empty `$escape`.
 pub(super) const NO_ESCAPE: Option<u8> = None;
@@ -21,15 +23,27 @@ pub(super) const NO_ESCAPE: Option<u8> = None;
 /// byte, `None` for the empty string, the 8.4 deprecation and `\` when
 /// the call gave none, and the `ValueError` for more than one byte.
 pub(super) fn escape_argument(req: &mut Request, position: u32) -> Result<Option<u8>, Thrown> {
-    if given(req, position).is_none() {
+    let escape = match given(req, position) {
+        None => Passed::Omitted,
+        Some(_) => Passed::Given(string_argument(req, position)?),
+    };
+    escape_of(req, escape, position)
+}
+
+/// The same over the `$escape` the entry held at `position`.
+pub(super) fn escape_of(
+    req: &mut Request,
+    escape: Passed<PhpString>,
+    position: u32,
+) -> Result<Option<u8>, Thrown> {
+    let Passed::Given(escape) = escape else {
         docref(
             req,
             Level::Deprecated,
             "the $escape parameter must be provided as its default value will change",
         );
         return Ok(Some(b'\\'));
-    }
-    let escape = string_argument(req, position)?;
+    };
     match escape.as_bytes() {
         [] => Ok(NO_ESCAPE),
         [c] => Ok(Some(*c)),
@@ -292,22 +306,23 @@ pub fn fgetcsv(
 /// str_getcsv(): Argument #3 ($enclosure) must be a single character
 /// str_getcsv(): Argument #4 ($escape) must be empty or a single character
 /// ```
-pub(super) fn str_getcsv(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 4)?;
-    let string = string_argument(req, 1)?;
-    let delimiter = optional_string(req, 2)?;
-    let enclosure = optional_string(req, 3)?;
-    let delimiter = match delimiter.as_ref().map(PhpString::as_bytes) {
-        None => b',',
-        Some([c]) => *c,
-        Some(_) => return Err(arg_value_error(req, 2, "be a single character")),
+#[php_function]
+pub(super) fn str_getcsv(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = ",")] separator: PhpString,
+    #[php(default = "\"")] enclosure: PhpString,
+    #[php(default = "\\")] escape: Passed<PhpString>,
+) -> Result<PhpArray, Thrown> {
+    let delimiter = match separator.as_bytes() {
+        [c] => *c,
+        _ => return Err(arg_value_error(req, 2, "be a single character")),
     };
-    let enclosure = match enclosure.as_ref().map(PhpString::as_bytes) {
-        None => b'"',
-        Some([c]) => *c,
-        Some(_) => return Err(arg_value_error(req, 3, "be a single character")),
+    let enclosure = match enclosure.as_bytes() {
+        [c] => *c,
+        _ => return Err(arg_value_error(req, 3, "be a single character")),
     };
-    let escape = escape_argument(req, 4)?;
+    let escape = escape_of(req, escape, 4)?;
     let mut array = PhpArray::new(req)?;
     match fgetcsv(string.as_bytes(), delimiter, enclosure, escape, &mut || {
         None
@@ -315,10 +330,10 @@ pub(super) fn str_getcsv(req: &mut Request) -> Result<Value, Thrown> {
         None => array.append(req, Value::null())?,
         Some(fields) => {
             for field in fields {
-                let value = string_value(req, &field)?;
+                let value = Value::string(PhpString::new(req, &field)?);
                 array.append(req, value)?;
             }
         }
     }
-    Ok(Value::array(array))
+    Ok(array)
 }

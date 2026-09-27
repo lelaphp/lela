@@ -6,55 +6,16 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::FunctionDecl;
+use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::Value;
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::string_value;
-use crate::{argument_count_between, string_argument};
+use php_ext::values::PhpString;
 
 /// The hex digits `=XX` writes.
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
 /// `PHP_QPRINT_MAXL`.
 const MAXL: u64 = 75;
-
-/// The two, in the stub's order.
-///
-/// ```php
-/// echo new ReflectionFunction('quoted_printable_decode'), new ReflectionFunction('quoted_printable_encode');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function quoted_printable_decode ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $string ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function quoted_printable_encode ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $string ]
-///   }
-///   - Return [ string ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("quoted_printable_decode(string $string): string"),
-            quoted_printable_decode as Entry,
-        ),
-        (
-            stub("quoted_printable_encode(string $string): string"),
-            quoted_printable_encode,
-        ),
-    ]
-}
 
 /// `php_hex2int`.
 fn hex2int(c: u8) -> u8 {
@@ -77,9 +38,30 @@ fn hex2int(c: u8) -> u8 {
 /// string(0) ""
 /// string(1) "a"
 /// ```
-fn quoted_printable_decode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('quoted_printable_decode'), new ReflectionFunction('quoted_printable_encode');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function quoted_printable_decode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function quoted_printable_encode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// ```
+#[php_function]
+fn quoted_printable_decode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let s = string.as_bytes();
     let at = |i: usize| s.get(i).copied().unwrap_or(0);
     let mut out = Vec::with_capacity(s.len());
@@ -114,7 +96,7 @@ fn quoted_printable_decode(req: &mut Request) -> Result<Value, Thrown> {
             i += 1;
         }
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `hexval_tbl` of `php_quot_print_decode`: a hex digit's value, 16 for
@@ -216,12 +198,11 @@ pub fn decode(input: &[u8], underscores: bool) -> Option<Vec<u8>> {
 /// string(190) "=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=\r\n=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=\r\n=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9"
 /// string(0) ""
 /// ```
-fn quoted_printable_encode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn quoted_printable_encode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let s = string.as_bytes();
     if s.is_empty() {
-        return string_value(req, b"");
+        return PhpString::new(req, b"");
     }
     let at = |i: usize| s.get(i).copied().unwrap_or(0);
     let mut out = Vec::with_capacity(s.len() * 3);
@@ -258,5 +239,5 @@ fn quoted_printable_encode(req: &mut Request) -> Result<Value, Thrown> {
             out.push(c);
         }
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }

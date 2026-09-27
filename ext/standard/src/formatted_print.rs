@@ -10,120 +10,12 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::{Exponent, coerce_param, float_format, to_double, to_long, to_string};
-use php_ext::decl::{FunctionDecl, Parameter, Type};
-use php_ext::raising::{Level, Thrown, docref, fatal, throw, too_few_arguments};
-use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::{argument_count_between, declared, parameter, string_argument};
-
-/// The six, in the stub's order.
-///
-/// ```php
-/// foreach (['sprintf', 'printf', 'vsprintf', 'vprintf', 'fprintf', 'vfprintf'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function sprintf ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $format ]
-///     Parameter #1 [ <optional> mixed ...$values ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function printf ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $format ]
-///     Parameter #1 [ <optional> mixed ...$values ]
-///   }
-///   - Return [ int ]
-/// }
-/// Function [ <internal:standard> function vsprintf ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $format ]
-///     Parameter #1 [ <required> array $values ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function vprintf ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $format ]
-///     Parameter #1 [ <required> array $values ]
-///   }
-///   - Return [ int ]
-/// }
-/// Function [ <internal:standard> function fprintf ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> string $format ]
-///     Parameter #2 [ <optional> mixed ...$values ]
-///   }
-///   - Return [ int ]
-/// }
-/// Function [ <internal:standard> function vfprintf ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> string $format ]
-///     Parameter #2 [ <required> array $values ]
-///   }
-///   - Return [ int ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let values = || Parameter {
-        variadic: true,
-        ..parameter(b"values", Type::Mixed)
-    };
-    vec![
-        (
-            declared(
-                b"sprintf",
-                &[parameter(b"format", Type::String), values()],
-                Type::String,
-            ),
-            sprintf as Entry,
-        ),
-        (
-            declared(
-                b"printf",
-                &[parameter(b"format", Type::String), values()],
-                Type::Int,
-            ),
-            printf as Entry,
-        ),
-        (
-            declared(
-                b"vsprintf",
-                &[
-                    parameter(b"format", Type::String),
-                    parameter(b"values", Type::Array),
-                ],
-                Type::String,
-            ),
-            vsprintf as Entry,
-        ),
-        (
-            stub("vprintf(string $format, array $values): int"),
-            vprintf as Entry,
-        ),
-        (
-            stub("fprintf($stream, string $format, mixed ...$values): int"),
-            fprintf as Entry,
-        ),
-        (
-            stub("vfprintf($stream, string $format, array $values): int"),
-            vfprintf as Entry,
-        ),
-    ]
-}
+use php_ext::abi::{Raw, Variadic};
+use php_ext::attr::php_function;
+use php_ext::coerce::{Exponent, float_format, to_double, to_long, to_string};
+use php_ext::raising::{Level, Thrown, docref, fatal, throw};
+use php_ext::request::{Request, Stream};
+use php_ext::values::{PhpArray, PhpString, Value};
 
 /// `sprintf(string $format, mixed ...$values): string`, php's
 /// `PHP_FUNCTION(sprintf)`: the format and every argument after it
@@ -308,9 +200,72 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn sprintf(req: &mut Request) -> Result<Value, Thrown> {
-    let formatted = format_variadic(req)?;
-    Ok(Value::string(PhpString::new(req, &formatted)?))
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// foreach (['sprintf', 'printf', 'vsprintf', 'vprintf', 'fprintf', 'vfprintf'] as $f) echo new ReflectionFunction($f);
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function sprintf ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $format ]
+///     Parameter #1 [ <optional> mixed ...$values ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function printf ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $format ]
+///     Parameter #1 [ <optional> mixed ...$values ]
+///   }
+///   - Return [ int ]
+/// }
+/// Function [ <internal:standard> function vsprintf ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $format ]
+///     Parameter #1 [ <required> array $values ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function vprintf ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $format ]
+///     Parameter #1 [ <required> array $values ]
+///   }
+///   - Return [ int ]
+/// }
+/// Function [ <internal:standard> function fprintf ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> $stream ]
+///     Parameter #1 [ <required> string $format ]
+///     Parameter #2 [ <optional> mixed ...$values ]
+///   }
+///   - Return [ int ]
+/// }
+/// Function [ <internal:standard> function vfprintf ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> $stream ]
+///     Parameter #1 [ <required> string $format ]
+///     Parameter #2 [ <required> array $values ]
+///   }
+///   - Return [ int ]
+/// }
+/// ```
+#[php_function]
+fn sprintf(
+    req: &mut Request,
+    format: PhpString,
+    values: Variadic<Value>,
+) -> Result<PhpString, Thrown> {
+    let formatted = formatted(req, format.as_bytes(), &values.0, Some(1))?;
+    PhpString::new(req, &formatted)
 }
 
 /// `printf(string $format, mixed ...$values): int`, php's
@@ -330,25 +285,11 @@ fn sprintf(req: &mut Request) -> Result<Value, Thrown> {
 /// int(6)
 /// printf() expects at least 1 argument, 0 given
 /// ```
-fn printf(req: &mut Request) -> Result<Value, Thrown> {
-    let formatted = format_variadic(req)?;
+#[php_function]
+fn printf(req: &mut Request, format: PhpString, values: Variadic<Value>) -> Result<i64, Thrown> {
+    let formatted = formatted(req, format.as_bytes(), &values.0, Some(1))?;
     req.write(&formatted);
-    Ok(Value::int(
-        i64::try_from(formatted.len()).unwrap_or(i64::MAX),
-    ))
-}
-
-/// The two variadic natives' shape: the format at one, the arguments
-/// after it, and one additional parameter counted into the
-/// `ArgumentCountError`.
-fn format_variadic(req: &mut Request) -> Result<Vec<u8>, Thrown> {
-    let count = req.argument_count();
-    if count < 1 {
-        return Err(too_few_arguments(req, 1, 0));
-    }
-    let format = string_argument(req, 1)?;
-    let arguments = req.variadic_arguments(2)?;
-    formatted(req, format.as_bytes(), &arguments, Some(1))
+    Ok(i64::try_from(formatted.len()).unwrap_or(i64::MAX))
 }
 
 /// `vsprintf(string $format, array $values): string`, php's
@@ -372,30 +313,17 @@ fn format_variadic(req: &mut Request) -> Result<Vec<u8>, Thrown> {
 /// TypeError: vsprintf(): Argument #2 ($values) must be of type array, string given
 /// vsprintf() expects exactly 2 arguments, 1 given
 /// ```
-fn vsprintf(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let format = string_argument(req, 1)?;
-    let given = req.argument(2).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Array, 2)?;
-    let arguments: Vec<Value> = coerced
-        .deref()
-        .as_array()
-        .map(|array| array.iter().map(|(_, value)| value).collect())
-        .unwrap_or_default();
+#[php_function]
+fn vsprintf(req: &mut Request, format: PhpString, values: PhpArray) -> Result<PhpString, Thrown> {
+    let arguments = values_of(values);
     let formatted = formatted(req, format.as_bytes(), &arguments, None)?;
-    Ok(Value::string(PhpString::new(req, &formatted)?))
+    PhpString::new(req, &formatted)
 }
 
 /// `php_formatted_print_get_array`: the array's values in their order,
 /// keys ignored.
-fn array_values(req: &mut Request, position: u32) -> Result<Vec<Value>, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Array, position)?;
-    Ok(coerced
-        .deref()
-        .as_array()
-        .map(|array| array.iter().map(|(_, value)| value).collect())
-        .unwrap_or_default())
+fn values_of(array: PhpArray) -> Vec<Value> {
+    array.iter().map(|(_, value)| value).collect()
 }
 
 /// `vprintf(string $format, array $values): int`, php's
@@ -415,15 +343,12 @@ fn array_values(req: &mut Request, position: u32) -> Result<Vec<Value>, Thrown> 
 /// TypeError: vprintf(): Argument #2 ($values) must be of type array, string given
 /// vprintf() expects exactly 2 arguments, 1 given
 /// ```
-fn vprintf(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let format = string_argument(req, 1)?;
-    let arguments = array_values(req, 2)?;
+#[php_function]
+fn vprintf(req: &mut Request, format: PhpString, values: PhpArray) -> Result<i64, Thrown> {
+    let arguments = values_of(values);
     let formatted = formatted(req, format.as_bytes(), &arguments, None)?;
     req.write(&formatted);
-    Ok(Value::int(
-        i64::try_from(formatted.len()).unwrap_or(i64::MAX),
-    ))
+    Ok(i64::try_from(formatted.len()).unwrap_or(i64::MAX))
 }
 
 /// `fprintf($stream, string $format, mixed ...$values): int`, php's
@@ -449,21 +374,32 @@ fn vprintf(req: &mut Request) -> Result<Value, Thrown> {
 /// fprintf(): Argument #1 ($stream) must be of type resource, string given
 /// fprintf() expects at least 2 arguments, 1 given
 /// ```
-fn fprintf(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count < 2 {
-        return Err(too_few_arguments(req, 2, u32::try_from(count).unwrap_or(0)));
-    }
-    let stream = crate::file::stream_argument(req, 1)?;
-    let format = string_argument(req, 2)?;
-    let arguments = req.variadic_arguments(3)?;
-    let formatted = formatted(req, format.as_bytes(), &arguments, Some(2))?;
+///
+/// A closed stream is refused where the parse reaches `$stream`, before
+/// `$format` is read.
+///
+/// ```php
+/// $f = fopen("php://memory", "w"); fclose($f);
+/// try { fprintf($f, []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { vfprintf($f, "%s", 1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// fprintf(): Argument #1 ($stream) must be an open stream resource
+/// vfprintf(): Argument #1 ($stream) must be an open stream resource
+/// ```
+#[php_function]
+fn fprintf(
+    req: &mut Request,
+    stream: Stream,
+    format: Raw<PhpString>,
+    values: Variadic<Value>,
+) -> Result<i64, Thrown> {
+    let format = format.hold(req)?;
+    let formatted = formatted(req, format.as_bytes(), &values.0, Some(2))?;
     if !formatted.is_empty() {
         stream.write(req, &formatted);
     }
-    Ok(Value::int(
-        i64::try_from(formatted.len()).unwrap_or(i64::MAX),
-    ))
+    Ok(i64::try_from(formatted.len()).unwrap_or(i64::MAX))
 }
 
 /// `vfprintf($stream, string $format, array $values): int`, php's
@@ -480,18 +416,19 @@ fn fprintf(req: &mut Request) -> Result<Value, Thrown> {
 /// The arguments array must contain 2 items, 1 given
 /// vfprintf(): Argument #3 ($values) must be of type array, string given
 /// ```
-fn vfprintf(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 3, 3)?;
-    let stream = crate::file::stream_argument(req, 1)?;
-    let format = string_argument(req, 2)?;
-    let arguments = array_values(req, 3)?;
+#[php_function]
+fn vfprintf(
+    req: &mut Request,
+    stream: Stream,
+    format: PhpString,
+    values: PhpArray,
+) -> Result<i64, Thrown> {
+    let arguments = values_of(values);
     let formatted = formatted(req, format.as_bytes(), &arguments, None)?;
     if !formatted.is_empty() {
         stream.write(req, &formatted);
     }
-    Ok(Value::int(
-        i64::try_from(formatted.len()).unwrap_or(i64::MAX),
-    ))
+    Ok(i64::try_from(formatted.len()).unwrap_or(i64::MAX))
 }
 
 /// `INT_MAX`, the bound on an argnum, a width and a precision.

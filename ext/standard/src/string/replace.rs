@@ -2,14 +2,15 @@
 //! over `php_str_replace_in_subject`, `strtr` over `php_strtr_ex` and
 //! `php_strtr_array`, and `substr_replace`.
 
-use php_ext::coerce::{to_long, to_string};
-use php_ext::raising::{Level, Thrown, arg_type_error, docref, throw};
+use php_ext::abi::{Raw, Ref, Union, Untyped};
+use php_ext::attr::php_function;
+use php_ext::coerce::{coerce_param, to_long, to_string};
+use php_ext::decl::Type;
+use php_ext::raising::{Level, Thrown, arg_count_error, arg_type_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use super::{long, lower, memnstr};
-use crate::zpp::{ArrayOr, array_or_long, array_or_string, assign_ref, given, same, string_value};
-use crate::{argument_count_between, string_argument};
+use super::{long, lower, memnstr, str_copy};
 
 /// A key handed to a new array, one more reference to its string.
 fn owned_key(req: &mut Request, key: &Key) -> Key {
@@ -57,8 +58,15 @@ fn owned_key(req: &mut Request, key: &Key) -> Key {
 /// string(6) "x--y--"
 /// str_replace(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string
 /// ```
-pub(super) fn str_replace(req: &mut Request) -> Result<Value, Thrown> {
-    replace_common(req, true)
+#[php_function]
+pub(super) fn str_replace(
+    req: &mut Request,
+    search: Union<PhpArray, PhpString>,
+    replace: Union<PhpArray, PhpString>,
+    subject: Union<PhpArray, PhpString>,
+    #[php(default = null)] count: Ref<Untyped<Value>>,
+) -> Result<Union<PhpArray, PhpString>, Thrown> {
+    replace_common(req, (search, replace, subject, count), true)
 }
 
 /// `str_ireplace(...)`, the search folded by `zend_tolower_ascii`.
@@ -78,20 +86,33 @@ pub(super) fn str_replace(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(2) "xb"
 /// }
 /// ```
-pub(super) fn str_ireplace(req: &mut Request) -> Result<Value, Thrown> {
-    replace_common(req, false)
+#[php_function]
+pub(super) fn str_ireplace(
+    req: &mut Request,
+    search: Union<PhpArray, PhpString>,
+    replace: Union<PhpArray, PhpString>,
+    subject: Union<PhpArray, PhpString>,
+    #[php(default = null)] count: Ref<Untyped<Value>>,
+) -> Result<Union<PhpArray, PhpString>, Thrown> {
+    replace_common(req, (search, replace, subject, count), false)
 }
 
 /// `php_str_replace_common`.
-fn replace_common(req: &mut Request, case_sensitive: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 3, 4)?;
-    let search = array_or_string(req, 1, false)?;
-    let replace = array_or_string(req, 2, false)?;
-    let subject = array_or_string(req, 3, false)?;
-    let (Some(search), Some(replace), Some(subject)) = (search, replace, subject) else {
-        return Ok(Value::null());
-    };
-    if matches!(search, ArrayOr::Other(_)) && matches!(replace, ArrayOr::Array(_)) {
+/// What `str_replace` and `str_ireplace` were called with: the search,
+/// the replacement, the subject and the `&$count` written back.
+type Replacing = (
+    Union<PhpArray, PhpString>,
+    Union<PhpArray, PhpString>,
+    Union<PhpArray, PhpString>,
+    Ref<Untyped<Value>>,
+);
+
+fn replace_common(
+    req: &mut Request,
+    (search, replace, subject, counted): Replacing,
+    case_sensitive: bool,
+) -> Result<Union<PhpArray, PhpString>, Thrown> {
+    if matches!(search, Union::B(_)) && matches!(replace, Union::A(_)) {
         return Err(arg_type_error(
             req,
             2,
@@ -100,26 +121,24 @@ fn replace_common(req: &mut Request, case_sensitive: bool) -> Result<Value, Thro
     }
     let mut count = 0i64;
     let result = match subject {
-        ArrayOr::Array(subjects) => {
+        Union::A(subjects) => {
             let mut out = PhpArray::new(req)?;
             for (key, entry) in subjects.snapshot() {
                 let subject = to_string(req, &entry.deref())?;
                 let (value, n) = in_subject(req, &search, &replace, subject, case_sensitive)?;
                 count += n;
                 let key = owned_key(req, &key);
-                out.set(req, key, value)?;
+                out.set(req, key, Value::string(value))?;
             }
-            Value::array(out)
+            Union::A(out)
         }
-        ArrayOr::Other(subject) => {
+        Union::B(subject) => {
             let (value, n) = in_subject(req, &search, &replace, subject, case_sensitive)?;
             count = n;
-            value
+            Union::B(value)
         }
     };
-    if given(req, 4).is_some() {
-        assign_ref(req, 4, Value::int(count))?;
-    }
+    counted.set(req, Untyped(Value::int(count)))?;
     Ok(result)
 }
 
@@ -127,21 +146,21 @@ fn replace_common(req: &mut Request, case_sensitive: bool) -> Result<Value, Thro
 /// the count of replacements.
 fn in_subject(
     req: &mut Request,
-    search: &ArrayOr<PhpString>,
-    replace: &ArrayOr<PhpString>,
+    search: &Union<PhpArray, PhpString>,
+    replace: &Union<PhpArray, PhpString>,
     subject: PhpString,
     case_sensitive: bool,
-) -> Result<(Value, i64), Thrown> {
+) -> Result<(PhpString, i64), Thrown> {
     if subject.is_empty() {
-        return Ok((string_value(req, b"")?, 0));
+        return Ok((PhpString::new(req, b"")?, 0));
     }
     let mut count = 0i64;
     let mut current: Option<Vec<u8>> = None;
     match search {
-        ArrayOr::Array(searches) => {
+        Union::A(searches) => {
             let mut replacements = match replace {
-                ArrayOr::Array(array) => Some(array.snapshot().into_iter()),
-                ArrayOr::Other(_) => None,
+                Union::A(array) => Some(array.snapshot().into_iter()),
+                Union::B(_) => None,
             };
             for (_, entry) in searches.snapshot() {
                 let needle = to_string(req, &entry.deref())?;
@@ -150,8 +169,8 @@ fn in_subject(
                         Some((_, value)) => to_string(req, &value.deref())?.as_bytes().to_vec(),
                         None => Vec::new(),
                     },
-                    (None, ArrayOr::Other(s)) => s.as_bytes().to_vec(),
-                    (None, ArrayOr::Array(_)) => Vec::new(),
+                    (None, Union::B(s)) => s.as_bytes().to_vec(),
+                    (None, Union::A(_)) => Vec::new(),
                 };
                 if needle.is_empty() {
                     continue;
@@ -164,14 +183,14 @@ fn in_subject(
                     current = Some(replaced);
                 }
                 if current.as_ref().is_some_and(Vec::is_empty) {
-                    return Ok((string_value(req, b"")?, count));
+                    return Ok((PhpString::new(req, b"")?, count));
                 }
             }
         }
-        ArrayOr::Other(needle) => {
+        Union::B(needle) => {
             let with: &[u8] = match replace {
-                ArrayOr::Other(s) => s.as_bytes(),
-                ArrayOr::Array(_) => b"",
+                Union::B(s) => s.as_bytes(),
+                Union::A(_) => b"",
             };
             if !needle.is_empty() {
                 let (replaced, n) =
@@ -184,8 +203,8 @@ fn in_subject(
         }
     }
     let value = match current {
-        Some(bytes) => string_value(req, &bytes)?,
-        None => same(req, subject),
+        Some(bytes) => PhpString::new(req, &bytes)?,
+        None => str_copy(req, subject),
     };
     Ok((value, count))
 }
@@ -251,28 +270,58 @@ fn replace_bytes(
 /// string(3) "ayc"
 /// strtr(): Argument #2 ($from) must be of type array, string given
 /// ```
-pub(super) fn strtr(req: &mut Request) -> Result<Value, Thrown> {
-    if req.argument_count() <= 2 {
-        argument_count_between(req, 2, 2)?;
-        let string = string_argument(req, 1)?;
-        let from = crate::zpp::array_argument(req, 2)?;
+///
+/// The parse is php's, chosen by the count, so a count it refuses is
+/// refused before any argument is read.
+///
+/// ```php
+/// foreach ([fn() => strtr("abc"), fn() => strtr([], "a"), fn() => strtr("abc", "a", "b", "c"), fn() => strtr("abc", 5), fn() => strtr("abc", ["a" => "x"], "q")] as $f) { try { $f(); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; } }
+/// ```
+/// ```expect
+/// ArgumentCountError: strtr() expects exactly 2 arguments, 1 given
+/// TypeError: strtr(): Argument #1 ($string) must be of type string, array given
+/// ArgumentCountError: strtr() expects exactly 3 arguments, 4 given
+/// TypeError: strtr(): Argument #2 ($from) must be of type array, int given
+/// TypeError: strtr(): Argument #2 ($from) must be of type string, array given
+/// ```
+#[php_function(arity = manual)]
+pub(super) fn strtr(
+    req: &mut Request,
+    string: Raw<PhpString>,
+    from: Raw<Union<PhpArray, PhpString>>,
+    #[php(default = null)] to: Raw<Option<PhpString>>,
+) -> Result<PhpString, Thrown> {
+    // php's own parse, chosen by the count: `(string, array)` for two
+    // arguments, `(string, string, string)` for three.
+    let given = req.argument_count();
+    if given <= 2 {
+        exactly(req, 2, given)?;
+        let string = string.hold(req)?;
+        let from = coerce_param(req, &from.value(), &Type::Array, 2)?;
+        let Some(from) = from.as_array().copied() else {
+            return PhpString::new(req, b"");
+        };
         if string.is_empty() {
-            return string_value(req, b"");
+            return PhpString::new(req, b"");
         }
         return strtr_array(req, string, from);
     }
-    argument_count_between(req, 3, 3)?;
-    let string = string_argument(req, 1)?;
-    let from = string_argument(req, 2)?;
+    exactly(req, 3, given)?;
+    let string = string.hold(req)?;
+    let from = coerce_param(req, &from.value(), &Type::String, 2)?;
     // `Z_PARAM_STRING`: a `null` is the deprecation, which names the
     // declared `?string`, and the empty string.
-    let to = string_argument(req, 3)?;
+    let to = coerce_param(req, &to.value(), &Type::String, 3)?;
+    let (Some(from), Some(to)) = (from.as_php_string().copied(), to.as_php_string().copied())
+    else {
+        return PhpString::new(req, b"");
+    };
     if string.is_empty() {
-        return string_value(req, b"");
+        return PhpString::new(req, b"");
     }
     let n = from.len().min(to.len());
     if n == 0 {
-        return Ok(same(req, string));
+        return Ok(str_copy(req, string));
     }
     let mut xlat: [u8; 256] = std::array::from_fn(|i| u8::try_from(i).unwrap_or(0));
     for (f, t) in from.as_bytes()[..n].iter().zip(&to.as_bytes()[..n]) {
@@ -280,18 +329,30 @@ pub(super) fn strtr(req: &mut Request) -> Result<Value, Thrown> {
     }
     let bytes = string.as_bytes();
     if bytes.iter().all(|c| xlat[usize::from(*c)] == *c) {
-        return Ok(same(req, string));
+        return Ok(str_copy(req, string));
     }
     let out: Vec<u8> = bytes.iter().map(|c| xlat[usize::from(*c)]).collect();
-    string_value(req, &out)
+    PhpString::new(req, &out)
+}
+
+/// `ZEND_PARSE_PARAMETERS_START(n, n)`'s count check over the `given`
+/// arguments.
+fn exactly(req: &mut Request, n: usize, given: usize) -> Result<(), Thrown> {
+    if given == n {
+        return Ok(());
+    }
+    Err(arg_count_error(
+        req,
+        &format!("exactly {n} arguments, {given} given"),
+    ))
 }
 
 /// `php_strtr_array` and `php_strtr_array_ex`.
-fn strtr_array(req: &mut Request, string: PhpString, from: PhpArray) -> Result<Value, Thrown> {
+fn strtr_array(req: &mut Request, string: PhpString, from: PhpArray) -> Result<PhpString, Thrown> {
     let s = string.as_bytes();
     let entries = from.snapshot();
     if entries.is_empty() {
-        return Ok(same(req, string));
+        return Ok(str_copy(req, string));
     }
     let key_bytes = |key: &Key| -> Vec<u8> {
         match key {
@@ -305,13 +366,13 @@ fn strtr_array(req: &mut Request, string: PhpString, from: PhpArray) -> Result<V
         let with = to_string(req, &value.deref())?;
         if k.is_empty() {
             docref(req, Level::Warning, "Ignoring replacement of empty string");
-            return Ok(same(req, string));
+            return Ok(str_copy(req, string));
         }
         let (out, n) = replace_bytes(s, &k, with.as_bytes(), true);
         if n == 0 {
-            return Ok(same(req, string));
+            return Ok(str_copy(req, string));
         }
-        return string_value(req, &out);
+        return PhpString::new(req, &out);
     }
     let mut patterns: Vec<(Vec<u8>, Value)> = Vec::with_capacity(entries.len());
     let (mut minlen, mut maxlen) = (128 * 1024usize, 0usize);
@@ -329,7 +390,7 @@ fn strtr_array(req: &mut Request, string: PhpString, from: PhpArray) -> Result<V
         patterns.push((k, *value));
     }
     if minlen > maxlen {
-        return Ok(same(req, string));
+        return Ok(str_copy(req, string));
     }
     let mut out: Option<Vec<u8>> = None;
     let (mut pos, mut old_pos) = (0usize, 0usize);
@@ -353,9 +414,9 @@ fn strtr_array(req: &mut Request, string: PhpString, from: PhpArray) -> Result<V
     match out {
         Some(mut buffer) => {
             buffer.extend_from_slice(&s[old_pos..]);
-            string_value(req, &buffer)
+            PhpString::new(req, &buffer)
         }
-        None => Ok(same(req, string)),
+        None => Ok(str_copy(req, string)),
     }
 }
 
@@ -402,25 +463,25 @@ fn strtr_array(req: &mut Request, string: PhpString, from: PhpArray) -> Result<V
 /// substr_replace(): Argument #4 ($length) cannot be an array when working on a single string
 /// ```
 #[allow(clippy::too_many_lines)]
-pub(super) fn substr_replace(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 3, 4)?;
-    let string = array_or_string(req, 1, false)?;
-    let replace = array_or_string(req, 2, false)?;
-    let from = array_or_long(req, 3, false)?;
-    let length = array_or_long(req, 4, true)?;
-    let (Some(string), Some(replace), Some(from)) = (string, replace, from) else {
-        return Ok(Value::null());
-    };
+#[php_function]
+pub(super) fn substr_replace(
+    req: &mut Request,
+    string: Union<PhpArray, PhpString>,
+    replace: Union<PhpArray, PhpString>,
+    offset: Union<PhpArray, i64>,
+    #[php(default = null)] length: Option<Union<PhpArray, i64>>,
+) -> Result<Union<PhpArray, PhpString>, Thrown> {
+    let from = offset;
     match string {
-        ArrayOr::Other(string) => {
-            if matches!(from, ArrayOr::Array(_)) {
+        Union::B(string) => {
+            if matches!(from, Union::A(_)) {
                 return Err(throw(
                     req,
                     "TypeError",
                     "substr_replace(): Argument #3 ($offset) cannot be an array when working on a single string",
                 ));
             }
-            if matches!(length, Some(ArrayOr::Array(_))) {
+            if matches!(length, Some(Union::A(_))) {
                 return Err(throw(
                     req,
                     "TypeError",
@@ -430,11 +491,11 @@ pub(super) fn substr_replace(req: &mut Request) -> Result<Value, Thrown> {
             let s = string.as_bytes();
             let slen = long(s.len());
             let mut f = match from {
-                ArrayOr::Other(f) => f,
-                ArrayOr::Array(_) => 0,
+                Union::B(f) => f,
+                Union::A(_) => 0,
             };
             let mut l = match length {
-                Some(ArrayOr::Other(l)) => l,
+                Some(Union::B(l)) => l,
                 _ => slen,
             };
             if f < 0 {
@@ -450,8 +511,8 @@ pub(super) fn substr_replace(req: &mut Request) -> Result<Value, Thrown> {
                 l = slen - f;
             }
             let with: Vec<u8> = match replace {
-                ArrayOr::Other(r) => r.as_bytes().to_vec(),
-                ArrayOr::Array(array) => match array.iter().next() {
+                Union::B(r) => r.as_bytes().to_vec(),
+                Union::A(array) => match array.iter().next() {
                     Some((_, value)) => to_string(req, &value.deref())?.as_bytes().to_vec(),
                     None => Vec::new(),
                 },
@@ -464,21 +525,21 @@ pub(super) fn substr_replace(req: &mut Request) -> Result<Value, Thrown> {
             out.extend_from_slice(&s[..f]);
             out.extend_from_slice(&with);
             out.extend_from_slice(&s[f + l..]);
-            string_value(req, &out)
+            PhpString::new(req, &out).map(Union::B)
         }
-        ArrayOr::Array(strings) => {
+        Union::A(strings) => {
             let mut out = PhpArray::new(req)?;
             let mut froms = match from {
-                ArrayOr::Array(array) => Some(array.snapshot().into_iter()),
-                ArrayOr::Other(_) => None,
+                Union::A(array) => Some(array.snapshot().into_iter()),
+                Union::B(_) => None,
             };
             let mut lengths = match length {
-                Some(ArrayOr::Array(array)) => Some(array.snapshot().into_iter()),
+                Some(Union::A(array)) => Some(array.snapshot().into_iter()),
                 _ => None,
             };
             let mut replaces = match replace {
-                ArrayOr::Array(array) => Some(array.snapshot().into_iter()),
-                ArrayOr::Other(_) => None,
+                Union::A(array) => Some(array.snapshot().into_iter()),
+                Union::B(_) => None,
             };
             for (key, entry) in strings.snapshot() {
                 let orig = to_string(req, &entry.deref())?;
@@ -496,15 +557,15 @@ pub(super) fn substr_replace(req: &mut Request) -> Result<Value, Thrown> {
                         Some((_, value)) => clamp_from(to_long(req, &value.deref())?),
                         None => 0,
                     },
-                    (None, ArrayOr::Other(f)) => clamp_from(*f),
-                    (None, ArrayOr::Array(_)) => 0,
+                    (None, Union::B(f)) => clamp_from(*f),
+                    (None, Union::A(_)) => 0,
                 };
                 let mut l = match (&mut lengths, &length) {
                     (Some(iter), _) => match iter.next() {
                         Some((_, value)) => to_long(req, &value.deref())?,
                         None => slen,
                     },
-                    (None, Some(ArrayOr::Other(l))) => *l,
+                    (None, Some(Union::B(l))) => *l,
                     (None, _) => slen,
                 };
                 if l < 0 {
@@ -518,8 +579,8 @@ pub(super) fn substr_replace(req: &mut Request) -> Result<Value, Thrown> {
                         Some((_, value)) => to_string(req, &value.deref())?.as_bytes().to_vec(),
                         None => Vec::new(),
                     },
-                    (None, ArrayOr::Other(r)) => r.as_bytes().to_vec(),
-                    (None, ArrayOr::Array(_)) => Vec::new(),
+                    (None, Union::B(r)) => r.as_bytes().to_vec(),
+                    (None, Union::A(_)) => Vec::new(),
                 };
                 let (f, l) = (
                     usize::try_from(f).unwrap_or(0),
@@ -529,11 +590,11 @@ pub(super) fn substr_replace(req: &mut Request) -> Result<Value, Thrown> {
                 bytes.extend_from_slice(&s[..f]);
                 bytes.extend_from_slice(&with);
                 bytes.extend_from_slice(&s[f + l..]);
-                let value = string_value(req, &bytes)?;
+                let value = Value::string(PhpString::new(req, &bytes)?);
                 let key = owned_key(req, &key);
                 out.set(req, key, value)?;
             }
-            Ok(Value::array(out))
+            Ok(Union::A(out))
         }
     }
 }

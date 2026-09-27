@@ -4,19 +4,15 @@
 //! that is not Windows, and the locale is ASCII-compatible, so
 //! `php_basename` takes its byte loop.
 
+use php_ext::abi::Union;
+use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use crate::zpp::{optional_long, optional_string, string_value};
-use crate::{argument_count_between, string_argument};
-
-/// `PHP_PATHINFO_*`, the bits of `pathinfo`'s `$flags`.
-pub(super) const PATHINFO_DIRNAME: i64 = 1;
-pub(super) const PATHINFO_BASENAME: i64 = 2;
-pub(super) const PATHINFO_EXTENSION: i64 = 4;
-pub(super) const PATHINFO_FILENAME: i64 = 8;
-pub(super) const PATHINFO_ALL: i64 = 15;
+use super::constants::{
+    PATHINFO_ALL, PATHINFO_BASENAME, PATHINFO_DIRNAME, PATHINFO_EXTENSION, PATHINFO_FILENAME,
+};
 
 /// `php_basename(s, len, suffix, suffix_len)`: the last component,
 /// trailing slashes dropped, and the suffix taken off when it ends the
@@ -94,13 +90,15 @@ pub(crate) fn zend_dirname(path: &[u8]) -> Vec<u8> {
 /// string(1) "b"
 /// string(8) "dir\file"
 /// ```
-pub(super) fn basename(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let path = string_argument(req, 1)?;
-    let suffix = optional_string(req, 2)?;
-    let suffix: &[u8] = suffix.as_ref().map_or(b"", PhpString::as_bytes);
+#[php_function]
+pub(super) fn basename(
+    req: &mut Request,
+    path: PhpString,
+    #[php(default = "")] suffix: PhpString,
+) -> Result<PhpString, Thrown> {
+    let suffix: &[u8] = suffix.as_bytes();
     let name = php_basename(path.as_bytes(), suffix).to_vec();
-    string_value(req, &name)
+    PhpString::new(req, &name)
 }
 
 /// `dirname(string $path, int $levels = 1): string`, `_zend_dirname`:
@@ -124,10 +122,12 @@ pub(super) fn basename(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "."
 /// dirname(): Argument #2 ($levels) must be greater than or equal to 1
 /// ```
-pub(super) fn dirname(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let path = string_argument(req, 1)?;
-    let levels = optional_long(req, 2, 1)?;
+#[php_function]
+pub(super) fn dirname(
+    req: &mut Request,
+    path: PhpString,
+    #[php(default = 1)] levels: i64,
+) -> Result<PhpString, Thrown> {
     if levels < 1 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 1"));
     }
@@ -139,7 +139,7 @@ pub(super) fn dirname(req: &mut Request) -> Result<Value, Thrown> {
         out = zend_dirname(&out);
         left -= 1;
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `pathinfo(string $path, int $flags = PATHINFO_ALL): array|string`:
@@ -178,10 +178,13 @@ pub(super) fn dirname(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "."
 /// string(0) ""
 /// ```
-pub(super) fn pathinfo(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let path = string_argument(req, 1)?;
-    let opt = optional_long(req, 2, PATHINFO_ALL)?;
+#[php_function]
+pub(super) fn pathinfo(
+    req: &mut Request,
+    path: PhpString,
+    #[php(default = PATHINFO_ALL)] flags: i64,
+) -> Result<Union<PhpArray, PhpString>, Thrown> {
+    let opt = flags;
     let p = path.as_bytes();
     let mut parts: Vec<(&[u8], Vec<u8>)> = Vec::new();
     if opt & PATHINFO_DIRNAME != 0 {
@@ -205,13 +208,13 @@ pub(super) fn pathinfo(req: &mut Request) -> Result<Value, Thrown> {
     }
     if opt != PATHINFO_ALL {
         let first = parts.first().map(|(_, v)| v.clone()).unwrap_or_default();
-        return string_value(req, &first);
+        return PhpString::new(req, &first).map(Union::B);
     }
     let mut array = PhpArray::new(req)?;
     for (name, bytes) in parts {
         let key = Key::Str(PhpString::new(req, name)?);
-        let value = string_value(req, &bytes)?;
+        let value = Value::string(PhpString::new(req, &bytes)?);
         array.set(req, key, value)?;
     }
-    Ok(Value::array(array))
+    Ok(Union::A(array))
 }

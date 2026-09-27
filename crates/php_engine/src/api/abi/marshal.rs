@@ -19,8 +19,8 @@ use crate::api::abi::Callable;
 use crate::api::abi::class::Class;
 use crate::api::call::Function;
 use crate::api::coerce;
-use crate::api::raising::{Thrown, arg_type_error, fatal};
-use crate::api::request::Request;
+use crate::api::raising::{Thrown, arg_type_error, arg_value_error, fatal};
+use crate::api::request::{Request, Stream};
 use crate::api::values::{PhpArray, PhpObject, PhpRef, PhpString, Resource, Value, ValueRef};
 
 /// `MAY_BE_NULL`, `MAY_BE_FALSE` and the rest of `zend_type_info.h`'s
@@ -278,6 +278,62 @@ impl FromArgument for Resource {
     }
 }
 
+/// No declared type, the stream `PHP_Z_PARAM_STREAM` holds: a resource,
+/// as [`Resource`] holds one, and then an open stream
+/// ([`Stream::from_value`]); a closed resource or one of another type is
+/// php's "must be an open stream resource".
+impl FromArgument for Stream {
+    const MASK: u32 = bits::RESOURCE;
+    fn declared() -> Option<Type> {
+        None
+    }
+    fn accepts(value: &Value) -> bool {
+        Resource::accepts(value)
+    }
+    fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
+        match Stream::from_value(req, &value) {
+            Some(stream) => Ok(stream),
+            None => mismatch(req, "open stream"),
+        }
+    }
+    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
+        let Some(resource) = Resource::hold(req, position)? else {
+            return Ok(None);
+        };
+        match Stream::from_value(req, &resource.as_value()) {
+            Some(stream) => Ok(Some(stream)),
+            None => Err(arg_type_error(req, position, "be an open stream resource")),
+        }
+    }
+}
+
+/// `string` as `Z_PARAM_PATH` holds it: a string with no NUL byte in it,
+/// one there being php's "must not contain any null bytes".
+#[derive(Debug, Clone, Copy)]
+pub struct Path(pub PhpString);
+
+impl FromArgument for Path {
+    const MASK: u32 = bits::STRING;
+    fn declared() -> Option<Type> {
+        Some(Type::String)
+    }
+    fn accepts(value: &Value) -> bool {
+        PhpString::accepts(value)
+    }
+    fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
+        PhpString::from_value(req, value).map(Path)
+    }
+    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
+        let Some(string) = PhpString::hold(req, position)? else {
+            return Ok(None);
+        };
+        if string.as_bytes().contains(&0) {
+            return Err(arg_value_error(req, position, "not contain any null bytes"));
+        }
+        Ok(Some(Path(string)))
+    }
+}
+
 /// `callable`, held as `Z_PARAM_FUNC` holds it.
 impl FromArgument for Callable {
     const MASK: u32 = bits::CALLABLE;
@@ -321,6 +377,20 @@ impl<T: FromArgument> FromArgument for Option<T> {
         match given(req, position) {
             None => Ok(None),
             Some(given) if matches!(given.deref().as_ref(), ValueRef::Null) => Ok(Some(None)),
+            // `Z_PARAM_RESOURCE_OR_NULL`: an untyped resource's refusal
+            // names the `null` it also takes.
+            Some(given)
+                if T::MASK == bits::RESOURCE
+                    && T::declared().is_none()
+                    && !matches!(given.deref().as_ref(), ValueRef::Resource(_)) =>
+            {
+                let name = coerce::value_name(req, &given.deref());
+                Err(arg_type_error(
+                    req,
+                    position,
+                    &format!("be of type resource or null, {name} given"),
+                ))
+            }
             Some(_) => T::hold(req, position).map(|held| held.map(Some)),
         }
     }
@@ -615,6 +685,22 @@ impl<T: FromArgument> FromArgument for Raw<T> {
             position,
             held: PhantomData,
         }))
+    }
+    /// The absent argument: the default evaluated and held to nothing, as
+    /// a given one is, so an `arity = manual` body counts its arguments
+    /// before any is coerced; [`Raw::hold`] holds it at its position.
+    fn from_default(
+        req: &mut Request,
+        expr: &ConstExpr,
+        scope: Option<&[u8]>,
+        position: u32,
+    ) -> Result<Self, Thrown> {
+        let value = default_value(req, expr, scope, position, (bits::ANY, || None))?;
+        Ok(Raw {
+            value,
+            position,
+            held: PhantomData,
+        })
     }
 }
 

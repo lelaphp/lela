@@ -7,56 +7,15 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::{OrFalse, Variadic};
+use php_ext::attr::php_function;
 use php_ext::coerce::{to_double, to_long, to_string};
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{optional_long, string_value};
-use crate::{argument_count_between, string_argument};
-
 /// `INT_MAX`, the bound every count of the file is held to.
 const INT_MAX: i64 = 2_147_483_647;
-
-/// The two, in the stub's order.
-///
-/// ```php
-/// echo new ReflectionFunction('pack'), new ReflectionFunction('unpack');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function pack ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $format ]
-///     Parameter #1 [ <optional> mixed ...$values ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function unpack ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $format ]
-///     Parameter #1 [ <required> string $string ]
-///     Parameter #2 [ <optional> int $offset = 0 ]
-///   }
-///   - Return [ array|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("pack(string $format, mixed ...$values): string"),
-            pack as Entry,
-        ),
-        (
-            stub("unpack(string $format, string $string, int $offset = 0): array|false"),
-            unpack,
-        ),
-    ]
-}
 
 /// `atoi(&format[i])`: the digits at `at`, as C's `atoi` reads them
 /// through `strtol` and truncates to `int`.
@@ -119,14 +78,39 @@ fn put_long(out: &mut [u8], value: i64, size: usize, big: bool) {
 /// Type C: too few arguments
 /// Type a: not enough arguments
 /// ```
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('pack'), new ReflectionFunction('unpack');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function pack ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $format ]
+///     Parameter #1 [ <optional> mixed ...$values ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function unpack ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $format ]
+///     Parameter #1 [ <required> string $string ]
+///     Parameter #2 [ <optional> int $offset = 0 ]
+///   }
+///   - Return [ array|false ]
+/// }
+/// ```
 #[allow(clippy::too_many_lines)]
-fn pack(req: &mut Request) -> Result<Value, Thrown> {
-    let given = req.argument_count();
-    if given < 1 {
-        return Err(php_ext::raising::too_few_arguments(req, 1, 0));
-    }
-    let format = string_argument(req, 1)?;
-    let mut argv = req.variadic_arguments(2)?;
+#[php_function]
+fn pack(
+    req: &mut Request,
+    format: PhpString,
+    values: Variadic<Value>,
+) -> Result<PhpString, Thrown> {
+    let mut argv = values.0;
     let format = format.as_bytes().to_vec();
     let num_args = argv.len();
     // Pass one: the codes and their counts.
@@ -381,7 +365,7 @@ fn pack(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     out.truncate(pos);
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `INC_OUTPUTPOS`'s refusal.
@@ -491,11 +475,14 @@ fn overflow(req: &mut Request, code: char) -> Thrown {
 /// unpack(): Argument #3 ($offset) must be contained in argument #2 ($data)
 /// ```
 #[allow(clippy::too_many_lines)]
-fn unpack(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let format = string_argument(req, 1)?;
-    let input = string_argument(req, 2)?;
-    let offset = optional_long(req, 3, 0)?;
+#[php_function]
+fn unpack(
+    req: &mut Request,
+    format: PhpString,
+    string: PhpString,
+    #[php(default = 0)] offset: i64,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let input = string;
     let full = input.as_bytes();
     if offset < 0 || offset > i64::try_from(full.len()).unwrap_or(i64::MAX) {
         return Err(arg_value_error(
@@ -529,7 +516,7 @@ fn unpack(req: &mut Request) -> Result<Value, Thrown> {
                 let Some(parsed) = parsed else {
                     docref(req, Level::Warning, &format!("Type {ch}: integer overflow"));
                     req.release(Value::array(array));
-                    return Ok(Value::bool(false));
+                    return Ok(OrFalse::False);
                 };
                 repetitions = parsed;
                 f += digits;
@@ -585,7 +572,7 @@ fn unpack(req: &mut Request) -> Result<Value, Thrown> {
             if size != 0 && size != -1 && INT_MAX - size + 1 < inputpos {
                 docref(req, Level::Warning, &format!("Type {ch}: integer overflow"));
                 req.release(Value::array(array));
-                return Ok(Value::bool(false));
+                return Ok(OrFalse::False);
             }
             if inputpos + size > inputlen {
                 if repetitions < 0 {
@@ -601,7 +588,7 @@ fn unpack(req: &mut Request) -> Result<Value, Thrown> {
                     ),
                 );
                 req.release(Value::array(array));
-                return Ok(Value::bool(false));
+                return Ok(OrFalse::False);
             }
             let at = usize::try_from(inputpos).unwrap_or(0);
             let bytes = |n: usize| &input[at..at + n];
@@ -629,7 +616,7 @@ fn unpack(req: &mut Request) -> Result<Value, Thrown> {
                             &span[..end]
                         }
                     };
-                    Some(string_value(req, kept)?)
+                    Some(Value::string(PhpString::new(req, kept)?))
                 }
                 b'h' | b'H' => {
                     if size > INT_MAX / 2 {
@@ -669,7 +656,7 @@ fn unpack(req: &mut Request) -> Result<Value, Thrown> {
                             first = true;
                         }
                     }
-                    Some(string_value(req, &hex)?)
+                    Some(Value::string(PhpString::new(req, &hex)?))
                 }
                 b'c' => Some(Value::int(i64::from(i8::from_ne_bytes([input[at]])))),
                 b'C' => Some(Value::int(i64::from(input[at]))),
@@ -774,5 +761,5 @@ fn unpack(req: &mut Request) -> Result<Value, Thrown> {
             f += 1;
         }
     }
-    Ok(Value::array(array))
+    Ok(OrFalse::Value(array))
 }

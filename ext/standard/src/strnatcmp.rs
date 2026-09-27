@@ -8,11 +8,8 @@
 
 use std::cmp::Ordering;
 
-use php_ext::raising::Thrown;
-use php_ext::request::Request;
-use php_ext::values::Value;
-
-use crate::{argument_count_between, string_argument};
+use php_ext::attr::php_function;
+use php_ext::values::PhpString;
 
 /// C's `isspace` under the C locale.
 const fn is_space(c: u8) -> bool {
@@ -154,8 +151,9 @@ pub(super) fn strnatcmp_ex(a: &[u8], b: &[u8], fold: bool) -> i64 {
 /// int(0)
 /// int(1)
 /// ```
-pub(super) fn strnatcmp(req: &mut Request) -> Result<Value, Thrown> {
-    natural(req, false)
+#[php_function]
+pub(super) fn strnatcmp(string1: PhpString, string2: PhpString) -> i64 {
+    strnatcmp_ex(string1.as_bytes(), string2.as_bytes(), false)
 }
 
 /// `strnatcasecmp(...)`.
@@ -169,13 +167,7 @@ pub(super) fn strnatcmp(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// int(0)
 /// ```
-pub(super) fn strnatcasecmp(req: &mut Request) -> Result<Value, Thrown> {
-    natural(req, true)
-}
-
-fn natural(req: &mut Request, fold: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let s1 = string_argument(req, 1)?;
-    let s2 = string_argument(req, 2)?;
-    Ok(Value::int(strnatcmp_ex(s1.as_bytes(), s2.as_bytes(), fold)))
+#[php_function]
+pub(super) fn strnatcasecmp(string1: PhpString, string2: PhpString) -> i64 {
+    strnatcmp_ex(string1.as_bytes(), string2.as_bytes(), true)
 }
