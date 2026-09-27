@@ -464,8 +464,44 @@ impl SplObjectStorage {
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }
 
-    /// `removeAllExcept(SplObjectStorage $storage): int`; the witness is
-    /// `addAll`'s.
+    /// `removeAllExcept(SplObjectStorage $storage): int`.
+    ///
+    /// The storage is walked live and each row's object held across the
+    /// `getHash` of the storage it is tested against, so one that detaches
+    /// a later row frees nothing the walk still reads; the position is
+    /// reset whether the walk finished or threw.
+    ///
+    /// ```php
+    /// class Evil extends SplObjectStorage {
+    ///     public $throw = false;
+    ///     public function getHash($o): string {
+    ///         global $s;
+    ///         if ($this->throw) throw new Exception("no hash for {$o->n}");
+    ///         echo "getHash {$o->n}\n";
+    ///         if ($o->n == 1) foreach ($s as $p) if ($p->n == 2) { unset($s[$p]); break; }
+    ///         return spl_object_hash($o);
+    ///     }
+    /// }
+    /// $s = new SplObjectStorage; $keep = new Evil;
+    /// foreach ([1, 2, 3] as $n) { $o = new stdClass; $o->n = $n; $s[$o] = $n; }
+    /// $keep[$o] = 'kept';
+    /// unset($o, $p);
+    /// var_dump($s->removeAllExcept($keep), count($s));
+    /// $s->next(); $keep->throw = true;
+    /// try { $s->removeAllExcept($keep); } catch (Exception $x) { echo $x->getMessage(), "\n"; }
+    /// var_dump(count($s), $s->key(), $s->current()->n);
+    /// ```
+    /// ```expect
+    /// getHash 3
+    /// getHash 1
+    /// getHash 3
+    /// int(1)
+    /// int(1)
+    /// no hash for 3
+    /// int(1)
+    /// int(0)
+    /// int(3)
+    /// ```
     #[php(tentative)]
     fn removeAllExcept(
         req: &mut Request,
@@ -473,23 +509,13 @@ impl SplObjectStorage {
         storage: Instance<SplObjectStorage>,
     ) -> Result<i64, Thrown> {
         let this = this.object();
-        let rows = with(req, this, |s| s.live())?;
-        for (object, _) in rows {
-            req.addref(&object.as_value());
-            let kept = storage_contains(req, storage.object(), object);
-            let done = match kept {
-                Ok(false) => storage_detach(req, this, object).map(|_| ()),
-                Ok(true) => Ok(()),
-                Err(thrown) => Err(thrown),
-            };
-            req.release(object.as_value());
-            done?;
-        }
+        let walked = remove_all_except(req, this, storage.object());
         let n = with(req, this, |s| {
             s.reset();
             s.index = 0;
             s.len()
         })?;
+        walked?;
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }
 
@@ -1205,6 +1231,26 @@ fn remove_all(req: &mut Request, this: PhpObject, other: PhpObject) -> Result<()
         if !storage_detach(req, this, object)? {
             pos = with(req, other, |s| s.forward_from(pos))?;
         }
+    }
+    Ok(())
+}
+
+/// `SplObjectStorage::removeAllExcept`'s walk: each row of `this` that
+/// `other` does not contain detached, `this` walked live as
+/// `SPL_SAFE_HASH_FOREACH_PTR` walks it and each row's object held,
+/// `GC_ADDREF(elem_obj)`, across the `getHash` of either storage. A
+/// throwing `getHash` stops the walk, as in [`add_all`].
+fn remove_all_except(req: &mut Request, this: PhpObject, other: PhpObject) -> Result<(), Thrown> {
+    let mut from = 0;
+    while let Some((at, object, _)) = with(req, this, |s| s.row_at(from))? {
+        from = at + 1;
+        let held = Held::take(req, object.as_value());
+        let tested = match storage_contains(req, other, object) {
+            Ok(false) => storage_detach(req, this, object).map(|_| ()),
+            kept => kept.map(|_| ()),
+        };
+        held.let_go(req);
+        tested?;
     }
     Ok(())
 }
