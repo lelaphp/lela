@@ -376,6 +376,7 @@ request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number
 request::Request::flush
+request::Request::forbid_dynamic_call
 request::Request::frame_args
 request::Request::frame_vars
 request::Request::frameless

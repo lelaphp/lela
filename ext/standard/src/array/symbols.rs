@@ -182,6 +182,7 @@ fn extract(
     {
         return Err(arg_value_error(req, 3, "be a valid identifier"));
     }
+    req.forbid_dynamic_call()?;
     let prefix = prefix.unwrap_or_default();
     // `EXTR_REFS` writes references into the caller's array, separated
     // in place where the call passed it by reference.
@@ -364,6 +365,7 @@ fn compact(
     var_name: Untyped<Value>,
     var_names: Variadic<Untyped<Value>>,
 ) -> Result<PhpArray, Thrown> {
+    req.forbid_dynamic_call()?;
     let arguments: Vec<Value> = std::iter::once(var_name.0)
         .chain(var_names.0.into_iter().map(|name| name.0))
         .collect();

@@ -30,16 +30,13 @@ fn zend_version(req: &mut Request) -> Result<PhpString, Thrown> {
 
 /// The calling function's arguments, or php's `Error` for a caller that
 /// is none: a code frame is `what` said of it, and another native is
-/// `zend_forbid_dynamic_call`'s. The name is the native's own.
+/// `zend_forbid_dynamic_call`'s ([`Request::forbid_dynamic_call`]). The
+/// name is the native's own.
 fn caller_arguments(req: &mut Request, name: &str, what: &str) -> Result<Vec<Value>, Thrown> {
     match req.native_caller() {
         NativeCaller::Function(_, arguments) => Ok(arguments),
         NativeCaller::Code(_) => Err(throw(req, "Error", &format!("{name}() {what}"))),
-        NativeCaller::Native => Err(throw(
-            req,
-            "Error",
-            &format!("Cannot call {name}() dynamically"),
-        )),
+        NativeCaller::Native => Err(req.dynamic_call()),
     }
 }
 

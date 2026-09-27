@@ -15252,6 +15252,41 @@ impl Request {
         }
     }
 
+    /// `zend_forbid_dynamic_call()` (`Z/Zend/zend_API.h:901`): php's
+    /// `Error` "Cannot call `name()` dynamically" where the native being
+    /// served was called dynamically, `ZEND_CALL_DYNAMIC`, which is where
+    /// [`Request::native_caller`] answers another native: a callee the
+    /// program named as it served (`$f()`), or one `zend_call_function`
+    /// served, a user buffer handler's among them. What reads or writes the
+    /// caller's variables, `compact` and `extract`, refuses such a call.
+    ///
+    /// ```php
+    /// function f() { $a = 1; $g = 'compact'; try { $g('a'); } catch (Error $e) { echo $e->getMessage(), "\n"; } var_dump(call_user_func('compact', 'a')); }
+    /// f();
+    /// ob_start('compact'); try { ob_end_clean(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot call compact() dynamically
+    /// array(1) {
+    ///   ["a"]=>
+    ///   int(1)
+    /// }
+    /// Cannot call compact() dynamically
+    /// ```
+    pub fn forbid_dynamic_call(&mut self) -> Result<(), Thrown> {
+        match self.native_caller() {
+            NativeCaller::Native => Err(self.dynamic_call()),
+            NativeCaller::Function(..) | NativeCaller::Code(_) => Ok(()),
+        }
+    }
+
+    /// The `Error` [`Request::forbid_dynamic_call`] throws, named for the
+    /// native being served.
+    pub(crate) fn dynamic_call(&mut self) -> Thrown {
+        let name = self.active_function_name();
+        crate::api::raising::throw(self, "Error", &format!("Cannot call {name}() dynamically"))
+    }
+
     /// `zend_proptable_to_symtable(&EG(symbol_table), 1)`
     /// (`Z/Zend/zend_hash.c:3396`), what `FETCH_GLOBALS` hands the
     /// program as `$GLOBALS`: a copy of the global table, every name
