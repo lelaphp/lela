@@ -230,28 +230,31 @@ pub fn default_stream_ctx(req: &mut Request) -> Result<Resource, Thrown> {
     default_context(req)
 }
 
-/// `php_stream_context_get_option` (`Z/main/streams/streams.c:2440`):
-/// the value `ctx` holds under `wrapper`'s array at `option`, as a
-/// wrapper's opener reads its own options, `None` where either level is
-/// missing or the resource is no `stream-context`.
+/// `php_stream_context_get_option` (`Z/main/streams/streams.c:2440`): the
+/// value under `option` of the `wrapper`'s options of a `context`, a view
+/// with no owner, dereferenced; `None` where either level is missing.
 pub fn stream_ctx_option(
     req: &mut Request,
-    ctx: Resource,
+    context: Resource,
     wrapper: &[u8],
     option: &[u8],
 ) -> Result<Option<Value>, Thrown> {
-    let Some(options) = ctx.native::<Context>(req).and_then(|c| c.options) else {
+    let Some(options) = context
+        .native::<Context>(req)
+        .and_then(|context| context.options)
+    else {
         return Ok(None);
     };
-    let wrapper = PhpString::new(req, wrapper)?;
-    let Some(inner) = options.get(&Key::Str(wrapper)).map(|v| v.deref()) else {
+    let key = PhpString::new(req, wrapper)?;
+    let found = options.get(&Key::Str(key)).map(|v| v.deref());
+    req.release(Value::string(key));
+    let Some(level) = found.as_ref().and_then(Value::as_array).copied() else {
         return Ok(None);
     };
-    let ValueRef::Array(inner) = inner.as_ref() else {
-        return Ok(None);
-    };
-    let option = PhpString::new(req, option)?;
-    Ok(inner.get(&Key::Str(option)))
+    let key = PhpString::new(req, option)?;
+    let found = level.get(&Key::Str(key)).map(|v| v.deref());
+    req.release(Value::string(key));
+    Ok(found)
 }
 
 /// `Z_PARAM_RESOURCE` then `decode_context_param`

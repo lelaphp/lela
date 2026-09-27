@@ -122,7 +122,7 @@ pub use streamsfuncs::{default_stream_ctx, stream_ctx_option};
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
 use php_ext::raising::{Thrown, arg_value_error};
-use php_ext::request::Request;
+use php_ext::request::{EngineWrapper, Request};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -744,6 +744,7 @@ pub fn extension() -> Extension {
         .class::<dir::Directory>()
         .ini(var::ini())
         .ini(sockets::ini())
+        .ini(file::ini())
         .dependencies(dependencies())
         .ini(assert::ini())
         .ini(browscap::ini())
@@ -758,10 +759,14 @@ pub fn extension() -> Extension {
 }
 
 /// The `on_modify` of each entry that has one, php's `PHP_INI_MH` at
-/// runtime: the URL rewriter's two over session's entries, and the five
-/// of `assert.c`.
-fn ini_handlers() -> [(&'static [u8], OnModify); 7] {
+/// runtime: `file.c`'s `auto_detect_line_endings`, the URL rewriter's
+/// two over session's entries, and the five of `assert.c`.
+fn ini_handlers() -> [(&'static [u8], OnModify); 8] {
     [
+        (
+            b"auto_detect_line_endings",
+            file::on_auto_detect_line_endings,
+        ),
         (b"session.trans_sid_tags", url_scanner::on_session_tags),
         (b"session.trans_sid_hosts", url_scanner::on_session_hosts),
         (b"assert.active", assert::on_active),
@@ -772,15 +777,21 @@ fn ini_handlers() -> [(&'static [u8], OnModify); 7] {
     ]
 }
 
-/// `PHP_RINIT(basic)`'s share here: the `glob://` wrapper and the
-/// filters, which php registers as the engine starts and this engine keeps
-/// in the request's wrapper and filter tables (`dir::glob_wrapper`,
-/// `filters::register`). The `assert.*` entries' startup deprecations are
-/// their on-modify rules, which the engine serves over the host's values
-/// as it starts.
+/// `PHP_RINIT(basic)`'s share here: the wrappers and the filters, which
+/// php registers as the engine starts and this engine keeps in the
+/// request's wrapper and filter tables (`filters::register`). The
+/// wrappers go in as `PHP_MINIT(basic)` registers them
+/// (`Z/ext/standard/basic_functions.c:341-346`): `php`, `file`, `glob`,
+/// `data`, the engine keeping the kinds of all but `glob`; `http` and
+/// `ftp` follow when they land. The `assert.*` entries' startup
+/// deprecations are their on-modify rules, which the engine serves over
+/// the host's values as it starts.
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::rinit`'s signature
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    req.register_engine_wrapper(EngineWrapper::Php);
+    req.register_engine_wrapper(EngineWrapper::Plain);
     req.register_wrapper(dir::glob_wrapper());
+    req.register_engine_wrapper(EngineWrapper::Data);
     filters::register(req);
     Ok(())
 }

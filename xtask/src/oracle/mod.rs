@@ -507,6 +507,10 @@ pub struct Invocation<'a> {
     /// how a phpt run is captured unless `--CAPTURE_STDIO--` says
     /// otherwise (run-tests.php:1885-1889). A witness pins the two apart.
     pub merge_streams: bool,
+    /// The working directory: the program's own where `None`, which is
+    /// a witness's; php-src's root for a phpt test and the sections run
+    /// beside it, as run-tests.php runs them (#952).
+    pub cwd: Option<&'a Path>,
 }
 
 impl<'a> Invocation<'a> {
@@ -522,6 +526,7 @@ impl<'a> Invocation<'a> {
             env: &[],
             stdin: None,
             merge_streams: false,
+            cwd: None,
         }
     }
 }
@@ -581,7 +586,7 @@ impl<'a> Oracle<'a> {
         cmd.args(call.flags)
             .arg(&scratch.script)
             .args(call.args)
-            .current_dir(&scratch.dir);
+            .current_dir(call.cwd.unwrap_or(&scratch.dir));
         if recipe.env_clear {
             cmd.env_clear();
         }

@@ -36,7 +36,7 @@ use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
 use crate::api::request::{
-    Cast, FdStream, FilterFlags, OptionAnswer, Request, Stream, StreamOption, Whence,
+    Cast, EngineWrapper, FdStream, FilterFlags, OptionAnswer, Request, Stream, StreamOption, Whence,
 };
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 
@@ -356,6 +356,21 @@ struct Flags {
     /// `PHP_STREAM_FLAG_IS_DIR`, which `php_stream_opendir` sets, with
     /// the `PHP_STREAM_FLAG_NO_FCLOSE` `opendir` sets beside it.
     is_dir: bool,
+    /// `PHP_STREAM_FLAG_DETECT_EOL` and `PHP_STREAM_FLAG_EOL_MAC`.
+    eol: Eol,
+}
+
+/// What ends a line for `php_stream_locate_eol`: `\n`, php's default,
+/// which a DOS `\r\n` ends in too; `\r` alone, once a line was found
+/// to end so; or not yet known, where `auto_detect_line_endings` was on
+/// as the stream was made (`PHP_STREAM_FLAG_DETECT_EOL`), which the
+/// first line that ends settles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Eol {
+    #[default]
+    Unix,
+    Mac,
+    Detect,
 }
 
 impl PhpStream {
@@ -733,6 +748,50 @@ impl PhpStream {
     /// `maxlen` is php's, so at most `maxlen - 1` bytes, and `None` is
     /// php's `grow_mode`, a line of any length. `None` back is a line of no
     /// bytes, at eof or after a read that failed.
+    /// `php_stream_locate_eol` (`Z/main/streams/streams.c:909`) over the
+    /// read buffer: where the line ends, `\n` or, for a stream found to
+    /// end its lines with `\r` alone, `\r`; a stream still detecting
+    /// settles on `\r` where one stands with no `\n` right after it and
+    /// no `\n` before it, and on `\n` where a `\n` stands.
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/eol.txt';
+    /// file_put_contents($f, "one\rtwo\rthree");
+    /// $show = fn($line) => var_dump(strtr($line, "\r", '|'));
+    /// $h = fopen($f, 'r'); $show(fgets($h));
+    /// @ini_set('auto_detect_line_endings', '1');
+    /// $h = fopen($f, 'r'); $show(fgets($h)); $show(fgets($h)); $show(fgets($h));
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// string(13) "one|two|three"
+    /// string(4) "one|"
+    /// string(4) "two|"
+    /// string(5) "three"
+    /// ```
+    fn locate_eol(&mut self) -> Option<usize> {
+        let held = &self.readbuf[self.readpos..self.writepos];
+        let find = |byte: u8| held.iter().position(|b| *b == byte);
+        match self.flags.eol {
+            Eol::Unix => find(b'\n'),
+            Eol::Mac => find(b'\r'),
+            Eol::Detect => {
+                let (cr, lf) = (find(b'\r'), find(b'\n'));
+                match cr {
+                    Some(cr) if lf != Some(cr + 1) && lf.is_none_or(|lf| lf > cr) => {
+                        self.flags.eol = Eol::Mac;
+                        Some(cr)
+                    }
+                    _ if lf.is_some() => {
+                        self.flags.eol = Eol::Unix;
+                        lf
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
+
     pub(crate) fn get_line(&mut self, req: &mut Request, maxlen: Option<usize>) -> Option<Vec<u8>> {
         if maxlen == Some(0) {
             return None;
@@ -742,8 +801,9 @@ impl PhpStream {
         loop {
             let avail = self.writepos - self.readpos;
             if avail > 0 {
+                let eol = self.locate_eol();
                 let held = &self.readbuf[self.readpos..self.writepos];
-                let (mut cpysz, mut done) = match held.iter().position(|b| *b == b'\n') {
+                let (mut cpysz, mut done) = match eol {
                     Some(eol) => (eol + 1, true),
                     None => (avail, false),
                 };
@@ -982,13 +1042,68 @@ impl PhpStream {
     /// are one path: the owed flush, then the kind closed, then the
     /// stream dropped.
     fn free(mut self, req: &mut Request) -> i32 {
+        self.flush_owed(req);
+        self.release(req)
+    }
+
+    /// `_php_stream_free`'s "make sure everything is saved": the write
+    /// chain flushed closing, where the stream was written or has one.
+    fn flush_owed(&mut self, req: &mut Request) {
         if self.flags.was_written || !self.writefilters.is_empty() {
             self.flush_closing(req, true);
         }
+    }
+
+    /// `_php_stream_free` past the flush: the kind closed, then each
+    /// filter taken off, and what the close answered.
+    fn release(mut self, req: &mut Request) -> i32 {
         let Self { ops, .. } = &mut self;
         let ret = ops.close(req);
         self.free_filters(req);
         ret
+    }
+
+    /// `php_stream_free(stream, PHP_STREAM_FREE_KEEP_RSRC | ...)` as
+    /// `fclose` reaches it: the owed flush while the resource is still
+    /// open, so a user filter's `$this->stream` is the open `resource`
+    /// php hands it; then `zend_list_close`, whose destructor finds the
+    /// stream in its free already (php's `in_free` guard) and leaves it;
+    /// then the kind closed and the filters taken off. The last owner's
+    /// release reaches the free through the destructor instead, the
+    /// resource closed already, as `zend_resource_dtor` closes it first.
+    ///
+    /// ```php
+    /// class F extends php_user_filter {
+    ///     function filter($in, $out, &$consumed, $closing): int {
+    ///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+    ///         if ($closing) echo get_resource_type($this->stream), "\n";
+    ///         return PSFS_PASS_ON;
+    ///     }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// $m = fopen('php://memory', 'w');
+    /// stream_filter_append($m, 'f', STREAM_FILTER_WRITE);
+    /// fwrite($m, 'x');
+    /// var_dump(fclose($m));
+    /// $m = fopen('php://memory', 'w');
+    /// stream_filter_append($m, 'f', STREAM_FILTER_WRITE);
+    /// $m = null;
+    /// ```
+    /// ```expect
+    /// stream
+    /// bool(true)
+    /// Unknown
+    /// ```
+    pub(crate) fn close_open(req: &mut Request, stream: Stream) {
+        let res = stream.resource();
+        req.stream_op(stream, |req, s| s.flush_owed(req));
+        let taken = req
+            .resource_native_mut::<Option<PhpStream>>(res.heap())
+            .and_then(Option::take);
+        res.close(req);
+        if let Some(taken) = taken {
+            req.pclose_ret = taken.release(req);
+        }
     }
 }
 
@@ -1159,10 +1274,24 @@ impl Ops for Memory {
     /// `php_stream_memory_set_option`'s `PHP_STREAM_OPTION_TRUNCATE_API`
     /// (`Z/main/streams/memory.c:193`): refused on a read-only stream;
     /// a shorter size cuts the bytes and pulls the position back to it,
-    /// a longer one zero-fills.
-    fn truncate(&mut self, _req: &mut Request, size: usize) -> Option<bool> {
+    /// a longer one zero-fills. The bytes are php's `zend_string`, which
+    /// `zend_string_realloc` grows, so a size past the memory limit is
+    /// the heap's fatal for that string, asked of the request's heap as
+    /// `php_stream_get_line` asks it, and kept for the native.
+    fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
         if self.mode == TempMode::ReadOnly {
             return Some(false);
+        }
+        if size > self.data.len() && size > req.heap_memory_limit() {
+            match req.string_with(size, |_| {}) {
+                Ok(asked) => req.release(Value::string(asked)),
+                Err(thrown) => {
+                    if req.stream_thrown.is_none() {
+                        req.stream_thrown = Some(thrown);
+                    }
+                    return Some(false);
+                }
+            }
         }
         self.data.resize(size, 0);
         self.fpos = self.fpos.min(size);
@@ -1647,7 +1776,25 @@ impl Ops for Stdio {
     /// `php_stdiop_seek` (`Z/main/streams/plain_wrapper.c:616`): php's
     /// warning on a stream that cannot seek, else `lseek(2)` and the
     /// offset it answered, and `EINVAL`'s `-1` for a `whence` it does
-    /// not know.
+    /// not know and for a position before the start, the position left
+    /// where it was.
+    ///
+    /// ```php
+    /// $h = fopen(__DIR__ . '/seek.tmp', 'wb+');
+    /// fwrite($h, '123456789');
+    /// var_dump(fseek($h, -4, SEEK_SET), ftell($h), fseek($h, -1, SEEK_CUR), fread($h, 1));
+    /// var_dump(fseek($h, -20, SEEK_CUR), ftell($h), fread($h, 1));
+    /// fclose($h); unlink(__DIR__ . '/seek.tmp');
+    /// ```
+    /// ```expect
+    /// int(-1)
+    /// int(9)
+    /// int(0)
+    /// string(1) "9"
+    /// int(-1)
+    /// int(9)
+    /// string(0) ""
+    /// ```
     fn seek(
         &mut self,
         req: &mut Request,
@@ -1661,7 +1808,10 @@ impl Ops for Stdio {
             return Some(false);
         }
         let from = match whence {
-            Some(Whence::Set) => SeekFrom::Start(u64::try_from(offset).unwrap_or(0)),
+            Some(Whence::Set) => match u64::try_from(offset) {
+                Ok(offset) => SeekFrom::Start(offset),
+                Err(_) => return Some(false),
+            },
             Some(Whence::Cur) => SeekFrom::Current(offset),
             Some(Whence::End) => SeekFrom::End(offset),
             None => return Some(false),
@@ -2518,6 +2668,21 @@ pub(crate) struct Registered {
     pub(crate) wrapper: Located,
 }
 
+impl Registered {
+    /// The row of a wrapper the engine keeps, under php's scheme for it.
+    pub(crate) fn engine(which: EngineWrapper) -> Registered {
+        let (scheme, wrapper) = match which {
+            EngineWrapper::Php => (&b"php"[..], Located::Php),
+            EngineWrapper::Plain => (&b"file"[..], Located::Plain),
+            EngineWrapper::Data => (&b"data"[..], Located::Data),
+        };
+        Registered {
+            scheme: scheme.to_vec(),
+            wrapper,
+        }
+    }
+}
+
 impl Located {
     /// `wrapper->is_url`: the `data:` wrapper, and one a program
     /// registered with `STREAM_IS_URL`.
@@ -2544,30 +2709,24 @@ fn same_wrapper(a: &Located, b: &Located) -> bool {
 
 impl Request {
     /// `url_stream_wrappers_hash`, the wrappers every request starts
-    /// with: `php`, `file` and `data`, the engine's own, then those the
-    /// extensions registered.
+    /// with, in the order they were registered: the engine's own where
+    /// `standard` places them, among the extensions' (#920).
     pub(crate) fn global_wrappers(&self) -> Vec<Registered> {
-        let mut table = vec![
-            Registered {
-                scheme: b"php".to_vec(),
-                wrapper: Located::Php,
-            },
-            Registered {
-                scheme: b"file".to_vec(),
-                wrapper: Located::Plain,
-            },
-            Registered {
-                scheme: b"data".to_vec(),
-                wrapper: Located::Data,
-            },
-        ];
-        for (at, w) in self.wrappers.iter().enumerate() {
-            table.push(Registered {
-                scheme: w.scheme.as_bytes().to_vec(),
-                wrapper: Located::Ext(at),
-            });
+        self.url_stream_wrappers.clone()
+    }
+
+    /// `php_register_url_stream_wrapper`'s insert: the row at the end of
+    /// the global table, `false` where its scheme is taken.
+    pub(crate) fn add_url_wrapper(&mut self, row: Registered) -> bool {
+        if self
+            .url_stream_wrappers
+            .iter()
+            .any(|r| r.scheme == row.scheme)
+        {
+            return false;
         }
-        table
+        self.url_stream_wrappers.push(row);
+        true
     }
 
     /// `php_stream_get_url_stream_wrappers_hash`: the request's own table
@@ -3124,7 +3283,15 @@ impl Request {
     /// `php_stream_alloc`'s `zend_register_resource(ret, le_stream)`: the
     /// stream as the payload of a resource of the `stream` type, one
     /// owner, under the next id.
-    pub(crate) fn stream_alloc(&mut self, stream: PhpStream) -> Result<Stream, Thrown> {
+    pub(crate) fn stream_alloc(&mut self, mut stream: PhpStream) -> Result<Stream, Thrown> {
+        // `_php_stream_alloc`'s `FG(auto_detect_line_endings)`
+        // (`Z/main/streams/streams.c:326`).
+        if self
+            .ini_get(b"auto_detect_line_endings")
+            .is_some_and(Request::ini_parse_bool)
+        {
+            stream.flags.eol = Eol::Detect;
+        }
         let kind = self.stream_type();
         let res = self.new_resource(kind, Some(stream))?;
         if let Some(Some(stream)) = self.resource_native_mut::<Option<PhpStream>>(res.heap()) {

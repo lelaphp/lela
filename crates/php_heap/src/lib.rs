@@ -59,7 +59,10 @@ pub use block::Block;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use collector::GcStatus;
 pub use compare::{Scalar, compare, identical};
-pub use fd::{BUFSIZ, Readiness, dup_fd, fd_table_size, peek_fd, poll_fd, set_fd_blocking};
+pub use fd::{
+    BUFSIZ, Readiness, SockOpt, bind_fd, connect_fd, dup_fd, fd_table_size, listen_fd, new_socket,
+    peek_fd, poll_fd, set_fd_blocking, set_sockopt,
+};
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, HeapHooks};
 pub use locale::reset_lc_ctype_locale;

@@ -19,13 +19,15 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpS
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use php_heap::Readiness;
+use php_heap::{Readiness, SockOpt};
 
 use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
-use crate::api::request::{OptionAnswer, Request, Stream, StreamOption, Xport, XportFailure};
+use crate::api::request::{
+    BindTo, OptionAnswer, Request, SocketOptions, Stream, StreamOption, Xport, XportFailure,
+};
 use crate::api::values::PhpString;
 
 /// `STREAM_OOB` and `STREAM_PEEK`, the bits of `stream_socket_sendto`'s
@@ -155,16 +157,26 @@ impl Sock {
 /// `php_netstream_data_t` under one of `xp_socket.c`'s ops: the socket,
 /// `None` once closed; the ops' label; `is_blocked`; the read timeout,
 /// `None` for php's `tv_sec == -1`; `timeout_event`; and whether the
-/// stream is a server's, `PHP_STREAM_FLAG_NO_IO`, which
-/// `php_stream_xport_create` sets on a stream it bound
-/// (`Z/main/streams/transports.c:175`) and which only this kind reads.
+/// stream is a server's ([`Role`]), which only this kind reads.
 pub(crate) struct Socket {
     sock: Option<Sock>,
     label: &'static str,
     is_blocked: bool,
     timeout: Option<Duration>,
     timeout_event: bool,
-    no_io: bool,
+    role: Role,
+}
+
+/// Whether a socket stream is a server's: `PHP_STREAM_FLAG_NO_IO`, which
+/// `php_stream_xport_create` sets on a stream it bound
+/// (`Z/main/streams/transports.c:175`), with the `tcp_nodelay` option
+/// the server was made with, which `php_tcp_sockop_accept` gives each
+/// client it accepts; read when the server is made, since the stream
+/// keeps no `PHP_STREAM_CONTEXT` here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Peer,
+    Server { accept_nodelay: bool },
 }
 
 impl Socket {
@@ -175,7 +187,7 @@ impl Socket {
             is_blocked: true,
             timeout,
             timeout_event: false,
-            no_io: false,
+            role: Role::Peer,
         }
     }
 
@@ -456,7 +468,7 @@ impl Socket {
         let Some(sock) = self.sock.as_ref() else {
             return false;
         };
-        if self.no_io
+        if matches!(self.role, Role::Server { .. })
             && !matches!(
                 php_heap::poll_fd(sock.fd(), Readiness::Readable, Some(Duration::ZERO)),
                 Ok(true)
@@ -505,6 +517,13 @@ impl Socket {
         let (client, peer) = match sock {
             Sock::TcpServer(listener) => {
                 let (client, addr) = listener.accept().map_err(|e| socket_error(&e).1)?;
+                if self.role
+                    == (Role::Server {
+                        accept_nodelay: true,
+                    })
+                {
+                    let _ = client.set_nodelay(true);
+                }
                 (Sock::Tcp(client), inet_text(&addr))
             }
             Sock::UnixServer(listener) => {
@@ -666,15 +685,125 @@ fn failure(error: &std::io::Error) -> XportFailure {
     XportFailure { code, text }
 }
 
-/// `php_tcp_sockop_connect` (`Z/main/streams/xp_socket.c:763`) for
-/// `tcp` and `udp`: each address the host resolves to tried in turn, a
-/// TCP socket connected within `timeout` and a UDP one bound and given
-/// its peer; the last failure is the error.
+/// `php_tcp_sockop_connect` (`Z/main/streams/xp_socket.c:747`) for
+/// `tcp` and `udp`, over `php_network_connect_socket_to_host`
+/// (`Z/main/network.c:818`): the `bindto` option read after the host,
+/// a value that is no string refusing the connect; then each address the
+/// host resolves to tried in turn within what is left of `timeout`: a
+/// socket of its family, bound to `bindto` where it is an address of that
+/// family (php's `Invalid IP Address` and `Failed to bind` warnings where
+/// it is not one, or will not bind), `SO_BROADCAST` on a UDP one and
+/// `TCP_NODELAY` on a TCP one as the options say, and connected. The last
+/// failure is the error.
 fn connect_inet(
     req: &mut Request,
     name: &[u8],
     udp: bool,
     timeout: Option<Duration>,
+    options: &SocketOptions,
+) -> Result<Sock, XportFailure> {
+    let text_only = |text| XportFailure { code: 0, text };
+    let (host, port) = parse_ip_address(name).map_err(text_only)?;
+    // A `bindto` that does not parse is php's error text, which the first
+    // attempt clears, and no bind.
+    let mut bindto = match &options.bindto {
+        Some(BindTo::NotAString) => {
+            return Err(text_only(String::from(
+                "local_addr context option is not a string.",
+            )));
+        }
+        Some(BindTo::Address(text)) => parse_ip_address(text).ok(),
+        None => None,
+    };
+    let addrs = addresses(req, &host, port).map_err(text_only)?;
+    let deadline = timeout.map(|t| Instant::now() + t);
+    let mut last = XportFailure {
+        code: 0,
+        text: String::new(),
+    };
+    for addr in addrs {
+        if let Some((local, _)) = &bindto {
+            if addr.is_ipv6() && !local.contains(':') {
+                continue;
+            }
+            if addr.is_ipv4() && (local.contains(':') || local == "0") {
+                bindto = None;
+            }
+        }
+        let Ok(fd) = php_heap::new_socket(&addr, udp) else {
+            continue;
+        };
+        if let Some((local, local_port)) = &bindto {
+            bind_local(req, fd.as_fd(), &addr, local, *local_port);
+        }
+        if udp && options.so_broadcast {
+            let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true);
+        }
+        if !udp && options.tcp_nodelay {
+            let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::TcpNodelay, true);
+        }
+        let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        match php_heap::connect_fd(
+            fd.as_fd(),
+            &addr,
+            left.map(|t| t.max(Duration::from_micros(1))),
+        ) {
+            Ok(()) if udp => return Ok(Sock::Udp(UdpSocket::from(fd))),
+            Ok(()) => return Ok(Sock::Tcp(TcpStream::from(fd))),
+            Err(error) => last = failure(&error),
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
+    }
+    Err(last)
+}
+
+/// The `bindto` half of `php_network_connect_socket_to_host`
+/// (`Z/main/network.c:883`): the local address as `inet_pton` of the
+/// socket's family reads it, php's `Invalid IP Address: %s` where it
+/// does not, and `Failed to bind to '%s:%d', system said: %s` where the
+/// bind fails; the connect goes on either way.
+fn bind_local(req: &mut Request, fd: BorrowedFd<'_>, to: &SocketAddr, local: &str, port: u16) {
+    let ip = if to.is_ipv4() {
+        local
+            .parse::<std::net::Ipv4Addr>()
+            .ok()
+            .map(std::net::IpAddr::V4)
+    } else {
+        local
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(std::net::IpAddr::V6)
+    };
+    let Some(ip) = ip else {
+        let text = format!("{}(): Invalid IP Address: {local}", req.active_native());
+        warning(req, &text);
+        return;
+    };
+    if let Err(error) = php_heap::bind_fd(fd, &SocketAddr::new(ip, port)) {
+        let text = format!(
+            "{}(): Failed to bind to '{local}:{port}', system said: {}",
+            req.active_native(),
+            socket_error(&error).1
+        );
+        warning(req, &text);
+    }
+}
+
+/// `php_tcp_sockop_bind` (`Z/main/streams/xp_socket.c:678`) over
+/// `php_network_bind_socket_to_local_addr` (`Z/main/network.c:487`) for
+/// `tcp` and `udp`: the first address the host resolves to that binds,
+/// each socket given `SO_REUSEADDR`, then `IPV6_V6ONLY`, `SO_REUSEPORT`
+/// and, for UDP, `SO_BROADCAST` as the options say; then, for a TCP
+/// server asked to, `listen(2)` with the `backlog` option, `32` where it
+/// is absent (`Z/main/streams/transports.c:162`).
+fn bind_inet(
+    req: &mut Request,
+    name: &[u8],
+    udp: bool,
+    listen: bool,
+    options: &SocketOptions,
 ) -> Result<Sock, XportFailure> {
     let text_only = |text| XportFailure { code: 0, text };
     let (host, port) = parse_ip_address(name).map_err(text_only)?;
@@ -684,41 +813,41 @@ fn connect_inet(
         text: String::new(),
     };
     for addr in addrs {
-        let made = if udp {
-            let local: SocketAddr = if addr.is_ipv4() {
-                (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
-            } else {
-                (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
-            };
-            UdpSocket::bind(local).and_then(|s| s.connect(addr).map(|()| Sock::Udp(s)))
-        } else {
-            match timeout {
-                Some(t) => TcpStream::connect_timeout(&addr, t.max(Duration::from_micros(1))),
-                None => TcpStream::connect(addr),
+        let fd = match php_heap::new_socket(&addr, udp) {
+            Ok(fd) => fd,
+            Err(error) => {
+                last = failure(&error);
+                continue;
             }
-            .map(Sock::Tcp)
         };
-        match made {
-            Ok(sock) => return Ok(sock),
-            Err(error) => last = failure(&error),
+        let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::SoReuseaddr, true);
+        if addr.is_ipv6()
+            && let Some(only) = options.ipv6_v6only
+        {
+            let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::Ipv6V6only, only);
         }
+        if options.so_reuseport {
+            let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::SoReuseport, true);
+        }
+        if udp && options.so_broadcast {
+            let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true);
+        }
+        if let Err(error) = php_heap::bind_fd(fd.as_fd(), &addr) {
+            last = failure(&error);
+            continue;
+        }
+        if udp {
+            return Ok(Sock::Udp(UdpSocket::from(fd)));
+        }
+        if listen {
+            let backlog = options.listen_queue.unwrap_or(32);
+            let backlog =
+                i32::try_from(backlog).unwrap_or(if backlog < 0 { i32::MIN } else { i32::MAX });
+            php_heap::listen_fd(fd.as_fd(), backlog).map_err(|error| failure(&error))?;
+        }
+        return Ok(Sock::TcpServer(TcpListener::from(fd)));
     }
     Err(last)
-}
-
-/// `php_tcp_sockop_bind` (`Z/main/streams/xp_socket.c:694`) for `tcp` and
-/// `udp`: the first address the host resolves to that binds, with
-/// `SO_REUSEADDR` as `std`'s listener sets it, and a TCP one listening.
-fn bind_inet(req: &mut Request, name: &[u8], udp: bool) -> Result<Sock, XportFailure> {
-    let text_only = |text| XportFailure { code: 0, text };
-    let (host, port) = parse_ip_address(name).map_err(text_only)?;
-    let addrs = addresses(req, &host, port).map_err(text_only)?;
-    let made = if udp {
-        UdpSocket::bind(addrs.as_slice()).map(Sock::Udp)
-    } else {
-        TcpListener::bind(addrs.as_slice()).map(Sock::TcpServer)
-    };
-    made.map_err(|error| failure(&error))
 }
 
 /// The `transports` `PHP_MINIT(standard)` registers
@@ -776,11 +905,25 @@ impl Request {
                 ),
             }));
         };
+        let role = match &xport {
+            Xport::Client { .. } => Role::Peer,
+            Xport::Server { socket, .. } => Role::Server {
+                accept_nodelay: socket.tcp_nodelay,
+            },
+        };
         let made = match (label, xport) {
-            ("tcp_socket", Xport::Client { timeout }) => connect_inet(self, rest, false, timeout),
-            ("udp_socket", Xport::Client { timeout }) => connect_inet(self, rest, true, timeout),
-            ("tcp_socket", Xport::Server { .. }) => bind_inet(self, rest, false),
-            ("udp_socket", Xport::Server { .. }) => bind_inet(self, rest, true),
+            ("tcp_socket", Xport::Client { timeout, socket }) => {
+                connect_inet(self, rest, false, timeout, &socket)
+            }
+            ("udp_socket", Xport::Client { timeout, socket }) => {
+                connect_inet(self, rest, true, timeout, &socket)
+            }
+            ("tcp_socket", Xport::Server { listen, socket }) => {
+                bind_inet(self, rest, false, listen, &socket)
+            }
+            ("udp_socket", Xport::Server { listen, socket }) => {
+                bind_inet(self, rest, true, listen, &socket)
+            }
             ("unix_socket", Xport::Client { .. }) => {
                 let path = unix_path(self, rest);
                 UnixStream::connect(path)
@@ -817,7 +960,7 @@ impl Request {
             Err(failed) => return Ok(Err(failed)),
         };
         let mut kind = Socket::new(sock, label, default_timeout(self));
-        kind.no_io = matches!(xport, Xport::Server { .. });
+        kind.role = role;
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
         stream.orig_path = Some(name.to_vec());
         stream.flags.no_seek = true;

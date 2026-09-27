@@ -80,7 +80,7 @@ impl<'a> Adapter<'a> {
         ini.extend(self.lane.map(Lane::ini));
         let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
         if let Some(body) = phpt.filled("SKIPIF") {
-            let out = self.run_section(test, "skip", body)?;
+            let out = self.run_section(subset, test, "skip", body)?;
             let said = String::from_utf8_lossy(&out.stdout).into_owned();
             if let Some(reason) = reason_after("skip", &said) {
                 return Ok(Judged::new(&id, &name, Judgement::Skip, reason));
@@ -90,7 +90,7 @@ impl<'a> Adapter<'a> {
             }
         }
 
-        let actual = match self.run_program(&phpt, test, &ini)? {
+        let actual = match self.run_program(subset, &phpt, test, &ini)? {
             Ok(actual) => actual,
             Err((judgement, why)) => return Ok(Judged::new(&id, &name, judgement, why)),
         };
@@ -148,8 +148,11 @@ impl<'a> Adapter<'a> {
     /// (run-tests.php:1187), and past it upstream kills the process and
     /// holds what it wrote, with its `** ERROR: process timed out **`
     /// line, to the expectation, which fails (run-tests.php:1205-1209).
+    /// The working directory is php-src's root, the subset's, as upstream
+    /// runs every program from `TEST_PHP_SRCDIR` (run-tests.php:1173).
     fn run_program(
         &self,
+        subset: &Subset,
         phpt: &Phpt,
         test: &Path,
         ini: &[String],
@@ -175,6 +178,7 @@ impl<'a> Adapter<'a> {
             env: &env,
             stdin: phpt.section("STDIN"),
             merge_streams: merges_streams(phpt),
+            cwd: Some(&subset.root),
             ..Invocation::new(self.binary, Program::File(&program))
         });
         drop(written);
@@ -186,7 +190,7 @@ impl<'a> Adapter<'a> {
             },
         };
         if let Some(body) = phpt.filled("CLEAN") {
-            self.run_section(test, "clean", body)?;
+            self.run_section(subset, test, "clean", body)?;
         }
         Ok(output)
     }
@@ -199,13 +203,25 @@ impl<'a> Adapter<'a> {
     /// engine can do yet, and a young engine must not be trusted with
     /// cleanup. Upstream runs them under the binary it is testing, so a
     /// `SKIPIF` that asks what the engine has is answered here by php; it
-    /// is the runner's one known difference from upstream's verdicts.
-    fn run_section(&self, test: &Path, kind: &str, body: &[u8]) -> Result<Observation> {
+    /// is the runner's one known difference from upstream's verdicts. Both
+    /// run from php-src's root, as the test's program does.
+    fn run_section(
+        &self,
+        subset: &Subset,
+        test: &Path,
+        kind: &str,
+        body: &[u8],
+    ) -> Result<Observation> {
         let program = beside(test, Some(kind));
         let written = Written::new(&program, body)?;
+        self.oracle.asserted()?;
+        let pinned = &self.oracle.pin().oracle.path;
         let out = self
             .oracle
-            .run(Program::File(&program), None)
+            .run_under(&Invocation {
+                cwd: Some(&subset.root),
+                ..Invocation::new(pinned, Program::File(&program))
+            })
             .with_context(|| format!("running the {kind} section of {}", test.display()))?;
         drop(written);
         Ok(out)

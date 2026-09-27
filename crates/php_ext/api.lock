@@ -296,10 +296,12 @@ raising::throw_value
 raising::throwing_warnings
 raising::too_few_arguments
 raising::warning
+request::BindTo
 request::Brigade
 request::BufferHandler
 request::Cast
 request::ContentType
+request::EngineWrapper
 request::Execution
 request::ExtensionId
 request::FdStream
@@ -421,6 +423,7 @@ request::Request::realpath
 request::Request::realpath_cache
 request::Request::realpath_cache_clear
 request::Request::register_constant
+request::Request::register_engine_wrapper
 request::Request::register_filter
 request::Request::register_shutdown_function
 request::Request::register_tick_function
@@ -485,6 +488,7 @@ request::Resolve
 request::ResourceDtor
 request::Resources
 request::Resources::register_type
+request::SocketOptions
 request::StartHandler
 request::Stream
 request::Stream::accept

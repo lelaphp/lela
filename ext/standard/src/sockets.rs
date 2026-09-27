@@ -9,11 +9,14 @@
 //! the constants `file.stub.php` declares for these natives are
 //! `file::constants`.
 //!
-//! What is not here: a stream `context`'s options, so `$context` is held
-//! as `Z_PARAM_RESOURCE_OR_NULL` holds it and not read;
-//! persistent sockets, which a request-scoped engine has no store for,
-//! so `pfsockopen` and `STREAM_CLIENT_PERSISTENT` open a socket of the
-//! request's own; and crypto, which is `ext/openssl`'s.
+//! `stream_socket_client` and `stream_socket_server` resolve their
+//! `$context` as `php_stream_context_from_zval` does, the default one for
+//! `null`, and hand `php_stream_xport_create` its `socket` options, which
+//! `xp_socket.c` and `transports.c` read; `fsockopen` opens with none.
+//!
+//! What is not here: persistent sockets, which a request-scoped engine
+//! has no store for, so `pfsockopen` and `STREAM_CLIENT_PERSISTENT` open
+//! a socket of the request's own; and crypto, which is `ext/openssl`'s.
 //!
 //! The natives, as `basic_functions.stub.php` declares them.
 //!
@@ -130,14 +133,16 @@ use std::time::Duration;
 
 use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
+use php_ext::coerce::{to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
-use php_ext::request::{FdStream, Request, Stream, Xport, XportFailure};
-use php_ext::values::{PhpArray, PhpString, Resource, Value};
+use php_ext::request::{BindTo, FdStream, Request, SocketOptions, Stream, Xport, XportFailure};
+use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::file::constants::{
     STREAM_SERVER_LISTEN, STREAM_SHUT_RD, STREAM_SHUT_RDWR, STREAM_SHUT_WR,
 };
+use crate::streamsfuncs::{NullContext, context_of, stream_ctx_option};
 
 /// An untyped by-reference out-parameter, `&$error_code = null`.
 type Out = Ref<Untyped<Value>>;
@@ -333,7 +338,11 @@ fn fsockopen_stream(
         hostname.extend_from_slice(format!(":{port}").as_bytes());
     }
     let timeout = if limited { timeval(timeout) } else { None };
-    match req.xport_create(&hostname, Xport::Client { timeout })? {
+    let xport = Xport::Client {
+        timeout,
+        socket: SocketOptions::default(),
+    };
+    match req.xport_create(&hostname, xport)? {
         Ok(stream) => {
             assign_error(req, error, 0, Some(b""))?;
             Ok(Untyped(OrFalse::Value(stream.resource())))
@@ -408,6 +417,29 @@ fn fsockopen_stream(
 /// string(18) "Connection refused"
 /// stream_socket_client(): Argument #4 ($timeout) must be a finite value
 /// ```
+///
+/// The `socket` options of its `context`: a client binds where `bindto` says,
+/// and a value that is no string refuses the connect.
+///
+/// ```php
+/// $t = stream_socket_server('tcp://127.0.0.1:0');
+/// $port = explode(':', stream_socket_get_name($t, false))[1];
+/// fclose($t);
+/// $s = stream_socket_server('tcp://127.0.0.1:0');
+/// $ctx = stream_context_create(['socket' => ['bindto' => "127.0.0.1:$port", 'tcp_nodelay' => true]]);
+/// $c = stream_socket_client('tcp://' . stream_socket_get_name($s, false), $code, $message, 1, STREAM_CLIENT_CONNECT, $ctx);
+/// var_dump(stream_socket_get_name($c, false) === "127.0.0.1:$port", stream_socket_get_name(stream_socket_accept($s), true) === "127.0.0.1:$port");
+/// $ctx = stream_context_create(['socket' => ['bindto' => 12]]);
+/// var_dump(stream_socket_client('tcp://' . stream_socket_get_name($s, false), $code, $message, 1, STREAM_CLIENT_CONNECT, $ctx), $message);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+///
+/// Warning: stream_socket_client(): Unable to connect to tcp://127.0.0.1:%d (local_addr context option is not a string.) in %s on line 10
+/// bool(false)
+/// string(42) "local_addr context option is not a string."
+/// ```
 #[php_function]
 fn stream_socket_client(
     req: &mut Request,
@@ -418,7 +450,8 @@ fn stream_socket_client(
     #[php(default = STREAM_CLIENT_CONNECT)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
-    let _ = (flags, context);
+    let _ = flags;
+    let socket = socket_options(req, context)?;
     let host = address.as_bytes().to_vec();
     let timeout = match timeout {
         Some(timeout) if !timeout.is_finite() => {
@@ -432,6 +465,7 @@ fn stream_socket_client(
         &host,
         Xport::Client {
             timeout: timeval(timeout),
+            socket,
         },
     )? {
         Ok(stream) => Ok(Untyped(OrFalse::Value(stream.resource()))),
@@ -451,6 +485,42 @@ fn stream_socket_client(
             Ok(Untyped(OrFalse::False))
         }
     }
+}
+
+/// `php_stream_context_from_zval(zcontext, 0)` and the `socket` options
+/// of what it answers, each read as its reader in `xp_socket.c` and
+/// `transports.c` reads it: `bindto` a string or refused, `backlog` by
+/// `zval_get_long`, `ipv6_v6only` where it is not `null`, and the rest by
+/// `zend_is_true`.
+fn socket_options(req: &mut Request, given: Option<Resource>) -> Result<SocketOptions, Thrown> {
+    let mut options = SocketOptions::default();
+    let Some(context) = context_of(req, given, NullContext::Default)? else {
+        return Ok(options);
+    };
+    if let Some(value) = stream_ctx_option(req, context, b"socket", b"bindto")? {
+        options.bindto = Some(match value.as_php_string() {
+            Some(text) => BindTo::Address(text.as_bytes().to_vec()),
+            None => BindTo::NotAString,
+        });
+    }
+    if let Some(value) = stream_ctx_option(req, context, b"socket", b"backlog")? {
+        options.listen_queue = Some(to_long(req, &value)?);
+    }
+    for (name, flag) in [
+        (&b"tcp_nodelay"[..], &mut options.tcp_nodelay),
+        (b"so_reuseport", &mut options.so_reuseport),
+        (b"so_broadcast", &mut options.so_broadcast),
+    ] {
+        if let Some(value) = stream_ctx_option(req, context, b"socket", name)? {
+            *flag = truthy(req, &value);
+        }
+    }
+    if let Some(value) = stream_ctx_option(req, context, b"socket", b"ipv6_v6only")?
+        && !matches!(value.as_ref(), ValueRef::Null)
+    {
+        options.ipv6_v6only = Some(truthy(req, &value));
+    }
+    Ok(options)
 }
 
 /// `stream_socket_server(string $address, &$error_code = null,
@@ -484,6 +554,30 @@ fn stream_socket_client(
 /// int(0)
 /// string(0) ""
 /// ```
+///
+/// A server listens with the `backlog` its `context` names, `32` where
+/// it names none, and the default `context`'s options apply where
+/// `$context` is `null`: with `backlog` at one, one client of three gets
+/// in before the server accepts.
+///
+/// ```php
+/// foreach ([['backlog' => 1], []] as $socket) {
+///     $s = stream_socket_server('tcp://127.0.0.1:0', $code, $message, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, stream_context_create(['socket' => $socket]));
+///     $in = 0;
+///     for ($i = 0; $i < 3; $i++) $in += (bool) @stream_socket_client('tcp://' . stream_socket_get_name($s, false), $code, $message, 0.2);
+///     echo $in, "\n";
+/// }
+/// stream_context_set_default(['socket' => ['backlog' => 1]]);
+/// $s = stream_socket_server('tcp://127.0.0.1:0');
+/// $in = 0;
+/// for ($i = 0; $i < 3; $i++) $in += (bool) @stream_socket_client('tcp://' . stream_socket_get_name($s, false), $code, $message, 0.2);
+/// echo $in, "\n";
+/// ```
+/// ```expect
+/// 1
+/// 3
+/// 1
+/// ```
 #[php_function]
 fn stream_socket_server(
     req: &mut Request,
@@ -493,12 +587,13 @@ fn stream_socket_server(
     #[php(default = STREAM_SERVER_BIND | STREAM_SERVER_LISTEN)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
-    let _ = context;
+    let socket = socket_options(req, context)?;
     let host = address.as_bytes().to_vec();
     let error = (&error_code, &error_message);
     assign_error(req, error, 0, Some(b""))?;
     let xport = Xport::Server {
         listen: flags & STREAM_SERVER_LISTEN != 0,
+        socket,
     };
     match req.xport_create(&host, xport)? {
         Ok(stream) => Ok(Untyped(OrFalse::Value(stream.resource()))),
