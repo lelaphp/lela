@@ -8,7 +8,9 @@
 //! each element off as the walk passes it, and `SplQueue` and
 //! `SplStack` freeze the direction (`SPL_DLLIST_IT_FIX`).
 
-use php_ext::abi::{CloneObj, ExtensionBuilder, ObjectHandlers, PropertyPurpose, This, Untyped};
+use php_ext::abi::{
+    ClassIterator, CloneObj, ExtensionBuilder, ObjectHandlers, PropertyPurpose, This, Untyped,
+};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
@@ -32,16 +34,24 @@ struct Node {
     next: Option<usize>,
 }
 
-/// `spl_dllist_object`: the list, the traverse pointer and position,
-/// and the flags.
+/// A traverse pointer and its position, the object's own or a
+/// `foreach`'s: `traverse_pointer` and `traverse_position`, which
+/// `spl_dllist_object` and `spl_dllist_it` each keep and the
+/// `spl_dllist_it_helper_*` functions move.
+#[derive(Clone, Copy, Default)]
+struct Cursor {
+    pointer: Option<usize>,
+    position: i64,
+}
+
+/// `spl_dllist_object`: the list, the traverse cursor and the flags.
 #[derive(Default)]
 pub(crate) struct Llist {
     nodes: Vec<Node>,
     head: Option<usize>,
     tail: Option<usize>,
     count: usize,
-    pointer: Option<usize>,
-    position: i64,
+    cursor: Cursor,
     flags: i64,
     ready: bool,
 }
@@ -122,6 +132,49 @@ impl Llist {
             };
         }
         current
+    }
+
+    /// `spl_dllist_it_helper_rewind`: the cursor at the tail under
+    /// LIFO, at the head otherwise.
+    fn rewind(&self, cursor: &mut Cursor, flags: i64) {
+        *cursor = if flags & SplDoublyLinkedList::IT_MODE_LIFO != 0 {
+            Cursor {
+                pointer: self.tail,
+                position: i64::try_from(self.count).unwrap_or(i64::MAX) - 1,
+            }
+        } else {
+            Cursor {
+                pointer: self.head,
+                position: 0,
+            }
+        };
+    }
+
+    /// `spl_dllist_it_helper_move_forward`: the cursor one step on under
+    /// `flags`, and the element passed, taken off under
+    /// `IT_MODE_DELETE`, for the caller to give up.
+    fn move_forward(&mut self, cursor: &mut Cursor, flags: i64) -> Option<Value> {
+        let old = cursor.pointer?;
+        if flags & SplDoublyLinkedList::IT_MODE_LIFO != 0 {
+            cursor.pointer = self.nodes[old].prev;
+            cursor.position -= 1;
+            if flags & SplDoublyLinkedList::IT_MODE_DELETE != 0 {
+                return self.pop();
+            }
+        } else {
+            cursor.pointer = self.nodes[old].next;
+            if flags & SplDoublyLinkedList::IT_MODE_DELETE != 0 {
+                return self.shift();
+            }
+            cursor.position += 1;
+        }
+        None
+    }
+
+    /// The data a cursor stands on, `None` off the list or on a node
+    /// taken out under it.
+    fn at(&self, cursor: Cursor) -> Option<Value> {
+        cursor.pointer.and_then(|at| self.nodes[at].data)
     }
 
     /// The data from head to tail.
@@ -478,8 +531,8 @@ impl SplDoublyLinkedList {
             l.nodes[at].prev = None;
             l.nodes[at].next = None;
             l.count -= 1;
-            if l.pointer == Some(at) {
-                l.pointer = None;
+            if l.cursor.pointer == Some(at) {
+                l.cursor.pointer = None;
             }
             l.nodes[at].data.take()
         })?;
@@ -493,29 +546,23 @@ impl SplDoublyLinkedList {
     #[php(tentative)]
     fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         with(req, this.object(), |l| {
-            if l.flags & Self::IT_MODE_LIFO != 0 {
-                l.position = i64::try_from(l.count).unwrap_or(i64::MAX) - 1;
-                l.pointer = l.tail;
-            } else {
-                l.position = 0;
-                l.pointer = l.head;
-            }
+            let mut cursor = l.cursor;
+            l.rewind(&mut cursor, l.flags);
+            l.cursor = cursor;
         })
     }
 
     /// `current(): mixed`, `null` off the list.
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
-        let found = with(req, this.object(), |l| {
-            l.pointer.and_then(|at| l.nodes[at].data)
-        })?;
+        let found = with(req, this.object(), |l| l.at(l.cursor))?;
         Ok(found.map_or_else(Value::null, |v| crate::copied(req, v)))
     }
 
     /// `key(): int`, the traverse position.
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
-        with(req, this.object(), |l| l.position)
+        with(req, this.object(), |l| l.cursor.position)
     }
 
     /// `prev(): void`, `next()` the other way; the witness is `next`'s.
@@ -550,7 +597,7 @@ impl SplDoublyLinkedList {
     /// `valid(): bool`.
     #[php(tentative)]
     fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
-        with(req, this.object(), |l| l.pointer.is_some())
+        with(req, this.object(), |l| l.cursor.pointer.is_some())
     }
 
     /// `unserialize(string $data): void`: the list emptied, then the flags
@@ -793,6 +840,43 @@ impl ObjectHandlers for Handlers {
         Some(clone_list)
     }
 
+    /// `spl_dllist_get_iterator`: a cursor of the loop's own, where
+    /// the object's stands and under the direction the flags set when
+    /// the loop began, so a loop inside a loop over one list, or a
+    /// change of direction in the body, moves no other walk.
+    ///
+    /// ```php
+    /// $l = new SplDoublyLinkedList; $l->push(1); $l->push(2); $l->push(3);
+    /// foreach ($l as $k => $v) { $l->setIteratorMode(SplDoublyLinkedList::IT_MODE_LIFO); foreach ($l as $w) echo $w; echo " $k=$v\n"; }
+    /// $l->setIteratorMode(SplDoublyLinkedList::IT_MODE_DELETE);
+    /// foreach ($l as $k => $v) echo "$k=$v ";
+    /// echo count($l), "\n";
+    /// try { foreach (new SplQueue as &$v) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// 321 0=1
+    /// 321 1=2
+    /// 321 2=3
+    /// 0=1 0=2 0=3 0
+    /// An iterator cannot be used with foreach by reference
+    /// ```
+    fn get_iterator(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        by_ref: bool,
+    ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        if by_ref {
+            return Err(throw(
+                req,
+                "Error",
+                "An iterator cannot be used with foreach by reference",
+            ));
+        }
+        let (cursor, flags) = with(req, object, |l| (l.cursor, l.flags & IT_MASK))?;
+        Ok(Some(Box::new(ListIterator { cursor, flags })))
+    }
+
     fn count_elements(&self, req: &mut Request, object: PhpObject) -> Result<Option<i64>, Thrown> {
         if crate::overridden(req, object, b"count") {
             let answered = call_method(req, &object, b"count", &[])?;
@@ -802,6 +886,40 @@ impl ObjectHandlers for Handlers {
         }
         let n = with(req, object, |l| l.count)?;
         Ok(Some(i64::try_from(n).unwrap_or(i64::MAX)))
+    }
+}
+
+/// `spl_dllist_it`: the loop's cursor and the direction it walks in.
+struct ListIterator {
+    cursor: Cursor,
+    flags: i64,
+}
+
+impl ClassIterator for ListIterator {
+    fn rewind(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        let flags = self.flags;
+        with(req, object, |l| l.rewind(&mut self.cursor, flags))
+    }
+
+    fn valid(&mut self, _: &mut Request, _: PhpObject) -> Result<bool, Thrown> {
+        Ok(self.cursor.pointer.is_some())
+    }
+
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+        let found = with(req, object, |l| l.at(self.cursor))?;
+        Ok(found.map_or_else(Value::null, |v| crate::copied(req, v)))
+    }
+
+    fn key(&mut self, _: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
+        Ok(Value::int(self.cursor.position))
+    }
+
+    fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        let flags = self.flags;
+        if let Some(value) = with(req, object, |l| l.move_forward(&mut self.cursor, flags))? {
+            req.release(value);
+        }
+        Ok(())
     }
 }
 
@@ -818,7 +936,7 @@ fn clone_list(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown>
         req.addref(&value);
         copy.push(value);
     }
-    copy.pointer = copy.head;
+    copy.cursor.pointer = copy.head;
     clone_with(req, &object, copy)
 }
 
@@ -876,21 +994,10 @@ fn node(req: &mut Request, this: PhpObject, index: i64) -> Result<usize, Thrown>
 /// step on, the element passed taken off under `IT_MODE_DELETE`.
 fn move_forward(req: &mut Request, this: PhpObject, flags: i64) -> Result<(), Thrown> {
     let deleted = with(req, this, |l| {
-        let old = l.pointer?;
-        if flags & SplDoublyLinkedList::IT_MODE_LIFO != 0 {
-            l.pointer = l.nodes[old].prev;
-            l.position -= 1;
-            if flags & SplDoublyLinkedList::IT_MODE_DELETE != 0 {
-                return l.pop();
-            }
-        } else {
-            l.pointer = l.nodes[old].next;
-            if flags & SplDoublyLinkedList::IT_MODE_DELETE != 0 {
-                return l.shift();
-            }
-            l.position += 1;
-        }
-        None
+        let mut cursor = l.cursor;
+        let deleted = l.move_forward(&mut cursor, flags);
+        l.cursor = cursor;
+        deleted
     })?;
     if let Some(value) = deleted {
         req.release(value);

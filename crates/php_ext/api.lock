@@ -24,6 +24,13 @@ abi::Class
 abi::Class::NAME
 abi::Class::Payload
 abi::Class::new_payload
+abi::ClassIterator
+abi::ClassIterator::current
+abi::ClassIterator::key
+abi::ClassIterator::move_forward
+abi::ClassIterator::release
+abi::ClassIterator::rewind
+abi::ClassIterator::valid
 abi::ClassRef
 abi::CloneObj
 abi::CloneObjWith
@@ -105,6 +112,7 @@ abi::ObjectHandlers::get_closure
 abi::ObjectHandlers::get_constructor
 abi::ObjectHandlers::get_debug_info
 abi::ObjectHandlers::get_gc
+abi::ObjectHandlers::get_iterator
 abi::ObjectHandlers::get_method
 abi::ObjectHandlers::get_properties
 abi::ObjectHandlers::get_properties_for
