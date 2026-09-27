@@ -228,7 +228,12 @@ fn primary(input: ParseStream<'_>) -> syn::Result<Tokens> {
         return Ok(quote!(#root::decl::ConstExpr::ClassName { class: #class, line: 0 }));
     }
     let member = name(member);
-    Ok(quote!(#root::decl::ConstExpr::ClassConstant { class: #class, name: #member, line: 0 }))
+    Ok(quote!(#root::decl::ConstExpr::ClassConstant {
+        class: #class,
+        class_kind: #root::decl::NameKind::NotFullyQualified,
+        name: #member,
+        line: 0,
+    }))
 }
 
 fn array(input: ParseStream<'_>) -> syn::Result<Tokens> {

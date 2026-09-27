@@ -311,7 +311,7 @@ fn level_of(level: php_syntax::Level) -> Level {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use php_unit::decl::{ConstExpr, Parameter, Type, Visibility};
+    use php_unit::decl::{ConstExpr, NameKind, Parameter, Type, Visibility};
     use php_unit::{AutoGlobal, Opcode, OperandKind, OplineIdx, frameless_table};
 
     /// A unit whose constant strings are one engine's, which is what the
@@ -5283,6 +5283,7 @@ echo f(1), C::s(), $o->m(1), $o->p;
                 },
                 &ConstExpr::ClassConstant {
                     class: Name(b"A".as_slice().into()),
+                    class_kind: NameKind::NotFullyQualified,
                     name: Name(b"X".as_slice().into()),
                     line: 3,
                 },
@@ -5302,6 +5303,7 @@ echo f(1), C::s(), $o->m(1), $o->p;
                 }),
                 Some(ConstExpr::ClassConstant {
                     class: Name(b"A".as_slice().into()),
+                    class_kind: NameKind::NotFullyQualified,
                     name: Name(b"X".as_slice().into()),
                     line: 3,
                 }),

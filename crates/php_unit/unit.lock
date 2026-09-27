@@ -50,6 +50,7 @@ decl::HookKind::name
 decl::IniDecl
 decl::MethodDecl
 decl::Name
+decl::NameKind
 decl::Parameter
 decl::Parameter::is_required
 decl::ParameterDefault

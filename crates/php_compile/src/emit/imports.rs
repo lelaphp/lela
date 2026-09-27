@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use php_syntax::SyntaxKind;
 use php_syntax::tree::{self, NodeId};
 use php_unit::Level;
+use php_unit::decl::NameKind;
 
 use super::Emit;
 use super::types::is_reserved_class_name;
@@ -566,24 +567,53 @@ impl Emit<'_> {
     /// bool(true)
     /// ```
     pub(super) fn resolve_class(&self, name: &[u8]) -> Vec<u8> {
+        self.resolve_class_marked(name).0
+    }
+
+    /// [`Self::resolve_class`] with the mark php's name carries after it:
+    /// `ZEND_NAME_FQ` where the name was written after a `\` or where
+    /// resolution rewrote it, through an import or the namespace
+    /// (`zend_compile_const_expr_class_const` tests the string it gets
+    /// back against the one it gave), and otherwise the mark it was
+    /// written with.
+    ///
+    /// ```php
+    /// namespace App;
+    /// use Other\Baz;
+    /// function f($a = Bar::BAZ, $b = Baz::Y, $c = \Q::X) {}
+    /// foreach ((new \ReflectionFunction('App\f'))->getParameters() as $p) { echo $p, "\n"; }
+    /// ```
+    /// ```expect
+    /// Parameter #0 [ <optional> $a = \App\Bar::BAZ ]
+    /// Parameter #1 [ <optional> $b = \Other\Baz::Y ]
+    /// Parameter #2 [ <optional> $c = \Q::X ]
+    /// ```
+    pub(super) fn resolve_class_marked(&self, name: &[u8]) -> (Vec<u8>, NameKind) {
+        let rewritten = |resolved: Vec<u8>| (resolved, NameKind::FullyQualified);
         let name = match Written::of(name) {
-            Written::FullyQualified(rest) => return rest.to_vec(),
-            Written::Relative(rest) => return self.prefix_with_ns(rest),
+            Written::FullyQualified(rest) => return rewritten(rest.to_vec()),
+            Written::Relative(rest) if self.namespace.is_some() => {
+                return rewritten(self.prefix_with_ns(rest));
+            }
+            Written::Relative(rest) => return (rest.to_vec(), NameKind::Relative),
             Written::NotQualified(name) => name,
         };
         match name.iter().position(|byte| *byte == b'\\') {
             Some(slash) => {
                 if let Some(import) = self.imports.class(&name[..slash]) {
-                    return concat(import, &name[slash + 1..]);
+                    return rewritten(concat(import, &name[slash + 1..]));
                 }
             }
             None => {
                 if let Some(import) = self.imports.class(name) {
-                    return import.to_vec();
+                    return rewritten(import.to_vec());
                 }
             }
         }
-        self.prefix_with_ns(name)
+        if self.namespace.is_some() {
+            return rewritten(self.prefix_with_ns(name));
+        }
+        (name.to_vec(), NameKind::NotFullyQualified)
     }
 
     /// `zend_resolve_non_class_name` over the function imports or the

@@ -11,7 +11,7 @@
 use php_syntax::tree;
 use php_syntax::tree::{NodeId, TypeExpr};
 use php_unit::Level;
-use php_unit::decl::{Name, Type};
+use php_unit::decl::{Name, NameKind, Type};
 use php_unit::type_to_string;
 
 use super::walk::unread;
@@ -419,10 +419,10 @@ impl Emit<'_> {
             b"callable" => return Ok(Type::Callable),
             _ => {}
         }
-        let (qualified, prefix) = NameKind::of(&lowered);
+        let (qualified, prefix) = name_kind(&lowered);
         let bare = &lowered[prefix..];
         if let Some(builtin) = builtin_type(bare) {
-            if qualified != NameKind::Unqualified {
+            if qualified != NameKind::NotFullyQualified {
                 return Err(self.compile_error(format!(
                     "Type declaration '{}' must be unqualified",
                     String::from_utf8_lossy(bare)
@@ -461,7 +461,7 @@ impl Emit<'_> {
                     "Using \"_\" as a type name is deprecated since 8.4",
                 );
             }
-            if qualified == NameKind::Unqualified && self.not_imported(&written) {
+            if qualified == NameKind::NotFullyQualified && self.not_imported(&written) {
                 self.confusable_type(&written, &resolved);
             }
             return Ok(Type::Named(Name(resolved.into_boxed_slice())));
@@ -610,27 +610,15 @@ impl Emit<'_> {
     }
 }
 
-/// How a name is written, php's `ZEND_NAME_NOT_FQ`, `ZEND_NAME_FQ` and
-/// `ZEND_NAME_RELATIVE`: as written, after a `\\`, or after
-/// `namespace\\`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum NameKind {
-    Unqualified,
-    FullyQualified,
-    Relative,
-}
-
-impl NameKind {
-    /// The kind of a lowered name, with the length of the prefix that
-    /// makes it so.
-    fn of(lowered: &[u8]) -> (NameKind, usize) {
-        if lowered.starts_with(b"\\") {
-            (NameKind::FullyQualified, 1)
-        } else if lowered.starts_with(b"namespace\\") {
-            (NameKind::Relative, b"namespace\\".len())
-        } else {
-            (NameKind::Unqualified, 0)
-        }
+/// The mark a lowered name is written with, with the length of the
+/// prefix that makes it so.
+fn name_kind(lowered: &[u8]) -> (NameKind, usize) {
+    if lowered.starts_with(b"\\") {
+        (NameKind::FullyQualified, 1)
+    } else if lowered.starts_with(b"namespace\\") {
+        (NameKind::Relative, b"namespace\\".len())
+    } else {
+        (NameKind::NotFullyQualified, 0)
     }
 }
 

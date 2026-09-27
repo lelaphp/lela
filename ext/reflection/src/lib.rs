@@ -77,7 +77,7 @@ use php_ext::call::{
 use php_ext::coerce::{Exponent, float_format};
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
-    MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
+    MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, throw};
 use php_ext::request::{ExtensionId, PHP_VERSION, Request};
@@ -5962,7 +5962,17 @@ fn property_string(
 /// for a scalar, `NULL`, `true`, `false`, the number, or the string in
 /// single quotes with `smart_str_append_escaped`'s escapes; an array as
 /// `[a, b]` or `['k' => v]`; a constant's name as `zend_ast_export`
-/// writes an unevaluated expression.
+/// writes an unevaluated expression, a class constant's class after the
+/// mark compilation left on it:
+///
+/// ```php
+/// namespace App { function f($a = Bar::BAZ) {} }
+/// namespace { function g($a = N\Bar::BAZ) {} echo (new ReflectionFunction('App\f'))->getParameters()[0], "\n", (new ReflectionFunction('g'))->getParameters()[0], "\n"; }
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = \App\Bar::BAZ ]
+/// Parameter #0 [ <optional> $a = N\Bar::BAZ ]
+/// ```
 fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
     match expr {
         ConstExpr::Null => String::from("NULL"),
@@ -5996,11 +6006,25 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             out
         }
         ConstExpr::Constant { name, .. } => String::from_utf8_lossy(&name.0).into_owned(),
-        ConstExpr::ClassConstant { class, name, .. } => format!(
-            "{}::{}",
-            String::from_utf8_lossy(&class.0),
-            String::from_utf8_lossy(&name.0)
-        ),
+        // `zend_ast_export_ns_name`: the mark compilation left on the
+        // class's name before it.
+        ConstExpr::ClassConstant {
+            class,
+            class_kind,
+            name,
+            ..
+        } => {
+            let mark = match class_kind {
+                NameKind::NotFullyQualified => "",
+                NameKind::FullyQualified => "\\",
+                NameKind::Relative => "namespace\\",
+            };
+            format!(
+                "{mark}{}::{}",
+                String::from_utf8_lossy(&class.0),
+                String::from_utf8_lossy(&name.0)
+            )
+        }
         ConstExpr::ClassName { class, .. } => {
             format!("{}::class", String::from_utf8_lossy(&class.0))
         }

@@ -242,6 +242,38 @@ impl Type {
     }
 }
 
+/// A name's mark in php's tree, `ZEND_NAME_NOT_FQ`, `ZEND_NAME_FQ` or
+/// `ZEND_NAME_RELATIVE`: written as it stands, after a `\`, or after
+/// `namespace\`. A class constant's class keeps the mark
+/// `zend_compile_const_expr_class_const` leaves on it, `ZEND_NAME_FQ`
+/// wherever resolution rewrote the name, through an import or the
+/// namespace, and `zend_ast_export_ns_name` prints it back as `\` or
+/// `namespace\` before the name.
+///
+/// ```php
+/// namespace App { use Other\Baz; function f($a = Bar::BAZ, $b = \Q::X, $c = Baz::Y, $d = namespace\R::Z) {} }
+/// namespace { function g($a = N\Bar::BAZ, $b = namespace\R::Z) {} }
+/// namespace {
+///     foreach (['App\f', 'g'] as $f) {
+///         foreach ((new ReflectionFunction($f))->getParameters() as $p) { echo $p, "\n"; }
+///     }
+/// }
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = \App\Bar::BAZ ]
+/// Parameter #1 [ <optional> $b = \Q::X ]
+/// Parameter #2 [ <optional> $c = \Other\Baz::Y ]
+/// Parameter #3 [ <optional> $d = \App\R::Z ]
+/// Parameter #0 [ <optional> $a = N\Bar::BAZ ]
+/// Parameter #1 [ <optional> $b = namespace\R::Z ]
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NameKind {
+    NotFullyQualified,
+    FullyQualified,
+    Relative,
+}
+
 /// An unevaluated constant expression: Zend's `zend_ast` for constant
 /// expressions, evaluated by the engine on first use and kept as written
 /// for Reflection. A closure or a first-class callable is an index into
@@ -274,8 +306,12 @@ pub enum ConstExpr {
         name: Name,
         line: u32,
     },
+    /// `class::name`, php's `ZEND_AST_CLASS_CONST`: the class resolved,
+    /// `self` and `parent` as written, and the mark compilation left on
+    /// the class's name, which Reflection prints it back with.
     ClassConstant {
         class: Name,
+        class_kind: NameKind,
         name: Name,
         line: u32,
     },

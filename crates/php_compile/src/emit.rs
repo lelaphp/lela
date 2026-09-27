@@ -102,7 +102,8 @@ use php_heap::{
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
     ConstDecl, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, HookKind, MethodDecl, Name,
-    Parameter, ParameterDefault, PropertyDecl, TraitAdaptation, TraitMethodRef, Type, Visibility,
+    NameKind, Parameter, ParameterDefault, PropertyDecl, TraitAdaptation, TraitMethodRef, Type,
+    Visibility,
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody,
@@ -6791,9 +6792,16 @@ impl Emit<'_> {
                             "\"static::\" is not allowed in compile-time constants",
                         ));
                     }
-                    let class = self.class_name(&written);
+                    // `self` and `parent` keep the mark they were written
+                    // with; any other name the one resolution leaves.
+                    let (class, class_kind) = if class_fetch_type(&written) == FETCH_CLASS_DEFAULT {
+                        self.resolve_class_marked(&written)
+                    } else {
+                        (written, NameKind::NotFullyQualified)
+                    };
                     Ok(ConstExpr::ClassConstant {
                         class: Name(class.into_boxed_slice()),
+                        class_kind,
                         name: Name(name.into_boxed_slice()),
                         line,
                     })
