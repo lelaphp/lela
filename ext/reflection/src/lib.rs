@@ -72,7 +72,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
-    Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
+    Function, autoload, constant, eval_const_expr, lookup_class, lookup_function, new_object,
 };
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
@@ -4719,14 +4719,25 @@ fn class_of(
 /// `zend_lookup_class` or the `ReflectionException` every reflector
 /// throws for a miss, `Class "X" does not exist`, the name as given.
 fn class_named(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
-    let bare = name.strip_prefix(b"\\").unwrap_or(name);
-    match lookup_class(req, bare)? {
+    match looked_up(req, name)? {
         Some(class) => Ok(class),
         None => Err(throw(
             req,
             "ReflectionException",
             &format!("Class \"{}\" does not exist", String::from_utf8_lossy(name)),
         )),
+    }
+}
+
+/// `zend_lookup_class`: the linked class named, a leading `\\` dropped,
+/// and the autoloader asked where there is none. An anonymous class's
+/// name is no name the autoloader would be handed, so the table is read
+/// first.
+fn looked_up(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
+    let bare = name.strip_prefix(b"\\").unwrap_or(name);
+    match lookup_class(req, bare)? {
+        Some(class) => Ok(Some(class)),
+        None => autoload(req, bare),
     }
 }
 

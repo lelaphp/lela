@@ -26,9 +26,9 @@ use super::{
     answer, attr, class_chain, class_constant_named, class_extension_name, class_is, class_name_of,
     class_named, class_of, class_string, closure_invoke, constant_value, dynamic_properties,
     is_closure_invoke, is_constructor, is_internal, keep, kept_closure, kept_object,
-    linked_constants, linked_interfaces, linked_methods, linked_properties, lookup_class,
-    method_or_invoke, namespace_end, new_object, property_named, reflection_class_factory,
-    set_name, set_string_prop, string_value, this_class, user_line,
+    linked_constants, linked_interfaces, linked_methods, linked_properties, looked_up,
+    lookup_class, method_or_invoke, namespace_end, new_object, property_named,
+    reflection_class_factory, set_name, set_string_prop, string_value, this_class, user_line,
 };
 
 /// `ZEND_ACC_INTERFACE`, `ZEND_ACC_TRAIT` and `ZEND_ACC_ENUM`.
@@ -154,8 +154,7 @@ fn reflector_class(
         }
         Union::B(name) => name.as_bytes().to_vec(),
     };
-    let bare = name.strip_prefix(b"\\").unwrap_or(&name);
-    match lookup_class(req, bare)? {
+    match looked_up(req, &name)? {
         Some(class) => Ok(class),
         None => Err(throw(
             req,
@@ -328,6 +327,22 @@ impl ReflectionClass {
     /// #0 %s(2): ReflectionClass->__construct()
     /// #1 {main}
     ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// A name is `zend_lookup_class`'s, so the autoloader is asked for a
+    /// class not yet declared, once, and a miss throws after it.
+    ///
+    /// ```php
+    /// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Late') { class Late {} } });
+    /// var_dump((new ReflectionClass('Late'))->name, (new ReflectionClass('\\Late'))->name);
+    /// try { new ReflectionClass('Never'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// load Late
+    /// string(4) "Late"
+    /// string(4) "Late"
+    /// load Never
+    /// Class "Never" does not exist
     /// ```
     fn __construct(
         req: &mut Request,
