@@ -686,6 +686,22 @@ impl<T: FromArgument> FromArgument for Raw<T> {
             held: PhantomData,
         }))
     }
+    /// The absent argument: the default evaluated and held to nothing, as
+    /// a given one is, so an `arity = manual` body counts its arguments
+    /// before any is coerced; [`Raw::hold`] holds it at its position.
+    fn from_default(
+        req: &mut Request,
+        expr: &ConstExpr,
+        scope: Option<&[u8]>,
+        position: u32,
+    ) -> Result<Self, Thrown> {
+        let value = default_value(req, expr, scope, position, (bits::ANY, || None))?;
+        Ok(Raw {
+            value,
+            position,
+            held: PhantomData,
+        })
+    }
 }
 
 /// `Ref<T>`: a parameter the caller passes by reference, declared as `T`
