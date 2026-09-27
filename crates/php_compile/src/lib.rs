@@ -311,7 +311,7 @@ fn level_of(level: php_syntax::Level) -> Level {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use php_unit::decl::{ConstExpr, Parameter, Type, Visibility};
+    use php_unit::decl::{ConstExpr, NameKind, Parameter, Type, Visibility};
     use php_unit::{AutoGlobal, Opcode, OperandKind, OplineIdx, frameless_table};
 
     /// A unit whose constant strings are one engine's, which is what the
@@ -4833,7 +4833,11 @@ mod tests {
                     true,
                     ConstExpr::Unary {
                         op: Name(b"-".as_slice().into()),
-                        operand: Box::new(ConstExpr::Constant(Name(b"A".as_slice().into()))),
+                        operand: Box::new(ConstExpr::Constant {
+                            name: Name(b"A".as_slice().into()),
+                            line: 2,
+                        }),
+                        line: 2,
                     },
                     Some(b"/** F */"),
                 ),
@@ -5229,7 +5233,10 @@ echo f(1), C::s(), $o->m(1), $o->p;
                 ConstExpr::long(12),
                 ConstExpr::Double(1000.0),
                 ConstExpr::Str(b"1".as_slice().into()),
-                ConstExpr::Array(vec![(Some(ConstExpr::long(0)), ConstExpr::long(1))]),
+                ConstExpr::Array {
+                    elements: vec![(Some(ConstExpr::long(0)), ConstExpr::long(1))],
+                    line: 2,
+                },
             ]
         );
     }
@@ -5270,10 +5277,15 @@ echo f(1), C::s(), $o->m(1), $o->p;
         assert_eq!(
             unevaluated,
             vec![
-                &ConstExpr::Constant(Name(b"PHP_INT_MAX".as_slice().into())),
+                &ConstExpr::Constant {
+                    name: Name(b"PHP_INT_MAX".as_slice().into()),
+                    line: 3,
+                },
                 &ConstExpr::ClassConstant {
                     class: Name(b"A".as_slice().into()),
+                    class_kind: NameKind::NotFullyQualified,
                     name: Name(b"X".as_slice().into()),
+                    line: 3,
                 },
             ]
         );
@@ -5285,10 +5297,15 @@ echo f(1), C::s(), $o->m(1), $o->p;
                 .map(|p| p.default.expr().cloned())
                 .collect::<Vec<_>>(),
             vec![
-                Some(ConstExpr::Constant(Name(b"PHP_INT_MAX".as_slice().into()))),
+                Some(ConstExpr::Constant {
+                    name: Name(b"PHP_INT_MAX".as_slice().into()),
+                    line: 3,
+                }),
                 Some(ConstExpr::ClassConstant {
                     class: Name(b"A".as_slice().into()),
+                    class_kind: NameKind::NotFullyQualified,
                     name: Name(b"X".as_slice().into()),
+                    line: 3,
                 }),
                 Some(ConstExpr::long(1)),
             ]

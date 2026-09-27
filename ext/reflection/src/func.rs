@@ -1156,7 +1156,24 @@ impl ReflectionFunctionAbstract {
     /// int $flags = 0)`: `reflect_attributes` over
     /// `fptr->common.attributes`, with `ZEND_ATTRIBUTE_TARGET_METHOD` where
     /// the function has a scope and `ZEND_ATTRIBUTE_TARGET_FUNCTION` where
-    /// it has none.
+    /// it has none. The arguments are evaluated in `fptr->common.scope`,
+    /// which for a closure is the scope it is bound to:
+    ///
+    /// ```php
+    /// class T1 { private const FOO = 'bar'; }
+    /// class C1 {
+    ///     private const FOO = 'foo';
+    ///     static function f() { return #[A1(self::class, self::FOO)] function (#[A1(self::class)] $p) {}; }
+    /// }
+    /// $r = new ReflectionFunction(C1::f());
+    /// echo implode(',', $r->getAttributes()[0]->getArguments()), ' ', implode(',', $r->getParameters()[0]->getAttributes()[0]->getArguments()), "\n";
+    /// $r = new ReflectionFunction(C1::f()->bindTo(null, T1::class));
+    /// echo implode(',', $r->getAttributes()[0]->getArguments()), "\n";
+    /// ```
+    /// ```expect
+    /// C1,foo C1
+    /// T1,bar
+    /// ```
     ///
     /// ```php
     /// var_dump((new ReflectionFunction('json_encode'))->getAttributes());
@@ -1178,8 +1195,13 @@ impl ReflectionFunctionAbstract {
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
         let (function, decl) = this_function(req, this.object())?;
+        // `fptr->common.scope`: a method's class, a closure's bound scope.
         let (scope, target) = match function {
             FunctionRef::Method(scope, _) => (Some(scope), super::attr::TARGET_METHOD),
+            FunctionRef::Closure(closure) => (
+                closure.closure(req).and_then(|info| info.scope),
+                super::attr::TARGET_FUNCTION,
+            ),
             _ => (None, super::attr::TARGET_FUNCTION),
         };
         let attributes = decl.attributes.clone();

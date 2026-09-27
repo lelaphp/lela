@@ -1223,13 +1223,21 @@ fn default_text(default: &ConstExpr) -> String {
             let more = if bytes.len() > 10 { "..." } else { "" };
             format!("'{}{more}'", String::from_utf8_lossy(shown))
         }
-        ConstExpr::Array(elements) if elements.is_empty() => String::from("[]"),
-        ConstExpr::Array(_) => String::from("[...]"),
-        ConstExpr::Constant(name) => text(&name.0),
-        ConstExpr::ClassConstant { class, name } => {
+        ConstExpr::Array { elements, .. } if elements.is_empty() => String::from("[]"),
+        ConstExpr::Array { .. } => String::from("[...]"),
+        ConstExpr::Constant { name, .. } => text(&name.0),
+        ConstExpr::ClassConstant { class, name, .. } => {
             format!("{}::{}", text(&class.0), text(&name.0))
         }
-        ConstExpr::EnumCase { class, case } => format!("{}::{}", text(&class.0), text(&case.0)),
+        // A native's `C::class` as its stub writes it; a program's
+        // `self::class` is none of the nodes php prints.
+        ConstExpr::ClassName { class, .. }
+            if !class.0.eq_ignore_ascii_case(b"self")
+                && !class.0.eq_ignore_ascii_case(b"parent") =>
+        {
+            format!("{}::class", text(&class.0))
+        }
+        ConstExpr::EnumCase { class, case, .. } => format!("{}::{}", text(&class.0), text(&case.0)),
         ConstExpr::ScopeClass => String::from("__CLASS__"),
         _ => String::from("<expression>"),
     }
@@ -3124,7 +3132,13 @@ mod tests {
             default_text(&ConstExpr::Str(b"llllllllllll"[..].into())),
             "'llllllllll...'"
         );
-        assert_eq!(default_text(&ConstExpr::Array(Vec::new())), "[]");
+        assert_eq!(
+            default_text(&ConstExpr::Array {
+                elements: Vec::new(),
+                line: 0
+            }),
+            "[]"
+        );
         assert_eq!(default_text(&ConstExpr::Null), "null");
     }
 }

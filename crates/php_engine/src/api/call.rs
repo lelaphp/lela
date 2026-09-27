@@ -1237,7 +1237,7 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
     if !req.autoload_enter(&lowered) {
         return Ok(None);
     }
-    let served = (|| {
+    let served = req.without_site_override(|req| {
         let mut at = 0;
         while let Some(loader) = req.autoloader(at) {
             let class = crate::api::values::PhpString::new(req, bare)?;
@@ -1250,7 +1250,7 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
             at += 1;
         }
         Ok(None)
-    })();
+    });
     req.autoload_leave(&lowered);
     served
 }
@@ -1380,13 +1380,40 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
     })
 }
 
-/// `zend_fetch_class_constant`: a class constant, its expression
-/// evaluated on first use in the scope that declared it, and php's
-/// `Error` for one the class has not or the scope may not reach. A
-/// constant of an enum is a case, so what comes back is the enum's one
-/// instance for that case (`zend_enum_get_case`), by identity.
+/// `zend_update_class_constants` (`Z/Zend/zend_API.c:1535`): the
+/// constants, the `static` properties and the defaults of `class` and of
+/// its parents evaluated once in the request, each held to its type, as
+/// `new` and a `static` property's first read ask for it. A failure is the
+/// throwable it raised, and the next call tries again where it failed.
+pub fn update_class_constants(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
+    req.update_class_constants(class)
+}
+
+/// `zend_update_class_constant` over the constant `name` of `class`, as
+/// Reflection reads one: its expression evaluated on first use in the
+/// scope that declared it and held to its type, with no access checked
+/// and no deprecation raised, and php's `Error` for a name the class has
+/// not. A constant of an enum is a case, so what comes back is the
+/// enum's one instance for that case (`zend_enum_get_case`), by
+/// identity. One owner is the caller's.
+///
+/// ```php
+/// class A { const array CONST1 = C; }
+/// class B { private const object CONST1 = C; }
+/// define("C", new stdClass());
+/// $rc = new ReflectionClassConstant(A::class, 'CONST1');
+/// try { $rc->getValue(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { echo $rc; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump((new ReflectionClass('B'))->getConstant('CONST1'));
+/// ```
+/// ```expect
+/// Cannot assign stdClass to class constant A::CONST1 of type array
+/// Cannot assign stdClass to class constant A::CONST1 of type array
+/// object(stdClass)#1 (0) {
+/// }
+/// ```
 pub fn class_constant(req: &mut Request, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
-    req.class_constant(class, name)
+    req.updated_class_constant(class, name)
 }
 
 /// Evaluate a constant expression in `scope`, `zval_update_constant_ex`:
@@ -1452,7 +1479,46 @@ pub fn class_constant(req: &mut Request, class: ClassId, name: &[u8]) -> Result<
 /// }
 /// DivisionByZeroError: Modulo by zero
 /// ```
+///
+/// An expression that is a constant's name alone is fetched as
+/// `zval_update_constant_ex` fetches it, with no site of its own, so its
+/// error names the line executing; one inside anything else names its
+/// own, `zend_ast_evaluate_ex`'s:
+///
+/// ```php
+/// class D {
+///     const Y = NOPE;
+///     const Z = [NOPE];
+/// }
+/// try { D::Y; } catch (Error $e) { echo $e->getLine(), "\n"; }
+/// try { D::Z; } catch (Error $e) { echo $e->getLine(), "\n"; }
+/// ```
+/// ```expect
+/// 6
+/// 4
+/// ```
 pub fn eval_const_expr(
+    req: &mut Request,
+    expr: &ConstExpr,
+    scope: Option<ClassId>,
+) -> Result<Value, Thrown> {
+    // `zval_update_constant_ex`'s fast path: an expression that is a
+    // constant's name alone is fetched with no site of its own.
+    if let ConstExpr::Constant { .. } = expr {
+        return evaluate_node(req, expr, scope);
+    }
+    evaluate(req, expr, scope)
+}
+
+/// `zend_ast_evaluate_ex`: one node of a constant expression under its
+/// own site ([`Request::evaluate_at`]).
+fn evaluate(req: &mut Request, expr: &ConstExpr, scope: Option<ClassId>) -> Result<Value, Thrown> {
+    req.evaluate_at(scope, expr.line(), |req| evaluate_node(req, expr, scope))
+}
+
+/// `zend_ast_evaluate_inner`: one node of [`eval_const_expr`] under the
+/// site `zend_ast_evaluate_ex` stood the request at.
+fn evaluate_node(
     req: &mut Request,
     expr: &ConstExpr,
     scope: Option<ClassId>,
@@ -1465,7 +1531,7 @@ pub fn eval_const_expr(
         ConstExpr::Str(s) => Ok(Value::string(PhpString::new(req, s)?)),
         // `zend_get_constant_ex`, which words a `CONST_DEPRECATED`
         // constant's deprecation after it found it.
-        ConstExpr::Constant(name) => match req.constant_named(&name.0) {
+        ConstExpr::Constant { name, .. } => match req.constant_named(&name.0) {
             Some(value) => {
                 crate::api::raising::deprecated_constant(req, &name.0)?;
                 req.addref(&value);
@@ -1480,14 +1546,17 @@ pub fn eval_const_expr(
                 ),
             )),
         },
-        ConstExpr::ClassConstant { class, name } => class_constant_expr(req, class, name, scope),
+        ConstExpr::ClassConstant { class, name, .. } => {
+            class_constant_expr(req, class, name, scope)
+        }
         // `ZEND_AST_CONST_ENUM_INIT` read back as the case it made: the
         // enum's one instance for the case (`zend_enum_get_case`), which
         // is what its constant of the case's name holds.
-        ConstExpr::EnumCase { class, case } => {
+        ConstExpr::EnumCase { class, case, .. } => {
             let id = const_class(req, &class.0, scope)?;
             req.class_constant(id, &case.0)
         }
+        ConstExpr::ClassName { class, .. } => class_name_node(req, &class.0, scope),
         // `zend_ast_evaluate`'s `ZEND_AST_CONSTANT_CLASS` arm.
         ConstExpr::ScopeClass => {
             let name = scope
@@ -1495,41 +1564,17 @@ pub fn eval_const_expr(
                 .unwrap_or_default();
             Ok(Value::string(PhpString::new(req, &name)?))
         }
-        ConstExpr::Array(elements) => {
-            let mut array = crate::api::values::PhpArray::new(req)?;
-            for (key, value) in elements {
-                if let ConstExpr::Unpack(inner) = value {
-                    let spread = eval_const_expr(req, inner, scope)?;
-                    let added = add_unpacked_element(req, &mut array, &spread);
-                    req.release(spread);
-                    added?;
-                    continue;
-                }
-                // `zend_ast_add_array_element`: the key evaluated before
-                // the value, and the two written as `ADD_ARRAY_ELEMENT`
-                // writes them, a key's deprecations and refusals its own.
-                let offset = match key {
-                    Some(key) => crate::ops::Offset::At {
-                        key: eval_const_expr(req, key, scope)?,
-                        constant: false,
-                    },
-                    None => crate::ops::Offset::Next,
-                };
-                let value = eval_const_expr(req, value, scope)?;
-                crate::ops::add_array_element(req, array, offset, value)?;
-            }
-            Ok(Value::array(array))
-        }
+        ConstExpr::Array { elements, .. } => array_node(req, elements, scope),
         // `zend_ast_evaluate`'s `ZEND_AST_BINARY_OP`, `ZEND_AST_GREATER`
         // and unary arms: both sides evaluated, then the operator's own
         // kernel, which is what a native's default of flags joined by
         // `|` is evaluated by where a named argument skipped it,
         // each operand given up once the kernel has answered.
-        ConstExpr::Binary { op, lhs, rhs } => binary_node(req, &op.0, lhs, rhs, scope),
+        ConstExpr::Binary { op, lhs, rhs, .. } => binary_node(req, &op.0, lhs, rhs, scope),
         // `ZEND_AST_UNARY_PLUS` is `0 + x` and `ZEND_AST_UNARY_MINUS`
         // `-1 * x`, as `zend_ast_evaluate` serves them.
-        ConstExpr::Unary { op, operand } => {
-            let operand = eval_const_expr(req, operand, scope)?;
+        ConstExpr::Unary { op, operand, .. } => {
+            let operand = evaluate(req, operand, scope)?;
             let answered = match &*op.0 {
                 b"-" => crate::ops::mul(req, &Value::int(-1), &operand),
                 b"+" => crate::ops::add(req, &Value::int(0), &operand),
@@ -1545,19 +1590,19 @@ pub fn eval_const_expr(
             then,
             otherwise,
         } => {
-            let held = eval_const_expr(req, cond, scope)?;
+            let held = evaluate(req, cond, scope)?;
             let taken = match (crate::ops::is_true(req, &held), then) {
                 (true, None) => return Ok(held),
                 (true, Some(then)) => then,
                 (false, _) => otherwise,
             };
             req.release(held);
-            eval_const_expr(req, taken, scope)
+            evaluate(req, taken, scope)
         }
         // `ZEND_AST_CAST`: the operand as the `CAST` opline converts it,
         // `_IS_BOOL` by its truth.
-        ConstExpr::Cast { to, operand } => {
-            let value = eval_const_expr(req, operand, scope)?;
+        ConstExpr::Cast { to, operand, .. } => {
+            let value = evaluate(req, operand, scope)?;
             let cast = if *to == IS_BOOL {
                 Ok(Value::bool(crate::ops::is_true(req, &value)))
             } else {
@@ -1570,9 +1615,105 @@ pub fn eval_const_expr(
             cast
         }
         ConstExpr::Dim { .. } | ConstExpr::Prop { .. } => Ok(chain(req, expr, scope, false)?.value),
-        ConstExpr::New { class, arguments } => construct(req, &class.0, arguments, scope),
+        ConstExpr::New {
+            class, arguments, ..
+        } => construct(req, &class.0, arguments, scope),
         _ => Err(invalid_operations(req)),
     }
+}
+
+/// `zend_ast_evaluate`'s `ZEND_AST_ARRAY` arm: each element in written
+/// order, a `...` spread into the array under the array's own line.
+fn array_node(
+    req: &mut Request,
+    elements: &[(Option<ConstExpr>, ConstExpr)],
+    scope: Option<ClassId>,
+) -> Result<Value, Thrown> {
+    let mut array = crate::api::values::PhpArray::new(req)?;
+    for (key, value) in elements {
+        if let ConstExpr::Unpack(inner) = value {
+            let spread = evaluate(req, inner, scope)?;
+            let added = add_unpacked_element(req, &mut array, &spread);
+            req.release(spread);
+            added?;
+            continue;
+        }
+        // `zend_ast_add_array_element`: the key evaluated before
+        // the value, and the two written as `ADD_ARRAY_ELEMENT`
+        // writes them, a key's deprecations and refusals its own.
+        let offset = match key {
+            Some(key) => crate::ops::Offset::At {
+                key: evaluate(req, key, scope)?,
+                constant: false,
+            },
+            None => crate::ops::Offset::Next,
+        };
+        let value = evaluate(req, value, scope)?;
+        crate::ops::add_array_element(req, array, offset, value)?;
+    }
+    Ok(Value::array(array))
+}
+
+/// `zend_ast_evaluate`'s `ZEND_AST_CLASS_NAME` arm: `self` the scope's
+/// name and `parent` its parent's, php's `Error` where there is none,
+/// which names `self` whichever was written where no scope is; and a
+/// name written out the name itself, as
+/// `zend_get_default_from_internal_arg_info` folds a native's
+/// `SplFileObject::class`, with no class looked up.
+///
+/// ```php
+/// trait T { public $p = [self::class, parent::class]; }
+/// class P {}
+/// class C extends P { use T; }
+/// var_dump((new C)->p);
+/// $p = (new ReflectionMethod('SplFileInfo', 'setFileClass'))->getParameters()[0];
+/// var_dump($p->getDefaultValue(), $p->isDefaultValueConstant());
+/// echo $p, "\n";
+/// class D { use T; }
+/// try { new D; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   string(1) "C"
+///   [1]=>
+///   string(1) "P"
+/// }
+/// string(13) "SplFileObject"
+/// bool(false)
+/// Parameter #0 [ <optional> string $class = SplFileObject::class ]
+/// Cannot use "parent" when current class scope has no parent
+/// ```
+fn class_name_node(
+    req: &mut Request,
+    class: &[u8],
+    scope: Option<ClassId>,
+) -> Result<Value, Thrown> {
+    let parent = class.eq_ignore_ascii_case(b"parent");
+    let name = if parent || class.eq_ignore_ascii_case(b"self") {
+        let Some(scope) = scope else {
+            return Err(throw(
+                req,
+                "Error",
+                "Cannot use \"self\" when no class scope is active",
+            ));
+        };
+        let named = if parent {
+            req.class_parent(scope).ok_or_else(|| {
+                throw(
+                    req,
+                    "Error",
+                    "Cannot use \"parent\" when current class scope has no parent",
+                )
+            })?
+        } else {
+            scope
+        };
+        req.class_name_bytes(named)
+    } else {
+        class.to_vec()
+    };
+    Ok(Value::string(PhpString::new(req, &name)?))
 }
 
 /// `_IS_BOOL`, the type code a `(bool)` cast carries.
@@ -1594,13 +1735,13 @@ fn binary_node(
     match op {
         b"&&" | b"||" => {
             let or = op == b"||";
-            let lhs = eval_const_expr(req, lhs, scope)?;
+            let lhs = evaluate(req, lhs, scope)?;
             let held = crate::ops::is_true(req, &lhs);
             req.release(lhs);
             if held == or {
                 return Ok(Value::bool(or));
             }
-            let rhs = eval_const_expr(req, rhs, scope)?;
+            let rhs = evaluate(req, rhs, scope)?;
             let held = crate::ops::is_true(req, &rhs);
             req.release(rhs);
             Ok(Value::bool(held))
@@ -1611,11 +1752,11 @@ fn binary_node(
                 return Ok(lhs);
             }
             req.release(lhs);
-            eval_const_expr(req, rhs, scope)
+            evaluate(req, rhs, scope)
         }
         _ => {
-            let lhs = eval_const_expr(req, lhs, scope)?;
-            let rhs = match eval_const_expr(req, rhs, scope) {
+            let lhs = evaluate(req, lhs, scope)?;
+            let rhs = match evaluate(req, rhs, scope) {
                 Ok(rhs) => rhs,
                 Err(thrown) => {
                     req.release(lhs);
@@ -1684,10 +1825,23 @@ fn chain(
     scope: Option<ClassId>,
     silent: bool,
 ) -> Result<Chained, Thrown> {
+    req.evaluate_at(scope, expr.line(), |req| {
+        chain_node(req, expr, scope, silent)
+    })
+}
+
+/// One link of [`chain`] under the site `zend_ast_evaluate_ex` stood
+/// the request at.
+fn chain_node(
+    req: &mut Request,
+    expr: &ConstExpr,
+    scope: Option<ClassId>,
+    silent: bool,
+) -> Result<Chained, Thrown> {
     let link = |req: &mut Request, expr: &ConstExpr, silent: bool| match expr {
         ConstExpr::Dim { .. } | ConstExpr::Prop { .. } => chain(req, expr, scope, silent),
         other => Ok(Chained {
-            value: eval_const_expr(req, other, scope)?,
+            value: evaluate(req, other, scope)?,
             short: false,
         }),
     };
@@ -1696,7 +1850,7 @@ fn chain(
         short: true,
     };
     match expr {
-        ConstExpr::Dim { container, dim } => {
+        ConstExpr::Dim { container, dim, .. } => {
             let under = link(
                 req,
                 container,
@@ -1713,7 +1867,7 @@ fn chain(
                     "Cannot use [] on objects in constant expression",
                 ));
             }
-            let dim = match eval_const_expr(req, dim, scope) {
+            let dim = match evaluate(req, dim, scope) {
                 Ok(dim) => dim,
                 Err(thrown) => {
                     req.release(under.value);
@@ -1737,6 +1891,7 @@ fn chain(
             object,
             name,
             nullsafe,
+            ..
         } => {
             let under = link(req, object, false)?;
             let read = prop_link(req, &under, name, *nullsafe, scope);
@@ -1766,7 +1921,7 @@ fn prop_link(
             short: true,
         });
     }
-    let name = eval_const_expr(req, name, scope)?;
+    let name = evaluate(req, name, scope)?;
     let text = crate::ops::to_string(req, &name);
     req.release(name);
     let name = text?;
@@ -1824,7 +1979,7 @@ fn construct(
     let mut positional = Vec::new();
     let mut named = Vec::new();
     for (name, argument) in arguments {
-        let value = match eval_const_expr(req, argument, scope) {
+        let value = match evaluate(req, argument, scope) {
             Ok(value) => value,
             Err(thrown) => {
                 req.release(object.as_value());
@@ -1874,7 +2029,23 @@ fn construct(
 /// `zend_ast_evaluate`'s `ZEND_AST_CLASS_CONST` arm: the class fetched in
 /// `scope` ([`const_class`]) and its constant read through
 /// `zend_get_class_constant_ex`, whose access is checked against that
-/// scope; `static` is refused while the file compiles.
+/// scope; `static` is refused while the file compiles. An error names
+/// the class as the expression writes it, which is the string
+/// `zend_get_class_constant_ex` is handed, `self` and `parent` among
+/// them:
+///
+/// ```php
+/// class A { const X = self::NOPE; const Z = [A::NOPE]; }
+/// class B extends A { const Y = parent::NOPE; }
+/// foreach (['A::X', 'B::Y', 'A::Z'] as $c) {
+///     try { constant($c); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Undefined constant self::NOPE
+/// Undefined constant parent::NOPE
+/// Undefined constant A::NOPE
+/// ```
 fn class_constant_expr(
     req: &mut Request,
     class: &Name,
@@ -1882,8 +2053,14 @@ fn class_constant_expr(
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
     let id = const_class(req, &class.0, scope)?;
-    let shown = req.class_name(id);
-    req.class_constant_from(id, &name.0, &shown, scope)
+    let written = String::from_utf8_lossy(&class.0);
+    req.class_constant_from(
+        id,
+        &name.0,
+        &written,
+        scope,
+        crate::api::request::ConstantFetch::Lookup,
+    )
 }
 
 /// `zend_fetch_class_with_scope` under `ZEND_FETCH_CLASS_EXCEPTION`, the

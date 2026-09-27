@@ -1336,7 +1336,7 @@ impl ReflectionParameter {
         };
         Ok(matches!(
             expr,
-            ConstExpr::Constant(_) | ConstExpr::ClassConstant { .. }
+            ConstExpr::Constant { .. } | ConstExpr::ClassConstant { .. }
         ))
     }
 
@@ -1360,8 +1360,8 @@ impl ReflectionParameter {
             return Err(no_default(req));
         };
         match expr {
-            ConstExpr::Constant(name) => PhpString::new(req, &name.0).map(Some),
-            ConstExpr::ClassConstant { class, name } => {
+            ConstExpr::Constant { name, .. } => PhpString::new(req, &name.0).map(Some),
+            ConstExpr::ClassConstant { class, name, .. } => {
                 let text = format!(
                     "{}::{}",
                     String::from_utf8_lossy(&class.0),
@@ -1430,7 +1430,8 @@ impl ReflectionParameter {
         let scope = match reference.function {
             FunctionRef::Method(scope, _) => Some(scope),
             FunctionRef::Invoke(_) => lookup_class(req, b"Closure").ok().flatten(),
-            FunctionRef::Global(_) | FunctionRef::Closure(_) => None,
+            FunctionRef::Closure(closure) => closure.closure(req).and_then(|info| info.scope),
+            FunctionRef::Global(_) => None,
         };
         let attributes = parameter.attributes.clone();
         super::attr::reflect_attributes(
@@ -1587,6 +1588,18 @@ impl ReflectionUnionType {
     /// (X&Y)|null ReflectionUnionType true: ReflectionIntersectionType(X&Y) ReflectionNamedType(null)
     /// (X&Y)|null ReflectionUnionType true: ReflectionIntersectionType(X&Y) ReflectionNamedType(null)
     /// X&Y ReflectionIntersectionType false: ReflectionNamedType(X) ReflectionNamedType(Y)
+    /// ```
+    ///
+    /// `iterable` in a union was compiled to `Traversable|array`, so those
+    /// are its members:
+    ///
+    /// ```php
+    /// class X {}
+    /// function f(X|iterable|bool $a) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters()[0]->getType()->getTypes() as $m) { echo $m, ' '; }
+    /// ```
+    /// ```expect
+    /// X Traversable array bool
     /// ```
     fn getTypes(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let reference = this_type(req, this.object())?;

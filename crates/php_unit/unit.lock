@@ -39,6 +39,7 @@ decl::ClassFlags
 decl::ClassKind
 decl::ConstDecl
 decl::ConstExpr
+decl::ConstExpr::line
 decl::ConstExpr::long
 decl::DynamicProperties
 decl::EnumBacking
@@ -49,6 +50,7 @@ decl::HookKind::name
 decl::IniDecl
 decl::MethodDecl
 decl::Name
+decl::NameKind
 decl::Parameter
 decl::Parameter::is_required
 decl::ParameterDefault

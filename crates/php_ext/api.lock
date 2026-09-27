@@ -197,6 +197,7 @@ call::read_static_prop
 call::reset_as_lazy_ghost
 call::reset_as_lazy_proxy
 call::skip_lazy_initialization
+call::update_class_constants
 call::write_hooked_property
 call::write_prop
 call::write_raw_property
@@ -239,6 +240,7 @@ decl::ClassFlags
 decl::ClassKind
 decl::ConstDecl
 decl::ConstExpr
+decl::ConstExpr::line
 decl::ConstExpr::long
 decl::DynamicProperties
 decl::EnumBacking
@@ -249,6 +251,7 @@ decl::HookKind::name
 decl::IniDecl
 decl::MethodDecl
 decl::Name
+decl::NameKind
 decl::Parameter
 decl::Parameter::is_required
 decl::ParameterDefault

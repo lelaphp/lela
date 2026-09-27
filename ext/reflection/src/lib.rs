@@ -77,7 +77,7 @@ use php_ext::call::{
 use php_ext::coerce::{Exponent, float_format};
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
-    MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
+    MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, throw};
 use php_ext::request::{ExtensionId, PHP_VERSION, Request};
@@ -5125,18 +5125,16 @@ fn class_constant_named(
 /// bool(false)
 /// ```
 /// A class constant's value as the constants table holds it once it is
-/// updated: an enum's case is the enum's instance for it
-/// (`zend_enum_get_case`), and every other constant the expression it
-/// was written as, evaluated in the scope that declared it.
+/// updated (`zend_update_class_constant`): an enum's case is the enum's
+/// instance for it (`zend_enum_get_case`), and every other constant the
+/// expression it was written as, evaluated in the scope that declared
+/// it and held to its type.
 fn constant_value(
     req: &mut Request,
     constant: &php_ext::decl::ClassConstDecl,
     scope: ClassId,
 ) -> Result<Value, Thrown> {
-    if constant.is_case {
-        return php_ext::call::class_constant(req, scope, &constant.name.0);
-    }
-    eval_const_expr(req, &constant.value, Some(scope))
+    php_ext::call::class_constant(req, scope, &constant.name.0)
 }
 
 /// The property `name` names in the class's info table: the class's
@@ -5800,10 +5798,10 @@ fn class_const_string(
     // A case of an enum holds the enum's own instance, so
     // `zend_zval_type_name` names the enum and the `IS_OBJECT` arm
     // writes `Object` in place of the value.
-    // `zval_update_constant_ex(&c->value, c->ce)`: evaluated in the
-    // class that declared it, a failure the exception it raised and no
-    // rendering.
-    let value = eval_const_expr(req, &constant.value, Some(scope))?;
+    // `zend_update_class_constant(c, name, c->ce)`: evaluated in the
+    // class that declared it and held to its type, a failure the
+    // exception it raised and no rendering.
+    let value = constant_value(req, constant, scope)?;
     let ty = match (&constant.ty, enum_of) {
         (Some(ty), _) => type_to_string(ty),
         (None, Some(name)) => String::from_utf8_lossy(name).into_owned(),
@@ -5964,7 +5962,17 @@ fn property_string(
 /// for a scalar, `NULL`, `true`, `false`, the number, or the string in
 /// single quotes with `smart_str_append_escaped`'s escapes; an array as
 /// `[a, b]` or `['k' => v]`; a constant's name as `zend_ast_export`
-/// writes an unevaluated expression.
+/// writes an unevaluated expression, a class constant's class after the
+/// mark compilation left on it:
+///
+/// ```php
+/// namespace App { function f($a = Bar::BAZ) {} }
+/// namespace { function g($a = N\Bar::BAZ) {} echo (new ReflectionFunction('App\f'))->getParameters()[0], "\n", (new ReflectionFunction('g'))->getParameters()[0], "\n"; }
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = \App\Bar::BAZ ]
+/// Parameter #0 [ <optional> $a = N\Bar::BAZ ]
+/// ```
 fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
     match expr {
         ConstExpr::Null => String::from("NULL"),
@@ -5975,7 +5983,7 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
         ),
         ConstExpr::Str(s) => format!("'{}'", escaped(s)),
-        ConstExpr::Array(elements) => {
+        ConstExpr::Array { elements, .. } => {
             let is_list = elements.iter().all(|(key, _)| key.is_none());
             let mut out = String::from("[");
             for (i, (key, value)) in elements.iter().enumerate() {
@@ -5997,12 +6005,29 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             out.push(']');
             out
         }
-        ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
-        ConstExpr::ClassConstant { class, name } => format!(
-            "{}::{}",
-            String::from_utf8_lossy(&class.0),
-            String::from_utf8_lossy(&name.0)
-        ),
+        ConstExpr::Constant { name, .. } => String::from_utf8_lossy(&name.0).into_owned(),
+        // `zend_ast_export_ns_name`: the mark compilation left on the
+        // class's name before it.
+        ConstExpr::ClassConstant {
+            class,
+            class_kind,
+            name,
+            ..
+        } => {
+            let mark = match class_kind {
+                NameKind::NotFullyQualified => "",
+                NameKind::FullyQualified => "\\",
+                NameKind::Relative => "namespace\\",
+            };
+            format!(
+                "{mark}{}::{}",
+                String::from_utf8_lossy(&class.0),
+                String::from_utf8_lossy(&name.0)
+            )
+        }
+        ConstExpr::ClassName { class, .. } => {
+            format!("{}::class", String::from_utf8_lossy(&class.0))
+        }
         ConstExpr::Unary { .. }
         | ConstExpr::Binary { .. }
         | ConstExpr::Dim { .. }
@@ -6084,11 +6109,11 @@ fn property_name(req: &mut Request, name: &ConstExpr) -> String {
 /// ```
 fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
     let (text, own) = match expr {
-        ConstExpr::Unary { op, operand } => {
+        ConstExpr::Unary { op, operand, .. } => {
             let operand = ast_export(req, operand, 241);
             (format!("{}{operand}", String::from_utf8_lossy(&op.0)), 240)
         }
-        ConstExpr::Binary { op, lhs, rhs } => {
+        ConstExpr::Binary { op, lhs, rhs, .. } => {
             let (own, left, right) = match op.0.as_ref() {
                 b"**" => (250, 251, 250),
                 b"*" | b"/" | b"%" => (210, 210, 211),
@@ -6125,7 +6150,7 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
             let otherwise = ast_export(req, otherwise, 101);
             (format!("{cond}{middle}{otherwise}"), 100)
         }
-        ConstExpr::Cast { to, operand } => {
+        ConstExpr::Cast { to, operand, .. } => {
             let written = match to {
                 18 => "(bool)",
                 4 => "(int)",
@@ -6138,7 +6163,7 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
             (format!("{written}{operand}"), 240)
         }
         // The primary expressions, which no priority wraps.
-        ConstExpr::Dim { container, dim } => {
+        ConstExpr::Dim { container, dim, .. } => {
             let container = ast_export(req, container, 260);
             let dim = ast_export(req, dim, 0);
             return format!("{container}[{dim}]");
@@ -6147,13 +6172,16 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
             object,
             name,
             nullsafe,
+            ..
         } => {
             let object = ast_export(req, object, 0);
             let arrow = if *nullsafe { "?->" } else { "->" };
             let name = property_name(req, name);
             return format!("{object}{arrow}{name}");
         }
-        ConstExpr::New { class, arguments } => {
+        ConstExpr::New {
+            class, arguments, ..
+        } => {
             let mut text = format!("new {}(", new_class_name(&class.0));
             for (at, (name, value)) in arguments.iter().enumerate() {
                 if at > 0 {
@@ -7072,17 +7100,21 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         ConstExpr::Long { value, radix } => radix.written(*value),
         ConstExpr::Double(f) => f.to_string(),
         ConstExpr::Str(s) => format!("\"{}\"", stub_escaped(s)),
-        ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
+        ConstExpr::Constant { name, .. } => String::from_utf8_lossy(&name.0).into_owned(),
         // `DateTimeZone::ALL`, as `timezone_identifiers_list`'s stub writes it.
-        ConstExpr::ClassConstant { class, name } => format!(
+        ConstExpr::ClassConstant { class, name, .. } => format!(
             "{}::{}",
             String::from_utf8_lossy(&class.0),
             String::from_utf8_lossy(&name.0)
         ),
-        ConstExpr::Array(elements) if elements.is_empty() => String::from("[]"),
+        // `SplFileObject::class`, as `setFileClass`'s stub writes it.
+        ConstExpr::ClassName { class, .. } => {
+            format!("{}::class", String::from_utf8_lossy(&class.0))
+        }
+        ConstExpr::Array { elements, .. } if elements.is_empty() => String::from("[]"),
         // `ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401`: the stub's
         // operands with the operator between, as it wrote them.
-        ConstExpr::Binary { op, lhs, rhs } => format!(
+        ConstExpr::Binary { op, lhs, rhs, .. } => format!(
             "{} {} {}",
             const_expr_string(lhs),
             String::from_utf8_lossy(&op.0),

@@ -11,7 +11,7 @@
 use php_syntax::tree;
 use php_syntax::tree::{NodeId, TypeExpr};
 use php_unit::Level;
-use php_unit::decl::{Name, Type};
+use php_unit::decl::{Name, NameKind, Type};
 use php_unit::type_to_string;
 
 use super::walk::unread;
@@ -214,6 +214,22 @@ impl Emit<'_> {
     /// int(1)
     /// f(): Argument #1 ($x) must be of type (A&B)|null, stdClass given, called in %s on line 5
     /// ```
+    ///
+    /// `iterable` among a union's members is `Traversable|array`, and
+    /// standing alone, nullable or not, keeps its name:
+    ///
+    /// ```php
+    /// class X {}
+    /// function f(X|iterable|bool $a, iterable|null $b, ?iterable $c) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) { echo $p->getType(), "\n"; }
+    /// try { f(new stdClass, [], []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// X|Traversable|array|bool
+    /// Traversable|array|null
+    /// ?iterable
+    /// f(): Argument #1 ($a) must be of type X|Traversable|array|bool, stdClass given, called in %s on line 5
+    /// ```
     fn union_type(&mut self, members: &[TypeExpr]) -> Result<Type, CompileError> {
         let mut mask = 0;
         let mut out: Vec<Type> = Vec::with_capacity(members.len());
@@ -286,7 +302,26 @@ impl Emit<'_> {
                 type_to_string(&ty)
             )));
         }
-        Ok(ty)
+        // `zend_compile_single_typename` makes `iterable` the class
+        // `Traversable` over `MAY_BE_ARRAY`, with `_ZEND_TYPE_ITERABLE_BIT`
+        // to name it by; the union arm clears that bit with the member's
+        // flags, so inside a union it is the two it stands for and names
+        // itself so, in the type's text and in Reflection alike.
+        let Type::Union(members) = ty else {
+            return Ok(ty);
+        };
+        Ok(Type::Union(
+            members
+                .into_iter()
+                .flat_map(|member| match member {
+                    Type::Iterable => vec![
+                        Type::Named(Name(b"Traversable".as_slice().into())),
+                        Type::Array,
+                    ],
+                    member => vec![member],
+                })
+                .collect(),
+        ))
     }
 
     /// The intersection arm of `zend_compile_typename_ex`: class names
@@ -419,10 +454,10 @@ impl Emit<'_> {
             b"callable" => return Ok(Type::Callable),
             _ => {}
         }
-        let (qualified, prefix) = NameKind::of(&lowered);
+        let (qualified, prefix) = name_kind(&lowered);
         let bare = &lowered[prefix..];
         if let Some(builtin) = builtin_type(bare) {
-            if qualified != NameKind::Unqualified {
+            if qualified != NameKind::NotFullyQualified {
                 return Err(self.compile_error(format!(
                     "Type declaration '{}' must be unqualified",
                     String::from_utf8_lossy(bare)
@@ -461,7 +496,7 @@ impl Emit<'_> {
                     "Using \"_\" as a type name is deprecated since 8.4",
                 );
             }
-            if qualified == NameKind::Unqualified && self.not_imported(&written) {
+            if qualified == NameKind::NotFullyQualified && self.not_imported(&written) {
                 self.confusable_type(&written, &resolved);
             }
             return Ok(Type::Named(Name(resolved.into_boxed_slice())));
@@ -610,27 +645,15 @@ impl Emit<'_> {
     }
 }
 
-/// How a name is written, php's `ZEND_NAME_NOT_FQ`, `ZEND_NAME_FQ` and
-/// `ZEND_NAME_RELATIVE`: as written, after a `\\`, or after
-/// `namespace\\`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum NameKind {
-    Unqualified,
-    FullyQualified,
-    Relative,
-}
-
-impl NameKind {
-    /// The kind of a lowered name, with the length of the prefix that
-    /// makes it so.
-    fn of(lowered: &[u8]) -> (NameKind, usize) {
-        if lowered.starts_with(b"\\") {
-            (NameKind::FullyQualified, 1)
-        } else if lowered.starts_with(b"namespace\\") {
-            (NameKind::Relative, b"namespace\\".len())
-        } else {
-            (NameKind::Unqualified, 0)
-        }
+/// The mark a lowered name is written with, with the length of the
+/// prefix that makes it so.
+fn name_kind(lowered: &[u8]) -> (NameKind, usize) {
+    if lowered.starts_with(b"\\") {
+        (NameKind::FullyQualified, 1)
+    } else if lowered.starts_with(b"namespace\\") {
+        (NameKind::Relative, b"namespace\\".len())
+    } else {
+        (NameKind::NotFullyQualified, 0)
     }
 }
 

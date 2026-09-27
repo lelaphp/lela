@@ -185,12 +185,14 @@ pub struct ConstArray(pub &'static [(Option<ConstValue>, ConstValue)]);
 
 impl ConstArray {
     fn expr(self) -> ConstExpr {
-        ConstExpr::Array(
-            self.0
+        ConstExpr::Array {
+            elements: self
+                .0
                 .iter()
                 .map(|(key, value)| (key.map(ConstValue::expr), value.expr()))
                 .collect(),
-        )
+            line: 0,
+        }
     }
 }
 
