@@ -127,13 +127,13 @@ pub use scanf::php_sscanf_internal;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
-use php_ext::coerce::{coerce_param, is_type};
+use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{
     Level, Thrown, arg_count_error, arg_value_error, docref, too_few_arguments,
 };
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, TypeTag, Value};
+use php_ext::values::{PhpArray, PhpString, Value};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -158,8 +158,9 @@ struct State {
     assert: assert::Stage,
 }
 
-/// The natives this file declares itself: `count` and `sizeof`, `ord`,
-/// `chr`, `str_repeat` and the `is_*` type checks.
+/// The natives this file declares itself, `count` and `sizeof`, `ord`,
+/// `chr` and `str_repeat`, then the `is_*` type checks `type.rs`
+/// declares, at the place they have always been registered.
 fn core_natives() -> Vec<(FunctionDecl, output::Entry)> {
     let countable = || Type::Union(vec![Type::Named(Name::from("Countable")), Type::Array]);
     let normal = ParameterDefault::Expr(ConstExpr::Constant(Name::from("COUNT_NORMAL")));
@@ -203,18 +204,18 @@ fn core_natives() -> Vec<(FunctionDecl, output::Entry)> {
             ),
             str_repeat,
         ),
-        (type_check_declared(b"is_null"), is_null),
-        (type_check_declared(b"is_resource"), is_resource),
-        (type_check_declared(b"is_bool"), is_bool),
-        (type_check_declared(b"is_int"), is_int),
-        (type_check_declared(b"is_integer"), is_int),
-        (type_check_declared(b"is_long"), is_int),
-        (type_check_declared(b"is_float"), is_float),
-        (type_check_declared(b"is_double"), is_float),
-        (type_check_declared(b"is_string"), is_string),
-        (type_check_declared(b"is_array"), is_array),
-        (type_check_declared(b"is_object"), is_object),
-        (type_check_declared(b"is_scalar"), is_scalar),
+        r#type::is_null::declared(),
+        r#type::is_resource::declared(),
+        r#type::is_bool::declared(),
+        r#type::is_int::declared(),
+        r#type::is_integer::declared(),
+        r#type::is_long::declared(),
+        r#type::is_float::declared(),
+        r#type::is_double::declared(),
+        r#type::is_string::declared(),
+        r#type::is_array::declared(),
+        r#type::is_object::declared(),
+        r#type::is_scalar::declared(),
     ]
 }
 
@@ -251,7 +252,21 @@ pub fn extension() -> Extension {
         .functions(basic_natives())
         .functions(file_natives())
         .functions(math::natives())
-        .functions(r#type::natives())
+        .functions(vec![
+            r#type::gettype::declared(),
+            r#type::get_debug_type::declared(),
+            r#type::settype::declared(),
+            r#type::intval::declared(),
+            r#type::floatval::declared(),
+            r#type::doubleval::declared(),
+            r#type::boolval::declared(),
+            r#type::strval::declared(),
+            r#type::array_is_list::declared(),
+            r#type::is_numeric::declared(),
+            r#type::is_callable::declared(),
+            r#type::is_iterable::declared(),
+            r#type::is_countable::declared(),
+        ])
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
@@ -1172,181 +1187,6 @@ fn docref_deprecated(req: &mut Request, what: &str) {
     docref(req, Level::Deprecated, what);
 }
 
-/// `is_null(mixed $value): bool`, `php_is_type` under `IS_NULL`
-/// (`Z/ext/standard/type.c:239`) through the face's `is_type`. The
-/// one-argument call is `ZEND_TYPE_CHECK` over the engine's kernel and
-/// never reaches here, as with every native of the family; what does is
-/// the call `ZEND_PARSE_PARAMETERS_START(1, 1)` refuses.
-///
-/// ```php
-/// var_dump(is_null());
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: is_null() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): is_null()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn is_null(req: &mut Request) -> Result<Value, Thrown> {
-    type_check(req, TypeTag::Null)
-}
-
-/// `is_resource(mixed $value): bool`, `php_is_type` under `IS_RESOURCE`:
-/// a closed resource is not one.
-///
-/// ```php
-/// var_dump(is_resource());
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: is_resource() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): is_resource()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn is_resource(req: &mut Request) -> Result<Value, Thrown> {
-    type_check(req, TypeTag::Resource)
-}
-
-/// `is_bool(mixed $value): bool`, `PHP_FUNCTION(is_bool)`: `IS_FALSE`
-/// or `IS_TRUE`.
-///
-/// ```php
-/// var_dump(is_bool());
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: is_bool() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): is_bool()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn is_bool(req: &mut Request) -> Result<Value, Thrown> {
-    type_check(req, TypeTag::Bool)
-}
-
-/// `is_int(mixed $value): bool` and its aliases `is_integer` and
-/// `is_long`, `php_is_type` under `IS_LONG`.
-///
-/// ```php
-/// var_dump(is_int());
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: is_int() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): is_int()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn is_int(req: &mut Request) -> Result<Value, Thrown> {
-    type_check(req, TypeTag::Int)
-}
-
-/// `is_float(mixed $value): bool` and its alias `is_double`,
-/// `php_is_type` under `IS_DOUBLE`.
-///
-/// ```php
-/// var_dump(is_float());
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: is_float() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): is_float()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn is_float(req: &mut Request) -> Result<Value, Thrown> {
-    type_check(req, TypeTag::Float)
-}
-
-/// `is_string(mixed $value): bool`, `php_is_type` under `IS_STRING`.
-///
-/// ```php
-/// var_dump(is_string());
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: is_string() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): is_string()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn is_string(req: &mut Request) -> Result<Value, Thrown> {
-    type_check(req, TypeTag::String)
-}
-
-/// `is_array(mixed $value): bool`, `php_is_type` under `IS_ARRAY`.
-///
-/// ```php
-/// var_dump(is_array());
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: is_array() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): is_array()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn is_array(req: &mut Request) -> Result<Value, Thrown> {
-    type_check(req, TypeTag::Array)
-}
-
-/// `is_object(mixed $value): bool`, `php_is_type` under `IS_OBJECT`.
-///
-/// ```php
-/// var_dump(is_object());
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: is_object() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): is_object()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn is_object(req: &mut Request) -> Result<Value, Thrown> {
-    type_check(req, TypeTag::Object)
-}
-
-/// `is_scalar(mixed $value): bool`, `PHP_FUNCTION(is_scalar)`
-/// (`Z/ext/standard/type.c:389`): a bool, a long, a double or a string,
-/// which is the face's `is_type` asked four times.
-///
-/// ```php
-/// var_dump(is_scalar(1, 2));
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: is_scalar() expects exactly 1 argument, 2 given in %s:2
-/// Stack trace:
-/// #0 %s(2): is_scalar(1, 2)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn is_scalar(req: &mut Request) -> Result<Value, Thrown> {
-    let value = one_argument(req)?;
-    Ok(Value::bool(
-        [TypeTag::Bool, TypeTag::Int, TypeTag::Float, TypeTag::String]
-            .into_iter()
-            .any(|tag| is_type(&value, tag)),
-    ))
-}
-
-/// `php_is_type`: the one `Z_PARAM_ZVAL` and whether it is of `tag`.
-fn type_check(req: &mut Request, tag: TypeTag) -> Result<Value, Thrown> {
-    let value = one_argument(req)?;
-    Ok(Value::bool(is_type(&value, tag)))
-}
-
-/// `ZEND_PARSE_PARAMETERS_START(1, 1)` over one `Z_PARAM_ZVAL`: the
-/// argument as it is, or the `ArgumentCountError` for any other count.
-fn one_argument(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, count));
-    }
-    Ok(req.argument(1).unwrap_or_default())
-}
-
 /// `constant(string $name): mixed`, php's `PHP_FUNCTION(constant)`
 /// (`Z/ext/standard/basic_functions.c:501`): one `Z_PARAM_STR`, then
 /// `zend_get_constant_ex` under `ZEND_FETCH_CLASS_EXCEPTION` with the
@@ -1504,12 +1344,6 @@ fn sleep(req: &mut Request) -> Result<Value, Thrown> {
     };
     std::thread::sleep(std::time::Duration::from_secs(seconds));
     Ok(Value::int(0))
-}
-
-/// `is_*(mixed $value): bool`, the declaration every native of the
-/// family shares.
-fn type_check_declared(name: &[u8]) -> FunctionDecl {
-    declared(name, &[parameter(b"value", Type::Mixed)], Type::Bool)
 }
 
 /// One `REGISTER_LONG_CONSTANT`.

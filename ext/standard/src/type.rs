@@ -1,27 +1,42 @@
-//! The natives of `type.c` beside the `is_*` checks the crate root
-//! declares: the type names (`gettype`, `get_debug_type`), the
+//! The natives of `type.c`: the type names (`gettype`, `get_debug_type`), the
 //! conversions (`settype`, `intval`, `floatval` and its alias
 //! `doubleval`, `boolval`, `strval`), and the remaining predicates
-//! (`array_is_list`, `is_numeric`, `is_callable`, `is_iterable`,
-//! `is_countable`).
+//! (`array_is_list`, the `is_*` checks with their aliases,
+//! `is_numeric`, `is_callable`, `is_iterable`, `is_countable`).
 
+use php_ext::abi::{Ref, Untyped};
+use php_ext::attr::php_function;
 use php_ext::call::lookup_class;
 use php_ext::coerce::{
-    callable_name, is_callable as callable, numeric_string, to_array, to_double, to_long,
+    callable_name, is_callable as callable, is_type, numeric_string, to_array, to_double, to_long,
     to_object, to_string, truthy,
 };
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 
-use crate::output::Entry;
-use crate::{
-    argument_count_between, bool_argument, declared, frameless, long_argument, parameter,
-    string_argument,
-};
-
-/// The declarations, as `basic_functions.stub.php` has them.
+/// `gettype(mixed $value): string`, php's `PHP_FUNCTION(gettype)` over
+/// `zend_zval_get_legacy_type`: the names php has kept since PHP 4,
+/// `integer`, `double`, `boolean`, `NULL`, and `resource (closed)` for a
+/// closed resource.
+///
+/// ```php
+/// $f = fopen('php://memory', 'r'); fclose($f);
+/// var_dump(gettype(1), gettype(1.0), gettype("s"), gettype(null), gettype([]), gettype(new stdClass), gettype(true), gettype($f), gettype(fopen('php://memory', 'r')));
+/// ```
+/// ```expect
+/// string(7) "integer"
+/// string(6) "double"
+/// string(6) "string"
+/// string(4) "NULL"
+/// string(5) "array"
+/// string(6) "object"
+/// string(7) "boolean"
+/// string(17) "resource (closed)"
+/// string(8) "resource"
+/// ```
+///
+/// The declarations of `type.c`, as `basic_functions.stub.php` has them.
 ///
 /// ```php
 /// foreach (['gettype', 'get_debug_type', 'settype', 'intval', 'floatval', 'doubleval', 'boolval', 'strval', 'array_is_list', 'is_numeric', 'is_callable', 'is_iterable', 'is_countable'] as $f) echo new ReflectionFunction($f);
@@ -123,115 +138,8 @@ use crate::{
 ///   - Return [ bool ]
 /// }
 /// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let value = || parameter(b"value", Type::Mixed);
-    let one =
-        |name: &[u8], returns: Type, entry: Entry| (declared(name, &[value()], returns), entry);
-    vec![
-        one(b"gettype", Type::String, gettype),
-        one(b"get_debug_type", Type::String, get_debug_type),
-        (
-            declared(
-                b"settype",
-                &[
-                    Parameter {
-                        by_ref: true,
-                        ..parameter(b"var", Type::Mixed)
-                    },
-                    parameter(b"type", Type::String),
-                ],
-                Type::Bool,
-            ),
-            settype,
-        ),
-        (
-            declared(
-                b"intval",
-                &[
-                    value(),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::long(10)),
-                        ..parameter(b"base", Type::Int)
-                    },
-                ],
-                Type::Int,
-            ),
-            intval,
-        ),
-        one(b"floatval", Type::Float, floatval),
-        one(b"doubleval", Type::Float, floatval),
-        one(b"boolval", Type::Bool, boolval),
-        one(b"strval", Type::String, strval),
-        (
-            declared(
-                b"array_is_list",
-                &[parameter(b"array", Type::Array)],
-                Type::Bool,
-            ),
-            array_is_list,
-        ),
-        (
-            frameless(declared(b"is_numeric", &[value()], Type::Bool), &[1]),
-            is_numeric,
-        ),
-        (
-            declared(
-                b"is_callable",
-                &[
-                    value(),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                        ..parameter(b"syntax_only", Type::Bool)
-                    },
-                    Parameter {
-                        by_ref: true,
-                        default: ParameterDefault::Expr(ConstExpr::Null),
-                        ty: None,
-                        ..parameter(b"callable_name", Type::Mixed)
-                    },
-                ],
-                Type::Bool,
-            ),
-            is_callable,
-        ),
-        one(b"is_iterable", Type::Bool, is_iterable),
-        one(b"is_countable", Type::Bool, is_countable),
-    ]
-}
-
-/// The one argument of a type native, as `Z_PARAM_ZVAL` reads it: the
-/// value, a reference followed.
-fn the_value(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    Ok(req.argument(1).unwrap_or_default().deref())
-}
-
-fn string_value(req: &mut Request, text: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, text)?))
-}
-
-/// `gettype(mixed $value): string`, php's `PHP_FUNCTION(gettype)` over
-/// `zend_zval_get_legacy_type`: the names php has kept since PHP 4,
-/// `integer`, `double`, `boolean`, `NULL`, and `resource (closed)` for a
-/// closed resource.
-///
-/// ```php
-/// $f = fopen('php://memory', 'r'); fclose($f);
-/// var_dump(gettype(1), gettype(1.0), gettype("s"), gettype(null), gettype([]), gettype(new stdClass), gettype(true), gettype($f), gettype(fopen('php://memory', 'r')));
-/// ```
-/// ```expect
-/// string(7) "integer"
-/// string(6) "double"
-/// string(6) "string"
-/// string(4) "NULL"
-/// string(5) "array"
-/// string(6) "object"
-/// string(7) "boolean"
-/// string(17) "resource (closed)"
-/// string(8) "resource"
-/// ```
-fn gettype(req: &mut Request) -> Result<Value, Thrown> {
-    let value = the_value(req)?;
+#[php_function]
+fn gettype(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
     let name: &[u8] = match value.as_ref() {
         ValueRef::Null | ValueRef::Undef => b"NULL",
         ValueRef::Bool(_) => b"boolean",
@@ -244,7 +152,7 @@ fn gettype(req: &mut Request) -> Result<Value, Thrown> {
         ValueRef::Resource(_) => b"resource",
         ValueRef::Reference(_) => b"unknown type",
     };
-    string_value(req, name)
+    PhpString::new(req, name)
 }
 
 /// `get_debug_type(mixed $value): string`, php's
@@ -270,8 +178,8 @@ fn gettype(req: &mut Request) -> Result<Value, Thrown> {
 /// string(4) "null"
 /// string(4) "bool"
 /// ```
-fn get_debug_type(req: &mut Request) -> Result<Value, Thrown> {
-    let value = the_value(req)?;
+#[php_function]
+fn get_debug_type(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
     let name: Vec<u8> = match value.as_ref() {
         ValueRef::Null | ValueRef::Undef => b"null".to_vec(),
         ValueRef::Bool(_) => b"bool".to_vec(),
@@ -300,7 +208,7 @@ fn get_debug_type(req: &mut Request) -> Result<Value, Thrown> {
         },
         ValueRef::Reference(_) => b"unknown".to_vec(),
     };
-    string_value(req, &name)
+    PhpString::new(req, &name)
 }
 
 /// `settype(mixed &$var, string $type): bool`, php's
@@ -334,11 +242,10 @@ fn get_debug_type(req: &mut Request) -> Result<Value, Thrown> {
 /// Cannot convert to resource type
 /// settype(): Argument #2 ($type) must be a valid type
 /// ```
-fn settype(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let given = req.argument(1).unwrap_or_default();
-    let name = string_argument(req, 2)?.as_bytes().to_ascii_lowercase();
-    let current = given.deref();
+#[php_function]
+fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool, Thrown> {
+    let name = r#type.as_bytes().to_ascii_lowercase();
+    let current = var.get().copied().unwrap_or_default();
     let converted = match name.as_slice() {
         b"integer" | b"int" => Value::int(to_long(req, &current)?),
         b"float" | b"double" => Value::float(to_double(req, &current)?),
@@ -368,11 +275,8 @@ fn settype(req: &mut Request) -> Result<Value, Thrown> {
         }
         _ => return Err(arg_value_error(req, 2, "be a valid type")),
     };
-    match given.as_ref() {
-        ValueRef::Reference(reference) => reference.set(req, converted)?,
-        _ => req.release(converted),
-    }
-    Ok(Value::bool(true))
+    var.set(req, converted)?;
+    Ok(true)
 }
 
 /// `intval(mixed $value, int $base = 10): int`, php's
@@ -402,19 +306,13 @@ fn settype(req: &mut Request) -> Result<Value, Thrown> {
 /// int(0)
 /// int(1)
 /// ```
-fn intval(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let value = req.argument(1).unwrap_or_default().deref();
-    let base = if req.argument_count() == 2 {
-        long_argument(req, 2)?
-    } else {
-        10
-    };
+#[php_function]
+fn intval(req: &mut Request, value: Value, #[php(default = 10)] base: i64) -> Result<i64, Thrown> {
     let Some(text) = value.as_str_bytes().map(<[u8]>::to_vec) else {
-        return Ok(Value::int(to_long(req, &value)?));
+        return to_long(req, &value);
     };
     if base == 10 {
-        return Ok(Value::int(to_long(req, &value)?));
+        return to_long(req, &value);
     }
     if base == 0 || base == 2 {
         let start = text
@@ -427,11 +325,11 @@ fn intval(req: &mut Request) -> Result<Value, Thrown> {
             if rest[offset] == b'0' && matches!(rest.get(offset + 1), Some(b'b' | b'B')) {
                 let mut digits = rest[..offset].to_vec();
                 digits.extend_from_slice(&rest[offset + 2..]);
-                return Ok(Value::int(strtol(&digits, 2)));
+                return Ok(strtol(&digits, 2));
             }
         }
     }
-    Ok(Value::int(strtol(&text, base)))
+    Ok(strtol(&text, base))
 }
 
 /// `isspace` in the C locale.
@@ -506,9 +404,9 @@ fn strtol(bytes: &[u8], base: i64) -> i64 {
 /// float(-0.5)
 /// float(1)
 /// ```
-fn floatval(req: &mut Request) -> Result<Value, Thrown> {
-    let value = the_value(req)?;
-    Ok(Value::float(to_double(req, &value)?))
+#[php_function(aliases(doubleval))]
+fn floatval(req: &mut Request, value: Value) -> Result<f64, Thrown> {
+    to_double(req, &value)
 }
 
 /// `boolval(mixed $value): bool`, php's `PHP_FUNCTION(boolval)`:
@@ -527,9 +425,9 @@ fn floatval(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn boolval(req: &mut Request) -> Result<Value, Thrown> {
-    let value = the_value(req)?;
-    Ok(Value::bool(truthy(req, &value)))
+#[php_function]
+fn boolval(req: &mut Request, value: Value) -> bool {
+    truthy(req, &value)
 }
 
 /// `strval(mixed $value): string`, php's `PHP_FUNCTION(strval)`:
@@ -553,9 +451,9 @@ fn boolval(req: &mut Request) -> Result<Value, Thrown> {
 /// string(5) "Array"
 /// Object of class stdClass could not be converted to string
 /// ```
-fn strval(req: &mut Request) -> Result<Value, Thrown> {
-    let value = the_value(req)?;
-    Ok(Value::string(to_string(req, &value)?))
+#[php_function]
+fn strval(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
+    to_string(req, &value)
 }
 
 /// `array_is_list(array $array): bool`, php's
@@ -574,14 +472,174 @@ fn strval(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// array_is_list(): Argument #1 ($array) must be of type array, string given
 /// ```
-fn array_is_list(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let given = req.argument(1).unwrap_or_default();
-    let coerced = php_ext::coerce::coerce_param(req, &given, &Type::Array, 1)?;
-    let Some(array) = coerced.deref().as_array().copied() else {
-        return Ok(Value::bool(true));
-    };
-    Ok(Value::bool(array.is_list()))
+#[php_function]
+fn array_is_list(array: PhpArray) -> bool {
+    array.is_list()
+}
+
+/// `is_null(mixed $value): bool`, `php_is_type` under `IS_NULL`
+/// (`Z/ext/standard/type.c:239`) through the face's `is_type`. The
+/// one-argument call is `ZEND_TYPE_CHECK` over the engine's kernel and
+/// never reaches here, as with every native of the family; what does is
+/// the call `ZEND_PARSE_PARAMETERS_START(1, 1)` refuses.
+///
+/// ```php
+/// var_dump(is_null());
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: is_null() expects exactly 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): is_null()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function]
+fn is_null(value: Value) -> bool {
+    is_type(&value, TypeTag::Null)
+}
+
+/// `is_resource(mixed $value): bool`, `php_is_type` under `IS_RESOURCE`:
+/// a closed resource is not one.
+///
+/// ```php
+/// var_dump(is_resource());
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: is_resource() expects exactly 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): is_resource()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function]
+fn is_resource(value: Value) -> bool {
+    is_type(&value, TypeTag::Resource)
+}
+
+/// `is_bool(mixed $value): bool`, `PHP_FUNCTION(is_bool)`: `IS_FALSE`
+/// or `IS_TRUE`.
+///
+/// ```php
+/// var_dump(is_bool());
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: is_bool() expects exactly 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): is_bool()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function]
+fn is_bool(value: Value) -> bool {
+    is_type(&value, TypeTag::Bool)
+}
+
+/// `is_int(mixed $value): bool` and its aliases `is_integer` and
+/// `is_long`, `php_is_type` under `IS_LONG`.
+///
+/// ```php
+/// var_dump(is_int());
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: is_int() expects exactly 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): is_int()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function(aliases(is_integer, is_long))]
+fn is_int(value: Value) -> bool {
+    is_type(&value, TypeTag::Int)
+}
+
+/// `is_float(mixed $value): bool` and its alias `is_double`,
+/// `php_is_type` under `IS_DOUBLE`.
+///
+/// ```php
+/// var_dump(is_float());
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: is_float() expects exactly 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): is_float()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function(aliases(is_double))]
+fn is_float(value: Value) -> bool {
+    is_type(&value, TypeTag::Float)
+}
+
+/// `is_string(mixed $value): bool`, `php_is_type` under `IS_STRING`.
+///
+/// ```php
+/// var_dump(is_string());
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: is_string() expects exactly 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): is_string()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function]
+fn is_string(value: Value) -> bool {
+    is_type(&value, TypeTag::String)
+}
+
+/// `is_array(mixed $value): bool`, `php_is_type` under `IS_ARRAY`.
+///
+/// ```php
+/// var_dump(is_array());
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: is_array() expects exactly 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): is_array()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function]
+fn is_array(value: Value) -> bool {
+    is_type(&value, TypeTag::Array)
+}
+
+/// `is_object(mixed $value): bool`, `php_is_type` under `IS_OBJECT`.
+///
+/// ```php
+/// var_dump(is_object());
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: is_object() expects exactly 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): is_object()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function]
+fn is_object(value: Value) -> bool {
+    is_type(&value, TypeTag::Object)
+}
+
+/// `is_scalar(mixed $value): bool`, `PHP_FUNCTION(is_scalar)`
+/// (`Z/ext/standard/type.c:389`): a bool, a long, a double or a string,
+/// which is the face's `is_type` asked four times.
+///
+/// ```php
+/// var_dump(is_scalar(1, 2));
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: is_scalar() expects exactly 1 argument, 2 given in %s:2
+/// Stack trace:
+/// #0 %s(2): is_scalar(1, 2)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function]
+fn is_scalar(value: Value) -> bool {
+    [TypeTag::Bool, TypeTag::Int, TypeTag::Float, TypeTag::String]
+        .into_iter()
+        .any(|tag| is_type(&value, tag))
 }
 
 /// `is_numeric(mixed $value): bool`, php's `_zend_is_numeric`, with the
@@ -603,13 +661,13 @@ fn array_is_list(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn is_numeric(req: &mut Request) -> Result<Value, Thrown> {
-    let value = the_value(req)?;
-    Ok(Value::bool(match value.as_ref() {
+#[php_function(frameless(1))]
+fn is_numeric(value: Value) -> bool {
+    match value.as_ref() {
         ValueRef::Int(_) | ValueRef::Float(_) => true,
         ValueRef::Str(s) => numeric_string(s.as_bytes()).is_some(),
         _ => false,
-    }))
+    }
 }
 
 /// `is_callable(mixed $value, bool $syntax_only = false, &$callable_name = null): bool`, php's `PHP_FUNCTION(is_callable)`
@@ -656,14 +714,13 @@ fn is_numeric(req: &mut Request) -> Result<Value, Thrown> {
 /// string(3) "1.5"
 /// string(0) ""
 /// ```
-fn is_callable(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let value = req.argument(1).unwrap_or_default().deref();
-    let syntax_only = if req.argument_count() >= 2 {
-        bool_argument(req, 2)?
-    } else {
-        false
-    };
+#[php_function]
+fn is_callable(
+    req: &mut Request,
+    value: Value,
+    #[php(default = false)] syntax_only: bool,
+    #[php(default = null)] callable_name: Ref<Untyped<Value>>,
+) -> Result<bool, Thrown> {
     let answer = if syntax_only {
         match value.as_ref() {
             ValueRef::Str(_) => true,
@@ -679,14 +736,11 @@ fn is_callable(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         callable(req, &value)
     };
-    if req.argument_count() == 3
-        && let Some(ValueRef::Reference(cell)) = req.argument(3).as_ref().map(Value::as_ref)
-    {
-        let cell = *cell;
-        let name = Value::string(callable_name(req, &value)?);
-        cell.set(req, name)?;
+    if callable_name.is_given() {
+        let name = Value::string(self::callable_name(req, &value)?);
+        callable_name.set(req, Untyped(name))?;
     }
-    Ok(Value::bool(answer))
+    Ok(answer)
 }
 
 /// Whether the object is an instance of the interface `name`, where the
@@ -714,12 +768,12 @@ fn implements(req: &mut Request, value: &Value, name: &[u8]) -> Result<bool, Thr
 /// bool(false)
 /// bool(false)
 /// ```
-fn is_iterable(req: &mut Request) -> Result<Value, Thrown> {
-    let value = the_value(req)?;
+#[php_function]
+fn is_iterable(req: &mut Request, value: Value) -> Result<bool, Thrown> {
     if value.as_array().is_some() {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
-    Ok(Value::bool(implements(req, &value, b"Traversable")?))
+    implements(req, &value, b"Traversable")
 }
 
 /// `is_countable(mixed $value): bool`, php's `zend_is_countable`: an
@@ -735,10 +789,10 @@ fn is_iterable(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn is_countable(req: &mut Request) -> Result<Value, Thrown> {
-    let value = the_value(req)?;
+#[php_function]
+fn is_countable(req: &mut Request, value: Value) -> Result<bool, Thrown> {
     if value.as_array().is_some() {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
-    Ok(Value::bool(implements(req, &value, b"Countable")?))
+    implements(req, &value, b"Countable")
 }
