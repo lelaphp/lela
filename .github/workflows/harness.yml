@@ -22,7 +22,7 @@ concurrency:
 jobs:
   regions:
     name: computed check
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -31,7 +31,7 @@ jobs:
       - run: computed check AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md
   per-commit:
     name: the instruments, then done
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
