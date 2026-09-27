@@ -1111,18 +1111,23 @@ impl MultipleIterator {
     /// any under `MIT_NEED_ANY`, `false` with none attached.
     #[php(tentative)]
     fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
-        let (rows, flags) = with(req, this.object(), |s| (s.live(), s.flags))?;
-        if rows.is_empty() {
+        let this = this.object();
+        let (len, flags) = with(req, this, |s| (s.len(), s.flags))?;
+        if len == 0 {
             return Ok(false);
         }
         let expect = flags & Self::MIT_NEED_ALL != 0;
-        for (iterator, _) in rows {
-            let answered = crate::method(req, iterator, b"valid")?;
+        with(req, this, Storage::reset)?;
+        while let Some((iterator, held, _)) = held_here(req, this)? {
+            let answered = crate::method(req, iterator, b"valid");
+            held.let_go(req);
+            let answered = answered?;
             let valid = answered.as_bool() == Some(true);
             req.release(answered);
             if expect != valid {
                 return Ok(!expect);
             }
+            with(req, this, Storage::forward)?;
         }
         Ok(expect)
     }
@@ -1134,6 +1139,54 @@ impl MultipleIterator {
     }
 
     /// `MultipleIterator::current(): array`.
+    ///
+    /// The sub-iterators are walked by the storage's own position and each
+    /// held across its calls, so one that detaches another frees nothing
+    /// the walk still reads, and a `detachIterator` resets the position
+    /// the walk goes on from.
+    ///
+    /// ```php
+    /// class It extends ArrayIterator {
+    ///     public $drop = null;
+    ///     function __construct(public $name) { parent::__construct([$name]); }
+    ///     function valid(): bool {
+    ///         global $m;
+    ///         echo "valid {$this->name}\n";
+    ///         if ($this->drop) { $m->detachIterator($this->drop === 'self' ? $this : $this->drop); $this->drop = null; }
+    ///         return parent::valid();
+    ///     }
+    ///     function __destruct() { echo "gone {$this->name}\n"; }
+    /// }
+    /// $m = new MultipleIterator(MultipleIterator::MIT_NEED_ANY | MultipleIterator::MIT_KEYS_ASSOC);
+    /// foreach (['a', 'b', 'c', 'd'] as $n) $m->attachIterator(new It($n), $n);
+    /// foreach ($m->__debugInfo()["\0SplObjectStorage\0storage"] as $row) $its[$row['inf']] = $row['obj'];
+    /// $its['a']->drop = $its['b']; $its['c']->drop = 'self';
+    /// unset($its, $row);
+    /// var_dump($m->current());
+    /// echo "--\n";
+    /// var_dump($m->valid(), $m->countIterators());
+    /// ```
+    /// ```expect
+    /// valid a
+    /// gone b
+    /// valid c
+    /// gone c
+    /// valid d
+    /// array(3) {
+    ///   ["a"]=>
+    ///   string(1) "a"
+    ///   ["c"]=>
+    ///   string(1) "c"
+    ///   ["d"]=>
+    ///   string(1) "d"
+    /// }
+    /// --
+    /// valid a
+    /// bool(true)
+    /// int(2)
+    /// gone a
+    /// gone d
+    /// ```
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         get_all(req, this.object(), "current")
@@ -1650,20 +1703,39 @@ fn read_storage(
     Ok(None)
 }
 
-/// Each sub-iterator served `method`, in order, until one throws.
+/// The sub-iterator at the storage's position, held across what is
+/// served on it, and its information, a view: one step of php's walks
+/// over `intern->pos`, which read the row at the position as it stands,
+/// `zend_hash_get_current_data_ptr_ex`, and take `GC_ADDREF(it)`. The
+/// position is the storage's own, so a `detachIterator` the call
+/// reaches resets it and the walk goes on from the first row, as in
+/// php.
+fn held_here(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<Option<(PhpObject, Held, Value)>, Thrown> {
+    let here = with(req, this, |s| s.here())?;
+    Ok(here.map(|(iterator, inf)| (iterator, Held::take(req, iterator.as_value()), inf)))
+}
+
+/// Each sub-iterator served `method`, from the first row by the
+/// storage's position, until one throws.
 fn each(req: &mut Request, this: PhpObject, method: &[u8]) -> Result<(), Thrown> {
-    let rows = with(req, this, |s| s.live())?;
-    for (iterator, _) in rows {
-        crate::effect(req, iterator, method)?;
+    with(req, this, Storage::reset)?;
+    while let Some((iterator, held, _)) = held_here(req, this)? {
+        let served = crate::effect(req, iterator, method);
+        held.let_go(req);
+        served?;
+        with(req, this, Storage::forward)?;
     }
     Ok(())
 }
 
 /// `spl_multiple_iterator_get_all`: each sub-iterator's current or key,
-/// keyed by its information under `MultipleIterator::MIT_KEYS_ASSOC`.
+/// keyed by its information under `MultipleIterator::MIT_KEYS_ASSOC`,
+/// the flags read after each row's calls as php reads them.
 fn get_all(req: &mut Request, this: PhpObject, method: &str) -> Result<PhpArray, Thrown> {
-    let (rows, flags) = with(req, this, |s| (s.live(), s.flags))?;
-    if rows.is_empty() {
+    if with(req, this, |s| s.len())? == 0 {
         return Err(throw(
             req,
             "RuntimeException",
@@ -1671,45 +1743,77 @@ fn get_all(req: &mut Request, this: PhpObject, method: &str) -> Result<PhpArray,
         ));
     }
     let mut out = PhpArray::new(req)?;
-    for (iterator, inf) in rows {
-        let answered = crate::method(req, iterator, b"valid")?;
-        let valid = answered.as_bool() == Some(true);
-        req.release(answered);
-        let value = if valid {
-            crate::method(req, iterator, method.as_bytes())?
-        } else if flags & MultipleIterator::MIT_NEED_ALL != 0 {
-            req.release(Value::array(out));
-            return Err(throw(
-                req,
-                "RuntimeException",
-                &format!("Called {method}() with non valid sub iterator"),
-            ));
-        } else {
-            Value::null()
-        };
-        if flags & MultipleIterator::MIT_KEYS_ASSOC != 0 {
-            let key = match inf.as_ref() {
-                ValueRef::Int(n) => Key::Int(n),
-                ValueRef::Str(s) => Key::from_string(
-                    crate::copied(req, Value::string(*s))
-                        .as_php_string()
-                        .copied()
-                        .unwrap_or(*s),
-                ),
-                _ => {
-                    req.release(value);
-                    req.release(Value::array(out));
-                    return Err(throw(
-                        req,
-                        "InvalidArgumentException",
-                        "Sub-Iterator is associated with NULL",
-                    ));
-                }
-            };
-            out.set(req, key, value)?;
-        } else {
-            out.append(req, value)?;
-        }
+    let walked = get_all_rows(req, this, method, &mut out);
+    if let Err(thrown) = walked {
+        req.release(Value::array(out));
+        return Err(thrown);
     }
     Ok(out)
+}
+
+/// `spl_multiple_iterator_get_all`'s walk onto `out`, each row's
+/// sub-iterator and a copy of its information held across its calls,
+/// given back as `OBJ_RELEASE(it)` and then `zval_ptr_dtor(&inf)`.
+fn get_all_rows(
+    req: &mut Request,
+    this: PhpObject,
+    method: &str,
+    out: &mut PhpArray,
+) -> Result<(), Thrown> {
+    with(req, this, Storage::reset)?;
+    while let Some((iterator, held, inf)) = held_here(req, this)? {
+        let inf = Held::take(req, inf);
+        let row = get_one(req, this, iterator, inf.value(), method, out);
+        held.let_go(req);
+        inf.let_go(req);
+        row?;
+        with(req, this, Storage::forward)?;
+    }
+    Ok(())
+}
+
+/// One row of `spl_multiple_iterator_get_all` onto `out`.
+fn get_one(
+    req: &mut Request,
+    this: PhpObject,
+    iterator: PhpObject,
+    inf: Value,
+    method: &str,
+    out: &mut PhpArray,
+) -> Result<(), Thrown> {
+    let answered = crate::method(req, iterator, b"valid")?;
+    let valid = answered.as_bool() == Some(true);
+    req.release(answered);
+    let value = if valid {
+        crate::method(req, iterator, method.as_bytes())?
+    } else if with(req, this, |s| s.flags)? & MultipleIterator::MIT_NEED_ALL != 0 {
+        return Err(throw(
+            req,
+            "RuntimeException",
+            &format!("Called {method}() with non valid sub iterator"),
+        ));
+    } else {
+        Value::null()
+    };
+    if with(req, this, |s| s.flags)? & MultipleIterator::MIT_KEYS_ASSOC == 0 {
+        return out.append(req, value);
+    }
+    let key = match inf.as_ref() {
+        ValueRef::Int(n) => Key::Int(n),
+        ValueRef::Str(s) => Key::from_string(
+            crate::copied(req, Value::string(*s))
+                .as_php_string()
+                .copied()
+                .unwrap_or(*s),
+        ),
+        _ => {
+            req.release(value);
+            return Err(throw(
+                req,
+                "InvalidArgumentException",
+                "Sub-Iterator is associated with NULL",
+            ));
+        }
+    };
+    out.set(req, key, value)
 }
