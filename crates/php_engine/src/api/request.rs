@@ -5960,7 +5960,8 @@ impl Request {
     /// is named in the error as the opline names it, `ce->name`.
     pub(crate) fn class_constant(&mut self, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
         let class_name = self.class_name(class);
-        self.class_constant_shown(class, name, &class_name)
+        let scope = self.executed_scope();
+        self.class_constant_from(class, name, &class_name, scope, ConstantFetch::Opline)
     }
 
     /// [`Request::class_constant`] with the class named in the error as
@@ -5975,7 +5976,7 @@ impl Request {
         class_name: &str,
     ) -> Result<Value, Thrown> {
         let scope = self.executed_scope();
-        self.class_constant_from(class, name, class_name, scope)
+        self.class_constant_from(class, name, class_name, scope, ConstantFetch::Lookup)
     }
 
     /// `zend_get_class_constant_ex` with the `scope` a constant
@@ -6001,6 +6002,7 @@ impl Request {
         name: &[u8],
         class_name: &str,
         scope: Option<ClassId>,
+        fetch: ConstantFetch,
     ) -> Result<Value, Thrown> {
         let shown = String::from_utf8_lossy(name).into_owned();
         let Some((declaring, constant)) = self.class_constant_of(class, name, 0) else {
@@ -6049,7 +6051,12 @@ impl Request {
         if constant.is_case {
             return self.enum_case(class, name).map(|case| case.as_value());
         }
-        self.evaluated_class_constant(class, name, &constant)
+        match fetch {
+            ConstantFetch::Opline => self.evaluated_class_constant(class, name, &constant),
+            ConstantFetch::Lookup => {
+                self.visited_class_constant(class, name, &constant, class_name)
+            }
+        }
     }
 
     /// `zend_get_class_constant_ex` under `ZEND_FETCH_CLASS_SILENT`, as
@@ -17192,6 +17199,21 @@ fn redeclaration(earlier: &ClassDecl) -> String {
         String::from_utf8_lossy(&earlier.file.0),
         earlier.line
     )
+}
+
+/// Which of php's two reads of a class constant a fetch is, which
+/// differ in one thing: whether the constant is marked while its
+/// expression is evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConstantFetch {
+    /// `ZEND_FETCH_CLASS_CONSTANT`'s handler, which updates the constant
+    /// with no mark (`zend_update_class_constant`).
+    Opline,
+    /// `zend_get_class_constant_ex`, a constant expression's and
+    /// `constant()`'s, which marks the constant `IS_CONSTANT_VISITED`
+    /// while it is evaluated and refuses one it finds marked
+    /// ([`Request::visited_class_constant`]).
+    Lookup,
 }
 
 #[cfg(test)]

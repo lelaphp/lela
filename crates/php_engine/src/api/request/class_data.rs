@@ -34,6 +34,10 @@ pub(super) struct ClassData {
     /// `object_properties_init` leaves `IS_UNDEF`. Each value's one
     /// owner is the row.
     defaults: Vec<Option<Value>>,
+    /// The constants of the class's own declaration marked
+    /// `IS_CONSTANT_VISITED` (`MARK_CONSTANT_VISITED`) while
+    /// `zend_get_class_constant_ex` evaluates them, by name.
+    visiting: Vec<Box<[u8]>>,
 }
 
 impl Request {
@@ -198,6 +202,56 @@ impl Request {
             .constants
             .push((name.into(), value));
         Ok(value)
+    }
+
+    /// `zend_get_class_constant_ex`'s update of the constant `name` that
+    /// `declaring` declares (`Z/Zend/zend_constants.c:400`): one not
+    /// yet evaluated is marked while its expression is, and one found
+    /// marked is php's `Cannot declare self-referencing constant`, the
+    /// class named as the fetch was handed it; then
+    /// [`Request::evaluated_class_constant`]. The opline's fetch marks
+    /// nothing, so a cycle entered through it is refused one constant
+    /// further in.
+    ///
+    /// ```php
+    /// class A { const FOO = [self::BAR]; const BAR = [self::FOO]; }
+    /// class Foo { const A = Foo::B; const B = Foo::A; }
+    /// try { var_dump(A::FOO); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { echo Foo::A; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { echo constant('Foo::B'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot declare self-referencing constant self::BAR
+    /// Cannot declare self-referencing constant Foo::B
+    /// Cannot declare self-referencing constant Foo::B
+    /// ```
+    pub(crate) fn visited_class_constant(
+        &mut self,
+        declaring: ClassId,
+        name: &[u8],
+        constant: &ClassConstDecl,
+        class_name: &str,
+    ) -> Result<Value, Thrown> {
+        let data = self.class_data.entry(declaring).or_default();
+        if data.constants.iter().any(|(held, _)| **held == *name) {
+            return self.evaluated_class_constant(declaring, name, constant);
+        }
+        if data.visiting.iter().any(|held| **held == *name) {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!(
+                    "Cannot declare self-referencing constant {class_name}::{}",
+                    String::from_utf8_lossy(name)
+                ),
+            ));
+        }
+        data.visiting.push(name.into());
+        let evaluated = self.evaluated_class_constant(declaring, name, constant);
+        if let Some(data) = self.class_data.get_mut(&declaring) {
+            data.visiting.retain(|held| **held != *name);
+        }
+        evaluated
     }
 
     /// The default properties table of `class` once the class is

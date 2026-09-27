@@ -1948,7 +1948,13 @@ fn class_constant_expr(
 ) -> Result<Value, Thrown> {
     let id = const_class(req, &class.0, scope)?;
     let written = String::from_utf8_lossy(&class.0);
-    req.class_constant_from(id, &name.0, &written, scope)
+    req.class_constant_from(
+        id,
+        &name.0,
+        &written,
+        scope,
+        crate::api::request::ConstantFetch::Lookup,
+    )
 }
 
 /// `zend_fetch_class_with_scope` under `ZEND_FETCH_CLASS_EXCEPTION`, the
