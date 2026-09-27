@@ -9,11 +9,13 @@
 //! over four spaces of indent per level, a property's visibility in its
 //! name rather than beside it, and no type or length anywhere.
 
-use php_ext::abi::{PropertyPurpose, True, Union};
+use php_ext::abi::{
+    ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, True, Union,
+};
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
-use php_ext::raising::{Thrown, warning};
+use php_ext::raising::{Level, Thrown, docref, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpString, Value};
 
@@ -289,11 +291,110 @@ fn is_enum_class(req: &Request, class: php_ext::values::ClassId) -> bool {
 /// string(22) "__PHP_Incomplete_Class"
 /// string(26) "O:3:"Foo":1:{s:1:"a";i:1;}"
 /// ```
-#[php_class(final, dynamic_properties = allowed)]
+///
+/// Its handlers are php's `php_incomplete_object_handlers`
+/// (`Z/ext/standard/incomplete_class.c`): a property read or an `isset`
+/// warns and finds nothing, and a write or an `unset` is php's `Error`,
+/// each naming the class the object stands for.
+///
+/// ```php
+/// $o = unserialize('O:3:"Foo":1:{s:1:"a";i:1;}');
+/// var_dump($o->a, isset($o->a));
+/// try { $o->b = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { unset($o->a); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Warning: main(): The script tried to access a property on an incomplete object. Please ensure that the class definition "Foo" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 3
+///
+/// Warning: main(): The script tried to access a property on an incomplete object. Please ensure that the class definition "Foo" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 3
+/// NULL
+/// bool(false)
+/// The script tried to modify a property on an incomplete object. Please ensure that the class definition "Foo" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition
+/// The script tried to modify a property on an incomplete object. Please ensure that the class definition "Foo" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition
+/// ```
+#[php_class(final, dynamic_properties = allowed, handlers = INCOMPLETE)]
 pub(crate) struct __PHP_Incomplete_Class;
 
 #[php_class]
 impl __PHP_Incomplete_Class {}
+
+/// `php_incomplete_object_handlers`.
+pub(crate) struct Incomplete;
+
+pub(crate) static INCOMPLETE: Incomplete = Incomplete;
+
+/// `INCOMPLETE_CLASS_MSG` over what the program tried and the class the
+/// object stands for, `php_lookup_class_name`'s, `unknown` without one.
+fn incomplete_message(req: &Request, object: php_ext::values::PhpObject, what: &str) -> String {
+    let name = object
+        .prop(req, MAGIC_MEMBER)
+        .and_then(|v| {
+            v.as_str_bytes()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
+    format!(
+        "The script tried to {what} on an incomplete object. Please ensure that the class definition \"{name}\" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition"
+    )
+}
+
+impl ObjectHandlers for Incomplete {
+    fn read_property(
+        &self,
+        req: &mut Request,
+        object: php_ext::values::PhpObject,
+        _name: &[u8],
+        _read: PropertyRead,
+    ) -> Result<Value, Thrown> {
+        let message = incomplete_message(req, object, "access a property");
+        docref(req, Level::Warning, &message);
+        Ok(Value::null())
+    }
+
+    fn write_property(
+        &self,
+        req: &mut Request,
+        object: php_ext::values::PhpObject,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        req.release(value);
+        req.release(Value::string(name));
+        let message = incomplete_message(req, object, "modify a property");
+        Err(throw(req, "Error", &message))
+    }
+
+    fn get_property_ptr_ptr(
+        &self,
+        _req: &mut Request,
+        _object: php_ext::values::PhpObject,
+        _name: &[u8],
+    ) -> PropertyPlace {
+        PropertyPlace::Handlers
+    }
+
+    fn has_property(
+        &self,
+        req: &mut Request,
+        object: php_ext::values::PhpObject,
+        _name: &[u8],
+        _test: PropertyTest,
+    ) -> Result<bool, Thrown> {
+        let message = incomplete_message(req, object, "access a property");
+        docref(req, Level::Warning, &message);
+        Ok(false)
+    }
+
+    fn unset_property(
+        &self,
+        req: &mut Request,
+        object: php_ext::values::PhpObject,
+        _name: &[u8],
+    ) -> Result<(), Thrown> {
+        let message = incomplete_message(req, object, "modify a property");
+        Err(throw(req, "Error", &message))
+    }
+}
 
 /// The ini entries the unserializer reads, `basic_functions.c`'s
 /// `unserialize_callback_func` and `unserialize_max_depth`.
