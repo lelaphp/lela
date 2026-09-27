@@ -11,18 +11,14 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_unit::decl::{
-    Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault,
-    PropertyDecl, Type, Visibility,
-};
+use php_macros::php_class;
+use php_unit::decl::Attribute as AttributeDecl;
 
 use php_unit::Level;
 
-use crate::api::abi::{Entry, NativeClassDecl, ObjectHandlers, PropertyPurpose};
+use crate::api::abi::{ExtensionBuilder, NativeClassDecl, ObjectHandlers, PropertyPurpose, This};
 use crate::api::call::{Function, eval_const_expr, instantiate_named};
-use crate::api::coerce::argument;
-use crate::api::raising::{Thrown, arg_count_error, raise, throw};
+use crate::api::raising::{Thrown, raise, throw};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpArray, PhpObject, PhpString, Value};
 
@@ -44,7 +40,7 @@ pub(crate) struct Flags {
 impl Flags {
     /// The flags `attributes` raise, each attribute by its resolved name
     /// as `zend_get_attribute_str` finds it.
-    pub(crate) fn of(attributes: &[Attribute]) -> Flags {
+    pub(crate) fn of(attributes: &[AttributeDecl]) -> Flags {
         Flags {
             deprecated: find(attributes, b"Deprecated").is_some(),
             no_discard: find(attributes, b"NoDiscard").is_some(),
@@ -54,7 +50,7 @@ impl Flags {
 
 /// `zend_get_attribute_str`: the attribute of a lowered name among a
 /// declaration's, its name as resolved, a leading `\` dropped.
-fn find<'a>(attributes: &'a [Attribute], name: &[u8]) -> Option<&'a Attribute> {
+fn find<'a>(attributes: &'a [AttributeDecl], name: &[u8]) -> Option<&'a AttributeDecl> {
     attributes.iter().find(|one| {
         let written = one.name.0.strip_prefix(b"\\").unwrap_or(&one.name.0);
         written.eq_ignore_ascii_case(name)
@@ -70,7 +66,7 @@ fn find<'a>(attributes: &'a [Attribute], name: &[u8]) -> Option<&'a Attribute> {
 /// `strict_types`, and what it threw is the `Err`.
 fn internal_strings(
     req: &mut Request,
-    attributes: &[Attribute],
+    attributes: &[AttributeDecl],
     class: &[u8],
     properties: &[&[u8]],
     scope: Option<ClassId>,
@@ -334,7 +330,7 @@ pub(crate) fn deprecated_class_constant(
 /// is not there. What the object's constructor threw is the `Err`.
 pub(crate) fn deprecation_suffix(
     req: &mut Request,
-    attributes: &[Attribute],
+    attributes: &[AttributeDecl],
     scope: Option<ClassId>,
 ) -> Result<String, Thrown> {
     Ok(
@@ -374,21 +370,6 @@ fn pending(req: &Request) -> Result<(), Thrown> {
     }
     Ok(())
 }
-
-/// `ZEND_ATTRIBUTE_TARGET_*` and `ZEND_ATTRIBUTE_IS_REPEATABLE`
-/// (`Z/Zend/zend_attributes.h:26-35`), under the names the stub's
-/// constants give them.
-const TARGETS: [(&[u8], i64); 9] = [
-    (b"TARGET_CLASS", 1),
-    (b"TARGET_FUNCTION", 1 << 1),
-    (b"TARGET_METHOD", 1 << 2),
-    (b"TARGET_PROPERTY", 1 << 3),
-    (b"TARGET_CLASS_CONSTANT", 1 << 4),
-    (b"TARGET_PARAMETER", 1 << 5),
-    (b"TARGET_CONSTANT", 1 << 6),
-    (b"TARGET_ALL", (1 << 7) - 1),
-    (b"IS_REPEATABLE", 1 << 7),
-];
 
 /// `attributes_object_handlers_sensitive_parameter_value`:
 /// `std_object_handlers` with `get_properties_for` answering nothing
@@ -528,311 +509,329 @@ static SENSITIVE_VALUE: SensitiveValueHandlers = SensitiveValueHandlers;
 /// Deprecated: Creation of dynamic property AllowDynamicProperties::$x is deprecated in %s on line 7
 /// ```
 pub(crate) fn classes() -> Vec<NativeClassDecl> {
-    vec![
-        attribute(),
-        marker(b"ReturnTypeWillChange", b"TARGET_METHOD", false),
-        marker(b"AllowDynamicProperties", b"TARGET_CLASS", false),
-        marker(b"SensitiveParameter", b"TARGET_PARAMETER", true),
-        sensitive_value(),
-        marker(b"Override", b"TARGET_METHOD|TARGET_PROPERTY", true),
-        deprecated(),
-        no_discard(),
-        (
-            attribute_class(b"DelayedTargetValidation", b"TARGET_ALL", true),
-            Vec::new(),
-            None,
-            None,
-        ),
-    ]
+    ExtensionBuilder::default()
+        .class::<Attribute>()
+        .class::<ReturnTypeWillChange>()
+        .class::<AllowDynamicProperties>()
+        .class::<SensitiveParameter>()
+        .class::<SensitiveParameterValue>()
+        .class::<Override>()
+        .class::<Deprecated>()
+        .class::<NoDiscard>()
+        .class::<DelayedTargetValidation>()
+        .build("Core")
+        .classes
 }
 
-/// `final class Attribute`, its constants, `$flags` and constructor.
-fn attribute() -> NativeClassDecl {
-    let constants = TARGETS
-        .iter()
-        .map(|(name, value)| ClassConstDecl {
-            name: Name((*name).into()),
-            visibility: Visibility::Public,
-            is_final: false,
-            is_case: false,
-            ty: Some(Type::Int),
-            value: ConstExpr::long(*value),
-            attributes: Vec::new(),
-            doc_comment: None,
-        })
-        .collect();
-    let flags = Parameter {
-        default: ParameterDefault::Expr(ConstExpr::ClassConstant {
-            class: Name::from("Attribute"),
-            name: Name::from("TARGET_ALL"),
-        }),
-        ..parameter(b"flags", Type::Int)
-    };
-    (
-        ClassDecl {
-            constants,
-            properties: vec![property(b"flags", Visibility::Public, false, Type::Int)],
-            ..attribute_class(b"Attribute", b"TARGET_CLASS", false)
-        },
-        vec![(
-            method(b"__construct", vec![flags], None),
-            attribute_construct as Entry,
-        )],
-        None,
-        None,
+/// `final class Attribute`, itself `#[Attribute(Attribute::TARGET_CLASS)]`,
+/// its constants `ZEND_ATTRIBUTE_TARGET_*` and `ZEND_ATTRIBUTE_IS_REPEATABLE`
+/// (`Z/Zend/zend_attributes.h:26-35`) under the names the stub gives
+/// them, its `$flags` and its constructor.
+#[php_class(final, attribute_class(Attribute::TARGET_CLASS))]
+pub(crate) struct Attribute;
+
+#[php_class]
+impl Attribute {
+    const TARGET_CLASS: i64 = 1;
+    const TARGET_FUNCTION: i64 = 1 << 1;
+    const TARGET_METHOD: i64 = 1 << 2;
+    const TARGET_PROPERTY: i64 = 1 << 3;
+    const TARGET_CLASS_CONSTANT: i64 = 1 << 4;
+    const TARGET_PARAMETER: i64 = 1 << 5;
+    const TARGET_CONSTANT: i64 = 1 << 6;
+    const TARGET_ALL: i64 = (1 << 7) - 1;
+    const IS_REPEATABLE: i64 = 1 << 7;
+    #[php(property)]
+    const flags: i64;
+
+    /// `Attribute::__construct(int $flags = Attribute::TARGET_ALL)`: the
+    /// flags into the one property, unchecked, as php writes
+    /// `OBJ_PROP_NUM(obj, 0)`; `ReflectionAttribute::newInstance` is what
+    /// holds them to the targets.
+    ///
+    /// ```php
+    /// var_dump(new Attribute, new Attribute(Attribute::TARGET_CLASS | Attribute::IS_REPEATABLE));
+    /// try { new Attribute("x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { new Attribute(1, 2); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(Attribute)#1 (1) {
+    ///   ["flags"]=>
+    ///   int(127)
+    /// }
+    /// object(Attribute)#2 (1) {
+    ///   ["flags"]=>
+    ///   int(129)
+    /// }
+    /// Attribute::__construct(): Argument #1 ($flags) must be of type int, string given
+    /// Attribute::__construct() expects at most 1 argument, 2 given
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = Attribute::TARGET_ALL)] flags: i64,
+    ) -> Result<(), Thrown> {
+        this.object().set_slot(req, 0, Value::int(flags))
+    }
+}
+
+/// `final class ReturnTypeWillChange`, `#[Attribute(Attribute::TARGET_METHOD)]`.
+#[php_class(final, attribute_class(Attribute::TARGET_METHOD))]
+pub(crate) struct ReturnTypeWillChange;
+
+#[php_class]
+impl ReturnTypeWillChange {
+    /// The constructor of `ReturnTypeWillChange`, `AllowDynamicProperties`,
+    /// `SensitiveParameter` and `Override`, `ZEND_PARSE_PARAMETERS_NONE`.
+    ///
+    /// ```php
+    /// var_dump(new Override);
+    /// try { new Override(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(Override)#1 (0) {
+    /// }
+    /// Override::__construct() expects exactly 0 arguments, 1 given
+    /// ```
+    fn __construct(this: This<Self>) {
+        let _ = this;
+    }
+}
+
+/// `final class AllowDynamicProperties`, `#[Attribute(Attribute::TARGET_CLASS)]`.
+#[php_class(final, attribute_class(Attribute::TARGET_CLASS))]
+pub(crate) struct AllowDynamicProperties;
+
+#[php_class]
+impl AllowDynamicProperties {
+    #[php(implementation = ReturnTypeWillChange::__construct)]
+    fn __construct(this: This<Self>);
+}
+
+/// `final class SensitiveParameter`, `@strict-properties`,
+/// `#[Attribute(Attribute::TARGET_PARAMETER)]`.
+#[php_class(
+    final,
+    dynamic_properties = forbidden,
+    attribute_class(Attribute::TARGET_PARAMETER)
+)]
+pub(crate) struct SensitiveParameter;
+
+#[php_class]
+impl SensitiveParameter {
+    #[php(implementation = ReturnTypeWillChange::__construct)]
+    fn __construct(this: This<Self>);
+}
+
+/// `final class SensitiveParameterValue`, `@strict-properties` and
+/// `@not-serializable`, no attribute, its private readonly `$value`
+/// shown to no dumper through [`SensitiveValueHandlers`].
+///
+/// ```php
+/// $v = new SensitiveParameterValue(['secret']);
+/// var_dump($v->getValue(), $v->__debugInfo());
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   string(6) "secret"
+/// }
+/// array(0) {
+/// }
+/// ```
+#[php_class(
+    final,
+    not_serializable,
+    dynamic_properties = forbidden,
+    handlers = SENSITIVE_VALUE
+)]
+pub(crate) struct SensitiveParameterValue;
+
+#[php_class]
+impl SensitiveParameterValue {
+    #[php(property, private, readonly)]
+    const value: Value;
+
+    /// `SensitiveParameterValue::__construct(mixed $value)`.
+    ///
+    /// ```php
+    /// $v = new SensitiveParameterValue([1]);
+    /// try { $v->__construct(2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { new SensitiveParameterValue; } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($v->getValue());
+    /// ```
+    /// ```expect
+    /// Cannot modify readonly property SensitiveParameterValue::$value
+    /// SensitiveParameterValue::__construct() expects exactly 1 argument, 0 given
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// ```
+    fn __construct(req: &mut Request, this: This<Self>, value: Value) -> Result<(), Thrown> {
+        req.addref(&value);
+        initialise(
+            req,
+            this.object(),
+            "SensitiveParameterValue",
+            b"value",
+            value,
+        )
+    }
+
+    /// `SensitiveParameterValue::getValue(): mixed`, the value the
+    /// constructor kept.
+    fn getValue(req: &mut Request, this: This<Self>) -> Value {
+        let value = this.object().slot(0).unwrap_or_default();
+        req.addref(&value);
+        value
+    }
+
+    /// `SensitiveParameterValue::__debugInfo(): array`, empty.
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let _ = this;
+        PhpArray::new(req)
+    }
+}
+
+/// `final class Override`, `@strict-properties`,
+/// `#[Attribute(Attribute::TARGET_METHOD|Attribute::TARGET_PROPERTY)]`.
+#[php_class(
+    final,
+    dynamic_properties = forbidden,
+    attribute_class(Attribute::TARGET_METHOD | Attribute::TARGET_PROPERTY)
+)]
+pub(crate) struct Override;
+
+#[php_class]
+impl Override {
+    #[php(implementation = ReturnTypeWillChange::__construct)]
+    fn __construct(this: This<Self>);
+}
+
+/// `final class Deprecated`, `@strict-properties`, its two readonly
+/// properties.
+#[php_class(
+    final,
+    dynamic_properties = forbidden,
+    attribute_class(
+        Attribute::TARGET_METHOD
+            | Attribute::TARGET_FUNCTION
+            | Attribute::TARGET_CLASS_CONSTANT
+            | Attribute::TARGET_CONSTANT
+            | Attribute::TARGET_CLASS
     )
-}
+)]
+pub(crate) struct Deprecated;
 
-/// `final class SensitiveParameterValue`, no attribute, and
-/// `@not-serializable`.
-fn sensitive_value() -> NativeClassDecl {
-    let decl = class(b"SensitiveParameterValue", true);
-    (
-        ClassDecl {
-            flags: ClassFlags {
-                not_serializable: true,
-                ..decl.flags
-            },
-            properties: vec![property(b"value", Visibility::Private, true, Type::Mixed)],
-            ..decl
-        },
-        vec![
-            (
-                method(b"__construct", vec![parameter(b"value", Type::Mixed)], None),
-                sensitive_value_construct as Entry,
-            ),
-            (
-                method(b"getValue", Vec::new(), Some(Type::Mixed)),
-                sensitive_value_get_value as Entry,
-            ),
-            (
-                method(b"__debugInfo", Vec::new(), Some(Type::Array)),
-                sensitive_value_debug_info as Entry,
-            ),
-        ],
-        Some(&SENSITIVE_VALUE),
-        None,
-    )
-}
+#[php_class]
+impl Deprecated {
+    #[php(property, readonly)]
+    const message: Option<PhpString>;
+    #[php(property, readonly)]
+    const since: Option<PhpString>;
 
-/// `final class Deprecated`, its two readonly properties.
-fn deprecated() -> NativeClassDecl {
-    (
-        ClassDecl {
-            properties: vec![
-                property(b"message", Visibility::Public, true, nullable_string()),
-                property(b"since", Visibility::Public, true, nullable_string()),
-            ],
-            ..attribute_class(
-                b"Deprecated",
-                b"TARGET_METHOD|TARGET_FUNCTION|TARGET_CLASS_CONSTANT|TARGET_CONSTANT|TARGET_CLASS",
-                true,
-            )
-        },
-        vec![(
-            method(
-                b"__construct",
-                vec![optional_string(b"message"), optional_string(b"since")],
-                None,
-            ),
-            deprecated_construct as Entry,
-        )],
-        None,
-        None,
-    )
-}
-
-/// `final class NoDiscard`, its one readonly property.
-fn no_discard() -> NativeClassDecl {
-    (
-        ClassDecl {
-            properties: vec![property(
-                b"message",
-                Visibility::Public,
-                true,
-                nullable_string(),
-            )],
-            ..attribute_class(b"NoDiscard", b"TARGET_METHOD|TARGET_FUNCTION", true)
-        },
-        vec![(
-            method(b"__construct", vec![optional_string(b"message")], None),
-            no_discard_construct as Entry,
-        )],
-        None,
-        None,
-    )
-}
-
-/// One of the four attributes whose constructor takes nothing.
-fn marker(name: &[u8], targets: &[u8], strict: bool) -> NativeClassDecl {
-    (
-        attribute_class(name, targets, strict),
-        vec![(
-            method(b"__construct", Vec::new(), None),
-            no_arguments_construct as Entry,
-        )],
-        None,
-        None,
-    )
-}
-
-/// A final class of the stub, `strict` its `@strict-properties`.
-fn class(name: &[u8], strict: bool) -> ClassDecl {
-    ClassDecl {
-        name: Name(name.into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags {
-            is_final: true,
-            dynamic_properties: if strict {
-                DynamicProperties::Forbidden
-            } else {
-                DynamicProperties::Deprecated
-            },
-            ..ClassFlags::default()
-        },
-        parent: None,
-        interfaces: Vec::new(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: Vec::new(),
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
+    /// `Deprecated::__construct(?string $message = null, ?string $since =
+    /// null)`: each argument held to `?string` under the caller's
+    /// `strict_types`, then written into its readonly property.
+    ///
+    /// ```php
+    /// var_dump(new Deprecated, new Deprecated(since: "8.0"), new Deprecated(null, 5));
+    /// try { new Deprecated([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// $d = new Deprecated("foo");
+    /// try { $d->message = 'bar'; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $d->__construct("bar"); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(Deprecated)#1 (2) {
+    ///   ["message"]=>
+    ///   NULL
+    ///   ["since"]=>
+    ///   NULL
+    /// }
+    /// object(Deprecated)#2 (2) {
+    ///   ["message"]=>
+    ///   NULL
+    ///   ["since"]=>
+    ///   string(3) "8.0"
+    /// }
+    /// object(Deprecated)#3 (2) {
+    ///   ["message"]=>
+    ///   NULL
+    ///   ["since"]=>
+    ///   string(1) "5"
+    /// }
+    /// Deprecated::__construct(): Argument #1 ($message) must be of type ?string, array given
+    /// Cannot modify readonly property Deprecated::$message
+    /// Cannot modify readonly property Deprecated::$message
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] message: Option<PhpString>,
+        #[php(default = null)] since: Option<PhpString>,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        let message = message.map_or_else(Value::null, Value::string);
+        req.addref(&message);
+        initialise(req, this, "Deprecated", b"message", message)?;
+        let since = since.map_or_else(Value::null, Value::string);
+        req.addref(&since);
+        initialise(req, this, "Deprecated", b"since", since)
     }
 }
 
-/// A class the stub marks `#[Attribute(Attribute::A|Attribute::B)]`,
-/// `targets` the constants' names joined by `|` as the stub writes
-/// them.
-fn attribute_class(name: &[u8], targets: &[u8], strict: bool) -> ClassDecl {
-    let mut flags = targets
-        .split(|b| *b == b'|')
-        .map(|target| ConstExpr::ClassConstant {
-            class: Name::from("Attribute"),
-            name: Name(target.into()),
-        });
-    let first = flags.next().unwrap_or(ConstExpr::long(0));
-    let value = flags.fold(first, |lhs, rhs| ConstExpr::Binary {
-        op: Name::from("|"),
-        lhs: Box::new(lhs),
-        rhs: Box::new(rhs),
-    });
-    ClassDecl {
-        attributes: vec![Attribute {
-            name: Name::from("Attribute"),
-            arguments: vec![AttributeArgument { name: None, value }],
-        }],
-        ..class(name, strict)
+/// `final class NoDiscard`, `@strict-properties`, its one readonly
+/// property.
+#[php_class(
+    final,
+    dynamic_properties = forbidden,
+    attribute_class(Attribute::TARGET_METHOD | Attribute::TARGET_FUNCTION)
+)]
+pub(crate) struct NoDiscard;
+
+#[php_class]
+impl NoDiscard {
+    #[php(property, readonly)]
+    const message: Option<PhpString>;
+
+    /// `NoDiscard::__construct(?string $message = null)`.
+    ///
+    /// ```php
+    /// var_dump(new NoDiscard, new NoDiscard("kept"));
+    /// ```
+    /// ```expect
+    /// object(NoDiscard)#1 (1) {
+    ///   ["message"]=>
+    ///   NULL
+    /// }
+    /// object(NoDiscard)#2 (1) {
+    ///   ["message"]=>
+    ///   string(4) "kept"
+    /// }
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] message: Option<PhpString>,
+    ) -> Result<(), Thrown> {
+        let message = message.map_or_else(Value::null, Value::string);
+        req.addref(&message);
+        initialise(req, this.object(), "NoDiscard", b"message", message)
     }
 }
 
-fn nullable_string() -> Type {
-    Type::Nullable(Box::new(Type::String))
-}
+/// `final class DelayedTargetValidation`, `@strict-properties`,
+/// `#[Attribute(Attribute::TARGET_ALL)]`, of no member.
+#[php_class(
+    final,
+    dynamic_properties = forbidden,
+    attribute_class(Attribute::TARGET_ALL)
+)]
+pub(crate) struct DelayedTargetValidation;
 
-/// A declared instance property, a public readonly one `protected(set)`
-/// as `zend_declare_typed_property` makes it.
-fn property(name: &[u8], visibility: Visibility, is_readonly: bool, ty: Type) -> PropertyDecl {
-    PropertyDecl {
-        name: Name(name.into()),
-        visibility,
-        set_visibility: (is_readonly && visibility == Visibility::Public)
-            .then_some(Visibility::Protected),
-        is_instance: true,
-        is_readonly,
-        is_final: false,
-        is_promoted: false,
-        is_virtual: false,
-        ty: Some(ty),
-        default: None,
-        attributes: Vec::new(),
-        doc_comment: None,
-        hooks: None,
-    }
-}
-
-fn method(name: &[u8], parameters: Vec<Parameter>, returns: Option<Type>) -> MethodDecl {
-    MethodDecl {
-        function: FunctionDecl {
-            name: Name(name.into()),
-            parameters,
-            return_type: returns,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            end_line: 0,
-            frameless: Vec::new(),
-        },
-        visibility: Visibility::Public,
-        is_instance: true,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    }
-}
-
-fn parameter(name: &[u8], ty: Type) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty: Some(ty),
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    }
-}
-
-/// `?string $name = null`.
-fn optional_string(name: &[u8]) -> Parameter {
-    Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Null),
-        ..parameter(name, nullable_string())
-    }
-}
-
-/// `ZEND_PARSE_PARAMETERS_START(0, most)`: php's `ArgumentCountError`
-/// past `most`.
-fn at_most(req: &mut Request, most: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if given <= most {
-        return Ok(());
-    }
-    let what = match most {
-        1 => format!("at most 1 argument, {given} given"),
-        n => format!("at most {n} arguments, {given} given"),
-    };
-    Err(arg_count_error(req, &what))
-}
-
-/// `ZEND_PARSE_PARAMETERS_NONE` and `ZEND_PARSE_PARAMETERS_START(n, n)`.
-fn exactly(req: &mut Request, count: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if given == count {
-        return Ok(());
-    }
-    let what = match count {
-        1 => format!("exactly 1 argument, {given} given"),
-        n => format!("exactly {n} arguments, {given} given"),
-    };
-    Err(arg_count_error(req, &what))
-}
-
-fn receiver(req: &mut Request) -> Result<PhpObject, Thrown> {
-    match req.this() {
-        Some(this) => Ok(this),
-        None => Err(throw(req, "Error", "Non-static method called statically")),
-    }
-}
+#[php_class]
+impl DelayedTargetValidation {}
 
 /// `zend_update_property_ex` over a readonly property from its class's
 /// own constructor: the first write initialises it, and a second is
@@ -857,162 +856,4 @@ fn initialise(
     }
     let key = PhpString::new(req, name)?;
     this.set_prop(req, key, value)
-}
-
-/// `Attribute::__construct(int $flags = Attribute::TARGET_ALL)`: the
-/// flags into the one property, unchecked, as php writes
-/// `OBJ_PROP_NUM(obj, 0)`; `ReflectionAttribute::newInstance` is what
-/// holds them to the targets.
-///
-/// ```php
-/// var_dump(new Attribute, new Attribute(Attribute::TARGET_CLASS | Attribute::IS_REPEATABLE));
-/// try { new Attribute("x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// try { new Attribute(1, 2); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(Attribute)#1 (1) {
-///   ["flags"]=>
-///   int(127)
-/// }
-/// object(Attribute)#2 (1) {
-///   ["flags"]=>
-///   int(129)
-/// }
-/// Attribute::__construct(): Argument #1 ($flags) must be of type int, string given
-/// Attribute::__construct() expects at most 1 argument, 2 given
-/// ```
-fn attribute_construct(req: &mut Request) -> Result<Value, Thrown> {
-    at_most(req, 1)?;
-    let flags = argument(req, 1)?.unwrap_or(Value::int(TARGETS[7].1));
-    let this = receiver(req)?;
-    this.set_slot(req, 0, flags)?;
-    Ok(Value::null())
-}
-
-/// The constructor of `ReturnTypeWillChange`, `AllowDynamicProperties`,
-/// `SensitiveParameter` and `Override`, `ZEND_PARSE_PARAMETERS_NONE`.
-///
-/// ```php
-/// var_dump(new Override);
-/// try { new Override(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(Override)#1 (0) {
-/// }
-/// Override::__construct() expects exactly 0 arguments, 1 given
-/// ```
-fn no_arguments_construct(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 0)?;
-    Ok(Value::null())
-}
-
-/// `SensitiveParameterValue::__construct(mixed $value)`.
-///
-/// ```php
-/// $v = new SensitiveParameterValue([1]);
-/// try { $v->__construct(2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// try { new SensitiveParameterValue; } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
-/// var_dump($v->getValue());
-/// ```
-/// ```expect
-/// Cannot modify readonly property SensitiveParameterValue::$value
-/// SensitiveParameterValue::__construct() expects exactly 1 argument, 0 given
-/// array(1) {
-///   [0]=>
-///   int(1)
-/// }
-/// ```
-fn sensitive_value_construct(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 1)?;
-    let value = argument(req, 1)?.unwrap_or_default();
-    req.addref(&value);
-    let this = receiver(req)?;
-    initialise(req, this, "SensitiveParameterValue", b"value", value)?;
-    Ok(Value::null())
-}
-
-/// `SensitiveParameterValue::getValue(): mixed`, the value the
-/// constructor kept.
-fn sensitive_value_get_value(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 0)?;
-    let this = receiver(req)?;
-    let value = this.slot(0).unwrap_or_default();
-    req.addref(&value);
-    Ok(value)
-}
-
-/// `SensitiveParameterValue::__debugInfo(): array`, empty.
-fn sensitive_value_debug_info(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 0)?;
-    Ok(Value::array(PhpArray::new(req)?))
-}
-
-/// `Deprecated::__construct(?string $message = null, ?string $since =
-/// null)`: each argument held to `?string` under the caller's
-/// `strict_types`, then written into its readonly property.
-///
-/// ```php
-/// var_dump(new Deprecated, new Deprecated(since: "8.0"), new Deprecated(null, 5));
-/// try { new Deprecated([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// $d = new Deprecated("foo");
-/// try { $d->message = 'bar'; } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// try { $d->__construct("bar"); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(Deprecated)#1 (2) {
-///   ["message"]=>
-///   NULL
-///   ["since"]=>
-///   NULL
-/// }
-/// object(Deprecated)#2 (2) {
-///   ["message"]=>
-///   NULL
-///   ["since"]=>
-///   string(3) "8.0"
-/// }
-/// object(Deprecated)#3 (2) {
-///   ["message"]=>
-///   NULL
-///   ["since"]=>
-///   string(1) "5"
-/// }
-/// Deprecated::__construct(): Argument #1 ($message) must be of type ?string, array given
-/// Cannot modify readonly property Deprecated::$message
-/// Cannot modify readonly property Deprecated::$message
-/// ```
-fn deprecated_construct(req: &mut Request) -> Result<Value, Thrown> {
-    at_most(req, 2)?;
-    let message = argument(req, 1)?.unwrap_or_default();
-    let since = argument(req, 2)?.unwrap_or_default();
-    let this = receiver(req)?;
-    req.addref(&message);
-    initialise(req, this, "Deprecated", b"message", message)?;
-    req.addref(&since);
-    initialise(req, this, "Deprecated", b"since", since)?;
-    Ok(Value::null())
-}
-
-/// `NoDiscard::__construct(?string $message = null)`.
-///
-/// ```php
-/// var_dump(new NoDiscard, new NoDiscard("kept"));
-/// ```
-/// ```expect
-/// object(NoDiscard)#1 (1) {
-///   ["message"]=>
-///   NULL
-/// }
-/// object(NoDiscard)#2 (1) {
-///   ["message"]=>
-///   string(4) "kept"
-/// }
-/// ```
-fn no_discard_construct(req: &mut Request) -> Result<Value, Thrown> {
-    at_most(req, 1)?;
-    let message = argument(req, 1)?.unwrap_or_default();
-    let this = receiver(req)?;
-    req.addref(&message);
-    initialise(req, this, "NoDiscard", b"message", message)?;
-    Ok(Value::null())
 }
