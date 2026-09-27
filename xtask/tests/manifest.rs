@@ -147,6 +147,21 @@ fn an_empty_with_phrase_is_refused() {
     );
 }
 
+/// A `deny_argv` element is an option, an option and the name its value
+/// sets, or a subcommand (#1001); any other shape would match nothing and
+/// deny nothing, so the manifest refuses it.
+#[test]
+fn a_deny_argv_element_of_no_known_shape_is_refused() {
+    let text = format!(
+        "{MINIMAL}\n[[rule]]\nid = \"x.shape\"\ntool = \"Bash\"\ndeny_argv = [\"-n\", \"-c core.hooksPath\", \"git commit\"]\nwith = \"git commit\"\ntext = \"t\"\n"
+    );
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(
+        err.contains("x.shape") && err.contains("\"git commit\""),
+        "{err}"
+    );
+}
+
 #[test]
 fn a_qualifier_without_its_predicate_is_refused() {
     let text = format!(

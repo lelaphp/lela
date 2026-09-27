@@ -21,7 +21,7 @@
 
 use std::path::Path;
 
-use super::rules::{carries_a_phrase, flag_matches};
+use super::argv::Argv;
 use crate::manifest::Rule;
 use crate::ticket::Gh;
 use crate::track::Ticket;
@@ -29,14 +29,14 @@ use crate::track::Ticket;
 /// Whether the rule stands down for this call: it carries an
 /// `exempt_label`, the call names issues, and every one of them carries
 /// one of those labels on the tracker.
-pub(super) fn exempted(root: &Path, rule: &Rule, commands: &[Vec<String>]) -> bool {
+pub(super) fn exempted(root: &Path, rule: &Rule, commands: &[Argv]) -> bool {
     if rule.exempt_label.is_empty() {
         return false;
     }
     let named: Vec<Ticket> = commands
         .iter()
-        .filter(|tokens| the_act(rule, tokens))
-        .flat_map(|tokens| tokens.iter().filter_map(|t| issue(t)))
+        .filter(|argv| the_act(rule, argv))
+        .flat_map(|argv| argv.words().iter().filter_map(|t| issue(t)))
         .collect();
     if named.is_empty() {
         return false;
@@ -52,18 +52,15 @@ pub(super) fn exempted(root: &Path, rule: &Rule, commands: &[Vec<String>]) -> bo
     })
 }
 
-/// Whether this simple command is the act the rule denies: it carries the
-/// rule's `with` phrase, and one of its `deny_argv` words where it has
-/// them, which is what [`super::rules::judge`] fired on.
-fn the_act(rule: &Rule, tokens: &[String]) -> bool {
+/// Whether this simple command is the act the rule denies: the rule's
+/// `with` phrase names it, and one of its `deny_argv` elements stands in
+/// it where it has them, which is what [`super::rules::judge`] fired on.
+fn the_act(rule: &Rule, argv: &Argv) -> bool {
     let p = &rule.predicate;
-    carries_a_phrase(tokens, &p.with)
-        && match &p.deny_argv {
-            Some(denied) => tokens
-                .iter()
-                .any(|t| denied.iter().any(|d| flag_matches(d, t))),
-            None => true,
-        }
+    match &p.deny_argv {
+        Some(denied) => argv.denies(denied, &p.with),
+        None => argv.invokes(&p.with),
+    }
 }
 
 /// The issue a word names: a number, with an optional `#`.
@@ -79,7 +76,7 @@ fn issue(word: &str) -> Option<Ticket> {
 mod tests {
     use super::*;
     use crate::manifest::{OneOrMany, Predicates};
-    use crate::permit::rules::commands;
+    use crate::permit::argv::commands;
 
     fn rule() -> Rule {
         let mut rule = Rule::named("ticket.close", "");
@@ -103,8 +100,8 @@ mod tests {
         let named = |line: &str| -> Vec<u64> {
             commands(line)
                 .iter()
-                .filter(|tokens| the_act(&rule, tokens))
-                .flat_map(|tokens| tokens.iter().filter_map(|t| issue(t)))
+                .filter(|argv| the_act(&rule, argv))
+                .flat_map(|argv| argv.words().iter().filter_map(|t| issue(t)))
                 .map(Ticket::number)
                 .collect()
         };
@@ -116,7 +113,9 @@ mod tests {
             named("gh issue view 28 --json labels && gh issue close 460"),
             vec![460]
         );
-        assert_eq!(named("gh issue reopen #274"), vec![274]);
+        assert_eq!(named("gh issue reopen '#274'"), vec![274]);
+        // Unquoted, `#` starts a comment and the command names no issue.
+        assert_eq!(named("gh issue reopen #274"), Vec::<u64>::new());
         assert_eq!(named("gh issue close"), Vec::<u64>::new());
         assert_eq!(named("cargo xtask ticket close 341"), Vec::<u64>::new());
     }
