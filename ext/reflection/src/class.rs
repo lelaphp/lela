@@ -13,8 +13,8 @@
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::{
-    eval_const_expr, initialize_lazy, instantiate, mark_lazy_initialized, read_class_prop_silent,
-    write_static_prop,
+    eval_const_expr, initialize_lazy, instantiate, instantiate_named, mark_lazy_initialized,
+    read_class_prop_silent, write_static_prop,
 };
 use php_ext::decl::{ClassKind, MethodDecl, Visibility};
 use php_ext::raising::{Thrown, deprecated, throw};
@@ -219,24 +219,91 @@ fn method_bits(decl: &MethodDecl) -> i64 {
 fn new_instance(
     req: &mut Request,
     class: ClassId,
-    arguments: &[Value],
+    arguments: ConstructorArguments<'_>,
 ) -> Result<PhpObject, Thrown> {
     instantiable(req, class)?;
     let refusal = match constructor_of(req, class) {
         Some((decl, _)) if decl.visibility != Visibility::Public => {
             Some("Access to non-public constructor of class {}")
         }
-        None if !arguments.is_empty() => Some(
+        None if arguments.counted() > 0 => Some(
             "Class {} does not have a constructor, so you cannot pass any constructor arguments",
         ),
-        _ => None,
+        None => return instantiate(req, class, &[]),
+        Some(_) => None,
     };
     if let Some(refusal) = refusal {
         let name = class_name_of(req, class);
         let message = refusal.replace("{}", &String::from_utf8_lossy(&name));
         return Err(throw(req, "ReflectionException", &message));
     }
-    instantiate(req, class, arguments)
+    match arguments {
+        ConstructorArguments::Variadic(args) => {
+            instantiate_named(req, class, &args.positional, args.named())
+        }
+        ConstructorArguments::Array(args) => {
+            let unpacked = Unpacked::of(req, args)?;
+            instantiate_named(req, class, &unpacked.positional, &unpacked.named)
+        }
+    }
+}
+
+/// What a constructor is handed by the two `newInstance` methods: the
+/// call's own arguments, `Z_PARAM_VARIADIC_WITH_NAMED`, or an array php
+/// passes as `named_params`, whose integer keys are positional and whose
+/// string keys are named.
+#[derive(Clone, Copy)]
+enum ConstructorArguments<'a> {
+    Variadic(&'a NamedVariadic<Value>),
+    Array(PhpArray),
+}
+
+impl ConstructorArguments<'_> {
+    /// What php's refusal for a class with no constructor counts:
+    /// `ZEND_NUM_ARGS()`, the positional arguments alone, or
+    /// `zend_hash_num_elements` of the array.
+    fn counted(&self) -> usize {
+        match self {
+            ConstructorArguments::Variadic(args) => args.positional.len(),
+            ConstructorArguments::Array(args) => args.len(),
+        }
+    }
+}
+
+/// An array as `zend_call_function` reads it for `named_params`: each
+/// integer key an argument in order, each string key a named one.
+struct Unpacked {
+    positional: Vec<Value>,
+    named: Vec<(PhpString, Value)>,
+}
+
+impl Unpacked {
+    /// The array split, or php's `Error` for an integer key after a
+    /// string one.
+    fn of(req: &mut Request, args: PhpArray) -> Result<Unpacked, Thrown> {
+        let mut unpacked = Unpacked {
+            positional: Vec::new(),
+            named: Vec::new(),
+        };
+        let mut cursor = args.iter();
+        while cursor.advance() {
+            let (Some(key), Some(value)) = (cursor.key(), cursor.value().copied()) else {
+                continue;
+            };
+            match key {
+                Key::Str(name) => unpacked.named.push((name, value)),
+                Key::Int(_) if !unpacked.named.is_empty() => {
+                    return Err(throw(
+                        req,
+                        "Error",
+                        "Cannot use positional argument after named argument",
+                    ));
+                }
+                Key::Int(_) => unpacked.positional.push(value),
+            }
+        }
+        Ok(unpacked)
+    }
 }
 
 fn instantiable(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
@@ -1569,6 +1636,31 @@ impl ReflectionClass {
     /// ```expect
     /// string(1) "x"
     /// ```
+    ///
+    /// Named arguments reach the constructor as `Z_PARAM_VARIADIC_WITH_NAMED`
+    /// hands them on, with php's `Error` for a name it does not declare; a
+    /// class with no constructor counts only the positional ones.
+    ///
+    /// ```php
+    /// class C { function __construct(public $a = 1, public $b = 2) {} }
+    /// var_dump((new ReflectionClass('C'))->newInstance(b: 5));
+    /// var_dump((new ReflectionClass('C'))->newInstance(7, b: 8)->a);
+    /// try { (new ReflectionClass('C'))->newInstance(c: 1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { (new ReflectionClass('C'))->newInstance(1, a: 2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(get_class((new ReflectionClass('stdClass'))->newInstance(x: 1)));
+    /// ```
+    /// ```expect
+    /// object(C)#2 (2) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   ["b"]=>
+    ///   int(5)
+    /// }
+    /// int(7)
+    /// Unknown named parameter $c
+    /// Named parameter $a overwrites previous argument
+    /// string(8) "stdClass"
+    /// ```
     #[php(tentative)]
     fn newInstance(
         req: &mut Request,
@@ -1576,7 +1668,7 @@ impl ReflectionClass {
         args: NamedVariadic<Value>,
     ) -> Result<PhpObject, Thrown> {
         let class = this_class(req, this.object())?;
-        new_instance(req, class, &args.positional)
+        new_instance(req, class, ConstructorArguments::Variadic(&args))
     }
 
     /// `ReflectionClass::newInstanceWithoutConstructor()`:
@@ -1607,13 +1699,35 @@ impl ReflectionClass {
     }
 
     /// `ReflectionClass::newInstanceArgs(array $args = [])`: the same,
-    /// over the array's values in order.
+    /// over the array.
     ///
     /// ```php
     /// var_dump((new ReflectionClass('JsonException'))->newInstanceArgs(['x'])->getMessage());
     /// ```
     /// ```expect
     /// string(1) "x"
+    /// ```
+    ///
+    /// The array is php's `named_params`: a string key names the
+    /// parameter, and an integer key after one is refused.
+    ///
+    /// ```php
+    /// class C { function __construct(public $a = 1, public $b = 2) {} }
+    /// $r = new ReflectionClass('C');
+    /// var_dump($r->newInstanceArgs(['b' => 5]), $r->newInstanceArgs([3, 'b' => 4])->b);
+    /// try { $r->newInstanceArgs(['b' => 5, 6]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { (new ReflectionClass('stdClass'))->newInstanceArgs(['x' => 1]); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(C)#2 (2) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   ["b"]=>
+    ///   int(5)
+    /// }
+    /// int(4)
+    /// Cannot use positional argument after named argument
+    /// Class stdClass does not have a constructor, so you cannot pass any constructor arguments
     /// ```
     ///
     /// What is no array is php's `TypeError`, whose tail names the value as
@@ -1637,14 +1751,7 @@ impl ReflectionClass {
         #[php(default = [])] args: PhpArray,
     ) -> Result<Option<PhpObject>, Thrown> {
         let class = this_class(req, this.object())?;
-        let mut arguments = Vec::new();
-        let mut cursor = args.iter();
-        while cursor.advance() {
-            if let Some(value) = cursor.value() {
-                arguments.push(*value);
-            }
-        }
-        new_instance(req, class, &arguments).map(Some)
+        new_instance(req, class, ConstructorArguments::Array(args)).map(Some)
     }
 
     /// `ReflectionClass::newLazyGhost(callable $initializer, int $options = 0): object`:
