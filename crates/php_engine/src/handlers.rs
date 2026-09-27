@@ -6766,6 +6766,22 @@ fn fetch_obj(
 /// <?xml version="1.0"?>
 /// <r>new</r>
 /// ```
+///
+/// What a `&__get` answers from a local is a reference nothing else
+/// holds, which the `VAR` takes as the value it names (`ZVAL_UNREF`),
+/// so the write through it lands on the object:
+///
+/// ```php
+/// class Foo { private $bar; function __construct() { $this->bar = new Bar; }
+///     function &__get($k) { $bar = $this->bar; return $bar; } }
+/// class Bar { public $on = []; }
+/// $foo = new Foo;
+/// $foo->bar->on[] = 1;
+/// var_dump(count($foo->bar->on));
+/// ```
+/// ```expect
+/// int(1)
+/// ```
 pub(crate) fn fetch_obj_w<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -7421,6 +7437,12 @@ fn fetch_obj_read(
     };
     let read = table.read_property(req, object, name, mode);
     let value = match read {
+        // `if (Z_ISREF_P(ptr) && Z_REFCOUNT_P(ptr) == 1) ZVAL_UNREF(ptr)`:
+        // a reference nothing else holds, a `&__get`'s local, is the
+        // value it names.
+        Ok(value) if value.as_php_ref().is_some() && value.refcount() == 1 => {
+            req.unwrap_reference(value)
+        }
         Ok(value) => value,
         Err(thrown) => {
             let thrown = freeing_container(req, frame, code, op, thrown);
