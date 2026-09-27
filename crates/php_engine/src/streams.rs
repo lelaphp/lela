@@ -356,6 +356,9 @@ struct Flags {
     /// `PHP_STREAM_FLAG_IS_DIR`, which `php_stream_opendir` sets, with
     /// the `PHP_STREAM_FLAG_NO_FCLOSE` `opendir` sets beside it.
     is_dir: bool,
+    /// `PHP_STREAM_FLAG_NO_FCLOSE` on a stream an object keeps, which
+    /// `SplFileObject` sets on the file it opened: `fclose()` refuses it.
+    no_fclose: bool,
     /// `PHP_STREAM_FLAG_DETECT_EOL` and `PHP_STREAM_FLAG_EOL_MAC`.
     eol: Eol,
 }
@@ -410,6 +413,22 @@ impl PhpStream {
     /// `stream->flags & PHP_STREAM_FLAG_IS_DIR`.
     pub(crate) const fn is_dir(&self) -> bool {
         self.flags.is_dir
+    }
+
+    /// `stream->flags & PHP_STREAM_FLAG_NO_FCLOSE`, which a directory
+    /// carries too.
+    pub(crate) const fn no_fclose(&self) -> bool {
+        self.flags.is_dir || self.flags.no_fclose
+    }
+
+    /// `stream->flags |= PHP_STREAM_FLAG_NO_FCLOSE`.
+    pub(crate) fn forbid_fclose(&mut self) {
+        self.flags.no_fclose = true;
+    }
+
+    /// `stream->orig_path`.
+    pub(crate) fn orig_path(&self) -> Option<&[u8]> {
+        self.orig_path.as_deref()
     }
 
     /// `_php_stream_fill_read_buffer` (`Z/main/streams/streams.c:564`)

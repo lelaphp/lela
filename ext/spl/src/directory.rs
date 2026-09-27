@@ -1152,15 +1152,17 @@ impl SplFileObject {
             return Err(throw(req, "Error", "Cannot call constructor twice"));
         }
         file_open(req, this, &name, mode.as_bytes(), useIncludePath)?;
-        let mut len = name.len();
-        if len > 1 && slash(name[len - 1]) {
+        // The path is the directory of the path the stream opened.
+        let orig = fs(req, this, |it| it.orig_path.clone())?.unwrap_or(name);
+        let mut len = orig.len();
+        if len > 1 && slash(orig[len - 1]) {
             len -= 1;
         }
-        while len > 1 && !slash(name[len - 1]) {
+        while len > 1 && !slash(orig[len - 1]) {
             len -= 1;
         }
         len = len.saturating_sub(1);
-        let path = name[..len].to_vec();
+        let path = orig[..len].to_vec();
         fs(req, this, |it| it.path = Some(path))
     }
 
@@ -2439,10 +2441,15 @@ fn file_open(
     } else {
         name
     };
+    // `PHP_STREAM_FLAG_NO_FCLOSE`: the object keeps the stream, and
+    // `orig_path` is the path the stream opened, the one the include
+    // path resolved where it was searched.
+    stream.forbid_fclose(req);
+    let orig = stream.orig_path(req).unwrap_or_else(|| name.to_vec());
     fs(req, this, |it| {
         it.stream = Some(stream);
         it.file_name = Some(trimmed.to_vec());
-        it.orig_path = Some(name.to_vec());
+        it.orig_path = Some(orig);
         it.open_mode = mode.to_vec();
         it.delimiter = b',';
         it.enclosure = b'"';

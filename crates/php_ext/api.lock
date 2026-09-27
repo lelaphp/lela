@@ -517,12 +517,15 @@ request::Stream::copy_to_mem
 request::Stream::eof
 request::Stream::flock
 request::Stream::flush
+request::Stream::forbid_fclose
 request::Stream::from_value
 request::Stream::get_line
 request::Stream::get_record
 request::Stream::is_dir
 request::Stream::is_stdio
 request::Stream::meta_data
+request::Stream::no_fclose
+request::Stream::orig_path
 request::Stream::pclose
 request::Stream::read
 request::Stream::read_dir

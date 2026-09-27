@@ -682,6 +682,57 @@ impl Stream {
         req.stream_meta_data(self)
     }
 
+    /// `stream->orig_path`: the path the stream was opened by, the one
+    /// the include path resolved where it was searched, as
+    /// `stream_get_meta_data` answers it under `uri`, read without asking
+    /// the stream anything; `None` for a closed stream and one opened by
+    /// no path.
+    ///
+    /// ```php
+    /// $d = sys_get_temp_dir() . '/spl-orig-' . getmypid(); @mkdir("$d/sub", 0777, true); touch("$d/sub/x.txt");
+    /// set_include_path('sub'); chdir($d);
+    /// $o = new SplFileObject('x.txt', 'r', true);
+    /// var_dump($o->getPath() === realpath("$d/sub"), $o->getFilename(), $o->getRealPath() === realpath("$d/sub/x.txt"));
+    /// unlink("$d/sub/x.txt"); rmdir("$d/sub"); rmdir($d);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(5) "x.txt"
+    /// bool(true)
+    /// ```
+    #[must_use]
+    pub fn orig_path(self, req: &Request) -> Option<Vec<u8>> {
+        req.stream_ref(self)
+            .and_then(|stream| stream.orig_path().map(<[u8]>::to_vec))
+    }
+
+    /// `stream->flags |= PHP_STREAM_FLAG_NO_FCLOSE`: an object keeps the
+    /// stream, and `fclose()` over its resource refuses it with php's
+    /// warning; the object's own close is not refused.
+    ///
+    /// ```php
+    /// $o = new SplFileObject(__FILE__);
+    /// $r = get_resources(); var_dump(fclose(end($r)), $o->fgets());
+    /// ```
+    /// ```expect
+    /// Warning: fclose(): cannot close the provided stream, as it must not be manually closed in %s on line 3
+    /// bool(false)
+    /// string(6) "<?php
+    /// "
+    /// ```
+    pub fn forbid_fclose(self, req: &mut Request) {
+        req.stream_op(self, |_, stream| stream.forbid_fclose());
+    }
+
+    /// Whether `fclose()` refuses the stream,
+    /// `PHP_STREAM_FLAG_NO_FCLOSE`: a directory, and a stream an object
+    /// keeps ([`Stream::forbid_fclose`]).
+    #[must_use]
+    pub fn no_fclose(self, req: &Request) -> bool {
+        req.stream_ref(self)
+            .is_some_and(crate::streams::PhpStream::no_fclose)
+    }
+
     /// Whether `opendir` opened the stream, `PHP_STREAM_FLAG_IS_DIR`,
     /// which is what `readdir` and `closedir` accept and `fclose`
     /// refuses.

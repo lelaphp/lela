@@ -686,7 +686,7 @@ pub fn rewind(req: &mut Request, stream: Stream) -> bool {
 pub fn fclose(req: &mut Request, stream: Stream) -> bool {
     // `PHP_STREAM_FLAG_NO_FCLOSE`: a directory, and a stream an operation
     // holds while it serves PHP code on it, which `close` refuses.
-    if stream.is_dir(req) || !stream.close(req) {
+    if stream.no_fclose(req) || !stream.close(req) {
         docref(
             req,
             Level::Warning,
