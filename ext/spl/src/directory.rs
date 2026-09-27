@@ -2194,10 +2194,12 @@ fn info_class(req: &mut Request, chosen: Option<ClassId>) -> Result<ClassId, Thr
 }
 
 /// `spl_filesystem_object_create_info`: an object of `class` over
-/// `path`, its constructor served where a user class writes one.
+/// `path`, its constructor served where it is not `SplFileInfo`'s own
+/// (`ce->constructor->common.scope != spl_ce_SplFileInfo`), a user
+/// class's or an extension's, as phar's `PharFileInfo` declares one.
 fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<PhpObject, Thrown> {
     let object = new_object(req, class)?;
-    if crate::overridden(req, object, b"__construct") {
+    if crate::overridden(req, object, b"__construct") || declares_constructor(req, class)? {
         let arg = crate::string_value(req, path)?;
         let served = call_method(req, &object, b"__construct", &[arg]);
         req.release(arg);
@@ -2212,6 +2214,28 @@ fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<PhpObje
         set_filename(req, object, path)?;
     }
     Ok(object)
+}
+
+/// Whether a class from `class` up to `SplFileInfo`, that one aside,
+/// declares its own `__construct`.
+fn declares_constructor(req: &mut Request, class: ClassId) -> Result<bool, Thrown> {
+    let base = linked(req, b"SplFileInfo")?;
+    let mut at = Some(class);
+    for _ in 0..64 {
+        let Some(class) = at.filter(|c| *c != base) else {
+            return Ok(false);
+        };
+        let declares = req.class_decl(class).is_some_and(|decl| {
+            decl.methods
+                .iter()
+                .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__construct"))
+        });
+        if declares {
+            return Ok(true);
+        }
+        at = crate::parent_of(req, class);
+    }
+    Ok(false)
 }
 
 /// The name of the info class an object makes, `SplFileInfo` by default.
