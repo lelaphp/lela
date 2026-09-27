@@ -15,7 +15,7 @@
 //! `GC_DELREF` and its `OBJ_RELEASE`. A `Hold` is neither `Copy` nor
 //! `Clone`, so one taken is one given back.
 
-use php_heap::Heap;
+use php_heap::{Heap, ZvalRef};
 
 use super::{Hooks, Request};
 use crate::api::values::Value;
@@ -59,7 +59,36 @@ impl Left {
     }
 }
 
+/// Where the last `FETCH_DIM_W` laid the `IS_INDIRECT` of its `VAR`,
+/// and the array or object whose table the entry is in. What it names
+/// is owned by whatever held the container when the fetch walked it,
+/// and no PHP code may be reached between the fetch and the one read
+/// of it: [`Request::hold_walk`] turns it into an owner or into
+/// nothing, and the `ASSIGN_DIM` it is read by stands next after the
+/// fetch that wrote it, as php's delayed fetch compiles them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Walk {
+    place: ZvalRef,
+    table: Value,
+}
+
 impl Request {
+    /// What the `FETCH_DIM_W` just served laid down: the entry its
+    /// `VAR` points at and the array or object that holds the entry, or
+    /// nothing where the `VAR` holds no `IS_INDIRECT`. Every fetch
+    /// notes one or the other, so what is noted is its own.
+    pub(crate) fn note_walk(&mut self, walked: Option<(ZvalRef, Value)>) {
+        self.walk = walked.map(|(place, table)| Walk { place, table });
+    }
+
+    /// An owner of the table the `FETCH_DIM_W` before this opline walked
+    /// to `place`, taken before PHP code can be reached: nothing where the
+    /// fetch noted another place or none.
+    pub(crate) fn hold_walk(&mut self, place: ZvalRef) -> Option<Hold> {
+        let walk = self.walk.take()?;
+        (walk.place == place).then(|| self.take_hold(walk.table))
+    }
+
     /// One more owner of `value` until it is given back:
     /// `GC_ADDREF`, or `GC_TRY_ADDREF` over what may be immutable.
     pub(crate) fn take_hold(&self, value: Value) -> Hold {

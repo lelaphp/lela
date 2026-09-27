@@ -45,6 +45,7 @@ use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
 
 mod hold;
+pub(crate) use hold::Hold;
 mod hooks;
 mod lazy;
 mod linking;
@@ -1422,6 +1423,9 @@ pub struct Request {
     /// ([`Request::take_sensed`]).
     #[cfg(debug_assertions)]
     dirty: Option<DirtyTemporary>,
+    /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into,
+    /// for the `ASSIGN_DIM` after it to hold ([`Request::hold_walk`]).
+    walk: Option<hold::Walk>,
     /// The classes the units this request served declared, each the
     /// unit that holds it and the index of its declaration, in the
     /// order declared: php's `EG(class_table)` past what the engine
@@ -1854,6 +1858,7 @@ impl Request {
             static_vars: HashMap::new(),
             #[cfg(debug_assertions)]
             dirty: None,
+            walk: None,
         };
         req.activate();
         req

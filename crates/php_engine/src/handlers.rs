@@ -61,7 +61,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::request::{Opened, Request};
+use crate::api::request::{Hold, Opened, Request};
 use crate::api::values::{
     ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
@@ -8147,6 +8147,37 @@ fn write_container(req: &mut Request, place: php_heap::ZvalRef) -> Result<Contai
 /// string(3) "5bc"
 /// ```
 ///
+/// The place is held standing too ([`Keeper`]): the array a
+/// `FETCH_DIM_W` walked to, or the reference the place is the value of,
+/// has one more owner across the diagnostics, and the write lands only
+/// where that table is still someone else's and the place still holds
+/// the string. A handler that copies the string out and then gives the
+/// array up leaves the write nowhere, where php writes through the
+/// entry of the table it freed; a handler that shares the array sees
+/// the byte written, as php's does.
+///
+/// ```php
+/// set_error_handler(function () { $GLOBALS['b'] = $GLOBALS['a'][0]; $GLOBALS['a'] = null; });
+/// $a = [str_repeat('abc', 1)];
+/// $a[0][9] = 'long';
+/// var_dump($a, strlen($b) > 0);
+/// set_error_handler(function () { $GLOBALS['c'] = $GLOBALS['a']; });
+/// $a = [str_repeat('abc', 1)];
+/// var_dump($a[0][1] = 'long', $a === $c, $c[0]);
+/// set_error_handler(function () { $GLOBALS['a'] = null; });
+/// $a = [[str_repeat('abc', 1)]];
+/// var_dump($a[0][0][1] = 'long', $a);
+/// ```
+/// ```expect
+/// NULL
+/// bool(true)
+/// string(1) "l"
+/// bool(true)
+/// string(3) "alc"
+/// NULL
+/// NULL
+/// ```
+///
 /// A value with no byte at all is php's `Error`.
 ///
 /// ```php
@@ -8179,6 +8210,7 @@ fn assign_string_offset(
     op: &Opline,
     data: Opline,
     at: php_heap::ZvalRef,
+    keeper: &Keeper,
 ) -> Result<TextWrite, Thrown> {
     let Some(text) = separate_string(req, at)? else {
         return Ok(TextWrite::Gone);
@@ -8191,7 +8223,7 @@ fn assign_string_offset(
     let offset = if let ValueRef::Int(n) = dim.as_ref() {
         n
     } else {
-        let offset = string_held(req, string, |req| {
+        let offset = string_held(req, keeper, at, string, |req| {
             // `ZVAL_UNDEFINED_OP2()` and the cast warning after it.
             let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
             string_dim_offset(req, &dim, DimRead::Warning)
@@ -8211,7 +8243,7 @@ fn assign_string_offset(
     } else {
         offset
     };
-    let Some((count, byte)) = offset_byte(req, frame, code, data, string)? else {
+    let Some((count, byte)) = offset_byte(req, frame, code, data, keeper, at, string)? else {
         return Ok(TextWrite::Gone);
     };
     if count == 0 {
@@ -8222,7 +8254,7 @@ fn assign_string_offset(
         ));
     }
     if count != 1
-        && string_held(req, string, |req| {
+        && string_held(req, keeper, at, string, |req| {
             crate::api::raising::warning(
                 req,
                 "Only the first byte will be assigned to the string offset",
@@ -8292,6 +8324,8 @@ fn offset_byte(
     frame: FrameRef,
     code: &OpArray,
     data: Opline,
+    keeper: &Keeper,
+    at: php_heap::ZvalRef,
     string: Value,
 ) -> Result<Option<(usize, u8)>, Thrown> {
     let first = |bytes: &[u8]| (bytes.len(), bytes.first().copied().unwrap_or(0));
@@ -8301,7 +8335,7 @@ fn offset_byte(
     {
         return Ok(Some(first(value.as_bytes())));
     }
-    string_held(req, string, |req| {
+    string_held(req, keeper, at, string, |req| {
         let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
         let written = crate::ops::to_string(req, &value);
         req.release(value);
@@ -8321,12 +8355,15 @@ enum TextWrite {
 
 /// `step` with the string a write is landing in held across it, php's
 /// `GC_ADDREF(s)` before a diagnostic or a conversion and `GC_DELREF(s)
-/// == 0` after it: what `step` answered where the string stands, `None`
-/// where the hold was its last owner and it is freed, and the throw
-/// where one is pending (`EG(exception)`), which the handler after
-/// the write raises whether the string stands or not.
+/// == 0` after it: what `step` answered where the string stands in its
+/// place, `None` where the hold was its last owner and it is freed or
+/// where its place no longer stands or holds it ([`Keeper::stands`]),
+/// and the throw where one is pending (`EG(exception)`), which the
+/// handler after the write raises whether the string stands or not.
 fn string_held<T>(
     req: &mut Request,
+    keeper: &Keeper,
+    at: php_heap::ZvalRef,
     string: Value,
     step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
 ) -> Result<Option<T>, Thrown> {
@@ -8337,7 +8374,98 @@ fn string_held<T>(
     if req.is_pending() {
         return Err(Thrown::of(None));
     }
-    Ok((!left.freed()).then_some(stepped))
+    Ok((!left.freed() && keeper.stands(at, string)).then_some(stepped))
+}
+
+/// What keeps the place a write over a string offset lands in standing
+/// across the diagnostics that may reach a handler, which may give up
+/// every owner of the array the place is an entry of.
+enum Keeper {
+    /// A `CV`'s slot, or a `VAR` holding the string itself: the frame's,
+    /// which stands while the handler runs.
+    Frame,
+    /// An owner of the array or object the place is an entry of, as the
+    /// `FETCH_DIM_W` before walked to it ([`Request::hold_walk`]), or of
+    /// the reference the place is the value of.
+    Held(Hold),
+    /// An entry of a table no owner was taken of: a property's slot, a
+    /// static property's, a symbol table's. The string's own hold is all
+    /// the write goes by, as php's is.
+    Unheld,
+}
+
+impl Keeper {
+    /// Whether the place still stands and still holds `string` once a
+    /// diagnostic has reached a handler: its table owned by someone
+    /// besides the hold, and the string in it the one the write started
+    /// from.
+    fn stands(&self, at: php_heap::ZvalRef, string: Value) -> bool {
+        let holds = || {
+            let held = exec::value_of(at.read());
+            match (held.as_php_string(), string.as_php_string()) {
+                (Some(held), Some(string)) => held.heap().is_same(string.heap()),
+                _ => false,
+            }
+        };
+        match self {
+            Keeper::Frame => holds(),
+            Keeper::Held(hold) => hold.value().refcount() > 1 && holds(),
+            Keeper::Unheld => true,
+        }
+    }
+
+    /// The owner given back, `GC_DELREF`: where it was the table's last,
+    /// the table goes and the write with it.
+    fn give_back(self, req: &mut Request) {
+        if let Keeper::Held(hold) = self {
+            let _ = req.let_go(hold);
+        }
+    }
+}
+
+/// What keeps the string place `text_at` of the `ASSIGN_DIM` `op` at
+/// opline `at` standing, taken before PHP code can be reached: `place`
+/// is what `op1` names and `text_at` where [`write_container`] found
+/// the string, the value of a reference where `place` holds one. A
+/// `VAR`'s `IS_INDIRECT` is an entry of the table the `FETCH_DIM_W`
+/// just before walked to, which php's delayed compile puts next to the
+/// write.
+fn keeper(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    (at, op): (u32, &Opline),
+    place: php_heap::ZvalRef,
+    text_at: php_heap::ZvalRef,
+) -> Keeper {
+    let cell = exec::value_of(place.read());
+    if text_at != place && cell.as_php_ref().is_some() {
+        return Keeper::Held(req.take_hold(cell));
+    }
+    match op.op1_type {
+        OperandKind::Var => {
+            let indirect = req
+                .slot_ptr(frame, exec::temporary_slot(code, op.op1))
+                .and_then(|var| var.read().as_indirect());
+            if indirect.is_none() {
+                return Keeper::Frame;
+            }
+            let walked = at
+                .checked_sub(1)
+                .and_then(|before| exec::opline_at(code, before))
+                .is_some_and(|before| {
+                    before.opcode == Opcode::FetchDimW
+                        && before.out_type == OperandKind::Var
+                        && before.out == op.op1
+                });
+            match walked.then(|| req.hold_walk(place)).flatten() {
+                Some(hold) => Keeper::Held(hold),
+                None => Keeper::Unheld,
+            }
+        }
+        OperandKind::Cv => Keeper::Frame,
+        OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => Keeper::Unheld,
+    }
 }
 
 /// Where a dimension write over an array lands, before the table is
@@ -8688,8 +8816,11 @@ fn fetch_dim_place(
             "InternalError: ZEND_FETCH_DIM_W over a constant or a temporary, which php compiles no write over",
         )));
     };
-    let written = match write_container(req, place) {
-        Ok(Container::Array(array)) => array_place(req, frame, code, op, array, read)?,
+    let (written, table) = match write_container(req, place) {
+        Ok(Container::Array(array)) => (
+            array_place(req, frame, code, op, array, read)?,
+            Some(Value::array(array)),
+        ),
         Ok(Container::Object(object)) => {
             // php's `type`: `BP_VAR_RW` warns of a key it lays down,
             // `BP_VAR_W` lays it down in silence.
@@ -8697,14 +8828,15 @@ fn fetch_dim_place(
                 DimRead::Warning => DimensionRead::ReadWrite,
                 DimRead::Silent => DimensionRead::Write,
             };
-            object_held(req, object, |req| {
+            let written = object_held(req, object, |req| {
                 object_place(req, frame, code, op, object, fetch)
-            })
+            });
+            (written, Some(Value::object(object)))
         }
-        Ok(Container::Text(_)) => Err(text_dim_place(req, frame, code, op, false)),
-        Err(thrown) => Err(thrown),
+        Ok(Container::Text(_)) => (Err(text_dim_place(req, frame, code, op, false)), None),
+        Err(thrown) => (Err(thrown), None),
     };
-    lay_dim_place(req, frame, code, op, written, keep)
+    lay_dim_place(req, frame, code, op, written, keep, table)
 }
 
 /// `zend_fetch_dimension_address`'s string arm under a write or, with
@@ -8774,7 +8906,11 @@ fn unset_string_offset(req: &mut Request, dim: &Value) -> Result<(), Thrown> {
 /// What a `FETCH_DIM_W`, `_RW` or `_UNSET` found laid into its `VAR`:
 /// the dimension freed, the place written, and the container `VAR`
 /// given up after it unless `keep` says the next opline reads it
-/// (`FREE_OP1_VAR_PTR`); a throwable leaves the `VAR` empty.
+/// (`FREE_OP1_VAR_PTR`); a throwable leaves the `VAR` empty. The entry
+/// the `VAR` is left pointing at is noted with `table`, the array or
+/// object it is an entry of, for the `ASSIGN_DIM` after it
+/// ([`Request::note_walk`]); a `VAR` left holding anything else notes
+/// nothing.
 fn lay_dim_place(
     req: &mut Request,
     frame: FrameRef,
@@ -8782,7 +8918,9 @@ fn lay_dim_place(
     op: &Opline,
     written: Result<php_heap::Zval, Thrown>,
     keep: Keep,
+    table: Option<Value>,
 ) -> Edge {
+    req.note_walk(None);
     let out = exec::temporary_slot(code, op.out);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let previous = req.take_slot(frame, out);
@@ -8805,6 +8943,7 @@ fn lay_dim_place(
     if keep == Keep::Nothing {
         exec::free_container_var(req, frame, code, op);
     }
+    req.note_walk(table.and_then(|table| Some((var.read().as_indirect()?, table))));
     Ok(advance(req, frame))
 }
 
@@ -11785,6 +11924,7 @@ fn assign_text_dim(
     op: &Opline,
     data: Opline,
     place: php_heap::ZvalRef,
+    keeper: &Keeper,
 ) -> Result<(), Thrown> {
     if op.op2_type == OperandKind::Unused {
         return Err(crate::api::raising::throw(
@@ -11793,7 +11933,7 @@ fn assign_text_dim(
             "[] operator not supported for strings",
         ));
     }
-    let written = assign_string_offset(req, frame, code, op, data, place);
+    let written = assign_string_offset(req, frame, code, op, data, place, keeper);
     // `FREE_OP_DATA`, where the write landed before the value was read.
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let byte = match written? {
@@ -12012,7 +12152,12 @@ pub(crate) fn assign_dim<T: Tier>(
         Ok(Container::Object(object)) => object_held(req, object, |req| {
             assign_object_dim(req, frame, code, op, data, object)
         }),
-        Ok(Container::Text(place)) => assign_text_dim(req, frame, code, op, data, place),
+        Ok(Container::Text(text_at)) => {
+            let keeper = keeper(req, frame, code, (at, op), place, text_at);
+            let written = assign_text_dim(req, frame, code, op, data, text_at, &keeper);
+            keeper.give_back(req);
+            written
+        }
         Err(thrown) => Err(thrown),
     };
     if op.op2_type != OperandKind::Unused {
@@ -13584,7 +13729,7 @@ pub(crate) fn fetch_dim_unset<T: Tier>(
         }
         Err(thrown) => Err(thrown),
     };
-    lay_dim_place(req, frame, code, op, written, Keep::Nothing)
+    lay_dim_place(req, frame, code, op, written, Keep::Nothing, None)
 }
 
 /// `zend_fetch_dimension_address_inner` under `BP_VAR_UNSET`: the key
