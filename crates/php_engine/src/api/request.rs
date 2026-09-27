@@ -848,6 +848,18 @@ pub trait StreamOps: Send {
         None
     }
 
+    /// `ops->stat` whole, the thirteen fields `fstat()` prints in their
+    /// order, as phar's `phar_stream_stat` fills them from the entry;
+    /// by default the one [`StreamOps::size`] fills, `None` where the
+    /// kind has no stat.
+    fn stat(&mut self, req: &mut Request) -> Option<[i64; 13]> {
+        let _ = req;
+        let size = self.size()?;
+        let mut buf = [0; 13];
+        buf[7] = size;
+        Some(buf)
+    }
+
     /// `ops->flush`: `true` for php's `0`, which a kind with nothing of
     /// its own to flush answers.
     fn flush(&mut self, req: &mut Request) -> bool {

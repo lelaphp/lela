@@ -1339,11 +1339,8 @@ impl Ops for OfExtension {
         self.0.seekable()
     }
 
-    fn stat(&mut self, _req: &mut Request) -> Option<StatBuf> {
-        let size = self.0.size()?;
-        let mut buf = [0; 13];
-        buf[7] = size;
-        Some(buf)
+    fn stat(&mut self, req: &mut Request) -> Option<StatBuf> {
+        self.0.stat(req)
     }
 
     fn flush(&mut self, req: &mut Request) -> bool {

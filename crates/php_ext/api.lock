@@ -538,6 +538,7 @@ request::StreamOps::read
 request::StreamOps::seek
 request::StreamOps::seekable
 request::StreamOps::size
+request::StreamOps::stat
 request::StreamOps::write
 request::StreamOption
 request::StreamWrapper

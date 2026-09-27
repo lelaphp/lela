@@ -204,8 +204,16 @@ impl StreamOps for EntryStream {
         true
     }
 
-    fn size(&self) -> Option<i64> {
-        None
+    /// `phar_stream_stat`: `phar_dostat` over the entry the stream holds,
+    /// never as a made-up directory.
+    fn stat(&mut self, req: &mut Request) -> Option<[i64; 13]> {
+        let data = self.data.as_ref()?;
+        let a = archives(req).get(data.archive)?;
+        let entry = match &data.target {
+            Target::Slot(slot) => a.manifest.at(*slot)?,
+            Target::Temp(entry) => entry,
+        };
+        Some(dostat(a, Some(entry)))
     }
 
     /// `phar_stream_flush`: an entry something wrote to written out with
@@ -394,25 +402,22 @@ fn include_cwd(req: &mut Request, data: &EntryData, opening: Opening) {
 /// not writable; the inode the entry's name hashes to.
 pub(crate) fn dostat(archive: &archive::Archive, entry: Option<&archive::Entry>) -> [i64; 13] {
     let mut sb = [0_i64; 13];
-    match entry {
-        Some(e) if !e.is_temp_dir => {
-            sb[7] = if e.is_dir {
-                0
-            } else {
-                i64::from(e.uncompressed_filesize)
-            };
-            sb[2] = i64::from(e.flags & archive::ENT_PERM_MASK)
-                | if e.is_dir { 0o040_000 } else { 0o100_000 };
-            for t in [8, 9, 10] {
-                sb[t] = i64::from(e.timestamp);
-            }
-            sb[1] = i64::from(e.inode);
+    if let Some(e) = entry {
+        sb[7] = if e.is_dir {
+            0
+        } else {
+            i64::from(e.uncompressed_filesize)
+        };
+        sb[2] = i64::from(e.flags & archive::ENT_PERM_MASK)
+            | if e.is_dir { 0o040_000 } else { 0o100_000 };
+        for t in [8, 9, 10] {
+            sb[t] = i64::from(e.timestamp);
         }
-        _ => {
-            sb[2] = 0o777 | 0o040_000;
-            for t in [8, 9, 10] {
-                sb[t] = i64::from(archive.max_timestamp);
-            }
+        sb[1] = i64::from(e.inode);
+    } else {
+        sb[2] = 0o777 | 0o040_000;
+        for t in [8, 9, 10] {
+            sb[t] = i64::from(archive.max_timestamp);
         }
     }
     if !archive.is_writeable {
