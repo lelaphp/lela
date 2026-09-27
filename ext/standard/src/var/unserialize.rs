@@ -619,6 +619,9 @@ impl<'a> Unserializer<'a> {
         key: Key,
     ) -> Result<bool, Thrown> {
         let written = key.clone();
+        if let Key::Str(s) = &key {
+            self.state.hash.dtors.push(Dtor::Kept(Value::string(*s)));
+        }
         let read = self.state.read(req, Slot::Element(array, key));
         if let Some(value) = array.get(&written) {
             req.addref(&value);
@@ -1351,6 +1354,20 @@ impl State<'_> {
         done
     }
 
+    /// `process_nested_array_data`'s loop: each key read, what a key
+    /// the string repeats held left to the var hash, and the value read
+    /// into the element. A key's string is the var hash's until it is
+    /// destroyed, and nothing of it outlives the read.
+    ///
+    /// ```php
+    /// $s = serialize(["foo_1" => 1, "o" => (object)["p" => 2]]);
+    /// $m0 = memory_get_usage();
+    /// for ($i = 0; $i < 10; $i++) unserialize($s);
+    /// var_dump(memory_get_usage() - $m0);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     fn array_body(
         &mut self,
         req: &mut Request,
@@ -1365,6 +1382,11 @@ impl State<'_> {
                 Some(Scalar::Str(bytes)) => Key::from_string(PhpString::new(req, &bytes)?),
                 _ => return Ok(false),
             };
+            // The key's own owner is the var hash's, whose slots name it
+            // until it is destroyed; each write takes one of its own.
+            if let Key::Str(s) = &key {
+                self.hash.dtors.push(Dtor::Kept(Value::string(*s)));
+            }
             // `var_push_dtor_value`: a key the string repeats leaves what
             // it held to the var hash, which frees it with the rest.
             if let Some(old) = array.get(&key) {
@@ -1708,6 +1730,7 @@ impl State<'_> {
                 _ => return Ok(false),
             };
             let name = PhpString::new(req, &key)?;
+            self.hash.dtors.push(Dtor::Kept(Value::string(name)));
             if let Some(old) = object.prop(req, &key) {
                 req.addref(&old);
                 self.hash.dtors.push(Dtor::Kept(old));
@@ -1717,7 +1740,6 @@ impl State<'_> {
             // A key naming a virtual property fails the whole object,
             // `is_property_visibility_changed`'s `-1`.
             if !object.unserialize_prop(req, name, Value::null())? {
-                req.release(Value::string(name));
                 return Ok(false);
             }
             let at = self.hash.slots.len();
