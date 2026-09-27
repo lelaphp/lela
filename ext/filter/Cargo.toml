@@ -11,13 +11,17 @@ description = "The filter extension, php-src/ext/filter"
 [lints]
 workspace = true
 
-# The facade, and ext/standard for what `sanitizing_filters.c` includes
-# of it: `php_strip_tags_ex` (`php_string.h`) and
-# `php_escape_html_entities_ex` (`html.h`), ADR-0004's edge where php-src
-# includes the other extension's headers. The engine is out of reach
-# (`[[edge]]` ext/*).
+# The facade, ext/pcre for what `logical_filters.c` includes of it:
+# `pcre_get_compiled_regex` and `php_pcre_mctx` (`php_pcre.h`), which
+# `FILTER_VALIDATE_REGEXP` and `FILTER_VALIDATE_EMAIL` match through,
+# and config.m4's `PHP_ADD_EXTENSION_DEP(filter, pcre)`; and ext/standard
+# for what `sanitizing_filters.c` includes of it: `php_strip_tags_ex`
+# (`php_string.h`) and `php_escape_html_entities_ex` (`html.h`).
+# ADR-0004's edge where php-src includes the other extension's headers.
+# The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+php_ext_pcre = { path = "../pcre" }
 php_ext_standard = { path = "../standard" }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).

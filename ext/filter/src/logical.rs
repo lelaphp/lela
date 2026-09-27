@@ -9,12 +9,13 @@ use php_ext::coerce::{callable_checked, numeric_string, to_double, to_long};
 use php_ext::raising::{Thrown, fatal, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, Value, ValueRef};
+use php_ext_pcre::Regex;
 
 use crate::constants::{
     FILTER_FLAG_ALLOW_HEX, FILTER_FLAG_ALLOW_OCTAL, FILTER_FLAG_ALLOW_THOUSAND,
-    FILTER_FLAG_GLOBAL_RANGE, FILTER_FLAG_HOSTNAME, FILTER_FLAG_IPV4, FILTER_FLAG_IPV6,
-    FILTER_FLAG_NO_PRIV_RANGE, FILTER_FLAG_NO_RES_RANGE, FILTER_FLAG_PATH_REQUIRED,
-    FILTER_FLAG_QUERY_REQUIRED,
+    FILTER_FLAG_EMAIL_UNICODE, FILTER_FLAG_GLOBAL_RANGE, FILTER_FLAG_HOSTNAME, FILTER_FLAG_IPV4,
+    FILTER_FLAG_IPV6, FILTER_FLAG_NO_PRIV_RANGE, FILTER_FLAG_NO_RES_RANGE,
+    FILTER_FLAG_PATH_REQUIRED, FILTER_FLAG_QUERY_REQUIRED,
 };
 use crate::{Outcome, Run, find, sanitizing, string_value};
 
@@ -369,44 +370,182 @@ fn numeric(num: &[u8], min: Option<f64>, max: Option<f64>) -> Option<f64> {
     (!outside).then_some(value)
 }
 
+/// `pcre_get_compiled_regex` over the pattern, then `pcre2_match` from
+/// offset zero: the string unchanged where it matched, and a refused
+/// pattern, whose warning ext/pcre raises under the active native, or a
+/// match that errs, failed, as `php_filter_validate_regexp` and
+/// `php_filter_validate_email` share it.
+fn matched(req: &mut Request, pattern: &[u8], s: &[u8]) -> Result<Outcome, Thrown> {
+    match Regex::compile(req, pattern) {
+        Some(regex) if regex.is_match(req, s) => same(req, s),
+        _ => Ok(Outcome::Failed),
+    }
+}
+
 /// `php_filter_validate_regexp`, `FILTER_VALIDATE_REGEXP`: the `regexp`
-/// option is required, and the match is ext/pcre's, which this base does
-/// not carry yet (#734).
+/// option, a string, is required, and the string passes where it
+/// matches.
 ///
 /// ```php
 /// try { filter_var("a", FILTER_VALIDATE_REGEXP); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { filter_var("a", FILTER_VALIDATE_REGEXP, ["options" => ["regexp" => 5]]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// filter_var(): "regexp" option is missing
+/// filter_var(): "regexp" option is missing
 /// ```
-pub(crate) fn regexp(req: &mut Request, run: &Run, _: &[u8]) -> Result<Outcome, Thrown> {
-    if string_option(run, b"regexp").is_none() {
-        return Err(value_error(req, run, "\"regexp\" option is missing"));
-    }
-    Err(fatal(
-        req,
-        "InternalError: FILTER_VALIDATE_REGEXP matches through ext/pcre's compiled patterns, which this engine does not carry yet (#734)",
-    ))
-}
-
-/// `php_filter_validate_email`, `FILTER_VALIDATE_EMAIL`: at most 320
-/// bytes, then Michael Rushton's pattern through ext/pcre, which this
-/// base does not carry yet (#734).
+///
+/// A match from offset zero, unanchored unless the pattern anchors it,
+/// with the pattern's modifiers; a miss is the flags' failure.
 ///
 /// ```php
-/// var_dump(filter_var(str_repeat("a", 321), FILTER_VALIDATE_EMAIL));
+/// foreach (["abc", "xabc", "ABC", ""] as $s) var_dump(filter_var($s, FILTER_VALIDATE_REGEXP, ["options" => ["regexp" => "/^a/"]]), filter_var($s, FILTER_VALIDATE_REGEXP, ["options" => ["regexp" => "/b/i"]]));
+/// var_dump(filter_var("x", FILTER_VALIDATE_REGEXP, ["options" => ["regexp" => "/^a/"], "flags" => FILTER_NULL_ON_FAILURE]));
+/// ```
+/// ```expect
+/// string(3) "abc"
+/// string(3) "abc"
+/// bool(false)
+/// string(4) "xabc"
+/// bool(false)
+/// string(3) "ABC"
+/// bool(false)
+/// bool(false)
+/// NULL
+/// ```
+///
+/// A pattern php's syntax refuses warns as `pcre_get_compiled_regex`
+/// words it, under `filter_var()`, sets `PREG_INTERNAL_ERROR` and
+/// fails; the refusal is cached as the warning, so the second use warns
+/// again.
+///
+/// ```php
+/// var_dump(filter_var("a", FILTER_VALIDATE_REGEXP, ["options" => ["regexp" => "/(/"]]));
+/// var_dump(filter_var("a", FILTER_VALIDATE_REGEXP, ["options" => ["regexp" => "abc"]]));
+/// var_dump(filter_var("a", FILTER_VALIDATE_REGEXP, ["options" => ["regexp" => "/(/"]]));
+/// var_dump(preg_last_error_msg());
+/// ```
+/// ```expect
+///
+/// Warning: filter_var(): Compilation failed: missing closing parenthesis at offset 1 in %s on line 2
+/// bool(false)
+///
+/// Warning: filter_var(): Delimiter must not be alphanumeric, backslash, or NUL byte in %s on line 3
+/// bool(false)
+///
+/// Warning: filter_var(): Compilation failed: missing closing parenthesis at offset 1 in %s on line 4
+/// bool(false)
+/// string(14) "Internal error"
+/// ```
+///
+/// A match that errs, here a subject that is not UTF-8 under `u`, fails
+/// and leaves `preg_last_error()` as it was, where `preg_match` sets it.
+///
+/// ```php
+/// preg_match('/a/', 'a');
+/// var_dump(filter_var("\xff", FILTER_VALIDATE_REGEXP, ["options" => ["regexp" => "/./u"]]), preg_last_error_msg());
+/// var_dump(preg_match("/./u", "\xff"), preg_last_error_msg());
 /// ```
 /// ```expect
 /// bool(false)
+/// string(8) "No error"
+/// bool(false)
+/// string(56) "Malformed UTF-8 characters, possibly incorrectly encoded"
 /// ```
-pub(crate) fn email(req: &mut Request, _: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
+pub(crate) fn regexp(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
+    let Some(regexp) = string_option(run, b"regexp") else {
+        return Err(value_error(req, run, "\"regexp\" option is missing"));
+    };
+    matched(req, &regexp, s)
+}
+
+/// `regexp0` of `php_filter_validate_email`: Michael Rushton's pattern
+/// as php changed it to admit routeable addresses alone, its local part
+/// also admitting letters and digits of any alphabet (`\pL\pN`) under
+/// `u`, for `FILTER_FLAG_EMAIL_UNICODE`. php's bytes.
+const EMAIL_UNICODE: &[u8] = br"/^(?!(?:(?:\x22?\x5C[\x00-\x7E]\x22?)|(?:\x22?[^\x5C\x22]\x22?)){255,})(?!(?:(?:\x22?\x5C[\x00-\x7E]\x22?)|(?:\x22?[^\x5C\x22]\x22?)){65,}@)(?:(?:[\x21\x23-\x27\x2A\x2B\x2D\x2F-\x39\x3D\x3F\x5E-\x7E\pL\pN]+)|(?:\x22(?:[\x01-\x08\x0B\x0C\x0E-\x1F\x21\x23-\x5B\x5D-\x7F\pL\pN]|(?:\x5C[\x00-\x7F]))*\x22))(?:\.(?:(?:[\x21\x23-\x27\x2A\x2B\x2D\x2F-\x39\x3D\x3F\x5E-\x7E\pL\pN]+)|(?:\x22(?:[\x01-\x08\x0B\x0C\x0E-\x1F\x21\x23-\x5B\x5D-\x7F\pL\pN]|(?:\x5C[\x00-\x7F]))*\x22)))*@(?:(?:(?!.*[^.]{64,})(?:(?:(?:xn--)?[a-z0-9]+(?:-+[a-z0-9]+)*\.){1,126}){1,}(?:(?:[a-z][a-z0-9]*)|(?:(?:xn--)[a-z0-9]+))(?:-+[a-z0-9]+)*)|(?:\[(?:(?:IPv6:(?:(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){7})|(?:(?!(?:.*[a-f0-9][:\]]){7,})(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){0,5})?::(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){0,5})?)))|(?:(?:IPv6:(?:(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){5}:)|(?:(?!(?:.*[a-f0-9]:){5,})(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){0,3})?::(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){0,3}:)?)))?(?:(?:25[0-5])|(?:2[0-4][0-9])|(?:1[0-9]{2})|(?:[1-9]?[0-9]))(?:\.(?:(?:25[0-5])|(?:2[0-4][0-9])|(?:1[0-9]{2})|(?:[1-9]?[0-9]))){3}))\]))$/iDu";
+
+/// `regexp1`: the same pattern with an ASCII local part and no `u`.
+/// php's bytes.
+const EMAIL: &[u8] = br"/^(?!(?:(?:\x22?\x5C[\x00-\x7E]\x22?)|(?:\x22?[^\x5C\x22]\x22?)){255,})(?!(?:(?:\x22?\x5C[\x00-\x7E]\x22?)|(?:\x22?[^\x5C\x22]\x22?)){65,}@)(?:(?:[\x21\x23-\x27\x2A\x2B\x2D\x2F-\x39\x3D\x3F\x5E-\x7E]+)|(?:\x22(?:[\x01-\x08\x0B\x0C\x0E-\x1F\x21\x23-\x5B\x5D-\x7F]|(?:\x5C[\x00-\x7F]))*\x22))(?:\.(?:(?:[\x21\x23-\x27\x2A\x2B\x2D\x2F-\x39\x3D\x3F\x5E-\x7E]+)|(?:\x22(?:[\x01-\x08\x0B\x0C\x0E-\x1F\x21\x23-\x5B\x5D-\x7F]|(?:\x5C[\x00-\x7F]))*\x22)))*@(?:(?:(?!.*[^.]{64,})(?:(?:(?:xn--)?[a-z0-9]+(?:-+[a-z0-9]+)*\.){1,126}){1,}(?:(?:[a-z][a-z0-9]*)|(?:(?:xn--)[a-z0-9]+))(?:-+[a-z0-9]+)*)|(?:\[(?:(?:IPv6:(?:(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){7})|(?:(?!(?:.*[a-f0-9][:\]]){7,})(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){0,5})?::(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){0,5})?)))|(?:(?:IPv6:(?:(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){5}:)|(?:(?!(?:.*[a-f0-9]:){5,})(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){0,3})?::(?:[a-f0-9]{1,4}(?::[a-f0-9]{1,4}){0,3}:)?)))?(?:(?:25[0-5])|(?:2[0-4][0-9])|(?:1[0-9]{2})|(?:[1-9]?[0-9]))(?:\.(?:(?:25[0-5])|(?:2[0-4][0-9])|(?:1[0-9]{2})|(?:[1-9]?[0-9]))){3}))\]))$/iD";
+
+/// `php_filter_validate_email`, `FILTER_VALIDATE_EMAIL`: at most 320
+/// bytes (RFC 2821), then [`EMAIL`], or [`EMAIL_UNICODE`] under
+/// `FILTER_FLAG_EMAIL_UNICODE`. No comments or folding whitespace, and
+/// the domain a fully-qualified name or an address in brackets.
+///
+/// ```php
+/// foreach (["user@example.com", "first.last+tag@sub.example.co.uk", "a@b", "\"quoted str\"@example.com", "user@[IPv6:::1]", "user@[127.0.0.1]", "user@[256.0.0.1]", "a.@example.com", ".a@example.com", "a..b@example.com", "a@-example.com", "a@example.123", "a@xn--bcher-kva.example", "", "@example.com"] as $s) var_dump(filter_var($s, FILTER_VALIDATE_EMAIL));
+/// ```
+/// ```expect
+/// string(16) "user@example.com"
+/// string(32) "first.last+tag@sub.example.co.uk"
+/// bool(false)
+/// bool(false)
+/// string(15) "user@[IPv6:::1]"
+/// string(16) "user@[127.0.0.1]"
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// string(23) "a@xn--bcher-kva.example"
+/// bool(false)
+/// bool(false)
+/// ```
+///
+/// `FILTER_FLAG_EMAIL_UNICODE` admits letters and digits beyond ASCII
+/// in the local part alone; the domain stays ASCII, and a string that
+/// is not UTF-8 fails under it.
+///
+/// ```php
+/// foreach (["jöhn@example.com", "用户@example.com", "a@exämple.com", "\xff@example.com", "user@example.com"] as $s) var_dump(filter_var($s, FILTER_VALIDATE_EMAIL), filter_var($s, FILTER_VALIDATE_EMAIL, FILTER_FLAG_EMAIL_UNICODE));
+/// ```
+/// ```expect
+/// bool(false)
+/// string(17) "jöhn@example.com"
+/// bool(false)
+/// string(18) "用户@example.com"
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// string(16) "user@example.com"
+/// string(16) "user@example.com"
+/// ```
+///
+/// The lengths: 254 bytes in all, since the pattern's first lookahead
+/// refuses 255 of the address's characters, 64 in the local part and 63
+/// in a label; past 320 bytes the pattern is not matched at all.
+///
+/// ```php
+/// $local = str_repeat("a", 64);
+/// $label = str_repeat("b", 63);
+/// foreach ([61, 62] as $n) { $s = "$local@$label.$label." . str_repeat("c", $n); var_dump(strlen($s), filter_var($s, FILTER_VALIDATE_EMAIL) === $s); }
+/// var_dump(filter_var(str_repeat("a", 65) . "@example.com", FILTER_VALIDATE_EMAIL));
+/// var_dump(filter_var("a@" . str_repeat("b", 64) . ".com", FILTER_VALIDATE_EMAIL));
+/// var_dump(filter_var(str_repeat("a", 321), FILTER_VALIDATE_EMAIL));
+/// ```
+/// ```expect
+/// int(254)
+/// bool(true)
+/// int(255)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+pub(crate) fn email(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
+    let pattern = if run.flags & FILTER_FLAG_EMAIL_UNICODE != 0 {
+        EMAIL_UNICODE
+    } else {
+        EMAIL
+    };
     if s.len() > 320 {
         return Ok(Outcome::Failed);
     }
-    Err(fatal(
-        req,
-        "InternalError: FILTER_VALIDATE_EMAIL matches through ext/pcre's compiled patterns, which this engine does not carry yet (#734)",
-    ))
+    matched(req, pattern, s)
 }
 
 /// `php_filter_validate_domain_ex`: at most 253 bytes past a trailing
