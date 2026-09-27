@@ -715,6 +715,16 @@ impl<T> Ref<T> {
     pub fn get(&self) -> Option<&T> {
         self.held.as_ref()
     }
+
+    /// The caller's reference itself, for a body that reads the variable
+    /// again after calling back into the program, as `array_walk` reloads
+    /// the array its callback may have replaced ("Reload array and
+    /// position -- both may have changed"); none where the argument is
+    /// absent or came as a value.
+    #[must_use]
+    pub fn reference(&self) -> Option<PhpRef> {
+        self.cell
+    }
 }
 
 impl<T: IntoReturn> Ref<T> {
