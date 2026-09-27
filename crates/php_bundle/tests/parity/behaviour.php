@@ -42,3 +42,4 @@ $b->grow(); var_dump($b->value(), $b->add(1)->add(2)->value(), $b->kind(), $b->d
 var_dump(ProtoBox::make(7)->value(), ProtoBox::START, (new ProtoBox(3))->value(), (new ProtoTally())->value(), (new ProtoLaid())->same());
 try { new ProtoBase(); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
 try { $b->hidden(); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+$id = new ReflectionProperty('ProtoBox', 'id'); var_dump($id->isProtectedSet(), $id->isReadOnly());

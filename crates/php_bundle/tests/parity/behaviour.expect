@@ -150,3 +150,5 @@ int(0)
 bool(true)
 Error: Cannot instantiate abstract class ProtoBase
 Error: Call to protected method ProtoBox::hidden() from global scope
+bool(true)
+bool(true)

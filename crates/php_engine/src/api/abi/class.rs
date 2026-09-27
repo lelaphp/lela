@@ -9,7 +9,7 @@ use php_unit::decl::{ClassConstDecl, ClassDecl, ConstExpr, MethodDecl, PropertyD
 
 use crate::api::__private::Entry;
 use crate::api::abi::ExtensionBuilder;
-use crate::api::abi::marshal::{FromArgument, Untyped};
+use crate::api::abi::marshal::{FromArgument, Instance, Untyped};
 use crate::api::values::{ClassId, PhpArray, PhpString, Value};
 
 /// A named class: what `Instance<C>`, `This<C>`, `extends` and
@@ -110,6 +110,15 @@ impl<T: PropertyValue> PropertyValue for Option<T> {
     type Const = Option<T::Const>;
     fn const_expr(value: Option<T::Const>) -> ConstExpr {
         value.map_or(ConstExpr::Null, T::const_expr)
+    }
+}
+/// A property typed as a class, whose one default php's stubs write is
+/// `null`: `private ?Throwable $previous = null` is `Option<Instance<C>>`
+/// with `None`, and no Rust value stands for an object default.
+impl<C: Class> PropertyValue for Instance<C> {
+    type Const = std::convert::Infallible;
+    fn const_expr(value: std::convert::Infallible) -> ConstExpr {
+        match value {}
     }
 }
 impl PropertyValue for Value {
@@ -216,6 +225,17 @@ into_const!(String, Type::String, |s| ConstExpr::Str(
     s.as_bytes().into()
 ));
 into_const!(ConstArray, Type::Array, |array| array.expr());
+
+/// A plain value with no declared type, for a constant php declares by
+/// value alone, `NULL` among them.
+impl IntoConst for ConstValue {
+    fn declared() -> Option<Type> {
+        None
+    }
+    fn value(&self) -> ConstExpr {
+        self.expr()
+    }
+}
 
 /// A constant whose type no plain Rust type gives (`int|array`, `mixed`,
 /// `null`): `T` says the type and `V` holds the value, `const X:
