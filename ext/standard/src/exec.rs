@@ -146,7 +146,8 @@ enum Mode {
 /// the command's `output` read a line at a time and handled as `mode`
 /// says, the last line with its trailing whitespace taken off as the
 /// answer (the empty string where there was none) and `pclose`'s status;
-/// php's warning and `false` where the shell could not be started.
+/// php's warning and `false` where the shell could not be started. The
+/// pipe is php's plain stream, whose reads clear the stat cache.
 fn php_exec(
     req: &mut Request,
     mode: Mode,
@@ -162,6 +163,9 @@ fn php_exec(
         return Ok((Ran::Failed, pclose(child)));
     };
     let mut reader = BufReader::new(pipe);
+    // `php_stdiop_read`'s `php_clear_stat_cache`, since the command may
+    // have changed any file (`Z/main/streams/plain_wrapper.c:500`).
+    req.clear_stat_cache();
     if mode == Mode::Raw {
         let mut chunk = vec![0u8; 4096];
         while let Ok(read) = reader.read(&mut chunk) {
@@ -250,6 +254,23 @@ fn last_line(ran: Ran) -> OrFalse<PhpString> {
 /// }
 /// bool(true)
 /// exec(): Argument #1 ($command) must not be empty
+/// ```
+///
+/// Reading what the command wrote clears the stat cache, as the plain
+/// stream php reads it through does, so a file the command touched is
+/// stat'd again; `shell_exec` the same.
+///
+/// ```php
+/// $f = __DIR__ . '/exec-stat.txt';
+/// touch($f, 1); var_dump(filemtime($f)); exec("touch $f"); var_dump(filemtime($f) > 1);
+/// touch($f, 1); var_dump(filemtime($f)); shell_exec("touch $f"); var_dump(filemtime($f) > 1);
+/// unlink($f);
+/// ```
+/// ```expect
+/// int(1)
+/// bool(true)
+/// int(1)
+/// bool(true)
 /// ```
 #[php_function]
 fn exec(
@@ -533,6 +554,9 @@ fn shell_exec(req: &mut Request, command: PhpString) -> Result<Option<OrFalse<Ph
         let _ = pipe.read_to_end(&mut written);
     }
     pclose(child);
+    // The pipe is read through php's plain stream, whose reads clear the
+    // stat cache (`Z/main/streams/plain_wrapper.c:500`).
+    req.clear_stat_cache();
     if written.is_empty() {
         return Ok(None);
     }
