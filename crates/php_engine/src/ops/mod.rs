@@ -4245,7 +4245,28 @@ fn longs(
 /// reports. A double goes through [`double_to_long`]; a string is read
 /// by [`numeric_prefix`] with php's warning for what follows its number,
 /// and a double among them is `zend_dval_to_lval_cap`'s saturated long,
-/// with the float-string deprecation where that lost something.
+/// with the float-string deprecation where that lost something. The
+/// string is held across the warning, php's `op_str` copy, since a
+/// handler it reaches may give up the variable the string hangs from and
+/// the deprecation names it after.
+///
+/// ```php
+/// set_error_handler(function ($no, $message) {
+///     echo $message, "\n";
+///     unset($GLOBALS['x']);
+/// });
+/// $x = str_repeat("3e33", 2);
+/// var_dump($x & true);
+/// $x = str_repeat("7", 2) . "x";
+/// var_dump($x | 0);
+/// ```
+/// ```expect
+/// A non-numeric value encountered
+/// Implicit conversion from float-string "3e333e33" to int loses precision
+/// int(0)
+/// A non-numeric value encountered
+/// int(77)
+/// ```
 fn to_long(req: &mut Request, value: &Value) -> Option<i64> {
     if let Some(n) = value.as_int() {
         return Some(n);
@@ -4253,27 +4274,36 @@ fn to_long(req: &mut Request, value: &Value) -> Option<i64> {
     if let Some(d) = value.as_float() {
         return Some(double_to_long(req, d));
     }
-    if let Some(s) = value.as_php_string() {
+    if let Some(s) = value.as_php_string().copied() {
         let (number, trailing) = numeric_prefix(s.as_bytes())?;
+        let d = match number {
+            Number::Long(n) => {
+                if trailing {
+                    warning(req, "A non-numeric value encountered");
+                }
+                return Some(n);
+            }
+            Number::Double(d) => d,
+        };
+        // `op_str = zend_string_copy(Z_STR_P(op))`: a handler the warning
+        // reaches may give up the string's every other owner, and the
+        // deprecation after it names the string.
+        let held = req.take_hold(Value::string(s));
         if trailing {
             warning(req, "A non-numeric value encountered");
         }
-        return Some(match number {
-            Number::Long(n) => n,
-            Number::Double(d) => {
-                let capped = dval_to_lval_cap(d);
-                if !long_compatible(d, capped) {
-                    deprecated(
-                        req,
-                        &format!(
-                            "Implicit conversion from float-string \"{}\" to int loses precision",
-                            String::from_utf8_lossy(s.as_bytes())
-                        ),
-                    );
-                }
-                capped
-            }
-        });
+        let capped = dval_to_lval_cap(d);
+        if !long_compatible(d, capped) {
+            deprecated(
+                req,
+                &format!(
+                    "Implicit conversion from float-string \"{}\" to int loses precision",
+                    String::from_utf8_lossy(s.as_bytes())
+                ),
+            );
+        }
+        req.let_go(held);
+        return Some(capped);
     }
     if let Some(b) = value.as_bool() {
         return Some(i64::from(b));
