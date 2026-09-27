@@ -67,7 +67,8 @@ fn has_method(req: &mut Request, class: php_ext::values::ClassId, method: &[u8])
 /// `ce->ce_flags & ZEND_ACC_NOT_SERIALIZABLE`, the refusal
 /// `php_var_serialize_intern` and `object_common` raise before anything
 /// else of an object: the class, or a class it extends, declares
-/// `not_serializable`, which `zend_do_inheritance_ex` passes down.
+/// `not_serializable`, which `zend_do_inheritance_ex` passes down and
+/// `Request::class_flags` answers.
 /// `Some` of the class's name as php's `%s` prints `ce->name`, up to
 /// its first NUL, so an anonymous class is `class@anonymous`.
 ///
@@ -86,21 +87,12 @@ fn has_method(req: &mut Request, class: php_ext::values::ClassId, method: &[u8])
 /// O:11:"ArrayObject":4:{i:0;i:0;i:1;a:1:{i:0;i:1;}i:2;a:0:{}i:3;N;}
 /// ```
 fn not_serializable(req: &mut Request, class: php_ext::values::ClassId) -> Option<String> {
-    let mut at = Some(class);
-    for _ in 0..64 {
-        let decl = req.class_decl(at?)?;
-        if decl.flags.not_serializable {
-            let name = req.class_decl(class)?.name.0.to_vec();
-            let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-            return Some(String::from_utf8_lossy(&name[..end]).into_owned());
-        }
-        let parent = decl.parent.as_ref().map(|p| p.0.to_vec());
-        at = match parent {
-            Some(parent) => php_ext::call::lookup_class(req, &parent).ok().flatten(),
-            None => None,
-        };
+    if !req.class_flags(class)?.not_serializable {
+        return None;
     }
-    None
+    let name = &req.class_decl(class)?.name.0;
+    let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+    Some(String::from_utf8_lossy(&name[..end]).into_owned())
 }
 
 /// Whether the object is an enum case.

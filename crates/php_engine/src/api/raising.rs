@@ -446,7 +446,7 @@ mod tests {
     use crate::engine::Engine;
     use crate::test::Capture;
 
-    use super::{Thrown, arg_type_error, arg_value_error, throw_at};
+    use super::{Thrown, arg_type_error, arg_value_error, new_throwable, throw, throw_at};
 
     fn parameter(name: &[u8], ty: Type, variadic: bool) -> Parameter {
         Parameter {
@@ -495,6 +495,17 @@ mod tests {
         Err(throw_at(req, "ParseError", "Unclosed '('", b"", 1))
     }
 
+    /// A native whose body throws a class the bundle may not link, as
+    /// `php_macros`' parity test met it (#970).
+    fn unlinked(req: &mut Request) -> Result<Value, Thrown> {
+        Err(throw(req, "LogicException", "never returns"))
+    }
+
+    /// The same class made and not thrown.
+    fn unlinked_made(req: &mut Request) -> Result<Value, Thrown> {
+        new_throwable(req, "LogicException", "never made")
+    }
+
     /// The fatal a source comes to under an engine with the natives
     /// above declared beside the core's.
     fn fatal_of(source: &str) -> Option<String> {
@@ -522,6 +533,11 @@ mod tests {
                     array_merge as Entry,
                 ),
                 (declared(b"refuse", Vec::new()), refuse as Entry),
+                (declared(b"unlinked", Vec::new()), unlinked as Entry),
+                (
+                    declared(b"unlinked_made", Vec::new()),
+                    unlinked_made as Entry,
+                ),
             ])
             .build("raising");
         Engine::builder()
@@ -605,5 +621,28 @@ mod tests {
         );
         assert_eq!(served.exit_code, 255);
         assert_eq!(served.fatal, None);
+    }
+
+    /// A raiser naming a class the bundle does not link, `spl`'s
+    /// `LogicException` under an engine that links only the natives
+    /// above, ends the request in the `InternalError` fatal naming the
+    /// class, where it threw an object of whatever class held id zero,
+    /// its properties written as dynamic ones. php has no such call:
+    /// `zend_throw_error` takes a class entry, so nothing throws a
+    /// class nothing registered.
+    #[test]
+    fn a_raiser_naming_an_unlinked_class_is_the_internal_error_naming_it() {
+        for native in ["unlinked", "unlinked_made"] {
+            let served = served(&format!("<?php {native}(); echo 'after';"));
+            let stdout = String::from_utf8_lossy(&served.stdout);
+            assert_eq!(
+                stdout,
+                format!(
+                    "\nFatal error: InternalError: the class LogicException is not linked into this engine in Standard input code on line 1\nStack trace:\n#0 Standard input code(1): {native}()\n#1 {{main}}\n"
+                ),
+                "{native}"
+            );
+            assert_eq!(served.exit_code, 255, "{native}");
+        }
     }
 }

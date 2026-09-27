@@ -18,6 +18,7 @@
 
 use std::cmp::Ordering;
 
+use php_unit::Level;
 use php_unit::decl::{
     FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, Type, Visibility,
 };
@@ -1276,22 +1277,7 @@ impl Exception {
         #[php(default = 0)] code: Passed<i64>,
         #[php(default = null)] previous: Passed<Option<Instance<Throwable>>>,
     ) -> Result<(), Thrown> {
-        let this = this.object();
-        if let Passed::Given(message) = message {
-            let message = Value::string(message);
-            req.addref(&message);
-            write_throwable_property(req, this, b"message", message)?;
-        }
-        if let Passed::Given(code) = code {
-            write_throwable_property(req, this, b"code", Value::int(code))?;
-        }
-        if let Passed::Given(previous) = previous {
-            let previous =
-                previous.map_or_else(Value::null, |previous| previous.object().as_value());
-            req.addref(&previous);
-            write_throwable_property(req, this, b"previous", previous)?;
-        }
-        Ok(())
+        update_exception_properties(req, this.object(), message, code, previous)
     }
 
     /// `ZEND_METHOD(Exception, __wakeup)`: after `unserialize`, a `message`
@@ -1537,6 +1523,222 @@ impl Exception {
     }
 }
 
+/// `class ErrorException extends Exception`, `zend_exceptions.stub.php`'s:
+/// one property of its own, `protected int $severity = E_ERROR`, after the
+/// five it inherits, its constructor over php's six parameters and the
+/// final `getSeverity`; the rest is `Exception`'s, inherited. What an
+/// error handler converts a diagnostic into.
+///
+/// ```php
+/// echo new ReflectionClass('ErrorException');
+/// ```
+/// ```expect
+/// Class [ <internal:Core> class ErrorException extends Exception implements Throwable, Stringable ] {
+///
+///   - Constants [0] {
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [0] {
+///   }
+///
+///   - Properties [5] {
+///     Property [ protected $message = '' ]
+///     Property [ protected $code = 0 ]
+///     Property [ protected string $file = '' ]
+///     Property [ protected int $line = 0 ]
+///     Property [ protected int $severity = 1 ]
+///   }
+///
+///   - Methods [11] {
+///     Method [ <internal:Core, overwrites Exception, ctor> public method __construct ] {
+///
+///       - Parameters [6] {
+///         Parameter #0 [ <optional> string $message = "" ]
+///         Parameter #1 [ <optional> int $code = 0 ]
+///         Parameter #2 [ <optional> int $severity = E_ERROR ]
+///         Parameter #3 [ <optional> ?string $filename = null ]
+///         Parameter #4 [ <optional> ?int $line = null ]
+///         Parameter #5 [ <optional> ?Throwable $previous = null ]
+///       }
+///     }
+///
+///     Method [ <internal:Core> final public method getSeverity ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ int ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception> public method __wakeup ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Tentative return [ void ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getMessage ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getCode ] {
+///
+///       - Parameters [0] {
+///       }
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getFile ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getLine ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ int ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getTrace ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ array ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getPrevious ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ ?Throwable ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getTraceAsString ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Stringable> public method __toString ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///   }
+/// }
+/// ```
+///
+/// The handler that converts every diagnostic, the commonest there is:
+/// the level becomes the severity and the diagnostic's site the
+/// throwable's, and an uncaught one is rendered as any other.
+///
+/// ```php
+/// set_error_handler(function (int $no, string $str, string $file, int $line) {
+///     throw new ErrorException($str, 0, $no, $file, $line);
+/// });
+/// try { echo $undefined; } catch (ErrorException $e) {
+///     var_dump($e->getMessage(), $e->getSeverity() === E_WARNING, $e->getLine(), $e->getFile() === __FILE__);
+/// }
+/// $a = [];
+/// echo $a["missing"];
+/// ```
+/// ```expect exit=255
+/// string(29) "Undefined variable $undefined"
+/// bool(true)
+/// int(5)
+/// bool(true)
+///
+/// Fatal error: Uncaught ErrorException: Undefined array key "missing" in %s:9
+/// Stack trace:
+/// #0 %s(9): {closure:%s:2}(2, 'Undefined array...', '%s', 9)
+/// #1 {main}
+///   thrown in %s on line 9
+/// ```
+#[php_class(extends(Exception))]
+pub(crate) struct ErrorException;
+
+#[php_class]
+impl ErrorException {
+    #[php(property, protected)]
+    const severity: i64 = Level::Error.bit();
+
+    /// `ZEND_METHOD(ErrorException, __construct)`: `zend_parse_parameters`
+    /// over `|SllS!l!O!`, then `Exception`'s three written as
+    /// `zend_update_exception_properties` writes them, the severity
+    /// always, the file where one was named, and the line where one was
+    /// given, or `0` where a file was named without one.
+    ///
+    /// ```php
+    /// $e = new ErrorException();
+    /// var_dump($e->getSeverity(), $e->getLine(), $e->getFile() === __FILE__);
+    /// $e = new ErrorException("m", 3, E_NOTICE, "f.php");
+    /// var_dump($e->getMessage(), $e->getCode(), $e->getSeverity(), $e->getFile(), $e->getLine());
+    /// $e = new ErrorException("m", 0, E_USER_ERROR, null, 42, new Exception("p"));
+    /// var_dump($e->getLine(), $e->getFile() === __FILE__, $e->getPrevious()->getMessage());
+    /// new ErrorException("m", 0, "high");
+    /// ```
+    /// ```expect exit=255
+    /// int(1)
+    /// int(2)
+    /// bool(true)
+    /// string(1) "m"
+    /// int(3)
+    /// int(8)
+    /// string(5) "f.php"
+    /// int(0)
+    /// int(42)
+    /// bool(true)
+    /// string(1) "p"
+    ///
+    /// Fatal error: Uncaught TypeError: ErrorException::__construct(): Argument #3 ($severity) must be of type int, string given in %s:8
+    /// Stack trace:
+    /// #0 %s(8): ErrorException->__construct('m', 0, 'high')
+    /// #1 {main}
+    ///   thrown in %s on line 8
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = "")] message: Passed<PhpString>,
+        #[php(default = 0)] code: Passed<i64>,
+        #[php(default = E_ERROR)] severity: i64,
+        #[php(default = null)] filename: Option<PhpString>,
+        #[php(default = null)] line: Option<i64>,
+        #[php(default = null)] previous: Passed<Option<Instance<Throwable>>>,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        update_exception_properties(req, this, message, code, previous)?;
+        write_throwable_property(req, this, b"severity", Value::int(severity))?;
+        let named = filename.is_some();
+        if let Some(filename) = filename {
+            let filename = Value::string(filename);
+            req.addref(&filename);
+            write_throwable_property(req, this, b"file", filename)?;
+        }
+        match line {
+            Some(line) => write_throwable_property(req, this, b"line", Value::int(line)),
+            None if named => write_throwable_property(req, this, b"line", Value::int(0)),
+            None => Ok(()),
+        }
+    }
+
+    /// `ZEND_METHOD(ErrorException, getSeverity)`: the `severity`
+    /// property. The witnesses are the constructor's.
+    #[php(final)]
+    fn getSeverity(req: &mut Request, this: This<Self>) -> Result<Raw<i64>, Thrown> {
+        throwable_property(req, this.object(), b"severity")
+    }
+}
+
 /// `class Error implements Throwable`: `Exception`'s properties, `$line`
 /// with no default, and its eleven methods, each the stub's
 /// `@implementation-alias` of `Exception`'s, so one entry serves both.
@@ -1653,6 +1855,33 @@ pub(crate) struct RequestParseBodyException;
 
 #[php_class]
 impl RequestParseBodyException {}
+
+/// `zend_update_exception_properties` (`Z/Zend/zend_exceptions.c:331`),
+/// what `Exception::__construct` and `ErrorException::__construct` share:
+/// each of `message`, `code` and `previous` that was given written onto
+/// the receiver, the property's default left where one is absent.
+fn update_exception_properties(
+    req: &mut Request,
+    this: PhpObject,
+    message: Passed<PhpString>,
+    code: Passed<i64>,
+    previous: Passed<Option<Instance<Throwable>>>,
+) -> Result<(), Thrown> {
+    if let Passed::Given(message) = message {
+        let message = Value::string(message);
+        req.addref(&message);
+        write_throwable_property(req, this, b"message", message)?;
+    }
+    if let Passed::Given(code) = code {
+        write_throwable_property(req, this, b"code", Value::int(code))?;
+    }
+    if let Passed::Given(previous) = previous {
+        let previous = previous.map_or_else(Value::null, |previous| previous.object().as_value());
+        req.addref(&previous);
+        write_throwable_property(req, this, b"previous", previous)?;
+    }
+    Ok(())
+}
 
 /// `zend_update_property_ex` on the throwable's base class: the value
 /// written by name, one owner of it the object's.
