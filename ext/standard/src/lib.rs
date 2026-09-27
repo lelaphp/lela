@@ -734,6 +734,7 @@ pub fn extension() -> Extension {
         .class::<dir::Directory>()
         .ini(var::ini())
         .ini(sockets::ini())
+        .ini(file::ini())
         .dependencies(dependencies())
         .ini(assert::ini())
         .ini(browscap::ini())
@@ -748,10 +749,14 @@ pub fn extension() -> Extension {
 }
 
 /// The `on_modify` of each entry that has one, php's `PHP_INI_MH` at
-/// runtime: the URL rewriter's two over session's entries, and the five
-/// of `assert.c`.
-fn ini_handlers() -> [(&'static [u8], OnModify); 7] {
+/// runtime: `file.c`'s `auto_detect_line_endings`, the URL rewriter's
+/// two over session's entries, and the five of `assert.c`.
+fn ini_handlers() -> [(&'static [u8], OnModify); 8] {
     [
+        (
+            b"auto_detect_line_endings",
+            file::on_auto_detect_line_endings,
+        ),
         (b"session.trans_sid_tags", url_scanner::on_session_tags),
         (b"session.trans_sid_hosts", url_scanner::on_session_hosts),
         (b"assert.active", assert::on_active),

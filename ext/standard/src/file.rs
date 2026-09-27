@@ -147,9 +147,48 @@ use php_ext::abi::{OrFalse, Passed, Path, Ref, Union, Untyped, Variadic};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
 use php_ext::coerce::to_string;
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
+use php_ext::decl::{IniDecl, Name};
+use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw};
 use php_ext::request::{Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+
+/// `file.c`'s `auto_detect_line_endings`, `PHP_INI_ALL` and off, which
+/// every stream made while it is on starts detecting its line endings
+/// with (the engine's `_php_stream_alloc`).
+pub(crate) fn ini() -> Vec<IniDecl> {
+    vec![IniDecl {
+        name: Name(b"auto_detect_line_endings".as_slice().into()),
+        default: b"0".as_slice().into(),
+        user: true,
+        per_dir: true,
+        system: true,
+    }]
+}
+
+/// `OnUpdateAutoDetectLineEndings` (`Z/ext/standard/file.c:143`): a value
+/// that turns it on is php's deprecation, raised by `zend_error` and so
+/// with no function before it, `in Unknown on line 0` at startup.
+///
+/// ```php
+/// var_dump(ini_set('auto_detect_line_endings', '1'), ini_get('auto_detect_line_endings'), ini_set('auto_detect_line_endings', '0'));
+/// ```
+/// ```expect
+/// Deprecated: auto_detect_line_endings is deprecated in %s on line 2
+/// string(1) "0"
+/// string(1) "1"
+/// string(1) "1"
+/// ```
+#[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
+pub(crate) fn on_auto_detect_line_endings(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+    if Request::ini_parse_bool(value) {
+        raise(
+            req,
+            Level::Deprecated,
+            "auto_detect_line_endings is deprecated",
+        );
+    }
+    Ok(true)
+}
 
 use std::os::unix::ffi::OsStrExt;
 

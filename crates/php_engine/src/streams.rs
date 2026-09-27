@@ -356,6 +356,21 @@ struct Flags {
     /// `PHP_STREAM_FLAG_IS_DIR`, which `php_stream_opendir` sets, with
     /// the `PHP_STREAM_FLAG_NO_FCLOSE` `opendir` sets beside it.
     is_dir: bool,
+    /// `PHP_STREAM_FLAG_DETECT_EOL` and `PHP_STREAM_FLAG_EOL_MAC`.
+    eol: Eol,
+}
+
+/// What ends a line for `php_stream_locate_eol`: `\n`, php's default,
+/// which a DOS `\r\n` ends in too; `\r` alone, once a line was found
+/// to end so; or not yet known, where `auto_detect_line_endings` was on
+/// as the stream was made (`PHP_STREAM_FLAG_DETECT_EOL`), which the
+/// first line that ends settles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Eol {
+    #[default]
+    Unix,
+    Mac,
+    Detect,
 }
 
 impl PhpStream {
@@ -733,6 +748,50 @@ impl PhpStream {
     /// `maxlen` is php's, so at most `maxlen - 1` bytes, and `None` is
     /// php's `grow_mode`, a line of any length. `None` back is a line of no
     /// bytes, at eof or after a read that failed.
+    /// `php_stream_locate_eol` (`Z/main/streams/streams.c:909`) over the
+    /// read buffer: where the line ends, `\n` or, for a stream found to
+    /// end its lines with `\r` alone, `\r`; a stream still detecting
+    /// settles on `\r` where one stands with no `\n` right after it and
+    /// no `\n` before it, and on `\n` where a `\n` stands.
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/eol.txt';
+    /// file_put_contents($f, "one\rtwo\rthree");
+    /// $show = fn($line) => var_dump(strtr($line, "\r", '|'));
+    /// $h = fopen($f, 'r'); $show(fgets($h));
+    /// @ini_set('auto_detect_line_endings', '1');
+    /// $h = fopen($f, 'r'); $show(fgets($h)); $show(fgets($h)); $show(fgets($h));
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// string(13) "one|two|three"
+    /// string(4) "one|"
+    /// string(4) "two|"
+    /// string(5) "three"
+    /// ```
+    fn locate_eol(&mut self) -> Option<usize> {
+        let held = &self.readbuf[self.readpos..self.writepos];
+        let find = |byte: u8| held.iter().position(|b| *b == byte);
+        match self.flags.eol {
+            Eol::Unix => find(b'\n'),
+            Eol::Mac => find(b'\r'),
+            Eol::Detect => {
+                let (cr, lf) = (find(b'\r'), find(b'\n'));
+                match cr {
+                    Some(cr) if lf != Some(cr + 1) && lf.is_none_or(|lf| lf > cr) => {
+                        self.flags.eol = Eol::Mac;
+                        Some(cr)
+                    }
+                    _ if lf.is_some() => {
+                        self.flags.eol = Eol::Unix;
+                        lf
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
+
     pub(crate) fn get_line(&mut self, req: &mut Request, maxlen: Option<usize>) -> Option<Vec<u8>> {
         if maxlen == Some(0) {
             return None;
@@ -742,8 +801,9 @@ impl PhpStream {
         loop {
             let avail = self.writepos - self.readpos;
             if avail > 0 {
+                let eol = self.locate_eol();
                 let held = &self.readbuf[self.readpos..self.writepos];
-                let (mut cpysz, mut done) = match held.iter().position(|b| *b == b'\n') {
+                let (mut cpysz, mut done) = match eol {
                     Some(eol) => (eol + 1, true),
                     None => (avail, false),
                 };
@@ -3186,7 +3246,15 @@ impl Request {
     /// `php_stream_alloc`'s `zend_register_resource(ret, le_stream)`: the
     /// stream as the payload of a resource of the `stream` type, one
     /// owner, under the next id.
-    pub(crate) fn stream_alloc(&mut self, stream: PhpStream) -> Result<Stream, Thrown> {
+    pub(crate) fn stream_alloc(&mut self, mut stream: PhpStream) -> Result<Stream, Thrown> {
+        // `_php_stream_alloc`'s `FG(auto_detect_line_endings)`
+        // (`Z/main/streams/streams.c:326`).
+        if self
+            .ini_get(b"auto_detect_line_endings")
+            .is_some_and(Request::ini_parse_bool)
+        {
+            stream.flags.eol = Eol::Detect;
+        }
         let kind = self.stream_type();
         let res = self.new_resource(kind, Some(stream))?;
         if let Some(Some(stream)) = self.resource_native_mut::<Option<PhpStream>>(res.heap()) {
