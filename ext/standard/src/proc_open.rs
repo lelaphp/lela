@@ -21,19 +21,16 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::process::{Command, Stdio};
 
+use php_ext::abi::{OrFalse, Path, Ref, Union, Untyped};
+use php_ext::attr::php_function;
 use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::FunctionDecl;
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{Cast, FdStream, Request, Stream};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
-use crate::file::stream_argument;
+use crate::State;
 use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{
-    ArrayOr, array_argument, array_or_string, assign_ref, nullable_array, nullable_string,
-};
-use crate::{State, argument_count_between, long_argument, string_argument};
 
 /// What the request keeps for `proc_open`: the `process` resource type,
 /// registered on first use; `FG(pclose_wait)`, set while `proc_close`
@@ -114,20 +111,12 @@ struct Process {
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (stub("pclose($handle): int"), pclose as Entry),
-        (stub("popen(string $command, string $mode)"), popen),
-        (
-            stub(
-                "proc_open(array|string $command, array $descriptor_spec, &$pipes, ?string $cwd = null, ?array $env_vars = null, ?array $options = null)",
-            ),
-            proc_open,
-        ),
-        (stub("proc_close($process): int"), proc_close),
-        (
-            stub("proc_terminate($process, int $signal = 15): bool"),
-            proc_terminate,
-        ),
-        (stub("proc_get_status($process): array"), proc_get_status),
+        pclose::declared(),
+        popen::declared(),
+        proc_open::declared(),
+        proc_close::declared(),
+        proc_terminate::declared(),
+        proc_get_status::declared(),
     ]
 }
 
@@ -185,13 +174,14 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// popen(): Argument #1 ($command) must not contain any null bytes
 /// popen(): Argument #2 ($mode) must be one of "r", "rb", "w", or "wb"
 /// ```
-fn popen(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let command = string_argument(req, 1)?.as_bytes().to_vec();
-    if command.contains(&0) {
-        return Err(arg_value_error(req, 1, "not contain any null bytes"));
-    }
-    let mode = string_argument(req, 2)?.as_bytes().to_vec();
+#[php_function]
+fn popen(
+    req: &mut Request,
+    command: Path,
+    mode: PhpString,
+) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+    let command = command.0.as_bytes().to_vec();
+    let mode = mode.as_bytes().to_vec();
     let mut posix_mode = mode.clone();
     if let Some(at) = posix_mode.iter().position(|b| *b == b'b') {
         posix_mode.remove(at);
@@ -214,7 +204,7 @@ fn popen(req: &mut Request) -> Result<Value, Thrown> {
     if posix_mode.len() == 2 {
         let text = strerror(req, libc_einval());
         shown(req, &text);
-        return Ok(Value::bool(false));
+        return Ok(Untyped(OrFalse::False));
     }
     let reading = posix_mode == b"r";
     let mut sh = shell(req, &command);
@@ -228,7 +218,7 @@ fn popen(req: &mut Request) -> Result<Value, Thrown> {
         Err(error) => {
             let text = strerror(req, error.raw_os_error().unwrap_or(0));
             shown(req, &text);
-            return Ok(Value::bool(false));
+            return Ok(Untyped(OrFalse::False));
         }
     };
     let pipe: Option<OwnedFd> = if reading {
@@ -237,10 +227,10 @@ fn popen(req: &mut Request) -> Result<Value, Thrown> {
         child.stdin.take().map(OwnedFd::from)
     };
     let Some(pipe) = pipe else {
-        return Ok(Value::bool(false));
+        return Ok(Untyped(OrFalse::False));
     };
     let stream = req.stream_from_fd(pipe, FdStream::Process { mode: &mode, child })?;
-    Ok(stream.as_value())
+    Ok(Untyped(OrFalse::Value(stream.resource())))
 }
 
 /// `strerror(errno)`: the host's text for an `errno`, without the
@@ -292,10 +282,9 @@ fn in_request(req: &Request, command: &mut Command) {
 /// int(0)
 /// pclose(): Argument #1 ($handle) must be of type resource, int given
 /// ```
-fn pclose(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
-    Ok(Value::int(stream.pclose(req)))
+#[php_function]
+fn pclose(req: &mut Request, handle: Stream) -> i64 {
+    handle.pclose(req)
 }
 
 // ---------------------------------------------------------- proc_open
@@ -405,20 +394,10 @@ fn process_dtor(req: &mut Request, res: Resource) {
     req.state::<State>().proc_open.pclose_ret = i64::from(ret);
 }
 
-/// `Z_PARAM_RESOURCE` then `zend_fetch_resource(res, "process",
-/// le_proc_open)`: the argument as a live `process` resource, the
-/// parser's `TypeError` for a value that is no resource, and the fetch's
-/// for one of another type or closed.
-fn process_argument(req: &mut Request, native: &str) -> Result<Resource, Thrown> {
-    let given = req.argument(1).unwrap_or_default().deref();
-    let Some(res) = given.as_resource().copied() else {
-        let name = value_name(req, &given);
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type resource, {name} given"),
-        ));
-    };
+/// `zend_fetch_resource(res, "process", le_proc_open)` over the
+/// resource `Z_PARAM_RESOURCE` held: a live `process` resource, and the
+/// fetch's `TypeError` for one of another type or closed.
+fn process_of(req: &mut Request, res: Resource, native: &str) -> Result<Resource, Thrown> {
     let kind = process_type(req);
     if res.kind() != Some(kind) {
         let text = format!("{native}(): supplied resource is not a valid process resource");
@@ -868,21 +847,26 @@ fn environment(req: &mut Request, env: PhpArray) -> Result<Env, Thrown> {
 /// Warning: proc_open(): Cannot represent a stream of type MEMORY as a File Descriptor in %s on line 17
 /// bool(false)
 /// ```
-fn proc_open(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 3, 6)?;
-    let command = array_or_string(req, 1, false)?;
-    let descriptorspec = array_argument(req, 2)?;
-    let cwd = nullable_string(req, 4)?.map(|cwd| cwd.as_bytes().to_vec());
-    let environment_arg = nullable_array(req, 5)?;
-    nullable_array(req, 6)?;
-    let (command_str, argv) = command_of(req, command.as_ref())?;
-    let env = match environment_arg {
+#[php_function]
+fn proc_open(
+    req: &mut Request,
+    command: Union<PhpArray, PhpString>,
+    descriptor_spec: PhpArray,
+    pipes: Ref<Untyped<Value>>,
+    #[php(default = null)] cwd: Option<PhpString>,
+    #[php(default = null)] env_vars: Option<PhpArray>,
+    #[php(default = null)] options: Option<PhpArray>,
+) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+    let _ = options;
+    let cwd = cwd.map(|cwd| cwd.as_bytes().to_vec());
+    let (command_str, argv) = command_of(req, command)?;
+    let env = match env_vars {
         Some(env) => Some(environment(req, env)?),
         None => None,
     };
     let mut descriptors: Vec<Descriptor> = Vec::new();
     let mut pty = Pty::default();
-    for (key, item) in descriptorspec.snapshot() {
+    for (key, item) in descriptor_spec.snapshot() {
         let Key::Int(index) = key else {
             return Err(arg_value_error(req, 2, "be an integer indexed array"));
         };
@@ -896,7 +880,7 @@ fn proc_open(req: &mut Request) -> Result<Value, Thrown> {
         };
         match made {
             Some(descriptor) => descriptors.push(descriptor),
-            None => return Ok(Value::bool(false)),
+            None => return Ok(Untyped(OrFalse::False)),
         }
     }
     let child = child_command(
@@ -907,10 +891,10 @@ fn proc_open(req: &mut Request) -> Result<Value, Thrown> {
         env.as_ref(),
     );
     let Some(pid) = spawn(req, child, &descriptors) else {
-        return Ok(Value::bool(false));
+        return Ok(Untyped(OrFalse::False));
     };
     drop(pty);
-    let mut pipes = PhpArray::new(req)?;
+    let mut opened = PhpArray::new(req)?;
     let mut held = Vec::new();
     for descriptor in descriptors {
         let Descriptor {
@@ -927,11 +911,11 @@ fn proc_open(req: &mut Request) -> Result<Value, Thrown> {
         if let Some(stream) = stream {
             let value = stream.as_value();
             req.addref(&value);
-            pipes.set(req, Key::Int(index), value)?;
+            opened.set(req, Key::Int(index), value)?;
             held.push(stream.resource());
         }
     }
-    assign_ref(req, 3, Value::array(pipes))?;
+    pipes.set(req, Untyped(Value::array(opened)))?;
     let kind = process_type(req);
     let process = Process {
         child: pid,
@@ -940,7 +924,7 @@ fn proc_open(req: &mut Request) -> Result<Value, Thrown> {
         cached: None,
     };
     let res = Resource::new(req, kind, process)?;
-    Ok(res.as_value())
+    Ok(Untyped(OrFalse::Value(res)))
 }
 
 /// The command as `proc_get_status` prints it, and the `argv` of an
@@ -950,12 +934,9 @@ type Commanded = (Vec<u8>, Option<Vec<Vec<u8>>>);
 /// `get_command_from_array` (`Z/ext/standard/proc_open.c:777`) and the
 /// string form: the command as `proc_get_status` prints it, the first
 /// element of an array, and the array's elements as `argv`.
-fn command_of(
-    req: &mut Request,
-    command: Option<&ArrayOr<PhpString>>,
-) -> Result<Commanded, Thrown> {
+fn command_of(req: &mut Request, command: Union<PhpArray, PhpString>) -> Result<Commanded, Thrown> {
     match command {
-        Some(ArrayOr::Array(array)) => {
+        Union::A(array) => {
             if array.is_empty() {
                 return Err(arg_value_error(req, 1, "not be empty"));
             }
@@ -965,8 +946,7 @@ fn command_of(
             }
             Ok((argv[0].clone(), Some(argv)))
         }
-        Some(ArrayOr::Other(command)) => Ok((command.as_bytes().to_vec(), None)),
-        None => Ok((Vec::new(), None)),
+        Union::B(command) => Ok((command.as_bytes().to_vec(), None)),
     }
 }
 
@@ -1046,15 +1026,15 @@ fn spawn(req: &mut Request, mut child: Command, descriptors: &[Descriptor]) -> O
 /// proc_close(): supplied resource is not a valid process resource
 /// proc_close(): Argument #1 ($process) must be of type resource, int given
 /// ```
-fn proc_close(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let res = process_argument(req, "proc_close")?;
+#[php_function]
+fn proc_close(req: &mut Request, process: Resource) -> Result<i64, Thrown> {
+    let res = process_of(req, process, "proc_close")?;
     req.state::<State>().proc_open.pclose_wait = true;
     req.state::<State>().proc_open.pclose_ret = -1;
     res.close(req);
     let state = &mut req.state::<State>().proc_open;
     state.pclose_wait = false;
-    Ok(Value::int(state.pclose_ret))
+    Ok(state.pclose_ret)
 }
 
 /// `proc_terminate($process, int $signal = 15): bool`,
@@ -1077,17 +1057,16 @@ fn proc_close(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// int(-1)
 /// ```
-fn proc_terminate(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let res = process_argument(req, "proc_terminate")?;
-    let signal = if req.argument_count() >= 2 {
-        long_argument(req, 2)?
-    } else {
-        15
-    };
+#[php_function]
+fn proc_terminate(
+    req: &mut Request,
+    process: Resource,
+    #[php(default = 15)] signal: i64,
+) -> Result<bool, Thrown> {
+    let res = process_of(req, process, "proc_terminate")?;
     let pid = res.native::<Process>(req).map_or(-1, |p| p.child);
     let signal = i32::try_from(signal).unwrap_or(-1);
-    Ok(Value::bool(crate::ffi::kill(pid, signal)))
+    Ok(crate::ffi::kill(pid, signal))
 }
 
 /// `proc_get_status($process): array`, `PHP_FUNCTION(proc_get_status)`
@@ -1132,11 +1111,14 @@ fn proc_terminate(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// int(-1)
 /// ```
-fn proc_get_status(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let res = process_argument(req, "proc_get_status")?;
+#[php_function]
+fn proc_get_status(req: &mut Request, process: Resource) -> Result<PhpArray, Thrown> {
+    let res = process_of(req, process, "proc_get_status")?;
     let Some(process) = res.native_mut::<Process>(req) else {
-        return Ok(Value::bool(false));
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: a process resource without its process",
+        ));
     };
     let (mut running, mut is_signaled, mut is_stopped) = (true, false, false);
     let (mut exitcode, mut termsig, mut stopsig) = (-1, 0, 0);
@@ -1178,5 +1160,5 @@ fn proc_get_status(req: &mut Request) -> Result<Value, Thrown> {
         let key = Key::Str(PhpString::new(req, name)?);
         out.set(req, key, value)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
