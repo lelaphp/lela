@@ -8,25 +8,56 @@
 
 use std::collections::HashSet;
 
-use php_ext::abi::Callable;
+use php_ext::abi::{Callable, Passed, Raw, Ref, True, Variadic};
+use php_ext::attr::php_function;
 use php_ext::call::call;
-use php_ext::coerce::{coerce_param, truthy, value_name};
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
+use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Thrown, arg_type_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpRef, Value, ValueRef};
 
+use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
+use super::pointer::ArrayOrObject;
 use super::sort::key_value;
 use super::{copied, key_copy};
-use crate::output::Entry;
-use crate::{argument_count_between, callable_argument, declared, long_argument, parameter};
 
-/// `ARRAY_FILTER_USE_BOTH` and `ARRAY_FILTER_USE_KEY`.
-pub(super) const ARRAY_FILTER_USE_BOTH: i64 = 1;
-pub(super) const ARRAY_FILTER_USE_KEY: i64 = 2;
-
-/// The declarations, as `basic_functions.stub.php` has them, the walks'
-/// `$arg` optional with the default php leaves unknown.
+/// `array_walk(array|object &$array, callable $callback, mixed $arg = UNKNOWN): true`,
+/// php's `php_array_walk` (`Z/ext/standard/array.c:1438`):
+/// each element of the array the reference holds made a reference in
+/// place (`ZVAL_MAKE_REF`) and handed to the callback with its key, and
+/// `$arg` third where it was given, so a callback that takes the value
+/// by reference writes the caller's array. The array is read again
+/// after every call, since the callback may change it: an element it
+/// removed is not visited, and one it appended is.
+///
+/// ```php
+/// $a = ["x" => 1, "y" => 2, 3];
+/// var_dump(array_walk($a, function (&$v, $k, $p) { echo "$k "; $v = $p . $v; }, "n"), $a);
+/// ```
+/// ```expect
+/// x y 0 bool(true)
+/// array(3) {
+///   ["x"]=>
+///   string(2) "n1"
+///   ["y"]=>
+///   string(2) "n2"
+///   [0]=>
+///   string(2) "n3"
+/// }
+/// ```
+///
+/// ```php
+/// $a = [1, 2, 3]; array_walk($a, function ($v, $k) use (&$a) { echo $v; if ($k == 0) { unset($a[1]); $a[] = 9; } }); echo "\n";
+/// $b = [1]; try { array_walk($b, function () { throw new Exception("stop"); }); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// $c = 5; try { array_walk($c, 'strlen'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 139
+/// stop
+/// array_walk(): Argument #1 ($array) must be of type array, int given
+/// ```
+///
+/// The declarations of the natives that call back.
 ///
 /// ```php
 /// foreach (['array_walk', 'array_map', 'array_filter', 'array_reduce', 'array_find', 'array_all'] as $f) echo new ReflectionFunction($f);
@@ -85,135 +116,14 @@ pub(super) const ARRAY_FILTER_USE_KEY: i64 = 2;
 ///   - Return [ bool ]
 /// }
 /// ```
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let walk = |name: &[u8], entry: Entry| {
-        (
-            declared(
-                name,
-                &[
-                    Parameter {
-                        by_ref: true,
-                        ..parameter(b"array", Type::Union(vec![Type::Array, Type::Object]))
-                    },
-                    parameter(b"callback", Type::Callable),
-                    Parameter {
-                        default: ParameterDefault::Unshown,
-                        ..parameter(b"arg", Type::Mixed)
-                    },
-                ],
-                Type::True,
-            ),
-            entry,
-        )
-    };
-    let search = |name: &[u8], returns: Type, entry: Entry| {
-        (
-            declared(
-                name,
-                &[
-                    parameter(b"array", Type::Array),
-                    parameter(b"callback", Type::Callable),
-                ],
-                returns,
-            ),
-            entry,
-        )
-    };
-    vec![
-        walk(b"array_walk", array_walk),
-        walk(b"array_walk_recursive", array_walk_recursive),
-        (
-            declared(
-                b"array_reduce",
-                &[
-                    parameter(b"array", Type::Array),
-                    parameter(b"callback", Type::Callable),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Null),
-                        ..parameter(b"initial", Type::Mixed)
-                    },
-                ],
-                Type::Mixed,
-            ),
-            array_reduce,
-        ),
-        (
-            declared(
-                b"array_filter",
-                &[
-                    parameter(b"array", Type::Array),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Null),
-                        ..parameter(b"callback", Type::Nullable(Box::new(Type::Callable)))
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::long(0)),
-                        ..parameter(b"mode", Type::Int)
-                    },
-                ],
-                Type::Array,
-            ),
-            array_filter,
-        ),
-        search(b"array_find", Type::Mixed, array_find),
-        search(b"array_find_key", Type::Mixed, array_find_key),
-        search(b"array_any", Type::Bool, array_any),
-        search(b"array_all", Type::Bool, array_all),
-        (
-            declared(
-                b"array_map",
-                &[
-                    parameter(b"callback", Type::Nullable(Box::new(Type::Callable))),
-                    parameter(b"array", Type::Array),
-                    Parameter {
-                        variadic: true,
-                        ..parameter(b"arrays", Type::Array)
-                    },
-                ],
-                Type::Array,
-            ),
-            array_map,
-        ),
-    ]
-}
-
-/// `array_walk(array|object &$array, callable $callback, mixed $arg = UNKNOWN): true`,
-/// php's `php_array_walk` (`Z/ext/standard/array.c:1438`):
-/// each element of the array the reference holds made a reference in
-/// place (`ZVAL_MAKE_REF`) and handed to the callback with its key, and
-/// `$arg` third where it was given, so a callback that takes the value
-/// by reference writes the caller's array. The array is read again
-/// after every call, since the callback may change it: an element it
-/// removed is not visited, and one it appended is.
-///
-/// ```php
-/// $a = ["x" => 1, "y" => 2, 3];
-/// var_dump(array_walk($a, function (&$v, $k, $p) { echo "$k "; $v = $p . $v; }, "n"), $a);
-/// ```
-/// ```expect
-/// x y 0 bool(true)
-/// array(3) {
-///   ["x"]=>
-///   string(2) "n1"
-///   ["y"]=>
-///   string(2) "n2"
-///   [0]=>
-///   string(2) "n3"
-/// }
-/// ```
-///
-/// ```php
-/// $a = [1, 2, 3]; array_walk($a, function ($v, $k) use (&$a) { echo $v; if ($k == 0) { unset($a[1]); $a[] = 9; } }); echo "\n";
-/// $b = [1]; try { array_walk($b, function () { throw new Exception("stop"); }); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
-/// $c = 5; try { array_walk($c, 'strlen'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// 139
-/// stop
-/// array_walk(): Argument #1 ($array) must be of type array, int given
-/// ```
-fn array_walk(req: &mut Request) -> Result<Value, Thrown> {
-    walk(req, false)
+#[php_function]
+fn array_walk(
+    req: &mut Request,
+    array: Ref<ArrayOrObject>,
+    callback: Raw<Callable>,
+    arg: Passed<Value>,
+) -> Result<True, Thrown> {
+    walk(req, &array, callback, arg, false)
 }
 
 /// `array_walk_recursive(array|object &$array, callable $callback, mixed $arg = UNKNOWN): true`,
@@ -253,14 +163,24 @@ fn array_walk(req: &mut Request) -> Result<Value, Thrown> {
 /// 11
 /// Recursion detected
 /// ```
-fn array_walk_recursive(req: &mut Request) -> Result<Value, Thrown> {
-    walk(req, true)
+#[php_function]
+fn array_walk_recursive(
+    req: &mut Request,
+    array: Ref<ArrayOrObject>,
+    callback: Raw<Callable>,
+    arg: Passed<Value>,
+) -> Result<True, Thrown> {
+    walk(req, &array, callback, arg, true)
 }
 
-fn walk(req: &mut Request, recursive: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let given = req.argument(1).unwrap_or_default();
-    let target = given.deref();
+fn walk(
+    req: &mut Request,
+    given: &Ref<ArrayOrObject>,
+    callback: Raw<Callable>,
+    arg: Passed<Value>,
+    recursive: bool,
+) -> Result<True, Thrown> {
+    let target = given.get().map_or_else(Value::null, Raw::value);
     if !matches!(target.as_ref(), ValueRef::Array(_) | ValueRef::Object(_)) {
         let name = value_name(req, &target);
         return Err(arg_type_error(
@@ -269,26 +189,26 @@ fn walk(req: &mut Request, recursive: bool) -> Result<Value, Thrown> {
             &format!("be of type array, {name} given"),
         ));
     }
-    let callback = callable_argument(req, 2)?;
-    let userdata = if req.argument_count() == 3 {
-        req.argument(3)
-    } else {
-        None
+    // `Z_PARAM_FUNC` after `Z_PARAM_ARRAY_OR_OBJECT_EX`, in php's order.
+    let callback = callback.hold(req)?;
+    let userdata = match arg {
+        Passed::Given(userdata) => Some(userdata),
+        Passed::Omitted => None,
     };
     // A value where a reference was asked for, past the notice: the
     // walk is over a cell of its own, which nobody reads after.
-    let holder = if let ValueRef::Reference(reference) = given.as_ref() {
-        *reference
+    let holder = if let Some(reference) = given.reference() {
+        reference
     } else {
         req.addref(&target);
         PhpRef::new(req, target)?
     };
     let walked = walk_holder(req, holder, &callback, userdata, recursive);
-    if !matches!(given.as_ref(), ValueRef::Reference(_)) {
+    if given.reference().is_none() {
         req.release(holder.as_value());
     }
     walked?;
-    Ok(Value::bool(true))
+    Ok(True)
 }
 
 /// One level of `php_array_walk` over what the cell `holder` holds.
@@ -407,16 +327,6 @@ fn walk_object(
     Ok(())
 }
 
-/// `Z_PARAM_ARRAY` at `position`: the array, or php's `TypeError`.
-pub(super) fn array_argument(req: &mut Request, position: u32) -> Result<PhpArray, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Array, position)?;
-    match coerced.deref().as_array() {
-        Some(array) => Ok(*array),
-        None => PhpArray::new(req),
-    }
-}
-
 /// `array_reduce(array $array, callable $callback, mixed $initial = null):
 /// mixed`, php's `PHP_FUNCTION(array_reduce)`
 /// (`Z/ext/standard/array.c:6510`): the carry, `$initial` or `null`,
@@ -433,17 +343,15 @@ pub(super) fn array_argument(req: &mut Request, position: u32) -> Result<PhpArra
 /// string(5) "empty"
 /// array_reduce(): Argument #2 ($callback) must be a valid callback, function "nope" not found or invalid function name
 /// ```
-fn array_reduce(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let array = array_argument(req, 1)?;
-    let callback = callable_argument(req, 2)?;
-    let mut carry = if req.argument_count() == 3 {
-        let initial = req.argument(3).unwrap_or_default().deref();
-        req.addref(&initial);
-        initial
-    } else {
-        Value::null()
-    };
+#[php_function]
+fn array_reduce(
+    req: &mut Request,
+    array: PhpArray,
+    callback: Callable,
+    #[php(default = null)] initial: Value,
+) -> Result<Value, Thrown> {
+    let mut carry = initial;
+    req.addref(&carry);
     for (_, operand) in array.snapshot_refs() {
         let answer = call(req, &callback, &[carry, operand]);
         req.release(carry);
@@ -498,24 +406,13 @@ fn array_reduce(req: &mut Request) -> Result<Value, Thrown> {
 /// int(2)
 /// stop
 /// ```
-fn array_filter(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let array = array_argument(req, 1)?;
-    let callback = if req.argument_count() >= 2 {
-        let given = req.argument(2).unwrap_or_default().deref();
-        if matches!(given.as_ref(), ValueRef::Null) {
-            None
-        } else {
-            Some(callable_argument(req, 2)?)
-        }
-    } else {
-        None
-    };
-    let mode = if req.argument_count() == 3 {
-        long_argument(req, 3)?
-    } else {
-        0
-    };
+#[php_function]
+fn array_filter(
+    req: &mut Request,
+    array: PhpArray,
+    #[php(default = null)] callback: Option<Callable>,
+    #[php(default = 0)] mode: i64,
+) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, operand) in array.snapshot_refs() {
         let keep = match &callback {
@@ -544,17 +441,19 @@ fn array_filter(req: &mut Request) -> Result<Value, Thrown> {
             out.set(req, key, value)?;
         }
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// What `php_array_find` found: the value and the key of the first
 /// element the callback answered truthy for (falsy, under `negate`).
-fn find(req: &mut Request, negate: bool) -> Result<Option<(Key, Value)>, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let array = array_argument(req, 1)?;
-    let callback = callable_argument(req, 2)?;
+fn find(
+    req: &mut Request,
+    array: PhpArray,
+    callback: &Callable,
+    negate: bool,
+) -> Result<Option<(Key, Value)>, Thrown> {
     for (key, operand) in array.snapshot_refs() {
-        let answer = call(req, &callback, &[operand, key_value(&key)])?;
+        let answer = call(req, callback, &[operand, key_value(&key)])?;
         let truth = truthy(req, &answer);
         req.release(answer);
         if truth != negate {
@@ -577,8 +476,9 @@ fn find(req: &mut Request, negate: bool) -> Result<Option<(Key, Value)>, Thrown>
 /// int(2)
 /// NULL
 /// ```
-fn array_find(req: &mut Request) -> Result<Value, Thrown> {
-    match find(req, false)? {
+#[php_function]
+fn array_find(req: &mut Request, array: PhpArray, callback: Callable) -> Result<Value, Thrown> {
+    match find(req, array, &callback, false)? {
         Some((_, value)) => {
             let value = value.deref();
             req.addref(&value);
@@ -600,8 +500,9 @@ fn array_find(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// NULL
 /// ```
-fn array_find_key(req: &mut Request) -> Result<Value, Thrown> {
-    match find(req, false)? {
+#[php_function]
+fn array_find_key(req: &mut Request, array: PhpArray, callback: Callable) -> Result<Value, Thrown> {
+    match find(req, array, &callback, false)? {
         Some((key, _)) => {
             let value = key_value(&key);
             req.addref(&value);
@@ -622,8 +523,9 @@ fn array_find_key(req: &mut Request) -> Result<Value, Thrown> {
 /// 12bool(true)
 /// bool(false)
 /// ```
-fn array_any(req: &mut Request) -> Result<Value, Thrown> {
-    Ok(Value::bool(find(req, false)?.is_some()))
+#[php_function]
+fn array_any(req: &mut Request, array: PhpArray, callback: Callable) -> Result<bool, Thrown> {
+    Ok(find(req, array, &callback, false)?.is_some())
 }
 
 /// `array_all(array $array, callable $callback): bool`, php's
@@ -639,8 +541,9 @@ fn array_any(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn array_all(req: &mut Request) -> Result<Value, Thrown> {
-    Ok(Value::bool(find(req, true)?.is_none()))
+#[php_function]
+fn array_all(req: &mut Request, array: PhpArray, callback: Callable) -> Result<bool, Thrown> {
+    Ok(find(req, array, &callback, true)?.is_none())
 }
 
 /// `array_map(?callable $callback, array $array, array ...$arrays):
@@ -703,34 +606,22 @@ fn array_all(req: &mut Request) -> Result<Value, Thrown> {
 /// array_map(): Argument #3 must be of type array, int given
 /// array_map(): Argument #1 ($callback) must be a valid callback or null, function "nope" not found or invalid function name
 /// ```
-fn array_map(req: &mut Request) -> Result<Value, Thrown> {
-    let given = req.argument_count();
-    if given < 2 {
-        return Err(php_ext::raising::arg_count_error(
-            req,
-            &format!("at least 2 arguments, {given} given"),
-        ));
-    }
-    let callback = php_ext::coerce::callable_argument(req, 1)?;
-    let values = req.variadic_arguments(2)?;
-    let mut arrays = Vec::with_capacity(values.len());
-    for (at, value) in values.iter().enumerate() {
-        let position = u32::try_from(at + 2).unwrap_or(u32::MAX);
-        let held = coerce_param(req, value, &Type::Array, position)?;
-        if let Some(array) = held.as_array().copied() {
-            arrays.push(array);
-        }
-    }
+#[php_function]
+fn array_map(
+    req: &mut Request,
+    callback: Option<Callable>,
+    array: PhpArray,
+    arrays: Variadic<PhpArray>,
+) -> Result<PhpArray, Thrown> {
+    let arrays: Vec<PhpArray> = std::iter::once(array).chain(arrays.0).collect();
     if let [input] = arrays[..] {
         let Some(callback) = callback else {
-            let value = Value::array(input);
-            req.addref(&value);
-            return Ok(value);
+            req.addref(&Value::array(input));
+            return Ok(input);
         };
         if input.is_empty() {
-            let value = Value::array(input);
-            req.addref(&value);
-            return Ok(value);
+            req.addref(&Value::array(input));
+            return Ok(input);
         }
         let mut out = PhpArray::new(req)?;
         for (key, operand) in input.snapshot_refs() {
@@ -744,7 +635,7 @@ fn array_map(req: &mut Request) -> Result<Value, Thrown> {
             let key = key_copy(req, &key);
             out.set(req, key, answer)?;
         }
-        return Ok(Value::array(out));
+        return Ok(out);
     }
     let columns: Vec<Vec<Value>> = arrays
         .iter()
@@ -776,8 +667,5 @@ fn array_map(req: &mut Request) -> Result<Value, Thrown> {
         };
         out.append(req, element)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
-
-#[allow(dead_code)]
-fn unused(_: Name) {}

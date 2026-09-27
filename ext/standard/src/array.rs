@@ -8,44 +8,36 @@
 
 use std::cmp::Ordering;
 
-use php_ext::abi::Callable;
+use php_ext::abi::{Callable, FromArgument, Instance, Raw, Ref, Union, Variadic};
+use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
-use php_ext::coerce::{coerce_param, compare, to_double, to_long, to_string};
-use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
-use php_ext::raising::{Level, Thrown, docref};
+use php_ext::coerce::{compare, to_double, to_long, to_string};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
 
-use crate::output::Entry;
-use crate::{
-    argument_count_between, callable_argument, constant, declared, long_argument, parameter,
+use constants::{
+    COUNT_NORMAL, COUNT_RECURSIVE, SORT_FLAG_CASE, SORT_LOCALE_STRING, SORT_NATURAL, SORT_NUMERIC,
+    SORT_STRING,
 };
 
-mod keys;
-mod make;
-mod pointer;
-mod set;
-mod sort;
-mod stack;
-mod symbols;
-mod walk;
+pub(crate) mod keys;
+pub(crate) mod make;
+pub(crate) mod pointer;
+pub(crate) mod set;
+pub(crate) mod sort;
+pub(crate) mod stack;
+pub(crate) mod symbols;
+pub(crate) mod walk;
 
-/// `PHP_SORT_*` (`Z/ext/standard/php_array.h`), what a sort native's
-/// `$flags` is made of.
-const SORT_REGULAR: i64 = 0;
-const SORT_NUMERIC: i64 = 1;
-const SORT_STRING: i64 = 2;
-const SORT_DESC: i64 = 3;
-const SORT_ASC: i64 = 4;
-const SORT_LOCALE_STRING: i64 = 5;
-const SORT_NATURAL: i64 = 6;
-const SORT_FLAG_CASE: i64 = 8;
-
-/// The `SORT_*` constants, in the order `basic_functions.stub.php`
-/// declares them.
+/// The constants of `array.c`'s part of the stub, in its order: the
+/// `EXTR_*` modes `extract` reads, the `SORT_*` flags, the `CASE_*` pair
+/// `array_change_key_case` reads, `count`'s two modes and
+/// `array_filter`'s two.
 ///
 /// ```php
 /// var_dump(SORT_ASC, SORT_DESC, SORT_REGULAR, SORT_NUMERIC, SORT_STRING, SORT_LOCALE_STRING, SORT_NATURAL, SORT_FLAG_CASE);
+/// var_dump(EXTR_OVERWRITE, EXTR_REFS, CASE_LOWER, CASE_UPPER, COUNT_NORMAL, COUNT_RECURSIVE, ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY);
 /// ```
 /// ```expect
 /// int(4)
@@ -56,115 +48,53 @@ const SORT_FLAG_CASE: i64 = 8;
 /// int(5)
 /// int(6)
 /// int(8)
+/// int(0)
+/// int(256)
+/// int(0)
+/// int(1)
+/// int(0)
+/// int(1)
+/// int(1)
+/// int(2)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    vec![
-        constant(b"SORT_ASC", SORT_ASC),
-        constant(b"SORT_DESC", SORT_DESC),
-        constant(b"SORT_REGULAR", SORT_REGULAR),
-        constant(b"SORT_NUMERIC", SORT_NUMERIC),
-        constant(b"SORT_STRING", SORT_STRING),
-        constant(b"SORT_LOCALE_STRING", SORT_LOCALE_STRING),
-        constant(b"SORT_NATURAL", SORT_NATURAL),
-        constant(b"SORT_FLAG_CASE", SORT_FLAG_CASE),
-        constant(b"ARRAY_FILTER_USE_BOTH", walk::ARRAY_FILTER_USE_BOTH),
-        constant(b"ARRAY_FILTER_USE_KEY", walk::ARRAY_FILTER_USE_KEY),
-    ]
-    .into_iter()
-    .chain(keys::constants())
-    .chain(symbols::constants())
-    .collect()
+#[php_const]
+pub(crate) mod constants {
+    pub(crate) const EXTR_OVERWRITE: i64 = 0;
+    pub(crate) const EXTR_SKIP: i64 = 1;
+    pub(crate) const EXTR_PREFIX_SAME: i64 = 2;
+    pub(crate) const EXTR_PREFIX_ALL: i64 = 3;
+    pub(crate) const EXTR_PREFIX_INVALID: i64 = 4;
+    pub(crate) const EXTR_PREFIX_IF_EXISTS: i64 = 5;
+    pub(crate) const EXTR_IF_EXISTS: i64 = 6;
+    pub(crate) const EXTR_REFS: i64 = 0x100;
+    /// `PHP_SORT_*` (`Z/ext/standard/php_array.h`), what a sort native's
+    /// `$flags` is made of.
+    pub(crate) const SORT_ASC: i64 = 4;
+    pub(crate) const SORT_DESC: i64 = 3;
+    pub(crate) const SORT_REGULAR: i64 = 0;
+    pub(crate) const SORT_NUMERIC: i64 = 1;
+    pub(crate) const SORT_STRING: i64 = 2;
+    pub(crate) const SORT_LOCALE_STRING: i64 = 5;
+    pub(crate) const SORT_NATURAL: i64 = 6;
+    pub(crate) const SORT_FLAG_CASE: i64 = 8;
+    pub(crate) const CASE_LOWER: i64 = 0;
+    pub(crate) const CASE_UPPER: i64 = 1;
+    /// `PHP_COUNT_NORMAL` and `PHP_COUNT_RECURSIVE`, what `count`'s
+    /// `$mode` is one of.
+    pub(crate) const COUNT_NORMAL: i64 = 0;
+    pub(crate) const COUNT_RECURSIVE: i64 = 1;
+    pub(crate) const ARRAY_FILTER_USE_BOTH: i64 = 1;
+    pub(crate) const ARRAY_FILTER_USE_KEY: i64 = 2;
 }
 
-/// The natives declared here, paired with their entries, each with
-/// php's arity and parameter names, so `ReflectionFunction::__toString`
-/// renders it as the oracle does.
-///
-/// ```php
-/// echo new ReflectionFunction('array_unique'), new ReflectionFunction('sort'), new ReflectionFunction('usort');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function array_unique ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> array $array ]
-///     Parameter #1 [ <optional> int $flags = SORT_STRING ]
-///   }
-///   - Return [ array ]
-/// }
-/// Function [ <internal:standard> function sort ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> array &$array ]
-///     Parameter #1 [ <optional> int $flags = SORT_REGULAR ]
-///   }
-///   - Return [ true ]
-/// }
-/// Function [ <internal:standard> function usort ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> array &$array ]
-///     Parameter #1 [ <required> callable $callback ]
-///   }
-///   - Return [ true ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let flags = |default: &[u8]| Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Constant(php_ext::decl::Name(default.into()))),
-        ..parameter(b"flags", Type::Int)
-    };
-    let by_ref_array = || Parameter {
-        by_ref: true,
-        ..parameter(b"array", Type::Array)
-    };
-    let mut natives: Vec<(FunctionDecl, Entry)> = vec![
-        (
-            declared(
-                b"sort",
-                &[by_ref_array(), flags(b"SORT_REGULAR")],
-                Type::True,
-            ),
-            sort,
-        ),
-        (
-            declared(
-                b"usort",
-                &[by_ref_array(), parameter(b"callback", Type::Callable)],
-                Type::True,
-            ),
-            usort,
-        ),
-        (
-            declared(
-                b"array_unique",
-                &[parameter(b"array", Type::Array), flags(b"SORT_STRING")],
-                Type::Array,
-            ),
-            array_unique,
-        ),
-        (
-            declared(
-                b"array_merge",
-                &[Parameter {
-                    variadic: true,
-                    ..parameter(b"arrays", Type::Array)
-                }],
-                Type::Array,
-            ),
-            array_merge,
-        ),
-    ];
-    natives.extend(sort::natives());
-    natives.extend(pointer::natives());
-    natives.extend(walk::natives());
-    natives.extend(set::natives());
-    natives.extend(stack::natives());
-    natives.extend(keys::natives());
-    natives.extend(make::natives());
-    natives.extend(symbols::natives());
-    natives.push(sort::multisort_native());
-    natives
+/// Core's `Countable`, what `count` takes beside an array.
+#[php_class(extern)]
+pub(crate) struct Countable;
+
+/// The value a body built, returned under `T`'s declaration as it is:
+/// php verifies an internal return only in debug builds.
+fn returned<T: FromArgument>(req: &mut Request, value: Value) -> Result<Raw<T>, Thrown> {
+    <Raw<T> as FromArgument>::from_value(req, value)
 }
 
 /// `zval_add_ref` on an element being copied into a new array: a
@@ -265,18 +195,12 @@ fn key_copy(req: &mut Request, key: &Key) -> Key {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn array_merge(req: &mut Request) -> Result<Value, Thrown> {
-    let arguments = req.variadic_arguments(1)?;
-    let mut arrays = Vec::with_capacity(arguments.len());
-    for (at, argument) in arguments.iter().enumerate() {
-        let position = u32::try_from(at.saturating_add(1)).unwrap_or(u32::MAX);
-        let held = coerce_param(req, argument, &Type::Array, position)?;
-        if let Some(array) = held.as_array().copied() {
-            arrays.push(array);
-        }
-    }
+#[php_function]
+fn array_merge(req: &mut Request, arrays: Variadic<PhpArray>) -> Result<Raw<PhpArray>, Thrown> {
+    let arrays = arrays.0;
     if arrays.is_empty() {
-        return Ok(Value::array(PhpArray::new(req)?));
+        let empty = Value::array(PhpArray::new(req)?);
+        return returned(req, empty);
     }
     if let [first, second] = arrays[..] {
         let kept = if first.is_empty() {
@@ -293,7 +217,7 @@ fn array_merge(req: &mut Request) -> Result<Value, Thrown> {
         {
             let value = Value::array(kept);
             req.addref(&value);
-            return Ok(value);
+            return returned(req, value);
         }
     }
     let mut merged = PhpArray::new(req)?;
@@ -314,184 +238,7 @@ fn array_merge(req: &mut Request) -> Result<Value, Thrown> {
             }
         }
     }
-    Ok(Value::array(merged))
-}
-
-/// `sort(array &$array, int $flags = SORT_REGULAR): true`, php's
-/// `PHP_FUNCTION(sort)` (`Z/ext/standard/array.c:780`): the array the
-/// reference holds, separated in the cell, sorted in place by the
-/// comparison `$flags` names with the bucket-order fallback
-/// (`php_get_data_compare_func`) and renumbered, `zend_hash_sort` with
-/// `renumber`. Under `SORT_REGULAR` the comparison is `zend_compare`,
-/// which over mixed types is not transitive, and the order it leaves is
-/// `zend_sort`'s walk over those answers, php's to the element.
-///
-/// ```php
-/// $a = [1, "1", 2, 2.0, "a", "A", null, "", false, true]; var_dump(sort($a), $a);
-/// ```
-/// ```expect
-/// bool(true)
-/// array(10) {
-///   [0]=>
-///   NULL
-///   [1]=>
-///   string(0) ""
-///   [2]=>
-///   bool(false)
-///   [3]=>
-///   int(1)
-///   [4]=>
-///   string(1) "1"
-///   [5]=>
-///   int(2)
-///   [6]=>
-///   float(2)
-///   [7]=>
-///   string(1) "A"
-///   [8]=>
-///   string(1) "a"
-///   [9]=>
-///   bool(true)
-/// }
-/// ```
-///
-/// The other comparisons `$flags` names, and `SORT_FLAG_CASE` read off
-/// them.
-///
-/// ```php
-/// $a = [3, "10", 9, "9a", 1.5]; $b = $a; sort($a, SORT_STRING); sort($b, SORT_NUMERIC); $c = ["img12", "img10", "IMG2"]; sort($c, SORT_NATURAL | SORT_FLAG_CASE); echo json_encode($a), json_encode($b), json_encode($c), "\n";
-/// ```
-/// ```expect
-/// [1.5,"10",3,9,"9a"][1.5,3,9,"9a","10"]["IMG2","img10","img12"]
-/// ```
-///
-/// A shared array is copied into the variable before it is sorted, so
-/// the other holder keeps its order, `SEPARATE_ZVAL_NOREF`; anything
-/// but an array in the variable is php's `TypeError`, and an array
-/// written in the call cannot be passed by reference at all.
-///
-/// ```php
-/// $a = [3, 1, 2]; $shared = $a; sort($a); $s = "x"; try { sort($s); } catch (TypeError $e) { echo $e->getMessage(), "\n"; } echo json_encode($shared), json_encode($a), "\n";
-/// ```
-/// ```expect
-/// sort(): Argument #1 ($array) must be of type array, string given
-/// [3,1,2][1,2,3]
-/// ```
-///
-/// ```php
-/// sort([2, 1]);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught Error: sort(): Argument #1 ($array) could not be passed by reference in %s:2
-/// Stack trace:
-/// #0 {main}
-///   thrown in %s on line 2
-/// ```
-fn sort(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let mut target = array_by_reference(req, 1)?;
-    let flags = if req.argument_count() == 2 {
-        long_argument(req, 2)?
-    } else {
-        SORT_REGULAR
-    };
-    let sorted = target
-        .array
-        .sort_by(req, true, |req, (_, a), (_, b)| compared(req, flags, a, b));
-    target.finish(req);
-    sorted?;
-    Ok(Value::bool(true))
-}
-
-/// `usort(array &$array, callable $callback): true`, php's
-/// `PHP_FUNCTION(usort)` over `php_usort` (`Z/ext/standard/array.c:878`):
-/// the array copied first, `zend_array_dup`, so the callback sees the
-/// caller's array unchanged while the copy is sorted with
-/// `php_array_user_compare`, and the copy written into the caller's
-/// variable after, whatever the sort raised. An empty array is left
-/// alone, not copied. The callback's answer is read as `php_get_long`
-/// reads it and normalised to a sign, so a constant answer of `1` or
-/// `-1` never falls back to the bucket order and what is left is
-/// `zend_sort`'s walk alone; `0` falls back every time and leaves the
-/// array as it was.
-///
-/// ```php
-/// $seven = [1, 2, 3, 4, 5, 6, 7]; usort($seven, fn($a, $b) => 1);
-/// $twenty = []; for ($i = 1; $i <= 20; $i++) $twenty[] = $i; $less = $twenty; usort($twenty, fn($a, $b) => 1); usort($less, fn($a, $b) => -1);
-/// $zero = [3, 1, 2]; usort($zero, fn($a, $b) => 0);
-/// echo json_encode($seven), "\n", json_encode($twenty), "\n", json_encode($less), "\n", json_encode($zero), "\n";
-/// ```
-/// ```expect
-/// [6,7,5,4,3,2,1]
-/// [16,14,15,12,13,19,2,8,9,6,7,5,4,3,17,10,18,11,20,1]
-/// [1,12,19,18,17,16,15,14,13,11,2,10,9,8,7,6,5,4,3,20]
-/// [3,1,2]
-/// ```
-///
-/// A bool answer is the 8.0 deprecation, once per call, and `false` is
-/// asked again with the operands swapped; a string answer is read as a
-/// long.
-///
-/// ```php
-/// $a = [3, 1, 2]; usort($a, fn($x, $y) => $x > $y); $b = [3, 1, 2]; usort($b, fn($x, $y) => $x < $y); $c = [3, 1, 2]; var_dump(usort($c, fn($x, $y) => "2abc")); echo json_encode($a), json_encode($b), json_encode($c), "\n";
-/// ```
-/// ```expect
-///
-/// Deprecated: usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 2
-///
-/// Deprecated: usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 2
-/// bool(true)
-/// [1,2,3][3,2,1][1,2,3]
-/// ```
-///
-/// A callback that throws ends the calls but not the sort: every
-/// comparison after it answers by bucket order, the copy is written
-/// into the variable as it stands, and what was thrown is raised from the
-/// native.
-///
-/// ```php
-/// $a = [3, 1, 2, 5, 4]; $seen = 0; try { usort($a, function ($x, $y) use (&$seen) { if (++$seen == 3) throw new Exception("stop"); return $x <=> $y; }); } catch (Exception $e) { echo $e->getMessage(), "\n"; } echo json_encode($a), " ", $seen, "\n";
-/// ```
-/// ```expect
-/// stop
-/// [1,3,2,5,4] 3
-/// ```
-///
-/// ```php
-/// $a = [1]; usort($a, "no_such_function");
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: usort(): Argument #2 ($callback) must be a valid callback, function "no_such_function" not found or invalid function name in %s:2
-/// Stack trace:
-/// #0 %s(2): usort(Array, 'no_such_functio...')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn usort(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let given = req.argument(1).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Array, 1)?;
-    let callback = callable_argument(req, 2)?;
-    let Some(array) = coerced.as_array().copied() else {
-        return Ok(Value::bool(true));
-    };
-    if array.is_empty() {
-        return Ok(Value::bool(true));
-    }
-    let mut copy = array.copy(req)?;
-    let mut deprecated = false;
-    let sorted = copy.sort_by(req, true, |req, (_, a), (_, b)| {
-        user_compare(req, &callback, &mut deprecated, a, b)
-    });
-    let written = if let ValueRef::Reference(reference) = given.as_ref() {
-        reference.set(req, copy.to_value())
-    } else {
-        req.release(copy.to_value());
-        Ok(())
-    };
-    sorted?;
-    written?;
-    Ok(Value::bool(true))
+    returned(req, Value::array(merged))
 }
 
 /// `php_array_user_compare_unstable` (`Z/ext/standard/array.c:826`):
@@ -560,18 +307,14 @@ impl SortTarget {
 /// caller holds. An argument that is no reference is copied, which is
 /// what php's separation of the argument slot comes to for every such
 /// argument but a temporary with one owner.
-fn array_by_reference(req: &mut Request, position: u32) -> Result<SortTarget, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Array, position)?;
-    if let ValueRef::Reference(reference) = given.as_ref()
-        && let Some(array) = reference.separate_array(req)?
-    {
+fn array_by_reference(req: &mut Request, given: &Ref<PhpArray>) -> Result<SortTarget, Thrown> {
+    if let Some(array) = given.separated(req)? {
         return Ok(SortTarget {
             array,
             copied: false,
         });
     }
-    let array = match coerced.as_array() {
+    let array = match given.get() {
         Some(array) => array.copy(req)?,
         None => PhpArray::new(req)?,
     };
@@ -718,25 +461,32 @@ fn array_by_reference(req: &mut Request, position: u32) -> Result<SortTarget, Th
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn array_unique(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let given = req.argument(1).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Array, 1)?;
-    let Some(array) = coerced.deref().as_array().copied() else {
-        return Ok(Value::array(PhpArray::new(req)?));
-    };
-    let flags = if req.argument_count() == 2 {
-        long_argument(req, 2)?
-    } else {
-        SORT_STRING
-    };
+///
+/// ```php
+/// echo new ReflectionFunction('array_unique');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function array_unique ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> array $array ]
+///     Parameter #1 [ <optional> int $flags = SORT_STRING ]
+///   }
+///   - Return [ array ]
+/// }
+/// ```
+#[php_function]
+fn array_unique(
+    req: &mut Request,
+    array: PhpArray,
+    #[php(default = SORT_STRING)] flags: i64,
+) -> Result<PhpArray, Thrown> {
     if array.len() <= 1 {
-        let value = Value::array(array);
-        req.addref(&value);
-        return Ok(value);
+        req.addref(&Value::array(array));
+        return Ok(array);
     }
     if flags == SORT_STRING {
-        return unique_by_string(req, array).map(Value::array);
+        return unique_by_string(req, array);
     }
     let entries = array.snapshot_refs();
     let mut copy = array.copy(req)?;
@@ -773,7 +523,7 @@ fn array_unique(req: &mut Request) -> Result<Value, Thrown> {
         };
         copy.unset(req, &entries[gone].0)?;
     }
-    Ok(Value::array(copy))
+    Ok(copy)
 }
 
 /// The `SORT_STRING` arm: a set of the strings seen, and a new array of
@@ -1009,4 +759,94 @@ fn compare_left(a: &[u8], ap: &mut usize, b: &[u8], bp: &mut usize) -> Ordering 
         *ap += 1;
         *bp += 1;
     }
+}
+
+/// `count(Countable|array $value, int $mode = COUNT_NORMAL): int` and
+/// its alias `sizeof`, php's `PHP_FUNCTION(count)`
+/// (`Z/ext/standard/array.c:648`): the one-argument call is `ZEND_COUNT`
+/// over the engine's kernel and never reaches here, so what does is the
+/// call with a `$mode`. One that is neither constant is php's
+/// `ValueError`, raised before the value is looked at; then the kernel's
+/// arm through the face, `php_ext::coerce::count`, which is the element
+/// count or the `TypeError`, and under `COUNT_RECURSIVE` the count of
+/// every nested array added in (`php_count_recursive`), a reference
+/// followed to what it holds. The `TypeError` names the function as it
+/// was called, `sizeof` for the alias, since php reads the name off the
+/// active function.
+///
+/// ```php
+/// var_dump(count(token_get_all("<?php 1;"), COUNT_RECURSIVE), sizeof(token_get_all("<?php 1;"), 1), count(token_get_all("<?php 1;"), 0), count(token_get_all("<?php 1;"), true), count(token_get_all("<?php 1;"), "1"), count(token_get_all("<?php 1;"), null));
+/// ```
+/// ```expect
+/// Deprecated: count(): Passing null to parameter #2 ($mode) of type int is deprecated in %s on line 2
+/// int(9)
+/// int(9)
+/// int(3)
+/// int(9)
+/// int(9)
+/// int(3)
+/// ```
+///
+/// ```php
+/// var_dump(count("x", 2));
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ValueError: count(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE in %s:2
+/// Stack trace:
+/// #0 %s(2): count('x', 2)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// var_dump(sizeof(false, 0));
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: sizeof(): Argument #1 ($value) must be of type Countable|array, false given in %s:2
+/// Stack trace:
+/// #0 %s(2): sizeof(false, 0)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function(aliases(sizeof))]
+fn count(
+    req: &mut Request,
+    value: Raw<Union<Instance<Countable>, PhpArray>>,
+    #[php(default = COUNT_NORMAL)] mode: i64,
+) -> Result<i64, Thrown> {
+    // `Z_PARAM_ZVAL`: the value's type is the body's to refuse, after
+    // the mode.
+    let value = value.value();
+    if mode != COUNT_NORMAL && mode != COUNT_RECURSIVE {
+        return Err(arg_value_error(
+            req,
+            2,
+            "be either COUNT_NORMAL or COUNT_RECURSIVE",
+        ));
+    }
+    match value.deref().as_array() {
+        Some(array) if mode == COUNT_RECURSIVE => Ok(count_recursive(req, *array)),
+        _ => php_ext::coerce::count(req, &value),
+    }
+}
+
+/// `php_count_recursive`: the elements, and every nested array's
+/// elements counted the same way, a reference followed to what it
+/// holds, and the walk guarded as php guards it, so an array that
+/// holds itself is the warning `Recursion detected` and a zero where
+/// the walk meets itself again.
+fn count_recursive(req: &mut Request, array: PhpArray) -> i64 {
+    if array.is_recursive() {
+        docref(req, Level::Warning, "Recursion detected");
+        return 0;
+    }
+    array.protect();
+    let mut count = i64::try_from(array.len()).unwrap_or(i64::MAX);
+    for (_, element) in &array {
+        if let Some(nested) = element.deref().as_array() {
+            count = count.saturating_add(count_recursive(req, *nested));
+        }
+    }
+    array.unprotect();
+    count
 }

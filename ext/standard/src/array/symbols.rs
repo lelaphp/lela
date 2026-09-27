@@ -5,127 +5,18 @@
 //! through the face's `Request::caller_var` and `set_caller_var`. A
 //! variable declared and not yet written reads as one the frame has not.
 
+use php_ext::abi::{Passed, Ref, Untyped, Variadic};
+use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpRef, PhpString, Value, ValueRef};
 
-use super::key_copy;
-use crate::output::Entry;
-use crate::{
-    argument_count_between, constant, declared, long_argument, parameter, string_argument,
+use super::constants::{
+    EXTR_IF_EXISTS, EXTR_OVERWRITE, EXTR_PREFIX_ALL, EXTR_PREFIX_IF_EXISTS, EXTR_PREFIX_SAME,
+    EXTR_REFS, EXTR_SKIP,
 };
-
-/// `PHP_EXTR_*` (`Z/ext/standard/php_array.h`).
-const EXTR_OVERWRITE: i64 = 0;
-const EXTR_SKIP: i64 = 1;
-const EXTR_PREFIX_SAME: i64 = 2;
-const EXTR_PREFIX_ALL: i64 = 3;
-const EXTR_PREFIX_INVALID: i64 = 4;
-const EXTR_PREFIX_IF_EXISTS: i64 = 5;
-const EXTR_IF_EXISTS: i64 = 6;
-const EXTR_REFS: i64 = 0x100;
-
-/// The `EXTR_*` constants, in the stub's order.
-///
-/// ```php
-/// var_dump(EXTR_OVERWRITE, EXTR_SKIP, EXTR_PREFIX_SAME, EXTR_PREFIX_ALL, EXTR_PREFIX_INVALID, EXTR_PREFIX_IF_EXISTS, EXTR_IF_EXISTS, EXTR_REFS);
-/// ```
-/// ```expect
-/// int(0)
-/// int(1)
-/// int(2)
-/// int(3)
-/// int(4)
-/// int(5)
-/// int(6)
-/// int(256)
-/// ```
-pub(super) fn constants() -> Vec<php_ext::decl::ConstDecl> {
-    vec![
-        constant(b"EXTR_OVERWRITE", EXTR_OVERWRITE),
-        constant(b"EXTR_SKIP", EXTR_SKIP),
-        constant(b"EXTR_PREFIX_SAME", EXTR_PREFIX_SAME),
-        constant(b"EXTR_PREFIX_ALL", EXTR_PREFIX_ALL),
-        constant(b"EXTR_PREFIX_INVALID", EXTR_PREFIX_INVALID),
-        constant(b"EXTR_PREFIX_IF_EXISTS", EXTR_PREFIX_IF_EXISTS),
-        constant(b"EXTR_IF_EXISTS", EXTR_IF_EXISTS),
-        constant(b"EXTR_REFS", EXTR_REFS),
-    ]
-}
-
-/// The declarations, as `basic_functions.stub.php` has them.
-///
-/// ```php
-/// echo new ReflectionFunction('extract'), new ReflectionFunction('compact');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function extract ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> array &$array ]
-///     Parameter #1 [ <optional> int $flags = EXTR_OVERWRITE ]
-///     Parameter #2 [ <optional> string $prefix = "" ]
-///   }
-///   - Return [ int ]
-/// }
-/// Function [ <internal:standard> function compact ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> $var_name ]
-///     Parameter #1 [ <optional> ...$var_names ]
-///   }
-///   - Return [ array ]
-/// }
-/// ```
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            declared(
-                b"extract",
-                &[
-                    Parameter {
-                        by_ref: true,
-                        prefer_ref: true,
-                        promoted: false,
-                        ..parameter(b"array", Type::Array)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
-                            b"EXTR_OVERWRITE".as_slice().into(),
-                        ))),
-                        ..parameter(b"flags", Type::Int)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Str(b"".as_slice().into())),
-                        ..parameter(b"prefix", Type::String)
-                    },
-                ],
-                Type::Int,
-            ),
-            extract as Entry,
-        ),
-        (
-            declared(
-                b"compact",
-                &[
-                    Parameter {
-                        ty: None,
-                        ..parameter(b"var_name", Type::Mixed)
-                    },
-                    Parameter {
-                        ty: None,
-                        variadic: true,
-                        ..parameter(b"var_names", Type::Mixed)
-                    },
-                ],
-                Type::Array,
-            ),
-            compact,
-        ),
-    ]
-}
+use super::key_copy;
 
 /// `php_valid_var_name`: `[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*`.
 fn valid_var_name(name: &[u8]) -> bool {
@@ -245,26 +136,40 @@ fn reassign_this(req: &mut Request) -> Thrown {
 /// ```
 // One arm per extract type, php's fourteen helpers folded into one walk.
 #[allow(clippy::too_many_lines)]
-fn extract(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let given = req.argument(1).unwrap_or_default();
-    let coerced = php_ext::coerce::coerce_param(req, &given, &Type::Array, 1)?;
-    let flags = if req.argument_count() >= 2 {
-        long_argument(req, 2)?
-    } else {
-        EXTR_OVERWRITE
-    };
-    let prefix = if req.argument_count() == 3 {
-        Some(string_argument(req, 3)?.as_bytes().to_vec())
-    } else {
-        None
+///
+/// ```php
+/// echo new ReflectionFunction('extract');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function extract ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> array &$array ]
+///     Parameter #1 [ <optional> int $flags = EXTR_OVERWRITE ]
+///     Parameter #2 [ <optional> string $prefix = "" ]
+///   }
+///   - Return [ int ]
+/// }
+/// ```
+#[php_function]
+fn extract(
+    req: &mut Request,
+    #[php(prefer_ref)] array: Ref<PhpArray>,
+    #[php(default = EXTR_OVERWRITE)] flags: i64,
+    #[php(default = "")] prefix: Passed<PhpString>,
+) -> Result<i64, Thrown> {
+    let given = array;
+    let prefix_given = matches!(prefix, Passed::Given(_));
+    let prefix = match prefix {
+        Passed::Given(prefix) => Some(prefix.as_bytes().to_vec()),
+        Passed::Omitted => None,
     };
     let refs = flags & EXTR_REFS != 0;
     let kind = flags & 0xff;
     if !(EXTR_OVERWRITE..=EXTR_IF_EXISTS).contains(&kind) {
         return Err(arg_value_error(req, 2, "be a valid extract type"));
     }
-    if kind > EXTR_SKIP && kind <= EXTR_PREFIX_IF_EXISTS && req.argument_count() < 3 {
+    if kind > EXTR_SKIP && kind <= EXTR_PREFIX_IF_EXISTS && !prefix_given {
         return Err(throw(
             req,
             "ValueError",
@@ -278,15 +183,11 @@ fn extract(req: &mut Request) -> Result<Value, Thrown> {
         return Err(arg_value_error(req, 3, "be a valid identifier"));
     }
     let prefix = prefix.unwrap_or_default();
-    let mut array = match (refs, given.as_ref()) {
-        (true, ValueRef::Reference(cell)) => match cell.separate_array(req)? {
-            Some(array) => array,
-            None => return Ok(Value::int(0)),
-        },
-        _ => match coerced.deref().as_array() {
-            Some(array) => *array,
-            None => return Ok(Value::int(0)),
-        },
+    // `EXTR_REFS` writes references into the caller's array, separated
+    // in place where the call passed it by reference.
+    let separated = if refs { given.separated(req)? } else { None };
+    let Some(mut array) = separated.or_else(|| given.get().copied()) else {
+        return Ok(0);
     };
     let mut count = 0i64;
     for (key, entry) in array.snapshot_refs() {
@@ -406,7 +307,7 @@ fn extract(req: &mut Request) -> Result<Value, Thrown> {
         }
         count += 1;
     }
-    Ok(Value::int(count))
+    Ok(count)
 }
 
 /// `compact($var_name, ...$var_names): array`, php's
@@ -443,17 +344,35 @@ fn extract(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(1) "t"
 /// }
 /// ```
-fn compact(req: &mut Request) -> Result<Value, Thrown> {
-    if req.argument_count() < 1 {
-        return Err(php_ext::raising::too_few_arguments(req, 1, 0));
-    }
-    let arguments = req.variadic_arguments(1)?;
+///
+/// ```php
+/// echo new ReflectionFunction('compact');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function compact ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> $var_name ]
+///     Parameter #1 [ <optional> ...$var_names ]
+///   }
+///   - Return [ array ]
+/// }
+/// ```
+#[php_function]
+fn compact(
+    req: &mut Request,
+    var_name: Untyped<Value>,
+    var_names: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    let arguments: Vec<Value> = std::iter::once(var_name.0)
+        .chain(var_names.0.into_iter().map(|name| name.0))
+        .collect();
     let mut out = PhpArray::new(req)?;
     for (at, argument) in arguments.iter().enumerate() {
         let position = at + 1;
         compact_var(req, &mut out, argument, position)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `php_compact_var`.

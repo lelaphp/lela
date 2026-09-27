@@ -130,7 +130,7 @@ use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_count_error, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{PhpString, Value};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -155,33 +155,11 @@ struct State {
     assert: assert::Stage,
 }
 
-/// The natives this file declares itself, `count` and `sizeof`, `ord`,
-/// `chr` and `str_repeat`, then the `is_*` type checks `type.rs`
-/// declares, at the place they have always been registered.
+/// The natives this file declares itself, `ord`, `chr` and
+/// `str_repeat`, then the `is_*` type checks `type.rs` declares, at the
+/// place they have always been registered.
 fn core_natives() -> Vec<(FunctionDecl, output::Entry)> {
-    let countable = || Type::Union(vec![Type::Named(Name::from("Countable")), Type::Array]);
-    let normal = ParameterDefault::Expr(ConstExpr::Constant(Name::from("COUNT_NORMAL")));
-    let mode = || Parameter {
-        default: normal.clone(),
-        ..parameter(b"mode", Type::Int)
-    };
     vec![
-        (
-            declared(
-                b"count",
-                &[parameter(b"value", countable()), mode()],
-                Type::Int,
-            ),
-            count,
-        ),
-        (
-            declared(
-                b"sizeof",
-                &[parameter(b"value", countable()), mode()],
-                Type::Int,
-            ),
-            count,
-        ),
         (
             declared(b"ord", &[parameter(b"character", Type::String)], Type::Int),
             ord,
@@ -238,7 +216,95 @@ pub fn extension() -> Extension {
     let builder = ExtensionBuilder::default()
         .functions(core_natives())
         .functions(string_natives())
-        .functions(array::natives())
+        // `array.c`, in the stub's order.
+        .functions(vec![
+            array::stack::array_push::declared(),
+            array::sort::krsort::declared(),
+            array::sort::ksort::declared(),
+            array::count::declared(),
+            array::sizeof::declared(),
+            array::sort::natsort::declared(),
+            array::sort::natcasesort::declared(),
+            array::sort::asort::declared(),
+            array::sort::arsort::declared(),
+            array::sort::sort::declared(),
+            array::sort::rsort::declared(),
+            array::sort::usort::declared(),
+            array::sort::uasort::declared(),
+            array::sort::uksort::declared(),
+            array::pointer::end::declared(),
+            array::pointer::prev::declared(),
+            array::pointer::next::declared(),
+            array::pointer::reset::declared(),
+            array::pointer::current::declared(),
+            array::pointer::pos::declared(),
+            array::pointer::key::declared(),
+            array::pointer::min::declared(),
+            array::pointer::max::declared(),
+            array::walk::array_walk::declared(),
+            array::walk::array_walk_recursive::declared(),
+            array::keys::in_array::declared(),
+            array::keys::array_search::declared(),
+            array::symbols::extract::declared(),
+            array::symbols::compact::declared(),
+            array::keys::array_fill::declared(),
+            array::keys::array_fill_keys::declared(),
+            array::make::range::declared(),
+            array::make::shuffle::declared(),
+            array::stack::array_pop::declared(),
+            array::stack::array_shift::declared(),
+            array::stack::array_unshift::declared(),
+            array::stack::array_splice::declared(),
+            array::stack::array_slice::declared(),
+            array::array_merge::declared(),
+            array::make::array_merge_recursive::declared(),
+            array::make::array_replace::declared(),
+            array::make::array_replace_recursive::declared(),
+            array::keys::array_keys::declared(),
+            array::keys::array_key_first::declared(),
+            array::keys::array_key_last::declared(),
+            array::keys::array_first::declared(),
+            array::keys::array_last::declared(),
+            array::keys::array_values::declared(),
+            array::keys::array_count_values::declared(),
+            array::keys::array_column::declared(),
+            array::keys::array_reverse::declared(),
+            array::keys::array_pad::declared(),
+            array::keys::array_flip::declared(),
+            array::keys::array_change_key_case::declared(),
+            array::array_unique::declared(),
+            array::set::array_intersect_key::declared(),
+            array::set::array_intersect_ukey::declared(),
+            array::set::array_intersect::declared(),
+            array::set::array_uintersect::declared(),
+            array::set::array_intersect_assoc::declared(),
+            array::set::array_uintersect_assoc::declared(),
+            array::set::array_intersect_uassoc::declared(),
+            array::set::array_uintersect_uassoc::declared(),
+            array::set::array_diff_key::declared(),
+            array::set::array_diff_ukey::declared(),
+            array::set::array_diff::declared(),
+            array::set::array_udiff::declared(),
+            array::set::array_diff_assoc::declared(),
+            array::set::array_diff_uassoc::declared(),
+            array::set::array_udiff_assoc::declared(),
+            array::set::array_udiff_uassoc::declared(),
+            array::sort::array_multisort::declared(),
+            array::make::array_rand::declared(),
+            array::keys::array_sum::declared(),
+            array::keys::array_product::declared(),
+            array::walk::array_reduce::declared(),
+            array::walk::array_filter::declared(),
+            array::walk::array_find::declared(),
+            array::walk::array_find_key::declared(),
+            array::walk::array_any::declared(),
+            array::walk::array_all::declared(),
+            array::walk::array_map::declared(),
+            array::keys::array_key_exists::declared(),
+            array::keys::key_exists::declared(),
+            array::keys::array_chunk::declared(),
+            array::keys::array_combine::declared(),
+        ])
         .functions(vec![
             output::ob_start::declared(),
             output::ob_flush::declared(),
@@ -344,14 +410,12 @@ pub fn extension() -> Extension {
             r#type::is_iterable::declared(),
             r#type::is_countable::declared(),
         ])
+        .constants(array::constants::declared())
         .constants(vec![
-            constant(b"COUNT_NORMAL", COUNT_NORMAL),
-            constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
             constant(b"STR_PAD_LEFT", STR_PAD_LEFT),
             constant(b"STR_PAD_RIGHT", STR_PAD_RIGHT),
             constant(b"STR_PAD_BOTH", STR_PAD_BOTH),
         ])
-        .constants(array::constants())
         .constants(file::constants())
         .constants(file_constants())
         .constants(math::constants::declared())
@@ -666,114 +730,6 @@ fn string_natives() -> Vec<(FunctionDecl, output::Entry)> {
             substr,
         ),
     ]
-}
-
-/// `PHP_COUNT_NORMAL` and `PHP_COUNT_RECURSIVE`, what `count`'s
-/// `$mode` is one of.
-const COUNT_NORMAL: i64 = 0;
-const COUNT_RECURSIVE: i64 = 1;
-
-/// `count(Countable|array $value, int $mode = COUNT_NORMAL): int` and
-/// its alias `sizeof`, php's `PHP_FUNCTION(count)`
-/// (`Z/ext/standard/array.c:648`): the one-argument call is `ZEND_COUNT`
-/// over the engine's kernel and never reaches here, so what does is the
-/// call with a `$mode`. One that is neither constant is php's
-/// `ValueError`, raised before the value is looked at; then the kernel's
-/// arm through the face, `php_ext::coerce::count`, which is the element
-/// count or the `TypeError`, and under `COUNT_RECURSIVE` the count of
-/// every nested array added in (`php_count_recursive`), a reference
-/// followed to what it holds. The `TypeError` names the function as it
-/// was called, `sizeof` for the alias, since php reads the name off the
-/// active function.
-///
-/// ```php
-/// var_dump(count(token_get_all("<?php 1;"), COUNT_RECURSIVE), sizeof(token_get_all("<?php 1;"), 1), count(token_get_all("<?php 1;"), 0), count(token_get_all("<?php 1;"), true), count(token_get_all("<?php 1;"), "1"), count(token_get_all("<?php 1;"), null));
-/// ```
-/// ```expect
-/// Deprecated: count(): Passing null to parameter #2 ($mode) of type int is deprecated in %s on line 2
-/// int(9)
-/// int(9)
-/// int(3)
-/// int(9)
-/// int(9)
-/// int(3)
-/// ```
-///
-/// ```php
-/// var_dump(count("x", 2));
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ValueError: count(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE in %s:2
-/// Stack trace:
-/// #0 %s(2): count('x', 2)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// var_dump(sizeof(false, 0));
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: sizeof(): Argument #1 ($value) must be of type Countable|array, false given in %s:2
-/// Stack trace:
-/// #0 %s(2): sizeof(false, 0)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn count(req: &mut Request) -> Result<Value, Thrown> {
-    let given = req.argument_count();
-    if !(1..=2).contains(&given) {
-        return Err(arg_count_error(
-            req,
-            &format!(
-                "{} {} given",
-                if given < 1 {
-                    "at least 1 argument,"
-                } else {
-                    "at most 2 arguments,"
-                },
-                given
-            ),
-        ));
-    }
-    let value = req.argument(1).unwrap_or_default();
-    let mode = if given == 2 {
-        long_argument(req, 2)?
-    } else {
-        COUNT_NORMAL
-    };
-    if mode != COUNT_NORMAL && mode != COUNT_RECURSIVE {
-        return Err(arg_value_error(
-            req,
-            2,
-            "be either COUNT_NORMAL or COUNT_RECURSIVE",
-        ));
-    }
-    match value.deref().as_array() {
-        Some(array) if mode == COUNT_RECURSIVE => Ok(Value::int(count_recursive(req, *array))),
-        _ => php_ext::coerce::count(req, &value).map(Value::int),
-    }
-}
-
-/// `php_count_recursive`: the elements, and every nested array's
-/// elements counted the same way, a reference followed to what it
-/// holds, and the walk guarded as php guards it, so an array that
-/// holds itself is the warning `Recursion detected` and a zero where
-/// the walk meets itself again.
-fn count_recursive(req: &mut Request, array: PhpArray) -> i64 {
-    if array.is_recursive() {
-        docref(req, Level::Warning, "Recursion detected");
-        return 0;
-    }
-    array.protect();
-    let mut count = i64::try_from(array.len()).unwrap_or(i64::MAX);
-    for (_, element) in &array {
-        if let Some(nested) = element.deref().as_array() {
-            count = count.saturating_add(count_recursive(req, *nested));
-        }
-    }
-    array.unprotect();
-    count
 }
 
 /// `ord(string $character): int`, php's `PHP_FUNCTION(ord)`

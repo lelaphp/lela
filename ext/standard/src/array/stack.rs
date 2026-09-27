@@ -7,18 +7,96 @@
 //! table in place (`array_shift`, `array_unshift`, `php_splice`), the
 //! rebuilt table is written into the reference.
 
-use php_ext::coerce::{coerce_param, to_array};
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
-use php_ext::raising::{Thrown, throw, too_few_arguments};
+use php_ext::abi::{Passed, Ref, Variadic};
+use php_ext::attr::php_function;
+use php_ext::coerce::to_array;
+use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpRef, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpRef, Value};
 
-use super::walk::array_argument;
 use super::{copied, key_copy};
-use crate::output::Entry;
-use crate::{argument_count_between, bool_argument, declared, long_argument, parameter};
 
-/// The declarations, as `basic_functions.stub.php` has them.
+/// The array a by-reference argument holds, as `Z_PARAM_ARRAY_EX(array,
+/// 0, 1)` separates it, with the cell to write a rebuilt table into; an
+/// argument that came by value, past its notice, is a cell of its own
+/// nobody reads after.
+pub(super) struct Stack {
+    pub(super) array: PhpArray,
+    /// A cell of the native's own over a copy, where the call sent a
+    /// value for the reference: php separates the argument slot, which
+    /// nobody reads after.
+    owned: Option<PhpRef>,
+    given: Ref<PhpArray>,
+}
+
+impl Stack {
+    /// The array `given` holds, separated where the caller's reference
+    /// holds it, a copy in a cell of its own where the call sent a value.
+    pub(super) fn of(req: &mut Request, given: Ref<PhpArray>) -> Result<Stack, Thrown> {
+        if let Some(array) = given.separated(req)? {
+            return Ok(Stack {
+                array,
+                owned: None,
+                given,
+            });
+        }
+        let array = match given.get() {
+            Some(array) => array.copy(req)?,
+            None => PhpArray::new(req)?,
+        };
+        let cell = PhpRef::new(req, array.to_value())?;
+        Ok(Stack {
+            array,
+            owned: Some(cell),
+            given,
+        })
+    }
+
+    /// A rebuilt table written where the array stood.
+    pub(super) fn replace(&mut self, req: &mut Request, rebuilt: PhpArray) -> Result<(), Thrown> {
+        match self.owned {
+            Some(cell) => cell.set(req, rebuilt.to_value())?,
+            None => self.given.set(req, rebuilt)?,
+        }
+        self.array = rebuilt;
+        Ok(())
+    }
+
+    /// The cell of its own given up.
+    pub(super) fn finish(self, req: &mut Request) {
+        if let Some(cell) = self.owned {
+            req.release(cell.as_value());
+        }
+    }
+}
+
+/// `array_push(array &$array, mixed ...$values): int`, php's
+/// `PHP_FUNCTION(array_push)` (`Z/ext/standard/array.c:3520`): each value
+/// appended at `nNextFreeElement`, and the count after. An array whose
+/// next index is taken is php's `Error`.
+///
+/// ```php
+/// $f = [1]; var_dump(array_push($f, 2, [3]), $f, array_push($f));
+/// $h = [PHP_INT_MAX => 1]; try { array_push($h, 2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(3)
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   array(1) {
+///     [0]=>
+///     int(3)
+///   }
+/// }
+/// int(3)
+/// Cannot add element to the array as the next element is already occupied
+/// ```
+///
+/// The declarations of the stack natives.
 ///
 /// ```php
 /// foreach (['array_push', 'array_pop', 'array_shift', 'array_unshift', 'array_splice', 'array_slice'] as $f) echo new ReflectionFunction($f);
@@ -75,153 +153,14 @@ use crate::{argument_count_between, bool_argument, declared, long_argument, para
 ///   - Return [ array ]
 /// }
 /// ```
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let by_ref_array = || Parameter {
-        by_ref: true,
-        ..parameter(b"array", Type::Array)
-    };
-    let values = || Parameter {
-        variadic: true,
-        ..parameter(b"values", Type::Mixed)
-    };
-    let length = || Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Null),
-        ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
-    };
-    vec![
-        (
-            declared(b"array_push", &[by_ref_array(), values()], Type::Int),
-            array_push,
-        ),
-        (
-            declared(b"array_pop", &[by_ref_array()], Type::Mixed),
-            array_pop,
-        ),
-        (
-            declared(b"array_shift", &[by_ref_array()], Type::Mixed),
-            array_shift,
-        ),
-        (
-            declared(b"array_unshift", &[by_ref_array(), values()], Type::Int),
-            array_unshift,
-        ),
-        (
-            declared(
-                b"array_splice",
-                &[
-                    by_ref_array(),
-                    parameter(b"offset", Type::Int),
-                    length(),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Array(Vec::new())),
-                        ..parameter(b"replacement", Type::Mixed)
-                    },
-                ],
-                Type::Array,
-            ),
-            array_splice,
-        ),
-        (
-            declared(
-                b"array_slice",
-                &[
-                    parameter(b"array", Type::Array),
-                    parameter(b"offset", Type::Int),
-                    length(),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                        ..parameter(b"preserve_keys", Type::Bool)
-                    },
-                ],
-                Type::Array,
-            ),
-            array_slice,
-        ),
-    ]
-}
-
-/// The array a by-reference argument holds, as `Z_PARAM_ARRAY_EX(array,
-/// 0, 1)` separates it, with the cell to write a rebuilt table into; an
-/// argument that came by value, past its notice, is a cell of its own
-/// nobody reads after.
-struct Stack {
-    cell: PhpRef,
-    array: PhpArray,
-    owned: bool,
-}
-
-impl Stack {
-    fn of(req: &mut Request, position: u32) -> Result<Stack, Thrown> {
-        let given = req.argument(position).unwrap_or_default();
-        let coerced = coerce_param(req, &given, &Type::Array, position)?;
-        if let ValueRef::Reference(reference) = given.as_ref()
-            && let Some(array) = reference.separate_array(req)?
-        {
-            return Ok(Stack {
-                cell: *reference,
-                array,
-                owned: false,
-            });
-        }
-        let array = match coerced.deref().as_array() {
-            Some(array) => array.copy(req)?,
-            None => PhpArray::new(req)?,
-        };
-        let cell = PhpRef::new(req, array.to_value())?;
-        Ok(Stack {
-            cell,
-            array,
-            owned: true,
-        })
-    }
-
-    /// The rebuilt table written into the cell, the old one given up,
-    /// as an assignment through the cell is held to its type sources.
-    fn replace(&mut self, req: &mut Request, rebuilt: PhpArray) -> Result<(), Thrown> {
-        self.cell.set(req, rebuilt.to_value())?;
-        self.array = rebuilt;
-        Ok(())
-    }
-
-    fn finish(self, req: &mut Request) {
-        if self.owned {
-            req.release(self.cell.as_value());
-        }
-    }
-}
-
-/// `array_push(array &$array, mixed ...$values): int`, php's
-/// `PHP_FUNCTION(array_push)` (`Z/ext/standard/array.c:3520`): each value
-/// appended at `nNextFreeElement`, and the count after. An array whose
-/// next index is taken is php's `Error`.
-///
-/// ```php
-/// $f = [1]; var_dump(array_push($f, 2, [3]), $f, array_push($f));
-/// $h = [PHP_INT_MAX => 1]; try { array_push($h, 2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(3)
-/// array(3) {
-///   [0]=>
-///   int(1)
-///   [1]=>
-///   int(2)
-///   [2]=>
-///   array(1) {
-///     [0]=>
-///     int(3)
-///   }
-/// }
-/// int(3)
-/// Cannot add element to the array as the next element is already occupied
-/// ```
-fn array_push(req: &mut Request) -> Result<Value, Thrown> {
-    if req.argument_count() < 1 {
-        return Err(too_few_arguments(req, 1, 0));
-    }
-    let mut stack = Stack::of(req, 1)?;
-    let values = req.variadic_arguments(2)?;
-    for value in values {
+#[php_function]
+fn array_push(
+    req: &mut Request,
+    array: Ref<PhpArray>,
+    values: Variadic<Value>,
+) -> Result<i64, Thrown> {
+    let mut stack = Stack::of(req, array)?;
+    for value in values.0 {
         req.addref(&value);
         if let Err(thrown) = stack.array.append(req, value) {
             stack.finish(req);
@@ -230,7 +169,7 @@ fn array_push(req: &mut Request) -> Result<Value, Thrown> {
     }
     let count = i64::try_from(stack.array.len()).unwrap_or(i64::MAX);
     stack.finish(req);
-    Ok(Value::int(count))
+    Ok(count)
 }
 
 /// `array_pop(array &$array): mixed`, php's `PHP_FUNCTION(array_pop)`
@@ -269,9 +208,9 @@ fn array_push(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "a"
 /// int(1)
 /// ```
-fn array_pop(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let mut stack = Stack::of(req, 1)?;
+#[php_function]
+fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
+    let mut stack = Stack::of(req, array)?;
     let Some((key, value)) = stack.array.snapshot_refs().pop() else {
         stack.finish(req);
         return Ok(Value::null());
@@ -332,9 +271,9 @@ fn unwrapped(req: &mut Request, value: Value) -> Value {
 /// NULL
 /// int(2)
 /// ```
-fn array_shift(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let mut stack = Stack::of(req, 1)?;
+#[php_function]
+fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
+    let mut stack = Stack::of(req, array)?;
     let rows = stack.array.snapshot_refs();
     let Some((_, first)) = rows.first().cloned() else {
         stack.finish(req);
@@ -383,14 +322,15 @@ fn array_shift(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// int(4)
 /// ```
-fn array_unshift(req: &mut Request) -> Result<Value, Thrown> {
-    if req.argument_count() < 1 {
-        return Err(too_few_arguments(req, 1, 0));
-    }
-    let mut stack = Stack::of(req, 1)?;
-    let values = req.variadic_arguments(2)?;
+#[php_function]
+fn array_unshift(
+    req: &mut Request,
+    array: Ref<PhpArray>,
+    values: Variadic<Value>,
+) -> Result<i64, Thrown> {
+    let mut stack = Stack::of(req, array)?;
     let mut rebuilt = PhpArray::new(req)?;
-    for value in values {
+    for value in values.0 {
         req.addref(&value);
         rebuilt.append(req, value)?;
     }
@@ -407,7 +347,7 @@ fn array_unshift(req: &mut Request) -> Result<Value, Thrown> {
     let count = i64::try_from(rebuilt.len()).unwrap_or(i64::MAX);
     stack.replace(req, rebuilt)?;
     stack.finish(req);
-    Ok(Value::int(count))
+    Ok(count)
 }
 
 /// `array_splice(array &$array, int $offset, ?int $length = null, mixed
@@ -477,28 +417,24 @@ fn array_unshift(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(1)
 /// }
 /// ```
-fn array_splice(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 4)?;
-    let mut stack = Stack::of(req, 1)?;
-    let offset = long_argument(req, 2)?;
-    let length = if req.argument_count() >= 3 {
-        let given = req.argument(3).unwrap_or_default();
-        let coerced = coerce_param(req, &given, &Type::Nullable(Box::new(Type::Int)), 3)?;
-        coerced.as_int()
-    } else {
-        None
-    };
-    let replacement = if req.argument_count() == 4 {
-        let given = req.argument(4).unwrap_or_default().deref();
-        Some(match given.as_array() {
+#[php_function]
+fn array_splice(
+    req: &mut Request,
+    array: Ref<PhpArray>,
+    offset: i64,
+    #[php(default = null)] length: Option<i64>,
+    #[php(default = [])] replacement: Passed<Value>,
+) -> Result<PhpArray, Thrown> {
+    let mut stack = Stack::of(req, array)?;
+    let replacement = match replacement {
+        Passed::Given(given) => Some(match given.as_array() {
             Some(array) => {
                 req.addref(&given);
                 *array
             }
             None => to_array(req, &given)?,
-        })
-    } else {
-        None
+        }),
+        Passed::Omitted => None,
     };
     let rows = stack.array.snapshot_refs();
     let num_in = i64::try_from(rows.len()).unwrap_or(i64::MAX);
@@ -546,7 +482,7 @@ fn array_splice(req: &mut Request) -> Result<Value, Thrown> {
     }
     stack.replace(req, rebuilt)?;
     stack.finish(req);
-    Ok(Value::array(removed))
+    Ok(removed)
 }
 
 /// `php_splice`'s clamps: the offset into `0..=num_in`, from the end
@@ -609,29 +545,22 @@ fn clamp_splice(num_in: i64, offset: i64, length: i64) -> (i64, i64) {
 ///   int(3)
 /// }
 /// ```
-fn array_slice(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 4)?;
-    let input = array_argument(req, 1)?;
-    let offset = long_argument(req, 2)?;
-    let length = if req.argument_count() >= 3 {
-        let given = req.argument(3).unwrap_or_default();
-        let coerced = coerce_param(req, &given, &Type::Nullable(Box::new(Type::Int)), 3)?;
-        coerced.as_int()
-    } else {
-        None
-    };
-    let preserve = if req.argument_count() == 4 {
-        bool_argument(req, 4)?
-    } else {
-        false
-    };
+#[php_function]
+fn array_slice(
+    req: &mut Request,
+    array: PhpArray,
+    offset: i64,
+    #[php(default = null)] length: Option<i64>,
+    #[php(default = false)] preserve_keys: bool,
+) -> Result<PhpArray, Thrown> {
+    let (input, preserve) = (array, preserve_keys);
     let num_in = i64::try_from(input.len()).unwrap_or(i64::MAX);
     if offset > num_in {
-        return Ok(Value::array(PhpArray::new(req)?));
+        return PhpArray::new(req);
     }
     let (start, taken) = clamp_splice(num_in, offset, length.unwrap_or(num_in));
     if taken <= 0 {
-        return Ok(Value::array(PhpArray::new(req)?));
+        return PhpArray::new(req);
     }
     let mut out = PhpArray::new(req)?;
     let rows = input.snapshot_refs();
@@ -647,7 +576,7 @@ fn array_slice(req: &mut Request) -> Result<Value, Thrown> {
             }
         }
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// php's `Error` for an append past `ZEND_LONG_MAX`.
@@ -658,15 +587,4 @@ fn occupied(req: &mut Request) -> Thrown {
         "Error",
         "Cannot add element to the array as the next element is already occupied",
     )
-}
-
-/// The cell, the array it holds and whether the cell is this native's
-/// own, for a native in another file of `array` that writes a rebuilt
-/// table.
-pub(super) fn cell_array(
-    req: &mut Request,
-    position: u32,
-) -> Result<(PhpRef, PhpArray, bool), Thrown> {
-    let stack = Stack::of(req, position)?;
-    Ok((stack.cell, stack.array, stack.owned))
 }
