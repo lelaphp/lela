@@ -105,6 +105,11 @@ pub use file::{php_fputcsv, php_fstat};
 pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
 
+/// What `url_scanner_ex.h` declares `PHPAPI` for `session.c`, which adds
+/// the session's id to the URLs and forms of the session rewriter
+/// (ADR-0004; design §4.10).
+pub use url_scanner::{php_url_scanner_add_session_var, php_url_scanner_reset_session_var};
+
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
@@ -129,6 +134,8 @@ struct State {
     user_filters: user_filters::FilterState,
     /// `BG(url_adapt_output_ex)`, the URL rewriter's state.
     url_rewriter: url_scanner::Rewriter,
+    /// `BG(url_adapt_session_ex)`, `session.use_trans_sid`'s rewriter.
+    session_rewriter: url_scanner::Rewriter,
     assert: assert::Stage,
 }
 

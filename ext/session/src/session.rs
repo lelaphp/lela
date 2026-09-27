@@ -733,6 +733,36 @@ pub(super) fn destroy(req: &mut Request) -> Result<bool, Thrown> {
 ///
 /// A `SID` the program defined first is written the same way:
 ///
+/// Under `session.use_trans_sid`, with no cookie carrying the id, the id
+/// is added to the relative and listed URLs and to the forms, through
+/// ext/standard's session rewriter; the rewriter reads its pair as it
+/// flushes, and a regenerated id takes the old one's place rather than
+/// joining it, so the whole body carries the new id once per URL:
+///
+/// ```php
+/// @ini_set('session.use_only_cookies', '0'); @ini_set('session.use_trans_sid', '1');
+/// session_id('abc'); session_start(['use_cookies' => 0, 'cache_limiter' => '', 'save_path' => __DIR__]);
+/// ?>
+/// <a href="x.php?q=1">x</a> <a href="http://other.org/">y</a>
+/// <form action="x.php"></form>
+/// <?php
+/// print_r(ob_list_handlers()); session_regenerate_id(true);
+/// ?>
+/// <a href="y.php">y</a>
+/// <?php
+/// echo session_id() === 'abc' ? "old\n" : "new\n"; session_destroy();
+/// ```
+/// ```expect
+/// <a href="x.php?q=1&PHPSESSID=%s">x</a> <a href="http://other.org/">y</a>
+/// <form action="x.php"><input type="hidden" name="PHPSESSID" value="%s" /></form>
+/// Array
+/// (
+///     [0] => URL-Rewriter
+/// )
+/// <a href="y.php?PHPSESSID=%s">y</a>
+/// new
+/// ```
+///
 /// ```php
 /// define('SID', [0xdeadbeef]); ob_start(); session_save_path(__DIR__); session_start(["use_cookies" => 0, "cache_limiter" => ""]); var_dump(SID); session_destroy();
 /// ```
@@ -769,6 +799,22 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
     };
     if !registered {
         req.release(sid);
+    }
+    // `APPLY_TRANS_SID`, where no cookie of the session's name came with
+    // the request: the id added to the session context's URLs and forms,
+    // the old pair taken out first, which fails where the name changed.
+    if ini_bool(req, b"session.use_trans_sid") && !ini_bool(req, b"session.use_only_cookies") {
+        let name = ini(req, b"session.name");
+        let cookie_carries_it = ini_bool(req, b"session.use_cookies")
+            && req.superglobal(b"_COOKIE").is_some_and(|cookies| {
+                cookies.snapshot().into_iter().any(|(key, _)| {
+                    matches!(key, php_ext::values::Key::Str(s) if s.as_bytes() == name.as_slice())
+                })
+            });
+        if !cookie_carries_it {
+            php_ext_standard::php_url_scanner_reset_session_var(req, &name, true);
+            php_ext_standard::php_url_scanner_add_session_var(req, &name, &id, true)?;
+        }
     }
     Ok(true)
 }
