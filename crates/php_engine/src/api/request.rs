@@ -6796,6 +6796,26 @@ impl Request {
         }
     }
 
+    /// `ZEND_REF_ADD_TYPE_SOURCE` over the property whose slot `slot` of
+    /// `object` is (`zend_get_property_info_for_slot`): the cell the slot
+    /// holds is typed by that property too, one more source beside the
+    /// others, since another object's slot of the same property may
+    /// hold it as well. A slot of an untyped property types nothing.
+    pub(crate) fn slot_source_added(&mut self, object: PhpObject, slot: u32, cell: Ref) {
+        let placed = self.placed_properties(object.class());
+        let Some((declaring, p)) = usize::try_from(slot).ok().and_then(|at| placed.get(at)) else {
+            return;
+        };
+        if let Some(ty) = p.ty.clone() {
+            let source = RefSource {
+                declaring: *declaring,
+                name: p.name.0.to_vec(),
+                ty,
+            };
+            self.ref_add_type_source(cell, source);
+        }
+    }
+
     /// `ZEND_REF_FOREACH_TYPE_SOURCES` as a slice: the properties whose
     /// slots hold this cell, empty for a cell no typed property's slot
     /// holds, which is `ZEND_REF_HAS_TYPE_SOURCES` reading false.
@@ -8755,11 +8775,41 @@ impl Request {
             ))));
         };
         let new = PhpObject::of(new);
+        self.clone_slot_sources(new);
         if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
             return Err(thrown);
         }
         Ok(new)
+    }
+
+    /// `zend_objects_clone_members`' `ZEND_REF_ADD_TYPE_SOURCE`: a slot
+    /// of the copy holding a cell a typed property is a source of shares
+    /// the cell with the original, and the copy's own property is one
+    /// more source of it, so the cell stays held to the type when the
+    /// original is gone.
+    ///
+    /// ```php
+    /// class Test { public int $x = 42; }
+    /// $test = new Test; $x =& $test->x;
+    /// $test2 = clone $test;
+    /// unset($test);
+    /// try { $x = "foo"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($test2->x);
+    /// ```
+    /// ```expect
+    /// Cannot assign string to reference held by property Test::$x of type int
+    /// int(42)
+    /// ```
+    fn clone_slot_sources(&mut self, copy: PhpObject) {
+        let o = copy.heap();
+        for slot in 0..o.slots() {
+            if let Some(cell) = o.slot(slot).as_reference()
+                && cell.sources() != 0
+            {
+                self.slot_source_added(copy, slot, cell);
+            }
+        }
     }
 
     /// The tail of `zend_objects_clone_members`: the class's `__clone`
@@ -8797,6 +8847,7 @@ impl Request {
     ) -> Result<PhpObject, Thrown> {
         let cloned = self.heap.object_clone_with(object.heap(), payload);
         let new = PhpObject::of(self.fatal_of(cloned)?);
+        self.clone_slot_sources(new);
         if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
             return Err(thrown);
