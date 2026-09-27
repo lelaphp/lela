@@ -243,7 +243,14 @@ pub fn extension() -> Extension {
         .functions(output::natives())
         .functions(head::natives())
         .functions(var::natives())
-        .functions(formatted_print::natives())
+        .functions(vec![
+            formatted_print::sprintf::declared(),
+            formatted_print::printf::declared(),
+            formatted_print::vsprintf::declared(),
+            formatted_print::vprintf::declared(),
+            formatted_print::fprintf::declared(),
+            formatted_print::vfprintf::declared(),
+        ])
         .functions(vec![
             base64::base64_encode::declared(),
             base64::base64_decode::declared(),
@@ -340,7 +347,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         vec![md5::md5::declared(), md5::md5_file::declared()],
         vec![sha1::sha1::declared(), sha1::sha1_file::declared()],
         vec![crc32::crc32::declared()],
-        pack::natives(),
+        vec![pack::pack::declared(), pack::unpack::declared()],
         http::natives(),
         vec![
             quot_print::quoted_printable_decode::declared(),
