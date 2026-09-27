@@ -794,8 +794,28 @@ impl SplObjectStorage {
         storage_attach(req, this.object(), object.0, info)
     }
 
-    /// `offsetUnset($object): void`, php's alias of `detach()`; the
-    /// witness is the class's.
+    /// `offsetUnset($object): void`, php's alias of `detach()`: the row
+    /// given up object first, then its information
+    /// ([`give_up_row`]), as a detach, an `unset` and the storage's own
+    /// end give every row up.
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo "dtor {$this->n}\n"; } }
+    /// class S extends SplObjectStorage { function getHash($o): string { return 'k'; } }
+    /// $s = new S; $s[new D('o1')] = new D('i1');
+    /// $s->offsetUnset(new D('x'));
+    /// echo "--\n";
+    /// $t = new SplObjectStorage; $t[new D('o2')] = new D('i2');
+    /// unset($t);
+    /// ```
+    /// ```expect
+    /// dtor o1
+    /// dtor i1
+    /// dtor x
+    /// --
+    /// dtor o2
+    /// dtor i2
+    /// ```
     #[php(tentative)]
     fn offsetUnset(
         req: &mut Request,
@@ -1331,12 +1351,20 @@ fn storage_detach(req: &mut Request, this: PhpObject, object: PhpObject) -> Resu
     let key = row_key(req, this, object)?;
     match with(req, this, |s| s.detach(&key))? {
         Some((object, inf)) => {
-            req.release(inf);
-            req.release(object.as_value());
+            give_up_row(req, object, inf);
             Ok(true)
         }
         None => Ok(false),
     }
+}
+
+/// `spl_object_storage_dtor`, the table's destructor for every row a
+/// detach or the storage's end gives up: the object released, then the
+/// information, `zend_object_release(el->obj)` before
+/// `zval_ptr_dtor(&el->inf)`.
+fn give_up_row(req: &mut Request, object: PhpObject, inf: Value) {
+    req.release(object.as_value());
+    req.release(inf);
 }
 
 /// `SplObjectStorage::detach`'s body: the row gone and the position
@@ -1365,8 +1393,7 @@ impl ObjectHandlers for Handlers {
             })
             .unwrap_or_default();
         for (_, object, inf) in rows.into_iter().flatten() {
-            req.release(inf);
-            req.release(object.as_value());
+            give_up_row(req, object, inf);
         }
     }
 
@@ -1474,8 +1501,7 @@ impl ObjectHandlers for Handlers {
             Some(target) if overridden_bits(req, object)? & SOS_OVERRIDDEN_UNSET == 0 => {
                 let key = RowKey::Id(target.index());
                 if let Some((object, inf)) = with(req, object, |s| s.detach(&key))? {
-                    req.release(inf);
-                    req.release(object.as_value());
+                    give_up_row(req, object, inf);
                 }
                 Ok(())
             }
