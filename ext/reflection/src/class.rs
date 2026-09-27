@@ -788,16 +788,27 @@ impl ReflectionClass {
 
     /// `ReflectionClass::isCloneable()`: an interface, a trait, an enum or
     /// an abstract class is not; a class with a `__clone` is cloneable
-    /// while that method is public; anything else is, since every object
-    /// here has php's `clone_obj`.
+    /// while that method is public; any other is while its objects'
+    /// handlers have a `clone_obj`, read off the object a
+    /// `ReflectionObject` kept, or off a fresh one php makes and gives up
+    /// unconstructed. The handlers are the nearest internal class's, so
+    /// the fresh object is one of that class, and a user class above no
+    /// internal one has `Std`'s.
     ///
     /// ```php
     /// var_dump((new ReflectionClass('Exception'))->isCloneable());
     /// var_dump((new ReflectionClass('ReflectionClass'))->isCloneable());
+    /// class F extends SplFileObject { function __destruct() { echo "never\n"; } }
+    /// var_dump((new ReflectionClass("SplFileObject"))->isCloneable(), (new ReflectionClass("F"))->isCloneable(), (new ReflectionClass("ArrayObject"))->isCloneable(), (new ReflectionObject(new SplTempFileObject))->isCloneable(), (new ReflectionObject(new SplFileInfo(__FILE__)))->isCloneable());
     /// ```
     /// ```expect
     /// bool(false)
     /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
     /// ```
     #[php(tentative)]
     fn isCloneable(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
@@ -808,7 +819,22 @@ impl ReflectionClass {
         let clone = linked_methods(req, class)
             .into_iter()
             .find(|m| m.decl.function.name.0.eq_ignore_ascii_case(b"__clone"));
-        Ok(clone.is_none_or(|m| m.decl.visibility == Visibility::Public))
+        if let Some(clone) = clone {
+            return Ok(clone.decl.visibility == Visibility::Public);
+        }
+        if let Some(object) = kept_object(req, this.object()) {
+            return Ok(object.handlers(req).clone_obj().is_some());
+        }
+        let Some(internal) = class_chain(req, class)
+            .into_iter()
+            .find(|at| is_internal(req, *at))
+        else {
+            return Ok(true);
+        };
+        let fresh = new_object(req, internal)?;
+        let cloneable = fresh.handlers(req).clone_obj().is_some();
+        req.release(fresh.as_value());
+        Ok(cloneable)
     }
 
     /// `ReflectionClass::getFileName()`: `ce->info.user.filename` for a
