@@ -14336,7 +14336,10 @@ impl Request {
         if kind.once() {
             self.included_files.push(path.clone());
         }
-        if let Some(source) = self.compile_file_source(&path)? {
+        let outer = self.including.replace((kind, self.vm.call_depth()));
+        let replaced = self.compile_file_source(&path);
+        self.including = outer;
+        if let Some(source) = replaced? {
             let shared = Arc::clone(&self.shared);
             let unit = match shared.compile_for(self, &source, &path, SourceKind::File) {
                 Ok(unit) => unit,
