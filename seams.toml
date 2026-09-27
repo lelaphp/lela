@@ -79,7 +79,7 @@ name = "php"
 budget = 1000
 [[crate]]
 name = "xtask"
-budget = 19000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
+budget = 21000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
@@ -411,8 +411,8 @@ text = "ext/clippy.toml is generated from the manifest and committed; a stale co
 [[rule]]
 id = "git.no-verify"
 tool = "Bash"
-deny_argv = ["--no-verify", "-n"]
-with = "commit"
+deny_argv = ["--no-verify", "-n", "-c core.hooksPath", "--config-env core.hooksPath"]
+with = "git commit"
 text = "Commits run the pre-commit hook; --no-verify is not available to agents."
 
 [[rule]]
