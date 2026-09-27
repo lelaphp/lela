@@ -690,13 +690,8 @@ impl SplObjectStorage {
             return Ok(());
         }
         let mut reader = php_ext_standard::Unserializer::new(req, &data);
-        let mut kept = Vec::new();
-        let read = read_storage(req, this, &mut reader, &data, &mut kept);
+        let read = read_storage(req, this, &mut reader, &data);
         let finished = reader.finish(req);
-        // `var_tmp_var`'s values live until `PHP_VAR_UNSERIALIZE_DESTROY`.
-        for value in kept {
-            req.release(value);
-        }
         let broke_at = read?;
         finished?;
         match broke_at {
@@ -1679,15 +1674,15 @@ fn serialize_rows(
 }
 
 /// The body of `SplObjectStorage::unserialize` over one reader: `None`
-/// once the data is read, or the offset php's `outexcept` reports; each
-/// value read is left in `kept`, php's `var_tmp_var`, for the caller to
-/// give up once the reader is done.
+/// once the data is read, or the offset php's `outexcept` reports. The
+/// count and the members are the var hash's, php's `var_tmp_var`; each
+/// row's object and information are read as php reads them into locals
+/// and `var_replace`s into the row, the storage's to keep.
 fn read_storage(
     req: &mut Request,
     this: PhpObject,
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
-    kept: &mut Vec<Value>,
 ) -> Result<Option<usize>, Thrown> {
     if !data.starts_with(b"x:") {
         return Ok(Some(0));
@@ -1696,7 +1691,6 @@ fn read_storage(
     let Some(count) = reader.value(req)? else {
         return Ok(Some(reader.offset()));
     };
-    kept.push(count);
     // `--p` back onto the `;` the count's own value ended with.
     reader.set_offset(reader.offset().saturating_sub(1));
     let Some(count) = count.as_int().filter(|n| *n >= 0) else {
@@ -1710,23 +1704,25 @@ fn read_storage(
         if !matches!(data.get(reader.offset()), Some(b'O' | b'C' | b'r')) {
             return Ok(Some(reader.offset()));
         }
-        let Some(entry) = reader.value(req)? else {
+        let Some(entry) = reader.local(req)? else {
             return Ok(Some(reader.offset()));
         };
-        kept.push(entry);
         let mut inf = Value::null();
         if data.get(reader.offset()) == Some(&b',') {
             reader.set_offset(reader.offset() + 1);
-            let Some(read) = reader.value(req)? else {
+            let Some(read) = reader.local(req)? else {
+                req.release(entry);
                 return Ok(Some(reader.offset()));
             };
             inf = read;
         }
         let Some(target) = entry.as_object().copied() else {
+            req.release(entry);
             req.release(inf);
             return Ok(Some(reader.offset()));
         };
         let attached = storage_attach(req, this, target, inf);
+        req.release(entry);
         req.release(inf);
         attached?;
     }
@@ -1744,7 +1740,6 @@ fn read_storage(
     let Some(members) = reader.value(req)? else {
         return Ok(Some(reader.offset()));
     };
-    kept.push(members);
     if members.as_array().is_none() {
         return Ok(Some(reader.offset()));
     }

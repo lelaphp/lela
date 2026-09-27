@@ -530,14 +530,8 @@ impl ArrayObject {
         sorting_refused(req, this)?;
         let mut reader = php_ext_standard::Unserializer::new(req, &data);
         let mut pending = None;
-        let mut kept = Vec::new();
-        let read = read_record(req, this, &mut reader, &data, &mut pending, &mut kept);
+        let read = read_record(req, this, &mut reader, &data, &mut pending);
         let finished = reader.finish(req);
-        // `var_tmp_var`'s values live until `PHP_VAR_UNSERIALIZE_DESTROY`,
-        // since a later `R:` of the record may name one.
-        for value in kept {
-            req.release(value);
-        }
         let broke_at = read?;
         finished?;
         if let Some(at) = broke_at {
@@ -2148,16 +2142,14 @@ fn storage(req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
 
 /// The body of `ArrayObject::unserialize` over one reader: `None` once
 /// the record is read, or the offset php's `outexcept` reports; a
-/// refusal of the storage is left in `pending`, and each value read is
-/// left in `kept`, php's `var_tmp_var`, for the caller to give up once
-/// the reader is done.
+/// refusal of the storage is left in `pending`. Each value read is the
+/// var hash's, php's `var_tmp_var`, so a later `R:` may name it.
 fn read_record(
     req: &mut Request,
     this: PhpObject,
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
     pending: &mut Option<Thrown>,
-    kept: &mut Vec<Value>,
 ) -> Result<Option<usize>, Thrown> {
     if !data.starts_with(b"x:") {
         return Ok(Some(0));
@@ -2166,7 +2158,6 @@ fn read_record(
     let Some(flags) = reader.value(req)? else {
         return Ok(Some(reader.offset()));
     };
-    kept.push(flags);
     let Some(flags) = flags.as_int() else {
         return Ok(Some(reader.offset()));
     };
@@ -2184,7 +2175,6 @@ fn read_record(
         let Some(stored) = reader.value(req)? else {
             return Ok(Some(reader.offset()));
         };
-        kept.push(stored);
         if stored.as_array().is_none() && stored.as_object().is_none() {
             return Ok(Some(reader.offset()));
         }
@@ -2208,7 +2198,6 @@ fn read_record(
     let Some(members) = reader.value(req)? else {
         return Ok(Some(reader.offset()));
     };
-    kept.push(members);
     if members.as_array().is_none() {
         return Ok(Some(reader.offset()));
     }

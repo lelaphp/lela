@@ -585,12 +585,8 @@ impl SplDoublyLinkedList {
             req.release(old);
         }
         let mut reader = php_ext_standard::Unserializer::new(req, &data);
-        let mut kept = None;
-        let read = read_list(req, this, &mut reader, &data, &mut kept);
+        let read = read_list(req, this, &mut reader, &data);
         let finished = reader.finish(req);
-        if let Some(flags) = kept {
-            req.release(flags);
-        }
         let broke_at = read?;
         finished?;
         match broke_at {
@@ -904,19 +900,17 @@ fn move_forward(req: &mut Request, this: PhpObject, flags: i64) -> Result<(), Th
 
 /// The body of `SplDoublyLinkedList::unserialize` over one reader:
 /// `None` once the data is read, or the offset php's `error` label
-/// reports. The flags' value is left in `kept`, php's `var_tmp_var`,
-/// and each element is the list's.
+/// reports. Each value read is the var hash's, php's `var_tmp_var`, and
+/// the list takes an owner of each element.
 fn read_list(
     req: &mut Request,
     this: PhpObject,
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
-    kept: &mut Option<Value>,
 ) -> Result<Option<usize>, Thrown> {
     let Some(flags) = reader.value(req)? else {
         return Ok(Some(reader.offset()));
     };
-    *kept = Some(flags);
     let Some(flags) = flags.as_int() else {
         return Ok(Some(reader.offset()));
     };
@@ -926,6 +920,7 @@ fn read_list(
         let Some(value) = reader.value(req)? else {
             return Ok(Some(reader.offset()));
         };
+        req.addref(&value);
         with(req, this, |l| l.push(value))?;
     }
     if reader.offset() != data.len() {

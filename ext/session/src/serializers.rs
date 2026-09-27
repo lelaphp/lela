@@ -136,10 +136,20 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
     let data = data.to_vec();
     if format == Format::PhpSerialize {
         let mut reader = Unserializer::new(req, &data);
+        // The value is the var hash's until it is destroyed; the session
+        // keeps an owner of its own.
         let read = reader.value(req);
+        if let Ok(Some(value)) = &read {
+            req.addref(value);
+        }
         let finished = reader.finish(req);
+        if let Err(thrown) = finished {
+            if let Ok(Some(value)) = read {
+                req.release(value);
+            }
+            return Err(thrown);
+        }
         let read = read?;
-        finished?;
         let ok = read.is_some();
         let array = match read {
             Some(value) if value.as_array().is_some() => value.as_array().copied(),

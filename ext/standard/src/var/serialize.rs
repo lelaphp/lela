@@ -14,7 +14,8 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 use super::{
-    INCOMPLETE_CLASS, MAGIC_MEMBER, class_name, has_method, is_enum, locked, not_serializable,
+    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, class_name, has_method, is_enum, locked,
+    not_serializable,
 };
 
 /// What the var hash keys an entry by: the object's identity, or the
@@ -142,9 +143,7 @@ fn serialize(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
 /// ```
 pub struct Serializer {
     hash: VarHash,
-    /// Whether the var hash is `BG(serialize)`'s, the one every
-    /// serializer opened while it is open shares.
-    shared: bool,
+    holder: Holder,
 }
 
 impl Serializer {
@@ -154,9 +153,9 @@ impl Serializer {
     /// the string around it; a fresh one otherwise.
     #[must_use]
     pub fn new(req: &mut Request) -> Serializer {
-        let lock = req.state::<crate::State>().var.lock;
-        let (hash, shared) = req.state::<crate::State>().var.serialize.open(lock);
-        Serializer { hash, shared }
+        let nesting = &mut req.state::<crate::State>().var;
+        let (hash, holder) = nesting.serialize.open(nesting.lock, VarHash::default());
+        Serializer { hash, holder }
     }
 
     /// `php_var_serialize(buf, struc, &var_hash)`: `value` appended to
@@ -174,12 +173,12 @@ impl Serializer {
     /// serializer it is shared with, or destroyed where this was its last
     /// holder, the owners it took given up.
     pub fn finish(self, req: &mut Request) {
-        let Serializer { hash, shared } = self;
+        let Serializer { hash, holder } = self;
         if let Some(hash) = req
             .state::<crate::State>()
             .var
             .serialize
-            .close(hash, shared)
+            .close(hash, holder)
         {
             hash.destroy(req);
         }
@@ -188,19 +187,10 @@ impl Serializer {
     /// `f`, a call that may open another serializer, with the var hash
     /// set down where that one finds it.
     fn out<R>(&mut self, req: &mut Request, f: impl FnOnce(&mut Request) -> R) -> R {
-        if !self.shared {
-            return f(req);
-        }
         let hash = std::mem::take(&mut self.hash);
-        req.state::<crate::State>().var.serialize.parked = Some(hash);
-        let answered = f(req);
-        self.hash = req
-            .state::<crate::State>()
-            .var
-            .serialize
-            .parked
-            .take()
-            .unwrap_or_default();
+        let (hash, answered) =
+            Shared::set_down(req, |nesting| &mut nesting.serialize, hash, self.holder, f);
+        self.hash = hash;
         answered
     }
 

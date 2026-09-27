@@ -37,6 +37,7 @@ pub(crate) struct Nesting {
     /// `__unserialize()` and `__wakeup()` calls are under way.
     lock: u32,
     serialize: Shared<serialize::VarHash>,
+    unserialize: Shared<unserialize::VarHash>,
 }
 
 /// One of `BG(serialize)` and `BG(unserialize)`: how many holders share
@@ -56,34 +57,45 @@ impl<T> Default for Shared<T> {
     }
 }
 
-impl<T: Default> Shared<T> {
-    /// `PHP_VAR_SERIALIZE_INIT` and its twin: a var hash of its own while
-    /// `BG(serialize_lock)` is held, a fresh one that from here is the shared one where none
-    /// is open, and the open one otherwise; whether it is shared.
-    fn open(&mut self, lock: u32) -> (T, bool) {
+/// How a serializer or an unserializer holds its var hash.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    /// A var hash of its own, opened while `BG(serialize_lock)` is held.
+    Own,
+    /// The shared var hash, which it opened: `BG(...).level` was zero.
+    First,
+    /// The shared var hash another holder opened and set down for it.
+    Joined,
+}
+
+impl<T> Shared<T> {
+    /// `PHP_VAR_SERIALIZE_INIT` and its twin: `fresh` as a var hash of its
+    /// own while `BG(serialize_lock)` is held, `fresh` as the shared one
+    /// where none is open, and the open one otherwise.
+    fn open(&mut self, lock: u32, fresh: T) -> (T, Holder) {
         if lock > 0 {
-            return (T::default(), false);
+            return (fresh, Holder::Own);
         }
         if self.level == 0 {
             self.level = 1;
-            return (T::default(), true);
+            return (fresh, Holder::First);
         }
         match self.parked.take() {
             Some(hash) => {
                 self.level += 1;
-                (hash, true)
+                (hash, Holder::Joined)
             }
             // A holder that did not set its var hash down: this one keeps
-            // a var hash of its own, as under the lock.
-            None => (T::default(), false),
+            // a var hash of its own, as while the lock is held.
+            None => (fresh, Holder::Own),
         }
     }
 
     /// `PHP_VAR_SERIALIZE_DESTROY` and its twin: the var hash to destroy
     /// where this was its only or its last holder, `None` where it goes
     /// back to the holder that set it down.
-    fn close(&mut self, hash: T, shared: bool) -> Option<T> {
-        if !shared {
+    fn close(&mut self, hash: T, holder: Holder) -> Option<T> {
+        if holder == Holder::Own {
             return Some(hash);
         }
         self.level = self.level.saturating_sub(1);
@@ -92,6 +104,31 @@ impl<T: Default> Shared<T> {
         }
         self.parked = Some(hash);
         None
+    }
+
+    /// The var hash set down for a call that may open another holder,
+    /// and taken up again after it, `f`'s answer beside it; a var hash
+    /// of its own is kept through the call.
+    fn set_down<R>(
+        req: &mut Request,
+        home: fn(&mut Nesting) -> &mut Shared<T>,
+        hash: T,
+        holder: Holder,
+        f: impl FnOnce(&mut Request) -> R,
+    ) -> (T, R)
+    where
+        T: Default,
+    {
+        if holder == Holder::Own {
+            return (hash, f(req));
+        }
+        home(&mut req.state::<crate::State>().var).parked = Some(hash);
+        let answered = f(req);
+        let hash = home(&mut req.state::<crate::State>().var)
+            .parked
+            .take()
+            .unwrap_or_default();
+        (hash, answered)
     }
 }
 
