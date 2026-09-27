@@ -34,7 +34,7 @@ const BUFFER: usize = 4096;
 
 /// `check_options_validity` of `html_document.c`.
 fn check_options(req: &mut Request, position: u32, options: i64) -> Result<(), Thrown> {
-    let valid = NOERROR | COMPACT | NOIMPLIED | crate::HTML_NO_DEFAULT_NS;
+    let valid = NOERROR | COMPACT | NOIMPLIED | crate::modern_constants::HTML_NO_DEFAULT_NS;
     if options & !valid != 0 {
         return Err(php_ext::raising::argument_error(
             req,
@@ -833,7 +833,7 @@ fn finish(
 ) -> Result<Value, Thrown> {
     let doc = new_html_doc(req)?;
     let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc)?;
-    let create_default_ns = options & crate::HTML_NO_DEFAULT_NS == 0;
+    let create_default_ns = options & crate::modern_constants::HTML_NO_DEFAULT_NS == 0;
     let converted = dom_mut(req, object).and_then(|d| {
         convert(
             &mut d.obj,

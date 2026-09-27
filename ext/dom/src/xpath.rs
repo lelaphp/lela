@@ -3,23 +3,25 @@
 //! expression may call through `php:function`, `php:functionString` and
 //! the names `registerPhpFunctionNS` registered.
 
-use php_ext::abi::Callable;
+use php_ext::abi::{Callable, Instance, Passed, Path, Raw, This, Union};
+use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, to_string};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{
-    Answer, Called, Item, Name, Node, Operand, Returned, Route, Scope, XPath,
+    self, Answer, Called, Item, Name, Node, Operand, Returned, Route, Scope,
 };
 
-use crate::object::{Code, Extra};
+use crate::document::{DOMDocument, Document};
+use crate::map::NodeList;
+use crate::modern::Node as ModernNode;
+use crate::node::DOMNode;
+use crate::object::{Code, Dom, Extra};
 use crate::props::Prop;
-use crate::{
-    Entry, Read, arity, bool_arg, bytes_arg, dom, dom_mut, fetch, object_arg, object_for, string,
-    this,
-};
+use crate::{Read, dom, dom_mut, fetch, object_for, string};
 
 /// `PHP_DOM_REG_FUNC_MODE_*`: which php functions one namespace lets an
 /// expression call.
@@ -37,7 +39,7 @@ enum Mode {
 
 /// `dom_xpath_object`'s own fields.
 pub(crate) struct XPathState {
-    ctx: XPath,
+    ctx: ffi::XPath,
     register_node_ns: bool,
     callbacks: Callbacks,
 }
@@ -100,59 +102,6 @@ fn put(req: &mut Request, this: PhpObject, state: Box<XPathState>) {
     if let Some(d) = dom_mut(req, this) {
         d.extra = Extra::XPath(state);
     }
-}
-
-/// `DOMXPath::__construct(DOMDocument $document, bool $registerNodeNS = true)`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a>1</a><a>2</a></r>');
-/// $x = new DOMXPath($d);
-/// var_dump($x->document === $d, $x->registerNodeNamespaces, $x->query('//a')->length, $x->query('//a')->item(1)->textContent);
-/// $root = $d->documentElement;
-/// var_dump($x->query('a', $root)->length, $x->evaluate('count(//a)'), $x->evaluate('string(//a)'), $x->evaluate('1 = 1'));
-/// var_dump($x->query('//['));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// int(2)
-/// string(1) "2"
-/// int(2)
-/// float(2)
-/// string(1) "1"
-/// bool(true)
-///
-/// Warning: DOMXPath::query(): Invalid expression in %s on line %d
-/// bool(false)
-/// ```
-fn construct(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 2)?;
-    let Some(doc_obj) = object_arg(req, 1)? else {
-        return Ok(Value::null());
-    };
-    let register = bool_arg(req, 2, true)?;
-    let this = this(req)?;
-    let doc = fetch(req, doc_obj)?;
-    let Some(ctx) = XPath::new(doc) else {
-        return Err(crate::dom_throw(req, Code::InvalidState));
-    };
-    if let Some(old) = take(req, this) {
-        old.callbacks.release(req);
-    }
-    let shared = crate::shared_doc(req, doc_obj);
-    if let Some(d) = dom_mut(req, this) {
-        d.obj.set_object(this);
-        d.obj.decrement_doc_ref();
-        d.obj.share(shared, doc);
-    }
-    let state = XPathState {
-        ctx,
-        register_node_ns: register,
-        callbacks: Callbacks::default(),
-    };
-    put(req, this, Box::new(state));
-    Ok(Value::null())
 }
 
 /// `dom_xpath_document_read`.
@@ -370,13 +319,20 @@ fn dispatch(
 
 /// `php_xpath_eval`: `query` forces a node set, `evaluate` answers what
 /// the expression does.
-fn eval(req: &mut Request, force_node_set: bool) -> Result<Value, Thrown> {
-    arity(req, 1, 3)?;
-    let expr = bytes_arg(req, 1)?;
-    let context = object_arg(req, 2)?;
-    let this = this(req)?;
-    let default_ns = matches!(dom(req, this), Some(d) if matches!(&d.extra, Extra::XPath(s) if s.register_node_ns));
-    let register = bool_arg(req, 3, default_ns)?;
+fn eval(
+    req: &mut Request,
+    this: PhpObject,
+    expr: &[u8],
+    context: Option<PhpObject>,
+    register: Passed<bool>,
+    force_node_set: bool,
+) -> Result<Value, Thrown> {
+    let register = match register {
+        Passed::Given(on) => on,
+        Passed::Omitted => {
+            matches!(dom(req, this), Some(d) if matches!(&d.extra, Extra::XPath(s) if s.register_node_ns))
+        }
+    };
     let modern = crate::modern::follows_spec(req, this);
     let Some(mut state) = take(req, this) else {
         return Err(throw(req, "Error", "Invalid XPath Context"));
@@ -420,7 +376,7 @@ fn eval(req: &mut Request, force_node_set: bool) -> Result<Value, Thrown> {
         let mut handler = |req: &mut Request, called: Called, operands: Vec<Operand>| {
             dispatch(req, this, callbacks, called, operands)
         };
-        ctx.eval_scoped(req, &expr, node, scope, &mut handler)
+        ctx.eval_scoped(req, expr, node, scope, &mut handler)
     };
     put(req, this, state);
     let mut raised = raised;
@@ -472,68 +428,6 @@ fn eval(req: &mut Request, force_node_set: bool) -> Result<Value, Thrown> {
     }
 }
 
-/// `DOMXPath::query(string $expression, ?DOMNode $contextNode = null, bool $registerNodeNS = true): mixed`,
-/// and `Dom\XPath::query`, whose failures throw and whose document's
-/// in-scope declarations come from its `xmlns` attributes.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p"><p:a>1</p:a><p:a>2</p:a></r>');
-/// $x = new Dom\XPath($d);
-/// $l = $x->query('//p:a');
-/// var_dump(get_class($l), $l->length, $x->evaluate('string(//p:a[2])'), $x->document === $d);
-/// try { $x->query('//['); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// try { $x->query('//namespace::*'); } catch (DOMException $e) { echo $e->code, "\n"; }
-/// ```
-/// ```expect
-/// string(12) "Dom\NodeList"
-/// int(2)
-/// string(1) "2"
-/// bool(true)
-///
-/// Warning: Dom\XPath::query(): Invalid expression in %s on line %d
-/// Error: Could not evaluate XPath expression
-/// 9
-/// ```
-fn query(req: &mut Request) -> Result<Value, Thrown> {
-    eval(req, true)
-}
-
-/// `DOMXPath::evaluate(...)`.
-fn evaluate(req: &mut Request) -> Result<Value, Thrown> {
-    eval(req, false)
-}
-
-/// `DOMXPath::registerNamespace(string $prefix, string $namespace): bool`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r xmlns="urn:d"><c/></r>');
-/// $x = new DOMXPath($d);
-/// var_dump($x->query('//c')->length, $x->registerNamespace('d', 'urn:d'), $x->query('//d:c')->length);
-/// ```
-/// ```expect
-/// int(0)
-/// bool(true)
-/// int(1)
-/// ```
-fn register_namespace(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 2, 2)?;
-    let prefix = bytes_arg(req, 1)?;
-    let uri = bytes_arg(req, 2)?;
-    let this = this(req)?;
-    let took = match dom(req, this) {
-        Some(d) => match &d.extra {
-            Extra::XPath(state) => Some(state.ctx.register_ns(&prefix, &uri)),
-            _ => None,
-        },
-        None => None,
-    };
-    match took {
-        Some(ok) => Ok(Value::bool(ok)),
-        None => Err(throw(req, "Error", "Invalid XPath Context")),
-    }
-}
-
 /// One callable the registration read, with the value it came from, one
 /// owner taken.
 fn callable_of(
@@ -556,37 +450,6 @@ fn callable_of(
             Err(arg_type_error(req, position, &tail))
         }
     }
-}
-
-/// `DOMXPath::registerPhpFunctions(string|array|null $restrict = null): void`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><a>x</a></r>');
-/// $x = new DOMXPath($d);
-/// $x->registerNamespace('php', 'http://php.net/xpath');
-/// $x->registerPhpFunctions('strtoupper');
-/// var_dump($x->evaluate('php:functionString("strtoupper", //a)'));
-/// $x->registerPhpFunctions(['up' => fn($s) => strtoupper($s) . '!']);
-/// var_dump($x->evaluate('php:functionString("up", //a)'));
-/// try { $x->evaluate('php:functionString("strrev", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(1) "X"
-/// string(2) "X!"
-/// No callback handler "strrev" registered
-/// ```
-fn register_php_functions(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 1)?;
-    let restrict = crate::arg(req, 1)?;
-    let this = this(req)?;
-    let Some(mut state) = take(req, this) else {
-        return Err(throw(req, "Error", "Invalid XPath Context"));
-    };
-    let answered = register_into(req, &mut state.callbacks.php_ns, restrict);
-    put(req, this, state);
-    answered?;
-    Ok(Value::null())
 }
 
 /// `php_dom_xpath_callback_ns_update_method_handler`.
@@ -645,120 +508,377 @@ fn register_into(
     Ok(())
 }
 
-/// `DOMXPath::registerPhpFunctionNS(string $namespaceURI, string $name, callable $callable): void`.
+/// `class DOMXPath`, `@not-serializable`: an evaluator over one
+/// document, its `document` and `registerNodeNamespaces` `@virtual`,
+/// served by [`HANDLERS`].
 ///
 /// ```php
 /// $d = new DOMDocument;
-/// $d->loadXML('<r><a>x</a></r>');
+/// $d->loadXML('<r><a>1</a><a>2</a></r>');
 /// $x = new DOMXPath($d);
-/// $x->registerNamespace('my', 'urn:my');
-/// $x->registerPhpFunctionNS('urn:my', 'twice', fn($s) => $s . $s);
-/// var_dump($x->evaluate('my:twice(string(//a))'));
-/// try { $x->registerPhpFunctionNS('http://php.net/xpath', 'f', 'strlen'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($x->document === $d, $x->registerNodeNamespaces, $x->query('//a')->length, $x->query('//a')->item(1)->textContent);
+/// $root = $d->documentElement;
+/// var_dump($x->query('a', $root)->length, $x->evaluate('count(//a)'), $x->evaluate('string(//a)'), $x->evaluate('1 = 1'));
+/// var_dump($x->query('//['));
 /// ```
 /// ```expect
-/// string(2) "xx"
-/// DOMXPath::registerPhpFunctionNS(): Argument #1 ($namespaceURI) must not be "http://php.net/xpath" because it is reserved by PHP
-/// ```
-fn register_php_function_ns(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 3, 3)?;
-    let ns = crate::path_arg(req, 1)?;
-    let name = crate::path_arg(req, 2)?;
-    let given = crate::arg(req, 3)?.unwrap_or_default();
-    let this = this(req)?;
-    if ns == b"http://php.net/xpath" {
-        return Err(arg_value_error(
-            req,
-            1,
-            "not be \"http://php.net/xpath\" because it is reserved by PHP",
-        ));
-    }
-    if name.is_empty() || !Name::valid_ncname(&name) {
-        return Err(arg_value_error(req, 2, "be a valid callback name"));
-    }
-    let (callable, value) = callable_of(req, &given, 3, false)?;
-    let Some(mut state) = take(req, this) else {
-        req.release(value);
-        return Err(throw(req, "Error", "Invalid XPath Context"));
-    };
-    state.ctx.register_custom(&ns, &name);
-    let at = if let Some(at) = state
-        .callbacks
-        .namespaces
-        .iter()
-        .position(|(n, _)| *n == ns)
-    {
-        at
-    } else {
-        state.callbacks.namespaces.push((ns, Mode::None));
-        state.callbacks.namespaces.len() - 1
-    };
-    let mut functions = match std::mem::take(&mut state.callbacks.namespaces[at].1) {
-        Mode::Set(f) => f,
-        _ => Vec::new(),
-    };
-    if let Some(slot) = functions.iter_mut().find(|(n, _, _)| *n == name) {
-        let old = std::mem::replace(&mut slot.2, value);
-        slot.1 = callable;
-        req.release(old);
-    } else {
-        functions.push((name, callable, value));
-    }
-    state.callbacks.namespaces[at].1 = Mode::Set(functions);
-    put(req, this, state);
-    Ok(Value::null())
-}
-
-/// `DOMXPath::quote(string $str): string`.
+/// bool(true)
+/// bool(true)
+/// int(2)
+/// string(1) "2"
+/// int(2)
+/// float(2)
+/// string(1) "1"
+/// bool(true)
 ///
-/// ```php
-/// echo DOMXPath::quote("a"), ' ', DOMXPath::quote("it's"), ' ', DOMXPath::quote("'\"\""), "\n";
+/// Warning: DOMXPath::query(): Invalid expression in %s on line %d
+/// bool(false)
 /// ```
-/// ```expect
-/// 'a' "it's" concat("'",'""')
-/// ```
-fn quote(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let input = crate::path_arg(req, 1)?;
-    if !input.contains(&b'\'') {
-        return string(req, &[b"'".as_slice(), &input, b"'"].concat());
+#[php_class(not_serializable, payload = Dom, handlers = HANDLERS)]
+pub(crate) struct DOMXPath;
+
+#[php_class]
+impl DOMXPath {
+    #[php(property, virtual)]
+    const document: Instance<DOMDocument>;
+    #[php(property, virtual)]
+    const registerNodeNamespaces: bool;
+
+    /// `DOMXPath::__construct(DOMDocument $document, bool $registerNodeNS = true)`.
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        document: Instance<DOMDocument>,
+        #[php(default = true)] registerNodeNS: bool,
+    ) -> Result<(), Thrown> {
+        let (this, doc_obj) = (this.object(), document.object());
+        let doc = fetch(req, doc_obj)?;
+        let Some(ctx) = ffi::XPath::new(doc) else {
+            return Err(crate::dom_throw(req, Code::InvalidState));
+        };
+        if let Some(old) = take(req, this) {
+            old.callbacks.release(req);
+        }
+        let shared = crate::shared_doc(req, doc_obj);
+        if let Some(d) = dom_mut(req, this) {
+            d.obj.set_object(this);
+            d.obj.decrement_doc_ref();
+            d.obj.share(shared, doc);
+        }
+        let state = XPathState {
+            ctx,
+            register_node_ns: registerNodeNS,
+            callbacks: Callbacks::default(),
+        };
+        put(req, this, Box::new(state));
+        Ok(())
     }
-    if !input.contains(&b'"') {
-        return string(req, &[b"\"".as_slice(), &input, b"\""].concat());
+
+    /// `DOMXPath::evaluate(string $expression, ?DOMNode $contextNode = null, bool $registerNodeNS = true): mixed`;
+    /// an omitted `$registerNodeNS` is the evaluator's `registerNodeNamespaces`.
+    #[php(tentative)]
+    fn evaluate(
+        req: &mut Request,
+        this: This<Self>,
+        expression: PhpString,
+        #[php(default = null)] contextNode: Option<Instance<DOMNode>>,
+        #[php(default = true)] registerNodeNS: Passed<bool>,
+    ) -> Result<Value, Thrown> {
+        let context = contextNode.map(|c| c.object());
+        eval(
+            req,
+            this.object(),
+            expression.as_bytes(),
+            context,
+            registerNodeNS,
+            false,
+        )
     }
-    let mut out = b"concat(".to_vec();
-    let mut at = 0;
-    while at < input.len() {
-        let rest = &input[at..];
-        let to_single = rest.iter().position(|b| *b == b'\'').unwrap_or(rest.len());
-        let to_double = rest.iter().position(|b| *b == b'"').unwrap_or(rest.len());
-        let take = to_single.max(to_double);
-        let q = if to_single > to_double { b'\'' } else { b'"' };
-        out.push(q);
-        out.extend_from_slice(&rest[..take]);
-        out.push(q);
-        out.push(b',');
-        at += take;
+
+    /// `DOMXPath::query(string $expression, ?DOMNode $contextNode = null, bool $registerNodeNS = true): mixed`,
+    /// and `Dom\XPath::query`, whose failures throw and whose document's
+    /// in-scope declarations come from its `xmlns` attributes.
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p"><p:a>1</p:a><p:a>2</p:a></r>');
+    /// $x = new Dom\XPath($d);
+    /// $l = $x->query('//p:a');
+    /// var_dump(get_class($l), $l->length, $x->evaluate('string(//p:a[2])'), $x->document === $d);
+    /// try { $x->query('//['); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// try { $x->query('//namespace::*'); } catch (DOMException $e) { echo $e->code, "\n"; }
+    /// ```
+    /// ```expect
+    /// string(12) "Dom\NodeList"
+    /// int(2)
+    /// string(1) "2"
+    /// bool(true)
+    ///
+    /// Warning: Dom\XPath::query(): Invalid expression in %s on line %d
+    /// Error: Could not evaluate XPath expression
+    /// 9
+    /// ```
+    #[php(tentative)]
+    fn query(
+        req: &mut Request,
+        this: This<Self>,
+        expression: PhpString,
+        #[php(default = null)] contextNode: Option<Instance<DOMNode>>,
+        #[php(default = true)] registerNodeNS: Passed<bool>,
+    ) -> Result<Value, Thrown> {
+        let context = contextNode.map(|c| c.object());
+        eval(
+            req,
+            this.object(),
+            expression.as_bytes(),
+            context,
+            registerNodeNS,
+            true,
+        )
     }
-    if let Some(last) = out.last_mut() {
-        *last = b')';
+
+    /// `DOMXPath::registerNamespace(string $prefix, string $namespace): bool`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r xmlns="urn:d"><c/></r>');
+    /// $x = new DOMXPath($d);
+    /// var_dump($x->query('//c')->length, $x->registerNamespace('d', 'urn:d'), $x->query('//d:c')->length);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// bool(true)
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn registerNamespace(
+        req: &mut Request,
+        this: This<Self>,
+        prefix: PhpString,
+        namespace: PhpString,
+    ) -> Result<bool, Thrown> {
+        let took = match dom(req, this.object()) {
+            Some(d) => match &d.extra {
+                Extra::XPath(state) => Some(
+                    state
+                        .ctx
+                        .register_ns(prefix.as_bytes(), namespace.as_bytes()),
+                ),
+                _ => None,
+            },
+            None => None,
+        };
+        match took {
+            Some(ok) => Ok(ok),
+            None => Err(throw(req, "Error", "Invalid XPath Context")),
+        }
     }
-    string(req, &out)
+
+    /// `DOMXPath::registerPhpFunctions(string|array|null $restrict = null): void`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a>x</a></r>');
+    /// $x = new DOMXPath($d);
+    /// $x->registerNamespace('php', 'http://php.net/xpath');
+    /// $x->registerPhpFunctions('strtoupper');
+    /// var_dump($x->evaluate('php:functionString("strtoupper", //a)'));
+    /// $x->registerPhpFunctions(['up' => fn($s) => strtoupper($s) . '!']);
+    /// var_dump($x->evaluate('php:functionString("up", //a)'));
+    /// try { $x->evaluate('php:functionString("strrev", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $x->registerPhpFunctions(function () {}); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(1) "X"
+    /// string(2) "X!"
+    /// No callback handler "strrev" registered
+    /// DOMXPath::registerPhpFunctions(): Argument #1 ($restrict) must be of type array|string|null, Closure given
+    /// ```
+    #[php(tentative)]
+    fn registerPhpFunctions(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] restrict: Option<Union<PhpString, PhpArray>>,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        let Some(mut state) = take(req, this) else {
+            return Err(throw(req, "Error", "Invalid XPath Context"));
+        };
+        let restrict = restrict.map(|given| match given {
+            Union::A(name) => Value::string(name),
+            Union::B(array) => Value::array(array),
+        });
+        let answered = register_into(req, &mut state.callbacks.php_ns, restrict);
+        put(req, this, state);
+        answered
+    }
+
+    /// `DOMXPath::registerPhpFunctionNS(string $namespaceURI, string $name, callable $callable): void`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a>x</a></r>');
+    /// $x = new DOMXPath($d);
+    /// $x->registerNamespace('my', 'urn:my');
+    /// $x->registerPhpFunctionNS('urn:my', 'twice', fn($s) => $s . $s);
+    /// var_dump($x->evaluate('my:twice(string(//a))'));
+    /// try { $x->registerPhpFunctionNS('http://php.net/xpath', 'f', 'strlen'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(2) "xx"
+    /// DOMXPath::registerPhpFunctionNS(): Argument #1 ($namespaceURI) must not be "http://php.net/xpath" because it is reserved by PHP
+    /// ```
+    fn registerPhpFunctionNS(
+        req: &mut Request,
+        this: This<Self>,
+        namespaceURI: Path,
+        name: Path,
+        callable: Raw<Callable>,
+    ) -> Result<(), Thrown> {
+        // Held to `callable` before anything else is read, as ZPP holds
+        // it; the value is what the registration keeps.
+        callable.hold(req)?;
+        let this = this.object();
+        let (ns, name) = (
+            namespaceURI.0.as_bytes().to_vec(),
+            name.0.as_bytes().to_vec(),
+        );
+        if ns == b"http://php.net/xpath" {
+            return Err(arg_value_error(
+                req,
+                1,
+                "not be \"http://php.net/xpath\" because it is reserved by PHP",
+            ));
+        }
+        if name.is_empty() || !Name::valid_ncname(&name) {
+            return Err(arg_value_error(req, 2, "be a valid callback name"));
+        }
+        let (callable, value) = callable_of(req, &callable.value(), 3, false)?;
+        let Some(mut state) = take(req, this) else {
+            req.release(value);
+            return Err(throw(req, "Error", "Invalid XPath Context"));
+        };
+        state.ctx.register_custom(&ns, &name);
+        let at = if let Some(at) = state
+            .callbacks
+            .namespaces
+            .iter()
+            .position(|(n, _)| *n == ns)
+        {
+            at
+        } else {
+            state.callbacks.namespaces.push((ns, Mode::None));
+            state.callbacks.namespaces.len() - 1
+        };
+        let mut functions = match std::mem::take(&mut state.callbacks.namespaces[at].1) {
+            Mode::Set(f) => f,
+            _ => Vec::new(),
+        };
+        if let Some(slot) = functions.iter_mut().find(|(n, _, _)| *n == name) {
+            let old = std::mem::replace(&mut slot.2, value);
+            slot.1 = callable;
+            req.release(old);
+        } else {
+            functions.push((name, callable, value));
+        }
+        state.callbacks.namespaces[at].1 = Mode::Set(functions);
+        put(req, this, state);
+        Ok(())
+    }
+
+    /// `DOMXPath::quote(string $str): string`.
+    ///
+    /// ```php
+    /// echo DOMXPath::quote("a"), ' ', DOMXPath::quote("it's"), ' ', DOMXPath::quote("'\"\""), "\n";
+    /// ```
+    /// ```expect
+    /// 'a' "it's" concat("'",'""')
+    /// ```
+    fn quote(req: &mut Request, str: Path) -> Result<PhpString, Thrown> {
+        let input = str.0.as_bytes();
+        if !input.contains(&b'\'') {
+            return PhpString::new(req, &[b"'".as_slice(), input, b"'"].concat());
+        }
+        if !input.contains(&b'"') {
+            return PhpString::new(req, &[b"\"".as_slice(), input, b"\""].concat());
+        }
+        let mut out = b"concat(".to_vec();
+        let mut at = 0;
+        while at < input.len() {
+            let rest = &input[at..];
+            let to_single = rest.iter().position(|b| *b == b'\'').unwrap_or(rest.len());
+            let to_double = rest.iter().position(|b| *b == b'"').unwrap_or(rest.len());
+            let take = to_single.max(to_double);
+            let q = if to_single > to_double { b'\'' } else { b'"' };
+            out.push(q);
+            out.extend_from_slice(&rest[..take]);
+            out.push(q);
+            out.push(b',');
+            at += take;
+        }
+        if let Some(last) = out.last_mut() {
+            *last = b')';
+        }
+        PhpString::new(req, &out)
+    }
 }
 
-/// The methods, `Class::method` to entry.
-pub(crate) const METHODS: &[(&str, Entry)] = &[
-    ("DOMXPath::__construct", construct),
-    ("DOMXPath::evaluate", evaluate),
-    ("DOMXPath::query", query),
-    ("DOMXPath::registerNamespace", register_namespace),
-    ("DOMXPath::registerPhpFunctions", register_php_functions),
-    ("DOMXPath::registerPhpFunctionNS", register_php_function_ns),
-    ("DOMXPath::quote", quote),
-    ("Dom\\XPath::__construct", construct),
-    ("Dom\\XPath::evaluate", evaluate),
-    ("Dom\\XPath::query", query),
-];
+/// `final class Dom\XPath`, `@not-serializable`: `DOMXPath`'s bodies
+/// over the modern document, its failures thrown.
+#[php_class(
+    namespace(Dom),
+    final,
+    not_serializable,
+    payload = Dom,
+    handlers = HANDLERS
+)]
+pub(crate) struct XPath;
+
+/// `Dom\XPath::evaluate`'s answer: `null|bool|float|string|Dom\NodeList`.
+type Evaluated = Option<Union<Instance<NodeList>, Union<PhpString, Union<f64, bool>>>>;
+
+#[php_class]
+impl XPath {
+    #[php(property, virtual)]
+    const document: Instance<Document>;
+    #[php(property, virtual)]
+    const registerNodeNamespaces: bool;
+    #[php(implementation = DOMXPath::__construct)]
+    fn __construct(
+        this: This<Self>,
+        document: Instance<Document>,
+        #[php(default = true)] registerNodeNS: bool,
+    );
+    #[php(implementation = DOMXPath::evaluate)]
+    fn evaluate(
+        this: This<Self>,
+        expression: PhpString,
+        #[php(default = null)] contextNode: Option<Instance<ModernNode>>,
+        #[php(default = true)] registerNodeNS: Passed<bool>,
+    ) -> Evaluated;
+    #[php(implementation = DOMXPath::query)]
+    fn query(
+        this: This<Self>,
+        expression: PhpString,
+        #[php(default = null)] contextNode: Option<Instance<ModernNode>>,
+        #[php(default = true)] registerNodeNS: Passed<bool>,
+    ) -> Instance<NodeList>;
+    #[php(implementation = DOMXPath::registerNamespace)]
+    fn registerNamespace(this: This<Self>, prefix: PhpString, namespace: PhpString) -> bool;
+    #[php(implementation = DOMXPath::registerPhpFunctions)]
+    fn registerPhpFunctions(
+        this: This<Self>,
+        #[php(default = null)] restrict: Option<Union<PhpString, PhpArray>>,
+    );
+    #[php(implementation = DOMXPath::registerPhpFunctionNS)]
+    fn registerPhpFunctionNS(
+        this: This<Self>,
+        namespaceURI: Path,
+        name: Path,
+        callable: Raw<Callable>,
+    );
+    #[php(implementation = DOMXPath::quote)]
+    fn quote(str: Path) -> PhpString;
+}
 
 /// `dom_xpath_object_handlers`: the dom table with no clone, and the
 /// evaluator's registrations given back when the object goes.

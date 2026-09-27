@@ -4,8 +4,8 @@
 //! of `xml_document.c` and `html_document.c` hand out, and the cached
 //! objects php keeps in a declared property's slot.
 
-use php_ext::abi::{Instance, ObjectHandlers, OrFalse, PropertyTest, Raw, Std, This};
-use php_ext::attr::php_class;
+use php_ext::abi::{Instance, ObjectHandlers, OrFalse, PropertyTest, Raw, Std, This, Union};
+use php_ext::attr::{php_class, php_function};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
@@ -253,6 +253,9 @@ pub(crate) fn convert_to_modern(req: &mut Request, object: PhpObject, doc: f::No
     }
 }
 
+/// `Dom\import_simplexml`'s answer, `Dom\Attr|Dom\Element`.
+type Imported = Raw<Union<Instance<Attr>, Instance<crate::element::Element>>>;
+
 /// `Dom\import_simplexml(object $node): Dom\Attr|Dom\Element`: there is no
 /// simplexml, so a modern element or attribute answers as itself.
 ///
@@ -265,20 +268,21 @@ pub(crate) fn convert_to_modern(req: &mut Request, object: PhpObject, doc: f::No
 /// bool(true)
 /// Dom\import_simplexml(): Argument #1 ($node) is not a valid node type
 /// ```
-pub(crate) fn import_simplexml(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let object = crate::object_arg(req, 1)?;
-    let node = object
-        .filter(|o| crate::instance_of(req, *o, "Dom\\Node"))
-        .and_then(|o| node_of(req, o).map(|n| (o, n)));
+#[php_function(namespace(Dom))]
+pub(crate) fn import_simplexml(req: &mut Request, node: PhpObject) -> Result<Imported, Thrown> {
+    let object = node;
+    let node = crate::instance_of(req, object, "Dom\\Node")
+        .then(|| node_of(req, object))
+        .flatten();
     match node {
-        Some((o, n))
+        Some(n)
             if matches!(
                 n.kind(),
                 php_ext_libxml::ffi::Kind::Element | php_ext_libxml::ffi::Kind::Attribute
             ) =>
         {
-            crate::object_for(req, n, Some(o))
+            let found = crate::object_for(req, n, Some(object))?;
+            returned(req, found)
         }
         _ => Err(php_ext::raising::argument_error(
             req,

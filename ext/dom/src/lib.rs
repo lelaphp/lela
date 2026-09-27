@@ -41,22 +41,20 @@ mod object;
 mod parent;
 mod private;
 mod props;
-mod stub;
 mod token_list;
 mod xml_serializer;
 mod xpath;
 
 use php_ext::abi::{
-    Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, ObjectHandlers, OrFalse,
-    Passed, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw, Std,
+    Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance,
+    ObjectHandlers, OrFalse, Passed, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
+    Raw, Std, Union, Untyped,
 };
-use php_ext::attr::php_class;
+use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::{argument, to_string, truthy};
-use php_ext::decl::{self, Attribute, AttributeArgument, ConstDecl, ConstExpr};
+use php_ext::coerce::{to_string, truthy};
 use php_ext::raising::{
-    Level, Thrown, arg_count_error, argument_error, deprecated, fatal, new_throwable, throw,
-    throw_value,
+    Level, Thrown, argument_error, deprecated, fatal, new_throwable, throw, throw_value,
 };
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -78,129 +76,34 @@ pub(crate) struct Countable;
 #[php_class(extern)]
 pub(crate) struct Iterator;
 
-/// A native's entry, the shape `ExtensionBuilder` takes.
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
-
 /// A property read's answer: `None` is php's `FAILURE`, a row a dumper
 /// leaves out.
 type Read = Result<Option<Value>, Thrown>;
 
-/// The legacy classes as `php_dom.stub.php` declares them, in the order
-/// `PHP_MINIT_FUNCTION(dom)` registers them.
-const STUB: &str = r"
-final class DOMException extends Exception
-{
-    /**
-     * Intentionally left untyped for BC reasons
-     * @var int
-     */
-    public $code = 0;
+/// Core's `Exception`, named for `extends`.
+#[php_class(extern)]
+pub(crate) struct Exception;
+
+/// `final class DOMException extends Exception`, its `$code` left untyped
+/// for BC, as php's stub says; `Dom\DOMException` is its alias.
+///
+/// ```php
+/// $e = new DOMException('m', 3);
+/// var_dump($e->code, $e->getCode(), (new ReflectionProperty('DOMException', 'code'))->hasType());
+/// ```
+/// ```expect
+/// int(3)
+/// int(3)
+/// bool(false)
+/// ```
+#[php_class(final, extends(Exception))]
+pub(crate) struct DOMException;
+
+#[php_class]
+impl DOMException {
+    #[php(property)]
+    const code: Untyped<Value> = 0;
 }
-/** @not-serializable */
-class DOMXPath
-{
-    public DOMDocument $document;
-    public bool $registerNodeNamespaces;
-
-    public function __construct(DOMDocument $document, bool $registerNodeNS = true) {}
-
-    /** @tentative-return-type */
-    public function evaluate(string $expression, ?DOMNode $contextNode = null, bool $registerNodeNS = true): mixed {}
-
-    /** @tentative-return-type */
-    public function query(string $expression, ?DOMNode $contextNode = null, bool $registerNodeNS = true): mixed {}
-
-    /** @tentative-return-type */
-    public function registerNamespace(string $prefix, string $namespace): bool {}
-
-    /** @tentative-return-type */
-    public function registerPhpFunctions(string|array|null $restrict = null): void {}
-
-    public function registerPhpFunctionNS(string $namespaceURI, string $name, callable $callable): void {}
-
-    public static function quote(string $str): string {}
-}
-";
-
-/// The `Dom\` namespace as `php_dom.stub.php` declares it (8.4), with the
-/// docblocks the reader takes nothing from left out.
-const MODERN_STUB: &str = r"
-namespace Dom
-{
-/** @not-serializable */
-final class XPath
-{
-    public Document $document;
-    public bool $registerNodeNamespaces;
-    public function __construct(Document $document, bool $registerNodeNS = true) {}
-    public function evaluate(string $expression, ?Node $contextNode = null, bool $registerNodeNS = true): null|bool|float|string|NodeList {}
-    public function query(string $expression, ?Node $contextNode = null, bool $registerNodeNS = true): NodeList {}
-    /** @implementation-alias DOMXPath::registerNamespace */
-    public function registerNamespace(string $prefix, string $namespace): bool {}
-    /** @implementation-alias DOMXPath::registerPhpFunctions */
-    public function registerPhpFunctions(string|array|null $restrict = null): void {}
-    /** @implementation-alias DOMXPath::registerPhpFunctionNS */
-    public function registerPhpFunctionNS(string $namespaceURI, string $name, callable $callable): void {}
-    /** @implementation-alias DOMXPath::quote */
-    public static function quote(string $str): string {}
-}
-}
-";
-
-/// The order `PHP_MINIT_FUNCTION(dom)` registers the classes of both
-/// namespaces in, which `get_declared_classes()` shows.
-const MINIT_ORDER: [&str; 50] = [
-    "Dom\\AdjacentPosition",
-    "DOMException",
-    "DOMParentNode",
-    "Dom\\ParentNode",
-    "DOMChildNode",
-    "Dom\\ChildNode",
-    "DOMImplementation",
-    "Dom\\Implementation",
-    "DOMNode",
-    "Dom\\Node",
-    "DOMNameSpaceNode",
-    "Dom\\NamespaceInfo",
-    "DOMDocumentFragment",
-    "Dom\\DocumentFragment",
-    "Dom\\Document",
-    "DOMDocument",
-    "Dom\\HTMLDocument",
-    "Dom\\XMLDocument",
-    "DOMNodeList",
-    "Dom\\NodeList",
-    "DOMNamedNodeMap",
-    "Dom\\NamedNodeMap",
-    "Dom\\DtdNamedNodeMap",
-    "Dom\\HTMLCollection",
-    "DOMCharacterData",
-    "Dom\\CharacterData",
-    "DOMAttr",
-    "Dom\\Attr",
-    "DOMElement",
-    "Dom\\Element",
-    "Dom\\HTMLElement",
-    "DOMText",
-    "Dom\\Text",
-    "DOMComment",
-    "Dom\\Comment",
-    "DOMCdataSection",
-    "Dom\\CDATASection",
-    "DOMDocumentType",
-    "Dom\\DocumentType",
-    "DOMNotation",
-    "Dom\\Notation",
-    "DOMEntity",
-    "Dom\\Entity",
-    "DOMEntityReference",
-    "Dom\\EntityReference",
-    "DOMProcessingInstruction",
-    "Dom\\ProcessingInstruction",
-    "DOMXPath",
-    "Dom\\XPath",
-    "Dom\\TokenList",
-];
 
 /// The extension value (design §7.1).
 ///
@@ -219,105 +122,92 @@ const MINIT_ORDER: [&str; 50] = [
 ///     [domxml] => Conflicts
 /// )
 /// ```
+///
+/// Every class, function and constant is declared by the attributes, in
+/// `PHP_MINIT_FUNCTION(dom)`'s order:
+///
+/// ```php
+/// var_dump(DOMNode::DOCUMENT_POSITION_CONTAINED_BY, (new ReflectionMethod("DOMNode", "getLineNo"))->hasTentativeReturnType());
+/// echo implode(",", (new ReflectionClass("DOMElement"))->getInterfaceNames()), "\n";
+/// echo (new ReflectionMethod("DOMDocument", "__construct"))->getParameters()[0], "\n";
+/// echo (new ReflectionFunction("dom_import_simplexml"))->getReturnType(), "\n";
+/// $c = (new ReflectionExtension("dom"))->getClassNames();
+/// echo implode(",", array_slice($c, 0, 2)), " ", implode(",", array_slice($c, -3)), "\n";
+/// ```
+/// ```expect
+/// int(16)
+/// bool(true)
+/// DOMParentNode,DOMChildNode
+/// Parameter #0 [ <optional> string $version = "1.0" ]
+/// DOMAttr|DOMElement
+/// Dom\AdjacentPosition,DOMException DOMXPath,Dom\XPath,Dom\TokenList
+/// ```
 pub fn extension() -> Extension {
-    let entries = entries();
-    let mut builder = ExtensionBuilder::default()
+    ExtensionBuilder::default()
         .functions(vec![
-            (
-                stub::function("dom_import_simplexml(object $node): DOMAttr|DOMElement"),
-                import_simplexml as Entry,
-            ),
-            (
-                stub::function("Dom\\import_simplexml(object $node): Dom\\Attr|Dom\\Element"),
-                modern::import_simplexml as Entry,
-            ),
+            dom_import_simplexml::declared(),
+            modern::import_simplexml::declared(),
         ])
-        .constants(constants())
+        .constants([constants::declared(), modern_constants::declared()].concat())
         .dependencies(vec![
             dependency("libxml", DependencyKind::Required),
             dependency("lexbor", DependencyKind::Required),
             dependency("domxml", DependencyKind::Conflicts),
-        ]);
-    let mut declared = stub::classes(STUB, &entries);
-    declared.extend(stub::classes(MODERN_STUB, &entries));
-    for name in MINIT_ORDER {
-        builder = match name {
-            "DOMNode" => builder.class::<node::DOMNode>(),
-            "DOMNameSpaceNode" => builder.class::<node::DOMNameSpaceNode>(),
-            "Dom\\Node" => builder.class::<modern::Node>(),
-            "Dom\\NamespaceInfo" => builder.class::<modern::NamespaceInfo>(),
-            "DOMParentNode" => builder.class::<parent::DOMParentNode>(),
-            "Dom\\ParentNode" => builder.class::<parent::ParentNode>(),
-            "DOMChildNode" => builder.class::<parent::DOMChildNode>(),
-            "Dom\\ChildNode" => builder.class::<parent::ChildNode>(),
-            "Dom\\AdjacentPosition" => builder.class::<element::AdjacentPosition>(),
-            "DOMElement" => builder.class::<element::DOMElement>(),
-            "Dom\\Element" => builder.class::<element::Element>(),
-            "Dom\\HTMLElement" => builder.class::<element::HTMLElement>(),
-            "DOMImplementation" => builder.class::<classes::DOMImplementation>(),
-            "Dom\\Implementation" => builder.class::<classes::Implementation>(),
-            "DOMDocumentFragment" => builder.class::<classes::DOMDocumentFragment>(),
-            "Dom\\DocumentFragment" => builder.class::<classes::DocumentFragment>(),
-            "DOMCharacterData" => builder.class::<classes::DOMCharacterData>(),
-            "Dom\\CharacterData" => builder.class::<classes::CharacterData>(),
-            "DOMAttr" => builder.class::<classes::DOMAttr>(),
-            "Dom\\Attr" => builder.class::<modern::Attr>(),
-            "DOMText" => builder.class::<classes::DOMText>(),
-            "Dom\\Text" => builder.class::<classes::Text>(),
-            "DOMComment" => builder.class::<classes::DOMComment>(),
-            "Dom\\Comment" => builder.class::<classes::Comment>(),
-            "DOMCdataSection" => builder.class::<classes::DOMCdataSection>(),
-            "Dom\\CDATASection" => builder.class::<classes::CDATASection>(),
-            "DOMDocumentType" => builder.class::<classes::DOMDocumentType>(),
-            "Dom\\DocumentType" => builder.class::<classes::DocumentType>(),
-            "DOMNotation" => builder.class::<classes::DOMNotation>(),
-            "Dom\\Notation" => builder.class::<classes::Notation>(),
-            "DOMEntity" => builder.class::<classes::DOMEntity>(),
-            "Dom\\Entity" => builder.class::<classes::Entity>(),
-            "DOMEntityReference" => builder.class::<classes::DOMEntityReference>(),
-            "Dom\\EntityReference" => builder.class::<classes::EntityReference>(),
-            "DOMProcessingInstruction" => builder.class::<classes::DOMProcessingInstruction>(),
-            "Dom\\ProcessingInstruction" => builder.class::<classes::ProcessingInstruction>(),
-            "DOMDocument" => builder.class::<document::DOMDocument>(),
-            "Dom\\Document" => builder.class::<document::Document>(),
-            "Dom\\HTMLDocument" => builder.class::<html_document::HTMLDocument>(),
-            "Dom\\XMLDocument" => builder.class::<document::XMLDocument>(),
-            "DOMNodeList" => builder.class::<map::DOMNodeList>(),
-            "Dom\\NodeList" => builder.class::<map::NodeList>(),
-            "DOMNamedNodeMap" => builder.class::<map::DOMNamedNodeMap>(),
-            "Dom\\NamedNodeMap" => builder.class::<map::NamedNodeMap>(),
-            "Dom\\DtdNamedNodeMap" => builder.class::<map::DtdNamedNodeMap>(),
-            "Dom\\HTMLCollection" => builder.class::<map::HTMLCollection>(),
-            "Dom\\TokenList" => builder.class::<token_list::TokenList>(),
-            _ => builder,
-        };
-        let Some(at) = declared
-            .iter()
-            .position(|(d, _)| &*d.name.0 == name.as_bytes())
-        else {
-            continue;
-        };
-        let (decl, methods) = declared.remove(at);
-        let handlers: Option<&'static dyn ObjectHandlers> = match decl.name.0.as_ref() {
-            b"DOMException" => None,
-            _ => Some(&xpath::HANDLERS),
-        };
-        builder = match handlers {
-            Some(h) => builder.class_payload::<object::Dom>(decl, methods, h),
-            None => builder.classes(vec![(decl, methods)]),
-        };
-    }
-    builder
+        ])
+        .class::<element::AdjacentPosition>()
+        .class::<DOMException>()
+        .class::<parent::DOMParentNode>()
+        .class::<parent::ParentNode>()
+        .class::<parent::DOMChildNode>()
+        .class::<parent::ChildNode>()
+        .class::<classes::DOMImplementation>()
+        .class::<classes::Implementation>()
+        .class::<node::DOMNode>()
+        .class::<modern::Node>()
+        .class::<node::DOMNameSpaceNode>()
+        .class::<modern::NamespaceInfo>()
+        .class::<classes::DOMDocumentFragment>()
+        .class::<classes::DocumentFragment>()
+        .class::<document::Document>()
+        .class::<document::DOMDocument>()
+        .class::<html_document::HTMLDocument>()
+        .class::<document::XMLDocument>()
+        .class::<map::DOMNodeList>()
+        .class::<map::NodeList>()
+        .class::<map::DOMNamedNodeMap>()
+        .class::<map::NamedNodeMap>()
+        .class::<map::DtdNamedNodeMap>()
+        .class::<map::HTMLCollection>()
+        .class::<classes::DOMCharacterData>()
+        .class::<classes::CharacterData>()
+        .class::<classes::DOMAttr>()
+        .class::<modern::Attr>()
+        .class::<element::DOMElement>()
+        .class::<element::Element>()
+        .class::<element::HTMLElement>()
+        .class::<classes::DOMText>()
+        .class::<classes::Text>()
+        .class::<classes::DOMComment>()
+        .class::<classes::Comment>()
+        .class::<classes::DOMCdataSection>()
+        .class::<classes::CDATASection>()
+        .class::<classes::DOMDocumentType>()
+        .class::<classes::DocumentType>()
+        .class::<classes::DOMNotation>()
+        .class::<classes::Notation>()
+        .class::<classes::DOMEntity>()
+        .class::<classes::Entity>()
+        .class::<classes::DOMEntityReference>()
+        .class::<classes::EntityReference>()
+        .class::<classes::DOMProcessingInstruction>()
+        .class::<classes::ProcessingInstruction>()
+        .class::<xpath::DOMXPath>()
+        .class::<xpath::XPath>()
+        .class::<token_list::TokenList>()
         .request_state::<object::State>()
         .rinit(register_alias)
         .info(dom_info)
         .build("dom")
-}
-
-/// The entries the stub reader's classes name, `Class::method` to entry,
-/// until each class is declared by the attributes.
-fn entries() -> Vec<(&'static str, Entry)> {
-    xpath::METHODS.to_vec()
 }
 
 /// `zend_register_class_alias("Dom\\DOMException", ...)` of
@@ -347,77 +237,83 @@ fn dependency(name: &str, kind: DependencyKind) -> Dependency {
     }
 }
 
-/// `DOM_HTML_NO_DEFAULT_NS`, the option that keeps the HTML5 parser's
-/// elements out of the HTML namespace.
-pub(crate) const HTML_NO_DEFAULT_NS: i64 = 1 << 31;
-
 /// `register_php_dom_symbols`: the node types, the attribute types and the
-/// error codes, `DOM_PHP_ERR` deprecated since 8.4, then the `Dom\`
-/// codes and `Dom\HTML_NO_DEFAULT_NS`.
-fn constants() -> Vec<ConstDecl> {
-    let rows: [(&[u8], i64); 29] = [
-        (b"XML_ELEMENT_NODE", 1),
-        (b"XML_ATTRIBUTE_NODE", 2),
-        (b"XML_TEXT_NODE", 3),
-        (b"XML_CDATA_SECTION_NODE", 4),
-        (b"XML_ENTITY_REF_NODE", 5),
-        (b"XML_ENTITY_NODE", 6),
-        (b"XML_PI_NODE", 7),
-        (b"XML_COMMENT_NODE", 8),
-        (b"XML_DOCUMENT_NODE", 9),
-        (b"XML_DOCUMENT_TYPE_NODE", 10),
-        (b"XML_DOCUMENT_FRAG_NODE", 11),
-        (b"XML_NOTATION_NODE", 12),
-        (b"XML_HTML_DOCUMENT_NODE", 13),
-        (b"XML_DTD_NODE", 14),
-        (b"XML_ELEMENT_DECL_NODE", 15),
-        (b"XML_ATTRIBUTE_DECL_NODE", 16),
-        (b"XML_ENTITY_DECL_NODE", 17),
-        (b"XML_NAMESPACE_DECL_NODE", 18),
-        (b"XML_LOCAL_NAMESPACE", 18),
-        (b"XML_ATTRIBUTE_CDATA", 1),
-        (b"XML_ATTRIBUTE_ID", 2),
-        (b"XML_ATTRIBUTE_IDREF", 3),
-        (b"XML_ATTRIBUTE_IDREFS", 4),
-        (b"XML_ATTRIBUTE_ENTITY", 6),
-        (b"XML_ATTRIBUTE_NMTOKEN", 7),
-        (b"XML_ATTRIBUTE_NMTOKENS", 8),
-        (b"XML_ATTRIBUTE_ENUMERATION", 9),
-        (b"XML_ATTRIBUTE_NOTATION", 10),
-        (b"DOM_PHP_ERR", 0),
-    ];
-    let codes = Code::ALL.iter().map(|c| (c.constant(), *c as i64));
-    let modern = Code::ALL
-        .iter()
-        .filter_map(|c| Some((c.modern_constant()?, *c as i64)));
-    let no_default_ns: (&[u8], i64) = (b"Dom\\HTML_NO_DEFAULT_NS", HTML_NO_DEFAULT_NS);
-    rows.iter()
-        .copied()
-        .chain(codes)
-        .chain(modern)
-        .chain(std::iter::once(no_default_ns))
-        .map(|(name, value)| ConstDecl {
-            name: decl::Name(name.into()),
-            value: ConstExpr::long(value),
-            attributes: if name == b"DOM_PHP_ERR" {
-                vec![Attribute {
-                    name: decl::Name(b"Deprecated".as_slice().into()),
-                    arguments: vec![
-                        AttributeArgument {
-                            name: Some(decl::Name(b"since".as_slice().into())),
-                            value: ConstExpr::Str(b"8.4".as_slice().into()),
-                        },
-                        AttributeArgument {
-                            name: Some(decl::Name(b"message".as_slice().into())),
-                            value: ConstExpr::Str(b"as it is no longer used".as_slice().into()),
-                        },
-                    ],
-                }]
-            } else {
-                Vec::new()
-            },
-        })
-        .collect()
+/// error codes, `DOM_PHP_ERR` deprecated since 8.4; each code is its
+/// [`Code`].
+#[php_const]
+pub(crate) mod constants {
+    use super::Code;
+    pub(crate) const XML_ELEMENT_NODE: i64 = 1;
+    pub(crate) const XML_ATTRIBUTE_NODE: i64 = 2;
+    pub(crate) const XML_TEXT_NODE: i64 = 3;
+    pub(crate) const XML_CDATA_SECTION_NODE: i64 = 4;
+    pub(crate) const XML_ENTITY_REF_NODE: i64 = 5;
+    pub(crate) const XML_ENTITY_NODE: i64 = 6;
+    pub(crate) const XML_PI_NODE: i64 = 7;
+    pub(crate) const XML_COMMENT_NODE: i64 = 8;
+    pub(crate) const XML_DOCUMENT_NODE: i64 = 9;
+    pub(crate) const XML_DOCUMENT_TYPE_NODE: i64 = 10;
+    pub(crate) const XML_DOCUMENT_FRAG_NODE: i64 = 11;
+    pub(crate) const XML_NOTATION_NODE: i64 = 12;
+    pub(crate) const XML_HTML_DOCUMENT_NODE: i64 = 13;
+    pub(crate) const XML_DTD_NODE: i64 = 14;
+    pub(crate) const XML_ELEMENT_DECL_NODE: i64 = 15;
+    pub(crate) const XML_ATTRIBUTE_DECL_NODE: i64 = 16;
+    pub(crate) const XML_ENTITY_DECL_NODE: i64 = 17;
+    pub(crate) const XML_NAMESPACE_DECL_NODE: i64 = 18;
+    pub(crate) const XML_LOCAL_NAMESPACE: i64 = 18;
+    pub(crate) const XML_ATTRIBUTE_CDATA: i64 = 1;
+    pub(crate) const XML_ATTRIBUTE_ID: i64 = 2;
+    pub(crate) const XML_ATTRIBUTE_IDREF: i64 = 3;
+    pub(crate) const XML_ATTRIBUTE_IDREFS: i64 = 4;
+    pub(crate) const XML_ATTRIBUTE_ENTITY: i64 = 6;
+    pub(crate) const XML_ATTRIBUTE_NMTOKEN: i64 = 7;
+    pub(crate) const XML_ATTRIBUTE_NMTOKENS: i64 = 8;
+    pub(crate) const XML_ATTRIBUTE_ENUMERATION: i64 = 9;
+    pub(crate) const XML_ATTRIBUTE_NOTATION: i64 = 10;
+    #[php(deprecated(since = "8.4", message = "as it is no longer used"))]
+    pub(crate) const DOM_PHP_ERR: i64 = 0;
+    pub(crate) const DOM_INDEX_SIZE_ERR: i64 = Code::IndexSize as i64;
+    pub(crate) const DOMSTRING_SIZE_ERR: i64 = Code::StringSize as i64;
+    pub(crate) const DOM_HIERARCHY_REQUEST_ERR: i64 = Code::HierarchyRequest as i64;
+    pub(crate) const DOM_WRONG_DOCUMENT_ERR: i64 = Code::WrongDocument as i64;
+    pub(crate) const DOM_INVALID_CHARACTER_ERR: i64 = Code::InvalidCharacter as i64;
+    pub(crate) const DOM_NO_DATA_ALLOWED_ERR: i64 = Code::NoDataAllowed as i64;
+    pub(crate) const DOM_NO_MODIFICATION_ALLOWED_ERR: i64 = Code::NoModificationAllowed as i64;
+    pub(crate) const DOM_NOT_FOUND_ERR: i64 = Code::NotFound as i64;
+    pub(crate) const DOM_NOT_SUPPORTED_ERR: i64 = Code::NotSupported as i64;
+    pub(crate) const DOM_INUSE_ATTRIBUTE_ERR: i64 = Code::InuseAttribute as i64;
+    pub(crate) const DOM_INVALID_STATE_ERR: i64 = Code::InvalidState as i64;
+    pub(crate) const DOM_SYNTAX_ERR: i64 = Code::Syntax as i64;
+    pub(crate) const DOM_INVALID_MODIFICATION_ERR: i64 = Code::InvalidModification as i64;
+    pub(crate) const DOM_NAMESPACE_ERR: i64 = Code::Namespace as i64;
+    pub(crate) const DOM_INVALID_ACCESS_ERR: i64 = Code::InvalidAccess as i64;
+    pub(crate) const DOM_VALIDATION_ERR: i64 = Code::Validation as i64;
+}
+
+/// The `Dom\` codes, which have no `INVALID_ACCESS_ERR`, and
+/// `Dom\HTML_NO_DEFAULT_NS`.
+#[php_const(namespace(Dom))]
+pub(crate) mod modern_constants {
+    use super::Code;
+    pub(crate) const INDEX_SIZE_ERR: i64 = Code::IndexSize as i64;
+    pub(crate) const STRING_SIZE_ERR: i64 = Code::StringSize as i64;
+    pub(crate) const HIERARCHY_REQUEST_ERR: i64 = Code::HierarchyRequest as i64;
+    pub(crate) const WRONG_DOCUMENT_ERR: i64 = Code::WrongDocument as i64;
+    pub(crate) const INVALID_CHARACTER_ERR: i64 = Code::InvalidCharacter as i64;
+    pub(crate) const NO_DATA_ALLOWED_ERR: i64 = Code::NoDataAllowed as i64;
+    pub(crate) const NO_MODIFICATION_ALLOWED_ERR: i64 = Code::NoModificationAllowed as i64;
+    pub(crate) const NOT_FOUND_ERR: i64 = Code::NotFound as i64;
+    pub(crate) const NOT_SUPPORTED_ERR: i64 = Code::NotSupported as i64;
+    pub(crate) const INUSE_ATTRIBUTE_ERR: i64 = Code::InuseAttribute as i64;
+    pub(crate) const INVALID_STATE_ERR: i64 = Code::InvalidState as i64;
+    pub(crate) const SYNTAX_ERR: i64 = Code::Syntax as i64;
+    pub(crate) const INVALID_MODIFICATION_ERR: i64 = Code::InvalidModification as i64;
+    pub(crate) const NAMESPACE_ERR: i64 = Code::Namespace as i64;
+    pub(crate) const VALIDATION_ERR: i64 = Code::Validation as i64;
+    /// `DOM_HTML_NO_DEFAULT_NS`, the option that keeps the HTML5 parser's
+    /// elements out of the HTML namespace.
+    pub(crate) const HTML_NO_DEFAULT_NS: i64 = 1 << 31;
 }
 
 /// `PHP_MINFO_FUNCTION(dom)`.
@@ -451,6 +347,9 @@ fn dom_info(req: &mut Request) {
     ]);
 }
 
+/// `dom_import_simplexml`'s answer, `DOMAttr|DOMElement`.
+type Imported = Raw<Union<Instance<classes::DOMAttr>, Instance<element::DOMElement>>>;
+
 /// `dom_import_simplexml(object $node): DOMAttr|DOMElement`: a dom
 /// element or attribute answers as itself, as php's export of a dom node
 /// hands it back; there is no simplexml here.
@@ -465,20 +364,21 @@ fn dom_info(req: &mut Request) {
 /// bool(true)
 /// dom_import_simplexml(): Argument #1 ($node) is not a valid node type
 /// ```
-fn import_simplexml(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let object = object_arg(req, 1)?;
-    let node = object
-        .filter(|o| instance_of(req, *o, "DOMNode"))
-        .and_then(|o| node_of(req, o).map(|n| (o, n)));
+#[php_function]
+fn dom_import_simplexml(req: &mut Request, node: PhpObject) -> Result<Imported, Thrown> {
+    let object = node;
+    let node = instance_of(req, object, "DOMNode")
+        .then(|| node_of(req, object))
+        .flatten();
     match node {
-        Some((o, n))
+        Some(n)
             if matches!(
                 n.kind(),
                 php_ext_libxml::ffi::Kind::Element | php_ext_libxml::ffi::Kind::Attribute
             ) =>
         {
-            object_for(req, n, Some(o))
+            let found = object_for(req, n, Some(object))?;
+            returned(req, found)
         }
         _ => Err(argument_error(
             req,
@@ -655,17 +555,6 @@ fn dom_throw(req: &mut Request, code: Code) -> Thrown {
     }
 }
 
-/// `$this` of the method being served.
-fn this(req: &mut Request) -> Result<PhpObject, Thrown> {
-    match req.this() {
-        Some(this) => Ok(this),
-        None => Err(fatal(
-            req,
-            "InternalError: a dom method served without its receiver",
-        )),
-    }
-}
-
 /// `DOM_GET_OBJ`: the node an object stands for, php's `Error` "Couldn't
 /// fetch" where it stands for none.
 fn fetch(req: &mut Request, object: PhpObject) -> Result<Node, Thrown> {
@@ -685,65 +574,6 @@ fn intern(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
     }
     let name = class_name(req, this.class());
     Err(throw(req, "Error", &format!("Couldn't fetch {name}")))
-}
-
-/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check.
-fn arity(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if (min..=max).contains(&given) {
-        return Ok(());
-    }
-    let (how, n) = if min == max {
-        ("exactly", min)
-    } else if given < min {
-        ("at least", min)
-    } else {
-        ("at most", max)
-    };
-    let word = if n == 1 { "argument" } else { "arguments" };
-    Err(arg_count_error(
-        req,
-        &format!("{how} {n} {word}, {given} given"),
-    ))
-}
-
-/// The argument at `position` held to its declared type, `None` where the
-/// call gave none.
-fn arg(req: &mut Request, position: u32) -> Result<Option<Value>, Thrown> {
-    argument(req, position)
-}
-
-/// `Z_PARAM_STR`: the bytes, empty where the call gave none.
-fn bytes_arg(req: &mut Request, position: u32) -> Result<Vec<u8>, Thrown> {
-    Ok(arg(req, position)?
-        .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-        .unwrap_or_default())
-}
-
-/// `Z_PARAM_BOOL`, `default` where the call gave none.
-fn bool_arg(req: &mut Request, position: u32, default: bool) -> Result<bool, Thrown> {
-    Ok(arg(req, position)?
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default))
-}
-
-/// `Z_PARAM_OBJECT_OF_CLASS[_OR_NULL]`: the object, the declared class
-/// already held by the argument's type.
-fn object_arg(req: &mut Request, position: u32) -> Result<Option<PhpObject>, Thrown> {
-    Ok(arg(req, position)?.and_then(|v| v.as_object().copied()))
-}
-
-/// `Z_PARAM_PATH`: the bytes, php's `ValueError` where they hold a NUL.
-fn path_arg(req: &mut Request, position: u32) -> Result<Vec<u8>, Thrown> {
-    let bytes = bytes_arg(req, position)?;
-    if bytes.contains(&0) {
-        return Err(php_ext::raising::arg_value_error(
-            req,
-            position,
-            "not contain any null bytes",
-        ));
-    }
-    Ok(bytes)
 }
 
 /// `zend_hash_str_find_deref(array, name)`: a view of the element, no
