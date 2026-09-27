@@ -616,9 +616,7 @@ fn compared(req: &mut Request, flags: i64, a: &Value, b: &Value) -> Result<Order
             }
         }),
         SORT_NATURAL => as_strings(req, a, b, |x, y| strnatcmp(x, y, fold)),
-        SORT_LOCALE_STRING => {
-            as_strings(req, a, b, |x, y| sort::c_string(x).cmp(sort::c_string(y)))
-        }
+        SORT_LOCALE_STRING => as_strings(req, a, b, crate::string::locale::collate),
         _ => {
             let ordering = compare(req, a, b)?;
             // `result == ZEND_UNCOMPARABLE` with an enum case on the

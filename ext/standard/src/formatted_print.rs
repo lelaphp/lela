@@ -42,6 +42,25 @@ use php_ext::values::{PhpArray, PhpString, Value};
 /// string(9) "100%|%s|x"
 /// ```
 ///
+/// `%f`, `%g` and `%G` write the point of the request's `LC_NUMERIC`,
+/// and `%e`, `%E`, `%F`, `%h` and `%H` a `.` under any locale, as does
+/// a float's cast to string:
+///
+/// ```php
+/// setlocale(LC_NUMERIC, "is_IS", "is_IS.UTF-8");
+/// var_dump(sprintf("%.3f|%01.2f|%f'", 100.426, 123.1, 100.426), sprintf("%.3e|%F|%g|%G|%h|%H", 123.1, 1.5, 1.5, 1.5e25, 1.5, 1.5), sprintf("%s", 1.5), 1.5 . "");
+/// setlocale(LC_ALL, "de_DE"); printf("%.2f %.2F\n", 3.14, 3.14);
+/// setlocale(LC_ALL, "C"); printf("%.2f\n", 3.14);
+/// ```
+/// ```expect
+/// string(26) "100,426|123,10|100,426000'"
+/// string(37) "1.231e+2|1.500000|1,5|1,5E+25|1.5|1.5"
+/// string(3) "1.5"
+/// string(3) "1.5"
+/// 3,14 3.14
+/// 3.14
+/// ```
+///
 /// Width pads to the left with spaces, or with `0` or the byte after
 /// `'`; `-` pads to the right instead, where a `0` becomes a space for
 /// an integer; `+` writes a sign before a number that has none. A sign
@@ -1029,14 +1048,16 @@ fn append_double(
             (text, negative)
         }
     };
-    append_string(
-        req,
-        out,
-        text.as_bytes(),
-        spec,
-        sign_of(negative, spec),
-        false,
-    )
+    // `LCONV_DECIMAL_POINT` for `f`, `g` and `G`, the request's
+    // `LC_NUMERIC` radix read off the thread it is installed on; `e`,
+    // `E`, `F`, `h` and `H` keep `.` under every locale.
+    let mut text = text.into_bytes();
+    if matches!(fmt, b'f' | b'g' | b'G')
+        && let Some(point) = text.iter_mut().find(|b| **b == b'.')
+    {
+        *point = crate::ffi::locale::decimal_point();
+    }
+    append_string(req, out, &text, spec, sign_of(negative, spec), false)
 }
 
 /// The sign the appender moves before zero padding: the number's own

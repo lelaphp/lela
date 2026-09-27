@@ -69,6 +69,7 @@ use php_ext::values::{PhpArray, PhpObject, PhpString, Resource, Value, ValueRef}
 
 use crate::file::set_default_dir;
 use crate::streamsfuncs::{NullContext, context_of};
+use crate::string::locale::collate;
 use crate::{State, ffi};
 
 mod glob_wrapper;
@@ -445,8 +446,8 @@ fn getcwd(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
 /// `scandir(string $directory, int $sorting_order = SCANDIR_SORT_ASCENDING, $context = null): array|false`,
 /// `PHP_FUNCTION(scandir)` (`Z/ext/standard/dir.c:520`) over
 /// `php_stream_scandir`: every entry the directory stream gives, `.`
-/// and `..` among them, sorted by `strcoll`, which the C locale makes
-/// byte order, ascending for `SCANDIR_SORT_ASCENDING`, left in the
+/// and `..` among them, sorted by `strcoll` under the request's
+/// `LC_COLLATE`, which the C locale makes byte order, ascending for `SCANDIR_SORT_ASCENDING`, left in the
 /// stream's order for `SCANDIR_SORT_NONE` and descending for any other
 /// number; where the directory does not open, the open's warning and
 /// then php's own with `errno`.
@@ -521,8 +522,8 @@ fn scandir(
     stream.close(req);
     match order {
         SCANDIR_SORT_NONE => {}
-        SCANDIR_SORT_ASCENDING => names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes())),
-        _ => names.sort_by(|a, b| b.as_bytes().cmp(a.as_bytes())),
+        SCANDIR_SORT_ASCENDING => names.sort_by(|a, b| collate(a.as_bytes(), b.as_bytes())),
+        _ => names.sort_by(|a, b| collate(b.as_bytes(), a.as_bytes())),
     }
     let mut array = PhpArray::new(req)?;
     for name in names {

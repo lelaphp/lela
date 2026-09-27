@@ -9,12 +9,15 @@
 //! the host has. Beside them are the two `streamsfuncs.c` makes of a
 //! stream's host fd: `select(2)`, which `php_select` is on every
 //! platform php builds for here, over `fd_set`s built with `FD_SET`, and
-//! `isatty(3)`.
+//! `isatty(3)`. The request's own locale, the `locale_t` `setlocale()`
+//! builds and installs on the thread serving it, is in [`locale`].
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
 )]
+
+pub(crate) mod locale;
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::os::fd::RawFd;
