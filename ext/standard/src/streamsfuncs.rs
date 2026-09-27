@@ -431,7 +431,17 @@ pub(crate) fn stream_context(
     nocontext: NullContext,
 ) -> Result<Option<Resource>, Thrown> {
     let given = req.argument(position).unwrap_or_default().deref();
-    if let Some(res) = given.as_resource().copied() {
+    context_of(req, given.as_resource().copied(), nocontext)
+}
+
+/// [`stream_context`] over the `$context` a native's declaration held as
+/// `Z_PARAM_RESOURCE_OR_NULL`, `None` for `null` or none given.
+pub(crate) fn context_of(
+    req: &mut Request,
+    given: Option<Resource>,
+    nocontext: NullContext,
+) -> Result<Option<Resource>, Thrown> {
+    if let Some(res) = given {
         let kind = context_type(req);
         if res.is_closed() || res.kind() != Some(kind) {
             let text = format!(

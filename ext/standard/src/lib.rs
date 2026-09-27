@@ -120,7 +120,7 @@ pub use var::{Serializer, Unserializer};
 /// declare `PHPAPI` for `spl_directory.c`, which calls them directly
 /// rather than through the function table (ADR-0004; design §4.10).
 pub use csv::fgetcsv as php_fgetcsv;
-pub use dir::glob::php_glob;
+pub use dir::php_glob::php_glob;
 pub use file::{php_fputcsv, php_fstat};
 pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
@@ -235,7 +235,6 @@ fn core_natives() -> Vec<(FunctionDecl, output::Entry)> {
 /// }
 /// ```
 pub fn extension() -> Extension {
-    let directory = dir::directory_class();
     let builder = ExtensionBuilder::default()
         .functions(core_natives())
         .functions(string_natives())
@@ -270,7 +269,7 @@ pub fn extension() -> Extension {
         .ini(var::ini())
         .ini(sockets::ini())
         .dependencies(dependencies())
-        .class_with(directory.0, directory.1, directory.2)
+        .class::<dir::Directory>()
         .classes(vec![assert::assertion_error_class()])
         .ini(assert::ini())
         .ini(browscap::ini())
@@ -372,7 +371,7 @@ fn file_constants() -> Vec<ConstDecl> {
         url::constants(),
         html::constants(),
         basic_functions::constants(),
-        dir::constants(),
+        dir::constants::declared(),
         streamsfuncs::constants(),
         crypt::constants(),
         password::constants(),
