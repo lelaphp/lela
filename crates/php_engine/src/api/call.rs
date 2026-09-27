@@ -1923,7 +1923,23 @@ fn construct(
 /// `zend_ast_evaluate`'s `ZEND_AST_CLASS_CONST` arm: the class fetched in
 /// `scope` ([`const_class`]) and its constant read through
 /// `zend_get_class_constant_ex`, whose access is checked against that
-/// scope; `static` is refused while the file compiles.
+/// scope; `static` is refused while the file compiles. An error names
+/// the class as the expression writes it, which is the string
+/// `zend_get_class_constant_ex` is handed, `self` and `parent` among
+/// them:
+///
+/// ```php
+/// class A { const X = self::NOPE; const Z = [A::NOPE]; }
+/// class B extends A { const Y = parent::NOPE; }
+/// foreach (['A::X', 'B::Y', 'A::Z'] as $c) {
+///     try { constant($c); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Undefined constant self::NOPE
+/// Undefined constant parent::NOPE
+/// Undefined constant A::NOPE
+/// ```
 fn class_constant_expr(
     req: &mut Request,
     class: &Name,
@@ -1931,8 +1947,8 @@ fn class_constant_expr(
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
     let id = const_class(req, &class.0, scope)?;
-    let shown = req.class_name(id);
-    req.class_constant_from(id, &name.0, &shown, scope)
+    let written = String::from_utf8_lossy(&class.0);
+    req.class_constant_from(id, &name.0, &written, scope)
 }
 
 /// `zend_fetch_class_with_scope` under `ZEND_FETCH_CLASS_EXCEPTION`, the
