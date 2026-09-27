@@ -726,10 +726,13 @@ impl<T: IntoReturn> Ref<T> {
     }
 }
 
-impl Ref<PhpArray> {
+impl<T> Ref<T> {
     /// `Z_PARAM_ARRAY_EX(.., 0, 1)`: the caller's array separated in
     /// place ([`PhpRef::separate_array`]), so the body changes it with no
-    /// copy; none where the argument is absent.
+    /// copy; none where the argument is absent or its referent is no
+    /// array. Over an untyped or union referent it is the array arm's
+    /// `SEPARATE_ARRAY`, as `array_multisort`'s arguments and
+    /// `array_walk`'s `array|object` take it.
     pub fn separated(&self, req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
         match self.cell {
             Some(cell) => cell.separate_array(req),
