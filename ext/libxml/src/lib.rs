@@ -28,13 +28,13 @@ pub mod ffi;
 mod image_svg;
 mod load;
 
-use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
-use php_ext::coerce::{argument, callable_argument, value_name};
-use php_ext::decl::{
-    Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
-    EnumBacking, FunctionDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
+use php_ext::abi::{
+    Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, Instance, OrFalse, Raw,
+    True, Untyped,
 };
-use php_ext::raising::{Level, Thrown, arg_count_error, arg_type_error, docref, throw};
+use php_ext::attr::{php_class, php_const, php_function};
+use php_ext::coerce::value_name;
+use php_ext::raising::{Level, Thrown, arg_type_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
 
@@ -59,9 +59,6 @@ struct State {
     stream_context: Option<Value>,
 }
 
-/// A native's entry, the shape `ExtensionBuilder::functions` takes.
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
-
 /// The extension value (design §7.1): declarations paired with entries,
 /// and the state declared on it.
 ///
@@ -83,9 +80,18 @@ pub fn extension() -> Extension {
     ffi::Library::init();
     ffi::Library::install_loader();
     ExtensionBuilder::default()
-        .functions(natives())
-        .constants(constants())
-        .classes(vec![(error_class(), Vec::new())])
+        .functions(vec![
+            libxml_set_streams_context::declared(),
+            libxml_use_internal_errors::declared(),
+            libxml_get_last_error::declared(),
+            libxml_get_errors::declared(),
+            libxml_clear_errors::declared(),
+            libxml_disable_entity_loader::declared(),
+            libxml_set_external_entity_loader::declared(),
+            libxml_get_external_entity_loader::declared(),
+        ])
+        .constants(constants::declared())
+        .class::<LibXMLError>()
         .dependencies(vec![Dependency {
             name: String::from("standard"),
             kind: DependencyKind::Required,
@@ -97,95 +103,6 @@ pub fn extension() -> Extension {
         .rshutdown(rshutdown)
         .info(libxml_info)
         .build("libxml")
-}
-
-/// The natives in `libxml.stub.php`'s order, each with its entry.
-fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            function(
-                b"libxml_set_streams_context",
-                vec![parameter(b"context", None, None)],
-                Type::Void,
-            ),
-            set_streams_context as Entry,
-        ),
-        (
-            function(
-                b"libxml_use_internal_errors",
-                vec![parameter(
-                    b"use_errors",
-                    Some(Type::Nullable(Box::new(Type::Bool))),
-                    Some(ConstExpr::Null),
-                )],
-                Type::Bool,
-            ),
-            use_internal_errors as Entry,
-        ),
-        (
-            function(
-                b"libxml_get_last_error",
-                Vec::new(),
-                Type::Union(vec![
-                    Type::Named(Name(b"LibXMLError".as_slice().into())),
-                    Type::False,
-                ]),
-            ),
-            get_last_error as Entry,
-        ),
-        (
-            function(b"libxml_get_errors", Vec::new(), Type::Array),
-            get_errors as Entry,
-        ),
-        (
-            function(b"libxml_clear_errors", Vec::new(), Type::Void),
-            clear_errors as Entry,
-        ),
-        (
-            FunctionDecl {
-                attributes: vec![Attribute {
-                    name: Name(b"Deprecated".as_slice().into()),
-                    arguments: vec![
-                        named(b"since", b"8.0"),
-                        named(
-                            b"message",
-                            b"as external entity loading is disabled by default",
-                        ),
-                    ],
-                }],
-                ..function(
-                    b"libxml_disable_entity_loader",
-                    vec![parameter(
-                        b"disable",
-                        Some(Type::Bool),
-                        Some(ConstExpr::Bool(true)),
-                    )],
-                    Type::Bool,
-                )
-            },
-            disable_entity_loader as Entry,
-        ),
-        (
-            function(
-                b"libxml_set_external_entity_loader",
-                vec![parameter(
-                    b"resolver_function",
-                    Some(Type::Nullable(Box::new(Type::Callable))),
-                    None,
-                )],
-                Type::True,
-            ),
-            set_external_entity_loader as Entry,
-        ),
-        (
-            function(
-                b"libxml_get_external_entity_loader",
-                Vec::new(),
-                Type::Nullable(Box::new(Type::Callable)),
-            ),
-            get_external_entity_loader as Entry,
-        ),
-    ]
 }
 
 /// `PHP_MINFO_FUNCTION(libxml)`.
@@ -235,150 +152,65 @@ const DOTTED_VERSION: &str = "2.9.13";
 
 /// `register_libxml_symbols`: the constants in `libxml.stub.php`'s order,
 /// `LIBXML_NO_XXE` absent as it is below 2.13.
-fn constants() -> Vec<ConstDecl> {
-    let long = |name: &[u8], value: i32| ConstDecl {
-        name: Name(name.into()),
-        value: ConstExpr::long(i64::from(value)),
-        attributes: Vec::new(),
-    };
-    let string = |name: &[u8], value: &[u8]| ConstDecl {
-        name: Name(name.into()),
-        value: ConstExpr::Str(value.into()),
-        attributes: Vec::new(),
-    };
-    vec![
-        long(b"LIBXML_VERSION", 20913),
-        string(b"LIBXML_DOTTED_VERSION", DOTTED_VERSION.as_bytes()),
-        string(b"LIBXML_LOADED_VERSION", &ffi::Library::loaded_version()),
-        long(b"LIBXML_RECOVER", sys::XML_PARSE_RECOVER),
-        long(b"LIBXML_NOENT", sys::XML_PARSE_NOENT),
-        long(b"LIBXML_DTDLOAD", sys::XML_PARSE_DTDLOAD),
-        long(b"LIBXML_DTDATTR", sys::XML_PARSE_DTDATTR),
-        long(b"LIBXML_DTDVALID", sys::XML_PARSE_DTDVALID),
-        long(b"LIBXML_NOERROR", sys::XML_PARSE_NOERROR),
-        long(b"LIBXML_NOWARNING", sys::XML_PARSE_NOWARNING),
-        long(b"LIBXML_NOBLANKS", sys::XML_PARSE_NOBLANKS),
-        long(b"LIBXML_XINCLUDE", sys::XML_PARSE_XINCLUDE),
-        long(b"LIBXML_NSCLEAN", sys::XML_PARSE_NSCLEAN),
-        long(b"LIBXML_NOCDATA", sys::XML_PARSE_NOCDATA),
-        long(b"LIBXML_NONET", sys::XML_PARSE_NONET),
-        long(b"LIBXML_PEDANTIC", sys::XML_PARSE_PEDANTIC),
-        long(b"LIBXML_COMPACT", sys::XML_PARSE_COMPACT),
-        long(b"LIBXML_NOXMLDECL", sys::XML_SAVE_NO_DECL),
-        long(b"LIBXML_PARSEHUGE", sys::XML_PARSE_HUGE),
-        long(b"LIBXML_BIGLINES", sys::XML_PARSE_BIG_LINES),
-        long(b"LIBXML_NOEMPTYTAG", NOEMPTYTAG),
-        long(b"LIBXML_SCHEMA_CREATE", 1),
-        long(b"LIBXML_HTML_NOIMPLIED", sys::HTML_PARSE_NOIMPLIED),
-        long(b"LIBXML_HTML_NODEFDTD", sys::HTML_PARSE_NODEFDTD),
-        long(b"LIBXML_ERR_NONE", sys::XML_ERR_NONE),
-        long(b"LIBXML_ERR_WARNING", sys::XML_ERR_WARNING),
-        long(b"LIBXML_ERR_ERROR", sys::XML_ERR_ERROR),
-        long(b"LIBXML_ERR_FATAL", sys::XML_ERR_FATAL),
-    ]
+#[php_const]
+#[allow(non_snake_case)]
+pub(crate) mod constants {
+    pub(crate) const LIBXML_VERSION: i64 = 20913;
+    pub(crate) const LIBXML_DOTTED_VERSION: &str = super::DOTTED_VERSION;
+    /// Read off the library the process loaded, when the builder runs.
+    pub(crate) fn LIBXML_LOADED_VERSION() -> String {
+        String::from_utf8_lossy(&super::ffi::Library::loaded_version()).into_owned()
+    }
+    pub(crate) const LIBXML_RECOVER: i32 = super::sys::XML_PARSE_RECOVER;
+    pub(crate) const LIBXML_NOENT: i32 = super::sys::XML_PARSE_NOENT;
+    pub(crate) const LIBXML_DTDLOAD: i32 = super::sys::XML_PARSE_DTDLOAD;
+    pub(crate) const LIBXML_DTDATTR: i32 = super::sys::XML_PARSE_DTDATTR;
+    pub(crate) const LIBXML_DTDVALID: i32 = super::sys::XML_PARSE_DTDVALID;
+    pub(crate) const LIBXML_NOERROR: i32 = super::sys::XML_PARSE_NOERROR;
+    pub(crate) const LIBXML_NOWARNING: i32 = super::sys::XML_PARSE_NOWARNING;
+    pub(crate) const LIBXML_NOBLANKS: i32 = super::sys::XML_PARSE_NOBLANKS;
+    pub(crate) const LIBXML_XINCLUDE: i32 = super::sys::XML_PARSE_XINCLUDE;
+    pub(crate) const LIBXML_NSCLEAN: i32 = super::sys::XML_PARSE_NSCLEAN;
+    pub(crate) const LIBXML_NOCDATA: i32 = super::sys::XML_PARSE_NOCDATA;
+    pub(crate) const LIBXML_NONET: i32 = super::sys::XML_PARSE_NONET;
+    pub(crate) const LIBXML_PEDANTIC: i32 = super::sys::XML_PARSE_PEDANTIC;
+    pub(crate) const LIBXML_COMPACT: i32 = super::sys::XML_PARSE_COMPACT;
+    pub(crate) const LIBXML_NOXMLDECL: i32 = super::sys::XML_SAVE_NO_DECL;
+    pub(crate) const LIBXML_PARSEHUGE: i32 = super::sys::XML_PARSE_HUGE;
+    pub(crate) const LIBXML_BIGLINES: i32 = super::sys::XML_PARSE_BIG_LINES;
+    pub(crate) const LIBXML_NOEMPTYTAG: i32 = super::NOEMPTYTAG;
+    pub(crate) const LIBXML_SCHEMA_CREATE: i64 = 1;
+    pub(crate) const LIBXML_HTML_NOIMPLIED: i32 = super::sys::HTML_PARSE_NOIMPLIED;
+    pub(crate) const LIBXML_HTML_NODEFDTD: i32 = super::sys::HTML_PARSE_NODEFDTD;
+    pub(crate) const LIBXML_ERR_NONE: i32 = super::sys::XML_ERR_NONE;
+    pub(crate) const LIBXML_ERR_WARNING: i32 = super::sys::XML_ERR_WARNING;
+    pub(crate) const LIBXML_ERR_ERROR: i32 = super::sys::XML_ERR_ERROR;
+    pub(crate) const LIBXML_ERR_FATAL: i32 = super::sys::XML_ERR_FATAL;
 }
 
 /// `LIBXML_SAVE_NOEMPTYTAG`, php's own bit beside libxml's save options.
 pub const NOEMPTYTAG: i32 = 1 << 2;
 
-/// `class LibXMLError` as `libxml.stub.php` declares it.
-fn error_class() -> ClassDecl {
-    let property = |name: &[u8], ty: Type| PropertyDecl {
-        name: Name(name.into()),
-        visibility: Visibility::Public,
-        set_visibility: None,
-        is_instance: true,
-        is_readonly: false,
-        is_final: false,
-        is_promoted: false,
-        is_virtual: false,
-        ty: Some(ty),
-        default: None,
-        attributes: Vec::new(),
-        doc_comment: None,
-        hooks: None,
-    };
-    ClassDecl {
-        name: Name(b"LibXMLError".as_slice().into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags::default(),
-        parent: None,
-        interfaces: Vec::new(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::default(),
-        constants: Vec::new(),
-        properties: vec![
-            property(b"level", Type::Int),
-            property(b"code", Type::Int),
-            property(b"column", Type::Int),
-            property(b"message", Type::String),
-            property(b"file", Type::String),
-            property(b"line", Type::Int),
-        ],
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    }
-}
+/// `class LibXMLError` as `libxml.stub.php` declares it: six typed
+/// properties and no default, which `php_libxml_create_error_object`
+/// writes.
+#[php_class]
+pub(crate) struct LibXMLError;
 
-fn parameter(name: &[u8], ty: Option<Type>, default: Option<ConstExpr>) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty,
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
-        attributes: Vec::new(),
-    }
-}
-
-fn named(name: &[u8], value: &[u8]) -> AttributeArgument {
-    AttributeArgument {
-        name: Some(Name(name.into())),
-        value: ConstExpr::Str(value.into()),
-    }
-}
-
-fn function(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> FunctionDecl {
-    FunctionDecl {
-        name: Name(name.into()),
-        parameters,
-        return_type: Some(returns),
-        returns_by_ref: false,
-        is_generator: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
-    }
-}
-
-/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check.
-fn arity(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if (min..=max).contains(&given) {
-        return Ok(());
-    }
-    let (how, n) = if min == max {
-        ("exactly", min)
-    } else if given < min {
-        ("at least", min)
-    } else {
-        ("at most", max)
-    };
-    let word = if n == 1 { "argument" } else { "arguments" };
-    Err(arg_count_error(
-        req,
-        &format!("{how} {n} {word}, {given} given"),
-    ))
+#[php_class]
+impl LibXMLError {
+    #[php(property)]
+    const level: i64;
+    #[php(property)]
+    const code: i64;
+    #[php(property)]
+    const column: i64;
+    #[php(property)]
+    const message: PhpString;
+    #[php(property)]
+    const file: PhpString;
+    #[php(property)]
+    const line: i64;
 }
 
 // ---- the face php_libxml.h declares: the error state
@@ -615,9 +447,9 @@ impl Errors {
 /// libxml_set_streams_context(): Argument #1 ($context) must be of type resource, stdClass given
 /// libxml_set_streams_context(): supplied resource is not a valid Stream-Context resource
 /// ```
-fn set_streams_context(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let given = argument(req, 1)?.unwrap_or_default();
+#[php_function]
+fn libxml_set_streams_context(req: &mut Request, context: Untyped<Value>) -> Result<(), Thrown> {
+    let given = context.0.deref();
     let Some(resource) = given.as_resource() else {
         let name = value_name(req, &given);
         return Err(arg_type_error(
@@ -639,7 +471,7 @@ fn set_streams_context(req: &mut Request) -> Result<Value, Thrown> {
     if let Some(old) = req.state::<State>().stream_context.replace(given) {
         req.release(old);
     }
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `libxml_use_internal_errors(?bool $use_errors = null): bool`: the
@@ -655,9 +487,12 @@ fn set_streams_context(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn use_internal_errors(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 1)?;
-    let wanted = argument(req, 1)?.and_then(|v| v.as_bool());
+#[php_function]
+fn libxml_use_internal_errors(
+    req: &mut Request,
+    #[php(default = null)] use_errors: Option<bool>,
+) -> bool {
+    let wanted = use_errors;
     let state = req.state::<State>();
     let before = state.errors.is_some();
     match wanted {
@@ -667,11 +502,11 @@ fn use_internal_errors(req: &mut Request) -> Result<Value, Thrown> {
             state.errors.get_or_insert_with(Vec::new);
         }
     }
-    Ok(Value::bool(before))
+    before
 }
 
 /// `php_libxml_create_error_object`: a `LibXMLError` of one error.
-fn error_object(req: &mut Request, error: &Raised) -> Result<Value, Thrown> {
+fn error_object(req: &mut Request, error: &Raised) -> Result<Instance<LibXMLError>, Thrown> {
     let Some(class) = php_ext::call::lookup_class(req, b"LibXMLError")? else {
         return Err(php_ext::raising::fatal(
             req,
@@ -700,7 +535,7 @@ fn error_object(req: &mut Request, error: &Raised) -> Result<Value, Thrown> {
         let name = PhpString::new(req, name)?;
         object.set_prop(req, name, value)?;
     }
-    Ok(object.as_value())
+    Ok(Instance::of(object))
 }
 
 /// `libxml_get_last_error(): LibXMLError|false`: the list's last with
@@ -715,15 +550,15 @@ fn error_object(req: &mut Request, error: &Raised) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn get_last_error(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
+#[php_function]
+fn libxml_get_last_error(req: &mut Request) -> Result<OrFalse<Instance<LibXMLError>>, Thrown> {
     let last = match &req.state::<State>().errors {
         Some(list) => list.last().cloned(),
         None => ffi::Raised::last(),
     };
     match last {
-        Some(error) => error_object(req, &error),
-        None => Ok(Value::bool(false)),
+        Some(error) => error_object(req, &error).map(OrFalse::Value),
+        None => Ok(OrFalse::False),
     }
 }
 
@@ -741,15 +576,15 @@ fn get_last_error(req: &mut Request) -> Result<Value, Thrown> {
 /// array(0) {
 /// }
 /// ```
-fn get_errors(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
+#[php_function]
+fn libxml_get_errors(req: &mut Request) -> Result<PhpArray, Thrown> {
     let list = req.state::<State>().errors.clone().unwrap_or_default();
     let mut out = PhpArray::new(req)?;
     for error in &list {
         let object = error_object(req, error)?;
-        out.append(req, object)?;
+        out.append(req, object.object().as_value())?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `libxml_clear_errors(): void`: the library's last error reset and the
@@ -764,13 +599,12 @@ fn get_errors(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// int(0)
 /// ```
-fn clear_errors(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
+#[php_function]
+fn libxml_clear_errors(req: &mut Request) {
     ffi::Raised::reset_last();
     if let Some(list) = req.state::<State>().errors.as_mut() {
         list.clear();
     }
-    Ok(Value::null())
 }
 
 /// `libxml_disable_entity_loader(bool $disable = true): bool`,
@@ -786,12 +620,13 @@ fn clear_errors(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn disable_entity_loader(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 1)?;
-    let disable = argument(req, 1)?.and_then(|v| v.as_bool()).unwrap_or(true);
+#[php_function(deprecated(
+    since = "8.0",
+    message = "as external entity loading is disabled by default"
+))]
+fn libxml_disable_entity_loader(req: &mut Request, #[php(default = true)] disable: bool) -> bool {
     let state = req.state::<State>();
-    let before = std::mem::replace(&mut state.entity_loader_disabled, disable);
-    Ok(Value::bool(before))
+    std::mem::replace(&mut state.entity_loader_disabled, disable)
 }
 
 /// `libxml_set_external_entity_loader(?callable $resolver_function):
@@ -807,10 +642,13 @@ fn disable_entity_loader(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// NULL
 /// ```
-fn set_external_entity_loader(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    let callable = callable_argument(req, 1)?;
+#[php_function]
+fn libxml_set_external_entity_loader(
+    req: &mut Request,
+    resolver_function: Raw<Option<Callable>>,
+) -> Result<True, Thrown> {
+    let given = resolver_function.value();
+    let callable = resolver_function.hold(req)?;
     if let Some((_, old)) = req.state::<State>().entity_loader.take() {
         req.release(old);
     }
@@ -818,7 +656,7 @@ fn set_external_entity_loader(req: &mut Request) -> Result<Value, Thrown> {
         req.addref(&given);
         req.state::<State>().entity_loader = Some((callable, given));
     }
-    Ok(Value::bool(true))
+    Ok(True)
 }
 
 /// `libxml_get_external_entity_loader(): ?callable`: the value the loader
@@ -832,18 +670,10 @@ fn set_external_entity_loader(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// bool(true)
 /// ```
-fn get_external_entity_loader(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    match req
-        .state::<State>()
+#[php_function]
+fn libxml_get_external_entity_loader(req: &mut Request) -> Option<Callable> {
+    req.state::<State>()
         .entity_loader
         .as_ref()
-        .map(|(_, value)| *value)
-    {
-        Some(value) => {
-            req.addref(&value);
-            Ok(value)
-        }
-        None => Ok(Value::null()),
-    }
+        .map(|(callable, _)| callable.clone())
 }
