@@ -93,13 +93,7 @@ pub fn extension() -> Extension {
         builder = builder.class_payload::<dllist::SplDllist>(decl, methods, &dllist::HANDLERS);
     }
     builder = heap::register(builder);
-    for (decl, methods) in fixedarray::classes() {
-        builder = builder.class_payload::<fixedarray::SplFixedArray>(
-            decl,
-            methods,
-            &fixedarray::HANDLERS,
-        );
-    }
+    builder = builder.class::<fixedarray::SplFixedArray>();
     for (decl, methods) in observer::classes() {
         builder = if decl.kind == ClassKind::Interface {
             builder.classes(vec![(decl, methods)])
@@ -123,6 +117,18 @@ pub(crate) struct Iterator;
 /// Core's `Countable`.
 #[php_class(extern)]
 pub(crate) struct Countable;
+
+/// Core's `IteratorAggregate`.
+#[php_class(extern)]
+pub(crate) struct IteratorAggregate;
+
+/// Core's `ArrayAccess`.
+#[php_class(extern)]
+pub(crate) struct ArrayAccess;
+
+/// ext/json's `JsonSerializable`.
+#[php_class(extern)]
+pub(crate) struct JsonSerializable;
 
 /// `PHP_MINFO_FUNCTION(spl)`: `SPL support => enabled`.
 fn spl_info(req: &mut Request) {
