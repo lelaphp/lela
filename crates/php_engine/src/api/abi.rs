@@ -33,7 +33,7 @@ pub use class::{
 };
 pub use marshal::{
     False, FromArgument, Instance, IntoReturn, Iterable, NamedVariadic, Never, Null, NullDefault,
-    OrFalse, Passed, Raw, Ref, Static, This, True, Union, Untyped, Variadic,
+    OrFalse, Passed, Path, Raw, Ref, Static, This, True, Union, Untyped, Variadic,
 };
 
 /// The startup ini view an extension's engine state is built from: what
