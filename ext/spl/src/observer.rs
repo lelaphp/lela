@@ -989,9 +989,9 @@ impl SplObjectStorage {
         let this = this.object();
         let rows = with(req, this, |s| s.live())?;
         let mut out = PhpArray::new(req)?;
-        for (name, value) in this.props_for(req, PropertyPurpose::Debug)? {
+        for (key, value) in this.props_for(req, PropertyPurpose::Debug)? {
             req.addref(&value);
-            out.set(req, Key::Str(name), value)?;
+            out.set(req, key, value)?;
         }
         let mut storage = PhpArray::new(req)?;
         for (object, inf) in rows {

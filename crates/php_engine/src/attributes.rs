@@ -409,7 +409,7 @@ impl ObjectHandlers for SensitiveValueHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(crate::api::values::Key, Value)>>, Thrown> {
         let _ = (req, object, purpose);
         Ok(Some(Vec::new()))
     }

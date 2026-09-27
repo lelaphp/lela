@@ -140,8 +140,21 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                 .as_bytes(),
             );
             let mut dumped = Ok(());
-            for (prop, element) in props {
+            for (key, element) in props {
                 out.extend(std::iter::repeat_n(b' ', level + 1));
+                // An element a class shows among its properties is an
+                // integer key, `[%ld]=>`.
+                let prop = match key {
+                    Key::Int(n) => {
+                        out.extend_from_slice(format!("[{n}]=>\n").as_bytes());
+                        dumped = dump(req, out, &element, level + 2);
+                        if dumped.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    Key::Str(prop) => prop,
+                };
                 let bytes = prop.as_bytes();
                 out.push(b'[');
                 match super::unmangle(bytes) {

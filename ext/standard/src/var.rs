@@ -730,11 +730,7 @@ pub(super) fn render(
         let own = object.debug_info(req)?;
         let rows: Vec<(Key, Value)> = match own {
             Some(own) => own.snapshot(),
-            None => object
-                .props_for(req, PropertyPurpose::Debug)?
-                .into_iter()
-                .map(|(name, value)| (Key::from_string(name), value))
-                .collect(),
+            None => object.props_for(req, PropertyPurpose::Debug)?,
         };
         object.protect();
         let rendered = hash(req, out, &rows, indent, true);
@@ -1062,10 +1058,17 @@ fn export_object(
     if !is_enum {
         for (key, element) in rows? {
             out.extend(std::iter::repeat_n(b' ', level + 2));
-            let (_, name) = unmangle(key.as_bytes());
-            out.push(b'\'');
-            escaped(out, name);
-            out.push(b'\'');
+            // `php_object_element_export`: a name quoted, unmangled; an
+            // integer key as it stands.
+            match key {
+                Key::Str(key) => {
+                    let (_, name) = unmangle(key.as_bytes());
+                    out.push(b'\'');
+                    escaped(out, name);
+                    out.push(b'\'');
+                }
+                Key::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
+            }
             out.extend_from_slice(b" => ");
             written = export(req, out, &element, level + 2);
             if written.is_err() {

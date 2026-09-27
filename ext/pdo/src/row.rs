@@ -328,9 +328,9 @@ impl ObjectHandlers for Handlers {
             return Ok(None);
         };
         let mut out = PhpArray::new(req)?;
-        for (name, value) in rows {
+        for (key, value) in rows {
             req.addref(&value);
-            out.set(req, php_ext::values::Key::Str(name), value)?;
+            out.set(req, key, value)?;
         }
         Ok(Some(out))
     }
@@ -347,7 +347,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(php_ext::values::Key, Value)>>, Thrown> {
         if purpose != PropertyPurpose::Debug {
             return Ok(None);
         }
@@ -378,7 +378,11 @@ impl ObjectHandlers for Handlers {
                 None => rows.push((key, value)),
             }
         }
-        Ok(Some(rows))
+        Ok(Some(
+            rows.into_iter()
+                .map(|(name, value)| (php_ext::values::Key::Str(name), value))
+                .collect(),
+        ))
     }
 
     /// `row_get_ctor`.

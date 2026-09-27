@@ -208,12 +208,7 @@ impl Request {
     /// table, each key as it stands; views, no owner taken.
     pub(crate) fn table_entries(&mut self, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
         let object = self.table_owner(object)?;
-        let rows =
-            crate::ops::properties_for(self, object, crate::api::abi::PropertyPurpose::Serialize)?;
-        Ok(rows
-            .into_iter()
-            .map(|(name, value)| (Key::Str(name), value))
-            .collect())
+        crate::ops::properties_for(self, object, crate::api::abi::PropertyPurpose::Serialize)
     }
 
     /// `rebuild_object_properties` then `SEPARATE_ARRAY` over the

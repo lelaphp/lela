@@ -814,17 +814,19 @@ impl PhpObject {
 
     /// The properties one reader of them sees, `zend_get_properties_for`
     /// under its purpose: the declared slots that hold a value in slot
-    /// order and then the dynamic table, each name carrying the prefix
-    /// `zend_mangle_property_name` puts before it, `\0*\0p` for a
-    /// protected property and `\0C\0p` for a private one, which is what
-    /// `print_r` unmangles and `var_export` strips. Views, no owner
-    /// taken, and a mangled name is interned as php's is; the `Err` is
-    /// the memory limit refusing the intern.
+    /// order and then the dynamic table, each name a string key carrying
+    /// the prefix `zend_mangle_property_name` puts before it, `\0*\0p`
+    /// for a protected property and `\0C\0p` for a private one, which is
+    /// what `print_r` unmangles and `var_export` strips; or the rows a
+    /// class answers for the purpose, under the keys its table holds
+    /// them by, an integer one among them. Views, no owner taken, and a
+    /// mangled name is interned as php's is; the `Err` is the memory
+    /// limit refusing the intern.
     pub fn props_for(
         &self,
         req: &mut Request,
         purpose: PropertyPurpose,
-    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    ) -> Result<Vec<(Key, Value)>, Thrown> {
         crate::ops::properties_for(req, *self, purpose)
     }
 

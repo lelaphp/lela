@@ -577,11 +577,21 @@ fn answered_vars(
     req: &mut Request,
     class: ClassId,
     scope: Option<ClassId>,
-    rows: Vec<(PhpString, Value)>,
+    rows: Vec<(Key, Value)>,
 ) -> Result<PhpArray, Thrown> {
     let placed = req.placed_properties(class);
     let mut array = PhpArray::new(req)?;
-    for (name, value) in rows {
+    for (key, value) in rows {
+        // An integer key is an element the class shows among its
+        // properties, which no access rule holds (`zend_hash_index_add`).
+        let name = match key {
+            Key::Int(n) => {
+                req.addref(&value);
+                array.set(req, Key::Int(n), value)?;
+                continue;
+            }
+            Key::Str(name) => name,
+        };
         let bytes = name.as_bytes();
         let key = if bytes.first() == Some(&0) {
             Key::Str(name)
@@ -622,7 +632,7 @@ fn get_mangled_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpAr
     // `zend_get_properties_no_lazy_init`: a lazy object's table as it
     // stands, nothing initialised for it.
     let rows = req.properties_no_lazy_init(object)?;
-    crate::ops::mangled_array(req, object, rows)
+    crate::ops::mangled_array(req, object, crate::ops::named_rows(rows))
 }
 
 /// `ce->function_table` in its order: the class's own methods as

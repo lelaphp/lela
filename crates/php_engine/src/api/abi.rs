@@ -22,7 +22,7 @@ use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{
-    ClassId, ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
 };
 
 mod class;
@@ -1254,14 +1254,18 @@ pub trait ObjectHandlers: Send + Sync {
         Ok(None)
     }
 
-    /// `get_properties_for`: the rows one purpose reads; `None` at
-    /// `Std`, php's null slot, so every purpose reads `get_properties`.
+    /// `get_properties_for`: the rows one purpose reads, each under the
+    /// key php's table holds it by, a property's name as a string key
+    /// even where it reads as a number and an element a class shows
+    /// among its properties as an integer one
+    /// (`spl_fixedarray_object_get_properties_for`); `None` at `Std`,
+    /// php's null slot, so every purpose reads `get_properties`.
     fn get_properties_for(
         &self,
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         let _ = (req, object, purpose);
         Ok(None)
     }

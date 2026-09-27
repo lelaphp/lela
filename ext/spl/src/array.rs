@@ -1876,7 +1876,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         if flags(req, object)? & ArrayObject::STD_PROP_LIST != 0
             || !matches!(
                 purpose,
@@ -1885,18 +1885,9 @@ impl ObjectHandlers for Handlers {
         {
             return Ok(None);
         }
-        let rows = table(req, object)?.every_row(req)?;
-        let mut out = Vec::with_capacity(rows.len());
-        // Views, as `get_properties_for`'s rows are: a string key as it
-        // is, with no owner taken for it.
-        for (key, value) in rows {
-            let name = match key {
-                Key::Int(n) => PhpString::new(req, n.to_string().as_bytes())?,
-                Key::Str(s) => s,
-            };
-            out.push((name, value));
-        }
-        Ok(Some(out))
+        // Views, as `get_properties_for`'s rows are, each under the key the
+        // storage holds it by.
+        Ok(Some(table(req, object)?.every_row(req)?))
     }
 }
 
@@ -1904,9 +1895,9 @@ impl ObjectHandlers for Handlers {
 /// the private name `storage` of `ArrayObject` or `ArrayIterator`.
 fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (name, value) in object.props_for(req, PropertyPurpose::Debug)? {
+    for (key, value) in object.props_for(req, PropertyPurpose::Debug)? {
         req.addref(&value);
-        let key = crate::owned_key(req, &Key::Str(name));
+        let key = crate::owned_key(req, &key);
         out.set(req, key, value)?;
     }
     let storage = match payload(req, object)?.storage {

@@ -974,9 +974,9 @@ fn clone_list(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown>
 fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     let (flags, values) = with(req, object, |l| (l.flags, l.values()))?;
     let mut out = PhpArray::new(req)?;
-    for (name, value) in object.props_for(req, PropertyPurpose::Debug)? {
+    for (key, value) in object.props_for(req, PropertyPurpose::Debug)? {
         req.addref(&value);
-        out.set(req, Key::Str(name), value)?;
+        out.set(req, key, value)?;
     }
     let name = PhpString::new(req, b"\0SplDoublyLinkedList\0flags")?;
     out.set(req, Key::Str(name), Value::int(flags))?;

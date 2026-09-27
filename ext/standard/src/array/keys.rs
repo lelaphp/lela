@@ -1152,7 +1152,10 @@ fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Value>, Th
         let visible = object
             .props_for(req, php_ext::abi::PropertyPurpose::ArrayCast)?
             .into_iter()
-            .find(|(prop, _)| prop.as_bytes() == text.as_slice())
+            .find(|(prop, _)| match prop {
+                Key::Str(prop) => prop.as_bytes() == text.as_slice(),
+                Key::Int(n) => n.to_string().as_bytes() == text.as_slice(),
+            })
             .map(|(_, value)| value);
         return Ok(visible.map(|value| {
             let value = value.deref();

@@ -780,9 +780,9 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<PhpArray>, 
     }
     let own = object.props_for(req, PropertyPurpose::ArrayCast)?;
     let mut out = PhpArray::new(req)?;
-    for (name, value) in own {
+    for (key, value) in own {
         req.addref(&value);
-        out.set(req, Key::Str(name), value)?;
+        out.set(req, key, value)?;
     }
     let Some(table) = table_of(req, object) else {
         return Ok(Some(out));

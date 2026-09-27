@@ -448,8 +448,7 @@ fn rows(req: &mut Request, value: &Value) -> Result<Vec<(Key, Value)>, Thrown> {
     Ok(object
         .props_for(req, php_ext::abi::PropertyPurpose::Json)?
         .into_iter()
-        .filter(|(name, _)| name.as_bytes().first() != Some(&0))
-        .map(|(name, value)| (Key::Str(name), value))
+        .filter(|(key, _)| !matches!(key, Key::Str(name) if name.as_bytes().first() == Some(&0)))
         .collect())
 }
 

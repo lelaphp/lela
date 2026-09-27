@@ -730,12 +730,55 @@ impl ObjectHandlers for Handlers {
     ///   int(3)
     /// }
     /// ```
+    ///
+    /// Each element is an integer key, and a property named `"0"` a
+    /// string one beside it, which the `(array)` cast folds as php's
+    /// `zend_proptable_to_symtable` does.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties] class A extends SplFixedArray {}
+    /// $a = new A(2); $a[0] = 'e0'; $a->{'0'} = 'p0'; $a->x = 1;
+    /// var_dump($a); var_export($a); echo "\n"; var_dump((array)$a, get_object_vars($a)); echo json_encode($a), "\n";
+    /// ```
+    /// ```expect
+    /// object(A)#1 (4) {
+    ///   [0]=>
+    ///   string(2) "e0"
+    ///   [1]=>
+    ///   NULL
+    ///   ["0"]=>
+    ///   string(2) "p0"
+    ///   ["x"]=>
+    ///   int(1)
+    /// }
+    /// \A::__set_state(array(
+    ///    0 => 'e0',
+    ///    1 => NULL,
+    ///    '0' => 'p0',
+    ///    'x' => 1,
+    /// ))
+    /// array(3) {
+    ///   [0]=>
+    ///   string(2) "p0"
+    ///   [1]=>
+    ///   NULL
+    ///   ["x"]=>
+    ///   int(1)
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   string(2) "p0"
+    ///   ["x"]=>
+    ///   int(1)
+    /// }
+    /// ["e0",null]
+    /// ```
     fn get_properties_for(
         &self,
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         // php asserts no serializer asks, the class having `__serialize`;
         // what reads the table under that purpose reads the object's own.
         if purpose == PropertyPurpose::Serialize {
@@ -753,17 +796,15 @@ impl ObjectHandlers for Handlers {
         if elements.is_empty() && props.is_empty() {
             return Ok(None);
         }
-        let mut out = Vec::with_capacity(elements.len() + props.len());
+        // Each element under its integer index
+        // (`zend_hash_next_index_insert`), then each property under its
+        // name (`zend_hash_add_new`), so a property named `"0"` stands
+        // beside element 0.
+        let mut out: Vec<(Key, Value)> = Vec::with_capacity(elements.len() + props.len());
         for (at, value) in elements.into_iter().enumerate() {
-            out.push((PhpString::new(req, at.to_string().as_bytes())?, value));
+            out.push((Key::Int(i64::try_from(at).unwrap_or(i64::MAX)), value));
         }
-        for (key, value) in props {
-            let name = match key {
-                Key::Str(name) => name,
-                Key::Int(n) => PhpString::new(req, n.to_string().as_bytes())?,
-            };
-            out.push((name, value));
-        }
+        out.extend(props);
         Ok(Some(out))
     }
 
@@ -777,9 +818,9 @@ impl ObjectHandlers for Handlers {
             return Ok(None);
         };
         let mut out = PhpArray::new(req)?;
-        for (name, value) in rows {
+        for (key, value) in rows {
             req.addref(&value);
-            out.set(req, Key::from_string(name), value)?;
+            out.set(req, key, value)?;
         }
         Ok(Some(out))
     }

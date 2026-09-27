@@ -873,9 +873,9 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
         (h.queue, h.flags, h.corrupted, h.elements.clone())
     })?;
     let mut out = PhpArray::new(req)?;
-    for (name, value) in object.props_for(req, PropertyPurpose::Debug)? {
+    for (key, value) in object.props_for(req, PropertyPurpose::Debug)? {
         req.addref(&value);
-        out.set(req, Key::Str(name), value)?;
+        out.set(req, key, value)?;
     }
     let base: &[u8] = if queue {
         b"SplPriorityQueue"

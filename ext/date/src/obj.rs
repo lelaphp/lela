@@ -379,7 +379,7 @@ fn rows_view(
     object: PhpObject,
     fields: Vec<(&[u8], Value)>,
     keep: fn(&mut Request, PhpObject) -> Option<&mut Vec<Value>>,
-) -> Result<Vec<(PhpString, Value)>, Thrown> {
+) -> Result<Vec<(Key, Value)>, Thrown> {
     let mut rows = std_rows(req, object)?;
     let mut made = Vec::with_capacity(fields.len());
     for (name, value) in fields {
@@ -392,7 +392,10 @@ fn rows_view(
     for value in old.into_iter().flatten() {
         req.release(value);
     }
-    Ok(rows)
+    Ok(rows
+        .into_iter()
+        .map(|(name, value)| (Key::Str(name), value))
+        .collect())
 }
 
 /// What `free_obj` gives back of the kept rows.
@@ -594,7 +597,7 @@ impl ObjectHandlers for DateHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         // `date_object_get_properties_for`'s `default:`, the standard
         // table, for the debug reader and for `get_object_vars()`.
         if matches!(
@@ -711,7 +714,7 @@ impl ObjectHandlers for TzHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         // `date_object_get_properties_for`'s `default:`, the standard
         // table, for the debug reader and for `get_object_vars()`.
         if matches!(
@@ -919,7 +922,7 @@ impl ObjectHandlers for IntervalHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         if purpose == PropertyPurpose::Debug {
             return Ok(None);
         }
@@ -1173,7 +1176,7 @@ impl ObjectHandlers for PeriodHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         if purpose == PropertyPurpose::Debug {
             return Ok(None);
         }
