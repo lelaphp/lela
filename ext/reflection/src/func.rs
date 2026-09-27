@@ -6,10 +6,8 @@
 //! up again, through [`super::signature::this_function`].
 //!
 //! What still shares the entry of the methods not yet served
-//! ([`ReflectionFiber`]'s `getExecutingLine`): `setAccessible`
-//! and `ReflectionFunction`'s `isDisabled`, which the stub marks
-//! `#[\Deprecated]` and the engine does not raise the deprecation of
-//! yet (#412).
+//! ([`ReflectionFiber`]'s `getExecutingLine`): `ReflectionGenerator`'s
+//! and `ReflectionFiber`'s methods.
 
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Raw, Static, This, Union};
 use php_ext::attr::php_class;
@@ -18,13 +16,13 @@ use php_ext::call::{
 };
 use php_ext::coerce::{is_callable, to_callable};
 use php_ext::decl::{FunctionDecl, MethodDecl, Name, Visibility};
-use php_ext::raising::{Thrown, arg_count_error, deprecated, throw};
+use php_ext::raising::{Thrown, arg_count_error, deprecated, fatal, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 
 use super::signature::{FunctionRef, parameter_factory, this_function, type_factory};
 use super::{
-    answer, at_most_arguments, class_name_of, class_named, closure_string, exactly_arguments,
+    at_most_arguments, class_name_of, class_named, closure_string, exactly_arguments,
     function_string, is_constructor, keep, keep_closure, kept_class, kept_closure, linked_methods,
     method_or_invoke, method_string, namespace_end, new_object, reflection_class_factory,
     required_parameters, set_name, set_string_prop, signature, string_value, table_method,
@@ -44,8 +42,11 @@ fn visibility_bit(visibility: Visibility) -> i64 {
 /// The method a `ReflectionMethod` reflects, with the class its
 /// `$class` names: php's `GET_REFLECTION_OBJECT_PTR(mptr)` beside
 /// `intern->ce`.
-fn this_method(req: &mut Request) -> Result<(ClassId, MethodDecl, ClassId), Thrown> {
-    let (_, name) = this_name(req, "ReflectionMethod")?;
+fn this_method(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<(ClassId, MethodDecl, ClassId), Thrown> {
+    let name = this_name(req, this, "ReflectionMethod")?;
     let Some(class) = req
         .this()
         .and_then(|this| this.prop(req, b"class"))
@@ -60,13 +61,13 @@ fn this_method(req: &mut Request) -> Result<(ClassId, MethodDecl, ClassId), Thro
     let class = class_named(req, &class)?;
     // A hook's reflector holds the hook itself, found among the hooks
     // of the property its name names.
-    if req.this().is_some_and(|this| super::kept_hook(req, this))
+    if super::kept_hook(req, this)
         && let Some((property, kind)) = super::member::hook_name(&name)
         && let Some((scope, decl)) = php_ext::call::property_hook(req, class, property, kind)
     {
         return Ok((class, decl, scope));
     }
-    let kept = req.this().and_then(|this| kept_closure(req, this));
+    let kept = kept_closure(req, this);
     let Some(found) = method_or_invoke(req, class, &name, kept) else {
         let named = class_name_of(req, class);
         return Err(throw(
@@ -112,8 +113,8 @@ fn tentative_return(req: &mut Request, function: &FunctionRef) -> bool {
 /// The extension that declared the function, `internal->module`: for a
 /// method it is the class's, `ce->info.internal.module`, as php reads
 /// it off the same entry.
-fn function_extension_name(req: &mut Request) -> Result<Option<String>, Thrown> {
-    let (function, decl) = this_function(req)?;
+fn function_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<String>, Thrown> {
+    let (function, decl) = this_function(req, this)?;
     if !is_internal(&decl) {
         return Ok(None);
     }
@@ -357,7 +358,7 @@ impl ReflectionFunctionAbstract {
     /// Cannot clone object using __clone()
     /// ```
     #[php(private, arity = manual)]
-    fn __clone(req: &mut Request, _this: This<Self>) -> Result<(), Thrown> {
+    fn __clone(req: &mut Request, _: This<Self>) -> Result<(), Thrown> {
         Err(throw(
             req,
             "ReflectionException",
@@ -375,8 +376,8 @@ impl ReflectionFunctionAbstract {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn inNamespace(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn inNamespace(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         Ok(namespace_end(&decl.name.0).is_some())
     }
 
@@ -393,8 +394,8 @@ impl ReflectionFunctionAbstract {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isClosure(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (function, _) = this_function(req)?;
+    fn isClosure(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (function, _) = this_function(req, this.object())?;
         Ok(matches!(function, FunctionRef::Closure(_)))
     }
 
@@ -410,25 +411,31 @@ impl ReflectionFunctionAbstract {
     /// ```expect
     /// bool(false)
     /// ```
+    ///
+    /// A method's and a closure's bit are their own declaration's, so an
+    /// interface's deprecated method is deprecated and its implementation
+    /// is not:
+    ///
+    /// ```php
+    /// interface I { #[\Deprecated] function t(); }
+    /// class C implements I { function t() {} #[\Deprecated] static function s() {} }
+    /// var_dump((new ReflectionMethod('I', 't'))->isDeprecated(), (new ReflectionMethod('C', 't'))->isDeprecated(), (new ReflectionMethod('C', 's'))->isDeprecated());
+    /// var_dump((new ReflectionFunction(#[\Deprecated] function () {}))->isDeprecated(), (new ReflectionFunction(fn () => 1))->isDeprecated());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
     #[php(tentative)]
-    fn isDeprecated(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, name) = this_name(req, "ReflectionFunction")?;
-        let Some(function) = lookup_function(req, &name) else {
-            return Err(throw(
-                req,
-                "ReflectionException",
-                &format!(
-                    "Function {}() does not exist",
-                    String::from_utf8_lossy(&name)
-                ),
-            ));
-        };
-        let deprecated = req.function_decl(function).is_some_and(|decl| {
-            decl.attributes
-                .iter()
-                .any(|a| a.name.0.eq_ignore_ascii_case(b"Deprecated"))
-        });
-        Ok(deprecated)
+    fn isDeprecated(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
+        Ok(decl
+            .attributes
+            .iter()
+            .any(|a| a.name.0.eq_ignore_ascii_case(b"Deprecated")))
     }
 
     /// `ReflectionFunctionAbstract::isInternal()`: whether `fptr->type` is
@@ -441,8 +448,8 @@ impl ReflectionFunctionAbstract {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isInternal(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn isInternal(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         Ok(is_internal(&decl))
     }
 
@@ -456,8 +463,8 @@ impl ReflectionFunctionAbstract {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isUserDefined(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn isUserDefined(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         Ok(!is_internal(&decl))
     }
 
@@ -478,8 +485,8 @@ impl ReflectionFunctionAbstract {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isGenerator(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn isGenerator(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         Ok(decl.is_generator)
     }
 
@@ -495,8 +502,8 @@ impl ReflectionFunctionAbstract {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isVariadic(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn isVariadic(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         Ok(decl.parameters.iter().any(|p| p.variadic))
     }
 
@@ -514,8 +521,8 @@ impl ReflectionFunctionAbstract {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isStatic(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (function, _) = this_function(req)?;
+    fn isStatic(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (function, _) = this_function(req, this.object())?;
         if let FunctionRef::Closure(closure) = &function {
             let is_static = closure
                 .closure(req)
@@ -551,8 +558,8 @@ impl ReflectionFunctionAbstract {
     /// NULL
     /// ```
     #[php(tentative)]
-    fn getClosureThis(req: &mut Request, _this: This<Self>) -> Result<Option<PhpObject>, Thrown> {
-        let (function, _) = this_function(req)?;
+    fn getClosureThis(req: &mut Request, this: This<Self>) -> Result<Option<PhpObject>, Thrown> {
+        let (function, _) = this_function(req, this.object())?;
         let FunctionRef::Closure(closure) = function else {
             return Ok(None);
         };
@@ -583,9 +590,9 @@ impl ReflectionFunctionAbstract {
     #[php(tentative)]
     fn getClosureScopeClass(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::class::ReflectionClass>>, Thrown> {
-        let (function, _) = this_function(req)?;
+        let (function, _) = this_function(req, this.object())?;
         let FunctionRef::Closure(closure) = function else {
             return Ok(None);
         };
@@ -616,9 +623,9 @@ impl ReflectionFunctionAbstract {
     #[php(tentative)]
     fn getClosureCalledClass(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::class::ReflectionClass>>, Thrown> {
-        let (function, _) = this_function(req)?;
+        let (function, _) = this_function(req, this.object())?;
         let FunctionRef::Closure(closure) = function else {
             return Ok(None);
         };
@@ -661,8 +668,8 @@ impl ReflectionFunctionAbstract {
     /// array(0) {
     /// }
     /// ```
-    fn getClosureUsedVariables(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let (function, _) = this_function(req)?;
+    fn getClosureUsedVariables(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let (function, _) = this_function(req, this.object())?;
         let mut used = PhpArray::new(req)?;
         let FunctionRef::Closure(closure) = function else {
             return Ok(used);
@@ -684,8 +691,8 @@ impl ReflectionFunctionAbstract {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getDocComment(req: &mut Request, _this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn getDocComment(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         let Some(doc) = decl.doc_comment.clone() else {
             return Ok(OrFalse::False);
         };
@@ -712,8 +719,8 @@ impl ReflectionFunctionAbstract {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getEndLine(req: &mut Request, _this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn getEndLine(req: &mut Request, this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         if is_internal(&decl) {
             return Ok(OrFalse::False);
         }
@@ -739,9 +746,9 @@ impl ReflectionFunctionAbstract {
     #[php(tentative)]
     fn getExtension(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::ReflectionExtension>>, Thrown> {
-        let Some(name) = function_extension_name(req)? else {
+        let Some(name) = function_extension_name(req, this.object())? else {
             return Ok(None);
         };
         if req.extension_named(name.as_bytes()).is_none() {
@@ -765,11 +772,8 @@ impl ReflectionFunctionAbstract {
     /// string(4) "Core"
     /// ```
     #[php(tentative)]
-    fn getExtensionName(
-        req: &mut Request,
-        _this: This<Self>,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
-        let Some(name) = function_extension_name(req)? else {
+    fn getExtensionName(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let Some(name) = function_extension_name(req, this.object())? else {
             return Ok(OrFalse::False);
         };
         PhpString::new(req, name.as_bytes()).map(OrFalse::Value)
@@ -785,8 +789,8 @@ impl ReflectionFunctionAbstract {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getFileName(req: &mut Request, _this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn getFileName(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         if is_internal(&decl) {
             return Ok(OrFalse::False);
         }
@@ -806,8 +810,8 @@ impl ReflectionFunctionAbstract {
     /// string(7) "getCode"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         let name = decl.name.0.to_vec();
         PhpString::new(req, &name)
     }
@@ -822,8 +826,8 @@ impl ReflectionFunctionAbstract {
     /// string(0) ""
     /// ```
     #[php(tentative)]
-    fn getNamespaceName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn getNamespaceName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         let name = decl.name.0.to_vec();
         let space = namespace_end(&name).map_or_else(Vec::new, |end| name[..end].to_vec());
         PhpString::new(req, &space)
@@ -839,8 +843,8 @@ impl ReflectionFunctionAbstract {
     /// int(3)
     /// ```
     #[php(tentative)]
-    fn getNumberOfParameters(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn getNumberOfParameters(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         Ok(i64::try_from(decl.parameters.len()).unwrap_or(0))
     }
 
@@ -854,8 +858,8 @@ impl ReflectionFunctionAbstract {
     /// int(1)
     /// ```
     #[php(tentative)]
-    fn getNumberOfRequiredParameters(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn getNumberOfRequiredParameters(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         Ok(i64::try_from(required_parameters(&decl)).unwrap_or(0))
     }
 
@@ -886,8 +890,8 @@ impl ReflectionFunctionAbstract {
     /// }
     /// ```
     #[php(tentative)]
-    fn getParameters(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let (function, decl) = this_function(req)?;
+    fn getParameters(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let (function, decl) = this_function(req, this.object())?;
         let mut parameters = PhpArray::new(req)?;
         for offset in 0..decl.parameters.len() {
             let object = parameter_factory(req, &function, &decl, offset)?;
@@ -906,8 +910,8 @@ impl ReflectionFunctionAbstract {
     /// string(11) "json_encode"
     /// ```
     #[php(tentative)]
-    fn getShortName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn getShortName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         let name = decl.name.0.to_vec();
         let start = namespace_end(&name).map_or(0, |end| end + 1);
         let short = name[start..].to_vec();
@@ -924,8 +928,8 @@ impl ReflectionFunctionAbstract {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getStartLine(req: &mut Request, _this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn getStartLine(req: &mut Request, this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         if is_internal(&decl) {
             return Ok(OrFalse::False);
         }
@@ -1012,8 +1016,8 @@ impl ReflectionFunctionAbstract {
     /// }
     /// ```
     #[php(tentative)]
-    fn getStaticVariables(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let (function, _) = this_function(req)?;
+    fn getStaticVariables(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let (function, _) = this_function(req, this.object())?;
         let callable = match &function {
             FunctionRef::Method(scope, name) => {
                 known_method(req, *scope, &Name(name.as_slice().into()), None)
@@ -1057,8 +1061,8 @@ impl ReflectionFunctionAbstract {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn returnsReference(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl) = this_function(req)?;
+    fn returnsReference(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl) = this_function(req, this.object())?;
         Ok(decl.returns_by_ref)
     }
 
@@ -1074,8 +1078,8 @@ impl ReflectionFunctionAbstract {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn hasReturnType(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (function, decl) = this_function(req)?;
+    fn hasReturnType(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (function, decl) = this_function(req, this.object())?;
         let tentative = tentative_return(req, &function);
         Ok(decl.return_type.is_some() && !tentative)
     }
@@ -1095,9 +1099,9 @@ impl ReflectionFunctionAbstract {
     #[php(tentative)]
     fn getReturnType(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::signature::ReflectionType>>, Thrown> {
-        let (function, decl) = this_function(req)?;
+        let (function, decl) = this_function(req, this.object())?;
         let tentative = tentative_return(req, &function);
         let Some(ty) = decl.return_type.filter(|_| !tentative) else {
             return Ok(None);
@@ -1117,8 +1121,8 @@ impl ReflectionFunctionAbstract {
     /// bool(true)
     /// bool(false)
     /// ```
-    fn hasTentativeReturnType(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (function, decl) = this_function(req)?;
+    fn hasTentativeReturnType(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (function, decl) = this_function(req, this.object())?;
         let tentative = tentative_return(req, &function);
         Ok(decl.return_type.is_some() && tentative)
     }
@@ -1137,9 +1141,9 @@ impl ReflectionFunctionAbstract {
     /// ```
     fn getTentativeReturnType(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::signature::ReflectionType>>, Thrown> {
-        let (function, decl) = this_function(req)?;
+        let (function, decl) = this_function(req, this.object())?;
         let tentative = tentative_return(req, &function);
         let Some(ty) = decl.return_type.filter(|_| tentative) else {
             return Ok(None);
@@ -1169,11 +1173,11 @@ impl ReflectionFunctionAbstract {
     /// ```
     fn getAttributes(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
-        let (function, decl) = this_function(req)?;
+        let (function, decl) = this_function(req, this.object())?;
         let (scope, target) = match function {
             FunctionRef::Method(scope, _) => (Some(scope), super::attr::TARGET_METHOD),
             _ => (None, super::attr::TARGET_FUNCTION),
@@ -1269,7 +1273,7 @@ impl ReflectionFunction {
     /// ```
     fn __construct(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         function: Union<Instance<crate::Closure>, PhpString>,
     ) -> Result<(), Thrown> {
         let name = match function {
@@ -1284,10 +1288,9 @@ impl ReflectionFunction {
                         "InternalError: a Closure with no declaration behind it",
                     ));
                 };
-                if let Some(this) = req.this() {
-                    set_name(req, this, &decl.name.0)?;
-                    keep_closure(req, this, object);
-                }
+                let this = this.object();
+                set_name(req, this, &decl.name.0)?;
+                keep_closure(req, this, object);
                 return Ok(());
             }
             Union::B(name) => name.as_bytes().to_vec(),
@@ -1307,9 +1310,8 @@ impl ReflectionFunction {
             .function_decl(function)
             .map(|decl| decl.name.0.to_vec())
             .unwrap_or_default();
-        if let Some(this) = req.this() {
-            set_name(req, this, &declared)?;
-        }
+        let this = this.object();
+        set_name(req, this, &declared)?;
         Ok(())
     }
 
@@ -1328,9 +1330,9 @@ impl ReflectionFunction {
     ///   - Return [ bool ]
     /// }
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (this, name) = this_name(req, "ReflectionFunction")?;
-        if let Some(closure) = kept_closure(req, this) {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let name = this_name(req, this.object(), "ReflectionFunction")?;
+        if let Some(closure) = kept_closure(req, this.object()) {
             let text = closure_string(req, closure, "")?;
             return PhpString::new(req, text.as_bytes());
         }
@@ -1348,24 +1350,50 @@ impl ReflectionFunction {
         PhpString::new(req, text.as_bytes())
     }
 
-    /// `ReflectionFunction::isAnonymous()`: `ZEND_ACC_CLOSURE` again, on
-    /// the subclass.
+    /// `ReflectionFunction::isAnonymous()`: `ZEND_ACC_CLOSURE` without
+    /// `ZEND_ACC_FAKE_CLOSURE`, so a closure made of a function that has a
+    /// name, `strlen(...)`, is not anonymous.
     ///
     /// ```php
     /// var_dump((new ReflectionFunction('json_encode'))->isAnonymous());
     /// var_dump((new ReflectionFunction(fn () => 1))->isAnonymous());
+    /// var_dump((new ReflectionFunction(strlen(...)))->isAnonymous(), (new ReflectionFunction(Closure::fromCallable('strlen')))->isAnonymous());
     /// ```
     /// ```expect
     /// bool(false)
     /// bool(true)
+    /// bool(false)
+    /// bool(false)
     /// ```
-    fn isAnonymous(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (function, _) = this_function(req)?;
-        Ok(matches!(function, FunctionRef::Closure(_)))
+    fn isAnonymous(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (function, _) = this_function(req, this.object())?;
+        Ok(match function {
+            FunctionRef::Closure(closure) => closure.closure(req).is_some_and(|info| !info.fake),
+            _ => false,
+        })
     }
 
-    #[php(tentative, deprecated(since = "8.0", message = "as ReflectionFunction can no longer be constructed for disabled functions"), implementation = ReflectionFiber::getExecutingLine)]
-    fn isDisabled(_this: This<Self>) -> bool;
+    /// `ReflectionFunction::isDisabled()`: `false`, since a disabled
+    /// function cannot be reflected at all, after the deprecation its
+    /// declaration raises.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionFunction('strlen'))->isDisabled());
+    /// ```
+    /// ```expect
+    /// Deprecated: Method ReflectionFunction::isDisabled() is deprecated since 8.0, as ReflectionFunction can no longer be constructed for disabled functions in %s on line 2
+    /// bool(false)
+    /// ```
+    #[php(
+        tentative,
+        deprecated(
+            since = "8.0",
+            message = "as ReflectionFunction can no longer be constructed for disabled functions"
+        )
+    )]
+    fn isDisabled(_: This<Self>) -> bool {
+        false
+    }
 
     /// `ReflectionFunction::invoke(mixed ...$args): mixed`,
     /// `ZEND_METHOD(ReflectionFunction, invoke)`: the function the
@@ -1389,10 +1417,10 @@ impl ReflectionFunction {
     #[php(tentative)]
     fn invoke(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         args: NamedVariadic<Value>,
     ) -> Result<Value, Thrown> {
-        let (function, _) = this_function(req)?;
+        let (function, _) = this_function(req, this.object())?;
         let named = args.named().to_vec();
         let arguments = args.positional;
         invoke(req, &function, |req, callable| {
@@ -1415,8 +1443,8 @@ impl ReflectionFunction {
     /// string(3) "ccc"
     /// ```
     #[php(tentative)]
-    fn invokeArgs(req: &mut Request, _this: This<Self>, args: PhpArray) -> Result<Value, Thrown> {
-        let (function, _) = this_function(req)?;
+    fn invokeArgs(req: &mut Request, this: This<Self>, args: PhpArray) -> Result<Value, Thrown> {
+        let (function, _) = this_function(req, this.object())?;
         invoke(req, &function, |req, callable| {
             call_array(req, callable, args)
         })
@@ -1435,11 +1463,8 @@ impl ReflectionFunction {
     /// int(3)
     /// ```
     #[php(tentative)]
-    fn getClosure(
-        req: &mut Request,
-        _this: This<Self>,
-    ) -> Result<Instance<crate::Closure>, Thrown> {
-        let (function, decl) = this_function(req)?;
+    fn getClosure(req: &mut Request, this: This<Self>) -> Result<Instance<crate::Closure>, Thrown> {
+        let (function, decl) = this_function(req, this.object())?;
         if let FunctionRef::Closure(closure) = function {
             req.addref(&closure.as_value());
             return Ok(Instance::of(closure));
@@ -1450,6 +1475,23 @@ impl ReflectionFunction {
     }
 }
 
+/// `zend_create_fake_closure` over a method the reflector found, bound
+/// to `object` where it is an instance method.
+fn fake_closure(
+    req: &mut Request,
+    scope: ClassId,
+    name: &Name,
+    object: Option<PhpObject>,
+) -> Result<Instance<crate::Closure>, Thrown> {
+    let Some(callable) = known_method(req, scope, name, object) else {
+        return Err(fatal(
+            req,
+            "InternalError: a method the reflector found that its class does not serve",
+        ));
+    };
+    closure_from_callable(req, &callable).map(Instance::of)
+}
+
 /// `ReflectionGenerator` as the stub declares it.
 #[php_class(final, not_serializable)]
 pub(crate) struct ReflectionGenerator;
@@ -1457,31 +1499,31 @@ pub(crate) struct ReflectionGenerator;
 #[php_class]
 impl ReflectionGenerator {
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn __construct(_this: This<Self>, generator: Instance<crate::Generator>);
+    fn __construct(this: This<Self>, generator: Instance<crate::Generator>);
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getExecutingLine(_this: This<Self>) -> i64;
+    fn getExecutingLine(this: This<Self>) -> i64;
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getExecutingFile(_this: This<Self>) -> PhpString;
+    fn getExecutingFile(this: This<Self>) -> PhpString;
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
     fn getTrace(
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = DEBUG_BACKTRACE_PROVIDE_OBJECT)] options: i64,
     ) -> PhpArray;
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getFunction(_this: This<Self>) -> Instance<ReflectionFunctionAbstract>;
+    fn getFunction(this: This<Self>) -> Instance<ReflectionFunctionAbstract>;
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getThis(_this: This<Self>) -> Option<PhpObject>;
+    fn getThis(this: This<Self>) -> Option<PhpObject>;
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getExecutingGenerator(_this: This<Self>) -> Instance<crate::Generator>;
+    fn getExecutingGenerator(this: This<Self>) -> Instance<crate::Generator>;
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn isClosed(_this: This<Self>) -> bool;
+    fn isClosed(this: This<Self>) -> bool;
 }
 
 /// `ReflectionMethod` as the stub declares it.
@@ -1583,7 +1625,7 @@ impl ReflectionMethod {
     #[php(arity = manual)]
     fn __construct(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         objectOrMethod: Raw<Union<PhpObject, PhpString>>,
         #[php(default = null)] method: Raw<Option<PhpString>>,
     ) -> Result<(), Thrown> {
@@ -1650,16 +1692,15 @@ impl ReflectionMethod {
             ));
         };
         let scope = class_name_of(req, found.scope);
-        if let Some(this) = req.this() {
-            set_name(req, this, &found.decl.function.name.0)?;
-            set_string_prop(req, this, b"class", &scope)?;
-            // `intern->ce = ce`: the class the reflector was asked about,
-            // which `_function_string` takes as the method's scope, where
-            // `$class` is the class that declared the method; and for a
-            // closure's `__invoke`, the closure the method was made over.
-            let kept = closure.filter(|_| found.via_handler);
-            keep(req, this, class, kept);
-        }
+        let this = this.object();
+        set_name(req, this, &found.decl.function.name.0)?;
+        set_string_prop(req, this, b"class", &scope)?;
+        // `intern->ce = ce`: the class the reflector was asked about,
+        // which `_function_string` takes as the method's scope, where
+        // `$class` is the class that declared the method; and for a
+        // closure's `__invoke`, the closure the method was made over.
+        let kept = closure.filter(|_| found.via_handler);
+        keep(req, this, class, kept);
         Ok(())
     }
 
@@ -1786,9 +1827,10 @@ impl ReflectionMethod {
     ///   }
     /// }
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (this, name) = this_name(req, "ReflectionMethod")?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let name = this_name(req, this.object(), "ReflectionMethod")?;
         let Some(class) = this
+            .object()
             .prop(req, b"class")
             .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
         else {
@@ -1799,7 +1841,7 @@ impl ReflectionMethod {
             ));
         };
         let class = class_named(req, &class)?;
-        let kept = kept_closure(req, this);
+        let kept = kept_closure(req, this.object());
         let Some(found) = method_or_invoke(req, class, &name, kept) else {
             let class = class_name_of(req, class);
             return Err(throw(
@@ -1816,7 +1858,7 @@ impl ReflectionMethod {
         // class the reflector was asked about, so a method the class
         // inherited carries `inherits` and the declaring class's own
         // carries `overwrites`.
-        let scope = kept_class(req, this).unwrap_or(class);
+        let scope = kept_class(req, this.object()).unwrap_or(class);
         let text = method_string(req, &found, scope, "");
         PhpString::new(req, text.as_bytes())
     }
@@ -1830,8 +1872,8 @@ impl ReflectionMethod {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isPublic(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl, _) = this_method(req)?;
+    fn isPublic(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl, _) = this_method(req, this.object())?;
         Ok(decl.visibility == Visibility::Public)
     }
 
@@ -1844,8 +1886,8 @@ impl ReflectionMethod {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isPrivate(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl, _) = this_method(req)?;
+    fn isPrivate(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl, _) = this_method(req, this.object())?;
         Ok(decl.visibility == Visibility::Private)
     }
 
@@ -1858,8 +1900,8 @@ impl ReflectionMethod {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isProtected(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl, _) = this_method(req)?;
+    fn isProtected(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl, _) = this_method(req, this.object())?;
         Ok(decl.visibility == Visibility::Protected)
     }
 
@@ -1872,8 +1914,8 @@ impl ReflectionMethod {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isAbstract(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl, _) = this_method(req)?;
+    fn isAbstract(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl, _) = this_method(req, this.object())?;
         Ok(decl.is_abstract)
     }
 
@@ -1886,8 +1928,8 @@ impl ReflectionMethod {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isFinal(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl, _) = this_method(req)?;
+    fn isFinal(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl, _) = this_method(req, this.object())?;
         Ok(decl.is_final)
     }
 
@@ -1904,8 +1946,8 @@ impl ReflectionMethod {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isConstructor(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl, _) = this_method(req)?;
+    fn isConstructor(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl, _) = this_method(req, this.object())?;
         Ok(is_constructor(&decl))
     }
 
@@ -1918,8 +1960,8 @@ impl ReflectionMethod {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isDestructor(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl, _) = this_method(req)?;
+    fn isDestructor(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, decl, _) = this_method(req, this.object())?;
         Ok(decl.function.name.0.eq_ignore_ascii_case(b"__destruct"))
     }
 
@@ -1948,16 +1990,13 @@ impl ReflectionMethod {
     #[php(tentative)]
     fn getClosure(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] object: Option<PhpObject>,
-    ) -> Result<Raw<Instance<crate::Closure>>, Thrown> {
-        let (_, decl, scope) = this_method(req)?;
+    ) -> Result<Instance<crate::Closure>, Thrown> {
+        let (_, decl, scope) = this_method(req, this.object())?;
         let name = decl.function.name.clone();
         if !decl.is_instance {
-            let Some(callable) = known_method(req, scope, &name, None) else {
-                return answer(Ok(Value::null()), req);
-            };
-            return answer(Ok(closure_from_callable(req, &callable)?.as_value()), req);
+            return fake_closure(req, scope, &name, None);
         }
         let Some(object) = object else {
             return Err(throw(
@@ -1977,12 +2016,9 @@ impl ReflectionMethod {
         // the closure itself, one more owner.
         if super::is_closure_invoke(req, scope, &name.0.to_ascii_lowercase()) {
             req.addref(&object.as_value());
-            return answer(Ok(object.as_value()), req);
+            return Ok(Instance::of(object));
         }
-        let Some(callable) = known_method(req, scope, &name, Some(object)) else {
-            return answer(Ok(Value::null()), req);
-        };
-        answer(Ok(closure_from_callable(req, &callable)?.as_value()), req)
+        fake_closure(req, scope, &name, Some(object))
     }
 
     /// `ReflectionMethod::getModifiers()`: the `ZEND_ACC_PPP_MASK`,
@@ -1998,8 +2034,8 @@ impl ReflectionMethod {
     /// int(65)
     /// ```
     #[php(tentative)]
-    fn getModifiers(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
-        let (_, decl, _) = this_method(req)?;
+    fn getModifiers(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let (_, decl, _) = this_method(req, this.object())?;
         let mut bits = visibility_bit(decl.visibility);
         if !decl.is_instance {
             bits |= 16;
@@ -2040,11 +2076,11 @@ impl ReflectionMethod {
     #[php(tentative, arity = manual)]
     fn invoke(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: Raw<Option<PhpObject>>,
         args: NamedVariadic<Value>,
     ) -> Result<Value, Thrown> {
-        let (class, decl, scope) = this_method(req)?;
+        let (class, decl, scope) = this_method(req, this.object())?;
         abstract_refused(req, &decl, scope)?;
         at_least_arguments(req, 1)?;
         let this = receiver(req, &decl, scope, object)?;
@@ -2104,11 +2140,11 @@ impl ReflectionMethod {
     #[php(tentative, arity = manual)]
     fn invokeArgs(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: Raw<Option<PhpObject>>,
         args: Raw<PhpArray>,
     ) -> Result<Value, Thrown> {
-        let (class, decl, scope) = this_method(req)?;
+        let (class, decl, scope) = this_method(req, this.object())?;
         abstract_refused(req, &decl, scope)?;
         exactly_arguments(req, 2)?;
         let this = receiver(req, &decl, scope, object)?;
@@ -2133,9 +2169,9 @@ impl ReflectionMethod {
     #[php(tentative)]
     fn getDeclaringClass(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Instance<crate::class::ReflectionClass>, Thrown> {
-        let (_, _, scope) = this_method(req)?;
+        let (_, _, scope) = this_method(req, this.object())?;
         let object = reflection_class_factory(req, scope)?;
         Ok(Instance::of(object))
     }
@@ -2166,11 +2202,11 @@ impl ReflectionMethod {
     #[php(tentative)]
     fn getPrototype(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Instance<ReflectionMethod>, Thrown> {
-        let (_, name) = this_name(req, "ReflectionMethod")?;
+        let name = this_name(req, this.object(), "ReflectionMethod")?;
         let Some(prototype) = prototype_of(req, &name)? else {
-            let (class, _, _) = this_method(req)?;
+            let (class, _, _) = this_method(req, this.object())?;
             let class = class_name_of(req, class);
             return Err(throw(
                 req,
@@ -2200,13 +2236,36 @@ impl ReflectionMethod {
     /// ```expect
     /// bool(true)
     /// ```
-    fn hasPrototype(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, name) = this_name(req, "ReflectionMethod")?;
+    fn hasPrototype(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let name = this_name(req, this.object(), "ReflectionMethod")?;
         Ok(prototype_of(req, &name)?.is_some())
     }
 
-    #[php(tentative, deprecated(since = "8.5", message = "as it has no effect since PHP 8.1"), implementation = ReflectionFiber::getExecutingLine)]
-    fn setAccessible(_this: This<Self>, accessible: bool);
+    /// `ReflectionMethod::setAccessible(bool $accessible)`: the argument
+    /// parsed and nothing done, every method being invocable through
+    /// Reflection since 8.1. `ReflectionProperty::setAccessible` shares
+    /// the body.
+    ///
+    /// ```php
+    /// class A { private function f() { return 'f'; } private $p = 'p'; }
+    /// $m = new ReflectionMethod('A', 'f'); var_dump($m->setAccessible(false), $m->invoke(new A));
+    /// $p = new ReflectionProperty('A', 'p'); $p->setAccessible(false); var_dump($p->getValue(new A));
+    /// ```
+    /// ```expect
+    /// Deprecated: Method ReflectionMethod::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1 in %s on line 3
+    /// NULL
+    /// string(1) "f"
+    ///
+    /// Deprecated: Method ReflectionProperty::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1 in %s on line 4
+    /// string(1) "p"
+    /// ```
+    #[php(
+        tentative,
+        deprecated(since = "8.5", message = "as it has no effect since PHP 8.1")
+    )]
+    fn setAccessible(_: This<Self>, accessible: bool) {
+        let _ = accessible;
+    }
 }
 
 /// `ReflectionFiber` as the stub declares it.
@@ -2216,13 +2275,13 @@ pub(crate) struct ReflectionFiber;
 #[php_class]
 impl ReflectionFiber {
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn __construct(_this: This<Self>, fiber: Instance<crate::Fiber>);
+    fn __construct(this: This<Self>, fiber: Instance<crate::Fiber>);
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getFiber(_this: This<Self>) -> Instance<crate::Fiber>;
+    fn getFiber(this: This<Self>) -> Instance<crate::Fiber>;
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getExecutingFile(_this: This<Self>) -> Option<PhpString>;
+    fn getExecutingFile(this: This<Self>) -> Option<PhpString>;
 
     /// The entry every method not yet served shares: php's `Error`, as a
     /// native that cannot do what it was asked raises one, whatever the
@@ -2238,16 +2297,16 @@ impl ReflectionFiber {
     /// Error
     /// ```
     #[php(arity = manual)]
-    fn getExecutingLine(req: &mut Request, _this: This<Self>) -> Result<Raw<Option<i64>>, Thrown> {
+    fn getExecutingLine(req: &mut Request, _: This<Self>) -> Result<Raw<Option<i64>>, Thrown> {
         Err(unbuilt(req))
     }
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getCallable(_this: This<Self>) -> Callable;
+    fn getCallable(this: This<Self>) -> Callable;
 
     #[php(implementation = ReflectionFiber::getExecutingLine)]
     fn getTrace(
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = DEBUG_BACKTRACE_PROVIDE_OBJECT)] options: i64,
     ) -> PhpArray;
 }

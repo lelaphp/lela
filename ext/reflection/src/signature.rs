@@ -10,40 +10,21 @@
 //! reused only after its object is freed, and every reflector of
 //! these classes is born through a factory here, so a row is either
 //! this object's or gone.
-//!
-//! `getClass` still shares the entry of the methods not yet served.
 
 use php_ext::abi::{Instance, This, Union, Untyped};
 use php_ext::attr::php_class;
-use php_ext::call::{eval_const_expr, lookup_class};
-use php_ext::coerce::value_name;
+use php_ext::call::{autoload, eval_const_expr, lookup_class};
+use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use super::{
-    State, class_name_of, class_named, linked_methods, lookup_function, new_object,
+    State, class_chain, class_name_of, class_named, linked_methods, lookup_function, new_object,
     parameter_string, reflection_class_factory, required_parameters, set_name, set_string_prop,
     this_name, type_to_string,
 };
-
-/// `MAY_BE_NULL`, `MAY_BE_ARRAY` and `MAY_BE_CALLABLE`
-/// (`Z/Zend/zend_type_info.h`).
-const MAY_BE_NULL: u32 = 1 << 1;
-const MAY_BE_ARRAY: u32 = 1 << 7;
-const MAY_BE_CALLABLE: u32 = 1 << 12;
-
-/// `ZEND_TYPE_IS_ITERABLE_FALLBACK`: whether the type was written with
-/// `iterable` among its members.
-fn names_iterable(ty: &Type) -> bool {
-    match ty {
-        Type::Iterable => true,
-        Type::Nullable(inner) => names_iterable(inner),
-        Type::Union(members) => members.iter().any(names_iterable),
-        _ => false,
-    }
-}
 
 /// The function a `ReflectionParameter` reflects, `param->fptr` as a
 /// name this engine can look the declaration up with again: a global
@@ -101,6 +82,13 @@ struct Parts {
 
 fn parts(ty: &Type) -> Parts {
     match ty {
+        // `X&Y $p = null`: an intersection made nullable is the DNF
+        // union `(X&Y)|null`, a list with the intersection as a member.
+        Type::Nullable(inner) if matches!(**inner, Type::Intersection(_)) => Parts {
+            members: vec![(**inner).clone()],
+            nullable: true,
+            intersection: false,
+        },
         Type::Nullable(inner) => {
             let mut parts = parts(inner);
             parts.nullable = true;
@@ -133,13 +121,21 @@ fn parts(ty: &Type) -> Parts {
     }
 }
 
-/// `get_type_kind`: a list is its list's kind; `iterable` and `mixed`
-/// are named for backwards compatibility however wide their mask is;
-/// anything else with more than one member without `null` is a union.
+/// `get_type_kind`: a list is its list's kind, a union where an
+/// intersection is among its members; `iterable` and `mixed` are named
+/// for backwards compatibility however wide their mask is; anything else
+/// with more than one member without `null` is a union.
 fn kind_of(ty: &Type) -> Kind {
     let parts = parts(ty);
     if parts.intersection {
         return Kind::Intersection;
+    }
+    if parts
+        .members
+        .iter()
+        .any(|member| matches!(member, Type::Intersection(_)))
+    {
+        return Kind::Union;
     }
     if matches!(ty, Type::Mixed) || parts.members.first() == Some(&Type::Iterable) {
         return Kind::Named;
@@ -180,10 +176,8 @@ pub(super) fn type_factory(
 }
 
 /// `GET_REFLECTION_OBJECT_PTR` for a type reflector.
-fn this_type(req: &mut Request) -> Result<TypeRef, Thrown> {
-    let found = req
-        .this()
-        .and_then(|this| req.state::<State>().types.get(&this.index()).cloned());
+fn this_type(req: &mut Request, this: PhpObject) -> Result<TypeRef, Thrown> {
+    let found = req.state::<State>().types.get(&this.index()).cloned();
     match found {
         Some(reference) => Ok(reference),
         None => Err(throw(
@@ -258,6 +252,53 @@ fn scope_of(req: &mut Request, function: &FunctionRef) -> Option<ClassId> {
     }
 }
 
+/// `zval_try_get_string` as bytes: the string a value casts to, the
+/// cast's own owner given back.
+fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
+    let string = to_string(req, value)?;
+    let bytes = string.as_bytes().to_vec();
+    req.release(Value::string(string));
+    Ok(bytes)
+}
+
+/// The one class a type names, `ZEND_TYPE_HAS_NAME`: a name alone,
+/// nullable or beside `MAY_BE_*` bits, as php stores it in `arg_info` beside
+/// the mask; none for a type of bits alone, an intersection, or
+/// two names, which php stores as a list.
+fn one_name(ty: &Type) -> Option<&Type> {
+    let is_name =
+        |member: &&Type| matches!(member, Type::Named(_) | Type::SelfClass | Type::ParentClass);
+    match ty {
+        Type::Nullable(inner) => one_name(inner),
+        Type::Union(members) => {
+            let mut found = members.iter().filter(is_name);
+            let first = found.next();
+            if found.next().is_some() {
+                return None;
+            }
+            first
+        }
+        Type::Named(_) | Type::SelfClass | Type::ParentClass => Some(ty),
+        _ => None,
+    }
+}
+
+/// `ZEND_TYPE_PURE_MASK_WITHOUT_NULL`: the `MAY_BE_*` bits of the type,
+/// `null`'s aside.
+fn mask_without_null(ty: &Type) -> u32 {
+    ty.mask() & !Type::Null.mask()
+}
+
+/// `ZEND_TYPE_IS_ITERABLE_FALLBACK`: `iterable` written in the type.
+fn has_iterable(ty: &Type) -> bool {
+    match ty {
+        Type::Iterable => true,
+        Type::Nullable(inner) => has_iterable(inner),
+        Type::Union(members) => members.iter().any(has_iterable),
+        _ => false,
+    }
+}
+
 /// `zend_get_closure_method_def`: the declaration behind a `Closure`,
 /// which is the op array the `DECLARE_LAMBDA_FUNCTION` that made it
 /// named; none for an object that is no closure.
@@ -296,10 +337,11 @@ pub(super) fn parameter_factory(
 
 /// `GET_REFLECTION_OBJECT_PTR` for a parameter reflector, with the
 /// declaration and the one parameter it points at.
-fn this_parameter(req: &mut Request) -> Result<(ParameterRef, FunctionDecl, Parameter), Thrown> {
-    let found = req
-        .this()
-        .and_then(|this| req.state::<State>().parameters.get(&this.index()).cloned());
+fn this_parameter(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<(ParameterRef, FunctionDecl, Parameter), Thrown> {
+    let found = req.state::<State>().parameters.get(&this.index()).cloned();
     let Some(reference) = found else {
         return Err(throw(
             req,
@@ -427,13 +469,15 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
                     "Expected array($object, $method) or array($classname, $method)",
                 ));
             };
+            // `zval_try_get_string` over a class that is no object and
+            // over the method, so a `Stringable` names either.
             let (class, object) = if let ValueRef::Object(object) = class.deref().as_ref() {
                 (object.class(), Some(*object))
             } else {
-                let name = class.as_str_bytes().unwrap_or_default().to_vec();
+                let name = string_bytes(req, &class)?;
                 (class_named(req, &name)?, None)
             };
-            let method = method.as_str_bytes().unwrap_or_default().to_vec();
+            let method = string_bytes(req, &method)?;
             // An object's class is looked up with the closure it is, so
             // `[$closure, '__invoke']` reaches the method php makes.
             let found = if let Some(object) = object {
@@ -618,8 +662,11 @@ fn no_default(req: &mut Request) -> Thrown {
 /// string(1) "C"
 /// bool(false)
 /// ```
-pub(super) fn this_function(req: &mut Request) -> Result<(FunctionRef, FunctionDecl), Thrown> {
-    let (this, name) = this_name(req, "ReflectionFunctionAbstract")?;
+pub(super) fn this_function(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<(FunctionRef, FunctionDecl), Thrown> {
+    let name = this_name(req, this, "ReflectionFunctionAbstract")?;
     let scope = this
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
@@ -703,7 +750,7 @@ impl ReflectionParameter {
     const name: PhpString;
 
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `ReflectionParameter::__construct($function, int|string $param)`:
     /// the function [`construct_function`] reads off the first argument,
@@ -725,9 +772,23 @@ impl ReflectionParameter {
     /// ReflectionParameter::__construct(): Argument #2 ($param) must be greater than or equal to 0
     /// ReflectionParameter::__construct(): Argument #2 ($param) must be of type string|int, array given
     /// ```
+    ///
+    /// An array's class and method are cast to string as php's
+    /// `zval_try_get_string` casts them, a `Stringable` among them:
+    ///
+    /// ```php
+    /// class A { function m($p) {} }
+    /// $s = new class { public function __toString() { return 'm'; } };
+    /// echo new ReflectionParameter([A::class, $s], 'p'), "\n";
+    /// try { new ReflectionParameter([A::class, new class { public function __toString() { return 'nope'; } }], 'p'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Parameter #0 [ <required> $p ]
+    /// Method A::nope() does not exist
+    /// ```
     fn __construct(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         function: Untyped<Value>,
         param: Union<i64, PhpString>,
     ) -> Result<(), Thrown> {
@@ -750,20 +811,19 @@ impl ReflectionParameter {
             offset,
             required: offset < required_parameters(&decl),
         };
-        if let Some(this) = req.this() {
-            set_name(req, this, &name)?;
-            // `intern->obj`: a parameter of a closure keeps the closure, as
-            // php's does, so the row's `FunctionRef::Closure` names an
-            // object that stands for as long as the reflector does.
-            if let FunctionRef::Closure(closure) | FunctionRef::Invoke(Some(closure)) =
-                reference.function
-            {
-                super::keep_closure(req, this, closure);
-            }
-            req.state::<State>()
-                .parameters
-                .insert(this.index(), reference);
+        let this = this.object();
+        set_name(req, this, &name)?;
+        // `intern->obj`: a parameter of a closure keeps the closure, as
+        // php's does, so the row's `FunctionRef::Closure` names an
+        // object that stands for as long as the reflector does.
+        if let FunctionRef::Closure(closure) | FunctionRef::Invoke(Some(closure)) =
+            reference.function
+        {
+            super::keep_closure(req, this, closure);
         }
+        req.state::<State>()
+            .parameters
+            .insert(this.index(), reference);
         Ok(())
     }
 
@@ -802,8 +862,8 @@ impl ReflectionParameter {
     /// bool(true)
     /// bool(false)
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (reference, decl, parameter) = this_parameter(req)?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (reference, decl, parameter) = this_parameter(req, this.object())?;
         let internal = decl.file.0.is_empty();
         let text = parameter_string(
             req,
@@ -824,8 +884,8 @@ impl ReflectionParameter {
     /// string(6) "string"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         let name = parameter.name.0.to_vec();
         PhpString::new(req, &name)
     }
@@ -843,8 +903,8 @@ impl ReflectionParameter {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isPassedByReference(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn isPassedByReference(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(parameter.by_ref)
     }
 
@@ -862,8 +922,8 @@ impl ReflectionParameter {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn canBePassedByValue(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn canBePassedByValue(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(!parameter.by_ref || parameter.prefer_ref)
     }
 
@@ -898,9 +958,9 @@ impl ReflectionParameter {
     #[php(tentative)]
     fn getDeclaringFunction(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Instance<crate::func::ReflectionFunctionAbstract>, Thrown> {
-        let (reference, decl, _) = this_parameter(req)?;
+        let (reference, decl, _) = this_parameter(req, this.object())?;
         let object = match &reference.function {
             FunctionRef::Global(_) => {
                 let class = class_named(req, b"ReflectionFunction")?;
@@ -975,9 +1035,9 @@ impl ReflectionParameter {
     #[php(tentative)]
     fn getDeclaringClass(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::class::ReflectionClass>>, Thrown> {
-        let (reference, _, _) = this_parameter(req)?;
+        let (reference, _, _) = this_parameter(req, this.object())?;
         let Some(scope) = scope_of(req, &reference.function) else {
             return Ok(None);
         };
@@ -985,8 +1045,75 @@ impl ReflectionParameter {
         Ok(Some(Instance::of(object)))
     }
 
-    #[php(tentative, deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn getClass(_this: This<Self>) -> Option<Instance<crate::class::ReflectionClass>>;
+    /// `ReflectionParameter::getClass()`: where the declared type names
+    /// one class (`ZEND_TYPE_HAS_NAME`: alone, nullable, or beside
+    /// `MAY_BE_*` bits), that class, `self` and `parent` read off the function's
+    /// scope and any other name looked up with the autoloader; `null`
+    /// for a type with no name or with several.
+    ///
+    /// ```php
+    /// class P {} class C extends P { function f(self $a, ?parent $b, int|ArrayObject $c, P|C $d, int $e, $f) {} }
+    /// foreach ((new ReflectionMethod('C', 'f'))->getParameters() as $p) { $c = @$p->getClass(); echo $c ? $c->name : 'null', "\n"; }
+    /// $f = function (Missing $m) {};
+    /// try { @(new ReflectionFunction($f))->getParameters()[0]->getClass(); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// $f = function (self $s) {};
+    /// try { (new ReflectionFunction($f))->getParameters()[0]->getClass(); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// $f = (function (parent $s) {})->bindTo(null, P::class);
+    /// try { @(new ReflectionFunction($f))->getParameters()[0]->getClass(); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// C
+    /// P
+    /// ArrayObject
+    /// null
+    /// null
+    /// null
+    /// Class "Missing" does not exist
+    ///
+    /// Deprecated: Method ReflectionParameter::getClass() is deprecated since 8.0, use ReflectionParameter::getType() instead in %s on line 7
+    /// Parameter uses "self" as type but function is not a class member
+    /// Parameter uses "parent" as type although class does not have a parent
+    /// ```
+    #[php(
+        tentative,
+        deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead")
+    )]
+    fn getClass(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Instance<crate::class::ReflectionClass>>, Thrown> {
+        let (reference, _, parameter) = this_parameter(req, this.object())?;
+        let Some(name) = parameter.ty.as_ref().and_then(one_name) else {
+            return Ok(None);
+        };
+        let scope = scope_of(req, &reference.function);
+        let class = match name {
+            Type::SelfClass => scope.ok_or_else(|| {
+                "Parameter uses \"self\" as type but function is not a class member".to_owned()
+            }),
+            Type::ParentClass => match scope {
+                None => Err(
+                    "Parameter uses \"parent\" as type but function is not a class member"
+                        .to_owned(),
+                ),
+                Some(scope) => class_chain(req, scope).get(1).copied().ok_or_else(|| {
+                    "Parameter uses \"parent\" as type although class does not have a parent"
+                        .to_owned()
+                }),
+            },
+            Type::Named(name) => autoload(req, &name.0)?.ok_or_else(|| {
+                format!(
+                    "Class \"{}\" does not exist",
+                    String::from_utf8_lossy(&name.0)
+                )
+            }),
+            _ => return Ok(None),
+        };
+        match class {
+            Ok(class) => Ok(Some(Instance::of(reflection_class_factory(req, class)?))),
+            Err(message) => Err(throw(req, "ReflectionException", &message)),
+        }
+    }
 
     /// `ReflectionParameter::hasType()`: `ZEND_TYPE_IS_SET`.
     ///
@@ -999,8 +1126,8 @@ impl ReflectionParameter {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn hasType(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn hasType(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(parameter.ty.is_some())
     }
 
@@ -1019,9 +1146,9 @@ impl ReflectionParameter {
     #[php(tentative)]
     fn getType(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<ReflectionType>>, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         let Some(ty) = parameter.ty else {
             return Ok(None);
         };
@@ -1029,62 +1156,66 @@ impl ReflectionParameter {
         Ok(Some(Instance::of(object)))
     }
 
-    /// `ReflectionParameter::isArray()`: the declared mask without
-    /// `null` is `array` alone, class names contributing no bit, and an
-    /// `iterable` is not, for BC. Deprecated since 8.0.
+    /// `ReflectionParameter::isArray()`: the `MAY_BE_*` mask, `null` aside,
+    /// is `array` alone, and `false` for `iterable`, which php 8.2 compiles
+    /// to `Traversable|array` and marks for this answer.
     ///
     /// ```php
-    /// function f(array $a, ?array $b, array|Foo $c, iterable $d, array|int $e, $f) {}
-    /// foreach ((new ReflectionFunction("f"))->getParameters() as $p) var_dump(@$p->isArray());
+    /// function f(array $a, ?array $b, iterable $c, array|string $d, array|ArrayObject $e, $f) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) { var_dump(@$p->isArray()); }
+    /// var_dump((new ReflectionParameter('f', 0))->isArray());
     /// ```
     /// ```expect
     /// bool(true)
     /// bool(true)
+    /// bool(false)
+    /// bool(false)
     /// bool(true)
     /// bool(false)
-    /// bool(false)
-    /// bool(false)
+    ///
+    /// Deprecated: Method ReflectionParameter::isArray() is deprecated since 8.0, use ReflectionParameter::getType() instead in %s on line 4
+    /// bool(true)
     /// ```
     #[php(
         tentative,
         deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead")
     )]
-    fn isArray(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
-        let Some(ty) = &parameter.ty else {
-            return Ok(false);
-        };
-        if names_iterable(ty) {
-            return Ok(false);
-        }
-        Ok(ty.mask() & !MAY_BE_NULL == MAY_BE_ARRAY)
+    fn isArray(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
+        Ok(parameter
+            .ty
+            .as_ref()
+            .is_some_and(|ty| !has_iterable(ty) && mask_without_null(ty) == Type::Array.mask()))
     }
 
-    /// `ReflectionParameter::isCallable()`: the declared mask without
-    /// `null` is `callable` alone. Deprecated since 8.0, which php
-    /// raises at every call.
+    /// `ReflectionParameter::isCallable()`: the `MAY_BE_*` mask, `null`
+    /// aside, is `callable` alone.
     ///
     /// ```php
-    /// class bar { static function foo(callable $arg) {} }
-    /// function foo(?callable $bar, callable|int $baz) {}
-    /// var_dump((new ReflectionMethod("bar", "foo"))->getParameters()[0]->isCallable());
-    /// foreach ((new ReflectionFunction("foo"))->getParameters() as $p) var_dump(@$p->isCallable());
+    /// function f(callable $a, ?callable $b, callable|string $c, Closure $d, $e) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) { var_dump(@$p->isCallable()); }
+    /// var_dump((new ReflectionParameter('f', 0))->isCallable());
     /// ```
     /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
     ///
     /// Deprecated: Method ReflectionParameter::isCallable() is deprecated since 8.0, use ReflectionParameter::getType() instead in %s on line 4
     /// bool(true)
-    /// bool(true)
-    /// bool(false)
     /// ```
     #[php(
         tentative,
         deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead")
     )]
-    fn isCallable(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
-        let mask = parameter.ty.as_ref().map_or(0, Type::mask);
-        Ok(mask & !MAY_BE_NULL == MAY_BE_CALLABLE)
+    fn isCallable(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
+        Ok(parameter
+            .ty
+            .as_ref()
+            .is_some_and(|ty| mask_without_null(ty) == Type::Callable.mask()))
     }
 
     /// `ReflectionParameter::allowsNull()`: no declared type, or a mask
@@ -1099,8 +1230,8 @@ impl ReflectionParameter {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn allowsNull(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn allowsNull(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         let allows = match &parameter.ty {
             None | Some(Type::Mixed) => true,
             Some(ty) => parts(ty).nullable,
@@ -1117,8 +1248,8 @@ impl ReflectionParameter {
     /// int(1)
     /// ```
     #[php(tentative)]
-    fn getPosition(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
-        let (reference, _, _) = this_parameter(req)?;
+    fn getPosition(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let (reference, _, _) = this_parameter(req, this.object())?;
         Ok(i64::try_from(reference.offset).unwrap_or(0))
     }
 
@@ -1133,8 +1264,8 @@ impl ReflectionParameter {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isOptional(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (reference, _, _) = this_parameter(req)?;
+    fn isOptional(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (reference, _, _) = this_parameter(req, this.object())?;
         Ok(!reference.required)
     }
 
@@ -1152,8 +1283,8 @@ impl ReflectionParameter {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isDefaultValueAvailable(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn isDefaultValueAvailable(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(parameter_default(&parameter).is_some())
     }
 
@@ -1178,8 +1309,8 @@ impl ReflectionParameter {
     ///   thrown in %s on line 2
     /// ```
     #[php(tentative)]
-    fn getDefaultValue(req: &mut Request, _this: This<Self>) -> Result<Value, Thrown> {
-        let (reference, _, parameter) = this_parameter(req)?;
+    fn getDefaultValue(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let (reference, _, parameter) = this_parameter(req, this.object())?;
         let Some(expr) = parameter_default(&parameter).cloned() else {
             return Err(no_default(req));
         };
@@ -1198,8 +1329,8 @@ impl ReflectionParameter {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isDefaultValueConstant(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn isDefaultValueConstant(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         let Some(expr) = parameter_default(&parameter) else {
             return Err(no_default(req));
         };
@@ -1222,9 +1353,9 @@ impl ReflectionParameter {
     #[php(tentative)]
     fn getDefaultValueConstantName(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<PhpString>, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         let Some(expr) = parameter_default(&parameter).cloned() else {
             return Err(no_default(req));
         };
@@ -1253,8 +1384,8 @@ impl ReflectionParameter {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isVariadic(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn isVariadic(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(parameter.variadic)
     }
 
@@ -1270,8 +1401,8 @@ impl ReflectionParameter {
     /// bool(false)
     /// bool(false)
     /// ```
-    fn isPromoted(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn isPromoted(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(parameter.promoted)
     }
 
@@ -1291,11 +1422,11 @@ impl ReflectionParameter {
     /// ```
     fn getAttributes(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
-        let (reference, _, parameter) = this_parameter(req)?;
+        let (reference, _, parameter) = this_parameter(req, this.object())?;
         let scope = match reference.function {
             FunctionRef::Method(scope, _) => Some(scope),
             FunctionRef::Invoke(_) => lookup_class(req, b"Closure").ok().flatten(),
@@ -1320,7 +1451,7 @@ pub(crate) struct ReflectionType;
 #[php_class]
 impl ReflectionType {
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `ReflectionType::allowsNull()`: `ZEND_TYPE_ALLOW_NULL`, the `null`
     /// bit of the mask, which `?bool` carries and `string` does not.
@@ -1334,8 +1465,8 @@ impl ReflectionType {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn allowsNull(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let reference = this_type(req)?;
+    fn allowsNull(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let reference = this_type(req, this.object())?;
         let allows = matches!(reference.ty, Type::Mixed) || parts(&reference.ty).nullable;
         Ok(allows)
     }
@@ -1350,8 +1481,8 @@ impl ReflectionType {
     /// ```expect
     /// ?bool
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let reference = this_type(req)?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let reference = this_type(req, this.object())?;
         let text = type_text(&reference.ty);
         PhpString::new(req, text.as_bytes())
     }
@@ -1376,8 +1507,8 @@ impl ReflectionNamedType {
     /// ?bool
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let reference = this_type(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let reference = this_type(req, this.object())?;
         let text = if reference.legacy {
             type_text_without_null(&reference.ty)
         } else {
@@ -1399,8 +1530,8 @@ impl ReflectionNamedType {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isBuiltin(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let reference = this_type(req)?;
+    fn isBuiltin(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let reference = this_type(req, this.object())?;
         let named = parts(&reference.ty).members.iter().any(|member| {
             matches!(
                 member,
@@ -1437,8 +1568,28 @@ impl ReflectionUnionType {
     ///   }
     /// }
     /// ```
-    fn getTypes(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let reference = this_type(req)?;
+    ///
+    /// An intersection among a union's members makes a DNF union, and so
+    /// does an intersection made nullable by a `null` default:
+    ///
+    /// ```php
+    /// interface X {} interface Y {}
+    /// function f((X&Y)|null $a, X&Y $b = null, X&Y $c) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) {
+    ///     $t = $p->getType();
+    ///     echo $t, ' ', get_class($t), ' ', json_encode($t->allowsNull()), ':';
+    ///     foreach ($t->getTypes() as $m) { echo ' ', get_class($m), '(', $m, ')'; }
+    ///     echo "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// Deprecated: f(): Implicitly marking parameter $b as nullable is deprecated, the explicit nullable type must be used instead in %s on line 3
+    /// (X&Y)|null ReflectionUnionType true: ReflectionIntersectionType(X&Y) ReflectionNamedType(null)
+    /// (X&Y)|null ReflectionUnionType true: ReflectionIntersectionType(X&Y) ReflectionNamedType(null)
+    /// X&Y ReflectionIntersectionType false: ReflectionNamedType(X) ReflectionNamedType(Y)
+    /// ```
+    fn getTypes(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let reference = this_type(req, this.object())?;
         let parts = parts(&reference.ty);
         let mut members: Vec<Type> = Vec::new();
         for member in &parts.members {
@@ -1485,5 +1636,5 @@ pub(crate) struct ReflectionIntersectionType;
 #[php_class]
 impl ReflectionIntersectionType {
     #[php(implementation = ReflectionUnionType::getTypes)]
-    fn getTypes(_this: This<Self>) -> PhpArray;
+    fn getTypes(this: This<Self>) -> PhpArray;
 }

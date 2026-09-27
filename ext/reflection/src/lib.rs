@@ -68,12 +68,13 @@ use std::fmt::Write as _;
 
 use php_ext::abi::{
     CloneObj, DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance, ObjectHandlers,
-    OrFalse, Raw, This, Union,
+    OrFalse, PropertyPlace, Raw, Std, This, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
-    Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
+    Function, autoload, constant, eval_const_expr, lookup_class, lookup_function, new_object,
 };
+use php_ext::coerce::{Exponent, float_format};
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
     MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
@@ -4493,8 +4494,9 @@ pub(crate) struct Reflected {
 /// (`Z/ext/reflection/php_reflection.c:7976-7981`): `free_obj` gives
 /// back the object the reflector kept, `clone_obj` is php's null slot,
 /// which is why `clone $reflector` is php's uncloneable `Error`, and
-/// `get_gc` hands the collector what the payload holds. php's `offset`
-/// and `write_property` are its own bookkeeping and the engine's here.
+/// `get_gc` hands the collector what the payload holds, and
+/// `write_property` refuses a write to the `$name` and `$class` the class
+/// declares. php's `offset` is its own bookkeeping.
 pub(crate) struct ReflectorHandlers;
 
 /// The handlers every reflector with a [`Reflected`] payload carries.
@@ -4518,6 +4520,70 @@ impl ObjectHandlers for ReflectorHandlers {
         None
     }
 
+    /// `_reflection_write_property`: `$name` and `$class` where the
+    /// object's class declares them are php's `ReflectionException`, and
+    /// every other write is `zend_std_write_property`'s.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class M extends ReflectionMethod { public $foo = 'x'; }
+    /// $r = new M('M', 'getName');
+    /// foreach (['class', 'name', 'foo', 'bar'] as $p) {
+    ///     try { $r->$p = 'set'; echo $p, ': ', $r->$p, "\n"; } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// $c = new ReflectionClass('stdClass');
+    /// try { $c->name = 'x'; } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// try { $c->class = 'x'; } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot set read-only property M::$class
+    /// Cannot set read-only property M::$name
+    /// foo: set
+    /// bar: set
+    /// Cannot set read-only property ReflectionClass::$name
+    ///
+    /// Deprecated: Creation of dynamic property ReflectionClass::$class is deprecated in %s on line 10
+    /// ```
+    fn write_property(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let held = name.as_bytes().to_vec();
+        if read_only(req, object, &held) {
+            req.release(value);
+            req.release(Value::string(name));
+            let class = class_name_of(req, object.class());
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "Cannot set read-only property {}::${}",
+                    String::from_utf8_lossy(&class),
+                    String::from_utf8_lossy(&held)
+                ),
+            ));
+        }
+        Std.write_property(req, object, name, value)
+    }
+
+    /// php's `NULL` for the two names [`Self::write_property`] refuses,
+    /// so a write to either reaches it.
+    fn get_property_ptr_ptr(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        name: &[u8],
+    ) -> PropertyPlace {
+        if read_only(req, object, name) {
+            PropertyPlace::Handlers
+        } else {
+            Std.get_property_ptr_ptr(req, object, name)
+        }
+    }
+
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         let Some(reflected) = object.native::<Reflected>(req) else {
             return;
@@ -4529,6 +4595,13 @@ impl ObjectHandlers for ReflectorHandlers {
             visit(reference.as_value());
         }
     }
+}
+
+/// `$name` and `$class` where the object's class declares them, the
+/// two properties `_reflection_write_property` keeps a program from
+/// writing.
+fn read_only(req: &mut Request, object: PhpObject, name: &[u8]) -> bool {
+    (name == b"name" || name == b"class") && property_named(req, object.class(), name).is_some()
 }
 
 /// `intern->ce` and `intern->obj` written as php's constructors write
@@ -4592,10 +4665,9 @@ fn keep_attribute(req: &mut Request, this: PhpObject, kept: attr::AttributeRef) 
 /// `GET_REFLECTION_OBJECT_PTR(attr)`: the reference a
 /// `ReflectionAttribute` keeps, or php's `Error` for a reflector read
 /// before anything wrote one.
-fn this_attribute(req: &mut Request) -> Result<attr::AttributeRef, Thrown> {
-    let kept = req
-        .this()
-        .and_then(|this| this.native::<Reflected>(req))
+fn this_attribute(req: &mut Request, this: PhpObject) -> Result<attr::AttributeRef, Thrown> {
+    let kept = this
+        .native::<Reflected>(req)
         .and_then(|reflected| reflected.attribute.clone());
     match kept {
         Some(kept) => Ok(kept),
@@ -4623,6 +4695,15 @@ fn kept_class(req: &Request, this: PhpObject) -> Option<ClassId> {
 /// `intern->obj`, the object a `ReflectionObject` was made from.
 fn kept_object(req: &Request, this: PhpObject) -> Option<PhpObject> {
     this.native::<Reflected>(req).and_then(|kept| kept.object)
+}
+
+/// `EG(precision)`, the `precision` ini entry, 14 where it does not read
+/// as a number.
+fn precision(req: &Request) -> i32 {
+    req.ini_get(b"precision")
+        .and_then(|text| std::str::from_utf8(text).ok())
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(14)
 }
 
 /// Core's classes and interfaces the reflectors extend, implement and
@@ -4720,8 +4801,7 @@ fn class_of(
 /// `zend_lookup_class` or the `ReflectionException` every reflector
 /// throws for a miss, `Class "X" does not exist`, the name as given.
 fn class_named(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
-    let bare = name.strip_prefix(b"\\").unwrap_or(name);
-    match lookup_class(req, bare)? {
+    match looked_up(req, name)? {
         Some(class) => Ok(class),
         None => Err(throw(
             req,
@@ -4731,21 +4811,26 @@ fn class_named(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
     }
 }
 
-/// `ZEND_THIS` and its `name` property, or php's `Error` for a
-/// reflector read before its constructor ran.
-fn this_name(req: &mut Request, class: &str) -> Result<(PhpObject, Vec<u8>), Thrown> {
-    let Some(this) = req.this() else {
-        return Err(throw(
-            req,
-            "Error",
-            &format!("Internal error: Failed to retrieve the reflection object of {class}"),
-        ));
-    };
+/// `zend_lookup_class`: the linked class named, a leading `\\` dropped,
+/// and the autoloader asked where there is none. An anonymous class's
+/// name is no name the autoloader would be handed, so the table is read
+/// first.
+fn looked_up(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
+    let bare = name.strip_prefix(b"\\").unwrap_or(name);
+    match lookup_class(req, bare)? {
+        Some(class) => Ok(Some(class)),
+        None => autoload(req, bare),
+    }
+}
+
+/// The receiver's `name` property, or php's `Error` for a reflector
+/// read before its constructor ran.
+fn this_name(req: &mut Request, this: PhpObject, class: &str) -> Result<Vec<u8>, Thrown> {
     match this
         .prop(req, b"name")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     {
-        Some(name) => Ok((this, name)),
+        Some(name) => Ok(name),
         None => Err(throw(
             req,
             "Error",
@@ -4758,6 +4843,10 @@ fn set_name(req: &mut Request, this: PhpObject, name: &[u8]) -> Result<(), Throw
     set_string_prop(req, this, b"name", name)
 }
 
+/// A reflector's own property written as php's constructors write
+/// `reflection_prop_name` and `reflection_prop_class`, into the slot
+/// past [`ReflectorHandlers::write_property`], which refuses a program
+/// the same write.
 fn set_string_prop(
     req: &mut Request,
     this: PhpObject,
@@ -4766,7 +4855,7 @@ fn set_string_prop(
 ) -> Result<(), Thrown> {
     let key = PhpString::new(req, prop)?;
     let value = PhpString::new(req, value)?;
-    this.set_prop(req, key, Value::string(value))
+    Std.write_property(req, this, key, Value::string(value))
 }
 
 /// A string of the request's as a native's return.
@@ -4778,8 +4867,8 @@ fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
 /// extension `$name` names, looked up again as the constructor found
 /// it; a name the bundle has not is the constructor's
 /// `ReflectionException`.
-fn this_extension(req: &mut Request) -> Result<ExtensionId, Thrown> {
-    let (_, name) = this_name(req, "ReflectionExtension")?;
+fn this_extension(req: &mut Request, this: PhpObject) -> Result<ExtensionId, Thrown> {
+    let name = this_name(req, this, "ReflectionExtension")?;
     match req.extension_named(&name) {
         Some(extension) => Ok(extension),
         None => Err(throw(
@@ -4906,8 +4995,8 @@ fn extension_ini_string(req: &Request, extension: ExtensionId, indent: &str) -> 
 /// `GET_REFLECTION_OBJECT_PTR(ce)` for a class reflector: the linked
 /// class `$name` names on `ZEND_THIS`, looked up again since the
 /// reflector keeps the name and not php's `intern->ptr`.
-fn this_class(req: &mut Request) -> Result<ClassId, Thrown> {
-    let (_, name) = this_name(req, "ReflectionClass")?;
+fn this_class(req: &mut Request, this: PhpObject) -> Result<ClassId, Thrown> {
+    let name = this_name(req, this, "ReflectionClass")?;
     class_named(req, &name)
 }
 
@@ -5078,8 +5167,11 @@ fn property_named(
 /// The property a `ReflectionProperty` reflects: its declaring class
 /// (`$class`), its name, and its declaration where the class has one,
 /// none for a dynamic property.
-fn this_property(req: &mut Request) -> Result<(ClassId, Vec<u8>, Option<PropertyDecl>), Thrown> {
-    let (this, name) = this_name(req, "ReflectionProperty")?;
+fn this_property(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<(ClassId, Vec<u8>, Option<PropertyDecl>), Thrown> {
+    let name = this_name(req, this, "ReflectionProperty")?;
     let Some(class) = this
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
@@ -5162,10 +5254,8 @@ fn read_instance_property(
 
 /// `intern->ce`, the class a property reflector was asked about, or
 /// the declaring class where the payload has none.
-fn asked_class(req: &mut Request, declaring: ClassId) -> ClassId {
-    req.this()
-        .and_then(|this| kept_class(req, this))
-        .unwrap_or(declaring)
+fn asked_class(req: &mut Request, this: PhpObject, declaring: ClassId) -> ClassId {
+    kept_class(req, this).unwrap_or(declaring)
 }
 
 /// `reflection_property_get_effective_prop`: the class whose table the
@@ -5192,8 +5282,11 @@ fn effective_class(
 /// The constant a `ReflectionClassConstant` reflects, looked up again
 /// in the class `$class` names as php's `intern->ptr` points at the
 /// entry it found: `None` for a name the table no longer has.
-fn this_class_constant(req: &mut Request) -> Result<Option<ClassConstDecl>, Thrown> {
-    let (this, name) = this_name(req, "ReflectionClassConstant")?;
+fn this_class_constant(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<Option<ClassConstDecl>, Thrown> {
+    let name = this_name(req, this, "ReflectionClassConstant")?;
     let Some(class) = this
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
@@ -5346,13 +5439,33 @@ fn constant_is_deprecated(req: &Request, name: &[u8]) -> bool {
         .any(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"))
 }
 
-/// `zval_get_string` for a constant's value as `_const_string` and
-/// `_class_const_string` print it: `Array` for an array, `Object` for
-/// an object, and the string a scalar casts to.
+/// A constant's value as `_const_string` and `_class_const_string`
+/// print it: `Array` for an array, `Object` for an object, a float
+/// through `smart_str_append_double` at `precision`, which raises
+/// nothing for `NAN` where a cast to string warns since 8.5, and
+/// `zval_get_string` for the rest.
+///
+/// ```php
+/// echo new ReflectionConstant('NAN'), new ReflectionConstant('M_PI'), new ReflectionConstant('PHP_FLOAT_MAX');
+/// class C { const F = NAN; const G = -INF; const H = 0.1 + 0.2; const I = 1e25; }
+/// echo new ReflectionClassConstant('C', 'F'), new ReflectionClassConstant('C', 'G'), new ReflectionClassConstant('C', 'H'), new ReflectionClassConstant('C', 'I');
+/// ini_set('precision', 3); echo new ReflectionConstant('M_PI');
+/// ```
+/// ```expect
+/// Constant [ <persistent> float NAN ] { NAN }
+/// Constant [ <persistent> float M_PI ] { 3.1415926535898 }
+/// Constant [ <persistent> float PHP_FLOAT_MAX ] { 1.7976931348623E+308 }
+/// Constant [ public float F ] { NAN }
+/// Constant [ public float G ] { -INF }
+/// Constant [ public float H ] { 0.3 }
+/// Constant [ public float I ] { 1.0E+25 }
+/// Constant [ <persistent> float M_PI ] { 3.14 }
+/// ```
 fn value_string(req: &mut Request, value: &Value) -> String {
     match value.deref().as_ref() {
         ValueRef::Array(_) => String::from("Array"),
         ValueRef::Object(_) => String::from("Object"),
+        ValueRef::Float(number) => float_format(number, precision(req), Exponent::Upper),
         _ => php_ext::coerce::to_string(req, value).map_or_else(
             |_| String::new(),
             |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
@@ -7106,7 +7219,7 @@ impl ReflectionExtension {
     const name: PhpString;
 
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `ReflectionExtension::__construct(string $name)`: the extension
     /// under the lowered name in `module_registry`, its declared name kept
@@ -7141,7 +7254,7 @@ impl ReflectionExtension {
     /// #1 {main}
     ///   thrown in %s on line 2
     /// ```
-    fn __construct(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<(), Thrown> {
+    fn __construct(req: &mut Request, this: This<Self>, name: PhpString) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
         let Some(extension) = req.extension_named(&name) else {
             return Err(throw(
@@ -7157,9 +7270,8 @@ impl ReflectionExtension {
             .extension_name(extension)
             .map(str::to_owned)
             .unwrap_or_default();
-        if let Some(this) = req.this() {
-            set_name(req, this, declared.as_bytes())?;
-        }
+        let this = this.object();
+        set_name(req, this, declared.as_bytes())?;
         Ok(())
     }
 
@@ -7512,8 +7624,8 @@ impl ReflectionExtension {
     ///   }
     /// }
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let extension = this_extension(req)?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let extension = this_extension(req, this.object())?;
         let text = extension_string(req, extension, "")?;
         PhpString::new(req, text.as_bytes())
     }
@@ -7528,8 +7640,8 @@ impl ReflectionExtension {
     /// string(5) "ctype"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let extension = this_extension(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let extension = this_extension(req, this.object())?;
         let name = req
             .extension_name(extension)
             .map(str::to_owned)
@@ -7549,8 +7661,8 @@ impl ReflectionExtension {
     /// string(5) "8.5.9"
     /// ```
     #[php(tentative)]
-    fn getVersion(req: &mut Request, _this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        this_extension(req)?;
+    fn getVersion(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+        this_extension(req, this.object())?;
         PhpString::new(req, PHP_VERSION.as_bytes()).map(Some)
     }
 
@@ -7592,8 +7704,8 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getFunctions(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let extension = this_extension(req)?;
+    fn getFunctions(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req, this.object())?;
         let reflector = class_named(req, b"ReflectionFunction")?;
         let mut functions = PhpArray::new(req)?;
         for function in req.extension_functions(extension) {
@@ -7619,8 +7731,8 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getConstants(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let extension = this_extension(req)?;
+    fn getConstants(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req, this.object())?;
         let mut constants = PhpArray::new(req)?;
         for declared in req.extension_constants(extension) {
             let name = declared.0.to_vec();
@@ -7653,8 +7765,8 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getINIEntries(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let extension = this_extension(req)?;
+    fn getINIEntries(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req, this.object())?;
         let mut entries = PhpArray::new(req)?;
         for entry in req.extension_ini(extension) {
             let key = Key::Str(PhpString::new(req, &entry.decl.name.0)?);
@@ -7686,8 +7798,8 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getClasses(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let extension = this_extension(req)?;
+    fn getClasses(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req, this.object())?;
         let mut classes = PhpArray::new(req)?;
         for (class, name) in extension_classes(req, extension) {
             let reflector = reflection_class_factory(req, class)?;
@@ -7712,8 +7824,8 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getClassNames(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let extension = this_extension(req)?;
+    fn getClassNames(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req, this.object())?;
         let mut names = PhpArray::new(req)?;
         for (_, name) in extension_classes(req, extension) {
             let name = Value::string(PhpString::new(req, &name)?);
@@ -7736,8 +7848,8 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getDependencies(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let extension = this_extension(req)?;
+    fn getDependencies(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req, this.object())?;
         let mut dependencies = PhpArray::new(req)?;
         for dependency in req.extension_dependencies(extension) {
             let mut relation = String::from(match dependency.kind {
@@ -7769,8 +7881,8 @@ impl ReflectionExtension {
     /// ctype functions => enabled
     /// ```
     #[php(tentative)]
-    fn info(req: &mut Request, _this: This<Self>) -> Result<(), Thrown> {
-        let extension = this_extension(req)?;
+    fn info(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let extension = this_extension(req, this.object())?;
         req.extension_info(extension);
         Ok(())
     }
@@ -7788,8 +7900,8 @@ impl ReflectionExtension {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isPersistent(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        this_extension(req)?;
+    fn isPersistent(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        this_extension(req, this.object())?;
         Ok(true)
     }
 
@@ -7804,8 +7916,8 @@ impl ReflectionExtension {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isTemporary(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        this_extension(req)?;
+    fn isTemporary(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        this_extension(req, this.object())?;
         Ok(false)
     }
 }
@@ -7820,7 +7932,7 @@ impl ReflectionZendExtension {
     const name: PhpString;
 
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `ReflectionZendExtension::__construct(string $name)`:
     /// `zend_get_extension(name)` or php's `ReflectionException`. The
@@ -7835,7 +7947,7 @@ impl ReflectionZendExtension {
     /// Zend Extension "zend_opcache" does not exist
     /// ReflectionZendExtension::__construct(): Argument #1 ($name) must be of type string, array given
     /// ```
-    fn __construct(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<(), Thrown> {
+    fn __construct(req: &mut Request, _: This<Self>, name: PhpString) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
         Err(throw(
             req,
@@ -7869,7 +7981,7 @@ impl ReflectionZendExtension {
     /// Internal error: Failed to retrieve the reflection object
     /// ReflectionZendExtension::getName() expects exactly 0 arguments, 1 given
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, _: This<Self>) -> Result<PhpString, Thrown> {
         Err(throw(
             req,
             "Error",
@@ -7878,19 +7990,19 @@ impl ReflectionZendExtension {
     }
 
     #[php(tentative, implementation = ReflectionZendExtension::__toString)]
-    fn getName(_this: This<Self>) -> PhpString;
+    fn getName(this: This<Self>) -> PhpString;
 
     #[php(tentative, implementation = ReflectionZendExtension::__toString)]
-    fn getVersion(_this: This<Self>) -> PhpString;
+    fn getVersion(this: This<Self>) -> PhpString;
 
     #[php(tentative, implementation = ReflectionZendExtension::__toString)]
-    fn getAuthor(_this: This<Self>) -> PhpString;
+    fn getAuthor(this: This<Self>) -> PhpString;
 
     #[php(tentative, implementation = ReflectionZendExtension::__toString)]
-    fn getURL(_this: This<Self>) -> PhpString;
+    fn getURL(this: This<Self>) -> PhpString;
 
     #[php(tentative, implementation = ReflectionZendExtension::__toString)]
-    fn getCopyright(_this: This<Self>) -> PhpString;
+    fn getCopyright(this: This<Self>) -> PhpString;
 }
 
 /// `ReflectionReference` as the stub declares it.
@@ -7979,11 +8091,11 @@ impl ReflectionReference {
     /// bool(true)
     /// int(20)
     /// ```
-    fn getId(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getId(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         use std::hash::BuildHasher as _;
-        let reference = req
-            .this()
-            .and_then(|this| this.native::<Reflected>(req))
+        let reference = this
+            .object()
+            .native::<Reflected>(req)
             .and_then(|reflected| reflected.reference);
         let Some(reference) = reference else {
             return Err(throw(
@@ -8001,7 +8113,7 @@ impl ReflectionReference {
     }
 
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `ReflectionReference::__construct()`: private, and php's refusal
     /// when reached anyway, since a reflector is made by
@@ -8022,7 +8134,7 @@ impl ReflectionReference {
     /// Cannot directly instantiate ReflectionReference. Use ReflectionReference::fromArrayElement() instead
     /// ```
     #[php(private, arity = manual)]
-    fn __construct(req: &mut Request, _this: This<Self>) -> Result<(), Thrown> {
+    fn __construct(req: &mut Request, _: This<Self>) -> Result<(), Thrown> {
         Err(throw(
             req,
             "ReflectionException",

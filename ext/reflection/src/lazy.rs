@@ -14,7 +14,7 @@ use php_ext::call::{
 use php_ext::coerce::value_name;
 use php_ext::raising::{Thrown, arg_type_error, argument_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpObject, Value};
+use php_ext::values::{ClassId, PhpObject};
 
 use super::{asked_class, class_chain, class_name_of, is_internal, this_class, this_property};
 
@@ -52,11 +52,11 @@ pub(super) enum Strategy {
     Proxy,
 }
 
-/// `reflection_class_new_lazy` (`Z/ext/reflection/php_reflection.c:5187`),
-/// the body the four makers share: the arguments parsed, the options
-/// held to the user mask, `SKIP_DESTRUCTOR` refused where nothing is
-/// reset and an object already lazy refused where one is, then the
-/// engine's `zend_object_make_lazy`.
+/// `reflection_class_new_lazy` (`Z/ext/reflection/php_reflection.c:5187`)
+/// without `is_reset`, the body the two makers share: the options held to
+/// the user mask, `SKIP_DESTRUCTOR` refused since nothing is reset, then
+/// the engine's `zend_object_make_lazy` over a new object;
+/// [`reset_as_lazy`] is the same body with `is_reset`.
 ///
 /// ```php
 /// class C { public $a = 1; }
@@ -78,26 +78,14 @@ pub(super) enum Strategy {
 /// ```
 pub(super) fn new_lazy(
     req: &mut Request,
+    this: PhpObject,
     strategy: Strategy,
-    object: Option<PhpObject>,
     initializer: &Callable,
     options: i64,
-) -> Result<Value, Thrown> {
-    let class = this_class(req)?;
-    let first = u32::from(object.is_some());
-    let object = match object {
-        Some(object) => Some(object_of(req, object, class, 1)?),
-        None => None,
-    };
-    if options & !(SKIP_INITIALIZATION_ON_SERIALIZE | SKIP_DESTRUCTOR) != 0 {
-        return Err(argument_error(
-            req,
-            "ReflectionException",
-            first + 2,
-            "contains invalid flags",
-        ));
-    }
-    if object.is_none() && options & SKIP_DESTRUCTOR != 0 {
+) -> Result<PhpObject, Thrown> {
+    let class = this_class(req, this)?;
+    held_options(req, 2, options)?;
+    if options & SKIP_DESTRUCTOR != 0 {
         return Err(argument_error(
             req,
             "ReflectionException",
@@ -105,34 +93,58 @@ pub(super) fn new_lazy(
             "does not accept ReflectionClass::SKIP_DESTRUCTOR",
         ));
     }
-    match (object, strategy) {
-        (Some(object), _) if object.is_lazy() => {
-            Err(throw(req, "ReflectionException", "Object is already lazy"))
-        }
-        (Some(object), Strategy::Ghost) => {
-            reset_as_lazy_ghost(req, &object, class, initializer, options).map(|()| Value::null())
-        }
-        (Some(object), Strategy::Proxy) => {
-            reset_as_lazy_proxy(req, &object, class, initializer, options).map(|()| Value::null())
-        }
-        (None, Strategy::Ghost) => {
-            new_lazy_ghost(req, class, initializer, options).map(|o| o.as_value())
-        }
-        (None, Strategy::Proxy) => {
-            new_lazy_proxy(req, class, initializer, options).map(|o| o.as_value())
-        }
+    match strategy {
+        Strategy::Ghost => new_lazy_ghost(req, class, initializer, options),
+        Strategy::Proxy => new_lazy_proxy(req, class, initializer, options),
     }
+}
+
+/// `reflection_class_new_lazy` with `is_reset`: the object given, held to
+/// the class, made lazy in place.
+pub(super) fn reset_as_lazy(
+    req: &mut Request,
+    this: PhpObject,
+    strategy: Strategy,
+    object: PhpObject,
+    initializer: &Callable,
+    options: i64,
+) -> Result<(), Thrown> {
+    let class = this_class(req, this)?;
+    let object = object_of(req, object, class, 1)?;
+    held_options(req, 3, options)?;
+    if object.is_lazy() {
+        return Err(throw(req, "ReflectionException", "Object is already lazy"));
+    }
+    match strategy {
+        Strategy::Ghost => reset_as_lazy_ghost(req, &object, class, initializer, options),
+        Strategy::Proxy => reset_as_lazy_proxy(req, &object, class, initializer, options),
+    }
+}
+
+/// `$options` held to `ZEND_LAZY_OBJECT_USER_MASK`, the argument at
+/// `position`.
+fn held_options(req: &mut Request, position: u32, options: i64) -> Result<(), Thrown> {
+    if options & !(SKIP_INITIALIZATION_ON_SERIALIZE | SKIP_DESTRUCTOR) == 0 {
+        return Ok(());
+    }
+    Err(argument_error(
+        req,
+        "ReflectionException",
+        position,
+        "contains invalid flags",
+    ))
 }
 
 /// `reflection_property_check_lazy_compatible`: the property is a
 /// declared instance property, of an object whose class could be lazy.
 pub(super) fn lazy_compatible(
     req: &mut Request,
+    this: PhpObject,
     object: PhpObject,
     method: &str,
 ) -> Result<(ClassId, Vec<u8>), Thrown> {
-    let (class, name, declared) = this_property(req)?;
-    let asked = asked_class(req, class);
+    let (class, name, declared) = this_property(req, this)?;
+    let asked = asked_class(req, this, class);
     let shown = String::from_utf8_lossy(&name).into_owned();
     let Some(declared) = declared else {
         let of = String::from_utf8_lossy(&class_name_of(req, asked)).into_owned();

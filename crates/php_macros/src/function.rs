@@ -67,6 +67,21 @@ pub(crate) fn read(sig: &mut syn::Signature) -> syn::Result<Signature> {
             ));
         };
         let keys = Keys::take(&mut typed.attrs)?;
+        // `_: This<Self>`: the receiver of a body that reads nothing of
+        // it, as php's own reads nothing of `ZEND_THIS`. A PHP parameter
+        // has a name, so `_` is never one.
+        let receiver = match typed.pat.as_ref() {
+            Pat::Wild(_) => true,
+            Pat::Ident(pat) => pat.ident == "this" || pat.ident == "_this",
+            _ => false,
+        };
+        if receiver && !matches!(typed.ty.as_ref(), Type::Reference(_)) {
+            if !out.params.is_empty() {
+                return Err(error(typed.span(), "`this` comes first after the request"));
+            }
+            out.this = Some(typed.ty.as_ref().clone());
+            continue;
+        }
         let Pat::Ident(pat) = typed.pat.as_ref() else {
             return Err(error(
                 typed.pat.span(),
@@ -80,13 +95,6 @@ pub(crate) fn read(sig: &mut syn::Signature) -> syn::Result<Signature> {
                 return Err(error(typed.span(), "`&mut Request` comes first"));
             }
             out.request = true;
-            continue;
-        }
-        if pat.ident == "this" || pat.ident == "_this" {
-            if !out.params.is_empty() {
-                return Err(error(typed.span(), "`this` comes first after the request"));
-            }
-            out.this = Some(typed.ty.as_ref().clone());
             continue;
         }
         keys.allow(PARAMETER_KEYS, "a parameter")?;

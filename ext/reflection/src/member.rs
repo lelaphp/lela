@@ -7,11 +7,8 @@
 //! `ce->properties_info` holds them once linked, which the engine
 //! resolves ([`php_ext::call::property_hook`]); a hook is reflected as a
 //! `ReflectionMethod` named `$name::get` or `$name::set` (#427).
-//!
-//! What still shares the entry of the methods not yet served:
-//! `setAccessible`, which the stub marks `#[\\Deprecated]` (#412).
 
-use php_ext::abi::{Instance, OrFalse, Passed, Raw, This, Union};
+use php_ext::abi::{Instance, OrFalse, Passed, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::{
     constant, eval_const_expr, property_hook, property_is_virtual, read_class_prop_silent,
@@ -27,11 +24,11 @@ use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use super::lazy::{lazy_compatible, object_of};
 use super::signature::type_factory;
 use super::{
-    answer, asked_class, attr, class_const_string, class_constant_named, class_name_of,
-    class_named, class_of, const_string, constant_key, dynamic_properties, effective_class,
-    held_to, hooked, keep, kept_class, namespace_end, property_named, property_string,
-    read_instance_property, reflection_class_factory, set_name, set_string_prop, string_value,
-    this_class_constant, this_name, this_property,
+    asked_class, attr, class_const_string, class_constant_named, class_name_of, class_named,
+    class_of, const_string, constant_key, dynamic_properties, effective_class, held_to, hooked,
+    keep, kept_class, namespace_end, property_named, property_string, read_instance_property,
+    reflection_class_factory, set_name, set_string_prop, string_value, this_class_constant,
+    this_name, this_property,
 };
 
 // ----------------------------------------------- ReflectionProperty
@@ -43,8 +40,8 @@ type Reflected = (ClassId, Vec<u8>, Option<(ClassId, PropertyDecl)>);
 
 /// `GET_REFLECTION_OBJECT_PTR(ref)` for a property reflector, with the
 /// class that declared it.
-fn this_declared(req: &mut Request) -> Result<Reflected, Thrown> {
-    let (this, name) = this_name(req, "ReflectionProperty")?;
+fn this_declared(req: &mut Request, this: PhpObject) -> Result<Reflected, Thrown> {
+    let name = this_name(req, this, "ReflectionProperty")?;
     let Some(class) = this
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
@@ -87,10 +84,14 @@ fn hook_of(
 
 /// `reflection_method_factory(hook->common.scope, hook, NULL, ...)`: a
 /// `ReflectionMethod` over one hook, its `$class` the hook's scope.
-fn hook_reflector(req: &mut Request, scope: ClassId, decl: &MethodDecl) -> Result<Value, Thrown> {
+fn hook_reflector(
+    req: &mut Request,
+    scope: ClassId,
+    decl: &MethodDecl,
+) -> Result<PhpObject, Thrown> {
     let object = super::class::method_factory(req, &decl.function.name.0, scope, scope)?;
     super::keep_hook(req, object);
-    Ok(object.as_value())
+    Ok(object)
 }
 
 /// The visibility, set visibility, `final`, `static` and `readonly`
@@ -121,8 +122,12 @@ fn property_bits(decl: &PropertyDecl) -> i64 {
 
 /// The two `(set)` accessors' body: a dynamic property carries no set
 /// visibility, so it is `false` for either.
-fn set_visibility_is(req: &mut Request, wanted: Visibility) -> Result<bool, Thrown> {
-    let (_, _, found) = this_declared(req)?;
+fn set_visibility_is(
+    req: &mut Request,
+    this: PhpObject,
+    wanted: Visibility,
+) -> Result<bool, Thrown> {
+    let (_, _, found) = this_declared(req, this)?;
     Ok(found.is_some_and(|(_, decl)| decl.set_visibility == Some(wanted)))
 }
 
@@ -145,8 +150,13 @@ pub(super) fn property_flags(
     bits
 }
 
-fn visibility_is(req: &mut Request, wanted: Visibility, dynamic: bool) -> Result<bool, Thrown> {
-    let (_, _, found) = this_declared(req)?;
+fn visibility_is(
+    req: &mut Request,
+    this: PhpObject,
+    wanted: Visibility,
+    dynamic: bool,
+) -> Result<bool, Thrown> {
+    let (_, _, found) = this_declared(req, this)?;
     Ok(found.map_or(dynamic, |(_, decl)| decl.visibility == wanted))
 }
 
@@ -176,8 +186,11 @@ fn default_of(req: &Request, name: &[u8], found: Option<(ClassId, PropertyDecl)>
 
 /// `GET_REFLECTION_OBJECT_PTR(ref)` for a class-constant reflector,
 /// with the class that declared it.
-fn this_constant(req: &mut Request) -> Result<(Vec<u8>, ClassId, ClassConstDecl), Thrown> {
-    let (this, name) = this_name(req, "ReflectionClassConstant")?;
+fn this_constant(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<(Vec<u8>, ClassId, ClassConstDecl), Thrown> {
+    let name = this_name(req, this, "ReflectionClassConstant")?;
     let Some(class) = this
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
@@ -204,8 +217,12 @@ fn this_constant(req: &mut Request) -> Result<(Vec<u8>, ClassId, ClassConstDecl)
     Ok((name, scope, decl))
 }
 
-fn constant_visibility_is(req: &mut Request, wanted: Visibility) -> Result<bool, Thrown> {
-    let (_, _, decl) = this_constant(req)?;
+fn constant_visibility_is(
+    req: &mut Request,
+    this: PhpObject,
+    wanted: Visibility,
+) -> Result<bool, Thrown> {
+    let (_, _, decl) = this_constant(req, this)?;
     Ok(decl.visibility == wanted)
 }
 
@@ -213,16 +230,16 @@ fn constant_visibility_is(req: &mut Request, wanted: Visibility) -> Result<bool,
 
 /// The name a `ReflectionConstant` reflects, with the namespace part
 /// lowered as its constructor lowers it for the lookup.
-fn this_global_constant(req: &mut Request) -> Result<Vec<u8>, Thrown> {
-    let (_, name) = this_name(req, "ReflectionConstant")?;
+fn this_global_constant(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, Thrown> {
+    let name = this_name(req, this, "ReflectionConstant")?;
     Ok(name.strip_prefix(b"\\").unwrap_or(&name).to_vec())
 }
 
 /// `reflection_constant_find_ext`: the extension whose constants
 /// table the name is in, php's walk of `EG(zend_constants)` by the
 /// number that says which extension declared it.
-fn constant_extension_name(req: &mut Request) -> Result<Option<String>, Thrown> {
-    let name = this_global_constant(req)?;
+fn constant_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<String>, Thrown> {
+    let name = this_global_constant(req, this)?;
     for named in req.loaded_extensions() {
         let Some(extension) = req.extension_named(named.as_bytes()) else {
             continue;
@@ -319,7 +336,7 @@ impl ReflectionProperty {
     const class: PhpString;
 
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `ReflectionProperty::__construct(object|string $class, string
     /// $property)`: the property in the class's info table, or a dynamic
@@ -384,7 +401,7 @@ impl ReflectionProperty {
     /// ```
     fn __construct(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         class: Union<PhpObject, PhpString>,
         property: PhpString,
     ) -> Result<(), Thrown> {
@@ -412,13 +429,12 @@ impl ReflectionProperty {
             }
         };
         let declaring = class_name_of(req, declaring);
-        if let Some(this) = req.this() {
-            set_name(req, this, &name)?;
-            set_string_prop(req, this, b"class", &declaring)?;
-            // `intern->ce = ce`: the class asked about, which `getValue`
-            // holds its argument to, where `$class` is the declaring one.
-            keep(req, this, class, None);
-        }
+        let this = this.object();
+        set_name(req, this, &name)?;
+        set_string_prop(req, this, b"class", &declaring)?;
+        // `intern->ce = ce`: the class asked about, which `getValue`
+        // holds its argument to, where `$class` is the declaring one.
+        keep(req, this, class, None);
         Ok(())
     }
 
@@ -451,8 +467,8 @@ impl ReflectionProperty {
     /// Property [ abstract public virtual int $a { get; } ]
     /// Property [ public $b = 1 { final set; } ]
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, name, found) = this_declared(req)?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (_, name, found) = this_declared(req, this.object())?;
         let Some((declaring, decl)) = found else {
             // `_property_string` with no property info: php's dynamic row,
             // which carries no modifier but `public` and no default.
@@ -475,8 +491,8 @@ impl ReflectionProperty {
     /// string(7) "message"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, name, _) = this_declared(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (_, name, _) = this_declared(req, this.object())?;
         PhpString::new(req, &name)
     }
 
@@ -510,8 +526,8 @@ impl ReflectionProperty {
     ///   string(1) "d"
     /// }
     /// ```
-    fn getMangledName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, name, found) = this_declared(req)?;
+    fn getMangledName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (_, name, found) = this_declared(req, this.object())?;
         let mangled = match found {
             Some((scope, decl)) => match decl.visibility {
                 Visibility::Public => name,
@@ -611,13 +627,13 @@ impl ReflectionProperty {
     #[php(tentative)]
     fn getValue(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] object: Option<PhpObject>,
     ) -> Result<Value, Thrown> {
-        let (class, name, declared) = this_property(req)?;
+        let (class, name, declared) = this_property(req, this.object())?;
         // A `static` property is read through `intern->ce`, the class the
         // reflector was asked about.
-        let asked = asked_class(req, class);
+        let asked = asked_class(req, this.object(), class);
         if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
             return read_static_prop(req, asked, &name);
         }
@@ -724,11 +740,11 @@ impl ReflectionProperty {
     #[php(tentative)]
     fn setValue(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         objectOrValue: Value,
         value: Passed<Value>,
     ) -> Result<(), Thrown> {
-        let (class, name, declared) = this_property(req)?;
+        let (class, name, declared) = this_property(req, this.object())?;
         if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
             let value = match value {
                 Passed::Omitted => {
@@ -800,11 +816,11 @@ impl ReflectionProperty {
     /// ```
     fn getRawValue(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: PhpObject,
     ) -> Result<Value, Thrown> {
-        let (class, name, declared) = this_property(req)?;
-        let asked = asked_class(req, class);
+        let (class, name, declared) = this_property(req, this.object())?;
+        let asked = asked_class(req, this.object(), class);
         held_to(req, object, asked)?;
         if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
             return Err(throw(
@@ -843,11 +859,11 @@ impl ReflectionProperty {
     /// ```
     fn setRawValue(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: PhpObject,
         value: Value,
     ) -> Result<(), Thrown> {
-        let (class, name, declared) = this_property(req)?;
+        let (class, name, declared) = this_property(req, this.object())?;
         if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
             return Err(throw(
                 req,
@@ -857,7 +873,7 @@ impl ReflectionProperty {
         }
         req.addref(&value);
         let key = PhpString::new(req, &name)?;
-        let asked = asked_class(req, class);
+        let asked = asked_class(req, this.object(), class);
         let effective = effective_class(asked, object, declared.as_ref(), class);
         if php_ext::call::property_hook(req, effective, &name, HookKind::Set).is_some() {
             php_ext::call::write_raw_property(req, &object, key, value)?;
@@ -902,15 +918,20 @@ impl ReflectionProperty {
     /// ```
     fn setRawValueWithoutLazyInitialization(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: PhpObject,
         value: Value,
     ) -> Result<(), Thrown> {
-        let (class, _, _) = this_property(req)?;
-        let asked = asked_class(req, class);
+        let (class, _, _) = this_property(req, this.object())?;
+        let asked = asked_class(req, this.object(), class);
         let object = object_of(req, object, asked, 1)?;
         let object = object.lazy_real(req).unwrap_or(object);
-        let (_, name) = lazy_compatible(req, object, "setRawValueWithoutLazyInitialization")?;
+        let (_, name) = lazy_compatible(
+            req,
+            this.object(),
+            object,
+            "setRawValueWithoutLazyInitialization",
+        )?;
         req.addref(&value);
         skip_lazy_initialization(req, &object, &name, Some(value))?;
         Ok(())
@@ -942,13 +963,13 @@ impl ReflectionProperty {
     /// ```
     fn skipLazyInitialization(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: PhpObject,
     ) -> Result<(), Thrown> {
-        let (class, _, _) = this_property(req)?;
-        let asked = asked_class(req, class);
+        let (class, _, _) = this_property(req, this.object())?;
+        let asked = asked_class(req, this.object(), class);
         let object = object_of(req, object, asked, 1)?;
-        let (_, name) = lazy_compatible(req, object, "skipLazyInitialization")?;
+        let (_, name) = lazy_compatible(req, this.object(), object, "skipLazyInitialization")?;
         skip_lazy_initialization(req, &object, &name, None)?;
         Ok(())
     }
@@ -974,9 +995,9 @@ impl ReflectionProperty {
     /// bool(false)
     /// bool(false)
     /// ```
-    fn isLazy(req: &mut Request, _this: This<Self>, object: PhpObject) -> Result<bool, Thrown> {
-        let (class, name, declared) = this_property(req)?;
-        let asked = asked_class(req, class);
+    fn isLazy(req: &mut Request, this: This<Self>, object: PhpObject) -> Result<bool, Thrown> {
+        let (class, name, declared) = this_property(req, this.object())?;
+        let asked = asked_class(req, this.object(), class);
         let object = object_of(req, object, asked, 1)?;
         if !declared.is_some_and(|decl| decl.is_instance) {
             return Ok(false);
@@ -1014,11 +1035,11 @@ impl ReflectionProperty {
     #[php(tentative)]
     fn isInitialized(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] object: Option<PhpObject>,
     ) -> Result<bool, Thrown> {
-        let (class, name, declared) = this_property(req)?;
-        let asked = asked_class(req, class);
+        let (class, name, declared) = this_property(req, this.object())?;
+        let asked = asked_class(req, this.object(), class);
         if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
             let Some(value) = read_class_prop_silent(req, asked, &name)? else {
                 return Ok(false);
@@ -1054,8 +1075,8 @@ impl ReflectionProperty {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isPublic(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        visibility_is(req, Visibility::Public, true)
+    fn isPublic(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        visibility_is(req, this.object(), Visibility::Public, true)
     }
 
     /// `ReflectionProperty::isPrivate()`: `ZEND_ACC_PRIVATE`.
@@ -1067,8 +1088,8 @@ impl ReflectionProperty {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isPrivate(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        visibility_is(req, Visibility::Private, false)
+    fn isPrivate(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        visibility_is(req, this.object(), Visibility::Private, false)
     }
 
     /// `ReflectionProperty::isProtected()`: `ZEND_ACC_PROTECTED`.
@@ -1080,8 +1101,8 @@ impl ReflectionProperty {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isProtected(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        visibility_is(req, Visibility::Protected, false)
+    fn isProtected(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        visibility_is(req, this.object(), Visibility::Protected, false)
     }
 
     /// `ReflectionProperty::isPrivateSet()`: `ZEND_ACC_PRIVATE_SET`, the
@@ -1094,8 +1115,8 @@ impl ReflectionProperty {
     /// ```expect
     /// bool(true)
     /// ```
-    fn isPrivateSet(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        set_visibility_is(req, Visibility::Private)
+    fn isPrivateSet(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        set_visibility_is(req, this.object(), Visibility::Private)
     }
 
     /// `ReflectionProperty::isProtectedSet()`: `ZEND_ACC_PROTECTED_SET`.
@@ -1107,8 +1128,8 @@ impl ReflectionProperty {
     /// ```expect
     /// bool(true)
     /// ```
-    fn isProtectedSet(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        set_visibility_is(req, Visibility::Protected)
+    fn isProtectedSet(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        set_visibility_is(req, this.object(), Visibility::Protected)
     }
 
     /// `ReflectionProperty::isStatic()`: `ZEND_ACC_STATIC`.
@@ -1120,8 +1141,8 @@ impl ReflectionProperty {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isStatic(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, found) = this_declared(req)?;
+    fn isStatic(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, found) = this_declared(req, this.object())?;
         Ok(found.is_some_and(|(_, decl)| !decl.is_instance))
     }
 
@@ -1133,8 +1154,8 @@ impl ReflectionProperty {
     /// ```expect
     /// bool(false)
     /// ```
-    fn isReadOnly(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, found) = this_declared(req)?;
+    fn isReadOnly(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, found) = this_declared(req, this.object())?;
         Ok(found.is_some_and(|(_, decl)| decl.is_readonly))
     }
 
@@ -1148,8 +1169,8 @@ impl ReflectionProperty {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isDefault(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, found) = this_declared(req)?;
+    fn isDefault(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, found) = this_declared(req, this.object())?;
         Ok(found.is_some())
     }
 
@@ -1162,8 +1183,8 @@ impl ReflectionProperty {
     /// ```expect
     /// bool(false)
     /// ```
-    fn isDynamic(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, found) = this_declared(req)?;
+    fn isDynamic(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, found) = this_declared(req, this.object())?;
         Ok(found.is_none())
     }
 
@@ -1181,8 +1202,8 @@ impl ReflectionProperty {
     /// bool(true)
     /// bool(false)
     /// ```
-    fn isAbstract(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, found) = this_declared(req)?;
+    fn isAbstract(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, found) = this_declared(req, this.object())?;
         Ok(found
             .is_some_and(|(_, decl)| decl.hooks.as_ref().is_some_and(|hooks| hooks.is_abstract)))
     }
@@ -1199,8 +1220,8 @@ impl ReflectionProperty {
     /// bool(true)
     /// bool(false)
     /// ```
-    fn isVirtual(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, name, found) = this_declared(req)?;
+    fn isVirtual(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, name, found) = this_declared(req, this.object())?;
         Ok(found.is_some_and(|(declaring, _)| property_is_virtual(req, declaring, &name)))
     }
 
@@ -1219,8 +1240,8 @@ impl ReflectionProperty {
     /// bool(false)
     /// string(8) "/** D */"
     /// ```
-    fn isPromoted(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, found) = this_declared(req)?;
+    fn isPromoted(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, found) = this_declared(req, this.object())?;
         Ok(found.is_some_and(|(_, decl)| decl.is_promoted))
     }
 
@@ -1242,8 +1263,8 @@ impl ReflectionProperty {
     /// int(513)
     /// ```
     #[php(tentative)]
-    fn getModifiers(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
-        let (_, name, found) = this_declared(req)?;
+    fn getModifiers(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let (_, name, found) = this_declared(req, this.object())?;
         let Some((declaring, decl)) = found else {
             return Ok(1);
         };
@@ -1263,9 +1284,9 @@ impl ReflectionProperty {
     #[php(tentative)]
     fn getDeclaringClass(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Instance<crate::class::ReflectionClass>, Thrown> {
-        let (class, _, found) = this_declared(req)?;
+        let (class, _, found) = this_declared(req, this.object())?;
         let scope = found.map_or(class, |(scope, _)| scope);
         let object = reflection_class_factory(req, scope)?;
         Ok(Instance::of(object))
@@ -1299,16 +1320,16 @@ impl ReflectionProperty {
     ///   thrown in %s on line 2
     /// ```
     #[php(tentative)]
-    fn getDocComment(req: &mut Request, _this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
-        let (_, _, declared) = this_property(req)?;
+    fn getDocComment(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let (_, _, declared) = this_property(req, this.object())?;
         match declared.and_then(|decl| decl.doc_comment) {
             Some(doc) => PhpString::new(req, &doc).map(OrFalse::Value),
             None => Ok(OrFalse::False),
         }
     }
 
-    #[php(tentative, deprecated(since = "8.5", message = "as it has no effect since PHP 8.1"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn setAccessible(_this: This<Self>, accessible: bool);
+    #[php(tentative, deprecated(since = "8.5", message = "as it has no effect since PHP 8.1"), implementation = crate::func::ReflectionMethod::setAccessible)]
+    fn setAccessible(this: This<Self>, accessible: bool);
 
     /// `ReflectionProperty::getType()`: `reflection_type_factory` over
     /// `prop->type` with `legacy_behavior` set, and `null` where the
@@ -1323,9 +1344,9 @@ impl ReflectionProperty {
     #[php(tentative)]
     fn getType(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::signature::ReflectionType>>, Thrown> {
-        let (_, _, found) = this_declared(req)?;
+        let (_, _, found) = this_declared(req, this.object())?;
         let Some(ty) = found.and_then(|(_, decl)| decl.ty) else {
             return Ok(None);
         };
@@ -1351,9 +1372,9 @@ impl ReflectionProperty {
     /// ```
     fn getSettableType(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::signature::ReflectionType>>, Thrown> {
-        let (_, name, found) = this_declared(req)?;
+        let (_, name, found) = this_declared(req, this.object())?;
         let Some((declaring, decl)) = &found else {
             return Ok(None);
         };
@@ -1385,8 +1406,8 @@ impl ReflectionProperty {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn hasType(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, found) = this_declared(req)?;
+    fn hasType(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, found) = this_declared(req, this.object())?;
         Ok(found.is_some_and(|(_, decl)| decl.ty.is_some()))
     }
 
@@ -1408,8 +1429,8 @@ impl ReflectionProperty {
     /// bool(false)
     /// bool(true)
     /// ```
-    fn hasDefaultValue(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, name, found) = this_declared(req)?;
+    fn hasDefaultValue(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, name, found) = this_declared(req, this.object())?;
         let default = default_of(req, &name, found);
         Ok(!matches!(default, Default::Absent))
     }
@@ -1444,8 +1465,8 @@ impl ReflectionProperty {
     /// NULL
     /// ```
     #[php(tentative)]
-    fn getDefaultValue(req: &mut Request, _this: This<Self>) -> Result<Value, Thrown> {
-        let (_, name, found) = this_declared(req)?;
+    fn getDefaultValue(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let (_, name, found) = this_declared(req, this.object())?;
         match default_of(req, &name, found) {
             Default::Written(expr, scope) => eval_const_expr(req, &expr, Some(scope)),
             Default::ImplicitNull => Ok(Value::null()),
@@ -1472,11 +1493,11 @@ impl ReflectionProperty {
     /// ```
     fn getAttributes(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
-        let (class, _, found) = this_declared(req)?;
+        let (class, _, found) = this_declared(req, this.object())?;
         let scope = found.as_ref().map_or(class, |(scope, _)| *scope);
         let attributes = found.map_or_else(Vec::new, |(_, decl)| decl.attributes.clone());
         super::attr::reflect_attributes(
@@ -1505,8 +1526,8 @@ impl ReflectionProperty {
     /// bool(true)
     /// bool(true)
     /// ```
-    fn hasHooks(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, name, found) = this_declared(req)?;
+    fn hasHooks(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, name, found) = this_declared(req, this.object())?;
         Ok(HookKind::ALL
             .into_iter()
             .any(|kind| hook_of(req, found.as_ref(), &name, kind).is_some()))
@@ -1533,8 +1554,8 @@ impl ReflectionProperty {
     ///   }
     /// }
     /// ```
-    fn getHooks(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let (_, name, found) = this_declared(req)?;
+    fn getHooks(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let (_, name, found) = this_declared(req, this.object())?;
         let mut hooks = PhpArray::new(req)?;
         for kind in HookKind::ALL {
             let Some((scope, decl)) = hook_of(req, found.as_ref(), &name, kind) else {
@@ -1545,7 +1566,7 @@ impl ReflectionProperty {
                 req,
                 kind.name().as_bytes(),
             )?);
-            hooks.set(req, key, reflector)?;
+            hooks.set(req, key, reflector.as_value())?;
         }
         Ok(hooks)
     }
@@ -1569,11 +1590,11 @@ impl ReflectionProperty {
     /// ```
     fn hasHook(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         r#type: PropertyHookType,
     ) -> Result<bool, Thrown> {
         let kind = r#type.kind();
-        let (_, name, found) = this_declared(req)?;
+        let (_, name, found) = this_declared(req, this.object())?;
         Ok(hook_of(req, found.as_ref(), &name, kind).is_some())
     }
 
@@ -1596,18 +1617,15 @@ impl ReflectionProperty {
     /// ```
     fn getHook(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         r#type: PropertyHookType,
-    ) -> Result<Raw<Option<Instance<crate::func::ReflectionMethod>>>, Thrown> {
+    ) -> Result<Option<Instance<crate::func::ReflectionMethod>>, Thrown> {
         let kind = r#type.kind();
-        let (_, name, found) = this_declared(req)?;
-        answer(
-            match hook_of(req, found.as_ref(), &name, kind) {
-                Some((scope, decl)) => hook_reflector(req, scope, &decl),
-                None => Ok(Value::null()),
-            },
-            req,
-        )
+        let (_, name, found) = this_declared(req, this.object())?;
+        match hook_of(req, found.as_ref(), &name, kind) {
+            Some((scope, decl)) => Ok(Some(Instance::of(hook_reflector(req, scope, &decl)?))),
+            None => Ok(None),
+        }
     }
 
     /// `ReflectionProperty::isFinal()`: `ZEND_ACC_FINAL`, written or given
@@ -1622,8 +1640,8 @@ impl ReflectionProperty {
     /// bool(true)
     /// bool(false)
     /// ```
-    fn isFinal(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, found) = this_declared(req)?;
+    fn isFinal(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, found) = this_declared(req, this.object())?;
         Ok(found.is_some_and(|(_, decl)| decl.is_final))
     }
 }
@@ -1644,7 +1662,7 @@ impl ReflectionClassConstant {
     const class: PhpString;
 
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `ReflectionClassConstant::__construct(object|string $class, string
     /// $constant)`: the constant `zend_hash_find_ptr(CE_CONSTANTS_TABLE(ce),
@@ -1716,7 +1734,7 @@ impl ReflectionClassConstant {
     /// ```
     fn __construct(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         class: Union<PhpObject, PhpString>,
         constant: PhpString,
     ) -> Result<(), Thrown> {
@@ -1735,10 +1753,9 @@ impl ReflectionClassConstant {
             ));
         };
         let declaring = class_name_of(req, declaring);
-        if let Some(this) = req.this() {
-            set_name(req, this, &name)?;
-            set_string_prop(req, this, b"class", &declaring)?;
-        }
+        let this = this.object();
+        set_name(req, this, &name)?;
+        set_string_prop(req, this, b"class", &declaring)?;
         Ok(())
     }
 
@@ -1753,8 +1770,8 @@ impl ReflectionClassConstant {
     /// Constant [ public int IS_DEPRECATED ] { 2048 }
     /// Constant [ public PropertyHookType Get ] { Object }
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, scope, decl) = this_constant(req)?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (_, scope, decl) = this_constant(req, this.object())?;
         let held = class_name_of(req, scope);
         let enum_of = req
             .class_decl(scope)
@@ -1773,8 +1790,8 @@ impl ReflectionClassConstant {
     /// string(13) "IS_DEPRECATED"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (name, _, _) = this_constant(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (name, _, _) = this_constant(req, this.object())?;
         PhpString::new(req, &name)
     }
 
@@ -1788,8 +1805,8 @@ impl ReflectionClassConstant {
     /// int(2048)
     /// ```
     #[php(tentative)]
-    fn getValue(req: &mut Request, _this: This<Self>) -> Result<Value, Thrown> {
-        let (_, scope, decl) = this_constant(req)?;
+    fn getValue(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let (_, scope, decl) = this_constant(req, this.object())?;
         super::constant_value(req, &decl, scope)
     }
 
@@ -1802,8 +1819,8 @@ impl ReflectionClassConstant {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isPublic(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        constant_visibility_is(req, Visibility::Public)
+    fn isPublic(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        constant_visibility_is(req, this.object(), Visibility::Public)
     }
 
     /// `ReflectionClassConstant::isPrivate()`.
@@ -1815,8 +1832,8 @@ impl ReflectionClassConstant {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isPrivate(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        constant_visibility_is(req, Visibility::Private)
+    fn isPrivate(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        constant_visibility_is(req, this.object(), Visibility::Private)
     }
 
     /// `ReflectionClassConstant::isProtected()`.
@@ -1828,8 +1845,8 @@ impl ReflectionClassConstant {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isProtected(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        constant_visibility_is(req, Visibility::Protected)
+    fn isProtected(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        constant_visibility_is(req, this.object(), Visibility::Protected)
     }
 
     /// `ReflectionClassConstant::isFinal()`: `ZEND_ACC_FINAL`.
@@ -1840,8 +1857,8 @@ impl ReflectionClassConstant {
     /// ```expect
     /// bool(false)
     /// ```
-    fn isFinal(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, decl) = this_constant(req)?;
+    fn isFinal(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, decl) = this_constant(req, this.object())?;
         Ok(decl.is_final)
     }
 
@@ -1855,8 +1872,8 @@ impl ReflectionClassConstant {
     /// int(1)
     /// ```
     #[php(tentative)]
-    fn getModifiers(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
-        let (_, _, decl) = this_constant(req)?;
+    fn getModifiers(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let (_, _, decl) = this_constant(req, this.object())?;
         let mut bits = match decl.visibility {
             Visibility::Public => 1,
             Visibility::Protected => 2,
@@ -1880,9 +1897,9 @@ impl ReflectionClassConstant {
     #[php(tentative)]
     fn getDeclaringClass(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Instance<crate::class::ReflectionClass>, Thrown> {
-        let (_, scope, _) = this_constant(req)?;
+        let (_, scope, _) = this_constant(req, this.object())?;
         let object = reflection_class_factory(req, scope)?;
         Ok(Instance::of(object))
     }
@@ -1923,8 +1940,8 @@ impl ReflectionClassConstant {
     /// string(8) "/** R */"
     /// ```
     #[php(tentative)]
-    fn getDocComment(req: &mut Request, _this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
-        match this_class_constant(req)?.and_then(|decl| decl.doc_comment) {
+    fn getDocComment(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        match this_class_constant(req, this.object())?.and_then(|decl| decl.doc_comment) {
             Some(doc) => PhpString::new(req, &doc).map(OrFalse::Value),
             None => Ok(OrFalse::False),
         }
@@ -1943,11 +1960,11 @@ impl ReflectionClassConstant {
     /// ```
     fn getAttributes(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
-        let (_, scope, decl) = this_constant(req)?;
+        let (_, scope, decl) = this_constant(req, this.object())?;
         let attributes = decl.attributes.clone();
         super::attr::reflect_attributes(
             req,
@@ -1970,8 +1987,8 @@ impl ReflectionClassConstant {
     /// bool(false)
     /// bool(true)
     /// ```
-    fn isEnumCase(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, decl) = this_constant(req)?;
+    fn isEnumCase(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, decl) = this_constant(req, this.object())?;
         Ok(decl.is_case)
     }
 
@@ -1985,8 +2002,8 @@ impl ReflectionClassConstant {
     /// ```expect
     /// bool(false)
     /// ```
-    fn isDeprecated(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, decl) = this_constant(req)?;
+    fn isDeprecated(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, decl) = this_constant(req, this.object())?;
         Ok(decl
             .attributes
             .iter()
@@ -2002,8 +2019,8 @@ impl ReflectionClassConstant {
     /// ```expect
     /// bool(true)
     /// ```
-    fn hasType(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, decl) = this_constant(req)?;
+    fn hasType(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, decl) = this_constant(req, this.object())?;
         Ok(decl.ty.is_some())
     }
 
@@ -2018,9 +2035,9 @@ impl ReflectionClassConstant {
     /// ```
     fn getType(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::signature::ReflectionType>>, Thrown> {
-        let (_, _, decl) = this_constant(req)?;
+        let (_, _, decl) = this_constant(req, this.object())?;
         let Some(ty) = decl.ty else {
             return Ok(None);
         };
@@ -2075,7 +2092,7 @@ impl ReflectionConstant {
     /// #1 {main}
     ///   thrown in %s on line 2
     /// ```
-    fn __construct(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<(), Thrown> {
+    fn __construct(req: &mut Request, this: This<Self>, name: PhpString) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
         let lowered = constant_key(&name);
         if constant(req, &lowered)?.is_none() {
@@ -2088,9 +2105,8 @@ impl ReflectionConstant {
                 ),
             ));
         }
-        if let Some(this) = req.this() {
-            set_name(req, this, &name)?;
-        }
+        let this = this.object();
+        set_name(req, this, &name)?;
         Ok(())
     }
 
@@ -2102,8 +2118,8 @@ impl ReflectionConstant {
     /// ```expect
     /// string(7) "PHP_EOL"
     /// ```
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let name = this_global_constant(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let name = this_global_constant(req, this.object())?;
         PhpString::new(req, &name)
     }
 
@@ -2116,8 +2132,8 @@ impl ReflectionConstant {
     /// ```expect
     /// string(0) ""
     /// ```
-    fn getNamespaceName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let name = this_global_constant(req)?;
+    fn getNamespaceName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let name = this_global_constant(req, this.object())?;
         let space = namespace_end(&name).map_or_else(Vec::new, |end| name[..end].to_vec());
         PhpString::new(req, &space)
     }
@@ -2130,8 +2146,8 @@ impl ReflectionConstant {
     /// ```expect
     /// string(7) "PHP_EOL"
     /// ```
-    fn getShortName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let name = this_global_constant(req)?;
+    fn getShortName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let name = this_global_constant(req, this.object())?;
         let start = namespace_end(&name).map_or(0, |end| end + 1);
         let short = name[start..].to_vec();
         PhpString::new(req, &short)
@@ -2145,8 +2161,8 @@ impl ReflectionConstant {
     /// ```expect
     /// int(8)
     /// ```
-    fn getValue(req: &mut Request, _this: This<Self>) -> Result<Value, Thrown> {
-        let name = this_global_constant(req)?;
+    fn getValue(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let name = this_global_constant(req, this.object())?;
         Ok(constant(req, &name)?.unwrap_or_default())
     }
 
@@ -2162,8 +2178,8 @@ impl ReflectionConstant {
     /// bool(true)
     /// bool(false)
     /// ```
-    fn isDeprecated(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let name = this_global_constant(req)?;
+    fn isDeprecated(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let name = this_global_constant(req, this.object())?;
         Ok(super::constant_is_deprecated(req, &name))
     }
 
@@ -2180,8 +2196,8 @@ impl ReflectionConstant {
     /// bool(false)
     /// bool(false)
     /// ```
-    fn getFileName(req: &mut Request, _this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
-        let name = this_global_constant(req)?;
+    fn getFileName(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let name = this_global_constant(req, this.object())?;
         match req.constant_file(&name).map(<[u8]>::to_vec) {
             Some(file) => PhpString::new(req, &file).map(OrFalse::Value),
             None => Ok(OrFalse::False),
@@ -2202,9 +2218,9 @@ impl ReflectionConstant {
     /// ```
     fn getExtension(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::ReflectionExtension>>, Thrown> {
-        let Some(name) = constant_extension_name(req)? else {
+        let Some(name) = constant_extension_name(req, this.object())? else {
             return Ok(None);
         };
         let class = class_named(req, b"ReflectionExtension")?;
@@ -2222,11 +2238,8 @@ impl ReflectionConstant {
     /// ```expect
     /// string(4) "json"
     /// ```
-    fn getExtensionName(
-        req: &mut Request,
-        _this: This<Self>,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
-        let Some(name) = constant_extension_name(req)? else {
+    fn getExtensionName(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let Some(name) = constant_extension_name(req, this.object())? else {
             return Ok(OrFalse::False);
         };
         PhpString::new(req, name.as_bytes()).map(OrFalse::Value)
@@ -2252,8 +2265,8 @@ impl ReflectionConstant {
     /// ```expect
     /// Constant [ int DEMO ] { 1 }
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let name = this_global_constant(req)?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let name = this_global_constant(req, this.object())?;
         let text = const_string(req, &name, "");
         PhpString::new(req, text.as_bytes())
     }
@@ -2299,11 +2312,11 @@ impl ReflectionConstant {
     /// ```
     fn getAttributes(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
-        let (_, constant) = this_name(req, "ReflectionConstant")?;
+        let constant = this_name(req, this.object(), "ReflectionConstant")?;
         let attributes = req.constant_attributes(&constant_key(&constant)).to_vec();
         attr::reflect_attributes(req, &attributes, None, attr::TARGET_CONST, name, flags)
     }
