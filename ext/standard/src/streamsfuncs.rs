@@ -224,6 +224,36 @@ pub(crate) fn context_of(
     Ok(None)
 }
 
+/// `php_stream_context_from_zval(NULL, 0)`: `FG(default_context)`,
+/// made on the first use, what `gzopen` and its kin open under.
+pub fn default_stream_ctx(req: &mut Request) -> Result<Resource, Thrown> {
+    default_context(req)
+}
+
+/// `php_stream_context_get_option` (`Z/main/streams/streams.c:2440`):
+/// the value `ctx` holds under `wrapper`'s array at `option`, as a
+/// wrapper's opener reads its own options, `None` where either level is
+/// missing or the resource is no `stream-context`.
+pub fn stream_ctx_option(
+    req: &mut Request,
+    ctx: Resource,
+    wrapper: &[u8],
+    option: &[u8],
+) -> Result<Option<Value>, Thrown> {
+    let Some(options) = ctx.native::<Context>(req).and_then(|c| c.options) else {
+        return Ok(None);
+    };
+    let wrapper = PhpString::new(req, wrapper)?;
+    let Some(inner) = options.get(&Key::Str(wrapper)).map(|v| v.deref()) else {
+        return Ok(None);
+    };
+    let ValueRef::Array(inner) = inner.as_ref() else {
+        return Ok(None);
+    };
+    let option = PhpString::new(req, option)?;
+    Ok(inner.get(&Key::Str(option)))
+}
+
 /// `Z_PARAM_RESOURCE` then `decode_context_param`
 /// (`Z/ext/standard/streamsfuncs.c:937`): a `context`, or a stream's,
 /// which here is the default one; anything else is php's
