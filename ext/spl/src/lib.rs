@@ -36,7 +36,9 @@ mod iterators;
 mod observer;
 mod stub;
 
-use php_ext::abi::{Extension, ExtensionBuilder, ObjectHandlers, Std};
+pub(crate) use iterators::{RecursiveIterator, SeekableIterator};
+
+use php_ext::abi::{Extension, ExtensionBuilder, FromArgument, ObjectHandlers, Raw, Std};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, lookup_class};
 use php_ext::coerce::{coerce_param, key_of, truthy};
@@ -71,17 +73,7 @@ struct State {
 pub fn extension() -> Extension {
     let mut builder =
         exceptions::register(ExtensionBuilder::default().functions(functions::natives()));
-    for ((decl, methods), payload) in iterators::classes() {
-        builder = match payload {
-            iterators::Payload::Dual => {
-                builder.class_payload::<iterators::DualIt>(decl, methods, &iterators::DUAL)
-            }
-            iterators::Payload::Rec => {
-                builder.class_payload::<iterators::RecIt>(decl, methods, &iterators::REC)
-            }
-            iterators::Payload::None => builder.classes(vec![(decl, methods)]),
-        };
-    }
+    builder = iterators::register(builder);
     builder = array::register(builder);
     for (decl, methods) in directory::classes() {
         let handlers = directory::handlers(&decl);
@@ -102,6 +94,14 @@ pub fn extension() -> Extension {
 #[php_class(extern)]
 pub(crate) struct Exception;
 
+/// Core's `Traversable`.
+#[php_class(extern)]
+pub(crate) struct Traversable;
+
+/// Core's `Stringable`.
+#[php_class(extern)]
+pub(crate) struct Stringable;
+
 /// Core's `Iterator`.
 #[php_class(extern)]
 pub(crate) struct Iterator;
@@ -121,14 +121,6 @@ pub(crate) struct ArrayAccess;
 /// Core's `Serializable`.
 #[php_class(extern)]
 pub(crate) struct Serializable;
-
-/// `SeekableIterator`, which `iterators` declares from its stub text.
-#[php_class(extern)]
-pub(crate) struct SeekableIterator;
-
-/// `RecursiveIterator`, which `iterators` declares from its stub text.
-#[php_class(extern)]
-pub(crate) struct RecursiveIterator;
 
 /// ext/json's `JsonSerializable`.
 #[php_class(extern)]
@@ -401,6 +393,13 @@ fn zval_type_name(req: &Request, value: &Value) -> String {
 /// A string value made of `bytes`, one owner, the caller's.
 fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
     Ok(Value::string(PhpString::new(req, bytes)?))
+}
+
+/// A value a method hands back as it came, under the declared type `T`:
+/// php's `RETURN_COPY_VALUE` of what an inner iterator or a callback
+/// answered, which an internal method's return is not verified against.
+fn answered<T: FromArgument>(req: &mut Request, value: Value) -> Result<Raw<T>, Thrown> {
+    Raw::<T>::from_value(req, value)
 }
 
 /// A value handed back with one more owner, `RETURN_COPY`.
