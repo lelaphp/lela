@@ -1344,20 +1344,27 @@ impl ReflectionFunction {
         PhpString::new(req, text.as_bytes())
     }
 
-    /// `ReflectionFunction::isAnonymous()`: `ZEND_ACC_CLOSURE` again, on
-    /// the subclass.
+    /// `ReflectionFunction::isAnonymous()`: `ZEND_ACC_CLOSURE` without
+    /// `ZEND_ACC_FAKE_CLOSURE`, so a closure made of a function that has a
+    /// name, `strlen(...)`, is not anonymous.
     ///
     /// ```php
     /// var_dump((new ReflectionFunction('json_encode'))->isAnonymous());
     /// var_dump((new ReflectionFunction(fn () => 1))->isAnonymous());
+    /// var_dump((new ReflectionFunction(strlen(...)))->isAnonymous(), (new ReflectionFunction(Closure::fromCallable('strlen')))->isAnonymous());
     /// ```
     /// ```expect
     /// bool(false)
     /// bool(true)
+    /// bool(false)
+    /// bool(false)
     /// ```
     fn isAnonymous(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (function, _) = this_function(req, this.object())?;
-        Ok(matches!(function, FunctionRef::Closure(_)))
+        Ok(match function {
+            FunctionRef::Closure(closure) => closure.closure(req).is_some_and(|info| !info.fake),
+            _ => false,
+        })
     }
 
     /// `ReflectionFunction::isDisabled()`: `false`, since a disabled
