@@ -215,7 +215,7 @@ fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
         stack.finish(req);
         return Ok(Value::null());
     };
-    let value = unwrapped(req, value);
+    req.addref(&value);
     let popped = stack.array.unset(req, &key);
     if let Key::Int(index) = key
         && index == stack.array.next_free().wrapping_sub(1)
@@ -224,16 +224,22 @@ fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
     }
     stack.array.cursor_reset();
     stack.finish(req);
+    let value = unwrapped(req, value);
     popped?;
     Ok(value)
 }
 
-/// `RETVAL_COPY_VALUE` of an element about to be deleted, then
-/// `zend_unwrap_reference`: the value with one more owner, which the
-/// delete gives back, and a reference's value in place of the reference.
-fn unwrapped(req: &mut Request, value: Value) -> Value {
-    let value = value.deref();
+/// `zend_unwrap_reference` over the element `RETVAL_COPY_VALUE` took out,
+/// made once the table is changed: a reference's value as it stands
+/// after, with one more owner, in place of the reference, so an element
+/// that referred to the array itself hands back the array as it is left.
+fn unwrapped(req: &mut Request, taken: Value) -> Value {
+    let Some(reference) = taken.as_php_ref().copied() else {
+        return taken;
+    };
+    let value = reference.get().deref();
     req.addref(&value);
+    req.release(taken);
     value
 }
 
@@ -271,6 +277,24 @@ fn unwrapped(req: &mut Request, value: Value) -> Value {
 /// NULL
 /// int(2)
 /// ```
+///
+/// The element taken out is unwrapped once the table is left as it is,
+/// `zend_unwrap_reference` after the delete, so an element that refers
+/// to the array itself hands back the array without it (GH-16957,
+/// GH-17447), as `array_pop` does.
+///
+/// ```php
+/// $a = [&$a, 1, 2]; $s = array_shift($a); var_dump($s === $a, count($s));
+/// $b = []; $b[] = &$b; var_dump(array_pop($b), $b);
+/// ```
+/// ```expect
+/// bool(true)
+/// int(2)
+/// array(0) {
+/// }
+/// array(0) {
+/// }
+/// ```
 #[php_function]
 fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
     let mut stack = Stack::of(req, array)?;
@@ -279,7 +303,7 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown>
         stack.finish(req);
         return Ok(Value::null());
     };
-    let value = unwrapped(req, first);
+    req.addref(&first);
     let mut rebuilt = PhpArray::new(req)?;
     for (key, element) in rows.into_iter().skip(1) {
         req.addref(&element);
@@ -296,7 +320,7 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown>
     }
     stack.replace(req, rebuilt)?;
     stack.finish(req);
-    Ok(value)
+    Ok(unwrapped(req, first))
 }
 
 /// `array_unshift(array &$array, mixed ...$values): int`, php's
