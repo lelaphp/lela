@@ -1170,9 +1170,24 @@ pub fn internal_iterator(req: &mut Request, object: &PhpObject) -> Result<PhpObj
     crate::interfaces::internal_iterator(req, *object)
 }
 
-/// `zend_lookup_class`: the linked class named, autoloading if needed.
+/// The linked class named, `zend_lookup_class_ex` with
+/// `ZEND_FETCH_CLASS_NO_AUTOLOAD`: one leading backslash stands for the
+/// global namespace and is not part of the name.
+///
+/// ```php
+/// namespace NS { class P {} class C extends P {} }
+/// namespace { var_dump(class_parents('\\NS\\C', false), class_parents('\\\\NS\\C', false)); }
+/// ```
+/// ```expect
+/// Warning: class_parents(): Class \\NS\C does not exist in %s on line 3
+/// array(1) {
+///   ["NS\P"]=>
+///   string(4) "NS\P"
+/// }
+/// bool(false)
+/// ```
 pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
-    Ok(req.class_named(name))
+    Ok(req.class_named(name.strip_prefix(b"\\").unwrap_or(name)))
 }
 
 /// The linked function named, without autoloading.
