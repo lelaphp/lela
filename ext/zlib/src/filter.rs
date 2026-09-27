@@ -1,0 +1,309 @@
+//! `zlib_filter.c`: the `zlib.*` factory and its two filters,
+//! `zlib.inflate` and `zlib.deflate`, each feeding zlib from its buckets
+//! in pieces of the 32 KiB `inbuf` php copies through and handing on
+//! what fits the 32 KiB `outbuf` after every call, as php's do.
+
+use php_ext::coerce::to_long;
+use php_ext::raising::{Level, Thrown, docref};
+use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
+use php_ext::values::{Key, PhpString, Value, ValueRef};
+
+use crate::encode::MAX_MEM_LEVEL;
+use crate::ffi::{Deflate, Flush, Inflate, Status};
+
+/// The name `MINIT` registers the factory under.
+pub(crate) const NAME: &[u8] = b"zlib.*";
+
+/// The size of php's `inbuf` and `outbuf`, `0x8000`.
+const BUFFER: usize = 0x8000;
+
+/// `MAX_WBITS`.
+const MAX_WBITS: i64 = 15;
+
+/// `zlib.inflate`: the stream, ended and dropped once it reached its end.
+struct Inflating {
+    stream: Option<Inflate>,
+}
+
+/// `zlib.deflate`: the stream, and `finished`, whether no flush is
+/// pending since the last bucket.
+struct Deflating {
+    stream: Deflate,
+    finished: bool,
+}
+
+impl StreamFilter for Inflating {
+    /// `php_zlib_inflate_filter`.
+    fn filter(
+        &mut self,
+        req: &mut Request,
+        _stream: Stream,
+        input: &mut Brigade,
+        output: &mut Brigade,
+        consumed: Option<&mut usize>,
+        flags: FilterFlags,
+    ) -> Result<FilterStatus, Thrown> {
+        let flush = if flags == FilterFlags::FlushClose {
+            Flush::Finish
+        } else {
+            Flush::Sync
+        };
+        let mut exit = FilterStatus::FeedMe;
+        let mut total = 0;
+        let mut out = vec![0; BUFFER];
+        while let Some(bucket) = input.pop_front() {
+            let mut bin = 0;
+            while bin < bucket.len() {
+                let Some(stream) = self.stream.as_mut() else {
+                    break;
+                };
+                let desired = (bucket.len() - bin).min(BUFFER);
+                let step = stream.inflate(&bucket[bin..bin + desired], &mut out, flush);
+                match step.status {
+                    Status::StreamEnd => {
+                        self.stream = None;
+                        exit = FilterStatus::PassOn;
+                    }
+                    Status::Ok | Status::BufError => {}
+                    failed => {
+                        let text = format!("zlib: {}", failed.message());
+                        docref(req, Level::Notice, &text);
+                        return Ok(FilterStatus::ErrFatal);
+                    }
+                }
+                bin += step.read;
+                if step.written > 0 {
+                    output.push_back(out[..step.written].to_vec());
+                    exit = FilterStatus::PassOn;
+                }
+            }
+            total += bucket.len();
+        }
+        if flags == FilterFlags::FlushClose
+            && let Some(stream) = self.stream.as_mut()
+        {
+            loop {
+                let step = stream.inflate(&[], &mut out, Flush::Finish);
+                if step.written > 0 {
+                    output.push_back(out[..step.written].to_vec());
+                    exit = FilterStatus::PassOn;
+                }
+                if step.status != Status::Ok {
+                    break;
+                }
+            }
+        }
+        if let Some(consumed) = consumed {
+            *consumed = total;
+        }
+        Ok(exit)
+    }
+}
+
+impl StreamFilter for Deflating {
+    /// `php_zlib_deflate_filter`.
+    fn filter(
+        &mut self,
+        _req: &mut Request,
+        _stream: Stream,
+        input: &mut Brigade,
+        output: &mut Brigade,
+        consumed: Option<&mut usize>,
+        flags: FilterFlags,
+    ) -> Result<FilterStatus, Thrown> {
+        let mode = match flags {
+            FilterFlags::FlushClose => Flush::Full,
+            FilterFlags::FlushInc => Flush::Sync,
+            FilterFlags::Normal => Flush::None,
+        };
+        let mut exit = FilterStatus::FeedMe;
+        let mut total = 0;
+        let mut out = vec![0; BUFFER];
+        while let Some(bucket) = input.pop_front() {
+            let mut bin = 0;
+            while bin < bucket.len() {
+                let desired = (bucket.len() - bin).min(BUFFER);
+                self.finished = mode != Flush::None;
+                let step = self
+                    .stream
+                    .deflate(&bucket[bin..bin + desired], &mut out, mode);
+                if step.status != Status::Ok {
+                    return Ok(FilterStatus::ErrFatal);
+                }
+                bin += step.read;
+                if step.written > 0 {
+                    output.push_back(out[..step.written].to_vec());
+                    exit = FilterStatus::PassOn;
+                }
+            }
+            total += bucket.len();
+        }
+        let close = flags == FilterFlags::FlushClose;
+        if close || (flags == FilterFlags::FlushInc && !self.finished) {
+            let last = if close { Flush::Finish } else { Flush::Sync };
+            loop {
+                let step = self.stream.deflate(&[], &mut out, last);
+                self.finished = true;
+                if step.written > 0 {
+                    output.push_back(out[..step.written].to_vec());
+                    exit = FilterStatus::PassOn;
+                }
+                if step.status != Status::Ok {
+                    break;
+                }
+            }
+        }
+        if let Some(consumed) = consumed {
+            *consumed = total;
+        }
+        Ok(exit)
+    }
+}
+
+/// A parameter of an array or object `filterparams`,
+/// `zend_hash_str_find_ind(HASH_OF(filterparams), name)`.
+fn param(req: &mut Request, params: &Value, name: &[u8]) -> Result<Option<Value>, Thrown> {
+    match params.as_ref() {
+        ValueRef::Array(array) => {
+            let key = PhpString::new(req, name)?;
+            Ok(array.get(&Key::Str(key)).map(|value| value.deref()))
+        }
+        ValueRef::Object(object) => {
+            let object = *object;
+            Ok(object
+                .entries(req)?
+                .into_iter()
+                .find(|(key, _)| matches!(key, Key::Str(k) if k.as_bytes() == name))
+                .map(|(_, value)| value.deref()))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `php_zlib_filter_create`: `zlib.inflate` with its `window`, from raw
+/// deflate's -15 to 47, automatic header detection; `zlib.deflate` with
+/// `memory`, `window` and `level` from an array or object, or the level
+/// alone as a scalar. A parameter out of range is php's warning and the
+/// default kept; a name that is neither filter makes none.
+///
+/// ```php
+/// $data = str_repeat("The quick brown fox jumps over the lazy dog.\n", 100);
+/// $fp = fopen('php://memory', 'w+');
+/// $f = stream_filter_append($fp, 'zlib.deflate', STREAM_FILTER_WRITE, ['level' => 9, 'window' => 15, 'memory' => 9]);
+/// fwrite($fp, $data);
+/// stream_filter_remove($f);
+/// rewind($fp);
+/// $z = stream_get_contents($fp);
+/// echo strlen($z), ' ', md5($z), "\n";
+/// var_dump(gzinflate($z) === $data);
+/// rewind($fp);
+/// stream_filter_append($fp, 'zlib.inflate', STREAM_FILTER_READ);
+/// var_dump(stream_get_contents($fp) === $data);
+/// $fp = fopen('php://memory', 'w+');
+/// stream_filter_append($fp, 'zlib.deflate', STREAM_FILTER_WRITE, 11);
+/// stream_filter_append($fp, 'zlib.deflate', STREAM_FILTER_WRITE, ['window' => 99, 'memory' => 0]);
+/// stream_filter_append($fp, 'zlib.deflate', STREAM_FILTER_WRITE, true);
+/// var_dump(@stream_filter_append($fp, 'zlib.nope'));
+/// fclose($fp);
+/// $fp = fopen('php://memory', 'w+');
+/// fwrite($fp, gzencode('gz data'));
+/// rewind($fp);
+/// stream_filter_append($fp, 'zlib.inflate', STREAM_FILTER_READ, ['window' => 31]);
+/// var_dump(stream_get_contents($fp));
+/// ```
+/// ```expect
+/// 81 8f7b748b01c2e04f2a53ea1df54f2a4b
+///
+/// Warning: gzinflate(): data error in %s on line 10
+/// bool(false)
+///
+/// Notice: stream_get_contents(): zlib: data error in %s on line 13
+/// bool(false)
+///
+/// Warning: stream_filter_append(): Invalid compression level specified. (11) in %s on line 15
+///
+/// Warning: stream_filter_append(): Invalid parameter given for memory level (0) in %s on line 16
+///
+/// Warning: stream_filter_append(): Invalid parameter given for window size (99) in %s on line 16
+///
+/// Warning: stream_filter_append(): Invalid filter parameter, ignored in %s on line 17
+/// bool(false)
+/// string(7) "gz data"
+/// ```
+pub(crate) fn factory(
+    req: &mut Request,
+    name: &[u8],
+    params: Option<&Value>,
+) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+    if name.eq_ignore_ascii_case(b"zlib.inflate") {
+        let mut window = -MAX_WBITS;
+        if let Some(params) = params
+            && matches!(params.as_ref(), ValueRef::Array(_) | ValueRef::Object(_))
+            && let Some(value) = param(req, params, b"window")?
+        {
+            let tmp = to_long(req, &value)?;
+            if (-MAX_WBITS..=MAX_WBITS + 32).contains(&tmp) {
+                window = tmp;
+            } else {
+                let text = format!("Invalid parameter given for window size ({tmp})");
+                docref(req, Level::Warning, &text);
+            }
+        }
+        return Ok(Inflate::new(window).ok().map(|stream| {
+            Box::new(Inflating {
+                stream: Some(stream),
+            }) as Box<dyn StreamFilter>
+        }));
+    }
+    if !name.eq_ignore_ascii_case(b"zlib.deflate") {
+        return Ok(None);
+    }
+    let (mut level, mut window, mut memory) = (-1, -MAX_WBITS, MAX_MEM_LEVEL);
+    if let Some(params) = params {
+        let asked = match params.as_ref() {
+            ValueRef::Array(_) | ValueRef::Object(_) => {
+                if let Some(value) = param(req, params, b"memory")? {
+                    let tmp = to_long(req, &value)?;
+                    if (1..=MAX_MEM_LEVEL).contains(&tmp) {
+                        memory = tmp;
+                    } else {
+                        let text = format!("Invalid parameter given for memory level ({tmp})");
+                        docref(req, Level::Warning, &text);
+                    }
+                }
+                if let Some(value) = param(req, params, b"window")? {
+                    let tmp = to_long(req, &value)?;
+                    if (-MAX_WBITS..=MAX_WBITS + 16).contains(&tmp) {
+                        window = tmp;
+                    } else {
+                        let text = format!("Invalid parameter given for window size ({tmp})");
+                        docref(req, Level::Warning, &text);
+                    }
+                }
+                match param(req, params, b"level")? {
+                    Some(value) => Some(to_long(req, &value)?),
+                    None => None,
+                }
+            }
+            ValueRef::Str(_) | ValueRef::Float(_) | ValueRef::Int(_) => Some(to_long(req, params)?),
+            _ => {
+                docref(req, Level::Warning, "Invalid filter parameter, ignored");
+                None
+            }
+        };
+        if let Some(tmp) = asked {
+            if (-1..=9).contains(&tmp) {
+                level = tmp;
+            } else {
+                let text = format!("Invalid compression level specified. ({tmp})");
+                docref(req, Level::Warning, &text);
+            }
+        }
+    }
+    Ok(Deflate::new(level, window, memory, 0).ok().map(|stream| {
+        Box::new(Deflating {
+            stream,
+            finished: true,
+        }) as Box<dyn StreamFilter>
+    }))
+}

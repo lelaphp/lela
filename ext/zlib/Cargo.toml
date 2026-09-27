@@ -11,9 +11,16 @@ description = "The zlib extension, php-src/ext/zlib"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, and `standard`, whose `file.h` natives the `gz*` aliases
+# are and whose stream contexts the wrapper reads (design §4.10). The
+# engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+php_ext_standard = { path = "../standard" }
+# zlib is the platform's, linked through libz-sys and bound in `src/ffi/`
+# alone (`unsafe.homes`): no pure-Rust deflate writes the oracle's bytes
+# (design §7.2, revision 34; #950).
+libz-sys = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
