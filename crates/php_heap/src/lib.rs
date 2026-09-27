@@ -40,6 +40,7 @@ mod fiber;
 mod gc;
 mod hooks;
 mod iterators;
+mod locale;
 mod map;
 mod mm;
 mod numeric;
@@ -60,6 +61,7 @@ pub use compare::{Scalar, compare, identical};
 pub use fd::{BUFSIZ, Readiness, dup_fd, fd_table_size, peek_fd, poll_fd, set_fd_blocking};
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, HeapHooks};
+pub use locale::reset_lc_ctype_locale;
 pub use map::{MapPtr, MapTable};
 pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,

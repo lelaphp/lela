@@ -41,10 +41,6 @@ use php_ext::values::{Key, PhpArray, PhpString, Value};
 #[derive(Default)]
 struct State {}
 
-/// Engine-scoped and empty: building it is `zend_reset_lc_ctype_locale`,
-/// which `php_module_startup` runs.
-struct Startup;
-
 /// `iconv.stub.php`'s four constants, `ICONV_IMPL` and `ICONV_VERSION`
 /// as php's build against libiconv answers them.
 #[php_const]
@@ -158,10 +154,6 @@ pub fn extension() -> Extension {
             handler: ob_iconv_handler,
         })
         .info(info)
-        .engine_state(|_| {
-            ffi::reset_lc_ctype();
-            Startup
-        })
         .request_state::<State>()
         .rinit(rinit)
         .build("iconv")

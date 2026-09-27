@@ -1435,6 +1435,10 @@ impl Engine {
     /// test below holds it, and `ext/date`'s `date.timezone` is the one
     /// the phpt corpus reads.
     fn register_ini(&mut self, held: Vec<(Vec<u8>, Vec<u8>)>) {
+        // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
+        // handler or engine state runs: the process's, so the first engine
+        // a process builds sets it and every later one finds it set.
+        php_heap::reset_lc_ctype_locale();
         let mut taken = Vec::new();
         let mut raised = Vec::new();
         if !held.is_empty() {

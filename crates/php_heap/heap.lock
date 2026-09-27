@@ -286,6 +286,7 @@ numeric_prefix
 peek_fd
 poll_fd
 power
+reset_lc_ctype_locale
 set_fd_blocking
 shift_left
 shift_right
