@@ -5486,7 +5486,9 @@ impl Request {
             // A typed slot with no default is `IS_UNDEF` and
             // `IS_PROP_UNINIT`, as `object_properties_init` copies it.
             let Some(value) = value else {
-                object.heap().set_slot_uninit(slot, true);
+                object
+                    .heap()
+                    .set_slot_bit(slot, php_heap::PropBit::Uninit, true);
                 continue;
             };
             Heap::object_set_slot(&mut Hooks(self), object.heap(), slot, value.into_zval());
@@ -6696,6 +6698,53 @@ impl Request {
         Ok(())
     }
 
+    /// `zend_readonly_property_modification_error` (`Cannot modify
+    /// readonly property C::$p`) and
+    /// `zend_readonly_property_indirect_modification_error` (`Cannot
+    /// indirectly modify ...`), by `operation`, naming the class that
+    /// declared the property.
+    ///
+    /// Refused from the class's own scope as from any other, the unwritten
+    /// property included where the write is indirect; `__clone` writes it
+    /// once more, never indirectly:
+    ///
+    /// ```php
+    /// class T {
+    ///     public readonly int $i; public readonly array $a;
+    ///     function __construct() { $this->i = 1; }
+    ///     function bump() { try { $this->i++; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///         try { $this->i += 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///         try { $this->a[] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///         try { unset($this->i); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+    ///     function __clone() { $this->i = 5;
+    ///         try { $this->i = 6; } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+    /// }
+    /// $t = new T; $t->bump();
+    /// var_dump((clone $t)->i);
+    /// ```
+    /// ```expect
+    /// Cannot modify readonly property T::$i
+    /// Cannot modify readonly property T::$i
+    /// Cannot indirectly modify readonly property T::$a
+    /// Cannot unset readonly property T::$i
+    /// Cannot modify readonly property T::$i
+    /// int(5)
+    /// ```
+    fn readonly_modification(
+        &mut self,
+        declaring: ClassId,
+        name: &[u8],
+        operation: &str,
+    ) -> Thrown {
+        let class = self.class_name(declaring);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Cannot {operation} readonly property {class}::${shown}"),
+        )
+    }
+
     /// php's `Error` for a typed property read before anything wrote it
     /// (`zend_throw_error` under `uninit_error`), naming the class that
     /// declared it, `prop_info->ce`.
@@ -7149,10 +7198,27 @@ impl Request {
         {
             return Ok(None);
         }
+        // `zend_readonly_property_modification_error` and its indirect
+        // twin, ahead of the set visibility: an initialised readonly
+        // property is modified from no scope, save once more under
+        // `IS_PROP_REINITABLE` inside `__clone`, and an unwritten one is
+        // no place for an indirect modification either, which would
+        // initialise it by a write the property never sees.
+        let initialized = !o.slot(placed.slot).is_undef();
+        // `IS_PROP_REINITABLE` lets `__clone` write the property again,
+        // never modify it indirectly (`zend_std_read_property` under
+        // `BP_VAR_W` does not read the bit).
+        let indirect = operation == "indirectly modify";
+        if placed.readonly
+            && (indirect
+                || (initialized && !o.slot_bit(placed.slot, php_heap::PropBit::Reinitable)))
+        {
+            return Err(self.readonly_modification(placed.declaring, name, operation));
+        }
         // An initialised readonly property is refused as readonly, the
         // caller's, ahead of its set visibility
         // (`zend_std_write_property`).
-        let readonly_first = placed.readonly && !object.heap().slot(placed.slot).is_undef();
+        let readonly_first = placed.readonly && initialized;
         if let Some(set) = placed.set_visibility
             && !readonly_first
             && !self.has_set_access(placed.declaring, set)
@@ -7212,7 +7278,15 @@ impl Request {
     /// `read_property`, which under `BP_VAR_W` returns the object as a
     /// copy (`zend_std_read_property`), so a write through the object
     /// changes the object and never the property.
-    pub(crate) fn write_fetch_reads_object(&self, object: PhpObject, name: &[u8]) -> bool {
+    ///
+    /// Under an `unset` fetch the same slot holding nothing is read too,
+    /// as `null` and quietly: there is nothing to modify.
+    pub(crate) fn write_fetch_reads_object(
+        &self,
+        object: PhpObject,
+        name: &[u8],
+        unset: bool,
+    ) -> bool {
         let Some(placed) = self.declared_slot(object.class(), name) else {
             return false;
         };
@@ -7220,12 +7294,10 @@ impl Request {
             || placed
                 .set_visibility
                 .is_some_and(|set| !self.has_set_access(placed.declaring, set));
+        let held = object.heap().slot(placed.slot);
         barred
             && self.may_access(placed.declaring, placed.visibility)
-            && Value::of_zval(object.heap().slot(placed.slot))
-                .deref()
-                .as_object()
-                .is_some()
+            && (Value::of_zval(held).deref().as_object().is_some() || (unset && held.is_undef()))
     }
 
     /// The `zend_property_info` beside a typed slot, what
@@ -8151,13 +8223,37 @@ impl Request {
             ))));
         };
         let new = PhpObject::of(new);
-        if self.method_named(object.class(), b"__clone").is_some()
-            && let Err(thrown) = crate::api::call::call_method(self, &new, b"__clone", &[])
-        {
+        if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
             return Err(thrown);
         }
         Ok(new)
+    }
+
+    /// The tail of `zend_objects_clone_members`: the class's `__clone`
+    /// served on the copy, with every declared slot of it
+    /// `IS_PROP_REINITABLE` for the call, so the method may write a
+    /// readonly property once more, and none after it, whatever the method
+    /// threw. A class with no `__clone` is nothing to serve.
+    pub(crate) fn serve_clone_method(&mut self, copy: PhpObject) -> Result<(), Thrown> {
+        if self.method_named(copy.class(), b"__clone").is_none() {
+            return Ok(());
+        }
+        Self::mark_reinitable(copy, true);
+        let served = crate::api::call::call_method(self, &copy, b"__clone", &[]);
+        Self::mark_reinitable(copy, false);
+        served.map(|answered| self.release(answered))
+    }
+
+    /// `IS_PROP_REINITABLE` set or cleared on every declared slot of
+    /// `object`, as `zend_objects_clone_members` and
+    /// `zend_objects_clone_obj_with` do around `__clone` and a `clone
+    /// with`'s writes.
+    fn mark_reinitable(object: PhpObject, on: bool) {
+        let o = object.heap();
+        for slot in 0..o.slots() {
+            o.set_slot_bit(slot, php_heap::PropBit::Reinitable, on);
+        }
     }
 
     /// [`PhpObject::clone_with`]: the members copied beside `payload`,
@@ -8169,9 +8265,7 @@ impl Request {
     ) -> Result<PhpObject, Thrown> {
         let cloned = self.heap.object_clone_with(object.heap(), payload);
         let new = PhpObject::of(self.fatal_of(cloned)?);
-        if self.method_named(object.class(), b"__clone").is_some()
-            && let Err(thrown) = crate::api::call::call_method(self, &new, b"__clone", &[])
-        {
+        if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
             return Err(thrown);
         }
@@ -8197,10 +8291,29 @@ impl Request {
             return Err(self.uncloneable(object));
         };
         let new = clone_obj(self, object)?;
+        // "Unlock readonly properties once more" for the writes, and lock
+        // them again after, whatever a write threw.
+        Self::mark_reinitable(new, true);
+        let written = self.clone_with_writes(new, table, properties);
+        Self::mark_reinitable(new, false);
+        if let Err(thrown) = written {
+            self.release(new.as_value());
+            return Err(thrown);
+        }
+        Ok(new)
+    }
+
+    /// The writes of [`Request::clone_members_with`] over the copy, each
+    /// through the class's `write_property`.
+    fn clone_with_writes(
+        &mut self,
+        new: PhpObject,
+        table: &'static dyn crate::api::abi::ObjectHandlers,
+        properties: PhpArray,
+    ) -> Result<(), Thrown> {
         for (key, value) in properties.snapshot() {
             let value = match value.as_php_ref() {
                 Some(r) if r.as_value().refcount() > 1 => {
-                    self.release(new.as_value());
                     return Err(crate::api::raising::throw(
                         self,
                         "Error",
@@ -8210,20 +8323,11 @@ impl Request {
                 Some(_) => value.deref(),
                 None => value,
             };
-            let name = match key.to_prop_name(self) {
-                Ok(name) => name,
-                Err(thrown) => {
-                    self.release(new.as_value());
-                    return Err(thrown);
-                }
-            };
+            let name = key.to_prop_name(self)?;
             self.addref(&value);
-            if let Err(thrown) = table.write_property(self, new, name, value) {
-                self.release(new.as_value());
-                return Err(thrown);
-            }
+            table.write_property(self, new, name, value)?;
         }
-        Ok(new)
+        Ok(())
     }
 
     /// php's `Error` for a class whose `clone_obj` slot is null.
@@ -9558,16 +9662,13 @@ impl Request {
                 let in_unset = unsetter.is_some() && self.guard_word(object, name) & IN_UNSET != 0;
                 if !empty || uninit || unsetter.is_none() || in_unset || waits {
                     // `zend_readonly_property_unset_error`, ahead of the
-                    // set visibility. php raises it in the class's own
-                    // scope too, save in `__clone`, where the slot is
-                    // `IS_PROP_REINITABLE`, which this engine does not
-                    // keep; so it is raised here where the set visibility
-                    // would refuse the unset anyway.
+                    // set visibility: an initialised readonly property is
+                    // unset from no scope, the class's own included, save
+                    // inside `__clone`, where the slot is
+                    // `IS_PROP_REINITABLE`.
                     if placed.readonly
                         && !empty
-                        && placed
-                            .set_visibility
-                            .is_some_and(|set| !self.has_set_access(placed.declaring, set))
+                        && !o.slot_bit(placed.slot, php_heap::PropBit::Reinitable)
                     {
                         let declaring = self.class_name(placed.declaring);
                         let shown = String::from_utf8_lossy(name).into_owned();
@@ -9595,11 +9696,11 @@ impl Request {
                         Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
                         // An emptied slot is no longer `IS_PROP_UNINIT`,
                         // whatever it was made with.
-                        o.set_slot_uninit(placed.slot, false);
+                        o.set_slot_bit(placed.slot, php_heap::PropBit::Uninit, false);
                     } else if uninit && !waits {
                         // `Z_PROP_FLAG_P(slot) = 0`: the bit reset and
                         // `__unset` passed by.
-                        o.set_slot_uninit(placed.slot, false);
+                        o.set_slot_bit(placed.slot, php_heap::PropBit::Uninit, false);
                     } else if waits {
                         // `IS_PROP_LAZY`: the object initialised and the
                         // property unset on what that answers.

@@ -47,7 +47,7 @@ use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
 use crate::payload::{Payload, payload_of};
-use crate::{Heap, Zval, ZvalRef, ZvalType};
+use crate::{Heap, PropBit, Zval, ZvalRef, ZvalType};
 
 /// The identity of an object in the store (design §5.4): the index php
 /// reports as `spl_object_id()`, and what weak references, `WeakMap`
@@ -392,14 +392,21 @@ impl Obj {
     #[must_use]
     pub fn slot_uninit(&self, i: u32) -> bool {
         let z = self.slot(i);
-        z.is_undef() && z.prop_uninit()
+        z.is_undef() && z.prop_bit(PropBit::Uninit)
     }
 
-    /// Set or clear `IS_PROP_UNINIT` on declared slot `i`, the value it
-    /// holds untouched; nothing for a slot the class did not lay down.
-    pub fn set_slot_uninit(&self, i: u32, on: bool) {
+    /// Whether declared slot `i` carries `flag`; a slot the class did not
+    /// lay down carries none.
+    #[must_use]
+    pub fn slot_bit(&self, i: u32, flag: PropBit) -> bool {
+        self.slot(i).prop_bit(flag)
+    }
+
+    /// Set or clear `flag` on declared slot `i`, the value it holds
+    /// untouched; nothing for a slot the class did not lay down.
+    pub fn set_slot_bit(&self, i: u32, flag: PropBit, on: bool) {
         if let Some(slot) = self.slot_ref(i) {
-            slot.set_prop_uninit(on);
+            slot.set_prop_bit(flag, on);
         }
     }
 

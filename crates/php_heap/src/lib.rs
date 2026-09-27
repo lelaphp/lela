@@ -70,7 +70,7 @@ pub use resource::{Res, ResourceType};
 pub use sort::zend_sort;
 pub use stack::{EntryGuard, Frame, FrameRef, Slot, VmStack};
 pub use string::{Intern, Str, Strings};
-pub use zval::{Zval, ZvalRef, ZvalType};
+pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
 /// The per-request heap (design §5.13): the allocator every string,
 /// array, object and frame passes through, and the only accountant of

@@ -1114,9 +1114,7 @@ pub fn clone_with<T: std::any::Any + Send>(
     payload: T,
 ) -> Result<PhpObject, Thrown> {
     let copy = req.clone_with_payload(*object, payload)?;
-    if req.method_named(object.class(), b"__clone").is_some()
-        && let Err(thrown) = call_method(req, &copy, b"__clone", &[])
-    {
+    if let Err(thrown) = req.serve_clone_method(copy) {
         req.release(copy.as_value());
         return Err(thrown);
     }

@@ -7252,7 +7252,9 @@ fn property_place(
         // A readonly or set-restricted property holding an object is
         // read, as php's `read_property` returns it under `BP_VAR_W`: the
         // write goes through the object and the property is untouched.
-        PropertyPlace::Std if req.write_fetch_reads_object(object, &name) => {
+        PropertyPlace::Std
+            if req.write_fetch_reads_object(object, &name, op.opcode == Opcode::FetchObjUnset) =>
+        {
             return Ok(PropertyFound::Served(object, name));
         }
         // `BP_VAR_RW` reads the slot before anything is placed, so an
@@ -7331,7 +7333,14 @@ fn fetch_obj_read(
     name: &[u8],
 ) -> Edge {
     let table = req.object_handlers(object.heap());
-    let read = table.read_property(req, object, name, PropertyRead::Write);
+    // `BP_VAR_UNSET` reads what is not there as `null`, quietly; every
+    // other write fetch reads as a write.
+    let mode = if op.opcode == Opcode::FetchObjUnset {
+        PropertyRead::Silent
+    } else {
+        PropertyRead::Write
+    };
+    let read = table.read_property(req, object, name, mode);
     let value = match read {
         Ok(value) => value,
         Err(thrown) => {
@@ -10331,7 +10340,8 @@ fn assign_property(
             // stands under the same `Z_TYPE_P(variable_ptr) != IS_UNDEF`
             // (`Z/Zend/zend_object_handlers.c:1089`), so what the bit
             // refuses is the second write and never the initialisation.
-            if typed.readonly && !object.heap().slot(slot).is_undef() {
+            let reinitable = object.heap().slot_bit(slot, php_heap::PropBit::Reinitable);
+            if typed.readonly && !reinitable && !object.heap().slot(slot).is_undef() {
                 req.release(value);
                 let class = req.class_name(typed.declaring);
                 return Ok(Err(crate::api::raising::throw(
@@ -10347,6 +10357,11 @@ fn assign_property(
             };
             write_out(req, frame, code, op, &value);
             req.assign_declared_slot(object.heap(), slot, value);
+            // `Z_PROP_FLAG_P(property_val) &= ~IS_PROP_REINITABLE`: a
+            // readonly property `__clone` wrote is locked again.
+            object
+                .heap()
+                .set_slot_bit(slot, php_heap::PropBit::Reinitable, false);
             Ok(Ok(()))
         }
         Some((slot, false)) => {
@@ -12307,7 +12322,11 @@ fn step_property(
         // overloaded arm over it instead.
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
-            match req.declared_slot_for_write(object, &bytes, "modify", silent) {
+            // `BP_VAR_RW` reads an unwritten slot before the placement.
+            let placed = req
+                .read_before_write(object, &bytes)
+                .and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
+            match placed {
                 Ok(placed) => placed,
                 Err(thrown) => {
                     exec::free_operand(req, frame, code, data.op1_type, data.op1);
@@ -12872,7 +12891,11 @@ fn incdec_property(
         }
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
-            match req.declared_slot_for_write(object, &bytes, "modify", silent) {
+            // `BP_VAR_RW` reads an unwritten slot before the placement.
+            let placed = req
+                .read_before_write(object, &bytes)
+                .and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
+            match placed {
                 Ok(placed) => placed,
                 Err(thrown) => {
                     write_out(req, frame, code, op, &Value::null());
