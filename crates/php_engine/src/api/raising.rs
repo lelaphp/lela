@@ -193,10 +193,28 @@ pub fn fatal(req: &mut Request, message: &str) -> Thrown {
 
 /// Throw a new instance of `class` with `message`, `zend_throw_error`.
 /// A throwable the memory limit refuses to build is the fatal that ends
-/// the request, already recorded, and the `Thrown` says so.
+/// the request, already recorded, and the `Thrown` says so. The
+/// instance's one owner is the `Thrown`'s, as `zend_throw_exception`
+/// hands the object it made to `EG(exception)`, so once the program
+/// lets go of what it caught the object is freed:
+///
+/// ```php
+/// try { intdiv(1, 0); } catch (Error $e) { $w = WeakReference::create($e); }
+/// unset($e);
+/// var_dump($w->get(), new stdClass);
+/// ```
+/// ```expect
+/// NULL
+/// object(stdClass)#1 (0) {
+/// }
+/// ```
 pub fn throw(req: &mut Request, class: &str, message: &str) -> Thrown {
     match new_throwable(req, class, message) {
-        Ok(throwable) => throw_value(req, &throwable),
+        Ok(throwable) => {
+            let thrown = throw_value(req, &throwable);
+            req.release(throwable);
+            thrown
+        }
         Err(fatal) => fatal,
     }
 }

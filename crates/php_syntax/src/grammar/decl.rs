@@ -7,6 +7,7 @@ use crate::SyntaxKind as K;
 use crate::parser::{CompletedMarker, Marker, Parser};
 use crate::source::Diagnostic;
 
+use super::types::TypeSite;
 use super::{block, ckw, expr, semicolon, types};
 
 /// `#[…]` attribute groups, zero or more. A group takes the pending doc
@@ -219,7 +220,7 @@ pub(crate) fn enum_decl(p: &mut Parser<'_>, m: Marker) {
     if p.peek_at(K::COLON) {
         let b = p.start();
         p.bump(K::COLON);
-        types::type_expr(p);
+        types::type_expr(p, TypeSite::WithStatic);
         b.complete(p, K::ENUM_BACKING);
     }
     // An enum takes no `extends`: php's parser refuses it as the body's
@@ -319,6 +320,15 @@ fn class_body(p: &mut Parser<'_>) {
     m.complete(p, K::CLASS_BODY);
 }
 
+/// One member of a class body. A method's body is `;` or a block, and
+/// php names both where neither stands:
+///
+/// ```php
+/// interface I { function f(): int }
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token "}", expecting ";" or "{" in %s on line 2
+/// ```
 fn class_member(p: &mut Parser<'_>) {
     let m = p.start();
     attribute_groups(p);
@@ -340,7 +350,7 @@ fn class_member(p: &mut Parser<'_>) {
             // An optional type (8.3): a type is present when the
             // declarator shape `NAME =` does not immediately follow.
             if !(ckw::is_member_name(p.current()) && p.nth(1) == K::EQ) {
-                types::type_expr(p);
+                types::type_expr(p, TypeSite::WithStatic);
             }
             const_declarators(p, true);
             super::semicolon_expecting(p, Some("\",\" or \";\""));
@@ -357,7 +367,10 @@ fn class_member(p: &mut Parser<'_>) {
             if p.peek_at(K::L_CURLY) {
                 block(p);
             } else {
-                semicolon(p);
+                // `method_body: ';' | '{' …`: php lists both where the
+                // body was due (`function f(): ?A&B;`, `function f() x`,
+                // probed 8.5.9).
+                super::semicolon_expecting(p, Some("\";\" or \"{\""));
             }
             m.complete(p, K::METHOD_DECL);
         }
@@ -370,7 +383,7 @@ fn class_member(p: &mut Parser<'_>) {
         }
         // A typed property: anything that can start a type.
         _ if types::at_type_start(p) => {
-            types::type_expr(p);
+            types::type_expr(p, TypeSite::WithoutStatic);
             property_tail(p, m);
         }
         _ => {
@@ -767,7 +780,7 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
         attribute_groups(p);
         modifiers(p); // promotion (8.0), set-visibility (8.4)
         if types::at_type_start(p) {
-            types::type_expr(p);
+            types::type_expr(p, TypeSite::WithoutStatic);
         }
         // `&` (by reference) and `...` (variadic): `&` here is by
         // reference because an intersection's `&` was consumed inside
@@ -835,7 +848,7 @@ pub(crate) fn ret_type(p: &mut Parser<'_>) {
     if p.peek_at(K::COLON) {
         let m = p.start();
         p.bump(K::COLON);
-        types::type_expr(p);
+        types::type_expr(p, TypeSite::WithStatic);
         m.complete(p, K::RET_TYPE);
     }
 }

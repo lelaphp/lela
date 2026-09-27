@@ -461,6 +461,9 @@ impl Emit<'_> {
                     "Using \"_\" as a type name is deprecated since 8.4",
                 );
             }
+            if qualified == NameKind::Unqualified && self.not_imported(&written) {
+                self.confusable_type(&written, &resolved);
+            }
             return Ok(Type::Named(Name(resolved.into_boxed_slice())));
         }
         self.ensure_valid_class_fetch_type(fetch)?;
@@ -483,6 +486,60 @@ impl Emit<'_> {
             None if fetch == FETCH_CLASS_SELF => Type::SelfClass,
             None => Type::ParentClass,
         })
+    }
+
+    /// The warning `zend_compile_single_typename` raises for a class
+    /// type written as one of `zend_is_confusable_type`'s names, in the
+    /// case written, where no import takes it: the name php reads it as
+    /// and how to write it so, with the import beside the `\` inside a
+    /// namespace.
+    ///
+    /// ```php
+    /// function f(integer $a, Integer $b, \double $c, resource $d) {}
+    /// ```
+    /// ```expect
+    /// Warning: "integer" will be interpreted as a class name. Did you mean "int"? Write "\integer" to suppress this warning in %s on line 2
+    ///
+    /// Warning: "resource" is not a supported builtin type and will be interpreted as a class name. Write "\resource" to suppress this warning in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// namespace N;
+    /// use boolean;
+    /// function f(boolean $a, double $b): ?boolean {}
+    /// function g(): integer {}
+    /// ```
+    /// ```expect
+    /// Warning: "double" will be interpreted as a class name. Did you mean "float"? Write "\N\double" or import the class with "use" to suppress this warning in %s on line 4
+    ///
+    /// Warning: "integer" will be interpreted as a class name. Did you mean "int"? Write "\N\integer" or import the class with "use" to suppress this warning in %s on line 5
+    /// ```
+    fn confusable_type(&mut self, written: &[u8], resolved: &[u8]) {
+        let correct = match written {
+            b"boolean" => Some("bool"),
+            b"integer" => Some("int"),
+            b"double" => Some("float"),
+            b"resource" => None,
+            _ => return,
+        };
+        let written = String::from_utf8_lossy(written);
+        let resolved = String::from_utf8_lossy(resolved);
+        let extra = if self.namespace.is_some() {
+            " or import the class with \"use\""
+        } else {
+            ""
+        };
+        let message = match correct {
+            Some(correct) => format!(
+                "\"{written}\" will be interpreted as a class name. Did you mean \"{correct}\"? \
+                 Write \"\\{resolved}\"{extra} to suppress this warning"
+            ),
+            None => format!(
+                "\"{written}\" is not a supported builtin type and will be interpreted as a \
+                 class name. Write \"\\{resolved}\"{extra} to suppress this warning"
+            ),
+        };
+        self.raise(Level::CompileWarning, &message);
     }
 
     /// `zend_is_type_list_redundant_by_single_type`: a class the list

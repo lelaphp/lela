@@ -11,11 +11,7 @@
 //! these classes is born through a factory here, so a row is either
 //! this object's or gone.
 //!
-//! `getClass`, `isArray` and `isCallable` still share the entry of the
-//! methods not yet served: the stub marks all three `#[\Deprecated]` and php prints the
-//! deprecation on every call, which the engine does not raise yet
-//! (#412), so a witness beside a body here would pin a line the engine
-//! never prints.
+//! `getClass` still shares the entry of the methods not yet served.
 
 use php_ext::abi::{Instance, This, Union, Untyped};
 use php_ext::attr::php_class;
@@ -31,6 +27,23 @@ use super::{
     parameter_string, reflection_class_factory, required_parameters, set_name, set_string_prop,
     this_name, type_to_string,
 };
+
+/// `MAY_BE_NULL`, `MAY_BE_ARRAY` and `MAY_BE_CALLABLE`
+/// (`Z/Zend/zend_type_info.h`).
+const MAY_BE_NULL: u32 = 1 << 1;
+const MAY_BE_ARRAY: u32 = 1 << 7;
+const MAY_BE_CALLABLE: u32 = 1 << 12;
+
+/// `ZEND_TYPE_IS_ITERABLE_FALLBACK`: whether the type was written with
+/// `iterable` among its members.
+fn names_iterable(ty: &Type) -> bool {
+    match ty {
+        Type::Iterable => true,
+        Type::Nullable(inner) => names_iterable(inner),
+        Type::Union(members) => members.iter().any(names_iterable),
+        _ => false,
+    }
+}
 
 /// The function a `ReflectionParameter` reflects, `param->fptr` as a
 /// name this engine can look the declaration up with again: a global
@@ -1016,11 +1029,63 @@ impl ReflectionParameter {
         Ok(Some(Instance::of(object)))
     }
 
-    #[php(tentative, deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn isArray(_this: This<Self>) -> bool;
+    /// `ReflectionParameter::isArray()`: the declared mask without
+    /// `null` is `array` alone, class names contributing no bit, and an
+    /// `iterable` is not, for BC. Deprecated since 8.0.
+    ///
+    /// ```php
+    /// function f(array $a, ?array $b, array|Foo $c, iterable $d, array|int $e, $f) {}
+    /// foreach ((new ReflectionFunction("f"))->getParameters() as $p) var_dump(@$p->isArray());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    #[php(
+        tentative,
+        deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead")
+    )]
+    fn isArray(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req)?;
+        let Some(ty) = &parameter.ty else {
+            return Ok(false);
+        };
+        if names_iterable(ty) {
+            return Ok(false);
+        }
+        Ok(ty.mask() & !MAY_BE_NULL == MAY_BE_ARRAY)
+    }
 
-    #[php(tentative, deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn isCallable(_this: This<Self>) -> bool;
+    /// `ReflectionParameter::isCallable()`: the declared mask without
+    /// `null` is `callable` alone. Deprecated since 8.0, which php
+    /// raises at every call.
+    ///
+    /// ```php
+    /// class bar { static function foo(callable $arg) {} }
+    /// function foo(?callable $bar, callable|int $baz) {}
+    /// var_dump((new ReflectionMethod("bar", "foo"))->getParameters()[0]->isCallable());
+    /// foreach ((new ReflectionFunction("foo"))->getParameters() as $p) var_dump(@$p->isCallable());
+    /// ```
+    /// ```expect
+    ///
+    /// Deprecated: Method ReflectionParameter::isCallable() is deprecated since 8.0, use ReflectionParameter::getType() instead in %s on line 4
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(
+        tentative,
+        deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead")
+    )]
+    fn isCallable(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req)?;
+        let mask = parameter.ty.as_ref().map_or(0, Type::mask);
+        Ok(mask & !MAY_BE_NULL == MAY_BE_CALLABLE)
+    }
 
     /// `ReflectionParameter::allowsNull()`: no declared type, or a mask
     /// with `null` in it.

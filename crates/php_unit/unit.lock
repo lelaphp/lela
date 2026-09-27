@@ -92,5 +92,6 @@ link::Variance
 link::link
 link::object_type
 link::resolve_property
+link::set_hook_refused
 link::verify_hooked_property
 type_to_string

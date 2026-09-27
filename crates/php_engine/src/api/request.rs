@@ -44,6 +44,7 @@ use crate::output::Output;
 use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
 
+mod class_data;
 mod hold;
 pub(crate) use hold::Hold;
 mod hooks;
@@ -1253,6 +1254,9 @@ pub struct Request {
     /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
     /// is the request's; so is this one.
     statics: Vec<((ClassId, Vec<u8>), Value)>,
+    /// `zend_class_mutable_data` of each class the request updated or
+    /// read a constant of ([`class_data`]).
+    class_data: std::collections::HashMap<ClassId, class_data::ClassData>,
     /// The evaluated defaults of natives' absent arguments, each kept by
     /// the request under its native and position (design §4.7).
     defaults: Vec<((Function, u32), Value)>,
@@ -1803,6 +1807,7 @@ impl Request {
             trampolines: Vec::new(),
             deprecating: Vec::new(),
             statics: Vec::new(),
+            class_data: std::collections::HashMap::new(),
             defaults: Vec::new(),
             guards: Vec::new(),
             ref_sources: Vec::new(),
@@ -5453,27 +5458,7 @@ impl Request {
     /// }
     /// ```
     fn property_defaults(&mut self, class: ClassId) -> Result<Vec<Option<Value>>, Thrown> {
-        let defaults: Vec<(ClassId, bool, Option<php_unit::decl::ConstExpr>)> = self
-            .placed_properties(class)
-            .into_iter()
-            .map(|(declaring, p)| (declaring, p.ty.is_some(), p.default))
-            .collect();
-        let mut out = Vec::with_capacity(defaults.len());
-        for (declaring, typed, default) in defaults {
-            out.push(match default {
-                Some(expr) => match crate::api::call::eval_const_expr(self, &expr, Some(declaring))
-                {
-                    Ok(value) => Some(value),
-                    Err(thrown) => {
-                        self.release_defaults(out);
-                        return Err(thrown);
-                    }
-                },
-                None if typed => None,
-                None => Some(Value::null()),
-            });
-        }
-        Ok(out)
+        self.default_properties(class)
     }
 
     /// Defaults [`Request::property_defaults`] evaluated for an object
@@ -5667,18 +5652,63 @@ impl Request {
             .map(|(_, z)| Value::of_zval(z))
     }
 
+    /// The declared instance property `name` of `class` the executed
+    /// scope reaches, as `zend_get_property_offset` picks it: its slot,
+    /// the class that declared it and the declaration. The last
+    /// declaration of the name in slot order stands, save that one
+    /// shadowing a parent's private property of the name
+    /// (`ZEND_ACC_CHANGED`) is, from that parent's scope, the parent's
+    /// own private slot (`zend_get_parent_private_property`).
+    fn placed_property(&self, class: ClassId, name: &[u8]) -> Option<(u32, ClassId, PropertyDecl)> {
+        let mut placed = self.placed_properties(class);
+        let mut at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
+        if let Some(scope) = self.executed_scope()
+            && placed
+                .get(at)
+                .is_some_and(|(declaring, _)| *declaring != scope)
+            && let Some(own) = placed.iter().position(|(declaring, p)| {
+                *declaring == scope && p.visibility == Visibility::Private && &*p.name.0 == name
+            })
+        {
+            at = own;
+        }
+        let slot = u32::try_from(at).ok()?;
+        if at >= placed.len() {
+            return None;
+        }
+        let (declaring, property) = placed.swap_remove(at);
+        Some((slot, declaring, property))
+    }
+
     /// `zend_get_property_offset` over the placed instance properties:
     /// the slot `name` sits in, the class that declared what stands
     /// there, its visibility, its set visibility and whether it is
     /// typed; none for a name no class of the chain declares, which is
-    /// a dynamic property.
+    /// a dynamic property. A declaration that shadows a parent's
+    /// private property of the name (`ZEND_ACC_CHANGED`) is, from that
+    /// parent's scope, the parent's own private slot
+    /// (`zend_get_parent_private_property`).
+    ///
+    /// ```php
+    /// class A { private int $prop = 42;
+    ///     function r() { return $this->prop; }
+    ///     function op() { $this->prop += 1; return $this->prop; }
+    ///     function ref() { $x =& $this->prop; unset($this->prop); $x = "foo"; var_dump($x); } }
+    /// class B extends A { private $prop = "b"; }
+    /// $b = new B;
+    /// var_dump($b->r(), $b->op());
+    /// $b->ref();
+    /// ```
+    /// ```expect
+    /// int(42)
+    /// int(43)
+    /// string(3) "foo"
+    /// ```
     fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<DeclaredSlot> {
-        let placed = self.placed_properties(class);
-        let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
-        let (declaring, p) = placed.get(at)?;
+        let (at, declaring, p) = self.placed_property(class, name)?;
         Some(DeclaredSlot {
-            slot: u32::try_from(at).unwrap_or(u32::MAX),
-            declaring: *declaring,
+            slot: at,
+            declaring,
             visibility: p.visibility,
             set_visibility: p.set_visibility,
             typed: p.ty.is_some(),
@@ -5697,6 +5727,63 @@ impl Request {
     fn has_set_access(&self, class: ClassId, set: Visibility) -> bool {
         let scope = self.executed_scope();
         scope == Some(class) || (set == Visibility::Protected && self.check_protected(class, scope))
+    }
+
+    /// Whether `property`, which `declaring` declares, has a set
+    /// visibility the executed scope lacks.
+    pub(crate) fn lacks_set_access(&self, declaring: ClassId, property: &PropertyDecl) -> bool {
+        property
+            .set_visibility
+            .is_some_and(|set| !self.has_set_access(declaring, set))
+    }
+
+    /// `prop_info->flags & ZEND_ACC_PPP_SET_MASK &&
+    /// !zend_asymmetric_property_has_set_access(prop_info)`, the test the
+    /// opcodes over a `static` property make of it once it is fetched,
+    /// with php's `Error` for `operation`: `modify` for
+    /// `ASSIGN_STATIC_PROP` and `indirectly modify` for the fetches and
+    /// the read-modify-write opcodes.
+    ///
+    /// ```php
+    /// class C { public private(set) static int $p = 1; public private(set) static array $a = [];
+    ///     static function set() { self::$p = 5; self::$a[] = 1; } }
+    /// try { C::$p = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { C::$p++; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { C::$p .= "1"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { C::$a[] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $r = &C::$p; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// C::set();
+    /// var_dump(C::$p, C::$a);
+    /// ```
+    /// ```expect
+    /// Cannot modify private(set) property C::$p from global scope
+    /// Cannot indirectly modify private(set) property C::$p from global scope
+    /// Cannot indirectly modify private(set) property C::$p from global scope
+    /// Cannot indirectly modify private(set) property C::$a from global scope
+    /// Cannot indirectly modify private(set) property C::$p from global scope
+    /// int(5)
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// ```
+    pub(crate) fn set_refused(
+        &mut self,
+        declaring: ClassId,
+        property: &PropertyDecl,
+        operation: &str,
+    ) -> Option<Thrown> {
+        let set = property.set_visibility?;
+        if !self.lacks_set_access(declaring, property) {
+            return None;
+        }
+        Some(self.set_inaccessible_property(
+            declaring,
+            set,
+            property.is_readonly,
+            &property.name.0,
+            operation,
+        ))
     }
 
     /// `zend_asymmetric_visibility_property_modification_error`
@@ -5890,7 +5977,6 @@ impl Request {
             ));
         };
         let visibility = constant.visibility;
-        let value = constant.value.clone();
         let asked = class;
         let class = declaring;
         if !self.may_access_from(class, visibility, scope) {
@@ -5929,13 +6015,7 @@ impl Request {
         if constant.is_case {
             return self.enum_case(class, name).map(|case| case.as_value());
         }
-        let evaluated = crate::api::call::eval_const_expr(self, &value, Some(class))?;
-        match &constant.ty {
-            Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
-                crate::ops::verify_class_constant_type(self, evaluated, ty, class, name)
-            }
-            _ => Ok(evaluated),
-        }
+        self.evaluated_class_constant(class, name, &constant)
     }
 
     /// `zend_get_class_constant_ex` under `ZEND_FETCH_CLASS_SILENT`, as
@@ -6248,21 +6328,8 @@ impl Request {
                 ),
             ));
         };
-        if !self
-            .statics
-            .iter()
-            .any(|((held, under), _)| *held == declaring && under == name)
-        {
-            let value = match property.default.as_ref() {
-                Some(expr) => {
-                    let expr = expr.clone();
-                    crate::api::call::eval_const_expr(self, &expr, Some(declaring))?
-                }
-                None if property.ty.is_some() => Value::undef(),
-                None => Value::null(),
-            };
-            self.statics.push(((declaring, name.to_vec()), value));
-        }
+        self.update_class_constants(class)?;
+        self.lay_down_static(declaring, name)?;
         if self
             .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Trait)
@@ -6280,6 +6347,37 @@ impl Request {
             );
         }
         Ok(Some((declaring, property)))
+    }
+
+    /// `zend_class_init_statics` and `zend_update_class_constants` over
+    /// the `static` property `name` that `declaring` declares: its slot
+    /// laid down where it has none, from its default evaluated in the
+    /// declaring scope and held to its type under the strict rule, and
+    /// `IS_UNDEF` for a typed one with no default.
+    fn lay_down_static(&mut self, declaring: ClassId, name: &[u8]) -> Result<(), Thrown> {
+        if self
+            .statics
+            .iter()
+            .any(|((held, under), _)| *held == declaring && under == name)
+        {
+            return Ok(());
+        }
+        let Some(property) = self
+            .class_decl(declaring)
+            .and_then(|decl| decl.properties.iter().find(|p| *p.name.0 == *name).cloned())
+        else {
+            return Ok(());
+        };
+        let value = match property.default.as_ref() {
+            Some(expr) => {
+                let value = crate::api::call::eval_const_expr(self, expr, Some(declaring))?;
+                self.strictly_held(value, &property, declaring)?
+            }
+            None if property.ty.is_some() => Value::undef(),
+            None => Value::null(),
+        };
+        self.statics.push(((declaring, name.to_vec()), value));
+        Ok(())
     }
 
     /// `CE_STATIC_MEMBERS(ce)[prop_info->offset]`: what the slot of the
@@ -7364,6 +7462,40 @@ impl Request {
         Ok(Value::null())
     }
 
+    /// Whether `zend_std_get_property_ptr_ptr`
+    /// (`Z/Zend/zend_object_handlers.c:1485`) hands out no place for the
+    /// declared property `name` the scope reaches, so that a compound
+    /// assignment is `read_property`, the operation and `write_property`:
+    /// a readonly property, and one whose set visibility the scope lacks.
+    /// What the operation throws then comes before what the write
+    /// refuses.
+    ///
+    /// ```php
+    /// class Test { public readonly object $prop; public private(set) int $n = 1;
+    ///     function __construct() { $this->prop = new stdClass; } }
+    /// $t = new Test;
+    /// try { $t->prop += 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $t->prop .= "x"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $t->n += 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Unsupported operand types: stdClass + int
+    /// Object of class stdClass could not be converted to string
+    /// Cannot modify private(set) property Test::$n from global scope
+    /// ```
+    pub(crate) fn place_withheld(&self, object: PhpObject, name: &[u8]) -> bool {
+        let Some(placed) = self.declared_slot(object.class(), name) else {
+            return false;
+        };
+        if !self.may_access(placed.declaring, placed.visibility) {
+            return false;
+        }
+        placed.readonly
+            || placed
+                .set_visibility
+                .is_some_and(|set| !self.has_set_access(placed.declaring, set))
+    }
+
     /// `zend_get_property_offset` at a write site, what `FETCH_OBJ_W`
     /// and `ASSIGN_OBJ` place the name by: the declared slot `name` sits
     /// in and whether it is typed, where the executed scope may reach
@@ -7575,11 +7707,9 @@ impl Request {
         class: ClassId,
         name: &[u8],
     ) -> Option<TypedProperty> {
-        let placed = self.placed_properties(class);
-        let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
-        let (declaring, p) = placed.get(at)?;
-        p.ty.clone().map(|ty| TypedProperty {
-            declaring: *declaring,
+        let (_, declaring, p) = self.placed_property(class, name)?;
+        p.ty.map(|ty| TypedProperty {
+            declaring,
             ty,
             readonly: p.is_readonly,
         })

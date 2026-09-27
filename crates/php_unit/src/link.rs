@@ -41,7 +41,9 @@ use std::fmt;
 mod hooks;
 mod traits;
 
-pub use hooks::{Resolved, ResolvedHook, Variance, resolve_property, verify_hooked_property};
+pub use hooks::{
+    Resolved, ResolvedHook, Variance, resolve_property, set_hook_refused, verify_hooked_property,
+};
 
 const MAY_BE_OBJECT: u32 = 1 << 8;
 const MAY_BE_CALLABLE: u32 = 1 << 12;
@@ -2361,9 +2363,6 @@ impl<'a> Linker<'a> {
         let mut constants: Table<'a, ClassConstDecl> =
             child.constants.iter().map(|c| (None, c)).collect();
         let mut methods: Table<'a, MethodDecl> = child.methods.iter().map(|m| (None, m)).collect();
-        if let Some(linked) = self.set_hooks_refused(child) {
-            return Settled::of(linked);
-        }
         if let Some(parent_name) = &child.parent
             && let Some(parent) = self.class_named(&parent_name.0)
         {
@@ -2385,6 +2384,9 @@ impl<'a> Linker<'a> {
         }
         if let Some(refusal) = enum_properties(child) {
             return Settled::of(Linked::Refused(at_class(child, refusal)));
+        }
+        if let Some(linked) = self.set_hooks_refused(child) {
+            return Settled::of(linked);
         }
         let stringable = match self.stringable(child, &methods) {
             Ok(stringable) => stringable,

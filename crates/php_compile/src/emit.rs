@@ -3467,14 +3467,13 @@ impl Emit<'_> {
         if is_readonly && ty.is_none() && !hooked {
             return Err(self.compile_error(format!("Readonly property {member} must have type")));
         }
-        let set_visibility = self
-            .set_visibility_of(
-                promoted.visibility,
-                promoted.set_visibility,
-                ty.is_some(),
-                &member,
-            )?
-            .or_else(|| implicit_set_visibility(is_readonly, promoted.visibility));
+        let set_visibility = self.set_visibility_of(
+            promoted.visibility,
+            promoted.set_visibility,
+            is_readonly,
+            ty.is_some(),
+            &member,
+        )?;
         let default = (ty.is_none() && !hooked).then_some(ConstExpr::Null);
         let active = self.active_class.as_ref().map(|class| class.at);
         let (at, kind, declared_properties) =
@@ -3494,6 +3493,8 @@ impl Emit<'_> {
                     kind,
                     name: &parameter.name,
                     ty: parameter.ty,
+                    declared: ty,
+                    pending: None,
                     visibility: promoted.visibility,
                     is_static: false,
                     is_readonly,
@@ -5905,14 +5906,13 @@ impl Emit<'_> {
                     property.is_static,
                 )?;
             }
-            let set_visibility = self
-                .set_visibility_of(
-                    property.visibility,
-                    property.set_visibility,
-                    ty.is_some(),
-                    &member,
-                )?
-                .or_else(|| implicit_set_visibility(is_readonly, property.visibility));
+            let set_visibility = self.set_visibility_of(
+                property.visibility,
+                property.set_visibility,
+                is_readonly,
+                ty.is_some(),
+                &member,
+            )?;
             let (hooks, is_virtual) = match &property.hooks {
                 Some(hooks) => {
                     let hooked = hooks::Hooked {
@@ -5922,6 +5922,8 @@ impl Emit<'_> {
                         kind: class.kind,
                         name: &property.name,
                         ty: property.ty,
+                        declared: ty.as_ref(),
+                        pending: Some(decl),
                         visibility: property.visibility,
                         is_static: property.is_static,
                         is_readonly,
@@ -6256,15 +6258,33 @@ impl Emit<'_> {
     /// int(4)
     /// int(4145)
     /// ```
+    ///
+    /// A public readonly property that writes no set visibility is
+    /// `protected(set)`, and one that writes `public(set)` is public to
+    /// write, the equal set visibility dropped only after the implicit
+    /// one was passed over:
+    ///
+    /// ```php
+    /// class P { public readonly int $a; public public(set) readonly int $b; }
+    /// $p = new P;
+    /// try { $p->a = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $p->b = 2;
+    /// var_dump($p->b);
+    /// ```
+    /// ```expect
+    /// Cannot modify protected(set) readonly property P::$a from global scope
+    /// int(2)
+    /// ```
     fn set_visibility_of(
         &self,
         visibility: Visibility,
         set: Option<Visibility>,
+        is_readonly: bool,
         typed: bool,
         member: &str,
     ) -> Result<Option<Visibility>, CompileError> {
         let Some(set) = set else {
-            return Ok(None);
+            return Ok(implicit_set_visibility(is_readonly, visibility));
         };
         if !typed {
             return Err(self.compile_error(format!(
@@ -6527,7 +6547,7 @@ impl Emit<'_> {
     /// A class `CG(class_table)` holds while the file compiles: one the
     /// engine declared, or one of the file's own that was bound early,
     /// which a class declared by a `DECLARE_CLASS` is not yet.
-    fn bound_class(&self, name: &[u8]) -> Option<&ClassDecl> {
+    pub(super) fn bound_class(&self, name: &[u8]) -> Option<&ClassDecl> {
         let wanted = name.to_ascii_lowercase();
         self.known_classes
             .iter()

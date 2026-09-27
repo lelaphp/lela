@@ -1072,12 +1072,83 @@ fn null_as_scalar(req: &mut Request, mask: u32) -> Result<Option<Value>, Thrown>
 /// g(): Argument #1 ($x) must be of type int|float, string given
 /// ```
 pub(crate) fn declared_type_name(ty: &Type) -> String {
+    type_name_as(ty, "static")
+}
+
+/// `zend_type_to_string_resolved` with a scope, what an argument's
+/// and a return's `TypeError` name the type as
+/// (`zend_verify_type_error_common`): `self` and `parent` the scope's
+/// class and its parent, each up to a NUL as `resolve_class_name` cuts
+/// an anonymous class's, and `static` the called scope. Without a
+/// scope, an unbound closure's, the type is as written.
+///
+/// A trait's `self` and `parent` are the using class's, which the
+/// compiler could not write in:
+///
+/// ```php
+/// trait T { function g(self|int $a): parent|array { return $a; } }
+/// class P {}
+/// class A extends P { use T; function f(): static { return new A; } }
+/// class B extends A {}
+/// try { (new B)->f(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { (new B)->g(""); } catch (TypeError $e) { echo preg_replace('/, called in.*/', '', $e->getMessage()), "\n"; }
+/// try { (new B)->g(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $c = new class { function h(self|string $a) {} };
+/// try { $c->h(null); } catch (TypeError $e) { echo preg_replace('/, called in.*/', '', $e->getMessage()), "\n"; }
+/// ```
+/// ```expect
+/// A::f(): Return value must be of type B, A returned
+/// A::g(): Argument #1 ($a) must be of type A|int, string given
+/// A::g(): Return value must be of type P|array, int returned
+/// class@anonymous(): Argument #1 ($a) must be of type class@anonymous|string, null given
+/// ```
+pub(crate) fn resolved_type_name(req: &Request, scopes: Scopes, ty: &Type) -> String {
+    let Some(own) = scopes.own else {
+        return declared_type_name(ty);
+    };
+    let own_name = req.class_name(own);
+    let parent_name = req.class_parent(own).map(|parent| req.class_name(parent));
+    let resolved = resolve_named(ty, &own_name, parent_name.as_deref());
+    let called = scopes.called.map_or_else(
+        || String::from("static"),
+        |called| String::from_utf8_lossy(&req.class_name_bytes(called)).into_owned(),
+    );
+    type_name_as(&resolved, &called)
+}
+
+/// `resolve_class_name` over each member: `self` the scope's name,
+/// `parent` its parent's where it has one.
+fn resolve_named(ty: &Type, own: &str, parent: Option<&str>) -> Type {
+    let named = |name: &str| Type::Named(php_unit::decl::Name(name.as_bytes().into()));
+    match ty {
+        Type::SelfClass => named(own),
+        Type::ParentClass => parent.map_or(Type::ParentClass, named),
+        Type::Nullable(inner) => Type::Nullable(Box::new(resolve_named(inner, own, parent))),
+        Type::Union(members) => Type::Union(
+            members
+                .iter()
+                .map(|member| resolve_named(member, own, parent))
+                .collect(),
+        ),
+        Type::Intersection(members) => Type::Intersection(
+            members
+                .iter()
+                .map(|member| resolve_named(member, own, parent))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// `zend_type_to_string_resolved` over a type as written, `static`
+/// printed as `called`.
+fn type_name_as(ty: &Type, called: &str) -> String {
     let members: Vec<&Type> = match ty {
         Type::Mixed => return String::from("mixed"),
         Type::Intersection(members) => {
             return members
                 .iter()
-                .map(declared_type_name)
+                .map(|member| type_name_as(member, called))
                 .collect::<Vec<_>>()
                 .join("&");
         }
@@ -1096,15 +1167,14 @@ pub(crate) fn declared_type_name(ty: &Type) -> String {
             Type::SelfClass => parts.push(String::from("self")),
             Type::ParentClass => parts.push(String::from("parent")),
             Type::Iterable => parts.push(String::from("Traversable")),
-            Type::Intersection(_) => parts.push(format!("({})", declared_type_name(member))),
+            Type::Intersection(_) => parts.push(format!("({})", type_name_as(member, called))),
             _ => {}
         }
     }
-    for (member, word) in [
-        (Type::CalledClass, "static"),
-        (Type::Callable, "callable"),
-        (Type::Object, "object"),
-    ] {
+    if has(&Type::CalledClass) {
+        parts.push(String::from(called));
+    }
+    for (member, word) in [(Type::Callable, "callable"), (Type::Object, "object")] {
         if has(&member) {
             parts.push(String::from(word));
         }
