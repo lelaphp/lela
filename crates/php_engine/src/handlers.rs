@@ -1410,9 +1410,10 @@ fn dynamic_call_array(
     };
     let class = object.class();
     let table = req.object_handlers(object.heap());
-    let found = table
-        .get_method(req, object, &method.to_ascii_lowercase())
-        .or_else(|| req.call_trampoline(class, &method, false));
+    let found = match table.get_method(req, object, &method.to_ascii_lowercase())? {
+        Some(function) => Some(function),
+        None => req.call_trampoline(class, &method, false),
+    };
     let Some(function) = found else {
         let written = Value::string(PhpString::new(req, &method)?);
         let thrown = undefined_method(req, class, &written);
@@ -5115,40 +5116,69 @@ pub(crate) fn init_method_call<T: Tier>(
 /// name on the object, the trampoline of its class's `__call` where the
 /// class has no such method (`zend_std_get_method`), or the method on
 /// the receiver its class hands the call to instead
-/// ([`ObjectHandlers::method_receiver`]); `Call to undefined method
-/// X::m()` where none answers. A method the scope may not call is
-/// `__call`'s too where the class has one, and `zend_std_get_method`'s
-/// access rule's `Error` where it has none.
+/// ([`ObjectHandlers::method_receiver`]), found on that receiver the
+/// same way, so a chain of outer iterators hands an unknown method on
+/// to the innermost that has it; `Call to undefined method X::m()`,
+/// naming the object called on, where none answers. A method the scope
+/// may not call is `__call`'s too where the class it was found on has
+/// one, and `zend_std_get_method`'s access rule's `Error` where it has
+/// none. A class's handler that refuses the call raises here.
+///
+/// ```php
+/// class Deep extends ArrayIterator { function deep() { return get_class($this); } }
+/// $it = new CachingIterator(new LimitIterator(new IteratorIterator(new Deep([1, 2])), 0, 1));
+/// echo $it->deep(), "\n";
+/// ```
+/// ```expect
+/// Deep
+/// ```
 fn method_on(
     req: &mut Request,
     object: PhpObject,
     method: &exec::MethodName,
 ) -> Result<(Function, Option<PhpObject>), Thrown> {
     let written = method.written.as_str_bytes().unwrap_or_default().to_vec();
-    let table = req.object_handlers(object.heap());
-    let found = match table.get_method(req, object, &method.lowered) {
-        Some(function) => Some((function, None)),
-        None => match req.call_trampoline(object.class(), &written, false) {
-            Some(trampoline) => Some((trampoline, None)),
-            None => table.method_receiver(req, object).and_then(|inner| {
-                let inner_table = req.object_handlers(inner.heap());
-                inner_table
-                    .get_method(req, inner, &method.lowered)
-                    .map(|function| (function, Some(inner)))
-            }),
-        },
-    };
-    let Some((function, receiver)) = found else {
+    let Some((function, receiver)) = method_found(req, object, &method.lowered, &written)? else {
         return Err(undefined_method(req, object.class(), &method.written));
     };
+    let on = receiver.unwrap_or(object).class();
     let function = if req.method_accessible(function) {
         function
     } else {
-        req.call_trampoline(object.class(), &written, false)
-            .unwrap_or(function)
+        req.call_trampoline(on, &written, false).unwrap_or(function)
     };
     req.check_method_access(function, &written)?;
     Ok((function, receiver))
+}
+
+/// The lookup [`method_on`] holds to its rules: the class's
+/// `get_method`, then its `__call`, then the same on the receiver its
+/// class hands the call to, until a class answers or hands it to none.
+/// The receiver is `None` where the object itself answered.
+fn method_found(
+    req: &mut Request,
+    object: PhpObject,
+    lowered: &[u8],
+    written: &[u8],
+) -> Result<Option<(Function, Option<PhpObject>)>, Thrown> {
+    let mut on = object;
+    let mut receiver = None;
+    loop {
+        let table = req.object_handlers(on.heap());
+        if let Some(function) = table.get_method(req, on, lowered)? {
+            return Ok(Some((function, receiver)));
+        }
+        if let Some(trampoline) = req.call_trampoline(on.class(), written, false) {
+            return Ok(Some((trampoline, receiver)));
+        }
+        match table.method_receiver(req, on) {
+            Some(inner) => {
+                on = inner;
+                receiver = Some(inner);
+            }
+            None => return Ok(None),
+        }
+    }
 }
 
 /// `ZEND_FETCH_THIS` (`Z/Zend/zend_vm_def.h:9214`): `$this` read as a

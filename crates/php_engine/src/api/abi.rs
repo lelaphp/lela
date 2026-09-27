@@ -1014,9 +1014,18 @@ pub trait ObjectHandlers: Send + Sync {
     /// `get_method`, `zend_std_get_method` at `Std`: the method under
     /// the lowered name, by identity, and none where the class has no
     /// entry of that name. The access rule is the caller's, as php's
-    /// `INIT_METHOD_CALL` applies it after the lookup.
-    fn get_method(&self, req: &mut Request, object: PhpObject, lowered: &[u8]) -> Option<Function> {
-        req.method_named(object.class(), lowered)
+    /// `INIT_METHOD_CALL` applies it after the lookup. A class whose
+    /// handler refuses the call itself, as php's answers `NULL` with a
+    /// throwable left pending, answers the `Err`: `spl_recursive_it_get_method`
+    /// over an iterator whose constructor never ran, and
+    /// `incomplete_class_get_method` over any name.
+    fn get_method(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        lowered: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
+        Ok(req.method_named(object.class(), lowered))
     }
 
     /// The object a method `get_method` did not find is looked up on

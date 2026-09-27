@@ -404,7 +404,7 @@ fn release_rows(req: &mut Request, rows: Option<Vec<Value>>) {
 
 /// Whether the class declares `__debugInfo`, php's `ce->__debugInfo`.
 fn has_debug_info(req: &mut Request, object: PhpObject) -> bool {
-    Std.get_method(req, object, b"__debuginfo").is_some()
+    matches!(Std.get_method(req, object, b"__debuginfo"), Ok(Some(_)))
 }
 
 /// `date_object_to_hash`: `date`, and where the time is local its

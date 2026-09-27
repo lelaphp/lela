@@ -771,7 +771,7 @@ fn unset_property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<(
 /// handled property read with deprecations quiet, an object shown as
 /// `(object value omitted)`.
 fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<PhpArray>, Thrown> {
-    if Std.get_method(req, object, b"__debuginfo").is_some() {
+    if matches!(Std.get_method(req, object, b"__debuginfo"), Ok(Some(_))) {
         return Std.get_debug_info(req, object);
     }
     let own = object.props_for(req, PropertyPurpose::ArrayCast)?;
@@ -1890,7 +1890,7 @@ fn ns_list(first: Option<Ns>) -> Vec<Ns> {
 }
 
 fn has_to_string(req: &mut Request, object: PhpObject) -> bool {
-    Std.get_method(req, object, b"__tostring").is_some()
+    matches!(Std.get_method(req, object, b"__tostring"), Ok(Some(_)))
 }
 
 /// The declared type of a handled property, as the stub writes it: a

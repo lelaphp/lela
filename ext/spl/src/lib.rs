@@ -472,6 +472,8 @@ fn float_key(req: &mut Request, f: f64) -> Result<i64, Thrown> {
 /// answers is not one this crate serves.
 fn overridden(req: &mut Request, object: PhpObject, lowered: &[u8]) -> bool {
     Std.get_method(req, object, lowered)
+        .ok()
+        .flatten()
         .and_then(|method| req.function_decl(method))
         .is_some_and(|decl| !decl.file.0.is_empty())
 }
