@@ -283,6 +283,26 @@ impl PhpArray {
         req.array()
     }
 
+    /// `array_init_size(size)`, `zend_new_array(size)`: an empty array
+    /// sized for `size` elements, the size held to
+    /// `zend_hash_check_size`, whose `Possible integer overflow in memory
+    /// allocation` fatal ends the request past `HT_MAX_SIZE` before any
+    /// element is written; the elements' memory is asked for at the
+    /// first write.
+    ///
+    /// ```php
+    /// var_dump(count(array_fill(5, 3, 'x')));
+    /// $a = array_fill(0, 2147483647, 1);
+    /// ```
+    /// ```expect exit=255
+    /// int(3)
+    ///
+    /// Fatal error: Possible integer overflow in memory allocation (2147483647 * 32 + 32) in %s on line 3
+    /// ```
+    pub fn sized(req: &mut Request, size: u32) -> Result<PhpArray, Thrown> {
+        req.array_sized(size, true)
+    }
+
     /// The face over a heap array the engine already holds.
     pub(crate) const fn of(a: Arr) -> PhpArray {
         PhpArray(a)

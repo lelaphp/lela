@@ -601,7 +601,14 @@ fn array_fill(
             "Cannot add element to the array as the next element is already occupied",
         ));
     }
-    let mut out = PhpArray::new(req)?;
+    // `array_init_size`: packed from zero for a start inside the count,
+    // `start + count` slots, and a hash of `count` otherwise.
+    let size = if (0..count).contains(&start) {
+        start + count
+    } else {
+        count
+    };
+    let mut out = PhpArray::sized(req, u32::try_from(size).unwrap_or(u32::MAX))?;
     for at in 0..count {
         req.addref(&value);
         out.set(req, Key::Int(start + at), value)?;

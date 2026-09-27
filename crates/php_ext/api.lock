@@ -636,6 +636,7 @@ values::PhpArray::replace
 values::PhpArray::separate
 values::PhpArray::set
 values::PhpArray::set_next_free
+values::PhpArray::sized
 values::PhpArray::snapshot
 values::PhpArray::snapshot_refs
 values::PhpArray::sort_by
