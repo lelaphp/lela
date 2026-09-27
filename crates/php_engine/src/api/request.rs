@@ -5618,12 +5618,18 @@ impl Request {
             .collect()
     }
 
-    /// [`Request::new_object`] by the class's name; a name the tables do
-    /// not know is class zero, `Stringable`, as the skeleton has it.
+    /// [`Request::new_object`] by the class's name, what `object_init_ex`
+    /// is over a class entry an extension holds. php's caller cannot
+    /// name a class nothing registered, since it hands over the entry
+    /// itself; here a name the bundle does not link is the
+    /// `InternalError` fatal that says which, and no object is made.
     pub(crate) fn new_object_of(&mut self, class_name: &str) -> Result<PhpObject, Thrown> {
-        let class = self
-            .class_named(class_name.as_bytes())
-            .unwrap_or(ClassId(0));
+        let Some(class) = self.class_named(class_name.as_bytes()) else {
+            return Err(crate::api::raising::fatal(
+                self,
+                &format!("InternalError: the class {class_name} is not linked into this engine"),
+            ));
+        };
         self.new_object(class)
     }
 
