@@ -206,6 +206,12 @@ pub(crate) struct FrameState {
     /// a frame a native re-entered the loop on counts the native that
     /// entered it too, and so stands above it.
     pub(crate) calls_below: u32,
+    /// The frame is being popped: `zend_leave_helper` has written
+    /// `EG(current_execute_data) = EX(prev_execute_data)` ahead of
+    /// `i_free_compiled_variables`, so a destructor what it gives up
+    /// serves is called from the caller's activation, and this one is
+    /// on no chain a backtrace reads.
+    pub(crate) leaving: bool,
     /// The `Generator` whose frame this is, php's `EX(return_value)`
     /// under `ZEND_CALL_GENERATOR` (`zend_get_running_generator`): set
     /// by `GENERATOR_CREATE` when it moves the frame into the object,
@@ -551,6 +557,7 @@ impl Vm {
             extra_args: Vec::new(),
             extra_named: Vec::new(),
             calls_below,
+            leaving: false,
             generator: None,
             fast_calls: Vec::new(),
             runtime_cache,
@@ -1415,6 +1422,27 @@ pub(crate) fn free_carried_value(req: &mut Request, frame: FrameRef, code: &OpAr
 /// holds the `error_reporting` a `BEGIN_SILENCE` saved: the word is put
 /// back as `END_SILENCE` would have put it ([`restore_silenced`]), so a
 /// throw under a `@` does not leave the request silenced.
+///
+/// `ZEND_LIVE_NEW` holds the object a `NEW` made; its constructor threw,
+/// so the object is marked as `zend_object_store_ctor_failed` marks it
+/// and its destructor is never served, the operand beside it freed first:
+///
+/// ```php
+/// class Foo { function __construct() { echo "Foo\n"; } function __destruct() { echo "~Foo\n"; } }
+/// class Bar { function __construct() { echo "Bar\n"; throw new Exception; } function __destruct() { echo "~Bar\n"; } }
+/// try { new Foo() + new Bar(); } catch (Exception $e) { echo "caught\n"; }
+/// try { $b = new Bar; } catch (Exception $e) { echo "caught\n"; }
+/// var_dump(isset($b));
+/// ```
+/// ```expect
+/// Foo
+/// Bar
+/// ~Foo
+/// caught
+/// Bar
+/// caught
+/// bool(false)
+/// ```
 pub(crate) fn cleanup_live_vars(
     req: &mut Request,
     frame: FrameRef,
@@ -1439,8 +1467,17 @@ pub(crate) fn cleanup_live_vars(
             crate::handlers::ForeachVar::iterator_del(req, held);
         }
         let garbage = req.take_slot(frame, slot);
-        if range.kind == php_unit::LiveKind::Silence {
-            restore_silenced(req, &garbage);
+        match range.kind {
+            php_unit::LiveKind::Silence => restore_silenced(req, &garbage),
+            // `zend_object_store_ctor_failed`: the object whose
+            // constructor threw is marked as though its destructor had
+            // been served, so releasing it serves none.
+            php_unit::LiveKind::New => {
+                if let Some(object) = garbage.as_object() {
+                    object.heap().set_destructor_called(true);
+                }
+            }
+            php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop | php_unit::LiveKind::Rope => {}
         }
         req.release(garbage);
     }

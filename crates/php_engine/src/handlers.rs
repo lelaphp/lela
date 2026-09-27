@@ -1790,7 +1790,15 @@ fn send_by_ref(
             "InternalError: ZEND_SEND_REF over an operand php compiles no write over",
         )));
     };
-    match bound_at(req, at) {
+    let bound = bound_at(req, at);
+    // `FREE_OP1_VAR_PTR()`: a `VAR` holding the `IS_INDIRECT` a fetch
+    // left owns nothing, and one holding the cell a write fetch fell
+    // back to `read_property` for (a `&get` hook's) gives its owner up,
+    // the argument holding its own.
+    if op.op1_type == OperandKind::Var {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    }
+    match bound {
         Ok(bound) => place_argument(req, frame, slot, bound),
         Err(thrown) => threw(req, frame, &thrown),
     }
@@ -1820,20 +1828,10 @@ fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
 /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past the
 /// declared ones.
 fn send_mode(req: &Request, number: u32) -> (bool, bool) {
-    let Some(function) = req.vm().building_call_function() else {
-        return (false, false);
-    };
-    let Some(decl) = req.function_decl(function) else {
-        return (false, false);
-    };
-    let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
-    let variadic = decl.parameters.last().filter(|last| last.variadic);
-    decl.parameters
-        .get(at)
-        .filter(|parameter| !parameter.variadic)
-        .or(variadic)
-        .map_or((false, false), |parameter| {
-            (parameter.by_ref, parameter.by_ref && parameter.prefer_ref)
+    req.vm()
+        .building_call_function()
+        .map_or((false, false), |function| {
+            req.arg_send_mode(function, number)
         })
 }
 
@@ -2528,6 +2526,23 @@ pub(crate) fn send_user<T: Tier>(
 /// call_user_func_array(): Argument #2 ($args) must be of type array, string given
 /// array_slice(): Argument #3 ($length) must be of type ?int, array given
 /// ```
+///
+/// A reference among the elements reaches a `__call` as the reference
+/// it is ("don't separate references for __call"), and any other
+/// callee's by-value parameter as its value:
+///
+/// ```php
+/// function inc(&$x) { $x++; }
+/// class P { function __call($n, $a) { call_user_func_array('inc', $a); } }
+/// function v($x) { $x = 5; }
+/// $arg = 1;
+/// call_user_func_array([new P, 'bar'], [&$arg]);
+/// call_user_func_array('v', [&$arg]);
+/// var_dump($arg);
+/// ```
+/// ```expect
+/// int(2)
+/// ```
 pub(crate) fn send_array<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -2688,7 +2703,17 @@ fn send_array_element(
             element
         }
     } else {
-        let value = element.deref();
+        // "don't separate references for __call": a trampoline takes
+        // the reference as it is, every other callee its value.
+        let value = if req
+            .vm()
+            .building_call_function()
+            .is_some_and(|function| req.via_trampoline(function))
+        {
+            element
+        } else {
+            element.deref()
+        };
         req.addref(&value);
         value
     };
@@ -3463,10 +3488,26 @@ pub(crate) fn recv<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op:
 /// object against a class the type names (`instanceof_function`), then
 /// `zend_verify_scalar_type_hint` under the caller's `strict_types`
 /// ([`crate::api::coerce::scalar_type_hint`]). A coercion replaces the
-/// argument where it stands, as php converts the zval in the frame; what
-/// does not convert is `zend_verify_arg_error`, the `TypeError` naming
-/// the function, the parameter, the declared type, the value's kind and,
+/// argument where it stands, as php converts the zval in the frame, and
+/// a by-reference parameter's in the cell it is bound to; what does not
+/// convert is `zend_verify_arg_error`, the `TypeError` naming the
+/// function, the parameter, the declared type, the value's kind and,
 /// where the caller is user code, its file and line.
+///
+/// ```php
+/// function to_int(int &$x) {}
+/// function to_string(string &$x) {}
+/// class C { public float $f = 1.5; }
+/// $x = 1.0; to_int($x); var_dump($x);
+/// to_string($x); var_dump($x);
+/// $c = new C; $r = &$c->f;
+/// try { to_int($r); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "1"
+/// to_int(): Argument #1 ($x) must be of type int, float given, called in %s on line 8
+/// ```
 fn verify_arg_type(
     req: &mut Request,
     frame: FrameRef,
@@ -3474,7 +3515,7 @@ fn verify_arg_type(
     slot: u32,
 ) -> Result<(), Thrown> {
     let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
-    let argument = req.slot(frame, slot).deref();
+    let argument = req.slot(frame, slot);
     if let Some(coerced) = verified_arg(req, frame, number, at, &argument)? {
         let previous = req.set_slot(frame, slot, coerced);
         req.release(previous);
@@ -3488,14 +3529,19 @@ fn verify_arg_type(
 /// collects, while `number` is the argument's own position, which is
 /// what php's error says. `Some` is the value the coercion outside
 /// `strict_types` made of it, which the caller writes where the value
-/// stood; `None` is a value the type contains as it is.
+/// stood; `None` is a value the type contains as it is, or a reference,
+/// whose coercion is written into the cell here, as `zend_check_type`
+/// converts the value the reference holds. A cell some typed property
+/// is a source of converts nothing ("We cannot have conversions for
+/// typed refs"), so what the type does not hold is the error.
 fn verified_arg(
     req: &mut Request,
     frame: FrameRef,
     number: u32,
     at: usize,
-    argument: &Value,
+    raw: &Value,
 ) -> Result<Option<Value>, Thrown> {
+    let argument = &raw.deref();
     let function = req.vm().at(frame).and_then(|state| state.function);
     let Some(ty) = function
         .and_then(|function| req.function_decl(function))
@@ -3508,8 +3554,17 @@ fn verified_arg(
         return Ok(None);
     }
     let strict = req.caller_strict_types(frame);
-    if let Some(coerced) = crate::api::coerce::scalar_type_hint(req, argument, ty.mask(), strict)? {
-        return Ok(Some(coerced));
+    let cell = raw.as_php_ref().copied();
+    let typed_cell = cell.is_some_and(|cell| !req.ref_type_sources(cell.heap()).is_empty());
+    if !typed_cell
+        && let Some(coerced) =
+            crate::api::coerce::scalar_type_hint(req, argument, ty.mask(), strict)?
+    {
+        let Some(cell) = cell else {
+            return Ok(Some(coerced));
+        };
+        req.reference_set(cell.heap(), coerced);
+        return Ok(None);
     }
     Err(arg_type_error(req, frame, number, at, &ty, argument))
 }
@@ -4832,7 +4887,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     } else {
         php_unit::decl::HookKind::Set
     };
-    let hook = req.hooked(parent, &name).and_then(|hooked| match kind {
+    let hook = req.row_hooked(parent, &name).and_then(|hooked| match kind {
         php_unit::decl::HookKind::Get => hooked.get,
         php_unit::decl::HookKind::Set => hooked.set,
     });
@@ -6544,6 +6599,27 @@ fn fetch_static_prop(
 /// int(-1)
 /// int(-1)
 /// ```
+///
+/// A `&__get` answers with its reference, and the temporary holds the
+/// value it names, so a `foreach` over it frees what it took and not
+/// the array the reference keeps:
+///
+/// ```php
+/// class A { private $k = []; function &__get($n) { return $this->k[$n]; } }
+/// $a = new A; $b = &$a->arr; $b = [1]; $b[] = 2;
+/// foreach ($a->arr as $v) { echo $v, "\n"; }
+/// var_dump($b);
+/// ```
+/// ```expect
+/// 1
+/// 2
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// ```
 pub(crate) fn fetch_obj_r<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -6661,8 +6737,11 @@ fn fetch_obj(
     };
     name.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    // `ZVAL_COPY_DEREF`, or `zend_unwrap_reference` where the slot
+    // answered into the temporary: a `&__get` hands back its reference,
+    // and the temporary holds the value, never the cell.
     let value = match read {
-        Ok(value) => value,
+        Ok(value) => req.unwrap_reference(value),
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let slot = exec::temporary_slot(code, op.out);
@@ -6771,6 +6850,22 @@ fn fetch_obj(
 /// Attempt to assign property "firstChild" on null
 /// <?xml version="1.0"?>
 /// <r>new</r>
+/// ```
+///
+/// What a `&__get` answers from a local is a reference nothing else
+/// holds, which the `VAR` takes as the value it names (`ZVAL_UNREF`),
+/// so the write through it lands on the object:
+///
+/// ```php
+/// class Foo { private $bar; function __construct() { $this->bar = new Bar; }
+///     function &__get($k) { $bar = $this->bar; return $bar; } }
+/// class Bar { public $on = []; }
+/// $foo = new Foo;
+/// $foo->bar->on[] = 1;
+/// var_dump(count($foo->bar->on));
+/// ```
+/// ```expect
+/// int(1)
 /// ```
 pub(crate) fn fetch_obj_w<T: Tier>(
     req: &mut Request,
@@ -7427,6 +7522,12 @@ fn fetch_obj_read(
     };
     let read = table.read_property(req, object, name, mode);
     let value = match read {
+        // `if (Z_ISREF_P(ptr) && Z_REFCOUNT_P(ptr) == 1) ZVAL_UNREF(ptr)`:
+        // a reference nothing else holds, a `&__get`'s local, is the
+        // value it names.
+        Ok(value) if value.as_php_ref().is_some() && value.refcount() == 1 => {
+            req.unwrap_reference(value)
+        }
         Ok(value) => value,
         Err(thrown) => {
             let thrown = freeing_container(req, frame, code, op, thrown);
@@ -10367,10 +10468,15 @@ pub(crate) fn assign_ref<T: Tier>(
 /// `zend_assign_to_property_reference` over a name the class serves
 /// itself ([`PropertyFound::Served`]): what `read_property` answered is
 /// given up and the throw is `Cannot assign by reference to overloaded
-/// object`, or the throw the read raised (`Z_ISERROR_P`).
+/// object`, or the throw the read raised (`Z_ISERROR_P`). The read is
+/// `zend_fetch_property_address`'s `BP_VAR_W`, so a value `__get`
+/// answered is php's notice that the modification has no effect first.
 fn overloaded_reference(req: &mut Request, object: PhpObject, name: &[u8]) -> Thrown {
+    if let Some(thrown) = req.hooked_reference_refusal(object, name) {
+        return thrown;
+    }
     let table = req.object_handlers(object.heap());
-    match table.read_property(req, object, name, PropertyRead::Warning) {
+    match table.read_property(req, object, name, PropertyRead::Write) {
         Ok(value) => {
             req.release(value);
             crate::api::raising::throw(
@@ -10407,6 +10513,19 @@ fn overloaded_reference(req: &mut Request, object: PhpObject, name: &[u8]) -> Th
 /// ```expect
 /// Cannot assign by reference to overloaded object
 /// string(1) "a"
+/// ```
+///
+/// A name the class's `__get` answers is read under `BP_VAR_W`, php's
+/// notice ahead of the `Error`:
+///
+/// ```php
+/// class A { public $q = 3; function __get($n) { return $this->q; } }
+/// $a = new A; $b = 1;
+/// try { $a->w = &$b; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Notice: Indirect modification of overloaded property A::$w has no effect in %s on line 4
+/// Cannot assign by reference to overloaded object
 /// ```
 ///
 /// ```php
@@ -10884,8 +11003,10 @@ fn assign_property(
                 Ok(value) => value,
                 Err(thrown) => return Ok(Err(thrown)),
             };
-            write_out(req, frame, code, op, &value);
-            req.assign_declared_slot(object.heap(), slot, value);
+            match req.assign_declared_slot(object.heap(), slot, value, strict) {
+                Ok(pair) => landed_out(req, frame, code, op, pair),
+                Err(thrown) => return Ok(Err(thrown)),
+            }
             // `Z_PROP_FLAG_P(property_val) &= ~IS_PROP_REINITABLE`: a
             // readonly property `__clone` wrote is locked again.
             object
@@ -10894,9 +11015,10 @@ fn assign_property(
             Ok(Ok(()))
         }
         Some((slot, false)) => {
-            write_out(req, frame, code, op, &value);
-            req.assign_declared_slot(object.heap(), slot, value);
-            Ok(Ok(()))
+            let strict = req.frame_strict_types(frame);
+            Ok(req
+                .assign_declared_slot(object.heap(), slot, value, strict)
+                .map(|pair| landed_out(req, frame, code, op, pair)))
         }
         None => {
             let Some(key) = name.as_php_string().copied() else {
@@ -11115,18 +11237,16 @@ pub(crate) fn assign_static_prop<T: Tier>(
         req.release(value);
         return threw(req, frame, &thrown);
     }
-    write_out(req, frame, code, op, &value);
     // `zend_assign_to_typed_prop` under this frame's
     // `EX_USES_STRICT_TYPES()`, which the write itself serves
     // ([`Request::set_static_property`]): a typed slot takes the value
     // the declared type accepts, coerced by the weak rule where the file
     // is not strict, and php's `TypeError` where it neither satisfies
-    // nor coerces. The temporary already names the value php's
-    // `RETURN_VALUE_USED` copies, which php writes before the verify
-    // too.
+    // nor coerces. `RETURN_VALUE_USED` copies what landed, after it.
     let strict = req.frame_strict_types(frame);
-    if let Err(thrown) = req.set_static_slot(declaring, &property, &name, value, strict) {
-        return threw(req, frame, &thrown);
+    match req.set_static_slot(declaring, &property, &name, value, strict) {
+        Ok(pair) => landed_out(req, frame, code, op, pair),
+        Err(thrown) => return threw(req, frame, &thrown),
     }
     req.vm_mut().jump(frame, at.saturating_add(2));
     Ok(Stepped::Same(frame))
@@ -11330,6 +11450,22 @@ fn vacate(req: &mut Request, at: Option<php_heap::ZvalRef>) {
 /// Cannot assign string to property C::$n of type int
 /// int(1)
 /// ```
+///
+/// A slot bound to a cell a typed property is a source of is
+/// `zend_binary_assign_op_typed_ref`, held to the cell's types whatever
+/// the slot's own declaration:
+///
+/// ```php
+/// class T { public static int $i = 123; public static $p; }
+/// T::$p = &T::$i;
+/// try { T::$p .= "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// T::$p .= "4";
+/// var_dump(T::$i);
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property T::$i of type int
+/// int(1234)
+/// ```
 pub(crate) fn assign_static_prop_op<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -11411,6 +11547,19 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let strict = req.frame_strict_types(frame);
+    // `ZEND_REF_HAS_TYPE_SOURCES` ahead of the property's own type:
+    // `zend_binary_assign_op_typed_ref` over the cell the slot holds.
+    if let Some(cell) = req
+        .static_slot_cell(declaring, &name)
+        .filter(|cell| !req.ref_type_sources(cell.heap()).is_empty())
+    {
+        if let Err(thrown) = req.assign_to_reference(cell.heap(), stepped, strict) {
+            return threw(req, frame, &thrown);
+        }
+        write_out(req, frame, code, op, &cell.get());
+        req.vm_mut().jump(frame, at.saturating_add(2));
+        return Ok(Stepped::Same(frame));
+    }
     let stepped = match ty {
         None => stepped,
         Some(ty) => match verified_op(req, &stepped, &ty, declaring, &name, strict) {
@@ -12781,6 +12930,21 @@ fn binary_assign_op_obj_dim(
 /// string(3) "100"
 /// int(1)
 /// ```
+///
+/// A slot bound to a cell a typed property is a source of is
+/// `zend_binary_assign_op_typed_ref`:
+///
+/// ```php
+/// $a = new class { public int $foo = 1; public $_; };
+/// $a->_ = &$a->foo;
+/// try { $a->_ .= "e50"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($a->_ .= "1", $a->foo);
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property class@anonymous::$foo of type int
+/// int(11)
+/// int(11)
+/// ```
 pub(crate) fn assign_obj_op<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -13030,10 +13194,38 @@ fn step_slot(
             return Ok(Err(thrown));
         }
     };
-    if !typed {
-        write_out(req, frame, code, op, &stepped);
-        req.assign_declared_slot(object.heap(), slot, stepped);
-        return Ok(Ok(()));
+    land_step(req, frame, code, op, object, (slot, typed), bytes, stepped)
+}
+
+/// What a compound step made, written back into the declared slot it
+/// read. `ZEND_REF_HAS_TYPE_SOURCES` stands ahead of the property's own
+/// type: a slot holding a cell some typed property is a source of is
+/// `zend_binary_assign_op_typed_ref`, which the slot's write serves
+/// ([`Request::assign_declared_slot`]); only a slot holding none is
+/// held to its own declaration first, `zend_binary_assign_op_typed_prop`,
+/// under this frame's own regime. What landed is what the temporary
+/// takes.
+#[allow(clippy::too_many_arguments)] // the handler's frame, the slot and the value, each one fact
+fn land_step(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    object: PhpObject,
+    (slot, typed): (u32, bool),
+    bytes: &[u8],
+    stepped: Value,
+) -> Result<Result<(), Thrown>, Fatal> {
+    let bound = object
+        .heap()
+        .slot(slot)
+        .as_reference()
+        .is_some_and(|cell| cell.sources() != 0);
+    let strict = req.caller_strict_types(frame);
+    if !typed || bound {
+        return Ok(req
+            .assign_declared_slot(object.heap(), slot, stepped, strict)
+            .map(|pair| landed_out(req, frame, code, op, pair)));
     }
     let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
         req.release(stepped);
@@ -13050,9 +13242,23 @@ fn step_slot(
             return Ok(Err(thrown));
         }
     };
+    Ok(req
+        .assign_declared_slot(object.heap(), slot, landed, strict)
+        .map(|pair| landed_out(req, frame, code, op, pair)))
+}
+
+/// What a write answered written into the temporary `out` names, then
+/// what the place held given up, php's `GC_DTOR(garbage)` after the
+/// `ZVAL_COPY` into `result`.
+fn landed_out(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (landed, garbage): (Value, Value),
+) {
     write_out(req, frame, code, op, &landed);
-    req.assign_declared_slot(object.heap(), slot, landed);
-    Ok(Ok(()))
+    req.release(garbage);
 }
 
 /// `ZEND_ASSIGN_OBJ_OP` over the place `zend_std_get_property_ptr_ptr`
@@ -13599,8 +13805,10 @@ fn incdec_property(
         if step.post { &held } else { &landed },
     );
     req.release(held);
-    req.assign_declared_slot(object.heap(), slot, landed);
-    Ok(Ok(()))
+    let strict = req.frame_strict_types(frame);
+    Ok(req
+        .assign_declared_slot(object.heap(), slot, landed, strict)
+        .map(|(_, garbage)| req.release(garbage)))
 }
 
 /// The property step over a slot bound to a reference other properties
@@ -13676,8 +13884,14 @@ fn typed_step(
             step.increment,
         );
         req.release(stepped);
-        req.assign_declared_slot(object.heap(), slot, limit);
-        return Ok(Err(thrown));
+        // The slot holds no cell another property types, which the
+        // caller took to `zend_incdec_typed_ref` first, so the store is
+        // the property's own.
+        let strict = req.frame_strict_types(frame);
+        let stored = req.assign_declared_slot(object.heap(), slot, limit, strict);
+        return Ok(stored
+            .map(|(_, garbage)| req.release(garbage))
+            .and(Err(thrown)));
     }
     // A refusal is `ZVAL_COPY_VALUE(var_ptr, copy)`: the slot keeps
     // what it held.
@@ -16139,17 +16353,14 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
         Ok(None) => return Ok(Ok(None)),
         Err(thrown) => return Ok(Err(thrown)),
     };
+    // A `&get` hook's answer is the walk's own owner of the cell, as an
+    // iterator's element is.
+    let owned = matches!(walked, crate::api::request::Walked::Hooked(..));
     let cell = match req.walked_reference(object, walked) {
         Ok(cell) => cell,
         Err(thrown) => return Ok(Err(thrown)),
     };
-    Ok(fe_key_kept(req, op, key).map(|key| {
-        Some(BoundRw {
-            key,
-            cell,
-            owned: false,
-        })
-    }))
+    Ok(fe_key_kept(req, op, key).map(|key| Some(BoundRw { key, cell, owned })))
 }
 
 /// `FE_FETCH_RW`'s iterator arm (`Z/Zend/zend_vm_def.h:7358`): the
@@ -18684,6 +18895,22 @@ fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
 /// ```expect exit=3
 /// a
 /// ```
+///
+/// The variable the clause names is written as an assignment writes
+/// it, strictly: bound to a typed property's cell, a throwable the type
+/// refuses is php's `TypeError`, raised from the clause.
+///
+/// ```php
+/// class T { public int $i = 42; }
+/// $t = new T; $ref = &$t->i;
+/// try { try { throw new Exception("ex"); } catch (Exception $ref) { echo "no\n"; } }
+/// catch (TypeError $e) { echo $e->getMessage(), " on line ", $e->getLine(), "\n"; }
+/// var_dump($t->i);
+/// ```
+/// ```expect
+/// Cannot assign Exception to reference held by property T::$i of type int on line 4
+/// int(42)
+/// ```
 pub(crate) fn catch<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -18712,7 +18939,13 @@ pub(crate) fn catch<T: Tier>(
     if op.out_type == OperandKind::Cv {
         let value = caught.as_value();
         if let Some(cell) = req.slot(frame, op.out).as_php_ref() {
-            req.reference_set(cell.heap(), value);
+            // `zend_assign_to_variable(ex, &tmp, IS_TMP_VAR, /* strict */
+            // 1)`: a cell a typed property is a source of takes the
+            // throwable only where every type holds it, with no
+            // coercion, and refuses it with php's `TypeError` otherwise.
+            if let Err(thrown) = req.assign_to_reference(cell.heap(), value, true) {
+                return threw(req, frame, &thrown);
+            }
         } else {
             let garbage = req.set_slot(frame, op.out, value);
             req.release(garbage);

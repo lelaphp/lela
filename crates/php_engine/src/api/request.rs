@@ -1237,6 +1237,11 @@ pub struct Request {
     /// method and name, two function numbers each
     /// ([`crate::trampoline`]).
     trampolines: Vec<crate::trampoline::CallTrampoline>,
+    /// `EG(fake_scope)`: the class a write that names its own scope
+    /// stands in while it lasts, as `zend_update_property_ex(scope, ...)`
+    /// sets it, which the property placement reads ahead of the executed
+    /// scope (`get_fake_or_executed_scope`).
+    fake_scope: Option<ClassId>,
     /// `CONST_IS_RECURSIVE` over the constants a deprecation is being
     /// worded for, so an attribute naming the constant it marks reads it
     /// without raising again (GH-18463): the declaring class and the
@@ -1643,6 +1648,11 @@ struct DeclaredSlot {
     typed: bool,
     /// `ZEND_ACC_READONLY`, which the set visibility's refusal names.
     readonly: bool,
+    /// `property_info->prototype->ce`: the class that first declared the
+    /// property up the chain, through every redeclaration that was not
+    /// over a private one, which a protected property's access is
+    /// measured against (`is_protected_compatible_scope`).
+    root: ClassId,
 }
 
 /// What a write to a typed declared slot reads off its
@@ -1805,6 +1815,7 @@ impl Request {
             enums_updated: Vec::new(),
             enum_functions: Vec::new(),
             trampolines: Vec::new(),
+            fake_scope: None,
             deprecating: Vec::new(),
             statics: Vec::new(),
             class_data: std::collections::HashMap::new(),
@@ -2186,9 +2197,25 @@ impl Request {
     /// them while the frame still stands on both stacks, as php's
     /// `vm_stack_top` is only put back after them, so a destructor one
     /// of them serves pushes its frames above it; then
-    /// `zend_vm_stack_free_call_frame`.
+    /// `zend_vm_stack_free_call_frame`. The frame is off the chain a
+    /// backtrace reads from the first release on, as php's
+    /// `EG(current_execute_data)` is the caller's by then, so a
+    /// destructor served from here is called from the caller's line:
+    ///
+    /// ```php
+    /// class D { function __destruct() { debug_print_backtrace(); } }
+    /// function f($x) { $d = new D; }
+    /// f(new D);
+    /// ```
+    /// ```expect
+    /// #0 %s(4): D->__destruct()
+    /// #0 %s(4): D->__destruct()
+    /// ```
     pub(crate) fn pop_frame(&mut self) {
         let frame = self.stack.current();
+        if let Some(state) = self.vm.at_mut(frame) {
+            state.leaving = true;
+        }
         let slots = self.stack.frame(frame).map_or(0, php_heap::Frame::len);
         let cvs = self
             .vm
@@ -2598,7 +2625,48 @@ impl Request {
         self.serve_call(function, None, None, None, arguments, extra_named)
     }
 
+    /// `zend_call_function` (`Z/Zend/zend_execute_API.c:806`), which every
+    /// `serve_*` ends in: the callee pushed on a call of its own with the
+    /// arguments as its walk of `fci->params` places them. The call
+    /// allocates nothing the request's memory counts beside the frame,
+    /// so the first `__toString` a native serves costs what php's does:
+    ///
+    /// ```php
+    /// class Foo { function __toString(): string { return 'Foo'; } }
+    /// $f = new Foo;
+    /// $s = memory_get_usage(); md5($f); array_map(fn($x) => $x, [1]);
+    /// var_dump(memory_get_usage() - $s);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     fn serve_call(
+        &mut self,
+        function: Function,
+        this: Option<PhpObject>,
+        called_scope: Option<ClassId>,
+        closure: Option<PhpObject>,
+        arguments: &[Value],
+        extra_named: &[(PhpString, Value)],
+    ) -> Result<Value, Thrown> {
+        // `EG(fake_scope) = NULL` for the call and put back after it: a
+        // destructor or a `__toString` a scoped write serves stands in its
+        // own scope.
+        let fake = self.fake_scope.take();
+        let served = self.serve_call_body(
+            function,
+            this,
+            called_scope,
+            closure,
+            arguments,
+            extra_named,
+        );
+        self.fake_scope = fake;
+        served
+    }
+
+    /// [`Request::serve_call`] with no scope a write named standing.
+    fn serve_call_body(
         &mut self,
         function: Function,
         this: Option<PhpObject>,
@@ -2613,10 +2681,20 @@ impl Request {
             crate::attributes::deprecated_function(self, function)?;
         }
         let wrapped = self.values_for_references(function, arguments)?;
-        let name = self.declared_name(function);
-        let name = self.interned(name.as_bytes())?;
+        let via_trampoline = self.via_trampoline(function);
         let mut sent = arguments.to_vec();
         for (at, argument) in sent.iter_mut().enumerate() {
+            // A reference handed to a parameter taking a value is
+            // followed, "don't separate references for __call" but for a
+            // trampoline, which takes it as it is.
+            if !via_trampoline
+                && argument.as_php_ref().is_some()
+                && !self
+                    .arg_send_mode(function, u32::try_from(at + 1).unwrap_or(u32::MAX))
+                    .0
+            {
+                *argument = argument.deref();
+            }
             self.addref(argument);
             if wrapped.contains(&at) {
                 // `Z_TRY_ADDREF_P(arg); ZVAL_NEW_REF(param, arg)`: the
@@ -2636,9 +2714,13 @@ impl Request {
         let may_have_undef = sent
             .iter()
             .any(|argument| matches!(argument.as_ref(), ValueRef::Undef));
+        // `zend_call_function` names the callee by
+        // `func->common.function_name`, which the function carries; no
+        // constant spelled it, so the call carries no name of its own
+        // and interns none into the request's memory.
         let call = CallState {
             function,
-            name: Some(name),
+            name: None,
             count: sent.len(),
             arguments: sent,
             this,
@@ -2738,6 +2820,34 @@ impl Request {
             }
         }
         Ok(wrapped)
+    }
+
+    /// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over
+    /// `function`: whether the parameter numbered `number` takes its
+    /// argument by reference, and whether only where it can
+    /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past
+    /// the declared ones.
+    pub(crate) fn arg_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
+        let Some(decl) = self.function_decl(function) else {
+            return (false, false);
+        };
+        let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+        let variadic = decl.parameters.last().filter(|last| last.variadic);
+        decl.parameters
+            .get(at)
+            .filter(|parameter| !parameter.variadic)
+            .or(variadic)
+            .map_or((false, false), |parameter| {
+                (parameter.by_ref, parameter.by_ref && parameter.prefer_ref)
+            })
+    }
+
+    /// `fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE`: `function` is the
+    /// trampoline a call to a name the class serves through `__call` or
+    /// `__callStatic` resolved to.
+    pub(crate) fn via_trampoline(&self, function: Function) -> bool {
+        self.trampoline_of(function)
+            .is_some_and(|(_, served)| served == crate::trampoline::Served::Trampoline)
     }
 
     /// `zend_param_must_be_ref` (`Z/Zend/zend_execute.c`): the warning
@@ -3284,6 +3394,64 @@ impl Request {
     /// A native with no scope, `constant()` or `get_class()` called
     /// from a method, is walked past, so the scope a native reads is
     /// its caller's; a native method's is its own class.
+    /// `get_fake_or_executed_scope`: the scope a property is placed and
+    /// its visibility measured from, the scope a write named for itself
+    /// ([`Request::write_property_as_declared`]) or the executed one.
+    pub(crate) fn property_scope(&self) -> Option<ClassId> {
+        self.fake_scope.or_else(|| self.executed_scope())
+    }
+
+    /// `zend_update_property_ex(prop_info->ce, ...)`, what an engine or a
+    /// native write names a property by: the write made in the scope of
+    /// the class whose declaration the object's table holds for `name`,
+    /// so a private property of a parent class, `Exception::$trace` on a
+    /// `TypeError`, is its slot and not a dynamic property; a name no
+    /// class declared is written as the executed scope writes it.
+    ///
+    /// ```php
+    /// class C { public $p { get { return intdiv(1, 0); } } }
+    /// try { (new C)->p; } catch (DivisionByZeroError $e) { var_dump(count($e->getTrace()), array_key_exists("\0Error\0trace", (array) $e)); }
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// bool(true)
+    /// ```
+    pub(crate) fn write_property_as_declared(
+        &mut self,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let table = self.object_handlers(object.heap());
+        let bytes = name.as_bytes().to_vec();
+        self.in_declared_scope(object.class(), &bytes, |req| {
+            table.write_property(req, object, name, value)
+        })
+    }
+
+    /// `f` called with `EG(fake_scope)` the class whose declaration
+    /// `class`'s table holds for `name`, as `zend_update_property_ex(ce,
+    /// ...)` makes a write, and put back after it; a name no class
+    /// declared leaves the scope as it stands.
+    pub(crate) fn in_declared_scope<R>(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let declaring = self
+            .placed_properties(class)
+            .iter()
+            .rev()
+            .find(|(_, p)| &*p.name.0 == name)
+            .map(|(declaring, _)| *declaring);
+        let saved = self.fake_scope;
+        self.fake_scope = declaring.or(saved);
+        let done = f(self);
+        self.fake_scope = saved;
+        done
+    }
+
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, closure, carried) = match link {
@@ -3420,16 +3588,60 @@ impl Request {
     /// `zend_check_protected` relates to it. A function that is no
     /// method, and one the tables have no declaration for, is anyone's.
     pub(crate) fn method_accessible(&self, function: Function) -> bool {
-        let Some(class) = self.method_class(function) else {
-            return true;
-        };
-        let scope = self.executed_scope();
-        match self.method_visibility(function) {
-            Visibility::Public => true,
-            _ if scope == Some(class) => true,
-            Visibility::Private => false,
-            Visibility::Protected => self.check_protected(class, scope),
+        self.method_accessible_from(function, self.executed_scope())
+    }
+
+    /// `zend_get_function_root_class`: the class of the method's
+    /// `common.prototype` where it has one, the method's own class
+    /// otherwise, which is what a protected method is reached through. A
+    /// method overriding one a parent declares public or protected, or
+    /// abstract, has the parent's for its prototype, or the one that
+    /// method has (`do_inheritance_check_on_method`); a constructor has
+    /// one only where the prototype it would take is abstract.
+    ///
+    /// ```php
+    /// abstract class Base { abstract protected function __clone(); abstract protected function m(); }
+    /// class Boy extends Base { protected function __clone() { echo "Boy::__clone\n"; } protected function m() { echo "Boy::m\n"; } }
+    /// class Kid extends Base {
+    ///     public function __construct() { $b = new Boy; $b = clone $b; $b->m(); }
+    ///     public function __clone() {} protected function m() {}
+    /// }
+    /// new Kid;
+    /// ```
+    /// ```expect
+    /// Boy::__clone
+    /// Boy::m
+    /// ```
+    fn function_root_class(&self, function: Function) -> Option<ClassId> {
+        let class = self.method_class(function)?;
+        let lowered = self.declared_name(function).to_ascii_lowercase();
+        let mut root = class;
+        let mut root_abstract = self.method_decl(function).is_some_and(|m| m.is_abstract);
+        for _ in 0..64 {
+            let Some(overridden) = self
+                .class_parent(root)
+                .and_then(|parent| self.method_named(parent, lowered.as_bytes()))
+            else {
+                break;
+            };
+            let Some(decl) = self.method_decl(overridden) else {
+                break;
+            };
+            // "The parent method is private and not an abstract": no
+            // prototype.
+            if decl.visibility == Visibility::Private && !decl.is_abstract {
+                break;
+            }
+            let Some(declaring) = self.method_class(overridden) else {
+                break;
+            };
+            root = declaring;
+            root_abstract = decl.is_abstract;
         }
+        if lowered == "__construct" && !root_abstract {
+            return Some(class);
+        }
+        Some(root)
     }
 
     /// `fn_flags & (ZEND_ACC_PUBLIC|ZEND_ACC_PROTECTED|ZEND_ACC_PRIVATE)`:
@@ -4033,7 +4245,9 @@ impl Request {
                     }
                     taken += 1;
                 }
-                links.push(Link::Frame(stack, at, state));
+                if !state.leaving {
+                    links.push(Link::Frame(stack, at, state));
+                }
             }
             while taken < calls.len() {
                 if calls[taken].stage == exec::CallStage::Serving {
@@ -5638,6 +5852,15 @@ impl Request {
             .and_then(|i| u32::try_from(i).ok())
     }
 
+    /// The dynamic table's entry for `name`, a view; none where the
+    /// object has no table or the table no such key.
+    pub(crate) fn dynamic_prop(o: Obj, name: &[u8]) -> Option<Value> {
+        o.properties()?
+            .iter()
+            .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
+            .map(|(_, z)| Value::of_zval(z))
+    }
+
     /// A property read, `zend_std_read_property` without the handler
     /// in the way: the declared slot, `None` while nothing wrote it, or
     /// the dynamic table's entry. A view, no owner taken.
@@ -5652,39 +5875,12 @@ impl Request {
             .map(|(_, z)| Value::of_zval(z))
     }
 
-    /// The declared instance property `name` of `class` the executed
-    /// scope reaches, as `zend_get_property_offset` picks it: its slot,
-    /// the class that declared it and the declaration. The last
-    /// declaration of the name in slot order stands, save that one
-    /// shadowing a parent's private property of the name
-    /// (`ZEND_ACC_CHANGED`) is, from that parent's scope, the parent's
-    /// own private slot (`zend_get_parent_private_property`).
-    fn placed_property(&self, class: ClassId, name: &[u8]) -> Option<(u32, ClassId, PropertyDecl)> {
-        let mut placed = self.placed_properties(class);
-        let mut at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
-        if let Some(scope) = self.executed_scope()
-            && placed
-                .get(at)
-                .is_some_and(|(declaring, _)| *declaring != scope)
-            && let Some(own) = placed.iter().position(|(declaring, p)| {
-                *declaring == scope && p.visibility == Visibility::Private && &*p.name.0 == name
-            })
-        {
-            at = own;
-        }
-        let slot = u32::try_from(at).ok()?;
-        if at >= placed.len() {
-            return None;
-        }
-        let (declaring, property) = placed.swap_remove(at);
-        Some((slot, declaring, property))
-    }
-
     /// `zend_get_property_offset` over the placed instance properties:
     /// the slot `name` sits in, the class that declared what stands
     /// there, its visibility, its set visibility and whether it is
     /// typed; none for a name no class of the chain declares, which is
-    /// a dynamic property. A declaration that shadows a parent's
+    /// a dynamic property. The row is the one the executed scope finds
+    /// ([`Request::placed_row`]). A declaration that shadows a parent's
     /// private property of the name (`ZEND_ACC_CHANGED`) is, from that
     /// parent's scope, the parent's own private slot
     /// (`zend_get_parent_private_property`).
@@ -5705,15 +5901,134 @@ impl Request {
     /// string(3) "foo"
     /// ```
     fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<DeclaredSlot> {
-        let (at, declaring, p) = self.placed_property(class, name)?;
+        let (at, declaring, p) = self.placed_row(class, name)?;
+        let root = if p.visibility == Visibility::Protected {
+            self.property_root(declaring, name)
+        } else {
+            declaring
+        };
         Some(DeclaredSlot {
-            slot: at,
+            slot: u32::try_from(at).unwrap_or(u32::MAX),
             declaring,
             visibility: p.visibility,
             set_visibility: p.set_visibility,
             typed: p.ty.is_some(),
             readonly: p.is_readonly,
+            root,
         })
+    }
+
+    /// `property_info->prototype->ce` for the instance property `name`
+    /// that `declaring` declares: `do_inherit_property` hands a child
+    /// the parent's prototype where the parent's declaration is not
+    /// private, so the walk goes up the parents while each one that
+    /// declares the name declares it so.
+    fn property_root(&self, declaring: ClassId, name: &[u8]) -> ClassId {
+        let mut root = declaring;
+        let mut at = self.class_parent(declaring);
+        for _ in 0..64 {
+            let Some(here) = at else { break };
+            let own = self.class_decl(here).and_then(|decl| {
+                decl.properties
+                    .iter()
+                    .find(|p| p.is_instance && &*p.name.0 == name)
+                    .map(|p| p.visibility)
+            });
+            match own {
+                Some(Visibility::Private) => break,
+                Some(_) => root = here,
+                None => {}
+            }
+            at = self.class_parent(here);
+        }
+        root
+    }
+
+    /// `zend_get_property_offset`'s access rule over the row
+    /// [`Request::declared_slot`] placed: public, the scope the declaring
+    /// class, or, for a protected property, a scope related to its
+    /// prototype's class (`is_protected_compatible_scope`), so two
+    /// classes that each redeclare a parent's property reach each other's.
+    ///
+    /// ```php
+    /// abstract class P { abstract protected $foo { get; } }
+    /// class C1 extends P { protected $foo = 1; }
+    /// class C2 extends P { protected $foo = 2; static function foo($c) { return $c->foo; } }
+    /// var_dump(C2::foo(new C2), C2::foo(new C1));
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(1)
+    /// ```
+    fn reaches(&self, placed: &DeclaredSlot) -> bool {
+        let scope = self.property_scope();
+        match placed.visibility {
+            Visibility::Public => true,
+            _ if scope == Some(placed.declaring) => true,
+            Visibility::Private => false,
+            Visibility::Protected => self.check_protected(placed.root, scope),
+        }
+    }
+
+    /// `zend_get_property_offset`'s choice of `property_info` for `name`
+    /// on an object of `class` under the executed scope, as the placed
+    /// row it names: the row `ce->properties_info` holds, the class's
+    /// own declaration over a parent's private one; under
+    /// `ZEND_ACC_CHANGED` the scope's own private property where the
+    /// scope is a parent of `class` that declares one
+    /// (`zend_get_parent_private_property`); and none where the row is
+    /// a parent's private property the scope is not, which php reads as
+    /// a dynamic property (`goto dynamic`).
+    ///
+    /// ```php
+    /// class A { private $shadowed = 'A'; private $p = 'A::p';
+    ///     function test() { foreach ($this as $k => $v) { echo "$k => $v\n"; } var_dump($this->p); } }
+    /// #[AllowDynamicProperties]
+    /// class B extends A { public $p = 'B::p'; }
+    /// $b = new B;
+    /// $b->shadowed = 'Global';
+    /// $b->test();
+    /// var_dump($b->p);
+    /// ```
+    /// ```expect
+    /// shadowed => A
+    /// p => A::p
+    /// string(4) "A::p"
+    /// string(4) "B::p"
+    /// ```
+    /// `zend_get_parent_private_property`: the executed scope, where it
+    /// is a parent of `class` that declares `name` as a private instance
+    /// property of its own.
+    pub(crate) fn parent_private(&self, class: ClassId, name: &[u8]) -> Option<ClassId> {
+        self.property_scope().filter(|&scope| {
+            scope != class
+                && self.instance_of(class, scope)
+                && self.class_decl(scope).is_some_and(|decl| {
+                    decl.properties.iter().any(|p| {
+                        p.is_instance && p.visibility == Visibility::Private && &*p.name.0 == name
+                    })
+                })
+        })
+    }
+
+    fn placed_row(&self, class: ClassId, name: &[u8]) -> Option<(usize, ClassId, PropertyDecl)> {
+        let placed = self.placed_properties(class);
+        let mut at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
+        let (declaring, p) = placed.get(at)?;
+        if self.property_scope() != Some(*declaring) {
+            if let Some(own) = self.parent_private(class, name) {
+                if let Some(i) = placed
+                    .iter()
+                    .position(|(d, p)| *d == own && &*p.name.0 == name)
+                {
+                    at = i;
+                }
+            } else if p.visibility == Visibility::Private && *declaring != class {
+                return None;
+            }
+        }
+        let (declaring, p) = placed.get(at)?;
+        Some((at, *declaring, p.clone()))
     }
 
     /// `zend_asymmetric_property_has_set_access`
@@ -5725,7 +6040,7 @@ impl Request {
     /// visibility the read visibility already equals and refuses one
     /// weaker than it.
     fn has_set_access(&self, class: ClassId, set: Visibility) -> bool {
-        let scope = self.executed_scope();
+        let scope = self.property_scope();
         scope == Some(class) || (set == Visibility::Protected && self.check_protected(class, scope))
     }
 
@@ -6509,12 +6824,29 @@ impl Request {
                 }
             };
         self.set_static_slot(declaring, &property, name, value, strict)
+            .map(|(_, garbage)| self.release(garbage))
     }
 
     /// [`Request::set_static_property`] over a slot already addressed,
     /// as `ZEND_ASSIGN_STATIC_PROP` addresses it before it reads its
     /// value and writes it after: `declaring` is the class the slot is
-    /// in and `property` its declaration.
+    /// in and `property` its declaration. What the slot holds after the
+    /// write comes back, a view: the value `zend_assign_to_typed_prop`
+    /// answers, coerced where the weak rule coerced it, which is what
+    /// `RETURN_VALUE_USED` copies. Beside it comes what the slot held,
+    /// one owner, for the caller to give up after that copy, php's
+    /// `garbage`: a destructor it serves that writes the property again
+    /// does not change what the assignment answers.
+    ///
+    /// ```php
+    /// class Foo { public static int $i; public static string $s = "x"; }
+    /// var_dump(Foo::$i = "1", Foo::$s = Foo::$i++, Foo::$s = 3);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// string(1) "1"
+    /// string(1) "3"
+    /// ```
     pub(crate) fn set_static_slot(
         &mut self,
         declaring: ClassId,
@@ -6522,7 +6854,7 @@ impl Request {
         name: &[u8],
         mut value: Value,
         strict: bool,
-    ) -> Result<(), Thrown> {
+    ) -> Result<(Value, Value), Thrown> {
         // `zend_verify_property_type`: the value held to the declared
         // type and coerced by the weak rule where the writer's regime is
         // not strict, and php's `TypeError` where it neither satisfies
@@ -6543,13 +6875,25 @@ impl Request {
         // `zend_assign_to_variable` over a slot bound by reference: the
         // cell is held to every property it is typed by, which may be
         // another `static` than this one (`Test::$x =& Test::$y`).
+        let held = |req: &Request| {
+            req.statics
+                .iter()
+                .find(|((at, under), _)| *at == declaring && under == name)
+                .map_or(Value::null(), |(_, held)| held.deref())
+        };
+        let garbage = held(self);
+        self.addref(&garbage);
         if let Some(cell) = self.static_slot_cell(declaring, name)
             && cell.heap().sources() != 0
         {
-            return self.assign_to_reference(cell.heap(), value, strict);
+            if let Err(thrown) = self.assign_to_reference(cell.heap(), value, strict) {
+                self.release(garbage);
+                return Err(thrown);
+            }
+        } else {
+            self.store_static_property(declaring, name, value);
         }
-        self.store_static_property(declaring, name, value);
-        Ok(())
+        Ok((held(self), garbage))
     }
 
     /// The write half of [`Request::set_static_property`], php's
@@ -6762,6 +7106,63 @@ impl Request {
         }
     }
 
+    /// `zend_object_dtor_property` then `ZVAL_UNDEF`: what the slot held
+    /// given up, a cell it held typed by the slot's property no longer
+    /// ([`Request::slot_source_gone`]), and the slot left empty. What a
+    /// lazy object does to its slots goes through here: a reset, the
+    /// proxy's slots once its instance stands, and an initializer's
+    /// revert, which types the cell it puts back again.
+    ///
+    /// ```php
+    /// class C { public ?C $a; public $c; public function __construct() { $this->a = null; } }
+    /// $r = new ReflectionClass(C::class);
+    /// $objs = ['ghost' => $r->newLazyGhost(function ($o) { $o->__construct(); }),
+    ///     'proxy' => $r->newLazyProxy(fn () => new C),
+    ///     'failed' => $r->newLazyGhost(function ($o) { throw new Exception('no'); })];
+    /// foreach ($objs as $k => $obj) {
+    ///     $r->getProperty('a')->setRawValueWithoutLazyInitialization($obj, null);
+    ///     $ref = &$obj->a;
+    ///     try { $obj->c; } catch (Exception $e) { echo "$k: ", $e->getMessage(), "\n"; }
+    ///     try { $ref = 1; echo "$k: bound to nothing typed\n"; } catch (TypeError $e) { echo "$k: ", $e->getMessage(), "\n"; }
+    ///     unset($ref);
+    /// }
+    /// ```
+    /// ```expect
+    /// ghost: Cannot assign int to reference held by property C::$a of type ?C
+    /// proxy: bound to nothing typed
+    /// failed: no
+    /// failed: Cannot assign int to reference held by property C::$a of type ?C
+    /// ```
+    pub(crate) fn dtor_property(&mut self, object: PhpObject, slot: u32) {
+        let o = object.heap();
+        if let Some(cell) = o.slot(slot).as_reference() {
+            self.slot_source_gone(object, slot, cell);
+        }
+        if !o.slot(slot).is_undef() {
+            Heap::object_set_slot(&mut Hooks(self), o, slot, Zval::UNDEF);
+        }
+    }
+
+    /// `ZEND_REF_ADD_TYPE_SOURCE` over the property whose slot `slot` of
+    /// `object` is (`zend_get_property_info_for_slot`): the cell the slot
+    /// holds is typed by that property too, one more source beside the
+    /// others, since another object's slot of the same property may
+    /// hold it as well. A slot of an untyped property types nothing.
+    pub(crate) fn slot_source_added(&mut self, object: PhpObject, slot: u32, cell: Ref) {
+        let placed = self.placed_properties(object.class());
+        let Some((declaring, p)) = usize::try_from(slot).ok().and_then(|at| placed.get(at)) else {
+            return;
+        };
+        if let Some(ty) = p.ty.clone() {
+            let source = RefSource {
+                declaring: *declaring,
+                name: p.name.0.to_vec(),
+                ty,
+            };
+            self.ref_add_type_source(cell, source);
+        }
+    }
+
     /// `ZEND_REF_FOREACH_TYPE_SOURCES` as a slice: the properties whose
     /// slots hold this cell, empty for a cell no typed property's slot
     /// holds, which is `ZEND_REF_HAS_TYPE_SOURCES` reading false.
@@ -6897,14 +7298,20 @@ impl Request {
     /// ```
     pub(crate) fn overloaded_fetch(&self, object: PhpObject, name: &[u8]) -> bool {
         let class = object.class();
-        if !self.serves_accessor(class, b"__get") || self.guard_word(object, name) & IN_GET != 0 {
+        if !self.serves_accessor(class, b"__get") {
+            return false;
+        }
+        if self.wrong_name(class, name) {
+            return true;
+        }
+        if self.guard_word(object, name) & IN_GET != 0 {
             return false;
         }
         let o = object.heap();
         match self.declared_slot(class, name) {
             // A property the scope may not reach is placed silently where
             // the class has a `__get`, which answers for it.
-            Some(placed) if !self.may_access(placed.declaring, placed.visibility) => true,
+            Some(placed) if !self.reaches(&placed) => true,
             Some(placed) => {
                 o.slot(placed.slot).is_undef()
                     && !o.slot_uninit(placed.slot)
@@ -7000,6 +7407,24 @@ impl Request {
     /// __get u
     /// Value of type string returned from T::__get() must be compatible with unset property T::$u of type int
     /// ```
+    ///
+    /// A reference `&__get` answers is converted in its cell, so the
+    /// property it names reads the conversion too, and a write fetch
+    /// binds to that cell:
+    ///
+    /// ```php
+    /// class Test { public $prop = "42"; public int $val;
+    ///     public function &__get($name) { return $this->prop; } }
+    /// $test = new Test; unset($test->val);
+    /// $val = &$test->val;
+    /// var_dump($test->prop);
+    /// $test->prop = "x";
+    /// var_dump($val);
+    /// ```
+    /// ```expect
+    /// int(42)
+    /// string(1) "x"
+    /// ```
     fn hold_magic_get(
         &mut self,
         class: ClassId,
@@ -7009,7 +7434,7 @@ impl Request {
     ) -> Result<Value, Thrown> {
         let Some(placed) = self
             .declared_slot(class, name)
-            .filter(|p| p.typed && self.may_access(p.declaring, p.visibility))
+            .filter(|p| p.typed && self.reaches(p))
         else {
             return Ok(got);
         };
@@ -7018,6 +7443,30 @@ impl Request {
         };
         let strict = self.function_strict_types(getter);
         let held = got.deref();
+        let cell = got.as_php_ref().copied();
+        // A cell some typed property is already a source of converts
+        // nothing: it holds the type as it is, or it is refused.
+        if let Some(bound) = cell.filter(|cell| cell.heap().sources() != 0) {
+            let holds = crate::ops::typed_ref_holds(
+                self,
+                bound.heap(),
+                &typed.ty,
+                placed.declaring,
+                name,
+                strict,
+            );
+            return match holds {
+                Ok(true) => Ok(got),
+                Ok(false) => {
+                    self.release(got);
+                    Err(self.magic_get_refused(placed.declaring, name, &typed.ty, &held))
+                }
+                Err(thrown) => {
+                    self.release(got);
+                    Err(thrown)
+                }
+            };
+        }
         let admitted = match crate::ops::property_type_admits(
             self,
             &held,
@@ -7033,25 +7482,46 @@ impl Request {
         };
         match admitted {
             crate::ops::Admitted::As => Ok(got),
+            // `i_zend_check_property_type` converts the value where it
+            // stands, which for a reference `__get` answered is in the
+            // cell, so every name bound to it reads the conversion.
             crate::ops::Admitted::Converted(coerced) => {
-                self.release(got);
-                Ok(coerced)
+                if let Some(cell) = cell {
+                    self.reference_set(cell.heap(), coerced);
+                    Ok(got)
+                } else {
+                    self.release(got);
+                    Ok(coerced)
+                }
             }
             crate::ops::Admitted::Refused => {
-                let given = crate::ops::type_name(self, &held);
                 self.release(got);
-                let class = self.class_name(placed.declaring);
-                let ty = crate::api::coerce::declared_type_name(&typed.ty);
-                let shown = String::from_utf8_lossy(name).into_owned();
-                Err(crate::api::raising::throw(
-                    self,
-                    "TypeError",
-                    &format!(
-                        "Value of type {given} returned from {class}::__get() must be compatible with unset property {class}::${shown} of type {ty}"
-                    ),
-                ))
+                Err(self.magic_get_refused(placed.declaring, name, &typed.ty, &held))
             }
         }
+    }
+
+    /// `zend_magic_get_property_type_inconsistency_error`: php's
+    /// `TypeError` for what `__get` answered for an unset typed property
+    /// whose type holds it in no form.
+    fn magic_get_refused(
+        &mut self,
+        declaring: ClassId,
+        name: &[u8],
+        ty: &php_unit::decl::Type,
+        held: &Value,
+    ) -> Thrown {
+        let given = crate::ops::type_name(self, held);
+        let class = self.class_name(declaring);
+        let ty = crate::api::coerce::declared_type_name(ty);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        crate::api::raising::throw(
+            self,
+            "TypeError",
+            &format!(
+                "Value of type {given} returned from {class}::__get() must be compatible with unset property {class}::${shown} of type {ty}"
+            ),
+        )
     }
 
     /// `zend_readonly_property_modification_error` (`Cannot modify
@@ -7112,6 +7582,68 @@ impl Request {
             "Error",
             &format!("Typed property {class}::${shown} must not be accessed before initialization"),
         )
+    }
+
+    /// `zend_get_property_offset`'s other wrong offset: a name no class
+    /// declared that starts with a NUL byte, which is how a mangled
+    /// private or protected name reads, is no property PHP code may
+    /// reach, and is no dynamic one.
+    pub(crate) fn bad_property_name(name: &[u8]) -> bool {
+        name.first() == Some(&0)
+    }
+
+    /// [`Request::bad_property_name`] over a name `class` did not
+    /// declare, which is the wrong offset `zend_get_property_offset`
+    /// answers: a `__get` is asked for it whatever its guard says, and
+    /// the guard standing is [`Request::wrong_offset`]'s `Error`.
+    fn wrong_name(&self, class: ClassId, name: &[u8]) -> bool {
+        Self::bad_property_name(name) && self.declared_slot(class, name).is_none()
+    }
+
+    /// `zend_bad_property_name`: php's `Error` for a name
+    /// [`Request::bad_property_name`] refuses.
+    ///
+    /// ```php
+    /// class A { function __unset($p) { unset($this->$p); }
+    ///     function __set($p, $v) { $this->$p = $v; }
+    ///     function __get($p) { return $this->$p; } }
+    /// $a = new A; $p = "\0x"; $o = new stdClass;
+    /// foreach ([fn() => $a->$p, fn() => $a->$p = 1, function () use ($a, $p) { unset($a->$p); },
+    ///           fn() => $o->$p, fn() => $o->$p = 1, fn() => $o->$p[] = 1, fn() => $o->$p++] as $f) {
+    ///     try { $f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// var_dump(isset($o->$p), isset($a->$p), property_exists($o, $p));
+    /// ```
+    /// ```expect
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    pub(crate) fn bad_property_name_error(&mut self) -> Thrown {
+        crate::api::raising::throw(
+            self,
+            "Error",
+            "Cannot access property starting with \"\\0\"",
+        )
+    }
+
+    /// `zend_wrong_offset`: the placement a magic accessor's guard
+    /// kept silent made again, loudly, where the guard stands and the
+    /// accessor cannot answer: the `Error` for a declared property the
+    /// scope may not reach, or for a name that starts with a NUL byte.
+    fn wrong_offset(&mut self, class: ClassId, name: &[u8]) -> Option<Thrown> {
+        if let Some(placed) = self.declared_slot(class, name) {
+            return (!self.reaches(&placed))
+                .then(|| self.inaccessible_property(class, placed.visibility, name));
+        }
+        Self::bad_property_name(name).then(|| self.bad_property_name_error())
     }
 
     /// `zend_bad_property_access`: php's `Error` for a property the
@@ -7356,7 +7888,7 @@ impl Request {
         // without a lookup.
         let mut wrong = false;
         if let Some(placed) = self.declared_slot(class, name) {
-            if self.may_access(placed.declaring, placed.visibility) {
+            if self.reaches(&placed) {
                 let z = o.slot(placed.slot);
                 if !z.is_undef() {
                     let value = Value::of_zval(z).deref();
@@ -7389,6 +7921,11 @@ impl Request {
                 }
                 wrong = true;
             }
+        } else if Self::bad_property_name(name) {
+            if !silent && !self.serves_accessor(class, b"__get") {
+                return Err(self.bad_property_name_error());
+            }
+            wrong = true;
         } else {
             let dynamic = o
                 .properties()
@@ -7435,10 +7972,10 @@ impl Request {
                 return self.hold_magic_get(class, name, getter, got);
             }
             // `zend_wrong_offset`: the guard stands and the placement
-            // was one the scope may not reach, so it is made again,
-            // loudly, and the `Error` it raises is the answer.
-            if wrong && let Some(placed) = self.declared_slot(class, name) {
-                return Err(self.inaccessible_property(class, placed.visibility, name));
+            // was a wrong offset, so it is made again, loudly, and the
+            // `Error` it raises is the answer.
+            if wrong && let Some(thrown) = self.wrong_offset(class, name) {
+                return Err(thrown);
             }
         }
         // `uninit_error` over a lazy object: a name nothing holds
@@ -7569,9 +8106,12 @@ impl Request {
     ) -> Result<Option<(u32, bool)>, Thrown> {
         let class = object.class();
         let Some(placed) = self.declared_slot(class, name) else {
+            if !silent && Self::bad_property_name(name) {
+                return Err(self.bad_property_name_error());
+            }
             return Ok(None);
         };
-        if !self.may_access(placed.declaring, placed.visibility) {
+        if !self.reaches(&placed) {
             if silent {
                 return Ok(None);
             }
@@ -7643,7 +8183,7 @@ impl Request {
         let Some(placed) = self.declared_slot(class, name) else {
             return Ok(());
         };
-        if !self.may_access(placed.declaring, placed.visibility)
+        if !self.reaches(&placed)
             || !o.slot(placed.slot).is_undef()
             || self.lazy_slot(o, placed.slot)
         {
@@ -7691,7 +8231,7 @@ impl Request {
                 .is_some_and(|set| !self.has_set_access(placed.declaring, set));
         let held = object.heap().slot(placed.slot);
         barred
-            && self.may_access(placed.declaring, placed.visibility)
+            && self.reaches(&placed)
             && (Value::of_zval(held).deref().as_object().is_some() || (unset && held.is_undef()))
     }
 
@@ -7707,7 +8247,7 @@ impl Request {
         class: ClassId,
         name: &[u8],
     ) -> Option<TypedProperty> {
-        let (_, declaring, p) = self.placed_property(class, name)?;
+        let (_, declaring, p) = self.placed_row(class, name)?;
         p.ty.map(|ty| TypedProperty {
             declaring,
             ty,
@@ -7777,13 +8317,68 @@ impl Request {
     /// last, after the write, which is where a destructor is served; a
     /// slot holding a reference is written through the cell
     /// (`Z_ISREF_P(variable_ptr)`), so every holder of the cell reads
-    /// the new value.
-    pub(crate) fn assign_declared_slot(&mut self, o: Obj, i: u32, value: Value) {
+    /// the new value. A cell some typed property is a source of is
+    /// `zend_assign_to_typed_ref`, held to each of their types under
+    /// `strict` ([`Request::assign_to_reference`]), whatever the slot's
+    /// own property declares. What landed comes back, a view: the
+    /// coercion where the cell's types made one. Beside it comes what the
+    /// slot held, one owner, for the caller to release after it has
+    /// copied what landed into `result`, as php's `garbage` is given up
+    /// last: a destructor that writes the property again does not change
+    /// the value the assignment answers.
+    ///
+    /// ```php
+    /// class C { public int $foo = 1; public $_; }
+    /// $a = new C; $a->_ = &$a->foo;
+    /// try { $a->_ = []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($a->_ = "5", $a->foo);
+    /// ```
+    /// ```expect
+    /// Cannot assign array to reference held by property C::$foo of type int
+    /// int(5)
+    /// int(5)
+    /// ```
+    ///
+    /// What the slot held is given up after the assignment's value is
+    /// copied, so a destructor it serves that writes the property again
+    /// changes the property and not the value:
+    ///
+    /// ```php
+    /// class Box { public ?Test $value; public static ?Test $s; }
+    /// class Test { function __destruct() { global $box; $box->value = null; Box::$s = null; } }
+    /// $box = new Box; $box->value = new Test; Box::$s = new Test;
+    /// var_dump($box->value = new Test, Box::$s = new Test, $box->value, Box::$s);
+    /// ```
+    /// ```expect
+    /// object(Test)#4 (0) {
+    /// }
+    /// object(Test)#2 (0) {
+    /// }
+    /// NULL
+    /// object(Test)#2 (0) {
+    /// }
+    /// ```
+    pub(crate) fn assign_declared_slot(
+        &mut self,
+        o: Obj,
+        i: u32,
+        value: Value,
+        strict: bool,
+    ) -> Result<(Value, Value), Thrown> {
         if let Some(r) = o.slot(i).as_reference() {
-            self.reference_set(r, value);
-        } else {
-            Heap::object_set_slot(&mut Hooks(self), o, i, value.into_zval());
+            let cell = PhpRef::of(r);
+            let garbage = cell.get();
+            self.addref(&garbage);
+            if let Err(thrown) = self.assign_to_reference(r, value, strict) {
+                self.release(garbage);
+                return Err(thrown);
+            }
+            return Ok((cell.get(), garbage));
         }
+        let garbage = Value::of_zval(o.slot(i));
+        self.addref(&garbage);
+        Heap::object_set_slot(&mut Hooks(self), o, i, value.into_zval());
+        Ok((value, garbage))
     }
 
     /// `OBJ_PROP_NUM(obj, i)` written with no name in hand, what a
@@ -7883,7 +8478,7 @@ impl Request {
         }
         let placed = self.declared_slot(class, name.as_bytes());
         if let Some(p) = placed.as_ref()
-            && self.may_access(p.declaring, p.visibility)
+            && self.reaches(p)
         {
             if !o.slot(p.slot).is_undef() {
                 return self.write_std_property(object, name, value);
@@ -7899,7 +8494,15 @@ impl Request {
                 return self.write_std_property(object, name, value);
             }
         }
+        let bad_name = placed.is_none() && Self::bad_property_name(name.as_bytes());
+        if bad_name && !self.serves_accessor(class, b"__set") {
+            let thrown = self.bad_property_name_error();
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(thrown);
+        }
         let held = placed.is_none()
+            && !bad_name
             && o.properties()
                 .is_some_and(|table| table.contains(php_heap::Key::Str(name.heap())));
         if held {
@@ -7919,9 +8522,7 @@ impl Request {
             return self.write_std_property(object, name, value);
         };
         let bytes = name.as_bytes().to_vec();
-        let wrong = placed
-            .as_ref()
-            .is_some_and(|p| !self.may_access(p.declaring, p.visibility));
+        let wrong = bad_name || placed.as_ref().is_some_and(|p| !self.reaches(p));
         if self.guard_word(object, &bytes) & IN_SET == 0 {
             let served = self.call_accessor(object, setter, IN_SET, &bytes, &[value]);
             self.release(value);
@@ -7931,10 +8532,8 @@ impl Request {
             return Ok(());
         }
         // `zend_wrong_offset`: the guard stands, so the placement is
-        // made again and the `Error` it raises for a property the scope
-        // may not reach is the answer.
-        if wrong && let Some(placed) = self.declared_slot(class, &bytes) {
-            let thrown = self.inaccessible_property(class, placed.visibility, &bytes);
+        // made again and the `Error` it raises is the answer.
+        if wrong && let Some(thrown) = self.wrong_offset(class, &bytes) {
             self.release(value);
             self.release(Value::string(name));
             return Err(thrown);
@@ -8073,7 +8672,13 @@ impl Request {
             } else {
                 value
             };
-            self.assign_declared_slot(o, placed.slot, value);
+            match self.assign_declared_slot(o, placed.slot, value, self.property_strict_types()) {
+                Ok((_, garbage)) => self.release(garbage),
+                Err(thrown) => {
+                    self.release(Value::string(name));
+                    return Err(thrown);
+                }
+            }
         } else {
             let key = php_heap::Key::Str(name.heap());
             // `zend_array_dup` over a table a clone or a cast shares,
@@ -8225,6 +8830,31 @@ impl Request {
         Ok(true)
     }
 
+    /// `object_and_properties_init` over `zend_symtable_to_proptable`,
+    /// the `(object)` cast of an array: each element laid into the new
+    /// object's dynamic table under its key as a property name, one
+    /// owner of it taken and a reference kept as the reference, with no
+    /// handler in the way, so a key a handler would refuse, a mangled
+    /// one that opens with a NUL byte, is laid down as it is.
+    pub(crate) fn properties_from_array(
+        &mut self,
+        object: PhpObject,
+        array: PhpArray,
+    ) -> Result<(), Thrown> {
+        for (key, entry) in array.snapshot_refs() {
+            let name = key.to_prop_name(self)?;
+            self.addref(&entry);
+            let o = object.heap();
+            let table = self.heap.object_properties(o);
+            let table = self.fatal_of(table)?;
+            let table = self.array_separate(table)?;
+            self.heap.object_set_properties(o, table);
+            self.array_update(table, php_heap::Key::Str(name.heap()), entry)?;
+            self.release(Value::string(name));
+        }
+        Ok(())
+    }
+
     /// The two arms php takes before it lays a name the class did not
     /// declare into the dynamic table, in
     /// `zend_std_write_property` and in `zend_std_get_property_ptr_ptr`
@@ -8347,15 +8977,17 @@ impl Request {
                 return Ok(Some((php_heap::Key::Str(key.heap()), walked)));
             }
         } else {
-            let declared: Vec<(Box<[u8]>, ClassId, Visibility)> = self
+            let declared: Vec<(Box<[u8]>, ClassId)> = self
                 .placed_properties(class)
                 .into_iter()
-                .map(|(declaring, p)| (p.name.0, declaring, p.visibility))
+                .map(|(declaring, p)| (p.name.0, declaring))
                 .collect();
             let mut at = self.heap.iterator_lead(idx) as usize;
-            while let Some((name, declaring, visibility)) = declared.get(at) {
+            while let Some((name, declaring)) = declared.get(at) {
                 let slot = u32::try_from(at).unwrap_or(u32::MAX);
-                if !o.slot(slot).is_undef() && self.may_access(*declaring, *visibility) {
+                if !o.slot(slot).is_undef()
+                    && self.property_row_visible(class, name, Some(*declaring))
+                {
                     let interned = self.heap.intern(name);
                     let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
                     self.heap.iterator_set_lead(idx, slot.saturating_add(1));
@@ -8369,12 +9001,23 @@ impl Request {
         let Some(table) = o.properties() else {
             return Ok(None);
         };
-        let pos = self.heap.iterator_pos(idx, table);
-        let Some((found, key, _)) = table.live_from(pos) else {
-            return Ok(None);
-        };
-        self.heap.iterator_set_pos(idx, found.saturating_add(1));
-        Ok(Some((key, Walked::Dynamic(key))))
+        // A dynamic row whose name the scope finds declared, and not
+        // public, is stepped over (`zend_check_property_access`).
+        let mut pos = self.heap.iterator_pos(idx, table);
+        loop {
+            let Some((found, key, _)) = table.live_from(pos) else {
+                return Ok(None);
+            };
+            pos = found.saturating_add(1);
+            self.heap.iterator_set_pos(idx, pos);
+            let visible = match key {
+                php_heap::Key::Str(name) => self.property_row_visible(class, name.bytes(), None),
+                php_heap::Key::Long(_) => true,
+            };
+            if visible {
+                return Ok(Some((key, Walked::Dynamic(key))));
+            }
+        }
     }
 
     /// What [`Request::object_walk`] found at a place: the value, a view
@@ -8528,7 +9171,8 @@ impl Request {
     /// guard is not already holding.
     pub(crate) fn overloaded_place(&self, object: PhpObject, name: &[u8]) -> bool {
         self.serves_accessor(object.class(), b"__get")
-            && self.guard_word(object, name) & IN_GET == 0
+            && (self.guard_word(object, name) & IN_GET == 0
+                || self.wrong_name(object.class(), name))
     }
 
     /// The properties in order, the declared slots that hold a value
@@ -8612,11 +9256,41 @@ impl Request {
             ))));
         };
         let new = PhpObject::of(new);
+        self.clone_slot_sources(new);
         if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
             return Err(thrown);
         }
         Ok(new)
+    }
+
+    /// `zend_objects_clone_members`' `ZEND_REF_ADD_TYPE_SOURCE`: a slot
+    /// of the copy holding a cell a typed property is a source of shares
+    /// the cell with the original, and the copy's own property is one
+    /// more source of it, so the cell stays held to the type when the
+    /// original is gone.
+    ///
+    /// ```php
+    /// class Test { public int $x = 42; }
+    /// $test = new Test; $x =& $test->x;
+    /// $test2 = clone $test;
+    /// unset($test);
+    /// try { $x = "foo"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($test2->x);
+    /// ```
+    /// ```expect
+    /// Cannot assign string to reference held by property Test::$x of type int
+    /// int(42)
+    /// ```
+    fn clone_slot_sources(&mut self, copy: PhpObject) {
+        let o = copy.heap();
+        for slot in 0..o.slots() {
+            if let Some(cell) = o.slot(slot).as_reference()
+                && cell.sources() != 0
+            {
+                self.slot_source_added(copy, slot, cell);
+            }
+        }
     }
 
     /// The tail of `zend_objects_clone_members`: the class's `__clone`
@@ -8654,6 +9328,7 @@ impl Request {
     ) -> Result<PhpObject, Thrown> {
         let cloned = self.heap.object_clone_with(object.heap(), payload);
         let new = PhpObject::of(self.fatal_of(cloned)?);
+        self.clone_slot_sources(new);
         if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
             return Err(thrown);
@@ -9822,7 +10497,7 @@ impl Request {
         let mut placed_slot = None;
         let value = match self.declared_slot(class, name) {
             Some(placed) => {
-                if self.may_access(placed.declaring, placed.visibility) {
+                if self.reaches(&placed) {
                     placed_slot = Some(placed.slot);
                     let z = o.slot(placed.slot);
                     (!z.is_undef()).then(|| Value::of_zval(z))
@@ -9830,7 +10505,11 @@ impl Request {
                     None
                 }
             }
-            None => self.object_prop(o, name),
+            // A name the scope finds no declaration of is the dynamic
+            // table's alone, a parent's private slot of the same name
+            // being none of its business.
+            None if Self::bad_property_name(name) => None,
+            None => Self::dynamic_prop(o, name),
         };
         if let Some(value) = value {
             let value = value.deref();
@@ -10065,7 +10744,7 @@ impl Request {
         let unsetter = self.magic_accessor(class, b"__unset");
         let mut wrong = false;
         if let Some(placed) = self.declared_slot(class, name) {
-            if self.may_access(placed.declaring, placed.visibility) {
+            if self.reaches(&placed) {
                 let empty = o.slot(placed.slot).is_undef();
                 // `error = Z_TYPE_P(slot) != IS_UNDEF || (Z_PROP_FLAG_P(slot)
                 // & IS_PROP_UNINIT) || !zobj->ce->__unset`: a slot that
@@ -10130,6 +10809,11 @@ impl Request {
                 }
                 wrong = true;
             }
+        } else if Self::bad_property_name(name) {
+            if unsetter.is_none() {
+                return Err(self.bad_property_name_error());
+            }
+            wrong = true;
         } else if let Some(table) = o.properties() {
             let key = self.interned(name)?;
             let key = php_heap::Key::Str(key.heap());
@@ -10153,8 +10837,8 @@ impl Request {
                 self.release(answered);
                 return Ok(());
             }
-            if wrong && let Some(placed) = self.declared_slot(class, name) {
-                return Err(self.inaccessible_property(class, placed.visibility, name));
+            if wrong && let Some(thrown) = self.wrong_offset(class, name) {
+                return Err(thrown);
             }
         }
         // A lazy object with nothing that answered the name is
@@ -11723,8 +12407,11 @@ impl Request {
         };
         match self.method_visibility(function) {
             Visibility::Public => true,
-            Visibility::Private => scope == Some(class),
-            Visibility::Protected => self.check_protected(class, scope),
+            _ if scope == Some(class) => true,
+            Visibility::Private => false,
+            Visibility::Protected => {
+                self.check_protected(self.function_root_class(function).unwrap_or(class), scope)
+            }
         }
     }
 

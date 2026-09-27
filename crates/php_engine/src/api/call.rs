@@ -317,8 +317,24 @@ pub fn call_named(
 /// never at its key, and a string-keyed one as a named argument placed
 /// as [`call_named`] places it, in the array's order, so a positional
 /// element after a named one is php's `Error` there and not before an
-/// earlier name's own. A reference among the elements is followed, as
-/// the walk follows one for a parameter taken by value.
+/// earlier name's own. A reference among the elements is handed on as
+/// it is, and the walk follows it for a parameter taken by value but a
+/// trampoline's, "don't separate references for __call".
+///
+/// ```php
+/// function inc(&$x) { $x++; }
+/// class P { function __call($n, $a) { $a[0]++; } }
+/// function v($x) { $x = 5; }
+/// $f = 'call_user_func_array';
+/// $arg = 1;
+/// $f('inc', [&$arg]);
+/// $f([new P, 'bar'], [&$arg]);
+/// $f('v', [&$arg]);
+/// var_dump($arg);
+/// ```
+/// ```expect
+/// int(3)
+/// ```
 pub fn call_array(
     req: &mut Request,
     callable: &Callable,
@@ -326,12 +342,12 @@ pub fn call_array(
 ) -> Result<Value, Thrown> {
     let target = callable.target();
     let Some(function) = callee(req, target) else {
-        let positional: Vec<Value> = array.snapshot().into_iter().map(|(_, v)| v).collect();
+        let positional: Vec<Value> = array.snapshot_refs().into_iter().map(|(_, v)| v).collect();
         return serve(req, target, &positional, &[]);
     };
     let mut placement = Placement::new(function, &[]);
     let mut have_named = false;
-    for (key, value) in array.snapshot() {
+    for (key, value) in array.snapshot_refs() {
         match key {
             Key::Int(_) => {
                 if have_named {
