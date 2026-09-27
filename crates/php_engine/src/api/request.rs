@@ -6702,6 +6702,33 @@ impl Request {
     /// answered is neither an object nor a reference: a write through the
     /// copy has no effect on anything (`zend_std_read_property`, `Indirect
     /// modification of overloaded property`), naming the object's class.
+    ///
+    /// A private property the scope may not reach is `__get`'s too (#513):
+    /// an int it answers is the notice, and an object is written through.
+    ///
+    /// ```php
+    /// class C { private $p = 1; private $q;
+    ///     function __construct() { $this->q = new stdClass; }
+    ///     function __get($n) { return $this->$n; } }
+    /// $c = new C;
+    /// try { $c->p->x = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $c->q->x = 3;
+    /// var_dump($c);
+    /// ```
+    /// ```expect
+    ///
+    /// Notice: Indirect modification of overloaded property C::$p has no effect in %s on line 6
+    /// Attempt to assign property "x" on int
+    /// object(C)#1 (2) {
+    ///   ["p":"C":private]=>
+    ///   int(1)
+    ///   ["q":"C":private]=>
+    ///   object(stdClass)#2 (1) {
+    ///     ["x"]=>
+    ///     int(3)
+    ///   }
+    /// }
+    /// ```
     fn overloaded_write_notice(
         &mut self,
         class: ClassId,
@@ -6727,7 +6754,8 @@ impl Request {
     /// Whether a write fetch over `name` falls back to `read_property`
     /// for the class's `__get` to answer, where php's
     /// `zend_std_get_property_ptr_ptr` answers `NULL` for it: a declared
-    /// slot the scope reaches that an `unset` emptied, or a name the
+    /// property the scope may not reach, a declared slot it reaches that
+    /// an `unset` emptied, or a name the
     /// object holds no dynamic property for, on a class with a `__get`
     /// not already serving the name. A slot that is `IS_PROP_UNINIT` or
     /// waits on a lazy initializer is the placement's.
@@ -6764,9 +6792,11 @@ impl Request {
         }
         let o = object.heap();
         match self.declared_slot(class, name) {
+            // A property the scope may not reach is placed silently where
+            // the class has a `__get`, which answers for it.
+            Some(placed) if !self.may_access(placed.declaring, placed.visibility) => true,
             Some(placed) => {
-                self.may_access(placed.declaring, placed.visibility)
-                    && o.slot(placed.slot).is_undef()
+                o.slot(placed.slot).is_undef()
                     && !o.slot_uninit(placed.slot)
                     && !self.lazy_slot(o, placed.slot)
             }
