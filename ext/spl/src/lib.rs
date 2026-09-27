@@ -3,7 +3,7 @@
 //! state on the value (ADR-0005). The phpt subset is
 //! `php-src/ext/spl/tests`, through `xtask phpt --subset`.
 //!
-//! Each class is declared off the text of its `*.stub.php` ([`stub`])
+//! Each class is a `#[php_class]` header and member impl, registered
 //! in the order `PHP_MINIT_FUNCTION(spl)` registers it, and where php
 //! gives the class an object of its own (`spl_array_object`,
 //! `spl_fixedarray_object`) the object carries it as the native
@@ -11,7 +11,7 @@
 //! the `ObjectHandlers` php overrides beside it. What a payload holds
 //! of the heap is given back by the table's `free_obj` and named to the
 //! collector by its `get_gc`. The natives of `php_spl.c` are
-//! [`functions`], over the engine's autoload stack.
+//! [`functions`]' `#[php_function]`s, over the engine's autoload stack.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -34,19 +34,17 @@ mod functions;
 mod heap;
 mod iterators;
 mod observer;
-mod stub;
 
-use php_ext::abi::{Extension, ExtensionBuilder, ObjectHandlers, Std};
+pub(crate) use iterators::{RecursiveIterator, SeekableIterator};
+
+use php_ext::abi::{Extension, ExtensionBuilder, FromArgument, ObjectHandlers, Raw, Std};
+use php_ext::attr::php_class;
 use php_ext::call::{call_method, lookup_class};
-use php_ext::coerce::{coerce_param, key_of, truthy};
-use php_ext::decl::{ClassKind, Name, Type};
-use php_ext::raising::{Thrown, arg_count_error, throw};
+use php_ext::coerce::{key_of, truthy};
+use php_ext::decl::{ClassKind, Name};
+use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
-
-/// A native's entry, the shape `ExtensionBuilder::functions` pairs a
-/// declaration with.
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -67,50 +65,113 @@ struct State {
 /// ```expect
 /// bool(true)
 /// ```
+///
+/// The natives are `php_spl.stub.php`'s, in its order.
+///
+/// ```php
+/// var_dump(get_extension_funcs("spl"));
+/// ```
+/// ```expect
+/// array(15) {
+///   [0]=>
+///   string(16) "class_implements"
+///   [1]=>
+///   string(13) "class_parents"
+///   [2]=>
+///   string(10) "class_uses"
+///   [3]=>
+///   string(12) "spl_autoload"
+///   [4]=>
+///   string(17) "spl_autoload_call"
+///   [5]=>
+///   string(23) "spl_autoload_extensions"
+///   [6]=>
+///   string(22) "spl_autoload_functions"
+///   [7]=>
+///   string(21) "spl_autoload_register"
+///   [8]=>
+///   string(23) "spl_autoload_unregister"
+///   [9]=>
+///   string(11) "spl_classes"
+///   [10]=>
+///   string(15) "spl_object_hash"
+///   [11]=>
+///   string(13) "spl_object_id"
+///   [12]=>
+///   string(14) "iterator_apply"
+///   [13]=>
+///   string(14) "iterator_count"
+///   [14]=>
+///   string(17) "iterator_to_array"
+/// }
+/// ```
 pub fn extension() -> Extension {
-    let mut builder = ExtensionBuilder::default()
-        .functions(functions::natives())
-        .classes(exceptions::classes());
-    for ((decl, methods), payload) in iterators::classes() {
-        builder = match payload {
-            iterators::Payload::Dual => {
-                builder.class_payload::<iterators::DualIt>(decl, methods, &iterators::DUAL)
-            }
-            iterators::Payload::Rec => {
-                builder.class_payload::<iterators::RecIt>(decl, methods, &iterators::REC)
-            }
-            iterators::Payload::None => builder.classes(vec![(decl, methods)]),
-        };
-    }
-    for (decl, methods) in array::classes() {
-        builder = builder.class_payload::<array::SplArray>(decl, methods, &array::HANDLERS);
-    }
-    for (decl, methods) in directory::classes() {
-        let handlers = directory::handlers(&decl);
-        builder = builder.class_payload::<directory::Fs>(decl, methods, handlers);
-    }
-    for (decl, methods) in dllist::classes() {
-        builder = builder.class_payload::<dllist::SplDllist>(decl, methods, &dllist::HANDLERS);
-    }
-    for (decl, methods) in heap::classes() {
-        builder = builder.class_payload::<heap::SplHeap>(decl, methods, &heap::HANDLERS);
-    }
-    for (decl, methods) in fixedarray::classes() {
-        builder = builder.class_payload::<fixedarray::SplFixedArray>(
-            decl,
-            methods,
-            &fixedarray::HANDLERS,
-        );
-    }
-    for (decl, methods) in observer::classes() {
-        builder = if decl.kind == ClassKind::Interface {
-            builder.classes(vec![(decl, methods)])
-        } else {
-            builder.class_payload::<observer::Storage>(decl, methods, &observer::HANDLERS)
-        };
-    }
-    builder.request_state::<State>().info(spl_info).build("SPL")
+    let mut builder = exceptions::register(ExtensionBuilder::default().functions(vec![
+        functions::class_implements::declared(),
+        functions::class_parents::declared(),
+        functions::class_uses::declared(),
+        functions::spl_autoload::declared(),
+        functions::spl_autoload_call::declared(),
+        functions::spl_autoload_extensions::declared(),
+        functions::spl_autoload_functions::declared(),
+        functions::spl_autoload_register::declared(),
+        functions::spl_autoload_unregister::declared(),
+        functions::spl_classes::declared(),
+        functions::spl_object_hash::declared(),
+        functions::spl_object_id::declared(),
+        functions::iterator_apply::declared(),
+        functions::iterator_count::declared(),
+        functions::iterator_to_array::declared(),
+    ]));
+    builder = iterators::register(builder);
+    builder = array::register(builder);
+    builder = directory::register(builder);
+    builder = dllist::register(builder);
+    builder = heap::register(builder);
+    builder = builder.class::<fixedarray::SplFixedArray>();
+    observer::register(builder)
+        .request_state::<State>()
+        .info(spl_info)
+        .build("SPL")
 }
+
+// ---- Core's classes, named for `extends` and `implements`
+
+/// Core's `Exception`.
+#[php_class(extern)]
+pub(crate) struct Exception;
+
+/// Core's `Traversable`.
+#[php_class(extern)]
+pub(crate) struct Traversable;
+
+/// Core's `Stringable`.
+#[php_class(extern)]
+pub(crate) struct Stringable;
+
+/// Core's `Iterator`.
+#[php_class(extern)]
+pub(crate) struct Iterator;
+
+/// Core's `Countable`.
+#[php_class(extern)]
+pub(crate) struct Countable;
+
+/// Core's `IteratorAggregate`.
+#[php_class(extern)]
+pub(crate) struct IteratorAggregate;
+
+/// Core's `ArrayAccess`.
+#[php_class(extern)]
+pub(crate) struct ArrayAccess;
+
+/// Core's `Serializable`.
+#[php_class(extern)]
+pub(crate) struct Serializable;
+
+/// ext/json's `JsonSerializable`.
+#[php_class(extern)]
+pub(crate) struct JsonSerializable;
 
 /// `PHP_MINFO_FUNCTION(spl)`: `SPL support => enabled`.
 fn spl_info(req: &mut Request) {
@@ -251,129 +312,6 @@ fn interfaces_at(req: &mut Request, class: ClassId, depth: u32) -> Vec<ClassId> 
     list
 }
 
-// ---- the `Z_PARAM_*` readers SPL's natives and methods share (`Z/Zend/zend_API.h`)
-
-/// `zend_wrong_parameters_count_error`: the count `min..=max` checked,
-/// php's `ArgumentCountError` worded as it words it.
-fn arity(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if (min..=max).contains(&given) {
-        return Ok(());
-    }
-    let (how, n) = if min == max {
-        ("exactly", min)
-    } else if given < min {
-        ("at least", min)
-    } else {
-        ("at most", max)
-    };
-    let word = if n == 1 { "argument" } else { "arguments" };
-    Err(arg_count_error(
-        req,
-        &format!("{how} {n} {word}, {given} given"),
-    ))
-}
-
-/// The argument at `position` when the call gave one.
-fn given(req: &Request, position: u32) -> Option<Value> {
-    req.argument(position)
-        .filter(|value| !matches!(value.as_ref(), ValueRef::Undef))
-}
-
-/// `Z_PARAM_ZVAL`: the value, a reference followed.
-fn value(req: &Request, position: u32) -> Value {
-    given(req, position).unwrap_or_default().deref()
-}
-
-fn scalar(req: &mut Request, position: u32, ty: &Type) -> Result<Value, Thrown> {
-    let given = given(req, position).unwrap_or_default();
-    coerce_param(req, &given, ty, position)
-}
-
-/// `Z_PARAM_LONG`.
-fn long(req: &mut Request, position: u32) -> Result<i64, Thrown> {
-    Ok(scalar(req, position, &Type::Int)?.as_int().unwrap_or(0))
-}
-
-/// `Z_PARAM_LONG` after `Z_PARAM_OPTIONAL`.
-fn long_or(req: &mut Request, position: u32, default: i64) -> Result<i64, Thrown> {
-    if given(req, position).is_none() {
-        return Ok(default);
-    }
-    long(req, position)
-}
-
-/// `Z_PARAM_LONG_OR_NULL`.
-fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i64>, Thrown> {
-    match given(req, position) {
-        Some(v) if !matches!(v.deref().as_ref(), ValueRef::Null) => long(req, position).map(Some),
-        _ => Ok(None),
-    }
-}
-
-/// `$this` of the method being served.
-fn this(req: &mut Request) -> Result<PhpObject, Thrown> {
-    match req.this() {
-        Some(this) => Ok(this),
-        None => Err(php_ext::raising::fatal(
-            req,
-            "InternalError: an SPL method served without its receiver",
-        )),
-    }
-}
-
-/// `Z_PARAM_BOOL` after `Z_PARAM_OPTIONAL`.
-fn bool_or(req: &mut Request, position: u32, default: bool) -> Result<bool, Thrown> {
-    if given(req, position).is_none() {
-        return Ok(default);
-    }
-    Ok(scalar(req, position, &Type::Bool)?
-        .as_bool()
-        .unwrap_or(false))
-}
-
-/// `Z_PARAM_STR`.
-fn string(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let coerced = scalar(req, position, &Type::String)?;
-    match coerced.as_php_string() {
-        Some(s) => Ok(*s),
-        None => PhpString::new(req, b""),
-    }
-}
-
-/// `Z_PARAM_STR_OR_NULL`.
-fn nullable_string(req: &mut Request, position: u32) -> Result<Option<PhpString>, Thrown> {
-    match given(req, position) {
-        Some(v) if !matches!(v.deref().as_ref(), ValueRef::Null) => string(req, position).map(Some),
-        _ => Ok(None),
-    }
-}
-
-/// `Z_PARAM_ARRAY_HT`.
-fn array(req: &mut Request, position: u32) -> Result<PhpArray, Thrown> {
-    let v = given(req, position).unwrap_or_default();
-    let held = coerce_param(req, &v, &Type::Array, position)?;
-    match held.as_array() {
-        Some(a) => Ok(*a),
-        None => PhpArray::new(req),
-    }
-}
-
-/// `Z_PARAM_OBJECT_OF_CLASS` and `Z_PARAM_OBJ`: an object, of `class`
-/// where one is named, both `coerce_param`'s.
-fn object(req: &mut Request, position: u32, class: Option<&str>) -> Result<PhpObject, Thrown> {
-    let v = value(req, position);
-    let ty = class.map_or(Type::Object, |c| Type::Named(Name(c.as_bytes().into())));
-    let coerced = coerce_param(req, &v, &ty, position)?;
-    match coerced.as_object() {
-        Some(o) => Ok(*o),
-        None => Err(php_ext::raising::fatal(
-            req,
-            "InternalError: coerce_param held a value that is no object to an object type",
-        )),
-    }
-}
-
 /// `zend_zval_type_name`: an object's class name, any other value's
 /// type.
 fn zval_type_name(req: &Request, value: &Value) -> String {
@@ -387,6 +325,13 @@ fn zval_type_name(req: &Request, value: &Value) -> String {
 /// A string value made of `bytes`, one owner, the caller's.
 fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
     Ok(Value::string(PhpString::new(req, bytes)?))
+}
+
+/// A value a method hands back as it came, under the declared type `T`:
+/// php's `RETURN_COPY_VALUE` of what an inner iterator or a callback
+/// answered, which an internal method's return is not verified against.
+fn answered<T: FromArgument>(req: &mut Request, value: Value) -> Result<Raw<T>, Thrown> {
+    Raw::<T>::from_value(req, value)
 }
 
 /// A value handed back with one more owner, `RETURN_COPY`.

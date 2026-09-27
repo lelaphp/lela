@@ -8,19 +8,21 @@
 //! each element off as the walk passes it, and `SplQueue` and
 //! `SplStack` freeze the direction (`SPL_DLLIST_IT_FIX`).
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPurpose, Std};
+use php_ext::abi::{
+    CloneObj, ExtensionBuilder, ObjectHandlers, PropertyPurpose, Std, This, Untyped,
+};
+use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
-use crate::Entry;
-use crate::stub::{self, Declared};
+use crate::{ArrayAccess, Countable, Iterator, Serializable};
 
-const IT_DELETE: i64 = 1;
-const IT_LIFO: i64 = 2;
+/// `SPL_DLLIST_IT_MASK`, the two bits `setIteratorMode()` sets.
 const IT_MASK: i64 = 3;
+/// `SPL_DLLIST_IT_FIX`: the LIFO bit frozen, `SplQueue`'s and `SplStack`'s.
 const IT_FIX: i64 = 4;
 
 /// One `spl_ptr_llist_element`: its data, `None` once taken out, and
@@ -35,7 +37,7 @@ struct Node {
 /// `spl_dllist_object`: the list, the traverse pointer and position,
 /// and the flags.
 #[derive(Default)]
-pub(crate) struct SplDllist {
+pub(crate) struct Llist {
     nodes: Vec<Node>,
     head: Option<usize>,
     tail: Option<usize>,
@@ -46,7 +48,7 @@ pub(crate) struct SplDllist {
     ready: bool,
 }
 
-impl SplDllist {
+impl Llist {
     fn push(&mut self, value: Value) {
         let at = self.nodes.len();
         self.nodes.push(Node {
@@ -143,124 +145,605 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
-const STUB: &str = "
-class SplDoublyLinkedList implements Iterator, Countable, ArrayAccess, Serializable {
-    public const int IT_MODE_LIFO = 2;
-    public const int IT_MODE_FIFO = 0;
-    public const int IT_MODE_DELETE = 1;
-    public const int IT_MODE_KEEP = 0;
-    /** @tentative-return-type */ public function add(int $index, mixed $value): void {}
-    /** @tentative-return-type */ public function pop(): mixed {}
-    /** @tentative-return-type */ public function shift(): mixed {}
-    /** @tentative-return-type */ public function push(mixed $value): void {}
-    /** @tentative-return-type */ public function unshift(mixed $value): void {}
-    /** @tentative-return-type */ public function top(): mixed {}
-    /** @tentative-return-type */ public function bottom(): mixed {}
-    /** @tentative-return-type */ public function __debugInfo(): array {}
-    /** @tentative-return-type */ public function count(): int {}
-    /** @tentative-return-type */ public function isEmpty(): bool {}
-    /** @tentative-return-type */ public function setIteratorMode(int $mode): int {}
-    /** @tentative-return-type */ public function getIteratorMode(): int {}
-    /** @tentative-return-type */ public function offsetExists($index): bool {}
-    /** @tentative-return-type */ public function offsetGet($index): mixed {}
-    /** @tentative-return-type */ public function offsetSet($index, mixed $value): void {}
-    /** @tentative-return-type */ public function offsetUnset($index): void {}
-    /** @tentative-return-type */ public function rewind(): void {}
-    /** @tentative-return-type */ public function current(): mixed {}
-    /** @tentative-return-type */ public function key(): int {}
-    /** @tentative-return-type */ public function prev(): void {}
-    /** @tentative-return-type */ public function next(): void {}
-    /** @tentative-return-type */ public function valid(): bool {}
-    /** @tentative-return-type */ public function unserialize(string $data): void {}
-    /** @tentative-return-type */ public function serialize(): string {}
-    /** @tentative-return-type */ public function __serialize(): array {}
-    /** @tentative-return-type */ public function __unserialize(array $data): void {}
+/// The three classes onto `builder`, in the order
+/// `PHP_MINIT_FUNCTION(spl_dllist)` registers them.
+pub(crate) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
+    builder
+        .class::<SplDoublyLinkedList>()
+        .class::<SplQueue>()
+        .class::<SplStack>()
 }
-class SplQueue extends SplDoublyLinkedList {
-    /** @tentative-return-type */ public function enqueue(mixed $value): void {}
-    /** @tentative-return-type */ public function dequeue(): mixed {}
-}
-class SplStack extends SplDoublyLinkedList {
-}
-";
 
-/// The three classes, each method with its entry; `enqueue` and
-/// `dequeue` are php's aliases of `push` and `shift`.
+/// `class SplDoublyLinkedList implements Iterator, Countable,
+/// ArrayAccess, Serializable`.
 ///
 /// ```php
-/// $s = new SplStack; $s->push(1); $s->push(2); $s[] = 3;
-/// foreach ($s as $k => $v) echo "$k:$v;";
-/// echo "\n", $s->top(), " ", $s->pop(), " ", count($s), "\n";
+/// $l = new SplDoublyLinkedList;
+/// $l->push(2); $l->unshift(1); $l[] = 3;
+/// echo count($l), $l->count(), " ", $l->offsetExists(2) ? "y" : "n", $l->offsetGet(0), "\n";
+/// $l->offsetSet(0, 'one'); $l->offsetSet(null, 4); $l->offsetUnset(3);
+/// foreach ($l as $k => $v) echo "$k:$v;";
+/// echo "\n";
+/// $l->rewind(); var_dump($l->valid(), $l->key(), $l->current());
+/// $l->next(); $l->prev(); var_dump($l->current(), $l->bottom(), $l->shift(), $l->isEmpty(), $l->getIteratorMode());
+/// echo $l->serialize(), "\n";
+/// $m = new SplDoublyLinkedList; $m->__unserialize($l->__serialize()); var_dump(count($m), $m->__debugInfo()["\0SplDoublyLinkedList\0flags"]);
+/// ```
+/// ```expect
+/// 33 y1
+/// 0:one;1:2;2:3;
+/// bool(true)
+/// int(0)
+/// string(3) "one"
+/// string(3) "one"
+/// string(3) "one"
+/// string(3) "one"
+/// bool(false)
+/// int(0)
+/// i:0;:i:2;:i:3;
+/// int(2)
+/// int(0)
+/// ```
+#[php_class(
+    implements(Iterator, Countable, ArrayAccess, Serializable),
+    payload = Llist,
+    handlers = HANDLERS
+)]
+pub(crate) struct SplDoublyLinkedList;
+
+#[php_class]
+impl SplDoublyLinkedList {
+    const IT_MODE_LIFO: i64 = 2;
+    const IT_MODE_FIFO: i64 = 0;
+    const IT_MODE_DELETE: i64 = 1;
+    const IT_MODE_KEEP: i64 = 0;
+
+    /// `add(int $index, mixed $value): void`: before the element at the
+    /// index, or at the end for the count.
+    ///
+    /// ```php
+    /// $l = new SplDoublyLinkedList; $l->push('a'); $l->push('c');
+    /// $l->add(1, 'b'); $l->add(3, 'd');
+    /// echo implode(',', iterator_to_array($l)), "\n";
+    /// try { $l->add(9, 'x'); } catch (OutOfRangeException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// a,b,c,d
+    /// SplDoublyLinkedList::add(): Argument #1 ($index) is out of range
+    /// ```
+    #[php(tentative)]
+    fn add(req: &mut Request, this: This<Self>, index: i64, value: Value) -> Result<(), Thrown> {
+        let this = this.object();
+        let count = with(req, this, |l| l.count)?;
+        if index < 0 || index > i64::try_from(count).unwrap_or(i64::MAX) {
+            return Err(out_of_range(req, "is out of range"));
+        }
+        let value = crate::copied(req, value);
+        with(req, this, |l| {
+            if index == i64::try_from(l.count).unwrap_or(i64::MAX) {
+                l.push(value);
+                return;
+            }
+            let Some(element) = l.offset(index, l.flags & Self::IT_MODE_LIFO != 0) else {
+                return;
+            };
+            let at = l.nodes.len();
+            let prev = l.nodes[element].prev;
+            l.nodes.push(Node {
+                data: Some(value),
+                prev,
+                next: Some(element),
+            });
+            match prev {
+                None => l.head = Some(at),
+                Some(prev) => l.nodes[prev].next = Some(at),
+            }
+            l.nodes[element].prev = Some(at);
+            l.count += 1;
+        })
+    }
+
+    /// `pop(): mixed`.
+    ///
+    /// ```php
+    /// $l = new SplDoublyLinkedList; $l->push(1); $l->unshift(0);
+    /// var_dump($l->pop(), $l->shift(), $l->isEmpty());
+    /// try { $l->pop(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+    /// try { $l->shift(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+    /// try { $l->top(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(0)
+    /// bool(true)
+    /// Can't pop from an empty datastructure
+    /// Can't shift from an empty datastructure
+    /// Can't peek at an empty datastructure
+    /// ```
+    #[php(tentative)]
+    fn pop(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        match with(req, this.object(), Llist::pop)? {
+            Some(value) => Ok(value),
+            None => Err(throw(
+                req,
+                "RuntimeException",
+                "Can't pop from an empty datastructure",
+            )),
+        }
+    }
+
+    /// `shift(): mixed`; the witness is the class's.
+    #[php(tentative)]
+    fn shift(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        match with(req, this.object(), Llist::shift)? {
+            Some(value) => Ok(value),
+            None => Err(throw(
+                req,
+                "RuntimeException",
+                "Can't shift from an empty datastructure",
+            )),
+        }
+    }
+
+    /// `push(mixed $value): void`.
+    #[php(tentative)]
+    fn push(req: &mut Request, this: This<Self>, value: Value) -> Result<(), Thrown> {
+        let value = crate::copied(req, value);
+        with(req, this.object(), |l| l.push(value))
+    }
+
+    /// `unshift(mixed $value): void`.
+    #[php(tentative)]
+    fn unshift(req: &mut Request, this: This<Self>, value: Value) -> Result<(), Thrown> {
+        let value = crate::copied(req, value);
+        with(req, this.object(), |l| l.unshift(value))
+    }
+
+    /// `top(): mixed`: the tail's data.
+    ///
+    /// ```php
+    /// $l = new SplDoublyLinkedList; $l->push('first'); $l->push('last');
+    /// var_dump($l->top(), $l->bottom());
+    /// ```
+    /// ```expect
+    /// string(4) "last"
+    /// string(5) "first"
+    /// ```
+    #[php(tentative)]
+    fn top(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        peek(req, this.object(), true)
+    }
+
+    /// `bottom(): mixed`: the head's data; the witness is the class's.
+    #[php(tentative)]
+    fn bottom(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        peek(req, this.object(), false)
+    }
+
+    /// `__debugInfo(): array`.
+    ///
+    /// ```php
+    /// $q = new SplQueue; $q[] = 1;
+    /// var_dump($q);
+    /// ```
+    /// ```expect
+    /// object(SplQueue)#1 (2) {
+    ///   ["flags":"SplDoublyLinkedList":private]=>
+    ///   int(4)
+    ///   ["dllist":"SplDoublyLinkedList":private]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     int(1)
+    ///   }
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        list_debug_info(req, this.object())
+    }
+
+    /// `count(): int`.
+    #[php(tentative)]
+    fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let n = with(req, this.object(), |l| l.count)?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// `isEmpty(): bool`, over the class's count, `count()` a user class
+    /// overrides included.
+    #[php(tentative)]
+    fn isEmpty(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let this = this.object();
+        ready(req, this)?;
+        let n = Handlers.count_elements(req, this)?.unwrap_or(0);
+        Ok(n == 0)
+    }
+
+    /// `setIteratorMode(int $mode): int`.
+    ///
+    /// ```php
+    /// $l = new SplDoublyLinkedList; $l->push(1); $l->push(2); $l->push(3);
+    /// var_dump($l->setIteratorMode(SplDoublyLinkedList::IT_MODE_LIFO | SplDoublyLinkedList::IT_MODE_DELETE));
+    /// foreach ($l as $k => $v) echo "$k:$v ";
+    /// echo count($l), " ", $l->getIteratorMode(), "\n";
+    /// ```
+    /// ```expect
+    /// int(3)
+    /// 2:3 1:2 0:1 0 3
+    /// ```
+    #[php(tentative)]
+    fn setIteratorMode(req: &mut Request, this: This<Self>, mode: i64) -> Result<i64, Thrown> {
+        let this = this.object();
+        let flags = with(req, this, |l| l.flags)?;
+        if flags & IT_FIX != 0 && (flags & Self::IT_MODE_LIFO) != (mode & Self::IT_MODE_LIFO) {
+            return Err(throw(
+                req,
+                "RuntimeException",
+                "Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen",
+            ));
+        }
+        let flags = (mode & IT_MASK) | (flags & IT_FIX);
+        with(req, this, |l| l.flags = flags)?;
+        Ok(flags)
+    }
+
+    /// `getIteratorMode(): int`; the witness is `setIteratorMode`'s.
+    #[php(tentative)]
+    fn getIteratorMode(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        with(req, this.object(), |l| l.flags)
+    }
+
+    /// `offsetExists($index): bool`.
+    ///
+    /// ```php
+    /// $l = new SplDoublyLinkedList; $l->push('x'); $l->push('y');
+    /// var_dump(isset($l[1]), isset($l[2]), $l[1]);
+    /// $l[0] = 'z'; unset($l[1]);
+    /// var_dump($l->toArray ?? null, count($l), $l[0]);
+    /// try { $l[5]; } catch (OutOfRangeException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// string(1) "y"
+    /// NULL
+    /// int(1)
+    /// string(1) "z"
+    /// SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range
+    /// ```
+    #[php(tentative)]
+    fn offsetExists(
+        req: &mut Request,
+        this: This<Self>,
+        index: Untyped<i64>,
+    ) -> Result<bool, Thrown> {
+        let index = index.0;
+        let count = with(req, this.object(), |l| l.count)?;
+        Ok(index >= 0 && usize::try_from(index).is_ok_and(|i| i < count))
+    }
+
+    /// `offsetGet($index): mixed`; the witness is `offsetExists`'s.
+    #[php(tentative)]
+    fn offsetGet(
+        req: &mut Request,
+        this: This<Self>,
+        index: Untyped<i64>,
+    ) -> Result<Value, Thrown> {
+        let this = this.object();
+        let at = node(req, this, index.0)?;
+        let value = with(req, this, |l| l.nodes[at].data)?.unwrap_or_default();
+        Ok(crate::copied(req, value))
+    }
+
+    /// `offsetSet($index, mixed $value): void`, `null` pushing.
+    #[php(tentative)]
+    fn offsetSet(
+        req: &mut Request,
+        this: This<Self>,
+        index: Untyped<Option<i64>>,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        let Some(index) = index.0 else {
+            let value = crate::copied(req, value);
+            return with(req, this, |l| l.push(value));
+        };
+        let at = node(req, this, index)?;
+        let value = crate::copied(req, value);
+        let old = with(req, this, |l| l.nodes[at].data.replace(value))?;
+        if let Some(old) = old {
+            req.release(old);
+        }
+        Ok(())
+    }
+
+    /// `offsetUnset($index): void`: the node unlinked, its links cut, the
+    /// traverse pointer let go where it stood on it.
+    #[php(tentative)]
+    fn offsetUnset(req: &mut Request, this: This<Self>, index: Untyped<i64>) -> Result<(), Thrown> {
+        let this = this.object();
+        let at = node(req, this, index.0)?;
+        let old = with(req, this, |l| {
+            let Node { prev, next, .. } = l.nodes[at];
+            if let Some(prev) = prev {
+                l.nodes[prev].next = next;
+            }
+            if let Some(next) = next {
+                l.nodes[next].prev = prev;
+            }
+            if l.head == Some(at) {
+                l.head = next;
+            }
+            if l.tail == Some(at) {
+                l.tail = prev;
+            }
+            l.nodes[at].prev = None;
+            l.nodes[at].next = None;
+            l.count -= 1;
+            if l.pointer == Some(at) {
+                l.pointer = None;
+            }
+            l.nodes[at].data.take()
+        })?;
+        if let Some(old) = old {
+            req.release(old);
+        }
+        Ok(())
+    }
+
+    /// `spl_dllist_it_helper_rewind`.
+    #[php(tentative)]
+    fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        with(req, this.object(), |l| {
+            if l.flags & Self::IT_MODE_LIFO != 0 {
+                l.position = i64::try_from(l.count).unwrap_or(i64::MAX) - 1;
+                l.pointer = l.tail;
+            } else {
+                l.position = 0;
+                l.pointer = l.head;
+            }
+        })
+    }
+
+    /// `current(): mixed`, `null` off the list.
+    #[php(tentative)]
+    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let found = with(req, this.object(), |l| {
+            l.pointer.and_then(|at| l.nodes[at].data)
+        })?;
+        Ok(found.map_or_else(Value::null, |v| crate::copied(req, v)))
+    }
+
+    /// `key(): int`, the traverse position.
+    #[php(tentative)]
+    fn key(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        with(req, this.object(), |l| l.position)
+    }
+
+    /// `prev(): void`, `next()` the other way; the witness is `next`'s.
+    #[php(tentative)]
+    fn prev(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let this = this.object();
+        let flags = with(req, this, |l| l.flags)?;
+        move_forward(req, this, flags ^ Self::IT_MODE_LIFO)
+    }
+
+    /// `next(): void`.
+    ///
+    /// ```php
+    /// $l = new SplDoublyLinkedList; foreach ([1, 2, 3] as $n) $l->push($n);
+    /// $l->rewind(); $l->next(); $l->next(); echo $l->current(), $l->key(), "\n";
+    /// $l->prev(); echo $l->current(), $l->key(), "\n";
+    /// $l->next(); $l->next(); var_dump($l->valid(), $l->current());
+    /// ```
+    /// ```expect
+    /// 32
+    /// 21
+    /// bool(false)
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let this = this.object();
+        let flags = with(req, this, |l| l.flags)?;
+        move_forward(req, this, flags)
+    }
+
+    /// `valid(): bool`.
+    #[php(tentative)]
+    fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        with(req, this.object(), |l| l.pointer.is_some())
+    }
+
+    /// `unserialize(string $data): void`: the list emptied, then the flags
+    /// and each `:`-led element read through one var hash, as php reads
+    /// them; where the data breaks off php's `UnexpectedValueException`
+    /// names the offset the reader stopped at.
+    ///
+    /// ```php
+    /// $l = new SplDoublyLinkedList;
+    /// $l->unserialize('i:2;:s:1:"a";:O:8:"stdClass":0:{}:r:3;');
+    /// var_dump($l->getIteratorMode(), count($l), $l[1] === $l[2]);
+    /// foreach (['i:0;:x', 's:1:"a";', 'i:1;;'] as $bad) {
+    ///     try { $l->unserialize($bad); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(3)
+    /// bool(false)
+    /// Error at offset 5 of 6 bytes
+    /// Error at offset 8 of 8 bytes
+    /// Error at offset 4 of 5 bytes
+    /// ```
+    #[php(tentative)]
+    fn unserialize(req: &mut Request, this: This<Self>, data: PhpString) -> Result<(), Thrown> {
+        let this = this.object();
+        let data = data.as_bytes().to_vec();
+        if data.is_empty() {
+            return Ok(());
+        }
+        while let Some(old) = with(req, this, Llist::pop)? {
+            req.release(old);
+        }
+        let mut reader = php_ext_standard::Unserializer::new(req, &data);
+        let mut kept = None;
+        let read = read_list(req, this, &mut reader, &data, &mut kept);
+        let finished = reader.finish(req);
+        if let Some(flags) = kept {
+            req.release(flags);
+        }
+        let broke_at = read?;
+        finished?;
+        match broke_at {
+            Some(at) => Err(throw(
+                req,
+                "UnexpectedValueException",
+                &format!("Error at offset {at} of {} bytes", data.len()),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// `serialize(): string`: the flags, then `:` and each element, each
+    /// through `serialize()`; the witness is the class's.
+    #[php(tentative)]
+    fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (flags, values) = with(req, this.object(), |l| (l.flags, l.values()))?;
+        let mut out = crate::serialized(req, Value::int(flags))?;
+        for value in values {
+            out.push(b':');
+            out.extend(crate::serialized(req, value)?);
+        }
+        PhpString::new(req, &out)
+    }
+
+    /// `__serialize(): array`: the flags, the elements and the members.
+    ///
+    /// ```php
+    /// $s = new SplStack; $s->push('a');
+    /// var_dump($s->__serialize());
+    /// $t = new SplStack; $t->__unserialize([6, ['x', 'y'], []]); echo $t->top(), count($t), "\n";
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   int(6)
+    ///   [1]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     string(1) "a"
+    ///   }
+    ///   [2]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// y2
+    /// ```
+    #[php(tentative)]
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let this = this.object();
+        let (flags, values) = with(req, this, |l| (l.flags, l.values()))?;
+        let mut out = PhpArray::new(req)?;
+        out.append(req, Value::int(flags))?;
+        let mut list = PhpArray::new(req)?;
+        for value in values {
+            list.append(req, crate::copied(req, value))?;
+        }
+        out.append(req, Value::array(list))?;
+        let members = crate::members(req, this)?;
+        out.append(req, Value::array(members))?;
+        Ok(out)
+    }
+
+    /// `__unserialize(array $data): void`; the witness is the class's.
+    #[php(tentative)]
+    fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
+        let this = this.object();
+        let flags = data.get(&Key::Int(0)).and_then(|f| f.deref().as_int());
+        let storage = data
+            .get(&Key::Int(1))
+            .and_then(|s| s.deref().as_array().copied());
+        let members = data
+            .get(&Key::Int(2))
+            .and_then(|m| m.deref().as_array().copied());
+        let (Some(flags), Some(storage), Some(members)) = (flags, storage, members) else {
+            return Err(throw(
+                req,
+                "UnexpectedValueException",
+                "Incomplete or ill-typed serialization data",
+            ));
+        };
+        with(req, this, |l| l.flags = flags)?;
+        for (_, value) in storage.snapshot() {
+            let value = crate::copied(req, value);
+            with(req, this, |l| l.push(value))?;
+        }
+        for (key, value) in members.snapshot() {
+            let name = key.to_prop_name(req)?;
+            req.addref(&value);
+            Std.write_property(req, this, name, value)?;
+        }
+        Ok(())
+    }
+}
+
+/// `class SplQueue extends SplDoublyLinkedList`, its walk FIFO and
+/// frozen so; `enqueue` and `dequeue` are php's aliases of `push` and
+/// `shift`.
+///
+/// ```php
 /// $q = new SplQueue; $q->enqueue('a'); $q->enqueue('b');
 /// echo $q->dequeue(), count($q), "\n";
 /// try { $q->setIteratorMode(SplDoublyLinkedList::IT_MODE_LIFO); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
-/// 2:3;1:2;0:1;
-/// 3 3 2
 /// a1
 /// Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen
 /// ```
-pub(crate) fn classes() -> Vec<Declared> {
-    let base = "SplDoublyLinkedList";
-    let rows: [(&str, Entry); 28] = [
-        ("add", add),
-        ("pop", pop),
-        ("shift", shift),
-        ("push", push),
-        ("unshift", unshift),
-        ("top", top),
-        ("bottom", bottom),
-        ("__debugInfo", debug_info),
-        ("count", count),
-        ("isEmpty", is_empty),
-        ("setIteratorMode", set_iterator_mode),
-        ("getIteratorMode", get_iterator_mode),
-        ("offsetExists", offset_exists),
-        ("offsetGet", offset_get),
-        ("offsetSet", offset_set),
-        ("offsetUnset", offset_unset),
-        ("rewind", rewind),
-        ("current", current),
-        ("key", key),
-        ("prev", prev),
-        ("next", next),
-        ("valid", valid),
-        ("unserialize", unserialize),
-        ("serialize", serialize),
-        ("__serialize", magic_serialize),
-        ("__unserialize", magic_unserialize),
-        ("SplQueue::enqueue", push),
-        ("SplQueue::dequeue", shift),
-    ];
-    let names: Vec<(String, Entry)> = rows
-        .iter()
-        .map(|(k, e)| {
-            if k.contains("::") {
-                ((*k).to_owned(), *e)
-            } else {
-                (format!("{base}::{k}"), *e)
-            }
-        })
-        .collect();
-    let entries: Vec<(&str, Entry)> = names.iter().map(|(k, e)| (k.as_str(), *e)).collect();
-    stub::classes(STUB, &entries)
+#[php_class(extends(SplDoublyLinkedList))]
+pub(crate) struct SplQueue;
+
+#[php_class]
+impl SplQueue {
+    #[php(tentative, implementation = SplDoublyLinkedList::push)]
+    fn enqueue(this: This<Self>, value: Value);
+    #[php(tentative, implementation = SplDoublyLinkedList::shift)]
+    fn dequeue(this: This<Self>) -> Value;
 }
+
+/// `class SplStack extends SplDoublyLinkedList`, its walk LIFO and
+/// frozen so.
+///
+/// ```php
+/// $s = new SplStack; $s->push(1); $s->push(2); $s[] = 3;
+/// foreach ($s as $k => $v) echo "$k:$v;";
+/// echo "\n", $s->top(), " ", $s->pop(), " ", count($s), "\n";
+/// ```
+/// ```expect
+/// 2:3;1:2;0:1;
+/// 3 3 2
+/// ```
+#[php_class(extends(SplDoublyLinkedList))]
+pub(crate) struct SplStack;
+
+#[php_class]
+impl SplStack {}
 
 /// The payload of `object`, the flags laid down on first use as
 /// `spl_dllist_object_new_ex` lays them for the class.
 fn ready(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    match object.native::<SplDllist>(req).map(|l| l.ready) {
+    match object.native::<Llist>(req).map(|l| l.ready) {
         Some(true) => Ok(()),
         Some(false) => {
             let flags = if crate::is_a(req, object.class(), b"SplStack") {
-                IT_FIX | IT_LIFO
+                IT_FIX | SplDoublyLinkedList::IT_MODE_LIFO
             } else if crate::is_a(req, object.class(), b"SplQueue") {
                 IT_FIX
             } else {
                 0
             };
-            if let Some(l) = object.native_mut::<SplDllist>(req) {
+            if let Some(l) = object.native_mut::<Llist>(req) {
                 l.flags = flags;
                 l.ready = true;
             }
@@ -276,19 +759,13 @@ fn ready(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 fn with<R>(
     req: &mut Request,
     object: PhpObject,
-    change: impl FnOnce(&mut SplDllist) -> R,
+    change: impl FnOnce(&mut Llist) -> R,
 ) -> Result<R, Thrown> {
     ready(req, object)?;
-    match object.native_mut::<SplDllist>(req) {
+    match object.native_mut::<Llist>(req) {
         Some(l) => Ok(change(l)),
-        None => Ok(change(&mut SplDllist::default())),
+        None => Ok(change(&mut Llist::default())),
     }
-}
-
-fn this(req: &mut Request) -> Result<PhpObject, Thrown> {
-    let this = crate::this(req)?;
-    ready(req, this)?;
-    Ok(this)
 }
 
 /// `zend_argument_error(spl_ce_OutOfRangeException, 1, ...)`.
@@ -299,7 +776,7 @@ fn out_of_range(req: &mut Request, tail: &str) -> Thrown {
 impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let values = object
-            .native_mut::<SplDllist>(req)
+            .native_mut::<Llist>(req)
             .map(|l| {
                 let values = l.values();
                 l.nodes.clear();
@@ -314,7 +791,7 @@ impl ObjectHandlers for Handlers {
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(l) = object.native::<SplDllist>(req) {
+        if let Some(l) = object.native::<Llist>(req) {
             for value in l.values() {
                 visit(value);
             }
@@ -341,10 +818,10 @@ impl ObjectHandlers for Handlers {
 /// element, the pointer at the head.
 fn clone_list(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let (values, flags) = with(req, object, |l| (l.values(), l.flags))?;
-    let mut copy = SplDllist {
+    let mut copy = Llist {
         flags,
         ready: true,
-        ..SplDllist::default()
+        ..Llist::default()
     };
     for value in values {
         req.addref(&value);
@@ -374,140 +851,8 @@ fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
     Ok(out)
 }
 
-/// `add(int $index, mixed $value): void`: before the element at the
-/// index, or at the end for the count.
-///
-/// ```php
-/// $l = new SplDoublyLinkedList; $l->push('a'); $l->push('c');
-/// $l->add(1, 'b'); $l->add(3, 'd');
-/// echo implode(',', iterator_to_array($l)), "\n";
-/// try { $l->add(9, 'x'); } catch (OutOfRangeException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// a,b,c,d
-/// SplDoublyLinkedList::add(): Argument #1 ($index) is out of range
-/// ```
-fn add(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 2, 2)?;
-    let this = this(req)?;
-    let index = crate::long(req, 1)?;
-    let value = crate::value(req, 2);
-    let count = with(req, this, |l| l.count)?;
-    if index < 0 || index > i64::try_from(count).unwrap_or(i64::MAX) {
-        return Err(out_of_range(req, "is out of range"));
-    }
-    let value = crate::copied(req, value);
-    with(req, this, |l| {
-        if index == i64::try_from(l.count).unwrap_or(i64::MAX) {
-            l.push(value);
-            return;
-        }
-        let Some(element) = l.offset(index, l.flags & IT_LIFO != 0) else {
-            return;
-        };
-        let at = l.nodes.len();
-        let prev = l.nodes[element].prev;
-        l.nodes.push(Node {
-            data: Some(value),
-            prev,
-            next: Some(element),
-        });
-        match prev {
-            None => l.head = Some(at),
-            Some(prev) => l.nodes[prev].next = Some(at),
-        }
-        l.nodes[element].prev = Some(at);
-        l.count += 1;
-    })?;
-    Ok(Value::null())
-}
-
-/// `pop(): mixed`.
-///
-/// ```php
-/// $l = new SplDoublyLinkedList; $l->push(1); $l->unshift(0);
-/// var_dump($l->pop(), $l->shift(), $l->isEmpty());
-/// try { $l->pop(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
-/// try { $l->shift(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
-/// try { $l->top(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(1)
-/// int(0)
-/// bool(true)
-/// Can't pop from an empty datastructure
-/// Can't shift from an empty datastructure
-/// Can't peek at an empty datastructure
-/// ```
-fn pop(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    match with(req, this, SplDllist::pop)? {
-        Some(value) => Ok(value),
-        None => Err(throw(
-            req,
-            "RuntimeException",
-            "Can't pop from an empty datastructure",
-        )),
-    }
-}
-
-/// `shift(): mixed`; the witness is `pop`'s.
-fn shift(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    match with(req, this, SplDllist::shift)? {
-        Some(value) => Ok(value),
-        None => Err(throw(
-            req,
-            "RuntimeException",
-            "Can't shift from an empty datastructure",
-        )),
-    }
-}
-
-/// `push(mixed $value): void`.
-fn push(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = this(req)?;
-    let value = crate::value(req, 1);
-    let value = crate::copied(req, value);
-    with(req, this, |l| l.push(value))?;
-    Ok(Value::null())
-}
-
-/// `unshift(mixed $value): void`.
-fn unshift(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = this(req)?;
-    let value = crate::value(req, 1);
-    let value = crate::copied(req, value);
-    with(req, this, |l| l.unshift(value))?;
-    Ok(Value::null())
-}
-
-/// `top(): mixed`: the tail's data.
-///
-/// ```php
-/// $l = new SplDoublyLinkedList; $l->push('first'); $l->push('last');
-/// var_dump($l->top(), $l->bottom());
-/// ```
-/// ```expect
-/// string(4) "last"
-/// string(5) "first"
-/// ```
-fn top(req: &mut Request) -> Result<Value, Thrown> {
-    peek(req, true)
-}
-
-/// `bottom(): mixed`: the head's data; the witness is `top`'s.
-fn bottom(req: &mut Request) -> Result<Value, Thrown> {
-    peek(req, false)
-}
-
-fn peek(req: &mut Request, tail: bool) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
+/// The tail's or the head's data, php's `Can't peek` where there is none.
+fn peek(req: &mut Request, this: PhpObject, tail: bool) -> Result<Value, Thrown> {
     let found = with(req, this, |l| {
         let at = if tail { l.tail } else { l.head };
         at.and_then(|at| l.nodes[at].data)
@@ -522,114 +867,13 @@ fn peek(req: &mut Request, tail: bool) -> Result<Value, Thrown> {
     }
 }
 
-/// `__debugInfo(): array`.
-///
-/// ```php
-/// $q = new SplQueue; $q[] = 1;
-/// var_dump($q);
-/// ```
-/// ```expect
-/// object(SplQueue)#1 (2) {
-///   ["flags":"SplDoublyLinkedList":private]=>
-///   int(4)
-///   ["dllist":"SplDoublyLinkedList":private]=>
-///   array(1) {
-///     [0]=>
-///     int(1)
-///   }
-/// }
-/// ```
-fn debug_info(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    Ok(Value::array(list_debug_info(req, this)?))
-}
-
-/// `count(): int`.
-fn count(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    let n = with(req, this, |l| l.count)?;
-    Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX)))
-}
-
-/// `isEmpty(): bool`, over the class's count, `count()` a user class
-/// overrides included.
-fn is_empty(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    let n = Handlers.count_elements(req, this)?.unwrap_or(0);
-    Ok(Value::bool(n == 0))
-}
-
-/// `setIteratorMode(int $mode): int`.
-///
-/// ```php
-/// $l = new SplDoublyLinkedList; $l->push(1); $l->push(2); $l->push(3);
-/// var_dump($l->setIteratorMode(SplDoublyLinkedList::IT_MODE_LIFO | SplDoublyLinkedList::IT_MODE_DELETE));
-/// foreach ($l as $k => $v) echo "$k:$v ";
-/// echo count($l), " ", $l->getIteratorMode(), "\n";
-/// ```
-/// ```expect
-/// int(3)
-/// 2:3 1:2 0:1 0 3
-/// ```
-fn set_iterator_mode(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = this(req)?;
-    let mode = crate::long(req, 1)?;
-    let flags = with(req, this, |l| l.flags)?;
-    if flags & IT_FIX != 0 && (flags & IT_LIFO) != (mode & IT_LIFO) {
-        return Err(throw(
-            req,
-            "RuntimeException",
-            "Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen",
-        ));
-    }
-    let flags = (mode & IT_MASK) | (flags & IT_FIX);
-    with(req, this, |l| l.flags = flags)?;
-    Ok(Value::int(flags))
-}
-
-/// `getIteratorMode(): int`; the witness is `setIteratorMode`'s.
-fn get_iterator_mode(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    Ok(Value::int(with(req, this, |l| l.flags)?))
-}
-
-/// `offsetExists($index): bool`.
-///
-/// ```php
-/// $l = new SplDoublyLinkedList; $l->push('x'); $l->push('y');
-/// var_dump(isset($l[1]), isset($l[2]), $l[1]);
-/// $l[0] = 'z'; unset($l[1]);
-/// var_dump($l->toArray ?? null, count($l), $l[0]);
-/// try { $l[5]; } catch (OutOfRangeException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// string(1) "y"
-/// NULL
-/// int(1)
-/// string(1) "z"
-/// SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range
-/// ```
-fn offset_exists(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = this(req)?;
-    let index = crate::long(req, 1)?;
-    let count = with(req, this, |l| l.count)?;
-    Ok(Value::bool(
-        index >= 0 && usize::try_from(index).is_ok_and(|i| i < count),
-    ))
-}
-
 /// The node at `index`, or php's `OutOfRangeException`.
 fn node(req: &mut Request, this: PhpObject, index: i64) -> Result<usize, Thrown> {
     let (count, found) = with(req, this, |l| {
-        (l.count, l.offset(index, l.flags & IT_LIFO != 0))
+        (
+            l.count,
+            l.offset(index, l.flags & SplDoublyLinkedList::IT_MODE_LIFO != 0),
+        )
     })?;
     if index < 0 || usize::try_from(index).is_ok_and(|i| i >= count) {
         return Err(out_of_range(req, "is out of range"));
@@ -637,116 +881,20 @@ fn node(req: &mut Request, this: PhpObject, index: i64) -> Result<usize, Thrown>
     found.ok_or_else(|| out_of_range(req, "is an invalid offset"))
 }
 
-/// `offsetGet($index): mixed`; the witness is `offsetExists`'s.
-fn offset_get(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = this(req)?;
-    let index = crate::long(req, 1)?;
-    let at = node(req, this, index)?;
-    let value = with(req, this, |l| l.nodes[at].data)?.unwrap_or_default();
-    Ok(crate::copied(req, value))
-}
-
-/// `offsetSet($index, mixed $value): void`, `null` pushing.
-fn offset_set(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 2, 2)?;
-    let this = this(req)?;
-    let index = crate::nullable_long(req, 1)?;
-    let value = crate::value(req, 2);
-    let Some(index) = index else {
-        let value = crate::copied(req, value);
-        with(req, this, |l| l.push(value))?;
-        return Ok(Value::null());
-    };
-    let at = node(req, this, index)?;
-    let value = crate::copied(req, value);
-    let old = with(req, this, |l| l.nodes[at].data.replace(value))?;
-    if let Some(old) = old {
-        req.release(old);
-    }
-    Ok(Value::null())
-}
-
-/// `offsetUnset($index): void`: the node unlinked, its links cut, the
-/// traverse pointer let go where it stood on it.
-fn offset_unset(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = this(req)?;
-    let index = crate::long(req, 1)?;
-    let at = node(req, this, index)?;
-    let old = with(req, this, |l| {
-        let Node { prev, next, .. } = l.nodes[at];
-        if let Some(prev) = prev {
-            l.nodes[prev].next = next;
-        }
-        if let Some(next) = next {
-            l.nodes[next].prev = prev;
-        }
-        if l.head == Some(at) {
-            l.head = next;
-        }
-        if l.tail == Some(at) {
-            l.tail = prev;
-        }
-        l.nodes[at].prev = None;
-        l.nodes[at].next = None;
-        l.count -= 1;
-        if l.pointer == Some(at) {
-            l.pointer = None;
-        }
-        l.nodes[at].data.take()
-    })?;
-    if let Some(old) = old {
-        req.release(old);
-    }
-    Ok(Value::null())
-}
-
-/// `spl_dllist_it_helper_rewind`.
-fn rewind(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    with(req, this, |l| {
-        if l.flags & IT_LIFO != 0 {
-            l.position = i64::try_from(l.count).unwrap_or(i64::MAX) - 1;
-            l.pointer = l.tail;
-        } else {
-            l.position = 0;
-            l.pointer = l.head;
-        }
-    })?;
-    Ok(Value::null())
-}
-
-/// `current(): mixed`, `null` off the list.
-fn current(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    let found = with(req, this, |l| l.pointer.and_then(|at| l.nodes[at].data))?;
-    Ok(found.map_or_else(Value::null, |v| crate::copied(req, v)))
-}
-
-/// `key(): int`, the traverse position.
-fn key(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    Ok(Value::int(with(req, this, |l| l.position)?))
-}
-
 /// `spl_dllist_it_helper_move_forward` under `flags`: the pointer one
 /// step on, the element passed taken off under `IT_MODE_DELETE`.
 fn move_forward(req: &mut Request, this: PhpObject, flags: i64) -> Result<(), Thrown> {
     let deleted = with(req, this, |l| {
         let old = l.pointer?;
-        if flags & IT_LIFO != 0 {
+        if flags & SplDoublyLinkedList::IT_MODE_LIFO != 0 {
             l.pointer = l.nodes[old].prev;
             l.position -= 1;
-            if flags & IT_DELETE != 0 {
+            if flags & SplDoublyLinkedList::IT_MODE_DELETE != 0 {
                 return l.pop();
             }
         } else {
             l.pointer = l.nodes[old].next;
-            if flags & IT_DELETE != 0 {
+            if flags & SplDoublyLinkedList::IT_MODE_DELETE != 0 {
                 return l.shift();
             }
             l.position += 1;
@@ -757,110 +905,6 @@ fn move_forward(req: &mut Request, this: PhpObject, flags: i64) -> Result<(), Th
         req.release(value);
     }
     Ok(())
-}
-
-/// `next(): void`.
-///
-/// ```php
-/// $l = new SplDoublyLinkedList; foreach ([1, 2, 3] as $n) $l->push($n);
-/// $l->rewind(); $l->next(); $l->next(); echo $l->current(), $l->key(), "\n";
-/// $l->prev(); echo $l->current(), $l->key(), "\n";
-/// $l->next(); $l->next(); var_dump($l->valid(), $l->current());
-/// ```
-/// ```expect
-/// 32
-/// 21
-/// bool(false)
-/// NULL
-/// ```
-fn next(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    let flags = with(req, this, |l| l.flags)?;
-    move_forward(req, this, flags)?;
-    Ok(Value::null())
-}
-
-/// `prev(): void`, `next()` the other way; the witness is `next`'s.
-fn prev(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    let flags = with(req, this, |l| l.flags)?;
-    move_forward(req, this, flags ^ IT_LIFO)?;
-    Ok(Value::null())
-}
-
-/// `valid(): bool`.
-fn valid(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    Ok(Value::bool(with(req, this, |l| l.pointer.is_some())?))
-}
-
-/// `serialize(): string`: the flags, then `:` and each element, each
-/// through `serialize()`.
-///
-/// The witness waits on the ext/standard native it calls (#712).
-fn serialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    let (flags, values) = with(req, this, |l| (l.flags, l.values()))?;
-    let mut out = crate::serialized(req, Value::int(flags))?;
-    for value in values {
-        out.push(b':');
-        out.extend(crate::serialized(req, value)?);
-    }
-    crate::string_value(req, &out)
-}
-
-/// `unserialize(string $data): void`: the list emptied, then the flags
-/// and each `:`-led element read through one var hash, as php reads
-/// them; where the data breaks off php's `UnexpectedValueException`
-/// names the offset the reader stopped at.
-///
-/// ```php
-/// $l = new SplDoublyLinkedList;
-/// $l->unserialize('i:2;:s:1:"a";:O:8:"stdClass":0:{}:r:3;');
-/// var_dump($l->getIteratorMode(), count($l), $l[1] === $l[2]);
-/// foreach (['i:0;:x', 's:1:"a";', 'i:1;;'] as $bad) {
-///     try { $l->unserialize($bad); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
-/// }
-/// ```
-/// ```expect
-/// int(2)
-/// int(3)
-/// bool(false)
-/// Error at offset 5 of 6 bytes
-/// Error at offset 8 of 8 bytes
-/// Error at offset 4 of 5 bytes
-/// ```
-fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = this(req)?;
-    let data = crate::string(req, 1)?.as_bytes().to_vec();
-    if data.is_empty() {
-        return Ok(Value::null());
-    }
-    while let Some(old) = with(req, this, SplDllist::pop)? {
-        req.release(old);
-    }
-    let mut reader = php_ext_standard::Unserializer::new(req, &data);
-    let mut kept = None;
-    let read = read_list(req, this, &mut reader, &data, &mut kept);
-    let finished = reader.finish(req);
-    if let Some(flags) = kept {
-        req.release(flags);
-    }
-    let broke_at = read?;
-    finished?;
-    match broke_at {
-        Some(at) => Err(throw(
-            req,
-            "UnexpectedValueException",
-            &format!("Error at offset {at} of {} bytes", data.len()),
-        )),
-        None => Ok(Value::null()),
-    }
 }
 
 /// The body of `SplDoublyLinkedList::unserialize` over one reader:
@@ -893,74 +937,4 @@ fn read_list(
         return Ok(Some(reader.offset()));
     }
     Ok(None)
-}
-
-/// `__serialize(): array`: the flags, the elements and the members.
-///
-/// ```php
-/// $s = new SplStack; $s->push('a');
-/// var_dump($s->__serialize());
-/// $t = new SplStack; $t->__unserialize([6, ['x', 'y'], []]); echo $t->top(), count($t), "\n";
-/// ```
-/// ```expect
-/// array(3) {
-///   [0]=>
-///   int(6)
-///   [1]=>
-///   array(1) {
-///     [0]=>
-///     string(1) "a"
-///   }
-///   [2]=>
-///   array(0) {
-///   }
-/// }
-/// y2
-/// ```
-fn magic_serialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this(req)?;
-    let (flags, values) = with(req, this, |l| (l.flags, l.values()))?;
-    let mut out = PhpArray::new(req)?;
-    out.append(req, Value::int(flags))?;
-    let mut list = PhpArray::new(req)?;
-    for value in values {
-        list.append(req, crate::copied(req, value))?;
-    }
-    out.append(req, Value::array(list))?;
-    let members = crate::members(req, this)?;
-    out.append(req, Value::array(members))?;
-    Ok(Value::array(out))
-}
-
-/// `__unserialize(array $data): void`; the witness is `__serialize`'s.
-fn magic_unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = this(req)?;
-    let data = crate::array(req, 1)?;
-    let flags = data.get(&Key::Int(0)).and_then(|f| f.deref().as_int());
-    let storage = data
-        .get(&Key::Int(1))
-        .and_then(|s| s.deref().as_array().copied());
-    let members = data
-        .get(&Key::Int(2))
-        .and_then(|m| m.deref().as_array().copied());
-    let (Some(flags), Some(storage), Some(members)) = (flags, storage, members) else {
-        return Err(throw(
-            req,
-            "UnexpectedValueException",
-            "Incomplete or ill-typed serialization data",
-        ));
-    };
-    with(req, this, |l| l.flags = flags)?;
-    for (_, value) in storage.snapshot() {
-        let value = crate::copied(req, value);
-        with(req, this, |l| l.push(value))?;
-    }
-    for (key, value) in members.snapshot() {
-        let name = key.to_prop_name(req)?;
-        req.addref(&value);
-        Std.write_property(req, this, name, value)?;
-    }
-    Ok(Value::null())
 }

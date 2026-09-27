@@ -1,24 +1,22 @@
-//! `spl_heap.c`: `SplPriorityQueue`, `SplHeap`, `SplMinHeap` and
-//! `SplMaxHeap` over php's `spl_ptr_heap`, the array-backed binary heap
-//! whose sift up and sift down this file copies step for step, so the
-//! order two equal elements come out in is php's. A comparison is
+//! `spl_heap.c`: `SplHeap`, `SplMinHeap`, `SplMaxHeap` and
+//! `SplPriorityQueue` over php's `spl_ptr_heap`, the array-backed binary
+//! heap whose sift up and sift down this file copies step for step, so
+//! the order two equal elements come out in is php's. A comparison is
 //! `zend_compare`, or the class's `compare()` where a user class
 //! overrides it (`fptr_cmp`); one that throws leaves the heap marked
-//! corrupted, and a heap is locked against writes while it sifts.
+//! corrupted, and a heap is locked against writes while it sifts. One
+//! body serves a heap and a queue where the two differ only by the
+//! payload's kind, so a queue's method is the heap's `implementation =`.
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPurpose, Std};
+use php_ext::abi::{CloneObj, ExtensionBuilder, ObjectHandlers, PropertyPurpose, Std, This, True};
+use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::{compare, to_long};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
-use crate::Entry;
-use crate::stub::{self, Declared};
-
-const EXTR_DATA: i64 = 1;
-const EXTR_PRIORITY: i64 = 2;
-const EXTR_BOTH: i64 = 3;
+use crate::{Countable, Iterator};
 
 /// `spl_heap_object` with its `spl_ptr_heap`: the elements, a value
 /// each for a heap and a data and priority pair for a queue, the
@@ -27,7 +25,7 @@ const EXTR_BOTH: i64 = 3;
 // each, as `spl_ptr_heap` and `spl_heap_object` keep them.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
-pub(crate) struct SplHeap {
+pub(crate) struct Heap {
     elements: Vec<(Value, Value)>,
     queue: bool,
     min: bool,
@@ -42,126 +40,527 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
-const STUB: &str = "
-class SplPriorityQueue implements Iterator, Countable {
-    public const int EXTR_BOTH = 3;
-    public const int EXTR_PRIORITY = 2;
-    public const int EXTR_DATA = 1;
-    /** @tentative-return-type */ public function compare(mixed $priority1, mixed $priority2): int {}
-    /** @tentative-return-type */ public function insert(mixed $value, mixed $priority): true {}
-    /** @tentative-return-type */ public function setExtractFlags(int $flags): int {}
-    /** @tentative-return-type */ public function top(): mixed {}
-    /** @tentative-return-type */ public function extract(): mixed {}
-    /** @tentative-return-type */ public function count(): int {}
-    /** @tentative-return-type */ public function isEmpty(): bool {}
-    /** @tentative-return-type */ public function rewind(): void {}
-    /** @tentative-return-type */ public function current(): mixed {}
-    /** @tentative-return-type */ public function key(): int {}
-    /** @tentative-return-type */ public function next(): void {}
-    /** @tentative-return-type */ public function valid(): bool {}
-    /** @tentative-return-type */ public function recoverFromCorruption(): true {}
-    /** @tentative-return-type */ public function isCorrupted(): bool {}
-    /** @tentative-return-type */ public function getExtractFlags(): int {}
-    /** @tentative-return-type */ public function __debugInfo(): array {}
-    /** @tentative-return-type */ public function __serialize(): array {}
-    /** @tentative-return-type */ public function __unserialize(array $data): void {}
+/// The four classes onto `builder`, in the order
+/// `PHP_MINIT_FUNCTION(spl_heap)` registers them.
+pub(crate) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
+    builder
+        .class::<SplHeap>()
+        .class::<SplMinHeap>()
+        .class::<SplMaxHeap>()
+        .class::<SplPriorityQueue>()
 }
-abstract class SplHeap implements Iterator, Countable {
-    /** @tentative-return-type */ public function extract(): mixed {}
-    /** @tentative-return-type */ public function insert(mixed $value): true {}
-    /** @tentative-return-type */ public function top(): mixed {}
-    /** @tentative-return-type */ public function count(): int {}
-    /** @tentative-return-type */ public function isEmpty(): bool {}
-    /** @tentative-return-type */ public function rewind(): void {}
-    /** @tentative-return-type */ public function current(): mixed {}
-    /** @tentative-return-type */ public function key(): int {}
-    /** @tentative-return-type */ public function next(): void {}
-    /** @tentative-return-type */ public function valid(): bool {}
-    /** @tentative-return-type */ public function recoverFromCorruption(): true {}
-    /** @tentative-return-type */ abstract protected function compare(mixed $value1, mixed $value2): int;
-    /** @tentative-return-type */ public function isCorrupted(): bool {}
-    /** @tentative-return-type */ public function __debugInfo(): array {}
-    /** @tentative-return-type */ public function __serialize(): array {}
-    /** @tentative-return-type */ public function __unserialize(array $data): void {}
-}
-class SplMinHeap extends SplHeap {
-    /** @tentative-return-type */ protected function compare(mixed $value1, mixed $value2): int {}
-}
-class SplMaxHeap extends SplHeap {
-    /** @tentative-return-type */ protected function compare(mixed $value1, mixed $value2): int {}
-}
-";
 
-/// The four classes, each method with its entry.
+/// `abstract class SplHeap implements Iterator, Countable`: a walk is
+/// the heap emptied from the top, `key()` counting down.
 ///
 /// ```php
 /// $h = new SplMinHeap;
 /// foreach ([5, 1, 3, 1, 4] as $n) $h->insert($n);
-/// echo count($h), " ", $h->top(), "\n";
+/// echo count($h), " ", $h->count(), " ", $h->top(), "\n";
 /// foreach ($h as $k => $v) echo "$k:$v;";
 /// echo "\n", count($h), "\n";
 /// $max = new SplMaxHeap; $max->insert('b'); $max->insert('c'); $max->insert('a');
 /// echo $max->extract(), $max->extract(), $max->extract(), "\n";
+/// $h->insert(9); $h->rewind(); var_dump($h->valid(), $h->current()); $h->next(); var_dump($h->valid());
+/// $h->insert(2); $h->insert(1);
+/// var_dump($h->isCorrupted()); $c = new SplMaxHeap; $c->__unserialize($h->__serialize()); var_dump($c->top());
 /// ```
 /// ```expect
-/// 5 1
+/// 5 5 1
 /// 4:1;3:1;2:3;1:4;0:5;
 /// 0
 /// cba
+/// bool(true)
+/// int(9)
+/// bool(false)
+/// bool(false)
+/// int(2)
 /// ```
-pub(crate) fn classes() -> Vec<Declared> {
-    let common: [(&str, Entry); 14] = [
-        ("top", top),
-        ("extract", extract),
-        ("count", count),
-        ("isEmpty", is_empty),
-        ("rewind", rewind),
-        ("current", current),
-        ("key", key),
-        ("next", next),
-        ("valid", valid),
-        ("recoverFromCorruption", recover),
-        ("isCorrupted", is_corrupted),
-        ("__debugInfo", debug_info),
-        ("__serialize", serialize),
-        ("__unserialize", unserialize),
-    ];
-    let own: [(&str, Entry); 7] = [
-        ("SplPriorityQueue::compare", queue_compare),
-        ("SplPriorityQueue::insert", queue_insert),
-        ("SplPriorityQueue::setExtractFlags", set_extract_flags),
-        ("SplPriorityQueue::getExtractFlags", get_extract_flags),
-        ("SplHeap::insert", insert),
-        ("SplMinHeap::compare", min_compare),
-        ("SplMaxHeap::compare", max_compare),
-    ];
-    let names: Vec<(String, Entry)> = ["SplPriorityQueue", "SplHeap"]
-        .iter()
-        .flat_map(|class| {
-            common
-                .iter()
-                .map(move |(method, entry)| (format!("{class}::{method}"), *entry))
-        })
-        .chain(own.iter().map(|(k, e)| ((*k).to_owned(), *e)))
-        .collect();
-    let entries: Vec<(&str, Entry)> = names.iter().map(|(k, e)| (k.as_str(), *e)).collect();
-    stub::classes(STUB, &entries)
+#[php_class(abstract, implements(Iterator, Countable), payload = Heap, handlers = HANDLERS)]
+pub(crate) struct SplHeap;
+
+#[php_class]
+impl SplHeap {
+    /// `extract(): mixed`: the top taken off.
+    ///
+    /// ```php
+    /// $h = new SplMaxHeap;
+    /// try { $h->extract(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+    /// try { $h->top(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Can't extract from an empty heap
+    /// Can't peek at an empty heap
+    /// ```
+    #[php(tentative)]
+    fn extract(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let this = this.object();
+        consistent(req, this, true)?;
+        let Some(top) = delete_top(req, this)? else {
+            return Err(throw(
+                req,
+                "RuntimeException",
+                "Can't extract from an empty heap",
+            ));
+        };
+        let (queue, flags) = read(req, this, |h| (h.queue, h.flags))?;
+        if !queue {
+            return Ok(top.0);
+        }
+        let out = extracted(req, top, flags);
+        release(req, top);
+        out
+    }
+
+    /// `SplHeap::insert(mixed $value): true`: sifted up into place.
+    ///
+    /// ```php
+    /// class Reverse extends SplHeap {
+    ///     protected function compare($a, $b): int { echo "cmp($a,$b);"; return $b <=> $a; }
+    /// }
+    /// $h = new Reverse; $h->insert(2); $h->insert(1); $h->insert(3);
+    /// echo "\n", implode(',', iterator_to_array($h, false)), "\n";
+    /// ```
+    /// ```expect
+    /// cmp(2,1);cmp(1,3);
+    /// cmp(3,2);cmp(3,2);1,2,3
+    /// ```
+    #[php(tentative)]
+    fn insert(req: &mut Request, this: This<Self>, value: Value) -> Result<True, Thrown> {
+        let this = this.object();
+        consistent(req, this, true)?;
+        let value = crate::copied(req, value);
+        heap_insert(req, this, (value, Value::null()))?;
+        Ok(True)
+    }
+
+    /// `top(): mixed`: the top, left in place.
+    #[php(tentative)]
+    fn top(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let this = this.object();
+        consistent(req, this, false)?;
+        let (queue, flags, top) = read(req, this, |h| {
+            (h.queue, h.flags, h.elements.first().copied())
+        })?;
+        let Some(top) = top else {
+            return Err(throw(
+                req,
+                "RuntimeException",
+                "Can't peek at an empty heap",
+            ));
+        };
+        if queue {
+            extracted(req, top, flags)
+        } else {
+            Ok(crate::copied(req, top.0))
+        }
+    }
+
+    /// `count(): int`.
+    #[php(tentative)]
+    fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let n = read(req, this.object(), |h| h.elements.len())?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// `isEmpty(): bool`.
+    ///
+    /// ```php
+    /// $h = new SplMinHeap; var_dump($h->isEmpty()); $h->insert(1); var_dump($h->isEmpty(), $h->key(), $h->current());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// int(0)
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn isEmpty(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        read(req, this.object(), |h| h.elements.is_empty())
+    }
+
+    /// `rewind(): void`: nothing, a heap walked is a heap emptied.
+    #[php(tentative)]
+    fn rewind(this: This<Self>) {
+        let _ = this;
+    }
+
+    /// `current(): mixed`: the top, `null` for an empty heap.
+    #[php(tentative)]
+    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let (queue, flags, top) = read(req, this.object(), |h| {
+            (h.queue, h.flags, h.elements.first().copied())
+        })?;
+        match top {
+            None => Ok(Value::null()),
+            Some(top) if queue => extracted(req, top, flags),
+            Some(top) => Ok(crate::copied(req, top.0)),
+        }
+    }
+
+    /// `key(): int`, `count - 1`.
+    #[php(tentative)]
+    fn key(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let n = read(req, this.object(), |h| h.elements.len())?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX) - 1)
+    }
+
+    /// `next(): void`: the top taken off and dropped.
+    #[php(tentative)]
+    fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let this = this.object();
+        consistent(req, this, true)?;
+        if let Some(top) = delete_top(req, this)? {
+            release(req, top);
+        }
+        Ok(())
+    }
+
+    /// `valid(): bool`.
+    #[php(tentative)]
+    fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        read(req, this.object(), |h| !h.elements.is_empty())
+    }
+
+    /// `recoverFromCorruption(): true`.
+    ///
+    /// ```php
+    /// class Bad extends SplMinHeap {
+    ///     protected function compare($a, $b): int { throw new Exception("no"); }
+    /// }
+    /// $h = new Bad; $h->insert(1);
+    /// try { $h->insert(2); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($h->isCorrupted(), count($h));
+    /// try { $h->top(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+    /// $h->recoverFromCorruption(); var_dump($h->isCorrupted());
+    /// ```
+    /// ```expect
+    /// no
+    /// bool(true)
+    /// int(2)
+    /// Heap is corrupted, heap properties are no longer ensured.
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn recoverFromCorruption(req: &mut Request, this: This<Self>) -> Result<True, Thrown> {
+        with(req, this.object(), |h| h.corrupted = false)?;
+        Ok(True)
+    }
+
+    #[php(tentative, protected)]
+    fn compare(this: This<Self>, value1: Value, value2: Value) -> i64;
+
+    /// `isCorrupted(): bool`; the witness is `recoverFromCorruption`'s.
+    #[php(tentative)]
+    fn isCorrupted(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        read(req, this.object(), |h| h.corrupted)
+    }
+
+    /// `__debugInfo(): array`.
+    ///
+    /// ```php
+    /// $q = new SplPriorityQueue; $q->insert('a', 2);
+    /// var_dump($q);
+    /// $h = new SplMaxHeap; $h->insert(7);
+    /// var_dump($h);
+    /// ```
+    /// ```expect
+    /// object(SplPriorityQueue)#1 (3) {
+    ///   ["flags":"SplPriorityQueue":private]=>
+    ///   int(1)
+    ///   ["isCorrupted":"SplPriorityQueue":private]=>
+    ///   bool(false)
+    ///   ["heap":"SplPriorityQueue":private]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     array(2) {
+    ///       ["data"]=>
+    ///       string(1) "a"
+    ///       ["priority"]=>
+    ///       int(2)
+    ///     }
+    ///   }
+    /// }
+    /// object(SplMaxHeap)#2 (3) {
+    ///   ["flags":"SplHeap":private]=>
+    ///   int(0)
+    ///   ["isCorrupted":"SplHeap":private]=>
+    ///   bool(false)
+    ///   ["heap":"SplHeap":private]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     int(7)
+    ///   }
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        heap_debug_info(req, this.object())
+    }
+
+    /// `__serialize(): array`: the properties, then `flags` and
+    /// `heap_elements` in heap order.
+    ///
+    /// ```php
+    /// $h = new SplMinHeap; $h->insert(3); $h->insert(1);
+    /// var_dump($h->__serialize());
+    /// $c = new SplMinHeap; $c->__unserialize($h->__serialize()); var_dump($c->top());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   array(0) {
+    ///   }
+    ///   [1]=>
+    ///   array(2) {
+    ///     ["flags"]=>
+    ///     int(0)
+    ///     ["heap_elements"]=>
+    ///     array(2) {
+    ///       [0]=>
+    ///       int(1)
+    ///       [1]=>
+    ///       int(3)
+    ///     }
+    ///   }
+    /// }
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        serialize(req, this.object())
+    }
+
+    /// `__unserialize(array $data): void`; the witness is `__serialize`'s.
+    #[php(tentative)]
+    fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
+        unserialize(req, this.object(), data)
+    }
+}
+
+/// `class SplMinHeap extends SplHeap`: the smallest on top.
+///
+/// ```php
+/// class Probe extends SplMinHeap { function probe($a, $b) { return $this->compare($a, $b); } }
+/// $p = new Probe; var_dump($p->probe(1, 2), $p->probe(2, 1), $p->probe(3, 3));
+/// ```
+/// ```expect
+/// int(1)
+/// int(-1)
+/// int(0)
+/// ```
+#[php_class(extends(SplHeap))]
+pub(crate) struct SplMinHeap;
+
+#[php_class]
+impl SplMinHeap {
+    /// `SplMinHeap::compare(mixed $value1, mixed $value2): int`,
+    /// protected: the two the other way round.
+    #[php(tentative, protected)]
+    fn compare(
+        req: &mut Request,
+        this: This<Self>,
+        value1: Value,
+        value2: Value,
+    ) -> Result<i64, Thrown> {
+        let _ = this;
+        Ok(compare(req, &value2, &value1)? as i64)
+    }
+}
+
+/// `class SplMaxHeap extends SplHeap`: the largest on top, its
+/// `compare()` `SplPriorityQueue::compare`'s body.
+///
+/// ```php
+/// class Probe extends SplMaxHeap { function probe($a, $b) { return $this->compare($a, $b); } }
+/// $p = new Probe; var_dump($p->probe(1, 2), $p->probe(2, 1));
+/// ```
+/// ```expect
+/// int(-1)
+/// int(1)
+/// ```
+#[php_class(extends(SplHeap))]
+pub(crate) struct SplMaxHeap;
+
+#[php_class]
+impl SplMaxHeap {
+    #[php(tentative, protected, implementation = SplPriorityQueue::compare)]
+    fn compare(this: This<Self>, value1: Value, value2: Value) -> i64;
+}
+
+/// `class SplPriorityQueue implements Iterator, Countable`: each element
+/// a data and a priority, what comes out chosen by the extract flags.
+///
+/// ```php
+/// $q = new SplPriorityQueue;
+/// foreach (['a' => 3, 'b' => 1, 'c' => 2] as $d => $p) $q->insert($d, $p);
+/// echo count($q), $q->count(), " ", $q->isEmpty() ? "empty" : "full", " ", $q->top(), "\n";
+/// foreach ($q as $k => $v) echo "$k:$v;";
+/// echo "\n";
+/// $q->insert('z', 0); $q->rewind(); var_dump($q->valid(), $q->key(), $q->current(), $q->extract(), $q->isCorrupted(), $q->recoverFromCorruption());
+/// $q->insert('y', 0); $q->next(); var_dump($q->valid());
+/// $c = new SplPriorityQueue; $q->insert('w', 5); $c->__unserialize($q->__serialize()); var_dump($c->__debugInfo()["\0SplPriorityQueue\0heap"][0]['data']);
+/// var_dump($c->getExtractFlags());
+/// ```
+/// ```expect
+/// 33 full a
+/// 2:a;1:c;0:b;
+/// bool(true)
+/// int(0)
+/// string(1) "z"
+/// string(1) "z"
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// string(1) "w"
+/// int(1)
+/// ```
+#[php_class(implements(Iterator, Countable), payload = Heap, handlers = HANDLERS)]
+pub(crate) struct SplPriorityQueue;
+
+#[php_class]
+impl SplPriorityQueue {
+    const EXTR_BOTH: i64 = 3;
+    const EXTR_PRIORITY: i64 = 2;
+    const EXTR_DATA: i64 = 1;
+
+    /// `SplPriorityQueue::compare(mixed $priority1, mixed $priority2): int`.
+    ///
+    /// ```php
+    /// $q = new SplPriorityQueue;
+    /// var_dump($q->compare(1, 2), $q->compare(2, 1), (new SplMinHeap)->isEmpty());
+    /// ```
+    /// ```expect
+    /// int(-1)
+    /// int(1)
+    /// bool(true)
+    /// ```
+    #[php(tentative)]
+    fn compare(
+        req: &mut Request,
+        this: This<Self>,
+        priority1: Value,
+        priority2: Value,
+    ) -> Result<i64, Thrown> {
+        let _ = this;
+        Ok(compare(req, &priority1, &priority2)? as i64)
+    }
+
+    /// `SplPriorityQueue::insert(mixed $value, mixed $priority): true`.
+    ///
+    /// ```php
+    /// $q = new SplPriorityQueue;
+    /// $q->insert('low', 1); $q->insert('high', 10); $q->insert('mid', 5); $q->insert('mid2', 5);
+    /// $q->setExtractFlags(SplPriorityQueue::EXTR_BOTH);
+    /// print_r($q->top());
+    /// $q->setExtractFlags(SplPriorityQueue::EXTR_DATA);
+    /// while ($q->valid()) { echo $q->extract(), ";"; }
+    /// ```
+    /// ```expect
+    /// Array
+    /// (
+    ///     [data] => high
+    ///     [priority] => 10
+    /// )
+    /// high;mid2;mid;low;
+    /// ```
+    #[php(tentative)]
+    fn insert(
+        req: &mut Request,
+        this: This<Self>,
+        value: Value,
+        priority: Value,
+    ) -> Result<True, Thrown> {
+        let this = this.object();
+        consistent(req, this, true)?;
+        let data = crate::copied(req, value);
+        let priority = crate::copied(req, priority);
+        heap_insert(req, this, (data, priority))?;
+        Ok(True)
+    }
+
+    /// `setExtractFlags(int $flags): int`.
+    ///
+    /// ```php
+    /// $q = new SplPriorityQueue; $q->insert('x', 1);
+    /// var_dump($q->setExtractFlags(SplPriorityQueue::EXTR_PRIORITY), $q->getExtractFlags(), $q->current());
+    /// try { $q->setExtractFlags(0); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(2)
+    /// int(1)
+    /// Must specify at least one extract flag
+    /// ```
+    #[php(tentative)]
+    fn setExtractFlags(req: &mut Request, this: This<Self>, flags: i64) -> Result<i64, Thrown> {
+        let flags = flags & Self::EXTR_BOTH;
+        if flags == 0 {
+            return Err(throw(
+                req,
+                "RuntimeException",
+                "Must specify at least one extract flag",
+            ));
+        }
+        with(req, this.object(), |h| h.flags = flags)?;
+        Ok(flags)
+    }
+
+    #[php(tentative, implementation = SplHeap::top)]
+    fn top(this: This<Self>) -> Value;
+    #[php(tentative, implementation = SplHeap::extract)]
+    fn extract(this: This<Self>) -> Value;
+    #[php(tentative, implementation = SplHeap::count)]
+    fn count(this: This<Self>) -> i64;
+    #[php(tentative, implementation = SplHeap::isEmpty)]
+    fn isEmpty(this: This<Self>) -> bool;
+    #[php(tentative, implementation = SplHeap::rewind)]
+    fn rewind(this: This<Self>);
+    #[php(tentative, implementation = SplHeap::current)]
+    fn current(this: This<Self>) -> Value;
+    #[php(tentative, implementation = SplHeap::key)]
+    fn key(this: This<Self>) -> i64;
+    #[php(tentative, implementation = SplHeap::next)]
+    fn next(this: This<Self>);
+    #[php(tentative, implementation = SplHeap::valid)]
+    fn valid(this: This<Self>) -> bool;
+    #[php(tentative, implementation = SplHeap::recoverFromCorruption)]
+    fn recoverFromCorruption(this: This<Self>) -> True;
+    #[php(tentative, implementation = SplHeap::isCorrupted)]
+    fn isCorrupted(this: This<Self>) -> bool;
+
+    /// `getExtractFlags(): int`; the witness is `setExtractFlags`'s.
+    #[php(tentative)]
+    fn getExtractFlags(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        read(req, this.object(), |h| h.flags)
+    }
+
+    #[php(tentative, implementation = SplHeap::__debugInfo)]
+    fn __debugInfo(this: This<Self>) -> PhpArray;
+    #[php(tentative, implementation = SplHeap::__serialize)]
+    fn __serialize(this: This<Self>) -> PhpArray;
+    #[php(tentative, implementation = SplHeap::__unserialize)]
+    fn __unserialize(this: This<Self>, data: PhpArray);
 }
 
 /// The payload, laid out on first use as `spl_heap_object_new_ex` lays
 /// it out for the class: a queue under `SplPriorityQueue`, a min-heap
 /// under `SplMinHeap`, a max-heap otherwise.
 fn state(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    let ready = object.native::<SplHeap>(req).map(|h| h.ready);
+    let ready = object.native::<Heap>(req).map(|h| h.ready);
     match ready {
         Some(true) => Ok(()),
         Some(false) => {
             let queue = crate::is_a(req, object.class(), b"SplPriorityQueue");
             let min = crate::is_a(req, object.class(), b"SplMinHeap");
-            if let Some(h) = object.native_mut::<SplHeap>(req) {
+            if let Some(h) = object.native_mut::<Heap>(req) {
                 h.queue = queue;
                 h.min = min;
-                h.flags = if queue { EXTR_DATA } else { 0 };
+                h.flags = if queue {
+                    SplPriorityQueue::EXTR_DATA
+                } else {
+                    0
+                };
                 h.ready = true;
             }
             Ok(())
@@ -177,10 +576,10 @@ fn state(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 fn with<R>(
     req: &mut Request,
     object: PhpObject,
-    change: impl FnOnce(&mut SplHeap) -> R,
+    change: impl FnOnce(&mut Heap) -> R,
 ) -> Result<R, Thrown> {
     state_ready(req, object)?;
-    if let Some(h) = object.native_mut::<SplHeap>(req) {
+    if let Some(h) = object.native_mut::<Heap>(req) {
         return Ok(change(h));
     }
     Err(php_ext::raising::fatal(
@@ -190,7 +589,7 @@ fn with<R>(
 }
 
 fn state_ready(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    if object.native::<SplHeap>(req).is_some_and(|h| h.ready) {
+    if object.native::<Heap>(req).is_some_and(|h| h.ready) {
         return Ok(());
     }
     state(req, object)
@@ -200,10 +599,10 @@ fn state_ready(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 fn read<R>(
     req: &mut Request,
     object: PhpObject,
-    look: impl FnOnce(&SplHeap) -> R,
+    look: impl FnOnce(&Heap) -> R,
 ) -> Result<R, Thrown> {
     state_ready(req, object)?;
-    if let Some(h) = object.native::<SplHeap>(req) {
+    if let Some(h) = object.native::<Heap>(req) {
         return Ok(look(h));
     }
     Err(php_ext::raising::fatal(
@@ -285,7 +684,7 @@ fn overridden_compare(req: &mut Request, object: PhpObject) -> bool {
 
 fn element(req: &Request, object: PhpObject, at: usize) -> (Value, Value) {
     object
-        .native::<SplHeap>(req)
+        .native::<Heap>(req)
         .and_then(|h| h.elements.get(at).copied())
         .unwrap_or_default()
 }
@@ -394,7 +793,7 @@ fn release(req: &mut Request, elem: (Value, Value)) {
 /// `spl_pqueue_extract_helper`: the data, the priority or both, one
 /// more owner each.
 fn extracted(req: &mut Request, elem: (Value, Value), flags: i64) -> Result<Value, Thrown> {
-    if flags & EXTR_BOTH == EXTR_BOTH {
+    if flags & SplPriorityQueue::EXTR_BOTH == SplPriorityQueue::EXTR_BOTH {
         let mut out = PhpArray::new(req)?;
         let data = PhpString::new(req, b"data")?;
         out.set(req, Key::Str(data), crate::copied(req, elem.0))?;
@@ -402,7 +801,7 @@ fn extracted(req: &mut Request, elem: (Value, Value), flags: i64) -> Result<Valu
         out.set(req, Key::Str(priority), crate::copied(req, elem.1))?;
         return Ok(Value::array(out));
     }
-    if flags & EXTR_PRIORITY != 0 {
+    if flags & SplPriorityQueue::EXTR_PRIORITY != 0 {
         return Ok(crate::copied(req, elem.1));
     }
     Ok(crate::copied(req, elem.0))
@@ -411,7 +810,7 @@ fn extracted(req: &mut Request, elem: (Value, Value), flags: i64) -> Result<Valu
 impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let elements = object
-            .native_mut::<SplHeap>(req)
+            .native_mut::<Heap>(req)
             .map(|h| std::mem::take(&mut h.elements));
         for elem in elements.unwrap_or_default() {
             release(req, elem);
@@ -419,7 +818,7 @@ impl ObjectHandlers for Handlers {
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(h) = object.native::<SplHeap>(req) {
+        if let Some(h) = object.native::<Heap>(req) {
             for (a, b) in &h.elements {
                 visit(*a);
                 if h.queue {
@@ -448,7 +847,7 @@ impl ObjectHandlers for Handlers {
 /// `spl_heap_object_clone`: the elements with one more owner each.
 fn clone_heap(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     state_ready(req, object)?;
-    let copy = read(req, object, |h| SplHeap {
+    let copy = read(req, object, |h| Heap {
         elements: h.elements.clone(),
         queue: h.queue,
         min: h.min,
@@ -489,7 +888,7 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
     let mut heap = PhpArray::new(req)?;
     for elem in elements {
         let value = if queue {
-            extracted(req, elem, EXTR_BOTH)?
+            extracted(req, elem, SplPriorityQueue::EXTR_BOTH)?
         } else {
             crate::copied(req, elem.0)
         };
@@ -500,290 +899,8 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
     Ok(out)
 }
 
-/// `SplHeap::insert(mixed $value): true`: sifted up into place.
-///
-/// ```php
-/// class Reverse extends SplHeap {
-///     protected function compare($a, $b): int { echo "cmp($a,$b);"; return $b <=> $a; }
-/// }
-/// $h = new Reverse; $h->insert(2); $h->insert(1); $h->insert(3);
-/// echo "\n", implode(',', iterator_to_array($h, false)), "\n";
-/// ```
-/// ```expect
-/// cmp(2,1);cmp(1,3);
-/// cmp(3,2);cmp(3,2);1,2,3
-/// ```
-fn insert(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let value = crate::value(req, 1);
-    consistent(req, this, true)?;
-    let value = crate::copied(req, value);
-    heap_insert(req, this, (value, Value::null()))?;
-    Ok(Value::bool(true))
-}
-
-/// `SplPriorityQueue::insert(mixed $value, mixed $priority): true`.
-///
-/// ```php
-/// $q = new SplPriorityQueue;
-/// $q->insert('low', 1); $q->insert('high', 10); $q->insert('mid', 5); $q->insert('mid2', 5);
-/// $q->setExtractFlags(SplPriorityQueue::EXTR_BOTH);
-/// print_r($q->top());
-/// $q->setExtractFlags(SplPriorityQueue::EXTR_DATA);
-/// while ($q->valid()) { echo $q->extract(), ";"; }
-/// ```
-/// ```expect
-/// Array
-/// (
-///     [data] => high
-///     [priority] => 10
-/// )
-/// high;mid2;mid;low;
-/// ```
-fn queue_insert(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 2, 2)?;
-    let this = crate::this(req)?;
-    let data = crate::value(req, 1);
-    let priority = crate::value(req, 2);
-    consistent(req, this, true)?;
-    let data = crate::copied(req, data);
-    let priority = crate::copied(req, priority);
-    heap_insert(req, this, (data, priority))?;
-    Ok(Value::bool(true))
-}
-
-/// `extract(): mixed`: the top taken off.
-///
-/// ```php
-/// $h = new SplMaxHeap;
-/// try { $h->extract(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
-/// try { $h->top(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Can't extract from an empty heap
-/// Can't peek at an empty heap
-/// ```
-fn extract(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    consistent(req, this, true)?;
-    let Some(top) = delete_top(req, this)? else {
-        return Err(throw(
-            req,
-            "RuntimeException",
-            "Can't extract from an empty heap",
-        ));
-    };
-    let (queue, flags) = read(req, this, |h| (h.queue, h.flags))?;
-    if !queue {
-        return Ok(top.0);
-    }
-    let out = extracted(req, top, flags);
-    release(req, top);
-    out
-}
-
-/// `top(): mixed`: the top, left in place.
-fn top(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    consistent(req, this, false)?;
-    let (queue, flags, top) = read(req, this, |h| {
-        (h.queue, h.flags, h.elements.first().copied())
-    })?;
-    let Some(top) = top else {
-        return Err(throw(
-            req,
-            "RuntimeException",
-            "Can't peek at an empty heap",
-        ));
-    };
-    if queue {
-        extracted(req, top, flags)
-    } else {
-        Ok(crate::copied(req, top.0))
-    }
-}
-
-/// `count(): int`.
-fn count(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let n = read(req, this, |h| h.elements.len())?;
-    Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX)))
-}
-
-/// `isEmpty(): bool`.
-///
-/// ```php
-/// $h = new SplMinHeap; var_dump($h->isEmpty()); $h->insert(1); var_dump($h->isEmpty(), $h->key(), $h->current());
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// int(0)
-/// int(1)
-/// ```
-fn is_empty(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::bool(read(req, this, |h| h.elements.is_empty())?))
-}
-
-/// `rewind(): void`: nothing, a heap walked is a heap emptied.
-fn rewind(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    Ok(Value::null())
-}
-
-/// `current(): mixed`: the top, `null` for an empty heap.
-fn current(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let (queue, flags, top) = read(req, this, |h| {
-        (h.queue, h.flags, h.elements.first().copied())
-    })?;
-    match top {
-        None => Ok(Value::null()),
-        Some(top) if queue => extracted(req, top, flags),
-        Some(top) => Ok(crate::copied(req, top.0)),
-    }
-}
-
-/// `key(): int`, `count - 1`.
-fn key(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let n = read(req, this, |h| h.elements.len())?;
-    Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX) - 1))
-}
-
-/// `next(): void`: the top taken off and dropped.
-fn next(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    consistent(req, this, true)?;
-    if let Some(top) = delete_top(req, this)? {
-        release(req, top);
-    }
-    Ok(Value::null())
-}
-
-/// `valid(): bool`.
-fn valid(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::bool(read(req, this, |h| !h.elements.is_empty())?))
-}
-
-/// `recoverFromCorruption(): true`.
-///
-/// ```php
-/// class Bad extends SplMinHeap {
-///     protected function compare($a, $b): int { throw new Exception("no"); }
-/// }
-/// $h = new Bad; $h->insert(1);
-/// try { $h->insert(2); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
-/// var_dump($h->isCorrupted(), count($h));
-/// try { $h->top(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
-/// $h->recoverFromCorruption(); var_dump($h->isCorrupted());
-/// ```
-/// ```expect
-/// no
-/// bool(true)
-/// int(2)
-/// Heap is corrupted, heap properties are no longer ensured.
-/// bool(false)
-/// ```
-fn recover(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    with(req, this, |h| h.corrupted = false)?;
-    Ok(Value::bool(true))
-}
-
-/// `isCorrupted(): bool`; the witness is `recoverFromCorruption`'s.
-fn is_corrupted(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::bool(read(req, this, |h| h.corrupted)?))
-}
-
-/// `__debugInfo(): array`.
-///
-/// ```php
-/// $q = new SplPriorityQueue; $q->insert('a', 2);
-/// var_dump($q);
-/// $h = new SplMaxHeap; $h->insert(7);
-/// var_dump($h);
-/// ```
-/// ```expect
-/// object(SplPriorityQueue)#1 (3) {
-///   ["flags":"SplPriorityQueue":private]=>
-///   int(1)
-///   ["isCorrupted":"SplPriorityQueue":private]=>
-///   bool(false)
-///   ["heap":"SplPriorityQueue":private]=>
-///   array(1) {
-///     [0]=>
-///     array(2) {
-///       ["data"]=>
-///       string(1) "a"
-///       ["priority"]=>
-///       int(2)
-///     }
-///   }
-/// }
-/// object(SplMaxHeap)#2 (3) {
-///   ["flags":"SplHeap":private]=>
-///   int(0)
-///   ["isCorrupted":"SplHeap":private]=>
-///   bool(false)
-///   ["heap":"SplHeap":private]=>
-///   array(1) {
-///     [0]=>
-///     int(7)
-///   }
-/// }
-/// ```
-fn debug_info(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::array(heap_debug_info(req, this)?))
-}
-
-/// `__serialize(): array`: the properties, then `flags` and
-/// `heap_elements` in heap order.
-///
-/// ```php
-/// $h = new SplMinHeap; $h->insert(3); $h->insert(1);
-/// var_dump($h->__serialize());
-/// $c = new SplMinHeap; $c->__unserialize($h->__serialize()); var_dump($c->top());
-/// ```
-/// ```expect
-/// array(2) {
-///   [0]=>
-///   array(0) {
-///   }
-///   [1]=>
-///   array(2) {
-///     ["flags"]=>
-///     int(0)
-///     ["heap_elements"]=>
-///     array(2) {
-///       [0]=>
-///       int(1)
-///       [1]=>
-///       int(3)
-///     }
-///   }
-/// }
-/// int(1)
-/// ```
-fn serialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
+/// The array `__serialize` answers for a heap or a queue.
+fn serialize(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
     consistent(req, this, false)?;
     let (queue, flags, elements) = read(req, this, |h| (h.queue, h.flags, h.elements.clone()))?;
     let mut out = PhpArray::new(req)?;
@@ -799,7 +916,7 @@ fn serialize(req: &mut Request) -> Result<Value, Thrown> {
     let mut heap = PhpArray::new(req)?;
     for elem in elements {
         let value = if queue {
-            extracted(req, elem, EXTR_BOTH)?
+            extracted(req, elem, SplPriorityQueue::EXTR_BOTH)?
         } else {
             crate::copied(req, elem.0)
         };
@@ -808,14 +925,11 @@ fn serialize(req: &mut Request) -> Result<Value, Thrown> {
     let key = PhpString::new(req, b"heap_elements")?;
     state.set(req, Key::Str(key), Value::array(heap))?;
     out.append(req, Value::array(state))?;
-    Ok(Value::array(out))
+    Ok(out)
 }
 
-/// `__unserialize(array $data): void`; the witness is `__serialize`'s.
-fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let data = crate::array(req, 1)?;
+/// A heap or a queue restored from what `__serialize` answered.
+fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(), Thrown> {
     let queue = read(req, this, |h| h.queue)?;
     if !queue {
         consistent(req, this, true)?;
@@ -856,7 +970,7 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
         return invalid(req);
     };
     if queue {
-        flags &= EXTR_BOTH;
+        flags &= SplPriorityQueue::EXTR_BOTH;
         if flags == 0 {
             return invalid(req);
         }
@@ -883,72 +997,5 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
         };
         heap_insert(req, this, elem)?;
     }
-    Ok(Value::null())
-}
-
-/// `SplPriorityQueue::compare(mixed $priority1, mixed $priority2): int`.
-///
-/// ```php
-/// $q = new SplPriorityQueue;
-/// var_dump($q->compare(1, 2), $q->compare(2, 1), (new SplMinHeap)->isEmpty());
-/// ```
-/// ```expect
-/// int(-1)
-/// int(1)
-/// bool(true)
-/// ```
-fn queue_compare(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 2, 2)?;
-    let a = crate::value(req, 1);
-    let b = crate::value(req, 2);
-    Ok(Value::int(compare(req, &a, &b)? as i64))
-}
-
-/// `SplMaxHeap::compare(mixed $value1, mixed $value2): int`, protected.
-fn max_compare(req: &mut Request) -> Result<Value, Thrown> {
-    queue_compare(req)
-}
-
-/// `SplMinHeap::compare(mixed $value1, mixed $value2): int`, protected:
-/// the two the other way round.
-fn min_compare(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 2, 2)?;
-    let a = crate::value(req, 1);
-    let b = crate::value(req, 2);
-    Ok(Value::int(compare(req, &b, &a)? as i64))
-}
-
-/// `setExtractFlags(int $flags): int`.
-///
-/// ```php
-/// $q = new SplPriorityQueue; $q->insert('x', 1);
-/// var_dump($q->setExtractFlags(SplPriorityQueue::EXTR_PRIORITY), $q->getExtractFlags(), $q->current());
-/// try { $q->setExtractFlags(0); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(2)
-/// int(2)
-/// int(1)
-/// Must specify at least one extract flag
-/// ```
-fn set_extract_flags(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let flags = crate::long(req, 1)? & EXTR_BOTH;
-    if flags == 0 {
-        return Err(throw(
-            req,
-            "RuntimeException",
-            "Must specify at least one extract flag",
-        ));
-    }
-    with(req, this, |h| h.flags = flags)?;
-    Ok(Value::int(flags))
-}
-
-/// `getExtractFlags(): int`; the witness is `setExtractFlags`'s.
-fn get_extract_flags(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::int(read(req, this, |h| h.flags)?))
+    Ok(())
 }

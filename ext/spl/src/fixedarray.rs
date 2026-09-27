@@ -7,19 +7,21 @@
 //! out Zend's `InternalIterator`, which walks the elements through
 //! [`Handlers::iterator_element`].
 
-use php_ext::abi::{CloneObj, DimensionRead, ObjectHandlers, PropertyPurpose, Std};
+use php_ext::abi::{
+    CloneObj, DimensionRead, Instance, ObjectHandlers, PropertyPurpose, Std, This, True, Untyped,
+};
+use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, arg_value_error, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::Entry;
-use crate::stub::{self, Declared};
+use crate::{ArrayAccess, Countable, Iterator, IteratorAggregate, JsonSerializable};
 
 /// `spl_fixedarray_object`'s row of elements.
 #[derive(Default)]
-pub(crate) struct SplFixedArray {
+pub(crate) struct Row {
     elements: Vec<Value>,
 }
 
@@ -28,38 +30,21 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
-const STUB: &str = "
-class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable, JsonSerializable {
-    public function __construct(int $size = 0) {}
-    /** @tentative-return-type */ #[\\Deprecated(since: '8.4', message: 'this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()')]
-    public function __wakeup(): void {}
-    public function __serialize(): array {}
-    public function __unserialize(array $data): void {}
-    /** @tentative-return-type */ public function count(): int {}
-    /** @tentative-return-type */ public function toArray(): array {}
-    /** @tentative-return-type */ public static function fromArray(array $array, bool $preserveKeys = true): SplFixedArray {}
-    /** @tentative-return-type */ public function getSize(): int {}
-    /** @tentative-return-type */ public function setSize(int $size): true {}
-    /** @tentative-return-type */ public function offsetExists($index): bool {}
-    /** @tentative-return-type */ public function offsetGet($index): mixed {}
-    /** @tentative-return-type */ public function offsetSet($index, mixed $value): void {}
-    /** @tentative-return-type */ public function offsetUnset($index): void {}
-    public function getIterator(): Iterator {}
-    public function jsonSerialize(): array {}
-}
-";
-
-/// The class, each method with its entry; `jsonSerialize` is php's
-/// alias of `toArray`.
+/// `class SplFixedArray implements IteratorAggregate, ArrayAccess,
+/// Countable, JsonSerializable`.
 ///
 /// ```php
 /// $a = new SplFixedArray(3);
 /// $a[0] = 'x'; $a['1'] = 'y';
 /// var_dump($a);
 /// foreach ($a as $k => $v) echo "$k=", var_export($v, true), ";";
-/// echo "\n", count($a), " ", $a->getSize(), "\n";
+/// echo "\n", count($a), " ", $a->count(), " ", $a->getSize(), "\n";
 /// try { $a[3] = 1; } catch (RuntimeException $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
 /// try { $a[] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $a->offsetSet(2, 'z'); $a->offsetUnset(0); echo get_class($a->getIterator()), " ", implode(',', $a->toArray()), " ", json_encode($a->jsonSerialize()), "\n";
+/// $b = new SplFixedArray; $b->__unserialize([7, 8]); var_dump($b->offsetGet(1));
+/// $w = unserialize('O:13:"SplFixedArray":2:{i:0;s:1:"p";i:1;s:1:"q";}'); var_dump($w->toArray());
+/// $w->__wakeup();
 /// ```
 /// ```expect
 /// object(SplFixedArray)#1 (3) {
@@ -71,38 +56,374 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable, JsonSe
 ///   NULL
 /// }
 /// 0='x';1='y';2=NULL;
-/// 3 3
+/// 3 3 3
 /// OutOfBoundsException: Index invalid or out of range
 /// [] operator not supported for SplFixedArray
+/// InternalIterator ,y,z [null,"y","z"]
+/// int(8)
+/// array(2) {
+///   [0]=>
+///   string(1) "p"
+///   [1]=>
+///   string(1) "q"
+/// }
+///
+/// Deprecated: Method SplFixedArray::__wakeup() is deprecated since 8.4, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize() in %s on line 12
 /// ```
-pub(crate) fn classes() -> Vec<Declared> {
-    let rows: [(&str, Entry); 16] = [
-        ("SplFixedArray::__construct", construct),
-        ("SplFixedArray::__wakeup", wakeup),
-        ("SplFixedArray::__serialize", serialize),
-        ("SplFixedArray::__unserialize", unserialize),
-        ("SplFixedArray::count", count),
-        ("SplFixedArray::toArray", to_array),
-        ("SplFixedArray::fromArray", from_array),
-        ("SplFixedArray::getSize", count),
-        ("SplFixedArray::setSize", set_size),
-        ("SplFixedArray::offsetExists", offset_exists),
-        ("SplFixedArray::offsetGet", offset_get),
-        ("SplFixedArray::offsetSet", offset_set),
-        ("SplFixedArray::offsetUnset", offset_unset),
-        ("SplFixedArray::getIterator", get_iterator),
-        ("SplFixedArray::jsonSerialize", to_array),
-        ("", to_array),
-    ];
-    stub::classes(STUB, &rows)
+#[php_class(
+    implements(IteratorAggregate, ArrayAccess, Countable, JsonSerializable),
+    payload = Row,
+    handlers = HANDLERS
+)]
+pub(crate) struct SplFixedArray;
+
+#[php_class]
+impl SplFixedArray {
+    /// `__construct(int $size = 0)`: `size` nulls, nothing on a second call.
+    ///
+    /// ```php
+    /// try { new SplFixedArray(-1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// $a = new SplFixedArray(2); $a->__construct(5); var_dump($a->getSize());
+    /// ```
+    /// ```expect
+    /// SplFixedArray::__construct(): Argument #1 ($size) must be greater than or equal to 0
+    /// int(2)
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = 0)] size: i64,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        if size < 0 {
+            return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
+        }
+        if !with(req, this, |a| a.elements.is_empty())? {
+            return Ok(());
+        }
+        let size = usize::try_from(size).unwrap_or(0);
+        reserve(req, size)?;
+        with(req, this, |a| a.elements = vec![Value::null(); size])
+    }
+
+    /// `__wakeup(): void`, deprecated: the properties an old serialization
+    /// left become the elements.
+    #[php(
+        tentative,
+        deprecated(
+            since = "8.4",
+            message = "this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()"
+        )
+    )]
+    fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let this = this.object();
+        if with(req, this, |a| a.elements.is_empty())? {
+            let props = Std.get_properties(req, this)?;
+            let mut elements = Vec::with_capacity(props.len());
+            for (name, value) in props {
+                elements.push(crate::copied(req, value));
+                Std.unset_property(req, this, name.as_bytes())?;
+            }
+            with(req, this, |a| a.elements = elements)?;
+        }
+        Ok(())
+    }
+
+    /// `__serialize(): array`: the elements, then the properties by name.
+    ///
+    /// ```php
+    /// $a = SplFixedArray::fromArray([1, 2]);
+    /// var_dump($a->__serialize());
+    /// $b = new SplFixedArray; $b->__unserialize([7, 8, 9]); var_dump($b->toArray());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// array(3) {
+    ///   [0]=>
+    ///   int(7)
+    ///   [1]=>
+    ///   int(8)
+    ///   [2]=>
+    ///   int(9)
+    /// }
+    /// ```
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let this = this.object();
+        let elements = with(req, this, |a| a.elements.clone())?;
+        let mut out = PhpArray::new(req)?;
+        for value in elements {
+            out.append(req, crate::copied(req, value))?;
+        }
+        for (name, value) in Std.get_properties(req, this)? {
+            req.addref(&value);
+            out.set(req, Key::Str(name), value)?;
+        }
+        Ok(out)
+    }
+
+    /// `__unserialize(array $data): void`; the witness is the class's.
+    fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
+        let this = this.object();
+        if !with(req, this, |a| a.elements.is_empty())? {
+            return Ok(());
+        }
+        let mut elements = Vec::new();
+        for (key, value) in data.snapshot() {
+            match key {
+                Key::Int(_) => elements.push(crate::copied(req, value)),
+                Key::Str(name) => {
+                    req.addref(&value);
+                    req.addref(&Value::string(name));
+                    Std.write_property(req, this, name, value)?;
+                }
+            }
+        }
+        with(req, this, |a| a.elements = elements)
+    }
+
+    /// `count(): int`, and `getSize(): int`.
+    #[php(tentative)]
+    fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let n = with(req, this.object(), |a| a.elements.len())?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// `toArray(): array`, and `jsonSerialize(): array`.
+    ///
+    /// ```php
+    /// $a = new SplFixedArray(2); $a[1] = 'b';
+    /// var_dump($a->toArray());
+    /// echo json_encode($a), "\n";
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   NULL
+    ///   [1]=>
+    ///   string(1) "b"
+    /// }
+    /// [null,"b"]
+    /// ```
+    #[php(tentative)]
+    fn toArray(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let elements = with(req, this.object(), |a| a.elements.clone())?;
+        let mut out = PhpArray::new(req)?;
+        for value in elements {
+            out.append(req, crate::copied(req, value))?;
+        }
+        Ok(out)
+    }
+
+    /// `fromArray(array $array, bool $preserveKeys = true): SplFixedArray`,
+    /// a class method: the keys kept as indexes, the holes null, or the values in
+    /// order.
+    ///
+    /// ```php
+    /// var_dump(SplFixedArray::fromArray([3 => 'd', 1 => 'b'])->toArray());
+    /// var_dump(SplFixedArray::fromArray([3 => 'd', 1 => 'b'], false)->toArray());
+    /// try { SplFixedArray::fromArray(['k' => 1]); } catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// array(4) {
+    ///   [0]=>
+    ///   NULL
+    ///   [1]=>
+    ///   string(1) "b"
+    ///   [2]=>
+    ///   NULL
+    ///   [3]=>
+    ///   string(1) "d"
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   string(1) "d"
+    ///   [1]=>
+    ///   string(1) "b"
+    /// }
+    /// array must contain only positive integer keys
+    /// ```
+    #[php(tentative)]
+    fn fromArray(
+        req: &mut Request,
+        array: PhpArray,
+        #[php(default = true)] preserveKeys: bool,
+    ) -> Result<Instance<Self>, Thrown> {
+        let rows = array.snapshot();
+        let mut elements: Vec<Value>;
+        if preserveKeys && !rows.is_empty() {
+            let mut max = 0usize;
+            for (key, _) in &rows {
+                match key {
+                    Key::Int(n) if *n >= 0 => {
+                        max = max.max(usize::try_from(*n).unwrap_or(usize::MAX));
+                    }
+                    _ => {
+                        return Err(throw(
+                            req,
+                            "InvalidArgumentException",
+                            "array must contain only positive integer keys",
+                        ));
+                    }
+                }
+            }
+            let Some(size) = max.checked_add(1).filter(|s| i64::try_from(*s).is_ok()) else {
+                return Err(throw(
+                    req,
+                    "InvalidArgumentException",
+                    "integer overflow detected",
+                ));
+            };
+            reserve(req, size)?;
+            elements = vec![Value::null(); size];
+            for (key, value) in rows {
+                if let Key::Int(n) = key
+                    && let Some(slot) = usize::try_from(n).ok().and_then(|n| elements.get_mut(n))
+                {
+                    *slot = value;
+                }
+            }
+        } else {
+            elements = rows.into_iter().map(|(_, v)| v).collect();
+        }
+        let elements: Vec<Value> = elements
+            .into_iter()
+            .map(|v| crate::copied(req, v))
+            .collect();
+        let Some(class) = php_ext::call::lookup_class(req, b"SplFixedArray")? else {
+            return Err(php_ext::raising::fatal(
+                req,
+                "InternalError: SplFixedArray::fromArray served with its class unlinked",
+            ));
+        };
+        let object = new_object(req, class)?;
+        with(req, object, |a| a.elements = elements)?;
+        Ok(Instance::of(object))
+    }
+
+    #[php(tentative, implementation = SplFixedArray::count)]
+    fn getSize(this: This<Self>) -> i64;
+
+    /// `setSize(int $size): true`: the row grown with nulls or cut.
+    ///
+    /// ```php
+    /// $a = SplFixedArray::fromArray([1, 2, 3]);
+    /// $a->setSize(2); var_dump($a->toArray());
+    /// $a->setSize(4); var_dump(count($a), $a[3]);
+    /// try { $a->setSize(-1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// int(4)
+    /// NULL
+    /// SplFixedArray::setSize(): Argument #1 ($size) must be greater than or equal to 0
+    /// ```
+    #[php(tentative)]
+    fn setSize(req: &mut Request, this: This<Self>, size: i64) -> Result<True, Thrown> {
+        if size < 0 {
+            return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
+        }
+        let size = usize::try_from(size).unwrap_or(usize::MAX);
+        reserve(req, size)?;
+        let cut = with(req, this.object(), |a| {
+            if size < a.elements.len() {
+                a.elements.split_off(size)
+            } else {
+                a.elements.resize(size, Value::null());
+                Vec::new()
+            }
+        })?;
+        for value in cut.into_iter().rev() {
+            req.release(value);
+        }
+        Ok(True)
+    }
+
+    /// `offsetExists($index): bool`: inside the row and not null.
+    ///
+    /// ```php
+    /// $a = new SplFixedArray(2); $a[0] = 0;
+    /// var_dump(isset($a[0]), empty($a[0]), isset($a[1]), $a->offsetExists(5), $a->offsetGet(0));
+    /// unset($a[0]); var_dump($a[0]);
+    /// try { $a['x']; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { $a[new stdClass] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// int(0)
+    /// NULL
+    /// Cannot access offset of type string on SplFixedArray
+    /// Cannot access offset of type stdClass on SplFixedArray
+    /// ```
+    #[php(tentative)]
+    fn offsetExists(
+        req: &mut Request,
+        this: This<Self>,
+        index: Untyped<Value>,
+    ) -> Result<bool, Thrown> {
+        has(req, this.object(), &index.0, false)
+    }
+
+    /// `offsetGet($index): mixed`; the witness is the class's.
+    #[php(tentative)]
+    fn offsetGet(
+        req: &mut Request,
+        this: This<Self>,
+        index: Untyped<Value>,
+    ) -> Result<Value, Thrown> {
+        read(req, this.object(), Some(&index.0))
+    }
+
+    /// `offsetSet($index, mixed $value): void`.
+    #[php(tentative)]
+    fn offsetSet(
+        req: &mut Request,
+        this: This<Self>,
+        index: Untyped<Value>,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let offset = (!matches!(index.0.as_ref(), ValueRef::Null)).then_some(index.0);
+        write(req, this.object(), offset.as_ref(), value)
+    }
+
+    /// `offsetUnset($index): void`, the element set back to null.
+    #[php(tentative)]
+    fn offsetUnset(
+        req: &mut Request,
+        this: This<Self>,
+        index: Untyped<Value>,
+    ) -> Result<(), Thrown> {
+        unset(req, this.object(), &index.0)
+    }
+
+    /// `getIterator(): Iterator`, an `InternalIterator` over the elements;
+    /// the witness is the class's.
+    fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
+        Ok(Instance::of(internal_iterator(req, &this.object())?))
+    }
+
+    #[php(implementation = SplFixedArray::toArray)]
+    fn jsonSerialize(this: This<Self>) -> PhpArray;
 }
 
 fn with<R>(
     req: &mut Request,
     object: PhpObject,
-    change: impl FnOnce(&mut SplFixedArray) -> R,
+    change: impl FnOnce(&mut Row) -> R,
 ) -> Result<R, Thrown> {
-    if let Some(a) = object.native_mut::<SplFixedArray>(req) {
+    if let Some(a) = object.native_mut::<Row>(req) {
         return Ok(change(a));
     }
     Err(php_ext::raising::fatal(
@@ -224,7 +545,7 @@ fn unset(req: &mut Request, object: PhpObject, offset: &Value) -> Result<(), Thr
 impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let elements = object
-            .native_mut::<SplFixedArray>(req)
+            .native_mut::<Row>(req)
             .map(|a| std::mem::take(&mut a.elements))
             .unwrap_or_default();
         for value in elements {
@@ -233,7 +554,7 @@ impl ObjectHandlers for Handlers {
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(a) = object.native::<SplFixedArray>(req) {
+        if let Some(a) = object.native::<Row>(req) {
             for value in &a.elements {
                 visit(*value);
             }
@@ -412,327 +733,5 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
     for value in &elements {
         req.addref(value);
     }
-    clone_with(req, &object, SplFixedArray { elements })
-}
-
-/// `__construct(int $size = 0)`: `size` nulls, nothing on a second call.
-///
-/// ```php
-/// try { new SplFixedArray(-1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// $a = new SplFixedArray(2); $a->__construct(5); var_dump($a->getSize());
-/// ```
-/// ```expect
-/// SplFixedArray::__construct(): Argument #1 ($size) must be greater than or equal to 0
-/// int(2)
-/// ```
-fn construct(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 1)?;
-    let this = crate::this(req)?;
-    let size = crate::long_or(req, 1, 0)?;
-    if size < 0 {
-        return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
-    }
-    if !with(req, this, |a| a.elements.is_empty())? {
-        return Ok(Value::null());
-    }
-    let size = usize::try_from(size).unwrap_or(0);
-    reserve(req, size)?;
-    with(req, this, |a| a.elements = vec![Value::null(); size])?;
-    Ok(Value::null())
-}
-
-/// `__wakeup(): void`, deprecated: the properties an old serialization
-/// left become the elements.
-fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    if with(req, this, |a| a.elements.is_empty())? {
-        let props = Std.get_properties(req, this)?;
-        let mut elements = Vec::with_capacity(props.len());
-        for (name, value) in props {
-            elements.push(crate::copied(req, value));
-            Std.unset_property(req, this, name.as_bytes())?;
-        }
-        with(req, this, |a| a.elements = elements)?;
-    }
-    Ok(Value::null())
-}
-
-/// `__serialize(): array`: the elements, then the properties by name.
-///
-/// ```php
-/// $a = SplFixedArray::fromArray([1, 2]);
-/// var_dump($a->__serialize());
-/// $b = new SplFixedArray; $b->__unserialize([7, 8, 9]); var_dump($b->toArray());
-/// ```
-/// ```expect
-/// array(2) {
-///   [0]=>
-///   int(1)
-///   [1]=>
-///   int(2)
-/// }
-/// array(3) {
-///   [0]=>
-///   int(7)
-///   [1]=>
-///   int(8)
-///   [2]=>
-///   int(9)
-/// }
-/// ```
-fn serialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let elements = with(req, this, |a| a.elements.clone())?;
-    let mut out = PhpArray::new(req)?;
-    for value in elements {
-        out.append(req, crate::copied(req, value))?;
-    }
-    for (name, value) in Std.get_properties(req, this)? {
-        req.addref(&value);
-        out.set(req, Key::Str(name), value)?;
-    }
-    Ok(Value::array(out))
-}
-
-/// `__unserialize(array $data): void`; the witness is `__serialize`'s.
-fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let data = crate::array(req, 1)?;
-    if !with(req, this, |a| a.elements.is_empty())? {
-        return Ok(Value::null());
-    }
-    let mut elements = Vec::new();
-    for (key, value) in data.snapshot() {
-        match key {
-            Key::Int(_) => elements.push(crate::copied(req, value)),
-            Key::Str(name) => {
-                req.addref(&value);
-                req.addref(&Value::string(name));
-                Std.write_property(req, this, name, value)?;
-            }
-        }
-    }
-    with(req, this, |a| a.elements = elements)?;
-    Ok(Value::null())
-}
-
-/// `count(): int` and `getSize(): int`.
-fn count(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let n = with(req, this, |a| a.elements.len())?;
-    Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX)))
-}
-
-/// `toArray(): array`, and `jsonSerialize(): array`.
-///
-/// ```php
-/// $a = new SplFixedArray(2); $a[1] = 'b';
-/// var_dump($a->toArray());
-/// echo json_encode($a), "\n";
-/// ```
-/// ```expect
-/// array(2) {
-///   [0]=>
-///   NULL
-///   [1]=>
-///   string(1) "b"
-/// }
-/// [null,"b"]
-/// ```
-fn to_array(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let elements = with(req, this, |a| a.elements.clone())?;
-    let mut out = PhpArray::new(req)?;
-    for value in elements {
-        out.append(req, crate::copied(req, value))?;
-    }
-    Ok(Value::array(out))
-}
-
-/// `fromArray(array $array, bool $preserveKeys = true): SplFixedArray`,
-/// a class method: the keys kept as indexes, the holes null, or the values in
-/// order.
-///
-/// ```php
-/// var_dump(SplFixedArray::fromArray([3 => 'd', 1 => 'b'])->toArray());
-/// var_dump(SplFixedArray::fromArray([3 => 'd', 1 => 'b'], false)->toArray());
-/// try { SplFixedArray::fromArray(['k' => 1]); } catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// array(4) {
-///   [0]=>
-///   NULL
-///   [1]=>
-///   string(1) "b"
-///   [2]=>
-///   NULL
-///   [3]=>
-///   string(1) "d"
-/// }
-/// array(2) {
-///   [0]=>
-///   string(1) "d"
-///   [1]=>
-///   string(1) "b"
-/// }
-/// array must contain only positive integer keys
-/// ```
-fn from_array(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 2)?;
-    let data = crate::array(req, 1)?;
-    let keys = crate::bool_or(req, 2, true)?;
-    let rows = data.snapshot();
-    let mut elements: Vec<Value>;
-    if keys && !rows.is_empty() {
-        let mut max = 0usize;
-        for (key, _) in &rows {
-            match key {
-                Key::Int(n) if *n >= 0 => max = max.max(usize::try_from(*n).unwrap_or(usize::MAX)),
-                _ => {
-                    return Err(throw(
-                        req,
-                        "InvalidArgumentException",
-                        "array must contain only positive integer keys",
-                    ));
-                }
-            }
-        }
-        let Some(size) = max.checked_add(1).filter(|s| i64::try_from(*s).is_ok()) else {
-            return Err(throw(
-                req,
-                "InvalidArgumentException",
-                "integer overflow detected",
-            ));
-        };
-        reserve(req, size)?;
-        elements = vec![Value::null(); size];
-        for (key, value) in rows {
-            if let Key::Int(n) = key
-                && let Some(slot) = usize::try_from(n).ok().and_then(|n| elements.get_mut(n))
-            {
-                *slot = value;
-            }
-        }
-    } else {
-        elements = rows.into_iter().map(|(_, v)| v).collect();
-    }
-    let elements: Vec<Value> = elements
-        .into_iter()
-        .map(|v| crate::copied(req, v))
-        .collect();
-    let Some(class) = php_ext::call::lookup_class(req, b"SplFixedArray")? else {
-        return Ok(Value::null());
-    };
-    let object = new_object(req, class)?;
-    with(req, object, |a| a.elements = elements)?;
-    Ok(object.as_value())
-}
-
-/// `setSize(int $size): true`: the row grown with nulls or cut.
-///
-/// ```php
-/// $a = SplFixedArray::fromArray([1, 2, 3]);
-/// $a->setSize(2); var_dump($a->toArray());
-/// $a->setSize(4); var_dump(count($a), $a[3]);
-/// try { $a->setSize(-1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// array(2) {
-///   [0]=>
-///   int(1)
-///   [1]=>
-///   int(2)
-/// }
-/// int(4)
-/// NULL
-/// SplFixedArray::setSize(): Argument #1 ($size) must be greater than or equal to 0
-/// ```
-fn set_size(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let size = crate::long(req, 1)?;
-    if size < 0 {
-        return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
-    }
-    let size = usize::try_from(size).unwrap_or(usize::MAX);
-    reserve(req, size)?;
-    let cut = with(req, this, |a| {
-        if size < a.elements.len() {
-            a.elements.split_off(size)
-        } else {
-            a.elements.resize(size, Value::null());
-            Vec::new()
-        }
-    })?;
-    for value in cut.into_iter().rev() {
-        req.release(value);
-    }
-    Ok(Value::bool(true))
-}
-
-/// `offsetExists($index): bool`: inside the row and not null.
-///
-/// ```php
-/// $a = new SplFixedArray(2); $a[0] = 0;
-/// var_dump(isset($a[0]), empty($a[0]), isset($a[1]), $a->offsetExists(5), $a->offsetGet(0));
-/// unset($a[0]); var_dump($a[0]);
-/// try { $a['x']; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// try { $a[new stdClass] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// int(0)
-/// NULL
-/// Cannot access offset of type string on SplFixedArray
-/// Cannot access offset of type stdClass on SplFixedArray
-/// ```
-fn offset_exists(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let offset = crate::value(req, 1);
-    Ok(Value::bool(has(req, this, &offset, false)?))
-}
-
-/// `offsetGet($index): mixed`; the witness is `offsetExists`'s.
-fn offset_get(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let offset = crate::value(req, 1);
-    read(req, this, Some(&offset))
-}
-
-/// `offsetSet($index, mixed $value): void`.
-fn offset_set(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 2, 2)?;
-    let this = crate::this(req)?;
-    let offset = crate::value(req, 1);
-    let value = crate::value(req, 2);
-    let offset = (!matches!(offset.as_ref(), ValueRef::Null)).then_some(offset);
-    write(req, this, offset.as_ref(), value)?;
-    Ok(Value::null())
-}
-
-/// `offsetUnset($index): void`, the element set back to null.
-fn offset_unset(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let offset = crate::value(req, 1);
-    unset(req, this, &offset)?;
-    Ok(Value::null())
-}
-
-/// `getIterator(): Iterator`, an `InternalIterator` over the elements;
-/// the witness is the class's.
-fn get_iterator(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(internal_iterator(req, &this)?.as_value())
+    clone_with(req, &object, Row { elements })
 }

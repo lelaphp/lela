@@ -6,112 +6,20 @@
 //! the two object identities, and the walks of a `Traversable`
 //! `spl_iterator_apply` makes.
 
-use php_ext::abi::Callable;
+use php_ext::abi::{Callable, Instance, Iterable, OrFalse, Raw, Untyped};
+use php_ext::attr::php_function;
 use php_ext::call::{autoload, call, call_array, lookup_class, lookup_function};
 use php_ext::coerce::{callable_checked, truthy, value_name};
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::{Entry, State, stub};
-
-/// The natives, in the stub's order.
-///
-/// ```php
-/// var_dump(get_extension_funcs("spl"));
-/// ```
-/// ```expect
-/// array(15) {
-///   [0]=>
-///   string(16) "class_implements"
-///   [1]=>
-///   string(13) "class_parents"
-///   [2]=>
-///   string(10) "class_uses"
-///   [3]=>
-///   string(12) "spl_autoload"
-///   [4]=>
-///   string(17) "spl_autoload_call"
-///   [5]=>
-///   string(23) "spl_autoload_extensions"
-///   [6]=>
-///   string(22) "spl_autoload_functions"
-///   [7]=>
-///   string(21) "spl_autoload_register"
-///   [8]=>
-///   string(23) "spl_autoload_unregister"
-///   [9]=>
-///   string(11) "spl_classes"
-///   [10]=>
-///   string(15) "spl_object_hash"
-///   [11]=>
-///   string(13) "spl_object_id"
-///   [12]=>
-///   string(14) "iterator_apply"
-///   [13]=>
-///   string(14) "iterator_count"
-///   [14]=>
-///   string(17) "iterator_to_array"
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    [
-        (
-            "class_implements($object_or_class, bool $autoload = true): array|false",
-            class_implements as Entry,
-        ),
-        (
-            "class_parents($object_or_class, bool $autoload = true): array|false",
-            class_parents,
-        ),
-        (
-            "class_uses($object_or_class, bool $autoload = true): array|false",
-            class_uses,
-        ),
-        (
-            "spl_autoload(string $class, ?string $file_extensions = null): void",
-            spl_autoload,
-        ),
-        ("spl_autoload_call(string $class): void", spl_autoload_call),
-        (
-            "spl_autoload_extensions(?string $file_extensions = null): string",
-            spl_autoload_extensions,
-        ),
-        ("spl_autoload_functions(): array", spl_autoload_functions),
-        (
-            "spl_autoload_register(?callable $callback = null, bool $throw = true, bool $prepend = false): bool",
-            spl_autoload_register,
-        ),
-        (
-            "spl_autoload_unregister(callable $callback): bool",
-            spl_autoload_unregister,
-        ),
-        ("spl_classes(): array", spl_classes),
-        ("spl_object_hash(object $object): string", spl_object_hash),
-        ("spl_object_id(object $object): int", spl_object_id),
-        (
-            "iterator_apply(Traversable $iterator, callable $callback, ?array $args = null): int",
-            iterator_apply,
-        ),
-        ("iterator_count(iterable $iterator): int", iterator_count),
-        (
-            "iterator_to_array(iterable $iterator, bool $preserve_keys = true): array",
-            iterator_to_array,
-        ),
-    ]
-    .into_iter()
-    .map(|(line, entry)| (stub::function(line), entry))
-    .collect()
-}
+use crate::{State, Traversable};
 
 /// The class `$object_or_class` names, php's `spl_find_ce_by_name` for
 /// a string: the table, then the autoloaders where `$autoload` asks,
 /// and the warning and `false` where neither has it.
-fn subject(req: &mut Request) -> Result<Option<ClassId>, Thrown> {
-    crate::arity(req, 1, 2)?;
-    let given = crate::value(req, 1);
-    let autoloading = crate::bool_or(req, 2, true)?;
+fn subject(req: &mut Request, given: Value, autoloading: bool) -> Result<Option<ClassId>, Thrown> {
     match given.as_ref() {
         ValueRef::Object(object) => Ok(Some(object.class())),
         ValueRef::Str(name) => {
@@ -149,7 +57,7 @@ fn subject(req: &mut Request) -> Result<Option<ClassId>, Thrown> {
 }
 
 /// `spl_add_class_name` over a list of classes: each keyed by its name.
-fn class_names(req: &mut Request, classes: &[ClassId]) -> Result<Value, Thrown> {
+fn class_names(req: &mut Request, classes: &[ClassId]) -> Result<OrFalse<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for class in classes {
         let name = crate::class_name(req, *class);
@@ -160,7 +68,7 @@ fn class_names(req: &mut Request, classes: &[ClassId]) -> Result<Value, Thrown> 
         let value = crate::string_value(req, &name)?;
         out.set(req, Key::from_string(key), value)?;
     }
-    Ok(Value::array(out))
+    Ok(OrFalse::Value(out))
 }
 
 /// `class_implements($object_or_class, bool $autoload = true):
@@ -187,9 +95,14 @@ fn class_names(req: &mut Request, classes: &[ClassId]) -> Result<Value, Thrown> 
 /// }
 /// bool(false)
 /// ```
-fn class_implements(req: &mut Request) -> Result<Value, Thrown> {
-    let Some(class) = subject(req)? else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn class_implements(
+    req: &mut Request,
+    object_or_class: Untyped<Value>,
+    #[php(default = true)] autoload: bool,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let Some(class) = subject(req, object_or_class.0, autoload)? else {
+        return Ok(OrFalse::False);
     };
     let interfaces = crate::interfaces_of(req, class);
     class_names(req, &interfaces)
@@ -216,9 +129,14 @@ fn class_implements(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 3
 /// ```
-fn class_parents(req: &mut Request) -> Result<Value, Thrown> {
-    let Some(class) = subject(req)? else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn class_parents(
+    req: &mut Request,
+    object_or_class: Untyped<Value>,
+    #[php(default = true)] autoload: bool,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let Some(class) = subject(req, object_or_class.0, autoload)? else {
+        return Ok(OrFalse::False);
     };
     let mut parents = Vec::new();
     let mut at = crate::parent_of(req, class);
@@ -270,9 +188,14 @@ fn class_parents(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(1) "T"
 /// }
 /// ```
-fn class_uses(req: &mut Request) -> Result<Value, Thrown> {
-    let Some(class) = subject(req)? else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn class_uses(
+    req: &mut Request,
+    object_or_class: Untyped<Value>,
+    #[php(default = true)] autoload: bool,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let Some(class) = subject(req, object_or_class.0, autoload)? else {
+        return Ok(OrFalse::False);
     };
     let names: Vec<Vec<u8>> = req
         .class_decl(class)
@@ -318,11 +241,13 @@ const DEFAULT_EXTENSIONS: &[u8] = b".inc,.php";
 ///   string(12) "spl_autoload"
 /// }
 /// ```
-fn spl_autoload(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 2)?;
-    let class = crate::string(req, 1)?;
-    let given = crate::nullable_string(req, 2)?;
-    let extensions = match given {
+#[php_function]
+fn spl_autoload(
+    req: &mut Request,
+    class: PhpString,
+    #[php(default = null)] file_extensions: Option<PhpString>,
+) -> Result<(), Thrown> {
+    let extensions = match file_extensions {
         Some(given) => given.as_bytes().to_vec(),
         None => req
             .state::<State>()
@@ -345,7 +270,7 @@ fn spl_autoload(req: &mut Request) -> Result<Value, Thrown> {
             break;
         }
     }
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `spl_autoload_call(string $class): void`: every autoloader served
@@ -358,11 +283,10 @@ fn spl_autoload(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// load Anything
 /// ```
-fn spl_autoload_call(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let class = crate::string(req, 1)?;
+#[php_function]
+fn spl_autoload_call(req: &mut Request, class: PhpString) -> Result<(), Thrown> {
     autoload(req, class.as_bytes())?;
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `spl_autoload_extensions(?string $file_extensions = null): string`:
@@ -376,9 +300,12 @@ fn spl_autoload_call(req: &mut Request) -> Result<Value, Thrown> {
 /// string(10) ".class.php"
 /// string(10) ".class.php"
 /// ```
-fn spl_autoload_extensions(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 1)?;
-    if let Some(given) = crate::nullable_string(req, 1)? {
+#[php_function]
+fn spl_autoload_extensions(
+    req: &mut Request,
+    #[php(default = null)] file_extensions: Option<PhpString>,
+) -> Result<PhpString, Thrown> {
+    if let Some(given) = file_extensions {
         req.state::<State>().autoload_extensions = Some(given.as_bytes().to_vec());
     }
     let now = req
@@ -386,7 +313,7 @@ fn spl_autoload_extensions(req: &mut Request) -> Result<Value, Thrown> {
         .autoload_extensions
         .clone()
         .unwrap_or_else(|| DEFAULT_EXTENSIONS.to_vec());
-    crate::string_value(req, &now)
+    PhpString::new(req, &now)
 }
 
 /// `spl_autoload_functions(): array`: the stack, in the order it is
@@ -411,8 +338,8 @@ fn spl_autoload_extensions(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(4) "load"
 /// }
 /// ```
-fn spl_autoload_functions(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
+#[php_function]
+fn spl_autoload_functions(req: &mut Request) -> Result<PhpArray, Thrown> {
     let loaders = req.autoload_functions();
     let mut out = PhpArray::new(req)?;
     for loader in loaders {
@@ -422,7 +349,7 @@ fn spl_autoload_functions(req: &mut Request) -> Result<Value, Thrown> {
         };
         out.append(req, loader)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// A loader written `'Class::method'` as the pair `[Class, method]`,
@@ -460,18 +387,6 @@ fn static_pair(req: &mut Request, loader: &Value) -> Result<Option<Value>, Throw
     Ok(Some(Value::array(pair)))
 }
 
-/// The callable at `position`, php's `Z_PARAM_FUNC` and its refusal,
-/// `coerce::callable_argument`'s over the declared `callable`.
-fn callable(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
-    match php_ext::coerce::callable_argument(req, position)? {
-        Some(callable) => Ok(callable),
-        None => Err(php_ext::raising::fatal(
-            req,
-            "InternalError: a callable parameter read no callable",
-        )),
-    }
-}
-
 /// `spl_autoload_register(?callable $callback = null, bool $throw =
 /// true, bool $prepend = false): bool`: the callable onto the stack,
 /// at its head under `$prepend`, `spl_autoload` where none is given,
@@ -496,15 +411,31 @@ fn callable(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
 ///
 /// Notice: spl_autoload_register(): Argument #2 ($do_throw) has been ignored, spl_autoload_register() will always throw in %s on line 9
 /// ```
-fn spl_autoload_register(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 3)?;
-    let given = crate::given(req, 1).map(|v| v.deref());
-    let loader = match given {
-        Some(v) if !matches!(v.as_ref(), ValueRef::Null) => Some(callable(req, 1)?),
-        _ => None,
-    };
-    let throw = crate::bool_or(req, 2, true)?;
-    let prepend = crate::bool_or(req, 3, false)?;
+///
+/// The declaration is php's, its defaults shown:
+///
+/// ```php
+/// $f = new ReflectionFunction("spl_autoload_register");
+/// foreach ($f->getParameters() as $p) echo $p, "\n";
+/// echo $f->getReturnType(), " ", (new ReflectionFunction("iterator_to_array"))->getNumberOfRequiredParameters(), "\n";
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> ?callable $callback = null ]
+/// Parameter #1 [ <optional> bool $throw = true ]
+/// Parameter #2 [ <optional> bool $prepend = false ]
+/// bool 1
+/// ```
+#[php_function]
+fn spl_autoload_register(
+    req: &mut Request,
+    #[php(default = null)] callback: Raw<Option<Callable>>,
+    #[php(default = true)] throw: Raw<bool>,
+    #[php(default = false)] prepend: Raw<bool>,
+) -> Result<bool, Thrown> {
+    let given = callback.value();
+    let loader = callback.hold(req)?;
+    let throw = throw.hold(req)?;
+    let prepend = prepend.hold(req)?;
     if !throw {
         docref(
             req,
@@ -512,7 +443,7 @@ fn spl_autoload_register(req: &mut Request) -> Result<Value, Thrown> {
             "Argument #2 ($do_throw) has been ignored, spl_autoload_register() will always throw",
         );
     }
-    if loader.is_some() && given.is_some_and(|g| names_native(req, &g, b"spl_autoload_call")) {
+    if loader.is_some() && names_native(req, &given, b"spl_autoload_call") {
         return Err(arg_value_error(
             req,
             1,
@@ -524,12 +455,12 @@ fn spl_autoload_register(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         let name = crate::string_value(req, b"spl_autoload")?;
         let Ok(loader) = callable_checked(req, &name) else {
-            return Ok(Value::bool(false));
+            return Ok(false);
         };
         loader
     };
     req.autoload_register(loader, prepend)?;
-    Ok(Value::bool(true))
+    Ok(true)
 }
 
 /// Whether `given` names the native `name`, as a string callable does.
@@ -564,10 +495,10 @@ fn names_native(req: &Request, given: &Value, name: &[u8]) -> bool {
 /// array(0) {
 /// }
 /// ```
-fn spl_autoload_unregister(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let loader = callable(req, 1)?;
-    let given = crate::value(req, 1);
+#[php_function]
+fn spl_autoload_unregister(req: &mut Request, callback: Raw<Callable>) -> Result<bool, Thrown> {
+    let given = callback.value();
+    let loader = callback.hold(req)?;
     let named = match given.deref().as_ref() {
         ValueRef::Str(s) => {
             let name = s.as_bytes();
@@ -588,9 +519,9 @@ fn spl_autoload_unregister(req: &mut Request) -> Result<Value, Thrown> {
                 req.autoload_unregister(&held);
             }
         }
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
-    Ok(Value::bool(req.autoload_unregister(&loader)))
+    Ok(req.autoload_unregister(&loader))
 }
 
 /// `SPL_LIST_CLASSES`, in its alphabetical order.
@@ -665,15 +596,15 @@ const SPL_CLASSES: &[&str] = &[
 /// string(11) "ArrayObject"
 /// string(14) "AppendIterator"
 /// ```
-fn spl_classes(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
+#[php_function]
+fn spl_classes(req: &mut Request) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in SPL_CLASSES {
         let key = PhpString::new(req, name.as_bytes())?;
         let value = crate::string_value(req, name.as_bytes())?;
         out.set(req, Key::from_string(key), value)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `spl_object_hash(object $object): string`, php's
@@ -688,11 +619,10 @@ fn spl_classes(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn spl_object_hash(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let object = crate::object(req, 1, None)?;
+#[php_function]
+fn spl_object_hash(req: &mut Request, object: PhpObject) -> Result<PhpString, Thrown> {
     let hash = format!("{:016x}0000000000000000", object.index());
-    crate::string_value(req, hash.as_bytes())
+    PhpString::new(req, hash.as_bytes())
 }
 
 /// `spl_object_id(object $object): int`, the index the object store gave the object.
@@ -712,16 +642,9 @@ fn spl_object_hash(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 4
 /// ```
-fn spl_object_id(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let object = crate::object(req, 1, None)?;
-    Ok(Value::int(i64::from(object.index())))
-}
-
-/// `Z_PARAM_ITERABLE`: an array or a `Traversable`, `coerce_param`'s.
-fn iterable(req: &mut Request, position: u32) -> Result<Value, Thrown> {
-    let given = crate::value(req, position);
-    php_ext::coerce::coerce_param(req, &given, &php_ext::decl::Type::Iterable, position)
+#[php_function]
+fn spl_object_id(object: PhpObject) -> i64 {
+    i64::from(object.index())
 }
 
 /// `iterator_apply(Traversable $iterator, callable $callback, ?array
@@ -745,16 +668,16 @@ fn iterable(req: &mut Request, position: u32) -> Result<Value, Thrown> {
 /// b
 /// int(2)
 /// ```
-fn iterator_apply(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 2, 3)?;
-    let iterator = crate::object(req, 1, Some("Traversable"))?;
-    let callback = callable(req, 2)?;
-    let arguments = match crate::given(req, 3).map(|v| v.deref()) {
-        Some(v) if !matches!(v.as_ref(), ValueRef::Null) => Some(crate::array(req, 3)?),
-        _ => None,
-    };
+#[php_function]
+fn iterator_apply(
+    req: &mut Request,
+    iterator: Instance<Traversable>,
+    callback: Callable,
+    #[php(default = null)] args: Option<PhpArray>,
+) -> Result<i64, Thrown> {
+    let arguments = args;
     let mut count = 0i64;
-    crate::apply(req, iterator, |req, _| {
+    crate::apply(req, iterator.object(), |req, _| {
         count += 1;
         let answered = match arguments {
             Some(arguments) => call_array(req, &callback, arguments)?,
@@ -764,7 +687,7 @@ fn iterator_apply(req: &mut Request) -> Result<Value, Thrown> {
         req.release(answered);
         Ok(keep)
     })?;
-    Ok(Value::int(count))
+    Ok(count)
 }
 
 /// `iterator_count(iterable $iterator): int`: the elements an array
@@ -786,20 +709,18 @@ fn iterator_apply(req: &mut Request) -> Result<Value, Thrown> {
 /// int(3)
 /// int(1)
 /// ```
-fn iterator_count(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let given = iterable(req, 1)?;
-    if let Some(array) = given.as_array() {
-        return Ok(Value::int(i64::try_from(array.len()).unwrap_or(i64::MAX)));
-    }
+#[php_function]
+fn iterator_count(req: &mut Request, iterator: Iterable) -> Result<i64, Thrown> {
+    let object = match iterator {
+        Iterable::Array(array) => return Ok(i64::try_from(array.len()).unwrap_or(i64::MAX)),
+        Iterable::Traversable(object) => object,
+    };
     let mut count = 0i64;
-    if let Some(object) = given.as_object().copied() {
-        crate::apply(req, object, |_, _| {
-            count += 1;
-            Ok(count < i64::MAX)
-        })?;
-    }
-    Ok(Value::int(count))
+    crate::apply(req, object, |_, _| {
+        count += 1;
+        Ok(count < i64::MAX)
+    })?;
+    Ok(count)
 }
 
 /// `iterator_to_array(iterable $iterator, bool $preserve_keys = true):
@@ -839,24 +760,29 @@ fn iterator_count(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(1)
 /// }
 /// ```
-fn iterator_to_array(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 2)?;
-    let given = iterable(req, 1)?;
-    let keys = crate::bool_or(req, 2, true)?;
-    let mut out = PhpArray::new(req)?;
-    if let Some(array) = given.as_array() {
-        if keys {
-            return Ok(crate::copied(req, given));
+#[php_function]
+fn iterator_to_array(
+    req: &mut Request,
+    iterator: Iterable,
+    #[php(default = true)] preserve_keys: bool,
+) -> Result<PhpArray, Thrown> {
+    let keys = preserve_keys;
+    let object = match iterator {
+        Iterable::Array(array) => {
+            if keys {
+                req.addref(&Value::array(array));
+                return Ok(array);
+            }
+            let mut out = PhpArray::new(req)?;
+            for (_, value) in array.snapshot() {
+                let value = crate::copied(req, value);
+                out.append(req, value)?;
+            }
+            return Ok(out);
         }
-        for (_, value) in array.snapshot() {
-            let value = crate::copied(req, value);
-            out.append(req, value)?;
-        }
-        return Ok(Value::array(out));
-    }
-    let Some(object) = given.as_object().copied() else {
-        return Ok(Value::array(out));
+        Iterable::Traversable(object) => object,
     };
+    let mut out = PhpArray::new(req)?;
     let walked = crate::apply(req, object, |req, iterator| {
         let current = crate::method(req, iterator, b"current")?;
         if keys {
@@ -880,5 +806,5 @@ fn iterator_to_array(req: &mut Request) -> Result<Value, Thrown> {
         req.release(Value::array(out));
         return Err(thrown);
     }
-    Ok(Value::array(out))
+    Ok(out)
 }

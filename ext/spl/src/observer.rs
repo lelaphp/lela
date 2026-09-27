@@ -9,18 +9,18 @@
 
 use std::collections::HashMap;
 
-use php_ext::abi::{CloneObj, DimensionRead, ObjectHandlers, PropertyPurpose, Std};
+use php_ext::abi::{
+    CloneObj, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers, PropertyPurpose, Std,
+    This, Union, Untyped,
+};
+use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::{compare, identical, truthy, value_name};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::Entry;
-use crate::stub::{self, Declared};
-
-const MIT_NEED_ALL: i64 = 1;
-const MIT_KEYS_ASSOC: i64 = 2;
+use crate::{ArrayAccess, Countable, Iterator, SeekableIterator, Serializable};
 
 /// A row's key: the object's id, or the string `getHash()` answered.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -117,68 +117,17 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
-const STUB: &str = "
-interface SplObserver {
-    /** @tentative-return-type */ public function update(SplSubject $subject): void;
+/// The two interfaces and the two classes onto `builder`, in the order
+/// `PHP_MINIT_FUNCTION(spl_observer)` registers them.
+pub(crate) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
+    builder
+        .class::<SplObserver>()
+        .class::<SplSubject>()
+        .class::<SplObjectStorage>()
+        .class::<MultipleIterator>()
 }
-interface SplSubject {
-    /** @tentative-return-type */ public function attach(SplObserver $observer): void;
-    /** @tentative-return-type */ public function detach(SplObserver $observer): void;
-    /** @tentative-return-type */ public function notify(): void;
-}
-class SplObjectStorage implements Countable, SeekableIterator, Serializable, ArrayAccess {
-    /** @tentative-return-type */ #[\\Deprecated(since: '8.5', message: \"use method SplObjectStorage::offsetSet() instead\")]
-    public function attach(object $object, mixed $info = null): void {}
-    /** @tentative-return-type */ #[\\Deprecated(since: '8.5', message: \"use method SplObjectStorage::offsetUnset() instead\")]
-    public function detach(object $object): void {}
-    /** @tentative-return-type */ #[\\Deprecated(since: '8.5', message: \"use method SplObjectStorage::offsetExists() instead\")]
-    public function contains(object $object): bool {}
-    /** @tentative-return-type */ public function addAll(SplObjectStorage $storage): int {}
-    /** @tentative-return-type */ public function removeAll(SplObjectStorage $storage): int {}
-    /** @tentative-return-type */ public function removeAllExcept(SplObjectStorage $storage): int {}
-    /** @tentative-return-type */ public function getInfo(): mixed {}
-    /** @tentative-return-type */ public function setInfo(mixed $info): void {}
-    /** @tentative-return-type */ public function count(int $mode = COUNT_NORMAL): int {}
-    /** @tentative-return-type */ public function rewind(): void {}
-    /** @tentative-return-type */ public function valid(): bool {}
-    /** @tentative-return-type */ public function key(): int {}
-    /** @tentative-return-type */ public function current(): object {}
-    /** @tentative-return-type */ public function next(): void {}
-    public function seek(int $offset): void {}
-    /** @tentative-return-type */ public function unserialize(string $data): void {}
-    /** @tentative-return-type */ public function serialize(): string {}
-    /** @tentative-return-type */ public function offsetExists($object): bool {}
-    /** @tentative-return-type */ public function offsetGet($object): mixed {}
-    /** @tentative-return-type */ public function offsetSet($object, mixed $info = null): void {}
-    /** @tentative-return-type */ public function offsetUnset($object): void {}
-    /** @tentative-return-type */ public function getHash(object $object): string {}
-    /** @tentative-return-type */ public function __serialize(): array {}
-    /** @tentative-return-type */ public function __unserialize(array $data): void {}
-    /** @tentative-return-type */ public function __debugInfo(): array {}
-}
-class MultipleIterator implements Iterator {
-    public const int MIT_NEED_ANY = 0;
-    public const int MIT_NEED_ALL = 1;
-    public const int MIT_KEYS_NUMERIC = 0;
-    public const int MIT_KEYS_ASSOC = 2;
-    public function __construct(int $flags = MultipleIterator::MIT_NEED_ALL|MultipleIterator::MIT_KEYS_NUMERIC) {}
-    /** @tentative-return-type */ public function getFlags(): int {}
-    /** @tentative-return-type */ public function setFlags(int $flags): void {}
-    /** @tentative-return-type */ public function attachIterator(Iterator $iterator, string|int|null $info = null): void {}
-    /** @tentative-return-type */ public function detachIterator(Iterator $iterator): void {}
-    /** @tentative-return-type */ public function containsIterator(Iterator $iterator): bool {}
-    /** @tentative-return-type */ public function countIterators(): int {}
-    /** @tentative-return-type */ public function rewind(): void {}
-    /** @tentative-return-type */ public function valid(): bool {}
-    /** @tentative-return-type */ public function key(): array {}
-    /** @tentative-return-type */ public function current(): array {}
-    /** @tentative-return-type */ public function next(): void {}
-    /** @tentative-return-type */ public function __debugInfo(): array {}
-}
-";
 
-/// The interfaces and classes, each method with its entry;
-/// `offsetExists` is php's alias of `contains`.
+/// `interface SplObserver`, what an `SplSubject` notifies.
 ///
 /// ```php
 /// class Subject implements SplSubject {
@@ -199,48 +148,858 @@ class MultipleIterator implements Iterator {
 /// a updated by Subject
 /// b updated by Subject
 /// ```
-pub(crate) fn classes() -> Vec<Declared> {
-    let rows: [(&str, Entry); 38] = [
-        ("SplObjectStorage::attach", deprecated_attach),
-        ("SplObjectStorage::detach", deprecated_detach),
-        ("SplObjectStorage::contains", deprecated_contains),
-        ("SplObjectStorage::addAll", add_all),
-        ("SplObjectStorage::removeAll", remove_all),
-        ("SplObjectStorage::removeAllExcept", remove_all_except),
-        ("SplObjectStorage::getInfo", get_info),
-        ("SplObjectStorage::setInfo", set_info),
-        ("SplObjectStorage::count", count),
-        ("SplObjectStorage::rewind", rewind),
-        ("SplObjectStorage::valid", valid),
-        ("SplObjectStorage::key", key),
-        ("SplObjectStorage::current", current),
-        ("SplObjectStorage::next", next),
-        ("SplObjectStorage::seek", seek),
-        ("SplObjectStorage::unserialize", unserialize),
-        ("SplObjectStorage::serialize", serialize),
-        ("SplObjectStorage::offsetExists", contains),
-        ("SplObjectStorage::offsetGet", offset_get),
-        ("SplObjectStorage::offsetSet", attach),
-        ("SplObjectStorage::offsetUnset", detach),
-        ("SplObjectStorage::getHash", get_hash),
-        ("SplObjectStorage::__serialize", magic_serialize),
-        ("SplObjectStorage::__unserialize", magic_unserialize),
-        ("SplObjectStorage::__debugInfo", debug_info),
-        ("MultipleIterator::__construct", multiple_construct),
-        ("MultipleIterator::getFlags", multiple_get_flags),
-        ("MultipleIterator::setFlags", multiple_set_flags),
-        ("MultipleIterator::attachIterator", attach_iterator),
-        ("MultipleIterator::detachIterator", detach_iterator),
-        ("MultipleIterator::containsIterator", contains_iterator),
-        ("MultipleIterator::countIterators", count),
-        ("MultipleIterator::rewind", multiple_rewind),
-        ("MultipleIterator::valid", multiple_valid),
-        ("MultipleIterator::key", multiple_key),
-        ("MultipleIterator::current", multiple_current),
-        ("MultipleIterator::next", multiple_next),
-        ("MultipleIterator::__debugInfo", debug_info),
-    ];
-    stub::classes(STUB, &rows)
+#[php_class(interface)]
+pub(crate) struct SplObserver;
+
+#[php_class]
+impl SplObserver {
+    #[php(tentative)]
+    fn update(this: This<Self>, subject: Instance<SplSubject>);
+}
+
+/// `interface SplSubject`, what keeps and notifies its observers.
+#[php_class(interface)]
+pub(crate) struct SplSubject;
+
+#[php_class]
+impl SplSubject {
+    #[php(tentative)]
+    fn attach(this: This<Self>, observer: Instance<SplObserver>);
+    #[php(tentative)]
+    fn detach(this: This<Self>, observer: Instance<SplObserver>);
+    #[php(tentative)]
+    fn notify(this: This<Self>);
+}
+
+/// `class SplObjectStorage implements Countable, SeekableIterator,
+/// Serializable, ArrayAccess`; `offsetExists`, `offsetSet` and
+/// `offsetUnset` are php's aliases of `contains`, `attach` and `detach`,
+/// each a body of its own here since the three declare `$object`
+/// untyped where the three they alias declare `object`.
+///
+/// ```php
+/// $s = new SplObjectStorage; $a = new stdClass; $b = new stdClass;
+/// $s->offsetSet($a, 1); $s->offsetSet($b, 2);
+/// var_dump($s->offsetExists($a), $s->count(), $s->offsetGet($b));
+/// $s->offsetUnset($b); $s->rewind(); var_dump($s->valid(), $s->key(), $s->current() === $a, $s->getInfo());
+/// $s->setInfo('i'); $s->next(); var_dump($s->valid());
+/// $t = new SplObjectStorage; $t->unserialize($s->serialize()); var_dump(count($t));
+/// $u = new SplObjectStorage; $u->__unserialize($s->__serialize()); var_dump(count($u->__debugInfo()["\0SplObjectStorage\0storage"]));
+/// $s->seek(0); var_dump($s->addAll($t), $s->removeAll($t), $s->removeAllExcept($u), strlen($s->getHash($a)));
+/// var_dump($s->contains($a)); $s->attach($a); $s->detach($a);
+/// ```
+/// ```expect
+/// bool(true)
+/// int(2)
+/// int(2)
+/// bool(true)
+/// int(0)
+/// bool(true)
+/// int(1)
+/// bool(false)
+/// int(1)
+/// int(1)
+/// int(2)
+/// int(1)
+/// int(1)
+/// int(32)
+///
+/// Deprecated: Method SplObjectStorage::contains() is deprecated since 8.5, use method SplObjectStorage::offsetExists() instead in %s on line 10
+/// bool(true)
+///
+/// Deprecated: Method SplObjectStorage::attach() is deprecated since 8.5, use method SplObjectStorage::offsetSet() instead in %s on line 10
+///
+/// Deprecated: Method SplObjectStorage::detach() is deprecated since 8.5, use method SplObjectStorage::offsetUnset() instead in %s on line 10
+/// ```
+#[php_class(
+    implements(Countable, SeekableIterator, Serializable, ArrayAccess),
+    payload = Storage,
+    handlers = HANDLERS
+)]
+pub(crate) struct SplObjectStorage;
+
+#[php_class]
+impl SplObjectStorage {
+    /// `attach(object $object, mixed $info = null): void`, deprecated in
+    /// 8.5 for `offsetSet`.
+    ///
+    /// ```php
+    /// $s = new SplObjectStorage; $a = new stdClass; $b = new stdClass;
+    /// $s[$a] = 'first'; $s->offsetSet($b, 'second'); $s[$a] = 'again';
+    /// var_dump(count($s), $s[$a], isset($s[$b]), $s->offsetExists(new stdClass));
+    /// $s->attach($b);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// string(5) "again"
+    /// bool(true)
+    /// bool(false)
+    ///
+    /// Deprecated: Method SplObjectStorage::attach() is deprecated since 8.5, use method SplObjectStorage::offsetSet() instead in %s on line 5
+    /// ```
+    #[php(
+        tentative,
+        deprecated(
+            since = "8.5",
+            message = "use method SplObjectStorage::offsetSet() instead"
+        )
+    )]
+    fn attach(
+        req: &mut Request,
+        this: This<Self>,
+        object: PhpObject,
+        #[php(default = null)] info: Value,
+    ) -> Result<(), Thrown> {
+        storage_attach(req, this.object(), object, info)
+    }
+
+    /// `detach(object $object): void`, `offsetUnset`: the row gone and the
+    /// position reset.
+    ///
+    /// ```php
+    /// $s = new SplObjectStorage; $a = new stdClass; $s[$a] = 1;
+    /// $s->offsetUnset($a); $s->offsetUnset(new stdClass);
+    /// var_dump(count($s));
+    /// try { $s[$a]; } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// Object not found
+    /// ```
+    #[php(
+        tentative,
+        deprecated(
+            since = "8.5",
+            message = "use method SplObjectStorage::offsetUnset() instead"
+        )
+    )]
+    fn detach(req: &mut Request, this: This<Self>, object: PhpObject) -> Result<(), Thrown> {
+        detach_row(req, this.object(), object)
+    }
+
+    /// `contains(object $object): bool`, `offsetExists`; the witness is the
+    /// class's.
+    #[php(
+        tentative,
+        deprecated(
+            since = "8.5",
+            message = "use method SplObjectStorage::offsetExists() instead"
+        )
+    )]
+    fn contains(req: &mut Request, this: This<Self>, object: PhpObject) -> Result<bool, Thrown> {
+        storage_contains(req, this.object(), object)
+    }
+
+    /// `addAll(SplObjectStorage $storage): int`.
+    ///
+    /// ```php
+    /// $a = new stdClass; $b = new stdClass; $c = new stdClass;
+    /// $x = new SplObjectStorage; $x[$a] = 1; $x[$b] = 2;
+    /// $y = new SplObjectStorage; $y[$b] = 'B'; $y[$c] = 'C';
+    /// var_dump($x->addAll($y), $x[$b]);
+    /// var_dump($x->removeAll($y), $x->removeAllExcept($y));
+    /// ```
+    /// ```expect
+    /// int(3)
+    /// string(1) "B"
+    /// int(1)
+    /// int(0)
+    /// ```
+    #[php(tentative)]
+    fn addAll(
+        req: &mut Request,
+        this: This<Self>,
+        storage: Instance<SplObjectStorage>,
+    ) -> Result<i64, Thrown> {
+        let this = this.object();
+        let rows = with(req, storage.object(), |s| s.live())?;
+        for (object, inf) in rows {
+            storage_attach(req, this, object, inf)?;
+        }
+        let n = with(req, this, |s| {
+            s.index = 0;
+            s.len()
+        })?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// `removeAll(SplObjectStorage $storage): int`; the witness is `addAll`'s.
+    #[php(tentative)]
+    fn removeAll(
+        req: &mut Request,
+        this: This<Self>,
+        storage: Instance<SplObjectStorage>,
+    ) -> Result<i64, Thrown> {
+        let this = this.object();
+        let rows = with(req, storage.object(), |s| s.live())?;
+        for (object, _) in rows {
+            storage_detach(req, this, object)?;
+        }
+        let n = with(req, this, |s| {
+            s.reset();
+            s.index = 0;
+            s.len()
+        })?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// `removeAllExcept(SplObjectStorage $storage): int`; the witness is
+    /// `addAll`'s.
+    #[php(tentative)]
+    fn removeAllExcept(
+        req: &mut Request,
+        this: This<Self>,
+        storage: Instance<SplObjectStorage>,
+    ) -> Result<i64, Thrown> {
+        let this = this.object();
+        let rows = with(req, this, |s| s.live())?;
+        for (object, _) in rows {
+            req.addref(&object.as_value());
+            let kept = storage_contains(req, storage.object(), object);
+            let done = match kept {
+                Ok(false) => storage_detach(req, this, object).map(|_| ()),
+                Ok(true) => Ok(()),
+                Err(thrown) => Err(thrown),
+            };
+            req.release(object.as_value());
+            done?;
+        }
+        let n = with(req, this, |s| {
+            s.reset();
+            s.index = 0;
+            s.len()
+        })?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// `getInfo(): mixed`: the information at the position.
+    ///
+    /// ```php
+    /// $s = new SplObjectStorage; $s[new stdClass] = 'one'; $s[new ArrayObject] = 'two';
+    /// foreach ($s as $i => $o) { echo $i, get_class($o), $s->getInfo(), ";"; $s->setInfo("#$i"); }
+    /// $s->rewind(); echo "\n", $s->getInfo(), $s->key(), "\n";
+    /// $s->seek(1); echo get_class($s->current()), "\n";
+    /// try { $s->seek(2); } catch (OutOfBoundsException $e) { echo $e->getMessage(), "\n"; }
+    /// $s->next(); try { $s->current(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// 0stdClassone;1ArrayObjecttwo;
+    /// #00
+    /// ArrayObject
+    /// Seek position 2 is out of range
+    /// Called current() on invalid iterator
+    /// ```
+    #[php(tentative)]
+    fn getInfo(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let here = with(req, this.object(), |s| s.here())?;
+        Ok(here.map_or_else(Value::null, |(_, inf)| crate::copied(req, inf)))
+    }
+
+    /// `setInfo(mixed $info): void`; the witness is `getInfo`'s.
+    #[php(tentative)]
+    fn setInfo(req: &mut Request, this: This<Self>, info: Value) -> Result<(), Thrown> {
+        let inf = crate::copied(req, info);
+        let old = with(req, this.object(), |s| {
+            let at = s.valid_from(s.pos);
+            match s.rows.get_mut(at).and_then(Option::as_mut) {
+                Some(row) => Ok(std::mem::replace(&mut row.2, inf)),
+                None => Err(inf),
+            }
+        })?;
+        match old {
+            Ok(old) | Err(old) => req.release(old),
+        }
+        Ok(())
+    }
+
+    /// `count(int $mode = COUNT_NORMAL): int`, the rows, and under
+    /// `COUNT_RECURSIVE` each row's information counted in as php's
+    /// `php_count_recursive` walks the table of rows.
+    ///
+    /// ```php
+    /// $s = new SplObjectStorage; $s[new stdClass] = [1, 2];
+    /// var_dump(count($s), $s->count(COUNT_RECURSIVE));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn count(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = COUNT_NORMAL)] mode: i64,
+    ) -> Result<i64, Thrown> {
+        let _ = mode;
+        let n = with(req, this.object(), |s| s.len())?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// `rewind(): void`.
+    #[php(tentative)]
+    fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        with(req, this.object(), |s| {
+            s.reset();
+            s.index = 0;
+        })
+    }
+
+    /// `valid(): bool`.
+    #[php(tentative)]
+    fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        with(req, this.object(), |s| s.here().is_some())
+    }
+
+    /// `key(): int`, `intern->index`.
+    #[php(tentative)]
+    fn key(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        with(req, this.object(), |s| s.index)
+    }
+
+    /// `current(): object`.
+    #[php(tentative)]
+    fn current(req: &mut Request, this: This<Self>) -> Result<PhpObject, Thrown> {
+        match with(req, this.object(), |s| s.here())? {
+            Some((object, _)) => {
+                req.addref(&object.as_value());
+                Ok(object)
+            }
+            None => Err(throw(
+                req,
+                "RuntimeException",
+                "Called current() on invalid iterator",
+            )),
+        }
+    }
+
+    /// `next(): void`.
+    #[php(tentative)]
+    fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        with(req, this.object(), |s| {
+            s.forward();
+            s.index += 1;
+        })
+    }
+
+    /// `seek(int $offset): void`; the witness is `getInfo`'s and the
+    /// class's.
+    fn seek(req: &mut Request, this: This<Self>, offset: i64) -> Result<(), Thrown> {
+        let this = this.object();
+        let position = offset;
+        let len = with(req, this, |s| s.len())?;
+        if position < 0 || usize::try_from(position).is_ok_and(|p| p >= len) {
+            return Err(throw(
+                req,
+                "OutOfBoundsException",
+                &format!("Seek position {position} is out of range"),
+            ));
+        }
+        with(req, this, |s| {
+            if position == 0 || s.index - position > position {
+                s.reset();
+                s.index = 0;
+            }
+            while position > s.index {
+                s.forward();
+                s.index += 1;
+            }
+            while position < s.index {
+                s.backward();
+                s.index -= 1;
+            }
+        })
+    }
+
+    /// `unserialize(string $data): void`: the `x:i:count` head, each
+    /// `;obj,inf` row attached, then `;m:` with the members, read through
+    /// one var hash so a row may name an earlier one by `r:`, as php reads
+    /// them; where the data breaks off php's `UnexpectedValueException`
+    /// names the offset the reader stopped at.
+    ///
+    /// ```php
+    /// $s = new SplObjectStorage;
+    /// $s->unserialize('x:i:2;O:8:"stdClass":0:{},s:1:"a";;r:2;,i:5;;m:a:1:{s:1:"p";i:1;}');
+    /// var_dump(count($s), $s->p);
+    /// foreach ($s as $i => $o) var_dump($s[$o]);
+    /// foreach (['x:i:-1;;m:a:0:{}', 'x:i:1;;i:1;;m:a:0:{}', 'y'] as $bad) {
+    ///     try { (new SplObjectStorage)->unserialize($bad); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Deprecated: Creation of dynamic property SplObjectStorage::$p is deprecated in %s on line 3
+    /// int(1)
+    /// int(1)
+    /// int(5)
+    /// Error at offset 6 of 16 bytes
+    /// Error at offset 6 of 20 bytes
+    /// Error at offset 0 of 1 bytes
+    /// ```
+    #[php(tentative)]
+    fn unserialize(req: &mut Request, this: This<Self>, data: PhpString) -> Result<(), Thrown> {
+        let this = this.object();
+        let data = data.as_bytes().to_vec();
+        if data.is_empty() {
+            return Ok(());
+        }
+        let mut reader = php_ext_standard::Unserializer::new(req, &data);
+        let mut kept = Vec::new();
+        let read = read_storage(req, this, &mut reader, &data, &mut kept);
+        let finished = reader.finish(req);
+        // `var_tmp_var`'s values live until `PHP_VAR_UNSERIALIZE_DESTROY`.
+        for value in kept {
+            req.release(value);
+        }
+        let broke_at = read?;
+        finished?;
+        match broke_at {
+            Some(at) => Err(throw(
+                req,
+                "UnexpectedValueException",
+                &format!("Error at offset {at} of {} bytes", data.len()),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// `serialize(): string`, php's `x:i:count;` then `obj,inf;` per row
+    /// and `m:` with the members. The rows are walked live and each is held
+    /// across its write, as php holds them (GH-16588): a `__serialize` that
+    /// empties the storage leaves the row being written whole.
+    ///
+    /// ```php
+    /// class C { function __serialize(): array { global $s; $s->removeAll($s); return []; } }
+    /// $s = new SplObjectStorage; $s[new C] = new stdClass; $s[new stdClass] = 1;
+    /// var_dump($s->serialize(), count($s));
+    /// ```
+    /// ```expect
+    /// string(47) "x:i:2;O:1:"C":0:{},O:8:"stdClass":0:{};m:a:0:{}"
+    /// int(0)
+    /// ```
+    #[php(tentative)]
+    fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let this = this.object();
+        let count = with(req, this, |s| s.len())?;
+        let mut out = b"x:".to_vec();
+        out.extend(crate::serialized(
+            req,
+            Value::int(i64::try_from(count).unwrap_or(i64::MAX)),
+        )?);
+        // The objects written, each held from its row on, as the var hash's
+        // `Z_ADDREF` holds it until `PHP_VAR_SERIALIZE_DESTROY`, so one a
+        // later `__serialize` frees cannot have its handle reused meanwhile.
+        let mut held = Vec::new();
+        let rows = serialize_rows(req, this, &mut out, &mut held);
+        for object in held {
+            req.release(object.as_value());
+        }
+        rows?;
+        out.extend_from_slice(b"m:");
+        let members = crate::members(req, this)?;
+        let text = crate::serialized(req, Value::array(members));
+        req.release(Value::array(members));
+        out.extend(text?);
+        PhpString::new(req, &out)
+    }
+
+    /// `offsetExists($object): bool`, php's alias of `contains()`, its
+    /// `$object` untyped and held as `Z_PARAM_OBJ` holds it; the witness
+    /// is the class's.
+    #[php(tentative)]
+    fn offsetExists(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<PhpObject>,
+    ) -> Result<bool, Thrown> {
+        storage_contains(req, this.object(), object.0)
+    }
+
+    /// `offsetGet($object): mixed`: the information, or php's
+    /// `UnexpectedValueException` for an object the storage has not.
+    #[php(tentative)]
+    fn offsetGet(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<PhpObject>,
+    ) -> Result<Value, Thrown> {
+        let this = this.object();
+        let key = row_key(req, this, object.0)?;
+        let found = with(req, this, |s| {
+            s.places
+                .get(&key)
+                .and_then(|at| s.rows[*at].as_ref().map(|row| row.2))
+        })?;
+        match found {
+            Some(inf) => Ok(crate::copied(req, inf)),
+            None => Err(throw(req, "UnexpectedValueException", "Object not found")),
+        }
+    }
+
+    /// `offsetSet($object, mixed $info = null): void`, php's alias of
+    /// `attach()`; the witness is the class's.
+    #[php(tentative)]
+    fn offsetSet(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<PhpObject>,
+        #[php(default = null)] info: Value,
+    ) -> Result<(), Thrown> {
+        storage_attach(req, this.object(), object.0, info)
+    }
+
+    /// `offsetUnset($object): void`, php's alias of `detach()`; the
+    /// witness is the class's.
+    #[php(tentative)]
+    fn offsetUnset(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<PhpObject>,
+    ) -> Result<(), Thrown> {
+        detach_row(req, this.object(), object.0)
+    }
+
+    /// `getHash(object $object): string`, `spl_object_hash`'s string; a
+    /// class overriding it keys the storage by what it answers.
+    ///
+    /// ```php
+    /// class ByName extends SplObjectStorage {
+    ///     public function getHash($o): string { return $o->name; }
+    /// }
+    /// $a = new stdClass; $a->name = 'x'; $b = new stdClass; $b->name = 'x';
+    /// $s = new ByName; $s[$a] = 1; $s[$b] = 2;
+    /// var_dump(count($s), $s[$a], strlen((new SplObjectStorage)->getHash($a)));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// int(32)
+    /// ```
+    #[php(tentative)]
+    fn getHash(
+        req: &mut Request,
+        this: This<Self>,
+        object: PhpObject,
+    ) -> Result<PhpString, Thrown> {
+        let _ = this;
+        let hash = format!("{:016x}0000000000000000", object.index());
+        PhpString::new(req, hash.as_bytes())
+    }
+
+    /// `__serialize(): array`: the rows as object then information, then
+    /// the members.
+    ///
+    /// ```php
+    /// $s = new SplObjectStorage; $o = new stdClass; $s[$o] = 'i';
+    /// var_dump($s->__serialize());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   array(2) {
+    ///     [0]=>
+    ///     object(stdClass)#2 (0) {
+    ///     }
+    ///     [1]=>
+    ///     string(1) "i"
+    ///   }
+    ///   [1]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let this = this.object();
+        let rows = with(req, this, |s| s.live())?;
+        let mut list = PhpArray::new(req)?;
+        for (object, inf) in rows {
+            list.append(req, crate::copied(req, object.as_value()))?;
+            list.append(req, crate::copied(req, inf))?;
+        }
+        let mut out = PhpArray::new(req)?;
+        out.append(req, Value::array(list))?;
+        let members = crate::members(req, this)?;
+        out.append(req, Value::array(members))?;
+        Ok(out)
+    }
+
+    /// `__unserialize(array $data): void`.
+    ///
+    /// ```php
+    /// $s = new SplObjectStorage;
+    /// try { $s->__unserialize([[new stdClass], []]); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+    /// try { $s->__unserialize([[1, 2], []]); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+    /// $s->__unserialize([[new stdClass, 'x'], []]); var_dump(count($s));
+    /// ```
+    /// ```expect
+    /// Odd number of elements
+    /// Non-object key
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
+        let this = this.object();
+        let storage = data
+            .get(&Key::Int(0))
+            .and_then(|v| v.deref().as_array().copied());
+        let members = data.get(&Key::Int(1)).map(|v| v.deref());
+        let (Some(storage), Some(members)) = (storage, members.filter(|m| m.as_array().is_some()))
+        else {
+            return Err(throw(
+                req,
+                "UnexpectedValueException",
+                "Incomplete or ill-typed serialization data",
+            ));
+        };
+        if storage.len() % 2 != 0 {
+            return Err(throw(
+                req,
+                "UnexpectedValueException",
+                "Odd number of elements",
+            ));
+        }
+        let values: Vec<Value> = storage.snapshot().into_iter().map(|(_, v)| v).collect();
+        for pair in values.chunks(2) {
+            let (Some(object), Some(inf)) = (pair.first(), pair.get(1)) else {
+                break;
+            };
+            let Some(target) = object.as_object().copied() else {
+                return Err(throw(req, "UnexpectedValueException", "Non-object key"));
+            };
+            storage_attach(req, this, target, *inf)?;
+        }
+        crate::load_members(req, this, &members)
+    }
+
+    /// `__debugInfo(): array`: the properties, then the rows under the
+    /// private name `storage` of `SplObjectStorage`, each an `obj` and `inf`
+    /// pair.
+    ///
+    /// ```php
+    /// $s = new SplObjectStorage; $s[new stdClass] = 1;
+    /// var_dump($s);
+    /// ```
+    /// ```expect
+    /// object(SplObjectStorage)#1 (1) {
+    ///   ["storage":"SplObjectStorage":private]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     array(2) {
+    ///       ["obj"]=>
+    ///       object(stdClass)#2 (0) {
+    ///       }
+    ///       ["inf"]=>
+    ///       int(1)
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let this = this.object();
+        let rows = with(req, this, |s| s.live())?;
+        let mut out = PhpArray::new(req)?;
+        for (name, value) in this.props_for(req, PropertyPurpose::Debug)? {
+            req.addref(&value);
+            out.set(req, Key::Str(name), value)?;
+        }
+        let mut storage = PhpArray::new(req)?;
+        for (object, inf) in rows {
+            let mut row = PhpArray::new(req)?;
+            let key = PhpString::new(req, b"obj")?;
+            row.set(req, Key::Str(key), crate::copied(req, object.as_value()))?;
+            let key = PhpString::new(req, b"inf")?;
+            row.set(req, Key::Str(key), crate::copied(req, inf))?;
+            storage.append(req, Value::array(row))?;
+        }
+        let name = PhpString::new(req, b"\0SplObjectStorage\0storage")?;
+        out.set(req, Key::Str(name), Value::array(storage))?;
+        Ok(out)
+    }
+}
+
+/// `class MultipleIterator implements Iterator`: its sub-iterators
+/// walked in step, their rows in an `SplObjectStorage`'s payload.
+///
+/// ```php
+/// $m = new MultipleIterator(MultipleIterator::MIT_NEED_ANY | MultipleIterator::MIT_KEYS_ASSOC);
+/// $m->attachIterator(new ArrayIterator([1, 2, 3]), 'n');
+/// $m->attachIterator(new ArrayIterator(['a', 'b']), 'l');
+/// foreach ($m as $k => $v) echo json_encode($k), json_encode($v), "\n";
+/// var_dump($m->getFlags(), $m->countIterators());
+/// $m->setFlags(MultipleIterator::MIT_NEED_ALL);
+/// foreach ($m as $v) echo implode(',', $v), ";";
+/// $m->rewind(); echo "\n", json_encode($m->key()), json_encode($m->current()), $m->valid() ? "valid" : "", "\n";
+/// $i = new ArrayIterator([]); $m->attachIterator($i); var_dump($m->containsIterator($i)); $m->detachIterator($i); $m->next(); var_dump($m->valid(), count($m->__debugInfo()["\0SplObjectStorage\0storage"]));
+/// ```
+/// ```expect
+/// {"n":0,"l":0}{"n":1,"l":"a"}
+/// {"n":1,"l":1}{"n":2,"l":"b"}
+/// {"n":2,"l":null}{"n":3,"l":null}
+/// int(2)
+/// int(2)
+/// 1,a;2,b;
+/// [0,0][1,"a"]valid
+/// bool(true)
+/// bool(true)
+/// int(2)
+/// ```
+#[php_class(implements(Iterator), payload = Storage, handlers = HANDLERS)]
+pub(crate) struct MultipleIterator;
+
+#[php_class]
+impl MultipleIterator {
+    const MIT_NEED_ANY: i64 = 0;
+    const MIT_NEED_ALL: i64 = 1;
+    const MIT_KEYS_NUMERIC: i64 = 0;
+    const MIT_KEYS_ASSOC: i64 = 2;
+
+    /// `MultipleIterator::__construct(int $flags = MIT_NEED_ALL|MIT_KEYS_NUMERIC)`;
+    /// the witness is the class's.
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = MultipleIterator::MIT_NEED_ALL | MultipleIterator::MIT_KEYS_NUMERIC)]
+        flags: i64,
+    ) -> Result<(), Thrown> {
+        with(req, this.object(), |s| s.flags = flags)
+    }
+
+    /// `getFlags(): int`.
+    #[php(tentative)]
+    fn getFlags(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        with(req, this.object(), |s| s.flags)
+    }
+
+    /// `setFlags(int $flags): void`.
+    #[php(tentative)]
+    fn setFlags(req: &mut Request, this: This<Self>, flags: i64) -> Result<(), Thrown> {
+        with(req, this.object(), |s| s.flags = flags)
+    }
+
+    /// `attachIterator(Iterator $iterator, string|int|null $info = null):
+    /// void`: an info a row has already is php's `InvalidArgumentException`.
+    ///
+    /// ```php
+    /// $m = new MultipleIterator(MultipleIterator::MIT_KEYS_ASSOC);
+    /// $a = new ArrayIterator([1]);
+    /// $m->attachIterator($a, 'x');
+    /// try { $m->attachIterator(new ArrayIterator([2]), 'x'); } catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
+    /// $m->attachIterator(new ArrayIterator([3]));
+    /// try { $m->current(); } catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($m->containsIterator($a)); $m->detachIterator($a); var_dump($m->containsIterator($a));
+    /// try { $m->attachIterator($a, new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Key duplication error
+    /// Sub-Iterator is associated with NULL
+    /// bool(true)
+    /// bool(false)
+    /// MultipleIterator::attachIterator(): Argument #2 ($info) must be of type string|int|null, stdClass given
+    /// ```
+    #[php(tentative)]
+    fn attachIterator(
+        req: &mut Request,
+        this: This<Self>,
+        iterator: Instance<Iterator>,
+        #[php(default = null)] info: Option<Union<PhpString, i64>>,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        let info = info.map(|info| match info {
+            Union::A(s) => Value::string(s),
+            Union::B(n) => Value::int(n),
+        });
+        if let Some(info) = info {
+            let rows = with(req, this, |s| s.live())?;
+            if rows.iter().any(|(_, inf)| identical(inf, &info)) {
+                return Err(throw(
+                    req,
+                    "InvalidArgumentException",
+                    "Key duplication error",
+                ));
+            }
+        }
+        storage_attach(req, this, iterator.object(), info.unwrap_or_default())
+    }
+
+    /// `detachIterator(Iterator $iterator): void`; the witness is
+    /// `attachIterator`'s.
+    #[php(tentative)]
+    fn detachIterator(
+        req: &mut Request,
+        this: This<Self>,
+        iterator: Instance<Iterator>,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        storage_detach(req, this, iterator.object())?;
+        with(req, this, |s| {
+            s.reset();
+            s.index = 0;
+        })
+    }
+
+    /// `containsIterator(Iterator $iterator): bool`.
+    #[php(tentative)]
+    fn containsIterator(
+        req: &mut Request,
+        this: This<Self>,
+        iterator: Instance<Iterator>,
+    ) -> Result<bool, Thrown> {
+        storage_contains(req, this.object(), iterator.object())
+    }
+
+    /// `countIterators(): int`.
+    #[php(tentative)]
+    fn countIterators(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let n = with(req, this.object(), |s| s.len())?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// `MultipleIterator::rewind(): void`.
+    #[php(tentative)]
+    fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        each(req, this.object(), b"rewind")
+    }
+
+    /// `MultipleIterator::valid(): bool`: all valid under `MIT_NEED_ALL`,
+    /// any under `MIT_NEED_ANY`, `false` with none attached.
+    #[php(tentative)]
+    fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (rows, flags) = with(req, this.object(), |s| (s.live(), s.flags))?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        let expect = flags & Self::MIT_NEED_ALL != 0;
+        for (iterator, _) in rows {
+            let answered = crate::method(req, iterator, b"valid")?;
+            let valid = answered.as_bool() == Some(true);
+            req.release(answered);
+            if expect != valid {
+                return Ok(!expect);
+            }
+        }
+        Ok(expect)
+    }
+
+    /// `MultipleIterator::key(): array`.
+    #[php(tentative)]
+    fn key(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        get_all(req, this.object(), "key")
+    }
+
+    /// `MultipleIterator::current(): array`.
+    #[php(tentative)]
+    fn current(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        get_all(req, this.object(), "current")
+    }
+
+    /// `MultipleIterator::next(): void`.
+    #[php(tentative)]
+    fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        each(req, this.object(), b"next")
+    }
+
+    #[php(tentative, implementation = SplObjectStorage::__debugInfo)]
+    fn __debugInfo(this: This<Self>) -> PhpArray;
 }
 
 fn with<R>(
@@ -306,6 +1065,16 @@ fn storage_detach(req: &mut Request, this: PhpObject, object: PhpObject) -> Resu
         }
         None => Ok(false),
     }
+}
+
+/// `SplObjectStorage::detach`'s body: the row gone and the position
+/// reset.
+fn detach_row(req: &mut Request, this: PhpObject, object: PhpObject) -> Result<(), Thrown> {
+    storage_detach(req, this, object)?;
+    with(req, this, |s| {
+        s.reset();
+        s.index = 0;
+    })
 }
 
 /// `spl_object_storage_contains`.
@@ -557,341 +1326,6 @@ fn clone_storage(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
     clone_with(req, &object, copy)
 }
 
-/// `attach()`, deprecated for `offsetSet()`, whose deprecation the
-/// call raises from the declaration; the witness is `offsetSet`'s.
-fn deprecated_attach(req: &mut Request) -> Result<Value, Thrown> {
-    attach(req)
-}
-
-/// `detach()`, deprecated for `offsetUnset()`; the witness is
-/// `offsetUnset`'s.
-fn deprecated_detach(req: &mut Request) -> Result<Value, Thrown> {
-    detach(req)
-}
-
-/// `contains()`, deprecated for `offsetExists()`; the witness is
-/// `offsetSet`'s.
-fn deprecated_contains(req: &mut Request) -> Result<Value, Thrown> {
-    contains(req)
-}
-
-/// `attach(object $object, mixed $info = null): void`, deprecated in
-/// 8.5 for `offsetSet`, which is the same entry.
-///
-/// ```php
-/// $s = new SplObjectStorage; $a = new stdClass; $b = new stdClass;
-/// $s[$a] = 'first'; $s->offsetSet($b, 'second'); $s[$a] = 'again';
-/// var_dump(count($s), $s[$a], isset($s[$b]), $s->offsetExists(new stdClass));
-/// $s->attach($b);
-/// ```
-/// ```expect
-/// int(2)
-/// string(5) "again"
-/// bool(true)
-/// bool(false)
-///
-/// Deprecated: Method SplObjectStorage::attach() is deprecated since 8.5, use method SplObjectStorage::offsetSet() instead in %s on line 5
-/// ```
-fn attach(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 2)?;
-    let this = crate::this(req)?;
-    let object = crate::object(req, 1, None)?;
-    let inf = crate::given(req, 2).map_or_else(Value::null, |v| v.deref());
-    storage_attach(req, this, object, inf)?;
-    Ok(Value::null())
-}
-
-/// `detach(object $object): void`, `offsetUnset`: the row gone and the
-/// position reset.
-///
-/// ```php
-/// $s = new SplObjectStorage; $a = new stdClass; $s[$a] = 1;
-/// $s->offsetUnset($a); $s->offsetUnset(new stdClass);
-/// var_dump(count($s));
-/// try { $s[$a]; } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(0)
-/// Object not found
-/// ```
-fn detach(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let object = crate::object(req, 1, None)?;
-    storage_detach(req, this, object)?;
-    with(req, this, |s| {
-        s.reset();
-        s.index = 0;
-    })?;
-    Ok(Value::null())
-}
-
-/// `contains(object $object): bool`, `offsetExists`.
-fn contains(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let object = crate::object(req, 1, None)?;
-    Ok(Value::bool(storage_contains(req, this, object)?))
-}
-
-/// The storage argument at 1, an `SplObjectStorage`.
-fn other(req: &mut Request) -> Result<PhpObject, Thrown> {
-    crate::arity(req, 1, 1)?;
-    crate::object(req, 1, Some("SplObjectStorage"))
-}
-
-/// `addAll(SplObjectStorage $storage): int`.
-///
-/// ```php
-/// $a = new stdClass; $b = new stdClass; $c = new stdClass;
-/// $x = new SplObjectStorage; $x[$a] = 1; $x[$b] = 2;
-/// $y = new SplObjectStorage; $y[$b] = 'B'; $y[$c] = 'C';
-/// var_dump($x->addAll($y), $x[$b]);
-/// var_dump($x->removeAll($y), $x->removeAllExcept($y));
-/// ```
-/// ```expect
-/// int(3)
-/// string(1) "B"
-/// int(1)
-/// int(0)
-/// ```
-fn add_all(req: &mut Request) -> Result<Value, Thrown> {
-    let this = crate::this(req)?;
-    let other = other(req)?;
-    let rows = with(req, other, |s| s.live())?;
-    for (object, inf) in rows {
-        storage_attach(req, this, object, inf)?;
-    }
-    let n = with(req, this, |s| {
-        s.index = 0;
-        s.len()
-    })?;
-    Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX)))
-}
-
-/// `removeAll(SplObjectStorage $storage): int`; the witness is `addAll`'s.
-fn remove_all(req: &mut Request) -> Result<Value, Thrown> {
-    let this = crate::this(req)?;
-    let other = other(req)?;
-    let rows = with(req, other, |s| s.live())?;
-    for (object, _) in rows {
-        storage_detach(req, this, object)?;
-    }
-    let n = with(req, this, |s| {
-        s.reset();
-        s.index = 0;
-        s.len()
-    })?;
-    Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX)))
-}
-
-/// `removeAllExcept(SplObjectStorage $storage): int`; the witness is
-/// `addAll`'s.
-fn remove_all_except(req: &mut Request) -> Result<Value, Thrown> {
-    let this = crate::this(req)?;
-    let other = other(req)?;
-    let rows = with(req, this, |s| s.live())?;
-    for (object, _) in rows {
-        req.addref(&object.as_value());
-        let kept = storage_contains(req, other, object);
-        let done = match kept {
-            Ok(false) => storage_detach(req, this, object).map(|_| ()),
-            Ok(true) => Ok(()),
-            Err(thrown) => Err(thrown),
-        };
-        req.release(object.as_value());
-        done?;
-    }
-    let n = with(req, this, |s| {
-        s.reset();
-        s.index = 0;
-        s.len()
-    })?;
-    Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX)))
-}
-
-/// `getInfo(): mixed`: the information at the position.
-///
-/// ```php
-/// $s = new SplObjectStorage; $s[new stdClass] = 'one'; $s[new ArrayObject] = 'two';
-/// foreach ($s as $i => $o) { echo $i, get_class($o), $s->getInfo(), ";"; $s->setInfo("#$i"); }
-/// $s->rewind(); echo "\n", $s->getInfo(), $s->key(), "\n";
-/// $s->seek(1); echo get_class($s->current()), "\n";
-/// try { $s->seek(2); } catch (OutOfBoundsException $e) { echo $e->getMessage(), "\n"; }
-/// $s->next(); try { $s->current(); } catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// 0stdClassone;1ArrayObjecttwo;
-/// #00
-/// ArrayObject
-/// Seek position 2 is out of range
-/// Called current() on invalid iterator
-/// ```
-fn get_info(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let here = with(req, this, |s| s.here())?;
-    Ok(here.map_or_else(Value::null, |(_, inf)| crate::copied(req, inf)))
-}
-
-/// `setInfo(mixed $info): void`; the witness is `getInfo`'s.
-fn set_info(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let inf = crate::value(req, 1);
-    let inf = crate::copied(req, inf);
-    let old = with(req, this, |s| {
-        let at = s.valid_from(s.pos);
-        match s.rows.get_mut(at).and_then(Option::as_mut) {
-            Some(row) => Ok(std::mem::replace(&mut row.2, inf)),
-            None => Err(inf),
-        }
-    })?;
-    match old {
-        Ok(old) | Err(old) => req.release(old),
-    }
-    Ok(Value::null())
-}
-
-/// `count(int $mode = COUNT_NORMAL): int`, the rows, and under
-/// `COUNT_RECURSIVE` each row's information counted in as php's
-/// `php_count_recursive` walks the table of rows.
-///
-/// ```php
-/// $s = new SplObjectStorage; $s[new stdClass] = [1, 2];
-/// var_dump(count($s), $s->count(COUNT_RECURSIVE));
-/// ```
-/// ```expect
-/// int(1)
-/// int(1)
-/// ```
-fn count(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 1)?;
-    let this = crate::this(req)?;
-    let n = with(req, this, |s| s.len())?;
-    Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX)))
-}
-
-/// `rewind(): void`.
-fn rewind(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    with(req, this, |s| {
-        s.reset();
-        s.index = 0;
-    })?;
-    Ok(Value::null())
-}
-
-/// `valid(): bool`.
-fn valid(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::bool(with(req, this, |s| s.here().is_some())?))
-}
-
-/// `key(): int`, `intern->index`.
-fn key(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::int(with(req, this, |s| s.index)?))
-}
-
-/// `current(): object`.
-fn current(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    match with(req, this, |s| s.here())? {
-        Some((object, _)) => Ok(crate::copied(req, object.as_value())),
-        None => Err(throw(
-            req,
-            "RuntimeException",
-            "Called current() on invalid iterator",
-        )),
-    }
-}
-
-/// `next(): void`.
-fn next(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    with(req, this, |s| {
-        s.forward();
-        s.index += 1;
-    })?;
-    Ok(Value::null())
-}
-
-/// `seek(int $offset): void`.
-fn seek(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let position = crate::long(req, 1)?;
-    let len = with(req, this, |s| s.len())?;
-    if position < 0 || usize::try_from(position).is_ok_and(|p| p >= len) {
-        return Err(throw(
-            req,
-            "OutOfBoundsException",
-            &format!("Seek position {position} is out of range"),
-        ));
-    }
-    with(req, this, |s| {
-        if position == 0 || s.index - position > position {
-            s.reset();
-            s.index = 0;
-        }
-        while position > s.index {
-            s.forward();
-            s.index += 1;
-        }
-        while position < s.index {
-            s.backward();
-            s.index -= 1;
-        }
-    })?;
-    Ok(Value::null())
-}
-
-/// `serialize(): string`, php's `x:i:count;` then `obj,inf;` per row
-/// and `m:` with the members. The rows are walked live and each is held
-/// across its write, as php holds them (GH-16588): a `__serialize` that
-/// empties the storage leaves the row being written whole.
-///
-/// ```php
-/// class C { function __serialize(): array { global $s; $s->removeAll($s); return []; } }
-/// $s = new SplObjectStorage; $s[new C] = new stdClass; $s[new stdClass] = 1;
-/// var_dump($s->serialize(), count($s));
-/// ```
-/// ```expect
-/// string(47) "x:i:2;O:1:"C":0:{},O:8:"stdClass":0:{};m:a:0:{}"
-/// int(0)
-/// ```
-fn serialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let count = with(req, this, |s| s.len())?;
-    let mut out = b"x:".to_vec();
-    out.extend(crate::serialized(
-        req,
-        Value::int(i64::try_from(count).unwrap_or(i64::MAX)),
-    )?);
-    // The objects written, each held from its row on, as the var hash's
-    // `Z_ADDREF` holds it until `PHP_VAR_SERIALIZE_DESTROY`, so one a
-    // later `__serialize` frees cannot have its handle reused meanwhile.
-    let mut held = Vec::new();
-    let rows = serialize_rows(req, this, &mut out, &mut held);
-    for object in held {
-        req.release(object.as_value());
-    }
-    rows?;
-    out.extend_from_slice(b"m:");
-    let members = crate::members(req, this)?;
-    let text = crate::serialized(req, Value::array(members));
-    req.release(Value::array(members));
-    out.extend(text?);
-    crate::string_value(req, &out)
-}
-
 /// `SplObjectStorage::serialize`'s walk over the storage, live by
 /// position as `zend_hash_move_forward_ex` walks it, so a row an
 /// earlier row's `__serialize` detached is not written and one it
@@ -928,57 +1362,6 @@ fn serialize_rows(
         out.extend(written?);
         out.push(b';');
         from = at + 1;
-    }
-}
-
-/// `unserialize(string $data): void`: the `x:i:count` head, each
-/// `;obj,inf` row attached, then `;m:` with the members, read through
-/// one var hash so a row may name an earlier one by `r:`, as php reads
-/// them; where the data breaks off php's `UnexpectedValueException`
-/// names the offset the reader stopped at.
-///
-/// ```php
-/// $s = new SplObjectStorage;
-/// $s->unserialize('x:i:2;O:8:"stdClass":0:{},s:1:"a";;r:2;,i:5;;m:a:1:{s:1:"p";i:1;}');
-/// var_dump(count($s), $s->p);
-/// foreach ($s as $i => $o) var_dump($s[$o]);
-/// foreach (['x:i:-1;;m:a:0:{}', 'x:i:1;;i:1;;m:a:0:{}', 'y'] as $bad) {
-///     try { (new SplObjectStorage)->unserialize($bad); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
-/// }
-/// ```
-/// ```expect
-/// Deprecated: Creation of dynamic property SplObjectStorage::$p is deprecated in %s on line 3
-/// int(1)
-/// int(1)
-/// int(5)
-/// Error at offset 6 of 16 bytes
-/// Error at offset 6 of 20 bytes
-/// Error at offset 0 of 1 bytes
-/// ```
-fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let data = crate::string(req, 1)?.as_bytes().to_vec();
-    if data.is_empty() {
-        return Ok(Value::null());
-    }
-    let mut reader = php_ext_standard::Unserializer::new(req, &data);
-    let mut kept = Vec::new();
-    let read = read_storage(req, this, &mut reader, &data, &mut kept);
-    let finished = reader.finish(req);
-    // `var_tmp_var`'s values live until `PHP_VAR_UNSERIALIZE_DESTROY`.
-    for value in kept {
-        req.release(value);
-    }
-    let broke_at = read?;
-    finished?;
-    match broke_at {
-        Some(at) => Err(throw(
-            req,
-            "UnexpectedValueException",
-            &format!("Error at offset {at} of {} bytes", data.len()),
-        )),
-        None => Ok(Value::null()),
     }
 }
 
@@ -1056,288 +1439,6 @@ fn read_storage(
     Ok(None)
 }
 
-/// `offsetGet($object): mixed`: the information, or php's
-/// `UnexpectedValueException` for an object the storage has not.
-fn offset_get(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let object = crate::object(req, 1, None)?;
-    let key = row_key(req, this, object)?;
-    let found = with(req, this, |s| {
-        s.places
-            .get(&key)
-            .and_then(|at| s.rows[*at].as_ref().map(|row| row.2))
-    })?;
-    match found {
-        Some(inf) => Ok(crate::copied(req, inf)),
-        None => Err(throw(req, "UnexpectedValueException", "Object not found")),
-    }
-}
-
-/// `getHash(object $object): string`, `spl_object_hash`'s string; a
-/// class overriding it keys the storage by what it answers.
-///
-/// ```php
-/// class ByName extends SplObjectStorage {
-///     public function getHash($o): string { return $o->name; }
-/// }
-/// $a = new stdClass; $a->name = 'x'; $b = new stdClass; $b->name = 'x';
-/// $s = new ByName; $s[$a] = 1; $s[$b] = 2;
-/// var_dump(count($s), $s[$a], strlen((new SplObjectStorage)->getHash($a)));
-/// ```
-/// ```expect
-/// int(1)
-/// int(2)
-/// int(32)
-/// ```
-fn get_hash(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let object = crate::object(req, 1, None)?;
-    let hash = format!("{:016x}0000000000000000", object.index());
-    crate::string_value(req, hash.as_bytes())
-}
-
-/// `__serialize(): array`: the rows as object then information, then
-/// the members.
-///
-/// ```php
-/// $s = new SplObjectStorage; $o = new stdClass; $s[$o] = 'i';
-/// var_dump($s->__serialize());
-/// ```
-/// ```expect
-/// array(2) {
-///   [0]=>
-///   array(2) {
-///     [0]=>
-///     object(stdClass)#2 (0) {
-///     }
-///     [1]=>
-///     string(1) "i"
-///   }
-///   [1]=>
-///   array(0) {
-///   }
-/// }
-/// ```
-fn magic_serialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let rows = with(req, this, |s| s.live())?;
-    let mut list = PhpArray::new(req)?;
-    for (object, inf) in rows {
-        list.append(req, crate::copied(req, object.as_value()))?;
-        list.append(req, crate::copied(req, inf))?;
-    }
-    let mut out = PhpArray::new(req)?;
-    out.append(req, Value::array(list))?;
-    let members = crate::members(req, this)?;
-    out.append(req, Value::array(members))?;
-    Ok(Value::array(out))
-}
-
-/// `__unserialize(array $data): void`.
-///
-/// ```php
-/// $s = new SplObjectStorage;
-/// try { $s->__unserialize([[new stdClass], []]); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
-/// try { $s->__unserialize([[1, 2], []]); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
-/// $s->__unserialize([[new stdClass, 'x'], []]); var_dump(count($s));
-/// ```
-/// ```expect
-/// Odd number of elements
-/// Non-object key
-/// int(1)
-/// ```
-fn magic_unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let data = crate::array(req, 1)?;
-    let storage = data
-        .get(&Key::Int(0))
-        .and_then(|v| v.deref().as_array().copied());
-    let members = data.get(&Key::Int(1)).map(|v| v.deref());
-    let (Some(storage), Some(members)) = (storage, members.filter(|m| m.as_array().is_some()))
-    else {
-        return Err(throw(
-            req,
-            "UnexpectedValueException",
-            "Incomplete or ill-typed serialization data",
-        ));
-    };
-    if storage.len() % 2 != 0 {
-        return Err(throw(
-            req,
-            "UnexpectedValueException",
-            "Odd number of elements",
-        ));
-    }
-    let values: Vec<Value> = storage.snapshot().into_iter().map(|(_, v)| v).collect();
-    for pair in values.chunks(2) {
-        let (Some(object), Some(inf)) = (pair.first(), pair.get(1)) else {
-            break;
-        };
-        let Some(target) = object.as_object().copied() else {
-            return Err(throw(req, "UnexpectedValueException", "Non-object key"));
-        };
-        storage_attach(req, this, target, *inf)?;
-    }
-    crate::load_members(req, this, &members)?;
-    Ok(Value::null())
-}
-
-/// `__debugInfo(): array`: the properties, then the rows under the
-/// private name `storage` of `SplObjectStorage`, each an `obj` and `inf`
-/// pair.
-///
-/// ```php
-/// $s = new SplObjectStorage; $s[new stdClass] = 1;
-/// var_dump($s);
-/// ```
-/// ```expect
-/// object(SplObjectStorage)#1 (1) {
-///   ["storage":"SplObjectStorage":private]=>
-///   array(1) {
-///     [0]=>
-///     array(2) {
-///       ["obj"]=>
-///       object(stdClass)#2 (0) {
-///       }
-///       ["inf"]=>
-///       int(1)
-///     }
-///   }
-/// }
-/// ```
-fn debug_info(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let rows = with(req, this, |s| s.live())?;
-    let mut out = PhpArray::new(req)?;
-    for (name, value) in this.props_for(req, PropertyPurpose::Debug)? {
-        req.addref(&value);
-        out.set(req, Key::Str(name), value)?;
-    }
-    let mut storage = PhpArray::new(req)?;
-    for (object, inf) in rows {
-        let mut row = PhpArray::new(req)?;
-        let key = PhpString::new(req, b"obj")?;
-        row.set(req, Key::Str(key), crate::copied(req, object.as_value()))?;
-        let key = PhpString::new(req, b"inf")?;
-        row.set(req, Key::Str(key), crate::copied(req, inf))?;
-        storage.append(req, Value::array(row))?;
-    }
-    let name = PhpString::new(req, b"\0SplObjectStorage\0storage")?;
-    out.set(req, Key::Str(name), Value::array(storage))?;
-    Ok(Value::array(out))
-}
-
-/// `MultipleIterator::__construct(int $flags = MIT_NEED_ALL|MIT_KEYS_NUMERIC)`.
-///
-/// ```php
-/// $m = new MultipleIterator(MultipleIterator::MIT_NEED_ANY | MultipleIterator::MIT_KEYS_ASSOC);
-/// $m->attachIterator(new ArrayIterator([1, 2, 3]), 'n');
-/// $m->attachIterator(new ArrayIterator(['a', 'b']), 'l');
-/// foreach ($m as $k => $v) echo json_encode($k), json_encode($v), "\n";
-/// var_dump($m->getFlags(), $m->countIterators());
-/// $m->setFlags(MultipleIterator::MIT_NEED_ALL);
-/// foreach ($m as $v) echo implode(',', $v), ";";
-/// ```
-/// ```expect
-/// {"n":0,"l":0}{"n":1,"l":"a"}
-/// {"n":1,"l":1}{"n":2,"l":"b"}
-/// {"n":2,"l":null}{"n":3,"l":null}
-/// int(2)
-/// int(2)
-/// 1,a;2,b;
-/// ```
-fn multiple_construct(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 1)?;
-    let this = crate::this(req)?;
-    let flags = crate::long_or(req, 1, MIT_NEED_ALL)?;
-    with(req, this, |s| s.flags = flags)?;
-    Ok(Value::null())
-}
-
-/// `getFlags(): int`.
-fn multiple_get_flags(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::int(with(req, this, |s| s.flags)?))
-}
-
-/// `setFlags(int $flags): void`.
-fn multiple_set_flags(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let flags = crate::long(req, 1)?;
-    with(req, this, |s| s.flags = flags)?;
-    Ok(Value::null())
-}
-
-/// `attachIterator(Iterator $iterator, string|int|null $info = null):
-/// void`: an info a row has already is php's `InvalidArgumentException`.
-///
-/// ```php
-/// $m = new MultipleIterator(MultipleIterator::MIT_KEYS_ASSOC);
-/// $a = new ArrayIterator([1]);
-/// $m->attachIterator($a, 'x');
-/// try { $m->attachIterator(new ArrayIterator([2]), 'x'); } catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
-/// $m->attachIterator(new ArrayIterator([3]));
-/// try { $m->current(); } catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
-/// var_dump($m->containsIterator($a)); $m->detachIterator($a); var_dump($m->containsIterator($a));
-/// try { $m->attachIterator($a, new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Key duplication error
-/// Sub-Iterator is associated with NULL
-/// bool(true)
-/// bool(false)
-/// MultipleIterator::attachIterator(): Argument #2 ($info) must be of type string|int|null, stdClass given
-/// ```
-fn attach_iterator(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 2)?;
-    let this = crate::this(req)?;
-    let iterator = crate::object(req, 1, Some("Iterator"))?;
-    let info = match php_ext::coerce::argument(req, 2)? {
-        Some(info) if !matches!(info.as_ref(), ValueRef::Null) => Some(info),
-        _ => None,
-    };
-    if let Some(info) = info {
-        let rows = with(req, this, |s| s.live())?;
-        if rows.iter().any(|(_, inf)| identical(inf, &info)) {
-            return Err(throw(
-                req,
-                "InvalidArgumentException",
-                "Key duplication error",
-            ));
-        }
-    }
-    storage_attach(req, this, iterator, info.unwrap_or_default())?;
-    Ok(Value::null())
-}
-
-/// `detachIterator(Iterator $iterator): void`; the witness is
-/// `attachIterator`'s.
-fn detach_iterator(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let iterator = crate::object(req, 1, Some("Iterator"))?;
-    storage_detach(req, this, iterator)?;
-    with(req, this, |s| {
-        s.reset();
-        s.index = 0;
-    })?;
-    Ok(Value::null())
-}
-
-/// `containsIterator(Iterator $iterator): bool`.
-fn contains_iterator(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let iterator = crate::object(req, 1, Some("Iterator"))?;
-    Ok(Value::bool(storage_contains(req, this, iterator)?))
-}
-
 /// Each sub-iterator served `method`, in order, until one throws.
 fn each(req: &mut Request, this: PhpObject, method: &[u8]) -> Result<(), Thrown> {
     let rows = with(req, this, |s| s.live())?;
@@ -1347,48 +1448,9 @@ fn each(req: &mut Request, this: PhpObject, method: &[u8]) -> Result<(), Thrown>
     Ok(())
 }
 
-/// `MultipleIterator::rewind(): void`.
-fn multiple_rewind(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    each(req, this, b"rewind")?;
-    Ok(Value::null())
-}
-
-/// `MultipleIterator::next(): void`.
-fn multiple_next(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    each(req, this, b"next")?;
-    Ok(Value::null())
-}
-
-/// `MultipleIterator::valid(): bool`: all valid under `MIT_NEED_ALL`,
-/// any under `MIT_NEED_ANY`, `false` with none attached.
-fn multiple_valid(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let (rows, flags) = with(req, this, |s| (s.live(), s.flags))?;
-    if rows.is_empty() {
-        return Ok(Value::bool(false));
-    }
-    let expect = flags & MIT_NEED_ALL != 0;
-    for (iterator, _) in rows {
-        let answered = crate::method(req, iterator, b"valid")?;
-        let valid = answered.as_bool() == Some(true);
-        req.release(answered);
-        if expect != valid {
-            return Ok(Value::bool(!expect));
-        }
-    }
-    Ok(Value::bool(expect))
-}
-
 /// `spl_multiple_iterator_get_all`: each sub-iterator's current or key,
-/// keyed by its information under `MIT_KEYS_ASSOC`.
-fn get_all(req: &mut Request, method: &str) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
+/// keyed by its information under `MultipleIterator::MIT_KEYS_ASSOC`.
+fn get_all(req: &mut Request, this: PhpObject, method: &str) -> Result<PhpArray, Thrown> {
     let (rows, flags) = with(req, this, |s| (s.live(), s.flags))?;
     if rows.is_empty() {
         return Err(throw(
@@ -1404,7 +1466,7 @@ fn get_all(req: &mut Request, method: &str) -> Result<Value, Thrown> {
         req.release(answered);
         let value = if valid {
             crate::method(req, iterator, method.as_bytes())?
-        } else if flags & MIT_NEED_ALL != 0 {
+        } else if flags & MultipleIterator::MIT_NEED_ALL != 0 {
             req.release(Value::array(out));
             return Err(throw(
                 req,
@@ -1414,7 +1476,7 @@ fn get_all(req: &mut Request, method: &str) -> Result<Value, Thrown> {
         } else {
             Value::null()
         };
-        if flags & MIT_KEYS_ASSOC != 0 {
+        if flags & MultipleIterator::MIT_KEYS_ASSOC != 0 {
             let key = match inf.as_ref() {
                 ValueRef::Int(n) => Key::Int(n),
                 ValueRef::Str(s) => Key::from_string(
@@ -1438,15 +1500,5 @@ fn get_all(req: &mut Request, method: &str) -> Result<Value, Thrown> {
             out.append(req, value)?;
         }
     }
-    Ok(Value::array(out))
-}
-
-/// `MultipleIterator::current(): array`.
-fn multiple_current(req: &mut Request) -> Result<Value, Thrown> {
-    get_all(req, "current")
-}
-
-/// `MultipleIterator::key(): array`.
-fn multiple_key(req: &mut Request) -> Result<Value, Thrown> {
-    get_all(req, "key")
+    Ok(out)
 }

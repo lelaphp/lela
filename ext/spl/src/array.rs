@@ -1,6 +1,6 @@
 //! `spl_array.c`: `ArrayObject`, `ArrayIterator` and
 //! `RecursiveArrayIterator` over one payload, php's `spl_array_object`
-//! ([`SplArray`]), and one handler table, `spl_handler_ArrayObject`
+//! ([`SplArrayObject`]), and one handler table, `spl_handler_ArrayObject`
 //! ([`Handlers`]).
 //!
 //! The storage is an array the object holds, another `ArrayObject` or
@@ -19,21 +19,22 @@
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    Callable, CloneObj, CurrentPlace, DimensionRead, ObjectHandlers, PropertyPlace,
-    PropertyPurpose, PropertyRead, PropertyTest, Std,
+    Callable, CloneObj, CurrentPlace, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers,
+    Passed, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw, Std, This, True,
+    Union,
 };
+use php_ext::attr::php_class;
 use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{Level, Thrown, deprecated, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
-use crate::Entry;
-use crate::stub::{self, Declared};
+use crate::{
+    ArrayAccess, Countable, Iterator, IteratorAggregate, RecursiveIterator, SeekableIterator,
+    Serializable,
+};
 
-pub(crate) const STD_PROP_LIST: i64 = 1;
-pub(crate) const ARRAY_AS_PROPS: i64 = 2;
-const CHILD_ARRAYS_ONLY: i64 = 4;
 const IS_SELF: i64 = 0x0100_0000;
 const USE_OTHER: i64 = 0x0200_0000;
 const INT_MASK: i64 = 0xFFFF_0000;
@@ -43,7 +44,7 @@ const CLONE_MASK: i64 = 0x0100_FFFF;
 /// flags a user sets, the position, the class `getIterator()` makes and
 /// the count of sorts under way (`nApplyCount`).
 #[derive(Default, Clone, Copy)]
-pub(crate) struct SplArray {
+pub(crate) struct SplArrayObject {
     storage: Storage,
     /// `ar_flags` less `SPL_ARRAY_IS_SELF` and `SPL_ARRAY_USE_OTHER`,
     /// which the storage is.
@@ -101,83 +102,30 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
-const STUB: &str = "
-class ArrayObject implements IteratorAggregate, ArrayAccess, Serializable, Countable {
-    public const int STD_PROP_LIST = 1;
-    public const int ARRAY_AS_PROPS = 2;
-    public function __construct(array|object $array = [], int $flags = 0, string $iteratorClass = ArrayIterator::class) {}
-    /** @tentative-return-type */ public function offsetExists(mixed $key): bool {}
-    /** @tentative-return-type */ public function offsetGet(mixed $key): mixed {}
-    /** @tentative-return-type */ public function offsetSet(mixed $key, mixed $value): void {}
-    /** @tentative-return-type */ public function offsetUnset(mixed $key): void {}
-    /** @tentative-return-type */ public function append(mixed $value): void {}
-    /** @tentative-return-type */ public function getArrayCopy(): array {}
-    /** @tentative-return-type */ public function count(): int {}
-    /** @tentative-return-type */ public function getFlags(): int {}
-    /** @tentative-return-type */ public function setFlags(int $flags): void {}
-    /** @tentative-return-type */ public function asort(int $flags = SORT_REGULAR): true {}
-    /** @tentative-return-type */ public function ksort(int $flags = SORT_REGULAR): true {}
-    /** @tentative-return-type */ public function uasort(callable $callback): true {}
-    /** @tentative-return-type */ public function uksort(callable $callback): true {}
-    /** @tentative-return-type */ public function natsort(): true {}
-    /** @tentative-return-type */ public function natcasesort(): true {}
-    /** @tentative-return-type */ public function unserialize(string $data): void {}
-    /** @tentative-return-type */ public function serialize(): string {}
-    /** @tentative-return-type */ public function __serialize(): array {}
-    /** @tentative-return-type */ public function __unserialize(array $data): void {}
-    /** @tentative-return-type */ public function getIterator(): Iterator {}
-    /** @tentative-return-type */ public function exchangeArray(array|object $array): array {}
-    /** @tentative-return-type */ public function setIteratorClass(string $iteratorClass): void {}
-    /** @tentative-return-type */ public function getIteratorClass(): string {}
-    /** @tentative-return-type */ public function __debugInfo(): array {}
+/// The three classes onto `builder`, in the order
+/// `PHP_MINIT_FUNCTION(spl_array)` registers them.
+pub(crate) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
+    builder
+        .class::<ArrayObject>()
+        .class::<ArrayIterator>()
+        .class::<RecursiveArrayIterator>()
 }
-class ArrayIterator implements SeekableIterator, ArrayAccess, Serializable, Countable {
-    public const int STD_PROP_LIST = 1;
-    public const int ARRAY_AS_PROPS = 2;
-    public function __construct(array|object $array = [], int $flags = 0) {}
-    /** @tentative-return-type */ public function offsetExists(mixed $key): bool {}
-    /** @tentative-return-type */ public function offsetGet(mixed $key): mixed {}
-    /** @tentative-return-type */ public function offsetSet(mixed $key, mixed $value): void {}
-    /** @tentative-return-type */ public function offsetUnset(mixed $key): void {}
-    /** @tentative-return-type */ public function append(mixed $value): void {}
-    /** @tentative-return-type */ public function getArrayCopy(): array {}
-    /** @tentative-return-type */ public function count(): int {}
-    /** @tentative-return-type */ public function getFlags(): int {}
-    /** @tentative-return-type */ public function setFlags(int $flags): void {}
-    /** @tentative-return-type */ public function asort(int $flags = SORT_REGULAR): true {}
-    /** @tentative-return-type */ public function ksort(int $flags = SORT_REGULAR): true {}
-    /** @tentative-return-type */ public function uasort(callable $callback): true {}
-    /** @tentative-return-type */ public function uksort(callable $callback): true {}
-    /** @tentative-return-type */ public function natsort(): true {}
-    /** @tentative-return-type */ public function natcasesort(): true {}
-    /** @tentative-return-type */ public function unserialize(string $data): void {}
-    /** @tentative-return-type */ public function serialize(): string {}
-    /** @tentative-return-type */ public function __serialize(): array {}
-    /** @tentative-return-type */ public function __unserialize(array $data): void {}
-    /** @tentative-return-type */ public function rewind(): void {}
-    /** @tentative-return-type */ public function current(): mixed {}
-    /** @tentative-return-type */ public function key(): string|int|null {}
-    /** @tentative-return-type */ public function next(): void {}
-    /** @tentative-return-type */ public function valid(): bool {}
-    /** @tentative-return-type */ public function seek(int $offset): void {}
-    /** @tentative-return-type */ public function __debugInfo(): array {}
-}
-class RecursiveArrayIterator extends ArrayIterator implements RecursiveIterator {
-    public const int CHILD_ARRAYS_ONLY = 4;
-    /** @tentative-return-type */ public function hasChildren(): bool {}
-    /** @tentative-return-type */ public function getChildren(): ?RecursiveArrayIterator {}
-}
-";
 
-/// The three classes, each method paired with its entry; the methods
-/// `ArrayIterator` shares with `ArrayObject` are php's
-/// `@implementation-alias`es and take the same entry.
+/// `class ArrayObject implements IteratorAggregate, ArrayAccess,
+/// Serializable, Countable`.
 ///
 /// ```php
 /// echo implode(', ', class_implements('ArrayObject')), "\n";
 /// echo implode(', ', class_implements('RecursiveArrayIterator')), "\n";
 /// $c = clone new ArrayObject([1, 2]);
 /// var_dump($c == new ArrayObject([1, 2]), $c == new ArrayObject([2]), (array) new ArrayIterator(['k' => 'v']));
+/// $o = new ArrayObject(['b' => 'x10', 'a' => 'X9', 'c' => 'x2']);
+/// $o->ksort(); echo implode(',', array_keys($o->getArrayCopy())), "\n";
+/// $o->uasort(fn($l, $r) => strcmp($l, $r)); echo implode(',', (array) $o), "\n";
+/// $o->uksort(fn($l, $r) => strcmp($r, $l)); echo implode(',', array_keys((array) $o)), "\n";
+/// $o->natsort(); echo implode(',', (array) $o), "\n";
+/// $o->natcasesort(); echo implode(',', (array) $o), "\n";
+/// echo $o->serialize(), " ", $o->getIteratorClass(), " ", count($o->__debugInfo()), "\n";
 /// ```
 /// ```expect
 /// IteratorAggregate, Traversable, ArrayAccess, Serializable, Countable
@@ -188,63 +136,996 @@ class RecursiveArrayIterator extends ArrayIterator implements RecursiveIterator 
 ///   ["k"]=>
 ///   string(1) "v"
 /// }
+/// a,b,c
+/// X9,x10,x2
+/// c,b,a
+/// X9,x2,x10
+/// x2,X9,x10
+/// x:i:0;a:3:{s:1:"c";s:2:"x2";s:1:"a";s:2:"X9";s:1:"b";s:3:"x10";};m:a:0:{} ArrayIterator 1
 /// ```
-pub(crate) fn classes() -> Vec<Declared> {
-    let shared: [(&str, Entry); 20] = [
-        ("offsetExists", offset_exists),
-        ("offsetGet", offset_get),
-        ("offsetSet", offset_set),
-        ("offsetUnset", offset_unset),
-        ("append", append),
-        ("getArrayCopy", get_array_copy),
-        ("count", count),
-        ("getFlags", get_flags),
-        ("setFlags", set_flags),
-        ("asort", asort),
-        ("ksort", ksort),
-        ("uasort", uasort),
-        ("uksort", uksort),
-        ("natsort", natsort),
-        ("natcasesort", natcasesort),
-        ("unserialize", unserialize),
-        ("serialize", serialize),
-        ("__serialize", magic_serialize),
-        ("__unserialize", magic_unserialize),
-        ("__debugInfo", debug_info),
-    ];
-    let own: [(&str, Entry); 14] = [
-        ("ArrayObject::__construct", construct_object),
-        ("ArrayObject::getIterator", get_iterator),
-        ("ArrayObject::exchangeArray", exchange_array),
-        ("ArrayObject::setIteratorClass", set_iterator_class),
-        ("ArrayObject::getIteratorClass", get_iterator_class),
-        ("ArrayIterator::__construct", construct_iterator),
-        ("ArrayIterator::rewind", rewind),
-        ("ArrayIterator::current", current),
-        ("ArrayIterator::key", key),
-        ("ArrayIterator::next", next),
-        ("ArrayIterator::valid", valid),
-        ("ArrayIterator::seek", seek),
-        ("RecursiveArrayIterator::hasChildren", has_children),
-        ("RecursiveArrayIterator::getChildren", get_children),
-    ];
-    let names: Vec<(String, Entry)> = ["ArrayObject", "ArrayIterator"]
-        .iter()
-        .flat_map(|class| {
-            shared
-                .iter()
-                .map(move |(method, entry)| (format!("{class}::{method}"), *entry))
+#[php_class(
+    implements(IteratorAggregate, ArrayAccess, Serializable, Countable),
+    payload = SplArrayObject,
+    handlers = HANDLERS
+)]
+pub(crate) struct ArrayObject;
+
+#[php_class]
+impl ArrayObject {
+    const STD_PROP_LIST: i64 = 1;
+    const ARRAY_AS_PROPS: i64 = 2;
+
+    /// `ArrayObject::__construct(array|object $array = [], int $flags = 0,
+    /// string $iteratorClass = ArrayIterator::class)`: nothing for a call
+    /// with no argument, then php's `|AlC` in order.
+    ///
+    /// ```php
+    /// $o = new ArrayObject(['b' => 2, 'a' => 1]);
+    /// var_dump($o, count($o), $o['a'], isset($o['c']), $o->getIteratorClass());
+    /// $o['c'] = 3; unset($o['b']); $o[] = 4;
+    /// print_r($o->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// object(ArrayObject)#1 (1) {
+    ///   ["storage":"ArrayObject":private]=>
+    ///   array(2) {
+    ///     ["b"]=>
+    ///     int(2)
+    ///     ["a"]=>
+    ///     int(1)
+    ///   }
+    /// }
+    /// int(2)
+    /// int(1)
+    /// bool(false)
+    /// string(13) "ArrayIterator"
+    /// Array
+    /// (
+    ///     [a] => 1
+    ///     [c] => 3
+    ///     [0] => 4
+    /// )
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = [])] array: Raw<Union<PhpArray, PhpObject>>,
+        #[php(default = 0)] flags: Raw<i64>,
+        #[php(default = ArrayIterator::class)] iteratorClass: Passed<Raw<PhpString>>,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        if req.argument_count() == 0 {
+            return Ok(());
+        }
+        let given = array_or_object(req, array.value(), 1)?;
+        let flags = flags.hold(req)?;
+        if let Passed::Given(name) = iteratorClass {
+            let name = name.hold(req)?;
+            let class = iterator_class_argument(req, name, 3)?;
+            with(req, this, |p| p.iterator_class = Some(class))?;
+        }
+        let just_array = req.argument_count() == 1;
+        set_array(req, this, &given, flags & !INT_MASK, just_array)
+    }
+
+    /// `offsetExists(mixed $key): bool`: whether the key is there, a `null`
+    /// element included.
+    ///
+    /// ```php
+    /// $o = new ArrayObject(['n' => null, 1 => 0]);
+    /// var_dump($o->offsetExists('n'), isset($o[1]), empty($o[1]), $o->offsetExists('x'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn offsetExists(req: &mut Request, this: This<Self>, key: Value) -> Result<bool, Thrown> {
+        has(req, this.object(), &key, 2, false)
+    }
+
+    /// `offsetGet(mixed $key): mixed`: the element, the warning for a key
+    /// the table does not have.
+    ///
+    /// ```php
+    /// $o = new ArrayObject([1 => 'one']);
+    /// var_dump($o->offsetGet(1), $o->offsetGet('1'), $o['nope']);
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: Undefined array key "nope" in %s on line 3
+    /// string(3) "one"
+    /// string(3) "one"
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    fn offsetGet(req: &mut Request, this: This<Self>, key: Value) -> Result<Value, Thrown> {
+        read(req, this.object(), &key, true)
+    }
+
+    /// `offsetSet(mixed $key, mixed $value): void`, `null` appending.
+    ///
+    /// ```php
+    /// $o = new ArrayObject();
+    /// $o->offsetSet('k', 'v'); $o->offsetSet(null, 'next');
+    /// var_dump($o->getArrayCopy());
+    /// try { $o[[]] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { $o[new stdClass] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   ["k"]=>
+    ///   string(1) "v"
+    ///   [0]=>
+    ///   string(4) "next"
+    /// }
+    /// Cannot access offset of type array on ArrayObject
+    /// Cannot access offset of type stdClass on ArrayObject
+    /// ```
+    ///
+    /// A string key is a view of the offset until the table takes its own
+    /// owner of it, so a key built for the call and freed after it stays
+    /// in the table (bug #66834).
+    ///
+    /// ```php
+    /// class R extends ArrayObject { function offsetSet($k, $v): void { parent::offsetSet(str_rot13($k), $v); } }
+    /// $r = new R; $r['foo'] = 1; $r[str_repeat('b', 3)] = 2;
+    /// var_dump($r->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   ["sbb"]=>
+    ///   int(1)
+    ///   ["ooo"]=>
+    ///   int(2)
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn offsetSet(
+        req: &mut Request,
+        this: This<Self>,
+        key: Value,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        write(req, this.object(), Some(&key), value)
+    }
+
+    /// `offsetUnset(mixed $key): void`.
+    ///
+    /// ```php
+    /// $o = new ArrayObject(['a' => 1, 'b' => 2]);
+    /// $o->offsetUnset('a'); $o->offsetUnset('missing');
+    /// var_dump(count($o));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn offsetUnset(req: &mut Request, this: This<Self>, key: Value) -> Result<(), Thrown> {
+        unset(req, this.object(), &key)
+    }
+
+    /// `append(mixed $value): void`, refused over an object's properties.
+    ///
+    /// ```php
+    /// $o = new ArrayObject([5 => 'x']);
+    /// $o->append('y');
+    /// var_dump($o->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [5]=>
+    ///   string(1) "x"
+    ///   [6]=>
+    ///   string(1) "y"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn append(req: &mut Request, this: This<Self>, value: Value) -> Result<(), Thrown> {
+        let this = this.object();
+        if is_object(req, this)? {
+            let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
+            return Err(throw(
+                req,
+                "Error",
+                &format!("Cannot append properties to objects, use {class}::offsetSet() instead"),
+            ));
+        }
+        Handlers.write_dimension(req, this, None, crate::copied(req, value))
+    }
+
+    /// `getArrayCopy(): array`: the table as an array of its own.
+    ///
+    /// ```php
+    /// $a = [1, 2]; $o = new ArrayObject($a);
+    /// $copy = $o->getArrayCopy(); $copy[] = 3;
+    /// var_dump(count($o), count($copy));
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(3)
+    /// ```
+    #[php(tentative)]
+    fn getArrayCopy(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        table(req, this.object())?.copy(req)
+    }
+
+    /// `count(): int`, `spl_array_object_count_elements_helper`: the
+    /// elements, or an object's public properties.
+    ///
+    /// ```php
+    /// class Counted extends ArrayObject { function count(): int { return 42; } }
+    /// $c = new Counted([1, 2]);
+    /// var_dump($c->count(), count($c), (new ArrayObject([1, 2, 3]))->count());
+    /// class Held { public $a = 1; protected $b = 2; private $c = 3; public $d = 4; }
+    /// $h = @new ArrayObject(new Held);
+    /// var_dump(count($h));
+    /// foreach ($h as $k => $v) echo "$k=$v;";
+    /// ```
+    /// ```expect
+    /// int(42)
+    /// int(42)
+    /// int(3)
+    /// int(2)
+    /// a=1;d=4;
+    /// ```
+    #[php(tentative)]
+    fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let n = table(req, this.object())?.len(req)?;
+        Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// `getFlags(): int`.
+    ///
+    /// ```php
+    /// $o = new ArrayObject([], ArrayObject::ARRAY_AS_PROPS);
+    /// var_dump($o->getFlags());
+    /// $o->setFlags(ArrayObject::STD_PROP_LIST);
+    /// var_dump($o->getFlags());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn getFlags(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        Ok(flags(req, this.object())? & !INT_MASK)
+    }
+
+    /// `setFlags(int $flags): void`. Under `ARRAY_AS_PROPS` a property the
+    /// object does not declare is an element.
+    ///
+    /// ```php
+    /// $o = new ArrayObject(['a' => 1]);
+    /// $o->setFlags(ArrayObject::ARRAY_AS_PROPS);
+    /// $o->b = 2;
+    /// var_dump($o->a, isset($o->b), $o->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// bool(true)
+    /// array(2) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   ["b"]=>
+    ///   int(2)
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn setFlags(req: &mut Request, this: This<Self>, flags: i64) -> Result<(), Thrown> {
+        with(req, this.object(), |p| {
+            p.flags = (p.flags & INT_MASK) | (flags & !INT_MASK);
         })
-        .chain(own.iter().map(|(k, e)| ((*k).to_owned(), *e)))
-        .collect();
-    let entries: Vec<(&str, Entry)> = names.iter().map(|(k, e)| (k.as_str(), *e)).collect();
-    stub::classes(STUB, &entries)
+    }
+
+    /// `asort(int $flags = SORT_REGULAR): true`, `ext/standard`'s `asort`
+    /// over the table: the storage array, or an object's rows, laid down
+    /// again in the sorted order.
+    ///
+    /// ```php
+    /// $o = new ArrayObject(['b' => 2, 'a' => 3, 'c' => 1]);
+    /// $o->asort();
+    /// $d = (object) ['y' => 'b', 'x' => 'a'];
+    /// $p = @new ArrayObject($d);
+    /// $p->asort(); $p->ksort();
+    /// var_dump($o->getArrayCopy(), $d);
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   ["c"]=>
+    ///   int(1)
+    ///   ["b"]=>
+    ///   int(2)
+    ///   ["a"]=>
+    ///   int(3)
+    /// }
+    /// object(stdClass)#2 (2) {
+    ///   ["x"]=>
+    ///   string(1) "a"
+    ///   ["y"]=>
+    ///   string(1) "b"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn asort(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = SORT_REGULAR)] flags: i64,
+    ) -> Result<True, Thrown> {
+        sort_through(req, this.object(), b"asort", Some(Value::int(flags)))
+    }
+
+    /// `ksort(int $flags = SORT_REGULAR): true`; the witness is the
+    /// class's.
+    #[php(tentative)]
+    fn ksort(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = SORT_REGULAR)] flags: i64,
+    ) -> Result<True, Thrown> {
+        sort_through(req, this.object(), b"ksort", Some(Value::int(flags)))
+    }
+
+    /// `uasort(callable $callback): true`, the callable handed on as it
+    /// was given, `ext/standard`'s `uasort` its check; the witness is the
+    /// class's.
+    #[php(tentative)]
+    fn uasort(
+        req: &mut Request,
+        this: This<Self>,
+        callback: Raw<Callable>,
+    ) -> Result<True, Thrown> {
+        sort_through(req, this.object(), b"uasort", Some(callback.value()))
+    }
+
+    /// `uksort(callable $callback): true`; the witness is the class's.
+    #[php(tentative)]
+    fn uksort(
+        req: &mut Request,
+        this: This<Self>,
+        callback: Raw<Callable>,
+    ) -> Result<True, Thrown> {
+        sort_through(req, this.object(), b"uksort", Some(callback.value()))
+    }
+
+    /// `natsort(): true`; the witness is the class's.
+    #[php(tentative)]
+    fn natsort(req: &mut Request, this: This<Self>) -> Result<True, Thrown> {
+        sort_through(req, this.object(), b"natsort", None)
+    }
+
+    /// `natcasesort(): true`; the witness is the class's.
+    #[php(tentative)]
+    fn natcasesort(req: &mut Request, this: This<Self>) -> Result<True, Thrown> {
+        sort_through(req, this.object(), b"natcasesort", None)
+    }
+
+    /// `unserialize(string $data): void`, the inverse of `serialize`, read
+    /// through one var hash as php's is: the `x:i:flags;` head, the storage
+    /// and its `;`, then `m:` with the members. Where the record breaks off
+    /// php's `UnexpectedValueException` names the offset the reader stopped
+    /// at; a storage `spl_array_set_array` refuses leaves what it threw
+    /// pending while the members are still read, as php's does.
+    ///
+    /// ```php
+    /// $o = unserialize('C:11:"ArrayObject":33:{x:i:2;a:1:{s:1:"k";i:7;};m:a:0:{}}');
+    /// var_dump($o->k, $o->getFlags());
+    /// foreach (['x:i:0;r:3;;m:a:0:{}', 'y:i:0;', 'x:i:0;a:0:{}m:a:0:{}'] as $bad) {
+    ///     try { (new ArrayObject)->unserialize($bad); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// int(7)
+    /// int(2)
+    /// Error at offset 10 of 19 bytes
+    /// Error at offset 0 of 6 bytes
+    /// Error at offset 12 of 20 bytes
+    /// ```
+    #[php(tentative)]
+    fn unserialize(req: &mut Request, this: This<Self>, data: PhpString) -> Result<(), Thrown> {
+        let this = this.object();
+        let data = data.as_bytes().to_vec();
+        if data.is_empty() {
+            return Ok(());
+        }
+        sorting_refused(req, this)?;
+        let mut reader = php_ext_standard::Unserializer::new(req, &data);
+        let mut pending = None;
+        let mut kept = Vec::new();
+        let read = read_record(req, this, &mut reader, &data, &mut pending, &mut kept);
+        let finished = reader.finish(req);
+        // `var_tmp_var`'s values live until `PHP_VAR_UNSERIALIZE_DESTROY`,
+        // since a later `R:` of the record may name one.
+        for value in kept {
+            req.release(value);
+        }
+        let broke_at = read?;
+        finished?;
+        if let Some(at) = broke_at {
+            let len = data.len();
+            return Err(throw(
+                req,
+                "UnexpectedValueException",
+                &format!("Error at offset {at} of {len} bytes"),
+            ));
+        }
+        match pending {
+            Some(thrown) => Err(thrown),
+            None => Ok(()),
+        }
+    }
+
+    /// `serialize(): string`, php's `x:i:flags;storage;m:members`; the
+    /// witness is the class's.
+    #[php(tentative)]
+    fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let this = this.object();
+        let flags = ar_flags(req, this)? & CLONE_MASK;
+        let mut out = b"x:".to_vec();
+        out.extend(crate::serialized(req, Value::int(flags))?);
+        if flags & IS_SELF == 0 {
+            let stored = storage(req, this)?;
+            let bytes = crate::serialized(req, stored);
+            req.release(stored);
+            out.extend(bytes?);
+            out.push(b';');
+        }
+        out.extend_from_slice(b"m:");
+        let members = crate::members(req, this)?;
+        let bytes = crate::serialized(req, Value::array(members));
+        req.release(Value::array(members));
+        out.extend(bytes?);
+        PhpString::new(req, &out)
+    }
+
+    /// `__serialize(): array`: the flags, the storage, the members and the
+    /// iterator class, `null` for `ArrayIterator`.
+    ///
+    /// ```php
+    /// class Bag extends ArrayObject { public $label = 'bag'; }
+    /// $b = new Bag(['x' => 1], 0, 'RecursiveArrayIterator');
+    /// var_dump($b->__serialize());
+    /// ```
+    /// ```expect
+    /// array(4) {
+    ///   [0]=>
+    ///   int(0)
+    ///   [1]=>
+    ///   array(1) {
+    ///     ["x"]=>
+    ///     int(1)
+    ///   }
+    ///   [2]=>
+    ///   array(1) {
+    ///     ["label"]=>
+    ///     string(3) "bag"
+    ///   }
+    ///   [3]=>
+    ///   string(22) "RecursiveArrayIterator"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let this = this.object();
+        let flags = ar_flags(req, this)?;
+        let iterator_class = payload(req, this)?.iterator_class;
+        let mut out = PhpArray::new(req)?;
+        out.append(req, Value::int(flags & CLONE_MASK))?;
+        let stored = if flags & IS_SELF != 0 {
+            Value::null()
+        } else {
+            storage(req, this)?
+        };
+        out.append(req, stored)?;
+        let members = crate::members(req, this)?;
+        out.append(req, Value::array(members))?;
+        let class = match iterator_class {
+            Some(class) if !is_array_iterator(req, class) => {
+                let name = crate::class_name(req, class);
+                crate::string_value(req, &name)?
+            }
+            _ => Value::null(),
+        };
+        out.append(req, class)?;
+        Ok(out)
+    }
+
+    /// `__unserialize(array $data): void`.
+    ///
+    /// ```php
+    /// $o = new ArrayObject;
+    /// $o->__unserialize([2, ['k' => 7], ['p' => 1], null]);
+    /// var_dump($o->k, $o->getFlags(), $o->p);
+    /// try { (new ArrayObject)->__unserialize([]); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    ///
+    /// Deprecated: Creation of dynamic property ArrayObject::$p is deprecated in %s on line 3
+    /// int(7)
+    /// int(2)
+    /// int(1)
+    /// Incomplete or ill-typed serialization data
+    /// ```
+    #[php(tentative)]
+    fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
+        let this = this.object();
+        let flags = data.get(&Key::Int(0)).map(|v| v.deref());
+        let stored = data.get(&Key::Int(1)).map(|v| v.deref());
+        let members = data.get(&Key::Int(2)).map(|v| v.deref());
+        let class = data.get(&Key::Int(3)).map(|v| v.deref());
+        let (Some(flags), Some(stored), Some(members)) = (
+            flags.and_then(|f| f.as_int()),
+            stored,
+            members.filter(|m| m.as_array().is_some()),
+        ) else {
+            return Err(throw(
+                req,
+                "UnexpectedValueException",
+                "Incomplete or ill-typed serialization data",
+            ));
+        };
+        if class.is_some_and(|c| !matches!(c.as_ref(), ValueRef::Null | ValueRef::Str(_))) {
+            return Err(throw(
+                req,
+                "UnexpectedValueException",
+                "Incomplete or ill-typed serialization data",
+            ));
+        }
+        set_flags_and_self(req, this, flags)?;
+        if flags & IS_SELF == 0 {
+            if stored.as_array().is_none() && stored.as_object().is_none() {
+                return Err(throw(
+                    req,
+                    "InvalidArgumentException",
+                    "Passed variable is not an array or object",
+                ));
+            }
+            set_array(req, this, &stored, 0, true)?;
+        }
+        crate::load_members(req, this, &members)?;
+        if let Some(name) = class.and_then(|c| c.as_str_bytes().map(<[u8]>::to_vec)) {
+            let shown = String::from_utf8_lossy(&name).into_owned();
+            let Some(found) = lookup_class(req, &name)? else {
+                return Err(throw(
+                    req,
+                    "UnexpectedValueException",
+                    &format!(
+                        "Cannot deserialize ArrayObject with iterator class '{shown}'; no such class exists"
+                    ),
+                ));
+            };
+            if !crate::is_a(req, found, b"Iterator") {
+                return Err(throw(
+                    req,
+                    "UnexpectedValueException",
+                    &format!(
+                        "Cannot deserialize ArrayObject with iterator class '{shown}'; this class does not implement the Iterator interface"
+                    ),
+                ));
+            }
+            with(req, this, |p| p.iterator_class = Some(found))?;
+        }
+        Ok(())
+    }
+
+    /// `getIterator(): Iterator`: a new object of the iterator class
+    /// reading through this one, with its own position.
+    ///
+    /// ```php
+    /// $o = new ArrayObject(['a' => 1, 'b' => 2]);
+    /// $it = $o->getIterator();
+    /// $o['c'] = 3;
+    /// var_dump(get_class($it), iterator_to_array($it));
+    /// foreach ($o as $k => $v) echo "$k=$v;";
+    /// ```
+    /// ```expect
+    /// string(13) "ArrayIterator"
+    /// array(3) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   ["b"]=>
+    ///   int(2)
+    ///   ["c"]=>
+    ///   int(3)
+    /// }
+    /// a=1;b=2;c=3;
+    /// ```
+    #[php(tentative)]
+    fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
+        let this = this.object();
+        let (flags, class) = {
+            let p = payload(req, this)?;
+            (p.flags, p.iterator_class)
+        };
+        let class = match class {
+            Some(class) => class,
+            None => match lookup_class(req, b"ArrayIterator")? {
+                Some(class) => class,
+                None => {
+                    return Err(php_ext::raising::fatal(
+                        req,
+                        "InternalError: ArrayObject::getIterator served with ArrayIterator unlinked",
+                    ));
+                }
+            },
+        };
+        let iterator = php_ext::call::new_object(req, class)?;
+        req.addref(&this.as_value());
+        let old = with(req, iterator, |p| {
+            p.flags = flags & CLONE_MASK;
+            p.iterator_class = None;
+            std::mem::replace(&mut p.storage, Storage::Other(this))
+        })?;
+        if let Some(old) = old.held() {
+            req.release(old);
+        }
+        Ok(Instance::of(iterator))
+    }
+
+    /// `exchangeArray(array|object $array): array`: the old table handed
+    /// back as a copy, the new one in its place.
+    ///
+    /// ```php
+    /// $o = new ArrayObject([1, 2]);
+    /// var_dump($o->exchangeArray(['x' => 'y']), $o->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// array(1) {
+    ///   ["x"]=>
+    ///   string(1) "y"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn exchangeArray(
+        req: &mut Request,
+        this: This<Self>,
+        array: Raw<Union<PhpArray, PhpObject>>,
+    ) -> Result<PhpArray, Thrown> {
+        let this = this.object();
+        let given = array_or_object(req, array.value(), 1)?;
+        sorting_refused(req, this)?;
+        let old = table(req, this)?.copy(req)?;
+        if let Err(thrown) = set_array(req, this, &given, 0, true) {
+            req.release(Value::array(old));
+            return Err(thrown);
+        }
+        Ok(old)
+    }
+
+    /// `setIteratorClass(string $iteratorClass): void`.
+    ///
+    /// ```php
+    /// $o = new ArrayObject([[1]]);
+    /// $o->setIteratorClass('RecursiveArrayIterator');
+    /// var_dump($o->getIteratorClass(), get_class($o->getIterator()));
+    /// try { $o->setIteratorClass('stdClass'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(22) "RecursiveArrayIterator"
+    /// string(22) "RecursiveArrayIterator"
+    /// ArrayObject::setIteratorClass(): Argument #1 ($iteratorClass) must be a class name derived from ArrayIterator, stdClass given
+    /// ```
+    #[php(tentative)]
+    fn setIteratorClass(
+        req: &mut Request,
+        this: This<Self>,
+        iteratorClass: PhpString,
+    ) -> Result<(), Thrown> {
+        let class = iterator_class_argument(req, iteratorClass, 1)?;
+        with(req, this.object(), |p| p.iterator_class = Some(class))
+    }
+
+    /// `getIteratorClass(): string`; the witness is `setIteratorClass`'s.
+    #[php(tentative)]
+    fn getIteratorClass(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let name = match payload(req, this.object())?.iterator_class {
+            Some(class) => crate::class_name(req, class),
+            None => b"ArrayIterator".to_vec(),
+        };
+        PhpString::new(req, &name)
+    }
+
+    /// `__debugInfo(): array`, what `var_dump` shows.
+    ///
+    /// ```php
+    /// class Tagged extends ArrayIterator { protected $tag = 't'; }
+    /// foreach ((new Tagged([1]))->__debugInfo() as $name => $value) echo str_replace("\0", '\0', $name), ' => ', json_encode($value), "\n";
+    /// ```
+    /// ```expect
+    /// \0*\0tag => "t"
+    /// \0ArrayIterator\0storage => [1]
+    /// ```
+    #[php(tentative)]
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        spl_array_debug_info(req, this.object())
+    }
+}
+
+/// `class ArrayIterator implements SeekableIterator, ArrayAccess,
+/// Serializable, Countable`: the methods it shares with `ArrayObject`
+/// are php's `@implementation-alias`es and take the same entry.
+///
+/// ```php
+/// $it = new ArrayIterator([3 => 'c', 1 => 'a']);
+/// foreach ($it as $k => $v) echo "$k=$v;";
+/// echo "\n", count($it), " ", $it->getFlags(), "\n";
+/// $it->rewind(); $it->next();
+/// var_dump($it->valid(), $it->key(), $it->current());
+/// $it->next();
+/// var_dump($it->valid(), $it->key(), $it->current());
+/// $it->seek(0); var_dump($it->key());
+/// ```
+/// ```expect
+/// 3=c;1=a;
+/// 2 0
+/// bool(true)
+/// int(1)
+/// string(1) "a"
+/// bool(false)
+/// NULL
+/// NULL
+/// int(3)
+/// ```
+#[php_class(
+    implements(SeekableIterator, ArrayAccess, Serializable, Countable),
+    payload = SplArrayObject,
+    handlers = HANDLERS
+)]
+pub(crate) struct ArrayIterator;
+
+#[php_class]
+impl ArrayIterator {
+    const STD_PROP_LIST: i64 = ArrayObject::STD_PROP_LIST;
+    const ARRAY_AS_PROPS: i64 = ArrayObject::ARRAY_AS_PROPS;
+
+    /// `ArrayIterator::__construct(array|object $array = [], int $flags = 0)`:
+    /// nothing for a call with no argument, then php's `|Al` in order; the
+    /// witness is the class's.
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = [])] array: Raw<Union<PhpArray, PhpObject>>,
+        #[php(default = 0)] flags: Raw<i64>,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        if req.argument_count() == 0 {
+            return Ok(());
+        }
+        let given = array_or_object(req, array.value(), 1)?;
+        let flags = flags.hold(req)?;
+        let just_array = req.argument_count() == 1;
+        set_array(req, this, &given, flags & !INT_MASK, just_array)
+    }
+
+    #[php(tentative, implementation = ArrayObject::offsetExists)]
+    fn offsetExists(this: This<Self>, key: Value) -> bool;
+    #[php(tentative, implementation = ArrayObject::offsetGet)]
+    fn offsetGet(this: This<Self>, key: Value) -> Value;
+    #[php(tentative, implementation = ArrayObject::offsetSet)]
+    fn offsetSet(this: This<Self>, key: Value, value: Value);
+    #[php(tentative, implementation = ArrayObject::offsetUnset)]
+    fn offsetUnset(this: This<Self>, key: Value);
+    #[php(tentative, implementation = ArrayObject::append)]
+    fn append(this: This<Self>, value: Value);
+    #[php(tentative, implementation = ArrayObject::getArrayCopy)]
+    fn getArrayCopy(this: This<Self>) -> PhpArray;
+    #[php(tentative, implementation = ArrayObject::count)]
+    fn count(this: This<Self>) -> i64;
+    #[php(tentative, implementation = ArrayObject::getFlags)]
+    fn getFlags(this: This<Self>) -> i64;
+    #[php(tentative, implementation = ArrayObject::setFlags)]
+    fn setFlags(this: This<Self>, flags: i64);
+    #[php(tentative, implementation = ArrayObject::asort)]
+    fn asort(this: This<Self>, #[php(default = SORT_REGULAR)] flags: i64) -> True;
+    #[php(tentative, implementation = ArrayObject::ksort)]
+    fn ksort(this: This<Self>, #[php(default = SORT_REGULAR)] flags: i64) -> True;
+    #[php(tentative, implementation = ArrayObject::uasort)]
+    fn uasort(this: This<Self>, callback: Callable) -> True;
+    #[php(tentative, implementation = ArrayObject::uksort)]
+    fn uksort(this: This<Self>, callback: Callable) -> True;
+    #[php(tentative, implementation = ArrayObject::natsort)]
+    fn natsort(this: This<Self>) -> True;
+    #[php(tentative, implementation = ArrayObject::natcasesort)]
+    fn natcasesort(this: This<Self>) -> True;
+    #[php(tentative, implementation = ArrayObject::unserialize)]
+    fn unserialize(this: This<Self>, data: PhpString);
+    #[php(tentative, implementation = ArrayObject::serialize)]
+    fn serialize(this: This<Self>) -> PhpString;
+    #[php(tentative, implementation = ArrayObject::__serialize)]
+    fn __serialize(this: This<Self>) -> PhpArray;
+    #[php(tentative, implementation = ArrayObject::__unserialize)]
+    fn __unserialize(this: This<Self>, data: PhpArray);
+
+    /// `ArrayIterator::rewind(): void`.
+    #[php(tentative)]
+    fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        with(req, this.object(), |p| p.pos = 0)
+    }
+
+    /// `ArrayIterator::current(): mixed`, `null` past the end.
+    #[php(tentative)]
+    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        Ok(match here(req, this.object())? {
+            Some((_, _, value)) => crate::copied(req, value),
+            None => Value::null(),
+        })
+    }
+
+    /// `ArrayIterator::key(): string|int|null`.
+    #[php(tentative)]
+    fn key(req: &mut Request, this: This<Self>) -> Result<Option<Union<PhpString, i64>>, Thrown> {
+        Ok(match here(req, this.object())? {
+            Some((_, Key::Int(n), _)) => Some(Union::B(n)),
+            Some((_, Key::Str(s), _)) => {
+                req.addref(&Value::string(s));
+                Some(Union::A(s))
+            }
+            None => None,
+        })
+    }
+
+    /// `ArrayIterator::next(): void`.
+    #[php(tentative)]
+    fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        step(req, this.object())?;
+        Ok(())
+    }
+
+    /// `ArrayIterator::valid(): bool`.
+    #[php(tentative)]
+    fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        Ok(here(req, this.object())?.is_some())
+    }
+
+    /// `ArrayIterator::seek(int $offset): void`.
+    ///
+    /// ```php
+    /// $it = new ArrayIterator(['a', 'b', 'c']);
+    /// $it->seek(2); var_dump($it->current());
+    /// try { $it->seek(5); } catch (OutOfBoundsException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(1) "c"
+    /// Seek position 5 is out of range
+    /// ```
+    #[php(tentative)]
+    fn seek(req: &mut Request, this: This<Self>, offset: i64) -> Result<(), Thrown> {
+        let this = this.object();
+        let position = offset;
+        if position >= 0 {
+            with(req, this, |p| p.pos = 0)?;
+            let mut ok = true;
+            for _ in 0..position {
+                if !step(req, this)? {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok && here(req, this)?.is_some() {
+                return Ok(());
+            }
+        }
+        Err(throw(
+            req,
+            "OutOfBoundsException",
+            &format!("Seek position {position} is out of range"),
+        ))
+    }
+
+    #[php(tentative, implementation = ArrayObject::__debugInfo)]
+    fn __debugInfo(this: This<Self>) -> PhpArray;
+}
+
+/// `class RecursiveArrayIterator extends ArrayIterator implements
+/// RecursiveIterator`: an array element, or an object one where
+/// `CHILD_ARRAYS_ONLY` is off, is a child.
+///
+/// ```php
+/// $r = new RecursiveArrayIterator([[1, 2], 'x', new ArrayObject([3])]);
+/// var_dump($r->hasChildren(), $r->getChildren()->count());
+/// $r->next(); $r->next(); var_dump(get_class($r->getChildren()));
+/// foreach (new RecursiveIteratorIterator(new RecursiveArrayIterator([1, [2, [3]]])) as $v) echo $v;
+/// ```
+/// ```expect
+/// bool(true)
+/// int(2)
+///
+/// Deprecated: ArrayIterator::__construct(): Using an object as a backing array for ArrayIterator is deprecated, as it allows violating class constraints and invariants in %s on line 4
+/// string(22) "RecursiveArrayIterator"
+/// 123
+/// ```
+#[php_class(extends(ArrayIterator), implements(RecursiveIterator))]
+pub(crate) struct RecursiveArrayIterator;
+
+#[php_class]
+impl RecursiveArrayIterator {
+    const CHILD_ARRAYS_ONLY: i64 = 4;
+
+    /// `RecursiveArrayIterator::hasChildren(): bool`: an array, or an
+    /// object where `CHILD_ARRAYS_ONLY` is off.
+    ///
+    /// ```php
+    /// $r = new RecursiveArrayIterator(['a' => [1, [2]], 'b' => 2, 'c' => new ArrayObject([3])]);
+    /// var_dump($r->hasChildren(), get_class($r->getChildren()), $r->getChildren()->getArrayCopy());
+    /// $r->next(); var_dump($r->hasChildren(), $r->getChildren());
+    /// $r->next(); var_dump($r->hasChildren());
+    /// $r = new RecursiveArrayIterator([new ArrayObject([3])], RecursiveArrayIterator::CHILD_ARRAYS_ONLY);
+    /// var_dump($r->hasChildren());
+    /// ```
+    /// ```expect exit=255
+    /// bool(true)
+    /// string(22) "RecursiveArrayIterator"
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     int(2)
+    ///   }
+    /// }
+    ///
+    /// Fatal error: Uncaught TypeError: ArrayIterator::__construct(): Argument #1 ($array) must be of type array, int given in %s:4
+    /// Stack trace:
+    /// #0 [internal function]: ArrayIterator->__construct(2, 0)
+    /// #1 %s(4): RecursiveArrayIterator->getChildren()
+    /// #2 {main}
+    ///   thrown in %s on line 4
+    /// ```
+    #[php(tentative)]
+    fn hasChildren(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let this = this.object();
+        let flags = flags(req, this)?;
+        Ok(match here(req, this)? {
+            Some((_, _, value)) => {
+                let value = value.deref();
+                value.as_array().is_some()
+                    || (value.as_object().is_some() && flags & Self::CHILD_ARRAYS_ONLY == 0)
+            }
+            None => false,
+        })
+    }
+
+    /// `RecursiveArrayIterator::getChildren(): ?RecursiveArrayIterator`: an
+    /// object of this class over the element, or the element itself where
+    /// it is one already; the witness is the class's.
+    #[php(tentative)]
+    fn getChildren(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Instance<RecursiveArrayIterator>>, Thrown> {
+        let this = this.object();
+        let flags = flags(req, this)?;
+        let Some((_, _, value)) = here(req, this)? else {
+            return Ok(None);
+        };
+        let value = value.deref();
+        if let Some(object) = value.as_object().copied() {
+            if flags & Self::CHILD_ARRAYS_ONLY != 0 {
+                return Ok(None);
+            }
+            if crate::class_is(req, object.class(), this.class(), 0) {
+                req.addref(&value);
+                return Ok(Some(Instance::of(object)));
+            }
+        }
+        let child = instantiate(req, this.class(), &[value, Value::int(flags)])?;
+        Ok(Some(Instance::of(child)))
+    }
 }
 
 /// The payload of `object`, copied out, or the internal-error fatal
 /// for an object that has none, which no class of this file makes.
-fn payload(req: &mut Request, object: PhpObject) -> Result<SplArray, Thrown> {
-    if let Some(p) = object.native::<SplArray>(req) {
+fn payload(req: &mut Request, object: PhpObject) -> Result<SplArrayObject, Thrown> {
+    if let Some(p) = object.native::<SplArrayObject>(req) {
         return Ok(*p);
     }
     Err(missing(req))
@@ -254,9 +1135,9 @@ fn payload(req: &mut Request, object: PhpObject) -> Result<SplArray, Thrown> {
 fn with<R>(
     req: &mut Request,
     object: PhpObject,
-    change: impl FnOnce(&mut SplArray) -> R,
+    change: impl FnOnce(&mut SplArrayObject) -> R,
 ) -> Result<R, Thrown> {
-    if let Some(p) = object.native_mut::<SplArray>(req) {
+    if let Some(p) = object.native_mut::<SplArrayObject>(req) {
         return Ok(change(p));
     }
     Err(missing(req))
@@ -664,14 +1545,14 @@ fn ar_flags(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
 /// Whether the property `name` stands on the object as `std` sees it,
 /// which `ARRAY_AS_PROPS` leaves to the object.
 fn as_props(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<bool, Thrown> {
-    Ok(flags(req, object)? & ARRAY_AS_PROPS != 0
+    Ok(flags(req, object)? & ArrayObject::ARRAY_AS_PROPS != 0
         && !Std.has_property(req, object, name, PropertyTest::Exists)?)
 }
 
 impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let held = object
-            .native_mut::<SplArray>(req)
+            .native_mut::<SplArrayObject>(req)
             .and_then(|p| std::mem::take(&mut p.storage).held());
         if let Some(held) = held {
             req.release(held);
@@ -680,7 +1561,7 @@ impl ObjectHandlers for Handlers {
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(held) = object
-            .native::<SplArray>(req)
+            .native::<SplArrayObject>(req)
             .and_then(|p| p.storage.held())
         {
             visit(held);
@@ -877,7 +1758,7 @@ impl ObjectHandlers for Handlers {
         let (Some(l), Some(r)) = (left.as_object().copied(), right.as_object().copied()) else {
             return Std.compare(req, left, right);
         };
-        if l.native::<SplArray>(req).is_none() || r.native::<SplArray>(req).is_none() {
+        if l.native::<SplArrayObject>(req).is_none() || r.native::<SplArrayObject>(req).is_none() {
             return Std.compare(req, left, right);
         }
         let a = table(req, l)?.copy(req)?;
@@ -901,7 +1782,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         purpose: PropertyPurpose,
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
-        if flags(req, object)? & STD_PROP_LIST != 0
+        if flags(req, object)? & ArrayObject::STD_PROP_LIST != 0
             || !matches!(
                 purpose,
                 PropertyPurpose::ArrayCast | PropertyPurpose::VarExport | PropertyPurpose::Json
@@ -973,11 +1854,11 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
             Storage::Other(object)
         }
     };
-    let copy = SplArray {
+    let copy = SplArrayObject {
         storage,
         flags: flags & CLONE_MASK,
         iterator_class,
-        ..SplArray::default()
+        ..SplArrayObject::default()
     };
     clone_with(req, &object, copy)
 }
@@ -1011,7 +1892,7 @@ fn set_array(
                 "Using an object as a backing array for {what} is deprecated, as it allows violating class constraints and invariants"
             ),
         );
-        if other.native::<SplArray>(req).is_some() {
+        if other.native::<SplArrayObject>(req).is_some() {
             if just_array {
                 flags = payload(req, other)?.flags & !INT_MASK;
             }
@@ -1063,9 +1944,8 @@ fn set_array(
     Ok(())
 }
 
-/// `Z_PARAM_ARRAY_OR_OBJECT` at `position`.
-fn array_or_object(req: &mut Request, position: u32) -> Result<Value, Thrown> {
-    let given = crate::value(req, position);
+/// `Z_PARAM_ARRAY_OR_OBJECT` over `given`, the argument at `position`.
+fn array_or_object(req: &mut Request, given: Value, position: u32) -> Result<Value, Thrown> {
     if given.as_array().is_some() || given.as_object().is_some() {
         return Ok(given);
     }
@@ -1077,57 +1957,13 @@ fn array_or_object(req: &mut Request, position: u32) -> Result<Value, Thrown> {
     ))
 }
 
-/// `ArrayObject::__construct(array|object $array = [], int $flags = 0,
-/// string $iteratorClass = ArrayIterator::class)`.
-///
-/// ```php
-/// $o = new ArrayObject(['b' => 2, 'a' => 1]);
-/// var_dump($o, count($o), $o['a'], isset($o['c']), $o->getIteratorClass());
-/// $o['c'] = 3; unset($o['b']); $o[] = 4;
-/// print_r($o->getArrayCopy());
-/// ```
-/// ```expect
-/// object(ArrayObject)#1 (1) {
-///   ["storage":"ArrayObject":private]=>
-///   array(2) {
-///     ["b"]=>
-///     int(2)
-///     ["a"]=>
-///     int(1)
-///   }
-/// }
-/// int(2)
-/// int(1)
-/// bool(false)
-/// string(13) "ArrayIterator"
-/// Array
-/// (
-///     [a] => 1
-///     [c] => 3
-///     [0] => 4
-/// )
-/// ```
-fn construct_object(req: &mut Request) -> Result<Value, Thrown> {
-    let this = crate::this(req)?;
-    if req.argument_count() == 0 {
-        return Ok(Value::null());
-    }
-    crate::arity(req, 0, 3)?;
-    let given = array_or_object(req, 1)?;
-    let flags = crate::long_or(req, 2, 0)?;
-    if crate::given(req, 3).is_some() {
-        let class = iterator_class_argument(req, 3)?;
-        with(req, this, |p| p.iterator_class = Some(class))?;
-    }
-    let just_array = req.argument_count() == 1;
-    set_array(req, this, &given, flags & !INT_MASK, just_array)?;
-    Ok(Value::null())
-}
-
 /// `Z_PARAM_CLASS` of a class implementing `ArrayIterator`, php's
 /// `C` specifier under the stub's type.
-fn iterator_class_argument(req: &mut Request, position: u32) -> Result<ClassId, Thrown> {
-    let name = crate::string(req, position)?;
+fn iterator_class_argument(
+    req: &mut Request,
+    name: PhpString,
+    position: u32,
+) -> Result<ClassId, Thrown> {
     let found = match lookup_class(req, name.as_bytes())? {
         Some(found) => Some(found),
         None => php_ext::call::autoload(req, name.as_bytes())?,
@@ -1142,272 +1978,15 @@ fn iterator_class_argument(req: &mut Request, position: u32) -> Result<ClassId, 
     }
 }
 
-/// `ArrayIterator::__construct(array|object $array = [], int $flags = 0)`.
-///
-/// ```php
-/// $it = new ArrayIterator([3 => 'c', 1 => 'a']);
-/// foreach ($it as $k => $v) echo "$k=$v;";
-/// echo "\n", count($it), " ", $it->getFlags(), "\n";
-/// $it->rewind(); $it->next();
-/// var_dump($it->valid(), $it->key(), $it->current());
-/// $it->next();
-/// var_dump($it->valid(), $it->key(), $it->current());
-/// ```
-/// ```expect
-/// 3=c;1=a;
-/// 2 0
-/// bool(true)
-/// int(1)
-/// string(1) "a"
-/// bool(false)
-/// NULL
-/// NULL
-/// ```
-fn construct_iterator(req: &mut Request) -> Result<Value, Thrown> {
-    let this = crate::this(req)?;
-    if req.argument_count() == 0 {
-        return Ok(Value::null());
-    }
-    crate::arity(req, 0, 2)?;
-    let given = array_or_object(req, 1)?;
-    let flags = crate::long_or(req, 2, 0)?;
-    let just_array = req.argument_count() == 1;
-    set_array(req, this, &given, flags & !INT_MASK, just_array)?;
-    Ok(Value::null())
-}
-
-/// `offsetExists(mixed $key): bool`: whether the key is there, a `null`
-/// element included.
-///
-/// ```php
-/// $o = new ArrayObject(['n' => null, 1 => 0]);
-/// var_dump($o->offsetExists('n'), isset($o[1]), empty($o[1]), $o->offsetExists('x'));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// ```
-fn offset_exists(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let key = crate::value(req, 1);
-    Ok(Value::bool(has(req, this, &key, 2, false)?))
-}
-
-/// `offsetGet(mixed $key): mixed`: the element, the warning for a key
-/// the table does not have.
-///
-/// ```php
-/// $o = new ArrayObject([1 => 'one']);
-/// var_dump($o->offsetGet(1), $o->offsetGet('1'), $o['nope']);
-/// ```
-/// ```expect
-///
-/// Warning: Undefined array key "nope" in %s on line 3
-/// string(3) "one"
-/// string(3) "one"
-/// NULL
-/// ```
-fn offset_get(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let key = crate::value(req, 1);
-    read(req, this, &key, true)
-}
-
-/// `offsetSet(mixed $key, mixed $value): void`, `null` appending.
-///
-/// ```php
-/// $o = new ArrayObject();
-/// $o->offsetSet('k', 'v'); $o->offsetSet(null, 'next');
-/// var_dump($o->getArrayCopy());
-/// try { $o[[]] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// try { $o[new stdClass] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// array(2) {
-///   ["k"]=>
-///   string(1) "v"
-///   [0]=>
-///   string(4) "next"
-/// }
-/// Cannot access offset of type array on ArrayObject
-/// Cannot access offset of type stdClass on ArrayObject
-/// ```
-///
-/// A string key is a view of the offset until the table takes its own
-/// owner of it, so a key built for the call and freed after it stays
-/// in the table (bug #66834).
-///
-/// ```php
-/// class R extends ArrayObject { function offsetSet($k, $v): void { parent::offsetSet(str_rot13($k), $v); } }
-/// $r = new R; $r['foo'] = 1; $r[str_repeat('b', 3)] = 2;
-/// var_dump($r->getArrayCopy());
-/// ```
-/// ```expect
-/// array(2) {
-///   ["sbb"]=>
-///   int(1)
-///   ["ooo"]=>
-///   int(2)
-/// }
-/// ```
-fn offset_set(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 2, 2)?;
-    let this = crate::this(req)?;
-    let key = crate::value(req, 1);
-    let value = crate::value(req, 2);
-    write(req, this, Some(&key), value)?;
-    Ok(Value::null())
-}
-
-/// `offsetUnset(mixed $key): void`.
-///
-/// ```php
-/// $o = new ArrayObject(['a' => 1, 'b' => 2]);
-/// $o->offsetUnset('a'); $o->offsetUnset('missing');
-/// var_dump(count($o));
-/// ```
-/// ```expect
-/// int(1)
-/// ```
-fn offset_unset(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let key = crate::value(req, 1);
-    unset(req, this, &key)?;
-    Ok(Value::null())
-}
-
-/// `append(mixed $value): void`, refused over an object's properties.
-///
-/// ```php
-/// $o = new ArrayObject([5 => 'x']);
-/// $o->append('y');
-/// var_dump($o->getArrayCopy());
-/// ```
-/// ```expect
-/// array(2) {
-///   [5]=>
-///   string(1) "x"
-///   [6]=>
-///   string(1) "y"
-/// }
-/// ```
-fn append(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let value = crate::value(req, 1);
-    if is_object(req, this)? {
-        let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
-        return Err(throw(
-            req,
-            "Error",
-            &format!("Cannot append properties to objects, use {class}::offsetSet() instead"),
-        ));
-    }
-    Handlers.write_dimension(req, this, None, crate::copied(req, value))?;
-    Ok(Value::null())
-}
-
-/// `getArrayCopy(): array`: the table as an array of its own.
-///
-/// ```php
-/// $a = [1, 2]; $o = new ArrayObject($a);
-/// $copy = $o->getArrayCopy(); $copy[] = 3;
-/// var_dump(count($o), count($copy));
-/// ```
-/// ```expect
-/// int(2)
-/// int(3)
-/// ```
-fn get_array_copy(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let copy = table(req, this)?.copy(req)?;
-    Ok(Value::array(copy))
-}
-
-/// `count(): int`, `spl_array_object_count_elements_helper`: the
-/// elements, or an object's public properties.
-///
-/// ```php
-/// class Counted extends ArrayObject { function count(): int { return 42; } }
-/// $c = new Counted([1, 2]);
-/// var_dump($c->count(), count($c), (new ArrayObject([1, 2, 3]))->count());
-/// class Held { public $a = 1; protected $b = 2; private $c = 3; public $d = 4; }
-/// $h = @new ArrayObject(new Held);
-/// var_dump(count($h));
-/// foreach ($h as $k => $v) echo "$k=$v;";
-/// ```
-/// ```expect
-/// int(42)
-/// int(42)
-/// int(3)
-/// int(2)
-/// a=1;d=4;
-/// ```
-fn count(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let n = table(req, this)?.len(req)?;
-    Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX)))
-}
-
-/// `getFlags(): int`.
-///
-/// ```php
-/// $o = new ArrayObject([], ArrayObject::ARRAY_AS_PROPS);
-/// var_dump($o->getFlags());
-/// $o->setFlags(ArrayObject::STD_PROP_LIST);
-/// var_dump($o->getFlags());
-/// ```
-/// ```expect
-/// int(2)
-/// int(1)
-/// ```
-fn get_flags(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::int(flags(req, this)? & !INT_MASK))
-}
-
-/// `setFlags(int $flags): void`. Under `ARRAY_AS_PROPS` a property the
-/// object does not declare is an element.
-///
-/// ```php
-/// $o = new ArrayObject(['a' => 1]);
-/// $o->setFlags(ArrayObject::ARRAY_AS_PROPS);
-/// $o->b = 2;
-/// var_dump($o->a, isset($o->b), $o->getArrayCopy());
-/// ```
-/// ```expect
-/// int(1)
-/// bool(true)
-/// array(2) {
-///   ["a"]=>
-///   int(1)
-///   ["b"]=>
-///   int(2)
-/// }
-/// ```
-fn set_flags(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let given = crate::long(req, 1)?;
-    with(req, this, |p| {
-        p.flags = (p.flags & INT_MASK) | (given & !INT_MASK);
-    })?;
-    Ok(Value::null())
-}
-
 /// `spl_array_method`: the table handed by reference to the native of
 /// the same name, the sort counted meanwhile so a write from a callback
 /// is refused, and what the native left written back.
-fn sort_through(req: &mut Request, native: &[u8], extra: Option<Value>) -> Result<Value, Thrown> {
-    let this = crate::this(req)?;
+fn sort_through(
+    req: &mut Request,
+    this: PhpObject,
+    native: &[u8],
+    extra: Option<Value>,
+) -> Result<True, Thrown> {
     let name = crate::string_value(req, native)?;
     let callable: Option<Callable> = callable_checked(req, &name).ok();
     req.release(name);
@@ -1441,7 +2020,8 @@ fn sort_through(req: &mut Request, native: &[u8], extra: Option<Value>) -> Resul
     };
     req.release(cell.as_value());
     put?;
-    answered
+    req.release(answered?);
+    Ok(True)
 }
 
 /// `spl_array_method`'s write-back, `*ht_ptr = Z_ARRVAL_P(ht_zv)`: the
@@ -1475,77 +2055,6 @@ fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thr
     }
 }
 
-/// `asort(int $flags = SORT_REGULAR): true`, `ext/standard`'s `asort`
-/// over the table: the storage array, or an object's rows, laid down
-/// again in the sorted order.
-///
-/// ```php
-/// $o = new ArrayObject(['b' => 2, 'a' => 3, 'c' => 1]);
-/// $o->asort();
-/// $d = (object) ['y' => 'b', 'x' => 'a'];
-/// $p = @new ArrayObject($d);
-/// $p->asort(); $p->ksort();
-/// var_dump($o->getArrayCopy(), $d);
-/// ```
-/// ```expect
-/// array(3) {
-///   ["c"]=>
-///   int(1)
-///   ["b"]=>
-///   int(2)
-///   ["a"]=>
-///   int(3)
-/// }
-/// object(stdClass)#2 (2) {
-///   ["x"]=>
-///   string(1) "a"
-///   ["y"]=>
-///   string(1) "b"
-/// }
-/// ```
-fn asort(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 1)?;
-    let flags = crate::long_or(req, 1, 0)?;
-    sort_through(req, b"asort", Some(Value::int(flags)))
-}
-
-/// `ksort(int $flags = SORT_REGULAR): true`; the witness is `asort`'s.
-fn ksort(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 1)?;
-    let flags = crate::long_or(req, 1, 0)?;
-    sort_through(req, b"ksort", Some(Value::int(flags)))
-}
-
-/// `uasort(callable $callback): true`.
-///
-/// The witness waits on the ext/standard native it calls (#712).
-fn uasort(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let callback = crate::value(req, 1);
-    sort_through(req, b"uasort", Some(callback))
-}
-
-/// `uksort(callable $callback): true`; the witness is `uasort`'s.
-fn uksort(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let callback = crate::value(req, 1);
-    sort_through(req, b"uksort", Some(callback))
-}
-
-/// `natsort(): true`.
-///
-/// The witness waits on the ext/standard native it calls (#712).
-fn natsort(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    sort_through(req, b"natsort", None)
-}
-
-/// `natcasesort(): true`; the witness is `natsort`'s.
-fn natcasesort(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    sort_through(req, b"natcasesort", None)
-}
-
 /// The storage as `serialize` and `__serialize` write it: the array or
 /// the object read through, one more owner.
 fn storage(req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
@@ -1556,85 +2065,6 @@ fn storage(req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
     };
     req.addref(&value);
     Ok(value)
-}
-
-/// `serialize(): string`, php's `x:i:flags;storage;m:members`.
-///
-/// The witness waits on the ext/standard native it calls (#712).
-fn serialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let flags = ar_flags(req, this)? & CLONE_MASK;
-    let mut out = b"x:".to_vec();
-    out.extend(crate::serialized(req, Value::int(flags))?);
-    if flags & IS_SELF == 0 {
-        let stored = storage(req, this)?;
-        let bytes = crate::serialized(req, stored);
-        req.release(stored);
-        out.extend(bytes?);
-        out.push(b';');
-    }
-    out.extend_from_slice(b"m:");
-    let members = crate::members(req, this)?;
-    let bytes = crate::serialized(req, Value::array(members));
-    req.release(Value::array(members));
-    out.extend(bytes?);
-    crate::string_value(req, &out)
-}
-
-/// `unserialize(string $data): void`, the inverse of `serialize`, read
-/// through one var hash as php's is: the `x:i:flags;` head, the storage
-/// and its `;`, then `m:` with the members. Where the record breaks off
-/// php's `UnexpectedValueException` names the offset the reader stopped
-/// at; a storage `spl_array_set_array` refuses leaves what it threw
-/// pending while the members are still read, as php's does.
-///
-/// ```php
-/// $o = unserialize('C:11:"ArrayObject":33:{x:i:2;a:1:{s:1:"k";i:7;};m:a:0:{}}');
-/// var_dump($o->k, $o->getFlags());
-/// foreach (['x:i:0;r:3;;m:a:0:{}', 'y:i:0;', 'x:i:0;a:0:{}m:a:0:{}'] as $bad) {
-///     try { (new ArrayObject)->unserialize($bad); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
-/// }
-/// ```
-/// ```expect
-/// int(7)
-/// int(2)
-/// Error at offset 10 of 19 bytes
-/// Error at offset 0 of 6 bytes
-/// Error at offset 12 of 20 bytes
-/// ```
-fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let data = crate::string(req, 1)?.as_bytes().to_vec();
-    if data.is_empty() {
-        return Ok(Value::null());
-    }
-    sorting_refused(req, this)?;
-    let mut reader = php_ext_standard::Unserializer::new(req, &data);
-    let mut pending = None;
-    let mut kept = Vec::new();
-    let read = read_record(req, this, &mut reader, &data, &mut pending, &mut kept);
-    let finished = reader.finish(req);
-    // `var_tmp_var`'s values live until `PHP_VAR_UNSERIALIZE_DESTROY`,
-    // since a later `R:` of the record may name one.
-    for value in kept {
-        req.release(value);
-    }
-    let broke_at = read?;
-    finished?;
-    if let Some(at) = broke_at {
-        let len = data.len();
-        return Err(throw(
-            req,
-            "UnexpectedValueException",
-            &format!("Error at offset {at} of {len} bytes"),
-        ));
-    }
-    match pending {
-        Some(thrown) => Err(thrown),
-        None => Ok(Value::null()),
-    }
 }
 
 /// The body of `ArrayObject::unserialize` over one reader: `None` once
@@ -1707,58 +2137,6 @@ fn read_record(
     Ok(None)
 }
 
-/// `__serialize(): array`: the flags, the storage, the members and the
-/// iterator class, `null` for `ArrayIterator`.
-///
-/// ```php
-/// class Bag extends ArrayObject { public $label = 'bag'; }
-/// $b = new Bag(['x' => 1], 0, 'RecursiveArrayIterator');
-/// var_dump($b->__serialize());
-/// ```
-/// ```expect
-/// array(4) {
-///   [0]=>
-///   int(0)
-///   [1]=>
-///   array(1) {
-///     ["x"]=>
-///     int(1)
-///   }
-///   [2]=>
-///   array(1) {
-///     ["label"]=>
-///     string(3) "bag"
-///   }
-///   [3]=>
-///   string(22) "RecursiveArrayIterator"
-/// }
-/// ```
-fn magic_serialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let flags = ar_flags(req, this)?;
-    let iterator_class = payload(req, this)?.iterator_class;
-    let mut out = PhpArray::new(req)?;
-    out.append(req, Value::int(flags & CLONE_MASK))?;
-    let stored = if flags & IS_SELF != 0 {
-        Value::null()
-    } else {
-        storage(req, this)?
-    };
-    out.append(req, stored)?;
-    let members = crate::members(req, this)?;
-    out.append(req, Value::array(members))?;
-    let class = match iterator_class {
-        Some(class) if !is_array_iterator(req, class) => {
-            let name = crate::class_name(req, class);
-            crate::string_value(req, &name)?
-        }
-        _ => Value::null(),
-    };
-    out.append(req, class)?;
-    Ok(Value::array(out))
-}
-
 /// The flags an unserialization read, `ar_flags &= ~SPL_ARRAY_CLONE_MASK;
 /// ar_flags |= flags & SPL_ARRAY_CLONE_MASK`: the user's bits written,
 /// and `SPL_ARRAY_IS_SELF` among them made the storage, whatever the
@@ -1779,214 +2157,6 @@ fn is_array_iterator(req: &mut Request, class: ClassId) -> bool {
     lookup_class(req, b"ArrayIterator").ok().flatten() == Some(class)
 }
 
-/// `__unserialize(array $data): void`.
-///
-/// ```php
-/// $o = new ArrayObject;
-/// $o->__unserialize([2, ['k' => 7], ['p' => 1], null]);
-/// var_dump($o->k, $o->getFlags(), $o->p);
-/// try { (new ArrayObject)->__unserialize([]); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-///
-/// Deprecated: Creation of dynamic property ArrayObject::$p is deprecated in %s on line 3
-/// int(7)
-/// int(2)
-/// int(1)
-/// Incomplete or ill-typed serialization data
-/// ```
-fn magic_unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let data = crate::array(req, 1)?;
-    let flags = data.get(&Key::Int(0)).map(|v| v.deref());
-    let stored = data.get(&Key::Int(1)).map(|v| v.deref());
-    let members = data.get(&Key::Int(2)).map(|v| v.deref());
-    let class = data.get(&Key::Int(3)).map(|v| v.deref());
-    let (Some(flags), Some(stored), Some(members)) = (
-        flags.and_then(|f| f.as_int()),
-        stored,
-        members.filter(|m| m.as_array().is_some()),
-    ) else {
-        return Err(throw(
-            req,
-            "UnexpectedValueException",
-            "Incomplete or ill-typed serialization data",
-        ));
-    };
-    if class.is_some_and(|c| !matches!(c.as_ref(), ValueRef::Null | ValueRef::Str(_))) {
-        return Err(throw(
-            req,
-            "UnexpectedValueException",
-            "Incomplete or ill-typed serialization data",
-        ));
-    }
-    set_flags_and_self(req, this, flags)?;
-    if flags & IS_SELF == 0 {
-        if stored.as_array().is_none() && stored.as_object().is_none() {
-            return Err(throw(
-                req,
-                "InvalidArgumentException",
-                "Passed variable is not an array or object",
-            ));
-        }
-        set_array(req, this, &stored, 0, true)?;
-    }
-    crate::load_members(req, this, &members)?;
-    if let Some(name) = class.and_then(|c| c.as_str_bytes().map(<[u8]>::to_vec)) {
-        let shown = String::from_utf8_lossy(&name).into_owned();
-        let Some(found) = lookup_class(req, &name)? else {
-            return Err(throw(
-                req,
-                "UnexpectedValueException",
-                &format!(
-                    "Cannot deserialize ArrayObject with iterator class '{shown}'; no such class exists"
-                ),
-            ));
-        };
-        if !crate::is_a(req, found, b"Iterator") {
-            return Err(throw(
-                req,
-                "UnexpectedValueException",
-                &format!(
-                    "Cannot deserialize ArrayObject with iterator class '{shown}'; this class does not implement the Iterator interface"
-                ),
-            ));
-        }
-        with(req, this, |p| p.iterator_class = Some(found))?;
-    }
-    Ok(Value::null())
-}
-
-/// `__debugInfo(): array`, what `var_dump` shows.
-///
-/// ```php
-/// class Tagged extends ArrayIterator { protected $tag = 't'; }
-/// foreach ((new Tagged([1]))->__debugInfo() as $name => $value) echo str_replace("\0", '\0', $name), ' => ', json_encode($value), "\n";
-/// ```
-/// ```expect
-/// \0*\0tag => "t"
-/// \0ArrayIterator\0storage => [1]
-/// ```
-fn debug_info(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::array(spl_array_debug_info(req, this)?))
-}
-
-/// `getIterator(): Iterator`: a new object of the iterator class
-/// reading through this one, with its own position.
-///
-/// ```php
-/// $o = new ArrayObject(['a' => 1, 'b' => 2]);
-/// $it = $o->getIterator();
-/// $o['c'] = 3;
-/// var_dump(get_class($it), iterator_to_array($it));
-/// foreach ($o as $k => $v) echo "$k=$v;";
-/// ```
-/// ```expect
-/// string(13) "ArrayIterator"
-/// array(3) {
-///   ["a"]=>
-///   int(1)
-///   ["b"]=>
-///   int(2)
-///   ["c"]=>
-///   int(3)
-/// }
-/// a=1;b=2;c=3;
-/// ```
-fn get_iterator(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let (flags, class) = {
-        let p = payload(req, this)?;
-        (p.flags, p.iterator_class)
-    };
-    let class = match class {
-        Some(class) => class,
-        None => match lookup_class(req, b"ArrayIterator")? {
-            Some(class) => class,
-            None => return Ok(Value::null()),
-        },
-    };
-    let iterator = php_ext::call::new_object(req, class)?;
-    req.addref(&this.as_value());
-    let old = with(req, iterator, |p| {
-        p.flags = flags & CLONE_MASK;
-        p.iterator_class = None;
-        std::mem::replace(&mut p.storage, Storage::Other(this))
-    })?;
-    if let Some(old) = old.held() {
-        req.release(old);
-    }
-    Ok(iterator.as_value())
-}
-
-/// `exchangeArray(array|object $array): array`: the old table handed
-/// back as a copy, the new one in its place.
-///
-/// ```php
-/// $o = new ArrayObject([1, 2]);
-/// var_dump($o->exchangeArray(['x' => 'y']), $o->getArrayCopy());
-/// ```
-/// ```expect
-/// array(2) {
-///   [0]=>
-///   int(1)
-///   [1]=>
-///   int(2)
-/// }
-/// array(1) {
-///   ["x"]=>
-///   string(1) "y"
-/// }
-/// ```
-fn exchange_array(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let given = array_or_object(req, 1)?;
-    sorting_refused(req, this)?;
-    let old = table(req, this)?.copy(req)?;
-    if let Err(thrown) = set_array(req, this, &given, 0, true) {
-        req.release(Value::array(old));
-        return Err(thrown);
-    }
-    Ok(Value::array(old))
-}
-
-/// `setIteratorClass(string $iteratorClass): void`.
-///
-/// ```php
-/// $o = new ArrayObject([[1]]);
-/// $o->setIteratorClass('RecursiveArrayIterator');
-/// var_dump($o->getIteratorClass(), get_class($o->getIterator()));
-/// try { $o->setIteratorClass('stdClass'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(22) "RecursiveArrayIterator"
-/// string(22) "RecursiveArrayIterator"
-/// ArrayObject::setIteratorClass(): Argument #1 ($iteratorClass) must be a class name derived from ArrayIterator, stdClass given
-/// ```
-fn set_iterator_class(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let class = iterator_class_argument(req, 1)?;
-    with(req, this, |p| p.iterator_class = Some(class))?;
-    Ok(Value::null())
-}
-
-/// `getIteratorClass(): string`; the witness is `setIteratorClass`'s.
-fn get_iterator_class(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let name = match payload(req, this)?.iterator_class {
-        Some(class) => crate::class_name(req, class),
-        None => b"ArrayIterator".to_vec(),
-    };
-    crate::string_value(req, &name)
-}
-
 /// The element at this object's position, with the bucket it stands at.
 fn here(req: &mut Request, object: PhpObject) -> Result<Option<(u32, Key, Value)>, Thrown> {
     let pos = payload(req, object)?.pos;
@@ -1998,44 +2168,6 @@ fn here(req: &mut Request, object: PhpObject) -> Result<Option<(u32, Key, Value)
     Ok(found)
 }
 
-/// `ArrayIterator::rewind(): void`.
-fn rewind(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    with(req, this, |p| p.pos = 0)?;
-    Ok(Value::null())
-}
-
-/// `ArrayIterator::current(): mixed`, `null` past the end; the witness
-/// is the constructor's.
-fn current(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(match here(req, this)? {
-        Some((_, _, value)) => crate::copied(req, value),
-        None => Value::null(),
-    })
-}
-
-/// `ArrayIterator::key(): string|int|null`.
-fn key(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(match here(req, this)? {
-        Some((_, Key::Int(n), _)) => Value::int(n),
-        Some((_, Key::Str(s), _)) => crate::copied(req, Value::string(s)),
-        None => Value::null(),
-    })
-}
-
-/// `ArrayIterator::next(): void`.
-fn next(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    step(req, this)?;
-    Ok(Value::null())
-}
-
 /// `spl_array_next_ex`: the position one past the element it stands at.
 fn step(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     match here(req, object)? {
@@ -2045,114 +2177,4 @@ fn step(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
         }
         None => Ok(false),
     }
-}
-
-/// `ArrayIterator::valid(): bool`.
-fn valid(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    Ok(Value::bool(here(req, this)?.is_some()))
-}
-
-/// `ArrayIterator::seek(int $offset): void`.
-///
-/// ```php
-/// $it = new ArrayIterator(['a', 'b', 'c']);
-/// $it->seek(2); var_dump($it->current());
-/// try { $it->seek(5); } catch (OutOfBoundsException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(1) "c"
-/// Seek position 5 is out of range
-/// ```
-fn seek(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 1, 1)?;
-    let this = crate::this(req)?;
-    let position = crate::long(req, 1)?;
-    if position >= 0 {
-        with(req, this, |p| p.pos = 0)?;
-        let mut ok = true;
-        for _ in 0..position {
-            if !step(req, this)? {
-                ok = false;
-                break;
-            }
-        }
-        if ok && here(req, this)?.is_some() {
-            return Ok(Value::null());
-        }
-    }
-    Err(throw(
-        req,
-        "OutOfBoundsException",
-        &format!("Seek position {position} is out of range"),
-    ))
-}
-
-/// `RecursiveArrayIterator::hasChildren(): bool`: an array, or an
-/// object where `CHILD_ARRAYS_ONLY` is off.
-///
-/// ```php
-/// $r = new RecursiveArrayIterator(['a' => [1, [2]], 'b' => 2, 'c' => new ArrayObject([3])]);
-/// var_dump($r->hasChildren(), get_class($r->getChildren()), $r->getChildren()->getArrayCopy());
-/// $r->next(); var_dump($r->hasChildren(), $r->getChildren());
-/// $r->next(); var_dump($r->hasChildren());
-/// $r = new RecursiveArrayIterator([new ArrayObject([3])], RecursiveArrayIterator::CHILD_ARRAYS_ONLY);
-/// var_dump($r->hasChildren());
-/// ```
-/// ```expect exit=255
-/// bool(true)
-/// string(22) "RecursiveArrayIterator"
-/// array(2) {
-///   [0]=>
-///   int(1)
-///   [1]=>
-///   array(1) {
-///     [0]=>
-///     int(2)
-///   }
-/// }
-///
-/// Fatal error: Uncaught TypeError: ArrayIterator::__construct(): Argument #1 ($array) must be of type array, int given in %s:4
-/// Stack trace:
-/// #0 [internal function]: ArrayIterator->__construct(2, 0)
-/// #1 %s(4): RecursiveArrayIterator->getChildren()
-/// #2 {main}
-///   thrown in %s on line 4
-/// ```
-fn has_children(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let flags = flags(req, this)?;
-    Ok(Value::bool(match here(req, this)? {
-        Some((_, _, value)) => {
-            let value = value.deref();
-            value.as_array().is_some()
-                || (value.as_object().is_some() && flags & CHILD_ARRAYS_ONLY == 0)
-        }
-        None => false,
-    }))
-}
-
-/// `RecursiveArrayIterator::getChildren(): ?RecursiveArrayIterator`: an
-/// object of this class over the element, or the element itself where
-/// it is one already.
-fn get_children(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = crate::this(req)?;
-    let flags = flags(req, this)?;
-    let Some((_, _, value)) = here(req, this)? else {
-        return Ok(Value::null());
-    };
-    let value = value.deref();
-    if let Some(object) = value.as_object().copied() {
-        if flags & CHILD_ARRAYS_ONLY != 0 {
-            return Ok(Value::null());
-        }
-        if crate::class_is(req, object.class(), this.class(), 0) {
-            return Ok(crate::copied(req, value));
-        }
-    }
-    let child = instantiate(req, this.class(), &[value, Value::int(flags)])?;
-    Ok(child.as_value())
 }
