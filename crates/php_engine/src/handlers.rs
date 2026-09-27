@@ -1790,7 +1790,15 @@ fn send_by_ref(
             "InternalError: ZEND_SEND_REF over an operand php compiles no write over",
         )));
     };
-    match bound_at(req, at) {
+    let bound = bound_at(req, at);
+    // `FREE_OP1_VAR_PTR()`: a `VAR` holding the `IS_INDIRECT` a fetch
+    // left owns nothing, and one holding the cell a write fetch fell
+    // back to `read_property` for (a `&get` hook's) gives its owner up,
+    // the argument holding its own.
+    if op.op1_type == OperandKind::Var {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    }
+    match bound {
         Ok(bound) => place_argument(req, frame, slot, bound),
         Err(thrown) => threw(req, frame, &thrown),
     }
@@ -16038,17 +16046,14 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
         Ok(None) => return Ok(Ok(None)),
         Err(thrown) => return Ok(Err(thrown)),
     };
+    // A `&get` hook's answer is the walk's own owner of the cell, as an
+    // iterator's element is.
+    let owned = matches!(walked, crate::api::request::Walked::Hooked(..));
     let cell = match req.walked_reference(object, walked) {
         Ok(cell) => cell,
         Err(thrown) => return Ok(Err(thrown)),
     };
-    Ok(fe_key_kept(req, op, key).map(|key| {
-        Some(BoundRw {
-            key,
-            cell,
-            owned: false,
-        })
-    }))
+    Ok(fe_key_kept(req, op, key).map(|key| Some(BoundRw { key, cell, owned })))
 }
 
 /// `FE_FETCH_RW`'s iterator arm (`Z/Zend/zend_vm_def.h:7358`): the
