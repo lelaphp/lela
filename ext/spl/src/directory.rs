@@ -518,18 +518,27 @@ impl SplFileInfo {
         opened.map(Instance::of)
     }
 
-    /// `setFileClass(string $class = SplFileObject::class): void`; the
-    /// witness is the class's.
+    /// `setFileClass(string $class = SplFileObject::class): void`: an
+    /// omitted class is the default, evaluated to its name.
+    ///
+    /// ```php
+    /// class F extends SplFileObject {}
+    /// $i = new SplFileInfo(__FILE__);
+    /// $i->setFileClass('F');
+    /// $i->setFileClass();
+    /// $i->setInfoClass();
+    /// echo get_class($i->openFile()), ' ', get_class($i->getFileInfo()), "\n";
+    /// ```
+    /// ```expect
+    /// SplFileObject SplFileInfo
+    /// ```
     #[php(tentative)]
     fn setFileClass(
         req: &mut Request,
         this: This<Self>,
-        #[php(default = SplFileObject::class)] class: Passed<Raw<PhpString>>,
+        #[php(default = SplFileObject::class)] class: Raw<PhpString>,
     ) -> Result<(), Thrown> {
-        let class = match class {
-            Passed::Given(class) => class_argument(req, class.value(), 1, b"SplFileObject", false)?,
-            Passed::Omitted => None,
-        };
+        let class = class_argument(req, class.value(), 1, b"SplFileObject", false)?;
         fs(req, this.object(), |it| it.file_class = class)
     }
 
@@ -539,12 +548,9 @@ impl SplFileInfo {
     fn setInfoClass(
         req: &mut Request,
         this: This<Self>,
-        #[php(default = SplFileInfo::class)] class: Passed<Raw<PhpString>>,
+        #[php(default = SplFileInfo::class)] class: Raw<PhpString>,
     ) -> Result<(), Thrown> {
-        let class = match class {
-            Passed::Given(class) => class_argument(req, class.value(), 1, b"SplFileInfo", false)?,
-            Passed::Omitted => None,
-        };
+        let class = class_argument(req, class.value(), 1, b"SplFileInfo", false)?;
         fs(req, this.object(), |it| it.info_class = class)
     }
 

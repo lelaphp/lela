@@ -20,8 +20,7 @@ use std::cmp::Ordering;
 
 use php_ext::abi::{
     Callable, CloneObj, CurrentPlace, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers,
-    Passed, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw, Std, This, True,
-    Union,
+    PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw, Std, This, True, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
@@ -191,7 +190,7 @@ impl ArrayObject {
         this: This<Self>,
         #[php(default = [])] array: Raw<Union<PhpArray, PhpObject>>,
         #[php(default = 0)] flags: Raw<i64>,
-        #[php(default = ArrayIterator::class)] iteratorClass: Passed<Raw<PhpString>>,
+        #[php(default = ArrayIterator::class)] iteratorClass: Raw<PhpString>,
     ) -> Result<(), Thrown> {
         let this = this.object();
         if req.argument_count() == 0 {
@@ -199,11 +198,9 @@ impl ArrayObject {
         }
         let given = array_or_object(req, array.value(), 1)?;
         let flags = flags.hold(req)?;
-        if let Passed::Given(name) = iteratorClass {
-            let name = name.hold(req)?;
-            let class = iterator_class_argument(req, name, 3)?;
-            with(req, this, |p| p.iterator_class = Some(class))?;
-        }
+        let name = iteratorClass.hold(req)?;
+        let class = iterator_class_argument(req, name, 3)?;
+        with(req, this, |p| p.iterator_class = Some(class))?;
         let just_array = req.argument_count() == 1;
         set_array(req, this, &given, flags & !INT_MASK, just_array)
     }
