@@ -315,18 +315,7 @@ pub(crate) enum Command {
     ///
     /// Each snippet runs as `witness.php`; the kernels and natives without
     /// a witness are counted.
-    Witness {
-        /// Only these crates, by manifest name; default every crate that exists.
-        #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
-        crates: Vec<String>,
-        /// Only the crates with a staged change (pre-commit's touched crates).
-        #[arg(long)]
-        staged: bool,
-        /// Write the oracle's status onto each `expect` fence line that
-        /// does not already pin it; the only thing that writes an `exit`.
-        #[arg(long)]
-        accept: bool,
-    },
+    Witness(Witness),
     /// The glossary as a sensor: `_Avoid_` words in public item names and
     /// rustdoc prose, never in a lock; one reading per crate.
     Vocab {
@@ -357,6 +346,27 @@ pub(crate) struct Bench {
     /// owes.
     #[arg(long, value_name = "TEXT")]
     pub note: Option<String>,
+}
+
+/// What one `witness` run is asked for, flattened onto the command so the
+/// dispatch has one line for the instrument as it has for every other.
+#[derive(Debug, Args)]
+pub(crate) struct Witness {
+    /// Only these crates, by manifest name; default every crate that exists.
+    #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
+    pub crates: Vec<String>,
+    /// Only the crates with a staged change (pre-commit's touched crates).
+    #[arg(long)]
+    pub staged: bool,
+    /// Write the oracle's status onto each `expect` fence line that
+    /// does not already pin it; the only thing that writes an `exit`.
+    #[arg(long)]
+    pub accept: bool,
+    /// Serve the run in this process and append what it judged to
+    /// this file, for the process watching it to write: how
+    /// `witness` starts itself, never typed.
+    #[arg(long, value_name = "PATH", hide = true)]
+    pub journal: Option<PathBuf>,
 }
 
 /// What one `phpt` run is asked for, flattened onto the command so the

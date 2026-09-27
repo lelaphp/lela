@@ -54,6 +54,15 @@ fn the_failing_reading(readings: &[Reading]) -> &Reading {
         "the failing test is named: {}",
         reading.message
     );
+    // What the panic said is kept where the log keeps the reading, so a
+    // failure under the pre-commit hook says itself there (#976).
+    assert!(
+        reading
+            .message
+            .contains("the failing test the fixture is for"),
+        "the panic's own message is kept: {}",
+        reading.message
+    );
     reading
 }
 

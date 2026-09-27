@@ -189,11 +189,7 @@ fn command_line() -> Result<()> {
             }
             Ok(())
         }
-        Command::Witness {
-            crates,
-            accept,
-            staged,
-        } => witness::command(&root, &manifest, &store, crates, accept, staged),
+        Command::Witness(ask) => witness::command(&root, &manifest, &store, ask),
         Command::Vocab { crates } => match vocab::run(&root, &manifest, &store, &crates)? {
             Outcome::Met => Ok(()),
             Outcome::Unmet { .. } => {

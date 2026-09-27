@@ -1436,6 +1436,10 @@ impl Engine {
     /// a refused value, and `ext/date`'s `date.timezone` is the one the
     /// phpt corpus reads.
     fn register_ini(&mut self, mut held: Vec<(Vec<u8>, Vec<u8>)>) {
+        // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
+        // handler or engine state runs: the process's, so the first engine
+        // a process builds sets it and every later one finds it set.
+        php_heap::reset_lc_ctype_locale();
         // `zend_register_ini_entries_ex` walks each module's entries in
         // its `PHP_INI_BEGIN()` order, the modules in startup order, and
         // finds the host's value for each: the handlers meet the values

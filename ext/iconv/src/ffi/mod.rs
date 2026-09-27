@@ -247,21 +247,6 @@ impl Drop for Cd {
     }
 }
 
-/// `zend_reset_lc_ctype_locale`, which `php_module_startup` runs before
-/// any extension starts: `LC_CTYPE` as `C.UTF-8`, or `C`. The host's
-/// libiconv reads the locale when a `//TRANSLIT` converter first
-/// converts, and answers `?` for all of it under a process that never set
-/// one, so this runs as the engine starts, as php's does.
-pub(super) fn reset_lc_ctype() {
-    for name in [c"C.UTF-8", c"C"] {
-        // SAFETY: `name` is a static NUL-terminated string; `setlocale`
-        // reads it and keeps nothing of it.
-        if !unsafe { libc::setlocale(libc::LC_CTYPE, name.as_ptr()) }.is_null() {
-            return;
-        }
-    }
-}
-
 /// The stack below the caller filled with a nonzero byte. The host's
 /// libiconv reads a word of its own frame it never wrote when it
 /// transliterates: nonzero, as php's stack there holds, it answers
