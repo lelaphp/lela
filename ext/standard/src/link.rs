@@ -13,19 +13,17 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
 
+use php_ext::abi::{OrFalse, Path};
+use php_ext::attr::php_function;
 use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
+use php_ext::values::PhpString;
 
-use crate::argument_count_between;
 use crate::filestat::strerror;
-use crate::md5::path_argument;
 use crate::output::Entry;
 use crate::string::path::zend_dirname;
-use crate::stub::stub;
 use crate::virtual_cwd::{MAXPATHLEN, expand_filepath};
 
 /// The four, as the stub declares them.
@@ -67,18 +65,15 @@ use crate::virtual_cwd::{MAXPATHLEN, expand_filepath};
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (
-            stub("readlink(string $path): string|false"),
-            readlink as Entry,
-        ),
-        (stub("linkinfo(string $path): int|false"), linkinfo),
-        (stub("symlink(string $target, string $link): bool"), symlink),
-        (stub("link(string $target, string $link): bool"), link),
+        readlink::declared(),
+        linkinfo::declared(),
+        symlink::declared(),
+        link::declared(),
     ]
 }
 
-fn host(bytes: &[u8]) -> &Path {
-    Path::new(OsStr::from_bytes(bytes))
+fn host(bytes: &[u8]) -> &std::path::Path {
+    std::path::Path::new(OsStr::from_bytes(bytes))
 }
 
 /// The path a system call is handed for what the program wrote: against
@@ -97,10 +92,11 @@ fn cwd(req: &Request) -> Vec<u8> {
     req.cwd().0.as_os_str().as_bytes().to_vec()
 }
 
-/// `php_error_docref(NULL, E_WARNING, "%s", strerror(errno))`.
-fn failed(req: &mut Request, error: &std::io::Error) -> Value {
+/// `php_error_docref(NULL, E_WARNING, "%s", strerror(errno))`, and the
+/// `false` after it.
+fn failed(req: &mut Request, error: &std::io::Error) -> bool {
     docref(req, Level::Warning, &strerror(error));
-    Value::bool(false)
+    false
 }
 
 /// `readlink(string $path): string|false`, `PHP_FUNCTION(readlink)`
@@ -128,17 +124,19 @@ fn failed(req: &mut Request, error: &std::io::Error) -> Value {
 /// bool(false)
 /// readlink(): Argument #1 ($path) must not contain any null bytes
 /// ```
-fn readlink(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let link = path_argument(req, 1)?;
-    let path = plain(req, link.as_bytes());
+#[php_function]
+fn readlink(req: &mut Request, path: Path) -> Result<OrFalse<PhpString>, Thrown> {
+    let path = plain(req, path.0.as_bytes());
     match std::fs::read_link(host(&path)) {
         Ok(target) => {
             let target = target.as_os_str().as_bytes();
             let target = target.get(..MAXPATHLEN - 1).unwrap_or(target);
-            Ok(Value::string(PhpString::new(req, target)?))
+            Ok(OrFalse::Value(PhpString::new(req, target)?))
         }
-        Err(error) => Ok(failed(req, &error)),
+        Err(error) => {
+            failed(req, &error);
+            Ok(OrFalse::False)
+        }
     }
 }
 
@@ -162,15 +160,14 @@ fn readlink(req: &mut Request) -> Result<Value, Thrown> {
 /// int(-1)
 /// int(-1)
 /// ```
-fn linkinfo(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let link = path_argument(req, 1)?;
-    let path = plain(req, link.as_bytes());
+#[php_function]
+fn linkinfo(req: &mut Request, path: Path) -> OrFalse<i64> {
+    let path = plain(req, path.0.as_bytes());
     match std::fs::symlink_metadata(host(&path)) {
-        Ok(meta) => Ok(Value::int(i64::try_from(meta.dev()).unwrap_or(i64::MAX))),
+        Ok(meta) => OrFalse::Value(i64::try_from(meta.dev()).unwrap_or(i64::MAX)),
         Err(error) => {
             docref(req, Level::Warning, &strerror(&error));
-            Ok(Value::int(-1))
+            OrFalse::Value(-1)
         }
     }
 }
@@ -210,21 +207,20 @@ fn linkinfo(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// string(5) "t.txt"
 /// ```
-fn symlink(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let target = path_argument(req, 1)?;
-    let link = path_argument(req, 2)?;
+#[php_function]
+fn symlink(req: &mut Request, target: Path, link: Path) -> bool {
+    let (Path(target), Path(link)) = (target, link);
     let cwd_now = cwd(req);
     let Some(source) = expand_filepath(req, link.as_bytes(), &cwd_now) else {
-        return Ok(no_such_file(req));
+        return no_such_file(req);
     };
     let dirname = zend_dirname(&source);
     if expand_filepath(req, target.as_bytes(), &dirname).is_none() {
-        return Ok(no_such_file(req));
+        return no_such_file(req);
     }
     match std::os::unix::fs::symlink(host(target.as_bytes()), host(&source)) {
-        Ok(()) => Ok(Value::bool(true)),
-        Err(error) => Ok(failed(req, &error)),
+        Ok(()) => true,
+        Err(error) => failed(req, &error),
     }
 }
 
@@ -256,25 +252,25 @@ fn symlink(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn link(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let target = path_argument(req, 1)?;
-    let link = path_argument(req, 2)?;
+#[php_function]
+fn link(req: &mut Request, target: Path, link: Path) -> bool {
+    let (Path(target), Path(link)) = (target, link);
     let cwd = cwd(req);
     let (Some(source), Some(dest)) = (
         expand_filepath(req, link.as_bytes(), &cwd),
         expand_filepath(req, target.as_bytes(), &cwd),
     ) else {
-        return Ok(no_such_file(req));
+        return no_such_file(req);
     };
     match std::fs::hard_link(host(&dest), host(&source)) {
-        Ok(()) => Ok(Value::bool(true)),
-        Err(error) => Ok(failed(req, &error)),
+        Ok(()) => true,
+        Err(error) => failed(req, &error),
     }
 }
 
-/// The warning php writes itself where a path does not expand.
-fn no_such_file(req: &mut Request) -> Value {
+/// The warning php writes itself where a path does not expand, and the
+/// `false` after it.
+fn no_such_file(req: &mut Request) -> bool {
     docref(req, Level::Warning, "No such file or directory");
-    Value::bool(false)
+    false
 }

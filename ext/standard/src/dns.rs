@@ -9,16 +9,23 @@
 
 use std::ffi::{CStr, CString};
 
-use php_ext::decl::{ConstDecl, FunctionDecl};
+use php_ext::abi::{OrFalse, Passed, Path, Ref, Untyped};
+use php_ext::attr::{php_const, php_function};
+use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use crate::md5::path_argument;
 use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{assign_ref, given, optional_bool, optional_long, optional_string};
-use crate::{arg_value_error, argument_count_between, constant, ffi};
+use crate::{arg_value_error, ffi};
+
+use constants::{
+    DNS_A, DNS_A6, DNS_AAAA, DNS_ALL, DNS_ANY, DNS_CAA, DNS_CNAME, DNS_HINFO, DNS_MX, DNS_NAPTR,
+    DNS_NS, DNS_PTR, DNS_SOA, DNS_SRV, DNS_TXT,
+};
+
+/// An untyped by-reference out-parameter, `&$hosts`.
+type Out = Ref<Untyped<Value>>;
 
 /// The `DNS_*` constants, in the stub's order.
 ///
@@ -42,11 +49,50 @@ use crate::{arg_value_error, argument_count_between, constant, ffi};
 /// int(268435456)
 /// int(251721779)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    DNS_CONSTANTS
-        .into_iter()
-        .map(|(name, value)| constant(name.as_bytes(), value))
-        .collect()
+#[php_const]
+pub(crate) mod constants {
+    /// `PHP_DNS_A`, `Z/ext/standard/php_dns.h:60`.
+    pub(crate) const DNS_A: i64 = 0x0000_0001;
+    /// `PHP_DNS_NS`, `Z/ext/standard/php_dns.h:61`.
+    pub(crate) const DNS_NS: i64 = 0x0000_0002;
+    /// `PHP_DNS_CNAME`, `Z/ext/standard/php_dns.h:62`.
+    pub(crate) const DNS_CNAME: i64 = 0x0000_0010;
+    /// `PHP_DNS_SOA`, `Z/ext/standard/php_dns.h:63`.
+    pub(crate) const DNS_SOA: i64 = 0x0000_0020;
+    /// `PHP_DNS_PTR`, `Z/ext/standard/php_dns.h:64`.
+    pub(crate) const DNS_PTR: i64 = 0x0000_0800;
+    /// `PHP_DNS_HINFO`, `Z/ext/standard/php_dns.h:65`.
+    pub(crate) const DNS_HINFO: i64 = 0x0000_1000;
+    /// `PHP_DNS_CAA`, `Z/ext/standard/php_dns.h:67`.
+    pub(crate) const DNS_CAA: i64 = 0x0000_2000;
+    /// `PHP_DNS_MX`, `Z/ext/standard/php_dns.h:69`.
+    pub(crate) const DNS_MX: i64 = 0x0000_4000;
+    /// `PHP_DNS_TXT`, `Z/ext/standard/php_dns.h:70`.
+    pub(crate) const DNS_TXT: i64 = 0x0000_8000;
+    /// `PHP_DNS_SRV`, `Z/ext/standard/php_dns.h:72`.
+    pub(crate) const DNS_SRV: i64 = 0x0200_0000;
+    /// `PHP_DNS_NAPTR`, `Z/ext/standard/php_dns.h:73`.
+    pub(crate) const DNS_NAPTR: i64 = 0x0400_0000;
+    /// `PHP_DNS_AAAA`, `Z/ext/standard/php_dns.h:74`.
+    pub(crate) const DNS_AAAA: i64 = 0x0800_0000;
+    /// `PHP_DNS_A6`, `Z/ext/standard/php_dns.h:71`.
+    pub(crate) const DNS_A6: i64 = 0x0100_0000;
+    /// `PHP_DNS_ANY`, `Z/ext/standard/php_dns.h:75`.
+    pub(crate) const DNS_ANY: i64 = 0x1000_0000;
+    /// `PHP_DNS_ALL`, `Z/ext/standard/php_dns.h:82`.
+    pub(crate) const DNS_ALL: i64 = DNS_A
+        | DNS_NS
+        | DNS_CNAME
+        | DNS_SOA
+        | DNS_PTR
+        | DNS_HINFO
+        | DNS_CAA
+        | DNS_MX
+        | DNS_TXT
+        | DNS_A6
+        | DNS_SRV
+        | DNS_NAPTR
+        | DNS_AAAA;
 }
 
 /// The natives, as the stub declares them.
@@ -93,44 +139,15 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (
-            stub("gethostname(): string|false"),
-            php_gethostname as Entry,
-        ),
-        (
-            stub("gethostbyaddr(string $ip): string|false"),
-            php_gethostbyaddr_native,
-        ),
-        (
-            stub("gethostbyname(string $hostname): string"),
-            php_gethostbyname_native,
-        ),
-        (
-            stub("gethostbynamel(string $hostname): array|false"),
-            php_gethostbynamel,
-        ),
-        (
-            stub("dns_check_record(string $hostname, string $type = \"MX\"): bool"),
-            php_dns_check_record,
-        ),
-        (
-            stub("checkdnsrr(string $hostname, string $type = \"MX\"): bool"),
-            php_dns_check_record,
-        ),
-        (
-            stub(
-                "dns_get_record(string $hostname, int $type = DNS_ANY, &$authoritative_name_servers = null, &$additional_records = null, bool $raw = false): array|false",
-            ),
-            php_dns_get_record,
-        ),
-        (
-            stub("dns_get_mx(string $hostname, &$hosts, &$weights = null): bool"),
-            php_dns_get_mx,
-        ),
-        (
-            stub("getmxrr(string $hostname, &$hosts, &$weights = null): bool"),
-            php_dns_get_mx,
-        ),
+        gethostname::declared(),
+        gethostbyaddr::declared(),
+        gethostbyname::declared(),
+        gethostbynamel::declared(),
+        dns_check_record::declared(),
+        checkdnsrr::declared(),
+        dns_get_record::declared(),
+        dns_get_mx::declared(),
+        getmxrr::declared(),
     ]
 }
 
@@ -145,9 +162,8 @@ fn text(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
 }
 
 /// `Z_PARAM_PATH` as a C string: the check has refused a NUL.
-fn path(req: &mut Request, position: u32) -> Result<CString, Thrown> {
-    let bytes = path_argument(req, position)?;
-    Ok(CString::new(bytes.as_bytes()).unwrap_or_default())
+fn c_path(path: Path) -> CString {
+    CString::new(path.0.as_bytes()).unwrap_or_default()
 }
 
 /// The `ValueError` of one [`DnsError`]; `arg_value_error` adds the
@@ -171,13 +187,13 @@ fn value_error(req: &mut Request, error: DnsError) -> Thrown {
 /// bool(true)
 /// bool(true)
 /// ```
-fn php_gethostname(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    match gethostname() {
-        Ok(name) => text(req, &name),
+#[php_function]
+fn gethostname(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+    match lookup_hostname() {
+        Ok(name) => Ok(OrFalse::Value(PhpString::new(req, &name)?)),
         Err(warning) => {
             warn(req, &warning);
-            Ok(Value::bool(false))
+            Ok(OrFalse::False)
         }
     }
 }
@@ -197,14 +213,13 @@ fn php_gethostname(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// gethostbyaddr(): Argument #1 ($ip) must not contain any null bytes
 /// ```
-fn php_gethostbyaddr_native(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let ip = path(req, 1)?;
-    match gethostbyaddr(&ip) {
-        Ok(name) => text(req, &name),
+#[php_function]
+fn gethostbyaddr(req: &mut Request, ip: Path) -> Result<OrFalse<PhpString>, Thrown> {
+    match lookup_addr(&c_path(ip)) {
+        Ok(name) => Ok(OrFalse::Value(PhpString::new(req, &name)?)),
         Err(warning) => {
             warn(req, &warning);
-            Ok(Value::bool(false))
+            Ok(OrFalse::False)
         }
     }
 }
@@ -226,14 +241,13 @@ fn php_gethostbyaddr_native(req: &mut Request) -> Result<Value, Thrown> {
 /// Warning: gethostbyname(): Host name cannot be longer than 255 characters in %s on line 3
 /// int(256)
 /// ```
-fn php_gethostbyname_native(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let hostname = path(req, 1)?;
-    let (answer, warning) = gethostbyname(&hostname);
+#[php_function]
+fn gethostbyname(req: &mut Request, hostname: Path) -> Result<PhpString, Thrown> {
+    let (answer, warning) = lookup_name(&c_path(hostname));
     if let Some(warning) = warning {
         warn(req, &warning);
     }
-    text(req, &answer)
+    PhpString::new(req, &answer)
 }
 
 /// `gethostbynamel(string $hostname): array|false`,
@@ -252,22 +266,21 @@ fn php_gethostbyname_native(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn php_gethostbynamel(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let hostname = path(req, 1)?;
-    let (list, warning) = gethostbynamel(&hostname);
+#[php_function]
+fn gethostbynamel(req: &mut Request, hostname: Path) -> Result<OrFalse<PhpArray>, Thrown> {
+    let (list, warning) = lookup_names(&c_path(hostname));
     if let Some(warning) = warning {
         warn(req, &warning);
     }
     let Some(list) = list else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let mut array = PhpArray::new(req)?;
     for address in list {
         let v = text(req, &address)?;
         array.append(req, v)?;
     }
-    Ok(Value::array(array))
+    Ok(OrFalse::Value(array))
 }
 
 /// `dns_check_record(string $hostname, string $type = "MX"): bool` and
@@ -286,14 +299,17 @@ fn php_gethostbynamel(req: &mut Request) -> Result<Value, Thrown> {
 /// dns_check_record(): Argument #2 ($type) must be a valid DNS record type
 /// bool(false)
 /// ```
-fn php_dns_check_record(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let hostname = path(req, 1)?;
-    let rectype = optional_string(req, 2)?;
-    match dns_check_record(&hostname, rectype.as_ref().map(PhpString::as_bytes)) {
-        Ok(found) => Ok(Value::bool(found)),
-        Err(error) => Err(value_error(req, error)),
-    }
+#[php_function(aliases(checkdnsrr))]
+fn dns_check_record(
+    req: &mut Request,
+    hostname: Path,
+    #[php(default = "MX")] r#type: Passed<PhpString>,
+) -> Result<bool, Thrown> {
+    let rectype = match &r#type {
+        Passed::Given(rectype) => Some(rectype.as_bytes()),
+        Passed::Omitted => None,
+    };
+    check_record(&c_path(hostname), rectype).map_err(|error| value_error(req, error))
 }
 
 /// One record as php's array of it.
@@ -319,21 +335,21 @@ fn record_array(req: &mut Request, record: Record) -> Result<Value, Thrown> {
 }
 
 /// A list of records as php's array of them.
-fn records_array(req: &mut Request, records: Vec<Record>) -> Result<Value, Thrown> {
+fn records_array(req: &mut Request, records: Vec<Record>) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     for record in records {
         let v = record_array(req, record)?;
         array.append(req, v)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `zend_try_array_init` of each by-reference argument passed.
-fn empty_refs(req: &mut Request, positions: &[u32]) -> Result<(), Thrown> {
-    for &position in positions {
-        if given(req, position).is_some() {
+fn empty_refs(req: &mut Request, targets: &[&Out]) -> Result<(), Thrown> {
+    for target in targets {
+        if target.is_given() {
             let empty = PhpArray::new(req)?;
-            assign_ref(req, position, Value::array(empty))?;
+            target.set(req, Untyped(Value::array(empty)))?;
         }
     }
     Ok(())
@@ -360,15 +376,20 @@ fn empty_refs(req: &mut Request, positions: &[u32]) -> Result<(), Thrown> {
 /// dns_get_record(): Argument #2 ($type) must be between 1 and 65535 when argument #5 ($raw) is true
 /// dns_get_record(): Argument #1 ($hostname) must not contain any null bytes
 /// ```
-fn php_dns_get_record(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 5)?;
-    let hostname = path(req, 1)?;
-    let type_param = optional_long(req, 2, DNS_ANY)?;
-    let raw = optional_bool(req, 5, false)?;
-    empty_refs(req, &[3, 4])?;
-    let authns = given(req, 3).is_some();
-    let addtl = given(req, 4).is_some();
-    let found = match dns_get_record(&hostname, type_param, authns, addtl, raw) {
+#[php_function]
+fn dns_get_record(
+    req: &mut Request,
+    hostname: Path,
+    #[php(default = DNS_ANY)] r#type: i64,
+    #[php(default = null)] authoritative_name_servers: Out,
+    #[php(default = null)] additional_records: Out,
+    #[php(default = false)] raw: bool,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let hostname = c_path(hostname);
+    empty_refs(req, &[&authoritative_name_servers, &additional_records])?;
+    let authns = authoritative_name_servers.is_given();
+    let addtl = additional_records.is_given();
+    let found = match query_records(&hostname, r#type, authns, addtl, raw) {
         Ok(found) => found,
         Err(error) => return Err(value_error(req, error)),
     };
@@ -377,15 +398,15 @@ fn php_dns_get_record(req: &mut Request) -> Result<Value, Thrown> {
     }
     if authns {
         let v = records_array(req, found.authns)?;
-        assign_ref(req, 3, v)?;
+        authoritative_name_servers.set(req, Untyped(Value::array(v)))?;
     }
     if addtl {
         let v = records_array(req, found.addtl)?;
-        assign_ref(req, 4, v)?;
+        additional_records.set(req, Untyped(Value::array(v)))?;
     }
     match found.records {
-        Some(records) => records_array(req, records),
-        None => Ok(Value::bool(false)),
+        Some(records) => records_array(req, records).map(OrFalse::Value),
+        None => Ok(OrFalse::False),
     }
 }
 
@@ -405,93 +426,35 @@ fn php_dns_get_record(req: &mut Request) -> Result<Value, Thrown> {
 /// array(0) {
 /// }
 /// ```
-fn php_dns_get_mx(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let hostname = path(req, 1)?;
-    empty_refs(req, &[2, 3])?;
-    let weights = given(req, 3).is_some();
-    let found = dns_get_mx(&hostname, weights);
-    let mut hosts = PhpArray::new(req)?;
+#[php_function(aliases(getmxrr))]
+fn dns_get_mx(
+    req: &mut Request,
+    hostname: Path,
+    hosts: Out,
+    #[php(default = null)] weights: Out,
+) -> Result<bool, Thrown> {
+    let hostname = c_path(hostname);
+    empty_refs(req, &[&hosts, &weights])?;
+    let with_weights = weights.is_given();
+    let found = query_mx(&hostname, with_weights);
+    let mut list = PhpArray::new(req)?;
     for host in found.hosts {
         let v = text(req, &host)?;
-        hosts.append(req, v)?;
+        list.append(req, v)?;
     }
-    assign_ref(req, 2, Value::array(hosts))?;
-    if weights {
+    hosts.set(req, Untyped(Value::array(list)))?;
+    if with_weights {
         let mut list = PhpArray::new(req)?;
         for weight in found.weights {
             list.append(req, Value::int(weight))?;
         }
-        assign_ref(req, 3, Value::array(list))?;
+        weights.set(req, Untyped(Value::array(list)))?;
     }
-    Ok(Value::bool(found.found))
+    Ok(found.found)
 }
 
 /// `E_WARNING`, `Z/Zend/zend_errors.h:24`.
 const E_WARNING: i32 = 2;
-
-/// `PHP_DNS_A`, `Z/ext/standard/php_dns.h:60`.
-const DNS_A: i64 = 0x0000_0001;
-/// `PHP_DNS_NS`, `Z/ext/standard/php_dns.h:61`.
-const DNS_NS: i64 = 0x0000_0002;
-/// `PHP_DNS_CNAME`, `Z/ext/standard/php_dns.h:62`.
-const DNS_CNAME: i64 = 0x0000_0010;
-/// `PHP_DNS_SOA`, `Z/ext/standard/php_dns.h:63`.
-const DNS_SOA: i64 = 0x0000_0020;
-/// `PHP_DNS_PTR`, `Z/ext/standard/php_dns.h:64`.
-const DNS_PTR: i64 = 0x0000_0800;
-/// `PHP_DNS_HINFO`, `Z/ext/standard/php_dns.h:65`.
-const DNS_HINFO: i64 = 0x0000_1000;
-/// `PHP_DNS_CAA`, `Z/ext/standard/php_dns.h:67`.
-const DNS_CAA: i64 = 0x0000_2000;
-/// `PHP_DNS_MX`, `Z/ext/standard/php_dns.h:69`.
-const DNS_MX: i64 = 0x0000_4000;
-/// `PHP_DNS_TXT`, `Z/ext/standard/php_dns.h:70`.
-const DNS_TXT: i64 = 0x0000_8000;
-/// `PHP_DNS_A6`, `Z/ext/standard/php_dns.h:71`.
-const DNS_A6: i64 = 0x0100_0000;
-/// `PHP_DNS_SRV`, `Z/ext/standard/php_dns.h:72`.
-const DNS_SRV: i64 = 0x0200_0000;
-/// `PHP_DNS_NAPTR`, `Z/ext/standard/php_dns.h:73`.
-const DNS_NAPTR: i64 = 0x0400_0000;
-/// `PHP_DNS_AAAA`, `Z/ext/standard/php_dns.h:74`.
-const DNS_AAAA: i64 = 0x0800_0000;
-/// `PHP_DNS_ANY`, `Z/ext/standard/php_dns.h:75`.
-const DNS_ANY: i64 = 0x1000_0000;
-/// `PHP_DNS_ALL`, `Z/ext/standard/php_dns.h:82`.
-const DNS_ALL: i64 = DNS_A
-    | DNS_NS
-    | DNS_CNAME
-    | DNS_SOA
-    | DNS_PTR
-    | DNS_HINFO
-    | DNS_CAA
-    | DNS_MX
-    | DNS_TXT
-    | DNS_A6
-    | DNS_SRV
-    | DNS_NAPTR
-    | DNS_AAAA;
-
-/// The `DNS_*` constants in the order `Z/ext/standard/basic_functions.stub.php:383`
-/// declares them, which is the order php registers them.
-const DNS_CONSTANTS: [(&str, i64); 15] = [
-    ("DNS_A", DNS_A),
-    ("DNS_NS", DNS_NS),
-    ("DNS_CNAME", DNS_CNAME),
-    ("DNS_SOA", DNS_SOA),
-    ("DNS_PTR", DNS_PTR),
-    ("DNS_HINFO", DNS_HINFO),
-    ("DNS_CAA", DNS_CAA),
-    ("DNS_MX", DNS_MX),
-    ("DNS_TXT", DNS_TXT),
-    ("DNS_SRV", DNS_SRV),
-    ("DNS_NAPTR", DNS_NAPTR),
-    ("DNS_AAAA", DNS_AAAA),
-    ("DNS_A6", DNS_A6),
-    ("DNS_ANY", DNS_ANY),
-    ("DNS_ALL", DNS_ALL),
-];
 
 /// `PHP_DNS_NUM_TYPES`, `Z/ext/standard/php_dns.h:81`.
 const PHP_DNS_NUM_TYPES: i32 = 13;
@@ -1079,7 +1042,7 @@ fn type_of_step(ty: i32, type_param: i64) -> i64 {
 /// as `zend_try_array_init` does before the type is checked, and assigns
 /// [`DnsRecords::authns`] and [`DnsRecords::addtl`] to them after, also
 /// when the return value is `false`.
-fn dns_get_record(
+fn query_records(
     hostname: &CStr,
     type_param: i64,
     authns: bool,
@@ -1275,7 +1238,7 @@ impl Query<'_> {
 /// `PHP_FUNCTION(dns_check_record)`, `Z/ext/standard/dns.c:367`, and its
 /// alias `checkdnsrr`, after parsing: `rectype` is `None` where the second
 /// value was not passed.
-fn dns_check_record(hostname: &CStr, rectype: Option<&[u8]>) -> Result<bool, DnsError> {
+fn check_record(hostname: &CStr, rectype: Option<&[u8]>) -> Result<bool, DnsError> {
     if hostname.is_empty() {
         return Err(DnsError::EmptyHostname);
     }
@@ -1333,7 +1296,7 @@ struct MxHosts {
 /// passed) to an empty array before calling, as `zend_try_array_init`
 /// does, and assigns the lists after, also when [`MxHosts::found`] is
 /// `false`: php keeps the hosts it added before a parse failure.
-fn dns_get_mx(hostname: &CStr, weights: bool) -> MxHosts {
+fn query_mx(hostname: &CStr, weights: bool) -> MxHosts {
     let mut out = MxHosts::default();
     let Some(handle) = ffi::DnsHandle::open() else {
         return out;
@@ -1398,7 +1361,7 @@ fn mx_list(ans: &Answer, weights: bool, out: &mut MxHosts) -> bool {
 
 /// `PHP_FUNCTION(gethostname)`, `Z/ext/standard/dns.c:125`: the name, or
 /// the warning of a `false`.
-fn gethostname() -> Result<Vec<u8>, Warning> {
+fn lookup_hostname() -> Result<Vec<u8>, Warning> {
     ffi::gethostname(HOST_NAME_MAX + 1).map_err(|(errno, text)| {
         let mut w = format!("Unable to fetch host [{errno}]: ").into_bytes();
         w.extend_from_slice(&text);
@@ -1408,7 +1371,7 @@ fn gethostname() -> Result<Vec<u8>, Warning> {
 
 /// `PHP_FUNCTION(gethostbyaddr)`, `Z/ext/standard/dns.c:146`: the name, or
 /// the warning of a `false`.
-fn gethostbyaddr(ip: &CStr) -> Result<Vec<u8>, Warning> {
+fn lookup_addr(ip: &CStr) -> Result<Vec<u8>, Warning> {
     php_gethostbyaddr(ip).ok_or_else(|| {
         (
             E_WARNING,
@@ -1431,7 +1394,7 @@ fn php_gethostbyaddr(ip: &CStr) -> Option<Vec<u8>> {
 
 /// `PHP_FUNCTION(gethostbyname)`, `Z/ext/standard/dns.c:219`: the string it
 /// gives, and the warning raised before it, if any.
-fn gethostbyname(hostname: &CStr) -> (Vec<u8>, Option<Warning>) {
+fn lookup_name(hostname: &CStr) -> (Vec<u8>, Option<Warning>) {
     let bytes = hostname.to_bytes();
     if bytes.len() > MAXFQDNLEN {
         // name too long, protect from CVE-2015-0235
@@ -1466,7 +1429,7 @@ fn php_gethostbyname(name: &CStr) -> Vec<u8> {
 /// `PHP_FUNCTION(gethostbynamel)`, `Z/ext/standard/dns.c:245`: the list,
 /// `None` for `false`, and the warning raised, if any. As in
 /// [`php_gethostbyname`], the `inet_ntop` warning cannot happen.
-fn gethostbynamel(hostname: &CStr) -> (Option<Vec<Vec<u8>>>, Option<Warning>) {
+fn lookup_names(hostname: &CStr) -> (Option<Vec<Vec<u8>>>, Option<Warning>) {
     if hostname.to_bytes().len() > MAXFQDNLEN {
         // name too long, protect from CVE-2015-0235
         return (None, Some(too_long()));

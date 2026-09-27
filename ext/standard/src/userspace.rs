@@ -7,16 +7,15 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::Raw;
+use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
-use php_ext::decl::{ConstDecl, FunctionDecl};
+use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Thrown, arg_type_error};
 use php_ext::request::Request;
-use php_ext::values::Value;
+use php_ext::values::PhpString;
 
 use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::optional_long;
-use crate::{argument_count_between, constant, string_argument};
 
 /// The constants of `userspace.stub.php` and `file.stub.php` a wrapper's
 /// methods are handed or answer with.
@@ -49,32 +48,31 @@ use crate::{argument_count_between, constant, string_argument};
 /// int(4)
 /// int(6)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    vec![
-        constant(b"STREAM_USE_PATH", 1),
-        constant(b"STREAM_IGNORE_URL", 2),
-        constant(b"STREAM_REPORT_ERRORS", 8),
-        constant(b"STREAM_MUST_SEEK", 16),
-        constant(b"STREAM_URL_STAT_LINK", 1),
-        constant(b"STREAM_URL_STAT_QUIET", 2),
-        constant(b"STREAM_MKDIR_RECURSIVE", 1),
-        constant(b"STREAM_IS_URL", 1),
-        constant(b"STREAM_OPTION_BLOCKING", 1),
-        constant(b"STREAM_OPTION_READ_TIMEOUT", 4),
-        constant(b"STREAM_OPTION_READ_BUFFER", 2),
-        constant(b"STREAM_OPTION_WRITE_BUFFER", 3),
-        constant(b"STREAM_BUFFER_NONE", 0),
-        constant(b"STREAM_BUFFER_LINE", 1),
-        constant(b"STREAM_BUFFER_FULL", 2),
-        constant(b"STREAM_CAST_AS_STREAM", 0),
-        constant(b"STREAM_CAST_FOR_SELECT", 3),
-        constant(b"STREAM_META_TOUCH", 1),
-        constant(b"STREAM_META_OWNER", 3),
-        constant(b"STREAM_META_OWNER_NAME", 2),
-        constant(b"STREAM_META_GROUP", 5),
-        constant(b"STREAM_META_GROUP_NAME", 4),
-        constant(b"STREAM_META_ACCESS", 6),
-    ]
+#[php_const]
+pub(crate) mod constants {
+    pub(crate) const STREAM_USE_PATH: i64 = 1;
+    pub(crate) const STREAM_IGNORE_URL: i64 = 2;
+    pub(crate) const STREAM_REPORT_ERRORS: i64 = 8;
+    pub(crate) const STREAM_MUST_SEEK: i64 = 16;
+    pub(crate) const STREAM_URL_STAT_LINK: i64 = 1;
+    pub(crate) const STREAM_URL_STAT_QUIET: i64 = 2;
+    pub(crate) const STREAM_MKDIR_RECURSIVE: i64 = 1;
+    pub(crate) const STREAM_IS_URL: i64 = 1;
+    pub(crate) const STREAM_OPTION_BLOCKING: i64 = 1;
+    pub(crate) const STREAM_OPTION_READ_TIMEOUT: i64 = 4;
+    pub(crate) const STREAM_OPTION_READ_BUFFER: i64 = 2;
+    pub(crate) const STREAM_OPTION_WRITE_BUFFER: i64 = 3;
+    pub(crate) const STREAM_BUFFER_NONE: i64 = 0;
+    pub(crate) const STREAM_BUFFER_LINE: i64 = 1;
+    pub(crate) const STREAM_BUFFER_FULL: i64 = 2;
+    pub(crate) const STREAM_CAST_AS_STREAM: i64 = 0;
+    pub(crate) const STREAM_CAST_FOR_SELECT: i64 = 3;
+    pub(crate) const STREAM_META_TOUCH: i64 = 1;
+    pub(crate) const STREAM_META_OWNER: i64 = 3;
+    pub(crate) const STREAM_META_OWNER_NAME: i64 = 2;
+    pub(crate) const STREAM_META_GROUP: i64 = 5;
+    pub(crate) const STREAM_META_GROUP_NAME: i64 = 4;
+    pub(crate) const STREAM_META_ACCESS: i64 = 6;
 }
 
 /// The four natives, as `basic_functions.stub.php` declares them.
@@ -118,22 +116,10 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (
-            stub("stream_wrapper_register(string $protocol, string $class, int $flags = 0): bool"),
-            stream_wrapper_register as Entry,
-        ),
-        (
-            stub("stream_register_wrapper(string $protocol, string $class, int $flags = 0): bool"),
-            stream_wrapper_register,
-        ),
-        (
-            stub("stream_wrapper_unregister(string $protocol): bool"),
-            stream_wrapper_unregister,
-        ),
-        (
-            stub("stream_wrapper_restore(string $protocol): bool"),
-            stream_wrapper_restore,
-        ),
+        stream_wrapper_register::declared(),
+        stream_register_wrapper::declared(),
+        stream_wrapper_unregister::declared(),
+        stream_wrapper_restore::declared(),
     ]
 }
 
@@ -194,10 +180,16 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// bool(false)
 /// string(78) "fopen(bare://x): Failed to open stream: "Bare::stream_open" is not implemented"
 /// ```
-fn stream_wrapper_register(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let protocol = string_argument(req, 1)?.as_bytes().to_vec();
-    let name = string_argument(req, 2)?.as_bytes().to_vec();
+#[php_function(aliases(stream_register_wrapper))]
+fn stream_wrapper_register(
+    req: &mut Request,
+    protocol: PhpString,
+    class: PhpString,
+    #[php(default = 0)] flags: Raw<i64>,
+) -> Result<bool, Thrown> {
+    let protocol = protocol.as_bytes().to_vec();
+    let name = class.as_bytes().to_vec();
+    // `Z_PARAM_CLASS` looks the class up before `$flags` is held.
     let Some(class) = lookup_class(req, &name)? else {
         let text = format!(
             "be a valid class name, {} given",
@@ -205,8 +197,8 @@ fn stream_wrapper_register(req: &mut Request) -> Result<Value, Thrown> {
         );
         return Err(arg_type_error(req, 2, &text));
     };
-    let flags = optional_long(req, 3, 0)?;
-    Ok(Value::bool(req.wrapper_register(&protocol, class, flags)))
+    let flags = flags.hold(req)?;
+    Ok(req.wrapper_register(&protocol, class, flags))
 }
 
 /// `stream_wrapper_unregister(string $protocol): bool`,
@@ -229,10 +221,9 @@ fn stream_wrapper_register(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn stream_wrapper_unregister(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let protocol = string_argument(req, 1)?.as_bytes().to_vec();
-    Ok(Value::bool(req.wrapper_unregister(&protocol)))
+#[php_function]
+fn stream_wrapper_unregister(req: &mut Request, protocol: PhpString) -> bool {
+    req.wrapper_unregister(protocol.as_bytes())
 }
 
 /// `stream_wrapper_restore(string $protocol): bool`,
@@ -255,8 +246,7 @@ fn stream_wrapper_unregister(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn stream_wrapper_restore(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let protocol = string_argument(req, 1)?.as_bytes().to_vec();
-    Ok(Value::bool(req.wrapper_restore(&protocol)))
+#[php_function]
+fn stream_wrapper_restore(req: &mut Request, protocol: PhpString) -> bool {
+    req.wrapper_restore(protocol.as_bytes())
 }

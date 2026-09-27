@@ -59,18 +59,6 @@ pub(super) fn optional_string(
     }
 }
 
-/// `Z_PARAM_LONG_OR_NULL`: `None` for `null` or no argument.
-pub(super) fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i64>, Thrown> {
-    match given(req, position) {
-        Some(value) if !matches!(value.deref().as_ref(), ValueRef::Null) => {
-            let coerced =
-                coerce_param(req, &value, &Type::Nullable(Box::new(Type::Int)), position)?;
-            Ok(coerced.as_int())
-        }
-        _ => Ok(None),
-    }
-}
-
 /// `Z_PARAM_STR_OR_NULL`: `None` for `null` or no argument.
 pub(super) fn nullable_string(
     req: &mut Request,
@@ -98,20 +86,6 @@ pub(super) fn array_argument(req: &mut Request, position: u32) -> Result<PhpArra
         Some(array) => Ok(*array),
         None => PhpArray::new(req),
     }
-}
-
-/// `Z_PARAM_ARRAY_HT_OR_NULL`: `None` for `null` or no argument.
-pub(super) fn nullable_array(req: &mut Request, position: u32) -> Result<Option<PhpArray>, Thrown> {
-    let Some(value) = given(req, position) else {
-        return Ok(None);
-    };
-    let coerced = coerce_param(
-        req,
-        &value,
-        &Type::Nullable(Box::new(Type::Array)),
-        position,
-    )?;
-    Ok(coerced.as_array().copied())
 }
 
 /// One side of a `Z_PARAM_ARRAY_HT_OR_*` union.
@@ -167,11 +141,6 @@ pub(super) fn array_or_long(
 /// A new string of `bytes` as the return.
 pub(super) fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
     Ok(Value::string(PhpString::new(req, bytes)?))
-}
-
-/// A count as php's `zend_long`.
-pub(super) fn long_of(n: usize) -> Value {
-    Value::int(i64::try_from(n).unwrap_or(i64::MAX))
 }
 
 /// `ZEND_TRY_ASSIGN_REF_*` on the argument at `position`: `value`

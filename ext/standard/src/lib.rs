@@ -120,7 +120,7 @@ pub use var::{Serializer, Unserializer};
 /// declare `PHPAPI` for `spl_directory.c`, which calls them directly
 /// rather than through the function table (ADR-0004; design §4.10).
 pub use csv::fgetcsv as php_fgetcsv;
-pub use dir::glob::php_glob;
+pub use dir::php_glob::php_glob;
 pub use file::{php_fputcsv, php_fstat};
 pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
@@ -219,7 +219,6 @@ fn core_natives() -> Vec<(FunctionDecl, output::Entry)> {
 /// }
 /// ```
 pub fn extension() -> Extension {
-    let directory = dir::directory_class();
     let builder = ExtensionBuilder::default()
         .functions(core_natives())
         .functions(string_natives())
@@ -254,17 +253,18 @@ pub fn extension() -> Extension {
             string::STR_PAD_BOTH::declared(),
         ])
         .constants(array::constants())
-        .constants(file::constants())
+        .constants(file::constants::declared())
         .constants(file_constants())
         .constants(math::constants())
         .constants_with::<ImageHandler>(image::link_constants)
         .classes(math::classes())
         .classes(var::classes())
-        .classes(user_filters::classes())
+        .class::<user_filters::php_user_filter>()
+        .class::<user_filters::StreamBucket>()
         .ini(var::ini())
         .ini(sockets::ini())
         .dependencies(dependencies())
-        .class_with(directory.0, directory.1, directory.2)
+        .class::<dir::Directory>()
         .classes(vec![assert::assertion_error_class()])
         .ini(assert::ini())
         .ini(browscap::ini())
@@ -465,18 +465,16 @@ fn file_constants() -> Vec<ConstDecl> {
         url::constants::declared(),
         html::constants::declared(),
         basic_functions::constants(),
-        dir::constants(),
-        streamsfuncs::constants(),
+        dir::constants::declared(),
         crypt::constants::declared(),
         password::constants::declared(),
         assert::constants(),
         syslog::constants(),
         image::constants(),
-        dns::constants(),
+        dns::constants::declared(),
         info::constants(),
-        sockets::constants(),
-        user_filters::constants(),
-        userspace::constants(),
+        user_filters::constants::declared(),
+        userspace::constants::declared(),
     ]
     .into_iter()
     .flatten()

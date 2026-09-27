@@ -8,17 +8,16 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::{Raw, Union};
+use php_ext::attr::php_function;
 use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::{ClassKind, EnumBacking, FunctionDecl};
 use php_ext::raising::{Thrown, arg_type_error, fatal, throw, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::argument_count_between;
 use crate::output::Entry;
-use crate::stub::stub;
 use crate::url::{PHP_QUERY_RFC3986, url_encode};
-use crate::zpp::{nullable_array, nullable_string, optional_long, optional_string, string_value};
 
 /// The four, in the stub's order.
 ///
@@ -51,24 +50,10 @@ use crate::zpp::{nullable_array, nullable_string, optional_long, optional_string
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (
-            stub(
-                "http_build_query(object|array $data, string $numeric_prefix = \"\", ?string $arg_separator = null, int $encoding_type = PHP_QUERY_RFC1738): string",
-            ),
-            http_build_query as Entry,
-        ),
-        (
-            stub("http_get_last_response_headers(): ?array"),
-            http_get_last_response_headers,
-        ),
-        (
-            stub("http_clear_last_response_headers(): void"),
-            http_clear_last_response_headers,
-        ),
-        (
-            stub("request_parse_body(?array $options = null): array"),
-            request_parse_body,
-        ),
+        http_build_query::declared(),
+        http_get_last_response_headers::declared(),
+        http_clear_last_response_headers::declared(),
+        request_parse_body::declared(),
     ]
 }
 
@@ -147,9 +132,12 @@ impl PostType {
 /// RequestParseBodyException: Request does not provide a content type
 /// RequestParseBodyException: Request does not provide a content type
 /// ```
-fn request_parse_body(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    if let Some(options) = nullable_array(req, 1)? {
+#[php_function]
+fn request_parse_body(
+    req: &mut Request,
+    #[php(default = null)] options: Option<PhpArray>,
+) -> Result<PhpArray, Thrown> {
+    if let Some(options) = options {
         body_limits(req, options)?;
     }
     let headers = req.request_headers()?;
@@ -483,12 +471,15 @@ fn object_rows(req: &mut Request, object: PhpObject) -> Result<Vec<(KeyText, Val
 /// string(32) "o%5Bpub%5D=1&o%5Barr%5D%5Bx%5D=4"
 /// http_build_query(): Argument #1 ($data) must be of type array, string given
 /// ```
-fn http_build_query(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 4)?;
-    let data = req.argument(1).unwrap_or_default().deref();
-    let prefix = optional_string(req, 2)?;
-    let separator = nullable_string(req, 3)?;
-    let encoding = optional_long(req, 4, 1)?;
+#[php_function]
+fn http_build_query(
+    req: &mut Request,
+    data: Raw<Union<PhpObject, PhpArray>>,
+    #[php(default = "")] numeric_prefix: PhpString,
+    #[php(default = null)] arg_separator: Option<PhpString>,
+    #[php(default = PHP_QUERY_RFC1738)] encoding_type: i64,
+) -> Result<PhpString, Thrown> {
+    let data = data.value();
     let rows = match data.as_ref() {
         ValueRef::Array(array) => array_rows(*array),
         ValueRef::Object(object) => {
@@ -512,7 +503,7 @@ fn http_build_query(req: &mut Request) -> Result<Value, Thrown> {
             ));
         }
     };
-    let separator: Vec<u8> = match separator {
+    let separator: Vec<u8> = match arg_separator {
         Some(s) => s.as_bytes().to_vec(),
         None => req
             .ini_get(b"arg_separator.output")
@@ -522,11 +513,11 @@ fn http_build_query(req: &mut Request) -> Result<Value, Thrown> {
     let mut query = Query {
         out: Vec::new(),
         separator: &separator,
-        raw: encoding == PHP_QUERY_RFC3986,
+        raw: encoding_type == PHP_QUERY_RFC3986,
     };
-    let num_prefix = prefix.as_ref().map_or(&b""[..], |p| p.as_bytes()).to_vec();
+    let num_prefix = numeric_prefix.as_bytes().to_vec();
     query.hash(req, rows, &num_prefix, None)?;
-    string_value(req, &query.out)
+    PhpString::new(req, &query.out)
 }
 
 /// `http_get_last_response_headers(): ?array`: the headers the http
@@ -538,9 +529,9 @@ fn http_build_query(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// NULL
 /// ```
-fn http_get_last_response_headers(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(Value::null())
+#[php_function]
+fn http_get_last_response_headers() -> Option<PhpArray> {
+    None
 }
 
 /// `http_clear_last_response_headers(): void`: the headers forgotten.
@@ -552,7 +543,5 @@ fn http_get_last_response_headers(req: &mut Request) -> Result<Value, Thrown> {
 /// NULL
 /// NULL
 /// ```
-fn http_clear_last_response_headers(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(Value::null())
-}
+#[php_function]
+fn http_clear_last_response_headers() {}

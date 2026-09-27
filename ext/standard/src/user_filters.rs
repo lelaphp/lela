@@ -4,7 +4,8 @@
 //! `stream_filter_register` and `stream_get_filters`; beside them the
 //! three filter natives of `streamsfuncs.c`, `stream_filter_append`,
 //! `stream_filter_prepend` and `stream_filter_remove`, and the
-//! `PSFS_*` and `STREAM_FILTER_*` constants. The chains are the engine's
+//! `PSFS_*` constants, `file.stub.php`'s `STREAM_FILTER_*` being
+//! `file::constants`. The chains are the engine's
 //! (`main/streams/filter.c`); a user filter is a [`StreamFilter`] of this
 //! crate's over the object its factory made, and a brigade is handed to
 //! `filter()` as a resource of php's `userfilter.bucket brigade` type
@@ -16,28 +17,21 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::{ConstValue, Instance, OrFalse, Passed, Ref, This, Untyped};
+use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{call_method, lookup_class, new_object, write_prop};
-use php_ext::coerce::{is_callable, to_long, value_name};
-use php_ext::decl::{
-    ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl,
-    Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
-};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
+use php_ext::coerce::{is_callable, to_long};
+use php_ext::decl::FunctionDecl;
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
 use php_ext::values::{
     PhpArray, PhpObject, PhpRef, PhpString, Resource, ResourceType, Value, ValueRef,
 };
 
-use crate::file::stream_argument;
+use crate::State;
 use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::optional_long;
-use crate::{State, argument_count_between, constant, declared, parameter, string_argument};
 
-/// `PSFS_*` (`Z/main/streams/php_stream_filter_api.h`).
-const PSFS_ERR_FATAL: i64 = 0;
-const PSFS_FEED_ME: i64 = 1;
-const PSFS_PASS_ON: i64 = 2;
+use constants::{PSFS_ERR_FATAL, PSFS_PASS_ON};
 
 /// What the request keeps for user filters: each name
 /// `stream_filter_register` took with its class's name, and the two
@@ -66,8 +60,8 @@ impl BrigadeCell {
 /// A bucket: its bytes, and the brigade it is on, `bucket->brigade`.
 struct BucketCell(Vec<u8>, Option<Resource>);
 
-/// The constants `user_filters.stub.php` and `file.stub.php` declare
-/// for filters.
+/// The constants `user_filters.stub.php` declares for filters, beside
+/// `file.stub.php`'s `STREAM_FILTER_*` the filter natives take.
 ///
 /// ```php
 /// var_dump(PSFS_PASS_ON, PSFS_FEED_ME, PSFS_ERR_FATAL, PSFS_FLAG_NORMAL, PSFS_FLAG_FLUSH_INC, PSFS_FLAG_FLUSH_CLOSE, STREAM_FILTER_READ, STREAM_FILTER_WRITE, STREAM_FILTER_ALL);
@@ -83,74 +77,15 @@ struct BucketCell(Vec<u8>, Option<Resource>);
 /// int(2)
 /// int(3)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    vec![
-        constant(b"PSFS_PASS_ON", PSFS_PASS_ON),
-        constant(b"PSFS_FEED_ME", PSFS_FEED_ME),
-        constant(b"PSFS_ERR_FATAL", PSFS_ERR_FATAL),
-        constant(b"PSFS_FLAG_NORMAL", 0),
-        constant(b"PSFS_FLAG_FLUSH_INC", 1),
-        constant(b"PSFS_FLAG_FLUSH_CLOSE", 2),
-        constant(b"STREAM_FILTER_READ", 1),
-        constant(b"STREAM_FILTER_WRITE", 2),
-        constant(b"STREAM_FILTER_ALL", 3),
-    ]
-}
-
-/// A public property of the two classes, with its type and default.
-fn property(name: &[u8], ty: Option<Type>, default: Option<ConstExpr>) -> PropertyDecl {
-    PropertyDecl {
-        name: Name(name.into()),
-        visibility: Visibility::Public,
-        set_visibility: None,
-        is_instance: true,
-        is_readonly: false,
-        is_final: false,
-        is_promoted: false,
-        is_virtual: false,
-        ty,
-        default,
-        attributes: Vec::new(),
-        doc_comment: None,
-        hooks: None,
-    }
-}
-
-/// A class of this file as its stub declares it.
-fn class(name: &[u8], is_final: bool, properties: Vec<PropertyDecl>) -> ClassDecl {
-    ClassDecl {
-        name: Name(name.into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags {
-            is_final,
-            ..ClassFlags::default()
-        },
-        parent: None,
-        interfaces: Vec::new(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties,
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    }
-}
-
-/// A public instance method with a tentative return type.
-fn method(function: FunctionDecl) -> MethodDecl {
-    MethodDecl {
-        function,
-        visibility: Visibility::Public,
-        is_instance: true,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: true,
-    }
+#[php_const]
+pub(crate) mod constants {
+    /// `PSFS_*` (`Z/main/streams/php_stream_filter_api.h`).
+    pub(crate) const PSFS_PASS_ON: i64 = 2;
+    pub(crate) const PSFS_FEED_ME: i64 = 1;
+    pub(crate) const PSFS_ERR_FATAL: i64 = 0;
+    pub(crate) const PSFS_FLAG_NORMAL: i64 = 0;
+    pub(crate) const PSFS_FLAG_FLUSH_INC: i64 = 1;
+    pub(crate) const PSFS_FLAG_FLUSH_CLOSE: i64 = 2;
 }
 
 /// `php_user_filter` and `StreamBucket`, as `user_filters.stub.php`
@@ -226,105 +161,82 @@ fn method(function: FunctionDecl) -> MethodDecl {
 ///   }
 /// }
 /// ```
-pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
-    let filter = class(
-        b"php_user_filter",
-        false,
-        vec![
-            property(
-                b"filtername",
-                Some(Type::String),
-                Some(ConstExpr::Str(b"".as_slice().into())),
-            ),
-            property(
-                b"params",
-                Some(Type::Mixed),
-                Some(ConstExpr::Str(b"".as_slice().into())),
-            ),
-            property(b"stream", None, Some(ConstExpr::Null)),
-        ],
-    );
-    let consumed = Parameter {
-        by_ref: true,
-        ..parameter(b"consumed", Type::Mixed)
-    };
-    let methods = vec![
-        (
-            method(declared(
-                b"filter",
-                &[
-                    untyped(b"in"),
-                    untyped(b"out"),
-                    Parameter {
-                        ty: None,
-                        ..consumed
-                    },
-                    parameter(b"closing", Type::Bool),
-                ],
-                Type::Int,
-            )),
-            user_filter_filter as Entry,
-        ),
-        (
-            method(declared(b"onCreate", &[], Type::Bool)),
-            user_filter_on_create,
-        ),
-        (
-            method(declared(b"onClose", &[], Type::Void)),
-            user_filter_on_close,
-        ),
-    ];
-    let bucket = class(
-        b"StreamBucket",
-        true,
-        vec![
-            property(b"bucket", None, Some(ConstExpr::Null)),
-            property(b"data", Some(Type::String), None),
-            property(b"datalen", Some(Type::Int), None),
-            property(b"dataLength", Some(Type::Int), None),
-        ],
-    );
-    vec![(filter, methods), (bucket, Vec::new())]
-}
+///
+/// The three methods a subclass may leave as they are: `filter` holds
+/// `"rrzb"` and answers `PSFS_ERR_FATAL`, `onCreate` answers `true` and
+/// `onClose` nothing.
+///
+/// ```php
+/// $f = new php_user_filter;
+/// $c = 0;
+/// var_dump($f->onCreate(), $f->onClose(), $f->filter(STDIN, STDOUT, $c, false), $c);
+/// try { $f->filter('in', STDOUT, $c, false); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// NULL
+/// int(0)
+/// int(0)
+/// php_user_filter::filter(): Argument #1 ($in) must be of type resource, string given
+/// ```
+#[php_class]
+pub(crate) struct php_user_filter;
 
-/// A parameter with no type.
-fn untyped(name: &[u8]) -> Parameter {
-    Parameter {
-        ty: None,
-        ..parameter(name, Type::Mixed)
+#[php_class]
+impl php_user_filter {
+    #[php(property)]
+    const filtername: PhpString = "";
+    #[php(property)]
+    const params: Value = "";
+    #[php(property)]
+    const stream: Untyped<Value> = ConstValue::Null;
+
+    /// `php_user_filter::filter($in, $out, &$consumed, bool $closing): int`:
+    /// `"rrzb"` held, and `PSFS_ERR_FATAL`, what a filter that does not
+    /// override it answers.
+    #[php(tentative)]
+    fn filter(
+        this: This<Self>,
+        r#in: Resource,
+        out: Resource,
+        consumed: Ref<Untyped<Value>>,
+        closing: bool,
+    ) -> i64 {
+        let _ = (this, r#in, out, consumed, closing);
+        PSFS_ERR_FATAL
+    }
+
+    /// `php_user_filter::onCreate(): bool`: `true`.
+    #[php(tentative)]
+    fn onCreate(this: This<Self>) -> bool {
+        let _ = this;
+        true
+    }
+
+    /// `php_user_filter::onClose(): void`.
+    #[php(tentative)]
+    fn onClose(this: This<Self>) {
+        let _ = this;
     }
 }
 
-/// `php_user_filter::filter($in, $out, &$consumed, bool $closing): int`:
-/// `"rrzb"` held, and `PSFS_ERR_FATAL`, what a filter that does not
-/// override it answers.
-fn user_filter_filter(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 4, 4)?;
-    for position in [1, 2] {
-        let given = req.argument(position).unwrap_or_default().deref();
-        if given.as_resource().is_none() {
-            let name = value_name(req, &given);
-            return Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type resource, {name} given"),
-            ));
-        }
-    }
-    crate::bool_argument(req, 4)?;
-    Ok(Value::int(PSFS_ERR_FATAL))
-}
+/// `final class StreamBucket`, what `stream_bucket_make_writeable` and
+/// `stream_bucket_new` hand a filter: its `userfilter.bucket` resource
+/// and the bytes, whose `data` a filter may rewrite before the bucket is
+/// appended.
+#[php_class(final)]
+pub(crate) struct StreamBucket;
 
-/// `php_user_filter::onCreate(): bool`: `true`.
-fn user_filter_on_create(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(Value::bool(true))
-}
-
-/// `php_user_filter::onClose(): void`.
-fn user_filter_on_close(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(Value::null())
+#[php_class]
+impl StreamBucket {
+    #[php(property)]
+    const bucket: Untyped<Value> = ConstValue::Null;
+    #[php(property)]
+    const data: PhpString;
+    #[php(property)]
+    const datalen: i64;
+    #[php(property)]
+    const dataLength: i64;
 }
 
 /// The natives, as `user_filters.stub.php` and
@@ -406,57 +318,16 @@ fn user_filter_on_close(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let params = || Parameter {
-        default: ParameterDefault::Unshown,
-        ..parameter(b"params", Type::Mixed)
-    };
-    let apply = |name: &[u8]| {
-        declared(
-            name,
-            &[
-                untyped(b"stream"),
-                parameter(b"filter_name", Type::String),
-                Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::long(0)),
-                    ..parameter(b"mode", Type::Int)
-                },
-                params(),
-            ],
-            Type::Mixed,
-        )
-    };
-    let mut prepend = apply(b"stream_filter_prepend");
-    prepend.return_type = None;
-    let mut append = apply(b"stream_filter_append");
-    append.return_type = None;
     vec![
-        (
-            stub("stream_bucket_make_writeable($brigade): ?StreamBucket"),
-            stream_bucket_make_writeable as Entry,
-        ),
-        (
-            stub("stream_bucket_prepend($brigade, StreamBucket $bucket): void"),
-            stream_bucket_prepend,
-        ),
-        (
-            stub("stream_bucket_append($brigade, StreamBucket $bucket): void"),
-            stream_bucket_append,
-        ),
-        (
-            stub("stream_bucket_new($stream, string $buffer): StreamBucket"),
-            stream_bucket_new,
-        ),
-        (stub("stream_get_filters(): array"), stream_get_filters),
-        (
-            stub("stream_filter_register(string $filter_name, string $class): bool"),
-            stream_filter_register,
-        ),
-        (prepend, stream_filter_prepend),
-        (append, stream_filter_append),
-        (
-            stub("stream_filter_remove($stream_filter): bool"),
-            stream_filter_remove,
-        ),
+        stream_bucket_make_writeable::declared(),
+        stream_bucket_prepend::declared(),
+        stream_bucket_append::declared(),
+        stream_bucket_new::declared(),
+        stream_get_filters::declared(),
+        stream_filter_register::declared(),
+        stream_filter_prepend::declared(),
+        stream_filter_append::declared(),
+        stream_filter_remove::declared(),
     ]
 }
 
@@ -669,16 +540,7 @@ fn user_filter_factory(
 
 /// `Z_PARAM_RESOURCE` then `zend_fetch_resource` of a brigade: the
 /// argument as a live `userfilter.bucket brigade`, or php's `TypeError`.
-fn brigade_argument(req: &mut Request, native: &str) -> Result<Resource, Thrown> {
-    let given = req.argument(1).unwrap_or_default().deref();
-    let Some(res) = given.as_resource().copied() else {
-        let name = value_name(req, &given);
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type resource, {name} given"),
-        ));
-    };
+fn brigade_of(req: &mut Request, res: Resource, native: &str) -> Result<Resource, Thrown> {
     let kind = brigade_type(req);
     if res.kind() != Some(kind) {
         let text = format!(
@@ -691,9 +553,12 @@ fn brigade_argument(req: &mut Request, native: &str) -> Result<Resource, Thrown>
 
 /// A `StreamBucket` over a new `userfilter.bucket` resource of `bytes`,
 /// its `data`, `datalen` and `dataLength` the bytes and their count.
-fn bucket_object(req: &mut Request, bytes: Vec<u8>) -> Result<Value, Thrown> {
+fn bucket_object(req: &mut Request, bytes: Vec<u8>) -> Result<Instance<StreamBucket>, Thrown> {
     let Some(class) = lookup_class(req, b"StreamBucket")? else {
-        return Ok(Value::null());
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: a bucket without its StreamBucket class",
+        ));
     };
     let kind = bucket_type(req);
     let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
@@ -704,7 +569,7 @@ fn bucket_object(req: &mut Request, bytes: Vec<u8>) -> Result<Value, Thrown> {
     write_prop(req, &object, b"data", data)?;
     write_prop(req, &object, b"datalen", Value::int(len))?;
     write_prop(req, &object, b"dataLength", Value::int(len))?;
-    Ok(object.as_value())
+    Ok(Instance::of(object))
 }
 
 /// `stream_bucket_make_writeable($brigade): ?StreamBucket`,
@@ -737,41 +602,33 @@ fn bucket_object(req: &mut Request, bytes: Vec<u8>) -> Result<Value, Thrown> {
 /// "
 /// stream_bucket_make_writeable(): supplied resource is not a valid userfilter.bucket brigade resource
 /// ```
-fn stream_bucket_make_writeable(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let res = brigade_argument(req, "stream_bucket_make_writeable")?;
+#[php_function]
+fn stream_bucket_make_writeable(
+    req: &mut Request,
+    brigade: Resource,
+) -> Result<Option<Instance<StreamBucket>>, Thrown> {
+    let res = brigade_of(req, brigade, "stream_bucket_make_writeable")?;
     let head = res.native_mut::<BrigadeCell>(req).and_then(|cell| {
         cell.1.pop_front();
         cell.0.pop_front()
     });
     match head {
-        Some(bytes) => bucket_object(req, bytes),
-        None => Ok(Value::null()),
+        Some(bytes) => bucket_object(req, bytes).map(Some),
+        None => Ok(None),
     }
 }
 
 /// `php_stream_bucket_attach` (`Z/ext/standard/user_filters.c:373`): the
 /// bucket a `StreamBucket` holds, its bytes made the object's `data`,
 /// put at the tail of the brigade or at its head.
-fn bucket_attach(req: &mut Request, native: &str, append: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let brigade = brigade_argument(req, native)?;
-    let given = req.argument(2).unwrap_or_default().deref();
-    let object = match given.as_object().copied() {
-        Some(object)
-            if lookup_class(req, b"StreamBucket")?.is_some_and(|c| object.instance_of(req, c)) =>
-        {
-            object
-        }
-        _ => {
-            let name = value_name(req, &given);
-            return Err(arg_type_error(
-                req,
-                2,
-                &format!("be of type StreamBucket, {name} given"),
-            ));
-        }
-    };
+fn bucket_attach(
+    req: &mut Request,
+    native: &str,
+    (brigade, bucket): (Resource, Instance<StreamBucket>),
+    append: bool,
+) -> Result<(), Thrown> {
+    let brigade = brigade_of(req, brigade, native)?;
+    let object = bucket.object();
     let bucket = object.prop(req, b"bucket").map(|value| value.deref());
     let kind = bucket_type(req);
     let Some(res) = bucket
@@ -820,7 +677,7 @@ fn bucket_attach(req: &mut Request, native: &str, append: bool) -> Result<Value,
     if let Some(cell) = res.native_mut::<BucketCell>(req) {
         cell.1 = Some(brigade);
     }
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `stream_bucket_prepend($brigade, StreamBucket $bucket): void`: the
@@ -850,8 +707,13 @@ fn bucket_attach(req: &mut Request, native: &str, append: bool) -> Result<Value,
 /// string(6) "<ab<cd"
 /// stream_bucket_prepend(): Argument #1 ($brigade) must be of type resource, int given
 /// ```
-fn stream_bucket_prepend(req: &mut Request) -> Result<Value, Thrown> {
-    bucket_attach(req, "stream_bucket_prepend", false)
+#[php_function]
+fn stream_bucket_prepend(
+    req: &mut Request,
+    brigade: Resource,
+    bucket: Instance<StreamBucket>,
+) -> Result<(), Thrown> {
+    bucket_attach(req, "stream_bucket_prepend", (brigade, bucket), false)
 }
 
 /// `stream_bucket_append($brigade, StreamBucket $bucket): void`: the
@@ -882,8 +744,13 @@ fn stream_bucket_prepend(req: &mut Request) -> Result<Value, Thrown> {
 /// int(0)
 /// string(4) "[ab]"
 /// ```
-fn stream_bucket_append(req: &mut Request) -> Result<Value, Thrown> {
-    bucket_attach(req, "stream_bucket_append", true)
+#[php_function]
+fn stream_bucket_append(
+    req: &mut Request,
+    brigade: Resource,
+    bucket: Instance<StreamBucket>,
+) -> Result<(), Thrown> {
+    bucket_attach(req, "stream_bucket_append", (brigade, bucket), true)
 }
 
 /// `stream_bucket_new($stream, string $buffer): StreamBucket`,
@@ -899,11 +766,14 @@ fn stream_bucket_append(req: &mut Request) -> Result<Value, Thrown> {
 /// int(5)
 /// string(17) "userfilter.bucket"
 /// ```
-fn stream_bucket_new(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    stream_argument(req, 1)?;
-    let buffer = string_argument(req, 2)?.as_bytes().to_vec();
-    bucket_object(req, buffer)
+#[php_function]
+fn stream_bucket_new(
+    req: &mut Request,
+    stream: Stream,
+    buffer: PhpString,
+) -> Result<Instance<StreamBucket>, Thrown> {
+    let _ = stream;
+    bucket_object(req, buffer.as_bytes().to_vec())
 }
 
 /// `stream_get_filters(): array`, `PHP_FUNCTION(stream_get_filters)`
@@ -930,14 +800,14 @@ fn stream_bucket_new(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(4) "my.*"
 /// }
 /// ```
-fn stream_get_filters(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+#[php_function]
+fn stream_get_filters(req: &mut Request) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in req.stream_filters() {
         let value = Value::string(PhpString::new(req, &name)?);
         out.append(req, value)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `stream_filter_register(string $filter_name, string $class): bool`,
@@ -964,10 +834,14 @@ fn stream_get_filters(req: &mut Request) -> Result<Value, Thrown> {
 /// stream_filter_register(): Argument #1 ($filter_name) must be a non-empty string
 /// stream_filter_register(): Argument #2 ($class) must be a non-empty string
 /// ```
-fn stream_filter_register(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let name = string_argument(req, 1)?.as_bytes().to_vec();
-    let class = string_argument(req, 2)?.as_bytes().to_vec();
+#[php_function]
+fn stream_filter_register(
+    req: &mut Request,
+    filter_name: PhpString,
+    class: PhpString,
+) -> Result<bool, Thrown> {
+    let name = filter_name.as_bytes().to_vec();
+    let class = class.as_bytes().to_vec();
     if name.is_empty() {
         return Err(arg_value_error(req, 1, "be a non-empty string"));
     }
@@ -976,31 +850,37 @@ fn stream_filter_register(req: &mut Request) -> Result<Value, Thrown> {
     }
     let state = &mut req.state::<State>().user_filters;
     if state.map.iter().any(|(n, _)| *n == name) {
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     state.map.push((name.clone(), class));
     if req.register_filter(&name, user_filter_factory) {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
     req.state::<State>()
         .user_filters
         .map
         .retain(|(n, _)| *n != name);
-    Ok(Value::bool(false))
+    Ok(false)
 }
 
 /// `apply_filter_to_stream` (`Z/ext/standard/streamsfuncs.c:1208`): the
 /// parameters, then the engine's attach.
-fn apply_filter(req: &mut Request, append: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 4)?;
-    let stream = stream_argument(req, 1)?;
-    let name = string_argument(req, 2)?.as_bytes().to_vec();
-    let read_write = optional_long(req, 3, 0)?;
-    let params = crate::zpp::given(req, 4);
-    match stream.add_filter(req, &name, params.as_ref(), read_write, append)? {
-        Some(res) => Ok(res.as_value()),
-        None => Ok(Value::bool(false)),
-    }
+fn apply_filter(
+    req: &mut Request,
+    (stream, name, read_write, params): (Stream, PhpString, i64, Passed<Value>),
+    append: bool,
+) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+    let name = name.as_bytes().to_vec();
+    let params = match params {
+        Passed::Given(params) => Some(params),
+        Passed::Omitted => None,
+    };
+    Ok(Untyped(
+        match stream.add_filter(req, &name, params.as_ref(), read_write, append)? {
+            Some(res) => OrFalse::Value(res),
+            None => OrFalse::False,
+        },
+    ))
 }
 
 /// `stream_filter_prepend($stream, string $filter_name, int $mode = 0,
@@ -1018,8 +898,15 @@ fn apply_filter(req: &mut Request, append: bool) -> Result<Value, Thrown> {
 /// ```expect
 /// string(5) "URYYB"
 /// ```
-fn stream_filter_prepend(req: &mut Request) -> Result<Value, Thrown> {
-    apply_filter(req, false)
+#[php_function]
+fn stream_filter_prepend(
+    req: &mut Request,
+    stream: Stream,
+    filter_name: PhpString,
+    #[php(default = 0)] mode: i64,
+    params: Passed<Value>,
+) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+    apply_filter(req, (stream, filter_name, mode, params), false)
 }
 
 /// `stream_filter_append($stream, string $filter_name, int $mode = 0,
@@ -1052,8 +939,15 @@ fn stream_filter_prepend(req: &mut Request) -> Result<Value, Thrown> {
 /// string(6) "SHOUT
 /// "
 /// ```
-fn stream_filter_append(req: &mut Request) -> Result<Value, Thrown> {
-    apply_filter(req, true)
+#[php_function]
+fn stream_filter_append(
+    req: &mut Request,
+    stream: Stream,
+    filter_name: PhpString,
+    #[php(default = 0)] mode: i64,
+    params: Passed<Value>,
+) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+    apply_filter(req, (stream, filter_name, mode, params), true)
 }
 
 /// `stream_filter_remove($stream_filter): bool`,
@@ -1077,19 +971,10 @@ fn stream_filter_append(req: &mut Request) -> Result<Value, Thrown> {
 /// stream_filter_remove(): supplied resource is not a valid stream filter resource
 /// stream_filter_remove(): supplied resource is not a valid stream filter resource
 /// ```
-fn stream_filter_remove(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    let Some(res) = given.as_resource().copied() else {
-        let name = value_name(req, &given);
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type resource, {name} given"),
-        ));
-    };
-    match req.remove_filter(res)? {
-        Some(removed) => Ok(Value::bool(removed)),
+#[php_function]
+fn stream_filter_remove(req: &mut Request, stream_filter: Resource) -> Result<bool, Thrown> {
+    match req.remove_filter(stream_filter)? {
+        Some(removed) => Ok(removed),
         None => Err(throw(
             req,
             "TypeError",

@@ -10,80 +10,37 @@
 //! `file_get_contents` and `file_put_contents`; then
 //! `stream_get_meta_data`; then the natives over the wrapper operations
 //! past opening, `rmdir`, `umask`, `mkdir`, `rename`, `copy`, `tempnam`,
-//! `tmpfile` and `unlink`. A `$stream` parameter is
+//! `tmpfile` and `unlink`; then the rest of `file.c`'s, `flock` to
+//! `sys_get_temp_dir`. A `$stream` parameter is `abi::Stream`,
 //! `PHP_Z_PARAM_STREAM`: a resource, and one that is an open stream.
+//! `file.stub.php`'s constants are all here, once, in its order.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::{OrFalse, Passed, Path, Ref, Union, Untyped, Variadic};
+use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
-use php_ext::coerce::{coerce_param, to_string, value_name};
-use php_ext::decl::{
-    Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, Name, Parameter,
-    ParameterDefault, Radix, Type,
-};
+use php_ext::coerce::to_string;
+use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::{Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use std::os::unix::ffi::OsStrExt;
 
+use crate::State;
 use crate::output::Entry;
-use crate::streamsfuncs::{NullContext, stream_context};
-use crate::stub::stub;
+use crate::streamsfuncs::{NullContext, context_of};
 use crate::virtual_cwd::MAXPATHLEN;
-use crate::zpp::{
-    array_argument, assign_ref, nullable_long, nullable_string, optional_bool, optional_long,
-    optional_string,
-};
-use crate::{
-    State, argument_count_between, bool_argument, constant, declared, long_argument, parameter,
-    string_argument,
-};
 
-/// `SEEK_SET`, `SEEK_CUR` and `SEEK_END` as `<stdio.h>` has them.
-const SEEK_SET: i64 = 0;
-const SEEK_CUR: i64 = 1;
-const SEEK_END: i64 = 2;
-
-/// `PHP_LOCK_SH`, `PHP_LOCK_EX`, `PHP_LOCK_UN` and `PHP_LOCK_NB`
-/// (`Z/ext/standard/flock_compat.h:46`), what `LOCK_*` are to a program.
-const PHP_LOCK_SH: i64 = 1;
-const PHP_LOCK_EX: i64 = 2;
-const PHP_LOCK_UN: i64 = 3;
-const PHP_LOCK_NB: i64 = 4;
+use constants::{
+    FILE_APPEND, FILE_IGNORE_NEW_LINES, FILE_NO_DEFAULT_CONTEXT, FILE_SKIP_EMPTY_LINES,
+    FILE_USE_INCLUDE_PATH, LOCK_NB, LOCK_UN,
+};
 
 /// `flock(2)`'s `LOCK_EX`, what `file_put_contents` hands
 /// `php_stream_lock` and tests its `$flags` for.
-const LOCK_EX: i64 = 2;
-
-/// `PHP_FILE_*` (`Z/ext/standard/file.h`), the bits of `$flags`.
-const PHP_FILE_USE_INCLUDE_PATH: i64 = 1;
-const PHP_FILE_IGNORE_NEW_LINES: i64 = 2;
-const PHP_FILE_SKIP_EMPTY_LINES: i64 = 4;
-const PHP_FILE_APPEND: i64 = 8;
-const PHP_FILE_NO_DEFAULT_CONTEXT: i64 = 16;
-
-/// `FILE_TEXT` and `FILE_BINARY`, zero and `#[\Deprecated(since: '8.1',
-/// message: 'as the constant has no effect')]` in `file.stub.php`.
-fn deprecated_zero(name: &[u8]) -> ConstDecl {
-    ConstDecl {
-        name: Name(name.into()),
-        value: ConstExpr::long(0),
-        attributes: vec![Attribute {
-            name: Name(b"Deprecated".as_slice().into()),
-            arguments: vec![
-                AttributeArgument {
-                    name: Some(Name(b"since".as_slice().into())),
-                    value: ConstExpr::Str(b"8.1".as_slice().into()),
-                },
-                AttributeArgument {
-                    name: Some(Name(b"message".as_slice().into())),
-                    value: ConstExpr::Str(b"as the constant has no effect".as_slice().into()),
-                },
-            ],
-        }],
-    }
-}
+const FLOCK_EX: i64 = 2;
 
 /// The constants `file.stub.php` declares that the natives here read,
 /// in its order, the two 8.1 deprecated among them.
@@ -116,27 +73,168 @@ fn deprecated_zero(name: &[u8]) -> ConstDecl {
 /// int(0)
 /// int(0)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    vec![
-        constant(b"SEEK_SET", SEEK_SET),
-        constant(b"SEEK_CUR", SEEK_CUR),
-        constant(b"SEEK_END", SEEK_END),
-        constant(b"LOCK_SH", PHP_LOCK_SH),
-        constant(b"LOCK_EX", PHP_LOCK_EX),
-        constant(b"LOCK_UN", PHP_LOCK_UN),
-        constant(b"LOCK_NB", PHP_LOCK_NB),
-        constant(b"FILE_USE_INCLUDE_PATH", PHP_FILE_USE_INCLUDE_PATH),
-        constant(b"FILE_IGNORE_NEW_LINES", PHP_FILE_IGNORE_NEW_LINES),
-        constant(b"FILE_SKIP_EMPTY_LINES", PHP_FILE_SKIP_EMPTY_LINES),
-        constant(b"FILE_APPEND", PHP_FILE_APPEND),
-        constant(b"FILE_NO_DEFAULT_CONTEXT", PHP_FILE_NO_DEFAULT_CONTEXT),
-        deprecated_zero(b"FILE_TEXT"),
-        deprecated_zero(b"FILE_BINARY"),
-        constant(b"FNM_NOESCAPE", FNM_NOESCAPE),
-        constant(b"FNM_PATHNAME", FNM_PATHNAME),
-        constant(b"FNM_PERIOD", FNM_PERIOD),
-        constant(b"FNM_CASEFOLD", FNM_CASEFOLD),
-    ]
+///
+/// The `STREAM_*` constants the streams natives read or hand back,
+/// with this host's values where the stub takes a header's.
+///
+/// ```php
+/// var_dump(STREAM_NOTIFY_CONNECT, STREAM_NOTIFY_RESOLVE, STREAM_NOTIFY_SEVERITY_ERR, STREAM_FILTER_ALL, STREAM_CLIENT_CONNECT, STREAM_CRYPTO_METHOD_ANY_CLIENT, STREAM_CRYPTO_METHOD_TLSv1_3_SERVER, STREAM_CRYPTO_PROTO_TLSv1_2, STREAM_SHUT_RDWR, STREAM_PF_INET6, STREAM_PF_UNIX, STREAM_IPPROTO_RAW, STREAM_SOCK_SEQPACKET, STREAM_SOCK_RDM, STREAM_PEEK, STREAM_OOB, STREAM_SERVER_BIND, STREAM_SERVER_LISTEN);
+/// ```
+/// ```expect
+/// int(2)
+/// int(1)
+/// int(2)
+/// int(3)
+/// int(4)
+/// int(127)
+/// int(64)
+/// int(32)
+/// int(2)
+/// int(30)
+/// int(1)
+/// int(255)
+/// int(5)
+/// int(4)
+/// int(2)
+/// int(1)
+/// int(4)
+/// int(8)
+/// ```
+///
+/// The socket constants, with the values this host's `<sys/socket.h>`
+/// and php's headers give them, and `default_socket_timeout`.
+///
+/// ```php
+/// var_dump(STREAM_CLIENT_PERSISTENT, STREAM_CLIENT_ASYNC_CONNECT, STREAM_CLIENT_CONNECT, STREAM_CRYPTO_METHOD_ANY_CLIENT, STREAM_CRYPTO_METHOD_TLS_CLIENT, STREAM_CRYPTO_METHOD_TLS_SERVER, STREAM_CRYPTO_PROTO_TLSv1_3, STREAM_SHUT_RD, STREAM_SHUT_WR, STREAM_SHUT_RDWR, STREAM_PF_INET, STREAM_PF_INET6, STREAM_PF_UNIX, STREAM_IPPROTO_IP, STREAM_IPPROTO_TCP, STREAM_IPPROTO_UDP, STREAM_IPPROTO_ICMP, STREAM_IPPROTO_RAW, STREAM_SOCK_STREAM, STREAM_SOCK_DGRAM, STREAM_SOCK_RAW, STREAM_SOCK_SEQPACKET, STREAM_SOCK_RDM, STREAM_PEEK, STREAM_OOB, STREAM_SERVER_BIND, STREAM_SERVER_LISTEN, ini_get('default_socket_timeout'));
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// int(4)
+/// int(127)
+/// int(121)
+/// int(120)
+/// int(64)
+/// int(0)
+/// int(1)
+/// int(2)
+/// int(2)
+/// int(30)
+/// int(1)
+/// int(0)
+/// int(6)
+/// int(17)
+/// int(1)
+/// int(255)
+/// int(1)
+/// int(2)
+/// int(3)
+/// int(5)
+/// int(4)
+/// int(2)
+/// int(1)
+/// int(4)
+/// int(8)
+/// string(2) "60"
+/// ```
+#[php_const]
+pub(crate) mod constants {
+    /// `SEEK_SET`, `SEEK_CUR` and `SEEK_END` as `<stdio.h>` has them.
+    pub(crate) const SEEK_SET: i64 = 0;
+    pub(crate) const SEEK_CUR: i64 = 1;
+    pub(crate) const SEEK_END: i64 = 2;
+    /// `PHP_LOCK_SH`, `PHP_LOCK_EX`, `LOCK_UN` and `LOCK_NB`
+    /// (`Z/ext/standard/flock_compat.h:46`), what `LOCK_*` are to a program.
+    pub(crate) const LOCK_SH: i64 = 1;
+    pub(crate) const LOCK_EX: i64 = 2;
+    pub(crate) const LOCK_UN: i64 = 3;
+    pub(crate) const LOCK_NB: i64 = 4;
+    /// `PHP_STREAM_NOTIFY_*` and `PHP_STREAM_NOTIFY_SEVERITY_*`
+    /// (`Z/main/streams/php_stream_context.h`), a notifier's codes.
+    pub(crate) const STREAM_NOTIFY_CONNECT: i64 = 2;
+    pub(crate) const STREAM_NOTIFY_AUTH_REQUIRED: i64 = 3;
+    pub(crate) const STREAM_NOTIFY_AUTH_RESULT: i64 = 10;
+    pub(crate) const STREAM_NOTIFY_MIME_TYPE_IS: i64 = 4;
+    pub(crate) const STREAM_NOTIFY_FILE_SIZE_IS: i64 = 5;
+    pub(crate) const STREAM_NOTIFY_REDIRECTED: i64 = 6;
+    pub(crate) const STREAM_NOTIFY_PROGRESS: i64 = 7;
+    pub(crate) const STREAM_NOTIFY_FAILURE: i64 = 9;
+    pub(crate) const STREAM_NOTIFY_COMPLETED: i64 = 8;
+    pub(crate) const STREAM_NOTIFY_RESOLVE: i64 = 1;
+    pub(crate) const STREAM_NOTIFY_SEVERITY_INFO: i64 = 0;
+    pub(crate) const STREAM_NOTIFY_SEVERITY_WARN: i64 = 1;
+    pub(crate) const STREAM_NOTIFY_SEVERITY_ERR: i64 = 2;
+    /// `PHP_STREAM_FILTER_*` (`Z/main/streams/php_stream_filter_api.h`),
+    /// the chains `stream_filter_append` and `_prepend` name.
+    pub(crate) const STREAM_FILTER_READ: i64 = 1;
+    pub(crate) const STREAM_FILTER_WRITE: i64 = 2;
+    pub(crate) const STREAM_FILTER_ALL: i64 = 3;
+    /// `PHP_STREAM_CLIENT_*` and `STREAM_XPORT_*` (`Z/main/php_streams.h`,
+    /// `Z/main/streams/php_stream_transport.h`): what `$flags` holds.
+    pub(crate) const STREAM_CLIENT_PERSISTENT: i64 = 1;
+    pub(crate) const STREAM_CLIENT_ASYNC_CONNECT: i64 = 2;
+    pub(crate) const STREAM_CLIENT_CONNECT: i64 = 4;
+    pub(crate) const STREAM_CRYPTO_METHOD_ANY_CLIENT: i64 = 127;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv2_CLIENT: i64 = 3;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv3_CLIENT: i64 = 5;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv23_CLIENT: i64 = 57;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLS_CLIENT: i64 = 121;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_0_CLIENT: i64 = 9;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT: i64 = 17;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT: i64 = 33;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT: i64 = 65;
+    pub(crate) const STREAM_CRYPTO_METHOD_ANY_SERVER: i64 = 126;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv2_SERVER: i64 = 2;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv3_SERVER: i64 = 4;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv23_SERVER: i64 = 120;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLS_SERVER: i64 = 120;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_0_SERVER: i64 = 8;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_1_SERVER: i64 = 16;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_2_SERVER: i64 = 32;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_3_SERVER: i64 = 64;
+    pub(crate) const STREAM_CRYPTO_PROTO_SSLv3: i64 = 4;
+    pub(crate) const STREAM_CRYPTO_PROTO_TLSv1_0: i64 = 8;
+    pub(crate) const STREAM_CRYPTO_PROTO_TLSv1_1: i64 = 16;
+    pub(crate) const STREAM_CRYPTO_PROTO_TLSv1_2: i64 = 32;
+    pub(crate) const STREAM_CRYPTO_PROTO_TLSv1_3: i64 = 64;
+    /// `STREAM_SHUT_*`, what `stream_socket_shutdown` takes.
+    pub(crate) const STREAM_SHUT_RD: i64 = 0;
+    pub(crate) const STREAM_SHUT_WR: i64 = 1;
+    pub(crate) const STREAM_SHUT_RDWR: i64 = 2;
+    pub(crate) const STREAM_PF_INET: i64 = 2;
+    pub(crate) const STREAM_PF_INET6: i64 = 30;
+    pub(crate) const STREAM_PF_UNIX: i64 = 1;
+    pub(crate) const STREAM_IPPROTO_IP: i64 = 0;
+    pub(crate) const STREAM_IPPROTO_TCP: i64 = 6;
+    pub(crate) const STREAM_IPPROTO_UDP: i64 = 17;
+    pub(crate) const STREAM_IPPROTO_ICMP: i64 = 1;
+    pub(crate) const STREAM_IPPROTO_RAW: i64 = 255;
+    pub(crate) const STREAM_SOCK_STREAM: i64 = 1;
+    pub(crate) const STREAM_SOCK_DGRAM: i64 = 2;
+    pub(crate) const STREAM_SOCK_RAW: i64 = 3;
+    pub(crate) const STREAM_SOCK_SEQPACKET: i64 = 5;
+    pub(crate) const STREAM_SOCK_RDM: i64 = 4;
+    pub(crate) const STREAM_PEEK: i64 = 2;
+    pub(crate) const STREAM_OOB: i64 = 1;
+    pub(crate) const STREAM_SERVER_BIND: i64 = 4;
+    pub(crate) const STREAM_SERVER_LISTEN: i64 = 8;
+    /// `PHP_FILE_*` (`Z/ext/standard/file.h`), the bits of `$flags`.
+    pub(crate) const FILE_USE_INCLUDE_PATH: i64 = 1;
+    pub(crate) const FILE_IGNORE_NEW_LINES: i64 = 2;
+    pub(crate) const FILE_SKIP_EMPTY_LINES: i64 = 4;
+    pub(crate) const FILE_APPEND: i64 = 8;
+    pub(crate) const FILE_NO_DEFAULT_CONTEXT: i64 = 16;
+    #[php(deprecated(since = "8.1", message = "as the constant has no effect"))]
+    pub(crate) const FILE_TEXT: i64 = 0;
+    #[php(deprecated(since = "8.1", message = "as the constant has no effect"))]
+    pub(crate) const FILE_BINARY: i64 = 0;
+    /// `FNM_NOESCAPE`, `FNM_PATHNAME`, `FNM_PERIOD` and `FNM_CASEFOLD` as
+    /// this host's `<fnmatch.h>` has them, what `fnmatch`'s `$flags` hands
+    /// `fnmatch(3)` unchanged.
+    pub(crate) const FNM_NOESCAPE: i64 = 1;
+    pub(crate) const FNM_PATHNAME: i64 = 2;
+    pub(crate) const FNM_PERIOD: i64 = 4;
+    pub(crate) const FNM_CASEFOLD: i64 = 16;
 }
 
 /// The natives declared here, with the untyped `$stream` the stub
@@ -176,267 +274,139 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 ///   - Return [ int|false ]
 /// }
 /// ```
+///
+/// The rest of `file.c`'s natives, as the stub declares them. The
+/// witness leaves out `fputcsv` and `fgetcsv`, whose defaults `"\""`
+/// and `"\\"` the engine's Reflection prints with their escapes undone.
+///
+/// ```php
+/// foreach (['flock', 'get_meta_tags', 'readfile', 'fscanf', 'fpassthru', 'fsync', 'fdatasync', 'realpath', 'fnmatch', 'sys_get_temp_dir'] as $f) echo new ReflectionFunction($f);
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function flock ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> $stream ]
+///     Parameter #1 [ <required> int $operation ]
+///     Parameter #2 [ <optional> &$would_block = null ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function get_meta_tags ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $filename ]
+///     Parameter #1 [ <optional> bool $use_include_path = false ]
+///   }
+///   - Return [ array|false ]
+/// }
+/// Function [ <internal:standard> function readfile ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $filename ]
+///     Parameter #1 [ <optional> bool $use_include_path = false ]
+///     Parameter #2 [ <optional> $context = null ]
+///   }
+///   - Return [ int|false ]
+/// }
+/// Function [ <internal:standard> function fscanf ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> $stream ]
+///     Parameter #1 [ <required> string $format ]
+///     Parameter #2 [ <optional> mixed &...$vars ]
+///   }
+///   - Return [ array|int|false|null ]
+/// }
+/// Function [ <internal:standard> function fpassthru ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> $stream ]
+///   }
+///   - Return [ int ]
+/// }
+/// Function [ <internal:standard> function fsync ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> $stream ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function fdatasync ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> $stream ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function realpath ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $path ]
+///   }
+///   - Return [ string|false ]
+/// }
+/// Function [ <internal:standard> function fnmatch ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $pattern ]
+///     Parameter #1 [ <required> string $filename ]
+///     Parameter #2 [ <optional> int $flags = 0 ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function sys_get_temp_dir ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ string ]
+/// }
+/// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let fwrite_decl = |name: &[u8]| {
-        declared(
-            name,
-            &[
-                stream_parameter(),
-                parameter(b"data", Type::String),
-                Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::Null),
-                    ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
-                },
-            ],
-            Type::Union(vec![Type::Int, Type::False]),
-        )
-    };
-    let mut natives = dir_natives();
-    natives.extend(read_natives());
-    natives.extend(vec![
-        (
-            declared(
-                b"ftruncate",
-                &[stream_parameter(), parameter(b"size", Type::Int)],
-                Type::Bool,
-            ),
-            ftruncate as Entry,
-        ),
-        (
-            declared(
-                b"fstat",
-                &[stream_parameter()],
-                Type::Union(vec![Type::Array, Type::False]),
-            ),
-            fstat,
-        ),
-        (
-            declared(
-                b"fseek",
-                &[
-                    stream_parameter(),
-                    parameter(b"offset", Type::Int),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
-                            b"SEEK_SET".as_slice().into(),
-                        ))),
-                        ..parameter(b"whence", Type::Int)
-                    },
-                ],
-                Type::Int,
-            ),
-            fseek,
-        ),
-        (
-            declared(
-                b"ftell",
-                &[stream_parameter()],
-                Type::Union(vec![Type::Int, Type::False]),
-            ),
-            ftell,
-        ),
-        (
-            declared(b"fflush", &[stream_parameter()], Type::Bool),
-            fflush,
-        ),
-        (fwrite_decl(b"fwrite"), fwrite),
-        (fwrite_decl(b"fputs"), fwrite),
-    ]);
-    natives.extend(contents_natives());
-    natives.extend(path_natives());
-    natives.extend(rest_natives());
-    natives
-}
-
-/// The untyped `$stream` the stub declares.
-fn stream_parameter() -> Parameter {
-    Parameter {
-        ty: None,
-        ..parameter(b"stream", Type::Mixed)
-    }
-}
-
-/// An untyped parameter defaulting to `null`, the stub's `$context` and
-/// `$dir_handle`.
-pub(super) fn untyped_null(name: &[u8]) -> Parameter {
-    Parameter {
-        ty: None,
-        default: ParameterDefault::Expr(ConstExpr::Null),
-        ..parameter(name, Type::Mixed)
-    }
-}
-
-/// `string|false`.
-fn string_or_false() -> Type {
-    Type::Union(vec![Type::String, Type::False])
-}
-
-/// `file.c`'s from `rewind` to `fopen`, in the stub's order.
-fn read_natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (
-            declared(b"rewind", &[stream_parameter()], Type::Bool),
-            rewind as Entry,
-        ),
-        (
-            declared(b"fclose", &[stream_parameter()], Type::Bool),
-            fclose,
-        ),
-        (declared(b"feof", &[stream_parameter()], Type::Bool), feof),
-        (
-            declared(b"fgetc", &[stream_parameter()], string_or_false()),
-            fgetc,
-        ),
-        (
-            declared(
-                b"fgets",
-                &[
-                    stream_parameter(),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Null),
-                        ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
-                    },
-                ],
-                string_or_false(),
-            ),
-            fgets,
-        ),
-        (
-            declared(
-                b"fread",
-                &[stream_parameter(), parameter(b"length", Type::Int)],
-                string_or_false(),
-            ),
-            fread,
-        ),
-        (
-            FunctionDecl {
-                return_type: None,
-                ..declared(
-                    b"fopen",
-                    &[
-                        parameter(b"filename", Type::String),
-                        parameter(b"mode", Type::String),
-                        Parameter {
-                            default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                            ..parameter(b"use_include_path", Type::Bool)
-                        },
-                        untyped_null(b"context"),
-                    ],
-                    Type::Mixed,
-                )
-            },
-            fopen,
-        ),
+        opendir::declared(),
+        closedir::declared(),
+        rewinddir::declared(),
+        readdir::declared(),
+        rewind::declared(),
+        fclose::declared(),
+        feof::declared(),
+        fgetc::declared(),
+        fgets::declared(),
+        fread::declared(),
+        fopen::declared(),
+        ftruncate::declared(),
+        fstat::declared(),
+        fseek::declared(),
+        ftell::declared(),
+        fflush::declared(),
+        fwrite::declared(),
+        fputs::declared(),
+        file_get_contents::declared(),
+        file_put_contents::declared(),
+        stream_get_meta_data::declared(),
+        rmdir::declared(),
+        umask::declared(),
+        mkdir::declared(),
+        rename::declared(),
+        copy::declared(),
+        tempnam::declared(),
+        tmpfile::declared(),
+        unlink::declared(),
+        flock::declared(),
+        get_meta_tags::declared(),
+        readfile::declared(),
+        fscanf::declared(),
+        fpassthru::declared(),
+        file::declared(),
+        fsync::declared(),
+        fdatasync::declared(),
+        fputcsv::declared(),
+        fgetcsv::declared(),
+        realpath::declared(),
+        fnmatch::declared(),
+        sys_get_temp_dir::declared(),
     ]
-}
-
-/// `dir.c`'s four over a directory stream, in the stub's order.
-fn dir_natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            FunctionDecl {
-                return_type: None,
-                ..declared(
-                    b"opendir",
-                    &[
-                        parameter(b"directory", Type::String),
-                        untyped_null(b"context"),
-                    ],
-                    Type::Mixed,
-                )
-            },
-            opendir as Entry,
-        ),
-        (
-            declared(b"closedir", &[untyped_null(b"dir_handle")], Type::Void),
-            closedir,
-        ),
-        (
-            declared(b"rewinddir", &[untyped_null(b"dir_handle")], Type::Void),
-            rewinddir,
-        ),
-        (
-            declared(
-                b"readdir",
-                &[untyped_null(b"dir_handle")],
-                string_or_false(),
-            ),
-            readdir,
-        ),
-    ]
-}
-
-/// `file_get_contents` and `file_put_contents`, the last of `file.c`'s
-/// here, and `stream_get_meta_data`.
-fn contents_natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            declared(
-                b"file_get_contents",
-                &[
-                    parameter(b"filename", Type::String),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                        ..parameter(b"use_include_path", Type::Bool)
-                    },
-                    untyped_null(b"context"),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::long(0)),
-                        ..parameter(b"offset", Type::Int)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Null),
-                        ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
-                    },
-                ],
-                string_or_false(),
-            ),
-            file_get_contents as Entry,
-        ),
-        (
-            declared(
-                b"file_put_contents",
-                &[
-                    parameter(b"filename", Type::String),
-                    parameter(b"data", Type::Mixed),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::long(0)),
-                        ..parameter(b"flags", Type::Int)
-                    },
-                    untyped_null(b"context"),
-                ],
-                Type::Union(vec![Type::Int, Type::False]),
-            ),
-            file_put_contents,
-        ),
-        (
-            declared(b"stream_get_meta_data", &[stream_parameter()], Type::Array),
-            stream_get_meta_data,
-        ),
-    ]
-}
-
-/// `PHP_Z_PARAM_STREAM` (`Z/main/php_streams.h:322`) over
-/// `php_stream_zend_parse_arg_into_stream`: the argument at `position`
-/// as the stream it names; a resource of any other type, a closed one
-/// included, is php's `must be an open stream resource`, and anything
-/// that is not a resource is the parser's own `must be of type
-/// resource, %s given`, no null deprecation and no coercion either
-/// way.
-pub(super) fn stream_argument(req: &mut Request, position: u32) -> Result<Stream, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let given = given.deref();
-    if let ValueRef::Resource(_) = given.as_ref() {
-        return Stream::from_value(req, &given)
-            .ok_or_else(|| arg_type_error(req, position, "be an open stream resource"));
-    }
-    let name = value_name(req, &given);
-    Err(arg_type_error(
-        req,
-        position,
-        &format!("be of type resource, {name} given"),
-    ))
 }
 
 /// `PHP_Z_PARAM_STREAM_OR_NULL` then
@@ -446,24 +416,8 @@ pub(super) fn stream_argument(req: &mut Request, position: u32) -> Result<Stream
 /// then the directory `opendir` opened last, or php's `No resource
 /// supplied` where there is none; a stream that is no directory is php's
 /// `must be a valid Directory resource`.
-fn dir_argument(req: &mut Request) -> Result<Stream, Thrown> {
-    let given = req.argument(1).unwrap_or_default().deref();
-    let stream = match given.as_ref() {
-        ValueRef::Null | ValueRef::Undef => None,
-        ValueRef::Resource(_) => Some(
-            Stream::from_value(req, &given)
-                .ok_or_else(|| arg_type_error(req, 1, "be an open stream resource"))?,
-        ),
-        _ => {
-            let name = value_name(req, &given);
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!("be of type resource or null, {name} given"),
-            ));
-        }
-    };
-    let stream = if let Some(stream) = stream {
+fn dir_stream(req: &mut Request, given: Option<Stream>) -> Result<Stream, Thrown> {
+    let stream = if let Some(stream) = given {
         stream
     } else {
         docref(
@@ -535,16 +489,19 @@ pub(super) fn set_default_dir(req: &mut Request, stream: Option<Stream>) {
 /// bool(false)
 /// bool(false)
 /// ```
-fn opendir(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let directory = path_argument(req, 1)?;
-    context_argument(req, 2)?;
-    let context = stream_context(req, 2, NullContext::Default)?;
+#[php_function]
+fn opendir(
+    req: &mut Request,
+    directory: Path,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+    let Path(directory) = directory;
+    let context = context_of(req, context, NullContext::Default)?;
     let Some(dir) = req.with_stream_ctx(context, |req| req.open_dir(directory.as_bytes()))? else {
-        return Ok(Value::bool(false));
+        return Ok(Untyped(OrFalse::False));
     };
     set_default_dir(req, Some(dir));
-    Ok(dir.as_value())
+    Ok(Untyped(OrFalse::Value(dir.resource())))
 }
 
 /// `closedir($dir_handle = null): void`, `PHP_FUNCTION(closedir)`
@@ -576,9 +533,12 @@ fn opendir(req: &mut Request) -> Result<Value, Thrown> {
 /// Deprecated: closedir(): Passing null is deprecated, instead the last opened directory stream should be provided in %s on line 7
 /// No resource supplied
 /// ```
-fn closedir(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let dir = dir_argument(req)?;
+#[php_function]
+fn closedir(
+    req: &mut Request,
+    #[php(default = null)] dir_handle: Option<Stream>,
+) -> Result<(), Thrown> {
+    let dir = dir_stream(req, dir_handle)?;
     let res = dir.resource();
     dir.close(req);
     let is_default = req
@@ -588,7 +548,7 @@ fn closedir(req: &mut Request) -> Result<Value, Thrown> {
     if is_default {
         set_default_dir(req, None);
     }
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `rewinddir($dir_handle = null): void`, `PHP_FUNCTION(rewinddir)`
@@ -605,11 +565,14 @@ fn closedir(req: &mut Request) -> Result<Value, Thrown> {
 /// NULL
 /// bool(true)
 /// ```
-fn rewinddir(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let dir = dir_argument(req)?;
+#[php_function]
+fn rewinddir(
+    req: &mut Request,
+    #[php(default = null)] dir_handle: Option<Stream>,
+) -> Result<(), Thrown> {
+    let dir = dir_stream(req, dir_handle)?;
     dir.seek(req, 0, Whence::Set);
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `readdir($dir_handle = null): string|false`, `PHP_FUNCTION(readdir)`
@@ -645,12 +608,13 @@ fn rewinddir(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// readdir(): Argument #1 ($dir_handle) must be a valid Directory resource
 /// ```
-fn readdir(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let dir = dir_argument(req)?;
-    Ok(dir
-        .read_dir(req)?
-        .map_or_else(|| Value::bool(false), Value::string))
+#[php_function]
+fn readdir(
+    req: &mut Request,
+    #[php(default = null)] dir_handle: Option<Stream>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let dir = dir_stream(req, dir_handle)?;
+    Ok(dir.read_dir(req)?.map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `rewind($stream): bool`, `PHP_FUNCTION(rewind)`
@@ -677,10 +641,9 @@ fn readdir(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// string(2) "cd"
 /// ```
-fn rewind(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
-    Ok(Value::bool(stream.seek(req, 0, Whence::Set)))
+#[php_function]
+fn rewind(req: &mut Request, stream: Stream) -> bool {
+    stream.seek(req, 0, Whence::Set)
 }
 
 /// `fclose($stream): bool`, `PHP_FUNCTION(fclose)`
@@ -728,9 +691,8 @@ fn rewind(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// resource(%d) of type (Unknown)
 /// ```
-fn fclose(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
+#[php_function]
+fn fclose(req: &mut Request, stream: Stream) -> bool {
     // `PHP_STREAM_FLAG_NO_FCLOSE`: a directory, and a stream an operation
     // holds while it serves PHP code on it, which `close` refuses.
     if stream.is_dir(req) || !stream.close(req) {
@@ -739,9 +701,9 @@ fn fclose(req: &mut Request) -> Result<Value, Thrown> {
             Level::Warning,
             "cannot close the provided stream, as it must not be manually closed",
         );
-        return Ok(Value::bool(false));
+        return false;
     }
-    Ok(Value::bool(true))
+    true
 }
 
 /// `feof($stream): bool`, `PHP_FUNCTION(feof)`
@@ -786,10 +748,9 @@ fn fclose(req: &mut Request) -> Result<Value, Thrown> {
 /// string(2) "lo"
 /// bool(true)
 /// ```
-fn feof(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
-    Ok(Value::bool(stream.eof(req)))
+#[php_function]
+fn feof(req: &mut Request, stream: Stream) -> bool {
+    stream.eof(req)
 }
 
 /// `fgetc($stream): string|false`, `PHP_FUNCTION(fgetc)`
@@ -814,16 +775,15 @@ fn feof(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// fgetc(): Argument #1 ($stream) must be of type resource, string given
 /// ```
-fn fgetc(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
+#[php_function]
+fn fgetc(req: &mut Request, stream: Stream) -> Result<OrFalse<PhpString>, Thrown> {
     Ok(match stream.read(req, 1)? {
-        Some(byte) if !byte.is_empty() => Value::string(byte),
+        Some(byte) if !byte.is_empty() => OrFalse::Value(byte),
         Some(empty) => {
             req.release(Value::string(empty));
-            Value::bool(false)
+            OrFalse::False
         }
-        None => Value::bool(false),
+        None => OrFalse::False,
     })
 }
 
@@ -881,24 +841,20 @@ fn fgetc(req: &mut Request) -> Result<Value, Thrown> {
 ///
 /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate %d bytes) in %s on line 4
 /// ```
-fn fgets(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let stream = stream_argument(req, 1)?;
-    let maxlen = match req.argument(2) {
-        Some(given) if !matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) => {
-            let coerced = coerce_param(req, &given, &Type::Nullable(Box::new(Type::Int)), 2)?;
-            coerced.as_int()
-        }
-        _ => None,
-    };
-    let maxlen = match maxlen {
+#[php_function]
+fn fgets(
+    req: &mut Request,
+    stream: Stream,
+    #[php(default = null)] length: Option<i64>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let maxlen = match length {
         Some(len) if len <= 0 => return Err(arg_value_error(req, 2, "be greater than 0")),
         Some(len) => Some(usize::try_from(len).unwrap_or(usize::MAX)),
         None => None,
     };
     Ok(stream
         .get_line(req, maxlen)?
-        .map_or_else(|| Value::bool(false), Value::string))
+        .map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `fread($stream, int $length): string|false`, `PHP_FUNCTION(fread)`
@@ -941,17 +897,15 @@ fn fgets(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect exit=255
 /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate %d bytes) in %s on line 2
 /// ```
-fn fread(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let stream = stream_argument(req, 1)?;
-    let len = long_argument(req, 2)?;
-    if len <= 0 {
+#[php_function]
+fn fread(req: &mut Request, stream: Stream, length: i64) -> Result<OrFalse<PhpString>, Thrown> {
+    if length <= 0 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
-    let len = usize::try_from(len).unwrap_or(usize::MAX);
+    let len = usize::try_from(length).unwrap_or(usize::MAX);
     Ok(stream
         .read(req, len)?
-        .map_or_else(|| Value::bool(false), Value::string))
+        .map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `fopen(string $filename, string $mode, bool $use_include_path = false, $context = null)`,
@@ -1032,24 +986,22 @@ fn fread(req: &mut Request) -> Result<Value, Thrown> {
 /// ```stderr
 /// err
 /// ```
-fn fopen(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 4)?;
-    let filename = string_argument(req, 1)?;
-    if filename.as_bytes().contains(&0) {
-        return Err(arg_value_error(req, 1, "not contain any null bytes"));
-    }
-    let mode = string_argument(req, 2)?;
-    let use_include_path = if req.argument_count() >= 3 {
-        bool_argument(req, 3)?
-    } else {
-        false
-    };
-    context_argument(req, 4)?;
-    let context = stream_context(req, 4, NullContext::Default)?;
+#[php_function]
+fn fopen(
+    req: &mut Request,
+    filename: Path,
+    mode: PhpString,
+    #[php(default = false)] use_include_path: bool,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+    let Path(filename) = filename;
+    let context = context_of(req, context, NullContext::Default)?;
     let opened = req.with_stream_ctx(context, |req| {
         req.open_stream(filename.as_bytes(), mode.as_bytes(), use_include_path)
     })?;
-    Ok(opened.map_or_else(|| Value::bool(false), Stream::as_value))
+    Ok(Untyped(opened.map_or(OrFalse::False, |stream| {
+        OrFalse::Value(stream.resource())
+    })))
 }
 
 /// `ftruncate($stream, int $size): bool`, `PHP_FUNCTION(ftruncate)`
@@ -1086,19 +1038,17 @@ fn fopen(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// ftruncate(): Argument #2 ($size) must be greater than or equal to 0
 /// ```
-fn ftruncate(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let stream = stream_argument(req, 1)?;
-    let size = long_argument(req, 2)?;
+#[php_function]
+fn ftruncate(req: &mut Request, stream: Stream, size: i64) -> Result<bool, Thrown> {
     if size < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
     let size = usize::try_from(size).unwrap_or(usize::MAX);
     let Some(taken) = stream.truncate(req, size) else {
         docref(req, Level::Warning, "Can't truncate this stream!");
-        return Ok(Value::bool(false));
+        return Ok(false);
     };
-    Ok(Value::bool(taken))
+    Ok(taken)
 }
 
 /// The names `php_fstat` gives the thirteen fields after their numbers
@@ -1186,10 +1136,13 @@ const STAT_NAMES: [&[u8]; 13] = [
 /// bool(false)
 /// bool(false)
 /// ```
-fn fstat(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
-    php_fstat(req, stream)
+#[php_function]
+fn fstat(req: &mut Request, stream: Stream) -> Result<OrFalse<PhpArray>, Thrown> {
+    let answer = php_fstat(req, stream)?;
+    Ok(answer
+        .as_array()
+        .copied()
+        .map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `php_fstat(stream, return_value)`, `PHPAPI` in `file.h`
@@ -1286,17 +1239,15 @@ pub fn php_fstat(req: &mut Request, stream: Stream) -> Result<Value, Thrown> {
 /// int(0)
 /// string(1) "1"
 /// ```
-fn fseek(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let stream = stream_argument(req, 1)?;
-    let offset = long_argument(req, 2)?;
-    let whence = if req.argument_count() >= 3 {
-        long_argument(req, 3)?
-    } else {
-        SEEK_SET
-    };
+#[php_function]
+fn fseek(
+    req: &mut Request,
+    stream: Stream,
+    offset: i64,
+    #[php(default = SEEK_SET)] whence: i64,
+) -> i64 {
     let sought = stream.seek(req, offset, Whence::from_int(whence));
-    Ok(Value::int(if sought { 0 } else { -1 }))
+    if sought { 0 } else { -1 }
 }
 
 /// `ftell($stream): int|false`, `PHP_FUNCTION(ftell)`
@@ -1323,15 +1274,14 @@ fn fseek(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn ftell(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
+#[php_function]
+fn ftell(req: &mut Request, stream: Stream) -> OrFalse<i64> {
     let at = stream.tell(req);
-    Ok(if at == -1 {
-        Value::bool(false)
+    if at == -1 {
+        OrFalse::False
     } else {
-        Value::int(at)
-    })
+        OrFalse::Value(at)
+    }
 }
 
 /// `fflush($stream): bool`, `PHP_FUNCTION(fflush)`
@@ -1352,10 +1302,9 @@ fn ftell(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// fflush(): Argument #1 ($stream) must be of type resource, string given
 /// ```
-fn fflush(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
-    Ok(Value::bool(stream.flush(req)))
+#[php_function]
+fn fflush(req: &mut Request, stream: Stream) -> bool {
+    stream.flush(req)
 }
 
 /// `fwrite($stream, string $data, ?int $length = null): int|false`,
@@ -1424,70 +1373,37 @@ fn fflush(req: &mut Request) -> Result<Value, Thrown> {
 /// int(2097152)
 /// int(33152)
 /// ```
-fn fwrite(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let stream = stream_argument(req, 1)?;
-    let data = string_argument(req, 2)?;
+#[php_function(aliases(fputs))]
+fn fwrite(
+    req: &mut Request,
+    stream: Stream,
+    data: PhpString,
+    #[php(default = null)] length: Option<i64>,
+) -> OrFalse<i64> {
     // `Z_PARAM_LONG_OR_NULL`: `null`, given or defaulted, is the whole.
-    let maxlen = match req.argument(3) {
-        Some(given) if !matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) => {
-            let coerced = coerce_param(req, &given, &Type::Nullable(Box::new(Type::Int)), 3)?;
-            coerced.as_int()
-        }
-        _ => None,
-    };
     let bytes = data.as_bytes();
-    let num_bytes = match maxlen {
+    let num_bytes = match length {
         None => bytes.len(),
         Some(n) if n <= 0 => 0,
         Some(n) => usize::try_from(n).unwrap_or(usize::MAX).min(bytes.len()),
     };
     if num_bytes == 0 {
-        return Ok(Value::int(0));
+        return OrFalse::Value(0);
     }
     let wrote = stream.write(req, &bytes[..num_bytes]);
-    Ok(wrote.map_or_else(
-        || Value::bool(false),
-        |n| Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
-    ))
+    wrote.map_or(OrFalse::False, |n| {
+        OrFalse::Value(i64::try_from(n).unwrap_or(i64::MAX))
+    })
 }
 
-/// `flags & PHP_FILE_NO_DEFAULT_CONTEXT`, as `file()` and
+/// `flags & FILE_NO_DEFAULT_CONTEXT`, as `file()` and
 /// `file_put_contents()` hand it to `php_stream_context_from_zval`.
 fn no_default_context(flags: i64) -> NullContext {
-    if flags & PHP_FILE_NO_DEFAULT_CONTEXT == 0 {
+    if flags & FILE_NO_DEFAULT_CONTEXT == 0 {
         NullContext::Default
     } else {
         NullContext::None
     }
-}
-
-/// `Z_PARAM_RESOURCE_OR_NULL` for a `$context`: a resource or `null`,
-/// taken and not read, since no wrapper here reads a `$context`; anything
-/// else is the parser's `TypeError`.
-pub(super) fn context_argument(req: &mut Request, position: u32) -> Result<(), Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    match given.as_ref() {
-        ValueRef::Null | ValueRef::Undef | ValueRef::Resource(_) => Ok(()),
-        _ => {
-            let name = value_name(req, &given);
-            Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type resource or null, {name} given"),
-            ))
-        }
-    }
-}
-
-/// `Z_PARAM_PATH`: the string argument at `position`, with php's
-/// `ValueError` for a null byte in it.
-fn path_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let path = string_argument(req, position)?;
-    if path.as_bytes().contains(&0) {
-        return Err(arg_value_error(req, position, "not contain any null bytes"));
-    }
-    Ok(path)
 }
 
 /// `file_get_contents(string $filename, bool $use_include_path = false, $context = null, int $offset = 0, ?int $length = null): string|false`,
@@ -1540,40 +1456,29 @@ fn path_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> 
 /// bool(true)
 /// string(0) ""
 /// ```
-fn file_get_contents(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 5)?;
-    let filename = path_argument(req, 1)?;
-    let use_include_path = if req.argument_count() >= 2 {
-        bool_argument(req, 2)?
-    } else {
-        false
-    };
-    context_argument(req, 3)?;
-    let offset = if req.argument_count() >= 4 {
-        long_argument(req, 4)?
-    } else {
-        0
-    };
-    let maxlen = match req.argument(5) {
-        Some(given) if !matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) => {
-            let coerced = coerce_param(req, &given, &Type::Nullable(Box::new(Type::Int)), 5)?;
-            coerced.as_int()
-        }
-        _ => None,
-    };
-    let maxlen = match maxlen {
+#[php_function]
+fn file_get_contents(
+    req: &mut Request,
+    filename: Path,
+    #[php(default = false)] use_include_path: bool,
+    #[php(default = null)] context: Option<Resource>,
+    #[php(default = 0)] offset: i64,
+    #[php(default = null)] length: Option<i64>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let Path(filename) = filename;
+    let maxlen = match length {
         Some(len) if len < 0 => {
             return Err(arg_value_error(req, 5, "be greater than or equal to 0"));
         }
         Some(len) => Some(usize::try_from(len).unwrap_or(usize::MAX)),
         None => None,
     };
-    let context = stream_context(req, 3, NullContext::Default)?;
+    let context = context_of(req, context, NullContext::Default)?;
     let Some(stream) = req.with_stream_ctx(context, |req| {
         req.open_stream(filename.as_bytes(), b"rb", use_include_path)
     })?
     else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     if stream.is_stdio(req) {
         let unbuffered = StreamOption::ReadBuffer {
@@ -1591,12 +1496,12 @@ fn file_get_contents(req: &mut Request) -> Result<Value, Thrown> {
                 &format!("Failed to seek to position {offset} in the stream"),
             );
             stream.close(req);
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         }
     }
     let contents = stream.copy_to_mem(req, maxlen)?;
     stream.close(req);
-    Ok(Value::string(contents))
+    Ok(OrFalse::Value(contents))
 }
 
 /// `file_put_contents(string $filename, mixed $data, int $flags = 0, $context = null): int|false`,
@@ -1659,17 +1564,16 @@ fn file_get_contents(req: &mut Request) -> Result<Value, Thrown> {
 /// int(6)
 /// string(6) "aArray"
 /// ```
-fn file_put_contents(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 4)?;
-    let filename = path_argument(req, 1)?;
-    let data = req.argument(2).unwrap_or_default().deref();
-    let flags = if req.argument_count() >= 3 {
-        long_argument(req, 3)?
-    } else {
-        0
-    };
-    context_argument(req, 4)?;
-    let context = stream_context(req, 4, no_default_context(flags))?;
+#[php_function]
+fn file_put_contents(
+    req: &mut Request,
+    filename: Path,
+    data: Value,
+    #[php(default = 0)] flags: i64,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<OrFalse<i64>, Thrown> {
+    let Path(filename) = filename;
+    let context = context_of(req, context, no_default_context(flags))?;
     let source = match data.as_ref() {
         ValueRef::Resource(_) => match Stream::from_value(req, &data) {
             Some(stream) => Some(stream),
@@ -1684,9 +1588,9 @@ fn file_put_contents(req: &mut Request) -> Result<Value, Thrown> {
         _ => None,
     };
     let name = filename.as_bytes();
-    let mode: &[u8] = if flags & PHP_FILE_APPEND != 0 {
+    let mode: &[u8] = if flags & FILE_APPEND != 0 {
         b"ab"
-    } else if flags & LOCK_EX != 0 {
+    } else if flags & FLOCK_EX != 0 {
         let has_scheme = name.windows(3).any(|w| w == b"://");
         if has_scheme && !(name.len() >= 7 && name[..7].eq_ignore_ascii_case(b"file://")) {
             docref(
@@ -1694,26 +1598,26 @@ fn file_put_contents(req: &mut Request) -> Result<Value, Thrown> {
                 Level::Warning,
                 "Exclusive locks may only be set for regular files",
             );
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         }
         b"cb"
     } else {
         b"wb"
     };
-    let use_include_path = flags & PHP_FILE_USE_INCLUDE_PATH != 0;
+    let use_include_path = flags & FILE_USE_INCLUDE_PATH != 0;
     let Some(stream) =
         req.with_stream_ctx(context, |req| req.open_stream(name, mode, use_include_path))?
     else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
-    if flags & LOCK_EX != 0 && !stream.flock(req, LOCK_EX) {
+    if flags & FLOCK_EX != 0 && !stream.flock(req, FLOCK_EX) {
         stream.close(req);
         docref(
             req,
             Level::Warning,
             "Exclusive locks are not supported for this stream",
         );
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     if mode[0] == b'c' {
         stream.truncate(req, 0);
@@ -1721,8 +1625,8 @@ fn file_put_contents(req: &mut Request) -> Result<Value, Thrown> {
     let written = write_data(req, stream, source, &data, name);
     stream.close(req);
     Ok(match written? {
-        Some(n) => Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
-        None => Value::bool(false),
+        Some(n) => OrFalse::Value(i64::try_from(n).unwrap_or(i64::MAX)),
+        None => OrFalse::False,
     })
 }
 
@@ -1963,104 +1867,9 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
 ///   string(12) "php://output"
 /// }
 /// ```
-pub(super) fn stream_get_meta_data(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
-    Ok(Value::array(stream.meta_data(req)?))
-}
-
-/// The natives of `file.c` over the wrapper operations past opening, in
-/// the stub's order: `rmdir`, `umask`, `mkdir`, `rename`, `copy`,
-/// `tempnam`, `tmpfile` and `unlink`.
-fn path_natives() -> Vec<(FunctionDecl, Entry)> {
-    let two_paths = |name: &[u8]| {
-        declared(
-            name,
-            &[
-                parameter(b"from", Type::String),
-                parameter(b"to", Type::String),
-                untyped_null(b"context"),
-            ],
-            Type::Bool,
-        )
-    };
-    vec![
-        (
-            declared(
-                b"rmdir",
-                &[
-                    parameter(b"directory", Type::String),
-                    untyped_null(b"context"),
-                ],
-                Type::Bool,
-            ),
-            rmdir as Entry,
-        ),
-        (
-            declared(
-                b"umask",
-                &[Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::Null),
-                    ..parameter(b"mask", Type::Nullable(Box::new(Type::Int)))
-                }],
-                Type::Int,
-            ),
-            umask,
-        ),
-        (
-            declared(
-                b"mkdir",
-                &[
-                    parameter(b"directory", Type::String),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long {
-                            value: 0o777,
-                            radix: Radix::Octal,
-                        }),
-                        ..parameter(b"permissions", Type::Int)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                        ..parameter(b"recursive", Type::Bool)
-                    },
-                    untyped_null(b"context"),
-                ],
-                Type::Bool,
-            ),
-            mkdir,
-        ),
-        (two_paths(b"rename"), rename),
-        (two_paths(b"copy"), copy),
-        (
-            declared(
-                b"tempnam",
-                &[
-                    parameter(b"directory", Type::String),
-                    parameter(b"prefix", Type::String),
-                ],
-                string_or_false(),
-            ),
-            tempnam,
-        ),
-        (
-            FunctionDecl {
-                return_type: None,
-                ..declared(b"tmpfile", &[], Type::Mixed)
-            },
-            tmpfile,
-        ),
-        (
-            declared(
-                b"unlink",
-                &[
-                    parameter(b"filename", Type::String),
-                    untyped_null(b"context"),
-                ],
-                Type::Bool,
-            ),
-            unlink,
-        ),
-    ]
+#[php_function(aliases(socket_get_status))]
+fn stream_get_meta_data(req: &mut Request, stream: Stream) -> Result<PhpArray, Thrown> {
+    stream.meta_data(req)
 }
 
 /// `rmdir(string $directory, $context = null): bool`,
@@ -2083,14 +1892,17 @@ fn path_natives() -> Vec<(FunctionDecl, Entry)> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn rmdir(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let dir = path_argument(req, 1)?;
-    context_argument(req, 2)?;
-    let context = stream_context(req, 2, NullContext::Default)?;
-    Ok(Value::bool(req.with_stream_ctx(context, |req| {
+#[php_function]
+fn rmdir(
+    req: &mut Request,
+    directory: Path,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<bool, Thrown> {
+    let Path(dir) = directory;
+    let context = context_of(req, context, NullContext::Default)?;
+    req.with_stream_ctx(context, |req| {
         req.wrapper_op(dir.as_bytes(), WrapperOp::Rmdir)
-    })?))
+    })
 }
 
 /// `umask(?int $mask = null): int`, `PHP_FUNCTION(umask)`
@@ -2114,14 +1926,13 @@ fn rmdir(req: &mut Request) -> Result<Value, Thrown> {
 /// int(511)
 /// 40777 100666 100666 40700 100600
 /// ```
-fn umask(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let mask = crate::filestat::nullable_long(req, 1)?;
+#[php_function]
+fn umask(req: &mut Request, #[php(default = null)] mask: Option<i64>) -> i64 {
     let old = req.umask();
     if let Some(mask) = mask {
         req.set_umask(u32::try_from(mask & UMASK_BITS).unwrap_or(0));
     }
-    Ok(Value::int(i64::from(old)))
+    i64::from(old)
 }
 
 /// The bits of a mask `umask(2)` keeps: `ALLPERMS` on macOS, the nine
@@ -2162,22 +1973,21 @@ const UMASK_BITS: i64 = 0o777;
 /// bool(true)
 /// bool(false)
 /// ```
-fn mkdir(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 4)?;
-    let dir = path_argument(req, 1)?;
-    let given = req.argument_count();
-    let mode = if given >= 2 {
-        long_argument(req, 2)?
-    } else {
-        0o777
+#[php_function]
+fn mkdir(
+    req: &mut Request,
+    directory: Path,
+    #[php(default = 0777)] permissions: i64,
+    #[php(default = false)] recursive: bool,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<bool, Thrown> {
+    let Path(dir) = directory;
+    let context = context_of(req, context, NullContext::Default)?;
+    let op = WrapperOp::Mkdir {
+        mode: permissions,
+        recursive,
     };
-    let recursive = given >= 3 && bool_argument(req, 3)?;
-    context_argument(req, 4)?;
-    let context = stream_context(req, 4, NullContext::Default)?;
-    let op = WrapperOp::Mkdir { mode, recursive };
-    Ok(Value::bool(req.with_stream_ctx(context, |req| {
-        req.wrapper_op(dir.as_bytes(), op)
-    })?))
+    req.with_stream_ctx(context, |req| req.wrapper_op(dir.as_bytes(), op))
 }
 
 /// `rename(string $from, string $to, $context = null): bool`,
@@ -2207,16 +2017,17 @@ fn mkdir(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn rename(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let from = path_argument(req, 1)?;
-    let to = path_argument(req, 2)?;
-    context_argument(req, 3)?;
-    let context = stream_context(req, 3, NullContext::Default)?;
+#[php_function]
+fn rename(
+    req: &mut Request,
+    from: Path,
+    to: Path,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<bool, Thrown> {
+    let (Path(from), Path(to)) = (from, to);
+    let context = context_of(req, context, NullContext::Default)?;
     let op = WrapperOp::Rename { to: to.as_bytes() };
-    Ok(Value::bool(req.with_stream_ctx(context, |req| {
-        req.wrapper_op(from.as_bytes(), op)
-    })?))
+    req.with_stream_ctx(context, |req| req.wrapper_op(from.as_bytes(), op))
 }
 
 /// `php_copy_file_ctx` (`Z/ext/standard/file.c:1447`): the source
@@ -2323,16 +2134,19 @@ fn close_stream(req: &mut Request, stream: Stream) {
 /// int(0)
 /// bool(false)
 /// ```
-fn copy(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let source = path_argument(req, 1)?;
-    let target = path_argument(req, 2)?;
-    context_argument(req, 3)?;
-    let context = stream_context(req, 3, NullContext::Default)?;
+#[php_function]
+fn copy(
+    req: &mut Request,
+    from: Path,
+    to: Path,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<bool, Thrown> {
+    let (Path(source), Path(target)) = (from, to);
+    let context = context_of(req, context, NullContext::Default)?;
     let _ = req.plain_path(source.as_bytes());
-    Ok(Value::bool(req.with_stream_ctx(context, |req| {
+    req.with_stream_ctx(context, |req| {
         copy_file(req, source.as_bytes(), target.as_bytes())
-    })?))
+    })
 }
 
 /// `php_basename(s, len, NULL, 0)` (`Z/ext/standard/string.c:1364`)
@@ -2366,16 +2180,14 @@ fn basename(path: &[u8]) -> &[u8] {
 /// bool(true)
 /// int(60)
 /// ```
-fn tempnam(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let dir = path_argument(req, 1)?;
-    let prefix = path_argument(req, 2)?;
+#[php_function]
+fn tempnam(req: &mut Request, directory: Path, prefix: Path) -> Result<OrFalse<PhpString>, Thrown> {
+    let (Path(dir), Path(prefix)) = (directory, prefix);
     let prefix = basename(prefix.as_bytes());
     let prefix = &prefix[..prefix.len().min(63)];
-    match req.temporary_name(dir.as_bytes(), prefix)? {
-        Some(path) => Ok(Value::string(path)),
-        None => Ok(Value::bool(false)),
-    }
+    Ok(req
+        .temporary_name(dir.as_bytes(), prefix)?
+        .map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `tmpfile()`, `PHP_FUNCTION(tmpfile)` (`Z/ext/standard/file.c:705`):
@@ -2394,12 +2206,12 @@ fn tempnam(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn tmpfile(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    match req.tmpfile()? {
-        Some(stream) => Ok(stream.as_value()),
-        None => Ok(Value::bool(false)),
-    }
+#[php_function]
+fn tmpfile(req: &mut Request) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+    Ok(Untyped(match req.tmpfile()? {
+        Some(stream) => OrFalse::Value(stream.resource()),
+        None => OrFalse::False,
+    }))
 }
 
 /// `unlink(string $filename, $context = null): bool`,
@@ -2426,23 +2238,18 @@ fn tmpfile(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn unlink(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let filename = path_argument(req, 1)?;
-    context_argument(req, 2)?;
-    let context = stream_context(req, 2, NullContext::Default)?;
-    Ok(Value::bool(req.with_stream_ctx(context, |req| {
+#[php_function]
+fn unlink(
+    req: &mut Request,
+    filename: Path,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<bool, Thrown> {
+    let Path(filename) = filename;
+    let context = context_of(req, context, NullContext::Default)?;
+    req.with_stream_ctx(context, |req| {
         req.wrapper_op(filename.as_bytes(), WrapperOp::Unlink)
-    })?))
+    })
 }
-
-/// `FNM_NOESCAPE`, `FNM_PATHNAME`, `FNM_PERIOD` and `FNM_CASEFOLD` as
-/// this host's `<fnmatch.h>` has them, what `fnmatch`'s `$flags` hands
-/// `fnmatch(3)` unchanged.
-const FNM_NOESCAPE: i64 = 1;
-const FNM_PATHNAME: i64 = 2;
-const FNM_PERIOD: i64 = 4;
-const FNM_CASEFOLD: i64 = 16;
 
 /// `file(string $filename, int $flags = 0, $context = null): array|false`,
 /// `PHP_FUNCTION(file)` (`Z/ext/standard/file.c:581`): the file read
@@ -2469,31 +2276,30 @@ const FNM_CASEFOLD: i64 = 16;
 /// file(): Argument #2 ($flags) must be a valid flag value
 /// bool(false)
 /// ```
-fn file(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let filename = path_argument(req, 1)?;
-    let flags = if req.argument_count() >= 2 {
-        long_argument(req, 2)?
-    } else {
-        0
-    };
-    context_argument(req, 3)?;
-    let known = PHP_FILE_USE_INCLUDE_PATH
-        | PHP_FILE_IGNORE_NEW_LINES
-        | PHP_FILE_SKIP_EMPTY_LINES
-        | PHP_FILE_NO_DEFAULT_CONTEXT;
+#[php_function]
+fn file(
+    req: &mut Request,
+    filename: Path,
+    #[php(default = 0)] flags: i64,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let Path(filename) = filename;
+    let known = FILE_USE_INCLUDE_PATH
+        | FILE_IGNORE_NEW_LINES
+        | FILE_SKIP_EMPTY_LINES
+        | FILE_NO_DEFAULT_CONTEXT;
     if flags & !known != 0 {
         return Err(arg_value_error(req, 2, "be a valid flag value"));
     }
-    let context = stream_context(req, 3, no_default_context(flags))?;
-    let include_new_line = flags & PHP_FILE_IGNORE_NEW_LINES == 0;
-    let skip_blank_lines = flags & PHP_FILE_SKIP_EMPTY_LINES != 0;
-    let use_include_path = flags & PHP_FILE_USE_INCLUDE_PATH != 0;
+    let context = context_of(req, context, no_default_context(flags))?;
+    let include_new_line = flags & FILE_IGNORE_NEW_LINES == 0;
+    let skip_blank_lines = flags & FILE_SKIP_EMPTY_LINES != 0;
+    let use_include_path = flags & FILE_USE_INCLUDE_PATH != 0;
     let Some(stream) = req.with_stream_ctx(context, |req| {
         req.open_stream(filename.as_bytes(), b"rb", use_include_path)
     })?
     else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let contents = stream.copy_to_mem(req, None)?;
     stream.close(req);
@@ -2521,144 +2327,7 @@ fn file(req: &mut Request) -> Result<Value, Thrown> {
         let v = Value::string(PhpString::new(req, line)?);
         array.append(req, v)?;
     }
-    Ok(Value::array(array))
-}
-
-/// The rest of `file.c`'s natives, as the stub declares them. `popen`
-/// and `pclose` are not among them: a stream over a pipe to a process is
-/// a kind the streams facet does not hand an extension. The witness
-/// leaves out `fputcsv` and `fgetcsv`, whose defaults `"\""` and `"\\"`
-/// the engine's Reflection prints with their escapes undone.
-///
-/// ```php
-/// foreach (['flock', 'get_meta_tags', 'readfile', 'fscanf', 'fpassthru', 'fsync', 'fdatasync', 'realpath', 'fnmatch', 'sys_get_temp_dir'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function flock ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> int $operation ]
-///     Parameter #2 [ <optional> &$would_block = null ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function get_meta_tags ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $filename ]
-///     Parameter #1 [ <optional> bool $use_include_path = false ]
-///   }
-///   - Return [ array|false ]
-/// }
-/// Function [ <internal:standard> function readfile ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $filename ]
-///     Parameter #1 [ <optional> bool $use_include_path = false ]
-///     Parameter #2 [ <optional> $context = null ]
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function fscanf ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> string $format ]
-///     Parameter #2 [ <optional> mixed &...$vars ]
-///   }
-///   - Return [ array|int|false|null ]
-/// }
-/// Function [ <internal:standard> function fpassthru ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $stream ]
-///   }
-///   - Return [ int ]
-/// }
-/// Function [ <internal:standard> function fsync ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $stream ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function fdatasync ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $stream ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function realpath ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $path ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function fnmatch ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $pattern ]
-///     Parameter #1 [ <required> string $filename ]
-///     Parameter #2 [ <optional> int $flags = 0 ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function sys_get_temp_dir ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ string ]
-/// }
-/// ```
-fn rest_natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("flock($stream, int $operation, &$would_block = null): bool"),
-            flock as Entry,
-        ),
-        (
-            stub("get_meta_tags(string $filename, bool $use_include_path = false): array|false"),
-            get_meta_tags,
-        ),
-        (
-            stub(
-                "readfile(string $filename, bool $use_include_path = false, $context = null): int|false",
-            ),
-            readfile,
-        ),
-        (
-            stub("fscanf($stream, string $format, mixed &...$vars): array|int|false|null"),
-            fscanf,
-        ),
-        (stub("fpassthru($stream): int"), fpassthru),
-        (
-            stub("file(string $filename, int $flags = 0, $context = null): array|false"),
-            file,
-        ),
-        (stub("fsync($stream): bool"), fsync),
-        (stub("fdatasync($stream): bool"), fdatasync),
-        (
-            stub(
-                "fputcsv($stream, array $fields, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\", string $eol = \"\\n\"): int|false",
-            ),
-            fputcsv,
-        ),
-        (
-            stub(
-                "fgetcsv($stream, ?int $length = null, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\"): array|false",
-            ),
-            fgetcsv,
-        ),
-        (stub("realpath(string $path): string|false"), realpath),
-        (
-            stub("fnmatch(string $pattern, string $filename, int $flags = 0): bool"),
-            fnmatch,
-        ),
-        (stub("sys_get_temp_dir(): string"), sys_get_temp_dir),
-    ]
+    Ok(OrFalse::Value(array))
 }
 
 /// `flock($stream, int $operation, &$would_block = null): bool`,
@@ -2686,11 +2355,14 @@ fn rest_natives() -> Vec<(FunctionDecl, Entry)> {
 /// bool(false)
 /// flock(): Argument #2 ($operation) must be one of LOCK_SH, LOCK_EX, or LOCK_UN
 /// ```
-fn flock(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let stream = stream_argument(req, 1)?;
-    let operation = long_argument(req, 2)?;
-    let act = operation & PHP_LOCK_UN;
+#[php_function]
+fn flock(
+    req: &mut Request,
+    stream: Stream,
+    operation: i64,
+    #[php(default = null)] would_block: Ref<Untyped<Value>>,
+) -> Result<bool, Thrown> {
+    let act = operation & LOCK_UN;
     if !(1..=3).contains(&act) {
         return Err(arg_value_error(
             req,
@@ -2698,22 +2370,19 @@ fn flock(req: &mut Request) -> Result<Value, Thrown> {
             "be one of LOCK_SH, LOCK_EX, or LOCK_UN",
         ));
     }
-    let would_block = req.argument_count() >= 3;
-    if would_block {
-        assign_ref(req, 3, Value::int(0))?;
-    }
+    would_block.set(req, Untyped(Value::int(0)))?;
     // `flock_values[act - 1]`: `LOCK_SH`, `LOCK_EX` and `LOCK_UN` are
     // `flock(2)`'s 1, 2 and 8, and `LOCK_NB` its 4.
     let lock = [1, 2, 8][usize::try_from(act - 1).unwrap_or(0)];
-    let non_blocking = operation & PHP_LOCK_NB != 0;
+    let non_blocking = operation & LOCK_NB != 0;
     let lock = lock | if non_blocking { 4 } else { 0 };
     if stream.flock(req, lock) {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
-    if would_block && non_blocking && stream.is_stdio(req) {
-        assign_ref(req, 3, Value::int(1))?;
+    if non_blocking && stream.is_stdio(req) {
+        would_block.set(req, Untyped(Value::int(1)))?;
     }
-    Ok(Value::bool(false))
+    Ok(false)
 }
 
 /// `PHP_META_UNSAFE`: the bytes a meta tag's name has replaced by `_`.
@@ -2872,12 +2541,15 @@ impl MetaData {
 /// bool(false)
 /// ```
 #[allow(clippy::too_many_lines)] // one C function, kept whole
-fn get_meta_tags(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let filename = path_argument(req, 1)?;
-    let use_include_path = optional_bool(req, 2, false)?;
+#[php_function]
+fn get_meta_tags(
+    req: &mut Request,
+    filename: Path,
+    #[php(default = false)] use_include_path: bool,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let Path(filename) = filename;
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let mut array = PhpArray::new(req)?;
     let mut md = MetaData {
@@ -2976,7 +2648,7 @@ fn get_meta_tags(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     md.stream.close(req);
-    Ok(Value::array(array))
+    Ok(OrFalse::Value(array))
 }
 
 /// `php_stream_passthru`: what is left of the stream written to the
@@ -3012,21 +2684,24 @@ fn passthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
 /// int(8)
 /// bool(false)
 /// ```
-fn readfile(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let filename = path_argument(req, 1)?;
-    let use_include_path = optional_bool(req, 2, false)?;
-    context_argument(req, 3)?;
-    let context = stream_context(req, 3, NullContext::Default)?;
+#[php_function]
+fn readfile(
+    req: &mut Request,
+    filename: Path,
+    #[php(default = false)] use_include_path: bool,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<OrFalse<i64>, Thrown> {
+    let Path(filename) = filename;
+    let context = context_of(req, context, NullContext::Default)?;
     let Some(stream) = req.with_stream_ctx(context, |req| {
         req.open_stream(filename.as_bytes(), b"rb", use_include_path)
     })?
     else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let size = passthru(req, stream)?;
     stream.close(req);
-    Ok(Value::int(size))
+    Ok(OrFalse::Value(size))
 }
 
 /// `fpassthru($stream): int`, `PHP_FUNCTION(fpassthru)`
@@ -3041,10 +2716,9 @@ fn readfile(req: &mut Request) -> Result<Value, Thrown> {
 /// cdefint(4)
 /// int(0)
 /// ```
-fn fpassthru(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
-    Ok(Value::int(passthru(req, stream)?))
+#[php_function]
+fn fpassthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
+    passthru(req, stream)
 }
 
 /// `fscanf($stream, string $format, mixed &...$vars): array|int|false|null`,
@@ -3076,48 +2750,44 @@ fn fpassthru(req: &mut Request) -> Result<Value, Thrown> {
 /// fscanf(): supplied resource is not a valid File-Handle resource
 /// fscanf(): Argument #1 ($stream) must be of type resource, string given
 /// ```
-fn fscanf(req: &mut Request) -> Result<Value, Thrown> {
-    let given = req.argument_count();
-    if given < 2 {
-        return Err(php_ext::raising::too_few_arguments(
-            req,
-            2,
-            u32::try_from(given).unwrap_or(0),
-        ));
-    }
-    let handle = req.argument(1).unwrap_or_default().deref();
-    if !matches!(handle.as_ref(), ValueRef::Resource(_)) {
-        let name = value_name(req, &handle);
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type resource, {name} given"),
-        ));
-    }
-    let Some(stream) = Stream::from_value(req, &handle) else {
+#[php_function]
+fn fscanf(
+    req: &mut Request,
+    stream: Resource,
+    format: PhpString,
+    vars: Variadic<Ref<Value>>,
+) -> Result<Option<OrFalse<Union<PhpArray, i64>>>, Thrown> {
+    // `php_sscanf_internal` assigns through the call's own arguments from
+    // the third on, `vars` as the frame holds them.
+    let count = vars.0.len();
+    let Some(stream) = Stream::from_value(req, &stream.as_value()) else {
         return Err(throw(
             req,
             "TypeError",
             "fscanf(): supplied resource is not a valid File-Handle resource",
         ));
     };
-    let format = string_argument(req, 2)?;
     let Some(line) = stream.get_line(req, None)? else {
-        return Ok(Value::bool(false));
+        return Ok(Some(OrFalse::False));
     };
-    crate::scanf::php_sscanf_internal(req, line.as_bytes(), format.as_bytes(), 3, given - 2)
+    let scanned =
+        crate::scanf::php_sscanf_internal(req, line.as_bytes(), format.as_bytes(), 3, count)?;
+    Ok(match scanned.as_ref() {
+        ValueRef::Array(array) => Some(OrFalse::Value(Union::A(*array))),
+        ValueRef::Int(n) => Some(OrFalse::Value(Union::B(n))),
+        ValueRef::Bool(false) => Some(OrFalse::False),
+        _ => None,
+    })
 }
 
 /// `php_stream_sync_supported`: the plain files kind, and the host's
 /// standard streams, are the ones with an `fsync(2)`.
-fn sync(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
+fn sync(req: &mut Request, stream: Stream) -> bool {
     if !stream.is_stdio(req) {
         docref(req, Level::Warning, "Can't fsync this stream!");
-        return Ok(Value::bool(false));
+        return false;
     }
-    Ok(Value::bool(stream.flush(req)))
+    stream.flush(req)
 }
 
 /// `fsync($stream): bool`, `PHP_FUNCTION(fsync)`
@@ -3135,8 +2805,9 @@ fn sync(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "x"
 /// bool(false)
 /// ```
-fn fsync(req: &mut Request) -> Result<Value, Thrown> {
-    sync(req)
+#[php_function]
+fn fsync(req: &mut Request, stream: Stream) -> bool {
+    sync(req, stream)
 }
 
 /// `fdatasync($stream): bool`, `PHP_FUNCTION(fdatasync)`
@@ -3151,20 +2822,18 @@ fn fsync(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn fdatasync(req: &mut Request) -> Result<Value, Thrown> {
-    sync(req)
+#[php_function]
+fn fdatasync(req: &mut Request, stream: Stream) -> bool {
+    sync(req, stream)
 }
 
 /// The one-byte `$separator` or `$enclosure` at `position`, or the
 /// default where the call gave none, and php's `ValueError` for any
 /// other length.
-fn one_byte(req: &mut Request, position: u32, default: u8) -> Result<u8, Thrown> {
-    match optional_string(req, position)? {
-        None => Ok(default),
-        Some(s) => match s.as_bytes() {
-            [c] => Ok(*c),
-            _ => Err(arg_value_error(req, position, "be a single character")),
-        },
+fn one_byte(req: &mut Request, given: PhpString, position: u32) -> Result<u8, Thrown> {
+    match given.as_bytes() {
+        [c] => Ok(*c),
+        _ => Err(arg_value_error(req, position, "be a single character")),
     }
 }
 
@@ -3193,20 +2862,29 @@ fn one_byte(req: &mut Request, position: u32, default: u8) -> Result<u8, Thrown>
 /// Deprecated: fputcsv(): the $escape parameter must be provided as its default value will change in %s on line 5
 /// fputcsv(): Argument #3 ($separator) must be a single character
 /// ```
-fn fputcsv(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 6)?;
-    let stream = stream_argument(req, 1)?;
-    let fields = array_argument(req, 2)?;
-    let delimiter = one_byte(req, 3, b',')?;
-    let enclosure = one_byte(req, 4, b'"')?;
-    let escape = crate::csv::escape_argument(req, 5)?;
-    let eol = nullable_string(req, 6)?;
-    let eol = eol.as_ref().map(PhpString::as_bytes);
-    let written = php_fputcsv(req, stream, fields, (delimiter, enclosure, escape), eol)?;
-    Ok(written.map_or_else(
-        || Value::bool(false),
-        |n| Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
-    ))
+#[php_function]
+fn fputcsv(
+    req: &mut Request,
+    stream: Stream,
+    fields: PhpArray,
+    #[php(default = ",")] separator: PhpString,
+    #[php(default = "\"")] enclosure: PhpString,
+    #[php(default = "\\")] escape: Passed<PhpString>,
+    #[php(default = "\n")] eol: PhpString,
+) -> Result<OrFalse<i64>, Thrown> {
+    let delimiter = one_byte(req, separator, 3)?;
+    let enclosure = one_byte(req, enclosure, 4)?;
+    let escape = crate::csv::escape_of(req, escape, 5)?;
+    let written = php_fputcsv(
+        req,
+        stream,
+        fields,
+        (delimiter, enclosure, escape),
+        Some(eol.as_bytes()),
+    )?;
+    Ok(written.map_or(OrFalse::False, |n| {
+        OrFalse::Value(i64::try_from(n).unwrap_or(i64::MAX))
+    }))
 }
 
 /// `php_fputcsv(stream, fields, delimiter, enclosure, escape_char,
@@ -3317,13 +2995,19 @@ pub fn php_fputcsv(
 /// Deprecated: fgetcsv(): the $escape parameter must be provided as its default value will change in %s on line 4
 /// fgetcsv(): Argument #2 ($length) must be between 0 and 9223372036854775806
 /// ```
-fn fgetcsv(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 5)?;
-    let stream = stream_argument(req, 1)?;
-    let len = nullable_long(req, 2)?;
-    let delimiter = one_byte(req, 3, b',')?;
-    let enclosure = one_byte(req, 4, b'"')?;
-    let escape = crate::csv::escape_argument(req, 5)?;
+#[php_function]
+fn fgetcsv(
+    req: &mut Request,
+    stream: Stream,
+    #[php(default = null)] length: Option<i64>,
+    #[php(default = ",")] separator: PhpString,
+    #[php(default = "\"")] enclosure: PhpString,
+    #[php(default = "\\")] escape: Passed<PhpString>,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let len = length;
+    let delimiter = one_byte(req, separator, 3)?;
+    let enclosure = one_byte(req, enclosure, 4)?;
+    let escape = crate::csv::escape_of(req, escape, 5)?;
     let len = match len {
         None | Some(0) => None,
         Some(n) if !(0..=i64::MAX - 1).contains(&n) => {
@@ -3336,7 +3020,7 @@ fn fgetcsv(req: &mut Request) -> Result<Value, Thrown> {
         Some(n) => Some(usize::try_from(n).unwrap_or(usize::MAX).saturating_add(1)),
     };
     let Some(line) = stream.get_line(req, len)? else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let line = line.as_bytes().to_vec();
     let mut failed = None;
@@ -3361,7 +3045,7 @@ fn fgetcsv(req: &mut Request) -> Result<Value, Thrown> {
             }
         }
     }
-    Ok(Value::array(array))
+    Ok(OrFalse::Value(array))
 }
 
 /// `realpath(string $path): string|false`, `PHP_FUNCTION(realpath)`
@@ -3385,9 +3069,9 @@ fn fgetcsv(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// string(0) ""
 /// ```
-fn realpath(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let path = path_argument(req, 1)?;
+#[php_function]
+fn realpath(req: &mut Request, path: Path) -> Result<OrFalse<PhpString>, Thrown> {
+    let Path(path) = path;
     let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
     let written = if path.as_bytes().is_empty() {
         cwd.clone()
@@ -3400,8 +3084,8 @@ fn realpath(req: &mut Request) -> Result<Value, Thrown> {
         &cwd
     };
     match req.virtual_file_ex(cwd, &written, Resolve::RealPath) {
-        Some(resolved) => Ok(Value::string(PhpString::new(req, &resolved)?)),
-        None => Ok(Value::bool(false)),
+        Some(resolved) => Ok(OrFalse::Value(PhpString::new(req, &resolved)?)),
+        None => Ok(OrFalse::False),
     }
 }
 
@@ -3431,30 +3115,29 @@ fn realpath(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn fnmatch(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let pattern = path_argument(req, 1)?;
-    let filename = path_argument(req, 2)?;
-    let flags = optional_long(req, 3, 0)?;
+#[php_function]
+fn fnmatch(
+    req: &mut Request,
+    pattern: Path,
+    filename: Path,
+    #[php(default = 0)] flags: i64,
+) -> bool {
+    let (Path(pattern), Path(filename)) = (pattern, filename);
     if filename.len() >= MAXPATHLEN {
         let text =
             format!("Filename exceeds the maximum allowed length of {MAXPATHLEN} characters");
         docref(req, Level::Warning, &text);
-        return Ok(Value::bool(false));
+        return false;
     }
     if pattern.len() >= MAXPATHLEN {
         let text = format!("Pattern exceeds the maximum allowed length of {MAXPATHLEN} characters");
         docref(req, Level::Warning, &text);
-        return Ok(Value::bool(false));
+        return false;
     }
     // `(int)flags`: the low 32 bits, as C's conversion keeps them.
     #[allow(clippy::cast_possible_truncation)]
     let flags = flags as i32;
-    Ok(Value::bool(crate::ffi::fnmatch(
-        pattern.as_bytes(),
-        filename.as_bytes(),
-        flags,
-    )))
+    crate::ffi::fnmatch(pattern.as_bytes(), filename.as_bytes(), flags)
 }
 
 /// `sys_get_temp_dir(): string`, `PHP_FUNCTION(sys_get_temp_dir)`
@@ -3470,8 +3153,8 @@ fn fnmatch(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "/"
 /// bool(true)
 /// ```
-fn sys_get_temp_dir(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+#[php_function]
+fn sys_get_temp_dir(req: &mut Request) -> Result<PhpString, Thrown> {
     // A `sys_temp_dir` of `/` alone is passed over, as php's two tests
     // pass it over.
     let from_ini = req
@@ -3485,5 +3168,5 @@ fn sys_get_temp_dir(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         b"/tmp".to_vec()
     };
-    Ok(Value::string(PhpString::new(req, &dir)?))
+    PhpString::new(req, &dir)
 }

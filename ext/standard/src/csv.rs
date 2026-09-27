@@ -13,24 +13,13 @@ use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
 
-use crate::string_argument;
-use crate::zpp::given;
-
 /// `PHP_CSV_NO_ESCAPE`: the empty `$escape`.
 pub(super) const NO_ESCAPE: Option<u8> = None;
 
 /// `php_csv_handle_escape_argument(escape_str, arg_num)`: the escape
-/// byte, `None` for the empty string, the 8.4 deprecation and `\` when
-/// the call gave none, and the `ValueError` for more than one byte.
-pub(super) fn escape_argument(req: &mut Request, position: u32) -> Result<Option<u8>, Thrown> {
-    let escape = match given(req, position) {
-        None => Passed::Omitted,
-        Some(_) => Passed::Given(string_argument(req, position)?),
-    };
-    escape_of(req, escape, position)
-}
-
-/// The same over the `$escape` the entry held at `position`.
+/// byte of the `$escape` the entry held at `position`, `None` for the
+/// empty string, the 8.4 deprecation and `\` when the call gave none,
+/// and the `ValueError` for more than one byte.
 pub(super) fn escape_of(
     req: &mut Request,
     escape: Passed<PhpString>,

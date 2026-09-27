@@ -12,7 +12,7 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, StreamWrapper};
 
-use super::glob;
+use super::php_glob;
 
 /// The wrapper, `glob` under its label `glob`, with a directory opener
 /// alone.
@@ -77,9 +77,9 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thro
         prefixed.truncate(crate::virtual_cwd::MAXPATHLEN - 1);
         pattern = prefixed;
     }
-    let matches = match glob::php_glob(&pattern, 0) {
+    let matches = match php_glob::php_glob(&pattern, 0) {
         Ok(matches) => matches,
-        Err(glob::PHP_GLOB_NOMATCH) => Vec::new(),
+        Err(php_glob::PHP_GLOB_NOMATCH) => Vec::new(),
         Err(_) => return Ok(None),
     };
     let entries = matches

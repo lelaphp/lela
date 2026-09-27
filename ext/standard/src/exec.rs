@@ -16,15 +16,17 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, Stdio};
 
-use php_ext::decl::{FunctionDecl, Type};
+use php_ext::abi::{False, OrFalse, Path, Ref, Untyped};
+use php_ext::attr::php_function;
+use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
 use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{assign_ref, given};
-use crate::{argument_count_between, declared, long_argument, parameter, string_argument};
+
+/// An untyped by-reference out-parameter, `&$output = null`.
+type Out = Ref<Untyped<Value>>;
 
 /// The natives, as the stub declares them.
 ///
@@ -88,32 +90,13 @@ use crate::{argument_count_between, declared, long_argument, parameter, string_a
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (
-            stub("exec(string $command, &$output = null, &$result_code = null): string|false"),
-            exec as Entry,
-        ),
-        (
-            stub("system(string $command, &$result_code = null): string|false"),
-            system,
-        ),
-        (
-            stub("passthru(string $command, &$result_code = null): false|null"),
-            passthru,
-        ),
-        (
-            stub("escapeshellcmd(string $command): string"),
-            escapeshellcmd,
-        ),
-        (stub("escapeshellarg(string $arg): string"), escapeshellarg),
-        (
-            declared(
-                b"shell_exec",
-                &[parameter(b"command", Type::String)],
-                Type::Union(vec![Type::String, Type::False, Type::Null]),
-            ),
-            shell_exec,
-        ),
-        (stub("proc_nice(int $priority): bool"), proc_nice),
+        exec::declared(),
+        system::declared(),
+        passthru::declared(),
+        escapeshellcmd::declared(),
+        escapeshellarg::declared(),
+        shell_exec::declared(),
+        proc_nice::declared(),
     ]
 }
 
@@ -156,6 +139,15 @@ fn strip_trailing_whitespace(line: &[u8]) -> &[u8] {
 /// How `php_exec` hands the command's `output` on: `0` keeps only the
 /// last line, `1` writes each line as it comes, `2` gathers the lines
 /// into an array, `3` writes the bytes as they come.
+/// What `php_exec` answers: `false` where the command did not start, and
+/// otherwise the last line, which a raw pass-through leaves out.
+#[derive(Clone, Copy)]
+enum Ran {
+    Failed,
+    Raw,
+    Last(PhpString),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Last,
@@ -174,14 +166,14 @@ fn php_exec(
     mode: Mode,
     command: &[u8],
     mut array: Option<&mut PhpArray>,
-) -> Result<(Value, i64), Thrown> {
+) -> Result<(Ran, i64), Thrown> {
     let Some(mut child) = popen(req, command) else {
         let text = format!("Unable to fork [{}]", String::from_utf8_lossy(command));
         docref(req, Level::Warning, &text);
-        return Ok((Value::bool(false), -1));
+        return Ok((Ran::Failed, -1));
     };
     let Some(pipe) = child.stdout.take() else {
-        return Ok((Value::bool(false), pclose(child)));
+        return Ok((Ran::Failed, pclose(child)));
     };
     let mut reader = BufReader::new(pipe);
     if mode == Mode::Raw {
@@ -192,7 +184,7 @@ fn php_exec(
             }
             req.write(&chunk[..read]);
         }
-        return Ok((Value::null(), pclose(child)));
+        return Ok((Ran::Raw, pclose(child)));
     }
     let mut last: Vec<u8> = Vec::new();
     loop {
@@ -218,17 +210,25 @@ fn php_exec(
     }
     let status = pclose(child);
     let answer = PhpString::new(req, strip_trailing_whitespace(&last))?;
-    Ok((Value::string(answer), status))
+    Ok((Ran::Last(answer), status))
 }
 
-/// `Z_PARAM_PATH_STR(cmd)` and the empty command's `ValueError`, as
-/// `php_exec_ex` reads them.
-fn command_argument(req: &mut Request) -> Result<Vec<u8>, Thrown> {
-    let command = crate::md5::path_argument(req, 1)?;
-    if command.as_bytes().is_empty() {
+/// `$command` as `Z_PARAM_PATH_STR(cmd)` held it, and the empty
+/// command's `ValueError`, as `php_exec_ex` reads them.
+fn command_bytes(req: &mut Request, command: Path) -> Result<Vec<u8>, Thrown> {
+    if command.0.as_bytes().is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
-    Ok(command.as_bytes().to_vec())
+    Ok(command.0.as_bytes().to_vec())
+}
+
+/// `string|false`: the last line, or `false` where the command did not
+/// start.
+fn last_line(ran: Ran) -> OrFalse<PhpString> {
+    match ran {
+        Ran::Last(line) => OrFalse::Value(line),
+        Ran::Failed | Ran::Raw => OrFalse::False,
+    }
 }
 
 /// `exec(string $command, &$output = null, &$result_code = null): string|false`,
@@ -265,12 +265,17 @@ fn command_argument(req: &mut Request) -> Result<Vec<u8>, Thrown> {
 /// bool(true)
 /// exec(): Argument #1 ($command) must not be empty
 /// ```
-fn exec(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let command = command_argument(req)?;
-    let (answer, status) = if given(req, 2).is_some() {
-        let held = req.argument(2).unwrap_or_default();
-        let mut array = match held.deref().as_ref() {
+#[php_function]
+fn exec(
+    req: &mut Request,
+    command: Path,
+    #[php(default = null)] output: Out,
+    #[php(default = null)] result_code: Out,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let command = command_bytes(req, command)?;
+    let (answer, status) = if output.is_given() {
+        let held = output.get().map_or_else(Value::null, |held| held.0);
+        let mut array = match held.as_ref() {
             ValueRef::Array(array) => {
                 let mut array = *array;
                 req.addref(&Value::array(array));
@@ -280,15 +285,13 @@ fn exec(req: &mut Request) -> Result<Value, Thrown> {
             _ => PhpArray::new(req)?,
         };
         let done = php_exec(req, Mode::Gather, &command, Some(&mut array));
-        assign_ref(req, 2, Value::array(array))?;
+        output.set(req, Untyped(Value::array(array)))?;
         done?
     } else {
         php_exec(req, Mode::Last, &command, None)?
     };
-    if given(req, 3).is_some() {
-        assign_ref(req, 3, Value::int(status))?;
-    }
-    Ok(answer)
+    result_code.set(req, Untyped(Value::int(status)))?;
+    Ok(last_line(answer))
 }
 
 /// `system(string $command, &$result_code = null): string|false`,
@@ -307,14 +310,16 @@ fn exec(req: &mut Request) -> Result<Value, Thrown> {
 /// string(0) ""
 /// int(5)
 /// ```
-fn system(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let command = command_argument(req)?;
+#[php_function]
+fn system(
+    req: &mut Request,
+    command: Path,
+    #[php(default = null)] result_code: Out,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let command = command_bytes(req, command)?;
     let (answer, status) = php_exec(req, Mode::Print, &command, None)?;
-    if given(req, 2).is_some() {
-        assign_ref(req, 2, Value::int(status))?;
-    }
-    Ok(answer)
+    result_code.set(req, Untyped(Value::int(status)))?;
+    Ok(last_line(answer))
 }
 
 /// `passthru(string $command, &$result_code = null): false|null`,
@@ -328,14 +333,19 @@ fn system(req: &mut Request) -> Result<Value, Thrown> {
 /// raw-bytesNULL
 /// int(0)
 /// ```
-fn passthru(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let command = command_argument(req)?;
+#[php_function]
+fn passthru(
+    req: &mut Request,
+    command: Path,
+    #[php(default = null)] result_code: Out,
+) -> Result<Option<False>, Thrown> {
+    let command = command_bytes(req, command)?;
     let (answer, status) = php_exec(req, Mode::Raw, &command, None)?;
-    if given(req, 2).is_some() {
-        assign_ref(req, 2, Value::int(status))?;
-    }
-    Ok(answer)
+    result_code.set(req, Untyped(Value::int(status)))?;
+    Ok(match answer {
+        Ran::Failed => Some(False),
+        Ran::Raw | Ran::Last(_) => None,
+    })
 }
 
 /// `php_mblen` under the `C.UTF-8` `LC_CTYPE` php sets at startup: the
@@ -464,11 +474,10 @@ fn escape_shell_arg(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thrown> 
 /// string(12) "echo 'a' \"b"
 /// string(0) ""
 /// ```
-fn escapeshellcmd(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let command = crate::md5::path_argument(req, 1)?;
-    let escaped = escape_shell_cmd(req, command.as_bytes())?;
-    Ok(Value::string(PhpString::new(req, &escaped)?))
+#[php_function]
+fn escapeshellcmd(req: &mut Request, command: Path) -> Result<PhpString, Thrown> {
+    let escaped = escape_shell_cmd(req, command.0.as_bytes())?;
+    PhpString::new(req, &escaped)
 }
 
 /// `escapeshellarg(string $arg): string`, `PHP_FUNCTION(escapeshellarg)`
@@ -484,11 +493,10 @@ fn escapeshellcmd(req: &mut Request) -> Result<Value, Thrown> {
 /// string(10) "'it'\''s '"
 /// escapeshellarg(): Argument #1 ($arg) must not contain any null bytes
 /// ```
-fn escapeshellarg(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let argument = crate::md5::path_argument(req, 1)?;
-    let escaped = escape_shell_arg(req, argument.as_bytes())?;
-    Ok(Value::string(PhpString::new(req, &escaped)?))
+#[php_function]
+fn escapeshellarg(req: &mut Request, arg: Path) -> Result<PhpString, Thrown> {
+    let escaped = escape_shell_arg(req, arg.0.as_bytes())?;
+    PhpString::new(req, &escaped)
 }
 
 /// `shell_exec(string $command): string|false|null`,
@@ -520,9 +528,9 @@ fn escapeshellarg(req: &mut Request) -> Result<Value, Thrown> {
 /// shell_exec(): Argument #1 ($command) must not contain any null bytes
 /// shell_exec() expects exactly 1 argument, 0 given
 /// ```
-fn shell_exec(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let command = string_argument(req, 1)?.as_bytes().to_vec();
+#[php_function]
+fn shell_exec(req: &mut Request, command: PhpString) -> Result<Option<OrFalse<PhpString>>, Thrown> {
+    let command = command.as_bytes().to_vec();
     if command.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
@@ -532,7 +540,7 @@ fn shell_exec(req: &mut Request) -> Result<Value, Thrown> {
     let Some(mut child) = popen(req, &command) else {
         let text = String::from_utf8_lossy(&command).into_owned();
         docref(req, Level::Warning, &format!("Unable to execute '{text}'"));
-        return Ok(Value::bool(false));
+        return Ok(Some(OrFalse::False));
     };
     let mut written = Vec::new();
     if let Some(mut pipe) = child.stdout.take() {
@@ -540,9 +548,9 @@ fn shell_exec(req: &mut Request) -> Result<Value, Thrown> {
     }
     pclose(child);
     if written.is_empty() {
-        return Ok(Value::null());
+        return Ok(None);
     }
-    Ok(Value::string(PhpString::new(req, &written)?))
+    Ok(Some(OrFalse::Value(PhpString::new(req, &written)?)))
 }
 
 /// `proc_nice(int $priority): bool`, `PHP_FUNCTION(proc_nice)`
@@ -556,19 +564,18 @@ fn shell_exec(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// bool(true)
 /// ```
-fn proc_nice(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let priority = long_argument(req, 1)?;
+#[php_function]
+fn proc_nice(req: &mut Request, priority: i64) -> bool {
     // `nice((int) pri)`: the low 32 bits, as C's conversion keeps them.
     #[allow(clippy::cast_possible_truncation)]
     let priority = priority as i32;
     if crate::ffi::nice(priority) {
-        return Ok(Value::bool(true));
+        return true;
     }
     docref(
         req,
         Level::Warning,
         "Only a super user may attempt to increase the priority of a process",
     );
-    Ok(Value::bool(false))
+    false
 }

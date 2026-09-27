@@ -14,32 +14,24 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use php_ext::abi::{CloneObj, ObjectHandlers};
+use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path as PathArg, This};
+use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::decl::{
-    ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, DynamicProperties, EnumBacking,
-    FunctionDecl, MethodDecl, Name, PropertyDecl, Type, Visibility,
-};
+use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{HostPath, Request, Resolve, Stream, Whence};
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
-use crate::file::{context_argument, set_default_dir};
-use crate::md5::path_argument;
+use crate::file::set_default_dir;
 use crate::output::Entry;
-use crate::streamsfuncs::{NullContext, stream_context};
-use crate::stub::stub;
-use crate::zpp::optional_long;
-use crate::{State, argument_count_between, constant, ffi};
+use crate::streamsfuncs::{NullContext, context_of};
+use crate::{State, ffi};
 
-pub(crate) mod glob;
 mod glob_wrapper;
+pub(crate) mod php_glob;
 pub(crate) use glob_wrapper::wrapper as glob_wrapper;
 
-/// `PHP_SCANDIR_SORT_*`, `scandir`'s `$sorting_order`.
-const SCANDIR_SORT_ASCENDING: i64 = 0;
-const SCANDIR_SORT_DESCENDING: i64 = 1;
-const SCANDIR_SORT_NONE: i64 = 2;
+use constants::{SCANDIR_SORT_ASCENDING, SCANDIR_SORT_NONE};
 
 /// The constants of `dir.stub.php`, in its order.
 ///
@@ -61,30 +53,24 @@ const SCANDIR_SORT_NONE: i64 = 2;
 /// int(1)
 /// int(2)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    let string = |name: &[u8], value: &[u8]| ConstDecl {
-        name: Name(name.into()),
-        value: ConstExpr::Str(value.into()),
-        attributes: Vec::new(),
-    };
-    vec![
-        string(b"DIRECTORY_SEPARATOR", b"/"),
-        string(b"PATH_SEPARATOR", b":"),
-        constant(b"GLOB_BRACE", i64::from(glob::PHP_GLOB_BRACE)),
-        constant(b"GLOB_ERR", i64::from(glob::PHP_GLOB_ERR)),
-        constant(b"GLOB_MARK", i64::from(glob::PHP_GLOB_MARK)),
-        constant(b"GLOB_NOCHECK", i64::from(glob::PHP_GLOB_NOCHECK)),
-        constant(b"GLOB_NOESCAPE", i64::from(glob::PHP_GLOB_NOESCAPE)),
-        constant(b"GLOB_NOSORT", i64::from(glob::PHP_GLOB_NOSORT)),
-        constant(b"GLOB_ONLYDIR", i64::from(glob::PHP_GLOB_ONLYDIR)),
-        constant(
-            b"GLOB_AVAILABLE_FLAGS",
-            i64::from(glob::PHP_GLOB_AVAILABLE_FLAGS),
-        ),
-        constant(b"SCANDIR_SORT_ASCENDING", SCANDIR_SORT_ASCENDING),
-        constant(b"SCANDIR_SORT_DESCENDING", SCANDIR_SORT_DESCENDING),
-        constant(b"SCANDIR_SORT_NONE", SCANDIR_SORT_NONE),
-    ]
+#[php_const]
+pub(crate) mod constants {
+    use super::php_glob;
+
+    pub(crate) const DIRECTORY_SEPARATOR: &str = "/";
+    pub(crate) const PATH_SEPARATOR: &str = ":";
+    pub(crate) const GLOB_BRACE: i32 = php_glob::PHP_GLOB_BRACE;
+    pub(crate) const GLOB_ERR: i32 = php_glob::PHP_GLOB_ERR;
+    pub(crate) const GLOB_MARK: i32 = php_glob::PHP_GLOB_MARK;
+    pub(crate) const GLOB_NOCHECK: i32 = php_glob::PHP_GLOB_NOCHECK;
+    pub(crate) const GLOB_NOESCAPE: i32 = php_glob::PHP_GLOB_NOESCAPE;
+    pub(crate) const GLOB_NOSORT: i32 = php_glob::PHP_GLOB_NOSORT;
+    pub(crate) const GLOB_ONLYDIR: i32 = php_glob::PHP_GLOB_ONLYDIR;
+    pub(crate) const GLOB_AVAILABLE_FLAGS: i32 = php_glob::PHP_GLOB_AVAILABLE_FLAGS;
+    /// `PHP_SCANDIR_SORT_*`, `scandir`'s `$sorting_order`.
+    pub(crate) const SCANDIR_SORT_ASCENDING: i64 = 0;
+    pub(crate) const SCANDIR_SORT_DESCENDING: i64 = 1;
+    pub(crate) const SCANDIR_SORT_NONE: i64 = 2;
 }
 
 /// The natives, as the stub declares them.
@@ -134,22 +120,11 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (
-            stub("dir(string $directory, $context = null): Directory|false"),
-            dir as Entry,
-        ),
-        (stub("chdir(string $directory): bool"), chdir),
-        (stub("getcwd(): string|false"), getcwd),
-        (
-            stub(
-                "scandir(string $directory, int $sorting_order = SCANDIR_SORT_ASCENDING, $context = null): array|false",
-            ),
-            scandir,
-        ),
-        (
-            stub("glob(string $pattern, int $flags = 0): array|false"),
-            glob,
-        ),
+        dir::declared(),
+        chdir::declared(),
+        getcwd::declared(),
+        scandir::declared(),
+        glob::declared(),
     ]
 }
 
@@ -202,65 +177,64 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 ///   }
 /// }
 /// ```
-pub(crate) fn directory_class() -> (
-    ClassDecl,
-    Vec<(MethodDecl, Entry)>,
-    &'static dyn ObjectHandlers,
-) {
-    let property = |name: &[u8], ty: Type| PropertyDecl {
-        name: Name(name.into()),
-        visibility: Visibility::Public,
-        set_visibility: Some(Visibility::Protected),
-        is_instance: true,
-        is_readonly: true,
-        is_final: false,
-        is_promoted: false,
-        is_virtual: false,
-        ty: Some(ty),
-        default: None,
-        attributes: Vec::new(),
-        doc_comment: None,
-        hooks: None,
-    };
-    let method = |line: &str| MethodDecl {
-        function: stub(line),
-        visibility: Visibility::Public,
-        is_instance: true,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    };
-    let decl = ClassDecl {
-        name: Name(b"Directory".as_slice().into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags {
-            is_final: true,
-            dynamic_properties: DynamicProperties::Forbidden,
-            ..ClassFlags::default()
-        },
-        parent: None,
-        interfaces: Vec::new(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: vec![
-            property(b"path", Type::String),
-            property(b"handle", Type::Mixed),
-        ],
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    };
-    let methods = vec![
-        (method("close(): void"), directory_close as Entry),
-        (method("rewind(): void"), directory_rewind),
-        (method("read(): string|false"), directory_read),
-    ];
-    (decl, methods, &DirectoryHandlers)
+///
+/// The three methods over the `handle` slot: a read after a rewind is the
+/// first entry again, and after `close` each is php's `TypeError`.
+///
+/// ```php
+/// $d = dir(__DIR__);
+/// $first = $d->read(); $d->rewind(); var_dump($d->read() === $first, $d->close());
+/// try { $d->read(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $d->rewind(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// NULL
+/// Directory::read(): cannot use Directory resource after it has been closed
+/// Directory::rewind(): cannot use Directory resource after it has been closed
+/// ```
+#[php_class(final, handlers = DirectoryHandlers, dynamic_properties = forbidden)]
+pub(crate) struct Directory;
+
+#[php_class]
+impl Directory {
+    #[php(property, readonly)]
+    const path: PhpString;
+    #[php(property, readonly)]
+    const handle: Value;
+
+    /// `Directory::close(): void`, `PHP_METHOD(Directory, close)`
+    /// (`Z/ext/standard/dir.c:227`): the stream closed, and forgotten as
+    /// the last opened one where it was that.
+    fn close(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let stream = this_stream(req, this, "close")?;
+        let res = stream.resource();
+        stream.close(req);
+        let is_default = req
+            .state::<State>()
+            .default_dir
+            .is_some_and(|default| default.id() == res.id());
+        if is_default {
+            set_default_dir(req, None);
+        }
+        Ok(())
+    }
+
+    /// `Directory::rewind(): void`, `PHP_METHOD(Directory, rewind)`
+    /// (`Z/ext/standard/dir.c:260`): `php_stream_rewinddir`.
+    fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let stream = this_stream(req, this, "rewind")?;
+        stream.seek(req, 0, Whence::Set);
+        Ok(())
+    }
+
+    /// `Directory::read(): string|false`, `PHP_METHOD(Directory, read)`
+    /// (`Z/ext/standard/dir.c:294`): the next entry's name, `false` past
+    /// the last.
+    fn read(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let stream = this_stream(req, this, "read")?;
+        Ok(stream.read_dir(req)?.map_or(OrFalse::False, OrFalse::Value))
+    }
 }
 
 /// `dir_class_object_handlers` (`Z/ext/standard/dir.c:88-96`):
@@ -325,32 +299,38 @@ impl ObjectHandlers for DirectoryHandlers {
 /// Warning: dir(%s/nope): Failed to open directory: No such file or directory in %s on line 7
 /// bool(false)
 /// ```
-fn dir(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let directory = path_argument(req, 1)?;
-    context_argument(req, 2)?;
-    let context = stream_context(req, 2, NullContext::Default)?;
+#[php_function]
+fn dir(
+    req: &mut Request,
+    directory: PathArg,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<OrFalse<Instance<Directory>>, Thrown> {
+    let PathArg(directory) = directory;
+    let context = context_of(req, context, NullContext::Default)?;
     let Some(stream) = req.with_stream_ctx(context, |req| req.open_dir(directory.as_bytes()))?
     else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     set_default_dir(req, Some(stream));
     let Some(class) = lookup_class(req, b"Directory")? else {
-        return Ok(stream.as_value());
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: dir() without its Directory class",
+        ));
     };
     let object = new_object(req, class)?;
     req.addref(&Value::string(directory));
     object.set_slot(req, 0, Value::string(directory))?;
     object.set_slot(req, 1, stream.as_value())?;
-    Ok(Value::object(object))
+    Ok(OrFalse::Value(Instance::of(object)))
 }
 
 /// `php_dir_get_directory_stream_from_this` (`Z/ext/standard/dir.c:184`):
 /// the stream the object's `handle` slot holds, php's `Error` where the
 /// slot holds no resource or a stream that is no directory, and its
 /// `TypeError` naming the method where the resource is closed.
-fn this_stream(req: &mut Request, method: &str) -> Result<Stream, Thrown> {
-    let handle = req.this().and_then(|this| this.slot(1));
+fn this_stream(req: &mut Request, this: This<Directory>, method: &str) -> Result<Stream, Thrown> {
+    let handle = this.object().slot(1);
     let handle = handle.map(|value| value.deref());
     let Some(handle) = handle.filter(|value| matches!(value.as_ref(), ValueRef::Resource(_)))
     else {
@@ -377,44 +357,6 @@ fn this_stream(req: &mut Request, method: &str) -> Result<Stream, Thrown> {
         ));
     }
     Ok(stream)
-}
-
-/// `Directory::close(): void`, `PHP_METHOD(Directory, close)`
-/// (`Z/ext/standard/dir.c:227`): the stream closed, and forgotten as
-/// the last opened one where it was that.
-fn directory_close(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    let stream = this_stream(req, "close")?;
-    let res = stream.resource();
-    stream.close(req);
-    let is_default = req
-        .state::<State>()
-        .default_dir
-        .is_some_and(|default| default.id() == res.id());
-    if is_default {
-        set_default_dir(req, None);
-    }
-    Ok(Value::null())
-}
-
-/// `Directory::rewind(): void`, `PHP_METHOD(Directory, rewind)`
-/// (`Z/ext/standard/dir.c:260`): `php_stream_rewinddir`.
-fn directory_rewind(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    let stream = this_stream(req, "rewind")?;
-    stream.seek(req, 0, Whence::Set);
-    Ok(Value::null())
-}
-
-/// `Directory::read(): string|false`, `PHP_METHOD(Directory, read)`
-/// (`Z/ext/standard/dir.c:294`): the next entry's name, `false` past
-/// the last.
-fn directory_read(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    let stream = this_stream(req, "read")?;
-    Ok(stream
-        .read_dir(req)?
-        .map_or_else(|| Value::bool(false), Value::string))
 }
 
 fn host(bytes: &[u8]) -> &Path {
@@ -452,9 +394,9 @@ fn host(bytes: &[u8]) -> &Path {
 /// bool(false)
 /// chdir(): Argument #1 ($directory) must not contain any null bytes
 /// ```
-fn chdir(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let directory = path_argument(req, 1)?;
+#[php_function]
+fn chdir(req: &mut Request, directory: PathArg) -> Result<bool, Thrown> {
+    let PathArg(directory) = directory;
     let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
     let refused = |code: i32| Err(std::io::Error::from_raw_os_error(code));
     let target = match req.virtual_file_ex(&cwd, directory.as_bytes(), Resolve::RealPath) {
@@ -471,13 +413,13 @@ fn chdir(req: &mut Request) -> Result<Value, Thrown> {
     match target {
         Ok(path) => {
             req.set_cwd(HostPath(PathBuf::from(OsStr::from_bytes(&path))))?;
-            Ok(Value::bool(true))
+            Ok(true)
         }
         Err(error) => {
             let text = crate::filestat::strerror(&error);
             let code = error.raw_os_error().unwrap_or(0);
             docref(req, Level::Warning, &format!("{text} (errno {code})"));
-            Ok(Value::bool(false))
+            Ok(false)
         }
     }
 }
@@ -502,10 +444,10 @@ mod libc_errno {
 /// bool(true)
 /// getcwd() expects exactly 0 arguments, 1 given
 /// ```
-fn getcwd(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+#[php_function]
+fn getcwd(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
     let cwd = req.cwd();
-    Ok(Value::string(PhpString::new(
+    Ok(OrFalse::Value(PhpString::new(
         req,
         cwd.0.as_os_str().as_bytes(),
     )?))
@@ -554,16 +496,20 @@ fn getcwd(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// scandir(): Argument #1 ($directory) must not be empty
 /// ```
-fn scandir(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let directory = path_argument(req, 1)?;
-    let order = optional_long(req, 2, SCANDIR_SORT_ASCENDING)?;
-    context_argument(req, 3)?;
+#[php_function]
+fn scandir(
+    req: &mut Request,
+    directory: PathArg,
+    #[php(default = SCANDIR_SORT_ASCENDING)] sorting_order: i64,
+    #[php(default = null)] context: Option<Resource>,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let PathArg(directory) = directory;
+    let order = sorting_order;
     if directory.as_bytes().is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
     // `if (zcontext) context = php_stream_context_from_zval(zcontext, 0);`
-    let context = stream_context(req, 3, NullContext::None)?;
+    let context = context_of(req, context, NullContext::None)?;
     let Some(stream) = req.with_stream_ctx(context, |req| req.open_dir(directory.as_bytes()))?
     else {
         // The errno the open left, which `php_stream_opendir` does not
@@ -577,7 +523,7 @@ fn scandir(req: &mut Request) -> Result<Value, Thrown> {
         let text = crate::filestat::strerror(&error);
         let code = error.raw_os_error().unwrap_or(0);
         docref(req, Level::Warning, &format!("(errno {code}): {text}"));
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let mut names: Vec<PhpString> = Vec::new();
     while let Some(name) = stream.read_dir(req)? {
@@ -593,7 +539,7 @@ fn scandir(req: &mut Request) -> Result<Value, Thrown> {
     for name in names {
         array.append(req, Value::string(name))?;
     }
-    Ok(Value::array(array))
+    Ok(OrFalse::Value(array))
 }
 
 /// `glob(string $pattern, int $flags = 0): array|false`,
@@ -641,26 +587,29 @@ fn scandir(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn glob(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let pattern = path_argument(req, 1)?;
-    let flags = optional_long(req, 2, 0)?;
+#[php_function]
+fn glob(
+    req: &mut Request,
+    pattern: PathArg,
+    #[php(default = 0)] flags: i64,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let PathArg(pattern) = pattern;
     if pattern.len() >= crate::virtual_cwd::MAXPATHLEN {
         let text = format!(
             "Pattern exceeds the maximum allowed length of {} characters",
             crate::virtual_cwd::MAXPATHLEN
         );
         docref(req, Level::Warning, &text);
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
-    let available = i64::from(glob::PHP_GLOB_AVAILABLE_FLAGS);
+    let available = i64::from(php_glob::PHP_GLOB_AVAILABLE_FLAGS);
     if available & flags != flags {
         docref(
             req,
             Level::Warning,
             "At least one of the passed flags is invalid or not supported on this platform",
         );
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let mut work = pattern.as_bytes().to_vec();
     let mut cwd_skip = 0;
@@ -675,13 +624,13 @@ fn glob(req: &mut Request) -> Result<Value, Thrown> {
         work = prefixed;
     }
     // Every available bit fits an `int`.
-    let bits = i32::try_from(flags & i64::from(glob::PHP_GLOB_FLAGMASK)).unwrap_or(0);
-    let paths = match glob::php_glob(&work, bits) {
+    let bits = i32::try_from(flags & i64::from(php_glob::PHP_GLOB_FLAGMASK)).unwrap_or(0);
+    let paths = match php_glob::php_glob(&work, bits) {
         Ok(paths) => paths,
-        Err(glob::PHP_GLOB_NOMATCH) => Vec::new(),
-        Err(_) => return Ok(Value::bool(false)),
+        Err(php_glob::PHP_GLOB_NOMATCH) => Vec::new(),
+        Err(_) => return Ok(OrFalse::False),
     };
-    let only_dirs = flags & i64::from(glob::PHP_GLOB_ONLYDIR) != 0;
+    let only_dirs = flags & i64::from(php_glob::PHP_GLOB_ONLYDIR) != 0;
     let mut array = PhpArray::new(req)?;
     for path in paths {
         if only_dirs && !std::fs::metadata(host(&path)).is_ok_and(|m| m.is_dir()) {
@@ -691,5 +640,5 @@ fn glob(req: &mut Request) -> Result<Value, Thrown> {
         let shown = Value::string(PhpString::new(req, shown)?);
         array.append(req, shown)?;
     }
-    Ok(Value::array(array))
+    Ok(OrFalse::Value(array))
 }

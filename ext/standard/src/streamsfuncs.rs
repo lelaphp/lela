@@ -7,7 +7,8 @@
 //! `stream_set_*` asks of a stream, answered as the kinds this engine has
 //! answer them; and `stream_resolve_include_path`, `stream_is_local`,
 //! `stream_supports_lock` and `stream_get_wrappers`. `stream_get_meta_data`
-//! is `file`'s; `socket_get_status` is its alias here. The socket
+//! is `file`'s, which declares `socket_get_status` as its alias, listed
+//! here in the stub's order. The socket
 //! natives, `stream_select`, the filter natives, `stream_isatty` and
 //! `stream_get_transports` wait on faces the api does not have (#684).
 //!
@@ -19,24 +20,19 @@
 
 use std::os::unix::ffi::OsStrExt;
 
-use php_ext::coerce::{callable_checked, value_name};
-use php_ext::decl::{Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, Name};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw};
+use php_ext::abi::{OrFalse, Passed, Path, Raw, True, Union, Untyped};
+use php_ext::attr::php_function;
+use php_ext::coerce::callable_checked;
+use php_ext::decl::FunctionDecl;
+use php_ext::raising::{
+    Level, Thrown, arg_count_error, arg_type_error, arg_value_error, deprecated, docref, throw,
+};
 use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
-use crate::file::stream_argument;
-use crate::md5::path_argument;
+use crate::State;
 use crate::output::Entry;
-use crate::stub::stub;
 use crate::virtual_cwd::MAXPATHLEN;
-use crate::zpp::{
-    ArrayOr, array_argument, array_or_string, given, nullable_array, nullable_long,
-    nullable_string, optional_long,
-};
-use crate::{
-    State, argument_count_between, bool_argument, constant, long_argument, string_argument,
-};
 
 /// What the request keeps for the `contexts`: the resource type, once
 /// registered, and `FG(default_context)`.
@@ -54,103 +50,6 @@ struct Context {
 
 /// `PHP_STREAM_COPY_ALL` as `stream_get_contents` spells it, `-1`.
 const COPY_ALL: i64 = -1;
-
-/// The `STREAM_*` constants of `file.stub.php` the streams natives read
-/// or hand back, in its order, with this host's values where the stub
-/// takes a header's.
-///
-/// ```php
-/// var_dump(STREAM_NOTIFY_CONNECT, STREAM_NOTIFY_RESOLVE, STREAM_NOTIFY_SEVERITY_ERR, STREAM_FILTER_ALL, STREAM_CLIENT_CONNECT, STREAM_CRYPTO_METHOD_ANY_CLIENT, STREAM_CRYPTO_METHOD_TLSv1_3_SERVER, STREAM_CRYPTO_PROTO_TLSv1_2, STREAM_SHUT_RDWR, STREAM_PF_INET6, STREAM_PF_UNIX, STREAM_IPPROTO_RAW, STREAM_SOCK_SEQPACKET, STREAM_SOCK_RDM, STREAM_PEEK, STREAM_OOB, STREAM_SERVER_BIND, STREAM_SERVER_LISTEN);
-/// ```
-/// ```expect
-/// int(2)
-/// int(1)
-/// int(2)
-/// int(3)
-/// int(4)
-/// int(127)
-/// int(64)
-/// int(32)
-/// int(2)
-/// int(30)
-/// int(1)
-/// int(255)
-/// int(5)
-/// int(4)
-/// int(2)
-/// int(1)
-/// int(4)
-/// int(8)
-/// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    [
-        ("STREAM_NOTIFY_CONNECT", 2),
-        ("STREAM_NOTIFY_AUTH_REQUIRED", 3),
-        ("STREAM_NOTIFY_AUTH_RESULT", 10),
-        ("STREAM_NOTIFY_MIME_TYPE_IS", 4),
-        ("STREAM_NOTIFY_FILE_SIZE_IS", 5),
-        ("STREAM_NOTIFY_REDIRECTED", 6),
-        ("STREAM_NOTIFY_PROGRESS", 7),
-        ("STREAM_NOTIFY_FAILURE", 9),
-        ("STREAM_NOTIFY_COMPLETED", 8),
-        ("STREAM_NOTIFY_RESOLVE", 1),
-        ("STREAM_NOTIFY_SEVERITY_INFO", 0),
-        ("STREAM_NOTIFY_SEVERITY_WARN", 1),
-        ("STREAM_NOTIFY_SEVERITY_ERR", 2),
-        ("STREAM_FILTER_READ", 1),
-        ("STREAM_FILTER_WRITE", 2),
-        ("STREAM_FILTER_ALL", 3),
-        ("STREAM_CLIENT_PERSISTENT", 1),
-        ("STREAM_CLIENT_ASYNC_CONNECT", 2),
-        ("STREAM_CLIENT_CONNECT", 4),
-        ("STREAM_CRYPTO_METHOD_ANY_CLIENT", 127),
-        ("STREAM_CRYPTO_METHOD_SSLv2_CLIENT", 3),
-        ("STREAM_CRYPTO_METHOD_SSLv3_CLIENT", 5),
-        ("STREAM_CRYPTO_METHOD_SSLv23_CLIENT", 57),
-        ("STREAM_CRYPTO_METHOD_TLS_CLIENT", 121),
-        ("STREAM_CRYPTO_METHOD_TLSv1_0_CLIENT", 9),
-        ("STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT", 17),
-        ("STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT", 33),
-        ("STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT", 65),
-        ("STREAM_CRYPTO_METHOD_ANY_SERVER", 126),
-        ("STREAM_CRYPTO_METHOD_SSLv2_SERVER", 2),
-        ("STREAM_CRYPTO_METHOD_SSLv3_SERVER", 4),
-        ("STREAM_CRYPTO_METHOD_SSLv23_SERVER", 120),
-        ("STREAM_CRYPTO_METHOD_TLS_SERVER", 120),
-        ("STREAM_CRYPTO_METHOD_TLSv1_0_SERVER", 8),
-        ("STREAM_CRYPTO_METHOD_TLSv1_1_SERVER", 16),
-        ("STREAM_CRYPTO_METHOD_TLSv1_2_SERVER", 32),
-        ("STREAM_CRYPTO_METHOD_TLSv1_3_SERVER", 64),
-        ("STREAM_CRYPTO_PROTO_SSLv3", 4),
-        ("STREAM_CRYPTO_PROTO_TLSv1_0", 8),
-        ("STREAM_CRYPTO_PROTO_TLSv1_1", 16),
-        ("STREAM_CRYPTO_PROTO_TLSv1_2", 32),
-        ("STREAM_CRYPTO_PROTO_TLSv1_3", 64),
-        ("STREAM_SHUT_RD", 0),
-        ("STREAM_SHUT_WR", 1),
-        ("STREAM_SHUT_RDWR", 2),
-        ("STREAM_PF_INET", 2),
-        ("STREAM_PF_INET6", 30),
-        ("STREAM_PF_UNIX", 1),
-        ("STREAM_IPPROTO_IP", 0),
-        ("STREAM_IPPROTO_TCP", 6),
-        ("STREAM_IPPROTO_UDP", 17),
-        ("STREAM_IPPROTO_ICMP", 1),
-        ("STREAM_IPPROTO_RAW", 255),
-        ("STREAM_SOCK_STREAM", 1),
-        ("STREAM_SOCK_DGRAM", 2),
-        ("STREAM_SOCK_RAW", 3),
-        ("STREAM_SOCK_SEQPACKET", 5),
-        ("STREAM_SOCK_RDM", 4),
-        ("STREAM_PEEK", 2),
-        ("STREAM_OOB", 1),
-        ("STREAM_SERVER_BIND", 4),
-        ("STREAM_SERVER_LISTEN", 8),
-    ]
-    .into_iter()
-    .map(|(name, value)| constant(name.as_bytes(), value))
-    .collect()
-}
 
 /// The natives, as the stub declares them.
 ///
@@ -219,125 +118,33 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 ///   - Return [ array ]
 /// }
 /// ```
-#[allow(clippy::too_many_lines)] // one row per native of the stub
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (
-            stub("stream_context_create(?array $options = null, ?array $params = null)"),
-            stream_context_create as Entry,
-        ),
-        (
-            stub("stream_context_set_params($context, array $params): true"),
-            stream_context_set_params,
-        ),
-        (
-            stub("stream_context_get_params($context): array"),
-            stream_context_get_params,
-        ),
-        (
-            stub(
-                "stream_context_set_option($context, array|string $wrapper_or_options, ?string $option_name = null, mixed $value = UNKNOWN): true",
-            ),
-            stream_context_set_option,
-        ),
-        (
-            stub("stream_context_set_options($context, array $options): true"),
-            stream_context_set_options,
-        ),
-        (
-            stub("stream_context_get_options($stream_or_context): array"),
-            stream_context_get_options,
-        ),
-        (
-            stub("stream_context_get_default(?array $options = null)"),
-            stream_context_get_default,
-        ),
-        (
-            stub("stream_context_set_default(array $options)"),
-            stream_context_set_default,
-        ),
-        (
-            stub(
-                "stream_copy_to_stream($from, $to, ?int $length = null, int $offset = 0): int|false",
-            ),
-            stream_copy_to_stream,
-        ),
-        (
-            stub(
-                "stream_get_contents($stream, ?int $length = null, int $offset = -1): string|false",
-            ),
-            stream_get_contents,
-        ),
-        (
-            stub("stream_supports_lock($stream): bool"),
-            stream_supports_lock,
-        ),
-        (
-            stub("stream_set_write_buffer($stream, int $size): int"),
-            stream_set_write_buffer,
-        ),
-        (
-            stub("set_file_buffer($stream, int $size): int"),
-            stream_set_write_buffer,
-        ),
-        (
-            stub("stream_set_read_buffer($stream, int $size): int"),
-            stream_set_read_buffer,
-        ),
-        (
-            stub("stream_set_blocking($stream, bool $enable): bool"),
-            stream_set_blocking,
-        ),
-        (
-            stub("socket_set_blocking($stream, bool $enable): bool"),
-            stream_set_blocking,
-        ),
-        (
-            stub("socket_get_status($stream): array"),
-            crate::file::stream_get_meta_data,
-        ),
-        (
-            stub("stream_get_line($stream, int $length, string $ending = \"\"): string|false"),
-            stream_get_line,
-        ),
-        (
-            stub("stream_resolve_include_path(string $filename): string|false"),
-            stream_resolve_include_path,
-        ),
-        (stub("stream_get_wrappers(): array"), stream_get_wrappers),
-        (stub("stream_is_local($stream): bool"), stream_is_local),
-        (
-            stub("stream_set_chunk_size($stream, int $size): int"),
-            stream_set_chunk_size,
-        ),
-        (
-            stub("stream_set_timeout($stream, int $seconds, int $microseconds = 0): bool"),
-            stream_set_timeout,
-        ),
-        (
-            deprecated_alias(
-                stub("socket_set_timeout($stream, int $seconds, int $microseconds = 0): bool"),
-                "use stream_set_timeout() instead",
-            ),
-            socket_set_timeout,
-        ),
+        stream_context_create::declared(),
+        stream_context_set_params::declared(),
+        stream_context_get_params::declared(),
+        stream_context_set_option::declared(),
+        stream_context_set_options::declared(),
+        stream_context_get_options::declared(),
+        stream_context_get_default::declared(),
+        stream_context_set_default::declared(),
+        stream_copy_to_stream::declared(),
+        stream_get_contents::declared(),
+        stream_supports_lock::declared(),
+        stream_set_write_buffer::declared(),
+        set_file_buffer::declared(),
+        stream_set_read_buffer::declared(),
+        stream_set_blocking::declared(),
+        socket_set_blocking::declared(),
+        crate::file::socket_get_status::declared(),
+        stream_get_line::declared(),
+        stream_resolve_include_path::declared(),
+        stream_get_wrappers::declared(),
+        stream_is_local::declared(),
+        stream_set_chunk_size::declared(),
+        stream_set_timeout::declared(),
+        socket_set_timeout::declared(),
     ]
-}
-
-/// The declaration under `#[\Deprecated(since: '8.5', message: ...)]`,
-/// as the stub marks `socket_set_timeout`.
-fn deprecated_alias(decl: FunctionDecl, message: &str) -> FunctionDecl {
-    let argument = |name: &[u8], value: &str| AttributeArgument {
-        name: Some(Name(name.into())),
-        value: ConstExpr::Str(value.as_bytes().into()),
-    };
-    FunctionDecl {
-        attributes: vec![Attribute {
-            name: Name(b"Deprecated".as_slice().into()),
-            arguments: vec![argument(b"since", "8.5"), argument(b"message", message)],
-        }],
-        ..decl
-    }
 }
 
 /// `le_stream_context`'s destructor, `php_stream_context_free`: the
@@ -404,8 +211,8 @@ pub(crate) enum NullContext {
 }
 
 /// `php_stream_context_from_zval(zcontext, nocontext)`
-/// (`Z/main/streams/php_stream_context.h:36`) over the `$context` at
-/// `position`, which `Z_PARAM_RESOURCE_OR_NULL` has taken: the one given,
+/// (`Z/main/streams/php_stream_context.h:36`) over the `$context` a
+/// native's declaration held as `Z_PARAM_RESOURCE_OR_NULL`: the one given,
 /// which must be a `stream-context` (`zend_fetch_resource_ex`'s
 /// `supplied resource is not a valid Stream-Context resource`), or for
 /// `null` `FG(default_context)`, made on the first use and a resource of
@@ -425,13 +232,12 @@ pub(crate) enum NullContext {
 /// resource(6) of type (stream)
 /// file_get_contents(): supplied resource is not a valid Stream-Context resource
 /// ```
-pub(crate) fn stream_context(
+pub(crate) fn context_of(
     req: &mut Request,
-    position: u32,
+    given: Option<Resource>,
     nocontext: NullContext,
 ) -> Result<Option<Resource>, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    if let Some(res) = given.as_resource().copied() {
+    if let Some(res) = given {
         let kind = context_type(req);
         if res.is_closed() || res.kind() != Some(kind) {
             let text = format!(
@@ -452,21 +258,12 @@ pub(crate) fn stream_context(
 /// (`Z/ext/standard/streamsfuncs.c:937`): a `context`, or a stream's,
 /// which here is the default one; anything else is php's
 /// `must be a valid stream/context`.
-fn context_argument(req: &mut Request, position: u32) -> Result<Resource, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    let Some(res) = given.as_resource().copied() else {
-        let name = value_name(req, &given);
-        return Err(arg_type_error(
-            req,
-            position,
-            &format!("be of type resource, {name} given"),
-        ));
-    };
+fn context_resource(req: &mut Request, res: Resource, position: u32) -> Result<Resource, Thrown> {
     let kind = context_type(req);
     if !res.is_closed() && res.kind() == Some(kind) {
         return Ok(res);
     }
-    if Stream::from_value(req, &given).is_some() {
+    if Stream::from_value(req, &res.as_value()).is_some() {
         return default_context(req);
     }
     Err(arg_type_error(req, position, "be a valid stream/context"))
@@ -636,10 +433,12 @@ fn parse_params(req: &mut Request, res: Resource, params: PhpArray) -> Result<()
 /// stream_context_create(): Argument #1 ($options) must be an array with valid callbacks as values, function "nope" not found or invalid function name
 /// Invalid stream/context parameter
 /// ```
-fn stream_context_create(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 2)?;
-    let options = nullable_array(req, 1)?;
-    let params = nullable_array(req, 2)?;
+#[php_function]
+fn stream_context_create(
+    req: &mut Request,
+    #[php(default = null)] options: Option<PhpArray>,
+    #[php(default = null)] params: Option<PhpArray>,
+) -> Result<Untyped<Resource>, Thrown> {
     let res = context_alloc(req)?;
     let mut applied = Ok(());
     if let Some(options) = options {
@@ -649,7 +448,7 @@ fn stream_context_create(req: &mut Request) -> Result<Value, Thrown> {
         applied = parse_params(req, res, params);
     }
     match applied {
-        Ok(()) => Ok(res.as_value()),
+        Ok(()) => Ok(Untyped(res)),
         Err(thrown) => {
             req.release(res.as_value());
             Err(thrown)
@@ -685,12 +484,15 @@ fn stream_context_create(req: &mut Request) -> Result<Value, Thrown> {
 ///
 /// Deprecated: closedir(): Passing null is deprecated, instead the last opened directory stream should be provided in %s on line 5
 /// ```
-fn stream_context_set_params(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let res = context_argument(req, 1)?;
-    let params = array_argument(req, 2)?;
+#[php_function]
+fn stream_context_set_params(
+    req: &mut Request,
+    context: Resource,
+    params: PhpArray,
+) -> Result<True, Thrown> {
+    let res = context_resource(req, context, 1)?;
     parse_params(req, res, params)?;
-    Ok(Value::bool(true))
+    Ok(True)
 }
 
 /// `stream_context_get_params($context): array`,
@@ -713,9 +515,9 @@ fn stream_context_set_params(req: &mut Request) -> Result<Value, Thrown> {
 ///   }
 /// }
 /// ```
-fn stream_context_get_params(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let res = context_argument(req, 1)?;
+#[php_function]
+fn stream_context_get_params(req: &mut Request, context: Resource) -> Result<PhpArray, Thrown> {
+    let res = context_resource(req, context, 1)?;
     let (options, notification) = res.native::<Context>(req).map_or((None, None), |context| {
         (context.options, context.notification)
     });
@@ -735,7 +537,7 @@ fn stream_context_get_params(req: &mut Request) -> Result<Value, Thrown> {
     };
     let key = Key::Str(PhpString::new(req, b"options")?);
     array.set(req, key, options)?;
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `stream_context_set_option($context, array|string $wrapper_or_options, ?string $option_name = null, mixed $value = UNKNOWN): true`,
@@ -776,24 +578,44 @@ fn stream_context_get_params(req: &mut Request) -> Result<Value, Thrown> {
 /// stream_context_set_option(): Argument #3 ($option_name) cannot be null when argument #2 ($wrapper_or_options) is a string
 /// stream_context_set_option(): Argument #4 ($value) must be provided when argument #2 ($wrapper_or_options) is a string
 /// ```
-fn stream_context_set_option(req: &mut Request) -> Result<Value, Thrown> {
-    if req.argument_count() == 2 {
+#[php_function(arity = manual)]
+fn stream_context_set_option(
+    req: &mut Request,
+    context: Raw<Resource>,
+    wrapper_or_options: Raw<Union<PhpArray, PhpString>>,
+    #[php(default = null)] option_name: Raw<Option<PhpString>>,
+    value: Passed<Value>,
+) -> Result<True, Thrown> {
+    // The 8.4 deprecation comes before `ZEND_PARSE_PARAMETERS_START(2, 4)`.
+    let given = req.argument_count();
+    if given == 2 {
         deprecated(
             req,
             "Calling stream_context_set_option() with 2 arguments is deprecated, use stream_context_set_options() instead",
         );
     }
-    argument_count_between(req, 2, 4)?;
-    let res = context_argument(req, 1)?;
-    let wrapper_or_options = array_or_string(req, 2, false)?;
-    let option = nullable_string(req, 3)?;
-    let value = given(req, 4);
+    if !(2..=4).contains(&given) {
+        let tail = if given < 2 {
+            format!("at least 2 arguments, {given} given")
+        } else {
+            format!("at most 4 arguments, {given} given")
+        };
+        return Err(arg_count_error(req, &tail));
+    }
+    let context = context.hold(req)?;
+    let res = context_resource(req, context, 1)?;
+    let wrapper_or_options = wrapper_or_options.hold(req)?;
+    let option = option_name.hold(req)?;
+    let value = match value {
+        Passed::Given(value) => Some(value),
+        Passed::Omitted => None,
+    };
     let refuse = |req: &mut Request, text: &str| {
         let message = format!("stream_context_set_option(): {text}");
         Err(throw(req, "ValueError", &message))
     };
     match wrapper_or_options {
-        Some(ArrayOr::Array(options)) => {
+        Union::A(options) => {
             if option.is_some() {
                 return refuse(
                     req,
@@ -808,7 +630,7 @@ fn stream_context_set_option(req: &mut Request) -> Result<Value, Thrown> {
             }
             parse_options(req, res, options)?;
         }
-        Some(ArrayOr::Other(wrapper)) => {
+        Union::B(wrapper) => {
             let Some(option) = option else {
                 return refuse(
                     req,
@@ -823,9 +645,8 @@ fn stream_context_set_option(req: &mut Request) -> Result<Value, Thrown> {
             };
             set_option(req, res, wrapper.as_bytes(), option.as_bytes(), &value)?;
         }
-        None => {}
     }
-    Ok(Value::bool(true))
+    Ok(True)
 }
 
 /// `stream_context_set_options($context, array $options): true`,
@@ -853,12 +674,15 @@ fn stream_context_set_option(req: &mut Request) -> Result<Value, Thrown> {
 ///   }
 /// }
 /// ```
-fn stream_context_set_options(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let res = context_argument(req, 1)?;
-    let options = array_argument(req, 2)?;
+#[php_function]
+fn stream_context_set_options(
+    req: &mut Request,
+    context: Resource,
+    options: PhpArray,
+) -> Result<True, Thrown> {
+    let res = context_resource(req, context, 1)?;
     parse_options(req, res, options)?;
-    Ok(Value::bool(true))
+    Ok(True)
 }
 
 /// `stream_context_get_options($stream_or_context): array`,
@@ -883,19 +707,21 @@ fn stream_context_set_options(req: &mut Request) -> Result<Value, Thrown> {
 /// array(0) {
 /// }
 /// ```
-fn stream_context_get_options(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let res = context_argument(req, 1)?;
+#[php_function]
+fn stream_context_get_options(
+    req: &mut Request,
+    stream_or_context: Resource,
+) -> Result<PhpArray, Thrown> {
+    let res = context_resource(req, stream_or_context, 1)?;
     let options = res
         .native::<Context>(req)
         .and_then(|context| context.options);
     match options {
         Some(options) => {
-            let value = Value::array(options);
-            req.addref(&value);
-            Ok(value)
+            req.addref(&Value::array(options));
+            Ok(options)
         }
-        None => Ok(Value::array(PhpArray::new(req)?)),
+        None => PhpArray::new(req),
     }
 }
 
@@ -921,16 +747,17 @@ fn stream_context_get_options(req: &mut Request) -> Result<Value, Thrown> {
 ///   }
 /// }
 /// ```
-fn stream_context_get_default(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let options = nullable_array(req, 1)?;
+#[php_function]
+fn stream_context_get_default(
+    req: &mut Request,
+    #[php(default = null)] options: Option<PhpArray>,
+) -> Result<Untyped<Resource>, Thrown> {
     let res = default_context(req)?;
     if let Some(options) = options {
         parse_options(req, res, options)?;
     }
-    let value = res.as_value();
-    req.addref(&value);
-    Ok(value)
+    req.addref(&res.as_value());
+    Ok(Untyped(res))
 }
 
 /// `stream_context_set_default(array $options)`,
@@ -946,14 +773,15 @@ fn stream_context_get_default(req: &mut Request) -> Result<Value, Thrown> {
 /// resource(%d) of type (stream-context)
 /// Options should have the form ["wrappername"]["optionname"] = $value
 /// ```
-fn stream_context_set_default(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let options = array_argument(req, 1)?;
+#[php_function]
+fn stream_context_set_default(
+    req: &mut Request,
+    options: PhpArray,
+) -> Result<Untyped<Resource>, Thrown> {
     let res = default_context(req)?;
     parse_options(req, res, options)?;
-    let value = res.as_value();
-    req.addref(&value);
-    Ok(value)
+    req.addref(&res.as_value());
+    Ok(Untyped(res))
 }
 
 /// `stream_get_contents($stream, ?int $length = null, int $offset = -1): string|false`,
@@ -981,11 +809,15 @@ fn stream_context_set_default(req: &mut Request) -> Result<Value, Thrown> {
 /// Warning: stream_get_contents(): Failed to seek to position 5 in the stream in %s on line 5
 /// bool(false)
 /// ```
-fn stream_get_contents(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let stream = stream_argument(req, 1)?;
-    let maxlen = nullable_long(req, 2)?.unwrap_or(COPY_ALL);
-    let desiredpos = optional_long(req, 3, -1)?;
+#[php_function]
+fn stream_get_contents(
+    req: &mut Request,
+    stream: Stream,
+    #[php(default = null)] length: Option<i64>,
+    #[php(default = -1)] offset: i64,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let maxlen = length.unwrap_or(COPY_ALL);
+    let desiredpos = offset;
     if maxlen < 0 && maxlen != COPY_ALL {
         return Err(arg_value_error(req, 2, "be greater than or equal to -1"));
     }
@@ -1001,14 +833,14 @@ fn stream_get_contents(req: &mut Request) -> Result<Value, Thrown> {
         if !sought {
             let text = format!("Failed to seek to position {desiredpos} in the stream");
             docref(req, Level::Warning, &text);
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         }
     }
     let maxlen = (maxlen != COPY_ALL).then(|| usize::try_from(maxlen).unwrap_or(0));
     if maxlen == Some(0) {
-        return Ok(Value::string(PhpString::new(req, b"")?));
+        return Ok(OrFalse::Value(PhpString::new(req, b"")?));
     }
-    Ok(Value::string(stream.copy_to_mem(req, maxlen)?))
+    Ok(OrFalse::Value(stream.copy_to_mem(req, maxlen)?))
 }
 
 /// `stream_copy_to_stream($from, $to, ?int $length = null, int $offset = 0): int|false`,
@@ -1038,29 +870,32 @@ fn stream_get_contents(req: &mut Request) -> Result<Value, Thrown> {
 /// int(2)
 /// bool(false)
 /// ```
-fn stream_copy_to_stream(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 4)?;
-    let src = stream_argument(req, 1)?;
-    let dest = stream_argument(req, 2)?;
-    let maxlen = nullable_long(req, 3)?;
-    let pos = optional_long(req, 4, 0)?;
+#[php_function]
+fn stream_copy_to_stream(
+    req: &mut Request,
+    from: Stream,
+    to: Stream,
+    #[php(default = null)] length: Option<i64>,
+    #[php(default = 0)] offset: i64,
+) -> Result<OrFalse<i64>, Thrown> {
+    let (src, dest, maxlen, pos) = (from, to, length, offset);
     if pos > 0 && !src.seek(req, pos, Whence::Set) {
         let text = format!("Failed to seek to position {pos} in the stream");
         docref(req, Level::Warning, &text);
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     // `PHP_STREAM_COPY_ALL`, and any other length the `size_t` makes
     // larger than a stream holds, is no limit.
     let maxlen = match maxlen {
         None => None,
-        Some(0) => return Ok(Value::int(0)),
+        Some(0) => return Ok(OrFalse::Value(0)),
         Some(n) => usize::try_from(n).ok(),
     };
     let mut haveread: usize = 0;
     loop {
         let readchunk = maxlen.map_or(8192, |max| (max - haveread).min(8192));
         let Some(chunk) = src.read(req, readchunk)? else {
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         };
         if chunk.is_empty() {
             break;
@@ -1071,7 +906,7 @@ fn stream_copy_to_stream(req: &mut Request) -> Result<Value, Thrown> {
         while written < bytes.len() {
             match dest.write(req, &bytes[written..]) {
                 Some(n) if n > 0 => written += n,
-                _ => return Ok(Value::bool(false)),
+                _ => return Ok(OrFalse::False),
             }
         }
         haveread += bytes.len();
@@ -1079,7 +914,7 @@ fn stream_copy_to_stream(req: &mut Request) -> Result<Value, Thrown> {
             break;
         }
     }
-    Ok(Value::int(i64::try_from(haveread).unwrap_or(i64::MAX)))
+    Ok(OrFalse::Value(i64::try_from(haveread).unwrap_or(i64::MAX)))
 }
 
 /// `stream_supports_lock($stream): bool`,
@@ -1095,10 +930,9 @@ fn stream_copy_to_stream(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn stream_supports_lock(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
-    Ok(Value::bool(stream.is_stdio(req)))
+#[php_function]
+fn stream_supports_lock(req: &mut Request, stream: Stream) -> bool {
+    stream.is_stdio(req)
 }
 
 /// `stream_set_write_buffer($stream, int $size): int` and its alias
@@ -1126,15 +960,13 @@ fn stream_supports_lock(req: &mut Request) -> Result<Value, Thrown> {
 /// int(0)
 /// int(-1)
 /// ```
-fn stream_set_write_buffer(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let stream = stream_argument(req, 1)?;
-    let buff = long_argument(req, 2)?;
+#[php_function(aliases(set_file_buffer))]
+fn stream_set_write_buffer(req: &mut Request, stream: Stream, size: i64) -> i64 {
     let option = StreamOption::WriteBuffer {
-        buffered: buff != 0,
-        size: buffer_size(buff),
+        buffered: size != 0,
+        size: buffer_size(size),
     };
-    Ok(Value::int(option_answer(stream.set_option(req, option))))
+    option_answer(stream.set_option(req, option))
 }
 
 /// The size a buffer option hands on: the one given, or `BUFSIZ`, what
@@ -1170,15 +1002,13 @@ fn option_answer(answer: OptionAnswer) -> i64 {
 /// int(0)
 /// string(2) "bc"
 /// ```
-fn stream_set_read_buffer(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let stream = stream_argument(req, 1)?;
-    let buff = long_argument(req, 2)?;
+#[php_function]
+fn stream_set_read_buffer(req: &mut Request, stream: Stream, size: i64) -> i64 {
     let option = StreamOption::ReadBuffer {
-        buffered: buff != 0,
-        size: buffer_size(buff),
+        buffered: size != 0,
+        size: buffer_size(size),
     };
-    Ok(Value::int(option_answer(stream.set_option(req, option))))
+    option_answer(stream.set_option(req, option))
 }
 
 /// `stream_set_blocking($stream, bool $enable): bool` and its alias
@@ -1202,12 +1032,10 @@ fn stream_set_read_buffer(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn stream_set_blocking(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let stream = stream_argument(req, 1)?;
-    let block = bool_argument(req, 2)?;
-    let answer = stream.set_option(req, StreamOption::Blocking(block));
-    Ok(Value::bool(answer != OptionAnswer::Err))
+#[php_function(aliases(socket_set_blocking))]
+fn stream_set_blocking(req: &mut Request, stream: Stream, enable: bool) -> bool {
+    let answer = stream.set_option(req, StreamOption::Blocking(enable));
+    answer != OptionAnswer::Err
 }
 
 /// `stream_set_timeout($stream, int $seconds, int $microseconds = 0): bool`
@@ -1228,24 +1056,45 @@ fn stream_set_blocking(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn stream_set_timeout(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let stream = stream_argument(req, 1)?;
-    let seconds = long_argument(req, 2)?;
-    let microseconds = optional_long(req, 3, 0)?;
+#[php_function]
+fn stream_set_timeout(
+    req: &mut Request,
+    stream: Stream,
+    seconds: i64,
+    #[php(default = 0)] microseconds: i64,
+) -> bool {
+    set_timeout(req, stream, seconds, microseconds)
+}
+
+/// The one body of `stream_set_timeout` and its deprecated alias.
+fn set_timeout(req: &mut Request, stream: Stream, seconds: i64, microseconds: i64) -> bool {
     let seconds = seconds.saturating_add(microseconds / 1_000_000);
     let micros = microseconds % 1_000_000;
     let timeout = std::time::Duration::from_secs(u64::try_from(seconds).unwrap_or(0))
         + std::time::Duration::from_micros(u64::try_from(micros).unwrap_or(0));
     let answer = stream.set_option(req, StreamOption::ReadTimeout(timeout));
-    Ok(Value::bool(answer == OptionAnswer::Ok))
+    answer == OptionAnswer::Ok
 }
 
 /// `socket_set_timeout`, `ZEND_ACC_DEPRECATED`: the call raises
 /// `zend_deprecated_function`'s sentence from the declaration before
 /// the arguments are read, then this is `stream_set_timeout`.
-fn socket_set_timeout(req: &mut Request) -> Result<Value, Thrown> {
-    stream_set_timeout(req)
+///
+/// ```php
+/// var_dump(socket_set_timeout(fopen('php://memory', 'r'), 1));
+/// ```
+/// ```expect
+/// Deprecated: Function socket_set_timeout() is deprecated since 8.5, use stream_set_timeout() instead in %s on line 2
+/// bool(false)
+/// ```
+#[php_function(deprecated(since = "8.5", message = "use stream_set_timeout() instead"))]
+fn socket_set_timeout(
+    req: &mut Request,
+    stream: Stream,
+    seconds: i64,
+    #[php(default = 0)] microseconds: i64,
+) -> bool {
+    set_timeout(req, stream, seconds, microseconds)
 }
 
 /// `stream_set_chunk_size($stream, int $size): int`,
@@ -1265,23 +1114,20 @@ fn socket_set_timeout(req: &mut Request) -> Result<Value, Thrown> {
 /// int(8192)
 /// stream_set_chunk_size(): Argument #2 ($size) must be greater than 0
 /// ```
-fn stream_set_chunk_size(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let stream = stream_argument(req, 1)?;
-    let size = long_argument(req, 2)?;
+#[php_function]
+fn stream_set_chunk_size(req: &mut Request, stream: Stream, size: i64) -> Result<i64, Thrown> {
     if size <= 0 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
     let size = usize::try_from(size).unwrap_or(usize::MAX);
+    // `RETURN_LONG(ret > 0 ? (zend_long)ret : (zend_long)EOF)`.
     let OptionAnswer::Previous(old) = stream.set_option(req, StreamOption::ChunkSize(size)) else {
-        return Ok(Value::bool(false));
+        return Ok(-1);
     };
     // `stream->chunk_size > INT_MAX ? INT_MAX : (int)stream->chunk_size`.
-    Ok(Value::int(
-        i64::try_from(old)
-            .unwrap_or(i64::MAX)
-            .min(i64::from(i32::MAX)),
-    ))
+    Ok(i64::try_from(old)
+        .unwrap_or(i64::MAX)
+        .min(i64::from(i32::MAX)))
 }
 
 /// `stream_get_line($stream, int $length, string $ending = ""): string|false`,
@@ -1326,14 +1172,14 @@ fn stream_set_chunk_size(req: &mut Request) -> Result<Value, Thrown> {
 /// string(4) "b||c"
 /// stream_get_line(): Argument #2 ($length) must be greater than or equal to 0
 /// ```
-fn stream_get_line(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let stream = stream_argument(req, 1)?;
-    let length = long_argument(req, 2)?;
-    let ending = match given(req, 3) {
-        Some(_) => string_argument(req, 3)?.as_bytes().to_vec(),
-        None => Vec::new(),
-    };
+#[php_function]
+fn stream_get_line(
+    req: &mut Request,
+    stream: Stream,
+    length: i64,
+    #[php(default = "")] ending: PhpString,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let ending = ending.as_bytes().to_vec();
     if length < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
@@ -1342,10 +1188,9 @@ fn stream_get_line(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         usize::try_from(length).unwrap_or(usize::MAX)
     };
-    match stream.get_record(req, maxlen, &ending)? {
-        Some(record) => Ok(Value::string(record)),
-        None => Ok(Value::bool(false)),
-    }
+    Ok(stream
+        .get_record(req, maxlen, &ending)?
+        .map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `stream_resolve_include_path(string $filename): string|false`,
@@ -1366,10 +1211,12 @@ fn stream_get_line(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn stream_resolve_include_path(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let filename = path_argument(req, 1)?;
-    let filename = filename.as_bytes().to_vec();
+#[php_function]
+fn stream_resolve_include_path(
+    req: &mut Request,
+    filename: Path,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let filename = filename.0.as_bytes().to_vec();
     let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
     let realpath = |req: &mut Request, path: &[u8]| {
         let base: &[u8] = if path.first() == Some(&b'/') {
@@ -1415,8 +1262,8 @@ fn stream_resolve_include_path(req: &mut Request) -> Result<Value, Thrown> {
         }
     };
     match resolved {
-        Some(path) => Ok(Value::string(PhpString::new(req, &path)?)),
-        None => Ok(Value::bool(false)),
+        Some(path) => Ok(OrFalse::Value(PhpString::new(req, &path)?)),
+        None => Ok(OrFalse::False),
     }
 }
 
@@ -1442,14 +1289,14 @@ fn stream_resolve_include_path(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn stream_get_wrappers(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+#[php_function]
+fn stream_get_wrappers(req: &mut Request) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     for scheme in req.stream_wrappers() {
         let scheme = Value::string(PhpString::new(req, scheme.as_bytes())?);
         array.append(req, scheme)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `stream_is_local($stream): bool`, `PHP_FUNCTION(stream_is_local)`
@@ -1472,12 +1319,15 @@ fn stream_get_wrappers(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn stream_is_local(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let given = req.argument(1).unwrap_or_default().deref();
+#[php_function]
+fn stream_is_local(req: &mut Request, stream: Untyped<Value>) -> Result<bool, Thrown> {
+    let given = stream.0;
     if let ValueRef::Resource(_) = given.as_ref() {
-        stream_argument(req, 1)?;
-        return Ok(Value::bool(true));
+        // `php_stream_from_zval`.
+        if Stream::from_value(req, &given).is_none() {
+            return Err(arg_type_error(req, 1, "be an open stream resource"));
+        }
+        return Ok(true);
     }
     let path = php_ext::coerce::to_string(req, &given)?;
     let path = path.as_bytes();
@@ -1490,7 +1340,7 @@ fn stream_is_local(req: &mut Request) -> Result<Value, Thrown> {
         && rest.first() == Some(&b':')
         && (rest.get(1..3) == Some(b"//".as_slice()) || (n == 4 && path.starts_with(b"data:")));
     if !protocol {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
     let scheme = &path[..n];
     let known = req
@@ -1506,14 +1356,14 @@ fn stream_is_local(req: &mut Request) -> Result<Value, Thrown> {
                 "Unable to find the wrapper \"{name}\" - did you forget to enable it when you configured PHP?"
             ),
         );
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
     if scheme.eq_ignore_ascii_case(b"file") {
         let localhost = path.len() >= 17 && path[..17].eq_ignore_ascii_case(b"file://localhost/");
         let after = path.get(n + 3).copied();
         if !localhost && after.is_some_and(|c| c != b'/') {
-            return Ok(Value::bool(false));
+            return Ok(false);
         }
     }
-    Ok(Value::bool(true))
+    Ok(true)
 }
