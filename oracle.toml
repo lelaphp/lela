@@ -150,6 +150,12 @@ ini = ["zend.assertions=-1"]
 # deep` first, #1080) names this regime to reach them with a small input.
 ini = ["zend.max_allowed_stack_size=256K"]
 
+[regime.phar-writable]
+# `phar.readonly` is `PHP_INI_ALL` but refuses to go from on to off at
+# runtime, so no snippet can write a phar-format archive under the recipe;
+# a witness of phar's writer names this regime (#1107).
+ini = ["phar.readonly=0"]
+
 [regime.filter-default]
 # `filter.default` is PHP_INI_SYSTEM|PHP_INI_PERDIR, and setting it raises
 # php's startup deprecation, which no snippet can reach from inside (#901, for

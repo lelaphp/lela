@@ -227,6 +227,12 @@ name = "ext/phar"
 budget = 14000    # phar.c, phar_object.c, util.c, tar.c, zip.c, stream.c, dirstream.c, func_interceptors.c (Mitchell, 2026-09-27, #1086)
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
+[[crate]]
+name = "ext/bz2"
+budget = 2500     # bz2.c and bz2_filter.c; pure Rust first, held to the oracle's bytes, libbz2 where none matches (Mitchell, 2026-09-28, #1107)
+feature = "bz2"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
