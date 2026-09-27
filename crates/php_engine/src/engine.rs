@@ -1430,11 +1430,25 @@ impl Engine {
     /// `ini_get()`, the master value and the startup ini the engine
     /// states are built from all read the default. What the handlers
     /// raise is kept for every request to raise first
-    /// ([`Engine::transaction`]), a docref as `PHP Startup: …`. No
-    /// witness reaches it, since a witness sets no startup ini; the
-    /// test below holds it, and `ext/date`'s `date.timezone` is the one
-    /// the phpt corpus reads.
-    fn register_ini(&mut self, held: Vec<(Vec<u8>, Vec<u8>)>) {
+    /// ([`Engine::transaction`]), a docref as `PHP Startup: …`, in the
+    /// order the entries are declared. ext/session's witness under the
+    /// pin's `session-startup` regime holds it, with the test below for
+    /// a refused value, and `ext/date`'s `date.timezone` is the one the
+    /// phpt corpus reads.
+    fn register_ini(&mut self, mut held: Vec<(Vec<u8>, Vec<u8>)>) {
+        // `zend_register_ini_entries_ex` walks each module's entries in
+        // its `PHP_INI_BEGIN()` order, the modules in startup order, and
+        // finds the host's value for each: the handlers meet the values
+        // in declaration order, whatever order the host set them in.
+        let declared_at = |name: &[u8]| {
+            self.shared
+                .extensions
+                .iter()
+                .flat_map(|e| e.ini.iter())
+                .position(|entry| entry.name.0.as_ref() == name)
+                .unwrap_or(usize::MAX)
+        };
+        held.sort_by_key(|(name, _)| declared_at(name));
         let mut taken = Vec::new();
         let mut raised = Vec::new();
         if !held.is_empty() {
@@ -1684,8 +1698,11 @@ impl Engine {
         // extensions' `RINIT` (`Z/main/main.c:1942`); what can fail is the
         // memory limit, which the first allocation after it meets again.
         let _ = req.hash_environment();
+        // Displayed past the `php_output` layer, as php displays what
+        // `MINIT` raised before `php_output_activate`, so no header is
+        // sent by it and a session may still start.
         for (level, message) in &self.shared.startup_raised {
-            req.note_error_in(*level, message, b"Unknown", 0);
+            req.note_startup_error(*level, message);
         }
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {

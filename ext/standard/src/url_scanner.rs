@@ -11,9 +11,12 @@
 //! next chunk, as `YYFILL` does.
 //!
 //! php keeps a second rewriter for `session.use_trans_sid` beside this
-//! one, `url_adapt_session_ex`; the session extension reaches it and
-//! this crate holds its two ini entries, `session.trans_sid_tags` and
-//! `session.trans_sid_hosts`, with their deprecations.
+//! one, `url_adapt_session_ex`, the same scanner and handler over
+//! `session.trans_sid_tags` and `session.trans_sid_hosts`; this crate
+//! holds both and the four entries, and ext/session reaches the second
+//! through what `url_scanner_ex.h` declares `PHPAPI`,
+//! [`php_url_scanner_add_session_var`] and
+//! [`php_url_scanner_reset_session_var`] (design §4.10).
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -118,9 +121,46 @@ enum AttrType {
     Action,
 }
 
-/// `url_adapt_state_ex_t` for `BG(url_adapt_output_ex)`: the scanner's
-/// state and what it holds between chunks, and what is added, the query
-/// pairs and the hidden inputs.
+/// Which of php's two rewriters is meant, the `is_session` every
+/// function of `url_scanner_ex.re` takes: `BG(url_adapt_output_ex)`,
+/// `output_add_rewrite_var`'s over `url_rewriter.*`, or
+/// `BG(url_adapt_session_ex)`, `session.use_trans_sid`'s over
+/// `session.trans_sid_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Context {
+    Output,
+    Session,
+}
+
+impl Context {
+    /// The entries the rewriter's tag table and host list are built from.
+    fn entries(self) -> (&'static [u8], &'static [u8]) {
+        match self {
+            Context::Output => (b"url_rewriter.tags", b"url_rewriter.hosts"),
+            Context::Session => (b"session.trans_sid_tags", b"session.trans_sid_hosts"),
+        }
+    }
+
+    /// The rewriter's state, in this crate's request state.
+    fn rewriter(self, req: &mut Request) -> &mut Rewriter {
+        let state = req.state::<State>();
+        match self {
+            Context::Output => &mut state.url_rewriter,
+            Context::Session => &mut state.session_rewriter,
+        }
+    }
+
+    /// The handler `php_output_start_internal` starts for the rewriter.
+    fn handler(self) -> BufferHandler {
+        match self {
+            Context::Output => OUTPUT_REWRITER,
+            Context::Session => SESSION_REWRITER,
+        }
+    }
+}
+
+/// `url_adapt_state_ex_t`: the scanner's state and what it holds between
+/// chunks, and what is added, the query pairs and the hidden inputs.
 #[derive(Debug, Default)]
 pub(crate) struct Rewriter {
     /// `active`: the handler was started, once per request.
@@ -155,7 +195,8 @@ struct Settings {
 }
 
 impl Settings {
-    fn read(req: &Request) -> Settings {
+    fn read(req: &Request, context: Context) -> Settings {
+        let (tags_entry, hosts_entry) = context.entries();
         let ini = |name: &[u8]| req.ini_get(name).unwrap_or_default().to_vec();
         // `php_strtok_r(tmp, ",")`, whose empty pieces are skipped.
         let pieces = |value: &[u8]| -> Vec<Vec<u8>> {
@@ -166,7 +207,7 @@ impl Settings {
                 .collect()
         };
         let mut tags: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        for piece in pieces(&ini(b"url_rewriter.tags")) {
+        for piece in pieces(&ini(tags_entry)) {
             let Some(at) = piece.iter().position(|c| *c == b'=') else {
                 continue;
             };
@@ -176,11 +217,11 @@ impl Settings {
                 tags.push((key, piece[at + 1..].to_vec()));
             }
         }
-        let hosts = pieces(&ini(b"url_rewriter.hosts"))
+        let hosts = pieces(&ini(hosts_entry))
             .into_iter()
             .map(|host| host.to_ascii_lowercase())
             .collect();
-        let separator = ini(b"arg_separator.output");
+        let separator = separator(req);
         let http_host = req.superglobal(b"_SERVER").and_then(|server| {
             let host = server
                 .snapshot()
@@ -197,13 +238,17 @@ impl Settings {
         Settings {
             tags,
             hosts,
-            separator: if separator.is_empty() {
-                b"&".to_vec()
-            } else {
-                separator
-            },
+            separator,
             http_host,
         }
+    }
+}
+
+/// `PG(arg_separator).output`, `&` where it is empty.
+fn separator(req: &Request) -> Vec<u8> {
+    match req.ini_get(b"arg_separator.output") {
+        Some(separator) if !separator.is_empty() => separator.to_vec(),
+        _ => b"&".to_vec(),
     }
 }
 
@@ -580,19 +625,18 @@ impl Chunk<'_> {
     }
 }
 
-/// `php_url_scanner_output_handler`: with pairs to add, the chunk
+/// `php_url_scanner_session_handler_impl`: with pairs to add, the chunk
 /// through the scanner, and on a flush or the last call what it had not
 /// decided after it; with none, the chunk after whatever the scanner had
 /// kept.
-#[allow(clippy::unnecessary_wraps)] // `BufferHandler::handler`'s signature
-fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatus, Thrown> {
-    let settings = Settings::read(req);
-    let ctx = &mut req.state::<State>().url_rewriter;
+fn handle(req: &mut Request, call: &mut HandlerCall<'_>, context: Context) -> HandlerStatus {
+    let settings = Settings::read(req, context);
+    let ctx = context.rewriter(req);
     if ctx.url_app.is_empty() {
         let mut out = std::mem::take(&mut ctx.buf);
         out.extend_from_slice(call.input);
         call.out = out;
-        return Ok(HandlerStatus::Success);
+        return HandlerStatus::Success;
     }
     let mut data = std::mem::take(&mut ctx.buf);
     data.extend_from_slice(call.input);
@@ -609,16 +653,204 @@ fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatu
         ctx.attr_val.clear();
     }
     call.out = out;
-    Ok(HandlerStatus::Success)
+    HandlerStatus::Success
 }
 
-/// The handler `php_output_start_internal` starts under the name
+/// `php_url_scanner_output_handler`.
+#[allow(clippy::unnecessary_wraps)] // `BufferHandler::handler`'s signature
+fn output_handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatus, Thrown> {
+    Ok(handle(req, call, Context::Output))
+}
+
+/// `php_url_scanner_session_handler`.
+#[allow(clippy::unnecessary_wraps)] // `BufferHandler::handler`'s signature
+fn session_handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatus, Thrown> {
+    Ok(handle(req, call, Context::Session))
+}
+
+/// The handlers `php_output_start_internal` starts, each under the name
 /// `URL-Rewriter`.
-const REWRITER: BufferHandler = BufferHandler {
+const OUTPUT_REWRITER: BufferHandler = BufferHandler {
     name: "URL-Rewriter",
     conflicts: &[],
-    handler,
+    handler: output_handler,
 };
+const SESSION_REWRITER: BufferHandler = BufferHandler {
+    name: "URL-Rewriter",
+    conflicts: &[],
+    handler: session_handler,
+};
+
+/// `php_url_scanner_add_var_impl`: the pair, raw-URL-encoded where
+/// `encode` is set, added to the rewriter's query pairs, and as a hidden
+/// input, HTML escaped, to its forms; the first pair of a request
+/// activates the rewriter and starts its `URL-Rewriter` handler.
+fn add_var(
+    req: &mut Request,
+    context: Context,
+    name: &[u8],
+    value: &[u8],
+    encode: bool,
+) -> Result<(), Thrown> {
+    let separator = separator(req);
+    let entity = |req: &mut Request, text: &[u8]| {
+        crate::html::escape(
+            req,
+            text,
+            false,
+            crate::html::QUOTES_SUBSTITUTE,
+            None,
+            false,
+        )
+    };
+    let (hname, hvalue) = if encode {
+        (entity(req, name), entity(req, value))
+    } else {
+        (name.to_vec(), value.to_vec())
+    };
+    let ctx = context.rewriter(req);
+    let start = !ctx.active;
+    if start {
+        // `php_url_scanner_ex_activate`: the scanner and both lists
+        // cleared, once a request.
+        *ctx = Rewriter {
+            active: true,
+            ..Rewriter::default()
+        };
+    }
+    if !ctx.url_app.is_empty() {
+        ctx.url_app.extend_from_slice(&separator);
+    }
+    if encode {
+        crate::url::url_encode(name, true, &mut ctx.url_app);
+        ctx.url_app.push(b'=');
+        crate::url::url_encode(value, true, &mut ctx.url_app);
+    } else {
+        ctx.url_app.extend_from_slice(name);
+        ctx.url_app.push(b'=');
+        ctx.url_app.extend_from_slice(value);
+    }
+    ctx.form_app
+        .extend_from_slice(b"<input type=\"hidden\" name=\"");
+    ctx.form_app.extend_from_slice(&hname);
+    ctx.form_app.extend_from_slice(b"\" value=\"");
+    ctx.form_app.extend_from_slice(&hvalue);
+    ctx.form_app.extend_from_slice(b"\" />");
+    if start {
+        req.output_buffer_op(&OutputOp::Start {
+            handler: StartHandler::Registered(context.handler()),
+            chunk_size: 0,
+            flags: 0x70,
+        })?;
+    }
+    Ok(())
+}
+
+/// `php_url_scanner_reset_var_impl`: the pair named `name` taken out of
+/// the rewriter's query pairs with one separator beside it, or all of
+/// them where it is the only one, and its hidden input out of the forms;
+/// `false` where no pair of that name was added. The name is found as
+/// php finds it, as the first `name=` anywhere in the pairs.
+fn reset_var(req: &mut Request, context: Context, name: &[u8], encode: bool) -> bool {
+    if context.rewriter(req).url_app.is_empty() {
+        return true;
+    }
+    let separator = separator(req);
+    let (sname, hname) = if encode {
+        let mut sname = Vec::new();
+        crate::url::url_encode(name, true, &mut sname);
+        let charset = req.ini_get(b"default_charset").map(<[u8]>::to_vec);
+        let hname = crate::html::escape(
+            req,
+            name,
+            false,
+            crate::html::QUOTES_SUBSTITUTE,
+            charset.as_deref(),
+            false,
+        );
+        (sname, hname)
+    } else {
+        (name.to_vec(), name.to_vec())
+    };
+    let mut url_var = sname;
+    url_var.push(b'=');
+    let mut form_var = b"<input type=\"hidden\" name=\"".to_vec();
+    form_var.extend_from_slice(&hname);
+    form_var.extend_from_slice(b"\" value=\"");
+    let ctx = context.rewriter(req);
+    let Some(mut start) = find(&ctx.url_app, &url_var) else {
+        return false;
+    };
+    let limit = ctx.url_app.len();
+    let mut end = start + url_var.len();
+    let mut separator_removed = false;
+    while end < limit {
+        if ctx.url_app[end..].starts_with(&separator) {
+            end += separator.len();
+            separator_removed = true;
+            break;
+        }
+        end += 1;
+    }
+    let end = end.min(limit);
+    if end - start == limit {
+        ctx.url_app.clear();
+        ctx.form_app.clear();
+        return true;
+    }
+    if !separator_removed
+        && start >= separator.len()
+        && ctx.url_app[start - separator.len()..start] == separator[..]
+    {
+        start -= separator.len();
+    }
+    ctx.url_app.drain(start..end);
+    let Some(start) = find(&ctx.form_app, &form_var) else {
+        ctx.url_app.clear();
+        ctx.form_app.clear();
+        return false;
+    };
+    let end = ctx.form_app[start + form_var.len()..]
+        .iter()
+        .position(|c| *c == b'>')
+        .map_or(ctx.form_app.len(), |at| start + form_var.len() + at + 1);
+    ctx.form_app.drain(start..end);
+    true
+}
+
+/// `php_memnstr`: where `needle` first stands in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// `php_url_scanner_add_session_var` (`url_scanner_ex.h`): the pair added
+/// to every URL and form the session's tags name, by the session
+/// rewriter's `URL-Rewriter`, started with the first pair of a request.
+/// What `php_session_reset_id` calls where `session.use_trans_sid` is on
+/// and no cookie carries the id; ext/session's `reset_id` carries the
+/// witness.
+///
+/// # Errors
+///
+/// What starting the handler threw.
+pub fn php_url_scanner_add_session_var(
+    req: &mut Request,
+    name: &[u8],
+    value: &[u8],
+    encode: bool,
+) -> Result<(), Thrown> {
+    add_var(req, Context::Session, name, value, encode)
+}
+
+/// `php_url_scanner_reset_session_var` (`url_scanner_ex.h`): the session
+/// rewriter's pair of that name taken out, so a new id replaces the old
+/// one rather than joining it; `false` where it was not there.
+/// ext/session's `reset_id` carries the witness.
+pub fn php_url_scanner_reset_session_var(req: &mut Request, name: &[u8], encode: bool) -> bool {
+    reset_var(req, Context::Session, name, encode)
+}
 
 /// `output_add_rewrite_var(string $name, string $value): bool`, php's
 /// `PHP_FUNCTION(output_add_rewrite_var)` over
@@ -667,47 +899,13 @@ fn output_add_rewrite_var(
     name: PhpString,
     value: PhpString,
 ) -> Result<bool, Thrown> {
-    let separator = Settings::read(req).separator;
-    let entity = |req: &mut Request, text: &[u8]| {
-        crate::html::escape(
-            req,
-            text,
-            false,
-            crate::html::QUOTES_SUBSTITUTE,
-            None,
-            false,
-        )
-    };
-    let (hname, hvalue) = (entity(req, name.as_bytes()), entity(req, value.as_bytes()));
-    let ctx = &mut req.state::<State>().url_rewriter;
-    let start = !ctx.active;
-    if start {
-        // `php_url_scanner_ex_activate`: the scanner and both lists
-        // cleared, once a request.
-        *ctx = Rewriter {
-            active: true,
-            ..Rewriter::default()
-        };
-    }
-    if !ctx.url_app.is_empty() {
-        ctx.url_app.extend_from_slice(&separator);
-    }
-    crate::url::url_encode(name.as_bytes(), true, &mut ctx.url_app);
-    ctx.url_app.push(b'=');
-    crate::url::url_encode(value.as_bytes(), true, &mut ctx.url_app);
-    ctx.form_app
-        .extend_from_slice(b"<input type=\"hidden\" name=\"");
-    ctx.form_app.extend_from_slice(&hname);
-    ctx.form_app.extend_from_slice(b"\" value=\"");
-    ctx.form_app.extend_from_slice(&hvalue);
-    ctx.form_app.extend_from_slice(b"\" />");
-    if start {
-        req.output_buffer_op(&OutputOp::Start {
-            handler: StartHandler::Registered(REWRITER),
-            chunk_size: 0,
-            flags: 0x70,
-        })?;
-    }
+    add_var(
+        req,
+        Context::Output,
+        name.as_bytes(),
+        value.as_bytes(),
+        true,
+    )?;
     Ok(true)
 }
 

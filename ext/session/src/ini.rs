@@ -3,7 +3,7 @@
 //! runs, `SESSION_CHECK_ACTIVE_STATE` and `SESSION_CHECK_OUTPUT_STATE`
 //! first. Each rule is the entry's `on_modify` on the face, so
 //! `ini_set()` and the natives, which call [`alter`] where php calls
-//! `zend_alter_ini_entry`, meet the same rule; [`startup`] runs them
+//! `zend_alter_ini_entry`, meet the same rule; the engine runs them
 //! over the values the host started the engine with (#744).
 
 use php_ext::abi::{ExtensionBuilder, OnModify};
@@ -83,6 +83,19 @@ pub(crate) const ENTRIES: [(&str, &str, Kind); 31] = [
 /// string(7) "nocache"
 /// string(2) "1%"
 /// ```
+///
+/// Where each may be changed, `ZEND_INI_PERDIR` alone for `auto_start`
+/// and the upload progress entries and `PHP_INI_ALL` for the rest:
+///
+/// ```php
+/// $all = ini_get_all('session');
+/// var_dump($all['session.auto_start']['access'], $all['session.upload_progress.freq']['access'], $all['session.name']['access']);
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+/// int(7)
+/// ```
 pub(super) fn declared() -> Vec<IniDecl> {
     ENTRIES
         .iter()
@@ -93,7 +106,9 @@ pub(super) fn declared() -> Vec<IniDecl> {
                 default: default.as_bytes().into(),
                 user: !per_dir,
                 per_dir: true,
-                system: true,
+                // `ZEND_INI_PERDIR` alone, which `php --re` shows as
+                // `<PERDIR>`; every other entry is `PHP_INI_ALL`.
+                system: !per_dir,
             }
         })
         .collect()
@@ -160,6 +175,22 @@ impl Stage {
 /// `PG(modules_activated)` is not yet set, so an unknown save handler or
 /// serializer is taken without a word there, and the session is disabled
 /// when a request starts under it (`PHP_RINIT_FUNCTION(session)`).
+///
+/// What a rule raises at startup is displayed before any request, in the
+/// order the entries are declared, and sends no header, so the session
+/// natives still take their values:
+///
+/// ```php
+/// var_dump(headers_sent(), session_save_path("/tmp"), session_save_path());
+/// ```
+/// ```expect regime=session-startup
+/// Deprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0
+///
+/// Deprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0
+/// bool(false)
+/// string(0) ""
+/// string(4) "/tmp"
+/// ```
 #[allow(clippy::too_many_lines)] // one arm per `PHP_INI_MH` of session.c
 fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool {
     let kind = ENTRIES
@@ -370,7 +401,8 @@ const MODIFIERS: [OnModify; 31] =
 
 /// Every entry's rule on the extension, as `PHP_INI_BEGIN()` pairs each
 /// with its `PHP_INI_MH`. The `ZEND_INI_PERDIR` ones are refused before
-/// any rule by `ini_set()`, and their rules are met only at [`startup`].
+/// any rule by `ini_set()`, and their rules are met only as the engine
+/// starts, over the host's values.
 ///
 /// ```php
 /// ob_start(); var_dump(ini_set('session.name', '123'), ini_set('session.gc_divisor', '0'), ini_get('session.gc_divisor'), ini_set('session.save_handler', 'user'));
@@ -410,7 +442,6 @@ pub(super) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
     ENTRIES
         .iter()
         .zip(MODIFIERS)
-        .filter(|((_, _, kind), _)| !matches!(kind, Kind::PerDir | Kind::PerDirBool))
         .fold(builder, |builder, ((name, _, _), modify)| {
             builder.on_modify(name.as_bytes(), modify)
         })

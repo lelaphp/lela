@@ -19,6 +19,9 @@ workspace = true
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 php_ext_standard = { path = "../standard" }
+# `getuid` and `geteuid` for the files handler's ownership check, in
+# `src/ffi/` alone (`unsafe.homes`).
+libc = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

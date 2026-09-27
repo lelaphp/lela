@@ -13,10 +13,11 @@
 //! rules of every `session.*` entry (`ini`). The session's variables are
 //! the `$_SESSION` superglobal's array, which the natives read and write;
 //! a program reads it once the compiler fetches a superglobal (#633, #745).
-//! The mm handler and upload progress are not ported: the first is not
+//! The process's uids, which the files handler reads, are the one
+//! binding, in `ffi`. The mm handler and upload progress are not ported: the first is not
 //! in php's default build, the second needs a request body the CLI
 //! host does not have.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -29,6 +30,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod ffi;
 mod files;
 mod ini;
 mod natives;
