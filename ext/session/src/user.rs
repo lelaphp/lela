@@ -5,17 +5,15 @@
 //! `SessionHandler`, whose methods call the handler that stood before
 //! `user`, `PS(default_mod)`.
 
+use php_ext::abi::{OrFalse, This};
+use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, value_name};
-use php_ext::decl::{ClassDecl, ClassKind, MethodDecl, ParameterDefault, Type};
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, fatal, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
-use crate::{
-    Entry, Module, State, Status, absorb, answer, arguments_between, class, coerced, declared,
-    files, method, parameter, pending, session, string_value,
-};
+use crate::{Module, State, Status, absorb, answer, files, pending, session, string_value};
 
 /// `PS(mod_user_names)`: the callables, each a value the request holds
 /// one owner of.
@@ -296,125 +294,6 @@ pub(super) fn validate_sid(req: &mut Request, id: &[u8]) -> Result<bool, Thrown>
     Ok(verify_bool(req, answered))
 }
 
-// ------------------------------------------------------------ classes
-
-/// The interfaces and `SessionHandler` in `PHP_MINIT_FUNCTION(session)`'s
-/// order, the class's methods paired with their entries.
-///
-/// ```php
-/// var_dump((new ReflectionClass("SessionHandler"))->getInterfaceNames(), (string) (new ReflectionMethod("SessionHandlerInterface", "gc"))->getTentativeReturnType(), interface_exists("SessionIdInterface"));
-/// ```
-/// ```expect
-/// array(2) {
-///   [0]=>
-///   string(23) "SessionHandlerInterface"
-///   [1]=>
-///   string(18) "SessionIdInterface"
-/// }
-/// string(9) "int|false"
-/// bool(true)
-/// ```
-pub(super) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
-    let typed = |name: &[u8], ty: Type| parameter(name, Some(ty), ParameterDefault::None);
-    let string = |name: &[u8]| typed(name, Type::String);
-    let string_or_false = || Type::Union(vec![Type::String, Type::False]);
-    let int_or_false = || Type::Union(vec![Type::Int, Type::False]);
-    let handler: [(&[u8], Vec<_>, Type, Entry); 6] = [
-        (
-            b"open",
-            vec![string(b"path"), string(b"name")],
-            Type::Bool,
-            handler_open,
-        ),
-        (b"close", Vec::new(), Type::Bool, handler_close),
-        (
-            b"read",
-            vec![string(b"id")],
-            string_or_false(),
-            handler_read,
-        ),
-        (
-            b"write",
-            vec![string(b"id"), string(b"data")],
-            Type::Bool,
-            handler_write,
-        ),
-        (b"destroy", vec![string(b"id")], Type::Bool, handler_destroy),
-        (
-            b"gc",
-            vec![typed(b"max_lifetime", Type::Int)],
-            int_or_false(),
-            handler_gc,
-        ),
-    ];
-    let abstract_of = |rows: &[(&[u8], Vec<php_ext::decl::Parameter>, Type)]| {
-        rows.iter()
-            .map(|(name, parameters, returns)| {
-                method(declared(name, parameters.clone(), returns.clone()), true)
-            })
-            .collect::<Vec<_>>()
-    };
-    let interface_rows: Vec<_> = handler
-        .iter()
-        .map(|(n, p, t, _)| (*n, p.clone(), t.clone()))
-        .collect();
-    let mut methods: Vec<(MethodDecl, Entry)> = handler
-        .into_iter()
-        .map(|(name, parameters, returns, entry)| {
-            (method(declared(name, parameters, returns), false), entry)
-        })
-        .collect();
-    methods.push((
-        method(declared(b"create_sid", Vec::new(), Type::String), false),
-        handler_create_sid,
-    ));
-    vec![
-        (
-            class(
-                b"SessionHandlerInterface",
-                ClassKind::Interface,
-                &[],
-                abstract_of(&interface_rows),
-            ),
-            Vec::new(),
-        ),
-        (
-            class(
-                b"SessionIdInterface",
-                ClassKind::Interface,
-                &[],
-                abstract_of(&[(b"create_sid", Vec::new(), Type::String)]),
-            ),
-            Vec::new(),
-        ),
-        (
-            class(
-                b"SessionUpdateTimestampHandlerInterface",
-                ClassKind::Interface,
-                &[],
-                abstract_of(&[
-                    (b"validateId", vec![string(b"id")], Type::Bool),
-                    (
-                        b"updateTimestamp",
-                        vec![string(b"id"), string(b"data")],
-                        Type::Bool,
-                    ),
-                ]),
-            ),
-            Vec::new(),
-        ),
-        (
-            class(
-                b"SessionHandler",
-                ClassKind::Class,
-                &[b"SessionHandlerInterface", b"SessionIdInterface"],
-                Vec::new(),
-            ),
-            methods,
-        ),
-    ]
-}
-
 /// `PS_SANITY_CHECK`: an active session and a handler to call, else
 /// php's `Error`; with `open`, the parent opened too, else php's warning
 /// and `false`.
@@ -433,181 +312,291 @@ fn sanity(req: &mut Request, open: bool) -> Result<Option<Module>, Thrown> {
     Ok(Some(module))
 }
 
-/// A string parameter, `Z_PARAM_STR`.
-fn string_at(req: &mut Request, position: u32) -> Result<Vec<u8>, Thrown> {
-    Ok(coerced(req, position, &Type::String)?
-        .as_str_bytes()
-        .unwrap_or_default()
-        .to_vec())
-}
-
-/// `SessionHandler::open(string $path, string $name): bool`: the
-/// default handler opened on the path and name given.
+/// `interface SessionHandlerInterface`, the six operations a save handler
+/// object answers, each return tentative.
 ///
 /// ```php
-/// class H implements SessionHandlerInterface { public $p; function __construct() { $this->p = new SessionHandler; }
-///   function open($p, $n): bool { echo "open ", $p === __DIR__ ? "dir" : $p, " $n\n"; return $this->p->open($p, $n); } function read($id): string|false { echo "read\n"; return $this->p->read($id); }
-///   function write($id, $d): bool { echo "write $d\n"; return $this->p->write($id, $d); } function close(): bool { echo "close\n"; return $this->p->close(); }
-///   function destroy($id): bool { return $this->p->destroy($id); } function gc($l): int|false { return $this->p->gc($l); } }
-/// ob_start(); session_set_save_handler(new H); session_save_path(__DIR__); session_id("handler1"); var_dump(session_start(["use_cookies" => 0]));
-/// session_decode('k|i:1;'); session_write_close(); echo file_get_contents(__DIR__ . "/sess_handler1"), "\n";
-/// try { (new SessionHandler)->open("", ""); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $m = new ReflectionMethod('SessionHandlerInterface', 'read');
+/// var_dump($m->isAbstract(), (string) $m->getTentativeReturnType());
+/// ```
+/// ```expect
+/// bool(true)
+/// string(12) "string|false"
+/// ```
+#[php_class(interface)]
+pub(crate) struct SessionHandlerInterface;
+
+#[php_class]
+impl SessionHandlerInterface {
+    #[php(tentative)]
+    fn open(this: This<Self>, path: PhpString, name: PhpString) -> bool;
+    #[php(tentative)]
+    fn close(this: This<Self>) -> bool;
+    #[php(tentative)]
+    fn read(this: This<Self>, id: PhpString) -> OrFalse<PhpString>;
+    #[php(tentative)]
+    fn write(this: This<Self>, id: PhpString, data: PhpString) -> bool;
+    #[php(tentative)]
+    fn destroy(this: This<Self>, id: PhpString) -> bool;
+    #[php(tentative)]
+    fn gc(this: This<Self>, max_lifetime: i64) -> OrFalse<i64>;
+}
+
+/// `interface SessionIdInterface`: a handler's own ids.
+///
+/// ```php
+/// var_dump(interface_exists('SessionIdInterface'), (string) (new ReflectionMethod('SessionIdInterface', 'create_sid'))->getTentativeReturnType());
+/// ```
+/// ```expect
+/// bool(true)
+/// string(6) "string"
+/// ```
+#[php_class(interface)]
+pub(crate) struct SessionIdInterface;
+
+#[php_class]
+impl SessionIdInterface {
+    #[php(tentative)]
+    fn create_sid(this: This<Self>) -> PhpString;
+}
+
+/// `interface SessionUpdateTimestampHandlerInterface`: the check
+/// `session.use_strict_mode` makes of an id, and `lazy_write`'s touch.
+///
+/// ```php
+/// echo implode(' ', get_class_methods('SessionUpdateTimestampHandlerInterface')), "\n";
+/// ```
+/// ```expect
+/// validateId updateTimestamp
+/// ```
+#[php_class(interface)]
+pub(crate) struct SessionUpdateTimestampHandlerInterface;
+
+#[php_class]
+impl SessionUpdateTimestampHandlerInterface {
+    #[php(tentative)]
+    fn validateId(this: This<Self>, id: PhpString) -> bool;
+    #[php(tentative)]
+    fn updateTimestamp(this: This<Self>, id: PhpString, data: PhpString) -> bool;
+}
+
+/// `class SessionHandler implements SessionHandlerInterface,
+/// SessionIdInterface`, each method calling the handler that stood before
+/// `user`, `PS(default_mod)`, its return tentative as the stub's
+/// `@tentative-return-type` marks every one.
+///
+/// ```php
+/// var_dump((new ReflectionClass("SessionHandler"))->getInterfaceNames(), (string) (new ReflectionMethod("SessionHandlerInterface", "gc"))->getTentativeReturnType(), interface_exists("SessionIdInterface"));
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   string(23) "SessionHandlerInterface"
+///   [1]=>
+///   string(18) "SessionIdInterface"
+/// }
+/// string(9) "int|false"
+/// bool(true)
+/// ```
+#[php_class(implements(SessionHandlerInterface, SessionIdInterface))]
+pub(crate) struct SessionHandler;
+
+/// The default handler's `read` and `write` reached through a class that
+/// extends `SessionHandler`, as a handler that decorates `files` calls
+/// them.
+///
+/// ```php
+/// ob_start(); session_save_path(__DIR__); file_put_contents(__DIR__ . "/sess_rw1", "k|i:5;");
+/// class R extends SessionHandler { function read($id): string|false { $d = parent::read($id); echo "read $d\n"; return $d; }
+///   function write($id, $d): bool { echo "write $d\n"; return parent::write($id, $d); } }
+/// session_set_save_handler(new R); session_id("rw1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// $_SESSION["k"]++; session_write_close(); echo file_get_contents(__DIR__ . "/sess_rw1"), "\n"; unlink(__DIR__ . "/sess_rw1");
 /// ob_end_flush();
 /// ```
 /// ```expect
-/// open dir PHPSESSID
-/// read
-/// bool(true)
-/// write k|i:1;
-/// close
-/// k|i:1;
-/// Session is not active
+/// read k|i:5;
+/// write k|i:6;
+/// k|i:6;
 /// ```
-fn handler_open(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 2, 2)?;
-    let path = string_at(req, 1)?;
-    let _name = string_at(req, 2)?;
-    let Some(module) = sanity(req, false)? else {
-        return Ok(Value::bool(false));
-    };
-    let opened = match module {
-        Module::Files => files::open(req, &path),
-        Module::User => false,
-    };
-    if opened {
-        req.state::<State>().parent_open = true;
+#[php_class]
+impl SessionHandler {
+    /// `SessionHandler::open(string $path, string $name): bool`: the
+    /// default handler opened on the path and name given.
+    ///
+    /// ```php
+    /// class H implements SessionHandlerInterface { public $p; function __construct() { $this->p = new SessionHandler; }
+    ///   function open($p, $n): bool { echo "open ", $p === __DIR__ ? "dir" : $p, " $n\n"; return $this->p->open($p, $n); } function read($id): string|false { echo "read\n"; return $this->p->read($id); }
+    ///   function write($id, $d): bool { echo "write $d\n"; return $this->p->write($id, $d); } function close(): bool { echo "close\n"; return $this->p->close(); }
+    ///   function destroy($id): bool { return $this->p->destroy($id); } function gc($l): int|false { return $this->p->gc($l); } }
+    /// ob_start(); session_set_save_handler(new H); session_save_path(__DIR__); session_id("handler1"); var_dump(session_start(["use_cookies" => 0]));
+    /// session_decode('k|i:1;'); session_write_close(); echo file_get_contents(__DIR__ . "/sess_handler1"), "\n";
+    /// try { (new SessionHandler)->open("", ""); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ob_end_flush();
+    /// ```
+    /// ```expect
+    /// open dir PHPSESSID
+    /// read
+    /// bool(true)
+    /// write k|i:1;
+    /// close
+    /// k|i:1;
+    /// Session is not active
+    /// ```
+    #[php(tentative)]
+    fn open(
+        req: &mut Request,
+        _this: This<Self>,
+        path: PhpString,
+        name: PhpString,
+    ) -> Result<bool, Thrown> {
+        let _ = name;
+        let Some(module) = sanity(req, false)? else {
+            return Ok(false);
+        };
+        let opened = match module {
+            Module::Files => files::open(req, path.as_bytes()),
+            Module::User => false,
+        };
+        if opened {
+            req.state::<State>().parent_open = true;
+        }
+        answer(req, opened)
     }
-    answer(req, Value::bool(opened))
-}
 
-/// `SessionHandler::close(): bool`, which takes no argument
-/// (`ZEND_PARSE_PARAMETERS_NONE`).
-///
-/// ```php
-/// class H extends SessionHandler { function close(): bool { return parent::close(false); } }
-/// ob_start(); session_set_save_handler(new H); session_save_path(__DIR__); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
-/// try { session_write_close(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// SessionHandler::close() expects exactly 0 arguments, 1 given
-/// ```
-fn handler_close(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
-    let Some(module) = sanity(req, true)? else {
-        return Ok(Value::bool(false));
-    };
-    req.state::<State>().parent_open = false;
-    if module == Module::Files {
-        files::close(req);
+    /// `SessionHandler::close(): bool`, which takes no argument
+    /// (`ZEND_PARSE_PARAMETERS_NONE`).
+    ///
+    /// ```php
+    /// class H extends SessionHandler { function close(): bool { return parent::close(false); } }
+    /// ob_start(); session_set_save_handler(new H); session_save_path(__DIR__); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+    /// try { session_write_close(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// SessionHandler::close() expects exactly 0 arguments, 1 given
+    /// ```
+    #[php(tentative)]
+    fn close(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let Some(module) = sanity(req, true)? else {
+            return Ok(false);
+        };
+        req.state::<State>().parent_open = false;
+        if module == Module::Files {
+            files::close(req);
+        }
+        Ok(true)
     }
-    Ok(Value::bool(true))
-}
 
-/// `SessionHandler::read(string $id): string|false`.
-fn handler_read(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 1, 1)?;
-    let id = string_at(req, 1)?;
-    let Some(module) = sanity(req, true)? else {
-        return Ok(Value::bool(false));
-    };
-    let data = match module {
-        Module::Files => files::read(req, &id)?,
-        Module::User => None,
-    };
-    match data {
-        Some(data) => string_value(req, &data),
-        None => Ok(Value::bool(false)),
+    /// `SessionHandler::read(string $id): string|false`.
+    #[php(tentative)]
+    fn read(
+        req: &mut Request,
+        _this: This<Self>,
+        id: PhpString,
+    ) -> Result<OrFalse<PhpString>, Thrown> {
+        let Some(module) = sanity(req, true)? else {
+            return Ok(OrFalse::False);
+        };
+        let data = match module {
+            Module::Files => files::read(req, id.as_bytes())?,
+            Module::User => None,
+        };
+        match data {
+            Some(data) => PhpString::new(req, &data).map(OrFalse::Value),
+            None => Ok(OrFalse::False),
+        }
     }
-}
 
-/// `SessionHandler::write(string $id, string $data): bool`.
-fn handler_write(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 2, 2)?;
-    let id = string_at(req, 1)?;
-    let data = string_at(req, 2)?;
-    let Some(module) = sanity(req, true)? else {
-        return Ok(Value::bool(false));
-    };
-    Ok(Value::bool(
-        module == Module::Files && files::write(req, &id, &data)?,
-    ))
-}
+    /// `SessionHandler::write(string $id, string $data): bool`.
+    #[php(tentative)]
+    fn write(
+        req: &mut Request,
+        _this: This<Self>,
+        id: PhpString,
+        data: PhpString,
+    ) -> Result<bool, Thrown> {
+        let Some(module) = sanity(req, true)? else {
+            return Ok(false);
+        };
+        Ok(module == Module::Files && files::write(req, id.as_bytes(), data.as_bytes())?)
+    }
 
-/// `SessionHandler::destroy(string $id): bool`.
-///
-/// ```php
-/// ob_start(); session_set_save_handler(new SessionHandler); session_save_path(__DIR__); session_id("gone1");
-/// session_start(["use_cookies" => 0]); session_write_close(); var_dump(file_exists(__DIR__ . "/sess_gone1"));
-/// session_start(); var_dump(session_destroy(), file_exists(__DIR__ . "/sess_gone1"), session_status());
-/// ob_end_flush();
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// int(1)
-/// ```
-fn handler_destroy(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 1, 1)?;
-    let id = string_at(req, 1)?;
-    let Some(module) = sanity(req, true)? else {
-        return Ok(Value::bool(false));
-    };
-    Ok(Value::bool(
-        module == Module::Files && files::destroy(req, &id)?,
-    ))
-}
+    /// `SessionHandler::destroy(string $id): bool`.
+    ///
+    /// ```php
+    /// ob_start(); session_set_save_handler(new SessionHandler); session_save_path(__DIR__); session_id("gone1");
+    /// session_start(["use_cookies" => 0]); session_write_close(); var_dump(file_exists(__DIR__ . "/sess_gone1"));
+    /// session_start(); var_dump(session_destroy(), file_exists(__DIR__ . "/sess_gone1"), session_status());
+    /// ob_end_flush();
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// int(1)
+    /// ```
+    #[php(tentative)]
+    fn destroy(req: &mut Request, _this: This<Self>, id: PhpString) -> Result<bool, Thrown> {
+        let Some(module) = sanity(req, true)? else {
+            return Ok(false);
+        };
+        Ok(module == Module::Files && files::destroy(req, id.as_bytes())?)
+    }
 
-/// `SessionHandler::gc(int $max_lifetime): int|false`: the default
-/// handler's collection, `false` where it counted nothing it could.
-///
-/// ```php
-/// ob_start(); $h = new SessionHandler; session_set_save_handler($h); session_save_path(__DIR__); touch(__DIR__ . "/sess_stale", 1000);
-/// session_start(["use_cookies" => 0, "cache_limiter" => "", "gc_probability" => 0]); var_dump($h->gc(1440), file_exists(__DIR__ . "/sess_stale"));
-/// session_write_close(); ob_end_flush();
-/// ```
-/// ```expect
-/// int(1)
-/// bool(false)
-/// ```
-fn handler_gc(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 1, 1)?;
-    let maxlifetime = coerced(req, 1, &Type::Int)?.as_int().unwrap_or(0);
-    let Some(module) = sanity(req, true)? else {
-        return Ok(Value::bool(false));
-    };
-    let deleted = match module {
-        Module::Files => files::gc(req, maxlifetime)?,
-        Module::User => -1,
-    };
-    Ok(if deleted == -1 {
-        Value::bool(false)
-    } else {
-        Value::int(deleted)
-    })
-}
+    /// `SessionHandler::gc(int $max_lifetime): int|false`: the default
+    /// handler's collection, `false` where it counted nothing it could.
+    ///
+    /// ```php
+    /// ob_start(); $h = new SessionHandler; session_set_save_handler($h); session_save_path(__DIR__); touch(__DIR__ . "/sess_stale", 1000);
+    /// session_start(["use_cookies" => 0, "cache_limiter" => "", "gc_probability" => 0]); var_dump($h->gc(1440), file_exists(__DIR__ . "/sess_stale"));
+    /// session_write_close(); ob_end_flush();
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn gc(req: &mut Request, _this: This<Self>, max_lifetime: i64) -> Result<OrFalse<i64>, Thrown> {
+        let Some(module) = sanity(req, true)? else {
+            return Ok(OrFalse::False);
+        };
+        let deleted = match module {
+            Module::Files => files::gc(req, max_lifetime)?,
+            Module::User => -1,
+        };
+        Ok(if deleted == -1 {
+            OrFalse::False
+        } else {
+            OrFalse::Value(deleted)
+        })
+    }
 
-/// `SessionHandler::create_sid(): string`.
-///
-/// ```php
-/// class C extends SessionHandler { public $p; function create_sid(): string { $id = (new SessionHandler)->create_sid(); echo strlen($id), "\n"; return "made" . substr($id, 4); } }
-/// ob_start(); session_set_save_handler(new C); session_save_path(__DIR__); session_start(["use_cookies" => 0]); echo substr(session_id(), 0, 4), "\n"; session_write_close(); ob_end_flush();
-/// ```
-/// ```expect
-/// 32
-/// made
-/// ```
-fn handler_create_sid(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
-    let Some(module) = sanity(req, false)? else {
-        return Ok(Value::bool(false));
-    };
-    let id = match module {
-        Module::Files => files::create_sid(req)?,
-        Module::User => session::create_id(req),
-    };
-    let id = id.unwrap_or_default();
-    string_value(req, &id)
+    /// `SessionHandler::create_sid(): string`.
+    ///
+    /// ```php
+    /// class C extends SessionHandler { public $p; function create_sid(): string { $id = (new SessionHandler)->create_sid(); echo strlen($id), "\n"; return "made" . substr($id, 4); } }
+    /// ob_start(); session_set_save_handler(new C); session_save_path(__DIR__); session_start(["use_cookies" => 0]); echo substr(session_id(), 0, 4), "\n"; session_write_close(); ob_end_flush();
+    /// ```
+    /// ```expect
+    /// 32
+    /// made
+    /// ```
+    #[php(tentative)]
+    fn create_sid(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        // `sanity` answers a module whenever it does not require the
+        // parent opened.
+        let Some(module) = sanity(req, false)? else {
+            return Err(fatal(
+                req,
+                "InternalError: SessionHandler::create_sid() without a default handler",
+            ));
+        };
+        let id = match module {
+            Module::Files => files::create_sid(req)?,
+            Module::User => session::create_id(req),
+        };
+        let id = id.unwrap_or_default();
+        PhpString::new(req, &id)
+    }
 }
 
 /// `[$object, $method]`, the callable `SESSION_SET_USER_HANDLER_OO`
