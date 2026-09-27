@@ -92,14 +92,10 @@ pub fn extension() -> Extension {
     builder = dllist::register(builder);
     builder = heap::register(builder);
     builder = builder.class::<fixedarray::SplFixedArray>();
-    for (decl, methods) in observer::classes() {
-        builder = if decl.kind == ClassKind::Interface {
-            builder.classes(vec![(decl, methods)])
-        } else {
-            builder.class_payload::<observer::Storage>(decl, methods, &observer::HANDLERS)
-        };
-    }
-    builder.request_state::<State>().info(spl_info).build("SPL")
+    observer::register(builder)
+        .request_state::<State>()
+        .info(spl_info)
+        .build("SPL")
 }
 
 // ---- Core's classes, named for `extends` and `implements`
@@ -127,6 +123,10 @@ pub(crate) struct ArrayAccess;
 /// Core's `Serializable`.
 #[php_class(extern)]
 pub(crate) struct Serializable;
+
+/// `SeekableIterator`, which `iterators` declares from its stub text.
+#[php_class(extern)]
+pub(crate) struct SeekableIterator;
 
 /// ext/json's `JsonSerializable`.
 #[php_class(extern)]
