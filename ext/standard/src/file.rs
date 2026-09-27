@@ -10,8 +10,10 @@
 //! `file_get_contents` and `file_put_contents`; then
 //! `stream_get_meta_data`; then the natives over the wrapper operations
 //! past opening, `rmdir`, `umask`, `mkdir`, `rename`, `copy`, `tempnam`,
-//! `tmpfile` and `unlink`. A `$stream` parameter is
+//! `tmpfile` and `unlink`; then the rest of `file.c`'s, `flock` to
+//! `sys_get_temp_dir`. A `$stream` parameter is `abi::Stream`,
 //! `PHP_Z_PARAM_STREAM`: a resource, and one that is an open stream.
+//! `file.stub.php`'s constants are all here, once, in its order.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 

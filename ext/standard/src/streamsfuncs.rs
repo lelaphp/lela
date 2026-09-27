@@ -7,7 +7,8 @@
 //! `stream_set_*` asks of a stream, answered as the kinds this engine has
 //! answer them; and `stream_resolve_include_path`, `stream_is_local`,
 //! `stream_supports_lock` and `stream_get_wrappers`. `stream_get_meta_data`
-//! is `file`'s; `socket_get_status` is its alias here. The socket
+//! is `file`'s, which declares `socket_get_status` as its alias, listed
+//! here in the stub's order. The socket
 //! natives, `stream_select`, the filter natives, `stream_isatty` and
 //! `stream_get_transports` wait on faces the api does not have (#684).
 //!

@@ -4,12 +4,13 @@
 //! `php_stream_xport_create`: a client connected or a server bound
 //! through a `transport`, accepted, named, sent to and received from, shut
 //! down, and a pair made by `socketpair(2)`, which is `src/ffi/`'s. Beside
-//! them are the constants `file.stub.php` declares for these natives and
-//! `default_socket_timeout`, `file.c`'s ini entry, which every socket's
-//! read timeout and every connect without one of its own read.
+//! them is `default_socket_timeout`, `file.c`'s ini entry, which every
+//! socket's read timeout and every connect without one of its own read;
+//! the constants `file.stub.php` declares for these natives are
+//! `file::constants`.
 //!
-//! What is not here: a stream `context`, which `t-opus-5/t680`'s
-//! `streamsfuncs.rs` lays down, so `$context` is taken and not read;
+//! What is not here: a stream `context`'s options, so `$context` is held
+//! as `Z_PARAM_RESOURCE_OR_NULL` holds it and not read;
 //! persistent sockets, which a request-scoped engine has no store for,
 //! so `pfsockopen` and `STREAM_CLIENT_PERSISTENT` open a socket of the
 //! request's own; and crypto, which is `ext/openssl`'s.

@@ -4,7 +4,8 @@
 //! `stream_filter_register` and `stream_get_filters`; beside them the
 //! three filter natives of `streamsfuncs.c`, `stream_filter_append`,
 //! `stream_filter_prepend` and `stream_filter_remove`, and the
-//! `PSFS_*` and `STREAM_FILTER_*` constants. The chains are the engine's
+//! `PSFS_*` constants, `file.stub.php`'s `STREAM_FILTER_*` being
+//! `file::constants`. The chains are the engine's
 //! (`main/streams/filter.c`); a user filter is a [`StreamFilter`] of this
 //! crate's over the object its factory made, and a brigade is handed to
 //! `filter()` as a resource of php's `userfilter.bucket brigade` type
