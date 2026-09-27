@@ -265,7 +265,8 @@ pub fn extension() -> Extension {
         .constants_with::<ImageHandler>(image::link_constants)
         .classes(math::classes())
         .classes(var::classes())
-        .classes(user_filters::classes())
+        .class::<user_filters::php_user_filter>()
+        .class::<user_filters::StreamBucket>()
         .ini(var::ini())
         .ini(sockets::ini())
         .dependencies(dependencies())
@@ -381,7 +382,7 @@ fn file_constants() -> Vec<ConstDecl> {
         dns::constants::declared(),
         info::constants(),
         sockets::constants::declared(),
-        user_filters::constants(),
+        user_filters::constants::declared(),
         userspace::constants::declared(),
     ]
     .into_iter()
