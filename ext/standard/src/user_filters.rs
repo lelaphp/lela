@@ -343,6 +343,17 @@ struct UserFilter {
     object: PhpObject,
 }
 
+/// php's warning for a call that left buckets on its input brigade.
+fn unprocessed(req: &mut Request, input: &Brigade) {
+    if !input.is_empty() {
+        docref(
+            req,
+            Level::Warning,
+            "Unprocessed filter buckets remaining on input brigade",
+        );
+    }
+}
+
 /// `zend_call_method_if_exists` of a method with no arguments.
 fn call_if_exists(
     req: &mut Request,
@@ -369,7 +380,27 @@ impl StreamFilter for UserFilter {
     /// the two brigades as resources, `$consumed` by reference, and
     /// `$closing`, to `filter()`; its answer as an int, the consumed
     /// count read back, php's warning where input buckets were left, and
-    /// `$this->stream` put back to `null`.
+    /// `$this->stream` put back to `null`. A `stream` property whose type
+    /// refuses the resource throws before `filter()` is called: php's
+    /// warning where input buckets are left, and `PSFS_ERR_FATAL`.
+    ///
+    /// ```php
+    /// class F {
+    ///     public $filtername, $params;
+    ///     public int $stream = 1;
+    ///     function filter($in, $out, &$consumed, $closing): int { echo "called\n"; return PSFS_PASS_ON; }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// $m = fopen('php://memory', 'w');
+    /// stream_filter_append($m, 'f', STREAM_FILTER_WRITE);
+    /// try { var_dump(fwrite($m, 'data')); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { fclose($m); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Warning: fwrite(): Unprocessed filter buckets remaining on input brigade in %s on line 10
+    /// Cannot assign resource to property F::$stream of type int
+    /// Cannot assign resource to property F::$stream of type int
+    /// ```
     fn filter(
         &mut self,
         req: &mut Request,
@@ -384,7 +415,13 @@ impl StreamFilter for UserFilter {
         if has_stream {
             let value = stream.as_value();
             req.addref(&value);
-            write_prop(req, &object, b"stream", value)?;
+            // A property update that threw skips the call: php's warning
+            // where input buckets remain, and `PSFS_ERR_FATAL` with the
+            // throwable pending (`Z/ext/standard/user_filters.c:161`).
+            if let Err(thrown) = write_prop(req, &object, b"stream", value) {
+                unprocessed(req, input);
+                return Err(thrown);
+            }
         }
         let kind = brigade_type(req);
         let in_res = Resource::new(req, kind, BrigadeCell::of(std::mem::take(input)))?;
@@ -420,13 +457,7 @@ impl StreamFilter for UserFilter {
             let read = count.get();
             *n = usize::try_from(to_long(req, &read.deref())?).unwrap_or(0);
         }
-        if !input.is_empty() {
-            docref(
-                req,
-                Level::Warning,
-                "Unprocessed filter buckets remaining on input brigade",
-            );
-        }
+        unprocessed(req, input);
         if has_stream {
             write_prop(req, &object, b"stream", Value::null())?;
         }
