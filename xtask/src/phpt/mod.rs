@@ -68,7 +68,12 @@
 //! run, so two runs over one subset from two checkouts wait on each other
 //! test by test and never stand in one path at once (#990); the paths are
 //! where upstream writes, so `__FILE__`, `__DIR__` and a relative include
-//! are run-tests.php's.
+//! are run-tests.php's. A test's directory is held across processes too,
+//! and shared within the run: while one of a run's batches has a test
+//! going in a directory, no other run has one going there, so two runs
+//! over one tree never meet in a directory, whatever path its tests make
+//! that no key names, and one run's batches go on beside each other as
+//! upstream's workers do (#1097).
 //!
 //! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
 //! a crate owns the directories of the corpus its row names, an extension
