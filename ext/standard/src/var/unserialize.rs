@@ -9,49 +9,281 @@
 
 use php_ext::abi::Passed;
 use php_ext::attr::php_function;
-use php_ext::call::{call, call_method, class_constant, lookup_class, new_object};
+use php_ext::call::{autoload, call, call_method, class_constant, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, value_name};
 use php_ext::raising::{Level, Thrown, deprecated, docref, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
-use super::{INCOMPLETE_CLASS, MAGIC_MEMBER, has_method, is_enum_class, not_serializable};
+use super::{
+    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, has_method, is_enum_class, is_serializable,
+    locked, not_serializable,
+};
 
 /// `HT_MAX_SIZE` on a 64-bit build.
 const HT_MAX_SIZE: i64 = 0x4000_0000;
 
-/// Where one value of the string goes: the value `unserialize()`
-/// returns, an element of an array being filled, or a property of an
-/// object being filled, by the key the string carries.
+/// Where one value of the string goes: the root the reader of that
+/// depth reads into, an element of an array being filled, or a property
+/// of an object being filled, by the key the string carries.
 #[derive(Clone)]
 enum Slot {
-    Root,
-    /// A root [`Unserializer::value`] has handed its caller, php's
-    /// `var_tmp_var`: an `R:` naming it later shares the value the var
-    /// hash holds and writes nothing back.
+    /// [`VarHash::roots`]' entry of the reader that reads into it.
+    Root(usize),
+    /// A root its reader has handed on, php's `var_tmp_var`: an `R:`
+    /// naming it later shares the value the var hash holds and writes
+    /// nothing back.
     Taken,
     Element(PhpArray, Key),
     Property(PhpObject, PhpString),
+    /// A place a repeated key wrote again: the slot numbered here, which
+    /// holds what the place holds now, as php's pointer to the bucket
+    /// reads it.
+    Same(usize),
 }
 
-/// A call php delays until the whole string is read (`var_destroy`).
-enum Delayed {
+/// One entry of php's dtor list, which `var_destroy` walks in order: a
+/// value the var hash holds an owner of until then, php's `var_tmp_var`
+/// and `var_push_dtor_value`, or an object whose `__wakeup()` or
+/// `__unserialize()` is delayed until the whole string is read.
+enum Dtor {
+    Kept(Value),
     Wakeup(PhpObject),
     Unserialize(PhpObject, PhpArray),
 }
 
 /// `php_unserialize_data`: the slots in push order, each with the value
 /// last written into it, `None` once a failure has forbidden it; the
-/// delayed calls; the options.
+/// root of each reader open over it, innermost last; the dtor list; the
+/// options, which a nested `unserialize()` sets and restores.
+#[derive(Default)]
+pub(crate) struct VarHash {
+    slots: Vec<Option<(Slot, Value)>>,
+    roots: Vec<Value>,
+    dtors: Vec<Dtor>,
+    allowed: Allowed,
+    max_depth: i64,
+    depth: i64,
+    /// `ref_props`: the slots of typed properties whose value was read
+    /// and held to the type, which an `R:` naming them later makes a
+    /// source of the cell it puts there.
+    ref_props: Vec<usize>,
+}
+
+/// `allowed_classes`: every class, php's null table, or those of the
+/// lowered names alone.
+#[derive(Clone, Default)]
+enum Allowed {
+    #[default]
+    Every,
+    Only(Vec<Vec<u8>>),
+}
+
+impl Allowed {
+    /// `unserialize_allowed_class` over a lowered name.
+    fn admits(&self, lowered: &[u8]) -> bool {
+        match self {
+            Allowed::Every => true,
+            Allowed::Only(names) => names.iter().any(|name| name.as_slice() == lowered),
+        }
+    }
+}
+
+impl VarHash {
+    /// `php_var_unserialize_init`'s fresh var hash: every class allowed
+    /// and the depth `unserialize_max_depth` sets.
+    fn fresh(req: &Request) -> VarHash {
+        VarHash {
+            max_depth: default_depth(req),
+            ..VarHash::default()
+        }
+    }
+
+    /// `var_destroy`: the dtor list walked in order, each delayed call
+    /// made with `BG(serialize_lock)` held until one of them throws, and
+    /// the object of that call and of every call after it marked as
+    /// destructed, so its destructor never runs; every owner given up
+    /// after its entry. The `Err` is what the call threw.
+    ///
+    /// ```php
+    /// class W { function __wakeup() { throw new Exception("no"); } function __destruct() { echo "dtor W\n"; } }
+    /// class V { function __wakeup() { echo "wakeup V\n"; } function __destruct() { echo "dtor V\n"; } }
+    /// class U { function __unserialize(array $a): void { echo "unserialize U\n"; } function __destruct() { echo "dtor U\n"; } }
+    /// try { unserialize('a:3:{i:0;O:1:"U":0:{}i:1;O:1:"W":0:{}i:2;O:1:"V":0:{}}'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(unserialize('a:2:{i:0;O:1:"V":0:{}i:1;O:1:"V":1:{'));
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// unserialize U
+    /// dtor U
+    /// no
+    ///
+    /// Warning: unserialize(): Error at offset 36 of 36 bytes in %s on line 6
+    /// wakeup V
+    /// dtor V
+    /// bool(false)
+    /// end
+    /// ```
+    fn destroy(self, req: &mut Request) -> Result<(), Thrown> {
+        let mut failed: Option<Thrown> = None;
+        for dtor in self.dtors {
+            let (object, argument) = match dtor {
+                Dtor::Kept(value) => {
+                    req.release(value);
+                    continue;
+                }
+                Dtor::Wakeup(object) => (object, None),
+                Dtor::Unserialize(object, array) => (object, Some(array)),
+            };
+            if failed.is_none() {
+                let called = locked(req, |req| match argument {
+                    None => call_method(req, &object, b"__wakeup", &[]),
+                    Some(array) => call_method(req, &object, b"__unserialize", &[array.to_value()]),
+                });
+                match called {
+                    Ok(answer) => req.release(answer),
+                    Err(thrown) => failed = Some(thrown),
+                }
+            }
+            if failed.is_some() {
+                object.mark_destructor_called();
+            }
+            req.release(object.as_value());
+            if let Some(array) = argument {
+                req.release(array.to_value());
+            }
+        }
+        for root in self.roots {
+            req.release(root);
+        }
+        failed.map_or(Ok(()), Err)
+    }
+}
+
+/// `unserialize_max_depth`, the depth a fresh var hash is held to.
+fn default_depth(req: &Request) -> i64 {
+    req.ini_get(b"unserialize_max_depth")
+        .and_then(|v| std::str::from_utf8(v).ok()?.trim().parse::<i64>().ok())
+        .unwrap_or(4096)
+}
+
+/// One reader over one string, php's `p` and `max` beside the var hash
+/// it reads through, which it holds as [`Holder`] says, and the depth of
+/// its root among [`VarHash::roots`].
 struct State<'a> {
     buf: &'a [u8],
     p: usize,
-    slots: Vec<Option<(Slot, Value)>>,
-    root: Value,
-    delayed: Vec<Delayed>,
-    allowed: Option<Vec<Vec<u8>>>,
-    max_depth: i64,
-    depth: i64,
+    hash: VarHash,
+    holder: Holder,
+    root: usize,
+}
+
+impl<'a> State<'a> {
+    /// `PHP_VAR_UNSERIALIZE_INIT` over `buf`: the var hash an
+    /// unserializer already open shares, where one is and
+    /// `BG(serialize_lock)` is not held, a fresh one otherwise; the
+    /// reader's root laid down in it.
+    fn open(req: &mut Request, buf: &'a [u8]) -> State<'a> {
+        let fresh = VarHash::fresh(req);
+        let nesting = &mut req.state::<crate::State>().var;
+        let (mut hash, holder) = nesting.unserialize.open(nesting.lock, fresh);
+        let root = hash.roots.len();
+        hash.roots.push(Value::null());
+        State {
+            buf,
+            p: 0,
+            hash,
+            holder,
+            root,
+        }
+    }
+
+    /// The root handed on, php's `var_tmp_var`: the slots that named it
+    /// name the value the var hash holds from here, and the reader's
+    /// next value is a root of its own. A view, which lives as long as
+    /// the var hash.
+    fn hand_on(&mut self) -> Value {
+        let root = self.hand_over();
+        self.hash.dtors.push(Dtor::Kept(root));
+        root
+    }
+
+    /// The root handed over to the caller with its owner: the slots that
+    /// named it name the value as the caller keeps it.
+    fn hand_over(&mut self) -> Value {
+        let root = self.take_root();
+        let at = self.root;
+        for (slot, _) in self.hash.slots.iter_mut().flatten() {
+            if matches!(slot, Slot::Root(of) if *of == at) {
+                *slot = Slot::Taken;
+            }
+        }
+        root
+    }
+
+    /// The root taken out as the value `unserialize()` returns, with the
+    /// owner the var hash held of it.
+    fn take_root(&mut self) -> Value {
+        self.hash
+            .roots
+            .get_mut(self.root)
+            .map_or(Value::null(), |root| std::mem::replace(root, Value::null()))
+    }
+
+    /// `php_var_unserialize`: one value into `slot`, and where it fails
+    /// every slot it numbered forbidden, so nothing read later in the
+    /// same var hash names a place a failed read left half made.
+    fn read(&mut self, req: &mut Request, slot: Slot) -> Result<bool, Thrown> {
+        let from = self.hash.slots.len();
+        let read = self.value(req, Some(slot));
+        if !matches!(read, Ok(true)) {
+            for forbidden in self.hash.slots.iter_mut().skip(from) {
+                *forbidden = None;
+            }
+        }
+        read
+    }
+
+    /// `f`, a call that may open another unserializer, with the var hash
+    /// set down where that one finds it.
+    fn out<R>(&mut self, req: &mut Request, f: impl FnOnce(&mut Request) -> R) -> R {
+        let hash = std::mem::take(&mut self.hash);
+        let (hash, answered) = Shared::set_down(
+            req,
+            |nesting| &mut nesting.unserialize,
+            hash,
+            self.holder,
+            f,
+        );
+        self.hash = hash;
+        answered
+    }
+
+    /// `PHP_VAR_UNSERIALIZE_DESTROY`: the reader's root taken off, and
+    /// the var hash handed back to the reader it is shared with, or
+    /// destroyed where this was its last holder.
+    fn close(self, req: &mut Request) -> Result<(), Thrown> {
+        let State {
+            mut hash,
+            holder,
+            root,
+            ..
+        } = self;
+        if hash.roots.len() > root {
+            for left in hash.roots.split_off(root) {
+                req.release(left);
+            }
+        }
+        match req
+            .state::<crate::State>()
+            .var
+            .unserialize
+            .close(hash, holder)
+        {
+            Some(hash) => hash.destroy(req),
+            None => Ok(()),
+        }
+    }
 }
 
 /// `unserialize(string $data, array $options = []): mixed`, php's
@@ -178,6 +410,7 @@ struct State<'a> {
 /// var_dump(unserialize('O:1:"W":0:{}', ['allowed_classes' => ['w']]) instanceof W, unserialize('a:1:{i:0;a:1:{i:0;i:1;}}', ['max_depth' => 1]));
 /// try { unserialize('i:1;', ['allowed_classes' => 1]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// try { unserialize('i:1;', ['max_depth' => -1]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { unserialize('i:1;', ['allowed_classes' => ["have\0nul"]]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// class W { function __wakeup() {} }
 /// ```
 /// ```expect
@@ -188,6 +421,7 @@ struct State<'a> {
 /// bool(false)
 /// unserialize(): Option "allowed_classes" must be of type array|bool, int given
 /// unserialize(): Option "max_depth" must be greater than or equal to 0
+/// unserialize(): Option "allowed_classes" must be an array of class names, "have" given
 /// ```
 ///
 /// An enum case is `E:` and its name, the case itself read back.
@@ -216,31 +450,29 @@ fn unserialize(
     #[php(default = [])] options: Passed<PhpArray>,
 ) -> Result<Value, Thrown> {
     let data = data.as_bytes().to_vec();
-    let (allowed, max_depth) = self::options(req, options)?;
+    let given = self::options(req, options)?;
     if data.is_empty() {
         return Ok(Value::bool(false));
     }
-    let mut state = State {
-        buf: &data,
-        p: 0,
-        slots: Vec::new(),
-        root: Value::null(),
-        delayed: Vec::new(),
-        allowed,
-        max_depth,
-        depth: 0,
-    };
-    let parsed = state.value(req, Some(Slot::Root));
-    let mut pending: Option<Thrown> = None;
-    let ok = match parsed {
-        Ok(ok) => ok,
-        Err(thrown) => {
-            pending = Some(thrown);
-            false
-        }
-    };
+    let mut state = State::open(req, &data);
+    let previous = (
+        state.hash.allowed.clone(),
+        state.hash.max_depth,
+        state.hash.depth,
+    );
+    if let Some(allowed) = given.allowed {
+        state.hash.allowed = allowed;
+    }
+    if let Some(max_depth) = given.max_depth {
+        state.hash.max_depth = max_depth;
+        // A nested call with a depth of its own counts from zero, for
+        // itself alone.
+        state.hash.depth = 0;
+    }
+    let root = state.root;
+    let parsed = state.read(req, Slot::Root(root));
     let total = data.len();
-    if pending.is_none() {
+    if let Ok(ok) = parsed {
         if !ok {
             docref(
                 req,
@@ -255,75 +487,110 @@ fn unserialize(
             );
         }
     }
-    // `var_destroy`: the delayed calls, in the order they were queued,
-    // until one of them fails.
-    for delayed in std::mem::take(&mut state.delayed) {
-        if pending.is_some() {
-            break;
+    // Inside another unserializer the root is `var_tmp_var`'s, which the
+    // var hash keeps, and the caller has a copy of it; outside, it is the
+    // return value, and a failure frees it before the delayed calls.
+    let answer = match parsed {
+        Ok(true) if state.holder == Holder::Joined => {
+            let root = state.hand_on();
+            req.addref(&root);
+            Some(root)
         }
-        let called = match delayed {
-            Delayed::Wakeup(object) => call_method(req, &object, b"__wakeup", &[]),
-            Delayed::Unserialize(object, array) => {
-                let answered = call_method(req, &object, b"__unserialize", &[array.to_value()]);
-                req.release(array.to_value());
-                answered
+        Ok(true) => Some(state.take_root()),
+        _ => {
+            if state.holder != Holder::Joined {
+                req.release(state.take_root());
             }
-        };
-        match called {
-            Ok(answer) => req.release(answer),
-            Err(thrown) => pending = Some(thrown),
+            None
         }
-    }
-    if let Some(thrown) = pending {
-        req.release(state.root);
+    };
+    let (allowed, max_depth, depth) = previous;
+    state.hash.allowed = allowed;
+    state.hash.max_depth = max_depth;
+    state.hash.depth = depth;
+    let destroyed = state.close(req);
+    let thrown = parsed.err().or(destroyed.err());
+    if let Some(thrown) = thrown {
+        if let Some(answer) = answer {
+            req.release(answer);
+        }
         return Err(thrown);
     }
-    if !ok {
-        req.release(state.root);
+    let Some(answer) = answer else {
         return Ok(Value::bool(false));
-    }
-    // A reference is unwrapped, per calling convention.
-    let root = state.root;
-    if let Some(cell) = root.as_php_ref() {
+    };
+    // A reference is unwrapped, per calling convention, after the delayed
+    // calls, which may have changed what it holds.
+    if let Some(cell) = answer.as_php_ref() {
         let inner = cell.get();
         req.addref(&inner);
-        req.release(root);
+        req.release(answer);
         return Ok(inner);
     }
-    Ok(root)
+    Ok(answer)
 }
 
 /// `php_unserialize_data_t` with `php_var_unserialize`, `PHPAPI` in
 /// `php_var.h`: one var hash across the values read out of one string,
 /// each from where the last stopped, so an `R:n;` in a later value is a
 /// reference to a slot an earlier one filled. What ext/session's decoders
-/// read each session variable through into the session's array;
-/// [`Unserializer::finish`] is `PHP_VAR_UNSERIALIZE_DESTROY`, the delayed
-/// `__unserialize()` and `__wakeup()` calls.
+/// read each session variable through into the session's array, and
+/// what ext/spl's `unserialize()` methods read their records through.
+/// Opened inside `unserialize()`, as a `C:` record's class reads its
+/// payload, it shares the var hash of the string around it, so an `R:`
+/// after the record names a value read inside it;
+/// [`Unserializer::finish`] is `PHP_VAR_UNSERIALIZE_DESTROY`, which
+/// makes the delayed `__unserialize()` and `__wakeup()` calls once the
+/// last reader of the var hash is done.
+///
+/// ```php
+/// $inner = 'x:i:1;a:0:{};m:a:0:{}';
+/// var_dump(unserialize('a:2:{i:0;C:11:"ArrayObject":' . strlen($inner) . ':{' . $inner . '}i:1;R:5;}'));
+/// class S implements Serializable {
+///     public $d;
+///     function serialize() { return serialize($this->d); }
+///     function unserialize($s) { $this->d = unserialize($s); }
+///     function __serialize(): array { return []; }
+///     function __unserialize(array $a): void {}
+/// }
+/// var_dump(unserialize('a:2:{i:0;C:1:"S":19:{O:8:"stdClass":0:{}}i:1;r:3;}'));
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   object(ArrayObject)#1 (1) {
+///     ["storage":"ArrayObject":private]=>
+///     array(0) {
+///     }
+///   }
+///   [1]=>
+///   array(0) {
+///   }
+/// }
+/// array(2) {
+///   [0]=>
+///   object(S)#1 (1) {
+///     ["d"]=>
+///     object(stdClass)#2 (0) {
+///     }
+///   }
+///   [1]=>
+///   object(stdClass)#2 (0) {
+///   }
+/// }
+/// ```
 pub struct Unserializer<'a> {
     state: State<'a>,
 }
 
 impl<'a> Unserializer<'a> {
-    /// `PHP_VAR_UNSERIALIZE_INIT` over `data`, every class allowed and
-    /// the depth `unserialize_max_depth` sets.
+    /// `PHP_VAR_UNSERIALIZE_INIT` over `data`: the var hash an
+    /// unserializer already open shares, or a fresh one with every class
+    /// allowed and the depth `unserialize_max_depth` sets.
     #[must_use]
-    pub fn new(req: &Request, data: &'a [u8]) -> Unserializer<'a> {
-        let max_depth = req
-            .ini_get(b"unserialize_max_depth")
-            .and_then(|v| std::str::from_utf8(v).ok()?.trim().parse::<i64>().ok())
-            .unwrap_or(4096);
+    pub fn new(req: &mut Request, data: &'a [u8]) -> Unserializer<'a> {
         Unserializer {
-            state: State {
-                buf: data,
-                p: 0,
-                slots: Vec::new(),
-                root: Value::null(),
-                delayed: Vec::new(),
-                allowed: None,
-                max_depth,
-                depth: 0,
-            },
+            state: State::open(req, data),
         }
     }
 
@@ -341,79 +608,95 @@ impl<'a> Unserializer<'a> {
 
     /// `php_var_unserialize` of one value into `array[key]`, the slot
     /// the var hash numbers; `false` is the scanner's failure. The key
-    /// is the array's from here, as a `set` takes it.
+    /// is the array's from here, as a `set` takes it. The var hash keeps
+    /// an owner of what was read until it is destroyed, as php's keeps
+    /// the `var_tmp_var` a session variable is read into, so an `R:` read
+    /// after the array has let the value go names a place that stands.
     pub fn element(
         &mut self,
         req: &mut Request,
         array: PhpArray,
         key: Key,
     ) -> Result<bool, Thrown> {
-        self.state.value(req, Some(Slot::Element(array, key)))
+        let written = key.clone();
+        if let Key::Str(s) = &key {
+            self.state.hash.dtors.push(Dtor::Kept(Value::string(*s)));
+        }
+        let read = self.state.read(req, Slot::Element(array, key));
+        if let Some(value) = array.get(&written) {
+            req.addref(&value);
+            self.state.hash.dtors.push(Dtor::Kept(value));
+        }
+        read
     }
 
-    /// `php_var_unserialize` of one value as a root, `None` for the
-    /// scanner's failure; the value is the caller's, a reference
-    /// unwrapped.
+    /// `php_var_unserialize` of one value into a `var_tmp_var`, `None`
+    /// for the scanner's failure. The value is a view the var hash holds
+    /// the owner of until it is destroyed, a reference unwrapped; a
+    /// caller that keeps it takes an owner of its own.
     pub fn value(&mut self, req: &mut Request) -> Result<Option<Value>, Thrown> {
-        if !self.state.value(req, Some(Slot::Root))? {
+        let root = self.state.root;
+        let read = self.state.read(req, Slot::Root(root));
+        let value = self.state.hand_on();
+        if !read? {
             return Ok(None);
         }
-        let root = std::mem::replace(&mut self.state.root, Value::null());
-        // The next value is a root of its own, so what named this one
-        // names the caller's value from here, not the reader's root.
-        for (slot, _) in self.state.slots.iter_mut().flatten() {
-            if matches!(slot, Slot::Root) {
-                *slot = Slot::Taken;
-            }
-        }
-        if let Some(cell) = root.as_php_ref() {
-            let inner = cell.get();
-            req.addref(&inner);
-            req.release(root);
-            return Ok(Some(inner));
-        }
-        Ok(Some(root))
+        Ok(Some(value.as_php_ref().map_or(value, PhpRef::get)))
     }
 
-    /// `PHP_VAR_UNSERIALIZE_DESTROY`: the delayed calls, in the order
-    /// they were queued, until one of them throws.
-    pub fn finish(mut self, req: &mut Request) -> Result<(), Thrown> {
-        req.release(std::mem::replace(&mut self.state.root, Value::null()));
-        for delayed in std::mem::take(&mut self.state.delayed) {
-            let called = match delayed {
-                Delayed::Wakeup(object) => call_method(req, &object, b"__wakeup", &[]),
-                Delayed::Unserialize(object, array) => {
-                    let answered = call_method(req, &object, b"__unserialize", &[array.to_value()]);
-                    req.release(array.to_value());
-                    answered
-                }
-            };
-            req.release(called?);
+    /// `php_var_unserialize` of one value into a zval of the caller's
+    /// own, `None` for the scanner's failure: the value is the caller's,
+    /// a reference unwrapped, and what names it later names it for as
+    /// long as the caller keeps it where it put it, php's `var_replace`
+    /// pointing the var hash at that place. What `SplObjectStorage` reads
+    /// its rows through, so a row a later one replaces is freed then.
+    pub fn local(&mut self, req: &mut Request) -> Result<Option<Value>, Thrown> {
+        let root = self.state.root;
+        let read = self.state.read(req, Slot::Root(root));
+        let value = self.state.hand_over();
+        if !read? {
+            req.release(value);
+            return Ok(None);
         }
-        Ok(())
+        let Some(cell) = value.as_php_ref() else {
+            return Ok(Some(value));
+        };
+        let inner = cell.get();
+        req.addref(&inner);
+        req.release(value);
+        Ok(Some(inner))
+    }
+
+    /// `PHP_VAR_UNSERIALIZE_DESTROY`: where this reader was the var
+    /// hash's last, the delayed calls, in the order they were queued,
+    /// until one of them throws, which is the `Err`.
+    pub fn finish(self, req: &mut Request) -> Result<(), Thrown> {
+        self.state.close(req)
     }
 }
 
-/// The allowed classes, lowered, `None` for all of them, and the depth
-/// limit.
-type Options = (Option<Vec<Vec<u8>>>, i64);
+/// The options `unserialize()` was given: `allowed_classes`, set
+/// whenever the options are given at all, and `max_depth`.
+struct Options {
+    allowed: Option<Allowed>,
+    max_depth: Option<i64>,
+}
 
 /// The `allowed_classes` and `max_depth` options, held to their types
-/// as php holds them; the default depth is `unserialize_max_depth`.
+/// as php holds them.
 fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown> {
-    let default_depth = req
-        .ini_get(b"unserialize_max_depth")
-        .and_then(|v| std::str::from_utf8(v).ok()?.trim().parse::<i64>().ok())
-        .unwrap_or(4096);
     let Passed::Given(options) = given else {
-        return Ok((None, default_depth));
+        return Ok(Options {
+            allowed: None,
+            max_depth: None,
+        });
     };
-    let mut allowed = None;
+    let mut allowed = Allowed::Every;
     if let Some(classes) = options.get(&Key::Str(PhpString::new(req, b"allowed_classes")?)) {
         let classes = classes.deref();
         match classes.as_ref() {
             ValueRef::Bool(true) => {}
-            ValueRef::Bool(false) => allowed = Some(Vec::new()),
+            ValueRef::Bool(false) => allowed = Allowed::Only(Vec::new()),
             ValueRef::Array(list) => {
                 let mut names = Vec::new();
                 for (_, entry) in list.snapshot() {
@@ -430,7 +713,10 @@ fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown
                     }
                     let name = php_ext::coerce::to_string(req, &entry)?.as_bytes().to_vec();
                     if !valid_class_name(&name) {
-                        let shown = String::from_utf8_lossy(&name).into_owned();
+                        // php prints the name as a C string, up to its
+                        // first NUL byte.
+                        let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+                        let shown = String::from_utf8_lossy(&name[..end]).into_owned();
                         return Err(throw(
                             req,
                             "ValueError",
@@ -441,7 +727,7 @@ fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown
                     }
                     names.push(name.to_ascii_lowercase());
                 }
-                allowed = Some(names);
+                allowed = Allowed::Only(names);
             }
             _ => {
                 let name = value_name(req, &classes);
@@ -455,7 +741,7 @@ fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown
             }
         }
     }
-    let mut depth = default_depth;
+    let mut depth = None;
     if let Some(max) = options.get(&Key::Str(PhpString::new(req, b"max_depth")?)) {
         let max = max.deref();
         let Some(n) = max.as_int() else {
@@ -473,9 +759,12 @@ fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown
                 "unserialize(): Option \"max_depth\" must be greater than or equal to 0",
             ));
         }
-        depth = n;
+        depth = Some(n);
     }
-    Ok((allowed, depth))
+    Ok(Options {
+        allowed: Some(allowed),
+        max_depth: depth,
+    })
 }
 
 /// `zend_is_valid_class_name`: letters, digits, `_`, `\` and the bytes
@@ -604,8 +893,8 @@ impl State<'_> {
 
     /// `var_push`: the slot numbered for `R:` and `r:`.
     fn push(&mut self, slot: &Slot, value: Value) -> usize {
-        self.slots.push(Some((slot.clone(), value)));
-        self.slots.len() - 1
+        self.hash.slots.push(Some((slot.clone(), value)));
+        self.hash.slots.len() - 1
     }
 
     /// The value written into `slot`, which from here holds it, and the
@@ -618,13 +907,16 @@ impl State<'_> {
         value: Value,
     ) -> Result<(), Thrown> {
         match slot {
-            Slot::Root => {
-                let previous = std::mem::replace(&mut self.root, value);
-                req.release(previous);
+            Slot::Root(at) => {
+                if let Some(root) = self.hash.roots.get_mut(*at) {
+                    let previous = std::mem::replace(root, value);
+                    req.release(previous);
+                }
             }
             // Nothing names a taken root's place any more; the `R:`
-            // arm shares its value instead of writing here.
-            Slot::Taken => {
+            // arm shares its value instead of writing here, and reads a
+            // repeated place through the slot it follows.
+            Slot::Taken | Slot::Same(_) => {
                 req.release(value);
                 return Ok(());
             }
@@ -641,7 +933,7 @@ impl State<'_> {
             }
         }
         if let Some(at) = entry
-            && let Some(Some((_, held))) = self.slots.get_mut(at)
+            && let Some(Some((_, held))) = self.hash.slots.get_mut(at)
         {
             *held = value;
         }
@@ -678,10 +970,15 @@ impl State<'_> {
                 }
                 self.p = end + 1;
                 let id = self.parse_uiv(start + 2);
-                let Some(Some((held_slot, held))) =
-                    id.checked_sub(1).and_then(|i| self.slots.get(i)).cloned()
-                else {
+                let Some(mut at) = id.checked_sub(1) else {
                     return Ok(false);
+                };
+                let (held_slot, held) = loop {
+                    match self.hash.slots.get(at).cloned() {
+                        Some(Some((Slot::Same(next), _))) if next > at => at = next,
+                        Some(Some((Slot::Same(_), _)) | None) | None => return Ok(false),
+                        Some(Some(entry)) => break entry,
+                    }
                 };
                 if c0 == b'R' && matches!(held_slot, Slot::Taken) {
                     // php makes the `var_tmp_var` its caller holds a
@@ -702,8 +999,14 @@ impl State<'_> {
                     } else {
                         req.addref(&held);
                         let cell = PhpRef::new(req, held)?;
-                        let at = id - 1;
                         self.write(req, &held_slot, Some(at), cell.as_value())?;
+                        // `ref_props`: a typed property whose value was read
+                        // becomes a source of the cell it now holds.
+                        if let Slot::Property(object, name) = &held_slot
+                            && self.hash.ref_props.contains(&at)
+                        {
+                            object.unserialize_verify(req, name.as_bytes())?;
+                        }
                         cell
                     };
                     req.addref(&cell.as_value());
@@ -767,7 +1070,22 @@ impl State<'_> {
         }
     }
 
-    /// The scanner without a var hash, what reads a key.
+    /// The scanner without a var hash, what reads a key: a scalar, and
+    /// php's failure for anything else, where php's rule leaves `*p`.
+    ///
+    /// ```php
+    /// var_dump(unserialize('a:1:{a:0:{}i:1;}'), unserialize('a:1:{R:1;i:1;}'), unserialize('a:1:{O:8:"stdClass":0:{}i:1;}'));
+    /// ```
+    /// ```expect
+    /// Warning: unserialize(): Error at offset 10 of 16 bytes in %s on line 2
+    ///
+    /// Warning: unserialize(): Error at offset 9 of 14 bytes in %s on line 2
+    ///
+    /// Warning: unserialize(): Error at offset 5 of 29 bytes in %s on line 2
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
     fn key(&mut self, req: &mut Request) -> Option<Scalar> {
         let start = self.p;
         if start >= self.buf.len() {
@@ -801,9 +1119,21 @@ impl State<'_> {
                 self.p = end;
                 Some(Scalar::Other)
             }
-            (b'a' | b'O' | b'C' | b'E', b':') => {
-                // The token's header matched; with no var hash php
-                // answers failure where the header ended.
+            // With no var hash php's rules answer failure: `a:` and the
+            // references where their header ended, the objects and the
+            // enum, with the rest, where they began.
+            (b'a', b':') => {
+                let end = self.uiv(start + 2)?;
+                if self.at(end) == b':' && self.at(end + 1) == b'{' && end + 1 < self.buf.len() {
+                    self.p = end + 2;
+                }
+                None
+            }
+            (b'R' | b'r', b':') => {
+                let end = self.uiv(start + 2)?;
+                if self.at(end) == b';' && end < self.buf.len() {
+                    self.p = end + 1;
+                }
                 None
             }
             (b'}', _) => {
@@ -918,10 +1248,52 @@ impl State<'_> {
         true
     }
 
+    /// A key the string repeats: the slots that named its place name the
+    /// slot the value about to be read is numbered, which is where php's
+    /// pointer to the bucket finds it; an `R:` value numbers none, and
+    /// leaves them as they stand.
+    ///
+    /// ```php
+    /// var_dump(unserialize('a:3:{i:0;i:1;i:0;a:1:{i:0;R:2;}i:1;R:2;}'));
+    /// var_dump(unserialize('O:8:"stdClass":2:{s:1:"a";i:1;s:1:"a";O:8:"stdClass":1:{s:1:"b";R:2;}}'));
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   &array(1) {
+    ///     [0]=>
+    ///     *RECURSION*
+    ///   }
+    ///   [1]=>
+    ///   &array(1) {
+    ///     [0]=>
+    ///     *RECURSION*
+    ///   }
+    /// }
+    /// object(stdClass)#1 (1) {
+    ///   ["a"]=>
+    ///   &object(stdClass)#2 (1) {
+    ///     ["b"]=>
+    ///     *RECURSION*
+    ///   }
+    /// }
+    /// ```
+    fn repeat_place(&mut self, place: &Slot) {
+        if self.at(self.p) == b'R' {
+            return;
+        }
+        let next = self.hash.slots.len();
+        for (slot, _) in self.hash.slots.iter_mut().flatten() {
+            if slots_equal(slot, place) {
+                *slot = Slot::Same(next);
+            }
+        }
+    }
+
     /// The depth check `process_nested_*_data` opens with.
     fn deeper(&mut self, req: &mut Request) -> bool {
-        if self.max_depth > 0 && self.depth >= self.max_depth {
-            let max = self.max_depth;
+        if self.hash.max_depth > 0 && self.hash.depth >= self.hash.max_depth {
+            let max = self.hash.max_depth;
             docref(
                 req,
                 Level::Warning,
@@ -931,7 +1303,7 @@ impl State<'_> {
             );
             return false;
         }
-        self.depth += 1;
+        self.hash.depth += 1;
         true
     }
 
@@ -978,10 +1350,24 @@ impl State<'_> {
             return Ok(false);
         }
         let done = self.array_body(req, array, elements);
-        self.depth -= 1;
+        self.hash.depth -= 1;
         done
     }
 
+    /// `process_nested_array_data`'s loop: each key read, what a key
+    /// the string repeats held left to the var hash, and the value read
+    /// into the element. A key's string is the var hash's until it is
+    /// destroyed, and nothing of it outlives the read.
+    ///
+    /// ```php
+    /// $s = serialize(["foo_1" => 1, "o" => (object)["p" => 2]]);
+    /// $m0 = memory_get_usage();
+    /// for ($i = 0; $i < 10; $i++) unserialize($s);
+    /// var_dump(memory_get_usage() - $m0);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     fn array_body(
         &mut self,
         req: &mut Request,
@@ -996,6 +1382,18 @@ impl State<'_> {
                 Some(Scalar::Str(bytes)) => Key::from_string(PhpString::new(req, &bytes)?),
                 _ => return Ok(false),
             };
+            // The key's own owner is the var hash's, whose slots name it
+            // until it is destroyed; each write takes one of its own.
+            if let Key::Str(s) = &key {
+                self.hash.dtors.push(Dtor::Kept(Value::string(*s)));
+            }
+            // `var_push_dtor_value`: a key the string repeats leaves what
+            // it held to the var hash, which frees it with the rest.
+            if let Some(old) = array.get(&key) {
+                req.addref(&old);
+                self.hash.dtors.push(Dtor::Kept(old));
+                self.repeat_place(&Slot::Element(array, key.clone()));
+            }
             if let Key::Str(s) = &key {
                 req.addref(&Value::string(*s));
             }
@@ -1048,23 +1446,22 @@ impl State<'_> {
             return Ok(false);
         }
         let lower = name.to_ascii_lowercase();
-        let allowed = self
-            .allowed
-            .as_ref()
-            .is_none_or(|list| list.contains(&lower));
+        let allowed = self.hash.allowed.admits(&lower);
         let mut incomplete = false;
         let class = if allowed {
-            if let Some(class) = lookup_class(req, &name)? {
+            // The class loader and the callback run with
+            // `BG(serialize_lock)` held, so what they unserialize is read
+            // through a var hash of its own.
+            if let Some(class) = locked(req, |req| autoload(req, &name))? {
                 Some(class)
             } else {
                 if !valid_class_name(&name) {
                     return Ok(false);
                 }
                 incomplete = true;
-                Self::callback(req, &name)?;
-                if let Some(class) = lookup_class(req, &name)? {
+                if locked(req, |req| Self::callback(req, &name))? {
                     incomplete = false;
-                    Some(class)
+                    lookup_class(req, &name)?
                 } else {
                     lookup_class(req, INCOMPLETE_CLASS)?
                 }
@@ -1110,6 +1507,21 @@ impl State<'_> {
         }
         self.p += 2;
         let has_unserialize = !incomplete && has_method(req, class, b"__unserialize");
+        // A `Serializable` class reads a `C:` record; an `O:` one it has no
+        // `__unserialize()` for is not what its serializer wrote.
+        if !has_unserialize && is_serializable(req, class) {
+            let shown = String::from_utf8_lossy(
+                &req.class_decl(class)
+                    .map(|d| d.name.0.to_vec())
+                    .unwrap_or_default(),
+            )
+            .into_owned();
+            warning(
+                req,
+                &format!("Erroneous data format for unserializing '{shown}'"),
+            );
+            return Ok(false);
+        }
         let object = new_object(req, class)?;
         self.write(req, slot, entry, object.as_value())?;
         if incomplete {
@@ -1123,49 +1535,99 @@ impl State<'_> {
             }
             let array = PhpArray::new(req)?;
             if !self.array_elements(req, array, elements)? {
+                object.mark_destructor_called();
                 req.release(array.to_value());
                 return Ok(false);
             }
             req.addref(&object.as_value());
-            self.delayed.push(Delayed::Unserialize(object, array));
+            self.hash.dtors.push(Dtor::Unserialize(object, array));
             return Ok(self.finish());
         }
         let has_wakeup = !incomplete && has_method(req, class, b"__wakeup");
         if !self.object_properties(req, object, elements)? {
+            if has_wakeup {
+                object.mark_destructor_called();
+            }
             return Ok(false);
         }
         if has_wakeup {
             req.addref(&object.as_value());
-            self.delayed.push(Delayed::Wakeup(object));
+            self.hash.dtors.push(Dtor::Wakeup(object));
         }
         Ok(self.finish())
     }
 
     /// `unserialize_callback_func`: the function the ini names, handed the
-    /// class name, and php's warning where it did not define it.
-    fn callback(req: &mut Request, name: &[u8]) -> Result<(), Thrown> {
+    /// class name, then the class looked for again, loader and all;
+    /// `true` where it stands after that, and php's warning where the
+    /// function did not define it. A name that is no callable is
+    /// `call_user_function`'s `Error`, which fails the read.
+    ///
+    /// ```php
+    /// function check($name) { echo "asked for $name\n"; }
+    /// ini_set('unserialize_callback_func', 'check');
+    /// var_dump(unserialize('O:3:"Foo":0:{}') instanceof __PHP_Incomplete_Class);
+    /// ini_set('unserialize_callback_func', 'Nonexistent');
+    /// try { unserialize('O:3:"Foo":0:{}'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// asked for Foo
+    ///
+    /// Warning: unserialize(): Function check() hasn't defined the class it was called for in %s on line 4
+    /// bool(true)
+    /// Invalid callback Nonexistent, function "Nonexistent" not found or invalid function name
+    /// ```
+    ///
+    /// The class is looked for through the autoloaders before the
+    /// function is called and after, as `zend_lookup_class` looks.
+    ///
+    /// ```php
+    /// spl_autoload_register(function ($c) { echo "autoload($c)\n"; });
+    /// ini_set('unserialize_callback_func', 'cb');
+    /// function cb($c) { echo "cb($c)\n"; }
+    /// echo get_class(@unserialize('O:3:"Foo":0:{}')), "\n";
+    /// ```
+    /// ```expect
+    /// autoload(Foo)
+    /// cb(Foo)
+    /// autoload(Foo)
+    /// __PHP_Incomplete_Class
+    /// ```
+    fn callback(req: &mut Request, name: &[u8]) -> Result<bool, Thrown> {
         let Some(function) = req
             .ini_get(b"unserialize_callback_func")
             .map(<[u8]>::to_vec)
             .filter(|f| !f.is_empty())
         else {
-            return Ok(());
+            return Ok(false);
         };
+        let shown = String::from_utf8_lossy(&function).into_owned();
         let callee = Value::string(PhpString::new(req, &function)?);
+        let checked = callable_checked(req, &callee);
+        req.release(callee);
+        let callable = match checked {
+            Ok(callable) => callable,
+            Err(error) => {
+                return Err(throw(
+                    req,
+                    "Error",
+                    &format!("Invalid callback {shown}, {error}"),
+                ));
+            }
+        };
         let argument = Value::string(PhpString::new(req, name)?);
-        if let Ok(callable) = callable_checked(req, &callee) {
-            let answer = call(req, &callable, &[argument])?;
-            req.release(answer);
+        let answer = call(req, &callable, &[argument]);
+        req.release(argument);
+        req.release(answer?);
+        if autoload(req, name)?.is_some() {
+            return Ok(true);
         }
-        if lookup_class(req, name)?.is_none() {
-            let shown = String::from_utf8_lossy(&function).into_owned();
-            docref(
-                req,
-                Level::Warning,
-                &format!("Function {shown}() hasn't defined the class it was called for"),
-            );
-        }
-        Ok(())
+        docref(
+            req,
+            Level::Warning,
+            &format!("Function {shown}() hasn't defined the class it was called for"),
+        );
+        Ok(false)
     }
 
     /// `object_custom`, `C:`: the data's length and braces checked, then
@@ -1209,7 +1671,16 @@ impl State<'_> {
         let object = new_object(req, class)?;
         self.write(req, slot, entry, object.as_value())?;
         let payload = self.buf[self.p..self.p + datalen].to_vec();
-        if !incomplete && php_ext::call::class_unserialize(req, object, &payload)? {
+        // `zend_user_unserialize` runs outside `BG(serialize_lock)`: what
+        // the class's `unserialize()` reads shares this var hash.
+        let served = if incomplete {
+            false
+        } else {
+            self.out(req, |req| {
+                php_ext::call::class_unserialize(req, object, &payload)
+            })?
+        };
+        if served {
             self.p += datalen + 1;
             return Ok(true);
         }
@@ -1241,7 +1712,7 @@ impl State<'_> {
             return Ok(false);
         }
         let done = self.object_body(req, object, elements);
-        self.depth -= 1;
+        self.hash.depth -= 1;
         done
     }
 
@@ -1259,15 +1730,27 @@ impl State<'_> {
                 _ => return Ok(false),
             };
             let name = PhpString::new(req, &key)?;
+            self.hash.dtors.push(Dtor::Kept(Value::string(name)));
+            if let Some(old) = object.prop(req, &key) {
+                req.addref(&old);
+                self.hash.dtors.push(Dtor::Kept(old));
+                self.repeat_place(&Slot::Property(object, name));
+            }
             req.addref(&Value::string(name));
             // A key naming a virtual property fails the whole object,
             // `is_property_visibility_changed`'s `-1`.
             if !object.unserialize_prop(req, name, Value::null())? {
-                req.release(Value::string(name));
                 return Ok(false);
             }
+            let at = self.hash.slots.len();
             if !self.value(req, Some(Slot::Property(object, name)))? {
                 return Ok(false);
+            }
+            object.unserialize_verify(req, &key)?;
+            // An `R:` value numbered no slot of its own.
+            if matches!(self.hash.slots.get(at), Some(Some((Slot::Property(of, _), _))) if *of == object)
+            {
+                self.hash.ref_props.push(at);
             }
             if elements > 0 && !matches!(self.at(self.p - 1), b';' | b'}') {
                 self.p -= 1;
@@ -1359,9 +1842,12 @@ impl State<'_> {
 /// Whether two slots name the same place, php's `rval_ref == rval`.
 fn slots_equal(left: &Slot, right: &Slot) -> bool {
     match (left, right) {
-        (Slot::Root, Slot::Root) | (Slot::Taken, Slot::Taken) => true,
+        (Slot::Root(one), Slot::Root(other)) => one == other,
+        (Slot::Taken, Slot::Taken) => true,
         (Slot::Element(one, key), Slot::Element(other, key2)) => one == other && key == key2,
-        (Slot::Property(one, name), Slot::Property(other, name2)) => one == other && name == name2,
+        (Slot::Property(one, name), Slot::Property(other, name2)) => {
+            one == other && name.as_bytes() == name2.as_bytes()
+        }
         _ => false,
     }
 }

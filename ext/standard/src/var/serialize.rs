@@ -7,13 +7,17 @@
 
 use php_ext::abi::PropertyPurpose;
 use php_ext::attr::php_function;
-use php_ext::call::call_method;
+use php_ext::call::{call_method, lookup_class};
 use php_ext::coerce::{Exponent, float_format, to_string};
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::decl::Visibility;
+use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
-use super::{INCOMPLETE_CLASS, MAGIC_MEMBER, class_name, has_method, is_enum, not_serializable};
+use super::{
+    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, class_name, has_method, is_enum,
+    is_serializable, locked, not_serializable,
+};
 
 /// What the var hash keys an entry by: the object's identity, or the
 /// reference's.
@@ -23,49 +27,24 @@ enum Held {
     Reference(PhpRef),
 }
 
-/// `php_serialize_data`: `n`, the count of values written, and the
-/// number each object and reference was first written at, `-1` for an
-/// object whose serialization failed.
-struct VarHash {
+/// `php_serialize_data`: `n`, the count of values written, the number
+/// each object and reference was first written at, `-1` for an object
+/// whose serialization failed, and an owner of each, which php's
+/// `Z_ADDREF_P` takes so a value a `__serialize()` frees cannot have its
+/// place reused by a later one while the walk goes on.
+#[derive(Default)]
+pub(crate) struct VarHash {
     n: i64,
     seen: Vec<(Held, i64)>,
+    owners: Vec<Value>,
 }
 
 impl VarHash {
-    /// `php_add_var_hash`: the number an earlier sight gave `value`, or
-    /// zero after recording this one; a scalar and an array are never
-    /// recorded, and a reference to an object is the object.
-    fn add(&mut self, value: &Value) -> i64 {
-        self.n += 1;
-        let held = match value.as_ref() {
-            ValueRef::Reference(cell) => match cell.get().as_object() {
-                Some(object) => Some((Held::Object(object.index()), true)),
-                None => Some((Held::Reference(*cell), true)),
-            },
-            ValueRef::Object(object) => Some((Held::Object(object.index()), false)),
-            _ => None,
-        };
-        let Some((held, is_ref)) = held else {
-            return 0;
-        };
-        if let Some((_, number)) = self.seen.iter().find(|(h, _)| *h == held) {
-            // References are counted once; undo the increment above.
-            if is_ref && *number != -1 {
-                self.n -= 1;
-            }
-            return *number;
-        }
-        self.seen.push((held, self.n));
-        0
-    }
-
-    fn fail(&mut self, object: PhpObject) {
-        if let Some((_, number)) = self
-            .seen
-            .iter_mut()
-            .find(|(h, _)| *h == Held::Object(object.index()))
-        {
-            *number = -1;
+    /// `PHP_VAR_SERIALIZE_DESTROY`'s `zend_hash_destroy`: the owners given
+    /// up.
+    fn destroy(self, req: &mut Request) {
+        for owner in self.owners {
+            req.release(owner);
         }
     }
 }
@@ -141,12 +120,11 @@ impl VarHash {
 /// ```
 #[php_function]
 fn serialize(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
-    let mut hash = VarHash {
-        n: 0,
-        seen: Vec::new(),
-    };
+    let mut serializer = Serializer::new(req);
     let mut out = Vec::new();
-    write(req, &mut out, &value, &mut hash, false, true)?;
+    let written = serializer.write(req, &mut out, &value);
+    serializer.finish(req);
+    written?;
     PhpString::new(req, &out)
 }
 
@@ -166,20 +144,21 @@ fn serialize(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
 /// ```
 pub struct Serializer {
     hash: VarHash,
-}
-
-impl Default for Serializer {
-    fn default() -> Serializer {
-        Serializer {
-            hash: VarHash {
-                n: 0,
-                seen: Vec::new(),
-            },
-        }
-    }
+    holder: Holder,
 }
 
 impl Serializer {
+    /// `PHP_VAR_SERIALIZE_INIT`: the var hash a serializer already open
+    /// shares, where one is and `BG(serialize_lock)` is not held, so what
+    /// a `Serializable::serialize()` writes of its parts is numbered in
+    /// the string around it; a fresh one otherwise.
+    #[must_use]
+    pub fn new(req: &mut Request) -> Serializer {
+        let nesting = &mut req.state::<crate::State>().var;
+        let (hash, holder) = nesting.serialize.open(nesting.lock, VarHash::default());
+        Serializer { hash, holder }
+    }
+
     /// `php_var_serialize(buf, struc, &var_hash)`: `value` appended to
     /// `out` as a root.
     pub fn write(
@@ -188,7 +167,107 @@ impl Serializer {
         out: &mut Vec<u8>,
         value: &Value,
     ) -> Result<(), Thrown> {
-        write(req, out, value, &mut self.hash, false, true)
+        write(req, out, value, self, false, true)
+    }
+
+    /// `PHP_VAR_SERIALIZE_DESTROY`: the var hash handed back to the
+    /// serializer it is shared with, or destroyed where this was its last
+    /// holder, the owners it took given up.
+    pub fn finish(self, req: &mut Request) {
+        let Serializer { hash, holder } = self;
+        if let Some(hash) = req
+            .state::<crate::State>()
+            .var
+            .serialize
+            .close(hash, holder)
+        {
+            hash.destroy(req);
+        }
+    }
+
+    /// `f`, a call that may open another serializer, with the var hash
+    /// set down where that one finds it.
+    fn out<R>(&mut self, req: &mut Request, f: impl FnOnce(&mut Request) -> R) -> R {
+        let hash = std::mem::take(&mut self.hash);
+        let (hash, answered) =
+            Shared::set_down(req, |nesting| &mut nesting.serialize, hash, self.holder, f);
+        self.hash = hash;
+        answered
+    }
+
+    /// `php_add_var_hash`: the number an earlier sight gave `value`, or
+    /// zero after recording this one with an owner of it. A scalar and an
+    /// array are never recorded, a reference to an object is the object,
+    /// and an object nothing else holds, in no array more than one holds
+    /// and of a class with neither `__serialize()` nor `__sleep()`, is
+    /// counted without being recorded, since nothing can show it again.
+    /// The owner keeps an object a `__serialize()` made and let go alive
+    /// until the serializer is done, so the next one it makes is another
+    /// object and not an `r:` to the first; one nothing records is freed
+    /// as soon as what held it is.
+    ///
+    /// ```php
+    /// class P { function __serialize(): array { return []; } function __destruct() { echo "P gone\n"; } }
+    /// class Q { function __serialize(): array { return [new P]; } }
+    /// class D { function __destruct() { echo "D gone\n"; } }
+    /// class R { function __serialize(): array { echo "R\n"; return [new D]; } }
+    /// echo serialize([new Q, new Q]), "\n";
+    /// echo serialize([new R, new R]), "\n";
+    /// ```
+    /// ```expect
+    /// P gone
+    /// P gone
+    /// a:2:{i:0;O:1:"Q":1:{i:0;O:1:"P":0:{}}i:1;O:1:"Q":1:{i:0;O:1:"P":0:{}}}
+    /// R
+    /// D gone
+    /// R
+    /// D gone
+    /// a:2:{i:0;O:1:"R":1:{i:0;O:1:"D":0:{}}i:1;O:1:"R":1:{i:0;O:1:"D":0:{}}}
+    /// ```
+    fn add(&mut self, req: &mut Request, value: &Value, in_rcn_array: bool) -> i64 {
+        self.hash.n += 1;
+        let (held, is_ref, recorded) = match value.as_ref() {
+            ValueRef::Reference(cell) => match cell.get().as_object() {
+                Some(object) => (Held::Object(object.index()), true, cell.get()),
+                None => (Held::Reference(*cell), true, *value),
+            },
+            ValueRef::Object(object) => {
+                let object = *object;
+                if !in_rcn_array
+                    && value.refcount() == 1
+                    && !has_method(req, object.class(), b"__serialize")
+                    && !has_method(req, object.class(), b"__sleep")
+                {
+                    return 0;
+                }
+                (Held::Object(object.index()), false, *value)
+            }
+            _ => return 0,
+        };
+        if let Some((_, number)) = self.hash.seen.iter().find(|(h, _)| *h == held) {
+            // References are counted once; undo the increment above.
+            if is_ref && *number != -1 {
+                self.hash.n -= 1;
+            }
+            return *number;
+        }
+        self.hash.seen.push((held, self.hash.n));
+        req.addref(&recorded);
+        self.hash.owners.push(recorded);
+        0
+    }
+
+    /// The entry of an object whose serialization failed marked `-1`, so
+    /// a later sight of it is written `N;`.
+    fn fail(&mut self, object: PhpObject) {
+        if let Some((_, number)) = self
+            .hash
+            .seen
+            .iter_mut()
+            .find(|(h, _)| *h == Held::Object(object.index()))
+        {
+            *number = -1;
+        }
     }
 }
 
@@ -231,11 +310,13 @@ fn write(
     req: &mut Request,
     out: &mut Vec<u8>,
     value: &Value,
-    hash: &mut VarHash,
+    hash: &mut Serializer,
     in_rcn_array: bool,
     is_root: bool,
 ) -> Result<(), Thrown> {
-    let already = hash.add(value);
+    // `php_serialize_check_stack_limit`.
+    call_stack_limit(req)?;
+    let already = hash.add(req, value, in_rcn_array);
     if already != 0 {
         if already == -1 {
             out.extend_from_slice(b"N;");
@@ -282,7 +363,7 @@ fn nested(
     out: &mut Vec<u8>,
     outer: &Value,
     table: PhpArray,
-    hash: &mut VarHash,
+    hash: &mut Serializer,
     in_rcn_array: bool,
     incomplete: bool,
 ) -> Result<(), Thrown> {
@@ -307,7 +388,7 @@ fn nested(
         if let (Some(inner), Some(outer_array)) = (data.as_array(), outer.as_array())
             && inner == outer_array
         {
-            hash.add(outer);
+            hash.add(req, outer, in_rcn_array);
             out.extend_from_slice(b"N;");
             continue;
         }
@@ -326,7 +407,7 @@ fn object_value(
     req: &mut Request,
     out: &mut Vec<u8>,
     object: PhpObject,
-    hash: &mut VarHash,
+    hash: &mut Serializer,
 ) -> Result<(), Thrown> {
     if let Some(shown) = not_serializable(req, object.class()) {
         return Err(throw(
@@ -351,7 +432,7 @@ fn object_value(
         return Ok(());
     }
     if has_method(req, object.class(), b"__serialize") {
-        let data = call_method(req, &object, b"__serialize", &[])?;
+        let data = locked(req, |req| call_method(req, &object, b"__serialize", &[]))?;
         let Some(array) = data.as_array().copied() else {
             req.release(data);
             let shown = String::from_utf8_lossy(&name).into_owned();
@@ -385,8 +466,11 @@ fn object_value(
         req.release(data);
         return written;
     }
+    if is_serializable(req, object.class()) {
+        return custom(req, out, object, &name, hash);
+    }
     if name != INCOMPLETE_CLASS && has_method(req, object.class(), b"__sleep") {
-        let names = call_method(req, &object, b"__sleep", &[])?;
+        let names = locked(req, |req| call_method(req, &object, b"__sleep", &[]))?;
         let Some(list) = names.as_array().copied() else {
             req.release(names);
             let shown = String::from_utf8_lossy(&name).into_owned();
@@ -423,6 +507,124 @@ fn object_value(
     written
 }
 
+/// `php_var_serialize_try_add_sleep_prop`'s `IS_UNDEF` arm: the name,
+/// mangled as the table would hold it, is a declared typed instance
+/// property of the object's class, which the table leaves out while
+/// nothing has written it.
+///
+/// ```php
+/// class T { public int $x; protected int $y; private int $z; public $w;
+///     function __sleep() { return ['x', 'y', 'z', 'w', 'nope']; } }
+/// echo serialize(new T), "\n";
+/// ```
+/// ```expect
+/// Warning: serialize(): "nope" returned as member variable from __sleep() but does not exist in %s on line 4
+/// O:1:"T":1:{s:1:"w";N;}
+/// ```
+fn uninitialized_typed(req: &mut Request, object: PhpObject, candidate: &[u8]) -> bool {
+    let (scope, name) = match candidate.strip_prefix(b"\0") {
+        Some(rest) => match rest.iter().position(|b| *b == 0) {
+            Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
+            None => return false,
+        },
+        None => (None, candidate),
+    };
+    let mut at = Some(object.class());
+    for _ in 0..64 {
+        let Some(here) = at else { return false };
+        let Some(decl) = req.class_decl(here) else {
+            return false;
+        };
+        let declared = decl.properties.iter().any(|p| {
+            p.is_instance
+                && p.ty.is_some()
+                && *p.name.0 == *name
+                && match (scope, p.visibility) {
+                    (None, Visibility::Public) | (Some(b"*"), Visibility::Protected) => true,
+                    (Some(class), Visibility::Private) => *decl.name.0 == *class,
+                    _ => false,
+                }
+        });
+        if declared {
+            return true;
+        }
+        let parent = decl.parent.as_ref().map(|p| p.0.to_vec());
+        at = parent.and_then(|parent| lookup_class(req, &parent).ok().flatten());
+    }
+    false
+}
+
+/// The `ce->serialize` arm, `zend_user_serialize`: the object's
+/// `serialize()` called outside `BG(serialize_lock)`, so what it
+/// serializes shares this var hash, and its string written as `C:len:"class":len:{string}`.
+/// `null` fails the object, which is written `N;` here and wherever it is
+/// seen again; anything else fails it and throws php's `Exception`.
+///
+/// ```php
+/// class S implements Serializable {
+///     public $d = 1;
+///     function serialize() { return serialize([$this->d, $GLOBALS['x']]); }
+///     function unserialize($s) { [$this->d] = unserialize($s); }
+/// }
+/// class N implements Serializable { function serialize() { return null; } function unserialize($s) {} }
+/// class Bad implements Serializable { function serialize() { return 1; } function unserialize($s) {} }
+/// $x = new stdClass;
+/// echo serialize([$x, new S]), "\n", serialize([$n = new N, $n]), "\n";
+/// try { serialize(new Bad); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Deprecated: S implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 2
+///
+/// Deprecated: N implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 7
+///
+/// Deprecated: Bad implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 8
+/// a:2:{i:0;O:8:"stdClass":0:{}i:1;C:1:"S":22:{a:2:{i:0;i:1;i:1;r:2;}}}
+/// a:2:{i:0;N;i:1;N;}
+/// Bad::serialize() must return a string or NULL
+/// ```
+fn custom(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    object: PhpObject,
+    name: &[u8],
+    hash: &mut Serializer,
+) -> Result<(), Thrown> {
+    let answered = hash.out(req, |req| call_method(req, &object, b"serialize", &[]));
+    let answered = match answered {
+        Ok(answered) => answered,
+        Err(thrown) => {
+            hash.fail(object);
+            return Err(thrown);
+        }
+    };
+    if let Some(payload) = answered.as_str_bytes().map(<[u8]>::to_vec) {
+        req.release(answered);
+        out.extend_from_slice(b"C:");
+        out.extend_from_slice(name.len().to_string().as_bytes());
+        out.extend_from_slice(b":\"");
+        out.extend_from_slice(name);
+        out.extend_from_slice(b"\":");
+        out.extend_from_slice(payload.len().to_string().as_bytes());
+        out.extend_from_slice(b":{");
+        out.extend_from_slice(&payload);
+        out.push(b'}');
+        return Ok(());
+    }
+    let null = matches!(answered.as_ref(), ValueRef::Null);
+    req.release(answered);
+    hash.fail(object);
+    out.extend_from_slice(b"N;");
+    if null {
+        return Ok(());
+    }
+    let shown = String::from_utf8_lossy(name).into_owned();
+    Err(throw(
+        req,
+        "Exception",
+        &format!("{shown}::serialize() must return a string or NULL"),
+    ))
+}
+
 /// `php_var_serialize_get_sleep_props`: each name `__sleep()` returned,
 /// looked for as it is, then mangled private, then mangled protected,
 /// among the properties php serializes; php's warnings for a name that
@@ -453,15 +655,22 @@ fn sleep_props(
         private.extend_from_slice(&text);
         let mut protected = b"\0*\0".to_vec();
         protected.extend_from_slice(&text);
-        let found = [text.clone(), private, protected]
-            .into_iter()
-            .find_map(|candidate| {
-                props
-                    .iter()
-                    .find(|(prop, _)| prop.as_bytes() == candidate.as_slice())
-                    .map(|(prop, value)| (*prop, *value))
-            });
+        let candidates = [text.clone(), private, protected];
+        let found = candidates.iter().find_map(|candidate| {
+            props
+                .iter()
+                .find(|(prop, _)| prop.as_bytes() == candidate.as_slice())
+                .map(|(prop, value)| (*prop, *value))
+        });
         let shown = String::from_utf8_lossy(&text).into_owned();
+        // A typed property nothing has written yet is left out quietly.
+        if found.is_none()
+            && candidates
+                .iter()
+                .any(|candidate| uninitialized_typed(req, object, candidate))
+        {
+            continue;
+        }
         let Some((prop, value)) = found else {
             docref(
                 req,

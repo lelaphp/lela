@@ -154,7 +154,22 @@ pub(crate) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// Deprecated: Method SplFileInfo::_bad_state_ex() is deprecated since 8.2 in %s on line 10
 /// The parent constructor was not called: the object is in an invalid state
 /// ```
-#[php_class(implements(Stringable), payload = Fs, handlers = HANDLERS)]
+///
+/// The class is `@not-serializable`, and so is every class that extends
+/// it.
+///
+/// ```php
+/// foreach ([new SplFileInfo(__FILE__), new SplTempFileObject] as $o) {
+///     try { serialize($o); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// try { unserialize('O:11:"SplFileInfo":0:{}'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Serialization of 'SplFileInfo' is not allowed
+/// Serialization of 'SplTempFileObject' is not allowed
+/// Unserialization of 'SplFileInfo' is not allowed
+/// ```
+#[php_class(implements(Stringable), not_serializable, payload = Fs, handlers = HANDLERS)]
 pub(crate) struct SplFileInfo;
 
 #[php_class]

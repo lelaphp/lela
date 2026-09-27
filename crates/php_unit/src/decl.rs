@@ -24,8 +24,26 @@ impl From<&str> for Name {
 /// with `%s`, and every other name is shown whole.
 #[must_use]
 pub fn shown(name: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(shown_bytes(name))
+}
+
+/// [`shown`]'s bytes as they stand, for a dump that prints a name as
+/// php prints it, byte for byte, whatever encoding it is in.
+///
+/// ```php
+/// eval("class \xdcb {}");
+/// ob_start(); var_dump(new ("\xdcb")); echo bin2hex(ob_get_clean()), "\n";
+/// var_dump(new class {});
+/// ```
+/// ```expect
+/// 6f626a65637428dc6229233120283029207b0a7d0a
+/// object(class@anonymous)#1 (0) {
+/// }
+/// ```
+#[must_use]
+pub fn shown_bytes(name: &[u8]) -> &[u8] {
     let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-    String::from_utf8_lossy(&name[..end])
+    &name[..end]
 }
 
 /// `validate_attribute`, `validate_allow_dynamic_properties` and

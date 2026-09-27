@@ -8,9 +8,7 @@
 //! each element off as the walk passes it, and `SplQueue` and
 //! `SplStack` freeze the direction (`SPL_DLLIST_IT_FIX`).
 
-use php_ext::abi::{
-    CloneObj, ExtensionBuilder, ObjectHandlers, PropertyPurpose, Std, This, Untyped,
-};
+use php_ext::abi::{CloneObj, ExtensionBuilder, ObjectHandlers, PropertyPurpose, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
@@ -587,12 +585,8 @@ impl SplDoublyLinkedList {
             req.release(old);
         }
         let mut reader = php_ext_standard::Unserializer::new(req, &data);
-        let mut kept = None;
-        let read = read_list(req, this, &mut reader, &data, &mut kept);
+        let read = read_list(req, this, &mut reader, &data);
         let finished = reader.finish(req);
-        if let Some(flags) = kept {
-            req.release(flags);
-        }
         let broke_at = read?;
         finished?;
         match broke_at {
@@ -610,12 +604,14 @@ impl SplDoublyLinkedList {
     #[php(tentative)]
     fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let (flags, values) = with(req, this.object(), |l| (l.flags, l.values()))?;
-        let mut out = crate::serialized(req, Value::int(flags))?;
-        for value in values {
-            out.push(b':');
-            out.extend(crate::serialized(req, value)?);
-        }
-        PhpString::new(req, &out)
+        crate::serialized_parts(req, |req, serializer, out| {
+            serializer.write(req, out, &Value::int(flags))?;
+            for value in values {
+                out.push(b':');
+                serializer.write(req, out, &value)?;
+            }
+            Ok(())
+        })
     }
 
     /// `__serialize(): array`: the flags, the elements and the members.
@@ -679,12 +675,7 @@ impl SplDoublyLinkedList {
             let value = crate::copied(req, value);
             with(req, this, |l| l.push(value))?;
         }
-        for (key, value) in members.snapshot() {
-            let name = key.to_prop_name(req)?;
-            req.addref(&value);
-            Std.write_property(req, this, name, value)?;
-        }
-        Ok(())
+        crate::load_members(req, this, &Value::array(members))
     }
 }
 
@@ -909,19 +900,17 @@ fn move_forward(req: &mut Request, this: PhpObject, flags: i64) -> Result<(), Th
 
 /// The body of `SplDoublyLinkedList::unserialize` over one reader:
 /// `None` once the data is read, or the offset php's `error` label
-/// reports. The flags' value is left in `kept`, php's `var_tmp_var`,
-/// and each element is the list's.
+/// reports. Each value read is the var hash's, php's `var_tmp_var`, and
+/// the list takes an owner of each element.
 fn read_list(
     req: &mut Request,
     this: PhpObject,
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
-    kept: &mut Option<Value>,
 ) -> Result<Option<usize>, Thrown> {
     let Some(flags) = reader.value(req)? else {
         return Ok(Some(reader.offset()));
     };
-    *kept = Some(flags);
     let Some(flags) = flags.as_int() else {
         return Ok(Some(reader.offset()));
     };
@@ -931,6 +920,7 @@ fn read_list(
         let Some(value) = reader.value(req)? else {
             return Ok(Some(reader.offset()));
         };
+        req.addref(&value);
         with(req, this, |l| l.push(value))?;
     }
     if reader.offset() != data.len() {

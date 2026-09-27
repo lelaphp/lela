@@ -901,6 +901,10 @@ pub enum Raised {
     /// never overridden by other classes`, of an `as` that made a trait's
     /// method both.
     PrivateFinal(Site),
+    /// `zend_implement_serializable`'s `E_DEPRECATED` of a class that
+    /// implements `Serializable` without `__serialize()` and
+    /// `__unserialize()`.
+    Serializable { class: String, site: Site },
 }
 
 impl Raised {
@@ -908,7 +912,7 @@ impl Raised {
     #[must_use]
     pub fn level(&self) -> Level {
         match self {
-            Raised::TentativeReturn(_) => Level::Deprecated,
+            Raised::TentativeReturn(_) | Raised::Serializable { .. } => Level::Deprecated,
             Raised::PrivateFinal(_) => Level::CompileWarning,
         }
     }
@@ -918,7 +922,7 @@ impl Raised {
     pub fn site(&self) -> &Site {
         match self {
             Raised::TentativeReturn(tentative) => &tentative.site,
-            Raised::PrivateFinal(site) => site,
+            Raised::PrivateFinal(site) | Raised::Serializable { site, .. } => site,
         }
     }
 }
@@ -929,6 +933,10 @@ impl fmt::Display for Raised {
             Raised::TentativeReturn(tentative) => tentative.fmt(f),
             Raised::PrivateFinal(_) => f.write_str(
                 "Private methods cannot be final as they are never overridden by other classes",
+            ),
+            Raised::Serializable { class, .. } => write!(
+                f,
+                "{class} implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary)"
             ),
         }
     }
@@ -2386,6 +2394,7 @@ impl<'a> Linker<'a> {
         if let Some(linked) = self.implement(child, &mut constants, &mut methods) {
             return Settled::of(linked);
         }
+        self.serializable_deprecated(child, &methods);
         let hooks = self.abstract_hooks(child);
         if let Some(refusal) = abstract_left(child, &methods, hooks) {
             return Settled::of(Linked::Refused(at_class(child, refusal)));
@@ -3014,6 +3023,50 @@ impl<'a> Linker<'a> {
             class,
             interface: text(name),
         })
+    }
+}
+
+impl<'a> Linker<'a> {
+    /// `zend_implement_serializable`'s deprecation: a class that is
+    /// `Serializable`, through its own interfaces or its parent's, and is
+    /// not declared abstract, left without `__serialize()` or
+    /// `__unserialize()` once it holds what it inherits. php raises it
+    /// for every class of the line, the subclass of one too.
+    ///
+    /// ```php
+    /// class A implements Serializable { function serialize() {} function unserialize($s) {} }
+    /// class B extends A {}
+    /// class C extends A { function __serialize(): array { return []; } function __unserialize(array $a): void {} }
+    /// abstract class D implements Serializable {}
+    /// echo "linked\n";
+    /// ```
+    /// ```expect
+    /// Deprecated: A implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 2
+    ///
+    /// Deprecated: B implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 3
+    /// linked
+    /// ```
+    fn serializable_deprecated(&mut self, child: &'a ClassDecl, methods: &Table<'a, MethodDecl>) {
+        if child.kind != ClassKind::Class || child.flags.is_abstract {
+            return;
+        }
+        let serializable = self
+            .class_named(b"serializable")
+            .is_some_and(|interface| self.instance_of(child, interface));
+        let has = |name: &[u8]| {
+            methods
+                .iter()
+                .any(|(_, m)| m.function.name.0.eq_ignore_ascii_case(name))
+        };
+        if serializable && !(has(b"__serialize") && has(b"__unserialize")) {
+            self.raised.push(Raised::Serializable {
+                class: text(&child.name.0),
+                site: Site {
+                    file: child.file.clone(),
+                    line: child.line,
+                },
+            });
+        }
     }
 }
 

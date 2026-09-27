@@ -69,6 +69,7 @@ decl::Type::mask
 decl::Visibility
 decl::class_attribute_refusal
 decl::shown
+decl::shown_bytes
 enum_methods
 frameless_table
 link::Body

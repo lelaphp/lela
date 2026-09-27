@@ -19,6 +19,7 @@ use php_ext::coerce::{compare, identical, truthy, value_name};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext_standard::Serializer;
 
 use crate::{ArrayAccess, Countable, Iterator, SeekableIterator, Serializable};
 
@@ -689,13 +690,8 @@ impl SplObjectStorage {
             return Ok(());
         }
         let mut reader = php_ext_standard::Unserializer::new(req, &data);
-        let mut kept = Vec::new();
-        let read = read_storage(req, this, &mut reader, &data, &mut kept);
+        let read = read_storage(req, this, &mut reader, &data);
         let finished = reader.finish(req);
-        // `var_tmp_var`'s values live until `PHP_VAR_UNSERIALIZE_DESTROY`.
-        for value in kept {
-            req.release(value);
-        }
         let broke_at = read?;
         finished?;
         match broke_at {
@@ -740,26 +736,17 @@ impl SplObjectStorage {
     fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let this = this.object();
         let count = with(req, this, |s| s.len())?;
-        let mut out = b"x:".to_vec();
-        out.extend(crate::serialized(
-            req,
-            Value::int(i64::try_from(count).unwrap_or(i64::MAX)),
-        )?);
-        // The objects written, each held from its row on, as the var hash's
-        // `Z_ADDREF` holds it until `PHP_VAR_SERIALIZE_DESTROY`, so one a
-        // later `__serialize` frees cannot have its handle reused meanwhile.
-        let mut held = Vec::new();
-        let rows = serialize_rows(req, this, &mut out, &mut held);
-        for object in held {
-            req.release(object.as_value());
-        }
-        rows?;
-        out.extend_from_slice(b"m:");
-        let members = crate::members(req, this)?;
-        let text = crate::serialized(req, Value::array(members));
-        req.release(Value::array(members));
-        out.extend(text?);
-        PhpString::new(req, &out)
+        crate::serialized_parts(req, |req, serializer, out| {
+            out.extend_from_slice(b"x:");
+            let count = Value::int(i64::try_from(count).unwrap_or(i64::MAX));
+            serializer.write(req, out, &count)?;
+            serialize_rows(req, this, serializer, out)?;
+            out.extend_from_slice(b"m:");
+            let members = crate::members(req, this)?;
+            let written = serializer.write(req, out, &Value::array(members));
+            req.release(Value::array(members));
+            written
+        })
     }
 
     /// `offsetExists($object): bool`, php's alias of `contains()`, its
@@ -1657,29 +1644,29 @@ fn clone_storage(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
 /// position of its own as `zend_hash_move_forward_ex` walks it, so a row
 /// an earlier row's `__serialize` detached is not written and one it
 /// attached is, and where a row's `__serialize` detached that row the
-/// step passes the row after it too. Each row's information is held
-/// across its write, php's `inf_copy`, given back after the step as php
-/// gives it back, and each object from its row on, in `held`, which the
-/// caller gives up once the walk is done.
+/// step passes the row after it too. Each row's object and information
+/// are held across its write, php's `obj` and `inf` copies, and given
+/// back after the step as php gives them back; the var hash keeps an
+/// owner of each object it records until the serializer is done, so one
+/// a later `__serialize` frees cannot have its place reused meanwhile.
 fn serialize_rows(
     req: &mut Request,
     this: PhpObject,
+    serializer: &mut Serializer,
     out: &mut Vec<u8>,
-    held: &mut Vec<PhpObject>,
 ) -> Result<(), Thrown> {
     let mut pos = 0;
     while let Some((_, object, inf)) = with(req, this, |s| s.row_at(pos))? {
-        req.addref(&object.as_value());
-        held.push(object);
+        let object = Held::take(req, object.as_value());
         let inf = Held::take(req, inf);
-        let written = crate::serialized(req, object.as_value()).and_then(|object| {
-            out.extend(object);
+        let written = serializer.write(req, out, &object.value()).and_then(|()| {
             out.push(b',');
-            crate::serialized(req, inf.value())
+            serializer.write(req, out, &inf.value())
         });
         let next = with(req, this, |s| s.forward_from(pos));
+        object.let_go(req);
         inf.let_go(req);
-        out.extend(written?);
+        written?;
         out.push(b';');
         pos = next?;
     }
@@ -1687,15 +1674,15 @@ fn serialize_rows(
 }
 
 /// The body of `SplObjectStorage::unserialize` over one reader: `None`
-/// once the data is read, or the offset php's `outexcept` reports; each
-/// value read is left in `kept`, php's `var_tmp_var`, for the caller to
-/// give up once the reader is done.
+/// once the data is read, or the offset php's `outexcept` reports. The
+/// count and the members are the var hash's, php's `var_tmp_var`; each
+/// row's object and information are read as php reads them into locals
+/// and `var_replace`s into the row, the storage's to keep.
 fn read_storage(
     req: &mut Request,
     this: PhpObject,
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
-    kept: &mut Vec<Value>,
 ) -> Result<Option<usize>, Thrown> {
     if !data.starts_with(b"x:") {
         return Ok(Some(0));
@@ -1704,7 +1691,6 @@ fn read_storage(
     let Some(count) = reader.value(req)? else {
         return Ok(Some(reader.offset()));
     };
-    kept.push(count);
     // `--p` back onto the `;` the count's own value ended with.
     reader.set_offset(reader.offset().saturating_sub(1));
     let Some(count) = count.as_int().filter(|n| *n >= 0) else {
@@ -1718,23 +1704,25 @@ fn read_storage(
         if !matches!(data.get(reader.offset()), Some(b'O' | b'C' | b'r')) {
             return Ok(Some(reader.offset()));
         }
-        let Some(entry) = reader.value(req)? else {
+        let Some(entry) = reader.local(req)? else {
             return Ok(Some(reader.offset()));
         };
-        kept.push(entry);
         let mut inf = Value::null();
         if data.get(reader.offset()) == Some(&b',') {
             reader.set_offset(reader.offset() + 1);
-            let Some(read) = reader.value(req)? else {
+            let Some(read) = reader.local(req)? else {
+                req.release(entry);
                 return Ok(Some(reader.offset()));
             };
             inf = read;
         }
         let Some(target) = entry.as_object().copied() else {
+            req.release(entry);
             req.release(inf);
             return Ok(Some(reader.offset()));
         };
         let attached = storage_attach(req, this, target, inf);
+        req.release(entry);
         req.release(inf);
         attached?;
     }
@@ -1752,7 +1740,6 @@ fn read_storage(
     let Some(members) = reader.value(req)? else {
         return Ok(Some(reader.offset()));
     };
-    kept.push(members);
     if members.as_array().is_none() {
         return Ok(Some(reader.offset()));
     }

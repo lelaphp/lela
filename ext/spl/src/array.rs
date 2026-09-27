@@ -530,14 +530,8 @@ impl ArrayObject {
         sorting_refused(req, this)?;
         let mut reader = php_ext_standard::Unserializer::new(req, &data);
         let mut pending = None;
-        let mut kept = Vec::new();
-        let read = read_record(req, this, &mut reader, &data, &mut pending, &mut kept);
+        let read = read_record(req, this, &mut reader, &data, &mut pending);
         let finished = reader.finish(req);
-        // `var_tmp_var`'s values live until `PHP_VAR_UNSERIALIZE_DESTROY`,
-        // since a later `R:` of the record may name one.
-        for value in kept {
-            req.release(value);
-        }
         let broke_at = read?;
         finished?;
         if let Some(at) = broke_at {
@@ -560,21 +554,22 @@ impl ArrayObject {
     fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let this = this.object();
         let flags = ar_flags(req, this)? & CLONE_MASK;
-        let mut out = b"x:".to_vec();
-        out.extend(crate::serialized(req, Value::int(flags))?);
-        if flags & IS_SELF == 0 {
-            let stored = storage(req, this)?;
-            let bytes = crate::serialized(req, stored);
-            req.release(stored);
-            out.extend(bytes?);
-            out.push(b';');
-        }
-        out.extend_from_slice(b"m:");
-        let members = crate::members(req, this)?;
-        let bytes = crate::serialized(req, Value::array(members));
-        req.release(Value::array(members));
-        out.extend(bytes?);
-        PhpString::new(req, &out)
+        crate::serialized_parts(req, |req, serializer, out| {
+            out.extend_from_slice(b"x:");
+            serializer.write(req, out, &Value::int(flags))?;
+            if flags & IS_SELF == 0 {
+                let stored = storage(req, this)?;
+                let written = serializer.write(req, out, &stored);
+                req.release(stored);
+                written?;
+                out.push(b';');
+            }
+            out.extend_from_slice(b"m:");
+            let members = crate::members(req, this)?;
+            let written = serializer.write(req, out, &Value::array(members));
+            req.release(Value::array(members));
+            written
+        })
     }
 
     /// `__serialize(): array`: the flags, the storage, the members and the
@@ -2147,16 +2142,14 @@ fn storage(req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
 
 /// The body of `ArrayObject::unserialize` over one reader: `None` once
 /// the record is read, or the offset php's `outexcept` reports; a
-/// refusal of the storage is left in `pending`, and each value read is
-/// left in `kept`, php's `var_tmp_var`, for the caller to give up once
-/// the reader is done.
+/// refusal of the storage is left in `pending`. Each value read is the
+/// var hash's, php's `var_tmp_var`, so a later `R:` may name it.
 fn read_record(
     req: &mut Request,
     this: PhpObject,
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
     pending: &mut Option<Thrown>,
-    kept: &mut Vec<Value>,
 ) -> Result<Option<usize>, Thrown> {
     if !data.starts_with(b"x:") {
         return Ok(Some(0));
@@ -2165,7 +2158,6 @@ fn read_record(
     let Some(flags) = reader.value(req)? else {
         return Ok(Some(reader.offset()));
     };
-    kept.push(flags);
     let Some(flags) = flags.as_int() else {
         return Ok(Some(reader.offset()));
     };
@@ -2183,7 +2175,6 @@ fn read_record(
         let Some(stored) = reader.value(req)? else {
             return Ok(Some(reader.offset()));
         };
-        kept.push(stored);
         if stored.as_array().is_none() && stored.as_object().is_none() {
             return Ok(Some(reader.offset()));
         }
@@ -2207,7 +2198,6 @@ fn read_record(
     let Some(members) = reader.value(req)? else {
         return Ok(Some(reader.offset()));
     };
-    kept.push(members);
     if members.as_array().is_none() {
         return Ok(Some(reader.offset()));
     }

@@ -130,6 +130,7 @@ struct State {
     /// `BG(url_adapt_output_ex)`, the URL rewriter's state.
     url_rewriter: url_scanner::Rewriter,
     assert: assert::Stage,
+    var: var::Nesting,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,

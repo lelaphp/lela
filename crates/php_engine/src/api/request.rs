@@ -8929,32 +8929,7 @@ impl Request {
             self.release(Value::string(key));
             return Ok(false);
         }
-        let placed = self.placed_properties(class);
-        let exact = placed.iter().rposition(|(declaring, p)| {
-            if *p.name.0 != *name.as_slice() {
-                return false;
-            }
-            match (&mangled_class, p.visibility) {
-                (None, Visibility::Public) => true,
-                (Some(c), Visibility::Protected) => c.as_slice() == b"*",
-                (Some(c), Visibility::Private) => self.class_name_bytes(*declaring) == c.as_slice(),
-                _ => false,
-            }
-        });
-        let changed = || {
-            let reachable = match &mangled_class {
-                None => true,
-                Some(c) => c.as_slice() == b"*" || c.eq_ignore_ascii_case(&class_name),
-            };
-            if !reachable {
-                return None;
-            }
-            placed.iter().rposition(|(declaring, p)| {
-                *p.name.0 == *name.as_slice()
-                    && (*declaring == class || p.visibility != Visibility::Private)
-            })
-        };
-        let slot = exact.or_else(changed);
+        let slot = self.unserialize_slot(class, &bytes);
         if let Some(at) = slot.and_then(|at| u32::try_from(at).ok()) {
             let z = value.into_zval();
             Heap::object_set_slot(&mut Hooks(self), object.heap(), at, z);
@@ -8978,6 +8953,107 @@ impl Request {
         self.array_update(table, table_key, value)?;
         self.release(Value::string(key));
         Ok(true)
+    }
+
+    /// The declared slot a serialized key places its value in, by its
+    /// index among [`Request::placed_properties`]: the property the
+    /// mangled name names, or the one of that name whose visibility
+    /// changed since (`is_property_visibility_changed`).
+    fn unserialize_slot(&self, class: ClassId, key: &[u8]) -> Option<usize> {
+        let (mangled_class, name) = match key.strip_prefix(b"\0") {
+            Some(rest) => match rest.iter().position(|b| *b == 0) {
+                Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
+                None => (None, key),
+            },
+            None => (None, key),
+        };
+        let class_name = self.class_name_bytes(class);
+        let placed = self.placed_properties(class);
+        let exact = placed.iter().rposition(|(declaring, p)| {
+            if *p.name.0 != *name {
+                return false;
+            }
+            match (mangled_class, p.visibility) {
+                (None, Visibility::Public) => true,
+                (Some(c), Visibility::Protected) => c == b"*",
+                (Some(c), Visibility::Private) => self.class_name_bytes(*declaring) == c,
+                _ => false,
+            }
+        });
+        exact.or_else(|| {
+            let reachable =
+                mangled_class.is_none_or(|c| c == b"*" || c.eq_ignore_ascii_case(&class_name));
+            if !reachable {
+                return None;
+            }
+            placed.iter().rposition(|(declaring, p)| {
+                *p.name.0 == *name && (*declaring == class || p.visibility != Visibility::Private)
+            })
+        })
+    }
+
+    /// `process_nested_object_data`'s hold on a declared typed property
+    /// once its value is read (`Z/ext/standard/var_unserializer.re`):
+    /// the value held to the type under strict rules, a cell to every
+    /// type its other sources hold it to, and the cell made one of this
+    /// property's own; a refusal leaves the slot undefined.
+    pub(crate) fn unserialize_verify(
+        &mut self,
+        object: PhpObject,
+        key: &[u8],
+    ) -> Result<(), Thrown> {
+        let Some(at) = self.unserialize_slot(object.class(), key) else {
+            return Ok(());
+        };
+        let placed = self.placed_properties(object.class());
+        let Some((declaring, ty, name)) = placed
+            .get(at)
+            .and_then(|(declaring, p)| Some((*declaring, p.ty.clone()?, p.name.0.to_vec())))
+        else {
+            return Ok(());
+        };
+        let Ok(index) = u32::try_from(at) else {
+            return Ok(());
+        };
+        let o = object.heap();
+        let held = Value::of_zval(o.slot(index));
+        let checked = match held.as_php_ref() {
+            Some(cell) => {
+                let cell = cell.heap();
+                let own = self
+                    .ref_type_sources(cell)
+                    .iter()
+                    .any(|s| s.declaring == declaring && s.name == name);
+                if own {
+                    return Ok(());
+                }
+                crate::ops::verify_prop_assignable_by_ref(self, cell, &ty, declaring, &name, true)
+                    .map(|coerced| {
+                        if let Some(coerced) = coerced {
+                            self.reference_set(cell, coerced);
+                        }
+                        self.ref_add_type_source(
+                            cell,
+                            RefSource {
+                                declaring,
+                                name,
+                                ty,
+                            },
+                        );
+                    })
+            }
+            None => crate::ops::verify_property_type(self, &held, &ty, declaring, &name, true).map(
+                |coerced| {
+                    if let Some(coerced) = coerced {
+                        Heap::object_set_slot(&mut Hooks(self), o, index, coerced.into_zval());
+                    }
+                },
+            ),
+        };
+        if checked.is_err() {
+            Heap::object_set_slot(&mut Hooks(self), o, index, php_heap::Zval::UNDEF);
+        }
+        checked
     }
 
     /// `object_and_properties_init` over `zend_symtable_to_proptable`,
@@ -11582,6 +11658,19 @@ impl Request {
             || String::from("native"),
             |function| self.qualified_name(function, None),
         )
+    }
+
+    /// `get_active_function_name` over the innermost user frame, with
+    /// the class `get_active_class_name` puts before a method's: `main`
+    /// for a file's own code, none while no frame is served. What
+    /// `php_verror` names a docref by when no native raises it, as an
+    /// object's handlers do from the code that reached them.
+    pub(crate) fn active_user_function(&self) -> Option<String> {
+        let frame = self.innermost_frame()?;
+        Some(frame.function.map_or_else(
+            || String::from("main"),
+            |function| self.qualified_name(function, None),
+        ))
     }
 
     /// `get_active_function_or_method_name`: the native being served as

@@ -9,11 +9,13 @@
 //! over four spaces of indent per level, a property's visibility in its
 //! name rather than beside it, and no type or length anywhere.
 
-use php_ext::abi::{PropertyPurpose, True, Union};
+use php_ext::abi::{
+    ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, True, Union,
+};
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
-use php_ext::raising::{Thrown, warning};
+use php_ext::raising::{Level, Thrown, docref, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpString, Value};
 
@@ -23,6 +25,124 @@ pub(crate) mod unserialize;
 
 pub use serialize::Serializer;
 pub use unserialize::Unserializer;
+
+/// `BG(serialize_lock)`, `BG(serialize)` and `BG(unserialize)`
+/// (`Z/ext/standard/basic_functions.h`): the var hash every serializer
+/// and every unserializer opened while one is open shares, so a
+/// `Serializable::serialize()` that serializes its parts numbers them
+/// in the string around it, and an `R:` after a `C:` record names a value
+/// read inside it; and `BG(serialize_lock)`, taken around the magic
+/// methods, under which each opens a var hash of its own.
+#[derive(Default)]
+pub(crate) struct Nesting {
+    /// `BG(serialize_lock)`: how many `__serialize()`, `__sleep()`,
+    /// `__unserialize()` and `__wakeup()` calls are under way.
+    lock: u32,
+    serialize: Shared<serialize::VarHash>,
+    unserialize: Shared<unserialize::VarHash>,
+}
+
+/// One of `BG(serialize)` and `BG(unserialize)`: how many holders share
+/// the var hash, `level`, and the var hash itself while its holder has
+/// set it down for a call that may open another holder.
+struct Shared<T> {
+    level: u32,
+    parked: Option<T>,
+}
+
+impl<T> Default for Shared<T> {
+    fn default() -> Shared<T> {
+        Shared {
+            level: 0,
+            parked: None,
+        }
+    }
+}
+
+/// How a serializer or an unserializer holds its var hash.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    /// A var hash of its own, opened while `BG(serialize_lock)` is held.
+    Own,
+    /// The shared var hash, which it opened: `BG(...).level` was zero.
+    First,
+    /// The shared var hash another holder opened and set down for it.
+    Joined,
+}
+
+impl<T> Shared<T> {
+    /// `PHP_VAR_SERIALIZE_INIT` and its twin: `fresh` as a var hash of its
+    /// own while `BG(serialize_lock)` is held, `fresh` as the shared one
+    /// where none is open, and the open one otherwise.
+    fn open(&mut self, lock: u32, fresh: T) -> (T, Holder) {
+        if lock > 0 {
+            return (fresh, Holder::Own);
+        }
+        if self.level == 0 {
+            self.level = 1;
+            return (fresh, Holder::First);
+        }
+        match self.parked.take() {
+            Some(hash) => {
+                self.level += 1;
+                (hash, Holder::Joined)
+            }
+            // A holder that did not set its var hash down: this one keeps
+            // a var hash of its own, as while the lock is held.
+            None => (fresh, Holder::Own),
+        }
+    }
+
+    /// `PHP_VAR_SERIALIZE_DESTROY` and its twin: the var hash to destroy
+    /// where this was its only or its last holder, `None` where it goes
+    /// back to the holder that set it down.
+    fn close(&mut self, hash: T, holder: Holder) -> Option<T> {
+        if holder == Holder::Own {
+            return Some(hash);
+        }
+        self.level = self.level.saturating_sub(1);
+        if self.level == 0 {
+            return Some(hash);
+        }
+        self.parked = Some(hash);
+        None
+    }
+
+    /// The var hash set down for a call that may open another holder,
+    /// and taken up again after it, `f`'s answer beside it; a var hash
+    /// of its own is kept through the call.
+    fn set_down<R>(
+        req: &mut Request,
+        home: fn(&mut Nesting) -> &mut Shared<T>,
+        hash: T,
+        holder: Holder,
+        f: impl FnOnce(&mut Request) -> R,
+    ) -> (T, R)
+    where
+        T: Default,
+    {
+        if holder == Holder::Own {
+            return (hash, f(req));
+        }
+        home(&mut req.state::<crate::State>().var).parked = Some(hash);
+        let answered = f(req);
+        let hash = home(&mut req.state::<crate::State>().var)
+            .parked
+            .take()
+            .unwrap_or_default();
+        (hash, answered)
+    }
+}
+
+/// `f` with `BG(serialize_lock)` held, as php holds it around the magic
+/// methods a serializer or an unserializer calls.
+fn locked<R>(req: &mut Request, f: impl FnOnce(&mut Request) -> R) -> R {
+    req.state::<crate::State>().var.lock += 1;
+    let answered = f(req);
+    let nesting = &mut req.state::<crate::State>().var;
+    nesting.lock = nesting.lock.saturating_sub(1);
+    answered
+}
 
 /// `PHP_IC_ENTRY`'s name, the class an object of a class `unserialize()`
 /// could not load becomes.
@@ -60,6 +180,56 @@ fn has_method(req: &mut Request, class: php_ext::values::ClassId, method: &[u8])
             Some(parent) => php_ext::call::lookup_class(req, &parent).ok().flatten(),
             None => None,
         };
+    }
+    false
+}
+
+/// Whether the class is `Serializable`, php's `ce->serialize` and
+/// `ce->unserialize` being set: `zend_implement_serializable` gives them
+/// to every class that implements the interface, through an interface
+/// that extends it or a class it extends. `unserialize()` refuses an
+/// `O:` record of such a class that has no `__unserialize()`.
+///
+/// ```php
+/// class N implements Serializable { function serialize() { return ""; } function unserialize($s) {} }
+/// class B extends N { function __serialize(): array { return []; } function __unserialize(array $a): void { echo "both\n"; } }
+/// var_dump(unserialize('O:1:"N":0:{}'), unserialize('O:1:"B":0:{}') instanceof B);
+/// ```
+/// ```expect
+/// Deprecated: N implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 2
+///
+/// Warning: Erroneous data format for unserializing 'N' in %s on line 4
+///
+/// Warning: unserialize(): Error at offset 11 of 12 bytes in %s on line 4
+/// both
+/// bool(false)
+/// bool(true)
+/// ```
+fn is_serializable(req: &mut Request, class: php_ext::values::ClassId) -> bool {
+    let mut pending = vec![class];
+    let mut seen = 0;
+    while let Some(here) = pending.pop() {
+        seen += 1;
+        if seen > 256 {
+            return false;
+        }
+        let Some(decl) = req.class_decl(here) else {
+            continue;
+        };
+        if decl.name.0.eq_ignore_ascii_case(b"Serializable") {
+            return true;
+        }
+        let names: Vec<Vec<u8>> = decl
+            .parent
+            .iter()
+            .chain(decl.interfaces.iter())
+            .map(|name| name.0.to_vec())
+            .collect();
+        for name in names {
+            if let Ok(Some(up)) = php_ext::call::lookup_class(req, &name) {
+                pending.push(up);
+            }
+        }
     }
     false
 }
@@ -121,11 +291,110 @@ fn is_enum_class(req: &Request, class: php_ext::values::ClassId) -> bool {
 /// string(22) "__PHP_Incomplete_Class"
 /// string(26) "O:3:"Foo":1:{s:1:"a";i:1;}"
 /// ```
-#[php_class(final, dynamic_properties = allowed)]
+///
+/// Its handlers are php's `php_incomplete_object_handlers`
+/// (`Z/ext/standard/incomplete_class.c`): a property read or an `isset`
+/// warns and finds nothing, and a write or an `unset` is php's `Error`,
+/// each naming the class the object stands for.
+///
+/// ```php
+/// $o = unserialize('O:3:"Foo":1:{s:1:"a";i:1;}');
+/// var_dump($o->a, isset($o->a));
+/// try { $o->b = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { unset($o->a); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Warning: main(): The script tried to access a property on an incomplete object. Please ensure that the class definition "Foo" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 3
+///
+/// Warning: main(): The script tried to access a property on an incomplete object. Please ensure that the class definition "Foo" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 3
+/// NULL
+/// bool(false)
+/// The script tried to modify a property on an incomplete object. Please ensure that the class definition "Foo" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition
+/// The script tried to modify a property on an incomplete object. Please ensure that the class definition "Foo" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition
+/// ```
+#[php_class(final, dynamic_properties = allowed, handlers = INCOMPLETE)]
 pub(crate) struct __PHP_Incomplete_Class;
 
 #[php_class]
 impl __PHP_Incomplete_Class {}
+
+/// `php_incomplete_object_handlers`.
+pub(crate) struct Incomplete;
+
+pub(crate) static INCOMPLETE: Incomplete = Incomplete;
+
+/// `INCOMPLETE_CLASS_MSG` over what the program tried and the class the
+/// object stands for, `php_lookup_class_name`'s, `unknown` without one.
+fn incomplete_message(req: &Request, object: php_ext::values::PhpObject, what: &str) -> String {
+    let name = object
+        .prop(req, MAGIC_MEMBER)
+        .and_then(|v| {
+            v.as_str_bytes()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
+    format!(
+        "The script tried to {what} on an incomplete object. Please ensure that the class definition \"{name}\" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition"
+    )
+}
+
+impl ObjectHandlers for Incomplete {
+    fn read_property(
+        &self,
+        req: &mut Request,
+        object: php_ext::values::PhpObject,
+        _name: &[u8],
+        _read: PropertyRead,
+    ) -> Result<Value, Thrown> {
+        let message = incomplete_message(req, object, "access a property");
+        docref(req, Level::Warning, &message);
+        Ok(Value::null())
+    }
+
+    fn write_property(
+        &self,
+        req: &mut Request,
+        object: php_ext::values::PhpObject,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        req.release(value);
+        req.release(Value::string(name));
+        let message = incomplete_message(req, object, "modify a property");
+        Err(throw(req, "Error", &message))
+    }
+
+    fn get_property_ptr_ptr(
+        &self,
+        _req: &mut Request,
+        _object: php_ext::values::PhpObject,
+        _name: &[u8],
+    ) -> PropertyPlace {
+        PropertyPlace::Handlers
+    }
+
+    fn has_property(
+        &self,
+        req: &mut Request,
+        object: php_ext::values::PhpObject,
+        _name: &[u8],
+        _test: PropertyTest,
+    ) -> Result<bool, Thrown> {
+        let message = incomplete_message(req, object, "access a property");
+        docref(req, Level::Warning, &message);
+        Ok(false)
+    }
+
+    fn unset_property(
+        &self,
+        req: &mut Request,
+        object: php_ext::values::PhpObject,
+        _name: &[u8],
+    ) -> Result<(), Thrown> {
+        let message = incomplete_message(req, object, "modify a property");
+        Err(throw(req, "Error", &message))
+    }
+}
 
 /// The ini entries the unserializer reads, `basic_functions.c`'s
 /// `unserialize_callback_func` and `unserialize_max_depth`.
