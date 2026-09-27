@@ -3494,6 +3494,8 @@ impl Emit<'_> {
                     kind,
                     name: &parameter.name,
                     ty: parameter.ty,
+                    declared: ty,
+                    pending: None,
                     visibility: promoted.visibility,
                     is_static: false,
                     is_readonly,
@@ -5922,6 +5924,8 @@ impl Emit<'_> {
                         kind: class.kind,
                         name: &property.name,
                         ty: property.ty,
+                        declared: ty.as_ref(),
+                        pending: Some(decl),
                         visibility: property.visibility,
                         is_static: property.is_static,
                         is_readonly,
@@ -6527,7 +6531,7 @@ impl Emit<'_> {
     /// A class `CG(class_table)` holds while the file compiles: one the
     /// engine declared, or one of the file's own that was bound early,
     /// which a class declared by a `DECLARE_CLASS` is not yet.
-    fn bound_class(&self, name: &[u8]) -> Option<&ClassDecl> {
+    pub(super) fn bound_class(&self, name: &[u8]) -> Option<&ClassDecl> {
         let wanted = name.to_ascii_lowercase();
         self.known_classes
             .iter()

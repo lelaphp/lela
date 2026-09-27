@@ -151,6 +151,45 @@ pub fn resolve_property<'a>(
     })
 }
 
+/// `zend_verify_property_hook_variance` as `zend_compile_property_hooks`
+/// runs it once a `set` hook has compiled, against the classes `lookup`
+/// holds while the file compiles and the class itself by its name: the
+/// refusal where the property's type is no subtype of the parameter's,
+/// which php raises before the class is declared, and nothing where it
+/// is or where a class it names is not held yet, which the link checks
+/// again once the class has taken its parent and its interfaces.
+///
+/// ```php
+/// echo "not reached\n";
+/// class P {}
+/// class C extends P { public int $x { set(string $v) {} } }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Type of parameter $v of hook C::$x::set must be compatible with property type in %s on line 4
+/// ```
+///
+/// ```php
+/// class A {} class B {}
+/// class C extends P { public A $x { set(B $v) {} } }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Type of parameter $v of hook C::$x::set must be compatible with property type in %s on line 3
+/// ```
+#[must_use]
+pub fn set_hook_refused<'a>(
+    class: &'a ClassDecl,
+    property: &[u8],
+    ty: Option<&Type>,
+    set: &MethodDecl,
+    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
+) -> Option<Refusal> {
+    let linker = Linker::over(lookup, Vec::new());
+    match linker.set_hook_variance(class, property, ty, set)? {
+        (Status::Error, refused) => Some(refused.refusal),
+        _ => None,
+    }
+}
+
 /// `zend_verify_hooked_property`: what a hooked property of `class` is
 /// refused for once its class's link has settled whether it is virtual,
 /// in php's order. None for one with no hooks.
@@ -411,10 +450,43 @@ impl<'a> Linker<'a> {
         }
     }
 
-    /// `zend_verify_property_hook_variance` over each of the class's own
-    /// `set` hooks whose parameter is typed: the property's type a
-    /// subtype of the parameter's, php's compile-time check and the
-    /// obligation it leaves where a class is not yet declared.
+    /// `zend_verify_property_hook_variance` of one `set` hook of the
+    /// class's own: the property's type a subtype of the parameter's
+    /// where the parameter is typed, and an untyped property's typed
+    /// parameter refused. The status, with the refusal it raises.
+    fn set_hook_variance(
+        &self,
+        child: &'a ClassDecl,
+        property: &[u8],
+        ty: Option<&Type>,
+        set: &MethodDecl,
+    ) -> Option<(Status, Refused)> {
+        let parameter = set.function.parameters.first()?;
+        let param_ty = parameter.ty.as_ref()?;
+        let scope = Self::scope_of(child, Cls::Linking);
+        let status = match ty {
+            Some(ty) => self.covariant(child, &scope, ty, &scope, param_ty),
+            None => Status::Error,
+        };
+        let refused = at_class(
+            child,
+            Refusal::SetHookParameter {
+                parameter: text(&parameter.name.0),
+                class: text(&child.name.0),
+                property: text(property),
+            },
+        );
+        Some((status, refused))
+    }
+
+    /// `zend_do_link_class`'s check of the class's own `set` hooks under
+    /// `num_hooked_prop_variance_checks`, after the interfaces, the
+    /// abstract methods and the enum, and before `Stringable` is added:
+    /// what the compiler could not resolve ([`set_hook_refused`]),
+    /// checked against the classes declared by now, and the obligation
+    /// it leaves where one still is not. Checking every own hook again
+    /// is checking those, since what held while the file compiled holds
+    /// with more classes known and what was refused never reached here.
     ///
     /// ```php
     /// class Test { public string|array $prop { set(string $prop) {} } }
@@ -422,38 +494,36 @@ impl<'a> Linker<'a> {
     /// ```expect exit=255
     /// Fatal error: Type of parameter $prop of hook Test::$prop::set must be compatible with property type in %s on line 2
     /// ```
+    ///
+    /// A class refused both here and by its interface is refused by the
+    /// interface, where the hook's classes were declared after the class
+    /// compiled:
+    ///
+    /// ```php
+    /// interface I { function f(); }
+    /// class C implements I { public A $x { set(B $v) {} } }
+    /// class A {} class B {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C contains 1 abstract method and must therefore be declared abstract or implement the remaining method (I::f) in %s on line 3
+    /// ```
     pub(super) fn set_hooks_refused(&self, child: &'a ClassDecl) -> Option<Linked> {
-        let scope = Self::scope_of(child, Cls::Linking);
         for property in &child.properties {
             let Some(set) = property.hooks.as_ref().and_then(|hooks| hooks.set.as_ref()) else {
                 continue;
             };
-            let Some(parameter) = set.function.parameters.first() else {
+            let Some((status, refused)) =
+                self.set_hook_variance(child, &property.name.0, property.ty.as_ref(), set)
+            else {
                 continue;
             };
-            let Some(param_ty) = &parameter.ty else {
-                continue;
-            };
-            let status = match &property.ty {
-                Some(ty) => self.covariant(child, &scope, ty, &scope, param_ty),
-                None => Status::Error,
-            };
-            if status == Status::Success {
-                continue;
+            match status {
+                Status::Success | Status::Warning => {}
+                Status::Unresolved => {
+                    self.defer(refused);
+                }
+                Status::Error => return Some(Linked::Refused(refused)),
             }
-            let refused = at_class(
-                child,
-                Refusal::SetHookParameter {
-                    parameter: text(&parameter.name.0),
-                    class: text(&child.name.0),
-                    property: text(&property.name.0),
-                },
-            );
-            if status == Status::Unresolved {
-                self.defer(refused);
-                continue;
-            }
-            return Some(Linked::Refused(refused));
         }
         None
     }

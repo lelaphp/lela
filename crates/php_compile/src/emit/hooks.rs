@@ -10,7 +10,7 @@
 //! [`Unit::hooks`]: php_unit::Unit::hooks
 
 use php_syntax::tree::TypeExpr;
-use php_unit::decl::{ClassKind, HookKind, MethodDecl, PropertyHooks, Visibility};
+use php_unit::decl::{ClassDecl, ClassKind, HookKind, MethodDecl, PropertyHooks, Type, Visibility};
 use php_unit::{HookBody, Opcode, OperandKind, Opline};
 
 use super::walk::{self, Function, Hook};
@@ -30,6 +30,13 @@ pub(super) struct Hooked<'a> {
     pub(super) kind: ClassKind,
     pub(super) name: &'a [u8],
     pub(super) ty: Option<TypeExpr>,
+    /// The type `ty` compiled to, which a `set` hook's parameter is
+    /// held to.
+    pub(super) declared: Option<&'a Type>,
+    /// The class the property is declared in where it is not yet among
+    /// [`Emit::classes`], its members still compiling; `None` where it
+    /// is, at `class`.
+    pub(super) pending: Option<&'a ClassDecl>,
     pub(super) visibility: Visibility,
     pub(super) is_static: bool,
     pub(super) is_readonly: bool,
@@ -110,6 +117,9 @@ impl Emit<'_> {
             self.line = hook.line;
             let written = hook.name.clone();
             let (kind, method) = self.property_hook(hooked, hook)?;
+            if kind == HookKind::Set {
+                self.set_hook_verified(hooked, &method)?;
+            }
             let slot = match kind {
                 HookKind::Get => &mut out.get,
                 HookKind::Set => &mut out.set,
@@ -124,6 +134,39 @@ impl Emit<'_> {
         }
         self.line = line;
         Ok((out, is_virtual))
+    }
+
+    /// `zend_compile_property_hooks`' check of a `set` hook as soon as
+    /// it has compiled, before the next hook: its parameter's type held
+    /// to the property's against the classes bound while the file
+    /// compiles ([`php_unit::link::set_hook_refused`]), a refusal being
+    /// the compile error it is in php, raised before anything runs.
+    ///
+    /// ```php
+    /// echo "not reached\n";
+    /// class C extends P { public int $x { set(string $v) {} get => 1; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type of parameter $v of hook C::$x::set must be compatible with property type in %s on line 3
+    /// ```
+    fn set_hook_verified(&self, hooked: &Hooked<'_>, set: &MethodDecl) -> Result<(), CompileError> {
+        let Some(scope) = hooked
+            .pending
+            .or_else(|| self.classes.get(usize::try_from(hooked.class).ok()?))
+        else {
+            return Err(self.fatal("InternalError: a set hook of a class the unit has not"));
+        };
+        let lookup = |name: &[u8]| {
+            self.bound_class(name).map(|decl| php_unit::link::Held {
+                decl,
+                bodies: None,
+                linked: true,
+            })
+        };
+        match php_unit::link::set_hook_refused(scope, hooked.name, hooked.declared, set, &lookup) {
+            Some(refusal) => Err(self.compile_error(refusal.to_string())),
+            None => Ok(()),
+        }
     }
 
     /// One hook held to its property, php's arms of the loop in their
