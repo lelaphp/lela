@@ -7,6 +7,44 @@
 //! to, as php's does. php's `Unable to symlink to a URL` refusal reads the
 //! expanded path, which on this host always begins with `/` and so never
 //! names a wrapper; it is left out.
+//!
+//! The four, as the stub declares them.
+//!
+//! ```php
+//! echo new ReflectionFunction('readlink'), new ReflectionFunction('linkinfo'), new ReflectionFunction('symlink'), new ReflectionFunction('link');
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function readlink ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> string $path ]
+//!   }
+//!   - Return [ string|false ]
+//! }
+//! Function [ <internal:standard> function linkinfo ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> string $path ]
+//!   }
+//!   - Return [ int|false ]
+//! }
+//! Function [ <internal:standard> function symlink ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $target ]
+//!     Parameter #1 [ <required> string $link ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function link ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $target ]
+//!     Parameter #1 [ <required> string $link ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -16,61 +54,13 @@ use std::os::unix::fs::MetadataExt;
 
 use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::PhpString;
 
 use crate::filestat::strerror;
-use crate::output::Entry;
 use crate::string::path::zend_dirname;
 use crate::virtual_cwd::{MAXPATHLEN, expand_filepath};
-
-/// The four, as the stub declares them.
-///
-/// ```php
-/// echo new ReflectionFunction('readlink'), new ReflectionFunction('linkinfo'), new ReflectionFunction('symlink'), new ReflectionFunction('link');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function readlink ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $path ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function linkinfo ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $path ]
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function symlink ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $target ]
-///     Parameter #1 [ <required> string $link ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function link ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $target ]
-///     Parameter #1 [ <required> string $link ]
-///   }
-///   - Return [ bool ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        readlink::declared(),
-        linkinfo::declared(),
-        symlink::declared(),
-        link::declared(),
-    ]
-}
 
 fn host(bytes: &[u8]) -> &std::path::Path {
     std::path::Path::new(OsStr::from_bytes(bytes))

@@ -12,10 +12,6 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{OutputOp, Request, StartHandler};
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
-/// A native's entry, the shape `ExtensionBuilder::functions` takes, which
-/// the natives not yet declared by the attributes are written as.
-pub(crate) type Entry = fn(&mut Request) -> Result<Value, Thrown>;
-
 /// What an op that answers `true` or `false` answered.
 fn op_bool(req: &mut Request, op: &OutputOp) -> Result<bool, Thrown> {
     Ok(req.output_buffer_op(op)?.as_bool().unwrap_or(false))

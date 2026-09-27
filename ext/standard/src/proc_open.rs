@@ -13,6 +13,62 @@
 //! The child's working directory and environment are the request's own
 //! where the call names none, since a request's `chdir` and `putenv` are
 //! its own and not the process's (ADR-0005).
+//!
+//! The five natives, in the order `basic_functions.stub.php` declares
+//! them.
+//!
+//! ```php
+//! foreach (['pclose', 'popen', 'proc_open', 'proc_close', 'proc_terminate', 'proc_get_status'] as $f) echo new ReflectionFunction($f);
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function pclose ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> $handle ]
+//!   }
+//!   - Return [ int ]
+//! }
+//! Function [ <internal:standard> function popen ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $command ]
+//!     Parameter #1 [ <required> string $mode ]
+//!   }
+//! }
+//! Function [ <internal:standard> function proc_open ] {
+//!
+//!   - Parameters [6] {
+//!     Parameter #0 [ <required> array|string $command ]
+//!     Parameter #1 [ <required> array $descriptor_spec ]
+//!     Parameter #2 [ <required> &$pipes ]
+//!     Parameter #3 [ <optional> ?string $cwd = null ]
+//!     Parameter #4 [ <optional> ?array $env_vars = null ]
+//!     Parameter #5 [ <optional> ?array $options = null ]
+//!   }
+//! }
+//! Function [ <internal:standard> function proc_close ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> $process ]
+//!   }
+//!   - Return [ int ]
+//! }
+//! Function [ <internal:standard> function proc_terminate ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> $process ]
+//!     Parameter #1 [ <optional> int $signal = 15 ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function proc_get_status ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> $process ]
+//!   }
+//!   - Return [ array ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -24,13 +80,11 @@ use std::process::{Command, Stdio};
 use php_ext::abi::{OrFalse, Path, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_string, value_name};
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{Cast, FdStream, Request, Stream};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
 use crate::State;
-use crate::output::Entry;
 
 /// What the request keeps for `proc_open`: the `process` resource type,
 /// registered on first use; `FG(pclose_wait)`, set while `proc_close`
@@ -52,72 +106,6 @@ struct Process {
     command: Vec<u8>,
     pipes: Vec<Resource>,
     cached: Option<i32>,
-}
-
-/// The five natives, in the order `basic_functions.stub.php` declares
-/// them.
-///
-/// ```php
-/// foreach (['pclose', 'popen', 'proc_open', 'proc_close', 'proc_terminate', 'proc_get_status'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function pclose ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $handle ]
-///   }
-///   - Return [ int ]
-/// }
-/// Function [ <internal:standard> function popen ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $command ]
-///     Parameter #1 [ <required> string $mode ]
-///   }
-/// }
-/// Function [ <internal:standard> function proc_open ] {
-///
-///   - Parameters [6] {
-///     Parameter #0 [ <required> array|string $command ]
-///     Parameter #1 [ <required> array $descriptor_spec ]
-///     Parameter #2 [ <required> &$pipes ]
-///     Parameter #3 [ <optional> ?string $cwd = null ]
-///     Parameter #4 [ <optional> ?array $env_vars = null ]
-///     Parameter #5 [ <optional> ?array $options = null ]
-///   }
-/// }
-/// Function [ <internal:standard> function proc_close ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $process ]
-///   }
-///   - Return [ int ]
-/// }
-/// Function [ <internal:standard> function proc_terminate ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> $process ]
-///     Parameter #1 [ <optional> int $signal = 15 ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function proc_get_status ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $process ]
-///   }
-///   - Return [ array ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        pclose::declared(),
-        popen::declared(),
-        proc_open::declared(),
-        proc_close::declared(),
-        proc_terminate::declared(),
-        proc_get_status::declared(),
-    ]
 }
 
 // -------------------------------------------------------------- popen

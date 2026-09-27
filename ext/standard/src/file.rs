@@ -14,6 +14,132 @@
 //! `sys_get_temp_dir`. A `$stream` parameter is `abi::Stream`,
 //! `PHP_Z_PARAM_STREAM`: a resource, and one that is an open stream.
 //! `file.stub.php`'s constants are all here, once, in its order.
+//!
+//! The natives declared here, with the untyped `$stream` the stub
+//! declares and `fopen`'s return left undeclared, as php declares
+//! them, so `ReflectionFunction::__toString` renders each as the oracle
+//! does.
+//!
+//! ```php
+//! echo new ReflectionFunction('fopen'), new ReflectionFunction('fwrite'), new ReflectionFunction('fputs');
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function fopen ] {
+//!
+//!   - Parameters [4] {
+//!     Parameter #0 [ <required> string $filename ]
+//!     Parameter #1 [ <required> string $mode ]
+//!     Parameter #2 [ <optional> bool $use_include_path = false ]
+//!     Parameter #3 [ <optional> $context = null ]
+//!   }
+//! }
+//! Function [ <internal:standard> function fwrite ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> string $data ]
+//!     Parameter #2 [ <optional> ?int $length = null ]
+//!   }
+//!   - Return [ int|false ]
+//! }
+//! Function [ <internal:standard> function fputs ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> string $data ]
+//!     Parameter #2 [ <optional> ?int $length = null ]
+//!   }
+//!   - Return [ int|false ]
+//! }
+//! ```
+//!
+//! The rest of `file.c`'s natives, as the stub declares them. The
+//! witness leaves out `fputcsv` and `fgetcsv`, whose defaults `"\""`
+//! and `"\\"` the engine's Reflection prints with their escapes undone.
+//!
+//! ```php
+//! foreach (['flock', 'get_meta_tags', 'readfile', 'fscanf', 'fpassthru', 'fsync', 'fdatasync', 'realpath', 'fnmatch', 'sys_get_temp_dir'] as $f) echo new ReflectionFunction($f);
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function flock ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> int $operation ]
+//!     Parameter #2 [ <optional> &$would_block = null ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function get_meta_tags ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $filename ]
+//!     Parameter #1 [ <optional> bool $use_include_path = false ]
+//!   }
+//!   - Return [ array|false ]
+//! }
+//! Function [ <internal:standard> function readfile ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> string $filename ]
+//!     Parameter #1 [ <optional> bool $use_include_path = false ]
+//!     Parameter #2 [ <optional> $context = null ]
+//!   }
+//!   - Return [ int|false ]
+//! }
+//! Function [ <internal:standard> function fscanf ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> string $format ]
+//!     Parameter #2 [ <optional> mixed &...$vars ]
+//!   }
+//!   - Return [ array|int|false|null ]
+//! }
+//! Function [ <internal:standard> function fpassthru ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> $stream ]
+//!   }
+//!   - Return [ int ]
+//! }
+//! Function [ <internal:standard> function fsync ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> $stream ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function fdatasync ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> $stream ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function realpath ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> string $path ]
+//!   }
+//!   - Return [ string|false ]
+//! }
+//! Function [ <internal:standard> function fnmatch ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> string $pattern ]
+//!     Parameter #1 [ <required> string $filename ]
+//!     Parameter #2 [ <optional> int $flags = 0 ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function sys_get_temp_dir ] {
+//!
+//!   - Parameters [0] {
+//!   }
+//!   - Return [ string ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -21,7 +147,6 @@ use php_ext::abi::{OrFalse, Passed, Path, Ref, Union, Untyped, Variadic};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
 use php_ext::coerce::to_string;
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::{Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
@@ -29,7 +154,6 @@ use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, Valu
 use std::os::unix::ffi::OsStrExt;
 
 use crate::State;
-use crate::output::Entry;
 use crate::streamsfuncs::{NullContext, context_of};
 use crate::virtual_cwd::MAXPATHLEN;
 
@@ -235,178 +359,6 @@ pub(crate) mod constants {
     pub(crate) const FNM_PATHNAME: i64 = 2;
     pub(crate) const FNM_PERIOD: i64 = 4;
     pub(crate) const FNM_CASEFOLD: i64 = 16;
-}
-
-/// The natives declared here, with the untyped `$stream` the stub
-/// declares and `fopen`'s return left undeclared, as php declares
-/// them, so `ReflectionFunction::__toString` renders each as the oracle
-/// does.
-///
-/// ```php
-/// echo new ReflectionFunction('fopen'), new ReflectionFunction('fwrite'), new ReflectionFunction('fputs');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function fopen ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> string $filename ]
-///     Parameter #1 [ <required> string $mode ]
-///     Parameter #2 [ <optional> bool $use_include_path = false ]
-///     Parameter #3 [ <optional> $context = null ]
-///   }
-/// }
-/// Function [ <internal:standard> function fwrite ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> string $data ]
-///     Parameter #2 [ <optional> ?int $length = null ]
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function fputs ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> string $data ]
-///     Parameter #2 [ <optional> ?int $length = null ]
-///   }
-///   - Return [ int|false ]
-/// }
-/// ```
-///
-/// The rest of `file.c`'s natives, as the stub declares them. The
-/// witness leaves out `fputcsv` and `fgetcsv`, whose defaults `"\""`
-/// and `"\\"` the engine's Reflection prints with their escapes undone.
-///
-/// ```php
-/// foreach (['flock', 'get_meta_tags', 'readfile', 'fscanf', 'fpassthru', 'fsync', 'fdatasync', 'realpath', 'fnmatch', 'sys_get_temp_dir'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function flock ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> int $operation ]
-///     Parameter #2 [ <optional> &$would_block = null ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function get_meta_tags ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $filename ]
-///     Parameter #1 [ <optional> bool $use_include_path = false ]
-///   }
-///   - Return [ array|false ]
-/// }
-/// Function [ <internal:standard> function readfile ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $filename ]
-///     Parameter #1 [ <optional> bool $use_include_path = false ]
-///     Parameter #2 [ <optional> $context = null ]
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function fscanf ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> string $format ]
-///     Parameter #2 [ <optional> mixed &...$vars ]
-///   }
-///   - Return [ array|int|false|null ]
-/// }
-/// Function [ <internal:standard> function fpassthru ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $stream ]
-///   }
-///   - Return [ int ]
-/// }
-/// Function [ <internal:standard> function fsync ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $stream ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function fdatasync ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $stream ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function realpath ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $path ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function fnmatch ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $pattern ]
-///     Parameter #1 [ <required> string $filename ]
-///     Parameter #2 [ <optional> int $flags = 0 ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function sys_get_temp_dir ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ string ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        opendir::declared(),
-        closedir::declared(),
-        rewinddir::declared(),
-        readdir::declared(),
-        rewind::declared(),
-        fclose::declared(),
-        feof::declared(),
-        fgetc::declared(),
-        fgets::declared(),
-        fread::declared(),
-        fopen::declared(),
-        ftruncate::declared(),
-        fstat::declared(),
-        fseek::declared(),
-        ftell::declared(),
-        fflush::declared(),
-        fwrite::declared(),
-        fputs::declared(),
-        file_get_contents::declared(),
-        file_put_contents::declared(),
-        stream_get_meta_data::declared(),
-        rmdir::declared(),
-        umask::declared(),
-        mkdir::declared(),
-        rename::declared(),
-        copy::declared(),
-        tempnam::declared(),
-        tmpfile::declared(),
-        unlink::declared(),
-        flock::declared(),
-        get_meta_tags::declared(),
-        readfile::declared(),
-        fscanf::declared(),
-        fpassthru::declared(),
-        file::declared(),
-        fsync::declared(),
-        fdatasync::declared(),
-        fputcsv::declared(),
-        fgetcsv::declared(),
-        realpath::declared(),
-        fnmatch::declared(),
-        sys_get_temp_dir::declared(),
-    ]
 }
 
 /// `PHP_Z_PARAM_STREAM_OR_NULL` then

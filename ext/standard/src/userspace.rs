@@ -4,18 +4,55 @@
 //! `stream_wrapper_restore`, over the engine's user-space wrapper, and the
 //! constants `userspace.stub.php` declares for a wrapper's methods to
 //! read.
+//!
+//! The four natives, as `basic_functions.stub.php` declares them.
+//!
+//! ```php
+//! foreach (['stream_wrapper_register', 'stream_register_wrapper', 'stream_wrapper_unregister', 'stream_wrapper_restore'] as $f) echo new ReflectionFunction($f);
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function stream_wrapper_register ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> string $protocol ]
+//!     Parameter #1 [ <required> string $class ]
+//!     Parameter #2 [ <optional> int $flags = 0 ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function stream_register_wrapper ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> string $protocol ]
+//!     Parameter #1 [ <required> string $class ]
+//!     Parameter #2 [ <optional> int $flags = 0 ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function stream_wrapper_unregister ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> string $protocol ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function stream_wrapper_restore ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> string $protocol ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::abi::Raw;
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Thrown, arg_type_error};
 use php_ext::request::Request;
 use php_ext::values::PhpString;
-
-use crate::output::Entry;
 
 /// The constants of `userspace.stub.php` and `file.stub.php` a wrapper's
 /// methods are handed or answer with.
@@ -73,54 +110,6 @@ pub(crate) mod constants {
     pub(crate) const STREAM_META_GROUP: i64 = 5;
     pub(crate) const STREAM_META_GROUP_NAME: i64 = 4;
     pub(crate) const STREAM_META_ACCESS: i64 = 6;
-}
-
-/// The four natives, as `basic_functions.stub.php` declares them.
-///
-/// ```php
-/// foreach (['stream_wrapper_register', 'stream_register_wrapper', 'stream_wrapper_unregister', 'stream_wrapper_restore'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function stream_wrapper_register ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $protocol ]
-///     Parameter #1 [ <required> string $class ]
-///     Parameter #2 [ <optional> int $flags = 0 ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function stream_register_wrapper ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $protocol ]
-///     Parameter #1 [ <required> string $class ]
-///     Parameter #2 [ <optional> int $flags = 0 ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function stream_wrapper_unregister ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $protocol ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function stream_wrapper_restore ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $protocol ]
-///   }
-///   - Return [ bool ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        stream_wrapper_register::declared(),
-        stream_register_wrapper::declared(),
-        stream_wrapper_unregister::declared(),
-        stream_wrapper_restore::declared(),
-    ]
 }
 
 /// `stream_wrapper_register(string $protocol, string $class, int $flags

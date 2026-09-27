@@ -14,6 +14,85 @@
 //!
 //! The filters registered by name and the two resource types are the
 //! request's (`BG(user_filter_map)`, ADR-0005).
+//!
+//! The natives, as `user_filters.stub.php` and
+//! `basic_functions.stub.php` declare them.
+//!
+//! ```php
+//! foreach (['stream_bucket_make_writeable', 'stream_bucket_prepend', 'stream_bucket_append', 'stream_bucket_new', 'stream_get_filters', 'stream_filter_register', 'stream_filter_prepend', 'stream_filter_append', 'stream_filter_remove'] as $f) echo new ReflectionFunction($f);
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function stream_bucket_make_writeable ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> $brigade ]
+//!   }
+//!   - Return [ ?StreamBucket ]
+//! }
+//! Function [ <internal:standard> function stream_bucket_prepend ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> $brigade ]
+//!     Parameter #1 [ <required> StreamBucket $bucket ]
+//!   }
+//!   - Return [ void ]
+//! }
+//! Function [ <internal:standard> function stream_bucket_append ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> $brigade ]
+//!     Parameter #1 [ <required> StreamBucket $bucket ]
+//!   }
+//!   - Return [ void ]
+//! }
+//! Function [ <internal:standard> function stream_bucket_new ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> string $buffer ]
+//!   }
+//!   - Return [ StreamBucket ]
+//! }
+//! Function [ <internal:standard> function stream_get_filters ] {
+//!
+//!   - Parameters [0] {
+//!   }
+//!   - Return [ array ]
+//! }
+//! Function [ <internal:standard> function stream_filter_register ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $filter_name ]
+//!     Parameter #1 [ <required> string $class ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function stream_filter_prepend ] {
+//!
+//!   - Parameters [4] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> string $filter_name ]
+//!     Parameter #2 [ <optional> int $mode = 0 ]
+//!     Parameter #3 [ <optional> mixed $params = <default> ]
+//!   }
+//! }
+//! Function [ <internal:standard> function stream_filter_append ] {
+//!
+//!   - Parameters [4] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> string $filter_name ]
+//!     Parameter #2 [ <optional> int $mode = 0 ]
+//!     Parameter #3 [ <optional> mixed $params = <default> ]
+//!   }
+//! }
+//! Function [ <internal:standard> function stream_filter_remove ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> $stream_filter ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -21,7 +100,6 @@ use php_ext::abi::{ConstValue, Instance, OrFalse, Passed, Ref, This, Untyped};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{call_method, lookup_class, new_object, write_prop};
 use php_ext::coerce::{is_callable, to_long};
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
 use php_ext::values::{
@@ -29,7 +107,6 @@ use php_ext::values::{
 };
 
 use crate::State;
-use crate::output::Entry;
 
 use constants::{PSFS_ERR_FATAL, PSFS_PASS_ON};
 
@@ -237,98 +314,6 @@ impl StreamBucket {
     const datalen: i64;
     #[php(property)]
     const dataLength: i64;
-}
-
-/// The natives, as `user_filters.stub.php` and
-/// `basic_functions.stub.php` declare them.
-///
-/// ```php
-/// foreach (['stream_bucket_make_writeable', 'stream_bucket_prepend', 'stream_bucket_append', 'stream_bucket_new', 'stream_get_filters', 'stream_filter_register', 'stream_filter_prepend', 'stream_filter_append', 'stream_filter_remove'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function stream_bucket_make_writeable ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $brigade ]
-///   }
-///   - Return [ ?StreamBucket ]
-/// }
-/// Function [ <internal:standard> function stream_bucket_prepend ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> $brigade ]
-///     Parameter #1 [ <required> StreamBucket $bucket ]
-///   }
-///   - Return [ void ]
-/// }
-/// Function [ <internal:standard> function stream_bucket_append ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> $brigade ]
-///     Parameter #1 [ <required> StreamBucket $bucket ]
-///   }
-///   - Return [ void ]
-/// }
-/// Function [ <internal:standard> function stream_bucket_new ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> string $buffer ]
-///   }
-///   - Return [ StreamBucket ]
-/// }
-/// Function [ <internal:standard> function stream_get_filters ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ array ]
-/// }
-/// Function [ <internal:standard> function stream_filter_register ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $filter_name ]
-///     Parameter #1 [ <required> string $class ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function stream_filter_prepend ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> string $filter_name ]
-///     Parameter #2 [ <optional> int $mode = 0 ]
-///     Parameter #3 [ <optional> mixed $params = <default> ]
-///   }
-/// }
-/// Function [ <internal:standard> function stream_filter_append ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> string $filter_name ]
-///     Parameter #2 [ <optional> int $mode = 0 ]
-///     Parameter #3 [ <optional> mixed $params = <default> ]
-///   }
-/// }
-/// Function [ <internal:standard> function stream_filter_remove ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $stream_filter ]
-///   }
-///   - Return [ bool ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        stream_bucket_make_writeable::declared(),
-        stream_bucket_prepend::declared(),
-        stream_bucket_append::declared(),
-        stream_bucket_new::declared(),
-        stream_get_filters::declared(),
-        stream_filter_register::declared(),
-        stream_filter_prepend::declared(),
-        stream_filter_append::declared(),
-        stream_filter_remove::declared(),
-    ]
 }
 
 /// The two resource types, registered on first use.

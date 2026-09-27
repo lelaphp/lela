@@ -4,6 +4,49 @@
 //! `checkdnsrr`, `dns_get_record`, `dns_get_mx` and `getmxrr`, and the
 //! `DNS_*` constants. The answer is parsed as `php_parserr` parses it,
 //! into records whose keys are in php's order.
+//!
+//! The natives, as the stub declares them.
+//!
+//! ```php
+//! foreach (['gethostbyname', 'checkdnsrr', 'dns_get_record', 'getmxrr'] as $f) echo new ReflectionFunction($f);
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function gethostbyname ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> string $hostname ]
+//!   }
+//!   - Return [ string ]
+//! }
+//! Function [ <internal:standard> function checkdnsrr ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $hostname ]
+//!     Parameter #1 [ <optional> string $type = "MX" ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function dns_get_record ] {
+//!
+//!   - Parameters [5] {
+//!     Parameter #0 [ <required> string $hostname ]
+//!     Parameter #1 [ <optional> int $type = DNS_ANY ]
+//!     Parameter #2 [ <optional> &$authoritative_name_servers = null ]
+//!     Parameter #3 [ <optional> &$additional_records = null ]
+//!     Parameter #4 [ <optional> bool $raw = false ]
+//!   }
+//!   - Return [ array|false ]
+//! }
+//! Function [ <internal:standard> function getmxrr ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> string $hostname ]
+//!     Parameter #1 [ <required> &$hosts ]
+//!     Parameter #2 [ <optional> &$weights = null ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -11,12 +54,10 @@ use std::ffi::{CStr, CString};
 
 use php_ext::abi::{OrFalse, Passed, Path, Ref, Untyped};
 use php_ext::attr::{php_const, php_function};
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use crate::output::Entry;
 use crate::{arg_value_error, ffi};
 
 use constants::{
@@ -93,62 +134,6 @@ pub(crate) mod constants {
         | DNS_SRV
         | DNS_NAPTR
         | DNS_AAAA;
-}
-
-/// The natives, as the stub declares them.
-///
-/// ```php
-/// foreach (['gethostbyname', 'checkdnsrr', 'dns_get_record', 'getmxrr'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function gethostbyname ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $hostname ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function checkdnsrr ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $hostname ]
-///     Parameter #1 [ <optional> string $type = "MX" ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function dns_get_record ] {
-///
-///   - Parameters [5] {
-///     Parameter #0 [ <required> string $hostname ]
-///     Parameter #1 [ <optional> int $type = DNS_ANY ]
-///     Parameter #2 [ <optional> &$authoritative_name_servers = null ]
-///     Parameter #3 [ <optional> &$additional_records = null ]
-///     Parameter #4 [ <optional> bool $raw = false ]
-///   }
-///   - Return [ array|false ]
-/// }
-/// Function [ <internal:standard> function getmxrr ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $hostname ]
-///     Parameter #1 [ <required> &$hosts ]
-///     Parameter #2 [ <optional> &$weights = null ]
-///   }
-///   - Return [ bool ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        gethostname::declared(),
-        gethostbyaddr::declared(),
-        gethostbyname::declared(),
-        gethostbynamel::declared(),
-        dns_check_record::declared(),
-        checkdnsrr::declared(),
-        dns_get_record::declared(),
-        dns_get_mx::declared(),
-        getmxrr::declared(),
-    ]
 }
 
 /// `php_error_docref` of one [`Warning`].

@@ -7,6 +7,67 @@
 //! reaches: `zend_compile_shell_exec` (`Z/Zend/zend_compile.c:10915`)
 //! compiles `` `…` `` as the parts concatenated and then a call of this
 //! name, so the operator has no opcode of its own.
+//!
+//! The natives, as the stub declares them.
+//!
+//! ```php
+//! foreach (['exec', 'system', 'passthru', 'escapeshellcmd', 'escapeshellarg', 'shell_exec', 'proc_nice'] as $f) echo new ReflectionFunction($f);
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function exec ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> string $command ]
+//!     Parameter #1 [ <optional> &$output = null ]
+//!     Parameter #2 [ <optional> &$result_code = null ]
+//!   }
+//!   - Return [ string|false ]
+//! }
+//! Function [ <internal:standard> function system ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $command ]
+//!     Parameter #1 [ <optional> &$result_code = null ]
+//!   }
+//!   - Return [ string|false ]
+//! }
+//! Function [ <internal:standard> function passthru ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $command ]
+//!     Parameter #1 [ <optional> &$result_code = null ]
+//!   }
+//!   - Return [ ?false ]
+//! }
+//! Function [ <internal:standard> function escapeshellcmd ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> string $command ]
+//!   }
+//!   - Return [ string ]
+//! }
+//! Function [ <internal:standard> function escapeshellarg ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> string $arg ]
+//!   }
+//!   - Return [ string ]
+//! }
+//! Function [ <internal:standard> function shell_exec ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> string $command ]
+//!   }
+//!   - Return [ string|false|null ]
+//! }
+//! Function [ <internal:standard> function proc_nice ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> int $priority ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -18,87 +79,12 @@ use std::process::{Child, Command, Stdio};
 
 use php_ext::abi::{False, OrFalse, Path, Ref, Untyped};
 use php_ext::attr::php_function;
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
-use crate::output::Entry;
-
 /// An untyped by-reference out-parameter, `&$output = null`.
 type Out = Ref<Untyped<Value>>;
-
-/// The natives, as the stub declares them.
-///
-/// ```php
-/// foreach (['exec', 'system', 'passthru', 'escapeshellcmd', 'escapeshellarg', 'shell_exec', 'proc_nice'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function exec ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $command ]
-///     Parameter #1 [ <optional> &$output = null ]
-///     Parameter #2 [ <optional> &$result_code = null ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function system ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $command ]
-///     Parameter #1 [ <optional> &$result_code = null ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function passthru ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $command ]
-///     Parameter #1 [ <optional> &$result_code = null ]
-///   }
-///   - Return [ ?false ]
-/// }
-/// Function [ <internal:standard> function escapeshellcmd ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $command ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function escapeshellarg ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $arg ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function shell_exec ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $command ]
-///   }
-///   - Return [ string|false|null ]
-/// }
-/// Function [ <internal:standard> function proc_nice ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> int $priority ]
-///   }
-///   - Return [ bool ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        exec::declared(),
-        system::declared(),
-        passthru::declared(),
-        escapeshellcmd::declared(),
-        escapeshellarg::declared(),
-        shell_exec::declared(),
-        proc_nice::declared(),
-    ]
-}
 
 /// `VCWD_POPEN(cmd, "r")`: the shell over the command, in the request's
 /// working directory and environment, its `output` a pipe.

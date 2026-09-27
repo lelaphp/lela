@@ -15,6 +15,74 @@
 //! A stream opened without a `context` of its own uses php's default
 //! one, `FG(default_context)`, which is what `stream_context_get_options`
 //! reads for a stream here: the facet keeps no `context` on a stream.
+//!
+//! The natives, as the stub declares them.
+//!
+//! ```php
+//! foreach (['stream_context_create', 'stream_context_set_option', 'stream_get_contents', 'stream_copy_to_stream', 'stream_get_line', 'stream_set_blocking', 'socket_get_status'] as $f) echo new ReflectionFunction($f);
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function stream_context_create ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <optional> ?array $options = null ]
+//!     Parameter #1 [ <optional> ?array $params = null ]
+//!   }
+//! }
+//! Function [ <internal:standard> function stream_context_set_option ] {
+//!
+//!   - Parameters [4] {
+//!     Parameter #0 [ <required> $context ]
+//!     Parameter #1 [ <required> array|string $wrapper_or_options ]
+//!     Parameter #2 [ <optional> ?string $option_name = null ]
+//!     Parameter #3 [ <optional> mixed $value = <default> ]
+//!   }
+//!   - Return [ true ]
+//! }
+//! Function [ <internal:standard> function stream_get_contents ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <optional> ?int $length = null ]
+//!     Parameter #2 [ <optional> int $offset = -1 ]
+//!   }
+//!   - Return [ string|false ]
+//! }
+//! Function [ <internal:standard> function stream_copy_to_stream ] {
+//!
+//!   - Parameters [4] {
+//!     Parameter #0 [ <required> $from ]
+//!     Parameter #1 [ <required> $to ]
+//!     Parameter #2 [ <optional> ?int $length = null ]
+//!     Parameter #3 [ <optional> int $offset = 0 ]
+//!   }
+//!   - Return [ int|false ]
+//! }
+//! Function [ <internal:standard> function stream_get_line ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> int $length ]
+//!     Parameter #2 [ <optional> string $ending = "" ]
+//!   }
+//!   - Return [ string|false ]
+//! }
+//! Function [ <internal:standard> function stream_set_blocking ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> bool $enable ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function socket_get_status ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> $stream ]
+//!   }
+//!   - Return [ array ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -23,13 +91,11 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::abi::{OrFalse, Passed, Path, Raw, True, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::callable_checked;
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw};
 use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
 use crate::State;
-use crate::output::Entry;
 use crate::virtual_cwd::MAXPATHLEN;
 
 /// What the request keeps for the `contexts`: the resource type, once
@@ -48,102 +114,6 @@ struct Context {
 
 /// `PHP_STREAM_COPY_ALL` as `stream_get_contents` spells it, `-1`.
 const COPY_ALL: i64 = -1;
-
-/// The natives, as the stub declares them.
-///
-/// ```php
-/// foreach (['stream_context_create', 'stream_context_set_option', 'stream_get_contents', 'stream_copy_to_stream', 'stream_get_line', 'stream_set_blocking', 'socket_get_status'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function stream_context_create ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <optional> ?array $options = null ]
-///     Parameter #1 [ <optional> ?array $params = null ]
-///   }
-/// }
-/// Function [ <internal:standard> function stream_context_set_option ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> $context ]
-///     Parameter #1 [ <required> array|string $wrapper_or_options ]
-///     Parameter #2 [ <optional> ?string $option_name = null ]
-///     Parameter #3 [ <optional> mixed $value = <default> ]
-///   }
-///   - Return [ true ]
-/// }
-/// Function [ <internal:standard> function stream_get_contents ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <optional> ?int $length = null ]
-///     Parameter #2 [ <optional> int $offset = -1 ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function stream_copy_to_stream ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> $from ]
-///     Parameter #1 [ <required> $to ]
-///     Parameter #2 [ <optional> ?int $length = null ]
-///     Parameter #3 [ <optional> int $offset = 0 ]
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function stream_get_line ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> int $length ]
-///     Parameter #2 [ <optional> string $ending = "" ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function stream_set_blocking ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> bool $enable ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function socket_get_status ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $stream ]
-///   }
-///   - Return [ array ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        stream_context_create::declared(),
-        stream_context_set_params::declared(),
-        stream_context_get_params::declared(),
-        stream_context_set_option::declared(),
-        stream_context_set_options::declared(),
-        stream_context_get_options::declared(),
-        stream_context_get_default::declared(),
-        stream_context_set_default::declared(),
-        stream_copy_to_stream::declared(),
-        stream_get_contents::declared(),
-        stream_supports_lock::declared(),
-        stream_set_write_buffer::declared(),
-        set_file_buffer::declared(),
-        stream_set_read_buffer::declared(),
-        stream_set_blocking::declared(),
-        socket_set_blocking::declared(),
-        crate::file::socket_get_status::declared(),
-        stream_get_line::declared(),
-        stream_resolve_include_path::declared(),
-        stream_get_wrappers::declared(),
-        stream_is_local::declared(),
-        stream_set_chunk_size::declared(),
-        stream_set_timeout::declared(),
-        socket_set_timeout::declared(),
-    ]
-}
 
 /// `le_stream_context`'s destructor, `php_stream_context_free`: the
 /// options and the callback given back.

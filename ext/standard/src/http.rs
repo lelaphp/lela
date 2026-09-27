@@ -5,57 +5,48 @@
 //! answers `null` as php does before one. `request_parse_body` reads its
 //! `$options` as `cache_request_parse_body_options` does and the
 //! request's content type as `sapi_read_post_data` does.
+//!
+//! The four, in the stub's order.
+//!
+//! ```php
+//! foreach (['http_build_query', 'http_get_last_response_headers', 'http_clear_last_response_headers'] as $f) echo new ReflectionFunction($f);
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function http_build_query ] {
+//!
+//!   - Parameters [4] {
+//!     Parameter #0 [ <required> object|array $data ]
+//!     Parameter #1 [ <optional> string $numeric_prefix = "" ]
+//!     Parameter #2 [ <optional> ?string $arg_separator = null ]
+//!     Parameter #3 [ <optional> int $encoding_type = PHP_QUERY_RFC1738 ]
+//!   }
+//!   - Return [ string ]
+//! }
+//! Function [ <internal:standard> function http_get_last_response_headers ] {
+//!
+//!   - Parameters [0] {
+//!   }
+//!   - Return [ ?array ]
+//! }
+//! Function [ <internal:standard> function http_clear_last_response_headers ] {
+//!
+//!   - Parameters [0] {
+//!   }
+//!   - Return [ void ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::abi::{Raw, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_string, value_name};
-use php_ext::decl::{ClassKind, EnumBacking, FunctionDecl};
+use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Thrown, arg_type_error, fatal, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::output::Entry;
 use crate::url::{PHP_QUERY_RFC3986, url_encode};
-
-/// The four, in the stub's order.
-///
-/// ```php
-/// foreach (['http_build_query', 'http_get_last_response_headers', 'http_clear_last_response_headers'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function http_build_query ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> object|array $data ]
-///     Parameter #1 [ <optional> string $numeric_prefix = "" ]
-///     Parameter #2 [ <optional> ?string $arg_separator = null ]
-///     Parameter #3 [ <optional> int $encoding_type = PHP_QUERY_RFC1738 ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function http_get_last_response_headers ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ ?array ]
-/// }
-/// Function [ <internal:standard> function http_clear_last_response_headers ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ void ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        http_build_query::declared(),
-        http_get_last_response_headers::declared(),
-        http_clear_last_response_headers::declared(),
-        request_parse_body::declared(),
-    ]
-}
 
 /// The limits `$options` may name, `REQUEST_PARSE_BODY_OPTION_*`, each
 /// standing in for the ini entry of its name while the body is parsed.

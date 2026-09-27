@@ -23,6 +23,7 @@ pub(super) mod strip_tags;
 
 pub use strip_tags::strip_tags_ex;
 
+use constants::{STR_PAD_BOTH, STR_PAD_LEFT, STR_PAD_RIGHT};
 use php_ext::abi::{OrFalse, Passed, Ref, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::to_string;
@@ -40,9 +41,11 @@ pub(super) struct State {
 }
 
 /// The constants the natives of `string.c` read, in the stub's order:
-/// `CHAR_MAX`, the `LC_*` categories and the `nl_langinfo` items, which
-/// are the pinned build's `<langinfo.h>` values in order, then
-/// `PHP_PATHINFO_*`, the bits of `pathinfo`'s `$flags`.
+/// `PHP_STR_PAD_*` (`Z/ext/standard/php_string.h`), what `str_pad`'s
+/// `$pad_type` is one of, `PHP_PATHINFO_*`, the bits of `pathinfo`'s
+/// `$flags`, then `CHAR_MAX`, the `LC_*` categories and the
+/// `nl_langinfo` items, which are the pinned build's `<langinfo.h>`
+/// values.
 ///
 /// ```php
 /// var_dump(CHAR_MAX, LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE, LC_MONETARY, LC_ALL, LC_MESSAGES, CODESET, ABDAY_1, MON_1, CRNCYSTR, PATHINFO_DIRNAME, PATHINFO_BASENAME, PATHINFO_EXTENSION, PATHINFO_FILENAME, PATHINFO_ALL);
@@ -68,6 +71,14 @@ pub(super) struct State {
 /// ```
 #[php_const]
 pub(crate) mod constants {
+    pub(crate) const STR_PAD_LEFT: i64 = 0;
+    pub(crate) const STR_PAD_RIGHT: i64 = 1;
+    pub(crate) const STR_PAD_BOTH: i64 = 2;
+    pub(crate) const PATHINFO_DIRNAME: i64 = 1;
+    pub(crate) const PATHINFO_BASENAME: i64 = 2;
+    pub(crate) const PATHINFO_EXTENSION: i64 = 4;
+    pub(crate) const PATHINFO_FILENAME: i64 = 8;
+    pub(crate) const PATHINFO_ALL: i64 = 15;
     pub(crate) const CHAR_MAX: i64 = 127;
     pub(crate) const LC_CTYPE: i64 = 2;
     pub(crate) const LC_NUMERIC: i64 = 4;
@@ -76,20 +87,6 @@ pub(crate) mod constants {
     pub(crate) const LC_MONETARY: i64 = 3;
     pub(crate) const LC_ALL: i64 = 0;
     pub(crate) const LC_MESSAGES: i64 = 6;
-    pub(crate) const CODESET: i64 = 0;
-    pub(crate) const D_T_FMT: i64 = 1;
-    pub(crate) const D_FMT: i64 = 2;
-    pub(crate) const T_FMT: i64 = 3;
-    pub(crate) const T_FMT_AMPM: i64 = 4;
-    pub(crate) const AM_STR: i64 = 5;
-    pub(crate) const PM_STR: i64 = 6;
-    pub(crate) const DAY_1: i64 = 7;
-    pub(crate) const DAY_2: i64 = 8;
-    pub(crate) const DAY_3: i64 = 9;
-    pub(crate) const DAY_4: i64 = 10;
-    pub(crate) const DAY_5: i64 = 11;
-    pub(crate) const DAY_6: i64 = 12;
-    pub(crate) const DAY_7: i64 = 13;
     pub(crate) const ABDAY_1: i64 = 14;
     pub(crate) const ABDAY_2: i64 = 15;
     pub(crate) const ABDAY_3: i64 = 16;
@@ -97,18 +94,13 @@ pub(crate) mod constants {
     pub(crate) const ABDAY_5: i64 = 18;
     pub(crate) const ABDAY_6: i64 = 19;
     pub(crate) const ABDAY_7: i64 = 20;
-    pub(crate) const MON_1: i64 = 21;
-    pub(crate) const MON_2: i64 = 22;
-    pub(crate) const MON_3: i64 = 23;
-    pub(crate) const MON_4: i64 = 24;
-    pub(crate) const MON_5: i64 = 25;
-    pub(crate) const MON_6: i64 = 26;
-    pub(crate) const MON_7: i64 = 27;
-    pub(crate) const MON_8: i64 = 28;
-    pub(crate) const MON_9: i64 = 29;
-    pub(crate) const MON_10: i64 = 30;
-    pub(crate) const MON_11: i64 = 31;
-    pub(crate) const MON_12: i64 = 32;
+    pub(crate) const DAY_1: i64 = 7;
+    pub(crate) const DAY_2: i64 = 8;
+    pub(crate) const DAY_3: i64 = 9;
+    pub(crate) const DAY_4: i64 = 10;
+    pub(crate) const DAY_5: i64 = 11;
+    pub(crate) const DAY_6: i64 = 12;
+    pub(crate) const DAY_7: i64 = 13;
     pub(crate) const ABMON_1: i64 = 33;
     pub(crate) const ABMON_2: i64 = 34;
     pub(crate) const ABMON_3: i64 = 35;
@@ -121,23 +113,37 @@ pub(crate) mod constants {
     pub(crate) const ABMON_10: i64 = 42;
     pub(crate) const ABMON_11: i64 = 43;
     pub(crate) const ABMON_12: i64 = 44;
+    pub(crate) const MON_1: i64 = 21;
+    pub(crate) const MON_2: i64 = 22;
+    pub(crate) const MON_3: i64 = 23;
+    pub(crate) const MON_4: i64 = 24;
+    pub(crate) const MON_5: i64 = 25;
+    pub(crate) const MON_6: i64 = 26;
+    pub(crate) const MON_7: i64 = 27;
+    pub(crate) const MON_8: i64 = 28;
+    pub(crate) const MON_9: i64 = 29;
+    pub(crate) const MON_10: i64 = 30;
+    pub(crate) const MON_11: i64 = 31;
+    pub(crate) const MON_12: i64 = 32;
+    pub(crate) const AM_STR: i64 = 5;
+    pub(crate) const PM_STR: i64 = 6;
+    pub(crate) const D_T_FMT: i64 = 1;
+    pub(crate) const D_FMT: i64 = 2;
+    pub(crate) const T_FMT: i64 = 3;
+    pub(crate) const T_FMT_AMPM: i64 = 4;
     pub(crate) const ERA: i64 = 45;
-    pub(crate) const ERA_D_FMT: i64 = 46;
     pub(crate) const ERA_D_T_FMT: i64 = 47;
+    pub(crate) const ERA_D_FMT: i64 = 46;
     pub(crate) const ERA_T_FMT: i64 = 48;
     pub(crate) const ALT_DIGITS: i64 = 49;
+    pub(crate) const CRNCYSTR: i64 = 56;
     pub(crate) const RADIXCHAR: i64 = 50;
     pub(crate) const THOUSEP: i64 = 51;
     pub(crate) const YESEXPR: i64 = 52;
     pub(crate) const NOEXPR: i64 = 53;
     pub(crate) const YESSTR: i64 = 54;
     pub(crate) const NOSTR: i64 = 55;
-    pub(crate) const CRNCYSTR: i64 = 56;
-    pub(crate) const PATHINFO_DIRNAME: i64 = 1;
-    pub(crate) const PATHINFO_BASENAME: i64 = 2;
-    pub(crate) const PATHINFO_EXTENSION: i64 = 4;
-    pub(crate) const PATHINFO_FILENAME: i64 = 8;
-    pub(crate) const PATHINFO_ALL: i64 = 15;
+    pub(crate) const CODESET: i64 = 0;
 }
 
 /// `RETURN_STR_COPY(str)`: the argument's own string handed back, one
@@ -869,16 +875,6 @@ fn substr(
     let end = start + usize::try_from(taken).unwrap_or(0);
     PhpString::new(req, &string.as_bytes()[start..end])
 }
-
-/// `PHP_STR_PAD_LEFT`, `PHP_STR_PAD_RIGHT` and `PHP_STR_PAD_BOTH`
-/// (`Z/ext/standard/php_string.h`), what `str_pad`'s `$pad_type` is one
-/// of.
-#[php_const]
-pub(crate) const STR_PAD_LEFT: i64 = 0;
-#[php_const]
-pub(crate) const STR_PAD_RIGHT: i64 = 1;
-#[php_const]
-pub(crate) const STR_PAD_BOTH: i64 = 2;
 
 /// `zend_tolower_ascii`.
 const fn lower(byte: u8) -> u8 {
