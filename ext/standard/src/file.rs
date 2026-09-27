@@ -996,7 +996,7 @@ fn ftruncate(req: &mut Request, stream: Stream, size: i64) -> Result<bool, Throw
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
     let size = usize::try_from(size).unwrap_or(usize::MAX);
-    let Some(taken) = stream.truncate(req, size) else {
+    let Some(taken) = stream.truncate(req, size)? else {
         docref(req, Level::Warning, "Can't truncate this stream!");
         return Ok(false);
     };
@@ -1572,7 +1572,7 @@ fn file_put_contents(
         return Ok(OrFalse::False);
     }
     if mode[0] == b'c' {
-        stream.truncate(req, 0);
+        stream.truncate(req, 0)?;
     }
     let written = write_data(req, stream, source, &data, name);
     stream.close(req);

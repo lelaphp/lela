@@ -1558,7 +1558,7 @@ impl SplFileObject {
         if size < 0 {
             return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
         }
-        if let Some(done) = stream.truncate(req, usize::try_from(size).unwrap_or(0)) {
+        if let Some(done) = stream.truncate(req, usize::try_from(size).unwrap_or(0))? {
             return Ok(done);
         }
         let name =

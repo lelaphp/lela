@@ -1214,10 +1214,24 @@ impl Ops for Memory {
     /// `php_stream_memory_set_option`'s `PHP_STREAM_OPTION_TRUNCATE_API`
     /// (`Z/main/streams/memory.c:193`): refused on a read-only stream;
     /// a shorter size cuts the bytes and pulls the position back to it,
-    /// a longer one zero-fills.
-    fn truncate(&mut self, _req: &mut Request, size: usize) -> Option<bool> {
+    /// a longer one zero-fills. The bytes are php's `zend_string`, which
+    /// `zend_string_realloc` grows, so a size past the memory limit is
+    /// the heap's fatal for that string, asked of the request's heap as
+    /// `php_stream_get_line` asks it, and kept for the native.
+    fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
         if self.mode == TempMode::ReadOnly {
             return Some(false);
+        }
+        if size > self.data.len() && size > req.heap_memory_limit() {
+            match req.string_with(size, |_| {}) {
+                Ok(asked) => req.release(Value::string(asked)),
+                Err(thrown) => {
+                    if req.stream_thrown.is_none() {
+                        req.stream_thrown = Some(thrown);
+                    }
+                    return Some(false);
+                }
+            }
         }
         self.data.resize(size, 0);
         self.fpos = self.fpos.min(size);

@@ -614,10 +614,28 @@ impl Stream {
     /// `php_stream_truncate_set_size` behind
     /// `php_stream_truncate_supported`: `None` where the stream does not
     /// truncate (`ftruncate`'s `Can't truncate this stream!`), else
-    /// whether it took the size.
-    pub fn truncate(self, req: &mut Request, size: usize) -> Option<bool> {
-        req.stream_op(self, |req, stream| stream.truncate(req, size))
-            .flatten()
+    /// whether it took the size; the `Err` is the memory limit's fatal of
+    /// a memory stream grown past it.
+    ///
+    /// ```php
+    /// $t = fopen('php://temp', 'w+');
+    /// var_dump(ftruncate($t, 3), strlen(stream_get_contents($t, -1, 0)));
+    /// ftruncate($t, PHP_INT_MAX);
+    /// ```
+    /// ```expect exit=255
+    /// bool(true)
+    /// int(3)
+    ///
+    /// Fatal error: Allowed memory size of %d bytes exhausted (tried to allocate 9223372036854775832 bytes) in %s on line 4
+    /// ```
+    pub fn truncate(self, req: &mut Request, size: usize) -> Result<Option<bool>, Thrown> {
+        let answer = req
+            .stream_op(self, |req, stream| stream.truncate(req, size))
+            .flatten();
+        match req.stream_thrown.take() {
+            Some(thrown) => Err(thrown),
+            None => Ok(answer),
+        }
     }
 
     /// `php_stream_lock`, `flock(2)` with its operation, which
