@@ -878,6 +878,25 @@ impl ParentIterator {
 }
 
 /// `interface SeekableIterator extends Iterator`.
+///
+/// ```php
+/// $m = new ReflectionMethod("SeekableIterator", "seek");
+/// var_dump($m->isAbstract(), $m->hasTentativeReturnType(), (string) $m->getTentativeReturnType(), $m->getParameters()[0]->getName());
+/// var_dump((new ReflectionClass("OutOfRangeException"))->getParentClass()->getName(), (new ReflectionClass("RecursiveIterator"))->getInterfaceNames());
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// string(4) "void"
+/// string(6) "offset"
+/// string(14) "LogicException"
+/// array(2) {
+///   [0]=>
+///   string(8) "Iterator"
+///   [1]=>
+///   string(11) "Traversable"
+/// }
+/// ```
 #[php_class(interface, extends(Iterator))]
 pub(crate) struct SeekableIterator;
 

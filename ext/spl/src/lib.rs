@@ -75,10 +75,7 @@ pub fn extension() -> Extension {
         exceptions::register(ExtensionBuilder::default().functions(functions::natives()));
     builder = iterators::register(builder);
     builder = array::register(builder);
-    for (decl, methods) in directory::classes() {
-        let handlers = directory::handlers(&decl);
-        builder = builder.class_payload::<directory::Fs>(decl, methods, handlers);
-    }
+    builder = directory::register(builder);
     builder = dllist::register(builder);
     builder = heap::register(builder);
     builder = builder.class::<fixedarray::SplFixedArray>();
@@ -302,30 +299,6 @@ fn value(req: &Request, position: u32) -> Value {
 fn scalar(req: &mut Request, position: u32, ty: &Type) -> Result<Value, Thrown> {
     let given = given(req, position).unwrap_or_default();
     coerce_param(req, &given, ty, position)
-}
-
-/// `Z_PARAM_LONG`.
-fn long(req: &mut Request, position: u32) -> Result<i64, Thrown> {
-    Ok(scalar(req, position, &Type::Int)?.as_int().unwrap_or(0))
-}
-
-/// `Z_PARAM_LONG` after `Z_PARAM_OPTIONAL`.
-fn long_or(req: &mut Request, position: u32, default: i64) -> Result<i64, Thrown> {
-    if given(req, position).is_none() {
-        return Ok(default);
-    }
-    long(req, position)
-}
-
-/// `$this` of the method being served.
-fn this(req: &mut Request) -> Result<PhpObject, Thrown> {
-    match req.this() {
-        Some(this) => Ok(this),
-        None => Err(php_ext::raising::fatal(
-            req,
-            "InternalError: an SPL method served without its receiver",
-        )),
-    }
 }
 
 /// `Z_PARAM_BOOL` after `Z_PARAM_OPTIONAL`.
