@@ -1229,7 +1229,14 @@ fn default_text(default: &ConstExpr) -> String {
         ConstExpr::ClassConstant { class, name, .. } => {
             format!("{}::{}", text(&class.0), text(&name.0))
         }
-        ConstExpr::ClassName { class, .. } => format!("{}::class", text(&class.0)),
+        // A native's `C::class` as its stub writes it; a program's
+        // `self::class` is none of the nodes php prints.
+        ConstExpr::ClassName { class, .. }
+            if !class.0.eq_ignore_ascii_case(b"self")
+                && !class.0.eq_ignore_ascii_case(b"parent") =>
+        {
+            format!("{}::class", text(&class.0))
+        }
         ConstExpr::EnumCase { class, case, .. } => format!("{}::{}", text(&class.0), text(&case.0)),
         ConstExpr::ScopeClass => String::from("__CLASS__"),
         _ => String::from("<expression>"),
