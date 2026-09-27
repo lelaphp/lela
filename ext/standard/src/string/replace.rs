@@ -6,7 +6,7 @@ use php_ext::abi::{Raw, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{coerce_param, to_long, to_string};
 use php_ext::decl::Type;
-use php_ext::raising::{Level, Thrown, arg_count_error, arg_type_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_type_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -295,7 +295,7 @@ pub(super) fn strtr(
     // arguments, `(string, string, string)` for three.
     let given = req.argument_count();
     if given <= 2 {
-        exactly(req, 2, given)?;
+        crate::arity(req, 2, Some(2))?;
         let string = string.hold(req)?;
         let from = coerce_param(req, &from.value(), &Type::Array, 2)?;
         let Some(from) = from.as_array().copied() else {
@@ -306,7 +306,7 @@ pub(super) fn strtr(
         }
         return strtr_array(req, string, from);
     }
-    exactly(req, 3, given)?;
+    crate::arity(req, 3, Some(3))?;
     let string = string.hold(req)?;
     let from = coerce_param(req, &from.value(), &Type::String, 2)?;
     // `Z_PARAM_STRING`: a `null` is the deprecation, which names the
@@ -333,18 +333,6 @@ pub(super) fn strtr(
     }
     let out: Vec<u8> = bytes.iter().map(|c| xlat[usize::from(*c)]).collect();
     PhpString::new(req, &out)
-}
-
-/// `ZEND_PARSE_PARAMETERS_START(n, n)`'s count check over the `given`
-/// arguments.
-fn exactly(req: &mut Request, n: usize, given: usize) -> Result<(), Thrown> {
-    if given == n {
-        return Ok(());
-    }
-    Err(arg_count_error(
-        req,
-        &format!("exactly {n} arguments, {given} given"),
-    ))
 }
 
 /// `php_strtr_array` and `php_strtr_array_ex`.

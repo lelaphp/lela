@@ -123,7 +123,7 @@ pub use file::{php_fputcsv, php_fstat};
 pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
 
-use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
+use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
 use php_ext::decl::{ConstDecl, FunctionDecl};
 use php_ext::raising::{Thrown, arg_count_error, arg_value_error};
 use php_ext::request::Request;
@@ -732,52 +732,41 @@ fn dependencies() -> Vec<Dependency> {
     ]
 }
 
-/// One `Z_PARAM_FUNC` of a native, php's `"F"`: the argument at
-/// `position` resolved into the callee it names, `zend_parse_arg_func`
-/// over `zend_is_callable_ex`, so a callback is held to being one where
-/// it is taken and not where it is served. The sentence a miss takes is
-/// php's `*error` for that miss, the one `zend_is_callable_ex` wrote.
-fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
-    match php_ext::coerce::callable_argument(req, position)? {
-        Some(callable) => Ok(callable),
-        None => Err(php_ext::raising::fatal(
-            req,
-            "InternalError: a callable parameter read no callable",
-        )),
-    }
-}
-
-/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check: nothing, or
-/// `zend_wrong_parameters_count_error`'s sentence for a count outside
-/// the range, `exactly` where the two are one and `at least` or `at
-/// most` by which side the count fell.
-fn argument_count_between(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
+/// `zend_wrong_parameters_count_error` (`Z/Zend/zend_API.c:232`) for a
+/// native that counts its own arguments, `arity = manual`, where php
+/// reads the count after a step of its own: nothing where `min..=max`
+/// holds the count, else `exactly`, `at least` or `at most` by where it
+/// fell, `max` of `None` unbounded as a `"+"` spec is. The four such
+/// natives' counts are `assert`'s after its active check, the `"+f"`
+/// set natives' over their trailing callbacks, `strtr`'s by the parse
+/// it chooses and `stream_context_set_option`'s after its deprecation.
+///
+/// ```php
+/// foreach ([fn () => assert(), fn () => array_udiff([1]), fn () => array_uintersect_uassoc([1], 'strcmp'), fn () => strtr("abc", "a", "b", "c"), fn () => stream_context_set_option()] as $f) {
+///     try { $f(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// assert() expects at least 1 argument, 0 given
+/// array_udiff() expects at least 2 arguments, 1 given
+/// array_uintersect_uassoc() expects at least 3 arguments, 2 given
+/// strtr() expects exactly 3 arguments, 4 given
+/// stream_context_set_option() expects at least 2 arguments, 0 given
+/// ```
+fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Thrown> {
     let given = req.argument_count();
-    if (min..=max).contains(&given) {
+    if given >= min && max.is_none_or(|max| given <= max) {
         return Ok(());
     }
-    if min == max {
-        return Err(wrong_argument_count(req, min, given));
-    }
-    let (word, bound) = if given < min {
-        ("at least", min)
-    } else {
-        ("at most", max)
+    let (word, bound) = match max {
+        Some(max) if max == min => ("exactly", min),
+        _ if given < min => ("at least", min),
+        Some(max) => ("at most", max),
+        None => ("at least", min),
     };
     let plural = if bound == 1 { "" } else { "s" };
     Err(arg_count_error(
         req,
         &format!("{word} {bound} argument{plural}, {given} given"),
     ))
-}
-
-/// `zend_wrong_parameters_count_error` for a native whose minimum is its
-/// maximum: `exactly N arguments, M given`.
-fn wrong_argument_count(req: &mut Request, exactly: usize, given: usize) -> Thrown {
-    let word = if exactly == 1 {
-        "argument"
-    } else {
-        "arguments"
-    };
-    arg_count_error(req, &format!("exactly {exactly} {word}, {given} given"))
 }

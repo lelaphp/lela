@@ -28,7 +28,6 @@ use php_ext::raising::{Level, Thrown, arg_value_error, docref, new_throwable, th
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
 
-use crate::argument_count_between;
 use constants::{ASSERT_ACTIVE, ASSERT_BAIL, ASSERT_CALLBACK, ASSERT_EXCEPTION, ASSERT_WARNING};
 
 /// `E_ERROR`, the code `zend_throw_exception` gives the `AssertionError`.
@@ -283,7 +282,7 @@ fn assert(
     }
     // `ZEND_PARSE_PARAMETERS_START(1, 2)` after the active check, as php
     // reads them.
-    argument_count_between(req, 1, 2)?;
+    crate::arity(req, 1, Some(2))?;
     let assertion = assertion.value();
     let description = description.hold(req)?;
     if truthy(req, &assertion) {

@@ -24,9 +24,7 @@ use php_ext::abi::{OrFalse, Passed, Path, Raw, True, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::callable_checked;
 use php_ext::decl::FunctionDecl;
-use php_ext::raising::{
-    Level, Thrown, arg_count_error, arg_type_error, arg_value_error, deprecated, docref, throw,
-};
+use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw};
 use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
@@ -594,14 +592,7 @@ fn stream_context_set_option(
             "Calling stream_context_set_option() with 2 arguments is deprecated, use stream_context_set_options() instead",
         );
     }
-    if !(2..=4).contains(&given) {
-        let tail = if given < 2 {
-            format!("at least 2 arguments, {given} given")
-        } else {
-            format!("at most 4 arguments, {given} given")
-        };
-        return Err(arg_count_error(req, &tail));
-    }
+    crate::arity(req, 2, Some(4))?;
     let context = context.hold(req)?;
     let res = context_resource(req, context, 1)?;
     let wrapper_or_options = wrapper_or_options.hold(req)?;
