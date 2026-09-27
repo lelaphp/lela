@@ -5,21 +5,23 @@
 //! over a string subject or each string of an array one, a pattern array
 //! applied in turn.
 
-use php_ext::abi::Callable;
+use php_ext::abi::{Callable, Ref, Union, Untyped};
+use php_ext::attr::php_function;
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, coerce_param, to_string};
-use php_ext::decl::Type;
+use php_ext::coerce::{callable_checked, to_string};
 use php_ext::raising::{Level, Thrown, arg_type_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
+use crate::Either;
+use crate::constants::{PREG_INTERNAL_ERROR, PREG_NO_ERROR};
 use crate::ffi::{self, Subject};
 use crate::matching::{Scratch, populate, unit_length};
 use crate::pattern::{Pattern, compiled};
-use crate::{
-    Either, INTERNAL_ERROR, NO_ERROR, arguments_between, assign_ref, callable_argument,
-    either_argument, exec_error, long_argument, set_error,
-};
+use crate::{exec_error, set_error};
+
+/// What a replacing native answers, `string|array|null`.
+type Replacement = Option<Union<PhpString, PhpArray>>;
 
 /// What one subject came to.
 enum Replaced {
@@ -108,7 +110,7 @@ fn replace_loop(
     count: &mut usize,
     mut each: impl FnMut(&mut Request, &Scratch, usize, &mut Vec<u8>) -> Result<(), Thrown>,
 ) -> Result<Replaced, Thrown> {
-    set_error(req, NO_ERROR);
+    set_error(req, PREG_NO_ERROR);
     let Some(mut scratch) = Scratch::take(req, pattern) else {
         return Ok(Replaced::Failed);
     };
@@ -127,7 +129,7 @@ fn replace_loop(
             loop {
                 let (match_start, match_end) = scratch.group(0);
                 if match_end < match_start {
-                    set_error(req, INTERNAL_ERROR);
+                    set_error(req, PREG_INTERNAL_ERROR);
                     break 'search Replaced::Failed;
                 }
                 *count += 1;
@@ -135,7 +137,7 @@ fn replace_loop(
                 buffer.extend_from_slice(subject.get(last_end..match_start).unwrap_or_default());
                 let n = usize::try_from(rc).unwrap_or(0);
                 if let Err(thrown) = each(req, &scratch, n, buffer) {
-                    set_error(req, INTERNAL_ERROR);
+                    set_error(req, PREG_INTERNAL_ERROR);
                     scratch.give_back(req);
                     return Err(thrown);
                 }
@@ -284,8 +286,8 @@ fn in_subject(
     count: &mut usize,
 ) -> Result<Option<PhpString>, Thrown> {
     let patterns = match regex {
-        Either::Str(regex) => {
-            let Either::Str(replacement) = replacement else {
+        Union::B(regex) => {
+            let Union::B(replacement) = replacement else {
                 return Ok(None);
             };
             return replace_one(
@@ -297,11 +299,11 @@ fn in_subject(
                 count,
             );
         }
-        Either::Array(patterns) => patterns,
+        Union::A(patterns) => patterns,
     };
     let replacements = match replacement {
-        Either::Array(replacements) => Some(replacements.snapshot()),
-        Either::Str(_) => None,
+        Union::A(replacements) => Some(replacements.snapshot()),
+        Union::B(_) => None,
     };
     req.addref(&Value::string(subject));
     let mut current = subject;
@@ -312,11 +314,11 @@ fn in_subject(
                 Some((_, value)) => to_string(req, value)?,
                 None => PhpString::new(req, b"")?,
             },
-            (None, Either::Str(text)) => {
+            (None, Union::B(text)) => {
                 req.addref(&Value::string(text));
                 text
             }
-            (None, Either::Array(_)) => PhpString::new(req, b"")?,
+            (None, Union::A(_)) => PhpString::new(req, b"")?,
         };
         let result = replace_one(
             req,
@@ -348,7 +350,7 @@ fn in_subject_func(
     flags: i64,
 ) -> Result<Option<PhpString>, Thrown> {
     let patterns = match regex {
-        Either::Str(regex) => {
+        Union::B(regex) => {
             return replace_one_func(
                 req,
                 regex.as_bytes(),
@@ -359,7 +361,7 @@ fn in_subject_func(
                 flags,
             );
         }
-        Either::Array(patterns) => patterns,
+        Union::A(patterns) => patterns,
     };
     req.addref(&Value::string(subject));
     let mut current = subject;
@@ -398,7 +400,7 @@ fn over_array(
     count: &mut usize,
     mut each: impl FnMut(&mut Request, PhpString, &mut usize) -> Result<Option<PhpString>, Thrown>,
     keep: impl Fn(usize, usize) -> bool,
-) -> Result<Value, Thrown> {
+) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, entry) in subjects.snapshot() {
         let before = *count;
@@ -417,7 +419,7 @@ fn over_array(
         }
         out.set(req, key, Value::string(result))?;
     }
-    Ok(out.to_value())
+    Ok(out)
 }
 
 /// `preg_replace(string|array $pattern, string|array $replacement,
@@ -474,8 +476,16 @@ fn over_array(
 /// NULL
 /// string(14) "Internal error"
 /// ```
-pub(crate) fn preg_replace(req: &mut Request) -> Result<Value, Thrown> {
-    replace_common(req, false)
+#[php_function(frameless(3))]
+fn preg_replace(
+    req: &mut Request,
+    pattern: Either,
+    replacement: Either,
+    subject: Either,
+    #[php(default = -1)] limit: i64,
+    #[php(default = null)] count: Ref<Untyped<Value>>,
+) -> Result<Replacement, Thrown> {
+    replace_common(req, pattern, replacement, subject, limit, &count, false)
 }
 
 /// `preg_filter`: `preg_replace` that answers only the subjects in
@@ -497,18 +507,30 @@ pub(crate) fn preg_replace(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(2) "A#"
 /// }
 /// ```
-pub(crate) fn preg_filter(req: &mut Request) -> Result<Value, Thrown> {
-    replace_common(req, true)
+#[php_function]
+fn preg_filter(
+    req: &mut Request,
+    pattern: Either,
+    replacement: Either,
+    subject: Either,
+    #[php(default = -1)] limit: i64,
+    #[php(default = null)] count: Ref<Untyped<Value>>,
+) -> Result<Replacement, Thrown> {
+    replace_common(req, pattern, replacement, subject, limit, &count, true)
 }
 
-/// `preg_replace_common` and `_preg_replace_common`.
-fn replace_common(req: &mut Request, filter: bool) -> Result<Value, Thrown> {
-    arguments_between(req, 3, 5)?;
-    let regex = either_argument(req, 1)?;
-    let replacement = either_argument(req, 2)?;
-    let subject = either_argument(req, 3)?;
-    let limit = limit_of(long_argument(req, 4, -1)?);
-    if matches!(replacement, Either::Array(_)) && matches!(regex, Either::Str(_)) {
+/// `preg_replace_common` and `_preg_replace_common` past their ZPP.
+fn replace_common(
+    req: &mut Request,
+    regex: Either,
+    replacement: Either,
+    subject: Either,
+    limit: i64,
+    count_out: &Ref<Untyped<Value>>,
+    filter: bool,
+) -> Result<Replacement, Thrown> {
+    let limit = limit_of(limit);
+    if matches!(replacement, Union::A(_)) && matches!(regex, Union::B(_)) {
         return Err(arg_type_error(
             req,
             1,
@@ -518,27 +540,28 @@ fn replace_common(req: &mut Request, filter: bool) -> Result<Value, Thrown> {
     let mut count = 0;
     let keep = |before: usize, after: usize| !filter || after > before;
     let result = match subject {
-        Either::Str(subject) => {
+        Union::B(subject) => {
             match in_subject(req, regex, replacement, subject, limit, &mut count)? {
-                Some(result) if keep(0, count) => Value::string(result),
+                Some(result) if keep(0, count) => Some(Union::A(result)),
                 Some(result) => {
                     req.release(Value::string(result));
-                    Value::null()
+                    None
                 }
-                None => Value::null(),
+                None => None,
             }
         }
-        Either::Array(subjects) => over_array(
+        Union::A(subjects) => Some(Union::B(over_array(
             req,
             subjects,
             &mut count,
             |req, subject, count| in_subject(req, regex, replacement, subject, limit, count),
             keep,
-        )?,
+        )?)),
     };
-    if req.argument_count() >= 5 {
-        assign_ref(req, 5, Value::int(i64::try_from(count).unwrap_or(i64::MAX)))?;
-    }
+    count_out.set(
+        req,
+        Untyped(Value::int(i64::try_from(count).unwrap_or(i64::MAX))),
+    )?;
     Ok(result)
 }
 
@@ -551,16 +574,13 @@ fn func_impl(
     subject: Either,
     limit: usize,
     flags: i64,
-) -> Result<(Value, usize), Thrown> {
+) -> Result<(Replacement, usize), Thrown> {
     let mut count = 0;
     let value = match subject {
-        Either::Str(subject) => {
-            match in_subject_func(req, regex, callback, subject, limit, &mut count, flags)? {
-                Some(result) => Value::string(result),
-                None => Value::null(),
-            }
+        Union::B(subject) => {
+            in_subject_func(req, regex, callback, subject, limit, &mut count, flags)?.map(Union::A)
         }
-        Either::Array(subjects) => over_array(
+        Union::A(subjects) => Some(Union::B(over_array(
             req,
             subjects,
             &mut count,
@@ -568,7 +588,7 @@ fn func_impl(
                 in_subject_func(req, regex, callback, subject, limit, count, flags)
             },
             |_, _| true,
-        )?,
+        )?)),
     };
     Ok((value, count))
 }
@@ -628,17 +648,22 @@ fn func_impl(
 /// preg_replace_callback(): Argument #2 ($callback) must be a valid callback, function "no_such_function" not found or invalid function name
 /// string(8) "b<x><y>b"
 /// ```
-pub(crate) fn preg_replace_callback(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 3, 6)?;
-    let regex = either_argument(req, 1)?;
-    let callback = callable_argument(req, 2)?;
-    let subject = either_argument(req, 3)?;
-    let limit = limit_of(long_argument(req, 4, -1)?);
-    let flags = long_argument(req, 6, 0)?;
-    let (value, count) = func_impl(req, regex, &callback, subject, limit, flags)?;
-    if req.argument_count() >= 5 {
-        assign_ref(req, 5, Value::int(i64::try_from(count).unwrap_or(i64::MAX)))?;
-    }
+#[php_function]
+fn preg_replace_callback(
+    req: &mut Request,
+    pattern: Either,
+    callback: Callable,
+    subject: Either,
+    #[php(default = -1)] limit: i64,
+    #[php(default = null)] count: Ref<Untyped<Value>>,
+    #[php(default = 0)] flags: i64,
+) -> Result<Replacement, Thrown> {
+    let limit = limit_of(limit);
+    let (value, replaced) = func_impl(req, pattern, &callback, subject, limit, flags)?;
+    count.set(
+        req,
+        Untyped(Value::int(i64::try_from(replaced).unwrap_or(i64::MAX))),
+    )?;
     Ok(value)
 }
 
@@ -668,28 +693,28 @@ pub(crate) fn preg_replace_callback(req: &mut Request) -> Result<Value, Thrown> 
 /// NULL
 /// int(4)
 /// ```
-pub(crate) fn preg_replace_callback_array(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 2, 5)?;
-    let given = req.argument(1).unwrap_or_default();
-    let patterns = coerce_param(req, &given, &Type::Array, 1)?.deref();
-    let subject = either_argument(req, 2)?;
-    let limit = limit_of(long_argument(req, 3, -1)?);
-    let flags = long_argument(req, 5, 0)?;
-    let Some(patterns) = patterns.as_array().copied() else {
-        return Ok(Value::null());
-    };
+#[php_function]
+fn preg_replace_callback_array(
+    req: &mut Request,
+    pattern: PhpArray,
+    subject: Either,
+    #[php(default = -1)] limit: i64,
+    #[php(default = null)] count: Ref<Untyped<Value>>,
+    #[php(default = 0)] flags: i64,
+) -> Result<Replacement, Thrown> {
+    let limit = limit_of(limit);
     let mut current = subject;
     let own = |req: &mut Request, value: Either| match value {
-        Either::Str(s) => req.addref(&Value::string(s)),
-        Either::Array(a) => req.addref(&a.to_value()),
+        Union::B(s) => req.addref(&Value::string(s)),
+        Union::A(a) => req.addref(&a.to_value()),
     };
     let release = |req: &mut Request, value: Either| match value {
-        Either::Str(s) => req.release(Value::string(s)),
-        Either::Array(a) => req.release(a.to_value()),
+        Union::B(s) => req.release(Value::string(s)),
+        Union::A(a) => req.release(a.to_value()),
     };
     own(req, current);
     let mut total = 0;
-    for (key, callback) in patterns.snapshot() {
+    for (key, callback) in pattern.snapshot() {
         let Key::Str(regex) = key else {
             release(req, current);
             return Err(arg_type_error(
@@ -702,25 +727,24 @@ pub(crate) fn preg_replace_callback_array(req: &mut Request) -> Result<Value, Th
             release(req, current);
             return Err(arg_type_error(req, 1, "contain only valid callbacks"));
         };
-        let replaced = func_impl(req, Either::Str(regex), &callable, current, limit, flags);
+        let replaced = func_impl(req, Union::B(regex), &callable, current, limit, flags);
         release(req, current);
-        let (value, count) = replaced?;
-        total += count;
-        if let Some(array) = value.as_array() {
-            current = Either::Array(*array);
-        } else if let Some(string) = value.as_php_string() {
-            current = Either::Str(*string);
-        } else {
-            return Ok(Value::null());
-        }
+        let (value, replaced) = replaced?;
+        total += replaced;
+        current = match value {
+            Some(Union::A(string)) => Union::B(string),
+            Some(Union::B(array)) => Union::A(array),
+            None => return Ok(None),
+        };
     }
-    if req.argument_count() >= 4 {
-        assign_ref(req, 4, Value::int(i64::try_from(total).unwrap_or(i64::MAX)))?;
-    }
-    Ok(match current {
-        Either::Str(s) => Value::string(s),
-        Either::Array(a) => a.to_value(),
-    })
+    count.set(
+        req,
+        Untyped(Value::int(i64::try_from(total).unwrap_or(i64::MAX))),
+    )?;
+    Ok(Some(match current {
+        Union::A(array) => Union::B(array),
+        Union::B(string) => Union::A(string),
+    }))
 }
 
 #[cfg(test)]

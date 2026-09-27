@@ -5,8 +5,9 @@
 //! `php-src/ext/pcre/tests`, through `xtask phpt --subset`.
 //!
 //! Declared as `php_pcre.stub.php` at the tag declares it: the nineteen
-//! constants `register_php_pcre_symbols` registers, in its order, the
-//! eleven functions, and the three ini entries. The bodies are
+//! constants `register_php_pcre_symbols` registers, in its order, by
+//! `#[php_const]`, the eleven functions by `#[php_function]` from their
+//! Rust signatures, and the three ini entries. The bodies are
 //! `php_pcre.c`'s. The state is split where php splits it at
 //! `RSHUTDOWN` (design §2.3): compiled patterns live in the engine's
 //! cache of immutable values, [`pattern::Patterns`], and the match data,
@@ -36,36 +37,17 @@ mod split;
 
 pub use regex::Regex;
 
-use php_ext::abi::{Callable, Extension, ExtensionBuilder};
-use php_ext::coerce::coerce_param;
-use php_ext::decl::{
-    ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter, ParameterDefault, Type,
-};
-use php_ext::raising::{Thrown, arg_count_error};
+use php_ext::abi::{Extension, ExtensionBuilder, Union};
+use php_ext::attr::{php_const, php_function};
+use php_ext::decl::{IniDecl, Name};
+use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpString};
 
-/// `preg_match_all()` orders.
-const PATTERN_ORDER: i64 = 1;
-const SET_ORDER: i64 = 2;
-/// The match flags.
-const OFFSET_CAPTURE: i64 = 1 << 8;
-const UNMATCHED_AS_NULL: i64 = 1 << 9;
-/// `preg_split()` flags.
-const SPLIT_NO_EMPTY: i64 = 1 << 0;
-const SPLIT_DELIM_CAPTURE: i64 = 1 << 1;
-const SPLIT_OFFSET_CAPTURE: i64 = 1 << 2;
-/// `preg_grep()`'s option.
-const GREP_INVERT: i64 = 1 << 0;
-
-/// `php_pcre_error_code`, in its order.
-const NO_ERROR: i64 = 0;
-const INTERNAL_ERROR: i64 = 1;
-const BACKTRACK_LIMIT_ERROR: i64 = 2;
-const RECURSION_LIMIT_ERROR: i64 = 3;
-const BAD_UTF8_ERROR: i64 = 4;
-const BAD_UTF8_OFFSET_ERROR: i64 = 5;
-const JIT_STACKLIMIT_ERROR: i64 = 6;
+use constants::{
+    PREG_BACKTRACK_LIMIT_ERROR, PREG_BAD_UTF8_ERROR, PREG_BAD_UTF8_OFFSET_ERROR,
+    PREG_INTERNAL_ERROR, PREG_JIT_STACKLIMIT_ERROR, PREG_NO_ERROR, PREG_RECURSION_LIMIT_ERROR,
+};
 
 /// The three ini entries and their defaults, `PHP_INI_ALL` each.
 const INI: [(&str, &str); 3] = [
@@ -88,8 +70,10 @@ struct State {
     context: Option<ffi::Context>,
 }
 
-/// The extension value (design §7.1): declarations paired with entries,
-/// the constants, the ini entries and the two states.
+/// The extension value (design §7.1): the constants, the eleven
+/// functions in the stub's order, each declared by `#[php_function]`
+/// from its Rust signature, `preg_match` frameless for two arguments and
+/// `preg_replace` for three, the ini entries and the two states.
 ///
 /// ```php
 /// var_dump(extension_loaded('pcre'), ini_get('pcre.backtrack_limit'), ini_get('pcre.recursion_limit'), ini_get('pcre.jit'));
@@ -100,102 +84,8 @@ struct State {
 /// string(6) "100000"
 /// string(1) "1"
 /// ```
-pub fn extension() -> Extension {
-    ExtensionBuilder::default()
-        .constants(constants())
-        .functions(functions())
-        .ini(
-            INI.iter()
-                .map(|(name, default)| IniDecl {
-                    name: Name(name.as_bytes().into()),
-                    default: default.as_bytes().into(),
-                    user: true,
-                    per_dir: true,
-                    system: true,
-                })
-                .collect(),
-        )
-        .request_state::<State>()
-        .engine_state(pattern::engine_state)
-        .info(pcre_info)
-        .build("pcre")
-}
-
-/// A native's entry, the shape `ExtensionBuilder::functions` takes.
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
-
-/// The constants `register_php_pcre_symbols` registers, in its order.
-/// `PCRE_VERSION` and its two numbers are the linked library's.
 ///
-/// ```php
-/// var_dump(PREG_PATTERN_ORDER, PREG_SET_ORDER, PREG_OFFSET_CAPTURE, PREG_UNMATCHED_AS_NULL, PREG_SPLIT_NO_EMPTY, PREG_SPLIT_DELIM_CAPTURE, PREG_SPLIT_OFFSET_CAPTURE, PREG_GREP_INVERT, PREG_NO_ERROR, PREG_INTERNAL_ERROR, PREG_BACKTRACK_LIMIT_ERROR, PREG_RECURSION_LIMIT_ERROR, PREG_BAD_UTF8_ERROR, PREG_BAD_UTF8_OFFSET_ERROR, PREG_JIT_STACKLIMIT_ERROR, PCRE_VERSION_MAJOR, PCRE_JIT_SUPPORT, is_string(PCRE_VERSION));
-/// ```
-/// ```expect
-/// int(1)
-/// int(2)
-/// int(256)
-/// int(512)
-/// int(1)
-/// int(2)
-/// int(4)
-/// int(1)
-/// int(0)
-/// int(1)
-/// int(2)
-/// int(3)
-/// int(4)
-/// int(5)
-/// int(6)
-/// int(10)
-/// bool(true)
-/// bool(true)
-/// ```
-fn constants() -> Vec<ConstDecl> {
-    let version = ffi::version();
-    let number = |at: usize| -> i64 {
-        version
-            .split([' ', '.'])
-            .nth(at)
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0)
-    };
-    let ints: [(&str, i64); 15] = [
-        ("PREG_PATTERN_ORDER", PATTERN_ORDER),
-        ("PREG_SET_ORDER", SET_ORDER),
-        ("PREG_OFFSET_CAPTURE", OFFSET_CAPTURE),
-        ("PREG_UNMATCHED_AS_NULL", UNMATCHED_AS_NULL),
-        ("PREG_SPLIT_NO_EMPTY", SPLIT_NO_EMPTY),
-        ("PREG_SPLIT_DELIM_CAPTURE", SPLIT_DELIM_CAPTURE),
-        ("PREG_SPLIT_OFFSET_CAPTURE", SPLIT_OFFSET_CAPTURE),
-        ("PREG_GREP_INVERT", GREP_INVERT),
-        ("PREG_NO_ERROR", NO_ERROR),
-        ("PREG_INTERNAL_ERROR", INTERNAL_ERROR),
-        ("PREG_BACKTRACK_LIMIT_ERROR", BACKTRACK_LIMIT_ERROR),
-        ("PREG_RECURSION_LIMIT_ERROR", RECURSION_LIMIT_ERROR),
-        ("PREG_BAD_UTF8_ERROR", BAD_UTF8_ERROR),
-        ("PREG_BAD_UTF8_OFFSET_ERROR", BAD_UTF8_OFFSET_ERROR),
-        ("PREG_JIT_STACKLIMIT_ERROR", JIT_STACKLIMIT_ERROR),
-    ];
-    let constant = |name: &str, value: ConstExpr| ConstDecl {
-        name: Name(name.as_bytes().into()),
-        value,
-        attributes: Vec::new(),
-    };
-    let mut all: Vec<ConstDecl> = ints
-        .into_iter()
-        .map(|(name, value)| constant(name, ConstExpr::long(value)))
-        .collect();
-    all.extend([
-        constant("PCRE_VERSION", ConstExpr::Str(version.as_bytes().into())),
-        constant("PCRE_VERSION_MAJOR", ConstExpr::long(number(0))),
-        constant("PCRE_VERSION_MINOR", ConstExpr::long(number(1))),
-        constant("PCRE_JIT_SUPPORT", ConstExpr::Bool(ffi::jit_supported())),
-    ]);
-    all
-}
-
-/// The eleven functions, in the stub's order, `preg_match` frameless
-/// for two arguments and `preg_replace` for three.
+/// Three of the declarations as Reflection renders them.
 ///
 /// ```php
 /// echo new ReflectionFunction('preg_match'), new ReflectionFunction('preg_replace_callback'), new ReflectionFunction('preg_quote');
@@ -233,253 +123,113 @@ fn constants() -> Vec<ConstDecl> {
 ///   - Return [ string ]
 /// }
 /// ```
-#[allow(clippy::too_many_lines)] // one table, in the stub's order
-fn functions() -> Vec<(FunctionDecl, Entry)> {
-    let string = |name: &[u8]| parameter(name, Some(Type::String));
-    let either = |name: &[u8]| parameter(name, Some(Type::Union(vec![Type::Array, Type::String])));
-    let int = |name: &[u8], default: i64| Parameter {
-        default: ParameterDefault::Expr(ConstExpr::long(default)),
-        ..parameter(name, Some(Type::Int))
-    };
-    let by_ref = |name: &[u8]| Parameter {
-        by_ref: true,
-        default: ParameterDefault::Expr(ConstExpr::Null),
-        ..parameter(name, None)
-    };
-    let matcher = |name: &[u8], frameless: Vec<u32>| FunctionDecl {
-        frameless,
-        ..declared(
-            name,
-            vec![
-                string(b"pattern"),
-                string(b"subject"),
-                by_ref(b"matches"),
-                int(b"flags", 0),
-                int(b"offset", 0),
-            ],
-            Type::Union(vec![Type::Int, Type::False]),
+pub fn extension() -> Extension {
+    ExtensionBuilder::default()
+        .constants(constants::declared())
+        .functions(vec![
+            matching::preg_match::declared(),
+            matching::preg_match_all::declared(),
+            replace::preg_replace::declared(),
+            replace::preg_filter::declared(),
+            replace::preg_replace_callback::declared(),
+            replace::preg_replace_callback_array::declared(),
+            split::preg_split::declared(),
+            preg_quote::declared(),
+            split::preg_grep::declared(),
+            preg_last_error::declared(),
+            preg_last_error_msg::declared(),
+        ])
+        .ini(
+            INI.iter()
+                .map(|(name, default)| IniDecl {
+                    name: Name(name.as_bytes().into()),
+                    default: default.as_bytes().into(),
+                    user: true,
+                    per_dir: true,
+                    system: true,
+                })
+                .collect(),
         )
-    };
-    let string_array_null = || Type::Union(vec![Type::String, Type::Array, Type::Null]);
-    let replacer = |name: &[u8], frameless: Vec<u32>| FunctionDecl {
-        frameless,
-        ..declared(
-            name,
-            vec![
-                either(b"pattern"),
-                either(b"replacement"),
-                either(b"subject"),
-                int(b"limit", -1),
-                by_ref(b"count"),
-            ],
-            string_array_null(),
-        )
-    };
-    let array_or_false = || Type::Union(vec![Type::Array, Type::False]);
-    vec![
-        (
-            matcher(b"preg_match", vec![2]),
-            matching::preg_match as Entry,
-        ),
-        (
-            matcher(b"preg_match_all", Vec::new()),
-            matching::preg_match_all,
-        ),
-        (replacer(b"preg_replace", vec![3]), replace::preg_replace),
-        (replacer(b"preg_filter", Vec::new()), replace::preg_filter),
-        (
-            declared(
-                b"preg_replace_callback",
-                vec![
-                    either(b"pattern"),
-                    parameter(b"callback", Some(Type::Callable)),
-                    either(b"subject"),
-                    int(b"limit", -1),
-                    by_ref(b"count"),
-                    int(b"flags", 0),
-                ],
-                string_array_null(),
-            ),
-            replace::preg_replace_callback,
-        ),
-        (
-            declared(
-                b"preg_replace_callback_array",
-                vec![
-                    parameter(b"pattern", Some(Type::Array)),
-                    either(b"subject"),
-                    int(b"limit", -1),
-                    by_ref(b"count"),
-                    int(b"flags", 0),
-                ],
-                string_array_null(),
-            ),
-            replace::preg_replace_callback_array,
-        ),
-        (
-            declared(
-                b"preg_split",
-                vec![
-                    string(b"pattern"),
-                    string(b"subject"),
-                    int(b"limit", -1),
-                    int(b"flags", 0),
-                ],
-                array_or_false(),
-            ),
-            split::preg_split,
-        ),
-        (
-            declared(
-                b"preg_quote",
-                vec![
-                    string(b"str"),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Null),
-                        ..parameter(b"delimiter", Some(Type::Nullable(Box::new(Type::String))))
-                    },
-                ],
-                Type::String,
-            ),
-            preg_quote,
-        ),
-        (
-            declared(
-                b"preg_grep",
-                vec![
-                    string(b"pattern"),
-                    parameter(b"array", Some(Type::Array)),
-                    int(b"flags", 0),
-                ],
-                array_or_false(),
-            ),
-            split::preg_grep,
-        ),
-        (
-            declared(b"preg_last_error", Vec::new(), Type::Int),
-            preg_last_error,
-        ),
-        (
-            declared(b"preg_last_error_msg", Vec::new(), Type::String),
-            preg_last_error_msg,
-        ),
-    ]
+        .request_state::<State>()
+        .engine_state(pattern::engine_state)
+        .info(pcre_info)
+        .build("pcre")
 }
 
-/// One function as the stub declares it.
-fn declared(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> FunctionDecl {
-    FunctionDecl {
-        name: Name(name.into()),
-        parameters,
-        return_type: Some(returns),
-        returns_by_ref: false,
-        is_generator: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
+/// The constants `register_php_pcre_symbols` registers, in its order.
+/// `PCRE_VERSION` and its two numbers are the linked library's.
+///
+/// ```php
+/// var_dump(PREG_PATTERN_ORDER, PREG_SET_ORDER, PREG_OFFSET_CAPTURE, PREG_UNMATCHED_AS_NULL, PREG_SPLIT_NO_EMPTY, PREG_SPLIT_DELIM_CAPTURE, PREG_SPLIT_OFFSET_CAPTURE, PREG_GREP_INVERT, PREG_NO_ERROR, PREG_INTERNAL_ERROR, PREG_BACKTRACK_LIMIT_ERROR, PREG_RECURSION_LIMIT_ERROR, PREG_BAD_UTF8_ERROR, PREG_BAD_UTF8_OFFSET_ERROR, PREG_JIT_STACKLIMIT_ERROR, PCRE_VERSION_MAJOR, PCRE_JIT_SUPPORT, is_string(PCRE_VERSION));
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// int(256)
+/// int(512)
+/// int(1)
+/// int(2)
+/// int(4)
+/// int(1)
+/// int(0)
+/// int(1)
+/// int(2)
+/// int(3)
+/// int(4)
+/// int(5)
+/// int(6)
+/// int(10)
+/// bool(true)
+/// bool(true)
+/// ```
+#[php_const]
+pub(crate) mod constants {
+    use crate::ffi;
+
+    pub(crate) const PREG_PATTERN_ORDER: i64 = 1;
+    pub(crate) const PREG_SET_ORDER: i64 = 2;
+    pub(crate) const PREG_OFFSET_CAPTURE: i64 = 1 << 8;
+    pub(crate) const PREG_UNMATCHED_AS_NULL: i64 = 1 << 9;
+    pub(crate) const PREG_SPLIT_NO_EMPTY: i64 = 1 << 0;
+    pub(crate) const PREG_SPLIT_DELIM_CAPTURE: i64 = 1 << 1;
+    pub(crate) const PREG_SPLIT_OFFSET_CAPTURE: i64 = 1 << 2;
+    pub(crate) const PREG_GREP_INVERT: i64 = 1 << 0;
+    pub(crate) const PREG_NO_ERROR: i64 = 0;
+    pub(crate) const PREG_INTERNAL_ERROR: i64 = 1;
+    pub(crate) const PREG_BACKTRACK_LIMIT_ERROR: i64 = 2;
+    pub(crate) const PREG_RECURSION_LIMIT_ERROR: i64 = 3;
+    pub(crate) const PREG_BAD_UTF8_ERROR: i64 = 4;
+    pub(crate) const PREG_BAD_UTF8_OFFSET_ERROR: i64 = 5;
+    pub(crate) const PREG_JIT_STACKLIMIT_ERROR: i64 = 6;
+
+    /// The linked library's version, `"10.46 2025-08-27"`.
+    pub(crate) fn PCRE_VERSION() -> String {
+        ffi::version()
+    }
+    pub(crate) fn PCRE_VERSION_MAJOR() -> i64 {
+        crate::version_number(0)
+    }
+    pub(crate) fn PCRE_VERSION_MINOR() -> i64 {
+        crate::version_number(1)
+    }
+    pub(crate) fn PCRE_JIT_SUPPORT() -> bool {
+        ffi::jit_supported()
     }
 }
 
-fn parameter(name: &[u8], ty: Option<Type>) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty,
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    }
+/// The linked library's version's `at`th number, split at the space and
+/// the dot.
+fn version_number(at: usize) -> i64 {
+    ffi::version()
+        .split([' ', '.'])
+        .nth(at)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
 }
 
-/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check.
-fn arguments_between(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if (min..=max).contains(&given) {
-        return Ok(());
-    }
-    let (word, bound) = if min == max {
-        ("exactly", min)
-    } else if given < min {
-        ("at least", min)
-    } else {
-        ("at most", max)
-    };
-    let plural = if bound == 1 { "" } else { "s" };
-    Err(arg_count_error(
-        req,
-        &format!("{word} {bound} argument{plural}, {given} given"),
-    ))
-}
-
-/// One `Z_PARAM_STR`.
-fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::String, position)?;
-    match coerced.deref().as_php_string() {
-        Some(s) => Ok(*s),
-        None => PhpString::new(req, b""),
-    }
-}
-
-/// One `Z_PARAM_LONG` after `Z_PARAM_OPTIONAL`: `absent` where the call
-/// gave none.
-fn long_argument(req: &mut Request, position: u32, absent: i64) -> Result<i64, Thrown> {
-    let Some(given) = req.argument(position) else {
-        return Ok(absent);
-    };
-    let coerced = coerce_param(req, &given, &Type::Int, position)?;
-    Ok(coerced.deref().as_int().unwrap_or(0))
-}
-
-/// What `Z_PARAM_ARRAY_HT_OR_STR` reads.
-#[derive(Clone, Copy)]
-enum Either {
-    Array(PhpArray),
-    Str(PhpString),
-}
-
-/// One `Z_PARAM_ARRAY_HT_OR_STR`: the array, or the argument read as
-/// `Z_PARAM_STR` reads it, both `coerce_param`'s over `array|string`.
-fn either_argument(req: &mut Request, position: u32) -> Result<Either, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let ty = Type::Union(vec![Type::Array, Type::String]);
-    let coerced = coerce_param(req, &given, &ty, position)?;
-    match coerced.as_ref() {
-        ValueRef::Array(array) => Ok(Either::Array(*array)),
-        ValueRef::Str(s) => Ok(Either::Str(*s)),
-        _ => Ok(Either::Str(PhpString::new(req, b"")?)),
-    }
-}
-
-/// One `Z_PARAM_FUNC`.
-fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
-    match php_ext::coerce::callable_argument(req, position)? {
-        Some(callable) => Ok(callable),
-        None => Err(php_ext::raising::fatal(
-            req,
-            "InternalError: a callable parameter read no callable",
-        )),
-    }
-}
-
-/// `ZEND_TRY_ASSIGN_REF_*` on the argument at `position`: the value
-/// written through the reference the argument is, held to the types it
-/// is typed by, and given up where it is not one.
-fn assign_ref(req: &mut Request, position: u32, value: Value) -> Result<(), Thrown> {
-    if let Some(given) = req.argument(position)
-        && let ValueRef::Reference(reference) = given.as_ref()
-    {
-        let reference = *reference;
-        return reference.set(req, value);
-    }
-    req.release(value);
-    Ok(())
-}
+/// What `Z_PARAM_ARRAY_HT_OR_STR` holds, `array|string`: the pattern,
+/// replacement and subject of the replacing natives.
+pub(crate) type Either = Union<PhpArray, PhpString>;
 
 /// An ini entry of the extension read as `OnUpdateLong` reads it.
 fn ini_long(req: &Request, name: &str) -> i64 {
@@ -506,14 +256,14 @@ fn error_code(req: &mut Request) -> i64 {
 /// `pcre_handle_exec_error`: the library's code as php's.
 fn exec_error(req: &mut Request, rc: i32) {
     let code = match rc {
-        ffi::PCRE2_ERROR_MATCHLIMIT => BACKTRACK_LIMIT_ERROR,
-        ffi::PCRE2_ERROR_RECURSIONLIMIT => RECURSION_LIMIT_ERROR,
-        ffi::PCRE2_ERROR_BADUTFOFFSET => BAD_UTF8_OFFSET_ERROR,
-        ffi::PCRE2_ERROR_JIT_STACKLIMIT => JIT_STACKLIMIT_ERROR,
+        ffi::PCRE2_ERROR_MATCHLIMIT => PREG_BACKTRACK_LIMIT_ERROR,
+        ffi::PCRE2_ERROR_RECURSIONLIMIT => PREG_RECURSION_LIMIT_ERROR,
+        ffi::PCRE2_ERROR_BADUTFOFFSET => PREG_BAD_UTF8_OFFSET_ERROR,
+        ffi::PCRE2_ERROR_JIT_STACKLIMIT => PREG_JIT_STACKLIMIT_ERROR,
         rc if (ffi::PCRE2_ERROR_UTF8_ERR21..=ffi::PCRE2_ERROR_UTF8_ERR1).contains(&rc) => {
-            BAD_UTF8_ERROR
+            PREG_BAD_UTF8_ERROR
         }
-        _ => INTERNAL_ERROR,
+        _ => PREG_INTERNAL_ERROR,
     };
     set_error(req, code);
 }
@@ -521,15 +271,15 @@ fn exec_error(req: &mut Request, rc: i32) {
 /// `php_pcre_get_error_msg`.
 fn error_message(code: i64) -> &'static str {
     match code {
-        NO_ERROR => "No error",
-        INTERNAL_ERROR => "Internal error",
-        BAD_UTF8_ERROR => "Malformed UTF-8 characters, possibly incorrectly encoded",
-        BAD_UTF8_OFFSET_ERROR => {
+        PREG_NO_ERROR => "No error",
+        PREG_INTERNAL_ERROR => "Internal error",
+        PREG_BAD_UTF8_ERROR => "Malformed UTF-8 characters, possibly incorrectly encoded",
+        PREG_BAD_UTF8_OFFSET_ERROR => {
             "The offset did not correspond to the beginning of a valid UTF-8 code point"
         }
-        BACKTRACK_LIMIT_ERROR => "Backtrack limit exhausted",
-        RECURSION_LIMIT_ERROR => "Recursion limit exhausted",
-        JIT_STACKLIMIT_ERROR => "JIT stack limit exhausted",
+        PREG_BACKTRACK_LIMIT_ERROR => "Backtrack limit exhausted",
+        PREG_RECURSION_LIMIT_ERROR => "Recursion limit exhausted",
+        PREG_JIT_STACKLIMIT_ERROR => "JIT stack limit exhausted",
         _ => "Unknown error",
     }
 }
@@ -577,9 +327,9 @@ fn error_message(code: i64) -> &'static str {
 /// int(1)
 /// int(0)
 /// ```
-fn preg_last_error(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
-    Ok(Value::int(error_code(req)))
+#[php_function]
+fn preg_last_error(req: &mut Request) -> i64 {
+    error_code(req)
 }
 
 /// `preg_last_error_msg(): string`, `php_pcre_get_error_msg` over
@@ -600,13 +350,10 @@ fn preg_last_error(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// string(8) "No error"
 /// ```
-fn preg_last_error_msg(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function]
+fn preg_last_error_msg(req: &mut Request) -> Result<PhpString, Thrown> {
     let code = error_code(req);
-    Ok(Value::string(PhpString::new(
-        req,
-        error_message(code).as_bytes(),
-    )?))
+    PhpString::new(req, error_message(code).as_bytes())
 }
 
 /// `preg_quote(string $str, ?string $delimiter = null): string`: each
@@ -625,19 +372,14 @@ fn preg_last_error_msg(req: &mut Request) -> Result<Value, Thrown> {
 /// string(3) "abc"
 /// string(8) "a\-\b\:c"
 /// ```
-fn preg_quote(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 1, 2)?;
-    let text = string_argument(req, 1)?;
-    let delimiter = match req.argument(2) {
-        None => None,
-        Some(given) => {
-            let ty = Type::Nullable(Box::new(Type::String));
-            let coerced = coerce_param(req, &given, &ty, 2)?.deref();
-            coerced
-                .as_php_string()
-                .map(|s| s.as_bytes().first().copied().unwrap_or(0))
-        }
-    };
+#[php_function]
+fn preg_quote(
+    req: &mut Request,
+    str: PhpString,
+    #[php(default = null)] delimiter: Option<PhpString>,
+) -> Result<PhpString, Thrown> {
+    let text = str;
+    let delimiter = delimiter.map(|s| s.as_bytes().first().copied().unwrap_or(0));
     let mut quoted = Vec::with_capacity(text.len());
     for &byte in text.as_bytes() {
         match byte {
@@ -655,9 +397,9 @@ fn preg_quote(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     if quoted.len() == text.len() {
-        return Ok(Value::string(text));
+        return Ok(text);
     }
-    Ok(Value::string(PhpString::new(req, &quoted)?))
+    PhpString::new(req, &quoted)
 }
 
 /// `PHP_MINFO_FUNCTION(pcre)`: the library's version, its Unicode
