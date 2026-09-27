@@ -1521,6 +1521,12 @@ fn dump_members(
             // where it is typed, as php's `prop_info` row is. The value is
             // held while it prints, since its own dump may run user code
             // that overwrites the slot.
+            MemberRow::Declared { .. } | MemberRow::Dynamic { .. } if too_deep(req, out, level) => {
+                if let MemberRow::Dynamic { name, value } = row {
+                    req.release(value);
+                    req.release(Value::string(name));
+                }
+            }
             MemberRow::Declared { mangled, slot, ty } => match object.slot(slot) {
                 Some(value) => {
                     dump_property_name(req, out, level, &mangled);
@@ -1559,6 +1565,21 @@ fn dump_members(
 /// `zend_unmangle_property_name_ex` raises for it, which php prints
 /// where the row is, ahead of the indent, so what the walk has rendered
 /// so far is written before the notice is.
+/// `php_object_property_dump`'s `ZEND_CHECK_STACK_LIMIT` arm
+/// (`Z/ext/standard/var.c:59`): where the stack has passed
+/// `zend.max_allowed_stack_size`, the property is `nesting level too
+/// deep` after its indent, with no newline, in place of its name and
+/// value, so a chain deeper than the stack ends there and not in a
+/// crash.
+fn too_deep(req: &Request, out: &mut Vec<u8>, level: usize) -> bool {
+    if !req.stack_limit().overflowed() {
+        return false;
+    }
+    out.extend(std::iter::repeat_n(b' ', level + 1));
+    out.extend_from_slice(b"nesting level too deep");
+    true
+}
+
 fn dump_property_name(req: &mut Request, out: &mut Vec<u8>, level: usize, name: &[u8]) {
     let unmangled = unmangle_property_name(name);
     if let Unmangled::Illegal(notice) = unmangled {
@@ -1657,6 +1678,9 @@ fn dump_rows(
     ));
     out.extend_from_slice(format!(")#{} ({}) {{\n", object.index(), rows.len()).as_bytes());
     for (key, value) in rows.snapshot() {
+        if too_deep(req, out, level) {
+            continue;
+        }
         match &key {
             Key::Int(at) => {
                 out.extend(std::iter::repeat_n(b' ', level + 1));
