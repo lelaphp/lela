@@ -838,7 +838,24 @@ pub(super) fn strtod(bytes: &[u8]) -> f64 {
 /// array_multisort(): Argument #2 must be a valid sort flag
 /// array_multisort(): Argument #2 must be an array or a sort flag
 /// ```
-// php's body is one function: the parse, the sort and the rewrite.
+///
+/// The sort holds each table while it compares (GH-22678): a comparison
+/// that writes the variable separates it, and the variable keeps what
+/// the program wrote.
+///
+/// ```php
+/// class E { function __toString(): string { $GLOBALS["a"] = ["gone"]; return "x"; } }
+/// $a = [new E, new E, "b"]; var_dump(array_multisort($a, SORT_STRING), $a);
+/// ```
+/// ```expect
+/// bool(true)
+/// array(1) {
+///   [0]=>
+///   string(4) "gone"
+/// }
+/// ```
+// php's body is one function; this one is the parse, and `multisort`
+// the sort and the rewrite.
 #[allow(clippy::too_many_lines)]
 #[php_function]
 fn array_multisort(
@@ -847,7 +864,6 @@ fn array_multisort(
     #[php(prefer_ref)] rest: Variadic<Ref<Untyped<Value>>>,
 ) -> Result<True, Thrown> {
     use php_ext::raising::{arg_type_error, throw};
-    use php_ext::values::zend_sort;
     let given: Vec<Ref<Untyped<Value>>> = std::iter::once(array).chain(rest.0).collect();
     // Each array with the cell it came in, and the comparison each array
     // is sorted by, `(flags, descending)`.
@@ -919,6 +935,30 @@ fn array_multisort(
         return Ok(True);
     }
     sorts.push((kind, order != SORT_ASC));
+    // `GC_ADDREF(hashes[i])` (GH-22678): the sort holds each table while
+    // it compares, so a comparison that writes a variable separates it
+    // and every element the columns name stays alive.
+    for (array, _) in &arrays {
+        req.addref(&array.to_value());
+    }
+    let sorted = multisort(req, &arrays, &sorts, size);
+    for (array, _) in &arrays {
+        req.release(array.to_value());
+    }
+    sorted.map(|()| True)
+}
+
+/// `array_multisort`'s sort over the tables it holds, and each table
+/// rebuilt in the order found and written where its variable still holds
+/// it: php restructures the table it holds, so a variable the program
+/// wrote over while the sort ran keeps what the program wrote.
+fn multisort(
+    req: &mut Request,
+    arrays: &[(PhpArray, Ref<Untyped<Value>>)],
+    sorts: &[(i64, bool)],
+    size: usize,
+) -> Result<(), Thrown> {
+    use php_ext::values::zend_sort;
     let columns: Vec<Vec<(Key, Value)>> = arrays
         .iter()
         .map(|(array, _)| array.snapshot_refs())
@@ -929,7 +969,7 @@ fn array_multisort(
         if pending.is_some() {
             return Ordering::Equal;
         }
-        for (column, (flags, reverse)) in columns.iter().zip(&sorts) {
+        for (column, (flags, reverse)) in columns.iter().zip(sorts) {
             match compared(req, *flags, &column[*a].1, &column[*b].1) {
                 Ok(Ordering::Equal) => {}
                 Ok(ordering) => {
@@ -951,7 +991,16 @@ fn array_multisort(
         return Err(thrown);
     }
     let count = i64::try_from(size).unwrap_or(i64::MAX);
-    for ((_, cell), column) in arrays.iter().zip(&columns) {
+    for ((array, cell), column) in arrays.iter().zip(&columns) {
+        let holds = cell.reference().is_none_or(|reference| {
+            reference
+                .get()
+                .as_array()
+                .is_some_and(|now| now.is_same(array))
+        });
+        if !holds {
+            continue;
+        }
         let mut rebuilt = PhpArray::new(req)?;
         for row in &rows {
             let (key, value) = &column[*row];
@@ -967,5 +1016,5 @@ fn array_multisort(
         rebuilt.set_next_free(req, count)?;
         cell.set(req, Untyped(rebuilt.to_value()))?;
     }
-    Ok(True)
+    Ok(())
 }
