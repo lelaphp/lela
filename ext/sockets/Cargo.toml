@@ -1,0 +1,24 @@
+# ext/sockets: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_sockets"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The sockets extension, php-src/ext/sockets"
+
+[lints]
+workspace = true
+
+# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+# The OS through `nix` (the interfaces, their indexes and addresses, shutdown and `fstat`), and `libc` in `src/ffi/` alone for what `nix`
+# does not wrap in the form php makes the call (design §7.2, revision 36).
+nix = { workspace = true, features = ["socket", "net", "fs"] }
+libc = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }

@@ -21,7 +21,7 @@
 
 use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf};
 use crate::api::raising::{Level, Thrown, docref};
-use crate::api::request::{OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
+use crate::api::request::{Cast, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 /// `struct php_user_stream_wrapper` less the scheme, which is the row's:
@@ -637,9 +637,10 @@ impl Ops for UserStream {
     fn cast_target(
         &mut self,
         req: &mut Request,
-        select: bool,
+        cast: Cast,
         own: Option<Stream>,
     ) -> CastTarget<'_> {
+        let select = cast == Cast::Select;
         self.held(req, |this, req| this.cast_target_held(req, select, own))
             .map_or(CastTarget::Refused, CastTarget::Stream)
     }

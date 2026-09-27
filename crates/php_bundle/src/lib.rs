@@ -70,6 +70,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_pcntl::extension,
         #[cfg(feature = "posix")]
         php_ext_posix::extension,
+        #[cfg(feature = "sockets")]
+        php_ext_sockets::extension,
     ]
 }
 

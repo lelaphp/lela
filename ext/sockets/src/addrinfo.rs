@@ -1,0 +1,370 @@
+//! `AddressInfo` and the four `socket_addrinfo_*` natives over
+//! `getaddrinfo(3)`: one object per entry of the list, holding the entry
+//! as `php_addrinfo` copies it.
+
+use std::cmp::Ordering;
+use std::ffi::CString;
+
+use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse};
+use php_ext::attr::{php_class, php_function};
+use php_ext::call::Function;
+use php_ext::coerce::{float_to_long, numeric_string, type_name};
+use php_ext::raising::{Thrown, argument_error, throw};
+use php_ext::request::Request;
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+
+use crate::State;
+use crate::conv::put;
+use crate::ffi::{self, Addr};
+use crate::natives::string;
+use crate::socket::{Sock, Socket, made, socket_error, strerror};
+use php_ext::raising::{Level, docref};
+
+/// One `getaddrinfo` entry as `php_addrinfo` holds it; `None` only
+/// while `socket_addrinfo_lookup` lays the object down.
+#[derive(Default)]
+pub(crate) struct Entry(Option<ffi::AddrInfo>);
+
+/// `final class AddressInfo`, `@strict-properties`, `@not-serializable`.
+///
+/// ```php
+/// try { new AddressInfo; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $a = socket_addrinfo_lookup('127.0.0.1')[0];
+/// try { clone $a; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($a);
+/// ```
+/// ```expect
+/// Cannot directly construct AddressInfo, use socket_addrinfo_lookup() instead
+/// Trying to clone an uncloneable object of class AddressInfo
+/// object(AddressInfo)#1 (0) {
+/// }
+/// ```
+#[php_class(
+    final,
+    not_serializable,
+    payload = Entry,
+    handlers = ADDRESS_INFO,
+    dynamic_properties = forbidden
+)]
+pub(crate) struct AddressInfo;
+
+#[php_class]
+impl AddressInfo {}
+
+/// `address_info_object_handlers`.
+pub(crate) struct Handlers;
+
+pub(crate) static ADDRESS_INFO: Handlers = Handlers;
+
+impl ObjectHandlers for Handlers {
+    fn get_constructor(
+        &self,
+        req: &mut Request,
+        _object: PhpObject,
+    ) -> Result<Option<Function>, Thrown> {
+        Err(throw(
+            req,
+            "Error",
+            "Cannot directly construct AddressInfo, use socket_addrinfo_lookup() instead",
+        ))
+    }
+
+    fn clone_obj(&self) -> Option<CloneObj> {
+        None
+    }
+
+    fn compare(
+        &self,
+        req: &mut Request,
+        left: &Value,
+        right: &Value,
+    ) -> Result<Option<Ordering>, Thrown> {
+        let _ = (req, left, right);
+        Ok(None)
+    }
+}
+
+/// `zval_try_get_long`: a number, a numeric string, or `None`.
+fn try_long(value: &Value) -> Option<i64> {
+    match value.as_ref() {
+        ValueRef::Int(n) => Some(n),
+        ValueRef::Bool(b) => Some(i64::from(b)),
+        ValueRef::Null => Some(0),
+        ValueRef::Float(f) => Some(float_to_long(f)),
+        ValueRef::Str(s) => match numeric_string(s.as_bytes())?.as_ref() {
+            ValueRef::Int(n) => Some(n),
+            ValueRef::Float(f) => Some(float_to_long(f)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+const HINT_KEYS: &str =
+    "must only contain array keys \"ai_flags\", \"ai_socktype\", \"ai_protocol\", or \"ai_family\"";
+
+/// `socket_addrinfo_lookup(string $host, ?string $service = null, array
+/// $hints = []): array|false`: an `AddressInfo` for each entry
+/// `getaddrinfo` answers, `false` where it answers none.
+///
+/// ```php
+/// $r = socket_addrinfo_lookup('127.0.0.1', '80', ['ai_family' => AF_INET, 'ai_socktype' => SOCK_STREAM]);
+/// var_dump(count($r), socket_addrinfo_explain($r[0]));
+/// var_dump(socket_addrinfo_lookup('nonexistent.invalid'));
+/// try { socket_addrinfo_lookup('x', null, [1]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { socket_addrinfo_lookup('x', null, ['ai_family' => 99]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { socket_addrinfo_lookup('x', null, ['ai_flags' => 'x']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { socket_addrinfo_lookup('x', null, ['ai_flags' => -1]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// array(5) {
+///   ["ai_flags"]=>
+///   int(0)
+///   ["ai_family"]=>
+///   int(2)
+///   ["ai_socktype"]=>
+///   int(1)
+///   ["ai_protocol"]=>
+///   int(6)
+///   ["ai_addr"]=>
+///   array(2) {
+///     ["sin_port"]=>
+///     int(80)
+///     ["sin_addr"]=>
+///     string(9) "127.0.0.1"
+///   }
+/// }
+/// bool(false)
+/// socket_addrinfo_lookup(): Argument #3 ($hints) must only contain array keys "ai_flags", "ai_socktype", "ai_protocol", or "ai_family"
+/// socket_addrinfo_lookup(): Argument #3 ($hints) "ai_family" key must be AF_INET or AF_INET6
+/// socket_addrinfo_lookup(): Argument #3 ($hints) "ai_flags" key must be of type int, string given
+/// socket_addrinfo_lookup(): Argument #3 ($hints) "ai_flags" key must be between 0 and 2147483647
+/// ```
+#[php_function]
+fn socket_addrinfo_lookup(
+    req: &mut Request,
+    host: PhpString,
+    #[php(default = null)] service: Option<PhpString>,
+    #[php(default = [])] hints: PhpArray,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let mut want = [0i32; 4];
+    let entries = hints.snapshot();
+    if !entries.is_empty() && hints.is_list() {
+        return Err(argument_error(req, "ValueError", 3, HINT_KEYS));
+    }
+    for (key, hint) in entries {
+        let Key::Str(key) = key else {
+            return Err(argument_error(req, "ValueError", 3, HINT_KEYS));
+        };
+        let name = String::from_utf8_lossy(key.as_bytes()).into_owned();
+        let slot = match name.as_str() {
+            "ai_flags" => 0,
+            "ai_family" => 1,
+            "ai_socktype" => 2,
+            "ai_protocol" => 3,
+            _ => return Err(argument_error(req, "ValueError", 3, HINT_KEYS)),
+        };
+        let Some(n) = try_long(&hint) else {
+            let given = type_name(req, &hint);
+            let tail = format!("\"{name}\" key must be of type int, {given} given");
+            return Err(argument_error(req, "TypeError", 3, &tail));
+        };
+        if slot == 1 {
+            if n != i64::from(libc::AF_INET) && n != i64::from(libc::AF_INET6) {
+                return Err(argument_error(
+                    req,
+                    "ValueError",
+                    3,
+                    "\"ai_family\" key must be AF_INET or AF_INET6",
+                ));
+            }
+        } else if !(0..=i64::from(i32::MAX)).contains(&n) {
+            let tail = format!("\"{name}\" key must be between 0 and {}", i32::MAX);
+            return Err(argument_error(req, "ValueError", 3, &tail));
+        }
+        want[slot] = i32::try_from(n).unwrap_or(0);
+    }
+    let cut = |bytes: &[u8]| CString::new(crate::addr::c_str(bytes)).unwrap_or_default();
+    let host = cut(host.as_bytes());
+    let service = service.map(|s| cut(s.as_bytes()));
+    let Ok(list) = ffi::getaddrinfo(&host, service.as_deref(), want) else {
+        return Ok(OrFalse::False);
+    };
+    let mut out = PhpArray::new(req)?;
+    for info in list {
+        if info.family == libc::AF_UNSPEC {
+            continue;
+        }
+        let object = made(req, b"AddressInfo")?;
+        if let Some(entry) = object.native_mut::<Entry>(req) {
+            entry.0 = Some(info);
+        }
+        out.append(req, object.as_value())?;
+    }
+    Ok(OrFalse::Value(out))
+}
+
+/// The entry an `AddressInfo` holds, and an `InternalError` for one
+/// that holds none, which only a lookup lays down.
+fn entry(req: &mut Request, address: Instance<AddressInfo>) -> Result<ffi::AddrInfo, Thrown> {
+    let held = address.payload_mut(req)?.0.clone();
+    held.ok_or_else(|| php_ext::raising::fatal(req, "InternalError: an AddressInfo holds no entry"))
+}
+
+/// `socket_addrinfo_bind` and `socket_addrinfo_connect`: a socket of
+/// the entry's family, type and protocol, bound or connected to its
+/// address.
+fn open(
+    req: &mut Request,
+    address: Instance<AddressInfo>,
+    connect: bool,
+) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+    let info = entry(req, address)?;
+    let object = made(req, b"Socket")?;
+    let fd = match ffi::socket(info.family, info.socktype, info.protocol) {
+        Ok(fd) => fd,
+        Err(errno) => {
+            let code = errno as i32;
+            req.state::<State>().last_error = code;
+            let text = format!("Unable to create socket [{code}]: {}", strerror(req, code));
+            docref(req, Level::Warning, &text);
+            req.release(object.as_value());
+            return Ok(OrFalse::False);
+        }
+    };
+    let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
+    if let Some(sock) = object.native_mut::<Sock>(req) {
+        *sock = Sock::owning(fd, info.family);
+    }
+    let (done, msg) = if connect {
+        (ffi::connect(raw, &info.addr), "Unable to connect address")
+    } else {
+        (ffi::bind(raw, &info.addr), "Unable to bind address")
+    };
+    if let Err(errno) = done {
+        socket_error(req, object, msg, errno as i32);
+        req.release(object.as_value());
+        return Ok(OrFalse::False);
+    }
+    Ok(OrFalse::Value(Instance::of(object)))
+}
+
+/// `socket_addrinfo_connect(AddressInfo $address): Socket|false`.
+///
+/// ```php
+/// $b = socket_addrinfo_bind(socket_addrinfo_lookup('127.0.0.1', '0', ['ai_family' => AF_INET, 'ai_socktype' => SOCK_DGRAM])[0]);
+/// socket_getsockname($b, $ip, $port);
+/// $c = socket_addrinfo_connect(socket_addrinfo_lookup('127.0.0.1', (string) $port, ['ai_family' => AF_INET, 'ai_socktype' => SOCK_DGRAM])[0]);
+/// var_dump(socket_write($c, "hi"), socket_read($b, 10));
+/// ```
+/// ```expect
+/// int(2)
+/// string(2) "hi"
+/// ```
+#[php_function]
+fn socket_addrinfo_connect(
+    req: &mut Request,
+    address: Instance<AddressInfo>,
+) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+    open(req, address, true)
+}
+
+/// `socket_addrinfo_bind(AddressInfo $address): Socket|false`.
+///
+/// ```php
+/// $info = socket_addrinfo_lookup('127.0.0.1', '0', ['ai_family' => AF_INET, 'ai_socktype' => SOCK_STREAM])[0];
+/// $s = socket_addrinfo_bind($info);
+/// var_dump($s instanceof Socket, socket_getsockname($s, $a), $a);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// string(9) "127.0.0.1"
+/// ```
+#[php_function]
+fn socket_addrinfo_bind(
+    req: &mut Request,
+    address: Instance<AddressInfo>,
+) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+    open(req, address, false)
+}
+
+/// `socket_addrinfo_explain(AddressInfo $address): array`: the entry's
+/// fields and its address's.
+///
+/// ```php
+/// $r = socket_addrinfo_lookup('::1', '8080', ['ai_family' => AF_INET6, 'ai_socktype' => SOCK_DGRAM]);
+/// var_dump(socket_addrinfo_explain($r[0]));
+/// ```
+/// ```expect
+/// array(5) {
+///   ["ai_flags"]=>
+///   int(0)
+///   ["ai_family"]=>
+///   int(30)
+///   ["ai_socktype"]=>
+///   int(2)
+///   ["ai_protocol"]=>
+///   int(17)
+///   ["ai_addr"]=>
+///   array(2) {
+///     ["sin6_port"]=>
+///     int(8080)
+///     ["sin6_addr"]=>
+///     string(3) "::1"
+///   }
+/// }
+/// ```
+#[php_function]
+fn socket_addrinfo_explain(
+    req: &mut Request,
+    address: Instance<AddressInfo>,
+) -> Result<PhpArray, Thrown> {
+    let info = entry(req, address)?;
+    let mut out = PhpArray::new(req)?;
+    put(req, &mut out, "ai_flags", Value::int(i64::from(info.flags)))?;
+    put(
+        req,
+        &mut out,
+        "ai_family",
+        Value::int(i64::from(info.family)),
+    )?;
+    put(
+        req,
+        &mut out,
+        "ai_socktype",
+        Value::int(i64::from(info.socktype)),
+    )?;
+    put(
+        req,
+        &mut out,
+        "ai_protocol",
+        Value::int(i64::from(info.protocol)),
+    )?;
+    if let Some(name) = &info.canonname {
+        let name = string(req, name)?;
+        put(req, &mut out, "ai_canonname", name)?;
+    }
+    let mut addr = PhpArray::new(req)?;
+    match &info.addr {
+        Addr::V4(v4) if info.family == libc::AF_INET => {
+            put(req, &mut addr, "sin_port", Value::int(i64::from(v4.port())))?;
+            let text = string(req, v4.ip().to_string().as_bytes())?;
+            put(req, &mut addr, "sin_addr", text)?;
+        }
+        Addr::V6(v6) if info.family == libc::AF_INET6 => {
+            put(
+                req,
+                &mut addr,
+                "sin6_port",
+                Value::int(i64::from(v6.port())),
+            )?;
+            let text = string(req, v6.ip().to_string().as_bytes())?;
+            put(req, &mut addr, "sin6_addr", text)?;
+        }
+        _ => {}
+    }
+    put(req, &mut out, "ai_addr", Value::array(addr))?;
+    Ok(out)
+}

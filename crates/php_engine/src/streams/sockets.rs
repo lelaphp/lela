@@ -26,7 +26,7 @@ use php_heap::{Readiness, SockOpt};
 use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
-    BindTo, OptionAnswer, Request, SocketOptions, Stream, StreamOption, Xport, XportFailure,
+    BindTo, Cast, OptionAnswer, Request, SocketOptions, Stream, StreamOption, Xport, XportFailure,
 };
 use crate::api::values::PhpString;
 
@@ -334,11 +334,11 @@ impl Ops for Socket {
         }
     }
 
-    /// `php_sockop_cast`: the socket, for either cast.
+    /// `php_sockop_cast`: the socket, for any cast to a fd.
     fn cast_target(
         &mut self,
         _req: &mut Request,
-        _select: bool,
+        _cast: Cast,
         _own: Option<Stream>,
     ) -> CastTarget<'_> {
         self.sock
@@ -971,12 +971,36 @@ impl Request {
     /// socket the stream is handed, of the `generic_socket` kind, `r+`,
     /// blocking, with `default_socket_timeout` as its read timeout.
     pub(crate) fn socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown> {
-        let kind = Socket::new(
-            Sock::Generic(UnixStream::from(fd)),
-            "generic_socket",
-            default_timeout(self),
-        );
+        self.xport_stream(fd, None, true)
+    }
+
+    /// `php_stream_xport_create(name, 0 flags)` handed a socket
+    /// afterwards, as `socket_export_stream` makes one
+    /// (`Z/ext/sockets/sockets.c:2698`): the kind the registered xport
+    /// `name` names, with `name://` as its `uri`, or
+    /// `php_stream_sock_open_from_socket`'s `generic_socket` for none;
+    /// `r+`, `blocking` as its `is_blocked` with the fd's own `O_NONBLOCK`
+    /// left as it is, and `default_socket_timeout` as its read timeout.
+    pub(crate) fn xport_stream(
+        &mut self,
+        fd: OwnedFd,
+        name: Option<&str>,
+        blocking: bool,
+    ) -> Result<Stream, Thrown> {
+        let found = name.and_then(|name| TRANSPORTS.iter().find(|(r, _)| *r == name));
+        let (sock, label) = match found {
+            Some(("tcp", label)) => (Sock::Tcp(TcpStream::from(fd)), *label),
+            Some(("udp", label)) => (Sock::Udp(UdpSocket::from(fd)), *label),
+            Some(("unix", label)) => (Sock::Unix(UnixStream::from(fd)), *label),
+            Some(("udg", label)) => (Sock::Udg(UnixDatagram::from(fd)), *label),
+            _ => (Sock::Generic(UnixStream::from(fd)), "generic_socket"),
+        };
+        let mut kind = Socket::new(sock, label, default_timeout(self));
+        kind.is_blocked = blocking;
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
+        if let Some((name, _)) = found {
+            stream.orig_path = Some(format!("{name}://").into_bytes());
+        }
         stream.flags.no_seek = true;
         self.stream_alloc(stream)
     }
