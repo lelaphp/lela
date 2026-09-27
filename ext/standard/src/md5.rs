@@ -5,7 +5,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::abi::{OrFalse, Raw};
+use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
@@ -291,32 +291,21 @@ fn md5(
     digest_value(req, &digest, binary)
 }
 
-/// `Z_PARAM_PATH`'s check over the string held at `position`: none
-/// with a null byte in it. `md5_file` and `sha1_file` hold `$binary`
-/// raw and after this, where php's ZPP reaches it. What
-/// `php_stream_open_wrapper(arg, "rb", REPORT_ERRORS, NULL)` and the
-/// read loop the two share then read is every byte of the file, or
-/// `None` after the warning the open left or a read that stopped short
-/// of the end.
-pub(super) fn path_checked(
-    req: &mut Request,
-    filename: PhpString,
-    position: u32,
-) -> Result<PhpString, Thrown> {
+/// `Z_PARAM_PATH` at `position`, read by hand, for the natives outside
+/// this file that still do.
+pub(super) fn path_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
+    let filename = crate::string_argument(req, position)?;
     if filename.as_bytes().contains(&0) {
         return Err(arg_value_error(req, position, "not contain any null bytes"));
     }
     Ok(filename)
 }
 
-/// `Z_PARAM_PATH` at `position`, read by hand, for the natives outside
-/// this file that still do.
-pub(super) fn path_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let filename = crate::string_argument(req, position)?;
-    path_checked(req, filename, position)
-}
-
-/// The file's bytes, read as `md5_file`'s loop reads them.
+/// The file's bytes, read as `md5_file`'s loop reads them: what
+/// `php_stream_open_wrapper(arg, "rb", REPORT_ERRORS, NULL)` and the
+/// read loop `md5_file` and `sha1_file` share read is every byte of the
+/// file, or `None` after the warning the open left or a read that
+/// stopped short of the end.
 pub(super) fn file_bytes(
     req: &mut Request,
     filename: PhpString,
@@ -362,12 +351,10 @@ pub(super) fn file_bytes(
 #[php_function]
 fn md5_file(
     req: &mut Request,
-    filename: PhpString,
-    #[php(default = false)] binary: Raw<bool>,
+    filename: Path,
+    #[php(default = false)] binary: bool,
 ) -> Result<OrFalse<PhpString>, Thrown> {
-    let filename = path_checked(req, filename, 1)?;
-    let binary = binary.hold(req)?;
-    let Some(bytes) = file_bytes(req, filename)? else {
+    let Some(bytes) = file_bytes(req, filename.0)? else {
         return Ok(OrFalse::False);
     };
     let mut context = Md5::new();

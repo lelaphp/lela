@@ -3,13 +3,13 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::abi::{OrFalse, Raw};
+use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::PhpString;
 
-use crate::md5::{digest_value, file_bytes, path_checked};
+use crate::md5::{digest_value, file_bytes};
 
 /// `PHP_SHA1Init`, `PHP_SHA1Update` and `PHP_SHA1Final` over one
 /// buffer: the twenty bytes.
@@ -154,12 +154,10 @@ fn sha1(
 #[php_function]
 fn sha1_file(
     req: &mut Request,
-    filename: PhpString,
-    #[php(default = false)] binary: Raw<bool>,
+    filename: Path,
+    #[php(default = false)] binary: bool,
 ) -> Result<OrFalse<PhpString>, Thrown> {
-    let filename = path_checked(req, filename, 1)?;
-    let binary = binary.hold(req)?;
-    let Some(bytes) = file_bytes(req, filename)? else {
+    let Some(bytes) = file_bytes(req, filename.0)? else {
         return Ok(OrFalse::False);
     };
     let digest = digest(&bytes);

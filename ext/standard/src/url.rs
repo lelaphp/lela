@@ -6,11 +6,11 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::abi::{OrFalse, Raw, Union, Untyped};
+use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
 
 pub(super) use constants::PHP_QUERY_RFC3986;
 use constants::{
@@ -78,15 +78,13 @@ pub(crate) mod constants {
 #[php_function]
 fn get_headers(
     req: &mut Request,
-    url: PhpString,
-    #[php(default = false)] associative: Raw<bool>,
-    #[php(default = null)] context: Untyped<Value>,
+    url: Path,
+    #[php(default = false)] associative: bool,
+    #[php(default = null)] context: Option<Resource>,
 ) -> Result<OrFalse<PhpArray>, Thrown> {
+    // No wrapper here reads a `$context`: it is taken and not read.
     let _ = context;
-    let url = crate::md5::path_checked(req, url, 1)?;
-    let associative = associative.hold(req)?;
-    crate::file::context_argument(req, 3)?;
-    let Some(stream) = req.open_url(url.as_bytes(), b"r")? else {
+    let Some(stream) = req.open_url(url.0.as_bytes(), b"r")? else {
         return Ok(OrFalse::False);
     };
     let meta = stream.meta_data(req)?;
