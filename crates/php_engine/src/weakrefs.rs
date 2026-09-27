@@ -20,16 +20,14 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_heap::Obj;
-use php_unit::decl::{
-    ClassDecl, ClassFlags, ClassKind, DynamicProperties, FunctionDecl, MethodDecl, Name, Parameter,
-    ParameterDefault, Type, Visibility,
-};
+use php_macros::php_class;
 
-use crate::api::abi::{CloneObj, DimensionRead, Entry, NativeClassDecl, ObjectHandlers};
-use crate::api::coerce::coerce_param;
-use crate::api::raising::{Thrown, arg_count_error, throw};
+use crate::api::abi::{CloneObj, DimensionRead, Instance, ObjectHandlers, This, Untyped};
+use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use crate::classes::ArrayAccess;
+use crate::interfaces::Countable;
 
 /// One holder `EG(weakrefs)` lists against an object: php's tagged
 /// pointer, `ZEND_WEAKREF_TAG_REF` or `ZEND_WEAKREF_TAG_MAP`.
@@ -72,7 +70,7 @@ pub(crate) struct WeakRef {
 /// A `WeakMap`'s payload, `zend_weakmap`: its entries, each value keyed
 /// by the key object's id, laid down by the first write.
 #[derive(Default, Debug)]
-pub(crate) struct WeakMap {
+pub(crate) struct ZendWeakMap {
     entries: Option<PhpArray>,
 }
 
@@ -120,8 +118,8 @@ fn unref_single(req: &mut Request, id: u32, holder: Holder) {
             }
         }
         Holder::Map(at) => {
-            let entries =
-                stored(req, at).and_then(|map| map.native::<WeakMap>(req).and_then(|m| m.entries));
+            let entries = stored(req, at)
+                .and_then(|map| map.native::<ZendWeakMap>(req).and_then(|m| m.entries));
             if let Some(mut entries) = entries {
                 let _ = entries.unset(req, &Key::Int(i64::from(id)));
             }
@@ -273,7 +271,7 @@ fn map_key(req: &mut Request, offset: &Value) -> Result<PhpObject, Thrown> {
 }
 
 fn entries_of(req: &Request, map: PhpObject) -> Option<PhpArray> {
-    map.native::<WeakMap>(req)
+    map.native::<ZendWeakMap>(req)
         .and_then(|payload| payload.entries)
 }
 
@@ -290,7 +288,7 @@ impl ObjectHandlers for WeakMapHandlers {
     /// order.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let entries = object
-            .native_mut::<WeakMap>(req)
+            .native_mut::<ZendWeakMap>(req)
             .and_then(|payload| payload.entries.take());
         let Some(entries) = entries else {
             return;
@@ -381,7 +379,7 @@ impl ObjectHandlers for WeakMapHandlers {
             entries
         } else {
             let made = PhpArray::new(req)?;
-            if let Some(payload) = object.native_mut::<WeakMap>(req) {
+            if let Some(payload) = object.native_mut::<ZendWeakMap>(req) {
                 payload.entries = Some(made);
             }
             made
@@ -575,7 +573,7 @@ fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         Some(entries) => Some(entries.copy(req)?),
         None => None,
     };
-    let made = req.clone_with_payload(object, WeakMap { entries: copy })?;
+    let made = req.clone_with_payload(object, ZendWeakMap { entries: copy })?;
     for (key, _) in copy.map(|e| e.snapshot()).unwrap_or_default() {
         if let Key::Int(id) = key
             && let Some(owner) = u32::try_from(id).ok().and_then(|id| stored(req, id))
@@ -586,322 +584,154 @@ fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
     Ok(made)
 }
 
-/// The two classes as `zend_weakrefs.stub.php` declares them, each
-/// `final` and `@strict-properties`, with the methods the stub gives
-/// and the handler table and payload `zend_register_weakref_ce` sets.
-/// `WeakMap` implements `ArrayAccess` and `Countable`; the stub's
-/// `IteratorAggregate` and its `getIterator` wait on the engine's
-/// `Traversable` (#548) and a `get_iterator` for `foreach` to reach.
-pub(crate) fn weakref_classes() -> Vec<NativeClassDecl> {
-    vec![
-        (
-            final_class(b"WeakReference", Vec::new()),
-            vec![
-                (
-                    method(b"__construct", Vec::new(), None, true),
-                    weakref_construct as Entry,
-                ),
-                (
-                    method(
-                        b"create",
-                        vec![parameter(b"object", Type::Object)],
-                        Some(named(b"WeakReference")),
-                        false,
-                    ),
-                    weakref_create as Entry,
-                ),
-                (
-                    method(
-                        b"get",
-                        Vec::new(),
-                        Some(Type::Nullable(Box::new(Type::Object))),
-                        true,
-                    ),
-                    weakref_get as Entry,
-                ),
-            ],
-            Some(&WEAK_REFERENCE),
-            Some(crate::api::abi::new_payload::<WeakRef>()),
-        ),
-        (
-            final_class(
-                b"WeakMap",
-                vec![Name::from("ArrayAccess"), Name::from("Countable")],
-            ),
-            vec![
-                (
-                    method(
-                        b"offsetGet",
-                        vec![untyped(b"object")],
-                        Some(Type::Mixed),
-                        true,
-                    ),
-                    weakmap_offset_get as Entry,
-                ),
-                (
-                    method(
-                        b"offsetSet",
-                        vec![untyped(b"object"), parameter(b"value", Type::Mixed)],
-                        Some(Type::Void),
-                        true,
-                    ),
-                    weakmap_offset_set as Entry,
-                ),
-                (
-                    method(
-                        b"offsetExists",
-                        vec![untyped(b"object")],
-                        Some(Type::Bool),
-                        true,
-                    ),
-                    weakmap_offset_exists as Entry,
-                ),
-                (
-                    method(
-                        b"offsetUnset",
-                        vec![untyped(b"object")],
-                        Some(Type::Void),
-                        true,
-                    ),
-                    weakmap_offset_unset as Entry,
-                ),
-                (
-                    method(b"count", Vec::new(), Some(Type::Int), true),
-                    weakmap_count as Entry,
-                ),
-            ],
-            Some(&WEAK_MAP),
-            Some(crate::api::abi::new_payload::<WeakMap>()),
-        ),
-    ]
-}
-
-fn named(name: &[u8]) -> Type {
-    Type::Named(Name(name.into()))
-}
-
-/// One of the two classes, as the stub's `final`, `@strict-properties`
-/// and `@not-serializable` make each.
-fn final_class(name: &[u8], interfaces: Vec<Name>) -> ClassDecl {
-    ClassDecl {
-        name: Name(name.into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags {
-            is_final: true,
-            not_serializable: true,
-            dynamic_properties: DynamicProperties::Forbidden,
-            ..ClassFlags::default()
-        },
-        parent: None,
-        interfaces,
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: php_unit::decl::EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: Vec::new(),
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    }
-}
-
-fn method(
-    name: &[u8],
-    parameters: Vec<Parameter>,
-    returns: Option<Type>,
-    is_instance: bool,
-) -> MethodDecl {
-    MethodDecl {
-        function: FunctionDecl {
-            name: Name(name.into()),
-            parameters,
-            return_type: returns,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            end_line: 0,
-            frameless: Vec::new(),
-        },
-        visibility: Visibility::Public,
-        is_instance,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    }
-}
-
-fn parameter(name: &[u8], ty: Type) -> Parameter {
-    Parameter {
-        ty: Some(ty),
-        ..untyped(name)
-    }
-}
-
-fn untyped(name: &[u8]) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty: None,
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    }
-}
-
-/// `zend_parse_parameters` over exactly `count` arguments: php's
-/// `ArgumentCountError` for any other number.
-fn exactly(req: &mut Request, count: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if given == count {
-        return Ok(());
-    }
-    let what = match count {
-        0 => format!("exactly 0 arguments, {given} given"),
-        1 => format!("exactly 1 argument, {given} given"),
-        n => format!("exactly {n} arguments, {given} given"),
-    };
-    Err(arg_count_error(req, &what))
-}
-
-/// The receiver a method of these classes is served on.
-fn receiver(req: &mut Request) -> Result<PhpObject, Thrown> {
-    match req.this() {
-        Some(this) => Ok(this),
-        None => Err(throw(req, "Error", "Non-static method called statically")),
-    }
-}
-
-/// `WeakReference::__construct()` (`Z/Zend/zend_weakrefs.c:301`):
-/// `new WeakReference` is refused, the one way to make one being
-/// `create`.
+/// `final class WeakReference`, `@strict-properties` and
+/// `@not-serializable`, with the methods the stub gives, over the
+/// handler table and the [`WeakRef`] payload `zend_register_weakref_ce`
+/// sets.
 ///
 /// ```php
-/// new WeakReference;
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught Error: Direct instantiation of WeakReference is not allowed, use WeakReference::create instead in %s:2
-/// Stack trace:
-/// #0 %s(2): WeakReference->__construct()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn weakref_construct(req: &mut Request) -> Result<Value, Thrown> {
-    Err(throw(
-        req,
-        "Error",
-        "Direct instantiation of WeakReference is not allowed, use WeakReference::create instead",
-    ))
-}
-
-/// `WeakReference::create(object $object): WeakReference`
-/// (`Z/Zend/zend_weakrefs.c:306`): the one reference the object has
-/// already, `zend_weakref_find`, so two creates hand back one object;
-/// otherwise a new one naming it, registered. `get()` answers the
-/// object while it lives and `null` from the moment it is freed, and
-/// the reference takes no owner of it.
-///
-/// ```php
-/// $std = new stdClass;
-/// $wr = WeakReference::create($std);
-/// $wr2 = WeakReference::create($std);
-/// var_dump($wr === $wr2, $wr->get() === $std);
-/// unset($std);
-/// var_dump($wr->get(), $wr2->get());
+/// $o = new stdClass;
+/// $r = WeakReference::create($o);
+/// var_dump($r->get() === $o, WeakReference::create($o) === $r);
+/// unset($o);
+/// var_dump($r->get());
 /// ```
 /// ```expect
 /// bool(true)
 /// bool(true)
 /// NULL
-/// NULL
 /// ```
-///
-/// The reference is cleared when the object is freed, after its
-/// destructor ran and before its properties are released, so the
-/// destructor still reaches it through the reference and a property's
-/// own destructor no longer does.
-///
-/// ```php
-/// class D { public $wr; public $p; function __destruct() { echo "dtor: ", var_export($this->wr->get() === $this, true), "\n"; } }
-/// class P { public $wr; function __destruct() { echo "prop: ", var_export($this->wr->get(), true), "\n"; } }
-/// $d = new D; $d->wr = WeakReference::create($d);
-/// $d->p = new P; $d->p->wr = $d->wr;
-/// $d = null;
-/// echo "end\n";
-/// ```
-/// ```expect
-/// dtor: true
-/// prop: NULL
-/// end
-/// ```
-///
-/// ```php
-/// WeakReference::create(1);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: WeakReference::create(): Argument #1 ($object) must be of type object, int given in %s:2
-/// Stack trace:
-/// #0 %s(2): WeakReference::create(1)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn weakref_create(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 1)?;
-    let given = req.argument(1).unwrap_or_default();
-    let given = coerce_param(req, &given, &Type::Object, 1)?;
-    let Some(referent) = given.as_object().copied() else {
-        return Err(crate::api::raising::fatal(
+#[php_class(
+    final,
+    not_serializable,
+    dynamic_properties = forbidden,
+    payload = WeakRef,
+    handlers = WEAK_REFERENCE
+)]
+pub(crate) struct WeakReference;
+
+#[php_class]
+impl WeakReference {
+    /// `WeakReference::__construct()` (`Z/Zend/zend_weakrefs.c:301`):
+    /// `new WeakReference` is refused, the one way to make one being
+    /// `create`.
+    ///
+    /// ```php
+    /// new WeakReference;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Direct instantiation of WeakReference is not allowed, use WeakReference::create instead in %s:2
+    /// Stack trace:
+    /// #0 %s(2): WeakReference->__construct()
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    #[php(arity = manual)]
+    fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let _ = this;
+        Err(throw(
             req,
-            "InternalError: coerce_param held a value that is no object to `object`",
-        ));
-    };
-    let existing = req.weakrefs.row(referent.index()).and_then(|holders| {
-        holders.iter().find_map(|holder| match holder {
-            Holder::Reference(at) => Some(*at),
-            Holder::Map(_) => None,
-        })
-    });
-    if let Some(at) = existing
-        && let Some(reference) = stored(req, at)
-    {
-        req.addref(&reference.as_value());
-        return Ok(reference.as_value());
+            "Error",
+            "Direct instantiation of WeakReference is not allowed, use WeakReference::create instead",
+        ))
     }
-    let Some(class) = req.class_named(b"WeakReference") else {
-        return Err(throw(req, "Error", "Class \"WeakReference\" not found"));
-    };
-    let reference = req.new_object_with(
-        class,
-        WeakRef {
-            referent: Some(referent),
-        },
-    )?;
-    register(req, referent, Holder::Reference(reference.index()));
-    Ok(reference.as_value())
+
+    /// `WeakReference::create(object $object): WeakReference`
+    /// (`Z/Zend/zend_weakrefs.c:306`): the one reference the object has
+    /// already, `zend_weakref_find`, so two creates hand back one object;
+    /// otherwise a new one naming it, registered. `get()` answers the
+    /// object while it lives and `null` from the moment it is freed, and
+    /// the reference takes no owner of it.
+    ///
+    /// ```php
+    /// $std = new stdClass;
+    /// $wr = WeakReference::create($std);
+    /// $wr2 = WeakReference::create($std);
+    /// var_dump($wr === $wr2, $wr->get() === $std);
+    /// unset($std);
+    /// var_dump($wr->get(), $wr2->get());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// NULL
+    /// NULL
+    /// ```
+    ///
+    /// The reference is cleared when the object is freed, after its
+    /// destructor ran and before its properties are released, so the
+    /// destructor still reaches it through the reference and a property's
+    /// own destructor no longer does.
+    ///
+    /// ```php
+    /// class D { public $wr; public $p; function __destruct() { echo "dtor: ", var_export($this->wr->get() === $this, true), "\n"; } }
+    /// class P { public $wr; function __destruct() { echo "prop: ", var_export($this->wr->get(), true), "\n"; } }
+    /// $d = new D; $d->wr = WeakReference::create($d);
+    /// $d->p = new P; $d->p->wr = $d->wr;
+    /// $d = null;
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// dtor: true
+    /// prop: NULL
+    /// end
+    /// ```
+    ///
+    /// ```php
+    /// WeakReference::create(1);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught TypeError: WeakReference::create(): Argument #1 ($object) must be of type object, int given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): WeakReference::create(1)
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    fn create(req: &mut Request, object: PhpObject) -> Result<Instance<WeakReference>, Thrown> {
+        let referent = object;
+        let existing = req.weakrefs.row(referent.index()).and_then(|holders| {
+            holders.iter().find_map(|holder| match holder {
+                Holder::Reference(at) => Some(*at),
+                Holder::Map(_) => None,
+            })
+        });
+        if let Some(at) = existing
+            && let Some(reference) = stored(req, at)
+        {
+            req.addref(&reference.as_value());
+            return Ok(Instance::of(reference));
+        }
+        let Some(class) = req.class_named(b"WeakReference") else {
+            return Err(throw(req, "Error", "Class \"WeakReference\" not found"));
+        };
+        let reference = req.new_object_with(
+            class,
+            WeakRef {
+                referent: Some(referent),
+            },
+        )?;
+        register(req, referent, Holder::Reference(reference.index()));
+        Ok(Instance::of(reference))
+    }
+
+    /// `WeakReference::get(): ?object`: the referent with one more owner,
+    /// or `null` once it is gone.
+    fn get(req: &mut Request, this: This<Self>) -> Option<PhpObject> {
+        let referent = this
+            .object()
+            .native::<WeakRef>(req)
+            .and_then(|payload| payload.referent)?;
+        req.addref(&referent.as_value());
+        Some(referent)
+    }
 }
 
-/// `WeakReference::get(): ?object`: the referent with one more owner,
-/// or `null` once it is gone.
-fn weakref_get(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 0)?;
-    let this = receiver(req)?;
-    let referent = this
-        .native::<WeakRef>(req)
-        .and_then(|payload| payload.referent);
-    let value = referent.map_or(Value::null(), |referent| referent.as_value());
-    req.addref(&value);
-    Ok(value)
-}
-
-/// `WeakMap::offsetGet($object): mixed`, the read dimension handler's
-/// answer under `BP_VAR_R`.
+/// `final class WeakMap implements ArrayAccess, Countable`,
+/// `@strict-properties` and `@not-serializable`, over the handler table
+/// and the [`ZendWeakMap`] payload `zend_register_weakref_ce` sets. The
+/// stub's `IteratorAggregate` and its `getIterator` are not declared
+/// yet. Its methods are its dimension handlers and `count_elements`,
+/// served by name:
 ///
 /// ```php
 /// $map = new WeakMap;
@@ -931,105 +761,117 @@ fn weakref_get(req: &mut Request) -> Result<Value, Thrown> {
 /// WeakMap key must be an object
 /// Cannot append to WeakMap
 /// ```
-fn weakmap_offset_get(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 1)?;
-    let this = receiver(req)?;
-    let key = req.argument(1).unwrap_or_default();
-    WEAK_MAP.read_dimension(req, this, Some(&key), DimensionRead::Warning)
-}
+#[php_class(
+    final,
+    not_serializable,
+    dynamic_properties = forbidden,
+    implements(ArrayAccess, Countable),
+    payload = ZendWeakMap,
+    handlers = WEAK_MAP
+)]
+pub(crate) struct WeakMap;
 
-/// `WeakMap::offsetSet($object, mixed $value): void`: the write
-/// dimension handler, the value one more owner the map holds. An entry
-/// goes with its key: the object's free removes it and releases the
-/// value there, before anything after the `unset` runs.
-///
-/// ```php
-/// class V { function __destruct() { echo "value freed\n"; } }
-/// $map = new WeakMap;
-/// $k = new stdClass;
-/// $map[$k] = new V;
-/// var_dump(count($map));
-/// unset($k);
-/// echo "after unset\n";
-/// var_dump(count($map), $map);
-/// ```
-/// ```expect
-/// int(1)
-/// value freed
-/// after unset
-/// int(0)
-/// object(WeakMap)#1 (0) {
-/// }
-/// ```
-fn weakmap_offset_set(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 2)?;
-    let this = receiver(req)?;
-    let key = req.argument(1).unwrap_or_default();
-    let value = req.argument(2).unwrap_or_default().deref();
-    req.addref(&value);
-    WEAK_MAP.write_dimension(req, this, Some(&key), value)?;
-    Ok(Value::null())
-}
+#[php_class]
+impl WeakMap {
+    /// `WeakMap::offsetGet($object): mixed`, the read dimension handler's
+    /// answer under `BP_VAR_R`.
+    fn offsetGet(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<Value>,
+    ) -> Result<Value, Thrown> {
+        WEAK_MAP.read_dimension(req, this.object(), Some(&object.0), DimensionRead::Warning)
+    }
 
-/// `WeakMap::offsetExists($object): bool`: the has dimension handler
-/// without `empty()`'s test.
-///
-/// ```php
-/// $map = new WeakMap;
-/// $a = new stdClass; $b = new stdClass;
-/// $map[$a] = 'a'; $map[$b] = ['b'];
-/// var_dump($map);
-/// $c = clone $map;
-/// unset($a);
-/// var_dump(count($map), count($c));
-/// ```
-/// ```expect
-/// object(WeakMap)#1 (2) {
-///   [0]=>
-///   array(2) {
-///     ["key"]=>
-///     object(stdClass)#2 (0) {
-///     }
-///     ["value"]=>
-///     string(1) "a"
-///   }
-///   [1]=>
-///   array(2) {
-///     ["key"]=>
-///     object(stdClass)#3 (0) {
-///     }
-///     ["value"]=>
-///     array(1) {
-///       [0]=>
-///       string(1) "b"
-///     }
-///   }
-/// }
-/// int(1)
-/// int(1)
-/// ```
-fn weakmap_offset_exists(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 1)?;
-    let this = receiver(req)?;
-    let key = req.argument(1).unwrap_or_default();
-    WEAK_MAP
-        .has_dimension(req, this, &key, false)
-        .map(Value::bool)
-}
+    /// `WeakMap::offsetSet($object, mixed $value): void`: the write
+    /// dimension handler, the value one more owner the map holds. An entry
+    /// goes with its key: the object's free removes it and releases the
+    /// value there, before anything after the `unset` runs.
+    ///
+    /// ```php
+    /// class V { function __destruct() { echo "value freed\n"; } }
+    /// $map = new WeakMap;
+    /// $k = new stdClass;
+    /// $map[$k] = new V;
+    /// var_dump(count($map));
+    /// unset($k);
+    /// echo "after unset\n";
+    /// var_dump(count($map), $map);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// value freed
+    /// after unset
+    /// int(0)
+    /// object(WeakMap)#1 (0) {
+    /// }
+    /// ```
+    fn offsetSet(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<Value>,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        req.addref(&value);
+        WEAK_MAP.write_dimension(req, this.object(), Some(&object.0), value)
+    }
 
-/// `WeakMap::offsetUnset($object): void`: the unset dimension handler.
-fn weakmap_offset_unset(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 1)?;
-    let this = receiver(req)?;
-    let key = req.argument(1).unwrap_or_default();
-    WEAK_MAP.unset_dimension(req, this, &key)?;
-    Ok(Value::null())
-}
+    /// `WeakMap::offsetExists($object): bool`: the has dimension handler
+    /// without `empty()`'s test.
+    ///
+    /// ```php
+    /// $map = new WeakMap;
+    /// $a = new stdClass; $b = new stdClass;
+    /// $map[$a] = 'a'; $map[$b] = ['b'];
+    /// var_dump($map);
+    /// $c = clone $map;
+    /// unset($a);
+    /// var_dump(count($map), count($c));
+    /// ```
+    /// ```expect
+    /// object(WeakMap)#1 (2) {
+    ///   [0]=>
+    ///   array(2) {
+    ///     ["key"]=>
+    ///     object(stdClass)#2 (0) {
+    ///     }
+    ///     ["value"]=>
+    ///     string(1) "a"
+    ///   }
+    ///   [1]=>
+    ///   array(2) {
+    ///     ["key"]=>
+    ///     object(stdClass)#3 (0) {
+    ///     }
+    ///     ["value"]=>
+    ///     array(1) {
+    ///       [0]=>
+    ///       string(1) "b"
+    ///     }
+    ///   }
+    /// }
+    /// int(1)
+    /// int(1)
+    /// ```
+    fn offsetExists(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<Value>,
+    ) -> Result<bool, Thrown> {
+        WEAK_MAP.has_dimension(req, this.object(), &object.0, false)
+    }
 
-/// `WeakMap::count(): int`: `count_elements`.
-fn weakmap_count(req: &mut Request) -> Result<Value, Thrown> {
-    exactly(req, 0)?;
-    let this = receiver(req)?;
-    let count = WEAK_MAP.count_elements(req, this)?.unwrap_or(0);
-    Ok(Value::int(count))
+    /// `WeakMap::offsetUnset($object): void`: the unset dimension handler.
+    fn offsetUnset(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<Value>,
+    ) -> Result<(), Thrown> {
+        WEAK_MAP.unset_dimension(req, this.object(), &object.0)
+    }
+
+    /// `WeakMap::count(): int`: `count_elements`.
+    fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        Ok(WEAK_MAP.count_elements(req, this.object())?.unwrap_or(0))
+    }
 }

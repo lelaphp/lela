@@ -495,9 +495,10 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
         .class::<stdClass>()
         .class::<UnitEnum>()
         .class::<BackedEnum>()
+        .class::<crate::weakrefs::WeakReference>()
+        .class::<crate::weakrefs::WeakMap>()
         .build("Core")
         .classes;
-    classes.extend(crate::weakrefs::weakref_classes());
     // `zend_register_attribute_ce` after `zend_register_weakref_ce`.
     classes.extend(crate::attributes::classes());
     classes
