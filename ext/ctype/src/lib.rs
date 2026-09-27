@@ -3,8 +3,9 @@
 //! state on the value (ADR-0005). The phpt subset is
 //! `php-src/ext/ctype/tests`, through `xtask phpt --subset`.
 //!
-//! Eleven natives, `ctype_impl` in `ctype.c` at the tag over one of
-//! `<ctype.h>`'s classes each: a string is true when every byte is in
+//! Eleven natives, each declared by `#[php_function]` from its Rust
+//! signature, `mixed $text` in and `bool` out, and each `ctype_impl` in
+//! `ctype.c` at the tag over one of `<ctype.h>`'s classes: a string is true when every byte is in
 //! the class and false when it is empty; anything else is the 8.1
 //! deprecation and `ctype_fallback`, which reads an `int` as one byte
 //! where it fits and answers by the class's `allow_digits` and
@@ -25,9 +26,9 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::attr::php_function;
 use php_ext::coerce::type_name;
-use php_ext::decl::{FunctionDecl, Name, Parameter, ParameterDefault, Type};
-use php_ext::raising::{Level, Thrown, docref, too_few_arguments};
+use php_ext::raising::{Level, docref};
 use php_ext::request::Request;
 use php_ext::values::{Value, ValueRef};
 
@@ -48,17 +49,17 @@ struct State {}
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .functions(vec![
-            (declared(b"ctype_alnum"), ctype_alnum as Entry),
-            (declared(b"ctype_alpha"), ctype_alpha as Entry),
-            (declared(b"ctype_cntrl"), ctype_cntrl as Entry),
-            (declared(b"ctype_digit"), ctype_digit as Entry),
-            (declared(b"ctype_lower"), ctype_lower as Entry),
-            (declared(b"ctype_graph"), ctype_graph as Entry),
-            (declared(b"ctype_print"), ctype_print as Entry),
-            (declared(b"ctype_punct"), ctype_punct as Entry),
-            (declared(b"ctype_space"), ctype_space as Entry),
-            (declared(b"ctype_upper"), ctype_upper as Entry),
-            (declared(b"ctype_xdigit"), ctype_xdigit as Entry),
+            ctype_alnum::declared(),
+            ctype_alpha::declared(),
+            ctype_cntrl::declared(),
+            ctype_digit::declared(),
+            ctype_lower::declared(),
+            ctype_graph::declared(),
+            ctype_print::declared(),
+            ctype_punct::declared(),
+            ctype_space::declared(),
+            ctype_upper::declared(),
+            ctype_xdigit::declared(),
         ])
         .request_state::<State>()
         .info(ctype_info)
@@ -79,36 +80,6 @@ pub fn extension() -> Extension {
 /// ```
 fn ctype_info(req: &mut Request) {
     req.info_table(&[&["ctype functions", "enabled"]]);
-}
-
-/// A native's entry, the shape `ExtensionBuilder::functions` takes.
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
-
-/// `function ctype_<name>(mixed $text): bool`, as `ctype.stub.php`
-/// declares each of the eleven.
-fn declared(name: &[u8]) -> FunctionDecl {
-    FunctionDecl {
-        name: Name(name.into()),
-        parameters: vec![Parameter {
-            name: Name(b"text".as_slice().into()),
-            ty: Some(Type::Mixed),
-            by_ref: false,
-            prefer_ref: false,
-            promoted: false,
-            variadic: false,
-            default: ParameterDefault::None,
-            attributes: Vec::new(),
-        }],
-        return_type: Some(Type::Bool),
-        returns_by_ref: false,
-        is_generator: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
-    }
 }
 
 /// One of `<ctype.h>`'s classes, as libc answers for each byte under
@@ -149,8 +120,8 @@ fn class_of(class: Class, byte: u8) -> bool {
     ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&byte))
 }
 
-/// `ctype_impl(iswhat, allow_digits, allow_minus)`: `Z_PARAM_ZVAL` and
-/// the string walk, then `ctype_fallback` for everything else, which
+/// `ctype_impl(iswhat, allow_digits, allow_minus)` over the argument the
+/// entry held (`Z_PARAM_ZVAL`, the arity the attribute's): the string walk, then `ctype_fallback` for everything else, which
 /// raises the deprecation naming the argument's type as
 /// `zend_zval_type_name` does, the class for an object, through
 /// `php_error_docref` before it answers: an `int` from 0 to 255 is the
@@ -159,18 +130,14 @@ fn class_of(class: Class, byte: u8) -> bool {
 /// false.
 fn ctype(
     req: &mut Request,
+    text: &Value,
     class: Class,
     allow_digits: bool,
     allow_minus: bool,
-) -> Result<Value, Thrown> {
-    let Some(given) = req.argument(1) else {
-        return Err(too_few_arguments(req, 1, 0));
-    };
-    let given = given.deref();
+) -> bool {
+    let given = text.deref();
     if let Some(bytes) = given.as_str_bytes() {
-        return Ok(Value::bool(
-            !bytes.is_empty() && bytes.iter().all(|&b| class_of(class, b)),
-        ));
+        return !bytes.is_empty() && bytes.iter().all(|&b| class_of(class, b));
     }
     docref(
         req,
@@ -180,14 +147,14 @@ fn ctype(
             type_name(req, &given)
         ),
     );
-    Ok(Value::bool(match given.as_ref() {
+    match given.as_ref() {
         ValueRef::Int(n) => match u8::try_from(n).or_else(|_| u8::try_from(n + 256)) {
             Ok(byte) if (-128..=255).contains(&n) => class_of(class, byte),
             _ if n >= 0 => allow_digits,
             _ => allow_minus,
         },
         _ => false,
-    }))
+    }
 }
 
 /// `ctype_alnum(mixed $text): bool`, `isalnum` with digits allowed
@@ -210,8 +177,9 @@ fn ctype(
 /// bool(false)
 /// bool(false)
 /// ```
-fn ctype_alnum(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Alnum, true, false)
+#[php_function]
+fn ctype_alnum(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Alnum, true, false)
 }
 
 /// `ctype_alpha(mixed $text): bool`, `isalpha`. The fallback reads an
@@ -270,8 +238,9 @@ fn ctype_alnum(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn ctype_alpha(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Alpha, false, false)
+#[php_function]
+fn ctype_alpha(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Alpha, false, false)
 }
 
 /// `ctype_cntrl(mixed $text): bool`, `iscntrl`.
@@ -289,8 +258,9 @@ fn ctype_alpha(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn ctype_cntrl(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Cntrl, false, false)
+#[php_function]
+fn ctype_cntrl(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Cntrl, false, false)
 }
 
 /// `ctype_digit(mixed $text): bool`, `isdigit` with digits allowed past
@@ -316,8 +286,9 @@ fn ctype_cntrl(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn ctype_digit(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Digit, true, false)
+#[php_function]
+fn ctype_digit(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Digit, true, false)
 }
 
 /// `ctype_lower(mixed $text): bool`, `islower`.
@@ -332,8 +303,9 @@ fn ctype_digit(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn ctype_lower(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Lower, false, false)
+#[php_function]
+fn ctype_lower(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Lower, false, false)
 }
 
 /// `ctype_graph(mixed $text): bool`, `isgraph` with both digits and a
@@ -355,8 +327,9 @@ fn ctype_lower(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn ctype_graph(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Graph, true, true)
+#[php_function]
+fn ctype_graph(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Graph, true, true)
 }
 
 /// `ctype_print(mixed $text): bool`, `isprint` with both digits and a
@@ -378,8 +351,9 @@ fn ctype_graph(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn ctype_print(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Print, true, true)
+#[php_function]
+fn ctype_print(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Print, true, true)
 }
 
 /// `ctype_punct(mixed $text): bool`, `ispunct`.
@@ -394,8 +368,9 @@ fn ctype_print(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn ctype_punct(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Punct, false, false)
+#[php_function]
+fn ctype_punct(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Punct, false, false)
 }
 
 /// `ctype_space(mixed $text): bool`, `isspace`.
@@ -410,8 +385,9 @@ fn ctype_punct(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn ctype_space(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Space, false, false)
+#[php_function]
+fn ctype_space(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Space, false, false)
 }
 
 /// `ctype_upper(mixed $text): bool`, `isupper`.
@@ -426,8 +402,9 @@ fn ctype_space(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn ctype_upper(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Upper, false, false)
+#[php_function]
+fn ctype_upper(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Upper, false, false)
 }
 
 /// `ctype_xdigit(mixed $text): bool`, `isxdigit` with digits allowed
@@ -449,6 +426,7 @@ fn ctype_upper(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn ctype_xdigit(req: &mut Request) -> Result<Value, Thrown> {
-    ctype(req, Class::Xdigit, true, false)
+#[php_function]
+fn ctype_xdigit(req: &mut Request, text: Value) -> bool {
+    ctype(req, &text, Class::Xdigit, true, false)
 }
