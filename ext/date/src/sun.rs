@@ -1,20 +1,22 @@
 //! `date_sunrise`, `date_sunset` and `date_sun_info` over timelib's
 //! `astro.c`.
 
+use php_ext::abi::{OrFalse, Passed, Union};
+use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, Value};
+use php_ext::values::{PhpArray, PhpString, Value};
 
-use crate::args::{
-    count_between, double, long, nullable_double, optional_long, set_str, string_value,
+use crate::constants::{
+    SUNFUNCS_RET_DOUBLE as RET_DOUBLE, SUNFUNCS_RET_STRING as RET_STRING,
+    SUNFUNCS_RET_TIMESTAMP as RET_TIMESTAMP,
 };
 use crate::ffi::Time;
+use crate::obj::set_str;
 use crate::zone::default_zone;
 
-/// `SUNFUNCS_RET_*`.
-const RET_TIMESTAMP: i64 = 0;
-const RET_STRING: i64 = 1;
-const RET_DOUBLE: i64 = 2;
+/// `string|int|float|false`, what `date_sunrise` and `date_sunset` answer.
+type SunTime = Union<PhpString, Union<i64, OrFalse<f64>>>;
 
 /// `INI_FLT(name)`: `zend_strtod` of the entry, the longest prefix that
 /// reads as a number and zero where none does.
@@ -33,15 +35,37 @@ fn ini_float(req: &Request, name: &[u8]) -> f64 {
     if end == 0 { 0.0 } else { best }
 }
 
+/// `$returnFormat`, `SUNFUNCS_RET_STRING` where the call gave none: the
+/// C default, so an omitted argument reads no deprecated constant.
+fn format_or_string(given: Passed<i64>) -> i64 {
+    match given {
+        Passed::Given(format) => format,
+        Passed::Omitted => RET_STRING,
+    }
+}
+
+/// The arguments `date_sunrise` and `date_sunset` share, as the stub
+/// names them: the time, the format, then the four `?float`s.
+#[derive(Clone, Copy)]
+struct SunArguments {
+    time: i64,
+    format: i64,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    zenith: Option<f64>,
+    gmt_offset: Option<f64>,
+}
+
 /// `php_do_date_sunrise_sunset(INTERNAL_FUNCTION_PARAM_PASSTHRU, calc_sunset)`.
-fn sunrise_sunset(req: &mut Request, sunset: bool) -> Result<Value, Thrown> {
-    count_between(req, 1, 6)?;
-    let time = long(req, 1)?;
-    let format = optional_long(req, 2, RET_STRING)?;
-    let latitude = nullable_double(req, 3)?;
-    let longitude = nullable_double(req, 4)?;
-    let zenith = nullable_double(req, 5)?;
-    let gmt_offset = nullable_double(req, 6)?;
+fn sunrise_sunset(req: &mut Request, sunset: bool, given: SunArguments) -> Result<SunTime, Thrown> {
+    let SunArguments {
+        time,
+        format,
+        latitude,
+        longitude,
+        zenith,
+        gmt_offset,
+    } = given;
     let latitude = latitude.unwrap_or_else(|| ini_float(req, b"date.default_latitude"));
     let longitude = longitude.unwrap_or_else(|| ini_float(req, b"date.default_longitude"));
     let zenith = zenith.unwrap_or_else(|| {
@@ -60,7 +84,7 @@ fn sunrise_sunset(req: &mut Request, sunset: bool) -> Result<Value, Thrown> {
     }
     let altitude = 90.0 - zenith;
     if !latitude.is_finite() || !longitude.is_finite() {
-        return Ok(Value::bool(false));
+        return Ok(Union::B(Union::B(OrFalse::False)));
     }
     let zone = default_zone(req)?;
     let mut t = Time::new();
@@ -71,26 +95,26 @@ fn sunrise_sunset(req: &mut Request, sunset: bool) -> Result<Value, Thrown> {
     t.unixtime2local(time);
     let (rs, h_rise, h_set, rise, set, _) = t.rise_set(longitude, latitude, altitude, true);
     if rs != 0 {
-        return Ok(Value::bool(false));
+        return Ok(Union::B(Union::B(OrFalse::False)));
     }
     if format == RET_TIMESTAMP {
-        return Ok(Value::int(if sunset { set } else { rise }));
+        return Ok(Union::B(Union::A(if sunset { set } else { rise })));
     }
     let mut n = if sunset { h_set } else { h_rise } + gmt_offset;
     if !(0.0..=24.0).contains(&n) {
         n -= (n / 24.0).floor() * 24.0;
     }
     if !(0.0..=24.0).contains(&n) {
-        return Ok(Value::bool(false));
+        return Ok(Union::B(Union::B(OrFalse::False)));
     }
     if format == RET_STRING {
         #[allow(clippy::cast_possible_truncation)]
         let hours = n as i32;
         #[allow(clippy::cast_possible_truncation)]
         let minutes = (60.0 * (n - f64::from(hours))) as i32;
-        return string_value(req, format!("{hours:02}:{minutes:02}").as_bytes());
+        return PhpString::new(req, format!("{hours:02}:{minutes:02}").as_bytes()).map(Union::A);
     }
-    Ok(Value::float(n))
+    Ok(Union::B(Union::B(OrFalse::Value(n))))
 }
 
 /// `date_sunrise(int $timestamp, int $returnFormat = SUNFUNCS_RET_STRING,
@@ -116,8 +140,25 @@ fn sunrise_sunset(req: &mut Request, sunset: bool) -> Result<Value, Thrown> {
 /// bool(false)
 /// date_sunrise(): Argument #2 ($returnFormat) must be one of SUNFUNCS_RET_TIMESTAMP, SUNFUNCS_RET_STRING, or SUNFUNCS_RET_DOUBLE
 /// ```
-pub(crate) fn date_sunrise(req: &mut Request) -> Result<Value, Thrown> {
-    sunrise_sunset(req, false)
+#[php_function(deprecated(since = "8.1", message = "use date_sun_info() instead"))]
+fn date_sunrise(
+    req: &mut Request,
+    timestamp: i64,
+    #[php(default = SUNFUNCS_RET_STRING)] returnFormat: Passed<i64>,
+    #[php(default = null)] latitude: Option<f64>,
+    #[php(default = null)] longitude: Option<f64>,
+    #[php(default = null)] zenith: Option<f64>,
+    #[php(default = null)] utcOffset: Option<f64>,
+) -> Result<SunTime, Thrown> {
+    let given = SunArguments {
+        time: timestamp,
+        format: format_or_string(returnFormat),
+        latitude,
+        longitude,
+        zenith,
+        gmt_offset: utcOffset,
+    };
+    sunrise_sunset(req, false, given)
 }
 
 /// `date_sunset(...)`, `date_sunrise`'s twin, deprecated since 8.1.
@@ -131,8 +172,25 @@ pub(crate) fn date_sunrise(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1699998043)
 /// string(5) "09:42"
 /// ```
-pub(crate) fn date_sunset(req: &mut Request) -> Result<Value, Thrown> {
-    sunrise_sunset(req, true)
+#[php_function(deprecated(since = "8.1", message = "use date_sun_info() instead"))]
+fn date_sunset(
+    req: &mut Request,
+    timestamp: i64,
+    #[php(default = SUNFUNCS_RET_STRING)] returnFormat: Passed<i64>,
+    #[php(default = null)] latitude: Option<f64>,
+    #[php(default = null)] longitude: Option<f64>,
+    #[php(default = null)] zenith: Option<f64>,
+    #[php(default = null)] utcOffset: Option<f64>,
+) -> Result<SunTime, Thrown> {
+    let given = SunArguments {
+        time: timestamp,
+        format: format_or_string(returnFormat),
+        latitude,
+        longitude,
+        zenith,
+        gmt_offset: utcOffset,
+    };
+    sunrise_sunset(req, true, given)
 }
 
 /// One pair of `date_sun_info`'s rows: `false` for a body always below
@@ -205,11 +263,14 @@ fn add_pair(
 /// }
 /// date_sun_info(): Argument #2 ($latitude) must be finite
 /// ```
-pub(crate) fn date_sun_info(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 3, 3)?;
-    let time = long(req, 1)?;
-    let latitude = double(req, 2)?;
-    let longitude = double(req, 3)?;
+#[php_function]
+fn date_sun_info(
+    req: &mut Request,
+    timestamp: i64,
+    latitude: f64,
+    longitude: f64,
+) -> Result<PhpArray, Thrown> {
+    let time = timestamp;
     if !latitude.is_finite() {
         return Err(arg_value_error(req, 2, "be finite"));
     }
@@ -240,5 +301,5 @@ pub(crate) fn date_sun_info(req: &mut Request) -> Result<Value, Thrown> {
         let (rs, _, _, rise, set, _) = t.rise_set(longitude, latitude, altitude, false);
         add_pair(req, &mut array, rs, (begin, end), (rise, set))?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }

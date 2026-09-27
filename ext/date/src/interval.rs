@@ -2,18 +2,19 @@
 //! `timelib_strtointerval` reads, the relative part of a parse, the
 //! format letters of `date_interval_format`, and the serialised form.
 
+use php_ext::abi::{Instance, OrFalse, This};
+use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::coerce::{to_double, to_long, to_string};
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::args::{array, count_between, object_of, string, string_value};
 use crate::datetime::restore_properties;
 use crate::ffi::{self, RelTime, Time, UNSET};
 use crate::obj::{
-    CIVIL, IntervalObj, WALL, class_id, interval_fields, interval_of, new_interval, rows_array,
-    std_rows, this,
+    CIVIL, INTERVAL, IntervalObj, WALL, class_id, interval_fields, interval_of, new_interval,
+    rows_array, std_rows,
 };
 
 /// `date_interval_initialize(&rt, format, len)`: the period of an ISO
@@ -42,55 +43,6 @@ fn initialize(req: &mut Request, text: &[u8]) -> Result<RelTime, Thrown> {
         "DateMalformedIntervalStringException",
         &format!("Failed to parse interval ({shown})"),
     ))
-}
-
-/// `DateInterval::__construct(string $duration)`.
-///
-/// ```php
-/// var_dump(new DateInterval('P1Y2M3DT4H5M6S'), (new DateInterval('P2W'))->d, (new DateInterval('PT36H'))->h);
-/// var_dump((new DateInterval('2008-05-11T15:30:00Z/2008-06-12T16:31:01Z'))->format('%m %d %h %i %s %a'));
-/// try { new DateInterval('P1Q'); } catch (DateMalformedIntervalStringException $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// try { new DateInterval('2008-05-11T15:30:00Z'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(DateInterval)#1 (10) {
-///   ["y"]=>
-///   int(1)
-///   ["m"]=>
-///   int(2)
-///   ["d"]=>
-///   int(3)
-///   ["h"]=>
-///   int(4)
-///   ["i"]=>
-///   int(5)
-///   ["s"]=>
-///   int(6)
-///   ["f"]=>
-///   float(0)
-///   ["invert"]=>
-///   int(0)
-///   ["days"]=>
-///   bool(false)
-///   ["from_string"]=>
-///   bool(false)
-/// }
-/// int(14)
-/// int(36)
-/// string(12) "1 1 1 1 1 32"
-/// DateMalformedIntervalStringException: Unknown or bad format (P1Q)
-/// Failed to parse interval (2008-05-11T15:30:00Z)
-/// ```
-pub(crate) fn construct(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let text = string(req, 1)?.as_bytes().to_vec();
-    let diff = initialize(req, &text)?;
-    let object = this(req)?;
-    if let Some(payload) = object.native_mut::<IntervalObj>(req) {
-        payload.diff = Some(diff);
-        payload.civil_or_wall = WALL;
-    }
-    Ok(Value::null())
 }
 
 /// The relative part of a parse of `text`, or its first error.
@@ -136,18 +88,21 @@ fn from_date_string(text: &[u8]) -> Result<(RelTime, bool), (i32, char, String)>
 /// bool(false)
 /// bool(false)
 /// ```
-pub(crate) fn date_interval_create_from_date_string(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let text = string(req, 1)?.as_bytes().to_vec();
-    let shown = String::from_utf8_lossy(&text).into_owned();
-    match from_date_string(&text) {
+#[php_function]
+fn date_interval_create_from_date_string(
+    req: &mut Request,
+    datetime: PhpString,
+) -> Result<OrFalse<Instance<DateInterval>>, Thrown> {
+    let text = datetime.as_bytes();
+    let shown = String::from_utf8_lossy(text).into_owned();
+    match from_date_string(text) {
         Err((at, c, message)) => {
             docref(
                 req,
                 Level::Warning,
                 &format!("Unknown or bad format ({shown}) at position {at} ({c}): {message}"),
             );
-            Ok(Value::bool(false))
+            Ok(OrFalse::False)
         }
         Ok((_, true)) => {
             docref(
@@ -155,44 +110,9 @@ pub(crate) fn date_interval_create_from_date_string(req: &mut Request) -> Result
                 Level::Warning,
                 &format!("String '{shown}' contains non-relative elements"),
             );
-            Ok(Value::bool(false))
+            Ok(OrFalse::False)
         }
-        Ok((rel, false)) => new_interval(req, rel, CIVIL, Some(text)),
-    }
-}
-
-/// `DateInterval::createFromDateString(string $datetime): DateInterval`:
-/// the same, thrown as `DateMalformedIntervalStringException`.
-///
-/// ```php
-/// var_dump(DateInterval::createFromDateString('last day of next month'));
-/// try { DateInterval::createFromDateString('tomorrow noon'); } catch (DateMalformedIntervalStringException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(DateInterval)#1 (2) {
-///   ["from_string"]=>
-///   bool(true)
-///   ["date_string"]=>
-///   string(22) "last day of next month"
-/// }
-/// String 'tomorrow noon' contains non-relative elements
-/// ```
-pub(crate) fn create_from_date_string(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let text = string(req, 1)?.as_bytes().to_vec();
-    let shown = String::from_utf8_lossy(&text).into_owned();
-    match from_date_string(&text) {
-        Err((at, c, message)) => Err(throw(
-            req,
-            "DateMalformedIntervalStringException",
-            &format!("Unknown or bad format ({shown}) at position {at} ({c}): {message}"),
-        )),
-        Ok((_, true)) => Err(throw(
-            req,
-            "DateMalformedIntervalStringException",
-            &format!("String '{shown}' contains non-relative elements"),
-        )),
-        Ok((rel, false)) => new_interval(req, rel, CIVIL, Some(text)),
+        Ok((rel, false)) => new_interval(req, rel, CIVIL, Some(text.to_vec())).map(OrFalse::Value),
     }
 }
 
@@ -249,6 +169,12 @@ fn interval_format(format: &[u8], t: &RelTime) -> Vec<u8> {
     out
 }
 
+/// `date_interval_format` and `DateInterval::format`.
+fn format_of(req: &mut Request, object: PhpObject, format: PhpString) -> Result<PhpString, Thrown> {
+    let (diff, _) = interval_of(req, object)?;
+    PhpString::new(req, &interval_format(format.as_bytes(), &diff))
+}
+
 /// `date_interval_format(DateInterval $object, string $format): string`,
 /// and `DateInterval::format`.
 ///
@@ -264,18 +190,13 @@ fn interval_format(format: &[u8], t: &RelTime) -> Vec<u8> {
 /// string(23) "-6 days 11 hours 750000"
 /// string(2) "-6"
 /// ```
-pub(crate) fn date_interval_format(req: &mut Request) -> Result<Value, Thrown> {
-    let method = req.this().is_some();
-    let shift = usize::from(!method);
-    count_between(req, 1 + shift, 1 + shift)?;
-    let (object, at) = if method {
-        (this(req)?, 1)
-    } else {
-        (object_of(req, 1, "DateInterval")?, 2)
-    };
-    let format = string(req, at)?.as_bytes().to_vec();
-    let (diff, _) = interval_of(req, object)?;
-    string_value(req, &interval_format(&format, &diff))
+#[php_function]
+fn date_interval_format(
+    req: &mut Request,
+    object: Instance<DateInterval>,
+    format: PhpString,
+) -> Result<PhpString, Thrown> {
+    format_of(req, object.object(), format)
 }
 
 /// A hash row by name, dereferenced.
@@ -420,113 +341,6 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
     Ok(())
 }
 
-/// `DateInterval::__set_state(array $array): DateInterval`.
-///
-/// ```php
-/// var_dump(DateInterval::__set_state(['y' => 1, 'm' => '2', 'd' => 3.9, 'days' => false, 'f' => 0.5]));
-/// var_export(new DateInterval('P1D'));
-/// echo "\n";
-/// var_export(DateInterval::createFromDateString('+1 day'));
-/// ```
-/// ```expect
-/// object(DateInterval)#1 (10) {
-///   ["y"]=>
-///   int(1)
-///   ["m"]=>
-///   int(2)
-///   ["d"]=>
-///   int(3)
-///   ["h"]=>
-///   int(-1)
-///   ["i"]=>
-///   int(-1)
-///   ["s"]=>
-///   int(-1)
-///   ["f"]=>
-///   float(0.5)
-///   ["invert"]=>
-///   int(0)
-///   ["days"]=>
-///   bool(false)
-///   ["from_string"]=>
-///   bool(false)
-/// }
-/// \DateInterval::__set_state(array(
-///    'y' => 0,
-///    'm' => 0,
-///    'd' => 1,
-///    'h' => 0,
-///    'i' => 0,
-///    's' => 0,
-///    'f' => 0.0,
-///    'invert' => 0,
-///    'days' => false,
-///    'from_string' => false,
-/// ))
-/// \DateInterval::__set_state(array(
-///    'from_string' => true,
-///    'date_string' => '+1 day',
-/// ))
-/// ```
-pub(crate) fn set_state(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let hash = array(req, 1)?;
-    let class = class_id(req, "DateInterval")?;
-    let object = new_object(req, class)?;
-    if let Err(thrown) = from_hash(req, object, hash) {
-        req.release(object.as_value());
-        return Err(thrown);
-    }
-    Ok(object.as_value())
-}
-
-/// `DateInterval::__serialize(): array`.
-///
-/// ```php
-/// var_dump((new DateInterval('PT1M'))->__serialize(), DateInterval::createFromDateString('next monday')->__serialize());
-/// ```
-/// ```expect
-/// array(10) {
-///   ["y"]=>
-///   int(0)
-///   ["m"]=>
-///   int(0)
-///   ["d"]=>
-///   int(0)
-///   ["h"]=>
-///   int(0)
-///   ["i"]=>
-///   int(1)
-///   ["s"]=>
-///   int(0)
-///   ["f"]=>
-///   float(0)
-///   ["invert"]=>
-///   int(0)
-///   ["days"]=>
-///   bool(false)
-///   ["from_string"]=>
-///   bool(false)
-/// }
-/// array(2) {
-///   ["from_string"]=>
-///   bool(true)
-///   ["date_string"]=>
-///   string(11) "next monday"
-/// }
-/// ```
-pub(crate) fn serialize(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    let (diff, _) = interval_of(req, object)?;
-    let text = object
-        .native::<IntervalObj>(req)
-        .and_then(|i| i.date_string.clone());
-    let fields = interval_fields(req, &diff, text.as_deref())?;
-    let own = std_rows(req, object)?;
-    Ok(Value::array(rows_array(req, &own, fields, true)?))
-}
-
 /// The names `restore_custom_dateinterval_properties` passes over.
 const INTERNAL: [&[u8]; 11] = [
     b"date_string",
@@ -542,75 +356,288 @@ const INTERNAL: [&[u8]; 11] = [
     b"days",
 ];
 
-/// `DateInterval::__unserialize(array $data): void`.
+/// `class DateInterval`, over [`IntervalObj`] and the table that answers
+/// its fields as properties.
 ///
 /// ```php
-/// $i = new DateInterval('P1D');
-/// $i->__unserialize(['y' => 5, 'invert' => 1, 'days' => 10, 'extra' => 'x']);
-/// var_dump($i);
+/// var_dump((new DateInterval('P1Y2M3DT4H'))->format('%y-%m-%d %h %R %%'));
 /// ```
 /// ```expect
-/// Deprecated: Creation of dynamic property DateInterval::$extra is deprecated in %s on line 3
-/// object(DateInterval)#1 (11) {
-///   ["extra"]=>
-///   string(1) "x"
-///   ["y"]=>
-///   int(5)
-///   ["m"]=>
-///   int(-1)
-///   ["d"]=>
-///   int(-1)
-///   ["h"]=>
-///   int(-1)
-///   ["i"]=>
-///   int(-1)
-///   ["s"]=>
-///   int(-1)
-///   ["f"]=>
-///   float(0)
-///   ["invert"]=>
-///   int(1)
-///   ["days"]=>
-///   int(10)
-///   ["from_string"]=>
-///   bool(false)
-/// }
+/// string(11) "1-2-3 4 + %"
 /// ```
-pub(crate) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let hash = array(req, 1)?;
-    let object = this(req)?;
-    from_hash(req, object, hash)?;
-    restore_properties(req, object, hash, &INTERNAL)?;
-    Ok(Value::null())
-}
+#[php_class(payload = IntervalObj, handlers = INTERVAL)]
+pub(crate) struct DateInterval;
 
-/// `DateInterval::__wakeup(): void`, deprecated since 8.5.
-///
-/// ```php
-/// $i = new DateInterval('P1D');
-/// @$i->__wakeup();
-/// var_dump($i->d);
-/// ```
-/// ```expect
-/// int(1)
-/// ```
-pub(crate) fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    // `Z_OBJPROP_P`, which `date_object_get_properties_interval` fills
-    // with the fields before it answers.
-    let own = std_rows(req, object)?;
-    let state = object
-        .native::<IntervalObj>(req)
-        .and_then(|i| i.diff.map(|d| (d, i.date_string.clone())));
-    let fields = match state {
-        Some((diff, text)) => interval_fields(req, &diff, text.as_deref())?,
-        None => Vec::new(),
-    };
-    let hash = rows_array(req, &own, fields, false)?;
-    let done = from_hash(req, object, hash);
-    req.release(Value::array(hash));
-    done?;
-    Ok(Value::null())
+#[php_class]
+impl DateInterval {
+    /// `DateInterval::__construct(string $duration)`.
+    ///
+    /// ```php
+    /// var_dump(new DateInterval('P1Y2M3DT4H5M6S'), (new DateInterval('P2W'))->d, (new DateInterval('PT36H'))->h);
+    /// var_dump((new DateInterval('2008-05-11T15:30:00Z/2008-06-12T16:31:01Z'))->format('%m %d %h %i %s %a'));
+    /// try { new DateInterval('P1Q'); } catch (DateMalformedIntervalStringException $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// try { new DateInterval('2008-05-11T15:30:00Z'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(DateInterval)#1 (10) {
+    ///   ["y"]=>
+    ///   int(1)
+    ///   ["m"]=>
+    ///   int(2)
+    ///   ["d"]=>
+    ///   int(3)
+    ///   ["h"]=>
+    ///   int(4)
+    ///   ["i"]=>
+    ///   int(5)
+    ///   ["s"]=>
+    ///   int(6)
+    ///   ["f"]=>
+    ///   float(0)
+    ///   ["invert"]=>
+    ///   int(0)
+    ///   ["days"]=>
+    ///   bool(false)
+    ///   ["from_string"]=>
+    ///   bool(false)
+    /// }
+    /// int(14)
+    /// int(36)
+    /// string(12) "1 1 1 1 1 32"
+    /// DateMalformedIntervalStringException: Unknown or bad format (P1Q)
+    /// Failed to parse interval (2008-05-11T15:30:00Z)
+    /// ```
+    fn __construct(req: &mut Request, this: This<Self>, duration: PhpString) -> Result<(), Thrown> {
+        let diff = initialize(req, duration.as_bytes())?;
+        if let Some(payload) = this.object().native_mut::<IntervalObj>(req) {
+            payload.diff = Some(diff);
+            payload.civil_or_wall = WALL;
+        }
+        Ok(())
+    }
+
+    /// `DateInterval::createFromDateString(string $datetime): DateInterval`:
+    /// the same, thrown as `DateMalformedIntervalStringException`.
+    ///
+    /// ```php
+    /// var_dump(DateInterval::createFromDateString('last day of next month'));
+    /// try { DateInterval::createFromDateString('tomorrow noon'); } catch (DateMalformedIntervalStringException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(DateInterval)#1 (2) {
+    ///   ["from_string"]=>
+    ///   bool(true)
+    ///   ["date_string"]=>
+    ///   string(22) "last day of next month"
+    /// }
+    /// String 'tomorrow noon' contains non-relative elements
+    /// ```
+    #[php(tentative)]
+    fn createFromDateString(
+        req: &mut Request,
+        datetime: PhpString,
+    ) -> Result<Instance<DateInterval>, Thrown> {
+        let text = datetime.as_bytes();
+        let shown = String::from_utf8_lossy(text).into_owned();
+        match from_date_string(text) {
+            Err((at, c, message)) => Err(throw(
+                req,
+                "DateMalformedIntervalStringException",
+                &format!("Unknown or bad format ({shown}) at position {at} ({c}): {message}"),
+            )),
+            Ok((_, true)) => Err(throw(
+                req,
+                "DateMalformedIntervalStringException",
+                &format!("String '{shown}' contains non-relative elements"),
+            )),
+            Ok((rel, false)) => new_interval(req, rel, CIVIL, Some(text.to_vec())),
+        }
+    }
+
+    /// `DateInterval::format(string $format): string`,
+    /// `date_interval_format`'s body.
+    #[php(tentative)]
+    fn format(req: &mut Request, this: This<Self>, format: PhpString) -> Result<PhpString, Thrown> {
+        format_of(req, this.object(), format)
+    }
+
+    /// `DateInterval::__serialize(): array`.
+    ///
+    /// ```php
+    /// var_dump((new DateInterval('PT1M'))->__serialize(), DateInterval::createFromDateString('next monday')->__serialize());
+    /// ```
+    /// ```expect
+    /// array(10) {
+    ///   ["y"]=>
+    ///   int(0)
+    ///   ["m"]=>
+    ///   int(0)
+    ///   ["d"]=>
+    ///   int(0)
+    ///   ["h"]=>
+    ///   int(0)
+    ///   ["i"]=>
+    ///   int(1)
+    ///   ["s"]=>
+    ///   int(0)
+    ///   ["f"]=>
+    ///   float(0)
+    ///   ["invert"]=>
+    ///   int(0)
+    ///   ["days"]=>
+    ///   bool(false)
+    ///   ["from_string"]=>
+    ///   bool(false)
+    /// }
+    /// array(2) {
+    ///   ["from_string"]=>
+    ///   bool(true)
+    ///   ["date_string"]=>
+    ///   string(11) "next monday"
+    /// }
+    /// ```
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let object = this.object();
+        let (diff, _) = interval_of(req, object)?;
+        let text = object
+            .native::<IntervalObj>(req)
+            .and_then(|i| i.date_string.clone());
+        let fields = interval_fields(req, &diff, text.as_deref())?;
+        let own = std_rows(req, object)?;
+        rows_array(req, &own, fields, true)
+    }
+
+    /// `DateInterval::__unserialize(array $data): void`.
+    ///
+    /// ```php
+    /// $i = new DateInterval('P1D');
+    /// $i->__unserialize(['y' => 5, 'invert' => 1, 'days' => 10, 'extra' => 'x']);
+    /// var_dump($i);
+    /// ```
+    /// ```expect
+    /// Deprecated: Creation of dynamic property DateInterval::$extra is deprecated in %s on line 3
+    /// object(DateInterval)#1 (11) {
+    ///   ["extra"]=>
+    ///   string(1) "x"
+    ///   ["y"]=>
+    ///   int(5)
+    ///   ["m"]=>
+    ///   int(-1)
+    ///   ["d"]=>
+    ///   int(-1)
+    ///   ["h"]=>
+    ///   int(-1)
+    ///   ["i"]=>
+    ///   int(-1)
+    ///   ["s"]=>
+    ///   int(-1)
+    ///   ["f"]=>
+    ///   float(0)
+    ///   ["invert"]=>
+    ///   int(1)
+    ///   ["days"]=>
+    ///   int(10)
+    ///   ["from_string"]=>
+    ///   bool(false)
+    /// }
+    /// ```
+    fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
+        let object = this.object();
+        from_hash(req, object, data)?;
+        restore_properties(req, object, data, &INTERNAL)
+    }
+
+    /// `DateInterval::__wakeup(): void`, deprecated since 8.5.
+    ///
+    /// ```php
+    /// $i = new DateInterval('P1D');
+    /// @$i->__wakeup();
+    /// var_dump($i->d);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
+    #[php(
+        tentative,
+        deprecated(
+            since = "8.5",
+            message = "this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()"
+        )
+    )]
+    fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let object = this.object();
+        // `Z_OBJPROP_P`, which `date_object_get_properties_interval` fills
+        // with the fields before it answers.
+        let own = std_rows(req, object)?;
+        let state = object
+            .native::<IntervalObj>(req)
+            .and_then(|i| i.diff.map(|d| (d, i.date_string.clone())));
+        let fields = match state {
+            Some((diff, text)) => interval_fields(req, &diff, text.as_deref())?,
+            None => Vec::new(),
+        };
+        let hash = rows_array(req, &own, fields, false)?;
+        let done = from_hash(req, object, hash);
+        req.release(Value::array(hash));
+        done
+    }
+
+    /// `DateInterval::__set_state(array $array): DateInterval`.
+    ///
+    /// ```php
+    /// var_dump(DateInterval::__set_state(['y' => 1, 'm' => '2', 'd' => 3.9, 'days' => false, 'f' => 0.5]));
+    /// var_export(new DateInterval('P1D'));
+    /// echo "\n";
+    /// var_export(DateInterval::createFromDateString('+1 day'));
+    /// ```
+    /// ```expect
+    /// object(DateInterval)#1 (10) {
+    ///   ["y"]=>
+    ///   int(1)
+    ///   ["m"]=>
+    ///   int(2)
+    ///   ["d"]=>
+    ///   int(3)
+    ///   ["h"]=>
+    ///   int(-1)
+    ///   ["i"]=>
+    ///   int(-1)
+    ///   ["s"]=>
+    ///   int(-1)
+    ///   ["f"]=>
+    ///   float(0.5)
+    ///   ["invert"]=>
+    ///   int(0)
+    ///   ["days"]=>
+    ///   bool(false)
+    ///   ["from_string"]=>
+    ///   bool(false)
+    /// }
+    /// \DateInterval::__set_state(array(
+    ///    'y' => 0,
+    ///    'm' => 0,
+    ///    'd' => 1,
+    ///    'h' => 0,
+    ///    'i' => 0,
+    ///    's' => 0,
+    ///    'f' => 0.0,
+    ///    'invert' => 0,
+    ///    'days' => false,
+    ///    'from_string' => false,
+    /// ))
+    /// \DateInterval::__set_state(array(
+    ///    'from_string' => true,
+    ///    'date_string' => '+1 day',
+    /// ))
+    /// ```
+    #[php(tentative)]
+    fn __set_state(req: &mut Request, array: PhpArray) -> Result<Instance<DateInterval>, Thrown> {
+        let class = class_id(req, "DateInterval")?;
+        let object = new_object(req, class)?;
+        if let Err(thrown) = from_hash(req, object, array) {
+            req.release(object.as_value());
+            return Err(thrown);
+        }
+        Ok(Instance::of(object))
+    }
 }

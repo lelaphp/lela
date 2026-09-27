@@ -9,7 +9,8 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use php_ext::abi::{
-    CloneObj, ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Std,
+    Class, CloneObj, Instance, ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead,
+    PropertyTest, Std,
 };
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, truthy};
@@ -20,6 +21,8 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, Value
 
 use crate::ffi::{RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zone};
 use crate::format::date_format;
+use crate::interval::DateInterval;
+use crate::timezone::DateTimeZone;
 
 /// `PHP_DATE_CIVIL` and `PHP_DATE_WALL`.
 pub(super) const CIVIL: i64 = 1;
@@ -190,14 +193,17 @@ pub(super) fn new_date(req: &mut Request, class: ClassId, time: Time) -> Result<
     Ok(object)
 }
 
-/// A new `DateTimeZone` holding `kind`.
-pub(super) fn new_timezone(req: &mut Request, kind: TzKind) -> Result<Value, Thrown> {
+/// A new `DateTimeZone` holding `kind`, one owner, the caller's.
+pub(super) fn new_timezone(
+    req: &mut Request,
+    kind: TzKind,
+) -> Result<Instance<DateTimeZone>, Thrown> {
     let class = class_id(req, "DateTimeZone")?;
     let object = new_object(req, class)?;
     if let Some(payload) = object.native_mut::<TzObj>(req) {
         payload.tz = Some(kind);
     }
-    Ok(object.as_value())
+    Ok(Instance::of(object))
 }
 
 /// The zone a `DateTimeZone` holds, or the uninitialised error.
@@ -229,7 +235,7 @@ pub(super) fn new_interval(
     diff: RelTime,
     civil_or_wall: i64,
     date_string: Option<Vec<u8>>,
-) -> Result<Value, Thrown> {
+) -> Result<Instance<DateInterval>, Thrown> {
     let class = class_id(req, "DateInterval")?;
     let object = new_object(req, class)?;
     if let Some(payload) = object.native_mut::<IntervalObj>(req) {
@@ -238,7 +244,7 @@ pub(super) fn new_interval(
         payload.from_string = date_string.is_some();
         payload.date_string = date_string;
     }
-    Ok(object.as_value())
+    Ok(Instance::of(object))
 }
 
 /// The relative time a `DateInterval` holds, or the uninitialised error.
@@ -252,23 +258,32 @@ pub(super) fn interval_of(req: &mut Request, object: PhpObject) -> Result<(RelTi
     }
 }
 
-/// `RETURN_OBJ_COPY`: the object with one more owner.
-pub(super) fn this_again(req: &mut Request, object: PhpObject) -> Value {
-    let value = object.as_value();
-    req.addref(&value);
-    value
+/// `RETURN_OBJ_COPY`: the object with one more owner, answered as a `C`.
+pub(super) fn again<C: Class>(req: &mut Request, object: PhpObject) -> Instance<C> {
+    req.addref(&object.as_value());
+    Instance::of(object)
 }
 
-/// The receiver of a method, which the engine always gives one.
-pub(super) fn this(req: &mut Request) -> Result<PhpObject, Thrown> {
-    match req.this() {
-        Some(object) => Ok(object),
-        None => Err(throw(
-            req,
-            "Error",
-            "Using $this when not in object context",
-        )),
-    }
+/// `add_assoc_*`: one row under a string key.
+pub(super) fn set_str(
+    req: &mut Request,
+    array: &mut PhpArray,
+    key: &[u8],
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = Key::Str(PhpString::new(req, key)?);
+    array.set(req, key, value)
+}
+
+/// `add_assoc_string`.
+pub(super) fn set_string(
+    req: &mut Request,
+    array: &mut PhpArray,
+    key: &[u8],
+    value: &[u8],
+) -> Result<(), Thrown> {
+    let value = Value::string(PhpString::new(req, value)?);
+    set_str(req, array, key, value)
 }
 
 /// A declared property's name as the readers key it: `\0*\0p` for a
@@ -491,7 +506,7 @@ pub(super) fn period_fields(
     let current = period_date(req, current.as_ref(), class)?;
     let end = period_date(req, end.as_ref(), class)?;
     let interval = match interval {
-        Some(diff) => new_interval(req, diff, 0, None)?,
+        Some(diff) => new_interval(req, diff, 0, None)?.object().as_value(),
         None => Value::null(),
     };
     Ok(vec![
@@ -509,6 +524,9 @@ pub(super) fn period_fields(
 /// every reader of their properties but `get_object_vars`: the object's
 /// own and the three of `date_object_to_hash`.
 pub(crate) struct DateHandlers;
+
+/// `date_object_handlers_date`, `DateTime`'s and `DateTimeImmutable`'s.
+pub(crate) static DATE: DateHandlers = DateHandlers;
 
 impl ObjectHandlers for DateHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -613,6 +631,9 @@ pub(super) fn clone_date(req: &mut Request, object: PhpObject) -> Result<PhpObje
 
 /// `DateTimeZone`'s table: its rows, its clone and its comparison.
 pub(crate) struct TzHandlers;
+
+/// `date_object_handlers_timezone`.
+pub(crate) static TIMEZONE: TzHandlers = TzHandlers;
 
 impl ObjectHandlers for TzHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -731,6 +752,9 @@ const INTERVAL_FIELDS: [&[u8]; 9] = [b"y", b"m", b"d", b"h", b"i", b"s", b"f", b
 /// relative time (`date_interval_read_property` and its kin), the rows
 /// every reader sees, and php's refusal to compare two.
 pub(crate) struct IntervalHandlers;
+
+/// `date_object_handlers_interval`.
+pub(crate) static INTERVAL: IntervalHandlers = IntervalHandlers;
 
 impl IntervalHandlers {
     /// `date_interval_read_property` for one of its names: the field, or
@@ -988,6 +1012,9 @@ fn readonly(req: &mut Request, name: &[u8]) -> Thrown {
 /// Cannot modify readonly property DatePeriod::$interval
 /// ```
 pub(crate) struct PeriodHandlers;
+
+/// `date_object_handlers_period`.
+pub(crate) static PERIOD: PeriodHandlers = PeriodHandlers;
 
 impl ObjectHandlers for PeriodHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {

@@ -2,29 +2,21 @@
 //! `date_parse` and `date_parse_from_format` over
 //! `php_date_do_return_parsed_time`, and `DATEG(last_errors)`.
 
-use php_ext::raising::{Level, Thrown, arg_value_error, docref};
+use php_ext::abi::{OrFalse, Path};
+use php_ext::attr::php_function;
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 use crate::State;
-use crate::args::{count_between, nullable_long, set_str, set_string, string};
 use crate::ffi::{Errors, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::format::now;
+use crate::obj::{set_str, set_string};
 use crate::zone::default_zone;
 
 /// `TIMELIB_SPECIAL_WEEKDAY` and `TIMELIB_SPECIAL_FIRST_DAY_OF_MONTH`.
 const SPECIAL_WEEKDAY: u32 = 0x01;
 const FIRST_DAY_OF_MONTH: i32 = 0x01;
-
-/// `Z_PARAM_PATH_STR`: the string, or php's `ValueError` for one with a
-/// NUL inside it.
-pub(super) fn path_string(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let s = string(req, position)?;
-    if s.as_bytes().contains(&0) {
-        return Err(arg_value_error(req, position, "not contain any null bytes"));
-    }
-    Ok(s)
-}
 
 /// `update_errors_warnings(&err)`: the messages kept as the request's
 /// last where there are any, and none kept where there are none.
@@ -53,10 +45,10 @@ fn add_errors(req: &mut Request, array: &mut PhpArray, errors: &Errors) -> Resul
 }
 
 /// `date_get_last_errors`' array: `zval_from_error_container` alone.
-pub(super) fn errors_value(req: &mut Request, errors: &Errors) -> Result<Value, Thrown> {
+pub(super) fn errors_value(req: &mut Request, errors: &Errors) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     add_errors(req, &mut array, errors)?;
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `strtotime(string $datetime, ?int $baseTimestamp = null): int|false`:
@@ -87,12 +79,16 @@ pub(super) fn errors_value(req: &mut Request, errors: &Errors) -> Result<Value, 
 /// bool(false)
 /// bool(false)
 /// ```
-pub(crate) fn strtotime(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 2)?;
-    let text = string(req, 1)?.as_bytes().to_vec();
-    let base = nullable_long(req, 2)?;
+#[php_function]
+fn strtotime(
+    req: &mut Request,
+    datetime: PhpString,
+    #[php(default = null)] baseTimestamp: Option<i64>,
+) -> Result<OrFalse<i64>, Thrown> {
+    let text = datetime.as_bytes().to_vec();
+    let base = baseTimestamp;
     if text.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let zone = default_zone(req)?;
     let mut base_time = Time::new();
@@ -100,15 +96,15 @@ pub(crate) fn strtotime(req: &mut Request) -> Result<Value, Thrown> {
     base_time.unixtime2local(base.unwrap_or_else(now));
     let (mut t, errors) = Time::strtotime(&text);
     if !errors.errors.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     t.fill_holes(&mut base_time, crate::ffi::NO_CLONE);
     t.update_ts(Some(&zone));
     let Some(ts) = t.date_to_int() else {
         docref(req, Level::Warning, "Epoch doesn't fit in a PHP integer");
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
-    Ok(Value::int(ts))
+    Ok(OrFalse::Value(ts))
 }
 
 /// `PHP_DATE_PARSE_DATE_SET_TIME_ELEMENT`: `false` for a field the parse
@@ -123,7 +119,7 @@ fn element(req: &mut Request, array: &mut PhpArray, name: &[u8], n: i64) -> Resu
 }
 
 /// `php_date_do_return_parsed_time`.
-fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Value, Thrown> {
+fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     for (name, n) in [
         (&b"year"[..], t.y),
@@ -201,7 +197,7 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Value, Th
         }
         set_str(req, &mut array, b"relative", Value::array(rel))?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `date_parse(string $datetime): array`: every field timelib's parser
@@ -398,10 +394,9 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Value, Th
 ///   int(0)
 /// }
 /// ```
-pub(crate) fn date_parse(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let text = string(req, 1)?.as_bytes().to_vec();
-    let (t, errors) = Time::strtotime(&text);
+#[php_function]
+fn date_parse(req: &mut Request, datetime: PhpString) -> Result<PhpArray, Thrown> {
+    let (t, errors) = Time::strtotime(datetime.as_bytes());
     parsed_time(req, &t, &errors)
 }
 
@@ -481,10 +476,12 @@ pub(crate) fn date_parse(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// date_parse_from_format(): Argument #2 ($datetime) must not contain any null bytes
 /// ```
-pub(crate) fn date_parse_from_format(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 2, 2)?;
-    let format = string(req, 1)?.as_bytes().to_vec();
-    let text = path_string(req, 2)?.as_bytes().to_vec();
-    let (t, errors) = Time::parse_from_format(&format, &text);
+#[php_function]
+fn date_parse_from_format(
+    req: &mut Request,
+    format: PhpString,
+    datetime: Path,
+) -> Result<PhpArray, Thrown> {
+    let (t, errors) = Time::parse_from_format(format.as_bytes(), datetime.0.as_bytes());
     parsed_time(req, &t, &errors)
 }
