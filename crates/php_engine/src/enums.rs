@@ -21,7 +21,7 @@ use php_unit::decl::{ClassKind, EnumBacking, Type};
 use crate::api::abi::{CloneObj, Entry, ObjectHandlers};
 use crate::api::raising::{Thrown, arg_count_error, throw};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, PhpArray, Value};
+use crate::api::values::{ClassId, PhpArray, PhpString, Value};
 
 /// Where the function numbers of a program's enum methods begin: past
 /// every native, native method and user function a request can number,
@@ -208,6 +208,29 @@ fn try_from(req: &mut Request) -> Result<Value, Thrown> {
 /// `zend_enum_from_base` and `zend_enum_get_case_by_value`: the
 /// constants updated first, which is where a case of the wrong type or
 /// a duplicate is refused, then the case the value names.
+///
+/// A string-backed enum outside `strict_types` takes its argument as
+/// `Z_PARAM_STR_OR_LONG` takes it and converts an int itself
+/// (`zend_long_to_str`), never in the frame, so a trace prints the int
+/// that was passed; the value [`crate::api::coerce::coerce_param`]
+/// hands back is the frame's, a view nothing here releases.
+///
+/// ```php
+/// enum Suit: string { case Hearts = 'H'; case Spades = 'H'; }
+/// enum N: string { case A = '42'; }
+/// var_dump(N::from(42));
+/// try { Suit::from(42); } catch (Error $e) { echo $e->getMessage(), "\n"; var_dump($e->getTrace()[0]['args']); }
+/// try { Suit::tryFrom('bar'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// enum(N::A)
+/// Duplicate value in enum Suit for cases Hearts and Spades
+/// array(1) {
+///   [0]=>
+///   int(42)
+/// }
+/// Duplicate value in enum Suit for cases Hearts and Spades
+/// ```
 fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
     exactly(req, 1)?;
     let class = called_enum(req)?;
@@ -223,28 +246,43 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         }
     };
     let given = req.argument(1).unwrap_or_default().deref();
-    let wanted = crate::api::coerce::coerce_param(req, &given, &ty, 1)?;
-    if let Err(thrown) = req.update_enum_constants(class) {
-        req.release(wanted);
-        return Err(thrown);
+    let own = match given.as_int() {
+        Some(n) if backing == EnumBacking::String && !req.strict_types() => Some(Value::string(
+            PhpString::new(req, n.to_string().as_bytes())?,
+        )),
+        _ => None,
+    };
+    let wanted = match own {
+        Some(own) => own,
+        None => crate::api::coerce::coerce_param(req, &given, &ty, 1)?,
+    };
+    let found = case_by_value(req, class, &wanted, try_from);
+    if let Some(own) = own {
+        req.release(own);
     }
+    found
+}
+
+/// `zend_enum_get_case_by_value` over a value already held to the
+/// backing type: the case whose value is `wanted`, `null` for none under
+/// `tryFrom`, and php's `ValueError` for none under `from`. `wanted` is
+/// a view.
+fn case_by_value(
+    req: &mut Request,
+    class: ClassId,
+    wanted: &Value,
+    try_from: bool,
+) -> Result<Value, Thrown> {
+    req.update_enum_constants(class)?;
     for name in case_names(req, class) {
-        let case = match req.enum_case(class, &name) {
-            Ok(case) => case,
-            Err(thrown) => {
-                req.release(wanted);
-                return Err(thrown);
-            }
-        };
+        let case = req.enum_case(class, &name)?;
         let held = case.prop(req, b"value").unwrap_or_default();
-        if crate::api::coerce::identical(&held, &wanted) {
-            req.release(wanted);
+        if crate::api::coerce::identical(&held, wanted) {
             return Ok(case.as_value());
         }
         req.release(case.as_value());
     }
     if try_from {
-        req.release(wanted);
         return Ok(Value::null());
     }
     let class_name = req.class_name(class);
@@ -255,7 +293,6 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
             String::from_utf8_lossy(wanted.as_str_bytes().unwrap_or_default())
         ),
     };
-    req.release(wanted);
     Err(throw(
         req,
         "ValueError",
