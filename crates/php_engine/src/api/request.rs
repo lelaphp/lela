@@ -7168,6 +7168,66 @@ impl Request {
         Ok(Some((placed.slot, placed.typed)))
     }
 
+    /// `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))` in
+    /// `zend_std_get_property_ptr_ptr` under `BP_VAR_RW`, ahead of any
+    /// placement: a declared slot the scope reaches that nothing holds,
+    /// where no `__get` answers for it or it is `IS_PROP_UNINIT`, raises
+    /// the read's own diagnostic, the typed property's `Error` naming the
+    /// class that declared it or the warning, and php then leaves an
+    /// untyped one holding `null`. Anything else is the placement's.
+    pub(crate) fn read_before_write(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+    ) -> Result<(), Thrown> {
+        let class = object.class();
+        let o = object.heap();
+        let Some(placed) = self.declared_slot(class, name) else {
+            return Ok(());
+        };
+        if !self.may_access(placed.declaring, placed.visibility)
+            || !o.slot(placed.slot).is_undef()
+            || self.lazy_slot(o, placed.slot)
+        {
+            return Ok(());
+        }
+        let magic =
+            self.serves_accessor(class, b"__get") && self.guard_word(object, name) & IN_GET == 0;
+        if magic && !o.slot_uninit(placed.slot) {
+            return Ok(());
+        }
+        if placed.typed {
+            return Err(self.uninitialized_property(placed.declaring, name));
+        }
+        let class = self.class_name(class);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        self.write_declared_slot(o, placed.slot, Value::null())
+    }
+
+    /// Whether a write fetch over `name` reads the property rather than
+    /// placing it: a declared slot the scope reaches whose readonly or
+    /// set visibility bars this scope from writing it, holding an object.
+    /// php's `zend_std_get_property_ptr_ptr` hands such a slot to
+    /// `read_property`, which under `BP_VAR_W` returns the object as a
+    /// copy (`zend_std_read_property`), so a write through the object
+    /// changes the object and never the property.
+    pub(crate) fn write_fetch_reads_object(&self, object: PhpObject, name: &[u8]) -> bool {
+        let Some(placed) = self.declared_slot(object.class(), name) else {
+            return false;
+        };
+        let barred = placed.readonly
+            || placed
+                .set_visibility
+                .is_some_and(|set| !self.has_set_access(placed.declaring, set));
+        barred
+            && self.may_access(placed.declaring, placed.visibility)
+            && Value::of_zval(object.heap().slot(placed.slot))
+                .deref()
+                .as_object()
+                .is_some()
+    }
+
     /// The `zend_property_info` beside a typed slot, what
     /// `zend_assign_to_typed_prop` is handed: the declared type, the
     /// class that declared it, and `ZEND_ACC_READONLY`. Read only where

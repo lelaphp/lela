@@ -7249,19 +7249,29 @@ fn property_place(
         // overloaded property` notice, is not served yet (#513), so the
         // placement is loud and a property the scope may not reach is
         // the `Error`.
+        // A readonly or set-restricted property holding an object is
+        // read, as php's `read_property` returns it under `BP_VAR_W`: the
+        // write goes through the object and the property is untouched.
+        PropertyPlace::Std if req.write_fetch_reads_object(object, &name) => {
+            return Ok(PropertyFound::Served(object, name));
+        }
+        // `BP_VAR_RW` reads the slot before anything is placed, so an
+        // unwritten one is the read's diagnostic ahead of the set
+        // visibility's refusal.
+        PropertyPlace::Std
+            if read == PropertyRead::Warning
+                && let Err(thrown) = req.read_before_write(object, &name) =>
+        {
+            return Ok(PropertyFound::Threw(freeing_container(
+                req, frame, code, op, thrown,
+            )));
+        }
         PropertyPlace::Std => {
             req.declared_slot_for_write(object, &name, "indirectly modify", false)
         }
     };
     let at = match placed {
-        Ok(Some((slot, typed))) => {
-            if read == PropertyRead::Warning
-                && let Err(thrown) = unwritten_slot_read(req, object, slot, typed, &name)
-            {
-                return Ok(PropertyFound::Threw(freeing_container(
-                    req, frame, code, op, thrown,
-                )));
-            }
+        Ok(Some((slot, _))) => {
             let Some(at) = object.heap().slot_ref(slot) else {
                 return Err(Fatal::Error(format!(
                     "InternalError: ZEND_FETCH_OBJ_W placed ${} in slot {slot}, which the object does not have",
@@ -7303,33 +7313,6 @@ fn property_place(
         }
     };
     Ok(PropertyFound::At(at, object, name))
-}
-
-/// `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))` in
-/// `zend_std_get_property_ptr_ptr` under `BP_VAR_RW`: a slot nothing has
-/// written raises the read's own diagnostic, the typed property's
-/// `Error` or the warning, and php then leaves it holding `null`.
-fn unwritten_slot_read(
-    req: &mut Request,
-    object: PhpObject,
-    slot: u32,
-    typed: bool,
-    name: &[u8],
-) -> Result<(), Thrown> {
-    if !object.heap().slot(slot).is_undef() {
-        return Ok(());
-    }
-    let shown = String::from_utf8_lossy(name).into_owned();
-    let class = req.class_name(object.class());
-    if typed {
-        return Err(crate::api::raising::throw(
-            req,
-            "Error",
-            &format!("Typed property {class}::${shown} must not be accessed before initialization"),
-        ));
-    }
-    crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
-    req.write_declared_slot(object.heap(), slot, Value::null())
 }
 
 /// `zend_fetch_property_address`'s fallback where the class's
