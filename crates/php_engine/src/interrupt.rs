@@ -23,23 +23,26 @@ use php_heap::Fatal;
 use crate::api::request::{Interrupt, Request};
 
 /// The interrupt check (design §5.8): one relaxed load and a branch, at
-/// the three sites and nowhere else. php's check costs the same load,
-/// and an interrupt nobody raised costs nothing beyond it.
+/// the loop's sites and nowhere else. php's check costs the same load,
+/// and an interrupt nobody raised costs nothing beyond it. `Ok(true)`
+/// is a check whose extension hooks left a throwable pending, which the
+/// site hands to the loop as thrown where it stands, as `zend_interrupt_helper`
+/// leaves `EG(exception)` for the opline it re-enters.
 #[inline]
-pub(crate) fn check(req: &mut Request) -> Result<(), Fatal> {
+pub(crate) fn check(req: &mut Request) -> Result<bool, Fatal> {
     if req.interrupt().raised().load(Ordering::Relaxed) {
         return interrupted(req);
     }
-    Ok(())
+    Ok(false)
 }
 
 /// What a check that found the interrupt raised does
 /// (`Z/Zend/zend_vm_def.h:10526`): it clears the interrupt and then
 /// either raises php's timeout fatal, when the execution timer was what
-/// raised it, or dispatches the signals that were delivered to their
-/// PHP handlers, which is php's `zend_interrupt_function`. Nothing
-/// installs one until an extension delivers signals, and php does
-/// nothing in that case, so neither does this.
+/// raised it, or serves each extension's interrupt hook in bundle order,
+/// which is php's `zend_interrupt_function` and the chain each `MINIT`
+/// that sets it keeps (pcntl's dispatches the signals delivered to their
+/// PHP handlers). With no hook it does nothing, as php does.
 ///
 /// The text and the plural are `zend_timeout`'s
 /// (`Z/Zend/zend_execute_API.c:1441`), over the seconds the timer was
@@ -55,14 +58,15 @@ pub(crate) fn check(req: &mut Request) -> Result<(), Fatal> {
 /// ```expect exit=255 wall=1s
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
 /// ```
-pub(crate) fn interrupted(req: &mut Request) -> Result<(), Fatal> {
-    match req.interrupt().taken() {
-        Some(seconds) => Err(Fatal::Error(format!(
+pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
+    if let Some(seconds) = req.interrupt().taken() {
+        return Err(Fatal::Error(format!(
             "Maximum execution time of {seconds} second{} exceeded",
             if seconds == 1 { "" } else { "s" }
-        ))),
-        None => Ok(()),
+        )));
     }
+    req.serve_interrupt_hooks();
+    Ok(req.is_pending())
 }
 
 /// The engine's execution timer (design §5.8): what `zend_set_timeout`
@@ -301,7 +305,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), description());
 
         req.interrupt().raise();
-        assert_eq!(check(&mut req), Ok(()));
+        assert_eq!(check(&mut req), Ok(false));
         assert!(!req.interrupt().raised().load(Ordering::Relaxed));
 
         req.interrupt().elapsed(30);
@@ -313,6 +317,6 @@ mod tests {
         );
         assert!(!req.interrupt().raised().load(Ordering::Relaxed));
         // The second check finds nothing: php's helper clears both words.
-        assert_eq!(check(&mut req), Ok(()));
+        assert_eq!(check(&mut req), Ok(false));
     }
 }

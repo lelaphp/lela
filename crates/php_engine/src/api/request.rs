@@ -997,6 +997,16 @@ impl Interrupt {
     /// text names are the ones the timer was armed with; the loop's own
     /// test stays a relaxed load, because this is where the two threads
     /// meet.
+    /// Hand this interrupt to the process's signal post, which raises it
+    /// at every signal the process takes until the [`Receiving`] is
+    /// dropped: php's `pcntl_signal_handler` storing `EG(vm_interrupt)`
+    /// under `pcntl_async_signals(true)` (design §5.8). `None` when the
+    /// post holds as many interrupts as it can.
+    #[must_use]
+    pub fn receive_signals(&self) -> Option<Receiving> {
+        php_heap::signal::receive(Arc::clone(&self.0))
+    }
+
     pub(crate) fn taken(&self) -> Option<i64> {
         self.0.raised.swap(false, Ordering::Acquire);
         self.0
@@ -1017,6 +1027,22 @@ struct State {
     /// php's `EG(timeout_seconds)`.
     seconds: AtomicI64,
 }
+
+impl AsRef<AtomicBool> for State {
+    /// The word the signal post raises: the one the loop tests.
+    fn as_ref(&self) -> &AtomicBool {
+        &self.raised
+    }
+}
+
+/// The process's signal post (design §5.8, §7.2 revision 35), for the
+/// extension that installs signal handlers: [`signal_handler`] is the
+/// handler it hands `sigaction` with `SA_SIGINFO`, [`take_signals`] what
+/// its dispatch takes, and [`Interrupt::receive_signals`] how its
+/// asynchronous delivery raises this request's interrupt. The post is
+/// the engine's, since signal dispositions are the process's and an
+/// extension holds no atomic (ADR-0005).
+pub use php_heap::signal::{Posted, Receiving, post as signal_handler, take as take_signals};
 
 /// The fatal the request is ending in, when it is one: `E_ERROR` and
 /// its kin, or a source that did not compile. An `exit` is not one:
@@ -15963,6 +15989,21 @@ impl Request {
     #[must_use]
     pub fn resource(&self, id: i64) -> Option<Resource> {
         self.heap.resource_at(id).map(Resource::of)
+    }
+
+    /// Each extension's interrupt hook, in bundle order: php's
+    /// `zend_interrupt_function` and the chain each `MINIT` that set it
+    /// keeps to the one before, what the interrupt check serves when the
+    /// execution timer was not what raised it.
+    pub(crate) fn serve_interrupt_hooks(&mut self) {
+        let shared = Arc::clone(&self.shared);
+        for extension in &shared.extensions {
+            if let Some(hook) = extension.interrupt
+                && let Err(thrown) = hook(self)
+            {
+                self.leave_pending(&thrown);
+            }
+        }
     }
 
     /// This request's interrupt (design §5.8): what the loop tests at a

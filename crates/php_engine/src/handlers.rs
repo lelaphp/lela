@@ -9649,12 +9649,29 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
         return enter(req, frame, code, op, function);
     }
     let served = req.serve_native(function);
+    // `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`: the check php makes after a
+    // native returns, with the call still on the stack, which is where
+    // a signal the native delivered to its own process is dispatched
+    // under `pcntl_async_signals(true)`. A native that threw leaves the
+    // interrupt raised for the next site, since php calls no PHP handler
+    // while `EG(exception)` stands.
+    let interrupted = match &served {
+        Ok(_) => crate::interrupt::check(req),
+        Err(_) => Ok(false),
+    };
     req.pop_call();
     match served {
         Ok(value) => {
+            let threw = match interrupted {
+                Ok(threw) => threw,
+                Err(fatal) => {
+                    req.release(value);
+                    return Err(fatal);
+                }
+            };
             let into = (op.out_type != OperandKind::Unused)
                 .then(|| (frame, exec::temporary_slot(code, op.out)));
-            if handed_back(req, into, value) {
+            if handed_back(req, into, value) || threw {
                 return Ok(Stepped::Threw(frame));
             }
             Ok(advance(req, frame))
@@ -17742,7 +17759,9 @@ pub(crate) fn jmp<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: 
     let back = op.op1 <= req.vm().opline(frame);
     req.vm_mut().jump(frame, op.op1);
     if back {
-        crate::interrupt::check(req)?;
+        if crate::interrupt::check(req)? {
+            return Ok(Stepped::Threw(frame));
+        }
         continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
     }
     Ok(Stepped::Same(frame))
@@ -17770,7 +17789,9 @@ pub(crate) fn jmpnz<T: Tier>(
     let back = op.op2 <= req.vm().opline(frame);
     req.vm_mut().jump(frame, op.op2);
     if back {
-        crate::interrupt::check(req)?;
+        if crate::interrupt::check(req)? {
+            return Ok(Stepped::Threw(frame));
+        }
         continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
     }
     Ok(Stepped::Same(frame))
@@ -17804,7 +17825,9 @@ pub(crate) fn jmpz<T: Tier>(
     let back = op.op2 <= req.vm().opline(frame);
     req.vm_mut().jump(frame, op.op2);
     if back {
-        crate::interrupt::check(req)?;
+        if crate::interrupt::check(req)? {
+            return Ok(Stepped::Threw(frame));
+        }
         continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
     }
     Ok(Stepped::Same(frame))

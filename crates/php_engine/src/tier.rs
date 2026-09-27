@@ -163,8 +163,7 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
         Flow::Bail(fatal) => return Err(fatal),
         Flow::Resume(at) => at,
     };
-    interrupt::check(req)?;
-    if req.is_pending() {
+    if interrupt::check(req)? || req.is_pending() {
         return Ok(Stepped::Threw(at));
     }
     Ok(Stepped::Same(at))
@@ -174,7 +173,9 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
 /// (design §5.6, §4.3 seam 8): the interrupt check, then `Site::Entry`,
 /// then the frame the loop goes on in.
 fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
-    interrupt::check(req)?;
+    if interrupt::check(req)? {
+        return Ok(Stepped::Threw(frame));
+    }
     let flow = T::safepoint(req, frame, Site::Entry);
     answered(req, flow, frame)
 }
