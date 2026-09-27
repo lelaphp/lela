@@ -6,30 +6,21 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::{ConstDecl, FunctionDecl};
+use php_ext::abi::{OrFalse, Raw, Union, Untyped};
+use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{optional_bool, optional_long, string_value};
-use crate::{argument_count_between, constant, string_argument};
+pub(super) use constants::PHP_QUERY_RFC3986;
+use constants::{
+    PHP_URL_FRAGMENT, PHP_URL_HOST, PHP_URL_PASS, PHP_URL_PATH, PHP_URL_PORT, PHP_URL_QUERY,
+    PHP_URL_SCHEME, PHP_URL_USER,
+};
 
+/// The constants `url.c`'s natives read, in the stub's order:
 /// `PHP_URL_*`, `parse_url`'s component selectors, and `PHP_QUERY_*`,
 /// `http_build_query`'s encodings.
-const PHP_URL_SCHEME: i64 = 0;
-const PHP_URL_HOST: i64 = 1;
-const PHP_URL_PORT: i64 = 2;
-const PHP_URL_USER: i64 = 3;
-const PHP_URL_PASS: i64 = 4;
-const PHP_URL_PATH: i64 = 5;
-const PHP_URL_QUERY: i64 = 6;
-const PHP_URL_FRAGMENT: i64 = 7;
-pub(super) const PHP_QUERY_RFC1738: i64 = 1;
-pub(super) const PHP_QUERY_RFC3986: i64 = 2;
-
-/// The constants `url.c`'s natives read, in the stub's order.
 ///
 /// ```php
 /// var_dump(PHP_URL_SCHEME, PHP_URL_HOST, PHP_URL_PORT, PHP_URL_USER, PHP_URL_PASS, PHP_URL_PATH, PHP_URL_QUERY, PHP_URL_FRAGMENT, PHP_QUERY_RFC1738, PHP_QUERY_RFC3986);
@@ -46,81 +37,18 @@ pub(super) const PHP_QUERY_RFC3986: i64 = 2;
 /// int(1)
 /// int(2)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    vec![
-        constant(b"PHP_URL_SCHEME", PHP_URL_SCHEME),
-        constant(b"PHP_URL_HOST", PHP_URL_HOST),
-        constant(b"PHP_URL_PORT", PHP_URL_PORT),
-        constant(b"PHP_URL_USER", PHP_URL_USER),
-        constant(b"PHP_URL_PASS", PHP_URL_PASS),
-        constant(b"PHP_URL_PATH", PHP_URL_PATH),
-        constant(b"PHP_URL_QUERY", PHP_URL_QUERY),
-        constant(b"PHP_URL_FRAGMENT", PHP_URL_FRAGMENT),
-        constant(b"PHP_QUERY_RFC1738", PHP_QUERY_RFC1738),
-        constant(b"PHP_QUERY_RFC3986", PHP_QUERY_RFC3986),
-    ]
-}
-
-/// The five, in the stub's order.
-///
-/// ```php
-/// foreach (['parse_url', 'urlencode', 'urldecode', 'rawurlencode', 'rawurldecode'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function parse_url ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $url ]
-///     Parameter #1 [ <optional> int $component = -1 ]
-///   }
-///   - Return [ array|string|int|false|null ]
-/// }
-/// Function [ <internal:standard> function urlencode ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $string ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function urldecode ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $string ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function rawurlencode ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $string ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function rawurldecode ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $string ]
-///   }
-///   - Return [ string ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("parse_url(string $url, int $component = -1): int|array|string|null|false"),
-            parse_url as Entry,
-        ),
-        (stub("urlencode(string $string): string"), urlencode),
-        (stub("urldecode(string $string): string"), urldecode),
-        (stub("rawurlencode(string $string): string"), rawurlencode),
-        (stub("rawurldecode(string $string): string"), rawurldecode),
-        (
-            stub(
-                "get_headers(string $url, bool $associative = false, $context = null): array|false",
-            ),
-            get_headers,
-        ),
-    ]
+#[php_const]
+pub(crate) mod constants {
+    pub(crate) const PHP_URL_SCHEME: i64 = 0;
+    pub(crate) const PHP_URL_HOST: i64 = 1;
+    pub(crate) const PHP_URL_PORT: i64 = 2;
+    pub(crate) const PHP_URL_USER: i64 = 3;
+    pub(crate) const PHP_URL_PASS: i64 = 4;
+    pub(crate) const PHP_URL_PATH: i64 = 5;
+    pub(crate) const PHP_URL_QUERY: i64 = 6;
+    pub(crate) const PHP_URL_FRAGMENT: i64 = 7;
+    pub(crate) const PHP_QUERY_RFC1738: i64 = 1;
+    pub(crate) const PHP_QUERY_RFC3986: i64 = 2;
 }
 
 /// `get_headers(string $url, bool $associative = false, $context = null):
@@ -147,16 +75,19 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// get_headers(): Argument #3 ($context) must be of type resource or null, int given
 /// get_headers(): Argument #1 ($url) must not contain any null bytes
 /// ```
-fn get_headers(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let url = string_argument(req, 1)?;
-    if url.as_bytes().contains(&0) {
-        return Err(arg_value_error(req, 1, "not contain any null bytes"));
-    }
-    let associative = optional_bool(req, 2, false)?;
+#[php_function]
+fn get_headers(
+    req: &mut Request,
+    url: PhpString,
+    #[php(default = false)] associative: Raw<bool>,
+    #[php(default = null)] context: Untyped<Value>,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let _ = context;
+    let url = crate::md5::path_checked(req, url, 1)?;
+    let associative = associative.hold(req)?;
     crate::file::context_argument(req, 3)?;
     let Some(stream) = req.open_url(url.as_bytes(), b"r")? else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let meta = stream.meta_data(req)?;
     let wrapper_data = Key::Str(PhpString::new(req, b"wrapper_data")?);
@@ -165,7 +96,7 @@ fn get_headers(req: &mut Request) -> Result<Value, Thrown> {
         .and_then(|value| value.deref().as_array().copied());
     let Some(lines) = lines else {
         stream.close(req);
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let mut headers = PhpArray::new(req)?;
     for (_, line) in lines.snapshot() {
@@ -176,7 +107,7 @@ fn get_headers(req: &mut Request) -> Result<Value, Thrown> {
         add_header(req, &mut headers, line.as_bytes(), associative)?;
     }
     stream.close(req);
-    Ok(Value::array(headers))
+    Ok(OrFalse::Value(headers))
 }
 
 /// One header line into `get_headers`' answer: appended as it is, or
@@ -190,7 +121,7 @@ fn add_header(
     associative: bool,
 ) -> Result<(), Thrown> {
     let Some(at) = line.iter().position(|c| *c == b':').filter(|_| associative) else {
-        let value = string_value(req, line)?;
+        let value = Value::string(PhpString::new(req, line)?);
         return headers.append(req, value);
     };
     let mut start = at + 1;
@@ -198,7 +129,7 @@ fn add_header(
         start += 1;
     }
     let name = Key::Str(PhpString::new(req, &line[..at])?);
-    let value = string_value(req, &line[start..])?;
+    let value = Value::string(PhpString::new(req, &line[start..])?);
     let Some(previous) = headers.get(&name) else {
         return headers.set(req, name, value);
     };
@@ -523,12 +454,59 @@ type Part<'a> = (i64, &'a [u8], Option<&'a Vec<u8>>);
 /// NULL
 /// parse_url(): Argument #2 ($component) must be a valid URL component identifier, 8 given
 /// ```
-fn parse_url(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let url = string_argument(req, 1)?;
-    let key = optional_long(req, 2, -1)?;
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// foreach (['parse_url', 'urlencode', 'urldecode', 'rawurlencode', 'rawurldecode'] as $f) echo new ReflectionFunction($f);
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function parse_url ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $url ]
+///     Parameter #1 [ <optional> int $component = -1 ]
+///   }
+///   - Return [ array|string|int|false|null ]
+/// }
+/// Function [ <internal:standard> function urlencode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function urldecode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function rawurlencode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function rawurldecode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// ```
+#[php_function]
+fn parse_url(
+    req: &mut Request,
+    url: PhpString,
+    #[php(default = -1)] component: i64,
+) -> Result<Option<OrFalse<Component>>, Thrown> {
+    let key = component;
     let Some(url) = parse(url.as_bytes()) else {
-        return Ok(Value::bool(false));
+        return Ok(Some(OrFalse::False));
     };
     let parts: [Part; 8] = [
         (PHP_URL_SCHEME, b"scheme", url.scheme.as_ref()),
@@ -544,11 +522,14 @@ fn parse_url(req: &mut Request) -> Result<Value, Thrown> {
         if key == PHP_URL_PORT {
             return Ok(url
                 .port
-                .map_or(Value::null(), |port| Value::int(i64::from(port))));
+                .map(|port| OrFalse::Value(Union::A(i64::from(port)))));
         }
         return match parts.iter().find(|(id, _, _)| *id == key) {
-            Some((_, _, Some(bytes))) => string_value(req, bytes),
-            Some((_, _, None)) => Ok(Value::null()),
+            Some((_, _, Some(bytes))) => {
+                let part = PhpString::new(req, bytes)?;
+                Ok(Some(OrFalse::Value(Union::B(Union::B(part)))))
+            }
+            Some((_, _, None)) => Ok(None),
             None => Err(arg_value_error(
                 req,
                 2,
@@ -565,15 +546,19 @@ fn parse_url(req: &mut Request) -> Result<Value, Thrown> {
             }
         } else {
             match bytes {
-                Some(bytes) => string_value(req, bytes)?,
+                Some(bytes) => Value::string(PhpString::new(req, bytes)?),
                 None => continue,
             }
         };
         let key = Key::Str(PhpString::new(req, name)?);
         array.set(req, key, value)?;
     }
-    Ok(Value::array(array))
+    Ok(Some(OrFalse::Value(Union::B(Union::A(array)))))
 }
+
+/// What `parse_url` answers short of `false` and `null`: the
+/// `PHP_URL_PORT` number, every part as an array, or one part.
+type Component = Union<i64, Union<PhpArray, PhpString>>;
 
 /// `hexchars`.
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -638,8 +623,9 @@ pub(super) fn php_url_decode(s: &[u8]) -> Vec<u8> {
 /// string(0) ""
 /// string(9) "#00#FF#2B"
 /// ```
-fn urlencode(req: &mut Request) -> Result<Value, Thrown> {
-    encoded(req, false)
+#[php_function]
+fn urlencode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+    encoded(req, string, false)
 }
 
 /// `rawurlencode(string $string): string`, RFC 3986's.
@@ -652,16 +638,15 @@ fn urlencode(req: &mut Request) -> Result<Value, Thrown> {
 /// string(0) ""
 /// string(6) "#00#FF"
 /// ```
-fn rawurlencode(req: &mut Request) -> Result<Value, Thrown> {
-    encoded(req, true)
+#[php_function]
+fn rawurlencode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+    encoded(req, string, true)
 }
 
-fn encoded(req: &mut Request, raw: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+fn encoded(req: &mut Request, string: PhpString, raw: bool) -> Result<PhpString, Thrown> {
     let mut out = Vec::with_capacity(string.len() * 3);
     url_encode(string.as_bytes(), raw, &mut out);
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `urldecode(string $string): string`.
@@ -674,11 +659,10 @@ fn encoded(req: &mut Request, raw: bool) -> Result<Value, Thrown> {
 /// string(4) "e900"
 /// string(4) "100%"
 /// ```
-fn urldecode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn urldecode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let out = decode(string.as_bytes(), true);
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `rawurldecode(string $string): string`.
@@ -691,9 +675,8 @@ fn urldecode(req: &mut Request) -> Result<Value, Thrown> {
 /// string(2) "~~"
 /// string(1) "%"
 /// ```
-fn rawurldecode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn rawurldecode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let out = decode(string.as_bytes(), false);
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }

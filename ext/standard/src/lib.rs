@@ -322,8 +322,21 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
     [
         string::natives(),
-        url::natives(),
-        html::natives(),
+        vec![
+            url::parse_url::declared(),
+            url::urlencode::declared(),
+            url::urldecode::declared(),
+            url::rawurlencode::declared(),
+            url::rawurldecode::declared(),
+            url::get_headers::declared(),
+        ],
+        vec![
+            html::htmlspecialchars::declared(),
+            html::htmlspecialchars_decode::declared(),
+            html::html_entity_decode::declared(),
+            html::htmlentities::declared(),
+            html::get_html_translation_table::declared(),
+        ],
         vec![md5::md5::declared(), md5::md5_file::declared()],
         vec![sha1::sha1::declared(), sha1::sha1_file::declared()],
         vec![crc32::crc32::declared()],
@@ -384,8 +397,8 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
 fn file_constants() -> Vec<ConstDecl> {
     [
         string::constants(),
-        url::constants(),
-        html::constants(),
+        url::constants::declared(),
+        html::constants::declared(),
         basic_functions::constants(),
         dir::constants(),
         streamsfuncs::constants(),

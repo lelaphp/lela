@@ -472,6 +472,13 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     ]
 }
 
+/// `RETURN_STR_COPY(str)`: the argument's own string handed back, one
+/// more reference to it.
+pub(crate) fn str_copy(req: &mut Request, string: PhpString) -> PhpString {
+    req.addref(&Value::string(string));
+    string
+}
+
 /// `zend_tolower_ascii`.
 const fn lower(byte: u8) -> u8 {
     byte.to_ascii_lowercase()
