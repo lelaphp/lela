@@ -467,6 +467,7 @@ request::Request::take_uploaded_file
 request::Request::temp_dir
 request::Request::temporary_name
 request::Request::this
+request::Request::this_object
 request::Request::tmpfile
 request::Request::trampoline
 request::Request::transports

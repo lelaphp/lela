@@ -393,7 +393,16 @@ fn compact_var(
                 req.addref(&value);
                 let key = Key::from_string(PhpString::new(req, &bytes)?);
                 out.set(req, key, value)?;
-            } else if bytes != b"this" {
+            } else if bytes == b"this" {
+                // `zend_get_this_object`: the object the caller runs on,
+                // which no symbol table holds.
+                if let Some(object) = req.this_object() {
+                    let value = object.as_value();
+                    req.addref(&value);
+                    let key = Key::from_string(PhpString::new(req, &bytes)?);
+                    out.set(req, key, value)?;
+                }
+            } else {
                 let shown = String::from_utf8_lossy(&bytes).into_owned();
                 docref(req, Level::Warning, &format!("Undefined variable ${shown}"));
             }

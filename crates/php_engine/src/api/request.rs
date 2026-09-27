@@ -15412,6 +15412,41 @@ impl Request {
         self.vm.innermost()?.this
     }
 
+    /// `zend_get_this_object(EG(current_execute_data))`
+    /// (`Z/Zend/zend_execute_API.c:1317`): the receiver of the first link
+    /// of the chain that has one, walked past the natives that have no
+    /// class, and none where a user frame or a native method without one
+    /// comes first. So `compact('this')` inside a method, or a closure
+    /// bound to an object, finds the object its caller runs on.
+    ///
+    /// ```php
+    /// class A { function m() { return compact('this'); } function c() { return (fn() => compact('this'))(); } }
+    /// $a = new A; var_dump($a->m()['this'] === $a, $a->c()['this'] === $a, compact('this'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// array(0) {
+    /// }
+    /// ```
+    #[must_use]
+    pub fn this_object(&self) -> Option<PhpObject> {
+        for link in self.chain() {
+            let (function, this) = match link {
+                Link::Frame(_, _, state) => (state.function, state.this),
+                Link::Call(call) => (Some(call.function), call.this),
+            };
+            if this.is_some() {
+                return this;
+            }
+            let function = function?;
+            if self.user_function(function).is_some() || self.method_class(function).is_some() {
+                return None;
+            }
+        }
+        None
+    }
+
     // -------------------------------------------------- symbols
 
     /// The declaration of a linked class.
