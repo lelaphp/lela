@@ -376,59 +376,32 @@ pub fn compare(req: &mut Request, a: &Value, b: &Value) -> Result<Ordering, Thro
     crate::ops::compare(req, a, b)
 }
 
-/// One binary operator over the types the skeleton knows: `int` and
-/// `float` arithmetic, and string concatenation.
+/// One binary operator as its opcode runs it: the kernel `ZEND_ADD`,
+/// `ZEND_POW` or `ZEND_CONCAT` calls (`add_function`, `pow_function`,
+/// `concat_function` of `Zend/zend_operators.c`), with its conversions,
+/// its warnings and its throws, so a native that applies an operator
+/// applies php's.
 pub fn binary_op(
     req: &mut Request,
     op: BinaryOp,
     lhs: &Value,
     rhs: &Value,
 ) -> Result<Value, Thrown> {
-    if op == BinaryOp::Concat {
-        return crate::ops::concat(req, lhs, rhs);
-    }
-    if let (Some(left), Some(right)) = (lhs.as_int(), rhs.as_int()) {
-        let folded = match op {
-            BinaryOp::Add => left.checked_add(right),
-            BinaryOp::Sub => left.checked_sub(right),
-            BinaryOp::Mul => left.checked_mul(right),
-            BinaryOp::Mod if right == 0 => {
-                return Err(throw(req, "DivisionByZeroError", "Modulo by zero"));
-            }
-            BinaryOp::Mod => left.checked_rem(right),
-            BinaryOp::BitwiseAnd => Some(left & right),
-            BinaryOp::BitwiseOr => Some(left | right),
-            BinaryOp::BitwiseXor => Some(left ^ right),
-            BinaryOp::ShiftLeft => u32::try_from(right).ok().and_then(|s| left.checked_shl(s)),
-            BinaryOp::ShiftRight => u32::try_from(right).ok().and_then(|s| left.checked_shr(s)),
-            BinaryOp::Div | BinaryOp::Pow | BinaryOp::Concat => None,
-        };
-        if let Some(n) = folded {
-            return Ok(Value::int(n));
-        }
-    }
-    let left = to_double(req, lhs)?;
-    let right = to_double(req, rhs)?;
-    let folded = match op {
-        BinaryOp::Add => left + right,
-        BinaryOp::Sub => left - right,
-        BinaryOp::Mul => left * right,
-        BinaryOp::Div if right == 0.0 => {
-            return Err(throw(req, "DivisionByZeroError", "Division by zero"));
-        }
-        BinaryOp::Div => left / right,
-        BinaryOp::Pow => left.powf(right),
-        BinaryOp::Mod
-        | BinaryOp::BitwiseAnd
-        | BinaryOp::BitwiseOr
-        | BinaryOp::BitwiseXor
-        | BinaryOp::ShiftLeft
-        | BinaryOp::ShiftRight => {
-            return Ok(Value::int(0));
-        }
-        BinaryOp::Concat => 0.0,
+    let kernel = match op {
+        BinaryOp::Add => crate::ops::add,
+        BinaryOp::Sub => crate::ops::sub,
+        BinaryOp::Mul => crate::ops::mul,
+        BinaryOp::Div => crate::ops::div,
+        BinaryOp::Mod => crate::ops::r#mod,
+        BinaryOp::Pow => crate::ops::pow,
+        BinaryOp::Concat => crate::ops::concat,
+        BinaryOp::BitwiseAnd => crate::ops::bitwise_and,
+        BinaryOp::BitwiseOr => crate::ops::bitwise_or,
+        BinaryOp::BitwiseXor => crate::ops::bitwise_xor,
+        BinaryOp::ShiftLeft => crate::ops::shift_left,
+        BinaryOp::ShiftRight => crate::ops::shift_right,
     };
-    Ok(Value::float(folded))
+    kernel(req, lhs, rhs)
 }
 
 /// Hold the argument at `position` to `ty` as `zend_parse_parameters`

@@ -4,9 +4,9 @@
 //! (`Z/ext/standard/math.c:62-252`), which `round`, `number_format` and
 //! `range` round with.
 
-use php_ext::abi::{Passed, Raw, Union};
+use php_ext::abi::{FromArgument, Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::coerce::{coerce_param, numeric_string};
+use php_ext::coerce::{BinaryOp, binary_op, coerce_param};
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw};
 use php_ext::request::Request;
@@ -668,11 +668,11 @@ fn intdiv(req: &mut Request, num1: i64, num2: i64) -> Result<i64, Thrown> {
 }
 
 /// `pow(mixed $num, mixed $exponent): int|float|object`, php's
-/// `pow_function` (`Z/Zend/zend_operators.c:1415`), the `**` operator:
-/// two ints to an int by squaring where nothing overflows, a float
-/// otherwise, the operands made numbers first, with php's warning for a
-/// leading-numeric string and its `TypeError` for anything that is no
-/// number.
+/// `pow_function` (`Z/Zend/zend_operators.c:1415`): the `**` operator's
+/// own kernel through [`binary_op`], two ints to an int by squaring where
+/// nothing overflows, a float otherwise, the operands made numbers first,
+/// with php's warning for a leading-numeric string and its `TypeError`
+/// for anything that is no number.
 ///
 /// ```php
 /// var_dump(pow(2, 62), pow(2, 63), pow(2, -1), pow(0, 0), pow("3", 2), pow(2.5, 2), pow(-2, 63), pow(null, 2), pow(true, 3), pow(-8, 1/3));
@@ -697,172 +697,31 @@ fn intdiv(req: &mut Request, num1: i64, num2: i64) -> Result<i64, Thrown> {
 /// Warning: A non-numeric value encountered in %s on line 5
 /// int(25)
 /// ```
+///
+/// A zero base under a negative exponent is `safe_pow`'s deprecation
+/// before `INF`, whichever of the two is a float, as it is for `**`.
+///
+/// ```php
+/// var_dump(pow(0, -1), pow(0.0, -0.5), pow(0, -0), pow(0, -0.0));
+/// ```
+/// ```expect
+///
+/// Deprecated: Power of base 0 and negative exponent is deprecated in %s on line 2
+///
+/// Deprecated: Power of base 0 and negative exponent is deprecated in %s on line 2
+/// float(INF)
+/// float(INF)
+/// int(1)
+/// float(1)
+/// ```
 #[php_function]
-fn pow(req: &mut Request, num: Value, exponent: Value) -> Result<Union<Number, PhpObject>, Thrown> {
-    let base = num;
-    let (Some(x), Some(y)) = (to_number(&base), to_number(&exponent)) else {
-        return Err(unsupported(req, &base, &exponent));
-    };
-    if matches!(x, Operand::NonNumeric) || matches!(y, Operand::NonNumeric) {
-        return Err(unsupported(req, &base, &exponent));
-    }
-    let x = x.settle(req);
-    let y = y.settle(req);
-    Ok(Union::A(pow_base(x, y)))
-}
-
-/// What `zendi_try_convert_scalar_to_number` makes of one operand.
-#[derive(Clone, Copy)]
-enum Operand {
-    Number(Value),
-    /// A leading-numeric string, which warns as it converts.
-    Leading(Value),
-    NonNumeric,
-}
-
-impl Operand {
-    fn settle(self, req: &mut Request) -> Value {
-        match self {
-            Operand::Number(value) => value,
-            Operand::Leading(value) => {
-                php_ext::raising::warning(req, "A non-numeric value encountered");
-                value
-            }
-            Operand::NonNumeric => Value::int(0),
-        }
-    }
-}
-
-fn to_number(value: &Value) -> Option<Operand> {
-    Some(match value.as_ref() {
-        ValueRef::Int(_) | ValueRef::Float(_) => Operand::Number(*value),
-        ValueRef::Null | ValueRef::Undef => Operand::Number(Value::int(0)),
-        ValueRef::Bool(b) => Operand::Number(Value::int(i64::from(b))),
-        ValueRef::Str(s) => match numeric_string(s.as_bytes()) {
-            Some(number) => Operand::Number(number),
-            None => match leading_number(s.as_bytes()) {
-                Some(number) => Operand::Leading(number),
-                None => Operand::NonNumeric,
-            },
-        },
-        _ => return None,
-    })
-}
-
-/// The number a leading-numeric string starts with.
-fn leading_number(bytes: &[u8]) -> Option<Value> {
-    let mut end = 0;
-    while end < bytes.len() && matches!(bytes[end], b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C) {
-        end += 1;
-    }
-    let start = end;
-    if end < bytes.len() && matches!(bytes[end], b'+' | b'-') {
-        end += 1;
-    }
-    let digits = end;
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    let mut seen = end > digits;
-    if end < bytes.len() && bytes[end] == b'.' {
-        let mut fraction = end + 1;
-        while fraction < bytes.len() && bytes[fraction].is_ascii_digit() {
-            fraction += 1;
-        }
-        if seen || fraction > end + 1 {
-            seen = true;
-            end = fraction;
-        }
-    }
-    if !seen {
-        return None;
-    }
-    if end < bytes.len() && matches!(bytes[end], b'e' | b'E') {
-        let mut exponent = end + 1;
-        if exponent < bytes.len() && matches!(bytes[exponent], b'+' | b'-') {
-            exponent += 1;
-        }
-        let first = exponent;
-        while exponent < bytes.len() && bytes[exponent].is_ascii_digit() {
-            exponent += 1;
-        }
-        if exponent > first {
-            end = exponent;
-        }
-    }
-    numeric_string(&bytes[start..end])
-}
-
-/// `zend_binop_error("**", op1, op2)`.
-fn unsupported(req: &mut Request, a: &Value, b: &Value) -> Thrown {
-    let left = type_name(req, a);
-    let right = type_name(req, b);
-    throw(
-        req,
-        "TypeError",
-        &format!("Unsupported operand types: {left} ** {right}"),
-    )
-}
-
-/// `zend_zval_type_name`: a class's name for an object.
-fn type_name(req: &Request, value: &Value) -> String {
-    match value.as_object() {
-        Some(object) => req
-            .class_decl(object.class())
-            .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
-            .unwrap_or_default(),
-        None => value.type_name().to_owned(),
-    }
-}
-
-/// `pow_function_base`: the two number cases php has.
-fn pow_base(x: Value, y: Value) -> Number {
-    #[allow(clippy::cast_precision_loss)]
-    let double = |v: &Value| match v.as_ref() {
-        ValueRef::Int(n) => n as f64,
-        ValueRef::Float(f) => f,
-        _ => 0.0,
-    };
-    if let (ValueRef::Int(base), ValueRef::Int(exponent)) = (x.as_ref(), y.as_ref())
-        && exponent >= 0
-    {
-        return int_pow(base, exponent);
-    }
-    Union::B(double(&x).powf(double(&y)))
-}
-
-/// The squaring loop of `pow_function_base` over two ints, the product
-/// finished in floats from the first overflow on.
-fn int_pow(base: i64, exponent: i64) -> Number {
-    if exponent == 0 {
-        return Union::A(1);
-    }
-    if base == 0 {
-        return Union::A(0);
-    }
-    let (mut l1, mut l2, mut i) = (1i64, base, exponent);
-    while i >= 1 {
-        if i % 2 != 0 {
-            i -= 1;
-            let Some(product) = l1.checked_mul(l2) else {
-                #[allow(clippy::cast_precision_loss)]
-                let dval = l1 as f64 * l2 as f64;
-                #[allow(clippy::cast_precision_loss)]
-                return Union::B(dval * (l2 as f64).powf(i as f64));
-            };
-            l1 = product;
-        } else {
-            i /= 2;
-            let Some(square) = l2.checked_mul(l2) else {
-                #[allow(clippy::cast_precision_loss)]
-                let dval = l2 as f64 * l2 as f64;
-                #[allow(clippy::cast_precision_loss)]
-                return Union::B(l1 as f64 * dval.powf(i as f64));
-            };
-            l2 = square;
-        }
-    }
-    Union::A(l1)
+fn pow(
+    req: &mut Request,
+    num: Value,
+    exponent: Value,
+) -> Result<Raw<Union<Number, PhpObject>>, Thrown> {
+    let power = binary_op(req, BinaryOp::Pow, &num, &exponent)?;
+    <Raw<Union<Number, PhpObject>> as FromArgument>::from_value(req, power)
 }
 
 /// `exp(float $num): float`.
