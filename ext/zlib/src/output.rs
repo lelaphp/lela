@@ -1,0 +1,485 @@
+//! `zlib.c`'s compression of what a request prints: the `zlib output compression` handler
+//! `zlib.output_compression` starts at request start or on `ini_set()`,
+//! the `ob_gzhandler` name `ob_start()` takes for the same handler, the
+//! legacy `ob_gzhandler()` function over a stream of its own, and
+//! `zlib_get_coding_type`. The coding comes from the request's
+//! `Accept-Encoding`, read once per request.
+
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
+use php_ext::coerce::to_string;
+use php_ext::raising::{Level, Thrown, docref, raise};
+use php_ext::request::{
+    BufferHandler, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request, StartHandler,
+};
+use php_ext::values::{Key, PhpString, ValueRef};
+
+use crate::State;
+use crate::encode::{DEFAULT_STRATEGY, MAX_MEM_LEVEL, size_guess};
+use crate::ffi::{Deflate, Flush, Status};
+
+/// The three ini entries.
+pub(crate) const COMPRESSION: &str = "zlib.output_compression";
+pub(crate) const LEVEL: &str = "zlib.output_compression_level";
+pub(crate) const HANDLER: &str = "zlib.output_handler";
+
+/// `PHP_ZLIB_OUTPUT_HANDLER_NAME`.
+const HANDLER_NAME: &str = "zlib output compression";
+
+/// `PHP_OUTPUT_HANDLER_DEFAULT_SIZE`.
+const DEFAULT_SIZE: i64 = 0x4000;
+
+/// `PHP_OUTPUT_HANDLER_STDFLAGS`.
+const STDFLAGS: i64 = 0x70;
+
+/// What `php_zlib_output_conflict_check` refuses to start beside, for
+/// both names.
+const CONFLICTS: &[&str] = &[
+    HANDLER_NAME,
+    "ob_gzhandler",
+    "mb_output_handler",
+    "URL-Rewriter",
+];
+
+/// `php_output_handler_alias_register("ob_gzhandler", ...)`.
+pub(crate) const OB_GZHANDLER: BufferHandler = BufferHandler {
+    name: "ob_gzhandler",
+    conflicts: CONFLICTS,
+    handler,
+};
+
+/// The handler `php_zlib_output_compression_start` starts.
+const COMPRESSION_HANDLER: BufferHandler = BufferHandler {
+    name: HANDLER_NAME,
+    conflicts: CONFLICTS,
+    handler,
+};
+
+/// `ZLIBG(compression_coding)`: none until the request's
+/// `Accept-Encoding` named one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Coding {
+    #[default]
+    None,
+    Gzip,
+    Deflate,
+}
+
+impl Coding {
+    /// The window bits `deflateInit2` is handed for the coding.
+    fn bits(self) -> i64 {
+        match self {
+            Coding::Gzip => 0x1f,
+            Coding::Deflate | Coding::None => 0x0f,
+        }
+    }
+
+    /// The `Content-Encoding` header for it.
+    fn header(self) -> Option<&'static [u8]> {
+        match self {
+            Coding::Gzip => Some(b"Content-Encoding: gzip"),
+            Coding::Deflate => Some(b"Content-Encoding: deflate"),
+            Coding::None => None,
+        }
+    }
+}
+
+/// `php_zlib_context` as the buffer handlers use it: the stream and the
+/// input not yet deflated.
+#[derive(Default)]
+struct Context {
+    stream: Option<Deflate>,
+    buffer: Vec<u8>,
+}
+
+/// The buffer handlers' half of `zend_zlib_globals`, per request.
+#[derive(Default)]
+pub(crate) struct Globals {
+    /// `ZLIBG(output_compression)`: the chunk size the handler runs at,
+    /// zero for none.
+    compression: i64,
+    coding: Coding,
+    /// The running handler's `php_zlib_context`.
+    handler: Context,
+    /// `ZLIBG(ob_gzhandler)`, the legacy function's.
+    legacy: Option<Context>,
+}
+
+fn globals(req: &mut Request) -> &mut Globals {
+    &mut req.state::<State>().output
+}
+
+/// `zlib.output_compression` read as `OnUpdate_zlib_output_compression`
+/// reads it: `off` and `on` in any case, else a quantity, whose warning
+/// comes back beside it.
+fn parse(value: &[u8]) -> (i64, Option<String>) {
+    if value.eq_ignore_ascii_case(b"off") {
+        (0, None)
+    } else if value.eq_ignore_ascii_case(b"on") {
+        (1, None)
+    } else {
+        Request::ini_parse_quantity(value)
+    }
+}
+
+/// `php_zlib_output_encoding`: the coding once chosen, or the one the
+/// request's `HTTP_ACCEPT_ENCODING` names, `gzip` before `deflate`.
+fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
+    if globals(req).coding != Coding::None {
+        return Ok(globals(req).coding);
+    }
+    let key = PhpString::new(req, b"HTTP_ACCEPT_ENCODING")?;
+    let found = req
+        .superglobal(b"_SERVER")
+        .and_then(|server| server.get(&Key::Str(key)));
+    if let Some(value) = found {
+        let text = to_string(req, &value)?;
+        let text = text.as_bytes();
+        let has = |word: &[u8]| text.windows(word.len()).any(|w| w == word);
+        globals(req).coding = if has(b"gzip") {
+            Coding::Gzip
+        } else if has(b"deflate") {
+            Coding::Deflate
+        } else {
+            Coding::None
+        };
+    }
+    Ok(globals(req).coding)
+}
+
+/// `zlib.output_compression_level` as `OnUpdateLong` stored it.
+fn level(req: &Request) -> i64 {
+    let value = req.ini_get(LEVEL.as_bytes()).unwrap_or(b"-1");
+    Request::ini_parse_quantity(value).0
+}
+
+/// What `php_zlib_output_handler_ex` handed on: nothing, where it only
+/// cleaned, or the deflated bytes.
+type Handed = Option<Vec<u8>>;
+
+/// `php_zlib_output_handler_ex`: the stream made at the start and again
+/// after a clean, the input appended to what the last call left and
+/// deflated into a buffer of [`size_guess`] with a sync flush, a full
+/// one on a flush and a finish at the end; `Err` is php's `FAILURE`.
+fn handle(
+    ctx: &mut Context,
+    op: HandlerOp,
+    input: &[u8],
+    level: i64,
+    coding: Coding,
+) -> Result<Handed, ()> {
+    let init =
+        || Deflate::new(level, coding.bits(), MAX_MEM_LEVEL, DEFAULT_STRATEGY).map_err(|_| ());
+    if op.start {
+        ctx.stream = Some(init()?);
+    }
+    if op.clean {
+        ctx.stream = None;
+        if op.finish {
+            return Ok(None);
+        }
+        ctx.stream = Some(init()?);
+        ctx.buffer.clear();
+        return Ok(None);
+    }
+    ctx.buffer.extend_from_slice(input);
+    let mut out = vec![0; size_guess(input.len())];
+    let flush = if op.finish {
+        Flush::Finish
+    } else if op.flush {
+        Flush::Full
+    } else {
+        Flush::Sync
+    };
+    let Some(stream) = ctx.stream.as_mut() else {
+        return Err(());
+    };
+    let step = stream.deflate(&ctx.buffer, &mut out, flush);
+    match step.status {
+        Status::Ok if flush == Flush::Finish => {
+            ctx.stream = None;
+            return Err(());
+        }
+        Status::Ok | Status::StreamEnd => {
+            ctx.buffer.drain(..step.read);
+            out.truncate(step.written);
+        }
+        _ => {
+            ctx.stream = None;
+            return Err(());
+        }
+    }
+    if op.finish {
+        ctx.stream = None;
+    }
+    Ok(Some(out))
+}
+
+/// `php_zlib_output_handler`, both names' handler: nothing compressed
+/// without a coding, and `Vary` sent unless the whole buffer is thrown
+/// away; on the first call the headers, unless they went out already or
+/// compression was switched off meanwhile, and the handler made
+/// immutable.
+fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatus, Thrown> {
+    let op = call.op;
+    let coding = encoding(req)?;
+    if coding == Coding::None {
+        if op.start && !(op.clean && op.finish) {
+            req.header_add(b"Vary: Accept-Encoding", false, 0);
+        }
+        return Ok(HandlerStatus::Failure);
+    }
+    if op.start && globals(req).compression == 0 {
+        // `php_zlib_output_handler_init`, which php serves before the
+        // handler's first call: a chunk size where there was none.
+        globals(req).compression = DEFAULT_SIZE;
+    }
+    let level = level(req);
+    let mut ctx = std::mem::take(&mut globals(req).handler);
+    let handed = handle(&mut ctx, op, call.input, level, coding);
+    globals(req).handler = ctx;
+    let Ok(handed) = handed else {
+        return Ok(HandlerStatus::Failure);
+    };
+    if (!op.clean || !op.finish) && op.start {
+        if req.headers_sent().is_some() || globals(req).compression == 0 {
+            globals(req).handler.stream = None;
+            return Ok(HandlerStatus::Failure);
+        }
+        if let Some(header) = coding.header() {
+            req.header_add(header, true, 0);
+        }
+        req.header_add(b"Vary: Accept-Encoding", false, 0);
+        call.immutable = true;
+    }
+    call.out = handed.unwrap_or_default();
+    Ok(HandlerStatus::Success)
+}
+
+/// Whether a handler of `name` is on the stack,
+/// `php_output_handler_started`.
+fn started(req: &mut Request, name: &str) -> Result<bool, Thrown> {
+    let list = req.output_buffer_op(&OutputOp::ListHandlers)?;
+    let ValueRef::Array(list) = list.as_ref() else {
+        return Ok(false);
+    };
+    Ok(list.iter().any(
+        |(_, value)| matches!(value.as_ref(), ValueRef::Str(s) if s.as_bytes() == name.as_bytes()),
+    ))
+}
+
+/// `php_zlib_output_compression_start`: with a chunk size and a coding,
+/// the handler started, and `zlib.output_handler`'s after it.
+fn compression_start(req: &mut Request) -> Result<(), Thrown> {
+    match globals(req).compression {
+        0 => return Ok(()),
+        1 => globals(req).compression = DEFAULT_SIZE,
+        _ => {}
+    }
+    if encoding(req)? == Coding::None {
+        return Ok(());
+    }
+    let chunk_size = globals(req).compression;
+    let begun = req.output_buffer_op(&OutputOp::Start {
+        handler: StartHandler::Registered(COMPRESSION_HANDLER),
+        chunk_size,
+        flags: STDFLAGS,
+    })?;
+    let user = req.ini_get(HANDLER.as_bytes()).unwrap_or_default().to_vec();
+    if matches!(begun.as_ref(), ValueRef::Bool(true)) && !user.is_empty() {
+        let handler = if let Some(registered) = req.buffer_handler(&user) {
+            StartHandler::Registered(registered)
+        } else {
+            let name = php_ext::values::Value::string(PhpString::new(req, &user)?);
+            StartHandler::User(php_ext::coerce::to_callable(req, &name)?)
+        };
+        req.output_buffer_op(&OutputOp::Start {
+            handler,
+            chunk_size,
+            flags: STDFLAGS,
+        })?;
+    }
+    Ok(())
+}
+
+/// `PHP_RINIT_FUNCTION(zlib)`: no coding yet, the chunk size the ini
+/// holds, and the handler started where it asks for one.
+pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    let value = req.ini_get(COMPRESSION.as_bytes()).unwrap_or(b"0");
+    let (compression, _) = parse(value);
+    let globals = globals(req);
+    globals.coding = Coding::None;
+    globals.compression = compression;
+    compression_start(req)
+}
+
+/// `OnUpdate_zlib_output_compression`: the value read, refused beside a
+/// `output_handler`, and once the headers went out; the chunk size reset
+/// to it, and at runtime the handler started when it is not.
+///
+/// ```php
+/// var_dump(ini_set('zlib.output_compression', 'Off'), ini_get('zlib.output_compression'));
+/// var_dump(ini_set('zlib.output_compression', '5 apples'));
+/// ```
+/// ```expect
+/// string(1) "0"
+/// string(3) "Off"
+///
+/// Warning: Invalid "zlib.output_compression" setting. Invalid quantity "5 apples": unknown multiplier "s", interpreting as "5 " for backwards compatibility in %s on line 3
+///
+/// Warning: ini_set(): Cannot change zlib.output_compression - headers already sent in %s on line 3
+/// bool(false)
+/// ```
+pub(crate) fn on_compression(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+    let (compression, invalid) = parse(value);
+    if let Some(error) = invalid {
+        let text = format!("Invalid \"{COMPRESSION}\" setting. {error}");
+        raise(req, Level::Warning, &text);
+    }
+    let handler = req.ini_get(b"output_handler").unwrap_or_default();
+    if !handler.is_empty() && compression != 0 {
+        docref(
+            req,
+            Level::CoreError,
+            "Cannot use both zlib.output_compression and output_handler together!!",
+        );
+        return Ok(false);
+    }
+    if req.at_startup() {
+        return Ok(true);
+    }
+    if req.headers_sent().is_some() {
+        docref(
+            req,
+            Level::Warning,
+            "Cannot change zlib.output_compression - headers already sent",
+        );
+        return Ok(false);
+    }
+    globals(req).compression = compression;
+    if compression != 0 && !started(req, HANDLER_NAME)? {
+        compression_start(req)?;
+    }
+    Ok(true)
+}
+
+/// `OnUpdate_zlib_output_handler`: refused at runtime once the headers
+/// went out.
+#[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
+pub(crate) fn on_handler(req: &mut Request, _value: &[u8]) -> Result<bool, Thrown> {
+    if !req.at_startup() && req.headers_sent().is_some() {
+        docref(
+            req,
+            Level::Warning,
+            "Cannot change zlib.output_handler - headers already sent",
+        );
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// `ob_gzhandler(string $data, int $flags): string|false`, the legacy
+/// hack: the coding asked for, the headers on a start, and the bytes
+/// through a stream of its own, given back on a failure and at the
+/// request's end.
+///
+/// ```php
+/// var_dump(ob_gzhandler('abc', PHP_OUTPUT_HANDLER_START));
+/// $_SERVER['HTTP_ACCEPT_ENCODING'] = 'gzip, deflate';
+/// var_dump(ob_gzhandler('abc', PHP_OUTPUT_HANDLER_START));
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// ```
+#[php_function]
+pub(crate) fn ob_gzhandler(
+    req: &mut Request,
+    data: PhpString,
+    flags: i64,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let coding = encoding(req)?;
+    if coding == Coding::None {
+        return Ok(OrFalse::False);
+    }
+    let op = HandlerOp {
+        start: flags & 0x01 != 0,
+        clean: flags & 0x02 != 0,
+        flush: flags & 0x04 != 0,
+        finish: flags & 0x08 != 0,
+    };
+    if op.start {
+        if let Some(header) = coding.header() {
+            req.header_add(header, true, 0);
+        }
+        req.header_add(b"Vary: Accept-Encoding", false, 0);
+    }
+    let level = level(req);
+    let mut ctx = globals(req).legacy.take().unwrap_or_default();
+    match handle(&mut ctx, op, data.as_bytes(), level, coding) {
+        Ok(handed) => {
+            globals(req).legacy = Some(ctx);
+            let out = PhpString::new(req, &handed.unwrap_or_default())?;
+            Ok(OrFalse::Value(out))
+        }
+        Err(()) => Ok(OrFalse::False),
+    }
+}
+
+/// `zlib_get_coding_type(): string|false`: the coding chosen, which only
+/// starting the compression chooses.
+///
+/// ```php
+/// var_dump(zlib_get_coding_type());
+/// ```
+/// ```expect
+/// bool(false)
+/// ```
+#[php_function]
+pub(crate) fn zlib_get_coding_type(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+    let name: &[u8] = match globals(req).coding {
+        Coding::Gzip => b"gzip",
+        Coding::Deflate => b"deflate",
+        Coding::None => return Ok(OrFalse::False),
+    };
+    Ok(OrFalse::Value(PhpString::new(req, name)?))
+}
+
+/// `DISPLAY_INI_ENTRIES()` for the three, `zlib.output_compression`
+/// through `php_ini_boolean_displayer_cb`, `On` or `Off`.
+pub(crate) fn info_ini(req: &mut Request) {
+    let entries = req.ini_entries();
+    let shown = |name: &str, value: &[u8]| -> String {
+        if name == COMPRESSION {
+            return if Request::ini_parse_bool(value) {
+                "On"
+            } else {
+                "Off"
+            }
+            .into();
+        }
+        if value.is_empty() {
+            "no value".into()
+        } else {
+            String::from_utf8_lossy(value).into_owned()
+        }
+    };
+    let rows: Vec<[String; 3]> = [COMPRESSION, LEVEL, HANDLER]
+        .iter()
+        .map(|name| {
+            let entry = entries
+                .iter()
+                .find(|e| e.decl.name.0.as_ref() == name.as_bytes());
+            let local = entry.map_or(&[][..], |e| &e.value[..]);
+            let master = entry.map_or(&[][..], |e| e.original.as_deref().unwrap_or(&e.value[..]));
+            [(*name).to_string(), shown(name, local), shown(name, master)]
+        })
+        .collect();
+    let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
+    let cells: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
+        .collect();
+    table.extend(cells.iter().map(<[&str; 3]>::as_slice));
+    req.info_table(&table);
+}

@@ -1216,11 +1216,23 @@ impl Ops for OfExtension {
         buf[7] = size;
         Some(buf)
     }
+
+    fn flush(&mut self, req: &mut Request) -> bool {
+        self.0.flush(req)
+    }
+
+    fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
+        self.0.flock(req, operation)
+    }
 }
 
-/// `_php_stream_alloc` over a kind an extension implements.
+/// `_php_stream_alloc` over a kind an extension implements, with
+/// `PHP_STREAM_FLAG_NO_BUFFER` where the kind keeps no read buffer.
 pub(crate) fn of_extension(ops: Box<dyn crate::api::request::StreamOps>, mode: &[u8]) -> PhpStream {
-    PhpStream::new(Box::new(OfExtension(ops)), mode)
+    let buffered = ops.buffered();
+    let mut stream = PhpStream::new(Box::new(OfExtension(ops)), mode);
+    stream.flags.no_buffer = !buffered;
+    stream
 }
 
 /// `_php_stream_memory_create` (`Z/main/streams/memory.c:271`): empty,
@@ -2811,6 +2823,21 @@ impl Request {
         self.open_wrapper_ex(path, mode, options)
     }
 
+    /// `_php_stream_open_wrapper_ex` under an extension's [`Opening`].
+    pub(crate) fn open_wrapper_with(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        opening: crate::api::request::Opening,
+    ) -> Result<Option<Stream>, Thrown> {
+        let options = OpenOptions {
+            use_path: opening.use_path,
+            report: opening.warn,
+            ..OpenOptions::REPORT
+        };
+        self.open_wrapper_ex(path, mode, options)
+    }
+
     /// `_php_stream_open_wrapper_ex` under `REPORT_ERRORS | STREAM_USE_URL`,
     /// what `get_headers` opens with: a wrapper located that is no URL
     /// wrapper, the plain files one, `php://` and a registered one not
@@ -2842,10 +2869,12 @@ impl Request {
             return Err(throw(self, "ValueError", "Path must not be empty"));
         }
         let mut to_open = path.to_vec();
+        let mut use_path = options.use_path;
         if options.use_path
             && let Ok(resolved) = self.resolve_path(path)
         {
             to_open = resolved;
+            use_path = false;
         }
         let (wrapper, path_to_open) = self.locate(&to_open, options);
         if options.use_url && !wrapper.is_url() {
@@ -2880,8 +2909,16 @@ impl Request {
                 match open {
                     Some(open) => (
                         label,
-                        open(self, &path_to_open, mode)?
-                            .ok_or_else(|| String::from("operation failed")),
+                        open(
+                            self,
+                            &path_to_open,
+                            mode,
+                            crate::api::request::Opening {
+                                use_path,
+                                warn: false,
+                            },
+                        )?
+                        .ok_or_else(|| String::from("operation failed")),
                     ),
                     None => (
                         label,

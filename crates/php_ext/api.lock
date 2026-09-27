@@ -313,6 +313,7 @@ request::IniEntry
 request::Interrupt
 request::Interrupt::raise
 request::Interrupt::raised
+request::Opening
 request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
@@ -404,6 +405,7 @@ request::Request::named_arguments
 request::Request::new_stream
 request::Request::open_dir
 request::Request::open_stream
+request::Request::open_stream_with
 request::Request::open_url
 request::Request::os_error_text
 request::Request::output_buffer_op
@@ -447,6 +449,7 @@ request::Request::set_umask
 request::Request::state
 request::Request::status_line
 request::Request::stdin
+request::Request::stream_ctx
 request::Request::stream_filters
 request::Request::stream_from_fd
 request::Request::stream_wrappers
@@ -513,7 +516,10 @@ request::StreamFilter
 request::StreamFilter::close
 request::StreamFilter::filter
 request::StreamOps
+request::StreamOps::buffered
 request::StreamOps::close
+request::StreamOps::flock
+request::StreamOps::flush
 request::StreamOps::label
 request::StreamOps::read
 request::StreamOps::seek

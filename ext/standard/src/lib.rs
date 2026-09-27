@@ -110,6 +110,16 @@ pub use scanf::php_sscanf_internal;
 /// (ADR-0004; design §4.10).
 pub use url_scanner::{php_url_scanner_add_session_var, php_url_scanner_reset_session_var};
 
+/// What `file.h` declares `PHPAPI PHP_FUNCTION` for `zlib.c`, whose
+/// `gz*` file natives are `ZEND_FALIAS`es of these under declarations of
+/// their own, and what `php_stream_context.h` declares for
+/// `zlib_fopen_wrapper.c`, `php_stream_context_from_zval(NULL, 0)` and
+/// `php_stream_context_get_option`, which php keeps in `main/` and this
+/// engine ports in `streamsfuncs` beside `stream_context_create`
+/// (ADR-0004; design §4.10).
+pub use file::{fclose, feof, fgetc, fgets, fpassthru, fread, fseek, ftell, fwrite, rewind};
+pub use streamsfuncs::{default_stream_ctx, stream_ctx_option};
+
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;

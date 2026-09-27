@@ -304,6 +304,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libz-sys"
+version = "1.1.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "md5"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -382,6 +394,7 @@ dependencies = [
  "php_ext_spl",
  "php_ext_standard",
  "php_ext_tokenizer",
+ "php_ext_zlib",
 ]
 
 [[package]]
@@ -590,6 +603,15 @@ name = "php_ext_tokenizer"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+]
+
+[[package]]
+name = "php_ext_zlib"
+version = "0.0.0"
+dependencies = [
+ "libz-sys",
+ "php_ext",
+ "php_ext_standard",
 ]
 
 [[package]]

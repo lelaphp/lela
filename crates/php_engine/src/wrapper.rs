@@ -450,10 +450,22 @@ impl Request {
     /// `PHP_FUNCTION(rename)` (`Z/ext/standard/file.c:1196`) past its
     /// parameters: the source's wrapper located, no wrapper being
     /// `Unable to locate stream wrapper` and one without `rename`
-    /// `%s wrapper does not support renaming`; then the target's, which
+    /// `%s wrapper does not support renaming` under its label, `glob` or
+    /// `ZLIB` for an extension's; then the target's, which
     /// must be the same wrapper, `Cannot rename a file across wrapper
     /// types` otherwise; then the wrapper's `rename` over the two paths
     /// as written.
+    ///
+    /// ```php
+    /// var_dump(rename('glob:///tmp/x', 'glob:///tmp/y'), rename('compress.zlib:///tmp/x', 'compress.zlib:///tmp/y'));
+    /// ```
+    /// ```expect
+    /// Warning: rename(): glob wrapper does not support renaming in %s on line 2
+    ///
+    /// Warning: rename(): ZLIB wrapper does not support renaming in %s on line 2
+    /// bool(false)
+    /// bool(false)
+    /// ```
     fn rename_url(&mut self, from: &[u8], to: &[u8]) -> Result<bool, Thrown> {
         let wrapper = self.locate_wrapper(from).0;
         let rename = match &wrapper {
@@ -462,8 +474,8 @@ impl Request {
                 return Ok(false);
             }
             Located::Plain | Located::Space(_) => None,
-            Located::Ext(at) => self.wrappers[*at].rename,
-            Located::Php | Located::Data => {
+            Located::Ext(at) if self.wrappers[*at].rename.is_some() => self.wrappers[*at].rename,
+            Located::Ext(_) | Located::Php | Located::Data => {
                 let text = format!(
                     "{} wrapper does not support renaming",
                     self.wrapper_label(&wrapper)
@@ -472,16 +484,6 @@ impl Request {
                 return Ok(false);
             }
         };
-        if let Located::Ext(_) = wrapper
-            && rename.is_none()
-        {
-            docref(
-                self,
-                Level::Warning,
-                "user-space wrapper does not support renaming",
-            );
-            return Ok(false);
-        }
         if !same(&wrapper, &self.locate_wrapper(to).0) {
             docref(
                 self,

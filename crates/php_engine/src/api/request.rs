@@ -777,6 +777,30 @@ pub trait StreamOps: Send {
     fn size(&self) -> Option<i64> {
         None
     }
+
+    /// `ops->flush`: `true` for php's `0`, which a kind with nothing of
+    /// its own to flush answers.
+    fn flush(&mut self, req: &mut Request) -> bool {
+        let _ = req;
+        true
+    }
+
+    /// `PHP_STREAM_OPTION_LOCKING` with `flock(2)`'s operation, as
+    /// [`Stream::flock`] asks it: `None` where the kind has no
+    /// `flock(2)`, else whether `flock(2)` took it, which a kind over
+    /// another stream answers by asking that one, as
+    /// `php_gziop_set_option` does.
+    fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
+        let _ = (req, operation);
+        None
+    }
+
+    /// Whether the generic half keeps a read buffer before the kind:
+    /// `false` is `PHP_STREAM_FLAG_NO_BUFFER`, set on the stream as
+    /// `php_stream_gzopen` sets it, so every read reaches the kind.
+    fn buffered(&self) -> bool {
+        true
+    }
 }
 
 /// A stream wrapper's operations, Zend's `php_stream_wrapper_ops` as a
@@ -794,8 +818,9 @@ pub struct StreamWrapper {
     /// `stream_opener`, `None` for a wrapper that opens no stream, php's
     /// `wrapper does not support stream open`; the opener's own `None`
     /// is the open that failed, which `php_stream_display_wrapper_errors`
-    /// reports as `operation failed`.
-    pub open: Option<fn(&mut Request, &[u8], &[u8]) -> Result<Option<Stream>, Thrown>>,
+    /// reports as `operation failed`. It is handed the path, the `mode` and
+    /// the [`Opening`] php hands it, `REPORT_ERRORS` cleared.
+    pub open: Option<fn(&mut Request, &[u8], &[u8], Opening) -> Result<Option<Stream>, Thrown>>,
     /// `dir_opener`: the directory's entries, in the order `readdir`
     /// gives them, which the engine serves as a directory stream under
     /// the wrapper's label (`rewinddir` back to the first); `None` is the
@@ -810,6 +835,18 @@ pub struct StreamWrapper {
     /// [`WrapperOp::Owner`] and [`WrapperOp::Group`], with the path as
     /// the program wrote it.
     pub set_stat: Option<fn(&mut Request, &[u8], WrapperOp<'_>) -> Result<bool, Thrown>>,
+}
+
+/// The `options` of `php_stream_open_wrapper_ex` a wrapper's opener
+/// reads and hands on to an open of its own, [`Request::open_stream_with`]:
+/// `USE_PATH`, the path looked for along `include_path` first, and
+/// `REPORT_ERRORS`, a refusal a warning. The engine clears `warn` before
+/// it asks an opener, as php does, so what fails inside one is the
+/// generic `operation failed` alone unless the opener warns of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Opening {
+    pub use_path: bool,
+    pub warn: bool,
 }
 
 /// One wrapper operation past opening, php's `php_stream_wrapper_ops`
@@ -17326,6 +17363,19 @@ impl Request {
         self.open_stream_wrapper(path, mode, use_include_path)
     }
 
+    /// `php_stream_open_wrapper_ex(path, mode, options)` under the
+    /// options an opener was handed, or a native chose: what
+    /// [`Request::open_stream`] is with `REPORT_ERRORS` and `USE_PATH`
+    /// each as `opening` says.
+    pub fn open_stream_with(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        opening: Opening,
+    ) -> Result<Option<Stream>, Thrown> {
+        self.open_wrapper_with(path, mode, opening)
+    }
+
     /// `php_stream_open_wrapper_ex(url, mode, REPORT_ERRORS |
     /// STREAM_USE_URL)`, what `get_headers()` opens: [`Request::open_stream`]
     /// for a path whose wrapper is a URL wrapper, and for any other php's
@@ -17500,6 +17550,16 @@ impl Request {
         let answer = f(self);
         self.stream_ctx = outer;
         answer
+    }
+
+    /// The `php_stream_context *context` a wrapper's opener is handed:
+    /// what [`Request::with_stream_ctx`] set around the operation being
+    /// served, `None` outside one and where the native resolved its
+    /// `$context` to none. An extension's wrapper reads its options off
+    /// it, as `php_stream_gzopen` reads `zlib`'s `level`.
+    #[must_use]
+    pub fn stream_ctx(&self) -> Option<Resource> {
+        self.stream_ctx
     }
 
     /// `php_stream_fopen_tmpfile`, what `tmpfile()` is: a new file in the

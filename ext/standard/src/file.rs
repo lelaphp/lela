@@ -594,7 +594,7 @@ fn readdir(
 /// string(2) "cd"
 /// ```
 #[php_function]
-fn rewind(req: &mut Request, stream: Stream) -> bool {
+pub fn rewind(req: &mut Request, stream: Stream) -> bool {
     stream.seek(req, 0, Whence::Set)
 }
 
@@ -644,7 +644,7 @@ fn rewind(req: &mut Request, stream: Stream) -> bool {
 /// resource(%d) of type (Unknown)
 /// ```
 #[php_function]
-fn fclose(req: &mut Request, stream: Stream) -> bool {
+pub fn fclose(req: &mut Request, stream: Stream) -> bool {
     // `PHP_STREAM_FLAG_NO_FCLOSE`: a directory, and a stream an operation
     // holds while it serves PHP code on it, which `close` refuses.
     if stream.is_dir(req) || !stream.close(req) {
@@ -701,7 +701,7 @@ fn fclose(req: &mut Request, stream: Stream) -> bool {
 /// bool(true)
 /// ```
 #[php_function]
-fn feof(req: &mut Request, stream: Stream) -> bool {
+pub fn feof(req: &mut Request, stream: Stream) -> bool {
     stream.eof(req)
 }
 
@@ -728,7 +728,7 @@ fn feof(req: &mut Request, stream: Stream) -> bool {
 /// fgetc(): Argument #1 ($stream) must be of type resource, string given
 /// ```
 #[php_function]
-fn fgetc(req: &mut Request, stream: Stream) -> Result<OrFalse<PhpString>, Thrown> {
+pub fn fgetc(req: &mut Request, stream: Stream) -> Result<OrFalse<PhpString>, Thrown> {
     Ok(match stream.read(req, 1)? {
         Some(byte) if !byte.is_empty() => OrFalse::Value(byte),
         Some(empty) => {
@@ -794,7 +794,7 @@ fn fgetc(req: &mut Request, stream: Stream) -> Result<OrFalse<PhpString>, Thrown
 /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate %d bytes) in %s on line 4
 /// ```
 #[php_function]
-fn fgets(
+pub fn fgets(
     req: &mut Request,
     stream: Stream,
     #[php(default = null)] length: Option<i64>,
@@ -850,7 +850,7 @@ fn fgets(
 /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate %d bytes) in %s on line 2
 /// ```
 #[php_function]
-fn fread(req: &mut Request, stream: Stream, length: i64) -> Result<OrFalse<PhpString>, Thrown> {
+pub fn fread(req: &mut Request, stream: Stream, length: i64) -> Result<OrFalse<PhpString>, Thrown> {
     if length <= 0 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
@@ -1192,7 +1192,7 @@ pub fn php_fstat(req: &mut Request, stream: Stream) -> Result<Value, Thrown> {
 /// string(1) "1"
 /// ```
 #[php_function]
-fn fseek(
+pub fn fseek(
     req: &mut Request,
     stream: Stream,
     offset: i64,
@@ -1227,7 +1227,7 @@ fn fseek(
 /// bool(false)
 /// ```
 #[php_function]
-fn ftell(req: &mut Request, stream: Stream) -> OrFalse<i64> {
+pub fn ftell(req: &mut Request, stream: Stream) -> OrFalse<i64> {
     let at = stream.tell(req);
     if at == -1 {
         OrFalse::False
@@ -1326,7 +1326,7 @@ fn fflush(req: &mut Request, stream: Stream) -> bool {
 /// int(33152)
 /// ```
 #[php_function(aliases(fputs))]
-fn fwrite(
+pub fn fwrite(
     req: &mut Request,
     stream: Stream,
     data: PhpString,
@@ -2669,7 +2669,7 @@ fn readfile(
 /// int(0)
 /// ```
 #[php_function]
-fn fpassthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
+pub fn fpassthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
     passthru(req, stream)
 }
 
