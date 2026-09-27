@@ -11004,18 +11004,16 @@ pub(crate) fn assign_static_prop<T: Tier>(
         return Ok(Stepped::Same(frame));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
-    write_out(req, frame, code, op, &value);
     // `zend_assign_to_typed_prop` under this frame's
     // `EX_USES_STRICT_TYPES()`, which the write itself serves
     // ([`Request::set_static_property`]): a typed slot takes the value
     // the declared type accepts, coerced by the weak rule where the file
     // is not strict, and php's `TypeError` where it neither satisfies
-    // nor coerces. The temporary already names the value php's
-    // `RETURN_VALUE_USED` copies, which php writes before the verify
-    // too.
+    // nor coerces. `RETURN_VALUE_USED` copies what landed, after it.
     let strict = req.frame_strict_types(frame);
-    if let Err(thrown) = req.set_static_slot(declaring, &property, &name, value, strict) {
-        return threw(req, frame, &thrown);
+    match req.set_static_slot(declaring, &property, &name, value, strict) {
+        Ok(landed) => write_out(req, frame, code, op, &landed),
+        Err(thrown) => return threw(req, frame, &thrown),
     }
     req.vm_mut().jump(frame, at.saturating_add(2));
     Ok(Stepped::Same(frame))

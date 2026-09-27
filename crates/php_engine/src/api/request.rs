@@ -6524,12 +6524,26 @@ impl Request {
                 }
             };
         self.set_static_slot(declaring, &property, name, value, strict)
+            .map(|_| ())
     }
 
     /// [`Request::set_static_property`] over a slot already addressed,
     /// as `ZEND_ASSIGN_STATIC_PROP` addresses it before it reads its
     /// value and writes it after: `declaring` is the class the slot is
-    /// in and `property` its declaration.
+    /// in and `property` its declaration. What the slot holds after the
+    /// write comes back, a view: the value `zend_assign_to_typed_prop`
+    /// answers, coerced where the weak rule coerced it, which is what
+    /// `RETURN_VALUE_USED` copies.
+    ///
+    /// ```php
+    /// class Foo { public static int $i; public static string $s = "x"; }
+    /// var_dump(Foo::$i = "1", Foo::$s = Foo::$i++, Foo::$s = 3);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// string(1) "1"
+    /// string(1) "3"
+    /// ```
     pub(crate) fn set_static_slot(
         &mut self,
         declaring: ClassId,
@@ -6537,7 +6551,7 @@ impl Request {
         name: &[u8],
         mut value: Value,
         strict: bool,
-    ) -> Result<(), Thrown> {
+    ) -> Result<Value, Thrown> {
         // `zend_verify_property_type`: the value held to the declared
         // type and coerced by the weak rule where the writer's regime is
         // not strict, and php's `TypeError` where it neither satisfies
@@ -6561,10 +6575,15 @@ impl Request {
         if let Some(cell) = self.static_slot_cell(declaring, name)
             && cell.heap().sources() != 0
         {
-            return self.assign_to_reference(cell.heap(), value, strict);
+            self.assign_to_reference(cell.heap(), value, strict)?;
+        } else {
+            self.store_static_property(declaring, name, value);
         }
-        self.store_static_property(declaring, name, value);
-        Ok(())
+        Ok(self
+            .statics
+            .iter()
+            .find(|((at, under), _)| *at == declaring && under == name)
+            .map_or(Value::null(), |(_, held)| held.deref()))
     }
 
     /// The write half of [`Request::set_static_property`], php's
