@@ -122,6 +122,7 @@ abi::ObjectHandlers::write_property
 abi::OnModify
 abi::OrFalse
 abi::Passed
+abi::Path
 abi::PropertyPlace
 abi::PropertyPurpose
 abi::PropertyRead
