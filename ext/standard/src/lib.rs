@@ -125,8 +125,10 @@ pub use file::{php_fputcsv, php_fstat};
 pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
 
+use pad_types::{STR_PAD_BOTH, STR_PAD_LEFT, STR_PAD_RIGHT};
+use php_ext::abi::Passed;
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
-use php_ext::attr::php_function;
+use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_count_error, arg_value_error, docref};
@@ -195,7 +197,15 @@ pub fn extension() -> Extension {
             r#type::is_object::declared(),
             r#type::is_scalar::declared(),
         ])
-        .functions(string_natives())
+        // `string.c`'s six this file declares.
+        .functions(vec![
+            trim::declared(),
+            str_contains::declared(),
+            strtoupper::declared(),
+            strtolower::declared(),
+            str_pad::declared(),
+            substr::declared(),
+        ])
         // `array.c`, in the stub's order.
         .functions(vec![
             array::stack::array_push::declared(),
@@ -391,11 +401,7 @@ pub fn extension() -> Extension {
             r#type::is_countable::declared(),
         ])
         .constants(array::constants::declared())
-        .constants(vec![
-            constant(b"STR_PAD_LEFT", STR_PAD_LEFT),
-            constant(b"STR_PAD_RIGHT", STR_PAD_RIGHT),
-            constant(b"STR_PAD_BOTH", STR_PAD_BOTH),
-        ])
+        .constants(pad_types::declared())
         .constants(file::constants())
         .constants(file_constants())
         .constants(math::constants::declared())
@@ -567,7 +573,10 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         sockets::natives(),
         user_filters::natives(),
         userspace::natives(),
-        url_scanner::natives(),
+        vec![
+            url_scanner::output_reset_rewrite_vars::declared(),
+            url_scanner::output_add_rewrite_var::declared(),
+        ],
     ]
     .into_iter()
     .flatten()
@@ -616,99 +625,6 @@ fn dependencies() -> Vec<Dependency> {
             rel: None,
             version: None,
         },
-    ]
-}
-
-/// The natives of `string.c` declared so far, each with the frameless
-/// entries `basic_functions_arginfo.h` gives it.
-fn string_natives() -> Vec<(FunctionDecl, output::Entry)> {
-    vec![
-        (
-            frameless(
-                declared(
-                    b"trim",
-                    &[
-                        parameter(b"string", Type::String),
-                        Parameter {
-                            default: ParameterDefault::Expr(ConstExpr::Str(TRIM_DEFAULT.into())),
-                            ..parameter(b"characters", Type::String)
-                        },
-                    ],
-                    Type::String,
-                ),
-                &[1, 2],
-            ),
-            trim,
-        ),
-        (
-            frameless(
-                declared(
-                    b"str_contains",
-                    &[
-                        parameter(b"haystack", Type::String),
-                        parameter(b"needle", Type::String),
-                    ],
-                    Type::Bool,
-                ),
-                &[2],
-            ),
-            str_contains,
-        ),
-        (
-            declared(
-                b"strtoupper",
-                &[parameter(b"string", Type::String)],
-                Type::String,
-            ),
-            strtoupper,
-        ),
-        (
-            declared(
-                b"strtolower",
-                &[parameter(b"string", Type::String)],
-                Type::String,
-            ),
-            strtolower,
-        ),
-        (
-            declared(
-                b"str_pad",
-                &[
-                    parameter(b"string", Type::String),
-                    parameter(b"length", Type::Int),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Str(b" ".as_slice().into())),
-                        ..parameter(b"pad_string", Type::String)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
-                            b"STR_PAD_RIGHT".as_slice().into(),
-                        ))),
-                        ..parameter(b"pad_type", Type::Int)
-                    },
-                ],
-                Type::String,
-            ),
-            str_pad,
-        ),
-        (
-            frameless(
-                declared(
-                    b"substr",
-                    &[
-                        parameter(b"string", Type::String),
-                        parameter(b"offset", Type::Int),
-                        Parameter {
-                            default: ParameterDefault::Expr(ConstExpr::Null),
-                            ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
-                        },
-                    ],
-                    Type::String,
-                ),
-                &[2, 3],
-            ),
-            substr,
-        ),
     ]
 }
 
@@ -1010,9 +926,8 @@ fn str_repeat(req: &mut Request, string: PhpString, times: i64) -> Result<PhpStr
 /// arguments to a native of one, so the oracle ends in `ArgumentCountError` at the first
 /// handler call with the buffer lost; the `ob_*` layer's call of a
 /// native handler is #288's, and the witness for it stands there.
-fn strtoupper(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn strtoupper(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     cased(req, string, u8::to_ascii_uppercase)
 }
 
@@ -1041,18 +956,18 @@ fn strtoupper(req: &mut Request) -> Result<Value, Thrown> {
 /// int(96)
 /// string(60) "ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1"
 /// ```
-fn strtolower(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn strtolower(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     cased(req, string, u8::to_ascii_lowercase)
 }
 
-/// `PHP_STR_PAD_LEFT`, `PHP_STR_PAD_RIGHT` and `PHP_STR_PAD_BOTH`
-/// (`Z/ext/standard/php_string.h`), what `str_pad`'s `$pad_type` is one
-/// of.
-const STR_PAD_LEFT: i64 = 0;
-const STR_PAD_RIGHT: i64 = 1;
-const STR_PAD_BOTH: i64 = 2;
+/// `STR_PAD_*`, what `str_pad`'s `$pad_type` is one of.
+#[php_const]
+pub(crate) mod pad_types {
+    pub(crate) const STR_PAD_LEFT: i64 = 0;
+    pub(crate) const STR_PAD_RIGHT: i64 = 1;
+    pub(crate) const STR_PAD_BOTH: i64 = 2;
+}
 
 /// `str_pad(string $string, int $length, string $pad_string = " ", int
 /// $pad_type = STR_PAD_RIGHT): string`, php's `PHP_FUNCTION(str_pad)`
@@ -1129,26 +1044,19 @@ const STR_PAD_BOTH: i64 = 2;
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn str_pad(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 4)?;
-    let given = req.argument_count();
-    let input = string_argument(req, 1)?;
-    let length = long_argument(req, 2)?;
-    let pad = if given >= 3 {
-        string_argument(req, 3)?.as_bytes().to_vec()
-    } else {
-        vec![b' ']
-    };
-    let pad_type = if given >= 4 {
-        long_argument(req, 4)?
-    } else {
-        STR_PAD_RIGHT
-    };
+#[php_function]
+fn str_pad(
+    req: &mut Request,
+    string: PhpString,
+    length: i64,
+    #[php(default = " ")] pad_string: PhpString,
+    #[php(default = STR_PAD_RIGHT)] pad_type: i64,
+) -> Result<PhpString, Thrown> {
+    let (input, pad) = (string, pad_string.as_bytes().to_vec());
     let bytes = input.as_bytes();
     if length < 0 || usize::try_from(length).is_ok_and(|length| length <= bytes.len()) {
-        let value = Value::string(input);
-        req.addref(&value);
-        return Ok(value);
+        req.addref(&Value::string(input));
+        return Ok(input);
     }
     if pad.is_empty() {
         return Err(arg_value_error(req, 3, "not be empty"));
@@ -1183,19 +1091,18 @@ fn str_pad(req: &mut Request) -> Result<Value, Thrown> {
             at += 1;
         }
     })?;
-    Ok(Value::string(padded))
+    Ok(padded)
 }
 
 /// `zend_string_toupper_ex` and `zend_string_tolower_ex`'s one shape
 /// over `map`: the argument with one more owner when `map` changes no
 /// byte, else a new string of the request's with the bytes before the
 /// first changed one copied and every byte from it mapped.
-fn cased(req: &mut Request, string: PhpString, map: fn(&u8) -> u8) -> Result<Value, Thrown> {
+fn cased(req: &mut Request, string: PhpString, map: fn(&u8) -> u8) -> Result<PhpString, Thrown> {
     let bytes = string.as_bytes();
     let Some(first) = bytes.iter().position(|b| map(b) != *b) else {
-        let value = Value::string(string);
-        req.addref(&value);
-        return Ok(value);
+        req.addref(&Value::string(string));
+        return Ok(string);
     };
     let mapped = PhpString::filled(req, bytes.len(), |out| {
         out[..first].copy_from_slice(&bytes[..first]);
@@ -1203,12 +1110,8 @@ fn cased(req: &mut Request, string: PhpString, map: fn(&u8) -> u8) -> Result<Val
             *o = map(b);
         }
     })?;
-    Ok(Value::string(mapped))
+    Ok(mapped)
 }
-
-/// The characters `trim` strips when given none, `php_trim_int`'s
-/// default set as `basic_functions.stub.php` spells it.
-const TRIM_DEFAULT: &[u8] = b" \n\r\t\x0B\x00";
 
 /// `trim(string $string, string $characters = " \n\r\t\v\x00"): string`,
 /// php's `PHP_FUNCTION(trim)` over `php_do_trim` with both sides
@@ -1277,13 +1180,15 @@ const TRIM_DEFAULT: &[u8] = b" \n\r\t\x0B\x00";
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn trim(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let what = if req.argument_count() == 2 {
-        Some(string_argument(req, 2)?)
-    } else {
-        None
+#[php_function(frameless(1, 2))]
+fn trim(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = " \n\r\t\x0B\0")] characters: Passed<PhpString>,
+) -> Result<PhpString, Thrown> {
+    let what = match characters {
+        Passed::Given(what) => Some(what),
+        Passed::Omitted => None,
     };
     let bytes = string.as_bytes();
     let (start, end) = match what {
@@ -1300,11 +1205,10 @@ fn trim(req: &mut Request) -> Result<Value, Thrown> {
         }),
     };
     if end - start == bytes.len() {
-        let value = Value::string(string);
-        req.addref(&value);
-        return Ok(value);
+        req.addref(&Value::string(string));
+        return Ok(string);
     }
-    Ok(Value::string(PhpString::new(req, &bytes[start..end])?))
+    PhpString::new(req, &bytes[start..end])
 }
 
 /// The span of `bytes` left once every byte `strip` names is taken off
@@ -1392,11 +1296,9 @@ fn charmask(req: &mut Request, input: &[u8]) -> [bool; 256] {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn str_contains(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let haystack = string_argument(req, 1)?;
-    let needle = string_argument(req, 2)?;
-    Ok(Value::bool(memnstr(haystack.as_bytes(), needle.as_bytes())))
+#[php_function(frameless(2))]
+fn str_contains(haystack: PhpString, needle: PhpString) -> bool {
+    memnstr(haystack.as_bytes(), needle.as_bytes())
 }
 
 /// `php_memnstr`, `zend_memnstr` (`Z/Zend/zend_operators.h`): whether
@@ -1463,17 +1365,14 @@ fn memnstr(haystack: &[u8], needle: &[u8]) -> bool {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn substr(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let string = string_argument(req, 1)?;
-    let mut from = long_argument(req, 2)?;
-    let length = if req.argument_count() == 3 {
-        let given = req.argument(3).unwrap_or_default();
-        let coerced = coerce_param(req, &given, &Type::Nullable(Box::new(Type::Int)), 3)?;
-        coerced.as_int()
-    } else {
-        None
-    };
+#[php_function(frameless(2, 3))]
+fn substr(
+    req: &mut Request,
+    string: PhpString,
+    offset: i64,
+    #[php(default = null)] length: Option<i64>,
+) -> Result<PhpString, Thrown> {
+    let mut from = offset;
     let len = i64::try_from(string.len()).unwrap_or(i64::MAX);
     if from < 0 {
         // `-(size_t)f > ZSTR_LEN(str)`: a negative offset further back
@@ -1484,7 +1383,7 @@ fn substr(req: &mut Request) -> Result<Value, Thrown> {
             len + from
         };
     } else if from > len {
-        return Ok(Value::string(PhpString::new(req, b"")?));
+        return PhpString::new(req, b"");
     }
     let rest = len - from;
     let taken = match length {
@@ -1500,16 +1399,12 @@ fn substr(req: &mut Request) -> Result<Value, Thrown> {
         None => rest,
     };
     if taken == len {
-        let value = Value::string(string);
-        req.addref(&value);
-        return Ok(value);
+        req.addref(&Value::string(string));
+        return Ok(string);
     }
     let start = usize::try_from(from).unwrap_or(0);
     let end = start + usize::try_from(taken).unwrap_or(0);
-    Ok(Value::string(PhpString::new(
-        req,
-        &string.as_bytes()[start..end],
-    )?))
+    PhpString::new(req, &string.as_bytes()[start..end])
 }
 
 /// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check: nothing, or
@@ -1609,16 +1504,5 @@ fn declared(name: &[u8], parameters: &[Parameter], returns: Type) -> FunctionDec
         line: 0,
         end_line: 0,
         frameless: Vec::new(),
-    }
-}
-
-/// The declaration with its frameless entries, php's
-/// `frameless_function_infos_<name>` table: one arity per
-/// `ZEND_FRAMELESS_FUNCTION(name, arity)` the native has, in php's
-/// order.
-fn frameless(decl: FunctionDecl, arities: &[u32]) -> FunctionDecl {
-    FunctionDecl {
-        frameless: arities.to_vec(),
-        ..decl
     }
 }
