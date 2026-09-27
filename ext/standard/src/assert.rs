@@ -19,46 +19,20 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::{Instance, Passed, Raw, Union};
+use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
-use php_ext::coerce::{coerce_param, to_callable, to_string, truthy};
-use php_ext::decl::{
-    Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
-    EnumBacking, FunctionDecl, IniDecl, MethodDecl, Name, Type,
-};
+use php_ext::coerce::{to_callable, to_string, truthy};
+use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, new_throwable, throw_value};
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
 
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::given;
-use crate::{argument_count_between, long_argument};
-
-/// `PHP_ASSERT_*` (`Z/ext/standard/php_assert.h`), `assert_options`'s
-/// `$option`.
-const ASSERT_ACTIVE: i64 = 1;
-const ASSERT_CALLBACK: i64 = 2;
-const ASSERT_BAIL: i64 = 3;
-const ASSERT_WARNING: i64 = 4;
-const ASSERT_EXCEPTION: i64 = 5;
+use crate::argument_count_between;
+use constants::{ASSERT_ACTIVE, ASSERT_BAIL, ASSERT_CALLBACK, ASSERT_EXCEPTION, ASSERT_WARNING};
 
 /// `E_ERROR`, the code `zend_throw_exception` gives the `AssertionError`.
 const E_ERROR: i64 = 1;
-
-/// The `#[\Deprecated(since: '8.3', ...)]` the stub puts on each constant
-/// and, with no message, on `assert_options`.
-fn deprecated_attribute(message: Option<&str>) -> Attribute {
-    let argument = |name: &[u8], value: &str| AttributeArgument {
-        name: Some(Name(name.into())),
-        value: ConstExpr::Str(value.as_bytes().into()),
-    };
-    let mut arguments = vec![argument(b"since", "8.3")];
-    arguments.extend(message.map(|message| argument(b"message", message)));
-    Attribute {
-        name: Name(b"Deprecated".as_slice().into()),
-        arguments,
-    }
-}
 
 /// The `ASSERT_*` constants, each deprecated as the stub marks it.
 ///
@@ -81,23 +55,18 @@ fn deprecated_attribute(message: Option<&str>) -> Attribute {
 /// int(4)
 /// int(5)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    [
-        ("ASSERT_ACTIVE", ASSERT_ACTIVE),
-        ("ASSERT_CALLBACK", ASSERT_CALLBACK),
-        ("ASSERT_BAIL", ASSERT_BAIL),
-        ("ASSERT_WARNING", ASSERT_WARNING),
-        ("ASSERT_EXCEPTION", ASSERT_EXCEPTION),
-    ]
-    .into_iter()
-    .map(|(name, value)| ConstDecl {
-        name: Name(name.as_bytes().into()),
-        value: ConstExpr::long(value),
-        attributes: vec![deprecated_attribute(Some(
-            "as assert_options() is deprecated",
-        ))],
-    })
-    .collect()
+#[php_const]
+pub(crate) mod constants {
+    #[php(deprecated(since = "8.3", message = "as assert_options() is deprecated"))]
+    pub(crate) const ASSERT_ACTIVE: i64 = 1;
+    #[php(deprecated(since = "8.3", message = "as assert_options() is deprecated"))]
+    pub(crate) const ASSERT_CALLBACK: i64 = 2;
+    #[php(deprecated(since = "8.3", message = "as assert_options() is deprecated"))]
+    pub(crate) const ASSERT_BAIL: i64 = 3;
+    #[php(deprecated(since = "8.3", message = "as assert_options() is deprecated"))]
+    pub(crate) const ASSERT_WARNING: i64 = 4;
+    #[php(deprecated(since = "8.3", message = "as assert_options() is deprecated"))]
+    pub(crate) const ASSERT_EXCEPTION: i64 = 5;
 }
 
 /// `PHP_INI_BEGIN()` of `assert.c`: every entry `PHP_INI_ALL`.
@@ -222,64 +191,19 @@ handler!(on_exception, b"assert.exception");
 /// int(3)
 /// string(8) "standard"
 /// ```
-pub(crate) fn assertion_error_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    let decl = ClassDecl {
-        name: Name(b"AssertionError".as_slice().into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags::default(),
-        parent: Some(Name(b"Error".as_slice().into())),
-        interfaces: Vec::new(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: Vec::new(),
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    };
-    (decl, Vec::new())
-}
+#[php_class(extends(Error))]
+pub(crate) struct AssertionError;
 
-/// The two natives.
-///
-/// ```php
-/// echo new ReflectionFunction('assert'), new ReflectionFunction('assert_options');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function assert ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> mixed $assertion ]
-///     Parameter #1 [ <optional> Throwable|string|null $description = null ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal, deprecated:standard> function assert_options ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> int $option ]
-///     Parameter #1 [ <optional> mixed $value = <default> ]
-///   }
-///   - Return [ mixed ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let options = FunctionDecl {
-        attributes: vec![deprecated_attribute(None)],
-        ..stub("assert_options(int $option, mixed $value = UNKNOWN): mixed")
-    };
-    vec![
-        (
-            stub("assert(mixed $assertion, Throwable|string|null $description = null): bool"),
-            assert as Entry,
-        ),
-        (options, assert_options),
-    ]
-}
+#[php_class]
+impl AssertionError {}
+
+/// Core's `Error`, `AssertionError`'s parent.
+#[php_class(extern)]
+pub(crate) struct Error;
+
+/// Core's `Throwable`, what `assert`'s `$description` may be.
+#[php_class(extern)]
+pub(crate) struct Throwable;
 
 /// An `assert.*` entry as `zend_ini_parse_bool` reads it.
 fn flag(req: &Request, name: &[u8]) -> bool {
@@ -328,7 +252,26 @@ fn flag(req: &Request, name: &[u8]) -> bool {
 ///
 /// Under `assert.bail` without `assert.exception` the request ends there,
 /// through `zend_throw_unwind_exit`, with status zero.
-fn assert(req: &mut Request) -> Result<Value, Thrown> {
+///
+/// ```php
+/// echo new ReflectionFunction('assert');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function assert ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> mixed $assertion ]
+///     Parameter #1 [ <optional> Throwable|string|null $description = null ]
+///   }
+///   - Return [ bool ]
+/// }
+/// ```
+#[php_function(arity = manual)]
+fn assert(
+    req: &mut Request,
+    assertion: Raw<Value>,
+    #[php(default = null)] description: Raw<Option<Union<Instance<Throwable>, PhpString>>>,
+) -> Result<bool, Thrown> {
     let assertions = req.ini_get(b"zend.assertions").map_or(1, |value| {
         String::from_utf8_lossy(value)
             .trim()
@@ -336,35 +279,21 @@ fn assert(req: &mut Request) -> Result<Value, Thrown> {
             .unwrap_or(0)
     });
     if !flag(req, b"assert.active") || assertions <= 0 {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
+    // `ZEND_PARSE_PARAMETERS_START(1, 2)` after the active check, as php
+    // reads them.
     argument_count_between(req, 1, 2)?;
-    let assertion = req.argument(1).unwrap_or_default();
-    let description = match given(req, 2) {
-        Some(value) => {
-            let ty = Type::Union(vec![
-                Type::Named(Name(b"Throwable".as_slice().into())),
-                Type::String,
-                Type::Null,
-            ]);
-            Some(coerce_param(req, &value, &ty, 2)?.deref())
-        }
+    let assertion = assertion.value();
+    let description = description.hold(req)?;
+    if truthy(req, &assertion) {
+        return Ok(true);
+    }
+    let text = match description {
+        Some(Union::A(object)) => return Err(throw_value(req, &object.object().as_value())),
+        Some(Union::B(text)) => Some(text.as_bytes().to_vec()),
         None => None,
     };
-    if truthy(req, &assertion.deref()) {
-        return Ok(Value::bool(true));
-    }
-    let description = description.filter(|value| !matches!(value.as_ref(), ValueRef::Null));
-    if let Some(object) = description
-        .as_ref()
-        .filter(|value| value.as_object().is_some())
-    {
-        return Err(throw_value(req, object));
-    }
-    let text = description
-        .as_ref()
-        .and_then(Value::as_str_bytes)
-        .map(<[u8]>::to_vec);
     let callback = req.assert_callback().copied().or_else(|| {
         req.ini_get(b"assert.callback")
             .filter(|cb| !cb.is_empty())
@@ -407,7 +336,7 @@ fn assert(req: &mut Request) -> Result<Value, Thrown> {
     if flag(req, b"assert.bail") {
         return Err(php_ext::raising::exit(req, &Value::int(0)));
     }
-    Ok(Value::bool(false))
+    Ok(false)
 }
 
 /// `assert_options(int $option, mixed $value = UNKNOWN): mixed`,
@@ -440,10 +369,27 @@ fn assert(req: &mut Request) -> Result<Value, Thrown> {
 /// Deprecated: Function assert_options() is deprecated since 8.3 in %s on line 3
 /// assert_options(): Argument #1 ($option) must be an ASSERT_* constant
 /// ```
-fn assert_options(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let what = long_argument(req, 1)?;
-    let value = given(req, 2);
+///
+/// ```php
+/// echo new ReflectionFunction('assert_options');
+/// ```
+/// ```expect
+/// Function [ <internal, deprecated:standard> function assert_options ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> int $option ]
+///     Parameter #1 [ <optional> mixed $value = <default> ]
+///   }
+///   - Return [ mixed ]
+/// }
+/// ```
+#[php_function(deprecated(since = "8.3"))]
+fn assert_options(req: &mut Request, option: i64, value: Passed<Value>) -> Result<Value, Thrown> {
+    let what = option;
+    let value = match value {
+        Passed::Given(value) => Some(value),
+        Passed::Omitted => None,
+    };
     let entry: &[u8] = match what {
         ASSERT_ACTIVE => b"assert.active",
         ASSERT_BAIL => b"assert.bail",
@@ -461,7 +407,6 @@ fn assert_options(req: &mut Request) -> Result<Value, Thrown> {
                 },
             };
             if let Some(value) = value {
-                let value = value.deref();
                 if let Some(previous) = req.assert_callback().copied() {
                     req.release(previous);
                 }

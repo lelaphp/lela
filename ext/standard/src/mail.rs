@@ -16,49 +16,18 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 
+use php_ext::abi::{Passed, Path, Union};
+use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value, ValueRef};
-
-use crate::argument_count_between;
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{ArrayOr, array_or_string, given};
+use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 /// `EX_TEMPFAIL`, the one non-zero exit `php_mail` takes as sent.
 const EX_TEMPFAIL: i32 = 75;
 
 /// `LOG_NOTICE`, the priority `php_mail_log_to_syslog` logs at.
 const LOG_NOTICE: i32 = 5;
-
-/// The one native, as the stub declares it.
-///
-/// ```php
-/// echo new ReflectionFunction('mail');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function mail ] {
-///
-///   - Parameters [5] {
-///     Parameter #0 [ <required> string $to ]
-///     Parameter #1 [ <required> string $subject ]
-///     Parameter #2 [ <required> string $message ]
-///     Parameter #3 [ <optional> array|string $additional_headers = [] ]
-///     Parameter #4 [ <optional> string $additional_params = "" ]
-///   }
-///   - Return [ bool ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(
-        stub(
-            "mail(string $to, string $subject, string $message, array|string $additional_headers = [], string $additional_params = \"\"): bool",
-        ),
-        mail as Entry,
-    )]
-}
 
 /// `php_mail_build_headers_check_field_value` (`Z/ext/standard/mail.c:71`):
 /// the error a header's value has, a folded `CRLF` or `LF` followed by a
@@ -511,32 +480,51 @@ pub(super) fn php_mail(
 /// mail(): Argument #1 ($to) must not contain any null bytes
 /// mail(): Argument #4 ($additional_headers) must not contain any null bytes
 /// ```
-fn mail(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 3, 5)?;
-    let to = crate::md5::path_argument(req, 1)?;
-    let subject = crate::md5::path_argument(req, 2)?;
-    let message = crate::md5::path_argument(req, 3)?;
-    let headers = match given(req, 4) {
-        Some(_) => match array_or_string(req, 4, false)? {
-            Some(ArrayOr::Other(text)) => {
-                if text.as_bytes().contains(&0) {
-                    return Err(arg_value_error(req, 4, "not contain any null bytes"));
-                }
-                let bytes = text.as_bytes();
-                let end = bytes
-                    .iter()
-                    .rposition(|c| !matches!(c, b' ' | b'\n' | b'\r' | b'\t' | 0x0b | 0))
-                    .map_or(0, |at| at + 1);
-                Some(bytes[..end].to_vec())
+///
+/// ```php
+/// echo new ReflectionFunction('mail');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function mail ] {
+///
+///   - Parameters [5] {
+///     Parameter #0 [ <required> string $to ]
+///     Parameter #1 [ <required> string $subject ]
+///     Parameter #2 [ <required> string $message ]
+///     Parameter #3 [ <optional> array|string $additional_headers = [] ]
+///     Parameter #4 [ <optional> string $additional_params = "" ]
+///   }
+///   - Return [ bool ]
+/// }
+/// ```
+#[php_function]
+fn mail(
+    req: &mut Request,
+    to: Path,
+    subject: Path,
+    message: Path,
+    #[php(default = [])] additional_headers: Passed<Union<PhpArray, PhpString>>,
+    #[php(default = "")] additional_params: Passed<Path>,
+) -> Result<bool, Thrown> {
+    let (Path(to), Path(subject), Path(message)) = (to, subject, message);
+    let headers = match additional_headers {
+        Passed::Given(Union::B(text)) => {
+            if text.as_bytes().contains(&0) {
+                return Err(arg_value_error(req, 4, "not contain any null bytes"));
             }
-            Some(ArrayOr::Array(array)) => Some(build_headers(req, array)?),
-            None => None,
-        },
-        None => None,
+            let bytes = text.as_bytes();
+            let end = bytes
+                .iter()
+                .rposition(|c| !matches!(c, b' ' | b'\n' | b'\r' | b'\t' | 0x0b | 0))
+                .map_or(0, |at| at + 1);
+            Some(bytes[..end].to_vec())
+        }
+        Passed::Given(Union::A(array)) => Some(build_headers(req, array)?),
+        Passed::Omitted => None,
     };
-    let extra = match given(req, 5) {
-        Some(_) => Some(crate::md5::path_argument(req, 5)?.as_bytes().to_vec()),
-        None => None,
+    let extra = match additional_params {
+        Passed::Given(Path(extra)) => Some(extra.as_bytes().to_vec()),
+        Passed::Omitted => None,
     };
     let forced = req
         .ini_get(b"mail.force_extra_parameters")
@@ -557,5 +545,5 @@ fn mail(req: &mut Request) -> Result<Value, Thrown> {
         headers.as_deref(),
         extra.as_deref(),
     )?;
-    Ok(Value::bool(sent))
+    Ok(sent)
 }

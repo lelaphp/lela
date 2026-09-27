@@ -5,17 +5,11 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::abi::OrFalse;
+use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::php_function;
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::optional_long;
-use crate::{argument_count_between, string_argument};
 
 /// The JPEG markers `iptcembed` reads.
 const M_EOI: u32 = 0xd9;
@@ -27,36 +21,6 @@ const M_APP13: u32 = 0xed;
 /// `psheader` (`Z/ext/standard/iptc.c:180`): the `APP13` marker, its
 /// length's two bytes, and the Photoshop resource header.
 const PSHEADER: &[u8; 28] = b"\xFF\xED\0\0Photoshop 3.0\x008BIM\x04\x04\0\0\0\0";
-
-/// The native not yet declared by the attributes.
-///
-/// ```php
-/// echo new ReflectionFunction('iptcembed'), new ReflectionFunction('iptcparse');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function iptcembed ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $iptc_data ]
-///     Parameter #1 [ <required> string $filename ]
-///     Parameter #2 [ <optional> int $spool = 0 ]
-///   }
-///   - Return [ string|bool ]
-/// }
-/// Function [ <internal:standard> function iptcparse ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $iptc_block ]
-///   }
-///   - Return [ array|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(
-        stub("iptcembed(string $iptc_data, string $filename, int $spool = 0): string|bool"),
-        iptcembed as Entry,
-    )]
-}
 
 /// The file `iptcembed` reads and where its bytes go: `spool` above zero
 /// writes each to the `output`, and below two keeps them in `buf`, whose
@@ -166,11 +130,29 @@ impl Embedding {
 /// bool(false)
 /// bool(false)
 /// ```
-fn iptcembed(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let data = string_argument(req, 1)?.as_bytes().to_vec();
-    let file = crate::md5::path_argument(req, 2)?;
-    let spool = optional_long(req, 3, 0)?;
+///
+/// ```php
+/// echo new ReflectionFunction('iptcembed');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function iptcembed ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $iptc_data ]
+///     Parameter #1 [ <required> string $filename ]
+///     Parameter #2 [ <optional> int $spool = 0 ]
+///   }
+///   - Return [ string|bool ]
+/// }
+/// ```
+#[php_function]
+fn iptcembed(
+    req: &mut Request,
+    iptc_data: PhpString,
+    filename: Path,
+    #[php(default = 0)] spool: i64,
+) -> Result<Union<PhpString, bool>, Thrown> {
+    let (data, Path(file)) = (iptc_data.as_bytes().to_vec(), filename);
     if data.len() >= usize::MAX - PSHEADER.len() - 1026 {
         return Err(throw(
             req,
@@ -184,7 +166,7 @@ fn iptcembed(req: &mut Request) -> Result<Value, Thrown> {
             String::from_utf8_lossy(file.as_bytes())
         );
         docref(req, Level::Warning, &text);
-        return Ok(Value::bool(false));
+        return Ok(Union::B(false));
     };
     let room = data.len() + PSHEADER.len() + 1 + 1024 + 1 + bytes.len();
     let mut s = Embedding {
@@ -200,11 +182,11 @@ fn iptcembed(req: &mut Request) -> Result<Value, Thrown> {
         req.write(&s.out);
     }
     if !embedded {
-        return Ok(Value::bool(false));
+        return Ok(Union::B(false));
     }
     match s.buf {
-        Some(buf) => Ok(Value::string(PhpString::new(req, &buf)?)),
-        None => Ok(Value::bool(true)),
+        Some(buf) => PhpString::new(req, &buf).map(Union::A),
+        None => Ok(Union::B(true)),
     }
 }
 

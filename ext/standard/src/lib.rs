@@ -357,7 +357,7 @@ pub fn extension() -> Extension {
         .ini(sockets::ini())
         .dependencies(dependencies())
         .class_with(directory.0, directory.1, directory.2)
-        .classes(vec![assert::assertion_error_class()])
+        .class::<assert::AssertionError>()
         .ini(assert::ini())
         .ini(browscap::ini())
         .ini(url_scanner::ini());
@@ -475,7 +475,10 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         streamsfuncs::natives(),
         crypt::natives(),
         password::natives(),
-        assert::natives(),
+        vec![
+            assert::assert::declared(),
+            assert::assert_options::declared(),
+        ],
         vec![
             pageinfo::getmyuid::declared(),
             pageinfo::getmygid::declared(),
@@ -488,15 +491,27 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
             syslog::closelog::declared(),
             syslog::syslog::declared(),
         ],
-        mail::natives(),
-        image::natives(),
+        vec![mail::mail::declared()],
+        vec![
+            image::image_type_to_mime_type::declared(),
+            image::image_type_to_extension::declared(),
+            image::getimagesize::declared(),
+            image::getimagesizefromstring::declared(),
+        ],
         vec![browscap::get_browser::declared()],
         vec![datetime::strptime::declared()],
         vec![net::net_get_interfaces::declared()],
-        iptc::natives(),
-        vec![iptc::iptcparse::declared()],
+        vec![iptc::iptcembed::declared(), iptc::iptcparse::declared()],
         dns::natives(),
-        info::natives(),
+        vec![
+            info::phpinfo::declared(),
+            info::phpversion::declared(),
+            info::phpcredits::declared(),
+            info::php_sapi_name::declared(),
+            info::php_uname::declared(),
+            info::php_ini_scanned_files::declared(),
+            info::php_ini_loaded_file::declared(),
+        ],
         select::natives(),
         proc_open::natives(),
         sockets::natives(),
@@ -520,11 +535,11 @@ fn file_constants() -> Vec<ConstDecl> {
         streamsfuncs::constants(),
         crypt::constants(),
         password::constants(),
-        assert::constants(),
+        assert::constants::declared(),
         syslog::constants::declared(),
-        image::constants(),
+        image::constants::declared(),
         dns::constants(),
-        info::constants(),
+        info::constants::declared(),
         sockets::constants(),
         user_filters::constants(),
         userspace::constants(),

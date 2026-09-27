@@ -11,60 +11,22 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::{ConstDecl, FunctionDecl};
+use php_ext::abi::{OrFalse, Path, Ref, Untyped};
+use php_ext::attr::{php_const, php_function};
+use php_ext::decl::{ConstDecl, ConstExpr, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values as php;
 
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{assign_ref, given};
-use crate::{argument_count_between, constant, long_argument, string_argument};
+use constants::{
+    IMAGETYPE_AVIF, IMAGETYPE_BMP, IMAGETYPE_GIF, IMAGETYPE_HEIF, IMAGETYPE_ICO, IMAGETYPE_IFF,
+    IMAGETYPE_JB2, IMAGETYPE_JP2, IMAGETYPE_JPC, IMAGETYPE_JPEG, IMAGETYPE_JPX, IMAGETYPE_PNG,
+    IMAGETYPE_PSD, IMAGETYPE_SWC, IMAGETYPE_SWF, IMAGETYPE_TIFF_II, IMAGETYPE_TIFF_MM,
+    IMAGETYPE_UNKNOWN, IMAGETYPE_WBMP, IMAGETYPE_WEBP, IMAGETYPE_XBM,
+};
 
 mod avif;
 
-/// `IMAGE_FILETYPE_UNKNOWN`, `Z/ext/standard/php_image.h:28`.
-const TYPE_UNKNOWN: i64 = 0;
-/// `IMAGE_FILETYPE_GIF`.
-const TYPE_GIF: i64 = 1;
-/// `IMAGE_FILETYPE_JPEG`.
-const TYPE_JPEG: i64 = 2;
-/// `IMAGE_FILETYPE_PNG`.
-const TYPE_PNG: i64 = 3;
-/// `IMAGE_FILETYPE_SWF`.
-const TYPE_SWF: i64 = 4;
-/// `IMAGE_FILETYPE_PSD`.
-const TYPE_PSD: i64 = 5;
-/// `IMAGE_FILETYPE_BMP`.
-const TYPE_BMP: i64 = 6;
-/// `IMAGE_FILETYPE_TIFF_II` (Intel byte order).
-const TYPE_TIFF_II: i64 = 7;
-/// `IMAGE_FILETYPE_TIFF_MM` (Motorola byte order).
-const TYPE_TIFF_MM: i64 = 8;
-/// `IMAGE_FILETYPE_JPC`.
-const TYPE_JPC: i64 = 9;
-/// `IMAGE_FILETYPE_JP2`.
-const TYPE_JP2: i64 = 10;
-/// `IMAGE_FILETYPE_JPX`; never detected, only named.
-const TYPE_JPX: i64 = 11;
-/// `IMAGE_FILETYPE_JB2`; never detected, only named.
-const TYPE_JB2: i64 = 12;
-/// `IMAGE_FILETYPE_SWC` (zlib-compressed SWF).
-const TYPE_SWC: i64 = 13;
-/// `IMAGE_FILETYPE_IFF`.
-const TYPE_IFF: i64 = 14;
-/// `IMAGE_FILETYPE_WBMP`.
-const TYPE_WBMP: i64 = 15;
-/// `IMAGE_FILETYPE_XBM`.
-const TYPE_XBM: i64 = 16;
-/// `IMAGE_FILETYPE_ICO`.
-const TYPE_ICO: i64 = 17;
-/// `IMAGE_FILETYPE_WEBP`.
-const TYPE_WEBP: i64 = 18;
-/// `IMAGE_FILETYPE_AVIF`.
-const TYPE_AVIF: i64 = 19;
-/// `IMAGE_FILETYPE_HEIF`.
-const TYPE_HEIF: i64 = 20;
 /// `IMAGE_FILETYPE_FIXED_COUNT`: the first number an extension's
 /// `php_image_register_handler` hands out (ext/libxml takes it for SVG).
 const TYPE_FIXED_COUNT: i64 = 21;
@@ -77,31 +39,55 @@ const TYPE_FIXED_COUNT: i64 = 21;
 /// `IMAGETYPE_COUNT` is the fixed count; each `php_image_register_handler`
 /// call raises it by one and adds its own constant (ext/libxml adds
 /// `IMAGETYPE_SVG` = 21, making the count 22).
-const IMAGETYPE_CONSTANTS: [(&str, i64); 23] = [
-    ("IMAGETYPE_GIF", TYPE_GIF),
-    ("IMAGETYPE_JPEG", TYPE_JPEG),
-    ("IMAGETYPE_PNG", TYPE_PNG),
-    ("IMAGETYPE_SWF", TYPE_SWF),
-    ("IMAGETYPE_PSD", TYPE_PSD),
-    ("IMAGETYPE_BMP", TYPE_BMP),
-    ("IMAGETYPE_TIFF_II", TYPE_TIFF_II),
-    ("IMAGETYPE_TIFF_MM", TYPE_TIFF_MM),
-    ("IMAGETYPE_JPC", TYPE_JPC),
-    ("IMAGETYPE_JP2", TYPE_JP2),
-    ("IMAGETYPE_JPX", TYPE_JPX),
-    ("IMAGETYPE_JB2", TYPE_JB2),
-    ("IMAGETYPE_SWC", TYPE_SWC),
-    ("IMAGETYPE_IFF", TYPE_IFF),
-    ("IMAGETYPE_WBMP", TYPE_WBMP),
-    ("IMAGETYPE_JPEG2000", TYPE_JPC),
-    ("IMAGETYPE_XBM", TYPE_XBM),
-    ("IMAGETYPE_ICO", TYPE_ICO),
-    ("IMAGETYPE_WEBP", TYPE_WEBP),
-    ("IMAGETYPE_AVIF", TYPE_AVIF),
-    ("IMAGETYPE_HEIF", TYPE_HEIF),
-    ("IMAGETYPE_UNKNOWN", TYPE_UNKNOWN),
-    ("IMAGETYPE_COUNT", TYPE_FIXED_COUNT),
-];
+#[php_const]
+pub(crate) mod constants {
+    /// `IMAGE_FILETYPE_GIF`.
+    pub(crate) const IMAGETYPE_GIF: i64 = 1;
+    /// `IMAGE_FILETYPE_JPEG`.
+    pub(crate) const IMAGETYPE_JPEG: i64 = 2;
+    /// `IMAGE_FILETYPE_PNG`.
+    pub(crate) const IMAGETYPE_PNG: i64 = 3;
+    /// `IMAGE_FILETYPE_SWF`.
+    pub(crate) const IMAGETYPE_SWF: i64 = 4;
+    /// `IMAGE_FILETYPE_PSD`.
+    pub(crate) const IMAGETYPE_PSD: i64 = 5;
+    /// `IMAGE_FILETYPE_BMP`.
+    pub(crate) const IMAGETYPE_BMP: i64 = 6;
+    /// `IMAGE_FILETYPE_TIFF_II` (Intel byte order).
+    pub(crate) const IMAGETYPE_TIFF_II: i64 = 7;
+    /// `IMAGE_FILETYPE_TIFF_MM` (Motorola byte order).
+    pub(crate) const IMAGETYPE_TIFF_MM: i64 = 8;
+    /// `IMAGE_FILETYPE_JPC`.
+    pub(crate) const IMAGETYPE_JPC: i64 = 9;
+    /// `IMAGE_FILETYPE_JP2`.
+    pub(crate) const IMAGETYPE_JP2: i64 = 10;
+    /// `IMAGE_FILETYPE_JPX`; never detected, only named.
+    pub(crate) const IMAGETYPE_JPX: i64 = 11;
+    /// `IMAGE_FILETYPE_JB2`; never detected, only named.
+    pub(crate) const IMAGETYPE_JB2: i64 = 12;
+    /// `IMAGE_FILETYPE_SWC` (zlib-compressed SWF).
+    pub(crate) const IMAGETYPE_SWC: i64 = 13;
+    /// `IMAGE_FILETYPE_IFF`.
+    pub(crate) const IMAGETYPE_IFF: i64 = 14;
+    /// `IMAGE_FILETYPE_WBMP`.
+    pub(crate) const IMAGETYPE_WBMP: i64 = 15;
+    pub(crate) const IMAGETYPE_JPEG2000: i64 = IMAGETYPE_JPC;
+    /// `IMAGE_FILETYPE_XBM`.
+    pub(crate) const IMAGETYPE_XBM: i64 = 16;
+    /// `IMAGE_FILETYPE_ICO`.
+    pub(crate) const IMAGETYPE_ICO: i64 = 17;
+    /// `IMAGE_FILETYPE_WEBP`.
+    pub(crate) const IMAGETYPE_WEBP: i64 = 18;
+    /// `IMAGE_FILETYPE_AVIF`.
+    pub(crate) const IMAGETYPE_AVIF: i64 = 19;
+    /// `IMAGE_FILETYPE_HEIF`.
+    pub(crate) const IMAGETYPE_HEIF: i64 = 20;
+    /// `IMAGE_FILETYPE_UNKNOWN`, `Z/ext/standard/php_image.h:28`.
+    pub(crate) const IMAGETYPE_UNKNOWN: i64 = 0;
+    /// The fixed count, which each registered handler raises by one as
+    /// the engine links the constants ([`super::link_constants`]).
+    pub(crate) const IMAGETYPE_COUNT: i64 = super::TYPE_FIXED_COUNT;
+}
 
 // ---------------------------------------------------------------------------
 // Signatures, `Z/ext/standard/image.c:36`.
@@ -502,27 +488,27 @@ fn image_size(bytes: &[u8], want_info: bool, handlers: &[ImageHandler]) -> Answe
         }
     }
     let gfx = match itype {
-        TYPE_GIF => handle_gif(&mut s),
-        TYPE_JPEG => {
+        IMAGETYPE_GIF => handle_gif(&mut s),
+        IMAGETYPE_JPEG => {
             let info = if want_info { Some(&mut segments) } else { None };
             handle_jpeg(&mut s, info, &mut warnings)
         }
-        TYPE_PNG => handle_png(&mut s),
-        TYPE_SWF => handle_swf(&mut s),
-        TYPE_SWC => handle_swc(&mut s),
-        TYPE_PSD => handle_psd(&mut s),
-        TYPE_BMP => handle_bmp(&mut s),
-        TYPE_TIFF_II => handle_tiff(&mut s, false),
-        TYPE_TIFF_MM => handle_tiff(&mut s, true),
-        TYPE_JPC => handle_jpc(&mut s, &mut warnings),
-        TYPE_JP2 => handle_jp2(&mut s, &mut warnings),
-        TYPE_IFF => handle_iff(&mut s),
-        TYPE_WBMP => get_wbmp(&mut s, true),
-        TYPE_XBM => get_xbm(&mut s),
-        TYPE_ICO => handle_ico(&mut s),
-        TYPE_WEBP => handle_webp(&mut s),
-        TYPE_AVIF => handle_avif(&mut s),
-        TYPE_HEIF => {
+        IMAGETYPE_PNG => handle_png(&mut s),
+        IMAGETYPE_SWF => handle_swf(&mut s),
+        IMAGETYPE_SWC => handle_swc(&mut s),
+        IMAGETYPE_PSD => handle_psd(&mut s),
+        IMAGETYPE_BMP => handle_bmp(&mut s),
+        IMAGETYPE_TIFF_II => handle_tiff(&mut s, false),
+        IMAGETYPE_TIFF_MM => handle_tiff(&mut s, true),
+        IMAGETYPE_JPC => handle_jpc(&mut s, &mut warnings),
+        IMAGETYPE_JP2 => handle_jp2(&mut s, &mut warnings),
+        IMAGETYPE_IFF => handle_iff(&mut s),
+        IMAGETYPE_WBMP => get_wbmp(&mut s, true),
+        IMAGETYPE_XBM => get_xbm(&mut s),
+        IMAGETYPE_ICO => handle_ico(&mut s),
+        IMAGETYPE_WEBP => handle_webp(&mut s),
+        IMAGETYPE_AVIF => handle_avif(&mut s),
+        IMAGETYPE_HEIF => {
             if s.rewind() {
                 handle_avif(&mut s)
             } else {
@@ -599,11 +585,15 @@ pub(crate) fn link_constants(
     let count = TYPE_FIXED_COUNT + i64::try_from(handlers.len()).unwrap_or(0);
     for decl in &mut declared {
         if &*decl.name.0 == b"IMAGETYPE_COUNT" {
-            decl.value = php_ext::decl::ConstExpr::long(count);
+            decl.value = ConstExpr::long(count);
         }
     }
     for (at, handler) in (TYPE_FIXED_COUNT..).zip(handlers) {
-        declared.push(constant(handler.const_name.as_bytes(), at));
+        declared.push(ConstDecl {
+            name: Name(handler.const_name.as_bytes().into()),
+            value: ConstExpr::long(at),
+            attributes: Vec::new(),
+        });
     }
     declared
 }
@@ -623,21 +613,21 @@ fn mime_type(image_type: i64) -> &'static str {
     #[allow(clippy::cast_possible_truncation)]
     let t = i64::from(image_type as i32);
     match t {
-        TYPE_GIF => "image/gif",
-        TYPE_JPEG => "image/jpeg",
-        TYPE_PNG => "image/png",
-        TYPE_SWF | TYPE_SWC => "application/x-shockwave-flash",
-        TYPE_PSD => "image/psd",
-        TYPE_BMP => "image/bmp",
-        TYPE_TIFF_II | TYPE_TIFF_MM => "image/tiff",
-        TYPE_IFF => "image/iff",
-        TYPE_WBMP => "image/vnd.wap.wbmp",
-        TYPE_JP2 => "image/jp2",
-        TYPE_XBM => "image/xbm",
-        TYPE_ICO => "image/vnd.microsoft.icon",
-        TYPE_WEBP => "image/webp",
-        TYPE_AVIF => "image/avif",
-        TYPE_HEIF => "image/heif",
+        IMAGETYPE_GIF => "image/gif",
+        IMAGETYPE_JPEG => "image/jpeg",
+        IMAGETYPE_PNG => "image/png",
+        IMAGETYPE_SWF | IMAGETYPE_SWC => "application/x-shockwave-flash",
+        IMAGETYPE_PSD => "image/psd",
+        IMAGETYPE_BMP => "image/bmp",
+        IMAGETYPE_TIFF_II | IMAGETYPE_TIFF_MM => "image/tiff",
+        IMAGETYPE_IFF => "image/iff",
+        IMAGETYPE_WBMP => "image/vnd.wap.wbmp",
+        IMAGETYPE_JP2 => "image/jp2",
+        IMAGETYPE_XBM => "image/xbm",
+        IMAGETYPE_ICO => "image/vnd.microsoft.icon",
+        IMAGETYPE_WEBP => "image/webp",
+        IMAGETYPE_AVIF => "image/avif",
+        IMAGETYPE_HEIF => "image/heif",
         _ => "application/octet-stream",
     }
 }
@@ -649,23 +639,23 @@ fn mime_type(image_type: i64) -> &'static str {
 /// A registered handler's extension is looked up by the native first.
 fn extension(image_type: i64) -> Option<&'static str> {
     Some(match image_type {
-        TYPE_GIF => "gif",
-        TYPE_JPEG => "jpeg",
-        TYPE_PNG => "png",
-        TYPE_SWF | TYPE_SWC => "swf",
-        TYPE_PSD => "psd",
-        TYPE_BMP | TYPE_WBMP => "bmp",
-        TYPE_TIFF_II | TYPE_TIFF_MM => "tiff",
-        TYPE_IFF => "iff",
-        TYPE_JPC => "jpc",
-        TYPE_JP2 => "jp2",
-        TYPE_JPX => "jpx",
-        TYPE_JB2 => "jb2",
-        TYPE_XBM => "xbm",
-        TYPE_ICO => "ico",
-        TYPE_WEBP => "webp",
-        TYPE_AVIF => "avif",
-        TYPE_HEIF => "heif",
+        IMAGETYPE_GIF => "gif",
+        IMAGETYPE_JPEG => "jpeg",
+        IMAGETYPE_PNG => "png",
+        IMAGETYPE_SWF | IMAGETYPE_SWC => "swf",
+        IMAGETYPE_PSD => "psd",
+        IMAGETYPE_BMP | IMAGETYPE_WBMP => "bmp",
+        IMAGETYPE_TIFF_II | IMAGETYPE_TIFF_MM => "tiff",
+        IMAGETYPE_IFF => "iff",
+        IMAGETYPE_JPC => "jpc",
+        IMAGETYPE_JP2 => "jp2",
+        IMAGETYPE_JPX => "jpx",
+        IMAGETYPE_JB2 => "jb2",
+        IMAGETYPE_XBM => "xbm",
+        IMAGETYPE_ICO => "ico",
+        IMAGETYPE_WEBP => "webp",
+        IMAGETYPE_AVIF => "avif",
+        IMAGETYPE_HEIF => "heif",
         _ => return None,
     })
 }
@@ -682,85 +672,85 @@ fn get_image_type(s: &mut Stream<'_>, w: &mut Vec<Warning>) -> (i64, bool) {
     let mut ft = [0u8; 12];
     if s.read(&mut ft[..3]) != 3 {
         w.push(Warning::ErrorReading);
-        return (TYPE_UNKNOWN, false);
+        return (IMAGETYPE_UNKNOWN, false);
     }
     let first3 = [ft[0], ft[1], ft[2]];
     if first3 == SIG_GIF {
-        return (TYPE_GIF, false);
+        return (IMAGETYPE_GIF, false);
     } else if first3 == SIG_JPG {
-        return (TYPE_JPEG, false);
+        return (IMAGETYPE_JPEG, false);
     } else if ft[..3] == SIG_PNG[..3] {
         if s.read(&mut ft[3..8]) != 5 {
             w.push(Warning::ErrorReading);
-            return (TYPE_UNKNOWN, false);
+            return (IMAGETYPE_UNKNOWN, false);
         }
         if ft[..8] == SIG_PNG {
-            return (TYPE_PNG, false);
+            return (IMAGETYPE_PNG, false);
         }
         w.push(Warning::PngAscii);
-        return (TYPE_UNKNOWN, false);
+        return (IMAGETYPE_UNKNOWN, false);
     } else if first3 == SIG_SWF {
-        return (TYPE_SWF, false);
+        return (IMAGETYPE_SWF, false);
     } else if first3 == SIG_SWC {
-        return (TYPE_SWC, false);
+        return (IMAGETYPE_SWC, false);
     } else if ft[..3] == SIG_PSD[..3] {
-        return (TYPE_PSD, false);
+        return (IMAGETYPE_PSD, false);
     } else if ft[..2] == SIG_BMP {
-        return (TYPE_BMP, false);
+        return (IMAGETYPE_BMP, false);
     } else if first3 == SIG_JPC {
-        return (TYPE_JPC, false);
+        return (IMAGETYPE_JPC, false);
     } else if ft[..3] == SIG_RIFF[..3] {
         if s.read(&mut ft[3..12]) != 9 {
             w.push(Warning::ErrorReading);
-            return (TYPE_UNKNOWN, false);
+            return (IMAGETYPE_UNKNOWN, false);
         }
         if ft[8..12] == SIG_WEBP {
-            return (TYPE_WEBP, false);
+            return (IMAGETYPE_WEBP, false);
         }
-        return (TYPE_UNKNOWN, false);
+        return (IMAGETYPE_UNKNOWN, false);
     }
 
     if s.read(&mut ft[3..4]) != 1 {
         w.push(Warning::ErrorReading);
-        return (TYPE_UNKNOWN, false);
+        return (IMAGETYPE_UNKNOWN, false);
     }
     let first4 = [ft[0], ft[1], ft[2], ft[3]];
     if first4 == SIG_TIF_II {
-        return (TYPE_TIFF_II, false);
+        return (IMAGETYPE_TIFF_II, false);
     } else if first4 == SIG_TIF_MM {
-        return (TYPE_TIFF_MM, false);
+        return (IMAGETYPE_TIFF_MM, false);
     } else if first4 == SIG_IFF {
-        return (TYPE_IFF, false);
+        return (IMAGETYPE_IFF, false);
     } else if first4 == SIG_ICO {
-        return (TYPE_ICO, false);
+        return (IMAGETYPE_ICO, false);
     }
 
     // WBMP may be shorter than twelve bytes, so the error waits.
     let twelve = s.read(&mut ft[4..12]) == 8;
     if twelve && ft == SIG_JP2 {
-        return (TYPE_JP2, false);
+        return (IMAGETYPE_JP2, false);
     }
     if s.rewind() && avif::identify(s) {
-        return (TYPE_AVIF, false);
+        return (IMAGETYPE_AVIF, false);
     }
     // GH-20201: after the AVIF test, so AVIF is not taken for HEIF.
     if twelve
         && ft[4..8] == SIG_FTYP
         && (ft[8..12] == SIG_MIF1 || ft[8..12] == SIG_HEIC || ft[8..12] == SIG_HEIX)
     {
-        return (TYPE_HEIF, false);
+        return (IMAGETYPE_HEIF, false);
     }
     if get_wbmp(s, false).is_some() {
-        return (TYPE_WBMP, false);
+        return (IMAGETYPE_WBMP, false);
     }
     if !twelve {
         w.push(Warning::ErrorReading);
-        return (TYPE_UNKNOWN, false);
+        return (IMAGETYPE_UNKNOWN, false);
     }
     if get_xbm(s).is_some() {
-        return (TYPE_XBM, false);
+        return (IMAGETYPE_XBM, false);
     }
-    (TYPE_UNKNOWN, true)
+    (IMAGETYPE_UNKNOWN, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -1576,31 +1566,21 @@ fn handle_avif(s: &mut Stream<'_>) -> Option<GfxInfo> {
     })
 }
 
-/// The `IMAGETYPE_*` constants image.c registers, in its order; the
-/// `IMAGETYPE_SVG` ext/libxml's reader adds, and the `IMAGETYPE_COUNT` it
-/// raises by one, are [`link_constants`]'s.
+/// `image_type_to_mime_type(int $image_type): string`,
+/// `PHP_FUNCTION(image_type_to_mime_type)` (`Z/ext/standard/image.c:1285`).
 ///
 /// ```php
-/// var_dump(IMAGETYPE_GIF, IMAGETYPE_JPEG, IMAGETYPE_SWC, IMAGETYPE_JPEG2000, IMAGETYPE_XBM, IMAGETYPE_AVIF, IMAGETYPE_HEIF, IMAGETYPE_UNKNOWN);
+/// var_dump(image_type_to_mime_type(IMAGETYPE_PNG), image_type_to_mime_type(IMAGETYPE_SWC), image_type_to_mime_type(IMAGETYPE_JPC), image_type_to_mime_type(99), image_type_to_mime_type(4294967297));
 /// ```
 /// ```expect
-/// int(1)
-/// int(2)
-/// int(13)
-/// int(9)
-/// int(16)
-/// int(19)
-/// int(20)
-/// int(0)
+/// string(9) "image/png"
+/// string(29) "application/x-shockwave-flash"
+/// string(24) "application/octet-stream"
+/// string(24) "application/octet-stream"
+/// string(9) "image/gif"
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    IMAGETYPE_CONSTANTS
-        .iter()
-        .map(|(name, value)| constant(name.as_bytes(), *value))
-        .collect()
-}
-
-/// The four natives, as the stub declares them.
+///
+/// The declarations of `image.c`.
 ///
 /// ```php
 /// foreach (['image_type_to_mime_type', 'image_type_to_extension', 'getimagesize', 'getimagesizefromstring'] as $f) echo new ReflectionFunction($f);
@@ -1638,50 +1618,13 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 ///   - Return [ array|false ]
 /// }
 /// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("image_type_to_mime_type(int $image_type): string"),
-            image_type_to_mime_type as Entry,
-        ),
-        (
-            stub(
-                "image_type_to_extension(int $image_type, bool $include_dot = true): string|false",
-            ),
-            image_type_to_extension,
-        ),
-        (
-            stub("getimagesize(string $filename, &$image_info = null): array|false"),
-            getimagesize,
-        ),
-        (
-            stub("getimagesizefromstring(string $string, &$image_info = null): array|false"),
-            getimagesizefromstring,
-        ),
-    ]
-}
-
-/// `image_type_to_mime_type(int $image_type): string`,
-/// `PHP_FUNCTION(image_type_to_mime_type)` (`Z/ext/standard/image.c:1285`).
-///
-/// ```php
-/// var_dump(image_type_to_mime_type(IMAGETYPE_PNG), image_type_to_mime_type(IMAGETYPE_SWC), image_type_to_mime_type(IMAGETYPE_JPC), image_type_to_mime_type(99), image_type_to_mime_type(4294967297));
-/// ```
-/// ```expect
-/// string(9) "image/png"
-/// string(29) "application/x-shockwave-flash"
-/// string(24) "application/octet-stream"
-/// string(24) "application/octet-stream"
-/// string(9) "image/gif"
-/// ```
-fn image_type_to_mime_type(req: &mut Request) -> Result<php::Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let image_type = long_argument(req, 1)?;
+#[php_function]
+fn image_type_to_mime_type(req: &mut Request, image_type: i64) -> Result<php::PhpString, Thrown> {
     // The C call truncates zend_long to int, on purpose here.
     #[allow(clippy::cast_possible_truncation)]
     let registered = handler_of(req, i64::from(image_type as i32));
     let mime = registered.map_or_else(|| mime_type(image_type), |h| h.mime_type);
-    string(req, mime.as_bytes())
+    php::PhpString::new(req, mime.as_bytes())
 }
 
 /// `image_type_to_extension(int $image_type, bool $include_dot = true): string|false`,
@@ -1698,24 +1641,30 @@ fn image_type_to_mime_type(req: &mut Request) -> Result<php::Value, Thrown> {
 /// string(4) ".jpc"
 /// bool(false)
 /// ```
-fn image_type_to_extension(req: &mut Request) -> Result<php::Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let image_type = long_argument(req, 1)?;
-    let include_dot = crate::zpp::optional_bool(req, 2, true)?;
+#[php_function]
+fn image_type_to_extension(
+    req: &mut Request,
+    image_type: i64,
+    #[php(default = true)] include_dot: bool,
+) -> Result<OrFalse<php::PhpString>, Thrown> {
     if let Some(ext) = extension(image_type) {
-        return if include_dot {
-            string(req, format!(".{ext}").as_bytes())
+        let text = if include_dot {
+            format!(".{ext}")
         } else {
-            string(req, ext.as_bytes())
+            ext.to_owned()
         };
+        return php::PhpString::new(req, text.as_bytes()).map(OrFalse::Value);
     }
     match handler_of(req, image_type) {
-        Some(handler) if include_dot => string(req, handler.extension.as_bytes()),
-        Some(handler) => string(
+        Some(handler) if include_dot => {
+            php::PhpString::new(req, handler.extension.as_bytes()).map(OrFalse::Value)
+        }
+        Some(handler) => php::PhpString::new(
             req,
             handler.extension.get(1..).unwrap_or_default().as_bytes(),
-        ),
-        None => Ok(php::Value::bool(false)),
+        )
+        .map(OrFalse::Value),
+        None => Ok(OrFalse::False),
     }
 }
 
@@ -1727,12 +1676,23 @@ fn string(req: &mut Request, bytes: &[u8]) -> Result<php::Value, Thrown> {
 /// `php_getimagesize_from_any`'s end (`Z/ext/standard/image.c:1541`):
 /// the warnings raised in order, `$image_info` filled with the `APPn`
 /// segments by name, and the array, or `false`.
+/// `$image_info` emptied before the image is read, as php's
+/// `ZEND_TRY_ASSIGN_REF_EMPTY_ARRAY`, where the call gave it.
+fn clear_info(req: &mut Request, image_info: Ref<Untyped<php::Value>>) -> Result<(), Thrown> {
+    if image_info.is_given() {
+        let empty = php::PhpArray::new(req)?;
+        image_info.set(req, Untyped(php::Value::array(empty)))?;
+    }
+    Ok(())
+}
+
 fn answer(
     req: &mut Request,
     bytes: &[u8],
     shown: &[u8],
-    want_info: bool,
-) -> Result<php::Value, Thrown> {
+    image_info: Ref<Untyped<php::Value>>,
+) -> Result<OrFalse<php::PhpArray>, Thrown> {
+    let want_info = image_info.is_given();
     let handlers: Vec<ImageHandler> = req.registered::<ImageHandler>().copied().collect();
     let found = image_size(bytes, want_info, &handlers);
     for warning in &found.warnings {
@@ -1752,10 +1712,10 @@ fn answer(
                 info.set(req, key, value)?;
             }
         }
-        assign_ref(req, 2, php::Value::array(info))?;
+        image_info.set(req, Untyped(php::Value::array(info)))?;
     }
     let Some(data) = found.data else {
-        return Ok(php::Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let mut array = php::PhpArray::new(req)?;
     for (key, value) in data.entries() {
@@ -1769,18 +1729,7 @@ fn answer(
         };
         array.set(req, key, value)?;
     }
-    Ok(php::Value::array(array))
-}
-
-/// `$image_info = []` where the call gave it, `zend_try_array_init`,
-/// before anything is opened.
-fn clear_info(req: &mut Request) -> Result<bool, Thrown> {
-    if given(req, 2).is_none() {
-        return Ok(false);
-    }
-    let empty = php::PhpArray::new(req)?;
-    assign_ref(req, 2, php::Value::array(empty))?;
-    Ok(true)
+    Ok(OrFalse::Value(array))
 }
 
 /// `getimagesize(string $filename, &$image_info = null): array|false`,
@@ -1843,16 +1792,20 @@ fn clear_info(req: &mut Request) -> Result<bool, Thrown> {
 /// bool(false)
 /// getimagesize(): Argument #1 ($filename) must not contain any null bytes
 /// ```
-fn getimagesize(req: &mut Request) -> Result<php::Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let filename = crate::md5::path_argument(req, 1)?;
-    let want_info = clear_info(req)?;
+#[php_function]
+fn getimagesize(
+    req: &mut Request,
+    filename: Path,
+    #[php(default = null)] image_info: Ref<Untyped<php::Value>>,
+) -> Result<OrFalse<php::PhpArray>, Thrown> {
+    let Path(filename) = filename;
+    clear_info(req, image_info)?;
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", false)? else {
-        return Ok(php::Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let bytes = stream.copy_to_mem(req, None)?;
     stream.close(req);
-    answer(req, bytes.as_bytes(), filename.as_bytes(), want_info)
+    answer(req, bytes.as_bytes(), filename.as_bytes(), image_info)
 }
 
 /// `getimagesizefromstring(string $string, &$image_info = null): array|false`,
@@ -1888,9 +1841,13 @@ fn getimagesize(req: &mut Request) -> Result<php::Value, Thrown> {
 /// }
 /// bool(false)
 /// ```
-fn getimagesizefromstring(req: &mut Request) -> Result<php::Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let data = string_argument(req, 1)?;
-    let want_info = clear_info(req)?;
-    answer(req, data.as_bytes(), data.as_bytes(), want_info)
+#[php_function]
+fn getimagesizefromstring(
+    req: &mut Request,
+    string: php::PhpString,
+    #[php(default = null)] image_info: Ref<Untyped<php::Value>>,
+) -> Result<OrFalse<php::PhpArray>, Thrown> {
+    let data = string;
+    clear_info(req, image_info)?;
+    answer(req, data.as_bytes(), data.as_bytes(), image_info)
 }
