@@ -1530,7 +1530,7 @@ fn highlight_file(
     };
     let html = php_ext::syntax::highlight(req, &source);
     if returned {
-        return PhpString::new(req, &html).map(Union::A);
+        return captured(req, &html).map(Union::A);
     }
     req.write(&html);
     Ok(Union::B(true))
@@ -1562,7 +1562,18 @@ fn php_strip_whitespace(req: &mut Request, filename: Path) -> Result<PhpString, 
         return PhpString::new(req, b"");
     };
     let stripped = php_ext::syntax::strip(req, &source);
-    PhpString::new(req, &stripped)
+    captured(req, &stripped)
+}
+
+/// What a native prints into php's default handler and hands back,
+/// `php_output_start_default`, `php_output_get_contents` and
+/// `php_output_discard` ([`Request::captured`]), and php's `Error`
+/// where the handler could not start.
+fn captured(req: &mut Request, printed: &[u8]) -> Result<PhpString, Thrown> {
+    match req.captured(|req| req.write(printed))? {
+        Some(captured) => Ok(captured),
+        None => Err(throw(req, "Error", "Unable to start output handler")),
+    }
 }
 
 /// `highlight_string(string $string, bool $return = false): string|true`,
@@ -1586,7 +1597,7 @@ fn highlight_string(
     let returned = r#return;
     let html = php_ext::syntax::highlight(req, string.as_bytes());
     if returned {
-        return PhpString::new(req, &html).map(Union::A);
+        return captured(req, &html).map(Union::A);
     }
     req.write(&html);
     Ok(Union::B(True))

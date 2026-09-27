@@ -343,6 +343,7 @@ request::Request::backtrace
 request::Request::buffer_handler
 request::Request::called_scope
 request::Request::caller_var
+request::Request::captured
 request::Request::cfg_entry
 request::Request::class_alias
 request::Request::class_decl
@@ -379,6 +380,7 @@ request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number
 request::Request::flush
+request::Request::forbid_dynamic_call
 request::Request::frame_args
 request::Request::frame_vars
 request::Request::frameless
@@ -440,6 +442,7 @@ request::Request::resources
 request::Request::response_code
 request::Request::restore_error_handler
 request::Request::restore_exception_handler
+request::Request::return_value_used
 request::Request::sapi_name
 request::Request::scope
 request::Request::script_name
@@ -470,6 +473,7 @@ request::Request::take_uploaded_file
 request::Request::temp_dir
 request::Request::temporary_name
 request::Request::this
+request::Request::this_object
 request::Request::tmpfile
 request::Request::trampoline
 request::Request::transports
@@ -614,6 +618,7 @@ values::ClosureInfo
 values::Key
 values::Key::from_string
 values::Key::to_prop_name
+values::Layout
 values::Laziness
 values::PhpArray
 values::PhpArray::append
@@ -628,6 +633,7 @@ values::PhpArray::cursor_reset
 values::PhpArray::get
 values::PhpArray::is_empty
 values::PhpArray::is_list
+values::PhpArray::is_packed
 values::PhpArray::is_recursive
 values::PhpArray::is_same
 values::PhpArray::iter
@@ -640,6 +646,7 @@ values::PhpArray::replace
 values::PhpArray::separate
 values::PhpArray::set
 values::PhpArray::set_next_free
+values::PhpArray::sized
 values::PhpArray::snapshot
 values::PhpArray::snapshot_refs
 values::PhpArray::sort_by

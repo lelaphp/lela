@@ -91,6 +91,25 @@ pub(crate) mod constants {
 #[php_class(extern)]
 pub(crate) struct Countable;
 
+/// `HT_MAX_SIZE` on a 64-bit build (`Z/Zend/zend_types.h`): the most
+/// elements a table may be sized for.
+const HT_MAX_SIZE: u64 = 0x4000_0000;
+
+/// `php_array_merge_wrapper`'s count (`Z/ext/standard/array.c:4268`):
+/// the elements of every array added up before anything is merged, and
+/// php's `Error` where they reach `HT_MAX_SIZE`.
+fn merge_total(req: &mut Request, arrays: &[PhpArray]) -> Result<(), Thrown> {
+    let count: u64 = arrays.iter().map(|array| array.len() as u64).sum();
+    if count >= HT_MAX_SIZE {
+        return Err(php_ext::raising::throw(
+            req,
+            "Error",
+            &format!("The total number of elements must be lower than {HT_MAX_SIZE}"),
+        ));
+    }
+    Ok(())
+}
+
 /// The value a body built, returned under `T`'s declaration as it is:
 /// php verifies an internal return only in debug builds.
 fn returned<T: FromArgument>(req: &mut Request, value: Value) -> Result<Raw<T>, Thrown> {
@@ -195,6 +214,20 @@ fn key_copy(req: &mut Request, key: &Key) -> Key {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// The elements of every array are counted before any is merged, and
+/// reaching `HT_MAX_SIZE` is php's `Error` (GHSA-h96m-rvf9-jgm2), for
+/// `array_merge_recursive` too.
+///
+/// ```php
+/// $r = range(0, 2 ** 20); $all = array_fill(0, 2 ** 10, $r);
+/// try { array_merge(...$all); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { array_merge_recursive(...$all); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// The total number of elements must be lower than 1073741824
+/// The total number of elements must be lower than 1073741824
+/// ```
 #[php_function]
 fn array_merge(req: &mut Request, arrays: Variadic<PhpArray>) -> Result<Raw<PhpArray>, Thrown> {
     let arrays = arrays.0;
@@ -202,6 +235,7 @@ fn array_merge(req: &mut Request, arrays: Variadic<PhpArray>) -> Result<Raw<PhpA
         let empty = Value::array(PhpArray::new(req)?);
         return returned(req, empty);
     }
+    merge_total(req, &arrays)?;
     if let [first, second] = arrays[..] {
         let kept = if first.is_empty() {
             Some(second)

@@ -116,6 +116,24 @@ use super::{copied, key_copy};
 ///   - Return [ bool ]
 /// }
 /// ```
+///
+/// After each callback the walk reads the variable again: another array
+/// there is walked from its own pointer, a copy of its own, and what is
+/// no array or object is php's `TypeError` (GH-69068, bug #70713).
+///
+/// ```php
+/// $a = [1, 2, 3]; array_walk($a, function (&$v) { global $a; echo $v, " "; if ($v == 2) { $a = [7, 8]; } $v *= 10; }); var_dump($a);
+/// $b = [1, 2]; try { array_walk($b, function () { global $b; $b = 1; }); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 1 2 7 8 array(2) {
+///   [0]=>
+///   int(70)
+///   [1]=>
+///   int(80)
+/// }
+/// Iterated value is no longer an array or object
+/// ```
 #[php_function]
 fn array_walk(
     req: &mut Request,
@@ -223,29 +241,22 @@ fn walk_holder(
     if let Some(object) = start.as_object().copied() {
         return walk_object(req, object, callback, userdata, recursive);
     }
-    let Some(array) = holder.separate_array(req)? else {
+    let Some(mut table) = holder.separate_array(req)? else {
         return Ok(());
     };
-    if array.is_empty() {
+    if table.is_empty() {
         return Ok(());
     }
+    // `zend_hash_internal_pointer_reset_ex`: the walk starts at the first
+    // element, whatever the array's own pointer says.
+    let mut pending: Vec<Key> = table.snapshot_refs().into_iter().map(|(k, _)| k).collect();
     let mut visited: HashSet<Key> = HashSet::new();
-    let mut pending: Vec<Key> = array.snapshot_refs().into_iter().map(|(k, _)| k).collect();
-    loop {
+    'table: loop {
         for key in std::mem::take(&mut pending) {
             if !visited.insert(key.clone()) {
                 continue;
             }
-            // "Reload array and position -- both may have changed".
-            let now = holder.get();
-            let Some(mut array) = now.as_array().copied() else {
-                return Err(throw(
-                    req,
-                    "TypeError",
-                    "Iterated value is no longer an array or object",
-                ));
-            };
-            let Some(value) = array.get(&key) else {
+            let Some(value) = table.get(&key) else {
                 continue;
             };
             // `ZVAL_MAKE_REF(zv)`: the element a reference in place.
@@ -255,22 +266,43 @@ fn walk_holder(
                 let Some(separated) = holder.separate_array(req)? else {
                     continue;
                 };
-                array = separated;
+                table = separated;
                 req.addref(&value);
                 let reference = PhpRef::new(req, value)?;
                 let written = key_copy(req, &key);
-                array.set(req, written, reference.as_value())?;
+                table.set(req, written, reference.as_value())?;
                 reference
             };
             visit(req, reference, &key, callback, userdata, recursive)?;
+            // "Reload array and position -- both may have changed": the
+            // variable may hold another array now, which the iterator
+            // moves to, separated, at that array's own pointer
+            // (`zend_hash_iterator_pos_ex`); an object's properties are
+            // walked from their start; anything else is php's TypeError.
+            let now = holder.get();
+            if let Some(now) = now.as_array().copied() {
+                if !now.is_same(table) {
+                    let Some(separated) = holder.separate_array(req)? else {
+                        return Ok(());
+                    };
+                    table = separated;
+                    visited.clear();
+                    pending = from_pointer(table);
+                    continue 'table;
+                }
+            } else if let Some(object) = now.as_object().copied() {
+                return walk_object(req, object, callback, userdata, recursive);
+            } else {
+                return Err(throw(
+                    req,
+                    "TypeError",
+                    "Iterated value is no longer an array or object",
+                ));
+            }
         }
         // What the callbacks appended is visited after, as php's position
         // walks on into it.
-        let now = holder.get();
-        let Some(array) = now.as_array().copied() else {
-            return Ok(());
-        };
-        pending = array
+        pending = table
             .snapshot_refs()
             .into_iter()
             .map(|(k, _)| k)
@@ -279,6 +311,17 @@ fn walk_holder(
         if pending.is_empty() {
             return Ok(());
         }
+    }
+}
+
+/// The keys of `table` from its internal pointer on,
+/// `_zend_hash_get_current_pos`: where an iterator moved onto a table it
+/// did not start on stands.
+fn from_pointer(table: PhpArray) -> Vec<Key> {
+    let keys = table.snapshot_refs().into_iter().map(|(k, _)| k);
+    match table.cursor_key() {
+        Some(at) => keys.skip_while(|k| *k != at).collect(),
+        None => Vec::new(),
     }
 }
 

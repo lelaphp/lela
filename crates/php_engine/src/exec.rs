@@ -454,6 +454,9 @@ pub(crate) struct CallState {
     /// not written over the argument, as `Z_FLF_PARAM_STR` converts in a
     /// temporary of the body's and a trace still reads the operand.
     pub(crate) frameless: bool,
+    /// `USED_RET()` (`Z/Zend/zend_API.h`): whether the caller reads what
+    /// the callee returns.
+    pub(crate) return_value: ReturnValue,
     /// `ZEND_CALL_DYNAMIC`: the callee was named as the program served,
     /// by `INIT_DYNAMIC_CALL` or `INIT_USER_CALL`, which a native that
     /// reads its caller's frame refuses (`zend_forbid_dynamic_call`).
@@ -461,6 +464,16 @@ pub(crate) struct CallState {
     /// php's `str_tmp`: what a coercion made for a frameless call, freed
     /// with the call as `Z_FLF_PARAM_FREE_STR` frees it at the body's end.
     pub(crate) coerced: Vec<Value>,
+}
+
+/// `USED_RET()`: whether a call's caller reads what it returns. It is
+/// `Unused` only where a `DO_*CALL` whose `result` operand is `UNUSED`
+/// serves the call; a call `zend_call_function` makes is `Used`, as php's
+/// test finds the frame before the callee's internal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReturnValue {
+    Used,
+    Unused,
 }
 
 /// Where a call stands: its `SEND_*` oplines placing arguments after the
@@ -704,11 +717,13 @@ impl Vm {
 
     /// `DO_*CALL` making the call it serves the current frame,
     /// `EG(current_execute_data) = call`: the callee, and the frame left
-    /// on the stack for the callee to read its arguments off. Nothing
-    /// under a `DO_*CALL` is none.
-    pub(crate) fn activate_call(&mut self) -> Option<Function> {
+    /// on the stack for the callee to read its arguments off, with
+    /// whether the opline's `result` operand is read. Nothing under a
+    /// `DO_*CALL` is none.
+    pub(crate) fn activate_call(&mut self, return_value: ReturnValue) -> Option<Function> {
         let call = self.calls.last_mut()?;
         call.stage = CallStage::Serving;
+        call.return_value = return_value;
         Some(call.function)
     }
 

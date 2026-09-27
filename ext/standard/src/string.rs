@@ -1303,6 +1303,20 @@ fn ltrim(
 /// wordwrap(): Argument #3 ($break) must not be empty
 /// wordwrap(): Argument #4 ($cut_long_words) cannot be true when argument #2 ($width) is 0
 /// ```
+///
+/// Where the break is longer than a byte or long words are cut, php asks
+/// for the longest the text can grow to before it scans a byte, and the
+/// memory limit is met there, whatever the text turns out to be.
+///
+/// ```php
+/// var_dump(wordwrap("ab cd", 1, "--"));
+/// wordwrap(str_repeat("x", 65534), 1, str_repeat("x", 65535));
+/// ```
+/// ```expect exit=255
+/// string(6) "ab--cd"
+///
+/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 4294901785 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn wordwrap(
     req: &mut Request,
@@ -1349,6 +1363,15 @@ fn wordwrap(
         }
         return PhpString::new(req, &out);
     }
+    // "Multiple character line break or forced cut": php asks for the
+    // longest the text can grow to, `zend_string_safe_alloc`, before a
+    // byte is scanned, so that is where the memory limit is met.
+    let (chunks, each, over) = match usize::try_from(linelength) {
+        Ok(width) if width > 0 => (text.len() / width + 1, brk.len(), text.len()),
+        _ => (text.len(), brk.len() + 1, 0),
+    };
+    let charge = PhpString::product(req, chunks, each, over, |_| {})?;
+    req.release(Value::string(charge));
     let mut out: Vec<u8> = Vec::with_capacity(text.len() + brk.len());
     let (mut laststart, mut lastspace) = (0usize, 0usize);
     let mut current = 0usize;

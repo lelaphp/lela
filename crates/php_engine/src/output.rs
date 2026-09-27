@@ -1513,6 +1513,25 @@ fn contents(req: &mut Request) -> Result<Option<Value>, Thrown> {
     Ok(Some(Value::string(PhpString::new(req, &buffered)?)))
 }
 
+/// `php_output_start_default`, what `body` writes, then
+/// `php_output_get_contents` and `php_output_discard`: how
+/// `highlight_file`, `highlight_string` and `php_strip_whitespace` hand
+/// back what they would have printed. The default handler starts as any
+/// does, so inside a running handler it is `php_output_lock_error`'s
+/// fatal; `None` where it did not start.
+pub(crate) fn captured(
+    req: &mut Request,
+    body: impl FnOnce(&mut Request),
+) -> Result<Option<PhpString>, Thrown> {
+    if !start_user(req, &StartHandler::Default, 0, HANDLER_STDFLAGS)? {
+        return Ok(None);
+    }
+    body(req);
+    let contents = contents(req)?;
+    stack_pop(req, POP_DISCARD | POP_TRY);
+    Ok(contents.and_then(|value| value.as_php_string().copied()))
+}
+
 /// The active handler's name and level, for a notice.
 fn active_named(req: &Request) -> String {
     let output = req.output();

@@ -215,7 +215,7 @@ fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
         stack.finish(req);
         return Ok(Value::null());
     };
-    let value = unwrapped(req, value);
+    req.addref(&value);
     let popped = stack.array.unset(req, &key);
     if let Key::Int(index) = key
         && index == stack.array.next_free().wrapping_sub(1)
@@ -224,16 +224,22 @@ fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
     }
     stack.array.cursor_reset();
     stack.finish(req);
+    let value = unwrapped(req, value);
     popped?;
     Ok(value)
 }
 
-/// `RETVAL_COPY_VALUE` of an element about to be deleted, then
-/// `zend_unwrap_reference`: the value with one more owner, which the
-/// delete gives back, and a reference's value in place of the reference.
-fn unwrapped(req: &mut Request, value: Value) -> Value {
-    let value = value.deref();
+/// `zend_unwrap_reference` over the element `RETVAL_COPY_VALUE` took out,
+/// made once the table is changed: a reference's value as it stands
+/// after, with one more owner, in place of the reference, so an element
+/// that referred to the array itself hands back the array as it is left.
+fn unwrapped(req: &mut Request, taken: Value) -> Value {
+    let Some(reference) = taken.as_php_ref().copied() else {
+        return taken;
+    };
+    let value = reference.get().deref();
     req.addref(&value);
+    req.release(taken);
     value
 }
 
@@ -271,6 +277,24 @@ fn unwrapped(req: &mut Request, value: Value) -> Value {
 /// NULL
 /// int(2)
 /// ```
+///
+/// The element taken out is unwrapped once the table is left as it is,
+/// `zend_unwrap_reference` after the delete, so an element that refers
+/// to the array itself hands back the array without it (GH-16957,
+/// GH-17447), as `array_pop` does.
+///
+/// ```php
+/// $a = [&$a, 1, 2]; $s = array_shift($a); var_dump($s === $a, count($s));
+/// $b = []; $b[] = &$b; var_dump(array_pop($b), $b);
+/// ```
+/// ```expect
+/// bool(true)
+/// int(2)
+/// array(0) {
+/// }
+/// array(0) {
+/// }
+/// ```
 #[php_function]
 fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
     let mut stack = Stack::of(req, array)?;
@@ -279,7 +303,7 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown>
         stack.finish(req);
         return Ok(Value::null());
     };
-    let value = unwrapped(req, first);
+    req.addref(&first);
     let mut rebuilt = PhpArray::new(req)?;
     for (key, element) in rows.into_iter().skip(1) {
         req.addref(&element);
@@ -296,7 +320,7 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown>
     }
     stack.replace(req, rebuilt)?;
     stack.finish(req);
-    Ok(value)
+    Ok(unwrapped(req, first))
 }
 
 /// `array_unshift(array &$array, mixed ...$values): int`, php's
@@ -417,6 +441,62 @@ fn array_unshift(
 ///   int(1)
 /// }
 /// ```
+///
+/// A removed element is released as it is deleted where the call's
+/// value is not read (`USED_RET()`), with the splice holding the table;
+/// a destructor that writes the array then separates it, and the splice
+/// finds itself its table's only holder and throws, the array left as
+/// the destructor wrote it. Where the value is read, the removed
+/// elements live in it and nothing runs mid-splice (GH-16649).
+///
+/// ```php
+/// class C { function __destruct() { global $a; echo "dtor ", count($a), "\n"; $a[] = 9; } }
+/// $a = [1, new C, 2]; try { array_splice($a, 1, 1); } catch (Error $e) { echo $e->getMessage(), "\n"; } var_dump($a);
+/// $a = [1, new C, 2]; $r = array_splice($a, 1, 1); echo "kept\n"; unset($r); var_dump($a);
+/// ```
+/// ```expect
+/// dtor 2
+/// Array was modified during array_splice operation
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [2]=>
+///   int(2)
+///   [3]=>
+///   int(9)
+/// }
+/// kept
+/// dtor 2
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   int(9)
+/// }
+/// ```
+///
+/// What the call hands back keeps a string key and renumbers an integer
+/// one, `zend_hash_add_new(removed, p->key, entry)`.
+///
+/// ```php
+/// $a = ["x" => 1, 5 => 2, "y" => 3, 4]; var_dump(array_splice($a, 0, 3), $a);
+/// ```
+/// ```expect
+/// array(3) {
+///   ["x"]=>
+///   int(1)
+///   [0]=>
+///   int(2)
+///   ["y"]=>
+///   int(3)
+/// }
+/// array(1) {
+///   [0]=>
+///   int(4)
+/// }
+/// ```
 #[php_function]
 fn array_splice(
     req: &mut Request,
@@ -440,8 +520,15 @@ fn array_splice(
     let num_in = i64::try_from(rows.len()).unwrap_or(i64::MAX);
     let length = length.unwrap_or(num_in);
     let (start, taken) = clamp_splice(num_in, offset, length);
-    let mut removed = PhpArray::new(req)?;
+    // `USED_RET()`: the removed elements are gathered only where the
+    // caller reads them; otherwise each is released as it is deleted.
+    let mut removed = if req.return_value_used() {
+        Some(PhpArray::new(req)?)
+    } else {
+        None
+    };
     let mut rebuilt = PhpArray::new(req)?;
+    let mut holder = Holder::Shared;
     for (at, (key, element)) in rows.into_iter().enumerate() {
         let at = i64::try_from(at).unwrap_or(i64::MAX);
         if at == start
@@ -453,8 +540,33 @@ fn array_splice(
             }
         }
         if at >= start && at < start + taken {
+            // `zend_hash_packed_del_val` and `zend_hash_del_bucket` with
+            // `ZVAL_PTR_DTOR`, under the owner `GC_ADDREF(in_hash)` took:
+            // a destructor served here that writes the array separates it.
+            // `zend_hash_add_new(removed, p->key, entry)`: a string key is
+            // kept, copied before the delete gives the bucket's up.
+            let kept = match (&removed, &key) {
+                (Some(_), Key::Str(_)) => Some(key_copy(req, &key)),
+                _ => None,
+            };
             req.addref(&element);
-            removed.append(req, element)?;
+            stack.array.unset(req, &key)?;
+            let table = stack.array.to_value();
+            if holder == Holder::Shared {
+                req.addref(&table);
+            }
+            match (removed.as_mut(), kept) {
+                (Some(removed), Some(key)) => removed.set(req, key, element)?,
+                (Some(removed), None) => removed.append(req, element)?,
+                (None, _) => req.release(element),
+            }
+            if holder == Holder::Shared {
+                if table.refcount() == 1 {
+                    holder = Holder::Alone;
+                } else {
+                    req.release(table);
+                }
+            }
             continue;
         }
         req.addref(&element);
@@ -477,12 +589,40 @@ fn array_splice(
     if let Some(replacement) = replacement {
         req.release(replacement.to_value());
     }
+    if holder == Holder::Alone {
+        // `GC_DELREF(in_hash) == 0`: nothing but the splice holds the
+        // table any more, so what the reference holds now stands.
+        req.release(stack.array.to_value());
+        req.release(rebuilt.to_value());
+        if let Some(removed) = removed {
+            req.release(removed.to_value());
+        }
+        stack.finish(req);
+        return Err(throw(
+            req,
+            "Error",
+            "Array was modified during array_splice operation",
+        ));
+    }
     if rebuilt.next_free() == i64::MIN {
         rebuilt.set_next_free(req, 0)?;
     }
     stack.replace(req, rebuilt)?;
     stack.finish(req);
-    Ok(removed)
+    match removed {
+        Some(removed) => Ok(removed),
+        None => PhpArray::new(req),
+    }
+}
+
+/// Who holds the table `php_splice` deletes from while it serves a
+/// destructor: the reference and the splice, or, once the program
+/// wrote the reference over or separated it, the splice alone
+/// (`GC_DELREF(in_hash) == 0`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    Shared,
+    Alone,
 }
 
 /// `php_splice`'s clamps: the offset into `0..=num_in`, from the end

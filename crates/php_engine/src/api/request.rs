@@ -2992,6 +2992,7 @@ impl Request {
             extra_named: extra_named.to_vec(),
             stage: CallStage::Serving,
             frameless: false,
+            return_value: exec::ReturnValue::Used,
             dynamic: false,
             coerced: Vec::new(),
             send_arg_by_ref: false,
@@ -14198,6 +14199,30 @@ impl Request {
         crate::output::buffer_op(self, op)
     }
 
+    /// `php_output_start_default`, what `body` writes through the stack,
+    /// then `php_output_get_contents` and `php_output_discard`: what the
+    /// body printed, as a string, for a native that hands back what it
+    /// would have printed. The default handler starts as `ob_start()`'s
+    /// does, so inside a running handler it is `php_output_lock_error`'s
+    /// fatal; `None` where it did not start, which such a native answers
+    /// with its `Error`.
+    ///
+    /// ```php
+    /// var_dump(highlight_string("x", true));
+    /// ob_start(function ($s) { return strlen(highlight_string("x", true)) . "\n"; }); echo "y"; ob_end_flush();
+    /// ```
+    /// ```expect exit=255
+    /// string(48) "<pre><code style="color: #000000">x</code></pre>"
+    ///
+    /// Fatal error: highlight_string(): Cannot use output buffering in output buffering display handlers in %s on line 3
+    /// ```
+    pub fn captured(
+        &mut self,
+        body: impl FnOnce(&mut Request),
+    ) -> Result<Option<PhpString>, Thrown> {
+        crate::output::captured(self, body)
+    }
+
     /// Where the first byte reached the host, `php_output_get_start_filename`
     /// and `_lineno`, once one has.
     #[must_use]
@@ -15104,6 +15129,19 @@ impl Request {
         self.vm.serving_call().is_some_and(|call| call.frameless)
     }
 
+    /// `USED_RET()` (`Z/Zend/zend_API.h`): whether the caller reads what
+    /// the native returns, false only for a call written as a statement,
+    /// whose `DO_*CALL` writes its return to an `UNUSED` operand; a call
+    /// made by a native, `call_user_func`'s, reads it. `array_splice`
+    /// builds the array of what it removed only where it is read, which
+    /// decides when the removed elements' destructors are served.
+    #[must_use]
+    pub fn return_value_used(&self) -> bool {
+        self.vm
+            .serving_call()
+            .is_none_or(|call| call.return_value == exec::ReturnValue::Used)
+    }
+
     /// `zend_hash_find_ind(zend_rebuild_symbol_table(), name)`: the
     /// variable `name` of the innermost user frame, the one that called
     /// the native, as it stands, a reference not followed; none where the
@@ -15356,6 +15394,41 @@ impl Request {
         }
     }
 
+    /// `zend_forbid_dynamic_call()` (`Z/Zend/zend_API.h:901`): php's
+    /// `Error` "Cannot call `name()` dynamically" where the native being
+    /// served was called dynamically, `ZEND_CALL_DYNAMIC`, which is where
+    /// [`Request::native_caller`] answers another native: a callee the
+    /// program named as it served (`$f()`), or one `zend_call_function`
+    /// served, a user buffer handler's among them. What reads or writes the
+    /// caller's variables, `compact` and `extract`, refuses such a call.
+    ///
+    /// ```php
+    /// function f() { $a = 1; $g = 'compact'; try { $g('a'); } catch (Error $e) { echo $e->getMessage(), "\n"; } var_dump(call_user_func('compact', 'a')); }
+    /// f();
+    /// ob_start('compact'); try { ob_end_clean(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot call compact() dynamically
+    /// array(1) {
+    ///   ["a"]=>
+    ///   int(1)
+    /// }
+    /// Cannot call compact() dynamically
+    /// ```
+    pub fn forbid_dynamic_call(&mut self) -> Result<(), Thrown> {
+        match self.native_caller() {
+            NativeCaller::Native => Err(self.dynamic_call()),
+            NativeCaller::Function(..) | NativeCaller::Code(_) => Ok(()),
+        }
+    }
+
+    /// The `Error` [`Request::forbid_dynamic_call`] throws, named for the
+    /// native being served.
+    pub(crate) fn dynamic_call(&mut self) -> Thrown {
+        let name = self.active_function_name();
+        crate::api::raising::throw(self, "Error", &format!("Cannot call {name}() dynamically"))
+    }
+
     /// `zend_proptable_to_symtable(&EG(symbol_table), 1)`
     /// (`Z/Zend/zend_hash.c:3396`), what `FETCH_GLOBALS` hands the
     /// program as `$GLOBALS`: a copy of the global table, every name
@@ -15479,6 +15552,41 @@ impl Request {
             return call.this;
         }
         self.vm.innermost()?.this
+    }
+
+    /// `zend_get_this_object(EG(current_execute_data))`
+    /// (`Z/Zend/zend_execute_API.c:1317`): the receiver of the first link
+    /// of the chain that has one, walked past the natives that have no
+    /// class, and none where a user frame or a native method without one
+    /// comes first. So `compact('this')` inside a method, or a closure
+    /// bound to an object, finds the object its caller runs on.
+    ///
+    /// ```php
+    /// class A { function m() { return compact('this'); } function c() { return (fn() => compact('this'))(); } }
+    /// $a = new A; var_dump($a->m()['this'] === $a, $a->c()['this'] === $a, compact('this'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// array(0) {
+    /// }
+    /// ```
+    #[must_use]
+    pub fn this_object(&self) -> Option<PhpObject> {
+        for link in self.chain() {
+            let (function, this) = match link {
+                Link::Frame(_, _, state) => (state.function, state.this),
+                Link::Call(call) => (Some(call.function), call.this),
+            };
+            if this.is_some() {
+                return this;
+            }
+            let function = function?;
+            if self.user_function(function).is_some() || self.method_class(function).is_some() {
+                return None;
+            }
+        }
+        None
     }
 
     // -------------------------------------------------- symbols

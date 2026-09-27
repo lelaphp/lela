@@ -9,6 +9,8 @@
 //! says (design §8): the one corpus body that needs PCRE-only syntax is a
 //! row in the divergence registry, not a reason to carry a backtracker.
 
+use std::fmt::Write as _;
+
 use anyhow::{Context, Result};
 use regex_lite::Regex;
 
@@ -52,7 +54,7 @@ impl Expectation {
             Expectation::Format(body) => expectf_to_regex(body),
             Expectation::Pattern(body) => body.clone(),
         };
-        let anchored = format!("(?s)^{pattern}$");
+        let anchored = format!("(?s)^{}$", pcre_literals(&pattern));
         let regex = Regex::new(&anchored).with_context(|| {
             format!(
                 "the {} section is not a pattern this engine takes: {pattern}",
@@ -165,6 +167,61 @@ fn preg_quote(text: &str) -> String {
         }
     }
     out
+}
+
+/// Two spellings PCRE reads as a literal and an RE2 engine refuses,
+/// written as that engine reads the same literal: the octal escape, `\0`
+/// and up to two octal digits after it, as `\x{..}` (`%r\0%r` in an
+/// `--EXPECTF--` and a `\0` in an `--EXPECTREGEX--` class mean NUL to
+/// php, and `preg_quote` writes NUL as `\000`), and a `{` that opens no
+/// `{n}`, `{n,}` or `{n,m}` quantifier, as `\{` (`array\(2\) {`).
+/// Every other escape is kept as written, an escaped backslash with it,
+/// so `\\0` stays a backslash and a zero.
+fn pcre_literals(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some((_, '0')) => {
+                    let mut value = 0u32;
+                    for _ in 0..2 {
+                        match chars.peek().and_then(|(_, d)| d.to_digit(8)) {
+                            Some(digit) => {
+                                value = value * 8 + digit;
+                                chars.next();
+                            }
+                            None => break,
+                        }
+                    }
+                    let _ = write!(out, "\\x{{{value:x}}}");
+                }
+                Some((_, next)) => {
+                    out.push('\\');
+                    out.push(next);
+                }
+                None => out.push('\\'),
+            },
+            '{' if !opens_quantifier(&pattern[at..]) => out.push_str("\\{"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Whether `text`, which starts at a `{`, is a quantifier PCRE reads:
+/// digits, then `}`, `,}` or `,` and digits and `}`.
+fn opens_quantifier(text: &str) -> bool {
+    let body = &text[1..];
+    let Some(close) = body.find('}') else {
+        return false;
+    };
+    let (low, high) = match body[..close].split_once(',') {
+        Some((low, high)) => (low, Some(high)),
+        None => (&body[..close], None),
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    digits(low) && high.is_none_or(|high| high.is_empty() || digits(high))
 }
 
 /// The offset of `needle` in `haystack` at or after `from`.
@@ -282,6 +339,24 @@ mod tests {
         assert_eq!(quoted_for_the_engine("<a>"), "[<]a[>]");
         let arrow = Expectation::Format("  [1]=>\n  string(3) \"abc\"".to_owned());
         assert!(arrow.met(b"  [1]=>\n  string(3) \"abc\"").unwrap());
+    }
+
+    #[test]
+    fn pcre_s_literals_are_written_as_this_engine_reads_them() {
+        assert_eq!(pcre_literals(r"a\0b\000c\012"), r"a\x{0}b\x{0}c\x{a}");
+        assert_eq!(pcre_literals(r"\\0 \d"), r"\\0 \d");
+        assert_eq!(pcre_literals(r"array\(2\) {"), r"array\(2\) \{");
+        assert_eq!(pcre_literals(r"a{2}b{1,}c{1,3}\{"), r"a{2}b{1,}c{1,3}\{");
+        assert!(
+            Expectation::Pattern("array\\(2\\) {\n}".to_owned())
+                .met(b"array(2) {\n}")
+                .unwrap()
+        );
+        let format = Expectation::Format("string(9) \"%r\\0%rA%r\\0%rb\"".to_owned());
+        assert!(format.met(b"string(9) \"\0A\0b\"").unwrap());
+        let pattern = Expectation::Pattern(r#"string\([0-9]*\) "[#\0]*""#.to_owned());
+        assert!(pattern.met(b"string(1) \"\0\"").unwrap());
+        assert!(Expectation::Format("a\0b".to_owned()).met(b"a\0b").unwrap());
     }
 
     #[test]

@@ -13193,6 +13193,17 @@ impl Emit<'_> {
     /// it, php's `result->u.op.var = -1`.
     const ROPE_UNASSIGNED: u32 = u32::MAX;
 
+    /// `zend_compile_rope_add`: one more opline, `ROPE_INIT` for element
+    /// 0 and `ROPE_ADD` after, taking `element` as element `num`, and
+    /// where the opline stands, which the first element's caller keeps
+    /// for [`Self::rope_finalize`].
+    pub(crate) fn rope_add(&mut self, num: u32, element: Where) -> usize {
+        let at = self.oplines.len();
+        self.push(Opline::default());
+        self.rope_add_at(at, num, element);
+        at
+    }
+
     /// `zend_compile_rope_add_ex` over the opline at `at`: `ROPE_INIT`
     /// for element 0 and `ROPE_ADD` over the rope's temporary after it,
     /// the element in `op2`, the rope's temporary as what it leaves, and
@@ -13227,7 +13238,7 @@ impl Emit<'_> {
     /// before `get_temporary_variable`, then one slot fewer than the
     /// `zval`s the `count` string pointers fill, and every opline of the
     /// rope given that temporary.
-    fn rope_finalize(&mut self, count: u32, init_at: usize) -> Where {
+    pub(crate) fn rope_finalize(&mut self, count: u32, init_at: usize) -> Where {
         let last_at = self.oplines.len().saturating_sub(1);
         if count == 1 {
             let out = self.temporary();
@@ -13305,6 +13316,12 @@ impl Emit<'_> {
             CastTo::Bool => self.emit_unary(Opcode::Bool, operand, 0),
             _ => self.emit_unary(Opcode::Cast, operand, to.type_code()),
         })
+    }
+
+    /// `ZEND_CAST` of `operand` to `to` into a temporary, what
+    /// `zend_compile_func_sprintf` emits before a `%d` and an array's `%s`.
+    pub(crate) fn emit_cast(&mut self, operand: Where, to: CastTo) -> Where {
+        self.emit_unary(Opcode::Cast, operand, to.type_code())
     }
 
     /// `zend_emit_op_tmp` over one operand: the opline with `op1`,
@@ -17779,7 +17796,7 @@ impl BinaryOp {
 /// pin). `(unset)` is refused as the compile error `zend_compile_cast`
 /// raises for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CastTo {
+pub(crate) enum CastTo {
     /// `(int)` and `(integer)`: `IS_LONG`.
     Long,
     /// `(float)` and `(double)`: `IS_DOUBLE`.

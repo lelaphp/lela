@@ -274,6 +274,16 @@ impl Key {
 #[derive(Clone, Copy)]
 pub struct PhpArray(Arr);
 
+/// How a table [`PhpArray::sized`] lays down is laid out: php's packed
+/// array, a list of values indexed from zero, or its hash, the buckets
+/// and their hash slots, `zend_hash_real_init_packed` and
+/// `zend_hash_real_init_mixed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    Packed,
+    Hash,
+}
+
 impl PhpArray {
     /// An empty array out of the request's heap, php's `array_init`:
     /// fifty-six bytes for the header, nothing for elements until the
@@ -281,6 +291,56 @@ impl PhpArray {
     /// `zend_mm` bails out.
     pub fn new(req: &mut Request) -> Result<PhpArray, Thrown> {
         req.array()
+    }
+
+    /// `array_init_size(size)`, `zend_new_array(size)`: an empty array
+    /// sized for `size` elements, the size held to
+    /// `zend_hash_check_size`, whose `Possible integer overflow in memory
+    /// allocation` fatal ends the request past `HT_MAX_SIZE` before any
+    /// element is written, and laid down as `layout` says: packed, or a
+    /// hash from the start, `zend_hash_real_init_mixed`, which
+    /// `debug_zval_dump` tells apart. The elements' memory is asked for
+    /// at the first write.
+    ///
+    /// ```php
+    /// var_dump(count(array_fill(5, 3, 'x')));
+    /// $a = array_fill(0, 2147483647, 1);
+    /// ```
+    /// ```expect exit=255
+    /// int(3)
+    ///
+    /// Fatal error: Possible integer overflow in memory allocation (2147483647 * 32 + 32) in %s on line 3
+    /// ```
+    ///
+    /// The unserializer lays every array down as a hash, and `array_fill`
+    /// one that does not start inside its count.
+    ///
+    /// ```php
+    /// $u = unserialize('a:2:{i:0;i:1;i:1;i:2;}'); $h = array_fill(5, 2, 0); $p = array_fill(0, 2, 0);
+    /// debug_zval_dump($u, $h, $p);
+    /// ```
+    /// ```expect
+    /// array(2) refcount(2){
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// array(2) refcount(2){
+    ///   [5]=>
+    ///   int(0)
+    ///   [6]=>
+    ///   int(0)
+    /// }
+    /// array(2) packed refcount(2){
+    ///   [0]=>
+    ///   int(0)
+    ///   [1]=>
+    ///   int(0)
+    /// }
+    /// ```
+    pub fn sized(req: &mut Request, size: u32, layout: Layout) -> Result<PhpArray, Thrown> {
+        req.array_sized(size, layout == Layout::Packed)
     }
 
     /// The face over a heap array the engine already holds.
@@ -303,6 +363,15 @@ impl PhpArray {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// `HT_IS_PACKED`: whether the table is php's packed list, its slots
+    /// the integer keys from zero with holes where elements were
+    /// removed, and not a hash, which is what `debug_zval_dump` prints
+    /// `packed` for; a list of keys `0..len` can be either.
+    #[must_use]
+    pub fn is_packed(&self) -> bool {
+        self.0.is_packed()
     }
 
     /// Whether the keys are `0..len` in order, `array_is_list()`.

@@ -32,6 +32,27 @@ use super::class_name;
 /// bool(true)
 /// bool(false)
 /// ```
+///
+/// `packed` is `HT_IS_PACKED`, how the table is laid out, not whether
+/// its keys count from zero: a hash whose one key is 0 is not packed, and a
+/// packed list with its first slot removed still is.
+///
+/// ```php
+/// $h = ["a" => 1]; unset($h["a"]); $h[] = 2; $p = [1, 2, 3]; unset($p[0]);
+/// debug_zval_dump($h, $p);
+/// ```
+/// ```expect
+/// array(1) refcount(2){
+///   [0]=>
+///   int(2)
+/// }
+/// array(2) packed refcount(2){
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   int(3)
+/// }
+/// ```
 #[php_function]
 fn debug_zval_dump(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<(), Thrown> {
     let values = std::iter::once(value).chain(values.0);
@@ -80,7 +101,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                 return Ok(());
             }
             array.protect();
-            let packed = if array.is_list() { "packed " } else { "" };
+            let packed = if array.is_packed() { "packed " } else { "" };
             let count = value.refcount();
             if count <= 1 {
                 out.extend_from_slice(

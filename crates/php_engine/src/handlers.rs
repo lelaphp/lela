@@ -66,7 +66,7 @@ use crate::api::values::{
     ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::exec::{
-    self, Cached, CallStage, CallState, E_FATAL_ERRORS, cleanup_live_vars,
+    self, Cached, CallStage, CallState, E_FATAL_ERRORS, ReturnValue, cleanup_live_vars,
     cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
 };
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
@@ -1261,6 +1261,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        return_value: ReturnValue::Used,
         dynamic: true,
         coerced: Vec::new(),
     });
@@ -1648,6 +1649,7 @@ fn init_call(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        return_value: ReturnValue::Used,
         dynamic: false,
         coerced: Vec::new(),
     });
@@ -2380,6 +2382,7 @@ pub(crate) fn init_user_call<T: Tier>(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        return_value: ReturnValue::Used,
         dynamic: true,
         coerced: Vec::new(),
     });
@@ -4454,6 +4457,7 @@ pub(crate) fn new<T: Tier>(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        return_value: ReturnValue::Used,
         dynamic: false,
         coerced: Vec::new(),
     });
@@ -4811,6 +4815,7 @@ fn static_call_frame(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        return_value: ReturnValue::Used,
         dynamic: false,
         coerced: Vec::new(),
     });
@@ -4922,6 +4927,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        return_value: ReturnValue::Used,
         coerced: Vec::new(),
         dynamic: false,
     });
@@ -5104,6 +5110,7 @@ pub(crate) fn init_method_call<T: Tier>(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        return_value: ReturnValue::Used,
         dynamic: false,
         coerced: Vec::new(),
     });
@@ -9633,7 +9640,14 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
         req.pop_call();
         return threw(req, frame, &thrown);
     }
-    let Some(function) = req.vm_mut().activate_call() else {
+    let Some(function) = req
+        .vm_mut()
+        .activate_call(if op.out_type == OperandKind::Unused {
+            ReturnValue::Unused
+        } else {
+            ReturnValue::Used
+        })
+    else {
         return Err(Fatal::Error(format!(
             "InternalError: {opcode} with no call frame under it"
         )));
@@ -10030,6 +10044,7 @@ fn frameless_call(
         stage: CallStage::Serving,
         send_arg_by_ref: false,
         frameless: true,
+        return_value: ReturnValue::Used,
         dynamic: false,
         coerced: Vec::new(),
     });
@@ -20189,6 +20204,7 @@ mod tests {
                 stage: CallStage::Serving,
                 send_arg_by_ref: false,
                 frameless: false,
+                return_value: ReturnValue::Used,
                 dynamic: false,
                 coerced: Vec::new(),
             };

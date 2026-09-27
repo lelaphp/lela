@@ -13,7 +13,9 @@ use php_ext::call::{autoload, call, call_method, class_constant, lookup_class, n
 use php_ext::coerce::{callable_checked, value_name};
 use php_ext::raising::{Level, Thrown, deprecated, docref, throw, warning};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{
+    ClassId, Key, Layout, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
+};
 
 use super::{
     Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, has_method, is_enum_class, is_serializable,
@@ -1346,7 +1348,12 @@ impl State<'_> {
         {
             return Ok(false);
         }
-        let array = PhpArray::new(req)?;
+        // `array_init_size` and `zend_hash_real_init_mixed`: "we can't
+        // convert from packed to hash during unserialization".
+        let array = match u32::try_from(elements) {
+            Ok(size) if size > 0 => PhpArray::sized(req, size, Layout::Hash)?,
+            _ => PhpArray::new(req)?,
+        };
         self.write(req, slot, entry, Value::array(array))?;
         if elements == 0 {
             return Ok(self.finish());
@@ -1551,7 +1558,9 @@ impl State<'_> {
             if elements >= HT_MAX_SIZE {
                 return Ok(false);
             }
-            let array = PhpArray::new(req)?;
+            // `array_init_size` and `zend_hash_real_init_mixed`, "Avoid
+            // reallocation due to packed -> mixed conversion".
+            let array = PhpArray::sized(req, u32::try_from(elements).unwrap_or(0), Layout::Hash)?;
             if !self.array_elements(req, array, elements)? {
                 object.mark_destructor_called();
                 req.release(array.to_value());
