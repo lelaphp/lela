@@ -314,6 +314,9 @@ impl SplFileInfo {
         if let Some((_, s)) = stat(req, this, true)? {
             return Ok(OrFalse::Value(PhpString::new(req, kind_name(s[2]))?));
         }
+        if unnamed(req, this)? {
+            return Ok(OrFalse::False);
+        }
         let name = String::from_utf8_lossy(&file_name(req, this)?).into_owned();
         Err(throw(
             req,
@@ -397,6 +400,25 @@ impl SplFileInfo {
     }
 
     /// `getRealPath(): string|false`.
+    ///
+    /// A `GlobIterator` that matched nothing stands on no entry: its
+    /// name is `""`, which every stat answers `false` for quietly
+    /// (`php_stat`), and whose real path is the working directory's.
+    ///
+    /// ```php
+    /// $o = new GlobIterator(__DIR__ . "/*.no-such-extension");
+    /// var_dump($o->getATime(), $o->getType(), $o->getSize(), $o->getFilename(), $o->getRealPath() === getcwd(), $o->count());
+    /// echo str_replace(__DIR__, "", var_export($o->__debugInfo()["\0DirectoryIterator\0glob"], true)), "\n";
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// string(0) ""
+    /// bool(true)
+    /// int(0)
+    /// 'glob:///*.no-such-extension'
+    /// ```
     #[php(tentative)]
     fn getRealPath(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
         let this = this.object();
@@ -411,10 +433,15 @@ impl SplFileInfo {
         if kind == Type::Dir && !known && entry {
             file_name(req, this)?;
         }
+        // A directory's name is its entry's where the name is not known,
+        // which a `GlobIterator` on no entry answers as `""`, php's
+        // `VCWD_REALPATH("")`, the working directory.
         let name = match orig {
             Some(orig) => Some(orig),
+            None if kind == Type::Dir => Some(file_name(req, this)?),
             None => fs(req, this, |it| it.file_name.clone())?,
         };
+        let name = name.map(|n| if n.is_empty() { b".".to_vec() } else { n });
         match name.and_then(|n| req.realpath(&n)) {
             Some(real) => Ok(OrFalse::Value(PhpString::new(
                 req,
@@ -2080,6 +2107,13 @@ fn stat(req: &mut Request, this: PhpObject, link: bool) -> Result<Option<Stat>, 
     Ok(got.map(|s| (name, s)))
 }
 
+/// Whether the object's file name is empty, which `php_stat` answers
+/// `false` for before it stats anything and raises nothing for: a
+/// `GlobIterator` standing on no entry.
+fn unnamed(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
+    Ok(file_name(req, this)?.is_empty())
+}
+
 /// One field of the object's stat, php's `RuntimeException` naming the
 /// method `what` where the stat fails.
 fn stat_field(
@@ -2090,6 +2124,9 @@ fn stat_field(
 ) -> Result<OrFalse<i64>, Thrown> {
     if let Some((_, s)) = stat(req, this, false)? {
         return Ok(OrFalse::Value(s[field]));
+    }
+    if unnamed(req, this)? {
+        return Ok(OrFalse::False);
     }
     let name = String::from_utf8_lossy(&file_name(req, this)?).into_owned();
     Err(throw(
@@ -2230,7 +2267,7 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
         let value = crate::string_value(req, &name)?;
         set(req, &mut out, b"SplFileInfo", b"fileName", value)?;
     }
-    let (kind, glob, sub_path, mode, delimiter, enclosure, path) = fs(req, this, |it| {
+    let (kind, glob, sub_path, mode, delimiter, enclosure) = fs(req, this, |it| {
         (
             it.kind,
             it.glob.as_ref().map(|(p, _)| p.clone()),
@@ -2238,12 +2275,13 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
             it.open_mode.clone(),
             it.delimiter,
             it.enclosure,
-            it.path.clone(),
         )
     })?;
     if kind == Type::Dir {
+        // `intern->path` of a glob stream's iterator, the pattern as
+        // `spl_filesystem_dir_open` was handed it, `glob://` first.
         let value = match glob {
-            Some(_) => crate::string_value(req, &path.unwrap_or_default())?,
+            Some(pattern) => crate::string_value(req, &[b"glob://".as_slice(), &pattern].concat())?,
             None => Value::bool(false),
         };
         set(req, &mut out, b"DirectoryIterator", b"glob", value)?;
