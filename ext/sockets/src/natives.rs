@@ -474,12 +474,17 @@ fn socket_close(req: &mut Request, socket: Instance<Socket>) -> Result<(), Throw
 /// var_dump(socket_write($p[0], "hello", 3), socket_read($p[1], 10));
 /// try { socket_write($p[0], "x", -1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// socket_close($p[1]);
+/// // The peer's close is seen before the write: a read of $p[0] returns
+/// // its EOF once the close has landed, so the write below meets a closed
+/// // peer on every run, whatever the load.
+/// var_dump(socket_read($p[0], 1));
 /// var_dump(@socket_write($p[0], "x"), socket_last_error($p[0]) === SOCKET_EPIPE);
 /// ```
 /// ```expect
 /// int(3)
 /// string(3) "hel"
 /// socket_write(): Argument #3 ($length) must be greater than or equal to 0
+/// string(0) ""
 /// bool(false)
 /// bool(true)
 /// ```
