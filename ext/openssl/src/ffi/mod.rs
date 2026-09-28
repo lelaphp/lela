@@ -118,6 +118,19 @@ pub(crate) fn next_error() -> Option<c_ulong> {
     (code != 0).then_some(code)
 }
 
+/// `OPENSSL_INIT_LOAD_CONFIG`, which openssl-sys does not carry.
+const OPENSSL_INIT_LOAD_CONFIG: u64 = 0x0000_0040;
+
+/// `php_openssl_backend_init`'s `OPENSSL_init_ssl(OPENSSL_INIT_LOAD_CONFIG,
+/// NULL)`: the library started with its configuration file read and every
+/// digest and cipher entered in the name table `openssl_get_md_methods`
+/// and `openssl_get_cipher_methods` walk. Once per process, whoever asks.
+pub(crate) fn start() {
+    // SAFETY: OPENSSL_init_ssl is safe to call from any thread any number
+    // of times; NULL settings are the defaults.
+    unsafe { sys::OPENSSL_init_ssl(OPENSSL_INIT_LOAD_CONFIG, std::ptr::null()) };
+}
+
 /// `ERR_clear_error()`: this thread's queue emptied, of what a request
 /// the thread served before left on it.
 pub(crate) fn clear_errors() {

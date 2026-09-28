@@ -42,7 +42,7 @@ mod x509;
 use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
 
-use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, ObjectHandlers, OrFalse};
+use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, ObjectHandlers, OrFalse, StartupIni};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::Function;
 use php_ext::decl::{IniDecl, Name};
@@ -422,6 +422,7 @@ pub fn extension() -> Extension {
             x509::openssl_get_cert_locations::declared(),
         ])
         .on_modify(b"openssl.libctx", on_update_libctx)
+        .engine_state(started)
         .request_state::<State>()
         .rinit(rinit)
         .info(info)
@@ -457,6 +458,16 @@ fn on_update_libctx(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
     );
     php_ext::raising::docref(req, level, &text);
     Ok(false)
+}
+
+/// `PHP_MINIT_FUNCTION(openssl)`'s `php_openssl_backend_init`, called
+/// once as the engine is built: nothing is kept but the mark of the call.
+struct Started;
+
+fn started(ini: &StartupIni) -> Started {
+    let _ = ini;
+    ffi::start();
+    Started
 }
 
 /// The library's error queue emptied as a request starts: it is the
