@@ -221,6 +221,12 @@ impl Certificate {
         unsafe { sys::PEM_write_bio_X509(out.as_ptr(), self.as_ptr()) != 0 }
     }
 
+    /// The certificate as PEM.
+    pub(crate) fn to_pem(&self) -> Option<Vec<u8>> {
+        // SAFETY: the sink and the certificate are live.
+        written(|out| unsafe { sys::PEM_write_bio_X509(out, self.as_ptr()) })
+    }
+
     /// `X509_digest(cert, md, buf, &n)`.
     pub(crate) fn digest(&self, md: &Digest) -> Option<Vec<u8>> {
         let mut out = [0u8; 64];

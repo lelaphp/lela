@@ -1,7 +1,7 @@
-//! Signed and enveloped messages: [`Pkcs7`] (`PKCS7`) and [`Cms`]
-//! (`CMS_ContentInfo`).
+//! Signed and enveloped messages: [`Pkcs7`] (`PKCS7`), [`Cms`]
+//! (`CMS_ContentInfo`) and the key store [`Pkcs12`] (`PKCS12`).
 
-use std::ffi::{c_int, c_uint, c_void};
+use std::ffi::{CStr, c_int, c_uint, c_void};
 use std::ptr;
 
 use openssl_sys as sys;
@@ -11,9 +11,9 @@ use super::key::PKey;
 use super::x509::{CertStack, Certificate, Pems, Store, pems_of};
 use super::{Bio, stack_items, written};
 
-// SAFETY: libcrypto's own declarations, from `openssl/cms.h` of OpenSSL
-// 3, which `openssl-sys` does not declare; the library `openssl-sys`
-// links defines each.
+// SAFETY: libcrypto's own declarations, from `openssl/cms.h` and
+// `openssl/pkcs12.h` of OpenSSL 3, which `openssl-sys` does not declare;
+// the library `openssl-sys` links defines each.
 unsafe extern "C" {
     fn SMIME_read_CMS_ex(
         bio: *mut sys::BIO,
@@ -48,6 +48,7 @@ unsafe extern "C" {
         data: *mut sys::BIO,
         flags: c_int,
     ) -> c_int;
+    fn d2i_PKCS12_bio(bp: *mut sys::BIO, p12: *mut *mut sys::PKCS12) -> *mut sys::PKCS12;
 }
 
 /// `NID_pkcs7_signed` and `NID_pkcs7_signedAndEnveloped`.
@@ -438,5 +439,82 @@ impl Cms {
             unsafe { sys::OPENSSL_sk_pop_free(crls, Some(free_crl)) };
         }
         (certs, pems)
+    }
+}
+
+owned!(
+    /// A `PKCS12` key store.
+    Pkcs12,
+    sys::PKCS12,
+    sys::PKCS12_free
+);
+
+/// What a key store holds once `PKCS12_parse` has opened it.
+pub(crate) struct Parsed {
+    pub(crate) key: Option<PKey>,
+    pub(crate) cert: Option<Certificate>,
+    pub(crate) extra: Option<CertStack>,
+}
+
+impl Pkcs12 {
+    /// `PKCS12_create(pass, name, key, cert, ca, 0, 0, 0, 0, 0)`.
+    pub(crate) fn create(
+        pass: &CStr,
+        name: Option<&CStr>,
+        key: &PKey,
+        cert: &Certificate,
+        extra: Option<&CertStack>,
+    ) -> Option<Pkcs12> {
+        let name = name.map_or(ptr::null(), CStr::as_ptr);
+        // SAFETY: every argument is live, NUL-terminated or null.
+        let p12 = unsafe {
+            sys::PKCS12_create(
+                pass.as_ptr(),
+                name,
+                key.as_ptr(),
+                cert.as_ptr(),
+                stack_or_null(extra),
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+        };
+        Pkcs12::owned(p12)
+    }
+
+    /// `d2i_PKCS12_bio(in, NULL)`.
+    pub(crate) fn read_der(input: &Bio<'_>) -> Option<Pkcs12> {
+        // SAFETY: the BIO is live.
+        Pkcs12::owned(unsafe { d2i_PKCS12_bio(input.as_ptr(), ptr::null_mut()) })
+    }
+
+    /// `i2d_PKCS12_bio(out, p12)`, nonzero.
+    pub(crate) fn write_der(&self, out: &Bio<'_>) -> bool {
+        // SAFETY: the sink and the store are live.
+        unsafe { sys::i2d_PKCS12_bio(out.as_ptr(), self.as_ptr()) != 0 }
+    }
+
+    /// `PKCS12_parse(p12, pass, &key, &cert, &ca)`, `None` where it failed.
+    pub(crate) fn parse(&self, pass: &CStr) -> Option<Parsed> {
+        let (mut key, mut cert, mut ca) = (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+        // SAFETY: the store is live and the passphrase NUL-terminated; what
+        // the library stores in the three is handed over.
+        let done = unsafe {
+            sys::PKCS12_parse(
+                self.as_ptr(),
+                pass.as_ptr(),
+                &raw mut key,
+                &raw mut cert,
+                &raw mut ca,
+            )
+        };
+        let parsed = Parsed {
+            key: PKey::owned(key),
+            cert: Certificate::owned(cert),
+            extra: CertStack::adopt(ca.cast()),
+        };
+        (done == 1).then_some(parsed)
     }
 }

@@ -214,6 +214,12 @@ impl PKey {
         done != 0
     }
 
+    /// The private key as PEM, as [`PKey::write_private`] writes it.
+    pub(crate) fn private_pem(&self, encryption: Option<(&Cipher, &[u8])>) -> Option<Vec<u8>> {
+        let out = Bio::memory()?;
+        self.write_private(&out, encryption).then(|| out.contents())
+    }
+
     /// `PEM_write_bio_PUBKEY(out, key)` into a memory sink.
     pub(crate) fn public_pem(&self) -> Option<Vec<u8>> {
         // SAFETY: the sink and the key are live.

@@ -8,11 +8,11 @@
 //! area: certificates ([`x509`]), signing requests ([`csr`]), asymmetric
 //! keys ([`key`], [`keydata`]) and the configuration they are made under
 //! ([`config`]), signatures and raw RSA ([`sign`]), ciphers, digests and
-//! envelopes ([`cipher`]), PKCS#7 ([`pkcs7`]), and CMS ([`cms`]), with the
-//! arguments they share decoded once ([`decode`]) and the ring of library
-//! errors `openssl_error_string` reads ([`Errors`]). ext/phar's OpenSSL
-//! signatures call `openssl_sign` and `openssl_verify` through the function
-//! table, as php's do.
+//! envelopes ([`cipher`]), PKCS#7 ([`pkcs7`]), CMS ([`cms`]), and PKCS#12
+//! ([`pkcs12`]), with the arguments they share decoded once ([`decode`])
+//! and the ring of library errors `openssl_error_string` reads
+//! ([`Errors`]). ext/phar's OpenSSL signatures call `openssl_sign` and
+//! `openssl_verify` through the function table, as php's do.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -34,6 +34,7 @@ mod decode;
 mod ffi;
 mod key;
 mod keydata;
+mod pkcs12;
 mod pkcs7;
 mod sign;
 mod x509;
@@ -368,6 +369,9 @@ pub fn extension() -> Extension {
             x509::openssl_x509_checkpurpose::declared(),
             x509::openssl_x509_read::declared(),
             x509::openssl_x509_free::declared(),
+            pkcs12::openssl_pkcs12_export_to_file::declared(),
+            pkcs12::openssl_pkcs12_export::declared(),
+            pkcs12::openssl_pkcs12_read::declared(),
             csr::openssl_csr_export_to_file::declared(),
             csr::openssl_csr_export::declared(),
             csr::openssl_csr_sign::declared(),
