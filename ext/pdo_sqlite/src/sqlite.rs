@@ -152,7 +152,20 @@ pub(super) fn open_basedir(req: &Request) -> bool {
 /// `open_basedir`; `:memory:` and the empty name as given; any other
 /// name expanded against the request's directory (`expand_filepath`)
 /// and held to the `open_basedir` guard, which warns; `None` for no name
-/// at all and for a name refused.
+/// at all and for a name refused. `PDO::__construct` runs the open under
+/// `EH_THROW`, so the guard's warning is a `PDOException` and the
+/// refusal `pdo_sqlite` throws after it has that one as its `previous`.
+///
+/// ```php
+/// ini_set('open_basedir', __DIR__);
+/// try { new PDO('sqlite:/nope.db'); } catch (PDOException $e) { echo $e->getMessage(), "\n", $e->getPrevious()->getMessage(), "\n"; }
+/// try { new PDO('sqlite:file:nope.db'); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// open_basedir prohibits opening /nope.db
+/// PDO::__construct(): open_basedir restriction in effect. File(/nope.db) is not within the allowed path(s): (%s)
+/// open_basedir prohibits opening file:nope.db
+/// ```
 pub(super) fn safe_filename(req: &mut Request, name: Option<&[u8]>) -> Option<Vec<u8>> {
     let name = name?;
     let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());

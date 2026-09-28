@@ -629,7 +629,10 @@ pub fn pending(req: &mut Request) -> Result<(), Thrown> {
 /// shown nowhere, the first one only, and the handling `f` found is
 /// restored after it, which is how SPL's file classes turn a stream's
 /// warning into their `RuntimeException`. A throwable left pending by a
-/// warning is the `Err`, whatever `f` answered.
+/// warning is the `Err`, whatever `f` answered; where `f` threw one of
+/// its own after it, that one is the `Err` with the warning's chained as
+/// its `previous`, as `zend_throw_exception_internal` chains a new
+/// throwable onto `EG(exception)`.
 ///
 /// ```php
 /// try { new SplFileObject(__DIR__ . '/no-such-file'); }
@@ -647,6 +650,23 @@ pub fn throwing_warnings<R>(
     let answered = f(req);
     req.replace_error_handling(previous);
     match (answered, req.take_error_handling_thrown()) {
+        (Err(later), Some(first)) => match (later.exception().copied(), first.exception().copied())
+        {
+            (Some(outer), Some(inner)) => {
+                req.set_previous(outer, inner);
+                Err(later)
+            }
+            // A fatal or an exit thrown after the warning ends it.
+            (None, Some(inner)) => {
+                req.release(inner.as_value());
+                Err(later)
+            }
+            (Some(outer), None) => {
+                req.release(outer.as_value());
+                Err(first)
+            }
+            (None, None) => Err(first),
+        },
         (_, Some(thrown)) => Err(thrown),
         (answered, None) => answered,
     }
