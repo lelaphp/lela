@@ -1784,6 +1784,21 @@ impl crate::Heap {
     ///   string(1) "a"
     /// }
     /// ```
+    ///
+    /// While the sort runs the table's hash index is empty, as php's
+    /// `HT_HASH_RESET` leaves it: an element that reaches the table
+    /// being sorted through a reference finds none of its keys there,
+    /// so `['k' => 1, 'r' => 1]` orders after it, the left side's key
+    /// missing from the right.
+    ///
+    /// ```php
+    /// $a = ['k' => ['k' => 1, 'r' => 1], 'r' => null];
+    /// $a['r'] = &$a;
+    /// asort($a); echo implode(",", array_keys($a)), "\n";
+    /// ```
+    /// ```expect
+    /// r,k
+    /// ```
     pub fn array_sort<H: HeapHooks + ?Sized>(
         hooks: &mut H,
         a: Arr,
@@ -1797,6 +1812,12 @@ impl crate::Heap {
         if a.is_packed() {
             a.packed_to_hash(&mut hooks.heap().tables())?;
         }
+        // `HT_HASH_RESET`: php's sort overwrites each bucket's chain
+        // link with its position, and empties the hash index so that a
+        // comparison reaching this table through a reference finds no
+        // key in it rather than a broken chain (`Z/Zend/zend_hash.c:3021`,
+        // for `bug63882_2.phpt`). The index is rebuilt below.
+        a.hash_reset();
         let mut entries: Vec<SortEntry> = (0..a.num_used())
             .map(|i| a.read_bucket(i))
             .filter(|b| !b.val.is_undef())
