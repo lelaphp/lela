@@ -6375,6 +6375,18 @@ impl Request {
         self.bailout = false;
     }
 
+    /// `zend_fiber_switch_block` and `zend_fiber_switch_unblock` around
+    /// `f`: while it runs, a fiber's `start`, `resume`, `throw` and
+    /// `suspend` refuse with php's `FiberError`, since a switch would
+    /// leave `f` standing on a stack it does not return to. What
+    /// `pcntl_signal_dispatch` serves its handlers under.
+    pub fn with_fiber_switch_blocked<R>(&mut self, f: impl FnOnce(&mut Request) -> R) -> R {
+        self.fibers.block_switch(true);
+        let out = f(self);
+        self.fibers.block_switch(false);
+        out
+    }
+
     /// `zend_is_unwind_exit(EG(exception))` for a native: whether a
     /// [`Thrown`] that carries no throwable is the `exit` a callback
     /// unwinds, which php's C code goes on past with the unwind exit
