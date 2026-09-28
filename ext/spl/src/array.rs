@@ -1411,7 +1411,10 @@ fn sorting_refused(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 /// read that warns.
 fn read(req: &mut Request, object: PhpObject, offset: &Value, warn: bool) -> Result<Value, Thrown> {
     let Some(key) = hash_key(req, offset)? else {
-        return Err(illegal(req, object, offset, "read"));
+        // `zend_illegal_container_offset(.., type)`: `BP_VAR_IS` names
+        // `isset` and `empty`.
+        let how = if warn { "read" } else { "isset" };
+        return Err(illegal(req, object, offset, how));
     };
     let table = table(req, object)?;
     if let Some(value) = table.get(req, &key)? {
@@ -1440,7 +1443,18 @@ fn place(
         sorting_refused(req, object)?;
     }
     let Some(key) = hash_key(req, offset)? else {
-        return Err(illegal(req, object, offset, "write"));
+        if read != DimensionRead::Unset {
+            return Err(illegal(req, object, offset, "write"));
+        }
+        // `BP_VAR_UNSET` names `unset`, and answers
+        // `&EG(uninitialized_zval)`, which the fetch notices as no place.
+        let thrown = illegal(req, object, offset, "unset");
+        let class = String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
+        php_ext::raising::notice(
+            req,
+            &format!("Indirect modification of overloaded element of {class} has no effect"),
+        );
+        return Err(thrown);
     };
     let table = table(req, object)?;
     let found = table.get(req, &key)?;
@@ -1569,7 +1583,9 @@ fn write(
     sorting_refused(req, object)?;
     let value = crate::copied(req, value);
     let table = table(req, object)?;
-    let offset = offset.filter(|o| !matches!(o.deref().as_ref(), ValueRef::Null));
+    // `if (!offset || Z_TYPE_P(offset) == IS_NULL)`: a reference to
+    // `null` is no `null` here, and is the key `""` below.
+    let offset = offset.filter(|o| !matches!(o.as_ref(), ValueRef::Null | ValueRef::Undef));
     let Some(offset) = offset else {
         return table.append(req, value);
     };
@@ -1717,6 +1733,38 @@ impl ObjectHandlers for Handlers {
     /// string(1) "d"
     ///
     /// Notice: Indirect modification of overloaded element of C has no effect in %s on line 11
+    /// ```
+    ///
+    /// An offset no key is made of is `zend_illegal_container_offset`'s
+    /// under the fetch's own type: `??` names `isset` and `empty`, and a
+    /// nested `unset` names `unset` and is noticed as no place; a
+    /// reference to `null` is the key `""`, and only a plain `null`
+    /// appends; a float no long represents warns as an array's does.
+    ///
+    /// ```php
+    /// $c = new ArrayObject();
+    /// try { var_dump($c[[]] ?? 'x'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { unset($c[[]][0]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// $n = null; $r = &$n;
+    /// $c[$r] = 5; $c[null] = 6;
+    /// var_dump($c->getArrayCopy(), $c[1.8446744073709552E+19] ?? 'none');
+    /// ```
+    /// ```expect
+    /// Cannot access offset of type array in isset or empty
+    ///
+    /// Notice: Indirect modification of overloaded element of ArrayObject has no effect in %s on line 4
+    /// Cannot unset offset of type array on ArrayObject
+    ///
+    /// Deprecated: Using null as an array offset is deprecated, use an empty string instead in %s on line 6
+    ///
+    /// Warning: The float 1.8446744073709552E+19 is not representable as an int, cast occurred in %s on line 7
+    /// array(2) {
+    ///   [""]=>
+    ///   int(5)
+    ///   [0]=>
+    ///   int(6)
+    /// }
+    /// int(6)
     /// ```
     fn read_dimension(
         &self,
