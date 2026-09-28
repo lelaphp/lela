@@ -1,0 +1,30 @@
+# ext/uri: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_uri"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The uri extension, php-src/ext/uri"
+# The one crate that links uriparser.
+links = "uriparser"
+
+[lints]
+workspace = true
+
+# The facade, and lexbor. The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+# lexbor's WHATWG URL parser through `ext/lexbor`, as php's uri includes
+# `lexbor/url` (`ZEND_MOD_REQUIRED("lexbor")`, design §4.10).
+php_ext_lexbor = { path = "../lexbor" }
+
+# uriparser is php-src's vendored copy, compiled by `build.rs` (design §7.2,
+# #1163) and bound in `src/ffi/` alone (`unsafe.homes`).
+[build-dependencies]
+cc = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }

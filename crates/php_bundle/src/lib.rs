@@ -76,6 +76,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_phar::extension,
         #[cfg(feature = "bz2")]
         php_ext_bz2::extension,
+        #[cfg(feature = "uri")]
+        php_ext_uri::extension,
     ]
 }
 

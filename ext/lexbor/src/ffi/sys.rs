@@ -71,6 +71,7 @@ pub(crate) const LXB_CSS_SELECTOR_PSEUDO_CLASS_FUNCTION_WHERE: c_uint = 0x0e;
 
 /// `lexbor_str_t`.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct lexbor_str_t {
     pub data: *mut u8,
     pub length: usize,
@@ -386,6 +387,188 @@ pub(crate) struct lxb_css_log_message_t {
 #[repr(C)]
 pub(crate) struct lxb_css_log_t {
     pub messages: lexbor_array_obj_t,
+}
+
+/// `lxb_url_host_type_t`.
+pub(crate) const LXB_URL_HOST_TYPE_DOMAIN: c_uint = 0x01;
+pub(crate) const LXB_URL_HOST_TYPE_OPAQUE: c_uint = 0x02;
+pub(crate) const LXB_URL_HOST_TYPE_IPV4: c_uint = 0x03;
+pub(crate) const LXB_URL_HOST_TYPE_IPV6: c_uint = 0x04;
+pub(crate) const LXB_URL_HOST_TYPE_EMPTY: c_uint = 0x05;
+
+/// `lexbor_serialize_cb_f`.
+pub(crate) type lexbor_serialize_cb_f =
+    unsafe extern "C" fn(data: *const u8, len: usize, ctx: *mut c_void) -> lxb_status_t;
+
+/// `lxb_url_scheme_t`.
+#[repr(C)]
+pub(crate) struct lxb_url_scheme_t {
+    pub(crate) name: lexbor_str_t,
+    pub(crate) type_: c_uint,
+}
+
+/// The union of `lxb_url_host_t`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) union lxb_url_host_u {
+    pub(crate) ipv6: [u16; 8],
+    pub(crate) ipv4: u32,
+    pub(crate) opaque: lexbor_str_t,
+    pub(crate) domain: lexbor_str_t,
+}
+
+/// `lxb_url_host_t`.
+#[repr(C)]
+pub(crate) struct lxb_url_host_t {
+    pub(crate) type_: c_uint,
+    pub(crate) u: lxb_url_host_u,
+}
+
+/// `lxb_url_path_t`.
+#[repr(C)]
+pub(crate) struct lxb_url_path_t {
+    pub(crate) str_: lexbor_str_t,
+    pub(crate) length: usize,
+    pub(crate) opaque: bool,
+}
+
+/// `lxb_url_t`.
+#[repr(C)]
+pub(crate) struct lxb_url_t {
+    pub(crate) scheme: lxb_url_scheme_t,
+    pub(crate) host: lxb_url_host_t,
+    pub(crate) username: lexbor_str_t,
+    pub(crate) password: lexbor_str_t,
+    pub(crate) port: u16,
+    pub(crate) has_port: bool,
+    pub(crate) path: lxb_url_path_t,
+    pub(crate) query: lexbor_str_t,
+    pub(crate) fragment: lexbor_str_t,
+    pub(crate) mraw: *mut c_void,
+}
+
+/// `lexbor_plog_entry_t`.
+#[repr(C)]
+pub(crate) struct lexbor_plog_entry_t {
+    pub(crate) data: *const u8,
+    pub(crate) context: *mut c_void,
+    pub(crate) id: c_uint,
+}
+
+/// `lxb_url_parser_t`: `log` is a `lexbor_plog_t`, whose one field is the
+/// `lexbor_array_obj_t` of its entries.
+#[repr(C)]
+pub(crate) struct lxb_url_parser_t {
+    pub(crate) url: *mut lxb_url_t,
+    pub(crate) mraw: *mut c_void,
+    pub(crate) log: *mut lexbor_array_obj_t,
+    pub(crate) idna: *mut c_void,
+    pub(crate) buffer: *mut u8,
+}
+
+unsafe extern "C" {
+    // core/mraw.h
+    pub(crate) fn lexbor_mraw_create() -> *mut c_void;
+    pub(crate) fn lexbor_mraw_init(mraw: *mut c_void, chunk_size: usize) -> lxb_status_t;
+    pub(crate) fn lexbor_mraw_destroy(mraw: *mut c_void, destroy_self: bool) -> *mut c_void;
+
+    // unicode/idna.h
+    pub(crate) fn lxb_unicode_idna_create() -> *mut c_void;
+    pub(crate) fn lxb_unicode_idna_init(idna: *mut c_void) -> lxb_status_t;
+    pub(crate) fn lxb_unicode_idna_destroy(idna: *mut c_void, self_destroy: bool) -> *mut c_void;
+
+    // url/url.h
+    pub(crate) fn lxb_url_parser_create() -> *mut lxb_url_parser_t;
+    pub(crate) fn lxb_url_parser_init(
+        parser: *mut lxb_url_parser_t,
+        mraw: *mut c_void,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_parser_destroy(
+        parser: *mut lxb_url_parser_t,
+        destroy_self: bool,
+    ) -> *mut lxb_url_parser_t;
+    pub(crate) fn lxb_url_parse(
+        parser: *mut lxb_url_parser_t,
+        base_url: *const lxb_url_t,
+        data: *const u8,
+        length: usize,
+    ) -> *mut lxb_url_t;
+    pub(crate) fn lxb_url_clone(mraw: *mut c_void, url: *const lxb_url_t) -> *mut lxb_url_t;
+    pub(crate) fn lxb_url_api_protocol_set(
+        url: *mut lxb_url_t,
+        parser: *mut lxb_url_parser_t,
+        protocol: *const u8,
+        length: usize,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_api_username_set(
+        url: *mut lxb_url_t,
+        username: *const u8,
+        length: usize,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_api_password_set(
+        url: *mut lxb_url_t,
+        password: *const u8,
+        length: usize,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_api_hostname_set(
+        url: *mut lxb_url_t,
+        parser: *mut lxb_url_parser_t,
+        hostname: *const u8,
+        length: usize,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_api_port_set(
+        url: *mut lxb_url_t,
+        parser: *mut lxb_url_parser_t,
+        port: *const u8,
+        length: usize,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_api_pathname_set(
+        url: *mut lxb_url_t,
+        parser: *mut lxb_url_parser_t,
+        pathname: *const u8,
+        length: usize,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_api_search_set(
+        url: *mut lxb_url_t,
+        parser: *mut lxb_url_parser_t,
+        search: *const u8,
+        length: usize,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_api_hash_set(
+        url: *mut lxb_url_t,
+        parser: *mut lxb_url_parser_t,
+        hash: *const u8,
+        length: usize,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_serialize(
+        url: *const lxb_url_t,
+        cb: lexbor_serialize_cb_f,
+        ctx: *mut c_void,
+        exclude_fragment: bool,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_serialize_idna(
+        idna: *mut c_void,
+        url: *const lxb_url_t,
+        cb: lexbor_serialize_cb_f,
+        ctx: *mut c_void,
+        exclude_fragment: bool,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_serialize_host_unicode(
+        idna: *mut c_void,
+        host: *const lxb_url_host_t,
+        cb: lexbor_serialize_cb_f,
+        ctx: *mut c_void,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_serialize_host_ipv4(
+        ipv4: u32,
+        cb: lexbor_serialize_cb_f,
+        ctx: *mut c_void,
+    ) -> lxb_status_t;
+    pub(crate) fn lxb_url_serialize_host_ipv6(
+        ipv6: *const u16,
+        cb: lexbor_serialize_cb_f,
+        ctx: *mut c_void,
+    ) -> lxb_status_t;
 }
 
 unsafe extern "C" {

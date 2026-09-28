@@ -591,7 +591,7 @@ impl<'doc> Attr<'doc> {
 }
 
 /// The entries of a `lexbor_array_obj_t` of `T` from `from` on.
-fn entries<'a, T: 'a>(
+pub(super) fn entries<'a, T: 'a>(
     array: *const sys::lexbor_array_obj_t,
     from: usize,
 ) -> impl Iterator<Item = &'a T> {

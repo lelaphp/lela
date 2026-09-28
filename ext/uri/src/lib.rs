@@ -1,0 +1,677 @@
+//! The `uri` extension: `php-src/ext/uri` as one crate under `ext/`
+//! (ADR-0004), 8.5's `Uri\Rfc3986\Uri` over uriparser and
+//! `Uri\WhatWg\Url` over lexbor. Two dependencies: the facade, and
+//! `ext/lexbor`, whose URL parser php's `uri_parser_whatwg.c` includes
+//! (design §4.10); one entry, `extension()`; no state (ADR-0005). The
+//! phpt subset is `php-src/ext/uri/tests`, through `xtask phpt --subset`.
+//!
+//! This file is `php_uri.c` and `php_uri_common.c`: the classes the two
+//! standards share, and the class machinery written once over
+//! [`UriParser`], php's `php_uri_parser`, which [`rfc3986`] and
+//! [`whatwg`] each implement. uriparser is vendored and bound in [`ffi`],
+//! the crate's one `unsafe` home.
+#![deny(unsafe_code)]
+// seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
+// The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
+
+mod ffi;
+mod rfc3986;
+mod whatwg;
+
+use std::marker::PhantomData;
+
+use php_ext::abi::{
+    CloneObj, Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Ref, Static,
+    Untyped,
+};
+use php_ext::attr::php_class;
+use php_ext::call::{clone_with, lookup_class, new_object};
+use php_ext::raising::{Thrown, fatal, throw, throw_chained};
+use php_ext::request::Request;
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
+
+/// `php_uri_component_read_mode`: how a component is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadMode {
+    Raw,
+    NormalizedAscii,
+    NormalizedUnicode,
+}
+
+/// `php_uri_recomposition_mode`: how a URI is written back as a string;
+/// php's fourth, normalized Unicode, no method asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Recomposition {
+    RawAscii,
+    RawUnicode,
+    NormalizedAscii,
+}
+
+/// What a parse left: the URI, `None` where the text is not one, and the
+/// errors array where the caller asked for one (`zval *errors`).
+pub(crate) struct Parsed<P> {
+    pub(crate) uri: Option<P>,
+    pub(crate) errors: Option<PhpArray>,
+}
+
+/// A component the parser could not read: a `read` handler's
+/// `FAILURE`, which `php_uri_property_read_helper` throws as a
+/// `Uri\UriError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Unreadable;
+
+/// What one component read answers.
+pub(crate) type Read<T> = Result<T, Unreadable>;
+
+/// `php_uri_parser`: one URI standard, the parse, the copy, the
+/// recomposition and the read and write of each component, which the
+/// class machinery below calls and never looks past.
+pub(crate) trait UriParser: Sized + Send + 'static {
+    /// `php_uri_parser.name`: the class the standard is served as.
+    const CLASS: &'static str;
+
+    /// `parse`: `text` resolved against `base` where there is one. With
+    /// `silent` unset a failure is the throw the `Err` carries; with it
+    /// set a failure is `uri: None`. The errors array is made when
+    /// `want_errors`.
+    fn parse(
+        req: &mut Request,
+        text: &[u8],
+        base: Option<&Self>,
+        want_errors: bool,
+        silent: bool,
+    ) -> Result<Parsed<Self>, Thrown>;
+
+    /// `clone`: a deep copy, `None` where the library could not allocate.
+    fn duplicate(&self) -> Option<Self>;
+
+    /// `to_string`, `None` where the URI cannot be recomposed.
+    fn recompose(&mut self, mode: Recomposition, exclude_fragment: bool) -> Option<Vec<u8>>;
+
+    fn scheme(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
+    fn username(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
+    fn password(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
+    fn host(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
+    fn port(&mut self, mode: ReadMode) -> Read<Option<i64>>;
+    fn path(&mut self, mode: ReadMode) -> Read<Vec<u8>>;
+    fn query(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
+    fn fragment(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
+
+    fn set_scheme(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown>;
+    fn set_host(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown>;
+    fn set_port(&mut self, req: &mut Request, value: Option<i64>) -> Result<(), Thrown>;
+    fn set_path(&mut self, req: &mut Request, value: &[u8]) -> Result<(), Thrown>;
+    fn set_query(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown>;
+    fn set_fragment(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown>;
+}
+
+/// `php_uri_object`'s `uri`: `None` until a constructor, `parse()`,
+/// `resolve()` or `__unserialize()` has set it.
+pub(crate) struct Slot<P>(Option<P>);
+
+impl<P> Default for Slot<P> {
+    fn default() -> Self {
+        Slot(None)
+    }
+}
+
+/// The class's handler table: `php_uri_object_handler_clone`, the URI
+/// copied into the clone; `free_obj` is the payload's `Drop`.
+pub(crate) struct Handlers<P>(PhantomData<fn() -> P>);
+
+impl<P: UriParser> ObjectHandlers for Handlers<P> {
+    fn clone_obj(&self) -> Option<CloneObj> {
+        Some(clone_uri::<P>)
+    }
+}
+
+fn clone_uri<P: UriParser>(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+    let copy = with_uri::<P, _>(req, object, |_, uri| Ok(uri.duplicate()))?;
+    let Some(copy) = copy else {
+        return Err(fatal(req, "InternalError: a URI could not be copied"));
+    };
+    clone_with(req, &object, Slot(Some(copy)))
+}
+
+/// `f` over the object's URI, taken out of its slot while `f` runs and
+/// put back after; a URI never set is php's failed `ZEND_ASSERT`, the one
+/// `InternalError`.
+fn with_uri<P: UriParser, R>(
+    req: &mut Request,
+    object: PhpObject,
+    f: impl FnOnce(&mut Request, &mut P) -> Result<R, Thrown>,
+) -> Result<R, Thrown> {
+    let Some(mut uri) = object
+        .native_mut::<Slot<P>>(req)
+        .and_then(|slot| slot.0.take())
+    else {
+        return Err(fatal(
+            req,
+            &format!(
+                "InternalError: a {} served before its URI was set",
+                P::CLASS
+            ),
+        ));
+    };
+    let result = f(req, &mut uri);
+    if let Some(slot) = object.native_mut::<Slot<P>>(req) {
+        slot.0 = Some(uri);
+    }
+    result
+}
+
+/// Whether the object's URI is set.
+fn is_set<P: UriParser>(req: &Request, object: PhpObject) -> bool {
+    object
+        .native::<Slot<P>>(req)
+        .is_some_and(|slot| slot.0.is_some())
+}
+
+/// Where `php_uri_instantiate_uri` puts the URI it parses.
+#[derive(Clone, Copy)]
+enum Target {
+    /// The constructor's receiver, `should_update_this_object`.
+    This(PhpObject),
+    /// A fresh object of the class, returned.
+    New(ClassId),
+}
+
+/// `php_uri_instantiate_uri`: `text` parsed, against the base object's
+/// URI where there is one, into the receiver or a fresh object; a
+/// failure is the parser's throw with `should_throw`, and `None` without.
+/// The errors array goes to `errors` where the call gave the reference.
+fn instantiate<P: UriParser>(
+    req: &mut Request,
+    target: Target,
+    text: &[u8],
+    base: Option<PhpObject>,
+    should_throw: bool,
+    errors: Option<&Ref<Untyped<Value>>>,
+) -> Result<Option<PhpObject>, Thrown> {
+    let (object, fresh) = match target {
+        Target::This(object) => {
+            if is_set::<P>(req, object) {
+                return Err(readonly(req, P::CLASS));
+            }
+            (object, false)
+        }
+        Target::New(class) => (new_object(req, class)?, true),
+    };
+    let want_errors = errors.is_some_and(Ref::is_given);
+    let parsed = match base {
+        Some(base) => with_uri::<P, _>(req, base, |req, base| {
+            P::parse(req, text, Some(base), want_errors, !should_throw)
+        }),
+        None => P::parse(req, text, None, want_errors, !should_throw),
+    };
+    let parsed = parsed.and_then(|parsed| {
+        match (parsed.errors, errors) {
+            (Some(array), Some(errors)) => errors.set(req, Untyped(Value::array(array)))?,
+            (Some(array), None) => req.release(Value::array(array)),
+            (None, _) => {}
+        }
+        Ok(parsed.uri)
+    });
+    match parsed {
+        Ok(Some(uri)) => {
+            if let Some(slot) = object.native_mut::<Slot<P>>(req) {
+                slot.0 = Some(uri);
+            }
+            Ok(Some(object))
+        }
+        failed => {
+            if fresh {
+                req.release(object.as_value());
+            }
+            failed.map(|_| None)
+        }
+    }
+}
+
+/// "Cannot modify readonly object of class ..."
+fn readonly(req: &mut Request, class: &str) -> Thrown {
+    throw(
+        req,
+        "Error",
+        &format!("Cannot modify readonly object of class {class}"),
+    )
+}
+
+/// The static `parse()` of either class, `create_*_uri` with
+/// `is_constructor` unset: a fresh object of the called class, or `null`.
+fn parse_static<P: UriParser>(
+    req: &mut Request,
+    text: PhpString,
+    base: Option<PhpObject>,
+    errors: Option<&Ref<Untyped<Value>>>,
+) -> Result<Option<Static>, Thrown> {
+    let class = match req.called_scope() {
+        Some(class) => class,
+        None => match lookup_class(req, P::CLASS.as_bytes())? {
+            Some(class) => class,
+            None => return Err(fatal(req, "InternalError: a URI class is not linked")),
+        },
+    };
+    let text = text.as_bytes().to_vec();
+    let made = instantiate::<P>(req, Target::New(class), &text, base, false, errors)?;
+    Ok(made.map(Static))
+}
+
+/// The constructor of either class, `create_*_uri` with
+/// `is_constructor` set: the receiver's URI, once.
+fn construct<P: UriParser>(
+    req: &mut Request,
+    this: PhpObject,
+    text: PhpString,
+    base: Option<PhpObject>,
+    errors: Option<&Ref<Untyped<Value>>>,
+) -> Result<(), Thrown> {
+    let text = text.as_bytes().to_vec();
+    instantiate::<P>(req, Target::This(this), &text, base, true, errors).map(|_| ())
+}
+
+/// `resolve()`: `text` against the receiver, into a fresh object of its
+/// class.
+fn resolve<P: UriParser>(
+    req: &mut Request,
+    this: PhpObject,
+    text: PhpString,
+    errors: Option<&Ref<Untyped<Value>>>,
+) -> Result<Static, Thrown> {
+    let text = text.as_bytes().to_vec();
+    let made = instantiate::<P>(
+        req,
+        Target::New(this.class()),
+        &text,
+        Some(this),
+        true,
+        errors,
+    )?;
+    match made {
+        Some(object) => Ok(Static(object)),
+        None => Err(fatal(
+            req,
+            "InternalError: a resolution that throws returned nothing",
+        )),
+    }
+}
+
+/// Whatever `f` makes of the receiver's URI.
+fn read<P: UriParser, T>(
+    req: &mut Request,
+    this: PhpObject,
+    f: impl FnOnce(&mut P) -> T,
+) -> Result<T, Thrown> {
+    with_uri::<P, _>(req, this, |_, uri| Ok(f(uri)))
+}
+
+/// One component read, `php_uri_property_read_helper`: a component the
+/// parser cannot read is the `UriError` naming it.
+fn component<P: UriParser, T>(
+    req: &mut Request,
+    this: PhpObject,
+    name: &str,
+    f: impl FnOnce(&mut P) -> Read<T>,
+) -> Result<T, Thrown> {
+    match read::<P, _>(req, this, f)? {
+        Ok(value) => Ok(value),
+        Err(Unreadable) => Err(throw(
+            req,
+            "Uri\\UriError",
+            &format!("The {name} component cannot be retrieved"),
+        )),
+    }
+}
+
+/// A string component read.
+fn component_string<P: UriParser>(
+    req: &mut Request,
+    this: PhpObject,
+    name: &str,
+    f: impl FnOnce(&mut P) -> Read<Option<Vec<u8>>>,
+) -> Result<Option<PhpString>, Thrown> {
+    let bytes = component::<P, _>(req, this, name, f)?;
+    bytes.map(|bytes| PhpString::new(req, &bytes)).transpose()
+}
+
+/// `php_uri_property_write_helper`: the receiver cloned through its
+/// handler, `f` applied to the clone's URI, and the clone returned; a refused
+/// write is the throw `f` made, the clone released.
+fn write<P: UriParser>(
+    req: &mut Request,
+    this: PhpObject,
+    f: impl FnOnce(&mut Request, &mut P) -> Result<(), Thrown>,
+) -> Result<Static, Thrown> {
+    let copy = clone_uri::<P>(req, this)?;
+    match with_uri::<P, _>(req, copy, f) {
+        Ok(()) => Ok(Static(copy)),
+        Err(thrown) => {
+            req.release(copy.as_value());
+            Err(thrown)
+        }
+    }
+}
+
+/// A write of a string or `null`.
+fn write_bytes<P: UriParser>(
+    req: &mut Request,
+    this: PhpObject,
+    value: Option<PhpString>,
+    f: impl FnOnce(&mut P, &mut Request, Option<&[u8]>) -> Result<(), Thrown>,
+) -> Result<Static, Thrown> {
+    let value = value.map(|value| value.as_bytes().to_vec());
+    write::<P>(req, this, |req, uri| f(uri, req, value.as_deref()))
+}
+
+/// `throw_cannot_recompose_uri_to_string`.
+fn cannot_recompose(req: &mut Request, class: &str) -> Thrown {
+    throw(
+        req,
+        "Uri\\UriError",
+        &format!("Cannot recompose {class} to a string"),
+    )
+}
+
+/// `to_string` of the receiver in `mode`, php's `UriError` where it
+/// cannot be.
+fn recompose<P: UriParser>(
+    req: &mut Request,
+    this: PhpObject,
+    mode: Recomposition,
+) -> Result<PhpString, Thrown> {
+    let bytes = read::<P, _>(req, this, |uri| uri.recompose(mode, false))?;
+    match bytes {
+        Some(bytes) => PhpString::new(req, &bytes),
+        None => Err(cannot_recompose(req, P::CLASS)),
+    }
+}
+
+/// `uri_equals`: the two recomposed as normalized ASCII, the fragment
+/// left out unless `IncludeFragment` is asked for.
+fn equals<P: UriParser>(
+    req: &mut Request,
+    this: PhpObject,
+    that: PhpObject,
+    mode: UriComparisonMode,
+) -> Result<bool, Thrown> {
+    let exclude_fragment = mode == UriComparisonMode::ExcludeFragment;
+    let side = |req: &mut Request, object| {
+        let bytes = read::<P, _>(req, object, |uri| {
+            uri.recompose(Recomposition::NormalizedAscii, exclude_fragment)
+        })?;
+        bytes.ok_or_else(|| cannot_recompose(req, P::CLASS))
+    };
+    let mine = side(req, this)?;
+    let theirs = side(req, that)?;
+    Ok(mine == theirs)
+}
+
+/// `PHP_URI_SERIALIZE_URI_FIELD_NAME`.
+const URI_FIELD: &[u8] = b"uri";
+
+/// `__serialize()`: `[["uri" => raw ASCII string], []]`.
+fn serialize<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
+    let uri = recompose::<P>(req, this, Recomposition::RawAscii)?;
+    let mut state = PhpArray::new(req)?;
+    let key = PhpString::new(req, URI_FIELD)?;
+    state.set(req, Key::Str(key), Value::string(uri))?;
+    let mut out = PhpArray::new(req)?;
+    out.append(req, Value::array(state))?;
+    let properties = PhpArray::new(req)?;
+    out.append(req, Value::array(properties))?;
+    Ok(out)
+}
+
+/// `uri_unserialize`: the state `__serialize()` wrote, parsed silently
+/// into an object not yet set; any other shape is php's `Exception`.
+fn unserialize<P: UriParser>(
+    req: &mut Request,
+    this: PhpObject,
+    data: PhpArray,
+) -> Result<(), Thrown> {
+    let invalid = format!("Invalid serialization data for {} object", P::CLASS);
+    if is_set::<P>(req, this) {
+        let first = readonly(req, P::CLASS);
+        return Err(throw_chained(req, first, "Exception", &invalid));
+    }
+    let key = PhpString::new(req, URI_FIELD)?;
+    let Some(text) = serialized_uri(data, key) else {
+        return Err(throw(req, "Exception", &invalid));
+    };
+    let parsed = P::parse(req, &text, None, false, true)?;
+    let Some(uri) = parsed.uri else {
+        return Err(throw(req, "Exception", &invalid));
+    };
+    if let Some(slot) = this.native_mut::<Slot<P>>(req) {
+        slot.0 = Some(uri);
+    }
+    let no_properties = data
+        .get(&Key::Int(1))
+        .and_then(|value| value.as_array().map(PhpArray::is_empty))
+        .unwrap_or(false);
+    if no_properties {
+        Ok(())
+    } else {
+        Err(throw(req, "Exception", &invalid))
+    }
+}
+
+/// The `uri` string of `[["uri" => ...], [...]]`, checked as
+/// `uri_unserialize` checks it before the parse: two elements, the first
+/// an array of the one string.
+fn serialized_uri(data: PhpArray, key: PhpString) -> Option<Vec<u8>> {
+    if data.len() != 2 {
+        return None;
+    }
+    let state = data.get(&Key::Int(0))?;
+    let state = state.as_array()?;
+    if state.len() != 1 {
+        return None;
+    }
+    let uri = state.get(&Key::Str(key))?;
+    uri.as_str_bytes().map(<[u8]>::to_vec)
+}
+
+/// `uri_get_debug_properties`: the declared properties, none, and each
+/// component read raw, in php's order; the properties alone where the URI
+/// was never set.
+fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
+    let mut out = PhpArray::new(req)?;
+    for (name, value) in this.props(req)? {
+        req.addref(&value);
+        out.set(req, Key::Str(name), value)?;
+    }
+    if !is_set::<P>(req, this) {
+        return Ok(out);
+    }
+    let raw = ReadMode::Raw;
+    let (scheme, username, password, host, port, path, query, fragment) =
+        read::<P, _>(req, this, |u| {
+            (
+                u.scheme(raw),
+                u.username(raw),
+                u.password(raw),
+                u.host(raw),
+                u.port(raw),
+                u.path(raw),
+                u.query(raw),
+                u.fragment(raw),
+            )
+        })?;
+    // A component the parser cannot read is left out, as php's
+    // `== SUCCESS` checks leave it.
+    let strings = [
+        (b"scheme".as_slice(), scheme),
+        (b"username", username),
+        (b"password", password),
+        (b"host", host),
+    ];
+    for (name, value) in strings {
+        if let Ok(value) = value {
+            put_string(req, &mut out, name, value)?;
+        }
+    }
+    if let Ok(port) = port {
+        put(
+            req,
+            &mut out,
+            b"port",
+            port.map_or_else(Value::null, Value::int),
+        )?;
+    }
+    if let Ok(path) = path {
+        put_string(req, &mut out, b"path", Some(path))?;
+    }
+    for (name, value) in [(b"query".as_slice(), query), (b"fragment", fragment)] {
+        if let Ok(value) = value {
+            put_string(req, &mut out, name, value)?;
+        }
+    }
+    Ok(out)
+}
+
+fn put_string(
+    req: &mut Request,
+    array: &mut PhpArray,
+    name: &[u8],
+    value: Option<Vec<u8>>,
+) -> Result<(), Thrown> {
+    let value = match value {
+        Some(bytes) => Value::string(PhpString::new(req, &bytes)?),
+        None => Value::null(),
+    };
+    put(req, array, name, value)
+}
+
+fn put(req: &mut Request, array: &mut PhpArray, name: &[u8], value: Value) -> Result<(), Thrown> {
+    let key = PhpString::new(req, name)?;
+    array.set(req, Key::Str(key), value)
+}
+
+/// Core's `Exception`, `Uri\UriException`'s parent.
+#[php_class(extern)]
+pub(crate) struct Exception;
+
+/// Core's `Error`, `Uri\UriError`'s parent.
+#[php_class(extern)]
+pub(crate) struct Error;
+
+/// `class Uri\UriException extends \Exception`, `@strict-properties`.
+///
+/// ```php
+/// var_dump(get_parent_class('Uri\UriException'), get_parent_class('Uri\InvalidUriException'), get_parent_class('Uri\UriError'));
+/// ```
+/// ```expect
+/// string(9) "Exception"
+/// string(16) "Uri\UriException"
+/// string(5) "Error"
+/// ```
+#[php_class(namespace(Uri), extends(Exception), dynamic_properties = forbidden)]
+pub(crate) struct UriException;
+
+#[php_class]
+impl UriException {}
+
+/// `class Uri\UriError extends \Error`, `@strict-properties`.
+#[php_class(namespace(Uri), extends(Error), dynamic_properties = forbidden)]
+pub(crate) struct UriError;
+
+#[php_class]
+impl UriError {}
+
+/// `class Uri\InvalidUriException extends Uri\UriException`,
+/// `@strict-properties`.
+#[php_class(
+    namespace(Uri),
+    extends(UriException),
+    dynamic_properties = forbidden
+)]
+pub(crate) struct InvalidUriException;
+
+#[php_class]
+impl InvalidUriException {}
+
+/// `enum Uri\UriComparisonMode`: whether `equals()` compares the
+/// fragment.
+///
+/// ```php
+/// var_dump(Uri\UriComparisonMode::cases());
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   enum(Uri\UriComparisonMode::IncludeFragment)
+///   [1]=>
+///   enum(Uri\UriComparisonMode::ExcludeFragment)
+/// }
+/// ```
+#[php_class(namespace(Uri))]
+pub(crate) enum UriComparisonMode {
+    IncludeFragment,
+    ExcludeFragment,
+}
+
+#[php_class]
+impl UriComparisonMode {}
+
+/// The extension value (design §7.1): `uri_module_entry`, which requires
+/// `lexbor`, with its classes in `PHP_MINIT_FUNCTION(uri)`'s order.
+///
+/// ```php
+/// var_dump(extension_loaded('uri'), (new ReflectionExtension('uri'))->getDependencies());
+/// ```
+/// ```expect
+/// bool(true)
+/// array(1) {
+///   ["lexbor"]=>
+///   string(8) "Required"
+/// }
+/// ```
+pub fn extension() -> Extension {
+    ExtensionBuilder::default()
+        .dependencies(vec![Dependency {
+            name: String::from("lexbor"),
+            kind: DependencyKind::Required,
+            rel: None,
+            version: None,
+        }])
+        .class::<rfc3986::Uri>()
+        .class::<whatwg::Url>()
+        .class::<UriComparisonMode>()
+        .class::<UriException>()
+        .class::<UriError>()
+        .class::<InvalidUriException>()
+        .class::<whatwg::InvalidUrlException>()
+        .class::<whatwg::UrlValidationError>()
+        .class::<whatwg::UrlValidationErrorType>()
+        .info(uri_info)
+        .build("uri")
+}
+
+/// `PHP_MINFO_FUNCTION(uri)`: the bundled uriparser's `URI_VER_ANSI`.
+///
+/// ```php
+/// (new ReflectionExtension('uri'))->info();
+/// ```
+/// ```expect
+///
+/// uri
+///
+/// URI support => active
+/// uriparser bundled version => 1.0.2
+/// ```
+fn uri_info(req: &mut Request) {
+    req.info_table(&[
+        &["URI support", "active"],
+        &["uriparser bundled version", "1.0.2"],
+    ]);
+}
