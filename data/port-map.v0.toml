@@ -2213,8 +2213,8 @@ api = "coerce::truthy"
 mahout = "semantics::PathIntent"
 sites = 33
 crates = 3
-status = "same"
-api = "request::PathIntent"
+status = "gone"
+rule = "php's guard takes one bit, whether it warns; Request::check_open_basedir(path, warn) is it (design revision 42)"
 
 [[item]]
 mahout = "semantics::deref_value"
@@ -2228,7 +2228,7 @@ mahout = "semantics::check_fs_access"
 sites = 27
 crates = 3
 status = "renamed"
-api = "request::Request::fs_guard"
+api = "request::Request::check_open_basedir"
 
 [[item]]
 mahout = "semantics::ArrayOrString"
@@ -2417,7 +2417,7 @@ mahout = "semantics::check_fs_access_display"
 sites = 5
 crates = 1
 status = "renamed"
-api = "request::Request::fs_guard"
+api = "request::Request::check_open_basedir"
 
 [[item]]
 mahout = "semantics::class_lookup"
@@ -2963,7 +2963,7 @@ mahout = "semantics::fs_path_allowed"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::fs_guard"
+api = "request::Request::check_open_basedir"
 
 [[item]]
 mahout = "semantics::function_to_string"
