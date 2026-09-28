@@ -454,6 +454,32 @@ fn rows(req: &mut Request, value: &Value) -> Result<Vec<(Key, Value)>, Thrown> {
 
 /// `php_json_encode_array`: the brackets, the rows between them, the
 /// recursion guard around the walk and the depth read after it.
+///
+/// Before any of it, `php_json_check_stack_limit`: a nesting that has
+/// come down to the thread's stack limit is `JSON_ERROR_DEPTH`, `null`
+/// in its place under `JSON_PARTIAL_OUTPUT_ON_ERROR`, whatever depth
+/// the caller allowed. Under the small-stack regime a chain of
+/// objects and a nest of arrays both reach the ini's 256K in both
+/// engines.
+///
+/// ```php
+/// class Node { public $next; }
+/// $first = $node = new Node;
+/// for ($i = 0; $i < 25000; $i++) { $node->next = new Node; $node = $node->next; }
+/// var_dump(json_encode($first, 0, 500000), json_last_error(), json_last_error_msg());
+/// while ($next = $first->next) { $first->next = $next->next; }
+/// $a = []; for ($i = 0; $i < 25000; $i++) { $a = [$a]; }
+/// $partial = json_encode($a, JSON_PARTIAL_OUTPUT_ON_ERROR, 500000);
+/// var_dump(json_encode($a, 0, 500000), json_last_error_msg(), str_contains($partial, '[null]'));
+/// ```
+/// ```expect regime=small-stack
+/// bool(false)
+/// int(1)
+/// string(28) "Maximum stack depth exceeded"
+/// bool(false)
+/// string(28) "Maximum stack depth exceeded"
+/// bool(true)
+/// ```
 fn encode_array(
     req: &mut Request,
     buf: &mut Vec<u8>,
@@ -461,6 +487,13 @@ fn encode_array(
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
+    if req.stack_overflowed() {
+        enc.error_code = JSON_ERROR_DEPTH;
+        if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
+            buf.extend_from_slice(b"null");
+        }
+        return Ok(false);
+    }
     let array = value.as_array().copied();
     let object = value.as_object().copied();
     let mut as_object = options & JSON_FORCE_OBJECT != 0;
