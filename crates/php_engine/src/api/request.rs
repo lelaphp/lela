@@ -1315,6 +1315,14 @@ impl AsRef<AtomicBool> for State {
 /// extension holds no atomic (ADR-0005).
 pub use crate::signal::{Receiving, SIGNAL_POST, Siginfo, take_signals};
 
+/// Why [`Request::resolve_path`] found no file: the last attempt's
+/// reason, or the throwable a wrapper's `url_stat` raised.
+#[derive(Debug)]
+pub(crate) enum Unresolved {
+    Missing(std::io::Error),
+    Threw(Thrown),
+}
+
 /// The fatal the request is ending in, when it is one: `E_ERROR` and
 /// its kin, or a source that did not compile. An `exit` is not one:
 /// php unwinds it as a throwable ([`Request::throw_unwind_exit`]) and
@@ -1728,17 +1736,10 @@ pub struct Request {
     /// execution state of the stack that resumed it, and where each
     /// suspends to (design §5.11, `crate::fiber`).
     fibers: crate::fiber::Fibers,
-    /// php's `EG(exception)`: the throwable a handler left pending, which
-    /// the loop reads at the `Threw` edge.
-    pending: Option<PhpObject>,
-    /// php's `zend_is_unwind_exit(EG(exception))`: the unwind exit an
-    /// `exit` threw is standing where a throwable would, and nothing is
-    /// in `pending` while it does. What `exit` leaves for the unwinder,
-    /// which skips every `finally` block for it and gives up every
-    /// throwable it meets, and for a native whose callback exited; the
-    /// outermost serving's end releases it, as `zend_exception_error`
-    /// does.
-    unwind_exit: bool,
+    /// php's `EG(exception)`: what a handler left pending, a throwable or
+    /// one of php's two exits ([`Raised`]), which the loop reads at the
+    /// `Threw` edge.
+    raised: Option<Raised>,
     /// php's `zend_bailout` under way: a fatal was rendered where it was
     /// raised and the request is leaving for the `zend_try` that catches
     /// it, the outermost serving's end or the step of
@@ -1756,12 +1757,12 @@ pub struct Request {
     /// `php_execute_script` and `php_request_shutdown`, what `php_verror`
     /// names a diagnostic's origin by when no function is active.
     phase: Phase,
-    /// `zend_objects_store_mark_destructed`: every object behind the
-    /// request, set where `shutdown_destructors` catches the
-    /// `zend_bailout` a destructor's raise ends the walk with
-    /// (`Z/Zend/zend_execute_API.c:258-266`). No destructor is served
-    /// once it stands.
-    marked_destructed: bool,
+    /// Where `shutdown_destructors` caught the `zend_bailout` a
+    /// destructor's raise ends the walk with
+    /// (`Z/Zend/zend_execute_API.c:258-266`): the walk over the symbol
+    /// table stops, and the objects then standing are marked destructed
+    /// in the heap, `zend_objects_store_mark_destructed`.
+    shutdown_walk_ended: bool,
     /// What the entry frame of the innermost serving returned.
     returned: Value,
     /// The interrupt, shared with whatever thread sets it (design §5.8).
@@ -1898,35 +1899,56 @@ fn links_of<'a>(
     vm: &'a Vm,
     frames: std::ops::Range<usize>,
     calls: std::ops::Range<usize>,
+    expand: &dyn Fn(PhpObject) -> Vec<Link<'a>>,
 ) -> Vec<Link<'a>> {
+    /// The calls being served below `below`, from where the walk stands.
+    fn take_below<'a>(
+        served: &'a [exec::CallState],
+        taken: &mut usize,
+        below: usize,
+        links: &mut Vec<Link<'a>>,
+    ) {
+        while *taken < below {
+            if let Some(call) = served.get(*taken)
+                && call.stage == exec::CallStage::Serving
+            {
+                links.push(Link::Call(call));
+            }
+            *taken += 1;
+        }
+    }
     let states = vm.frames();
     let served = vm.calls();
     let end = calls.end.min(served.len());
     let mut links: Vec<Link> = Vec::new();
     let mut taken = calls.start;
-    let mut take_below = |below: usize, links: &mut Vec<Link<'a>>| {
-        while taken < below {
-            if let Some(call) = served.get(taken)
-                && call.stage == exec::CallStage::Serving
-            {
-                links.push(Link::Call(call));
-            }
-            taken += 1;
+    // A placeholder standing at `at`, where a generator's frame stood,
+    // and the generators it expands into, outermost first here since
+    // the walk goes up the stack and is reversed at the end.
+    let placed = |at: usize, taken: &mut usize, links: &mut Vec<Link<'a>>| {
+        for mark in vm.placeholders().iter().filter(|mark| mark.frame == at) {
+            take_below(served, taken, mark.calls.min(end), links);
+            links.extend(expand(mark.generator).into_iter().rev());
         }
     };
-    for at in frames {
+    for at in frames.clone() {
+        placed(at, &mut taken, &mut links);
         let Some(state) = states.get(at) else {
             break;
         };
         let below = usize::try_from(state.calls_below)
             .unwrap_or(usize::MAX)
             .min(end);
-        take_below(below, &mut links);
+        take_below(served, &mut taken, below, &mut links);
+        if let Some(generator) = state.generator {
+            links.extend(expand(generator).into_iter().rev());
+        }
         if !state.leaving {
-            links.push(Link::Frame(stack, at, state));
+            links.push(Link::Frame(Slots::Stack(stack, at), state));
         }
     }
-    take_below(end, &mut links);
+    placed(frames.end, &mut taken, &mut links);
+    take_below(served, &mut taken, end, &mut links);
     links.reverse();
     links
 }
@@ -2018,8 +2040,27 @@ enum Resolved {
 /// a user frame, with its place among the frames, or a call a native
 /// is serving.
 enum Link<'a> {
-    Frame(&'a VmStack, usize, &'a exec::FrameState),
+    Frame(Slots<'a>, &'a exec::FrameState),
     Call(&'a exec::CallState),
+}
+
+/// Where the slots of a frame on the chain are: on a VM stack at its
+/// place, or kept by a suspended generator a running one was resumed
+/// through, which php's `execute_fake` placeholder stands for until a
+/// backtrace expands it.
+#[derive(Clone, Copy)]
+enum Slots<'a> {
+    Stack(&'a VmStack, usize),
+    Kept(&'a php_heap::Frame),
+}
+
+impl<'a> Slots<'a> {
+    fn frame(self) -> Option<&'a php_heap::Frame> {
+        match self {
+            Slots::Stack(stack, at) => stack.frame(FrameRef(u32::try_from(at).unwrap_or(u32::MAX))),
+            Slots::Kept(frame) => Some(frame),
+        }
+    }
 }
 
 /// What `zend_get_property_offset` places a declared instance property
@@ -2256,12 +2297,11 @@ impl Request {
             cwd,
             stream_type,
             fibers: crate::fiber::Fibers::default(),
-            pending: None,
-            unwind_exit: false,
+            raised: None,
             bailout: false,
             display_direct: false,
             phase: Phase::Startup,
-            marked_destructed: false,
+            shutdown_walk_ended: false,
             returned: Value::null(),
             interrupt: Interrupt::default(),
             timer: None,
@@ -2400,12 +2440,6 @@ impl Request {
     /// on a fiber whose callable is a native, the resumer's.
     fn innermost_frame(&self) -> Option<&exec::FrameState> {
         self.executions().find_map(|(_, vm)| vm.innermost())
-    }
-
-    /// `zend_objects_store_mark_destructed` has marked the store: no
-    /// destructor is served from here, a fiber's teardown among them.
-    pub(crate) fn destructors_marked(&self) -> bool {
-        self.marked_destructed
     }
 
     /// The loop over a generator's frame, bound to the engine's tier
@@ -3018,7 +3052,7 @@ impl Request {
     /// function (`ZEND_ACC_FAKE_CLOSURE`).
     pub(crate) fn calling_closure(&self) -> Option<PhpObject> {
         for link in self.chain() {
-            if let Link::Frame(_, _, state) = link {
+            if let Link::Frame(_, state) = link {
                 let closure = state.closure?;
                 return closure
                     .closure(self)
@@ -3431,7 +3465,7 @@ impl Request {
             while self.vm.frames().len() > standing {
                 self.pop_frame();
             }
-            return match self.pending.take() {
+            return match self.take_pending() {
                 Some(pending) => Err(Thrown::of(Some(pending))),
                 None => Ok(Value::null()),
             };
@@ -3447,14 +3481,14 @@ impl Request {
             self.pop_frame();
         }
         served?;
-        match self.pending.take() {
+        match self.take_pending() {
             Some(pending) => Err(Thrown::of(Some(pending))),
             // The callback exited: what the native reads is php's
-            // `EG(exception)` holding the unwind exit, and the native
-            // returns with it standing, for the unwinder to go on
-            // from the call opline; a fatal leaves the native as it left
-            // the callback.
-            None if self.unwinding() => Err(Thrown::of(None)),
+            // `EG(exception)` holding the unwind exit or the graceful
+            // one, and the native returns with it standing, for the
+            // unwinder to go on from the call opline; a fatal leaves the
+            // native as it left the callback.
+            None if self.is_pending() => Err(Thrown::of(None)),
             None => Ok(std::mem::replace(&mut self.returned, Value::null())),
         }
     }
@@ -3511,6 +3545,21 @@ impl Request {
     /// numbered below the user functions and methods.
     pub(crate) fn is_native_function(&self, function: Function) -> bool {
         self.user_function(function).is_none()
+    }
+
+    /// The native function no table carries whose declaration is named
+    /// `name` ([`MethodAt::Unlisted`]).
+    pub(crate) fn unlisted_function(&self, name: &[u8]) -> Option<Function> {
+        let at = self.shared.methods.iter().position(|method| {
+            matches!(method.at, MethodAt::Unlisted { at } if self
+                .shared
+                .trampolines
+                .get(at as usize)
+                .is_some_and(|decl| decl.function.name.0.as_ref() == name))
+        })?;
+        u32::try_from(self.shared.functions.len().checked_add(at)?)
+            .ok()
+            .map(Function)
     }
 
     /// The native method `function` is, if it is one: its class and its
@@ -3798,7 +3847,9 @@ impl Request {
                     .class_decl(class)?
                     .methods
                     .get(usize::try_from(at).ok()?),
-                MethodAt::Trampoline { at: index, .. } | MethodAt::ParentHook { at: index, .. } => {
+                MethodAt::Trampoline { at: index, .. }
+                | MethodAt::ParentHook { at: index, .. }
+                | MethodAt::Unlisted { at: index } => {
                     self.shared.trampolines.get(usize::try_from(index).ok()?)
                 }
             };
@@ -3949,7 +4000,7 @@ impl Request {
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, closure, carried) = match link {
-                Link::Frame(_, _, state) => (state.function, state.closure, state.scope),
+                Link::Frame(_, state) => (state.function, state.closure, state.scope),
                 Link::Call(call) => (
                     Some(call.function),
                     call.closure,
@@ -4250,15 +4301,17 @@ impl Request {
     /// which arrives with `catch`. One raised while the unwind exit
     /// stands is given up too, which is php's own arm there: what is
     /// unwinding is not replaced by a different throwable
-    /// (`Z/Zend/zend_exceptions.c:195-199`).
+    /// (`Z/Zend/zend_exceptions.c:195-199`). The graceful exit is
+    /// replaced, `zend_exception_set_previous` giving it up.
     pub(crate) fn leave_pending(&mut self, thrown: &Thrown) {
         let Some(object) = thrown.exception().copied() else {
             return;
         };
-        if self.pending.is_none() && !self.unwinding() {
-            self.pending = Some(object);
-        } else {
-            self.release(object.as_value());
+        match self.raised {
+            None | Some(Raised::GracefulExit) if !self.bailout => {
+                self.raised = Some(Raised::Throwable(object));
+            }
+            _ => self.release(object.as_value()),
         }
     }
 
@@ -4334,25 +4387,72 @@ impl Request {
         // no frame standing: a user exception handler takes the
         // throwable first, and what it leaves is rendered.
         self.user_exception_handler();
-        let Some(throwable) = self.pending.take() else {
-            // `zend_exception_error` on the unwind exit: "We
-            // successfully unwound, nothing more to do", and the
-            // object is released (`Z/Zend/zend_exceptions.c:1005`); a
-            // fatal's bailout is caught where the serving is left.
-            self.unwind_exit = false;
+        self.exception_error()
+    }
+
+    /// `zend_exception_error` (`Z/Zend/zend_exceptions.c:936`): what is
+    /// pending rendered as the uncaught fatal, with no handler asked,
+    /// and nothing rendered for either exit.
+    pub(crate) fn exception_error(&mut self) -> Result<(), Fatal> {
+        let Some(throwable) = self.take_pending() else {
+            // `zend_exception_error` on either exit: "We successfully
+            // unwound, nothing more to do", and the object is released
+            // (`Z/Zend/zend_exceptions.c:1005`); a fatal's bailout is
+            // caught where the serving is left.
+            self.raised = None;
             self.bailout = false;
             return Ok(());
         };
-        let (file, line) = self.throw_site(throwable);
         let class = self.class_name_of(throwable);
         let compile_time = match class.as_str() {
             "ParseError" => Some(Level::Parse),
             "CompileError" => Some(Level::CompileError),
             _ => None,
         };
-        let message = match compile_time {
-            Some(_) => string_prop(self, throwable, b"message"),
-            None => format!("Uncaught {}\n  thrown", self.throwable_to_string(throwable)),
+        let message = if compile_time.is_some() {
+            string_prop(self, throwable, b"message")
+        } else {
+            // The class's own `__toString`, which a user class may
+            // override; a string it answers is kept in the base class's
+            // `string` property, and a throwable it raises has no frame
+            // to take it, so it is rendered uncaught in its turn and the
+            // request leaves (`zend_call_function`'s tail,
+            // [`Request::thrown_without_frame`]).
+            match crate::api::call::call_method(self, &throwable, b"__tostring", &[]) {
+                Ok(returned) => {
+                    let text = returned.deref();
+                    if text.as_str_bytes().is_some() {
+                        if let Ok(name) = PhpString::new(self, b"string") {
+                            self.addref(&text);
+                            let _ = throwable.set_prop(self, name, text);
+                        }
+                    } else {
+                        crate::api::raising::warning(
+                            self,
+                            &format!("{class}::__toString() must return a string"),
+                        );
+                    }
+                    self.release(returned);
+                }
+                Err(inner) => {
+                    self.release(throwable.as_value());
+                    let _ = self.thrown_without_frame(&inner);
+                    return Err(Fatal::Error(String::new()));
+                }
+            }
+            format!(
+                "Uncaught {}\n  thrown",
+                string_prop(self, throwable, b"string")
+            )
+        };
+        let (file, line) = self.throw_site(throwable);
+        // `zend_error_va` with no file for a throwable that recorded an
+        // empty one, which `php_error_cb` names `Unknown`; a
+        // `ParseError`'s is handed on as it stands.
+        let file = if file.is_empty() && compile_time.is_none() {
+            b"Unknown".to_vec()
+        } else {
+            file
         };
         self.end_in_uncaught(compile_time.unwrap_or(Level::Error), &message, &file, line);
         let fatal = Fatal::Error(message);
@@ -4367,7 +4467,8 @@ impl Request {
     /// (`Z/Zend/zend_execute_API.c:1069`), as in an extension's
     /// `RSHUTDOWN` or a shutdown function: `zend_throw_exception_internal`
     /// with no frame hands a throwable to the handler `set_exception_handler` set,
-    /// and the call is done where the handler took it; otherwise it is
+    /// and the call is done where the handler took it, with the `UNDEF`
+    /// the callee never replaced as what it returned; otherwise it is
     /// rendered as the uncaught fatal, and the unwind exit is dropped,
     /// and either leaves by `zend_bailout`, which is the `Thrown` with
     /// no throwable handed back. The session's write at request end is
@@ -4381,7 +4482,7 @@ impl Request {
                 self.bailout = true;
                 Err(Thrown::of(None))
             }
-            Ok(()) if threw => Ok(Value::null()),
+            Ok(()) if threw => Ok(Value::undef()),
             Ok(()) => {
                 self.bailout = true;
                 Err(Thrown::of(None))
@@ -4399,61 +4500,102 @@ impl Request {
     }
 
     /// `Exception::__toString` (`Z/Zend/zend_exceptions.c:692`): each
-    /// throwable of the `previous` chain rendered by
-    /// [`Request::rendering_of`], the deepest first and `this` last,
-    /// with `\n\nNext ` between them, which is php's `prev_str` carried
-    /// through the loop and put after the one it is rendering. The
-    /// walk stops at a throwable it has already rendered, php's
-    /// `Z_PROTECT_RECURSION_P`; a chain is a path through live objects,
-    /// so the store's count is a length it cannot pass.
+    /// throwable of the `previous` chain rendered, the deepest last in
+    /// the text php builds by putting what it has so far after `\n\nNext `
+    /// behind the one it is rendering: the class, the message where
+    /// there is one, the site behind a colon and the trace under `Stack
+    /// trace:`. The message and the file are read as `zval_get_string`
+    /// reads them, so an object there is its `__toString`, and the line
+    /// as `zval_get_long`; a throwable raised on the way is handed back
+    /// once the text is built, as php leaves it pending past the loop.
+    /// The walk stops at a throwable it has already rendered, php's
+    /// `Z_PROTECT_RECURSION_P`. The text is kept in the base class's
+    /// private `string` property, which the uncaught rendering reads.
     ///
-    /// The ` and defined` a `TypeError` whose message names a call site
-    /// takes arrives with the frames that make it reachable.
-    pub(crate) fn throwable_to_string(&self, throwable: PhpObject) -> String {
-        let mut chain = vec![throwable];
-        for _ in 0..=self.heap.objects() {
-            let Some(at) = chain.last().copied() else {
+    /// ```php
+    /// class M { function __toString(): string { return "late"; } }
+    /// class E extends Exception { function __construct() { $this->message = new M; } }
+    /// $e = new E;
+    /// echo substr((string) $e, 0, 7), "\n";
+    /// var_dump(str_starts_with(((array) $e)["\0Exception\0string"], "E: late in "));
+    /// ```
+    /// ```expect
+    /// E: late
+    /// bool(true)
+    /// ```
+    pub(crate) fn exception_string(&mut self, this: PhpObject) -> Result<PhpString, Thrown> {
+        let mut text: Vec<u8> = Vec::new();
+        let mut seen: Vec<PhpObject> = Vec::new();
+        let mut raised: Option<Thrown> = None;
+        let mut at = Some(this);
+        while let Some(exception) = at {
+            let Some(throwable) = self.class_named(b"Throwable") else {
                 break;
             };
-            let Some(previous) = self.previous_of(at) else {
-                break;
-            };
-            if chain.iter().any(|seen| seen.index() == previous.index()) {
+            if !self.instance_of(exception.class(), throwable) {
                 break;
             }
-            chain.push(previous);
+            let mut read = |req: &mut Request, name: &[u8]| -> Vec<u8> {
+                let value = exception.prop(req, name).unwrap_or_else(Value::null);
+                match crate::ops::to_string(req, &value) {
+                    Ok(string) => {
+                        let bytes = string.as_bytes().to_vec();
+                        req.release(Value::string(string));
+                        bytes
+                    }
+                    Err(thrown) => {
+                        if raised.is_none() {
+                            raised = Some(thrown);
+                        } else {
+                            req.leave_pending(&thrown);
+                        }
+                        Vec::new()
+                    }
+                }
+            };
+            let mut message = read(self, b"message");
+            let file = read(self, b"file");
+            let line = exception.prop(self, b"line").unwrap_or_else(Value::null);
+            let line = crate::ops::get_long(self, &line);
+            let class = self.class_name_of(exception);
+            // `Z/Zend/zend_exceptions.c:740`: a `TypeError` or an
+            // `ArgumentCountError` whose message names the call site is
+            // closed with ` and defined`, the class itself and not what
+            // descends from it.
+            if (class == "TypeError" || class == "ArgumentCountError")
+                && message.windows(12).any(|window| window == b", called in ")
+            {
+                message.extend_from_slice(b" and defined");
+            }
+            let trace = self.trace_string_of(exception);
+            let mut rendered = class.into_bytes();
+            if !message.is_empty() {
+                rendered.extend_from_slice(b": ");
+                rendered.extend_from_slice(&message);
+            }
+            rendered.extend_from_slice(b" in ");
+            rendered.extend_from_slice(&file);
+            rendered.extend_from_slice(format!(":{line}\nStack trace:\n{trace}").as_bytes());
+            if !text.is_empty() {
+                rendered.extend_from_slice(b"\n\nNext ");
+                rendered.extend_from_slice(&text);
+            }
+            text = rendered;
+            seen.push(exception);
+            at = self
+                .previous_of(exception)
+                .filter(|previous| !seen.iter().any(|done| done.index() == previous.index()));
         }
-        chain
-            .iter()
-            .rev()
-            .map(|throwable| self.rendering_of(*throwable))
-            .collect::<Vec<String>>()
-            .join("\n\nNext ")
-    }
-
-    /// One throwable of that chain: the class, the message where there
-    /// is one, the site behind a colon and the trace under `Stack
-    /// trace:`.
-    fn rendering_of(&self, throwable: PhpObject) -> String {
-        let class = self.class_name_of(throwable);
-        let mut message = string_prop(self, throwable, b"message");
-        // `Z/Zend/zend_exceptions.c:740`: a `TypeError` or an
-        // `ArgumentCountError` whose message names the call site is
-        // closed with ` and defined`, so the site the rendering puts
-        // after it reads as the function's own. php compares the class
-        // itself and not what it descends from.
-        if (class == "TypeError" || class == "ArgumentCountError")
-            && message.contains(", called in ")
-        {
-            message.push_str(" and defined");
-        }
-        let (file, line) = self.throw_site(throwable);
-        let file = String::from_utf8_lossy(&file);
-        let trace = self.trace_string_of(throwable);
-        if message.is_empty() {
-            format!("{class} in {file}:{line}\nStack trace:\n{trace}")
-        } else {
-            format!("{class}: {message} in {file}:{line}\nStack trace:\n{trace}")
+        let string = PhpString::new(self, &text)?;
+        let name = PhpString::new(self, b"string")?;
+        self.addref(&Value::string(string));
+        this.set_prop(self, name, Value::string(string))?;
+        match raised {
+            Some(thrown) => {
+                self.release(Value::string(string));
+                Err(thrown)
+            }
+            None => Ok(string),
         }
     }
 
@@ -4478,7 +4620,19 @@ impl Request {
     /// `getTraceAsString`, `__toString` and the uncaught fatal render it
     /// through [`Request::trace_string_of`] when they are asked.
     pub(crate) fn note_throw_site(&mut self, throwable: PhpObject) -> Result<(), Thrown> {
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        // `zend_get_executed_filename`, which names no script where no
+        // user frame stands, as while the uncaught rendering serves a
+        // throwable's `__toString` after the main frame has returned.
+        let file = match self.overridden_site() {
+            Some((file, _)) => file.to_vec(),
+            None => self
+                .innermost_frame()
+                .and_then(|state| exec::body_of(&state.unit, state.body))
+                .map_or_else(
+                    || b"[no active file]".to_vec(),
+                    |code| code.filename.0.to_vec(),
+                ),
+        };
         let trace = self.debug_backtrace()?;
         let line = Value::int(i64::from(self.current_line()));
         for (name, value) in [
@@ -4496,7 +4650,7 @@ impl Request {
     /// `include_main`; a slot that holds no array, which is what a
     /// throwable made before this engine recorded one has, renders as
     /// the empty trace does, `#0 {main}`.
-    pub(crate) fn trace_string_of(&self, throwable: PhpObject) -> String {
+    pub(crate) fn trace_string_of(&mut self, throwable: PhpObject) -> String {
         match throwable
             .prop(self, b"trace")
             .and_then(|value| value.as_array().copied())
@@ -4608,10 +4762,10 @@ impl Request {
         limit: i64,
     ) -> Result<PhpArray, Thrown> {
         let chain: Vec<Link> = self.chain().collect();
-        let mut links = self.trace_rows(&chain);
-        if skip_last && !links.is_empty() {
-            links.remove(0);
-        }
+        // php steps past the native's own link before the walk, so no row
+        // of it is one a later row reads back.
+        let skipped = usize::from(skip_last).min(chain.len());
+        let mut links = self.trace_rows(&chain[skipped..]);
         if let Ok(limit) = usize::try_from(limit)
             && limit > 0
         {
@@ -4867,6 +5021,11 @@ impl Request {
     /// `stack_bottom->prev_execute_data` names the frame that resumed
     /// it: each stack's links innermost first, the running stack's
     /// before the stacks below it (design §5.11).
+    ///
+    /// A generator a resumption runs through another stands on the
+    /// placeholder php links it to (`execute_fake`), which the walk
+    /// expands into the kept frames of the generators between
+    /// ([`crate::generator::placeholder_frames`]).
     fn chain(&self) -> impl Iterator<Item = Link<'_>> {
         let mut chain: Vec<Link> = Vec::new();
         for (stack, vm) in self.executions() {
@@ -4875,9 +5034,18 @@ impl Request {
                 vm,
                 0..vm.frames().len(),
                 0..vm.calls().len(),
+                &|root| self.placeholder_links(root),
             ));
         }
         chain.into_iter()
+    }
+
+    /// The links a placeholder for `root` expands into, innermost first.
+    fn placeholder_links(&self, root: PhpObject) -> Vec<Link<'_>> {
+        crate::generator::placeholder_frames(self, root)
+            .into_iter()
+            .map(|(slots, state)| Link::Frame(Slots::Kept(slots), state))
+            .collect()
     }
 
     /// The rows of `chain`, `EG(current_execute_data)` and its
@@ -4905,35 +5073,57 @@ impl Request {
     /// them; a native's are the call's, as they were placed. A call
     /// still being built is not on the chain, as php's is a chain of
     /// activations.
+    ///
+    /// A function served from outside the loop over a frame standing at
+    /// an include, an error handler the include's warning serves, is
+    /// followed by the include's own row, php's `fake_frame`:
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $msg) { debug_print_backtrace(); return true; });
+    /// function f() { include "nope.php"; }
+    /// f();
+    /// ```
+    /// ```expect
+    /// #0 %s(3): {closure:%s:2}(2, 'include(nope.ph...', '%s', 3)
+    /// #1 %s(3): include()
+    /// #2 %s(4): f()
+    /// #0 %s(3): {closure:%s:2}(2, 'include(): Fail...', '%s', 3)
+    /// #1 %s(3): include()
+    /// #2 %s(4): f()
+    /// ```
     fn trace_rows(&self, chain: &[Link<'_>]) -> Vec<TraceRow> {
+        // The include the link below `at` stands at, where it is a user
+        // frame at an `INCLUDE_OR_EVAL`.
+        let including = |at: usize| {
+            chain
+                .get(at.saturating_add(1))
+                .and_then(|below| match below {
+                    Link::Frame(_, below) => Some(below),
+                    Link::Call(_) => None,
+                })
+                .and_then(|below| {
+                    let code = exec::body_of(&below.unit, below.body)?;
+                    exec::opline_at(code, below.opline)
+                })
+                .filter(|op| op.opcode == Opcode::IncludeOrEval)
+                .and_then(|op| IncludeKind::of(op.extended_value))
+        };
         let mut rows = Vec::new();
         for at in 0..chain.len() {
             let site = match chain.get(at.saturating_add(1)) {
-                Some(Link::Frame(_, _, below)) => exec::body_of(&below.unit, below.body)
+                Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
                     .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
                 Some(Link::Call(_)) | None => None,
             };
             match &chain[at] {
-                Link::Frame(stack, place, state) => {
+                Link::Frame(slots, state) => {
                     let Some(function) = state.function else {
                         // A code frame: named by the includer's opline
                         // where that is an `INCLUDE_OR_EVAL`, and the
                         // main op array's frame, which no opline pushed,
                         // makes no row (`zend_trace_to_string` closes
                         // every trace with `{main}`).
-                        let Some(kind) = chain
-                            .get(at.saturating_add(1))
-                            .and_then(|below| match below {
-                                Link::Frame(_, _, below) => Some(below),
-                                Link::Call(_) => None,
-                            })
-                            .and_then(|below| {
-                                let code = exec::body_of(&below.unit, below.body)?;
-                                exec::opline_at(code, below.opline)
-                            })
-                            .filter(|op| op.opcode == Opcode::IncludeOrEval)
-                            .and_then(|op| IncludeKind::of(op.extended_value))
-                        else {
+                        let Some(kind) = including(at) else {
                             continue;
                         };
                         // `build_filename_arg`: an `eval` names no file.
@@ -4951,14 +5141,13 @@ impl Request {
                         ));
                         continue;
                     };
-                    let frame = FrameRef(u32::try_from(*place).unwrap_or(u32::MAX));
                     let passed = usize::try_from(state.num_args).unwrap_or(0);
                     let mut arguments: Vec<Value> = (0..passed
                         .saturating_sub(state.extra_args.len()))
                         .map(|slot| {
                             let slot = Slot(u32::try_from(slot).unwrap_or(u32::MAX));
-                            stack
-                                .frame(frame)
+                            slots
+                                .frame()
                                 .map_or(Value::undef(), |f| Value::of_zval(f.slot(slot)))
                         })
                         .collect();
@@ -4969,8 +5158,32 @@ impl Request {
                         self.closure_scope(state.closure),
                         arguments,
                         state.extra_named.clone(),
-                        site,
+                        site.clone(),
                     ));
+                    // `fake_frame`: a function served from outside the
+                    // loop, an error handler among them, over a frame
+                    // that stands at an include is followed by the
+                    // include's own row, whose argument is php's
+                    // `include_filename`, the site of the row before the
+                    // function's, and none where it is the first.
+                    if state.caller.is_none()
+                        && let Some(kind) = including(at)
+                    {
+                        let file = (kind != IncludeKind::Eval)
+                            .then(|| rows.iter().rev().nth(1))
+                            .flatten()
+                            .and_then(|row: &TraceRow| {
+                                row.5.as_ref().map(|(file, _)| file.clone())
+                            });
+                        rows.push((
+                            Traced::Include { kind, file },
+                            None,
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                            site,
+                        ));
+                    }
                 }
                 Link::Call(call) => {
                     rows.push((
@@ -5171,59 +5384,97 @@ impl Request {
     }
 
     /// `zend_trace_to_string` (`Z/Zend/zend_exceptions.c:668`):
-    /// `_build_trace_string` over each row that is an array, `#N
-    /// file(line): ` where the row names a `file`, `[internal
-    /// function]: ` where it names none, the `class` and `type` where
-    /// there are ones, the `function`, and the `args` between the
-    /// parentheses; then, under `include_main`, `#N {main}`, and without
-    /// it every line closed by its newline, which is what
-    /// `debug_print_backtrace()` writes.
-    pub(crate) fn trace_to_string(&self, trace: PhpArray, include_main: bool) -> String {
-        let mut frames: Vec<String> = Vec::new();
-        for (_, row) in &trace {
-            let Some(row) = row.as_array() else {
+    /// `_build_trace_string` over each row that is an array, and php's
+    /// warning for one that is not: `#N file(line): ` where the row names
+    /// a `file`, `[internal function]: ` where it names none, the
+    /// `class`, `type` and `function` where the row has them, and the
+    /// `args` between the parentheses; then, under `include_main`, `#N
+    /// {main}`, and without it every line closed by its newline, which is
+    /// what `debug_print_backtrace()` writes. A field of the wrong type
+    /// is php's warning and its `[unknown]` stand-in.
+    ///
+    /// ```php
+    /// $e = new Exception();
+    /// $ref = new ReflectionProperty($e, 'trace');
+    /// $ref->setValue($e, [null, [], ['file' => null, 'function' => 1, 'args' => 2]]);
+    /// var_dump($e->getTraceAsString());
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: Expected array for frame 0 in %s on line 5
+    ///
+    /// Warning: File name is not a string in %s on line 5
+    ///
+    /// Warning: Value for function is not a string in %s on line 5
+    ///
+    /// Warning: args element is not an array in %s on line 5
+    /// string(67) "#0 [internal function]: ()
+    /// #1 [unknown file]: [unknown]()
+    /// #2 {main}"
+    /// ```
+    pub(crate) fn trace_to_string(&mut self, trace: PhpArray, include_main: bool) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let mut num = 0usize;
+        for (index, row) in trace.snapshot_refs() {
+            let Some(row) = row.as_array().copied() else {
+                let index = match index {
+                    Key::Int(n) => n.to_string(),
+                    Key::Str(_) => String::from("0"),
+                };
+                crate::api::raising::warning(self, &format!("Expected array for frame {index}"));
                 continue;
             };
+            let fields = row.snapshot_refs();
             let field = |name: &[u8]| {
-                row.into_iter()
+                fields
+                    .iter()
                     .find(|(key, _)| matches!(key, Key::Str(s) if s.as_bytes() == name))
-                    .map(|(_, value)| value)
+                    .map(|(_, value)| *value)
             };
-            let string = |name: &[u8]| {
-                field(name).and_then(|v| {
-                    v.as_str_bytes()
-                        .map(|b| String::from_utf8_lossy(b).into_owned())
-                })
-            };
-            let site = match string(b"file") {
-                Some(file) => {
-                    let line = field(b"line").and_then(|v| v.as_int()).unwrap_or(0);
-                    format!("{file}({line}): ")
+            let _ = write!(out, "#{num} ");
+            num += 1;
+            match field(b"file").map(|file| file.as_str_bytes().map(<[u8]>::to_vec)) {
+                None => out.push_str("[internal function]: "),
+                Some(None) => {
+                    crate::api::raising::warning(self, "File name is not a string");
+                    out.push_str("[unknown file]: ");
                 }
-                None => String::from("[internal function]: "),
-            };
-            let class = string(b"class").unwrap_or_default();
-            let join = string(b"type").unwrap_or_default();
-            let function = string(b"function").unwrap_or_else(|| String::from("unknown"));
-            let arguments = field(b"args")
-                .and_then(|v| v.as_array().copied())
-                .map(|args| self.trace_arguments(&args.snapshot_refs()))
-                .unwrap_or_default();
-            frames.push(format!(
-                "#{} {site}{class}{join}{function}({arguments})",
-                frames.len()
-            ));
-        }
-        if !include_main {
-            let mut out = frames.join("\n");
-            if !out.is_empty() {
-                out.push('\n');
+                Some(Some(file)) => {
+                    let line = match field(b"line") {
+                        Some(line) => line.as_int().unwrap_or_else(|| {
+                            crate::api::raising::warning(self, "Line is not an int");
+                            0
+                        }),
+                        None => 0,
+                    };
+                    let _ = write!(out, "{}({line}): ", String::from_utf8_lossy(&file));
+                }
             }
-            return out;
+            for key in ["class", "type", "function"] {
+                let Some(value) = field(key.as_bytes()) else {
+                    continue;
+                };
+                if let Some(text) = value.as_str_bytes() {
+                    out.push_str(&String::from_utf8_lossy(text));
+                } else {
+                    crate::api::raising::warning(self, &format!("Value for {key} is not a string"));
+                    out.push_str("[unknown]");
+                }
+            }
+            out.push('(');
+            if let Some(args) = field(b"args") {
+                match args.as_array() {
+                    Some(args) => out.push_str(&self.trace_arguments(&args.snapshot_refs())),
+                    None => crate::api::raising::warning(self, "args element is not an array"),
+                }
+            }
+            out.push_str(")\n");
         }
-        let main = frames.len();
-        frames.push(format!("#{main} {{main}}"));
-        frames.join("\n")
+        if include_main {
+            let _ = write!(out, "#{num} {{main}}");
+        }
+        out
     }
 
     /// The backtrace a fatal carries, `zend_fetch_debug_backtrace`
@@ -5781,7 +6032,7 @@ impl Request {
                 Level::Warning | Level::CoreWarning | Level::CompileWarning | Level::UserWarning
             )
         {
-            if self.pending.is_none() && self.error_handling_thrown.is_none() {
+            if self.raised.is_none() && self.error_handling_thrown.is_none() {
                 let thrown = crate::api::raising::throw(self, &class, message);
                 self.error_handling_thrown = Some(thrown);
             }
@@ -5789,7 +6040,7 @@ impl Request {
         }
         // "Always clear the last backtrace."
         self.last_fatal_error_backtrace = None;
-        if self.pending.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
+        if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
         if self.user_error_handler(level, message, file, line) {
@@ -6014,16 +6265,34 @@ impl Request {
         )
     }
 
-    /// `zend_error_noreturn(E_ERROR, ...)`: `php_error_cb` renders the
-    /// fatal where the request stands, on the streams the two ini entries
-    /// say, and the request ends in it. It is rendered once, here, and
-    /// `serve` writes nothing of its own.
     /// Whether a `zend_bailout` is under way, which leaves every step
     /// it passes through at once.
     pub(crate) fn bailing_out(&self) -> bool {
         self.bailout
     }
 
+    /// `zend_error_noreturn(E_ERROR, ...)`: `php_error_cb` renders the
+    /// fatal where the request stands, on the streams the two ini entries
+    /// say, and the request ends in it. It is rendered once, here, and
+    /// `serve` writes nothing of its own. The store is marked destructed
+    /// before the request bails out (`zend_objects_store_mark_destructed`), so no
+    /// object standing then is destructed, and a delegation of
+    /// generators a frame lets go of on the way out is not given up
+    /// link by link through their destructors:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// $d = new D;
+    /// register_shutdown_function(function () { $e = new D; echo "sd\n"; });
+    /// function a() { yield from a(); }
+    /// ini_set("memory_limit", "8M");
+    /// foreach (a() as $v);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted %s
+    /// sd
+    /// d
+    /// ```
     pub(crate) fn end_in_fatal(&mut self, message: &str) {
         // One raised while a bailout is under way is not rendered: php
         // left what raised it at the first. One raised after the bailout
@@ -6031,6 +6300,9 @@ impl Request {
         if self.bailout {
             return;
         }
+        // `php_error_cb` marks the store before it bails out: no object
+        // that stands now is destructed, one a shutdown function makes is.
+        self.heap.mark_destructed();
         let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
         let line = self.current_line();
         self.note_error_in(Level::Error, message, &file, line);
@@ -6046,6 +6318,7 @@ impl Request {
         if self.bailout {
             return;
         }
+        self.heap.mark_destructed();
         self.note_error_in(Level::CoreError, message, b"Unknown", 0);
         self.end_at_level(Level::CoreError, message, b"Unknown", 0);
     }
@@ -6069,10 +6342,25 @@ impl Request {
 
     /// `php_error_cb`'s `_zend_bailout` (`Z/main/main.c:1492-1520`) for a level
     /// it cannot recover from that the built-in handler served, raised
-    /// where the request stands: every object marked destructed,
-    /// `zend_objects_store_mark_destructed`, so no destructor is served
-    /// after it, and the request ended at the level. What
-    /// `trigger_error()` reaches with `E_USER_ERROR`.
+    /// where the request stands: every object standing marked
+    /// destructed, `zend_objects_store_mark_destructed`, so none of them
+    /// is destructed after it, while one a shutdown function makes is;
+    /// and the request ended at the level. What `trigger_error()` reaches
+    /// with `E_USER_ERROR`.
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// $d = new D;
+    /// register_shutdown_function(function () { $e = new D; echo "sd\n"; });
+    /// trigger_error("boom", E_USER_ERROR);
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 5
+    ///
+    /// Fatal error: boom in %s on line 5
+    /// sd
+    /// d
+    /// ```
     pub(crate) fn bail_out(&mut self, level: Level, message: &str) {
         let (file, line) = if self.executing() {
             let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
@@ -6080,7 +6368,7 @@ impl Request {
         } else {
             (b"Unknown".to_vec(), 0)
         };
-        self.marked_destructed = true;
+        self.heap.mark_destructed();
         self.end_at_level(level, message, &file, line);
     }
 
@@ -6152,8 +6440,17 @@ impl Request {
     /// unwinder to read; php asserts nothing else is pending, and a
     /// raiser that found something pending returns it instead.
     pub(crate) fn throw_unwind_exit(&mut self) {
-        if self.pending.is_none() {
-            self.unwind_exit = true;
+        if self.raised.is_none() {
+            self.raised = Some(Raised::UnwindExit);
+        }
+    }
+
+    /// `zend_throw_graceful_exit` (`Z/Zend/zend_exceptions.c:1069`): the
+    /// graceful exit standing where a throwable would, which is what
+    /// `zend_fiber_object_destroy` resumes a suspended fiber with.
+    pub(crate) fn throw_graceful_exit(&mut self) {
+        if self.raised.is_none() {
+            self.raised = Some(Raised::GracefulExit);
         }
     }
 
@@ -6163,14 +6460,14 @@ impl Request {
     /// [`Request::serve_user`] where a native reads what its callback
     /// left.
     pub(crate) fn unwind_exit(&self) -> bool {
-        self.unwind_exit
+        self.raised == Some(Raised::UnwindExit)
     }
 
     /// What the unwinder leaves by that no `catch` takes and no `finally`
     /// is served for: the unwind exit, or a fatal leaving for its
     /// `zend_try`.
     pub(crate) fn unwinding(&self) -> bool {
-        self.unwind_exit || self.bailout
+        self.unwind_exit() || self.bailout
     }
 
     /// `zend_end_try()` over a fatal's `zend_bailout`: the `zend_try` it left
@@ -6212,6 +6509,20 @@ impl Request {
         self.bailout = false;
     }
 
+    /// `zend_fiber_switch_block()` before `f` and
+    /// `zend_fiber_switch_unblock()` after it: while `f` is under way no
+    /// fiber starts, suspends, resumes or is thrown into, each php's
+    /// `FiberError`, `Cannot switch fibers in current execution context`,
+    /// since a switch would leave `f` standing on a stack it does not
+    /// return to. What a `ZEND_TICKS` round serves its functions under,
+    /// and `pcntl_signal_dispatch` its handlers.
+    pub fn with_fiber_switch_blocked<R>(&mut self, f: impl FnOnce(&mut Request) -> R) -> R {
+        self.fibers.block_switch();
+        let out = f(self);
+        self.fibers.unblock_switch();
+        out
+    }
+
     /// `zend_is_unwind_exit(EG(exception))` for a native: whether a
     /// [`Thrown`] that carries no throwable is the `exit` a callback
     /// unwinds, which php's C code goes on past with the unwind exit
@@ -6220,7 +6531,7 @@ impl Request {
     /// handler returns (`ps_call_handler`).
     #[must_use]
     pub fn is_unwind_exit(&self) -> bool {
-        self.unwind_exit
+        self.unwind_exit()
     }
 
     /// The request's [`Phase`].
@@ -10573,9 +10884,6 @@ impl Request {
     /// after
     /// ```
     pub(crate) fn destruct(&mut self, object: PhpObject) {
-        if self.marked_destructed {
-            return;
-        }
         let class = object.class();
         let Some(destructor) = self.method_named(class, b"__destruct") else {
             return;
@@ -10667,7 +10975,8 @@ impl Request {
     ///   thrown in %s on line 5
     /// ```
     fn end_the_walk(&mut self) {
-        self.marked_destructed = true;
+        self.shutdown_walk_ended = true;
+        self.heap.mark_destructed();
         if let Err(fatal) = self.uncaught() {
             self.end_in(&fatal);
         }
@@ -10702,19 +11011,12 @@ impl Request {
     /// this builds what the release cannot, and #458 is the question
     /// that leaves for a person.
     fn save_pending(&mut self, object: PhpObject) -> Saved {
-        match self.pending {
-            Some(pending) if pending.index() == object.index() => {
+        match self.raised {
+            Some(Raised::Throwable(pending)) if pending.index() == object.index() => {
                 self.end_in_core_error("Attempt to destruct pending exception");
                 Saved::TheObject
             }
-            _ => match self.pending.take() {
-                Some(pending) => Saved::Throwable(pending),
-                None if self.unwind_exit => {
-                    self.unwind_exit = false;
-                    Saved::UnwindExit
-                }
-                None => Saved::Nothing,
-            },
+            _ => Saved::Raised(self.raised.take()),
         }
     }
 
@@ -10756,37 +11058,91 @@ impl Request {
     ///   thrown in %s on line 5
     /// ```
     fn restore_pending(&mut self, saved: Saved) {
-        match saved {
-            Saved::Throwable(old) => match self.pending {
-                Some(new) => self.set_previous(new, old),
-                None => self.pending = Some(old),
-            },
-            // `zend_exception_set_previous(EG(exception), old_exception)`
-            // with the unwind exit as the old one releases it
-            // (`Z/Zend/zend_exceptions.c:113-116`): what the destructor
-            // raised is what is unwound from here, and the `exit`'s
-            // status stands only until that throwable is rendered.
-            Saved::UnwindExit => {
-                if self.pending.is_none() {
-                    self.unwind_exit = true;
-                }
-            }
-            Saved::Nothing | Saved::TheObject => {}
+        if let Saved::Raised(Some(old)) = saved {
+            self.raise_under(old);
+        }
+    }
+
+    /// The restore php writes after each step it protects from what was
+    /// pending before it, a destructor, a generator's `finally` on
+    /// destruction and a fiber's graceful unwind: `old` is pending again
+    /// where nothing is, and where something is,
+    /// `zend_exception_set_previous(EG(exception), old)` chains a
+    /// throwable under the one pending and gives up an exit
+    /// (`Z/Zend/zend_exceptions.c:113-116`), so what the step raised is
+    /// what is unwound from here and an `exit`'s status stands only
+    /// until that throwable is rendered. An exit pending keeps the slot,
+    /// and a throwable under it is given up with it.
+    pub(crate) fn raise_under(&mut self, old: Raised) {
+        match (self.raised, old) {
+            (None, old) if !self.bailout => self.raised = Some(old),
+            (Some(Raised::Throwable(new)), Raised::Throwable(old)) => self.set_previous(new, old),
+            (_, old) => self.release_raised(old),
+        }
+    }
+
+    /// What was pending out of php's slot, any of the three, its owner
+    /// the caller's: `EG(exception) = NULL` beside the object taken.
+    pub(crate) fn take_raised(&mut self) -> Option<Raised> {
+        self.raised.take()
+    }
+
+    /// `EG(exception) = Z_OBJ_P(fast_call)`: what a `finally` block
+    /// delayed standing in the slot again, which `FAST_RET` writes.
+    pub(crate) fn set_raised(&mut self, raised: Option<Raised>) {
+        self.raised = raised;
+    }
+
+    /// What was pending, a throwable's owner given up; an exit holds no
+    /// object here.
+    pub(crate) fn release_raised(&mut self, raised: Raised) {
+        if let Raised::Throwable(object) = raised {
+            self.release(object.as_value());
         }
     }
 
     /// `zend_exception_set_previous` (`Z/Zend/zend_exceptions.c:103`):
     /// `previous` is chained onto the end of the chain `throwable`
-    /// already carries, its one owner the property's from here. A
-    /// throwable that is already in that chain, or is `throwable`
-    /// itself, takes its owner back instead, since php refuses to make
-    /// a cycle. A chain is a path through live objects, so the store's
-    /// count is a length no walk of it passes.
+    /// already carries, its one owner the property's from here. php
+    /// refuses to make a cycle, and walks the two chains together to
+    /// find one: at each throwable of `throwable`'s chain, where that
+    /// throwable is already among `previous`'s own ancestors, or where
+    /// `previous` is `throwable` itself or already in its chain,
+    /// `previous` takes its owner back and nothing is chained. A chain
+    /// is a path through live objects, so the store's count is a length
+    /// no walk of it passes.
+    ///
+    /// A `finally` that rethrows the previous of the throwable it
+    /// delayed chains nothing, and the one it rethrows is what leaves:
+    ///
+    /// ```php
+    /// try {
+    ///     $e = new Exception("Foo");
+    ///     try { throw new Exception("Bar", 0, $e); } finally { throw $e; }
+    /// } catch (Exception $e) {
+    ///     echo $e->getMessage(), " ", var_export($e->getPrevious(), true), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// Foo NULL
+    /// ```
     pub(crate) fn set_previous(&mut self, throwable: PhpObject, previous: PhpObject) {
+        let bound = self.heap.objects();
         let mut at = throwable;
-        for _ in 0..=self.heap.objects() {
+        for _ in 0..=bound {
             if at.index() == previous.index() {
                 break;
+            }
+            let mut ancestor = self.previous_of(previous);
+            for _ in 0..=bound {
+                let Some(held) = ancestor else {
+                    break;
+                };
+                if held.index() == at.index() {
+                    self.release(previous.as_value());
+                    return;
+                }
+                ancestor = self.previous_of(held);
             }
             if let Some(next) = self.previous_of(at) {
                 at = next;
@@ -10803,11 +11159,27 @@ impl Request {
         self.release(previous.as_value());
     }
 
+    /// What a symbol table holds that is no CV of its frame, for the
+    /// collector: the frame's walk names the CVs themselves, which is
+    /// where php's `IS_INDIRECT` buckets point.
+    pub(crate) fn gc_symbol_table(&self, table: TableId, visit: &mut dyn FnMut(Value)) {
+        let Some(table) = self.tables.get(table.0 as usize) else {
+            return;
+        };
+        for (_, symbol) in &table.entries {
+            match symbol {
+                Symbol::Value(value) => visit(*value),
+                Symbol::Held(cell) => visit(cell.as_value()),
+                Symbol::Indirect(..) => {}
+            }
+        }
+    }
+
     /// The `previous` property of a throwable, when it holds one.
     fn previous_of(&self, throwable: PhpObject) -> Option<PhpObject> {
         throwable
             .prop(self, b"previous")
-            .and_then(|value| value.as_object().copied())
+            .and_then(|value| value.deref().as_object().copied())
     }
 
     /// `zend_objects_destroy_object`'s visibility branch: a public
@@ -11049,7 +11421,7 @@ impl Request {
                 }
             }
             Symbol::Indirect(frame, slot) => {
-                let Some(place) = self.slot_ptr(frame, slot) else {
+                let Some(place) = self.attached_ptr(TableId::GLOBAL, frame, slot) else {
                     return Err(crate::api::raising::fatal(
                         self,
                         "InternalError: a global bound to a CV the frame does not have",
@@ -11150,7 +11522,7 @@ impl Request {
             .map(|(_, symbol)| *symbol);
         match found {
             Some(Symbol::Indirect(frame, slot)) => {
-                let value = self.take_slot(frame, slot);
+                let value = self.take_attached(table, frame, slot);
                 self.release(value);
             }
             Some(_) => self.symbol_del(table, name),
@@ -11197,8 +11569,64 @@ impl Request {
         Some(match symbol {
             Symbol::Value(value) => value,
             Symbol::Held(cell) => cell.get(),
-            Symbol::Indirect(frame, at) => self.slot(frame, at),
+            Symbol::Indirect(frame, at) => self.attached(table, frame, at),
         })
+    }
+
+    /// php's `IS_INDIRECT` bucket of `table`, the CV slot an attached name
+    /// stands for, on the stack the table's frames stand on: the
+    /// request's own for `EG(symbol_table)`, below every fiber running,
+    /// and the running stack for a table rebuilt for a function frame.
+    /// php's bucket points at the slot itself, which no stack switch
+    /// moves, so a `global` inside a fiber binds the main frame's CV.
+    ///
+    /// ```php
+    /// $f = new Fiber(function () { global $x; $x = 1; $GLOBALS["y"] = 2; });
+    /// $f->start();
+    /// var_dump($x, $y);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// ```
+    fn attached_ptr(&mut self, table: TableId, frame: FrameRef, at: u32) -> Option<ZvalRef> {
+        let stack = match self.fibers.request_stack_mut() {
+            Some(own) if table == TableId::GLOBAL => own,
+            _ => &mut self.stack,
+        };
+        stack.frame_mut(frame)?.slot_ptr(Slot(at))
+    }
+
+    /// What an attached name's CV holds, a view ([`Request::attached_ptr`]).
+    fn attached(&mut self, table: TableId, frame: FrameRef, at: u32) -> Value {
+        self.attached_ptr(table, frame, at)
+            .map_or(Value::undef(), |place| Value::of_zval(place.read()))
+    }
+
+    /// What an attached name's CV holds, taken, the CV left `UNDEF`.
+    fn take_attached(&mut self, table: TableId, frame: FrameRef, at: u32) -> Value {
+        let Some(place) = self.attached_ptr(table, frame, at) else {
+            return Value::undef();
+        };
+        let held = Value::of_zval(place.read());
+        place.write(Zval::UNDEF);
+        held
+    }
+
+    /// `value` into an attached name's CV, what it held handed back.
+    pub(crate) fn set_attached(
+        &mut self,
+        table: TableId,
+        frame: FrameRef,
+        at: u32,
+        value: Value,
+    ) -> Value {
+        let Some(place) = self.attached_ptr(table, frame, at) else {
+            return value;
+        };
+        let held = Value::of_zval(place.read());
+        place.write(value.to_zval());
+        held
     }
 
     /// `zend_hash_find` in a symbol table for a fetch by name that
@@ -11228,7 +11656,7 @@ impl Request {
         };
         let symbol = entries[at].1;
         let cell = match symbol {
-            Symbol::Indirect(frame, slot) => return Ok(self.slot_ptr(frame, slot)),
+            Symbol::Indirect(frame, slot) => return Ok(self.attached_ptr(table, frame, slot)),
             Symbol::Held(cell) => cell,
             Symbol::Value(value) => {
                 let cell = self.reference(value)?;
@@ -11302,7 +11730,7 @@ impl Request {
         loop {
             let symbols = self.globals().len();
             let mut at = symbols;
-            while at > 0 && !self.marked_destructed {
+            while at > 0 && !self.shutdown_walk_ended {
                 at -= 1;
                 let alone = self.globals().get(at).is_some_and(|(_, symbol)| {
                     let value = match symbol {
@@ -11317,7 +11745,7 @@ impl Request {
                     self.release_symbol(symbol);
                 }
             }
-            if symbols == self.globals().len() || self.marked_destructed {
+            if symbols == self.globals().len() || self.shutdown_walk_ended {
                 break;
             }
         }
@@ -12680,21 +13108,32 @@ impl Request {
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        self.pending.is_some() || self.unwinding()
+        self.raised.is_some() || self.bailout
+    }
+
+    /// What stands in php's slot, a view, no owner taken.
+    pub(crate) fn raised(&self) -> Option<Raised> {
+        self.raised
     }
 
     /// The pending throwable as a view, no owner taken: what `CATCH`
-    /// tests its class against and what the unwinder chains onto.
+    /// tests its class against and what the unwinder chains onto. None
+    /// while an exit stands.
     pub(crate) fn pending(&self) -> Option<PhpObject> {
-        self.pending
+        match self.raised {
+            Some(Raised::Throwable(object)) => Some(object),
+            _ => None,
+        }
     }
 
     /// The pending throwable out, the slot left empty and its one owner
     /// the caller's: php's `EG(exception) = NULL` beside the object it
-    /// took, which is what a matching `CATCH` and an unwind into a
-    /// `finally` block do with it.
+    /// took, which is what a matching `CATCH` does with it. An exit
+    /// standing is left where it stands.
     pub(crate) fn take_pending(&mut self) -> Option<PhpObject> {
-        self.pending.take()
+        let object = self.pending()?;
+        self.raised = None;
+        Some(object)
     }
 
     fn ini_number(&self, name: &[u8], default: i32) -> i32 {
@@ -13098,7 +13537,7 @@ impl Request {
     /// array's frame, and none where no user frame stands.
     fn callable_frame(&self) -> CallFrame {
         for link in self.chain() {
-            let Link::Frame(_, _, state) = link else {
+            let Link::Frame(_, state) = link else {
                 continue;
             };
             let scope = self
@@ -13445,6 +13884,43 @@ impl Request {
             }
         }
         Ok(())
+    }
+
+    /// `zend_std_get_method`'s lookup (`Z/Zend/zend_object_handlers.c:1945`):
+    /// the method `class` has under the lowered name, but where the
+    /// executed scope is a class `class` descends from that declares a
+    /// private method of that name itself, that one, which the one found
+    /// overrides (`ZEND_ACC_CHANGED`, `zend_get_parent_private_method`):
+    /// a private method is its class's, whatever a child redeclares.
+    ///
+    /// ```php
+    /// class M { private function f() { return "M"; } function g() { return $this->f(); } }
+    /// class P extends M { private function f() { return "P"; } }
+    /// echo (new P)->g(), "\n";
+    /// ```
+    /// ```expect
+    /// M
+    /// ```
+    pub(crate) fn std_method(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
+        let found = self.method_named(class, lowered)?;
+        let Some(scope) = self.executed_scope() else {
+            return Some(found);
+        };
+        if self.method_class(found) == Some(scope)
+            || scope == class
+            || !self.instance_of(class, scope)
+        {
+            return Some(found);
+        }
+        match self.method_named(scope, lowered) {
+            Some(own)
+                if self.method_class(own) == Some(scope)
+                    && self.method_visibility(own) == Visibility::Private =>
+            {
+                Some(own)
+            }
+            _ => Some(found),
+        }
     }
 
     /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`) with
@@ -14916,13 +15392,14 @@ impl Request {
             // php's `resolved_path = zend_string_copy(inc_filename)` for a
             // path it could not resolve, which a stream wrapper opens.
             Ok(path) => return self.include_stream(kind, written, &path),
+            Err(Unresolved::Threw(thrown)) => return Err(thrown),
             Err(_) if is_wrapper_url(written) => {
                 if kind.once() && self.included_files.iter().any(|p| p == written) {
                     return Ok(Opened::Already);
                 }
                 return self.include_stream(kind, written, written);
             }
-            Err(reason) => {
+            Err(Unresolved::Missing(reason)) => {
                 self.open_stream_failed(kind, written, &reason);
                 return self.failed_opening(kind, written);
             }
@@ -15148,9 +15625,21 @@ impl Request {
     /// holds an include to when it opens; php reports a directory with
     /// whatever `errno` the failed open left, and this engine as a file
     /// that is not there. The `Err` is the last attempt's reason, which
-    /// the stream warning prints.
-    pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-        let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
+    /// the stream warning prints, or the throwable a wrapper's
+    /// `url_stat` raised, which ends the walk with nothing reported
+    /// (`if (EG(exception)) return NULL`).
+    ///
+    /// ```php
+    /// class W { public $context; function url_stat($path, $flags) { throw new Exception("stat failed"); } }
+    /// stream_wrapper_register("test", "W");
+    /// set_include_path("test://foo");
+    /// try { include "missing.php"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// stat failed
+    /// ```
+    pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, Unresolved> {
+        let not_found = || Unresolved::Missing(std::io::Error::from(std::io::ErrorKind::NotFound));
         let for_include = crate::streams::OpenOptions {
             for_include: true,
             report: false,
@@ -15158,14 +15647,16 @@ impl Request {
         };
         if scheme_length(written).is_some() {
             return match self.locate_for(written, for_include) {
-                (crate::streams::Located::Plain, local) => self.realpath_file(&local),
+                (crate::streams::Located::Plain, local) => {
+                    self.realpath_file(&local).map_err(Unresolved::Missing)
+                }
                 _ => Err(not_found()),
             };
         }
         let include_path = self.ini_get(b"include_path").unwrap_or_default().to_vec();
         let dot_relative = written.starts_with(b"./") || written.starts_with(b"../");
         if dot_relative || written.starts_with(b"/") || include_path.is_empty() {
-            return self.realpath_file(written);
+            return self.realpath_file(written).map_err(Unresolved::Missing);
         }
         let mut last = not_found();
         let mut entries: Vec<Vec<u8>> = include_path_entries(&include_path);
@@ -15184,19 +15675,21 @@ impl Request {
                     (crate::streams::Located::Nothing, _) => continue,
                     (crate::streams::Located::Plain, local) => match self.realpath_file(&local) {
                         Ok(path) => return Ok(path),
-                        Err(reason) => last = reason,
+                        Err(reason) => last = Unresolved::Missing(reason),
                     },
-                    _ => {
-                        if matches!(self.url_stat_quiet(&candidate, false), Ok(Some(_))) {
-                            return Ok(candidate);
+                    _ => match self.url_stat_quiet(&candidate, false) {
+                        Ok(Some(_)) => return Ok(candidate),
+                        Err(thrown) if thrown.exception().is_some() => {
+                            return Err(Unresolved::Threw(thrown));
                         }
-                    }
+                        Ok(None) | Err(_) => {}
+                    },
                 }
                 continue;
             }
             match self.realpath_file(&candidate) {
                 Ok(path) => return Ok(path),
-                Err(reason) => last = reason,
+                Err(reason) => last = Unresolved::Missing(reason),
             }
         }
         Err(last)
@@ -15571,7 +16064,7 @@ impl Request {
         if self.exception_handler.is_none() {
             return;
         }
-        let Some(throwable) = self.pending.take() else {
+        let Some(throwable) = self.take_pending() else {
             return;
         };
         let handler = self.exception_handler.take();
@@ -15593,14 +16086,6 @@ impl Request {
         {
             self.exception_handler = top;
         }
-    }
-
-    /// Whether a user handler for throwables stands, which is what
-    /// decides whether a throwable the main op array did not catch is
-    /// rendered in its frame or handed to the handler once the frame is
-    /// left.
-    pub(crate) fn has_exception_handler(&self) -> bool {
-        self.exception_handler.is_some()
     }
 
     /// `assert_options(ASSERT_CALLBACK)` as it stands.
@@ -15695,7 +16180,7 @@ impl Request {
             })?;
         let value = match symbol {
             Ok(value) => value,
-            Err((frame, at)) => self.slot(frame, at),
+            Err((frame, at)) => self.attached(table, frame, at),
         };
         (value.tag() != TypeTag::Undef).then_some(value)
     }
@@ -15724,7 +16209,7 @@ impl Request {
         });
         match indirect {
             Some((frame, at)) => {
-                let previous = self.set_slot(frame, at, value);
+                let previous = self.set_attached(table, frame, at, value);
                 self.release(previous);
             }
             None => self.symbol_update(table, name.to_vec(), value),
@@ -15907,7 +16392,7 @@ impl Request {
             // resumer: a native that is a fiber's own callable was called
             // from the fiber's bottom frame, which is `zend_fiber_function`,
             // a native's, so it answers as a native caller below.
-            Some(Link::Frame(stack, place, state))
+            Some(Link::Frame(Slots::Stack(stack, place), state))
                 if std::ptr::eq(stack, &raw const self.stack) && state.function.is_some() =>
             {
                 let frame = FrameRef(u32::try_from(place).unwrap_or(u32::MAX));
@@ -15918,7 +16403,9 @@ impl Request {
                 arguments.extend(state.extra_args.iter().copied());
                 NativeCaller::Function(frame, arguments)
             }
-            Some(Link::Frame(stack, place, _)) if std::ptr::eq(stack, &raw const self.stack) => {
+            Some(Link::Frame(Slots::Stack(stack, place), _))
+                if std::ptr::eq(stack, &raw const self.stack) =>
+            {
                 NativeCaller::Code(FrameRef(u32::try_from(place).unwrap_or(u32::MAX)))
             }
             Some(Link::Frame(..) | Link::Call(_)) | None => NativeCaller::Native,
@@ -15975,7 +16462,7 @@ impl Request {
             let value = match symbol {
                 Symbol::Value(value) => value,
                 Symbol::Held(cell) => cell.get(),
-                Symbol::Indirect(frame, slot) => self.slot(frame, slot),
+                Symbol::Indirect(frame, slot) => self.attached(TableId::GLOBAL, frame, slot),
             };
             if value.tag() == TypeTag::Undef {
                 continue;
@@ -16007,7 +16494,7 @@ impl Request {
             let value = match symbol {
                 Symbol::Value(value) => value,
                 Symbol::Held(cell) => cell.get(),
-                Symbol::Indirect(frame, slot) => self.slot(frame, slot),
+                Symbol::Indirect(frame, slot) => self.attached(table, frame, slot),
             };
             if value.tag() == TypeTag::Undef {
                 continue;
@@ -16056,7 +16543,7 @@ impl Request {
     pub fn called_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, this, called) = match link {
-                Link::Frame(_, _, state) => (state.function, state.this, state.called_scope),
+                Link::Frame(_, state) => (state.function, state.this, state.called_scope),
                 Link::Call(call) => (Some(call.function), call.this, call.called_scope),
             };
             if let Some(this) = this {
@@ -16106,7 +16593,7 @@ impl Request {
     pub fn this_object(&self) -> Option<PhpObject> {
         for link in self.chain() {
             let (function, this) = match link {
-                Link::Frame(_, _, state) => (state.function, state.this),
+                Link::Frame(_, state) => (state.function, state.this),
                 Link::Call(call) => (Some(call.function), call.this),
             };
             if this.is_some() {
@@ -17944,20 +18431,7 @@ impl Request {
             return Ok(());
         }
         self.ticks_count = 0;
-        self.fibers_blocked(Request::serve_ticks)
-    }
-
-    /// `zend_fiber_switch_block()` before `f` and
-    /// `zend_fiber_switch_unblock()` after it: while `f` is under way no
-    /// fiber starts, suspends, resumes or is thrown into, each php's
-    /// `FiberError`, `Cannot switch fibers in current execution context`,
-    /// as a `ZEND_TICKS` round holds the functions it serves and
-    /// pcntl's `pcntl_signal_dispatch` its handlers.
-    pub fn fibers_blocked<R>(&mut self, f: impl FnOnce(&mut Request) -> R) -> R {
-        self.fibers.block_switch();
-        let done = f(self);
-        self.fibers.unblock_switch();
-        done
+        self.with_fiber_switch_blocked(Request::serve_ticks)
     }
 
     /// [`Request::tick`]'s round, while fiber switching is blocked.
@@ -18331,6 +18805,20 @@ impl Request {
     /// 8.5 counts them.
     pub fn gc_collect(&mut self) -> i64 {
         Heap::gc_collect_cycles(&mut Hooks(self))
+    }
+
+    /// One entry of the collector's destructor phase served
+    /// ([`Heap::gc_call_destructor`]), for the fiber the phase is served
+    /// in: the object whose destructor was served.
+    pub(crate) fn gc_call_destructor(&mut self, idx: u32) -> Option<PhpObject> {
+        Heap::gc_call_destructor(&mut Hooks(self), idx).map(PhpObject::of)
+    }
+
+    /// `gc_check_possible_root` over an object: a possible root again,
+    /// where its release left it owners.
+    pub(crate) fn gc_possible_root(&mut self, object: PhpObject) {
+        let zval = object.as_value().to_zval();
+        Heap::gc_check_possible_root(&mut Hooks(self), zval);
     }
 
     /// `gc_enable()` and `gc_disable()`: `zend.enable_gc` altered, whose
@@ -18969,11 +19457,32 @@ impl HeapHooks for Hooks<'_> {
 
     /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`:
     /// the class declares or inherits `__destruct`, or its handler
-    /// table serves a destructor of its own, which `Fiber`'s does.
+    /// table serves a destructor of its own, which `Fiber`'s and
+    /// `Generator`'s do. A generator the collector finds is destroyed
+    /// before it is freed, its `finally` blocks served, and it is freed
+    /// by the release of what held it, not counted among what the
+    /// collection freed.
+    ///
+    /// ```php
+    /// $a = new stdClass; $b = new stdClass; $a->b = $b; $b->a = $a;
+    /// $a->gen = (function () { yield 1; })();
+    /// unset($a, $b);
+    /// var_dump(gc_collect_cycles());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// ```
+    /// The destructor phase served in the collector's own fiber while
+    /// a fiber runs ([`crate::fiber::gc_destructors_in_fiber`]).
+    fn gc_destructors_in_fiber(&mut self, from: u32, end: u32) -> bool {
+        crate::fiber::gc_destructors_in_fiber(self.0, from, end)
+    }
+
     fn has_destructor(&mut self, obj: Obj) -> bool {
         let class = ClassId(obj.class());
         self.0.method_named(class, b"__destruct").is_some()
             || crate::fiber::serves_destructor(self.0.object_handlers(obj))
+            || crate::generator::is_generator(self.0, PhpObject::of(obj))
     }
 
     /// The live temporaries of every frame of the running execution,
@@ -19100,10 +19609,26 @@ impl HeapHooks for Hooks<'_> {
 /// destroyed, which is php's one `E_CORE_ERROR` and no call at all.
 #[derive(Clone, Copy)]
 enum Saved {
-    Nothing,
-    Throwable(PhpObject),
-    UnwindExit,
+    Raised(Option<Raised>),
     TheObject,
+}
+
+/// What stands in php's `EG(exception)`: a throwable, or one of the two
+/// exits php unwinds as objects of internal classes no `catch` names
+/// and `zend_exception_error` renders nothing for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Raised {
+    /// A throwable, whose one owner is the slot's.
+    Throwable(PhpObject),
+    /// `zend_ce_unwind_exit`, what `exit` throws: no `finally` block is
+    /// served for it, every throwable it meets is given up, and none
+    /// raised while it stands replaces it.
+    UnwindExit,
+    /// `zend_ce_graceful_exit`, what `zend_fiber_object_destroy` resumes
+    /// a suspended fiber with: the fiber's `finally` blocks are served
+    /// for it, a throwable one of them delayed is given up, and one
+    /// raised while it stands replaces it.
+    GracefulExit,
 }
 
 /// Where `display_errors` sends a diagnostic.
@@ -19650,12 +20175,12 @@ mod tests {
         let Ok(object) = request.new_object_of("Destructible") else {
             return;
         };
-        request.pending = Some(object);
+        request.raised = Some(super::Raised::Throwable(object));
 
         request.destruct(object);
 
         assert!(
-            request.pending.is_some(),
+            request.pending().is_some(),
             "the throwable is pending still, since nothing was served"
         );
         assert_eq!(

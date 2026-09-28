@@ -347,10 +347,11 @@ pub(crate) struct FastCall {
     /// `Z_OPLINE_NUM_P`: the `FAST_CALL` the block is to return past,
     /// and none where an unwind entered it, php's `(uint32_t)-1`.
     pub(crate) from: Option<u32>,
-    /// `Z_OBJ_P`: the throwable an unwind delayed while the block runs,
-    /// one owner held here until a `FAST_RET` makes it pending again, a
-    /// `DISCARD_EXCEPTION` gives it up, or the unwinder chains it.
-    pub(crate) delayed: Option<PhpObject>,
+    /// `Z_OBJ_P`: what an unwind delayed while the block runs, a
+    /// throwable with one owner held here or the graceful exit, until a
+    /// `FAST_RET` makes it pending again, a `DISCARD_EXCEPTION` gives it
+    /// up, or the unwinder chains it.
+    pub(crate) delayed: Option<crate::api::request::Raised>,
 }
 
 /// One slot of the runtime cache, the `void *` at `CACHE_ADDR(num)`,
@@ -492,6 +493,9 @@ pub(crate) enum CallStage {
 pub(crate) struct Vm {
     frames: Vec<FrameState>,
     calls: Vec<CallState>,
+    /// php's `execute_fake` placeholders that outlive the generator frame
+    /// they stood under, while what the frame held is released.
+    placeholders: Vec<Placeholder>,
     /// How many times a kernel has looked a name up among the linked
     /// functions or the linked classes, which is what a primed cache
     /// slot spares: the tests count it across two passes of one opline.
@@ -524,7 +528,40 @@ pub(crate) fn find_class(req: &mut Request, lowered: &[u8]) -> Option<ClassId> {
     req.class_named(lowered)
 }
 
+/// php's `execute_fake` placeholder standing where a generator's frame
+/// stood, the frame gone from the stack while `zend_generator_close`
+/// releases what it held, since `EG(current_execute_data)` is moved back
+/// to the placeholder and not past it: a backtrace a destructor takes
+/// still reads the generators the resumption came through
+/// ([`crate::generator::placeholder_frames`]). `frame` and `calls` are
+/// where on the stack the generator's frame stood.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Placeholder {
+    pub(crate) frame: usize,
+    pub(crate) calls: usize,
+    pub(crate) generator: PhpObject,
+}
+
 impl Vm {
+    /// The placeholders standing, the innermost last.
+    pub(crate) fn placeholders(&self) -> &[Placeholder] {
+        &self.placeholders
+    }
+
+    /// A placeholder where `generator`'s frame stood, the frame just
+    /// taken off the stack, until [`Vm::pop_placeholder`].
+    pub(crate) fn push_placeholder(&mut self, generator: PhpObject) {
+        self.placeholders.push(Placeholder {
+            frame: self.frames.len(),
+            calls: self.calls.len(),
+            generator,
+        });
+    }
+
+    pub(crate) fn pop_placeholder(&mut self) {
+        self.placeholders.pop();
+    }
+
     /// Push one frame's state; its place is the `FrameRef` the VM stack
     /// gave the frame, and the two are pushed and popped together. The
     /// slots are the stack's, every one `IS_UNDEF` until an opline
@@ -1426,11 +1463,26 @@ pub(crate) fn free_carried_value(req: &mut Request, frame: FrameRef, code: &OpAr
     req.release(garbage);
 }
 
-/// `cleanup_live_vars` (`Z/Zend/zend_execute.c`): every live range the
-/// unwind leaves, given up. A range is left when it is open at `op_num`
-/// and the opline being landed on is outside it; `catch_op` of zero is
-/// php's "landing nowhere", the walk out of the frame, where every open
-/// range is left.
+/// `cleanup_live_vars` (`Z/Zend/zend_execute.c:4893`): every live range
+/// the unwind leaves, given up. A range is left when it is open at
+/// `op_num` and the opline being landed on is at or past its end, but
+/// for the half of a loop variable's range an early return split off,
+/// whose loop the landing is still inside; `catch_op` of zero is php's
+/// "landing nowhere", the walk out of the frame, where every open range
+/// is left.
+///
+/// ```php
+/// class C { function ok() { throw new Exception; } }
+/// foreach ([new C, new C] as $c) {
+///     try { if ($c->ok()) { return; } } catch (Exception $e) { echo "caught\n"; }
+/// }
+/// echo "done\n";
+/// ```
+/// ```expect
+/// caught
+/// caught
+/// done
+/// ```
 ///
 /// php frees each kind by what it holds; every kind here is one value in
 /// one temporary, freed the same way, but `ZEND_LIVE_SILENCE`, which
@@ -1472,7 +1524,7 @@ pub(crate) fn cleanup_live_vars(
         if op_num >= range.end.0 {
             continue;
         }
-        if catch_op != 0 && catch_op >= range.start.0 && catch_op < range.end.0 {
+        if catch_op != 0 && (catch_op < range.end.0 || stays_in_split_loop(code, range, catch_op)) {
             continue;
         }
         let slot = temporary_slot(code, range.var);
@@ -1482,19 +1534,138 @@ pub(crate) fn cleanup_live_vars(
             crate::handlers::ForeachVar::iterator_del(req, held);
         }
         let garbage = req.take_slot(frame, slot);
-        match range.kind {
-            php_unit::LiveKind::Silence => restore_silenced(req, &garbage),
-            // `zend_object_store_ctor_failed`: the object whose
-            // constructor threw is marked as though its destructor had
-            // been served, so releasing it serves none.
-            php_unit::LiveKind::New => {
-                if let Some(object) = garbage.as_object() {
-                    object.heap().set_destructor_called(true);
-                }
+        release_live(req, range.kind, garbage);
+    }
+}
+
+/// What one live range held, given up as its kind says, for the
+/// unwinder and for a generator closed before it finished alike: the
+/// `error_reporting` a `BEGIN_SILENCE` saved put back, the object whose
+/// constructor never ran marked as `zend_object_store_ctor_failed`
+/// marks it, as though its destructor had been served, so releasing it
+/// serves none; and every kind released. A loop variable's iterator is
+/// the caller's to delete first, while the slot still holds it.
+///
+/// A generator destroyed while it waits inside the arguments of a `new`
+/// gives the object up with no destructor served, as an unwind would:
+///
+/// ```php
+/// class D { function __destruct() { echo "D::__destruct\n"; } }
+/// function g() { new D(yield); }
+/// $g = g(); $g->current(); unset($g); echo "done\n";
+/// ```
+/// ```expect
+/// done
+/// ```
+pub(crate) fn release_live(req: &mut Request, kind: php_unit::LiveKind, garbage: Value) {
+    match kind {
+        php_unit::LiveKind::Silence => restore_silenced(req, &garbage),
+        php_unit::LiveKind::New => {
+            if let Some(object) = garbage.as_object() {
+                object.heap().set_destructor_called(true);
             }
-            php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop | php_unit::LiveKind::Rope => {}
         }
-        req.release(garbage);
+        php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop | php_unit::LiveKind::Rope => {}
+    }
+    req.release(garbage);
+}
+
+/// `ZEND_FREE_ON_RETURN` (`Z/Zend/zend_compile.h:1104`): the bit on the
+/// `FREE` or `FE_FREE` a `return`, a `break` or a `continue` emits for a
+/// loop variable it leaves behind.
+const FREE_ON_RETURN: u32 = 1 << 0;
+
+/// The distance from a `FREE` or `FE_FREE` flagged `ZEND_FREE_ON_RETURN`
+/// to the loop's own last free, which `zend_calc_live_ranges` wrote into
+/// its `op2`; none for any other opline.
+pub(crate) fn loop_end_distance(op: &Opline) -> Option<u32> {
+    (matches!(op.opcode, php_unit::Opcode::Free | php_unit::Opcode::FeFree)
+        && op.extended_value & FREE_ON_RETURN != 0)
+        .then_some(op.op2)
+}
+
+/// `cleanup_live_vars`'s "split range for loop vars": a range that ends
+/// at an early return's free of its loop variable is only the half
+/// before the return, and a landing inside the loop's rest still needs
+/// the variable, so it is kept.
+fn stays_in_split_loop(code: &OpArray, range: &php_unit::LiveRange, catch_op: u32) -> bool {
+    opline_at(code, range.end.0)
+        .and_then(loop_end_distance)
+        .is_some_and(|to_end| catch_op < range.end.0.saturating_add(to_end))
+}
+
+/// `zend_unfinished_execution_gc_ex` (`Z/Zend/zend_execute.c:4658`):
+/// what one frame that is not running holds, named for the collector.
+/// The receiver and the closure its call released, the CVs, the extra
+/// arguments and the extra named ones, the calls it was building
+/// ([`unfinished_calls_gc`]), the temporaries and loop variables live
+/// where it stands, and what its symbol table holds beside the CVs
+/// attached to it. Every frame the collector reads is walked here, a
+/// suspended generator's and each frame of a suspended fiber alike.
+pub(crate) fn unfinished_execution_gc(
+    req: &Request,
+    slots: &php_heap::Frame,
+    state: &FrameState,
+    calls: &[CallState],
+    visit: &mut dyn FnMut(Value),
+) {
+    if let Some(this) = state.this {
+        visit(this.as_value());
+    }
+    if let Some(closure) = state.closure {
+        visit(closure.as_value());
+    }
+    let Some(code) = body_of(&state.unit, state.body) else {
+        return;
+    };
+    let slot = |at: u32| Value::of_zval(slots.slot(php_heap::Slot(at)));
+    for cv in 0..code.num_cvs {
+        visit(slot(cv));
+    }
+    for extra in &state.extra_args {
+        visit(*extra);
+    }
+    for (_, value) in &state.extra_named {
+        visit(*value);
+    }
+    unfinished_calls_gc(calls, visit);
+    if state.opline != 0 {
+        for range in &code.live_ranges {
+            if range.start.0 > state.opline {
+                break;
+            }
+            if state.opline < range.end.0
+                && matches!(
+                    range.kind,
+                    php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop
+                )
+            {
+                visit(slot(temporary_slot(code, range.var)));
+            }
+        }
+    }
+    if let Some(table) = state.symbol_table {
+        req.gc_symbol_table(table, visit);
+    }
+}
+
+/// `zend_unfinished_calls_gc`: the calls a frame was building,
+/// innermost first, each with the arguments it has placed, its
+/// receiver, its extra named arguments and its closure.
+pub(crate) fn unfinished_calls_gc(calls: &[CallState], visit: &mut dyn FnMut(Value)) {
+    for call in calls.iter().rev() {
+        for argument in &call.arguments {
+            visit(*argument);
+        }
+        if let Some(this) = call.this {
+            visit(this.as_value());
+        }
+        for (_, value) in &call.extra_named {
+            visit(*value);
+        }
+        if let Some(closure) = call.closure {
+            visit(closure.as_value());
+        }
     }
 }
 

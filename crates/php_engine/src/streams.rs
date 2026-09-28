@@ -3109,11 +3109,15 @@ impl Request {
         }
         let mut to_open = path.to_vec();
         let mut use_path = options.use_path;
-        if options.use_path
-            && let Ok(resolved) = self.resolve_path(path)
-        {
-            to_open = resolved;
-            use_path = false;
+        if options.use_path {
+            match self.resolve_path(path) {
+                Ok(resolved) => {
+                    to_open = resolved;
+                    use_path = false;
+                }
+                Err(crate::api::request::Unresolved::Threw(thrown)) => return Err(thrown),
+                Err(crate::api::request::Unresolved::Missing(_)) => {}
+            }
         }
         let (wrapper, path_to_open) = self.locate(&to_open, options);
         if options.use_url && !wrapper.is_url() {

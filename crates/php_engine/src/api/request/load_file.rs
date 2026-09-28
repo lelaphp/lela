@@ -24,8 +24,10 @@ impl Request {
         if written.contains(&0) {
             return Ok(false);
         }
-        let Ok(path) = self.resolve_path(written) else {
-            return Ok(false);
+        let path = match self.resolve_path(written) {
+            Ok(path) => path,
+            Err(super::Unresolved::Threw(thrown)) => return Err(thrown),
+            Err(super::Unresolved::Missing(_)) => return Ok(false),
         };
         if self.included_files.contains(&path) {
             return Ok(false);
@@ -45,7 +47,7 @@ impl Request {
         };
         crate::engine::note_compiled(self, &unit);
         if !self.declare_classes(&unit) || !self.declare_functions(&unit) {
-            return Err(Thrown::of(self.pending.take()));
+            return Err(Thrown::of(self.take_pending()));
         }
         self.serve_top_code(unit)?;
         Ok(true)
@@ -90,9 +92,9 @@ impl Request {
         served?;
         let returned = std::mem::replace(&mut self.returned, Value::null());
         self.release(returned);
-        match self.pending.take() {
+        match self.take_pending() {
             Some(pending) => Err(Thrown::of(Some(pending))),
-            None if self.unwinding() => Err(Thrown::of(None)),
+            None if self.is_pending() => Err(Thrown::of(None)),
             None => Ok(()),
         }
     }

@@ -106,7 +106,7 @@ impl Request {
         });
         match attached {
             Some((frame, at)) => {
-                let previous = self.set_slot(frame, at, value);
+                let previous = self.set_attached(table, frame, at, value);
                 self.release(previous);
             }
             None => self.symbol_update(table, name.to_vec(), value),

@@ -180,22 +180,28 @@ fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fat
     answered(req, flow, frame)
 }
 
-/// What a serving does with a throwable its entry frame did not catch:
-/// the outermost serving renders it as the uncaught fatal, where php's
-/// `zend_execute_scripts` calls `zend_exception_error`, and a serving
-/// another serving is inside leaves it pending for its caller to read,
-/// where php's `zend_call_function` returns with `EG(exception)` set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Unhandled {
-    Render,
-    Pending,
-}
-
 /// The dispatch loop over `frame` until the entry frame returns, asking
 /// `T` at the safepoints. `Ok(())` exactly when the entry frame has
-/// returned; `Err` carries the fatal.
+/// returned or left a throwable it did not catch pending; `Err` carries
+/// the fatal. The throwable is rendered by the caller once the frame is
+/// popped, as php's `zend_execute_scripts` calls `zend_exception_error`
+/// after `zend_execute` has returned, so what the rendering serves
+/// stands on no frame of the main op array's: a throwable its
+/// `__toString` raises names no active file.
+///
+/// ```php
+/// class E extends Exception { function __construct() { $this->message = new stdClass; } }
+/// throw new E;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Object of class stdClass could not be converted to string in [no active file]:0
+/// Stack trace:
+/// #0 [internal function]: Exception->__toString()
+/// #1 {main}
+///   thrown in [no active file] on line 0
+/// ```
 pub fn execute<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
-    serving::<T>(req, frame, Unhandled::Render)
+    serving::<T>(req, frame)
 }
 
 /// `zend_call_function` over a user function: the same loop on a frame
@@ -205,7 +211,7 @@ pub fn execute<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal>
 /// serving is over, not that the frame returned; the caller reads the
 /// pending slot, as php's caller reads `EG(exception)`.
 pub(crate) fn reenter<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
-    serving::<T>(req, frame, Unhandled::Pending)
+    serving::<T>(req, frame)
 }
 
 /// `zend_generator_resume`'s `zend_execute_ex(generator->execute_data)`
@@ -220,25 +226,24 @@ pub(crate) fn reenter<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(),
 pub(crate) fn resume<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
     let guard = req.stack_mut().push_entry(frame);
     if refused_at_entry(req) {
-        let outcome = unhandled_at_entry(req, Unhandled::Pending);
         req.stack_mut().pop_entry(guard);
-        return outcome;
+        return Ok(());
     }
     let first = if req.is_pending() {
         Stepped::Threw(frame)
     } else {
         Stepped::Same(frame)
     };
-    let outcome = serve_from::<T>(req, Unhandled::Pending, first);
+    let outcome = serve_from::<T>(req, first);
     req.stack_mut().pop_entry(guard);
     outcome
 }
 
 /// One serving: the entry slot pushed, the loop, the entry slot popped
 /// on the fatal path as on the normal one.
-fn serving<T: Tier>(req: &mut Request, frame: FrameRef, unhandled: Unhandled) -> Result<(), Fatal> {
+fn serving<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
     let guard = req.stack_mut().push_entry(frame);
-    let outcome = serve::<T>(req, frame, unhandled);
+    let outcome = serve::<T>(req, frame);
     req.stack_mut().pop_entry(guard);
     outcome
 }
@@ -246,16 +251,22 @@ fn serving<T: Tier>(req: &mut Request, frame: FrameRef, unhandled: Unhandled) ->
 /// The loop itself, with the entry slot standing. `execute` activates
 /// its own entry frame whatever the caller is, where php installs its
 /// own site (design §4.3 seam 8).
-fn serve<T: Tier>(req: &mut Request, entry: FrameRef, unhandled: Unhandled) -> Result<(), Fatal> {
+fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
     if interrupt::check(req)? {
-        return serve_from::<T>(req, unhandled, Stepped::Threw(entry));
+        return serve_from::<T>(req, Stepped::Threw(entry));
     }
+    // A throwable raised before any opline of the entry frame ran, where
+    // php clears `EG(opline_before_exception)` so that
+    // `ZEND_HANDLE_EXCEPTION` looks for no `try` element and frees
+    // nothing the frame's opline would have written: the serving is
+    // over with the throwable pending, as the unwinder leaves an entry
+    // frame it caught nothing in.
     if refused_at_entry(req) {
-        return unhandled_at_entry(req, unhandled);
+        return Ok(());
     }
     let flow = T::safepoint(req, entry, Site::Entry);
     let first = answered(req, flow, entry)?;
-    serve_from::<T>(req, unhandled, first)
+    serve_from::<T>(req, first)
 }
 
 /// `execute_ex`'s own check (`Z/Zend/zend_vm_execute.h:116244`), after
@@ -288,26 +299,8 @@ fn refused_at_entry(req: &mut Request) -> bool {
     }
 }
 
-/// A throwable raised before any opline of the entry frame ran, where
-/// php clears `EG(opline_before_exception)` so that
-/// `ZEND_HANDLE_EXCEPTION` looks for no `try` element and frees nothing
-/// the frame's opline would have written: the serving is over with the
-/// throwable pending, as the unwinder leaves an entry frame it caught
-/// nothing in.
-fn unhandled_at_entry(req: &mut Request, unhandled: Unhandled) -> Result<(), Fatal> {
-    match unhandled {
-        Unhandled::Render if req.has_exception_handler() => Ok(()),
-        Unhandled::Render => req.uncaught(),
-        Unhandled::Pending => Ok(()),
-    }
-}
-
 /// The loop from the edge its first step took.
-fn serve_from<T: Tier>(
-    req: &mut Request,
-    unhandled: Unhandled,
-    first: Stepped,
-) -> Result<(), Fatal> {
+fn serve_from<T: Tier>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
     let mut frame;
     let mut stepped = first;
     loop {
@@ -321,11 +314,10 @@ fn serve_from<T: Tier>(
             Stepped::Threw(at) => {
                 let unwound = unwind::<T>(req, at)?;
                 if unwound == Stepped::Threw(at) {
-                    // A user exception handler is served once the main
-                    // frame is left, as `zend_execute_scripts` serves it
-                    // after `zend_execute` returns, so the throwable
-                    // stays pending for `serve` to hand it over.
-                    return unhandled_at_entry(req, unhandled);
+                    // The entry frame caught nothing: the throwable stays
+                    // pending for the caller, the native that re-entered
+                    // the loop or `serve` once the main frame is popped.
+                    return Ok(());
                 }
                 stepped = unwound;
                 continue;

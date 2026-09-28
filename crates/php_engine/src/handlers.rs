@@ -61,7 +61,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::request::{Hold, Opened, Request};
+use crate::api::request::{Hold, Opened, Raised, Request};
 use crate::api::values::{
     ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
@@ -14109,7 +14109,19 @@ fn typed_step(
 /// `zend_post_incdec_overloaded_property` (`Z/Zend/zend_execute.c:2367`):
 /// `read_property` under `BP_VAR_R`, the step over a dereferenced copy
 /// of what it answered, the temporary written with the value before or
-/// after it, and `write_property` with the stepped value.
+/// after it, and `write_property` with the stepped value, or with the
+/// copy unchanged where the step was refused.
+///
+/// ```php
+/// $o = new class { public $bar; function __construct() { $this->bar = new stdClass; } function &__get($x) { return $this->bar; } };
+/// try { $o->foo++; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(isset($o->foo));
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property class@anonymous::$foo is deprecated in %s on line 3
+/// Cannot increment stdClass
+/// bool(true)
+/// ```
 fn overloaded_incdec(
     req: &mut Request,
     frame: FrameRef,
@@ -14131,12 +14143,13 @@ fn overloaded_incdec(
     let copy = held.deref();
     req.addref(&copy);
     req.release(held);
-    let stepped = match step.kernel()(req, &copy) {
-        Ok(stepped) => stepped,
+    // A step `increment_function` refuses leaves the copy as it was,
+    // and php writes it back all the same, the refusal standing.
+    let (stepped, refused) = match step.kernel()(req, &copy) {
+        Ok(stepped) => (stepped, None),
         Err(thrown) => {
-            req.release(copy);
-            write_out(req, frame, code, op, &Value::null());
-            return Err(thrown);
+            req.addref(&copy);
+            (copy, Some(thrown))
         }
     };
     write_out(
@@ -14151,7 +14164,20 @@ fn overloaded_incdec(
     // the stepped value's own and one more of the name.
     req.addref(&Value::string(name));
     let table = req.object_handlers(object.heap());
-    table.write_property(req, object, name, stepped)
+    let wrote = table.write_property(req, object, name, stepped);
+    match (refused, wrote) {
+        (None, wrote) => wrote,
+        (Some(refusal), Ok(())) => Err(refusal),
+        // What the write raised is thrown over the refusal, which
+        // becomes its previous as `zend_throw_exception_internal` makes it.
+        (Some(refusal), Err(raised)) => match (refusal.exception(), raised.exception()) {
+            (Some(&first), Some(&second)) => {
+                req.set_previous(second, first);
+                Err(raised)
+            }
+            _ => Err(raised),
+        },
+    }
 }
 
 /// `zobj->handlers->get_property_ptr_ptr` asked for its verdict alone
@@ -18934,12 +18960,14 @@ fn no_table(opcode: &str) -> Fatal {
 /// is one rule for both, because nothing is pending after a handler php
 /// gives the unchecked macro to, and the release a handler makes last
 /// is where a destructor is served (design §5.10), which is PHP code
-/// between this opline and the next.
+/// between this opline and the next. The frame stays at the opline that
+/// raised, php's `EG(opline_before_exception)`, for the unwinder to
+/// read which `try` element and live ranges it stands in.
 fn advance(req: &mut Request, frame: FrameRef) -> Stepped {
-    req.vm_mut().advance(frame);
     if req.is_pending() {
         return Stepped::Threw(frame);
     }
+    req.vm_mut().advance(frame);
     Stepped::Same(frame)
 }
 
@@ -18991,12 +19019,6 @@ fn put_argument(req: &mut Request, slot: ArgSlot, value: Value) -> Result<(), Fa
 /// slot on the `extended_value` of the last `CATCH` of a `try`, the one
 /// that rethrows rather than jumping to a clause after it.
 const LAST_CATCH: u32 = 1 << 0;
-
-/// `ZEND_FREE_ON_RETURN`: the bit on the `FREE` or `FE_FREE` a `return`,
-/// a `break` or a `continue` emits for a loop variable it leaves behind,
-/// which moves where a throwable those oplines raise is held to have
-/// been raised.
-const FREE_ON_RETURN: u32 = 1 << 0;
 
 /// `ZEND_THROW` (`Z/Zend/zend_vm_def.h:4777`): the operand made pending,
 /// `zend_throw_exception_object`, with one more owner for the pending
@@ -19134,7 +19156,7 @@ pub(crate) fn catch<T: Tier>(
 ) -> Edge {
     let pending = match req.pending() {
         Some(pending) => Some(pending),
-        None if req.unwinding() => None,
+        None if req.is_pending() => None,
         None => return jump_to(req, frame, op.op2),
     };
     let slot = Some(CacheSlot(op.extended_value & !LAST_CATCH));
@@ -19202,8 +19224,8 @@ pub(crate) fn fast_call<T: Tier>(
     // php's temporary is dead at every `FAST_CALL` and holds no object;
     // a cell this engine kept from an earlier pass is given up rather
     // than written over.
-    if let Some(object) = left {
-        req.release(object.as_value());
+    if let Some(left) = left {
+        req.release_raised(left);
     }
     jump_to(req, frame, op.op1)
 }
@@ -19238,8 +19260,8 @@ pub(crate) fn fast_ret<T: Tier>(
     if let Some(from) = from {
         return jump_to(req, frame, from.saturating_add(1));
     }
-    if let Some(object) = delayed {
-        req.leave_pending(&Thrown::of(Some(object)));
+    if let Some(delayed) = delayed {
+        req.raise_under(delayed);
     }
     let at = req.vm().opline(frame);
     let enclosing = (op.op2 != u32::MAX).then_some(op.op2);
@@ -19273,8 +19295,8 @@ pub(crate) fn discard_exception<T: Tier>(
     if let Some(from) = from {
         free_carried_value(req, frame, code, from);
     }
-    if let Some(object) = delayed {
-        req.release(object.as_value());
+    if let Some(delayed) = delayed {
+        req.release_raised(delayed);
     }
     Ok(advance(req, frame))
 }
@@ -19300,6 +19322,24 @@ pub(crate) fn discard_exception<T: Tier>(
 /// outer x
 /// f
 /// ```
+///
+/// A throwable a loop variable's destructor raises from the `FE_FREE`
+/// of a `return`, after the `finally` block the return called, is
+/// raised past the loop's `try`, whose `catch` never takes it:
+///
+/// ```php
+/// class A { public $x = 1; function __destruct() { throw new Exception("d"); } }
+/// function f() {
+///     foreach (new A as $a) {
+///         try { return $a; } catch (Exception $e) { echo "inner\n"; } finally { echo "finally\n"; }
+///     }
+/// }
+/// try { f(); } catch (Exception $e) { echo "outer ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// finally
+/// outer d
+/// ```
 pub(crate) fn handle_exception<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -19310,9 +19350,8 @@ pub(crate) fn handle_exception<T: Tier>(
     // A throwable a loop variable's destruction raised on the way out of
     // a `foreach` is held to have been raised at the last of the frees,
     // which is where the `try` element covering it is looked for.
-    if matches!(op.opcode, Opcode::Free | Opcode::FeFree) && op.extended_value & FREE_ON_RETURN != 0
-    {
-        let moved = op_num.saturating_add(op.op2);
+    if let Some(to_end) = exec::loop_end_distance(op) {
+        let moved = op_num.saturating_add(to_end);
         cleanup_live_vars(req, frame, code, op_num, moved);
         op_num = moved;
     }
@@ -19418,7 +19457,7 @@ fn unwind_from<T: Tier>(
                 )));
             };
             cleanup_live_vars(req, frame, code, op_num, element.finally_op.0);
-            let delayed = req.take_pending();
+            let delayed = req.take_raised();
             if let Some(cell) = req.vm_mut().fast_call(frame, var) {
                 cell.delayed = delayed;
                 cell.from = None;
@@ -19443,10 +19482,14 @@ fn unwind_from<T: Tier>(
                 .fast_call(frame, var)
                 .and_then(|cell| cell.delayed.take());
             if let Some(delayed) = delayed {
-                match req.pending() {
-                    Some(pending) => req.set_previous(pending, delayed),
-                    None if req.unwinding() => req.release(delayed.as_value()),
-                    None => req.leave_pending(&Thrown::of(Some(delayed))),
+                match (req.raised(), delayed) {
+                    (Some(Raised::Throwable(pending)), Raised::Throwable(delayed)) => {
+                        req.set_previous(pending, delayed);
+                    }
+                    (None, delayed) if !req.bailing_out() => req.set_raised(Some(delayed)),
+                    // Either exit, or a fatal, gives up what the block
+                    // delayed; a throwable gives up a delayed exit.
+                    (_, delayed) => req.release_raised(delayed),
                 }
             }
         }

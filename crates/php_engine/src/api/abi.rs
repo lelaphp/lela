@@ -1234,7 +1234,7 @@ pub trait ObjectHandlers: Send + Sync {
         object: PhpObject,
         lowered: &[u8],
     ) -> Result<Option<Function>, Thrown> {
-        Ok(req.method_named(object.class(), lowered))
+        Ok(req.std_method(object.class(), lowered))
     }
 
     /// The object a method `get_method` did not find is looked up on
