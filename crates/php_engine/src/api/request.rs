@@ -4711,10 +4711,10 @@ impl Request {
         limit: i64,
     ) -> Result<PhpArray, Thrown> {
         let chain: Vec<Link> = self.chain().collect();
-        let mut links = self.trace_rows(&chain);
-        if skip_last && !links.is_empty() {
-            links.remove(0);
-        }
+        // php steps past the native's own link before the walk, so no row
+        // of it is one a later row reads back.
+        let skipped = usize::from(skip_last).min(chain.len());
+        let mut links = self.trace_rows(&chain[skipped..]);
         if let Ok(limit) = usize::try_from(limit)
             && limit > 0
         {
@@ -5022,7 +5022,41 @@ impl Request {
     /// them; a native's are the call's, as they were placed. A call
     /// still being built is not on the chain, as php's is a chain of
     /// activations.
+    ///
+    /// A function served from outside the loop over a frame standing at
+    /// an include, an error handler the include's warning serves, is
+    /// followed by the include's own row, php's `fake_frame`:
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $msg) { debug_print_backtrace(); return true; });
+    /// function f() { include "nope.php"; }
+    /// f();
+    /// ```
+    /// ```expect
+    /// #0 %s(3): {closure:%s:2}(2, 'include(nope.ph...', '%s', 3)
+    /// #1 %s(3): include()
+    /// #2 %s(4): f()
+    /// #0 %s(3): {closure:%s:2}(2, 'include(): Fail...', '%s', 3)
+    /// #1 %s(3): include()
+    /// #2 %s(4): f()
+    /// ```
     fn trace_rows(&self, chain: &[Link<'_>]) -> Vec<TraceRow> {
+        // The include the link below `at` stands at, where it is a user
+        // frame at an `INCLUDE_OR_EVAL`.
+        let including = |at: usize| {
+            chain
+                .get(at.saturating_add(1))
+                .and_then(|below| match below {
+                    Link::Frame(_, below) => Some(below),
+                    Link::Call(_) => None,
+                })
+                .and_then(|below| {
+                    let code = exec::body_of(&below.unit, below.body)?;
+                    exec::opline_at(code, below.opline)
+                })
+                .filter(|op| op.opcode == Opcode::IncludeOrEval)
+                .and_then(|op| IncludeKind::of(op.extended_value))
+        };
         let mut rows = Vec::new();
         for at in 0..chain.len() {
             let site = match chain.get(at.saturating_add(1)) {
@@ -5038,19 +5072,7 @@ impl Request {
                         // main op array's frame, which no opline pushed,
                         // makes no row (`zend_trace_to_string` closes
                         // every trace with `{main}`).
-                        let Some(kind) = chain
-                            .get(at.saturating_add(1))
-                            .and_then(|below| match below {
-                                Link::Frame(_, below) => Some(below),
-                                Link::Call(_) => None,
-                            })
-                            .and_then(|below| {
-                                let code = exec::body_of(&below.unit, below.body)?;
-                                exec::opline_at(code, below.opline)
-                            })
-                            .filter(|op| op.opcode == Opcode::IncludeOrEval)
-                            .and_then(|op| IncludeKind::of(op.extended_value))
-                        else {
+                        let Some(kind) = including(at) else {
                             continue;
                         };
                         // `build_filename_arg`: an `eval` names no file.
@@ -5085,8 +5107,32 @@ impl Request {
                         self.closure_scope(state.closure),
                         arguments,
                         state.extra_named.clone(),
-                        site,
+                        site.clone(),
                     ));
+                    // `fake_frame`: a function served from outside the
+                    // loop, an error handler among them, over a frame
+                    // that stands at an include is followed by the
+                    // include's own row, whose argument is php's
+                    // `include_filename`, the site of the row before the
+                    // function's, and none where it is the first.
+                    if state.caller.is_none()
+                        && let Some(kind) = including(at)
+                    {
+                        let file = (kind != IncludeKind::Eval)
+                            .then(|| rows.iter().rev().nth(1))
+                            .flatten()
+                            .and_then(|row: &TraceRow| {
+                                row.5.as_ref().map(|(file, _)| file.clone())
+                            });
+                        rows.push((
+                            Traced::Include { kind, file },
+                            None,
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                            site,
+                        ));
+                    }
                 }
                 Link::Call(call) => {
                     rows.push((
