@@ -22,8 +22,12 @@ crosscheck::run
 divergence::Counts
 divergence::Counts::cell
 divergence::Divergence
+divergence::Divergence::ids
 divergence::FILE
 divergence::INSTRUMENT
+divergence::Id
+divergence::Id::as_str
+divergence::Id::of
 divergence::Kind
 divergence::Kind::ALL
 divergence::Kind::as_str
@@ -35,6 +39,7 @@ divergence::Registry::load
 divergence::Registry::parse
 divergence::Registry::propose
 divergence::Registry::row
+divergence::Registry::rows
 divergence::Registry::unreasoned
 divergence::Status
 divergence::Status::ALL

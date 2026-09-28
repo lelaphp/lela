@@ -53,6 +53,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use toml::Value;
 
+use crate::divergence::{self, Registry};
 use crate::reading::{Reading, Status};
 
 /// The instrument name every reading of steer carries.
@@ -121,6 +122,14 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
         .with_context(|| format!("reading the proposal at {}", proposal.display()))?;
     let verdict = judge(&tracked, &proposed)?;
     let mut reading = Reading::stamped_over(INSTRUMENT, file, root, Path::new(file))?;
+    if let Err(unread) = loads(file, &proposed) {
+        reading.status = Status::Fail;
+        reading.message = format!(
+            "{file}: the proposal would not load, so every instrument that reads the file would \
+             stop: {unread:#}. Nothing was written."
+        );
+        return Ok(reading);
+    }
     match &verdict {
         Verdict::Refused(changed) => {
             reading.status = Status::Fail;
@@ -156,6 +165,18 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
         }
     }
     Ok(reading)
+}
+
+/// Whether the proposal loads as the file it would replace, where the
+/// harness reads that file through a grammar of its own beside TOML: the
+/// registry, whose rows decode their ids, so a `covers` list on a new row
+/// is held to its kind and to one row per id as part of the addition
+/// (harness-design.md §4.3, revision 62).
+fn loads(file: &str, proposed: &str) -> Result<()> {
+    if file == divergence::FILE {
+        Registry::parse(proposed)?;
+    }
+    Ok(())
 }
 
 /// The walk of the tracked file against the proposal: what was added,
@@ -365,6 +386,26 @@ mod tests {
         assert_eq!(
             verdict(old, &exempted),
             Verdict::Additive(vec!["rule[witness.exit-authored].exempt".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_new_row_with_covers_is_one_addition_and_a_grown_covers_is_not() {
+        // A covering row is one reason (revision 62): the ids it covers are
+        // part of the row the proposal adds, and a list the file already
+        // carries is a value, so one id more is a change to what binds.
+        let old = "[[divergence]]\nid = \"trace:x\"\nkind = \"trace\"\n";
+        let row = "[[divergence]]\nid = \"phpt:cause\"\nkind = \"phpt\"\n\
+                   covers = [\"phpt:a.phpt\", \"phpt:b.phpt\"]\n";
+        assert_eq!(
+            verdict(old, &format!("{old}{row}")),
+            Verdict::Additive(vec!["divergence[phpt:cause]".to_owned()])
+        );
+        let tracked = format!("{old}{row}");
+        let grown = tracked.replace("\"phpt:b.phpt\"]", "\"phpt:b.phpt\", \"phpt:c.phpt\"]");
+        assert_eq!(
+            verdict(&tracked, &grown),
+            Verdict::Refused(vec!["divergence[phpt:cause].covers".to_owned()])
         );
     }
 

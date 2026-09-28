@@ -379,6 +379,34 @@ fn the_same_missed_expectation_is_diverged_under_an_accepted_row() {
     assert!(tally.against().is_empty());
 }
 
+/// A test listed only in an accepted row's `covers` is diverged, as one
+/// that is the row's own id is, and the same subset without the row fails
+/// (harness §4.3, revision 62).
+#[test]
+fn a_missed_expectation_a_row_covers_is_diverged_and_fails_without_it() {
+    if oracle().is_none() {
+        return;
+    }
+    let (_tree, subset) = subset(
+        "covered",
+        &[(
+            "missed.phpt",
+            "--TEST--\nA wrong expectation\n--FILE--\n<?php echo \"four\";\n--EXPECT--\nfive\n",
+        )],
+    );
+    let covering = registry(
+        "[[divergence]]\nid = \"phpt:fixture-cause\"\nkind = \"phpt\"\nreason = \"One reason a person wrote for every test it covers.\"\nstatus = \"accepted\"\nsince = \"2026-09-28\"\ncovers = [\"phpt:php-src/ext/fixture/tests/missed.phpt\"]\n",
+    );
+    let tally = run(&subset, &covering);
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Diverged, "{tally:#?}");
+    assert!(note.contains("One reason a person wrote"), "{note}");
+
+    let tally = run(&subset, &registry(""));
+    let (judgement, _) = only(&tally);
+    assert_eq!(judgement, Judgement::Fail, "{tally:#?}");
+}
+
 /// A program the compiler refused with its own parse error, the one
 /// `Parse error` line ending in `this compiler cannot read yet`, is
 /// unread and the construct is the note; the `PHP ` prefix `log_errors`

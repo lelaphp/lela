@@ -605,9 +605,9 @@ fn locks(
     Ok(())
 }
 
-/// Condition 4: no `open` row touches a changed scope. A row the diff
-/// itself proposes, one the base's registry does not have, touches it by
-/// definition.
+/// Condition 4: no `open` row touches a changed scope, through its own id
+/// or any id it covers. A row the diff itself proposes, one the base's
+/// registry does not have, touches it by definition.
 fn open_rows(
     root: &Path,
     base: &str,
@@ -616,37 +616,38 @@ fn open_rows(
     changed: &[Change],
     unmet: &mut Vec<String>,
 ) -> Result<()> {
-    let proposed_here: Vec<String> = if changed.iter().any(|c| c.path == divergence::FILE) {
+    let proposed_here: Vec<divergence::Id> = if changed.iter().any(|c| c.path == divergence::FILE) {
         let before = git::show(root, base, divergence::FILE)?
             .map(|text| Registry::parse(&text))
             .transpose()
             .with_context(|| format!("{}:{}", base, divergence::FILE))?
             .unwrap_or_default();
         registry
-            .rows
+            .rows()
             .iter()
-            .filter(|r| before.row(&r.id).is_none())
+            .filter(|r| before.row(r.id.as_str()).is_none())
             .map(|r| r.id.clone())
             .collect()
     } else {
         Vec::new()
     };
     for row in registry
-        .rows
+        .rows()
         .iter()
         .filter(|r| r.status == divergence::Status::Open)
     {
+        let any_id_names = |part: &str| row.ids().any(|id| names(id.as_str(), part));
         let touched = if proposed_here.contains(&row.id) {
             Some(format!("{}, proposed in this diff", divergence::FILE))
         } else {
             crates
                 .iter()
-                .find(|c| names(&row.id, &c.name))
+                .find(|c| any_id_names(&c.name))
                 .map(|c| c.name.clone())
                 .or_else(|| {
                     changed
                         .iter()
-                        .find(|c| names(&row.id, &c.path))
+                        .find(|c| any_id_names(&c.path))
                         .map(|c| c.path.clone())
                 })
         };

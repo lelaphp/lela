@@ -22,6 +22,9 @@ fn scratch(name: &str, pin: &str) -> Tree {
 /// The same, for a workspace whose steerable file is another of the three.
 fn scratch_at(name: &str, file: &str, body: &str) -> Tree {
     let dir = Tree::new(&format!("steer-{name}")).expect("the scratch workspace");
+    if let Some(parent) = dir.join(file).parent() {
+        fs::create_dir_all(parent).expect("the tracked file's directory");
+    }
     fs::write(dir.join(file), body).expect("the tracked file");
     let who = ["-c", "user.name=x", "-c", "user.email=x@x"];
     for args in [
@@ -196,6 +199,77 @@ fn every_negative_control_is_refused_at_the_path_it_moved_and_writes_nothing() {
             fs::read_to_string(root.join("seams.toml")).expect("the manifest"),
             tracked,
             "{name}: a refused proposal writes nothing"
+        );
+    }
+}
+
+/// A covering row (harness-design.md §4.3, revision 62) proposed beside the
+/// tracked registry: one reason for three tests of its kind.
+const COVERING: &str = "\n[[divergence]]\nid = \"phpt:fixture-cause\"\nkind = \"phpt\"\n\
+reason = \"One reason (fixture).\"\nstatus = \"accepted\"\nsince = \"2026-09-28\"\n\
+covers = [\"phpt:php-src/ext/fixture/tests/a.phpt\", \"phpt:php-src/ext/fixture/tests/b.phpt\", \
+\"phpt:php-src/ext/fixture/tests/c.phpt\"]\n";
+
+#[test]
+fn a_new_row_with_covers_is_one_addition_to_the_registry() {
+    let tracked = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(xtask::divergence::FILE),
+    )
+    .expect("the tracked registry");
+    let root = scratch_at("covers", xtask::divergence::FILE, &tracked);
+    let proposal = root.join("proposed.toml");
+    fs::write(&proposal, format!("{tracked}{COVERING}")).expect("the proposal");
+
+    let reading =
+        steer::run(&root, xtask::divergence::FILE, &proposal, true).expect("the instrument runs");
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.numbers["added"], 1.into(), "{}", reading.message);
+    assert!(
+        reading.message.contains("divergence[phpt:fixture-cause]"),
+        "the row is the addition, its covers inside it: {}",
+        reading.message
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(xtask::divergence::FILE)).expect("the registry"),
+        tracked,
+        "a dry run writes nothing"
+    );
+
+    // What the registry would refuse at load, steer refuses at the write:
+    // a covered id without its kind's prefix or of another kind, and one
+    // another row holds.
+    let unprefixed = COVERING.replace(
+        "\"phpt:php-src/ext/fixture/tests/b.phpt\"",
+        "\"php-src/ext/fixture/tests/b.phpt\"",
+    );
+    let other_kind = COVERING.replace(
+        "\"phpt:php-src/ext/fixture/tests/c.phpt\"",
+        "\"trace:nested-entry-return\"",
+    );
+    let doubled = COVERING.replace(
+        "\"phpt:php-src/ext/fixture/tests/c.phpt\"",
+        "\"phpt:php-src/ext/opcache/tests/gh9164.phpt\"",
+    );
+    for (row, named) in [
+        (unprefixed.as_str(), "whose ids start with \"phpt:\""),
+        (other_kind.as_str(), "trace:nested-entry-return"),
+        (doubled.as_str(), "two rows"),
+    ] {
+        fs::write(&proposal, format!("{tracked}{row}")).expect("the proposal");
+        let reading = steer::run(&root, xtask::divergence::FILE, &proposal, false)
+            .expect("the instrument runs");
+        assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+        assert!(
+            reading.message.contains(named) && reading.message.contains("Nothing was written"),
+            "{named}: {}",
+            reading.message
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(xtask::divergence::FILE)).expect("the registry"),
+            tracked,
+            "a refused proposal writes nothing"
         );
     }
 }
