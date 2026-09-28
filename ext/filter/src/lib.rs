@@ -51,7 +51,8 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, docref, new_throwable, throw, throw_value,
+    Level, Thrown, arg_type_error, arg_value_error, call_stack_end, docref, new_throwable, throw,
+    throw_value,
 };
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
@@ -648,6 +649,7 @@ fn filter_in_place(
     if array.is_recursive() {
         return Ok(());
     }
+    call_stack_end(req)?;
     array.protect();
     let walked = filter_elements(req, array, filter, run);
     array.unprotect();

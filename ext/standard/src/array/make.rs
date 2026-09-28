@@ -6,7 +6,7 @@
 use php_ext::abi::{Passed, Raw, Ref, True, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{numeric_string, to_array};
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, call_stack_end, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 use php_ext_random::Rng;
@@ -157,6 +157,7 @@ fn array_merge_recursive(
 
 /// `php_array_merge_recursive`: `src`'s elements into `dest`.
 fn merge_recursive(req: &mut Request, dest: &mut PhpArray, src: PhpArray) -> Result<(), Thrown> {
+    call_stack_end(req)?;
     for (key, src_entry) in src.snapshot_refs() {
         let Key::Str(_) = key else {
             let value = copied(req, src_entry);
@@ -324,6 +325,7 @@ fn replace_flat(req: &mut Request, dest: &mut PhpArray, src: PhpArray) -> Result
 
 /// `php_array_replace_recursive`: `src` written over `dest`.
 fn replace_recursive(req: &mut Request, dest: &mut PhpArray, src: PhpArray) -> Result<(), Thrown> {
+    call_stack_end(req)?;
     for (key, src_entry) in src.snapshot_refs() {
         let src_value = src_entry.deref();
         let dest_array = dest

@@ -165,7 +165,7 @@ pub fn extension() -> Extension {
 ///   }
 /// }
 /// ```
-#[php_class(interface)]
+#[php_class(interface, use_guards)]
 pub(crate) struct JsonSerializable;
 
 #[php_class]

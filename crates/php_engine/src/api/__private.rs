@@ -177,7 +177,7 @@ pub fn case_of<E: Cases>(req: &mut Request, value: &Value) -> Result<E, Thrown> 
     let class = linked::<E>(req)?;
     for (name, variant) in E::CASES {
         let case = req.class_constant(class, name)?;
-        if crate::api::coerce::identical(&case, value) {
+        if case == value.deref() {
             return Ok(*variant);
         }
     }

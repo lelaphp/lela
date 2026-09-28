@@ -12,7 +12,7 @@ use php_ext::abi::{Callable, Passed, Raw, Ref, True, Variadic};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
-use php_ext::raising::{Thrown, arg_type_error, throw};
+use php_ext::raising::{Thrown, arg_type_error, call_stack_end, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, Value, ValueRef};
 
@@ -339,6 +339,7 @@ fn visit(
     recursive: bool,
 ) -> Result<(), Thrown> {
     if recursive && reference.get().as_array().is_some() {
+        call_stack_end(req)?;
         let Some(nested) = reference.separate_array(req)? else {
             return Ok(());
         };

@@ -241,14 +241,33 @@ pub fn call_stack_limit(req: &mut Request) -> Result<(), Thrown> {
     if !stack.overflowed() {
         return Ok(());
     }
-    let size = stack.max_stack_size();
-    Err(throw(
+    Err(call_stack_size_error(req, stack.max_stack_size()))
+}
+
+/// The same `Error` at the thread's floor rather than its limit
+/// (`php_compile::StackLimit::exhausted`): what a walk asks at each
+/// level where php asks no limit of it. The walk is refused one reserve
+/// short of the thread's end, with the size it had, so a nesting php
+/// takes whole under a small `zend.max_allowed_stack_size` is taken
+/// whole here too, as the small-stack witness beside `compare_arrays`
+/// in the kernels shows.
+pub fn call_stack_end(req: &mut Request) -> Result<(), Thrown> {
+    let stack = req.stack_limit();
+    if !stack.exhausted() {
+        return Ok(());
+    }
+    Err(call_stack_size_error(req, stack.floor_size()))
+}
+
+/// `zend_call_stack_size_error`: php's sentence over `size`.
+fn call_stack_size_error(req: &mut Request, size: usize) -> Thrown {
+    throw(
         req,
         "Error",
         &format!(
             "Maximum call stack size of {size} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?"
         ),
-    ))
+    )
 }
 
 /// `E_ERROR`: `php_error_cb` renders it where the request stands and the

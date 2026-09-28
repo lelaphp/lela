@@ -15,9 +15,9 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
-use php_ext::raising::{Level, Thrown, docref, throw, warning};
+use php_ext::raising::{Level, Thrown, call_stack_end, docref, throw, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpString, Value};
+use php_ext::values::{Key, PhpString, RecursionGuard, Value};
 
 pub(crate) mod debug;
 pub(crate) mod serialize;
@@ -673,6 +673,20 @@ fn print_r(
 /// which is why the marker lands on the next line with one space before
 /// it. Without the guard a value that holds itself is unbounded
 /// recursion, which is a panic reaching a request (design §10).
+///
+/// php asks no stack limit here, so a nest deeper than a small
+/// `zend.max_allowed_stack_size` is printed whole, and this walk is
+/// held to the thread's floor instead
+/// ([`php_ext::raising::call_stack_end`]), which the small-stack
+/// regime's 256K does not move.
+///
+/// ```php
+/// $a = []; for ($i = 0; $i < 600; $i++) { $a = [$a]; }
+/// echo strlen(print_r($a, true)), "\n";
+/// ```
+/// ```expect regime=small-stack
+/// 4335610
+/// ```
 pub(super) fn render(
     req: &mut Request,
     out: &mut Vec<u8>,
@@ -682,6 +696,9 @@ pub(super) fn render(
     // `case IS_REFERENCE`: php renders what the cell holds, at this
     // level and with no mark of its own.
     let value = value.deref();
+    // php asks no stack limit here and runs to the thread's end; this
+    // walk is held to the floor short of it.
+    call_stack_end(req)?;
     if let Some(array) = value.as_array() {
         out.extend_from_slice(b"Array\n");
         // `GC_IS_RECURSIVE` and `GC_PROTECT_RECURSION`, which php takes
@@ -718,7 +735,7 @@ pub(super) fn render(
         } else {
             out.extend_from_slice(b" Object\n");
         }
-        if object.is_recursive() {
+        if object.is_recursive_in(req, RecursionGuard::Debug) {
             out.extend_from_slice(b" *RECURSION*");
             return Ok(());
         }
@@ -732,9 +749,9 @@ pub(super) fn render(
             Some(own) => own.snapshot(),
             None => object.props_for(req, PropertyPurpose::Debug)?,
         };
-        object.protect();
+        object.protect_in(req, RecursionGuard::Debug);
         let rendered = hash(req, out, &rows, indent, true);
-        object.unprotect();
+        object.unprotect_in(req, RecursionGuard::Debug);
         if let Some(own) = own {
             req.release(Value::array(own));
         }
@@ -949,6 +966,8 @@ fn var_export(
 /// walk with `NULL` and the warning, which is what keeps the source it
 /// writes evaluable.
 fn export(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Result<(), Thrown> {
+    // Unguarded in php, held to the thread's floor here.
+    call_stack_end(req)?;
     let value = value.deref();
     if let Some(b) = value.as_bool() {
         out.extend_from_slice(if b { b"true" } else { b"false" });
@@ -1021,15 +1040,15 @@ fn export_object(
     object: php_ext::values::PhpObject,
     level: usize,
 ) -> Result<(), Thrown> {
-    if object.is_recursive() {
+    if object.is_recursive_in(req, RecursionGuard::Export) {
         out.extend_from_slice(b"NULL");
         circular(req);
         return Ok(());
     }
-    object.protect();
+    object.protect_in(req, RecursionGuard::Export);
     let rows = object.props_for(req, PropertyPurpose::VarExport);
     let Some(decl) = req.class_decl(object.class()) else {
-        object.unprotect();
+        object.unprotect_in(req, RecursionGuard::Export);
         return Ok(());
     };
     let (name, is_enum) = (decl.name.0.to_vec(), matches!(decl.kind, ClassKind::Enum));
@@ -1077,7 +1096,7 @@ fn export_object(
             out.extend_from_slice(b",\n");
         }
     }
-    object.unprotect();
+    object.unprotect_in(req, RecursionGuard::Export);
     written?;
     if level > 1 && !is_enum {
         out.extend(std::iter::repeat_n(b' ', level - 1));

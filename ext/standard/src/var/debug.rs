@@ -7,9 +7,9 @@
 use php_ext::abi::{PropertyPurpose, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format};
-use php_ext::raising::Thrown;
+use php_ext::raising::{Thrown, call_stack_end};
 use php_ext::request::Request;
-use php_ext::values::{Key, Laziness, Value, ValueRef};
+use php_ext::values::{Key, Laziness, RecursionGuard, Value, ValueRef};
 
 use super::class_name;
 
@@ -144,6 +144,8 @@ fn pad(out: &mut Vec<u8>, level: usize) {
 // One arm per type, as php's switch has them.
 #[allow(clippy::too_many_lines)]
 fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Result<(), Thrown> {
+    // Unguarded in php, held to the thread's floor here.
+    call_stack_end(req)?;
     pad(out, level);
     match value.as_ref() {
         ValueRef::Bool(false) => out.extend_from_slice(b"bool(false)\n"),
@@ -203,11 +205,11 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
             out.extend_from_slice(b"}\n");
         }
         ValueRef::Object(object) => {
-            if object.is_recursive() {
+            if object.is_recursive_in(req, RecursionGuard::Debug) {
                 out.extend_from_slice(b"*RECURSION*\n");
                 return Ok(());
             }
-            object.protect();
+            object.protect_in(req, RecursionGuard::Debug);
             // Held from here to the closing brace, as php holds the
             // table from `zend_get_properties_for` to
             // `zend_release_properties`, so the refcount printed counts
@@ -215,7 +217,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
             let held = match object.props_held(req, PropertyPurpose::Debug) {
                 Ok(held) => held,
                 Err(thrown) => {
-                    object.unprotect();
+                    object.unprotect_in(req, RecursionGuard::Debug);
                     return Err(thrown);
                 }
             };
@@ -284,7 +286,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                 }
             }
             held.release(req);
-            object.unprotect();
+            object.unprotect_in(req, RecursionGuard::Debug);
             dumped?;
             pad(out, level);
             out.extend_from_slice(b"}\n");

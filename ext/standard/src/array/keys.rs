@@ -33,7 +33,7 @@ fn matches(
 ) -> Result<bool, Thrown> {
     let element = element.deref();
     if strict {
-        return Ok(identical(needle, &element));
+        return identical(req, needle, &element);
     }
     loose_eq(req, needle, &element)
 }
@@ -68,6 +68,20 @@ fn search(
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// ```
+///
+/// `===` follows a reference inside an element as the operator does,
+/// and walks an array that holds itself under php's protection, whose
+/// `Error` ends the search.
+///
+/// ```php
+/// $x = 1; $a = [&$a];
+/// var_dump(in_array([1], [[&$x]], true));
+/// try { in_array($a, [[[]]], true); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// Nesting level too deep - recursive dependency?
 /// ```
 ///
 /// The declarations Reflection is asked for most.

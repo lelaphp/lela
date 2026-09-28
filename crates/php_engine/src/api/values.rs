@@ -1320,6 +1320,50 @@ impl PhpObject {
         self.0.unprotect();
     }
 
+    /// `ZEND_GUARD_OR_GC_IS_RECURSIVE(guard, walk, zobj)`: whether
+    /// `walk` is already inside this object. An object whose class
+    /// uses guards, one with `__get`, `__set`, `__isset`, `__unset` or
+    /// `__debugInfo`, or a `JsonSerializable`, answers for `walk` alone,
+    /// so `var_export()` inside a `var_dump()` of it is not a cycle;
+    /// any other answers [`PhpObject::is_recursive`], the one
+    /// `GC_PROTECTED` bit every walk shares.
+    ///
+    /// ```php
+    /// class D { public $a = 1; public function __debugInfo(): array { return ['e' => var_export($this, true)]; } }
+    /// var_dump(new D);
+    /// class P { public $p; }
+    /// $p = new P; $p->p = $p;
+    /// print_r($p); echo "\n";
+    /// ```
+    /// ```expect
+    /// object(D)#1 (1) {
+    ///   ["e"]=>
+    ///   string(38) "\D::__set_state(array(
+    ///    'a' => 1,
+    /// ))"
+    /// }
+    /// P Object
+    /// (
+    ///     [p] => P Object
+    ///  *RECURSION*
+    /// )
+    /// ```
+    #[must_use]
+    pub fn is_recursive_in(&self, req: &Request, walk: RecursionGuard) -> bool {
+        req.recursion_guarded(*self, walk)
+    }
+
+    /// `ZEND_GUARD_OR_GC_PROTECT_RECURSION`: `walk` is inside, on the
+    /// guard [`PhpObject::is_recursive_in`] reads.
+    pub fn protect_in(&self, req: &mut Request, walk: RecursionGuard) {
+        req.recursion_protect(*self, walk);
+    }
+
+    /// `ZEND_GUARD_OR_GC_UNPROTECT_RECURSION`: `walk` is out.
+    pub fn unprotect_in(&self, req: &mut Request, walk: RecursionGuard) {
+        req.recursion_unprotect(*self, walk);
+    }
+
     /// `GC_ADD_FLAGS(obj, IS_OBJ_DESTRUCTOR_CALLED)`: the object is
     /// taken as destructed, so its `__destruct()` never runs, which is
     /// what `unserialize()` does to an object whose `__wakeup()` or
@@ -1645,6 +1689,20 @@ impl std::fmt::Debug for Resource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self.0)
     }
+}
+
+/// Which walk an object's recursion guard is held for, php's
+/// `ZEND_GUARD_RECURSION_*` (`Z/Zend/zend_types.h:659-661`): each keeps
+/// its own mark on an object whose class uses guards
+/// ([`PhpObject::is_recursive_in`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecursionGuard {
+    /// `var_dump()`, `print_r()` and `debug_zval_dump()`.
+    Debug,
+    /// `var_export()`.
+    Export,
+    /// `json_encode()` around a `jsonSerialize()` call.
+    Json,
 }
 
 /// A borrowed view of a value by type, for matching.

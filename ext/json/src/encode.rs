@@ -17,7 +17,7 @@ use php_ext::coerce::{Exponent, float_format, numeric_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpObject, Value, ValueRef};
+use php_ext::values::{ClassId, Key, PhpObject, RecursionGuard, Value, ValueRef};
 
 use crate::constants::{
     JSON_ERROR_DEPTH, JSON_ERROR_INF_OR_NAN, JSON_ERROR_NON_BACKED_ENUM, JSON_ERROR_NONE,
@@ -28,9 +28,10 @@ use crate::constants::{
     JSON_UNESCAPED_SLASHES, JSON_UNESCAPED_UNICODE,
 };
 
-/// `php_json_encoder` beside the two recursion guards php keeps on the
-/// values themselves: this engine's face over an object has no bit to
-/// set, so the walk carries the store entries it is inside.
+/// `php_json_encoder`. The recursion guards are on the values
+/// themselves, as php keeps them: an array's and an object's
+/// `GC_PROTECTED`, and a `JsonSerializable`'s `JSON` guard, which a
+/// `json_encode()` called from its own `jsonSerialize()` sees too.
 pub(super) struct Encoder {
     /// `encoder->depth`.
     depth: i64,
@@ -40,11 +41,6 @@ pub(super) struct Encoder {
     pub(super) error_code: i64,
     /// `serialize_precision`, read once as php reads `PG()`.
     precision: i32,
-    /// `GC_PROTECT_RECURSION` over the object being written out.
-    inside: Vec<u32>,
-    /// `ZEND_GUARD_PROTECT_RECURSION(guard, JSON)` over the object
-    /// whose `jsonSerialize` is being served.
-    serializing: Vec<u32>,
     /// `php_json_serializable_ce`, looked up once.
     serializable: Option<ClassId>,
 }
@@ -57,8 +53,6 @@ impl Encoder {
             max_depth,
             error_code: JSON_ERROR_NONE,
             precision: serialize_precision(req),
-            inside: Vec::new(),
-            serializing: Vec::new(),
             serializable: call::lookup_class(req, b"JsonSerializable")?,
         })
     }
@@ -350,7 +344,23 @@ fn illegal_run(s: &[u8], at: usize, width: usize) -> usize {
 
 /// `php_json_encode_serializable_object`: `jsonSerialize` served on the
 /// object, its answer written out, and `$this` from it taken straight
-/// to the array arm so the method is not served again.
+/// to the array arm so the method is not served again. The object's
+/// `JSON` guard is held while the method runs, so a `json_encode()` of
+/// it from inside is the recursion error, a second call's as much as
+/// this one's.
+///
+/// ```php
+/// class S implements JsonSerializable {
+///     public $a = 1;
+///     public function jsonSerialize(): mixed { var_dump(json_encode($this), json_last_error_msg()); return $this; }
+/// }
+/// var_dump(json_encode(new S));
+/// ```
+/// ```expect
+/// bool(false)
+/// string(18) "Recursion detected"
+/// string(7) "{"a":1}"
+/// ```
 fn serializable(
     req: &mut Request,
     buf: &mut Vec<u8>,
@@ -358,35 +368,34 @@ fn serializable(
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
-    let index = object.index();
-    if enc.serializing.contains(&index) {
+    if object.is_recursive_in(req, RecursionGuard::Json) {
         enc.error_code = JSON_ERROR_RECURSION;
         if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
             buf.extend_from_slice(b"null");
         }
         return Ok(false);
     }
-    enc.serializing.push(index);
+    object.protect_in(req, RecursionGuard::Json);
     let served = call::call_method(req, &object, b"jsonSerialize", &[]);
     let answer = match served {
         Ok(answer) => answer,
         Err(thrown) => {
-            enc.serializing.pop();
+            object.unprotect_in(req, RecursionGuard::Json);
             if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
                 buf.extend_from_slice(b"null");
             }
             return Err(thrown);
         }
     };
-    let itself = answer.as_object().is_some_and(|o| o.index() == index);
+    let itself = answer.as_object().is_some_and(|o| *o == object);
     if itself {
-        enc.serializing.pop();
+        object.unprotect_in(req, RecursionGuard::Json);
     }
     let wrote = if itself {
         held(req, buf, &answer, options, enc)
     } else {
         let wrote = encode(req, buf, &answer, options, enc);
-        enc.serializing.pop();
+        object.unprotect_in(req, RecursionGuard::Json);
         wrote
     };
     req.release(answer);
@@ -454,6 +463,32 @@ fn rows(req: &mut Request, value: &Value) -> Result<Vec<(Key, Value)>, Thrown> {
 
 /// `php_json_encode_array`: the brackets, the rows between them, the
 /// recursion guard around the walk and the depth read after it.
+///
+/// Before any of it, `php_json_check_stack_limit`: a nesting that has
+/// come down to the thread's stack limit is `JSON_ERROR_DEPTH`, `null`
+/// in its place under `JSON_PARTIAL_OUTPUT_ON_ERROR`, whatever depth
+/// the caller allowed. Under the small-stack regime a chain of
+/// objects and a nest of arrays both reach the ini's 256K in both
+/// engines.
+///
+/// ```php
+/// class Node { public $next; }
+/// $first = $node = new Node;
+/// for ($i = 0; $i < 25000; $i++) { $node->next = new Node; $node = $node->next; }
+/// var_dump(json_encode($first, 0, 500000), json_last_error(), json_last_error_msg());
+/// while ($next = $first->next) { $first->next = $next->next; }
+/// $a = []; for ($i = 0; $i < 25000; $i++) { $a = [$a]; }
+/// $partial = json_encode($a, JSON_PARTIAL_OUTPUT_ON_ERROR, 500000);
+/// var_dump(json_encode($a, 0, 500000), json_last_error_msg(), str_contains($partial, '[null]'));
+/// ```
+/// ```expect regime=small-stack
+/// bool(false)
+/// int(1)
+/// string(28) "Maximum stack depth exceeded"
+/// bool(false)
+/// string(28) "Maximum stack depth exceeded"
+/// bool(true)
+/// ```
 fn encode_array(
     req: &mut Request,
     buf: &mut Vec<u8>,
@@ -461,6 +496,13 @@ fn encode_array(
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
+    if req.stack_overflowed() {
+        enc.error_code = JSON_ERROR_DEPTH;
+        if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
+            buf.extend_from_slice(b"null");
+        }
+        return Ok(false);
+    }
     let array = value.as_array().copied();
     let object = value.as_object().copied();
     let mut as_object = options & JSON_FORCE_OBJECT != 0;
@@ -475,19 +517,19 @@ fn encode_array(
     }
     if let Some(object) = object {
         as_object = true;
-        if enc.inside.contains(&object.index()) {
+        if object.is_recursive() {
             enc.error_code = JSON_ERROR_RECURSION;
             buf.extend_from_slice(b"null");
             return Ok(false);
         }
-        enc.inside.push(object.index());
+        object.protect();
     }
     let wrote = write_rows(req, buf, value, options, enc, as_object);
     if let Some(array) = array {
         array.unprotect();
     }
-    if object.is_some() {
-        enc.inside.pop();
+    if let Some(object) = object {
+        object.unprotect();
     }
     wrote
 }

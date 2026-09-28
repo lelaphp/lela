@@ -289,7 +289,10 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
             }
         };
         let held = case.prop(req, b"value").unwrap_or_default();
-        if crate::api::coerce::identical(&held, &wanted) {
+        // A backing value is an int or a string, the key php's
+        // `backed_enum_table` finds it by, so two are the same where
+        // the values are equal.
+        if held == wanted {
             req.release(wanted);
             return Ok(case.as_value());
         }

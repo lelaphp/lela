@@ -151,6 +151,16 @@ pub struct ClassFlags {
     /// ```
     pub not_serializable: bool,
     pub dynamic_properties: DynamicProperties,
+    /// `ZEND_ACC_USE_GUARDS` as an interface hands it on: every class
+    /// that implements the interface keeps its objects' recursion guards
+    /// one bit per walk (`ZEND_GUARD_RECURSION_DEBUG`, `_EXPORT`,
+    /// `_JSON`) rather than in the one `GC_PROTECTED` bit, which is what
+    /// ext/json's `interface_gets_implemented` hook does for
+    /// `JsonSerializable`. A class's own `__get`, `__set`, `__isset`,
+    /// `__unset` or `__debugInfo` does the same without this, as
+    /// `zend_add_magic_method` sets the bit; the engine asks those by
+    /// name.
+    pub use_guards: bool,
 }
 
 /// What a class does with a write to a name it did not declare, php's
