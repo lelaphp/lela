@@ -686,6 +686,43 @@ impl ArrayIter {
     }
 }
 
+/// php's `HashTableIterator`, one slot of `EG(ht_iterators)`: a bucket
+/// position registered at a table, which every write that moves the
+/// buckets moves with them (`zend_hash_iterators_update` in a rehash
+/// and in the packed-to-hash conversion, `zend_hash_iterators_clamp_max`
+/// in a delete), and which `zend_array_dup` copies onto the table a
+/// write separates. What a walk that outlives one call keeps, php's
+/// `spl_array_object::ht_iter`; given up with [`HashIterator::release`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HashIterator(u32);
+
+impl HashIterator {
+    /// `zend_hash_iterator_add`: an iterator over `array` at the bucket
+    /// `position`.
+    #[must_use]
+    pub fn new(req: &mut Request, array: &PhpArray, position: u32) -> HashIterator {
+        HashIterator(req.heap_mut().iterator_add(array.0, position))
+    }
+
+    /// `zend_hash_iterator_pos`: the bucket the iterator stands at in
+    /// `array`, moved onto it at the copy's position where `array` is a
+    /// separated copy of the table it walked, and at its internal
+    /// pointer where it is another table altogether.
+    pub fn position(self, req: &mut Request, array: &PhpArray) -> u32 {
+        req.heap_mut().iterator_pos(self.0, array.0)
+    }
+
+    /// `EG(ht_iterators)[idx].pos = position`.
+    pub fn set_position(self, req: &mut Request, position: u32) {
+        req.heap_mut().iterator_set_pos(self.0, position);
+    }
+
+    /// `zend_hash_iterator_del`: the slot given back.
+    pub fn release(self, req: &mut Request) {
+        req.heap_mut().iterator_del(self.0);
+    }
+}
+
 impl IntoIterator for &PhpArray {
     type Item = (Key, Value);
     type IntoIter = ArrayIter;

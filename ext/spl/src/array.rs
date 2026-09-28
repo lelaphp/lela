@@ -7,7 +7,9 @@
 //! `ArrayIterator` it reads through (`SPL_ARRAY_USE_OTHER`, which is
 //! what `getIterator()` hands out), or an object whose properties it
 //! reads and writes. Each object keeps its own position in the table,
-//! php's `ht_iter`, as the bucket it stands at. A dimension read,
+//! php's `ht_iter`, a hash iterator registered at the array it walks
+//! ([`Position`]), so a write that moves the buckets moves it too. A
+//! dimension read,
 //! write, `isset` and `unset` goes to the class's `offsetGet`,
 //! `offsetSet`, `offsetExists` and `offsetUnset` where a user class
 //! overrides them (`fptr_offset_*`), and to the table otherwise; under
@@ -27,7 +29,9 @@ use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{Level, Thrown, deprecated, throw, warning};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{
+    ClassId, HashIterator, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
+};
 
 use crate::{
     ArrayAccess, Countable, Iterator, IteratorAggregate, RecursiveIterator, SeekableIterator,
@@ -48,7 +52,7 @@ pub(crate) struct SplArrayObject {
     /// `ar_flags` less `SPL_ARRAY_IS_SELF` and `SPL_ARRAY_USE_OTHER`,
     /// which the storage is.
     flags: i64,
-    pos: u32,
+    position: Position,
     iterator_class: Option<ClassId>,
     sorting: u32,
 }
@@ -74,6 +78,21 @@ enum Storage {
     /// `SPL_ARRAY_IS_SELF`: this object's own property table, no owner
     /// taken.
     OwnProps,
+}
+
+/// Where the object's walk stands, php's `ht_iter`.
+#[derive(Default, Clone, Copy)]
+enum Position {
+    /// `(uint32_t)-1`: no walk has read it yet, or the storage was
+    /// replaced under it; the first read lays one down at the first
+    /// element (`spl_array_create_ht_iter`).
+    #[default]
+    Unset,
+    /// A hash iterator registered at the array the object reads, which
+    /// the array's writes move.
+    Hash(HashIterator),
+    /// The row of a property table the walk stands at.
+    Row(u32),
 }
 
 impl Storage {
@@ -939,7 +958,7 @@ impl ArrayIterator {
     /// `ArrayIterator::rewind(): void`.
     #[php(tentative)]
     fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
-        with(req, this.object(), |p| p.pos = 0)
+        set_position(req, this.object(), 0)
     }
 
     /// `ArrayIterator::current(): mixed`, `null` past the end.
@@ -964,7 +983,29 @@ impl ArrayIterator {
         })
     }
 
-    /// `ArrayIterator::next(): void`.
+    /// `ArrayIterator::next(): void`. The position is a hash iterator
+    /// on the storage, so a write that turns it from packed into a hash,
+    /// or deletes and a rehash, leave it on the element it stood at.
+    ///
+    /// ```php
+    /// $a = new ArrayIterator([1 => 1, 3 => 3, 5 => 5]);
+    /// $a->rewind(); $a->next(); echo $a->key(), "\n";
+    /// $a['x'] = 'x'; echo $a->key(), "\n"; $a->next(); echo $a->key(), "\n";
+    /// $b = new ArrayIterator([]); $b->rewind(); $b[] = 1; var_dump($b->valid());
+    /// $o = new ArrayObject(range(0, 9)); $it = $o->getIterator();
+    /// for ($i = 0; $i < 7; $i++) { $it->next(); }
+    /// for ($i = 0; $i < 6; $i++) { unset($o[$i]); }
+    /// for ($i = 0; $i < 8; $i++) { $o[] = $i; }
+    /// var_dump($it->key(), $it->current());
+    /// ```
+    /// ```expect
+    /// 3
+    /// 3
+    /// 5
+    /// bool(true)
+    /// int(7)
+    /// int(7)
+    /// ```
     #[php(tentative)]
     fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         step(req, this.object())?;
@@ -993,7 +1034,7 @@ impl ArrayIterator {
         let this = this.object();
         let position = offset;
         if position >= 0 {
-            with(req, this, |p| p.pos = 0)?;
+            set_position(req, this, 0)?;
             let mut ok = true;
             for _ in 0..position {
                 if !step(req, this)? {
@@ -1624,6 +1665,7 @@ fn as_props(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<bool, T
 
 impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let _ = forget_position(req, object);
         let held = object
             .native_mut::<SplArrayObject>(req)
             .and_then(|p| std::mem::take(&mut p.storage).held());
@@ -2021,9 +2063,9 @@ fn set_array(
     };
     let old = with(req, object, |p| {
         p.flags |= flags;
-        p.pos = 0;
         std::mem::replace(&mut p.storage, storage)
     })?;
+    forget_position(req, object)?;
     if let Some(old) = old.held() {
         req.release(old);
     }
@@ -2238,13 +2280,67 @@ fn is_array_iterator(req: &mut Request, class: ClassId) -> bool {
     lookup_class(req, b"ArrayIterator").ok().flatten() == Some(class)
 }
 
+/// `spl_array_get_pos_ptr`: the table the object reads and the position
+/// it stands at there, laid down at the first element where the object
+/// has none (`spl_array_create_ht_iter`). An array a hash iterator is
+/// registered at is the object's alone first, as php's storage is from
+/// `spl_array_set_array`'s `zend_array_dup` on, so the writes that move
+/// its buckets are the ones through this object and move the iterator.
+fn position(req: &mut Request, object: PhpObject) -> Result<(Table, u32), Thrown> {
+    let table = table(req, object)?;
+    let held = payload(req, object)?.position;
+    match (table, held) {
+        (Table::Array(_, array), Position::Hash(iterator)) => {
+            Ok((table, iterator.position(req, &array)))
+        }
+        (Table::Props(_), Position::Row(row)) => Ok((table, row)),
+        (Table::Array(owner, mut array), _) => {
+            forget_position(req, object)?;
+            array.separate(req)?;
+            store(req, owner, array)?;
+            let iterator = HashIterator::new(req, &array, 0);
+            with(req, object, |p| p.position = Position::Hash(iterator))?;
+            Ok((Table::Array(owner, array), 0))
+        }
+        (Table::Props(_), _) => {
+            forget_position(req, object)?;
+            with(req, object, |p| p.position = Position::Row(0))?;
+            Ok((table, 0))
+        }
+    }
+}
+
+/// `*spl_array_get_pos_ptr(...) = at`.
+fn set_position(req: &mut Request, object: PhpObject, at: u32) -> Result<(), Thrown> {
+    match position(req, object)?.0 {
+        Table::Array(..) => {
+            if let Position::Hash(iterator) = payload(req, object)?.position {
+                iterator.set_position(req, at);
+            }
+        }
+        Table::Props(_) => with(req, object, |p| p.position = Position::Row(at))?,
+    }
+    Ok(())
+}
+
+/// `zend_hash_iterator_del(intern->ht_iter)`, `ht_iter = -1`: the
+/// position given up, where the storage is replaced or the object freed.
+fn forget_position(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    let held = with(req, object, |p| std::mem::take(&mut p.position))?;
+    if let Position::Hash(iterator) = held {
+        iterator.release(req);
+    }
+    Ok(())
+}
+
 /// The element at this object's position, with the bucket it stands at.
 fn here(req: &mut Request, object: PhpObject) -> Result<Option<(u32, Key, Value)>, Thrown> {
-    let pos = payload(req, object)?.pos;
-    let table = table(req, object)?;
+    let (table, pos) = position(req, object)?;
     let found = table.at(req, pos)?;
-    if let Some((at, _, _)) = found {
-        with(req, object, |p| p.pos = at)?;
+    if let Some((at, _, _)) = found
+        && at != pos
+    {
+        set_position(req, object, at)?;
     }
     Ok(found)
 }
@@ -2253,7 +2349,7 @@ fn here(req: &mut Request, object: PhpObject) -> Result<Option<(u32, Key, Value)
 fn step(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     match here(req, object)? {
         Some((at, _, _)) => {
-            with(req, object, |p| p.pos = at.saturating_add(1))?;
+            set_position(req, object, at.saturating_add(1))?;
             Ok(here(req, object)?.is_some())
         }
         None => Ok(false),

@@ -638,6 +638,11 @@ values::ArrayIter::key
 values::ArrayIter::value
 values::ClassId
 values::ClosureInfo
+values::HashIterator
+values::HashIterator::new
+values::HashIterator::position
+values::HashIterator::release
+values::HashIterator::set_position
 values::Key
 values::Key::from_string
 values::Key::to_prop_name
