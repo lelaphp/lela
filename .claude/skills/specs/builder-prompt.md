@@ -16,9 +16,9 @@ Validate in the build skill's four tiers (#663 holds them until the skill does).
 
 Commit each piece as soon as it's done: sessions restart, and committed work survives them.
 
-Wait on a background command through its completion notice, or on a file it writes. `until ! pgrep -f <text>` matches the loop's own command line and never ends.
+Run a command you will wait on in the foreground with timeout set on the call, up to 45 minutes; background only what you will not wait on.
 
-The disk is tight: work in this one worktree and its one target/.
+The disk is might be tight: work in this one worktree and its one target/.
 
 The face: add a `php_ext` api item only where the face can't serve, general and typed, with its api.lock line in the same commit, never a narrow `Request` method for one native (#696). Hold every crate under its line ceiling; work that would cross one stops there and the crossing is filed `for-a-person`.
 
