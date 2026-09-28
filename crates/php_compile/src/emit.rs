@@ -92,6 +92,7 @@
 //! after it, as `zend_compile_array` emits them.
 
 use std::cmp::Ordering;
+use std::num::NonZeroI64;
 
 use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
 use php_syntax::{Holder, Parsed, SyntaxKind, TokenValue};
@@ -447,6 +448,13 @@ pub(crate) struct Emit<'a> {
     /// `eval` and an `include` compile under, is
     /// [`Options::strict_types`].
     typing: Typing,
+    /// `FC(declarables).ticks`: the count `declare(ticks=N)` set, none
+    /// where no declaration stands or it declared zero. A file-level
+    /// fact, which a function's body compiled inside the scope takes and
+    /// [`Emit::begin_body`] does not save; a `declare` with a statement
+    /// after its `)` puts back what stood before it once the statement
+    /// is compiled.
+    ticks: Option<NonZeroI64>,
     /// The thread's stack limit, [`Options::stack`], held to where the
     /// emitter recurses.
     stack: StackLimit,
@@ -1176,6 +1184,7 @@ pub(crate) fn unit(
         in_jmp_frameless_branch: false,
         statements_seen: 0,
         typing: Typing::of(options.strict_types),
+        ticks: None,
         stack: options.stack,
         oplines: Vec::new(),
         short_circuits: Vec::new(),
@@ -1580,7 +1589,7 @@ impl Emit<'_> {
     /// at the node's line in the one-line `cannot read yet` shape the
     /// phpt lane counts as unread.
     #[allow(clippy::too_many_lines)]
-    fn statement(&mut self, stmt: Stmt) -> Result<(), CompileError> {
+    pub(super) fn statement(&mut self, stmt: Stmt) -> Result<(), CompileError> {
         let tree = &self.parsed.tree;
         match stmt {
             Stmt::EmptyStmt(_) => return Ok(()),
@@ -1606,6 +1615,11 @@ impl Emit<'_> {
                     ..Opline::default()
                 });
             }
+            // php's parser makes `echo a, b;`, `unset($a, $b);`,
+            // `global $a, $b;` and `static $a, $b;` a `ZEND_AST_STMT_LIST`
+            // of one statement per element, each compiled by
+            // `zend_compile_stmt` and so each ticked where a
+            // `declare(ticks)` scope stands ([`Self::tick`]).
             Stmt::EchoStmt(id) => {
                 for part in &tree[id].exprs {
                     let value = self.expr(*part)?;
@@ -1616,6 +1630,7 @@ impl Emit<'_> {
                         op1,
                         ..Opline::default()
                     });
+                    self.tick();
                 }
             }
             Stmt::ExprStmt(id) => {
@@ -1670,12 +1685,14 @@ impl Emit<'_> {
             Stmt::UnsetStmt(id) => {
                 for target in &tree[id].targets {
                     self.unset(*target)?;
+                    self.tick();
                 }
             }
             Stmt::IfStmt(id) => self.r#if(id)?,
             Stmt::GlobalStmt(id) => {
                 for var in tree[id].vars.clone() {
                     self.global_var(var)?;
+                    self.tick();
                 }
             }
             Stmt::StaticVarStmt(id) => self.static_var(id)?,
@@ -3419,6 +3436,7 @@ impl Emit<'_> {
                     extended_value: slot | BIND_REF,
                     ..Opline::default()
                 });
+                self.tick();
                 continue;
             };
             let jump = self.push(Opline {
@@ -3440,6 +3458,7 @@ impl Emit<'_> {
                 ..Opline::default()
             });
             self.update_jump_target_to_next(jump);
+            self.tick();
         }
         Ok(())
     }
@@ -4047,6 +4066,9 @@ impl Emit<'_> {
                 }
                 Short::Assign(value) => self.assign_backing_value(value)?,
             }
+            // The one statement php's walk makes of the body, compiled
+            // by `zend_compile_stmt` as any other.
+            self.tick();
             self.depth = self.depth.saturating_sub(1);
         }
         self.line = function.end_line;
@@ -7311,10 +7333,10 @@ impl Emit<'_> {
     /// A 1 sets [`Emit::typing`] to [`Typing::Strict`], which every op
     /// array of the file then carries.
     ///
-    /// `ticks` a count of zero is the declarable php's compiler ignores
-    /// and is taken as php takes it; a count php would emit a
-    /// `ZEND_TICKS` after every statement for is refused, since no
-    /// opcode here serves one. `encoding` is refused for the scanner's
+    /// `ticks` is the count [`Emit::tick`] emits `ZEND_TICKS` with after
+    /// every statement in its scope, the value read as `zval_get_long`
+    /// reads it and zero turning the ticks off, and the scope the rest of
+    /// the file or the statement after the `)`. `encoding` is refused for the scanner's
     /// own warning, which this compiler does not raise. Every other
     /// name is php's `E_COMPILE_WARNING`, and the file compiles on.
     fn declare(&mut self, id: NodeId<tree::DeclareStmt>) -> Result<(), CompileError> {
@@ -7323,10 +7345,11 @@ impl Emit<'_> {
             return Err(self.unread("a `declare` in the alternative syntax"));
         }
         let body = node.body.filter(|body| !matches!(body, Stmt::EmptyStmt(_)));
+        let before = self.ticks;
         for directive in &node.declare_directives {
             let directive = &self.parsed.tree[*directive];
             self.line = directive.line();
-            let Some(value) = directive.value else {
+            let Some(written_value) = directive.value else {
                 return Err(self.unread("a `declare` directive"));
             };
             let written = self.text(directive.name);
@@ -7334,7 +7357,7 @@ impl Emit<'_> {
             // `(*value_ast_ptr)->kind != ZEND_AST_ZVAL`: the value is one
             // token the scanner made a zval of, so `-1`, `true` and
             // `1 + 0` are each the fatal and not a fold.
-            let Some(value) = self.literal_of(value) else {
+            let Some(value) = self.literal_of(written_value) else {
                 return Err(self.compile_error(format!("declare({name}) value must be a literal")));
             };
             if written.eq_ignore_ascii_case(b"strict_types") {
@@ -7358,11 +7381,12 @@ impl Emit<'_> {
                     }
                 }
             } else if written.eq_ignore_ascii_case(b"ticks") {
-                if !matches!(value, Literal::Int(0)) {
-                    return Err(
-                        self.fatal("a `declare(ticks)` of a count this compiler cannot read yet")
-                    );
-                }
+                // `zend_const_expr_to_zval` and `zval_get_long`.
+                let count = match value {
+                    Literal::Int(n) => n,
+                    Literal::Other => self.constant_of(written_value)?.map_or(0, long_of),
+                };
+                self.ticks = NonZeroI64::new(count);
             } else if written.eq_ignore_ascii_case(b"encoding") {
                 return Err(self.fatal("a `declare(encoding)` this compiler cannot read yet"));
             } else {
@@ -7378,6 +7402,7 @@ impl Emit<'_> {
         // statement at its own line, as a body's is.
         if let Some(body) = body {
             self.statements(&[body])?;
+            self.ticks = before;
         }
         Ok(())
     }
@@ -7536,10 +7561,76 @@ impl Emit<'_> {
                 continue;
             }
             self.line = stmt.line(self.parsed);
-            self.statement(*stmt)?;
+            self.stmt(*stmt)?;
         }
         self.depth = self.depth.saturating_sub(1);
         Ok(())
+    }
+
+    /// `zend_compile_stmt` (`Z/Zend/zend_compile.c:11685`): the
+    /// statement, then a `ZEND_TICKS` where a `declare(ticks)` scope
+    /// stands and the statement is none of `zend_is_unticked_stmt`'s, a
+    /// block or a label here (the class members it also names are no
+    /// statements of this walk).
+    pub(super) fn stmt(&mut self, stmt: Stmt) -> Result<(), CompileError> {
+        self.statement(stmt)?;
+        if !matches!(stmt, Stmt::Block(_) | Stmt::LabelStmt(_)) {
+            self.tick();
+        }
+        Ok(())
+    }
+
+    /// `zend_emit_tick`: `ZEND_TICKS` with the count in
+    /// `extended_value`, where a `declare(ticks)` scope stands and the
+    /// op array's last opline is not already one, which is what keeps
+    /// `declare(ticks=1) { … }` from ticking twice at its end.
+    ///
+    /// ```php
+    /// declare(ticks=1);
+    /// register_tick_function(function () { echo "."; });
+    /// echo "a";
+    /// if (true) { echo "b"; echo "c"; }
+    /// function f() { echo "f"; return 1; }
+    /// f();
+    /// $g = fn() => print "g";
+    /// $g();
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// .a.b.c.f...g.
+    /// .
+    /// ```
+    ///
+    /// ```php
+    /// register_tick_function(function () { echo "."; });
+    /// echo "a";
+    /// declare(ticks=1) { echo "b"; echo "c"; }
+    /// echo "d";
+    /// declare(ticks=2);
+    /// echo "e"; echo "f"; echo "g"; echo "\n";
+    /// ```
+    /// ```expect
+    /// ab.c.de.fg.
+    /// ```
+    pub(super) fn tick(&mut self) {
+        let Some(ticks) = self.ticks else {
+            return;
+        };
+        if self
+            .oplines
+            .last()
+            .is_some_and(|last| last.opcode == Opcode::Ticks)
+        {
+            return;
+        }
+        // `opline->extended_value = FC(declarables).ticks`, a
+        // `uint32_t` over the `zend_long`.
+        let every = u32::try_from(ticks.get() & i64::from(u32::MAX)).unwrap_or(u32::MAX);
+        self.push(Opline {
+            opcode: Opcode::Ticks,
+            extended_value: every,
+            ..Opline::default()
+        });
     }
 
     /// `zend_compile_for`: the initialisers, a `JMP` forward to the
@@ -17657,6 +17748,7 @@ mod tests {
             in_jmp_frameless_branch: false,
             statements_seen: 0,
             typing: Typing::of(options.strict_types),
+            ticks: None,
             stack: options.stack,
             oplines: Vec::new(),
             short_circuits: Vec::new(),

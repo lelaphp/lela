@@ -2533,10 +2533,10 @@ mod tests {
     #[test]
     fn a_source_the_compiler_refuses_names_the_construct_it_could_not_read() {
         let engine = Engine::builder().build();
-        let (body, observables) = served(&engine, "<?php\ndeclare(ticks=1);");
+        let (body, observables) = served(&engine, "<?php\ndeclare(ticks=0): enddeclare;");
         assert_eq!(
             body,
-            "\nParse error: a `declare(ticks)` of a count this compiler cannot read yet in witness.php on line 2\n"
+            "\nParse error: a `declare` in the alternative syntax this compiler cannot read yet in witness.php on line 2\n"
         );
         assert_eq!(observables.exit_code, 255);
         assert_eq!(
@@ -2554,19 +2554,22 @@ mod tests {
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php\ndeclare(ticks=1);"), &mut logged);
+            .serve(
+                description("<?php\ndeclare(ticks=0): enddeclare;"),
+                &mut logged,
+            );
         assert!(logged.body.is_empty());
         assert_eq!(
             logged.logged(),
-            "PHP Parse error:  a `declare(ticks)` of a count this compiler cannot read yet in witness.php on line 2\n"
+            "PHP Parse error:  a `declare` in the alternative syntax this compiler cannot read yet in witness.php on line 2\n"
         );
         assert_eq!(observables.exit_code, 255);
 
         let mut masked = Kept::default();
-        let observables = Engine::builder()
-            .ini("error_reporting", "0")
-            .build()
-            .serve(description("<?php\ndeclare(ticks=1);"), &mut masked);
+        let observables = Engine::builder().ini("error_reporting", "0").build().serve(
+            description("<?php\ndeclare(ticks=0): enddeclare;"),
+            &mut masked,
+        );
         assert!(masked.body.is_empty(), "E_PARSE is masked out");
         assert_eq!(observables.exit_code, 255, "the status is php's regardless");
     }

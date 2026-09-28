@@ -131,6 +131,9 @@ pub(crate) type EngineStateBuilder =
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
 /// The interrupt hook, php's `zend_interrupt_function`.
 pub(crate) type InterruptHook = fn(&mut Request) -> Result<(), Thrown>;
+/// The hook `ZEND_TICKS` serves, a function php's `php_add_tick_function`
+/// adds.
+pub(crate) type TicksHook = fn(&mut Request) -> Result<(), Thrown>;
 /// The compile hook, php's `zend_compile_file` as an extension overrides
 /// it: the source a file compiles from, where the extension replaces it.
 pub(crate) type CompileFileHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
@@ -208,6 +211,7 @@ pub struct Extension {
     pub(crate) rinit: Option<Rinit>,
     pub(crate) rshutdown: Option<fn(&mut Request)>,
     pub(crate) interrupt: Option<InterruptHook>,
+    pub(crate) ticks: Option<TicksHook>,
     pub(crate) compile_file: Option<CompileFileHook>,
     /// What [`ExtensionBuilder::intercept`] was handed: each native of
     /// another extension this one replaces, by name, with its entry.
@@ -250,6 +254,7 @@ pub struct ExtensionBuilder {
     rinit: Option<Rinit>,
     rshutdown: Option<fn(&mut Request)>,
     interrupt: Option<InterruptHook>,
+    ticks: Option<TicksHook>,
     compile_file: Option<CompileFileHook>,
     intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
@@ -453,6 +458,19 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The hook `ZEND_TICKS` serves, a function `php_add_tick_function`
+    /// adds to `PG(tick_functions)` as pcntl's `MINIT` adds its signal
+    /// dispatch: served each time a `declare(ticks=N)` count is reached,
+    /// every extension's in bundle order and then the functions
+    /// `register_tick_function()` kept, with fiber switching blocked
+    /// while they are served. What it throws is left pending where the
+    /// opline stands.
+    #[must_use]
+    pub fn ticks(mut self, hook: TicksHook) -> ExtensionBuilder {
+        self.ticks = Some(hook);
+        self
+    }
+
     /// `zend_compile_file` overridden, as phar's `MINIT` overrides it
     /// with `phar_compile_file`: before a file is compiled, by an
     /// include, `spl_autoload` or as the primary file, `hook` is handed
@@ -573,6 +591,7 @@ impl ExtensionBuilder {
             rinit: self.rinit,
             rshutdown: self.rshutdown,
             interrupt: self.interrupt,
+            ticks: self.ticks,
             compile_file: self.compile_file,
             intercepts: self.intercepts,
             info: self.info,

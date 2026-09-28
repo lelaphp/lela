@@ -96,6 +96,68 @@ pub(crate) fn nop<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, _: &
     Ok(advance(req, frame))
 }
 
+/// `ZEND_TICKS` (`Z/Zend/zend_vm_def.h:8024`), what `declare(ticks=N)`
+/// leaves after each statement in its scope, `N` in `extended_value`:
+/// every `N`th one passed serves the functions `register_tick_function()`
+/// kept ([`Request::tick`]), with fiber switching blocked while they are
+/// served.
+///
+/// ```php
+/// declare(ticks=1);
+/// function t($a) { echo "tick $a\n"; }
+/// register_tick_function('t', 'x');
+/// echo "a\n";
+/// unregister_tick_function('t');
+/// echo "b\n";
+/// ```
+/// ```expect
+/// tick x
+/// a
+/// tick x
+/// b
+/// ```
+///
+/// ```php
+/// declare(ticks=2);
+/// register_tick_function(function () { echo "tick\n"; });
+/// echo 1; echo 2; echo 3; echo 4, "\n";
+/// ```
+/// ```expect
+/// tick
+/// 1tick
+/// 2tick
+/// 3tick
+/// 4tick
+///
+/// tick
+/// ```
+///
+/// A fiber neither starts, suspends nor resumes from inside a function
+/// `ZEND_TICKS` serves:
+///
+/// ```php
+/// declare(ticks=1);
+/// register_tick_function(function () {
+///     if (Fiber::getCurrent()) {
+///         try { Fiber::suspend(); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
+///     }
+/// });
+/// $f = new Fiber(function () { echo "in\n"; });
+/// $f->start();
+/// echo "out\n";
+/// ```
+/// ```expect
+/// in
+/// Cannot switch fibers in current execution context
+/// out
+/// ```
+pub(crate) fn ticks<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: &Opline) -> Edge {
+    if let Err(thrown) = req.tick(op.extended_value) {
+        return threw(req, frame, &thrown);
+    }
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_FREE`: a temporary nothing reads, given up where it stands
 /// (`FREE_OP1`). `zend_do_free` emits one after an opline it cannot
 /// mark `UNUSED`, so `$a + 1;` as a statement is an `ADD` and a `FREE`

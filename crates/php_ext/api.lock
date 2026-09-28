@@ -63,6 +63,7 @@ abi::ExtensionBuilder::register
 abi::ExtensionBuilder::request_state
 abi::ExtensionBuilder::rinit
 abi::ExtensionBuilder::rshutdown
+abi::ExtensionBuilder::ticks
 abi::ExtensionBuilder::trampolines
 abi::False
 abi::FromArgument

@@ -4221,13 +4221,10 @@ mod tests {
             refused(b"<?php declare(ticks=-1);").as_deref(),
             Some("declare(ticks) value must be a literal")
         );
-        // What php compiles and this compiler does not: a tick count php
-        // emits a `ZEND_TICKS` after every statement for, the encoding
-        // pragma the scanner answers, and the alternative syntax.
-        assert_eq!(
-            refused(b"<?php declare(ticks=1); echo 1;").as_deref(),
-            Some("a `declare(ticks)` of a count this compiler cannot read yet")
-        );
+        // What php compiles and this compiler does not: the encoding
+        // pragma the scanner answers, and the alternative syntax. A tick
+        // count was one of them until #1190.
+        assert_eq!(refused(b"<?php declare(ticks=1); echo 1;").as_deref(), None);
         assert_eq!(
             refused(b"<?php declare(encoding=\"UTF-8\");").as_deref(),
             Some("a `declare(encoding)` this compiler cannot read yet")

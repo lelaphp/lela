@@ -113,9 +113,28 @@ pub(crate) struct Fibers {
     suspensions: Suspensions<Request>,
     running: Vec<Running>,
     stack_size: Option<usize>,
+    /// `zend_fiber_switch_blocking`: how many of php's
+    /// `zend_fiber_switch_block()` stand unmatched, while which no fiber
+    /// starts, suspends or resumes.
+    switch_blocking: u32,
 }
 
 impl Fibers {
+    /// `zend_fiber_switch_block()`, as a `ZEND_TICKS` round takes it.
+    pub(crate) fn block_switch(&mut self) {
+        self.switch_blocking = self.switch_blocking.saturating_add(1);
+    }
+
+    /// `zend_fiber_switch_unblock()`.
+    pub(crate) fn unblock_switch(&mut self) {
+        self.switch_blocking = self.switch_blocking.saturating_sub(1);
+    }
+
+    /// `zend_fiber_switch_blocked()`.
+    pub(crate) fn switch_blocked(&self) -> bool {
+        self.switch_blocking > 0
+    }
+
     /// `EG(active_fiber)`: the innermost fiber running, none on the
     /// request's own stack.
     pub(crate) fn active(&self) -> Option<PhpObject> {
@@ -579,6 +598,9 @@ impl Fiber {
             req.ini_get(b"zend.reserved_stack_size").unwrap_or(b"0"),
         ))
         .unwrap_or(0);
+        if req.fibers().switch_blocked() {
+            return Err(fiber_error(req, SWITCH_BLOCKED));
+        }
         let fiber = payload(req, this)?;
         if fiber.status != Status::Init {
             return Err(fiber_error(
@@ -681,6 +703,9 @@ impl Fiber {
         #[php(default = null)] value: Value,
     ) -> Result<Value, Thrown> {
         let this = this.object();
+        if req.fibers().switch_blocked() {
+            return Err(fiber_error(req, SWITCH_BLOCKED));
+        }
         if payload(req, this)?.status != Status::Suspended {
             return Err(fiber_error(
                 req,
@@ -731,6 +756,9 @@ impl Fiber {
     ) -> Result<Value, Thrown> {
         let throwable = exception.object();
         let this = this.object();
+        if req.fibers().switch_blocked() {
+            return Err(fiber_error(req, SWITCH_BLOCKED));
+        }
         if payload(req, this)?.status != Status::Suspended {
             return Err(fiber_error(
                 req,
@@ -890,12 +918,19 @@ impl Fiber {
         if payload(req, fiber)?.destroyed {
             return Err(fiber_error(req, "Cannot suspend in a force-closed fiber"));
         }
+        if req.fibers().switch_blocked() {
+            return Err(fiber_error(req, SWITCH_BLOCKED));
+        }
         req.addref(&value);
         let back = php_heap::suspend(req, Transfer::Value(value));
         let back = req.fatal_of(back)?;
         delegate(back)
     }
 }
+
+/// `zend_fiber_switch_blocked()`'s refusal in `Fiber::start`,
+/// `resume`, `throw` and `suspend`, while a `ZEND_TICKS` round is served.
+const SWITCH_BLOCKED: &str = "Cannot switch fibers in current execution context";
 
 /// `final class FiberError extends Error`, which only the engine makes.
 #[php_class(final, extends(Error))]
