@@ -4542,7 +4542,7 @@ impl Request {
     /// `include_main`; a slot that holds no array, which is what a
     /// throwable made before this engine recorded one has, renders as
     /// the empty trace does, `#0 {main}`.
-    pub(crate) fn trace_string_of(&self, throwable: PhpObject) -> String {
+    pub(crate) fn trace_string_of(&mut self, throwable: PhpObject) -> String {
         match throwable
             .prop(self, b"trace")
             .and_then(|value| value.as_array().copied())
@@ -5217,59 +5217,97 @@ impl Request {
     }
 
     /// `zend_trace_to_string` (`Z/Zend/zend_exceptions.c:668`):
-    /// `_build_trace_string` over each row that is an array, `#N
-    /// file(line): ` where the row names a `file`, `[internal
-    /// function]: ` where it names none, the `class` and `type` where
-    /// there are ones, the `function`, and the `args` between the
-    /// parentheses; then, under `include_main`, `#N {main}`, and without
-    /// it every line closed by its newline, which is what
-    /// `debug_print_backtrace()` writes.
-    pub(crate) fn trace_to_string(&self, trace: PhpArray, include_main: bool) -> String {
-        let mut frames: Vec<String> = Vec::new();
-        for (_, row) in &trace {
-            let Some(row) = row.as_array() else {
+    /// `_build_trace_string` over each row that is an array, and php's
+    /// warning for one that is not: `#N file(line): ` where the row names
+    /// a `file`, `[internal function]: ` where it names none, the
+    /// `class`, `type` and `function` where the row has them, and the
+    /// `args` between the parentheses; then, under `include_main`, `#N
+    /// {main}`, and without it every line closed by its newline, which is
+    /// what `debug_print_backtrace()` writes. A field of the wrong type
+    /// is php's warning and its `[unknown]` stand-in.
+    ///
+    /// ```php
+    /// $e = new Exception();
+    /// $ref = new ReflectionProperty($e, 'trace');
+    /// $ref->setValue($e, [null, [], ['file' => null, 'function' => 1, 'args' => 2]]);
+    /// var_dump($e->getTraceAsString());
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: Expected array for frame 0 in %s on line 5
+    ///
+    /// Warning: File name is not a string in %s on line 5
+    ///
+    /// Warning: Value for function is not a string in %s on line 5
+    ///
+    /// Warning: args element is not an array in %s on line 5
+    /// string(67) "#0 [internal function]: ()
+    /// #1 [unknown file]: [unknown]()
+    /// #2 {main}"
+    /// ```
+    pub(crate) fn trace_to_string(&mut self, trace: PhpArray, include_main: bool) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let mut num = 0usize;
+        for (index, row) in trace.snapshot_refs() {
+            let Some(row) = row.as_array().copied() else {
+                let index = match index {
+                    Key::Int(n) => n.to_string(),
+                    Key::Str(_) => String::from("0"),
+                };
+                crate::api::raising::warning(self, &format!("Expected array for frame {index}"));
                 continue;
             };
+            let fields = row.snapshot_refs();
             let field = |name: &[u8]| {
-                row.into_iter()
+                fields
+                    .iter()
                     .find(|(key, _)| matches!(key, Key::Str(s) if s.as_bytes() == name))
-                    .map(|(_, value)| value)
+                    .map(|(_, value)| *value)
             };
-            let string = |name: &[u8]| {
-                field(name).and_then(|v| {
-                    v.as_str_bytes()
-                        .map(|b| String::from_utf8_lossy(b).into_owned())
-                })
-            };
-            let site = match string(b"file") {
-                Some(file) => {
-                    let line = field(b"line").and_then(|v| v.as_int()).unwrap_or(0);
-                    format!("{file}({line}): ")
+            let _ = write!(out, "#{num} ");
+            num += 1;
+            match field(b"file").map(|file| file.as_str_bytes().map(<[u8]>::to_vec)) {
+                None => out.push_str("[internal function]: "),
+                Some(None) => {
+                    crate::api::raising::warning(self, "File name is not a string");
+                    out.push_str("[unknown file]: ");
                 }
-                None => String::from("[internal function]: "),
-            };
-            let class = string(b"class").unwrap_or_default();
-            let join = string(b"type").unwrap_or_default();
-            let function = string(b"function").unwrap_or_else(|| String::from("unknown"));
-            let arguments = field(b"args")
-                .and_then(|v| v.as_array().copied())
-                .map(|args| self.trace_arguments(&args.snapshot_refs()))
-                .unwrap_or_default();
-            frames.push(format!(
-                "#{} {site}{class}{join}{function}({arguments})",
-                frames.len()
-            ));
-        }
-        if !include_main {
-            let mut out = frames.join("\n");
-            if !out.is_empty() {
-                out.push('\n');
+                Some(Some(file)) => {
+                    let line = match field(b"line") {
+                        Some(line) => line.as_int().unwrap_or_else(|| {
+                            crate::api::raising::warning(self, "Line is not an int");
+                            0
+                        }),
+                        None => 0,
+                    };
+                    let _ = write!(out, "{}({line}): ", String::from_utf8_lossy(&file));
+                }
             }
-            return out;
+            for key in ["class", "type", "function"] {
+                let Some(value) = field(key.as_bytes()) else {
+                    continue;
+                };
+                if let Some(text) = value.as_str_bytes() {
+                    out.push_str(&String::from_utf8_lossy(text));
+                } else {
+                    crate::api::raising::warning(self, &format!("Value for {key} is not a string"));
+                    out.push_str("[unknown]");
+                }
+            }
+            out.push('(');
+            if let Some(args) = field(b"args") {
+                match args.as_array() {
+                    Some(args) => out.push_str(&self.trace_arguments(&args.snapshot_refs())),
+                    None => crate::api::raising::warning(self, "args element is not an array"),
+                }
+            }
+            out.push_str(")\n");
         }
-        let main = frames.len();
-        frames.push(format!("#{main} {{main}}"));
-        frames.join("\n")
+        if include_main {
+            let _ = write!(out, "#{num} {{main}}");
+        }
+        out
     }
 
     /// The backtrace a fatal carries, `zend_fetch_debug_backtrace`
