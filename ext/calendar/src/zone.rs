@@ -94,18 +94,20 @@ struct Rule {
     dst: Option<Daylight>,
 }
 
-/// Daylight time: its offset, and the day and local time of day it
-/// starts and ends on.
+/// A day a rule names and the local time of day on it, in seconds.
+type Moment = (RuleDay, i64);
+
+/// Daylight time: its offset, and the moments it starts and ends at,
+/// where the string names them.
 #[derive(Clone, Copy)]
 struct Daylight {
     offset: i64,
-    start: (RuleDay, i64),
-    end: (RuleDay, i64),
+    dates: Option<(Moment, Moment)>,
 }
 
-/// The rule the C library assumes for a daylight name with no dates,
-/// the United States' since 2007.
-const DEFAULT_DST: ((RuleDay, i64), (RuleDay, i64)) = (
+/// The dates a daylight name with none keeps where no `posixrules`
+/// file gives its changes, the United States' since 2007.
+const DEFAULT_DST: (Moment, Moment) = (
     (
         RuleDay::Week {
             month: 3,
@@ -220,15 +222,11 @@ impl Rule {
         let dates = if at.eat(b',') {
             let start = at.date()?;
             at.eat(b',').then_some(())?;
-            (start, at.date()?)
+            Some((start, at.date()?))
         } else {
-            DEFAULT_DST
+            None
         };
-        let daylight = Daylight {
-            offset: dst,
-            start: dates.0,
-            end: dates.1,
-        };
+        let daylight = Daylight { offset: dst, dates };
         at.0.is_empty().then_some(Rule {
             std,
             dst: Some(daylight),
@@ -237,14 +235,10 @@ impl Rule {
 
     /// The offset east of UTC at `t`.
     fn offset(&self, t: i64) -> i64 {
-        let Some(Daylight {
-            offset: dst,
-            start: (start, start_at),
-            end: (end, end_at),
-        }) = self.dst
-        else {
+        let Some(Daylight { offset: dst, dates }) = self.dst else {
             return self.std;
         };
+        let ((start, start_at), (end, end_at)) = dates.unwrap_or(DEFAULT_DST);
         let (year, _, _) = civil_from_days((t + self.std).div_euclid(DAY));
         let begins = start.in_year(year) * DAY + start_at - self.std;
         let ends = end.in_year(year) * DAY + end_at - dst;
@@ -293,71 +287,142 @@ impl Zone {
             (!name.split(|c| *c == b'/').any(|part| part == b"..")).then(|| Zone::file(&path));
         named
             .flatten()
-            .or_else(|| {
-                Rule::parse(tz).map(|rule| Zone {
-                    transitions: Vec::new(),
-                    initial: rule.std,
-                    rule: Some(rule),
-                })
-            })
+            .or_else(|| Rule::parse(tz).map(Zone::posix))
             .unwrap_or(UTC)
     }
 
-    /// A `TZif` file (RFC 8536), its 64-bit block where it has one.
+    /// A zone of a `TZif` file.
     fn file(path: &[u8]) -> Option<Zone> {
-        let bytes = std::fs::read(std::str::from_utf8(path).ok()?).ok()?;
-        let header = |at: usize| -> Option<[usize; 6]> {
-            (bytes.get(at..at + 4)? == b"TZif").then_some(())?;
-            let mut counts = [0; 6];
-            for (i, count) in counts.iter_mut().enumerate() {
-                let field = bytes.get(at + 20 + i * 4..at + 24 + i * 4)?;
-                *count = usize::try_from(u32::from_be_bytes(field.try_into().ok()?)).ok()?;
-            }
-            Some(counts)
-        };
-        let [isut, isstd, leap, time, types, chars] = header(0)?;
-        let v1_len = 44 + time * 5 + types * 6 + chars + leap * 8 + isstd + isut;
-        let (start, width, counts) = if bytes.get(4).is_some_and(|v| *v >= b'2') {
-            (v1_len, 8, header(v1_len)?)
-        } else {
-            (0, 4, [isut, isstd, leap, time, types, chars])
-        };
-        let [isut, isstd, leap, time, types, chars] = counts;
-        let data = start + 44;
-        let moment = |i: usize| -> Option<i64> {
-            let field = bytes.get(data + i * width..data + (i + 1) * width)?;
-            Some(if width == 8 {
-                i64::from_be_bytes(field.try_into().ok()?)
-            } else {
-                i64::from(i32::from_be_bytes(field.try_into().ok()?))
-            })
-        };
-        let index_at = data + time * width;
-        let types_at = index_at + time;
-        let offset = |t: usize| -> Option<i64> {
-            let field = bytes.get(types_at + t * 6..types_at + t * 6 + 4)?;
-            Some(i64::from(i32::from_be_bytes(field.try_into().ok()?)))
-        };
-        let mut transitions = Vec::with_capacity(time);
-        for i in 0..time {
-            let t = usize::from(*bytes.get(index_at + i)?);
-            transitions.push((moment(i)?, offset(t)?));
-        }
-        let end = types_at + types * 6 + chars + leap * (width + 4) + isstd + isut;
-        let rule = if width == 8 {
-            let footer = bytes.get(end + 1..)?;
-            let footer = &footer[..footer.iter().position(|c| *c == b'\n')?];
-            Rule::parse(footer)
-        } else {
-            None
-        };
+        let (changes, first, footer) = tzif(path)?;
         Some(Zone {
-            transitions,
-            initial: offset(0)?,
-            rule,
+            transitions: changes
+                .iter()
+                .map(|(at, kind)| (*at, kind.offset))
+                .collect(),
+            initial: first.offset,
+            rule: footer,
         })
     }
 
+    /// A zone of a POSIX TZ string. A daylight name with no dates takes
+    /// the changes of the `posixrules` file, each moved from that zone's
+    /// standard time to this one's, as the platform's `tzparse` moves
+    /// them (its daylight bit never set, so every change moves by the
+    /// standard offsets); they end where the file's table ends, 2037,
+    /// and its footer is not read.
+    fn posix(rule: Rule) -> Zone {
+        let posix_rules = match rule.dst {
+            Some(Daylight {
+                offset,
+                dates: None,
+            }) => tzif(b"/usr/share/zoneinfo/posixrules").map(|rules| (offset, rules)),
+            _ => None,
+        };
+        let Some((dst, (changes, _, _))) = posix_rules else {
+            return Zone {
+                transitions: Vec::new(),
+                initial: rule.std,
+                rule: Some(rule),
+            };
+        };
+        let mut their_std = changes
+            .iter()
+            .find(|(_, kind)| !kind.dst)
+            .map_or(0, |(_, kind)| kind.offset);
+        let transitions = changes
+            .iter()
+            .map(|(at, kind)| {
+                let at = if kind.universal {
+                    *at
+                } else {
+                    at - (rule.std - their_std)
+                };
+                if !kind.dst {
+                    their_std = kind.offset;
+                }
+                (at, if kind.dst { dst } else { rule.std })
+            })
+            .collect();
+        Zone {
+            transitions,
+            initial: rule.std,
+            rule: None,
+        }
+    }
+}
+
+/// A local time type of a `TZif` file: its offset, whether it is
+/// daylight time, and whether its changes were given in standard or
+/// universal time.
+#[derive(Clone, Copy)]
+struct Kind {
+    offset: i64,
+    dst: bool,
+    universal: bool,
+}
+
+/// What a `TZif` file (RFC 8536) holds, its 64-bit block where it has
+/// one: each change and the type from it on, the first type, and the
+/// footer.
+type Tzif = (Vec<(i64, Kind)>, Kind, Option<Rule>);
+
+fn tzif(path: &[u8]) -> Option<Tzif> {
+    let bytes = std::fs::read(std::str::from_utf8(path).ok()?).ok()?;
+    let header = |at: usize| -> Option<[usize; 6]> {
+        (bytes.get(at..at + 4)? == b"TZif").then_some(())?;
+        let mut counts = [0; 6];
+        for (i, count) in counts.iter_mut().enumerate() {
+            let field = bytes.get(at + 20 + i * 4..at + 24 + i * 4)?;
+            *count = usize::try_from(u32::from_be_bytes(field.try_into().ok()?)).ok()?;
+        }
+        Some(counts)
+    };
+    let [isut, isstd, leap, time, types, chars] = header(0)?;
+    let v1_len = 44 + time * 5 + types * 6 + chars + leap * 8 + isstd + isut;
+    let (start, width, counts) = if bytes.get(4).is_some_and(|v| *v >= b'2') {
+        (v1_len, 8, header(v1_len)?)
+    } else {
+        (0, 4, [isut, isstd, leap, time, types, chars])
+    };
+    let [isut, isstd, leap, time, types, chars] = counts;
+    let data = start + 44;
+    let moment = |i: usize| -> Option<i64> {
+        let field = bytes.get(data + i * width..data + (i + 1) * width)?;
+        Some(if width == 8 {
+            i64::from_be_bytes(field.try_into().ok()?)
+        } else {
+            i64::from(i32::from_be_bytes(field.try_into().ok()?))
+        })
+    };
+    let index_at = data + time * width;
+    let types_at = index_at + time;
+    let isstd_at = types_at + types * 6 + chars + leap * (width + 4);
+    let isut_at = isstd_at + isstd;
+    let kind = |t: usize| -> Option<Kind> {
+        let field = bytes.get(types_at + t * 6..types_at + t * 6 + 4)?;
+        Some(Kind {
+            offset: i64::from(i32::from_be_bytes(field.try_into().ok()?)),
+            dst: *bytes.get(types_at + t * 6 + 4)? != 0,
+            universal: t < isut && *bytes.get(isut_at + t)? != 0,
+        })
+    };
+    let mut changes = Vec::with_capacity(time);
+    for i in 0..time {
+        let t = usize::from(*bytes.get(index_at + i)?);
+        changes.push((moment(i)?, kind(t)?));
+    }
+    let end = isut_at + isut;
+    let rule = if width == 8 {
+        let footer = bytes.get(end + 1..)?;
+        let footer = &footer[..footer.iter().position(|c| *c == b'\n')?];
+        Rule::parse(footer)
+    } else {
+        None
+    };
+    Some((changes, kind(0)?, rule))
+}
+
+impl Zone {
     /// The offset east of UTC at `t`.
     pub(crate) fn offset(&self, t: i64) -> i64 {
         let passed = self.transitions.partition_point(|(at, _)| *at <= t);

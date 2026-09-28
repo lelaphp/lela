@@ -107,6 +107,7 @@ fn year_argument(req: &mut Request, year: Option<i64>) -> Result<i64, Thrown> {
 /// putenv('TZ=Australia/Sydney'); var_dump(easter_date(2024));
 /// putenv('TZ=JST-9'); var_dump(easter_date(2024));
 /// putenv('TZ=Foo/Bar'); var_dump(easter_date(2024));
+/// putenv('TZ=XYZ3ABC'); var_dump(easter_date(2036), easter_date(2038));
 /// foreach ([1969, 2000000001, 0, PHP_INT_MAX] as $year) {
 ///     try { easter_date($year); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// }
@@ -122,6 +123,8 @@ fn year_argument(req: &mut Request, year: Option<i64>) -> Result<i64, Thrown> {
 /// int(1711803600)
 /// int(1711810800)
 /// int(1711843200)
+/// int(2091664800)
+/// int(2155777200)
 /// easter_date(): Argument #1 ($year) must be a year after 1970 (inclusive)
 /// easter_date(): Argument #1 ($year) must be a year before 2.000.000.000 (inclusive)
 /// easter_date(): Argument #1 ($year) must be between 1 and 7378697629483820644
