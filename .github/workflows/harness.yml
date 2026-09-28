@@ -38,6 +38,24 @@ jobs:
           fetch-depth: 0 # done measures since the merge base with the track
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The named locales a request's setlocale() asks the C library for
+      # (design §5.14, revision 40; #1150), in the tests and the witnesses
+      # alike: de_DE for ext/standard's two-request test, and the names
+      # the witnesses under ext/ pin. ubuntu-latest generates none of
+      # them. `locale-gen` builds the ones glibc lists as supported, the
+      # ISO-8859 ones under their bare names, from the `locales` package
+      # the image carries, with no download (13 s for the seven in an
+      # ubuntu:24.04 container, 2026-09-28); `locales-all` is an
+      # `apt-get update` and every locale glibc has, and still lacks
+      # ja_JP.SJIS, which glibc lists as unsupported since Shift_JIS is
+      # not ASCII-compatible and which `localedef -c` builds all the same.
+      # `update-locale` is left out: it sets the system's default LANG,
+      # which nothing here reads. A name that fails to build fails the
+      # step, so no test here reads an absent locale as its skip.
+      - name: the named locales the tests and the witnesses ask for
+        run: |
+          sudo locale-gen de_DE de_DE.UTF-8 fr_FR fr_FR.UTF-8 tr_TR is_IS is_IS.UTF-8
+          sudo localedef -c --no-warnings=ascii -i ja_JP -f SHIFT_JIS ja_JP.SJIS
       # Each instrument exits 1 on a failing reading, which fails the job;
       # the readings it wrote are uploaded either way.
       - run: cargo fmt --check
