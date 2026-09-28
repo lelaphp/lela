@@ -14,6 +14,9 @@ workspace = true
 # The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+# `strftime(3)`, under the request's locale, in `src/ffi/` alone
+# (`unsafe.homes`).
+libc = { workspace = true }
 
 # timelib, compiled from `lib/`, the sources vendored from php-src's
 # `ext/date/lib` at the pinned tag (design §7.2, §12); no system library.

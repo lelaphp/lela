@@ -739,9 +739,11 @@ fn getdate(
     Ok(array)
 }
 
-/// `php_strftime(INTERNAL_FUNCTION_PARAM_PASSTHRU, gmt)` in the C
-/// locale: C's `strftime(3)` over the `struct tm` php fills, which is
-/// the locale-independent part #640 leaves here.
+/// `php_strftime(INTERNAL_FUNCTION_PARAM_PASSTHRU, gmt)`
+/// (`Z/ext/date/php_date.c:1262`): the `struct tm` php fills from the
+/// time in the default zone, or in UTC for `gmstrftime`, rendered by
+/// the C library's `strftime(3)` under the request's `LC_TIME`; `false`
+/// for an empty format and for text the C library answered none of.
 fn php_strftime(
     req: &mut Request,
     format: PhpString,
@@ -749,11 +751,10 @@ fn php_strftime(
     gmt: bool,
 ) -> Result<OrFalse<PhpString>, Thrown> {
     let format = format.as_bytes();
-    let ts = timestamp;
     if format.is_empty() {
         return Ok(OrFalse::False);
     }
-    let ts = ts.unwrap_or_else(now);
+    let ts = timestamp.unwrap_or_else(now);
     let mut t = Time::new();
     let offset = if gmt {
         t.unixtime2gmt(ts);
@@ -768,111 +769,27 @@ fn php_strftime(
         t.unixtime2local(ts);
         zone.offset_at(ts)
     };
-    let text = strftime_c(format, &t, &offset);
-    if text.is_empty() {
-        return Ok(OrFalse::False);
+    let tm = ffi::BrokenDown {
+        sec: t.s,
+        min: t.i,
+        hour: t.h,
+        mday: t.d,
+        mon: t.m - 1,
+        year: t.y - 1900,
+        wday: ffi::day_of_week(t.y, t.m, t.d),
+        yday: ffi::day_of_year(t.y, t.m, t.d),
+        isdst: offset.is_dst,
+        gmtoff: i64::from(offset.offset),
+        zone: &offset.abbr,
+    };
+    match ffi::strftime(format, &tm) {
+        Some(text) => PhpString::new(req, &text).map(OrFalse::Value),
+        None => Ok(OrFalse::False),
     }
-    PhpString::new(req, &text).map(OrFalse::Value)
-}
-
-/// C's `strftime` under the C locale for the conversions POSIX names.
-#[allow(clippy::too_many_lines)]
-fn strftime_c(format: &[u8], t: &Time, offset: &Offset) -> Vec<u8> {
-    let wday = ffi::day_of_week(t.y, t.m, t.d);
-    let yday = ffi::day_of_year(t.y, t.m, t.d);
-    let wd = usize::try_from(wday).unwrap_or(0) % 7;
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < format.len() {
-        if format[i] != b'%' || i + 1 >= format.len() {
-            out.push(format[i]);
-            i += 1;
-            continue;
-        }
-        i += 1;
-        let mut c = format[i];
-        if (c == b'E' || c == b'O') && i + 1 < format.len() {
-            i += 1;
-            c = format[i];
-        }
-        let (iso_week, iso_year) = ffi::isoweek_from_date(t.y, t.m, t.d);
-        let hour12 = if t.h % 12 == 0 { 12 } else { t.h % 12 };
-        let piece = match c {
-            b'a' => DAY_SHORT[wd].to_owned(),
-            b'A' => DAY_FULL[wd].to_owned(),
-            b'b' | b'h' => short_month(t.m).to_owned(),
-            b'B' => full_month(t.m).to_owned(),
-            b'c' => format!(
-                "{} {} {:>2} {:02}:{:02}:{:02} {}",
-                DAY_SHORT[wd],
-                short_month(t.m),
-                t.d,
-                t.h,
-                t.i,
-                t.s,
-                t.y
-            ),
-            b'C' => format!("{:02}", t.y.div_euclid(100)),
-            b'd' => format!("{:02}", t.d),
-            b'D' | b'x' => format!("{:02}/{:02}/{:02}", t.m, t.d, t.y.rem_euclid(100)),
-            b'e' => format!("{:>2}", t.d),
-            b'F' => format!("{}-{:02}-{:02}", t.y, t.m, t.d),
-            b'g' => format!("{:02}", iso_year.rem_euclid(100)),
-            b'G' => iso_year.to_string(),
-            b'H' => format!("{:02}", t.h),
-            b'I' => format!("{hour12:02}"),
-            b'j' => format!("{:03}", yday + 1),
-            b'k' => format!("{:>2}", t.h),
-            b'l' => format!("{hour12:>2}"),
-            b'm' => format!("{:02}", t.m),
-            b'M' => format!("{:02}", t.i),
-            b'n' => "\n".to_owned(),
-            b'p' => (if t.h >= 12 { "PM" } else { "AM" }).to_owned(),
-            b'P' => (if t.h >= 12 { "pm" } else { "am" }).to_owned(),
-            b'r' => format!(
-                "{hour12:02}:{:02}:{:02} {}",
-                t.i,
-                t.s,
-                if t.h >= 12 { "PM" } else { "AM" }
-            ),
-            b'R' => format!("{:02}:{:02}", t.h, t.i),
-            b's' => t.sse.to_string(),
-            b'S' => format!("{:02}", t.s),
-            b't' => "\t".to_owned(),
-            b'T' | b'X' => format!("{:02}:{:02}:{:02}", t.h, t.i, t.s),
-            b'u' => (if wday == 0 { 7 } else { wday }).to_string(),
-            b'U' => format!("{:02}", (yday + 7 - wday) / 7),
-            b'V' => format!("{iso_week:02}"),
-            b'w' => wday.to_string(),
-            b'W' => format!("{:02}", (yday + 7 - (wday + 6) % 7) / 7),
-            b'y' => format!("{:02}", t.y.rem_euclid(100)),
-            b'Y' => t.y.to_string(),
-            b'z' => {
-                let o = offset.offset;
-                format!(
-                    "{}{:02}{:02}",
-                    if o < 0 { '-' } else { '+' },
-                    (o / 3600).abs(),
-                    ((o % 3600) / 60).abs()
-                )
-            }
-            b'Z' => String::from_utf8_lossy(&offset.abbr).into_owned(),
-            b'%' => "%".to_owned(),
-            other => {
-                out.push(b'%');
-                out.push(other);
-                i += 1;
-                continue;
-            }
-        };
-        out.extend_from_slice(piece.as_bytes());
-        i += 1;
-    }
-    out
 }
 
 /// `strftime(string $format, ?int $timestamp = null): string|false`,
-/// deprecated since 8.1, in the C locale.
+/// deprecated since 8.1, under the request's `LC_TIME`.
 ///
 /// ```php
 /// date_default_timezone_set('Europe/Amsterdam');
@@ -886,6 +803,19 @@ fn strftime_c(format: &[u8], t: &Time, offset: &Offset) -> Vec<u8> {
 /// Deprecated: Function strftime() is deprecated since 8.1, use IntlDateFormatter::format() instead in %s on line 4
 /// bool(false)
 /// ```
+///
+/// Under the request's `LC_TIME`, the names and the formats the C
+/// library has for it.
+///
+/// ```php
+/// date_default_timezone_set('UTC');
+/// foreach (['fr_FR.UTF-8', 'de_DE.UTF-8', 'C'] as $l) { setlocale(LC_TIME, $l); var_dump(@strftime('%A %a %B %b|%c|%x|%p', 1700000000)); }
+/// ```
+/// ```expect
+/// string(59) "Mardi Mar novembre nov|Mar 14 nov 22:13:20 2023|14.11.2023|"
+/// string(62) "Dienstag Di November Nov|Di 14 Nov 22:13:20 2023|14.11.2023|pm"
+/// string(61) "Tuesday Tue November Nov|Tue Nov 14 22:13:20 2023|11/14/23|PM"
+/// ```
 #[php_function(deprecated(since = "8.1", message = "use IntlDateFormatter::format() instead"))]
 fn strftime(
     req: &mut Request,
@@ -896,15 +826,28 @@ fn strftime(
 }
 
 /// `gmstrftime(string $format, ?int $timestamp = null): string|false`,
-/// deprecated since 8.1.
+/// deprecated since 8.1. `%z` is the C library's: glibc reads the
+/// `tm_gmtoff` php sets to 0, and macOS's the process's `TZ`, whatever
+/// the time's zone, in php as here.
 ///
 /// ```php
 /// date_default_timezone_set('Europe/Amsterdam');
-/// var_dump(gmstrftime('%Y-%m-%d %H:%M:%S %Z %z %c', 1700000000));
+/// var_dump(gmstrftime('%Y-%m-%d %H:%M:%S %Z %c', 1700000000));
 /// ```
 /// ```expect
 /// Deprecated: Function gmstrftime() is deprecated since 8.1, use IntlDateFormatter::format() instead in %s on line 3
-/// string(54) "2023-11-14 22:13:20 GMT +0000 Tue Nov 14 22:13:20 2023"
+/// string(48) "2023-11-14 22:13:20 GMT Tue Nov 14 22:13:20 2023"
+/// ```
+///
+/// Under the request's `LC_TIME`.
+///
+/// ```php
+/// foreach (['fr_FR.UTF-8', 'de_DE.UTF-8', 'C'] as $l) { setlocale(LC_TIME, $l); var_dump(@gmstrftime('%A %B %x %X', 1700000000)); }
+/// ```
+/// ```expect
+/// string(34) "Mardi novembre 14.11.2023 22:13:20"
+/// string(37) "Dienstag November 14.11.2023 22:13:20"
+/// string(34) "Tuesday November 11/14/23 22:13:20"
 /// ```
 #[php_function(deprecated(since = "8.1", message = "use IntlDateFormatter::format() instead"))]
 fn gmstrftime(
