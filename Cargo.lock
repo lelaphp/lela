@@ -1075,6 +1075,7 @@ dependencies = [
  "anyhow",
  "clap",
  "md5",
+ "nix",
  "php_bundle",
  "regex-lite",
  "serde",
