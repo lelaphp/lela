@@ -11,6 +11,7 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::archive::{self, ENT_PERM_MASK, archives, lossy};
+use crate::ffi;
 use crate::path::{self, Create, Exec};
 
 /// `phar_intercept_functions`: the request marked, as php marks it
@@ -450,9 +451,48 @@ fn finish(a: &archive::Archive, mut sb: [i64; 13], e: Option<&archive::Entry>) -
     sb
 }
 
-/// `phar_fancy_stat`: what each `FS_*` answers of a stat. The owner and
-/// group of an entry are `0`, so the permission bits a check reads are
-/// the others' for any process that is not root's.
+/// `phar_fancy_stat`: what each `FS_*` answers of a stat. An access
+/// check reads the owner's bits where the process's user owns the entry,
+/// the group's where its group or one of its supplementary groups is the
+/// entry's, and the others' otherwise; an entry's owner and group are
+/// `0`, so root's process reads the owner's and one in group `0` the
+/// group's.
+///
+/// The witness names the writable regime, since only an archive opened
+/// for writing keeps its entries' write bits (`statme_baby`), and prints
+/// which of the two the process is beside what it read.
+///
+/// ```php
+/// $p = __DIR__ . '/stat-witness.phar';
+/// $files = [
+///     'a.php' => '<?php Phar::interceptFileFuncs(); foreach (["u", "g", "o"] as $n) var_dump(is_writable("$n.w"), is_readable("$n.r"), is_executable("$n.x")); var_dump(fileowner("u.w"), filegroup("u.w"), posix_getuid() === 0, posix_getgid() === 0 || in_array(0, posix_getgroups()));',
+///     'u.w' => '', 'g.w' => '', 'o.w' => '', 'u.r' => '', 'g.r' => '', 'o.r' => '', 'u.x' => '', 'g.x' => '', 'o.x' => '',
+/// ];
+/// $perm = ['a.php' => 0644, 'u.w' => 0200, 'g.w' => 0020, 'o.w' => 0002, 'u.r' => 0400, 'g.r' => 0040, 'o.r' => 0004, 'u.x' => 0100, 'g.x' => 0010, 'o.x' => 0001];
+/// $m = ''; $body = '';
+/// foreach ($files as $n => $c) { $m .= pack('V', strlen($n)) . $n . pack('VVVVVV', strlen($c), 1700000000, strlen($c), crc32($c), $perm[$n], 0); $body .= $c; }
+/// $m = pack('VnVV', count($files), 0x1110, 0x10000, 0) . pack('V', 0) . $m;
+/// $data = "<?php __HALT_COMPILER(); ?>\r\n" . pack('V', strlen($m)) . $m . $body;
+/// file_put_contents($p, $data . sha1($data, true) . pack('V', 2) . 'GBMB');
+/// $phar = new Phar($p);
+/// include "phar://$p/a.php";
+/// unlink($p);
+/// ```
+/// ```expect regime=phar-writable
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// int(0)
+/// int(0)
+/// bool(false)
+/// bool(false)
+/// ```
 fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Thrown> {
     const NAMES: [&[u8]; 13] = [
         b"dev", b"ino", b"mode", b"nlink", b"uid", b"gid", b"rdev", b"size", b"atime", b"mtime",
@@ -460,6 +500,11 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Throw
     ];
     let mode = sb[2];
     let is = |kind: i64| mode & 0o170_000 == kind;
+    let triad = if matches!(kind, Fs::IsW | Fs::IsR | Fs::IsX) {
+        access_triad(sb[4], sb[5])
+    } else {
+        0
+    };
     Ok(match kind {
         Fs::Perms => Value::int(mode),
         Fs::Inode => Value::int(sb[1]),
@@ -486,9 +531,9 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Throw
             };
             Value::string(PhpString::new(req, name)?)
         }
-        Fs::IsW => Value::bool(mode & 0o2 != 0),
-        Fs::IsR => Value::bool(mode & 0o4 != 0),
-        Fs::IsX => Value::bool(mode & 0o1 != 0 && !is(0o040_000)),
+        Fs::IsW => Value::bool(mode & (0o2 << triad) != 0),
+        Fs::IsR => Value::bool(mode & (0o4 << triad) != 0),
+        Fs::IsX => Value::bool(mode & (0o1 << triad) != 0 && !is(0o040_000)),
         Fs::IsDir => Value::bool(is(0o040_000)),
         Fs::Exists => Value::bool(true),
         Fs::Lstat | Fs::Stat => {
@@ -503,6 +548,23 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Throw
             Value::array(out)
         }
     })
+}
+
+/// The shift of the permission triad an access check reads of an entry
+/// owned by `owner` and `group`, as `phar_fancy_stat` picks its masks: 6,
+/// the owner's, where the process's user is `owner`; 3, the group's,
+/// where its group is `group` or, asked only then, one of its
+/// supplementary groups is; 0, the others', otherwise.
+fn access_triad(owner: i64, group: i64) -> u32 {
+    if owner == i64::from(ffi::uid()) {
+        6
+    } else if group == i64::from(ffi::gid())
+        || ffi::groups().into_iter().any(|gid| group == i64::from(gid))
+    {
+        3
+    } else {
+        0
+    }
 }
 
 /// `phar_is_file` and `phar_is_link`: whether a relative path names an

@@ -12,7 +12,9 @@
 //! it without bz2.
 //!
 //! The C library's local time, which zip entries' DOS times are read and
-//! written in, is bound in [`ffi`], the crate's one home of `unsafe`.
+//! written in, and the process's user and groups, which an intercepted
+//! access check reads an entry's permission bits by, are bound in
+//! [`ffi`], the crate's one home of `unsafe`.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
