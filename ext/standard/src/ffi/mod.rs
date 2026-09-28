@@ -224,14 +224,13 @@ pub(super) fn closelog() {
     unsafe { libc::closelog() };
 }
 
-/// `syslog(priority, "%.*s", len, message)`: one message, its bytes as
-/// they are, NUL ones included in the length.
-pub(super) fn syslog(priority: i32, message: &[u8]) {
-    let len = libc::c_int::try_from(message.len()).unwrap_or(libc::c_int::MAX);
-    // SAFETY: the format is NUL-terminated and asks for one `int` and one
-    // pointer to at most `len` bytes, which `message` holds and outlives
-    // the call.
-    unsafe { libc::syslog(priority, c"%.*s".as_ptr(), len, message.as_ptr()) };
+/// `syslog(priority, "%s", message)`: one message. It is a C string
+/// because the host's `syslog(3)` may read its argument past what a
+/// precision allows, even an empty one's first byte.
+pub(super) fn syslog(priority: i32, message: &CStr) {
+    // SAFETY: the format is NUL-terminated and asks for one pointer to a
+    // NUL-terminated string, which `message` is and outlives the call.
+    unsafe { libc::syslog(priority, c"%s".as_ptr(), message.as_ptr()) };
 }
 
 /// `strsignal(3)`: the host's name for a signal.

@@ -215,7 +215,7 @@ pub(super) fn php_syslog(req: &mut Request, priority: i32, message: &[u8]) {
 fn syslog_str(req: &Request, priority: i32, message: &[u8]) {
     let filter = req.ini_get(b"syslog.filter").unwrap_or(b"no-ctrl");
     if filter == b"raw" {
-        crate::ffi::syslog(priority, message);
+        send(priority, message);
         return;
     }
     let mut line = Vec::new();
@@ -224,13 +224,24 @@ fn syslog_str(req: &Request, priority: i32, message: &[u8]) {
             0x20..=0x7e => line.push(c),
             0x80..=0xff if filter != b"ascii" => line.push(c),
             b'\n' => {
-                crate::ffi::syslog(priority, &line);
+                send(priority, &line);
                 line.clear();
             }
             0x00..=0x1f if filter == b"all" => line.push(c),
             _ => line.extend_from_slice(format!("\\x{c:02x}").as_bytes()),
         }
     }
+    send(priority, &line);
+}
+
+/// One `syslog(priority, "%s", ...)` of `php_syslog_str`: the line as
+/// `%s` reads it, up to its first NUL, a NUL-terminated copy even when
+/// it is empty. php hands `%s` a `zend_string`'s bytes under `raw` and
+/// `%.*s` a `smart_string`'s otherwise; both end at a NUL, which only
+/// `raw` and `all` let through.
+fn send(priority: i32, line: &[u8]) {
+    let line = line.split(|&c| c == 0).next().unwrap_or_default();
+    let line = CString::new(line).unwrap_or_default();
     crate::ffi::syslog(priority, &line);
 }
 
@@ -242,6 +253,27 @@ fn syslog_str(req: &Request, priority: i32, message: &[u8]) {
 /// var_dump(syslog(LOG_DEBUG, "php witness\tline"));
 /// ```
 /// ```expect
+/// bool(true)
+/// ```
+///
+/// An empty message is one empty line, and a NUL ends the line as `%s`
+/// reads it, under every filter. `LOG_INFO`, not `LOG_DEBUG`: the host's
+/// default mask drops a debug line before it formats one.
+///
+/// ```php
+/// var_dump(syslog(LOG_INFO, ""));
+/// var_dump(syslog(LOG_INFO, "php witness\n"));
+/// ini_set('syslog.filter', 'raw');
+/// var_dump(syslog(LOG_INFO, ""));
+/// var_dump(syslog(LOG_INFO, "php witness\0after"));
+/// ini_set('syslog.filter', 'all');
+/// var_dump(syslog(LOG_INFO, "php witness\0after"));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
 /// bool(true)
 /// ```
 ///
