@@ -14,6 +14,9 @@ workspace = true
 # The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+# `isalpha(3)` and the rest of `<ctype.h>`, under the request's locale,
+# in `src/ffi/` alone (`unsafe.homes`).
+libc = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

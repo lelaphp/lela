@@ -1,13 +1,21 @@
-//! The locale natives of `string.c` under the one locale this engine
-//! has, C's: `setlocale`, `localeconv`, `nl_langinfo` and `strcoll`.
-//! The request keeps each category's name as the host's `setlocale(3)`
-//! reports it, starting where php leaves it after
+//! The locale natives of `string.c`, `setlocale`, `localeconv`,
+//! `nl_langinfo` and `strcoll`, over a request's own locale (design
+//! §5.14, revision 40). php's `setlocale` moves the process's locale,
+//! which one request per process makes safe; here `setlocale()` builds a
+//! `locale_t` with `newlocale(3)` from the categories it names, starting
+//! from the one the thread runs under, and installs it on the thread
+//! serving the request with `uselocale(3)`, so what reads the locale,
+//! here and in `*printf`'s `%f`, `SORT_LOCALE_STRING` and ctype, is the
+//! C library's own code under this request's locale and no other's. The
+//! request keeps each category's name beside it, as the host's
+//! `setlocale(3)` reports it, starting where php leaves it after
 //! `zend_reset_lc_ctype_locale`, `C.UTF-8` for `LC_CTYPE` and `C` for
-//! the rest, and dropped at the request's end as `basic_functions`'s
-//! `RSHUTDOWN` sets it back. The names a request can move a category
-//! to are the C locale's own, `C`, `POSIX` and `C.UTF-8`; what php
-//! answers for every other name is the host's locale table, and
-//! passing a name through to it is #640's.
+//! the rest; at the request's end the thread's own locale is put back
+//! and the request's freed, as `basic_functions`'s `RSHUTDOWN` sets the
+//! process's back to `C`.
+
+use std::cmp::Ordering;
+use std::ffi::{CString, c_char};
 
 use php_ext::abi::{OrFalse, Untyped, Variadic};
 use php_ext::attr::php_function;
@@ -17,9 +25,9 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use super::constants::{
-    self, CHAR_MAX, CODESET, LC_ALL, LC_COLLATE, LC_CTYPE, LC_MESSAGES, LC_MONETARY, LC_NUMERIC,
-    LC_TIME,
+    self, LC_ALL, LC_COLLATE, LC_CTYPE, LC_MESSAGES, LC_MONETARY, LC_NUMERIC, LC_TIME,
 };
+use crate::ffi::locale::{self as c, Category, Installed};
 
 /// `LC_ALL` and the six categories, the values of the pinned build's
 /// `<locale.h>`, in `setlocale(LC_ALL, NULL)`'s composite order.
@@ -33,80 +41,105 @@ const CATEGORIES: [(&[u8], i64); 7] = [
     (b"LC_MESSAGES", LC_MESSAGES),
 ];
 
-/// `nl_langinfo`'s items under the C locale, indexed by the pinned
-/// build's `<langinfo.h>` values, `CODESET` (0) aside since it follows
-/// `LC_CTYPE`.
-const LANGINFO: [(i64, &[u8]); 57] = [
-    (constants::CODESET, b""),
-    (constants::D_T_FMT, b"%a %b %e %H:%M:%S %Y"),
-    (constants::D_FMT, b"%m/%d/%y"),
-    (constants::T_FMT, b"%H:%M:%S"),
-    (constants::T_FMT_AMPM, b"%I:%M:%S %p"),
-    (constants::AM_STR, b"AM"),
-    (constants::PM_STR, b"PM"),
-    (constants::DAY_1, b"Sunday"),
-    (constants::DAY_2, b"Monday"),
-    (constants::DAY_3, b"Tuesday"),
-    (constants::DAY_4, b"Wednesday"),
-    (constants::DAY_5, b"Thursday"),
-    (constants::DAY_6, b"Friday"),
-    (constants::DAY_7, b"Saturday"),
-    (constants::ABDAY_1, b"Sun"),
-    (constants::ABDAY_2, b"Mon"),
-    (constants::ABDAY_3, b"Tue"),
-    (constants::ABDAY_4, b"Wed"),
-    (constants::ABDAY_5, b"Thu"),
-    (constants::ABDAY_6, b"Fri"),
-    (constants::ABDAY_7, b"Sat"),
-    (constants::MON_1, b"January"),
-    (constants::MON_2, b"February"),
-    (constants::MON_3, b"March"),
-    (constants::MON_4, b"April"),
-    (constants::MON_5, b"May"),
-    (constants::MON_6, b"June"),
-    (constants::MON_7, b"July"),
-    (constants::MON_8, b"August"),
-    (constants::MON_9, b"September"),
-    (constants::MON_10, b"October"),
-    (constants::MON_11, b"November"),
-    (constants::MON_12, b"December"),
-    (constants::ABMON_1, b"Jan"),
-    (constants::ABMON_2, b"Feb"),
-    (constants::ABMON_3, b"Mar"),
-    (constants::ABMON_4, b"Apr"),
-    (constants::ABMON_5, b"May"),
-    (constants::ABMON_6, b"Jun"),
-    (constants::ABMON_7, b"Jul"),
-    (constants::ABMON_8, b"Aug"),
-    (constants::ABMON_9, b"Sep"),
-    (constants::ABMON_10, b"Oct"),
-    (constants::ABMON_11, b"Nov"),
-    (constants::ABMON_12, b"Dec"),
-    (constants::ERA, b""),
-    (constants::ERA_D_FMT, b""),
-    (constants::ERA_D_T_FMT, b""),
-    (constants::ERA_T_FMT, b""),
-    (constants::ALT_DIGITS, b""),
-    (constants::RADIXCHAR, b"."),
-    (constants::THOUSEP, b""),
-    (constants::YESEXPR, b"^[yY]"),
-    (constants::NOEXPR, b"^[nN]"),
-    (constants::YESSTR, b"yes"),
-    (constants::NOSTR, b"no"),
-    (constants::CRNCYSTR, b""),
-];
+/// The category a `<locale.h>` value of the pinned build names, `LC_ALL`
+/// aside.
+fn category(value: usize) -> Option<Category> {
+    let value = i64::try_from(value).ok()?;
+    Some(match value {
+        LC_COLLATE => Category::Collate,
+        LC_CTYPE => Category::Ctype,
+        LC_MONETARY => Category::Monetary,
+        LC_NUMERIC => Category::Numeric,
+        LC_TIME => Category::Time,
+        LC_MESSAGES => Category::Messages,
+        _ => return None,
+    })
+}
 
-/// Each category's current name, by `<locale.h>` value, `LC_ALL`'s
-/// slot unused.
+/// `nl_langinfo`'s items: the pinned build's `<langinfo.h>` value each
+/// constant carries beside the item the host's C library knows it by.
+macro_rules! items {
+    ($($name:ident),* $(,)?) => {
+        [$((constants::$name, libc::$name)),*]
+    };
+}
+const LANGINFO: [(i64, libc::nl_item); 57] = items!(
+    CODESET,
+    D_T_FMT,
+    D_FMT,
+    T_FMT,
+    T_FMT_AMPM,
+    AM_STR,
+    PM_STR,
+    DAY_1,
+    DAY_2,
+    DAY_3,
+    DAY_4,
+    DAY_5,
+    DAY_6,
+    DAY_7,
+    ABDAY_1,
+    ABDAY_2,
+    ABDAY_3,
+    ABDAY_4,
+    ABDAY_5,
+    ABDAY_6,
+    ABDAY_7,
+    MON_1,
+    MON_2,
+    MON_3,
+    MON_4,
+    MON_5,
+    MON_6,
+    MON_7,
+    MON_8,
+    MON_9,
+    MON_10,
+    MON_11,
+    MON_12,
+    ABMON_1,
+    ABMON_2,
+    ABMON_3,
+    ABMON_4,
+    ABMON_5,
+    ABMON_6,
+    ABMON_7,
+    ABMON_8,
+    ABMON_9,
+    ABMON_10,
+    ABMON_11,
+    ABMON_12,
+    ERA,
+    ERA_D_FMT,
+    ERA_D_T_FMT,
+    ERA_T_FMT,
+    ALT_DIGITS,
+    RADIXCHAR,
+    THOUSEP,
+    YESEXPR,
+    NOEXPR,
+    YESSTR,
+    NOSTR,
+    CRNCYSTR,
+);
+
+/// A request's locale: the `locale_t` installed on the thread serving it
+/// once `setlocale()` has built one, and each category's name by
+/// `<locale.h>` value, `LC_ALL`'s slot unused.
+#[derive(Debug)]
 pub(super) struct Locale {
     names: [Vec<u8>; 7],
+    installed: Option<Installed>,
 }
 
 impl Default for Locale {
     fn default() -> Locale {
         let mut names: [Vec<u8>; 7] = std::array::from_fn(|_| b"C".to_vec());
         names[2] = b"C.UTF-8".to_vec();
-        Locale { names }
+        Locale {
+            names,
+            installed: None,
+        }
     }
 }
 
@@ -129,11 +162,15 @@ impl Locale {
             self.names[category].clone()
         }
     }
-}
 
-/// A name the C library's C locale answers to.
-fn c_locale(name: &[u8]) -> bool {
-    matches!(name, b"C" | b"POSIX" | b"C.UTF-8")
+    /// Install `locale` on the thread from here to the request's end, in
+    /// place of the one installed before it.
+    fn install(&mut self, locale: c::Locale) {
+        match &mut self.installed {
+            Some(installed) => installed.replace(locale),
+            None => self.installed = Some(Installed::install(locale)),
+        }
+    }
 }
 
 /// The name `setlocale(category, "")` reads for one category off the
@@ -150,8 +187,16 @@ fn from_environment(req: &Request, category: usize) -> Vec<u8> {
         .unwrap_or_else(|| b"C".to_vec())
 }
 
+/// The bytes up to the first NUL, what the C library reads of a
+/// `zend_string`'s value, as a C string.
+fn c_string(bytes: &[u8]) -> CString {
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    CString::new(&bytes[..end]).unwrap_or_default()
+}
+
 /// `try_setlocale_str(cat, loc)`: the name answered, or `None` where
-/// the C library refuses.
+/// the C library knows no such locale. The locale is built whole before
+/// it is installed, every category `LC_ALL` names or none.
 fn try_setlocale(req: &mut Request, category: i64, loc: &[u8]) -> Option<Vec<u8>> {
     let category = usize::try_from(category).ok().filter(|c| *c < 7)?;
     if loc == b"0" {
@@ -166,19 +211,19 @@ fn try_setlocale(req: &mut Request, category: i64, loc: &[u8]) -> Option<Vec<u8>
     } else {
         vec![category]
     };
+    let mut built = c::Locale::current()?;
     let mut names = Vec::with_capacity(targets.len());
     for target in &targets {
-        let name = if loc.is_empty() {
+        let name = c_string(&if loc.is_empty() {
             from_environment(req, *target)
         } else {
             loc.to_vec()
-        };
-        if !c_locale(&name) {
-            return None;
-        }
-        names.push(name);
+        });
+        built = built.with(self::category(*target)?, &name).ok()?;
+        names.push(name.into_bytes());
     }
     let locale = &mut req.state::<crate::State>().string.locale;
+    locale.install(built);
     for (target, name) in targets.iter().zip(names) {
         locale.names[*target] = name;
     }
@@ -221,6 +266,33 @@ fn try_setlocale(req: &mut Request, category: i64, loc: &[u8]) -> Option<Vec<u8>
 /// setlocale(): Argument #2 ($locales) must be of type array|string|null, stdClass given
 /// setlocale() expects at least 2 arguments, 1 given
 /// ```
+///
+/// Any name the host's C library knows is a locale a category moves to,
+/// and the name is what it answers, `LC_ALL` over categories that differ
+/// joined as the host joins them:
+///
+/// ```php
+/// var_dump(setlocale(LC_ALL, "de_DE"), setlocale(LC_NUMERIC, "is_IS", "is_IS.UTF-8"), setlocale(LC_ALL, "0"), setlocale(LC_COLLATE, "0"));
+/// var_dump(setlocale(LC_ALL, ["xx_XX", "fr_FR.ISO8859-1", "fr_FR"]), setlocale(LC_CTYPE, "de_DE.UTF-8"), setlocale(LC_ALL, "0"), setlocale(LC_ALL, "de_DE\0junk"));
+/// putenv("LC_ALL="); putenv("LC_TIME=fr_FR.UTF-8"); putenv("LANG=de_DE.UTF-8");
+/// var_dump(setlocale(LC_TIME, ""), setlocale(LC_ALL, null), setlocale(LC_ALL, "0"));
+/// var_dump(setlocale(LC_ALL, "C"), setlocale(LC_ALL, "0"));
+/// ```
+/// ```expect
+/// string(5) "de_DE"
+/// string(5) "is_IS"
+/// string(35) "de_DE/de_DE/de_DE/is_IS/de_DE/de_DE"
+/// string(5) "de_DE"
+/// string(15) "fr_FR.ISO8859-1"
+/// string(11) "de_DE.UTF-8"
+/// string(91) "fr_FR.ISO8859-1/de_DE.UTF-8/fr_FR.ISO8859-1/fr_FR.ISO8859-1/fr_FR.ISO8859-1/fr_FR.ISO8859-1"
+/// string(5) "de_DE"
+/// string(11) "fr_FR.UTF-8"
+/// string(71) "de_DE.UTF-8/de_DE.UTF-8/de_DE.UTF-8/de_DE.UTF-8/fr_FR.UTF-8/de_DE.UTF-8"
+/// string(71) "de_DE.UTF-8/de_DE.UTF-8/de_DE.UTF-8/de_DE.UTF-8/fr_FR.UTF-8/de_DE.UTF-8"
+/// string(1) "C"
+/// string(1) "C"
+/// ```
 #[php_function]
 pub(super) fn setlocale(
     req: &mut Request,
@@ -261,8 +333,10 @@ pub(super) fn setlocale(
     Ok(OrFalse::False)
 }
 
-/// `localeconv(): array`: the C locale's `struct lconv`, `CHAR_MAX` in
-/// every numeric field and both groupings empty.
+/// `localeconv(): array`: the thread's `struct lconv` under the
+/// request's locale, its eight strings, its eight `char`s as integers,
+/// `CHAR_MAX` where the locale leaves one unset, and each grouping's
+/// bytes up to its NUL.
 ///
 /// ```php
 /// var_dump(localeconv());
@@ -309,48 +383,81 @@ pub(super) fn setlocale(
 ///   }
 /// }
 /// ```
+///
+/// ```php
+/// setlocale(LC_ALL, "de_DE.UTF-8"); $l = localeconv();
+/// var_dump($l["decimal_point"], $l["thousands_sep"], $l["int_curr_symbol"], $l["mon_decimal_point"], $l["frac_digits"], $l["p_cs_precedes"], $l["grouping"], $l["mon_grouping"]);
+/// setlocale(LC_MONETARY, "C"); var_dump(localeconv()["currency_symbol"], localeconv()["decimal_point"]);
+/// ```
+/// ```expect
+/// string(1) ","
+/// string(1) "."
+/// string(4) "EUR "
+/// string(1) ","
+/// int(2)
+/// int(0)
+/// array(1) {
+///   [0]=>
+///   int(3)
+/// }
+/// array(1) {
+///   [0]=>
+///   int(3)
+/// }
+/// string(0) ""
+/// string(1) ","
+/// ```
 #[php_function]
 pub(super) fn localeconv(req: &mut Request) -> Result<PhpArray, Thrown> {
+    let lconv = c::conventions();
     let mut array = PhpArray::new(req)?;
     let strings: [(&[u8], &[u8]); 8] = [
-        (b"decimal_point", b"."),
-        (b"thousands_sep", b""),
-        (b"int_curr_symbol", b""),
-        (b"currency_symbol", b""),
-        (b"mon_decimal_point", b""),
-        (b"mon_thousands_sep", b""),
-        (b"positive_sign", b""),
-        (b"negative_sign", b""),
+        (b"decimal_point", &lconv.decimal_point),
+        (b"thousands_sep", &lconv.thousands_sep),
+        (b"int_curr_symbol", &lconv.int_curr_symbol),
+        (b"currency_symbol", &lconv.currency_symbol),
+        (b"mon_decimal_point", &lconv.mon_decimal_point),
+        (b"mon_thousands_sep", &lconv.mon_thousands_sep),
+        (b"positive_sign", &lconv.positive_sign),
+        (b"negative_sign", &lconv.negative_sign),
     ];
     for (name, value) in strings {
         let key = Key::Str(PhpString::new(req, name)?);
         let value = Value::string(PhpString::new(req, value)?);
         array.set(req, key, value)?;
     }
-    for name in [
-        &b"int_frac_digits"[..],
-        b"frac_digits",
-        b"p_cs_precedes",
-        b"p_sep_by_space",
-        b"n_cs_precedes",
-        b"n_sep_by_space",
-        b"p_sign_posn",
-        b"n_sign_posn",
-    ] {
+    let chars: [(&[u8], c_char); 8] = [
+        (b"int_frac_digits", lconv.int_frac_digits),
+        (b"frac_digits", lconv.frac_digits),
+        (b"p_cs_precedes", lconv.p_cs_precedes),
+        (b"p_sep_by_space", lconv.p_sep_by_space),
+        (b"n_cs_precedes", lconv.n_cs_precedes),
+        (b"n_sep_by_space", lconv.n_sep_by_space),
+        (b"p_sign_posn", lconv.p_sign_posn),
+        (b"n_sign_posn", lconv.n_sign_posn),
+    ];
+    for (name, value) in chars {
         let key = Key::Str(PhpString::new(req, name)?);
-        array.set(req, key, Value::int(CHAR_MAX))?;
+        array.set(req, key, Value::int(i64::from(value)))?;
     }
-    for name in [&b"grouping"[..], b"mon_grouping"] {
+    for (name, grouping) in [
+        (&b"grouping"[..], &lconv.grouping),
+        (b"mon_grouping", &lconv.mon_grouping),
+    ] {
+        let mut list = PhpArray::new(req)?;
+        for (at, byte) in (0i64..).zip(grouping) {
+            let value = i64::from(c_char::from_ne_bytes([*byte]));
+            list.set(req, Key::Int(at), Value::int(value))?;
+        }
         let key = Key::Str(PhpString::new(req, name)?);
-        let empty = PhpArray::new(req)?;
-        array.set(req, key, Value::array(empty))?;
+        array.set(req, key, Value::array(list))?;
     }
     Ok(array)
 }
 
-/// `nl_langinfo(int $item): string|false`: the C locale's answer for
-/// one of the items the build defines, `CODESET` read off `LC_CTYPE`,
-/// and the warning and `false` for any other number.
+/// `nl_langinfo(int $item): string|false`: the C library's answer under
+/// the request's locale for one of the items the build defines, and the
+/// warning and `false` for any other number.
 ///
 /// ```php
 /// var_dump(nl_langinfo(CODESET), nl_langinfo(ABDAY_1), nl_langinfo(MON_12), strtr(nl_langinfo(D_T_FMT), "%", "#"), nl_langinfo(RADIXCHAR), nl_langinfo(ERA), nl_langinfo(YESEXPR));
@@ -369,23 +476,42 @@ pub(super) fn localeconv(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// string(8) "US-ASCII"
 /// bool(false)
 /// ```
+///
+/// ```php
+/// setlocale(LC_ALL, "fr_FR.ISO8859-1");
+/// var_dump(nl_langinfo(CODESET), bin2hex(nl_langinfo(MON_2)), nl_langinfo(ABDAY_1), strtr(nl_langinfo(D_FMT), "%", "#"), nl_langinfo(RADIXCHAR), bin2hex(nl_langinfo(THOUSEP)));
+/// setlocale(LC_TIME, "de_DE.UTF-8"); var_dump(nl_langinfo(MON_3), nl_langinfo(RADIXCHAR));
+/// ```
+/// ```expect
+/// string(9) "ISO8859-1"
+/// string(14) "66e97672696572"
+/// string(4) "dim."
+/// string(8) "#d.#m.#Y"
+/// string(1) ","
+/// string(2) "a0"
+/// string(5) "März"
+/// string(1) ","
+/// ```
 #[php_function]
 pub(super) fn nl_langinfo(req: &mut Request, item: i64) -> Result<OrFalse<PhpString>, Thrown> {
-    let Some((_, answer)) = LANGINFO.iter().find(|(id, _)| *id == item) else {
+    let Some((_, host)) = LANGINFO.iter().find(|(id, _)| *id == item) else {
         docref(req, Level::Warning, &format!("Item '{item}' is not valid"));
         return Ok(OrFalse::False);
     };
-    if item == CODESET {
-        let utf8 = req.state::<crate::State>().string.locale.names[2] == b"C.UTF-8";
-        return PhpString::new(req, if utf8 { b"UTF-8" } else { b"US-ASCII" }).map(OrFalse::Value);
-    }
-    PhpString::new(req, answer).map(OrFalse::Value)
+    PhpString::new(req, &c::langinfo(*host)).map(OrFalse::Value)
 }
 
-/// `strcoll(string $string1, string $string2): int`: the C locale's
-/// collation, `strcmp` over the bytes up to each string's first NUL,
-/// whose answer on the pinned build is the difference of the first
-/// bytes that differ.
+/// `strcoll(3)` under the request's `LC_COLLATE` over the bytes up to
+/// each string's first NUL, what `SORT_LOCALE_STRING` orders by, as
+/// `string_locale_compare_function` normalises it.
+pub(crate) fn collate(left: &[u8], right: &[u8]) -> Ordering {
+    c::strcoll(&c_string(left), &c_string(right)).cmp(&0)
+}
+
+/// `strcoll(string $string1, string $string2): int`: the C library's
+/// collation under the request's `LC_COLLATE`, over the bytes up to each
+/// string's first NUL; under `C` it is `strcmp`, whose answer on the
+/// pinned build is the difference of the first bytes that differ.
 ///
 /// ```php
 /// var_dump(strcoll("a", "b"), strcoll("b", "a"), strcoll("abc", "abc"), strcoll("a", "c"), strcoll("a", ""), strcoll("\xff", "a"), strcoll("a\0b", "a\0c"));
@@ -399,18 +525,19 @@ pub(super) fn nl_langinfo(req: &mut Request, item: i64) -> Result<OrFalse<PhpStr
 /// int(158)
 /// int(0)
 /// ```
+///
+/// ```php
+/// setlocale(LC_COLLATE, "fr_FR.ISO8859-1");
+/// var_dump(strcoll("\xC9cosse", "Ontario") < 0, strcoll("Qu\xE9bec", "Quebed") < 0, strcoll("a", "B") < 0, strcoll("abc", "abc"));
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// int(0)
+/// ```
 #[php_function]
 pub(super) fn strcoll(string1: PhpString, string2: PhpString) -> i64 {
-    let (s1, s2) = (string1, string2);
-    let c_str = |s: &[u8]| -> Vec<u8> { s.split(|c| *c == 0).next().unwrap_or(&[]).to_vec() };
-    let (left, right) = (c_str(s1.as_bytes()), c_str(s2.as_bytes()));
-    let mut at = 0;
-    loop {
-        let x = left.get(at).copied().unwrap_or(0);
-        let y = right.get(at).copied().unwrap_or(0);
-        if x != y || x == 0 {
-            return i64::from(x) - i64::from(y);
-        }
-        at += 1;
-    }
+    let (left, right) = (c_string(string1.as_bytes()), c_string(string2.as_bytes()));
+    i64::from(c::strcoll(&left, &right))
 }

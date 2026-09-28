@@ -278,6 +278,19 @@ fn rsort(
 /// {"b":"9","c":"9a","a":"10"}
 /// {"a":"10","b":"9","c":"9a"}
 /// ```
+///
+/// `SORT_LOCALE_STRING` orders by `strcoll` under the request's
+/// `LC_COLLATE`, byte order under `C`:
+///
+/// ```php
+/// $t = ["NS" => "Nouvelle-\xC9cosse", "ON" => "Ontario", "PE" => "\xCEle-du-Prince-\xC9douard", "QC" => "Qu\xE9bec", "QB" => "Quebed", "MB" => "Manitoba", "AB" => "alberta"];
+/// $c = $t; asort($c, SORT_LOCALE_STRING); echo implode(" ", array_keys($c)), "\n";
+/// setlocale(LC_ALL, "fr_FR.ISO8859-1", "fr_FR"); asort($t, SORT_LOCALE_STRING); echo implode(" ", array_keys($t)), "\n";
+/// ```
+/// ```expect
+/// MB NS ON QB QC AB PE
+/// AB PE MB NS ON QC QB
+/// ```
 #[php_function]
 fn asort(
     req: &mut Request,
@@ -678,7 +691,7 @@ pub(super) fn key_compare(
         }
         SORT_LOCALE_STRING => {
             let (x, y) = (key_text(a), key_text(b));
-            c_string(&x).cmp(c_string(&y))
+            crate::string::locale::collate(&x, &y)
         }
         _ => match (a, b) {
             (Key::Int(x), Key::Int(y)) => long_keys(*x, *y),
@@ -724,15 +737,6 @@ fn key_double(key: &Key) -> f64 {
         Key::Int(n) => *n as f64,
         Key::Str(s) => strtod(s.as_bytes()),
     }
-}
-
-/// The bytes up to the first NUL, what `strcoll` reads of a
-/// `zend_string`'s value.
-pub(super) fn c_string(bytes: &[u8]) -> &[u8] {
-    bytes
-        .iter()
-        .position(|b| *b == 0)
-        .map_or(bytes, |end| &bytes[..end])
 }
 
 /// `zend_strtod(s, NULL)` (`Z/Zend/zend_strtod.c:2517`) as php builds it:

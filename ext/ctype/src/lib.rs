@@ -1,5 +1,5 @@
 //! The `ctype` extension: `php-src/ext/ctype` as one crate under `ext/`
-//! (ADR-0004). One dependency, the facade; one entry, `extension()`; its
+//! (ADR-0004). Two dependencies, the facade and `libc`; one entry, `extension()`; its
 //! state on the value (ADR-0005). The phpt subset is
 //! `php-src/ext/ctype/tests`, through `xtask phpt --subset`.
 //!
@@ -9,10 +9,12 @@
 //! the class and false when it is empty; anything else is the 8.1
 //! deprecation and `ctype_fallback`, which reads an `int` as one byte
 //! where it fits and answers by the class's `allow_digits` and
-//! `allow_minus` otherwise. The classes are the `C` locale's, the only
-//! one the engine sets (#567): ASCII, and no byte above 0x7F in any
-//! class, which is what [`class_of`] reads.
-#![forbid(unsafe_code)]
+//! `allow_minus` otherwise. The classes are the host C library's own
+//! under the request's `LC_CTYPE` (design §5.14, revision 40), read in
+//! `ffi`: ASCII alone under `C`, and under `C.UTF-8`, the locale php
+//! starts a request in, and any other, what the host's tables say of
+//! each byte above 0x7F.
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -24,6 +26,8 @@
 )]
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
+
+mod ffi;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_function;
@@ -82,8 +86,8 @@ fn ctype_info(req: &mut Request) {
     req.info_table(&[&["ctype functions", "enabled"]]);
 }
 
-/// One of `<ctype.h>`'s classes, as libc answers for each byte under
-/// `LC_CTYPE=C`: an ASCII class, which no byte above 0x7F is in.
+/// One of `<ctype.h>`'s classes, which the host's C library answers
+/// for each byte under the request's `LC_CTYPE`.
 #[derive(Clone, Copy)]
 enum Class {
     Alnum,
@@ -97,27 +101,6 @@ enum Class {
     Space,
     Upper,
     Xdigit,
-}
-
-/// `iswhat(c)` for one byte under `LC_CTYPE=C`, the table of C's
-/// `<ctype.h>` as inclusive ranges: ASCII and nothing else, so a byte
-/// above 0x7F is in no class. A locale other than C, once the engine
-/// sets one, is a table of its own beside this one.
-fn class_of(class: Class, byte: u8) -> bool {
-    let ranges: &[(u8, u8)] = match class {
-        Class::Alnum => &[(48, 57), (65, 90), (97, 122)],
-        Class::Alpha => &[(65, 90), (97, 122)],
-        Class::Cntrl => &[(0, 31), (127, 127)],
-        Class::Digit => &[(48, 57)],
-        Class::Lower => &[(97, 122)],
-        Class::Graph => &[(33, 126)],
-        Class::Print => &[(32, 126)],
-        Class::Punct => &[(33, 47), (58, 64), (91, 96), (123, 126)],
-        Class::Space => &[(9, 13), (32, 32)],
-        Class::Upper => &[(65, 90)],
-        Class::Xdigit => &[(48, 57), (65, 70), (97, 102)],
-    };
-    ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&byte))
 }
 
 /// `ctype_impl(iswhat, allow_digits, allow_minus)` over the argument the
@@ -137,7 +120,7 @@ fn ctype(
 ) -> bool {
     let given = text.deref();
     if let Some(bytes) = given.as_str_bytes() {
-        return !bytes.is_empty() && bytes.iter().all(|&b| class_of(class, b));
+        return !bytes.is_empty() && bytes.iter().all(|&b| ffi::is(class, b));
     }
     docref(
         req,
@@ -149,7 +132,7 @@ fn ctype(
     );
     match given.as_ref() {
         ValueRef::Int(n) => match u8::try_from(n).or_else(|_| u8::try_from(n + 256)) {
-            Ok(byte) if (-128..=255).contains(&n) => class_of(class, byte),
+            Ok(byte) if (-128..=255).contains(&n) => ffi::is(class, byte),
             _ if n >= 0 => allow_digits,
             _ => allow_minus,
         },
@@ -234,6 +217,28 @@ fn ctype_alnum(req: &mut Request, text: Value) -> bool {
 /// bool(false)
 /// bool(false)
 /// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+///
+/// Past 0x7F the class is the request's `LC_CTYPE`'s: the host's
+/// `C.UTF-8`, where a request starts, and `fr_FR.ISO8859-1` read
+/// `\xE9` as a letter, and `C` reads nothing there:
+///
+/// ```php
+/// var_dump(ctype_alpha("\xE9"), ctype_print("\xA0"), ctype_upper("\xC9"), ctype_space("\xA0"));
+/// setlocale(LC_CTYPE, "fr_FR.ISO8859-1"); var_dump(ctype_alpha("\xE9"), ctype_lower("\xE9"), ctype_upper("\xC9"), ctype_digit("\xB2"));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_alpha("\xE9"), ctype_print("\xA0"));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
 /// bool(false)
 /// bool(false)
 /// bool(false)
