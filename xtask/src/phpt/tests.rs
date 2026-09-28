@@ -987,8 +987,11 @@ fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() 
 /// judged them at once. On a pool of eight the three tests are cut into
 /// batches of two, as run-tests.php cuts them (run-tests.php:1537-1541),
 /// so the pair is judged one after the other and both pass, run after run;
-/// the third, in a batch of its own, runs beside the pair's first, the
-/// negative control that shows the pool runs anything at once at all.
+/// the third, in a batch of its own, runs beside the pair's first in some
+/// run, the negative control that shows the pool runs anything at once at
+/// all. Some run and not every run: on a loaded machine the scheduler may
+/// serve two batches one after the other, which says nothing about the
+/// pool (#1153).
 #[test]
 fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
     if oracle().is_none() {
@@ -996,6 +999,7 @@ fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
     }
     let tests = ["a-temp.phpt", "b-temp.phpt", "c-free.phpt"];
     let (tree, subset) = fixture_subset("relative");
+    let mut controls = Vec::new();
     for run in 0..20 {
         let tally = run_on(&subset, 8, 30);
         assert!(
@@ -1004,11 +1008,12 @@ fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
         );
         let span = spans(&tree, &tests);
         assert!(span[0].1 <= span[1].0, "run {run}, the batch: {span:?}");
-        assert!(
-            overlap(span[0], span[2]),
-            "run {run}, the control: {span:?}"
-        );
+        controls.push((span[0], span[2]));
     }
+    assert!(
+        controls.iter().any(|(a, c)| overlap(*a, *c)),
+        "the control met in no run: {controls:?}"
+    );
 }
 
 /// The fixture at `xtask/fixtures/phpt/past-limit` (#938): a test that
