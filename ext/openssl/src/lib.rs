@@ -270,7 +270,7 @@ pub fn extension() -> Extension {
         default: default.as_bytes().into(),
         user: false,
         per_dir: true,
-        system: true,
+        system: false,
     };
     ExtensionBuilder::default()
         .ini(vec![
@@ -294,9 +294,41 @@ pub fn extension() -> Extension {
             sign::openssl_sign::declared(),
             sign::openssl_verify::declared(),
         ])
+        .on_modify(b"openssl.libctx", on_update_libctx)
         .request_state::<State>()
         .info(info)
         .build("openssl")
+}
+
+/// `OnUpdateLibCtx`: `default` and `custom` name the two library
+/// contexts php keeps; any other value is refused, fatally as the engine
+/// starts and with a warning after. The entry is `PHP_INI_PERDIR`, so
+/// `ini_set()` refuses it before the handler and a program meets the
+/// value the host started with.
+///
+/// ```php
+/// var_dump(ini_get('openssl.libctx'), ini_set('openssl.libctx', 'default'));
+/// ```
+/// ```expect
+/// string(6) "custom"
+/// bool(false)
+/// ```
+#[allow(clippy::unnecessary_wraps)] // the ABI's `OnModify`
+fn on_update_libctx(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+    if value == b"default" || value == b"custom" {
+        return Ok(true);
+    }
+    let level = if req.at_startup() {
+        php_ext::raising::Level::Error
+    } else {
+        php_ext::raising::Level::Warning
+    };
+    let text = format!(
+        "OpenSSL libctx \"{}\" cannot be found",
+        String::from_utf8_lossy(value)
+    );
+    php_ext::raising::docref(req, level, &text);
+    Ok(false)
 }
 
 /// `PHP_MINFO_FUNCTION(openssl)`: the table, then `DISPLAY_INI_ENTRIES`.
