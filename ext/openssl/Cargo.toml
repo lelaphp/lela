@@ -11,9 +11,13 @@ description = "The openssl extension, php-src/ext/openssl"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+# libcrypto is the platform's OpenSSL 3, the major version the oracle
+# links, found by openssl-sys through pkg-config and bound in `src/ffi/`
+# alone (`unsafe.homes`; design §7.2).
+openssl-sys = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

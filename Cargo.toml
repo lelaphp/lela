@@ -57,3 +57,4 @@ pkg-config = "0.3"                  # ext/libxml's build.rs finds the platform's
 libsqlite3-sys = { version = "0.38", features = ["bundled"] } # ext/pdo_sqlite's libsqlite3, built from the crate's bundled amalgamation (design §7.2, `.cargo/config.toml`'s LIBSQLITE3_FLAGS)
 libz-sys = { version = "1.1", default-features = false, features = ["libc"] }  # ext/zlib: the platform's zlib, whose deflate bytes are the oracle's at every level (design §7.2, revision 34; #950)
 libbz2-rs-sys = { version = "0.2.5", default-features = false, features = ["rust-allocator"] }  # ext/bz2: libbzip2 ported to Rust, whose bytes are the oracle's libbz2 1.0.8's at every block size and work factor (design §7.2, revision 39; #1116)
+openssl-sys = "0.9"                # ext/openssl: the platform's libcrypto, OpenSSL 3 as the oracle links it, found through pkg-config and never vendored (design §7.2; #1108)
