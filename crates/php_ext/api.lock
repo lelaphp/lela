@@ -493,6 +493,7 @@ request::Request::set_error_handler
 request::Request::set_exception_handler
 request::Request::set_global
 request::Request::set_header_callback
+request::Request::set_local_var
 request::Request::set_opened_path
 request::Request::set_response_code
 request::Request::set_shutdown_function

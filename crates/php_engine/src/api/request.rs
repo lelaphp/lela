@@ -16346,6 +16346,43 @@ impl Request {
         }
     }
 
+    /// `zend_set_local_var_str(name, value, 0)`
+    /// (`Z/Zend/zend_execute_API.c:1960`), what the http wrapper leaves
+    /// `$http_response_header` with: the variable `name` of the innermost
+    /// user frame written with `value` where the frame has a symbol table,
+    /// as the main op array's frame always has, or where `name` is one of
+    /// its CVs, what it held released; `false`, and the value released,
+    /// where neither is so or no user frame is running, since without
+    /// `force` php adds no table to a frame that has none.
+    pub fn set_local_var(&mut self, name: &[u8], value: Value) -> bool {
+        let Some(frame) = self.caller_frame() else {
+            self.release(value);
+            return false;
+        };
+        if self
+            .vm
+            .at(frame)
+            .is_some_and(|state| state.symbol_table.is_some())
+        {
+            self.set_caller_var(name, value);
+            return true;
+        }
+        let at = self
+            .frame_var_names(frame)
+            .iter()
+            .position(|var| var == name)
+            .and_then(|at| u32::try_from(at).ok());
+        let place = at.and_then(|at| self.stack.frame_mut(frame)?.slot_ptr(Slot(at)));
+        let Some(place) = place else {
+            self.release(value);
+            return false;
+        };
+        let held = Value::of_zval(place.read());
+        place.write(value.to_zval());
+        self.release(held);
+        true
+    }
+
     /// The innermost user frame, the one a native's variable access
     /// reads: `EG(current_execute_data)`'s caller.
     fn caller_frame(&self) -> Option<FrameRef> {
