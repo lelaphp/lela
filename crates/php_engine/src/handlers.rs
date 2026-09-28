@@ -7413,6 +7413,38 @@ enum PropertyFound {
     Threw(Thrown),
 }
 
+/// `zend_fetch_property_address`'s arm over what is no object
+/// (`Z/Zend/zend_execute.c:3521`): `ZVAL_UNDEFINED_OP1` under every type
+/// but `BP_VAR_W`, php's `BP_VAR_RW` being [`PropertyRead::Warning`]
+/// here, then `zend_throw_non_object_error`, chained over what a handler
+/// of the warning threw, the operand freed.
+fn non_object_place(
+    req: &mut Request,
+    (frame, code, op): (FrameRef, &OpArray, &Opline),
+    read: PropertyRead,
+    container: &Value,
+    name: &[u8],
+) -> Thrown {
+    if op.op1_type == OperandKind::Cv
+        && matches!(read, PropertyRead::Warning | PropertyRead::Unset)
+        && matches!(container.as_ref(), ValueRef::Undef)
+    {
+        let _ = exec::operand(req, frame, code, op.op1_type, op.op1);
+    }
+    let ran_on = req.pending();
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let shown = crate::ops::value_name(req, &container.undef_as_null());
+    let thrown = crate::api::raising::throw(
+        req,
+        "Error",
+        &format!(
+            "Attempt to modify property \"{}\" on {shown}",
+            String::from_utf8_lossy(name)
+        ),
+    );
+    req.raised_over(thrown, ran_on)
+}
+
 /// `zend_fetch_property_address` (`Z/Zend/zend_execute.c`) under
 /// `BP_VAR_W` or `BP_VAR_RW`, the place `FETCH_OBJ_W`, `FETCH_OBJ_RW`
 /// and `ASSIGN_OBJ_REF` write through: the object `op1` holds and the
@@ -7437,16 +7469,7 @@ fn property_place(
     };
     let name = name_value.as_str_bytes().unwrap_or_default().to_vec();
     let Some(object) = container.as_object().copied() else {
-        exec::free_operand(req, frame, code, op.op1_type, op.op1);
-        let shown = crate::ops::value_name(req, &container.undef_as_null());
-        let thrown = crate::api::raising::throw(
-            req,
-            "Error",
-            &format!(
-                "Attempt to modify property \"{}\" on {shown}",
-                String::from_utf8_lossy(&name)
-            ),
-        );
+        let thrown = non_object_place(req, (frame, code, op), read, &container, &name);
         return Ok(PropertyFound::Threw(thrown));
     };
     let object = match req.lazy_place(object, &name) {
@@ -13308,6 +13331,24 @@ fn binary_assign_op_obj_dim(
 /// int(11)
 /// int(11)
 /// ```
+///
+/// A variable nothing wrote is warned of before the `Error`, after the
+/// value is read, as `FETCH_OBJ_RW` warns before its own:
+///
+/// ```php
+/// try { $u1->a += $v; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $u4->a->a += 5; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $v in %s on line 2
+///
+/// Warning: Undefined variable $u1 in %s on line 2
+/// Attempt to assign property "a" on null
+///
+/// Warning: Undefined variable $u4 in %s on line 3
+/// Attempt to modify property "a" on null
+/// ```
 pub(crate) fn assign_obj_op<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -13339,6 +13380,13 @@ pub(crate) fn assign_obj_op<T: Tier>(
     ) {
         (Ok(name), Some(object)) => step_property(req, frame, code, step, object, &name)?,
         (Ok(name), None) => {
+            // `GET_OP_DATA_ZVAL_PTR(BP_VAR_R)` and `ZVAL_UNDEFINED_OP1`,
+            // in php's order, before `zend_throw_non_object_error`.
+            let _value = exec::operand(req, frame, code, data.op1_type, data.op1);
+            if op.op1_type == OperandKind::Cv && matches!(container.as_ref(), ValueRef::Undef) {
+                let _ = exec::operand(req, frame, code, op.op1_type, op.op1);
+            }
+            let ran_on = req.pending();
             let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
             let shown = crate::ops::value_name(req, &container.undef_as_null());
             let thrown = crate::api::raising::throw(
@@ -13346,8 +13394,11 @@ pub(crate) fn assign_obj_op<T: Tier>(
                 "Error",
                 &format!("Attempt to assign property \"{shown_name}\" on {shown}"),
             );
-            exec::free_operand(req, frame, code, data.op1_type, data.op1);
-            write_out(req, frame, code, op, &Value::null());
+            let thrown = req.raised_over(thrown, ran_on);
+            let thrown = req.free_pending(thrown, |req| {
+                exec::free_operand(req, frame, code, data.op1_type, data.op1);
+                write_out(req, frame, code, op, &Value::null());
+            });
             Err(thrown)
         }
         (Err(thrown), _) => {
