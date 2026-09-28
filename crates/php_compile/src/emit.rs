@@ -1124,7 +1124,7 @@ fn dirname(path: &[u8]) -> Vec<u8> {
 #[allow(clippy::too_many_lines)] // the emitter laid down a field a line, and the unit taken off it
 pub(crate) fn unit(
     parsed: &Parsed,
-    options: &Options,
+    options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
     let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
@@ -1133,10 +1133,10 @@ pub(crate) fn unit(
         strings,
         precision: options.precision,
         assertions: assert::Assertions::of(options.assertions),
-        persistent: &options.persistent,
-        functions: &options.functions,
-        known_classes: &options.classes,
-        frameless: frameless_table(&options.functions),
+        persistent: options.persistent,
+        functions: options.functions,
+        known_classes: options.classes,
+        frameless: frameless_table(options.functions),
         namespace: None,
         namespacing: Namespacing::Global,
         imports: Imports::default(),
@@ -17483,16 +17483,16 @@ mod tests {
     fn in_namespace<'a>(
         parsed: &'a Parsed,
         strings: &'a mut php_heap::Strings,
-        options: &'a Options,
+        options: &'a Options<'a>,
     ) -> Emit<'a> {
         Emit {
             parsed,
             strings,
             precision: options.precision,
             assertions: assert::Assertions::of(options.assertions),
-            persistent: &options.persistent,
-            functions: &options.functions,
-            known_classes: &options.classes,
+            persistent: options.persistent,
+            functions: options.functions,
+            known_classes: options.classes,
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
             namespacing: Namespacing::Unbracketed,

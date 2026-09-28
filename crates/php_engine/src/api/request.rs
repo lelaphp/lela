@@ -3471,7 +3471,7 @@ impl Request {
         }
         let at = usize::try_from(function.0).ok()?;
         match at.checked_sub(self.shared.functions.len()) {
-            None => self.shared.functions.get(at).map(|(_, entry)| *entry),
+            None => self.shared.entries.get(at).copied(),
             Some(method) => self.shared.methods.get(method).map(|m| m.entry),
         }
     }
@@ -14224,7 +14224,7 @@ impl Request {
             .shared
             .functions
             .iter()
-            .position(|(decl, _)| decl.name.0.to_ascii_lowercase() == wanted)
+            .position(|decl| decl.name.0.eq_ignore_ascii_case(&wanted))
         {
             return u32::try_from(i).ok().map(Function);
         }
@@ -15951,7 +15951,7 @@ impl Request {
     pub fn function_decl(&self, function: Function) -> Option<&FunctionDecl> {
         let at = usize::try_from(function.0).ok()?;
         if at < self.shared.functions.len() {
-            return self.shared.functions.get(at).map(|(decl, _)| decl);
+            return self.shared.functions.get(at);
         }
         if let Some(decl) = self.user_function(function).and_then(user_function_decl) {
             return Some(decl);
@@ -15978,7 +15978,7 @@ impl Request {
             .shared
             .functions
             .iter()
-            .map(|(decl, _)| decl.name.0.to_ascii_lowercase())
+            .map(|decl| decl.name.0.to_ascii_lowercase())
             .collect();
         let user: Vec<Vec<u8>> = self
             .user_functions
