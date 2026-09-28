@@ -9689,6 +9689,29 @@ impl Request {
     /// int(7)
     /// int(7)
     /// ```
+    ///
+    /// A dynamic property that holds a reference a typed property holds
+    /// too is written through `zend_assign_to_typed_ref`, an undefined
+    /// value as the `null` its warning left.
+    ///
+    /// ```php
+    /// class T { public string $x = ""; public int $n = 1; }
+    /// $t = new T; $o = new stdClass;
+    /// $o->p =& $t->x;
+    /// try { $o->p = $v; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// $o->q =& $t->n;
+    /// try { $o->q = "abc"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// $o->q = "5";
+    /// var_dump($t->x, $t->n);
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: Undefined variable $v in %s on line 5
+    /// Cannot assign null to reference held by property T::$x of type string
+    /// Cannot assign string to reference held by property T::$n of type int
+    /// string(0) ""
+    /// int(5)
+    /// ```
     fn write_std_property(
         &mut self,
         object: PhpObject,
@@ -9743,15 +9766,17 @@ impl Request {
             let held = o.properties().is_some_and(|table| table.contains(key));
             // `zend_assign_to_variable` over the entry found: one that
             // holds a reference, what `$o->p = &$x` bound, is written
-            // through, so every name of the cell reads the value.
+            // through, so every name of the cell reads the value, and
+            // held to the types of the properties that hold the cell
+            // (`zend_assign_to_typed_ref`) under the writing file's rule.
             let bound = o
                 .properties()
                 .and_then(|table| table.get(key))
                 .and_then(|found| Value::of_zval(found).as_php_ref().copied());
             if let Some(cell) = bound {
-                self.reference_set(cell.heap(), value);
                 self.release(Value::string(name));
-                return Ok(());
+                let strict = self.property_strict_types();
+                return self.assign_to_reference(cell.heap(), value.undef_as_null(), strict);
             }
             if !held
                 && let Err(thrown) = self.dynamic_property_creation(object.class(), name.as_bytes())
