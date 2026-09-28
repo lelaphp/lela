@@ -274,16 +274,12 @@ impl Request {
             let name = PhpString::new(self, &name)?;
             server.set(self, Key::from_string(name), Value::string(value))?;
         }
-        // `sapi_get_request_time`: the host keeps no time of its own, so
-        // it is the moment the table is made, as `php_time()` makes it.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0.0, |elapsed| elapsed.as_secs_f64());
+        // `sapi_get_request_time`, when the request started.
+        let now = self.started().as_secs_f64();
         let name = PhpString::new(self, b"REQUEST_TIME_FLOAT")?;
         server.set(self, Key::Str(name), Value::float(now))?;
         let name = PhpString::new(self, b"REQUEST_TIME")?;
-        #[allow(clippy::cast_possible_truncation)]
-        let whole = now as i64;
+        let whole = self.request_time();
         server.set(self, Key::Str(name), Value::int(whole))?;
         // `zend_hash_find_ex_ind` of both, and neither where one is
         // missing: the zval as the table holds it, a reference kept one.

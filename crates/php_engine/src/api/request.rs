@@ -1730,6 +1730,10 @@ pub struct Request {
     /// [`Request::virtual_file_ex`] is entered in (`crate::virtual_cwd`).
     realpath_cache: RealpathCache,
     cwd: PathBuf,
+    /// `sapi_get_request_time`: when the request started, since the
+    /// epoch. The host keeps no time of its own, so it is the moment the
+    /// request is made, as `php_time()` makes it.
+    started: std::time::Duration,
     /// `le_stream`, the resource type every stream is registered under.
     stream_type: ResourceType,
     /// The fibers running on this request, innermost last, each with the
@@ -2295,6 +2299,9 @@ impl Request {
             umask: 0o022,
             stat_cache: crate::wrapper::StatCache::default(),
             cwd,
+            started: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default(),
             stream_type,
             fibers: crate::fiber::Fibers::default(),
             raised: None,
@@ -15333,6 +15340,28 @@ impl Request {
             }
         }
         Ok(None)
+    }
+
+    /// `sapi_get_request_time`, when the request started, as `$_SERVER`
+    /// and opcache's `ZCG(request_time)` read it.
+    ///
+    /// ```php
+    /// $t = $_SERVER['REQUEST_TIME_FLOAT'];
+    /// usleep(10000);
+    /// var_dump($t <= microtime(true), (int) $t === $_SERVER['REQUEST_TIME'], $_SERVER['REQUEST_TIME'] <= time());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    pub(crate) fn started(&self) -> std::time::Duration {
+        self.started
+    }
+
+    /// `ZCG(request_time)`: when the request started, in whole seconds.
+    pub(crate) fn request_time(&self) -> i64 {
+        i64::try_from(self.started.as_secs()).unwrap_or(i64::MAX)
     }
 
     /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
