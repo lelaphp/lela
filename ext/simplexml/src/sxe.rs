@@ -1445,13 +1445,32 @@ impl ObjectHandlers for Handlers {
         written.map(|_| ())
     }
 
+    /// `sxe_property_get_adr`'s verdict: a name some element has is the
+    /// handlers', and a name none has a place the object keeps apart
+    /// (`&sxe->tmp`), which the write fetch lays down: a compound write
+    /// or a step over it changes that value and writes nothing back.
+    ///
+    /// ```php
+    /// $x = simplexml_load_string('<r><a>1</a></r>');
+    /// $x->a .= 'x'; $x->n .= 'y'; $x->m++;
+    /// $x->p->q = 'v'; $x->l[] = 'w';
+    /// echo $x->asXML();
+    /// ```
+    /// ```expect
+    /// <?xml version="1.0"?>
+    /// <r><a>1x</a><n/><m/><p><q>v</q></p><l>w</l></r>
+    /// ```
     fn get_property_ptr_ptr(
         &self,
-        _: &mut Request,
-        _: PhpObject,
-        _: &[u8],
+        req: &mut Request,
+        object: PhpObject,
+        name: &[u8],
     ) -> Result<PropertyPlace, Thrown> {
-        Ok(PropertyPlace::Handlers)
+        let view = View::of(req, object);
+        Ok(match view.node {
+            Some(node) if !view.has_element(node, &c_name(name)) => PropertyPlace::Apart,
+            Some(_) | None => PropertyPlace::Handlers,
+        })
     }
 
     fn has_property(
