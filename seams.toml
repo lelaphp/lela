@@ -240,6 +240,33 @@ budget = 2500     # bz2.c and bz2_filter.c; pure Rust first, held to the oracle'
 feature = "bz2"
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
+[[crate]]
+name = "ext/opcache"
+budget = 2000     # zend_accelerator_module.c and zend_accelerator_blacklist.c: the ini entries, the natives and the status and configuration arrays; the unit cache they answer from is php_engine's (design §6.3), so the shared allocator, persist and file cache are not ported here (#1163)
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/calendar"
+budget = 2000     # calendar.c, cal_unix.c, dow.c, easter.c, french.c, gregor.c, jewish.c, julian.c; pure arithmetic, php's own C ported, no library (#1163)
+feature = "calendar"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/bcmath"
+budget = 5000     # bcmath.c and libbcmath, php's own C, ported (design §7.2) and so counted, less xsse.h's SIMD shim; no library (#1163)
+feature = "bcmath"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/simplexml"
+budget = 3000     # simplexml.c over the libxml2 ext/libxml binds, reached through its safe types, with no src/ffi/ of its own (design §4.10, §7.2) (#1163)
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/uri"
+budget = 3500     # php_uri.c, php_uri_common.c and the three parser adapters; uriparser vendored from php-src's ext/uri/uriparser, compiled by build.rs and bound in src/ffi/, the bindings pool's; Uri\WhatWg over ext/lexbor's safe types (#1163)
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
