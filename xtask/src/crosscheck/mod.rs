@@ -64,6 +64,7 @@ use crate::divergence::{Kind, Registry};
 use crate::manifest::Manifest;
 use crate::oracle::{self, Invocation, Observation, Oracle, Program, Verdict, linked};
 use crate::reading::{Reading, Status, Store, plural};
+use crate::sources;
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "crosscheck";
@@ -323,6 +324,17 @@ pub fn run(
         .map(|(name, column)| {
             let mut reading = reading_of(root, manifest, name, column)?;
             let recipe = recipe(manifest, name, column);
+            // A row whose crate the linked engine's workspace has not
+            // created yet has no rendering to hold, as `budget` and
+            // `unsafe-audit` count nothing for it (#64).
+            let row = format!("ext/{name}");
+            if let Some(krate) = manifest.crates.iter().find(|k| k.name == row)
+                && !sources::exists(&crate::built_root(), krate)
+            {
+                reading.status = Status::Skip;
+                reading.message = format!("{}: {}", reading.scope, sources::NOT_YET_CREATED);
+                return Ok(reading);
+            }
             if let Some(why) = &oracle_absent {
                 reading.status = Status::Skip;
                 reading.message = format!("{}: nothing rendered under `{recipe}`; {why}", reading.scope);

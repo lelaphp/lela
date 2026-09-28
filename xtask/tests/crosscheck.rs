@@ -176,6 +176,12 @@ fn below_the_floor(readings: &[Reading]) -> Result<(), String> {
 /// what may not go backwards. The oracle's bytes are kept for each
 /// column, and the section renders every row with the status its reading
 /// carries.
+/// Whether a reading rendered anything: a row laid before its crate
+/// (#1163's) is a skip that says it is not yet created.
+fn rendered(reading: &Reading) -> bool {
+    !reading.message.ends_with(": not yet created")
+}
+
 #[test]
 fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_holds() {
     if oracle().is_none() {
@@ -202,7 +208,7 @@ fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_h
     for scope in FLOOR {
         assert!(scopes.contains(&scope), "the floor's {scope} is run");
     }
-    for reading in &readings {
+    for reading in readings.iter().filter(|r| rendered(r)) {
         assert_eq!(reading.instrument, "crosscheck");
         let flag = if reading.scope.ends_with("/ri") {
             "--ri"
