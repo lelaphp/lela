@@ -149,8 +149,9 @@ impl UnitCache<'_> {
 
     /// `opcache_compile_file`'s `persistent_compile_file` without the
     /// execution: the file `written` names resolved as an `include`
-    /// resolves it, failing with the include's two warnings under the
-    /// native's name, compiled into the cache, and its functions and the
+    /// resolves it and held to the `open_basedir` guard as its open is,
+    /// failing with the include's warnings under the native's name,
+    /// compiled into the cache, and its functions and the
     /// classes it can bind declared in the request, which leaves
     /// `get_included_files()` as it was. `false` where nothing opens; a
     /// parse error is the `ParseError` an include throws, and a refusal
@@ -163,6 +164,27 @@ impl UnitCache<'_> {
             )))
         } else {
             req.resolve_path(written)
+        };
+        // The plain files opener's guard, which warns under the native's
+        // name: of the resolved path, and of the path as written where
+        // none resolved.
+        let resolved = match resolved {
+            Ok(path) => match req.check_open_basedir(&path, true) {
+                Ok(_) => Ok(path),
+                Err(refused) => {
+                    req.open_stream_failed(IncludeKind::Include, &path, &refused.into());
+                    return req
+                        .failed_opening(IncludeKind::Include, written)
+                        .map(|_| false);
+                }
+            },
+            Err(super::Unresolved::Missing(reason)) if !written.contains(&0) => {
+                match req.check_open_basedir(written, true) {
+                    Ok(_) => Err(super::Unresolved::Missing(reason)),
+                    Err(refused) => Err(super::Unresolved::Missing(refused.into())),
+                }
+            }
+            other => other,
         };
         let unit = match resolved.map(|path| (req.cached_file(&path), path)) {
             Ok((Some(Ok(unit)), _)) => unit,

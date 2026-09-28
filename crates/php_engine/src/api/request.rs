@@ -15421,14 +15421,8 @@ impl Request {
             }
         };
         if let Err(refused) = self.include_guard(kind, &path) {
-            // The once forms open the resolved path, which the stream's
-            // warning names; the others the path as written.
-            let shown = if kind.once() {
-                path.as_slice()
-            } else {
-                written
-            };
-            self.open_stream_failed(kind, shown, &refused.into());
+            // The stream opens the resolved path, which its warning names.
+            self.open_stream_failed(kind, &path, &refused.into());
             return self.failed_opening(kind, written);
         }
         if kind.once() {
@@ -15468,7 +15462,21 @@ impl Request {
 
     /// `php_plain_files_stream_opener`'s guard over the path an include
     /// opens (`Z/main/streams/plain_wrapper.c:1265`), its warning named by
-    /// the construct.
+    /// the construct: the resolved path, or the path as written where
+    /// none resolved, and the stream's warning naming the same.
+    ///
+    /// ```php
+    /// ini_set('open_basedir', __DIR__);
+    /// var_dump(include '/etc/hosts');
+    /// ```
+    /// ```expect
+    /// Warning: include(): open_basedir restriction in effect. File(%s) is not within the allowed path(s): (%s) in %s on line 3
+    ///
+    /// Warning: include(%s): Failed to open stream: Operation not permitted in %s on line 3
+    ///
+    /// Warning: include(): Failed opening '/etc/hosts' for inclusion (include_path='%s') in %s on line 3
+    /// bool(false)
+    /// ```
     fn include_guard(&mut self, kind: IncludeKind, path: &[u8]) -> Result<HostPath, Refused> {
         let outer = self.including.replace((kind, self.vm.call_depth()));
         let guarded = self.check_open_basedir(path, true);
