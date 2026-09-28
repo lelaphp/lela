@@ -394,12 +394,32 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 /// pending. `zend_default_exception_new` records where it was made, and
 /// that is the site an uncaught one names. Its strings are the
 /// request's, and the `Err` is the memory limit refusing them.
+///
+/// The site and its trace are recorded once, as the object is made
+/// ([`Request::new_object`]), so the `SensitiveParameterValue` a trace
+/// puts in place of a marked argument is made once, after the
+/// throwable and before anything the program makes next:
+///
+/// ```php
+/// function h(#[\SensitiveParameter] $x) { strlen(); }
+/// try { h('hunter2'); } catch (ArgumentCountError $e) {
+///     var_dump(spl_object_id($e), spl_object_id(new stdClass), $e->getTrace()[1]['args'][0]);
+/// }
+/// ```
+/// ```expect
+/// int(1)
+/// int(3)
+/// object(SensitiveParameterValue)#2 (0) {
+/// }
+/// ```
 pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Result<Value, Thrown> {
     let object = req.new_object_of(class)?;
     let name = PhpString::new(req, b"message")?;
     let message = PhpString::new(req, message.as_bytes())?;
     object.set_prop(req, name, Value::string(message))?;
-    req.note_throw_site(object)?;
+    if !crate::classes::records_throw_site(req.handlers_of(object.class())) {
+        req.note_throw_site(object)?;
+    }
     Ok(object.as_value())
 }
 
