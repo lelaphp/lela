@@ -1426,11 +1426,26 @@ pub(crate) fn free_carried_value(req: &mut Request, frame: FrameRef, code: &OpAr
     req.release(garbage);
 }
 
-/// `cleanup_live_vars` (`Z/Zend/zend_execute.c`): every live range the
-/// unwind leaves, given up. A range is left when it is open at `op_num`
-/// and the opline being landed on is outside it; `catch_op` of zero is
-/// php's "landing nowhere", the walk out of the frame, where every open
-/// range is left.
+/// `cleanup_live_vars` (`Z/Zend/zend_execute.c:4893`): every live range
+/// the unwind leaves, given up. A range is left when it is open at
+/// `op_num` and the opline being landed on is at or past its end, but
+/// for the half of a loop variable's range an early return split off,
+/// whose loop the landing is still inside; `catch_op` of zero is php's
+/// "landing nowhere", the walk out of the frame, where every open range
+/// is left.
+///
+/// ```php
+/// class C { function ok() { throw new Exception; } }
+/// foreach ([new C, new C] as $c) {
+///     try { if ($c->ok()) { return; } } catch (Exception $e) { echo "caught\n"; }
+/// }
+/// echo "done\n";
+/// ```
+/// ```expect
+/// caught
+/// caught
+/// done
+/// ```
 ///
 /// php frees each kind by what it holds; every kind here is one value in
 /// one temporary, freed the same way, but `ZEND_LIVE_SILENCE`, which
@@ -1472,7 +1487,7 @@ pub(crate) fn cleanup_live_vars(
         if op_num >= range.end.0 {
             continue;
         }
-        if catch_op != 0 && catch_op >= range.start.0 && catch_op < range.end.0 {
+        if catch_op != 0 && (catch_op < range.end.0 || stays_in_split_loop(code, range, catch_op)) {
             continue;
         }
         let slot = temporary_slot(code, range.var);
@@ -1496,6 +1511,30 @@ pub(crate) fn cleanup_live_vars(
         }
         req.release(garbage);
     }
+}
+
+/// `ZEND_FREE_ON_RETURN` (`Z/Zend/zend_compile.h:1104`): the bit on the
+/// `FREE` or `FE_FREE` a `return`, a `break` or a `continue` emits for a
+/// loop variable it leaves behind.
+const FREE_ON_RETURN: u32 = 1 << 0;
+
+/// The distance from a `FREE` or `FE_FREE` flagged `ZEND_FREE_ON_RETURN`
+/// to the loop's own last free, which `zend_calc_live_ranges` wrote into
+/// its `op2`; none for any other opline.
+pub(crate) fn loop_end_distance(op: &Opline) -> Option<u32> {
+    (matches!(op.opcode, php_unit::Opcode::Free | php_unit::Opcode::FeFree)
+        && op.extended_value & FREE_ON_RETURN != 0)
+        .then_some(op.op2)
+}
+
+/// `cleanup_live_vars`'s "split range for loop vars": a range that ends
+/// at an early return's free of its loop variable is only the half
+/// before the return, and a landing inside the loop's rest still needs
+/// the variable, so it is kept.
+fn stays_in_split_loop(code: &OpArray, range: &php_unit::LiveRange, catch_op: u32) -> bool {
+    opline_at(code, range.end.0)
+        .and_then(loop_end_distance)
+        .is_some_and(|to_end| catch_op < range.end.0.saturating_add(to_end))
 }
 
 /// `cleanup_unfinished_calls` (`Z/Zend/zend_execute.c`): the calls the

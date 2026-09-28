@@ -18891,12 +18891,6 @@ fn put_argument(req: &mut Request, slot: ArgSlot, value: Value) -> Result<(), Fa
 /// that rethrows rather than jumping to a clause after it.
 const LAST_CATCH: u32 = 1 << 0;
 
-/// `ZEND_FREE_ON_RETURN`: the bit on the `FREE` or `FE_FREE` a `return`,
-/// a `break` or a `continue` emits for a loop variable it leaves behind,
-/// which moves where a throwable those oplines raise is held to have
-/// been raised.
-const FREE_ON_RETURN: u32 = 1 << 0;
-
 /// `ZEND_THROW` (`Z/Zend/zend_vm_def.h:4777`): the operand made pending,
 /// `zend_throw_exception_object`, with one more owner for the pending
 /// slot before the operand is freed (`Z_TRY_ADDREF_P`, `FREE_OP1`). A
@@ -19227,9 +19221,8 @@ pub(crate) fn handle_exception<T: Tier>(
     // A throwable a loop variable's destruction raised on the way out of
     // a `foreach` is held to have been raised at the last of the frees,
     // which is where the `try` element covering it is looked for.
-    if matches!(op.opcode, Opcode::Free | Opcode::FeFree) && op.extended_value & FREE_ON_RETURN != 0
-    {
-        let moved = op_num.saturating_add(op.op2);
+    if let Some(to_end) = exec::loop_end_distance(op) {
+        let moved = op_num.saturating_add(to_end);
         cleanup_live_vars(req, frame, code, op_num, moved);
         op_num = moved;
     }
