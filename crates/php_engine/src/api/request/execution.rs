@@ -6,7 +6,7 @@
 
 use php_heap::VmStack;
 
-use super::{Link, Request, links_of};
+use super::{Link, Request, Slots, links_of};
 use crate::api::abi::Callable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -253,6 +253,21 @@ impl Request {
                 }
                 None => Vec::new(),
             };
+            return self.render_trace(rows, options).map(Some);
+        }
+        // The root runs, and `object` delegates to it: php links the
+        // root's frame to `object`'s `execute_fake`, which the walk
+        // expands into the frames between, cut under `object`'s.
+        if let Some((stack, vm, at)) = self.running_frame(root)
+            && let Some(state) = vm.frames().get(at)
+        {
+            let mut links = vec![Link::Frame(Slots::Stack(stack, at), state)];
+            links.extend(
+                generator::kept_frames(self, object, root)
+                    .into_iter()
+                    .map(|(slots, state)| Link::Frame(Slots::Kept(slots), state)),
+            );
+            let rows = self.trace_rows(&links);
             return self.render_trace(rows, options).map(Some);
         }
         generator::with_frames(self, object, |req, floor| {

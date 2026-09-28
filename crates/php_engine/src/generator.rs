@@ -1152,6 +1152,17 @@ pub(crate) fn placeholder_frames(
     let Some(orig) = read(req, root, |g| g.resumed_through).flatten() else {
         return Vec::new();
     };
+    kept_frames(req, orig, root)
+}
+
+/// The kept frames of the generators from `orig` towards `root`, the one
+/// `root` runs for first and `orig`'s last: what php links under
+/// `root`'s frame through `orig`'s `execute_fake`.
+pub(crate) fn kept_frames(
+    req: &Request,
+    orig: PhpObject,
+    root: PhpObject,
+) -> Vec<(&php_heap::Frame, &FrameState)> {
     delegation_chain(req, orig, root)
         .into_iter()
         .rev()
