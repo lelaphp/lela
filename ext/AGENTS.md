@@ -11,6 +11,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 <!-- computed tree src=. depth=1 dirs name=extensions | do not edit; run computed -->
 ```
 .
+├── bcmath
 ├── bz2
 ├── ctype
 ├── curl
@@ -41,7 +42,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── uri
 └── zlib
 ```
-<!-- /computed in=d05d4ba9e83aa1b14b568d813d9f25d5fe349a1243db9fe099fd872e6dcc0cb7 out=7b7988f8f96a7284c3dae1db60e8877baa1b4858ebbb9e15bac0aefd3b404575 -->
+<!-- /computed in=417876cc99c166919b78f14208d89be1e168eef55db8296193b8f4f9c519e462 out=a701edaf4b09ef0cc5c83b411cf7083242c05e3506202b59a628db6100329f74 -->
 
 <!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
 

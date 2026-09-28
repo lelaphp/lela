@@ -200,6 +200,7 @@ Options:
 .
 ├── AGENTS.md
 ├── CLAUDE.md
+├── bcmath
 ├── bz2
 ├── clippy.toml
 ├── ctype
@@ -231,4 +232,4 @@ Options:
 ├── uri
 └── zlib
 ```
-<!-- /computed in=c3cf4203549e5573848bbe5b4d94c70e5960a5c09e01c937ed63def005951849 out=b024126313a73279167cb384a316a2a5103e1cef5869e18dc485e52f406726dd -->
+<!-- /computed in=e2d03ba8371b69d294914b2b91f3a7d5be220960f5f7edb996820949322d6de1 out=082b12b3b24693633ff77029adbce4035febac1f8949b1d1ff8a8b085f2b9287 -->
