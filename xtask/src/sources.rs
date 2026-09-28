@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::git;
-use crate::manifest::{Crate, Manifest};
+use crate::manifest::{AvoidFrom, Crate, Manifest};
 use crate::reading::{Reading, Status, Store, listed};
 
 /// Where crates live under the root (design §4.2): `crates/*`, `ext/*`, `xtask`.
@@ -110,10 +110,12 @@ pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<Stri
 /// scope, by scope, so pre-commit measures what none covers and writes no
 /// reading for the rest. A reading taken over a working tree that differs
 /// from the index there is over content the commit does not take, and
-/// stands for nothing. Nothing stands while a staged file lies outside
-/// every crate: the manifest, the workspace's `Cargo.toml` and lockfile
-/// and the glossary are read by the instruments and stamped into no
+/// stands for nothing. Nothing stands while a staged file outside every
+/// crate is one an instrument reads: the manifest, the workspace's
+/// `Cargo.toml` and lockfile and a rule's glossary are stamped into no
 /// reading, so a commit that changes one is measured whole, as before.
+/// A Markdown file outside the crates other than a glossary, such as a
+/// region file pre-commit renders, is read by none of them.
 #[derive(Debug, Default)]
 pub(crate) struct Standing(BTreeMap<String, Reading>);
 
@@ -127,11 +129,18 @@ impl Standing {
         instrument: &str,
         scopes: &[String],
     ) -> Result<Standing> {
-        let staged = git::staged(root)?;
-        if let Some(outside) = staged
+        let glossaries: Vec<&str> = manifest
+            .rules
             .iter()
-            .find(|c| manifest.crates_of(&[&c.path]).is_empty())
-        {
+            .filter_map(|r| r.predicate.avoid_from.as_ref().map(AvoidFrom::file))
+            .collect();
+        let instrument_reads = |path: &str| {
+            manifest.crates_of(&[path]).is_empty()
+                && (Path::new(path).extension().is_none_or(|e| e != "md")
+                    || glossaries.contains(&path))
+        };
+        let staged = git::staged(root)?;
+        if let Some(outside) = staged.iter().find(|c| instrument_reads(&c.path)) {
             println!(
                 "{instrument}: {} is staged outside every crate, so no reading stands for the commit",
                 outside.path
@@ -306,6 +315,16 @@ mod tests {
         pass(&tree, &manifest, &store);
         edit(&tree, "c\n", true);
         assert!(!stands(&tree, &manifest, &store));
+    }
+
+    #[test]
+    fn a_staged_markdown_file_no_instrument_reads_leaves_the_reading_standing() {
+        let (tree, manifest, store) = repository("markdown");
+        edit(&tree, "b\n", true);
+        pass(&tree, &manifest, &store);
+        fs::write(tree.join("AGENTS.md"), "").unwrap();
+        git(&tree, &["add", "--", "AGENTS.md"], None).unwrap();
+        assert!(stands(&tree, &manifest, &store));
     }
 
     #[test]
