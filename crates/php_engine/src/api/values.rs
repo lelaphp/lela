@@ -777,6 +777,36 @@ impl HashIterator {
     }
 }
 
+impl PhpArray {
+    /// `zend_hash_iterators_lower_pos`: the lowest bucket at or after
+    /// `start` a hash iterator on the array stands at, the count of
+    /// buckets used where none does. What a native that rebuilds the
+    /// array walks its buckets ([`PhpArray::live_from`]) against.
+    pub fn iterators_lower_pos(&self, req: &mut Request, start: u32) -> u32 {
+        req.heap_mut().iterators_lower_pos(self.0, start)
+    }
+
+    /// `zend_hash_iterators_update`: every hash iterator on the array at
+    /// bucket `from` moved to `to`.
+    pub fn iterators_update(&self, req: &mut Request, from: u32, to: u32) {
+        req.heap_mut().iterators_update(self.0, from, to);
+    }
+
+    /// `zend_hash_iterators_advance`: every hash iterator on the array
+    /// `step` buckets on.
+    pub fn iterators_advance(&self, req: &mut Request, step: u32) {
+        req.heap_mut().iterators_advance(self.0, step);
+    }
+
+    /// The hash iterators on the array moved onto `rebuilt`, at the
+    /// positions they have: what php's swap of a rebuilt table's data
+    /// into the old header keeps (`HT_SET_ITERATORS_COUNT`), so a
+    /// `foreach` by reference over the array goes on in `rebuilt`.
+    pub fn iterators_carry(&self, req: &mut Request, rebuilt: &PhpArray) {
+        req.heap_mut().iterators_carry(self.0, rebuilt.0);
+    }
+}
+
 impl IntoIterator for &PhpArray {
     type Item = (Key, Value);
     type IntoIter = ArrayIter;

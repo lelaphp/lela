@@ -453,4 +453,52 @@ impl Heap {
     pub fn iterator_del(&mut self, idx: u32) {
         self.iterators.del(idx);
     }
+
+    /// `zend_hash_iterators_lower_pos` (`Z/Zend/zend_hash.c:700`): the
+    /// lowest position at or after `start` an iterator on `a` stands at,
+    /// `nNumUsed` where none does. What a native that rebuilds a table
+    /// walks its buckets against, as `php_splice` does.
+    pub fn iterators_lower_pos(&mut self, a: Arr, start: u32) -> u32 {
+        self.iterators.lower_pos(a, start)
+    }
+
+    /// `zend_hash_iterators_update` (`Z/Zend/zend_hash.h:366`): every
+    /// iterator on `a` at `from` moved to `to`.
+    pub fn iterators_update(&mut self, a: Arr, from: u32, to: u32) {
+        self.iterators.update(a, from, to);
+    }
+
+    /// `zend_hash_iterators_advance` (`Z/Zend/zend_hash.c:730`): every
+    /// iterator on `a` `step` positions on, what `array_unshift` makes
+    /// of the elements it puts before them.
+    pub fn iterators_advance(&mut self, a: Arr, step: u32) {
+        if !a.has_iterators() {
+            return;
+        }
+        for iter in self.iterators.in_use() {
+            if iter.ht.is(a) {
+                iter.pos = iter.pos.wrapping_add(step);
+            }
+        }
+    }
+
+    /// The swap `array_unshift` and `php_splice` make of a table they
+    /// rebuilt, `HT_SET_ITERATORS_COUNT(&new, HT_ITERATORS_COUNT(old))`
+    /// and `HT_SET_ITERATORS_COUNT(old, 0)`: php writes the new table's
+    /// data into the old one's header, so every iterator on `from` stands
+    /// on `to` from here at the position it has.
+    pub fn iterators_carry(&mut self, from: Arr, to: Arr) {
+        if !from.has_iterators() || from.is_same(to) {
+            return;
+        }
+        for iter in self.iterators.in_use() {
+            if iter.ht.is(from) {
+                iter.ht = Target::Table(to);
+            }
+        }
+        if !to.is_immutable() {
+            to.set_iterators_count(from.iterators_count());
+        }
+        from.set_iterators_count(0);
+    }
 }

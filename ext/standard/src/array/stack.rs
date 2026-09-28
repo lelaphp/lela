@@ -295,6 +295,18 @@ fn unwrapped(req: &mut Request, taken: Value) -> Value {
 /// array(0) {
 /// }
 /// ```
+///
+/// A `foreach` by reference over the array goes on at the element it
+/// stood before, the renumbering moving its iterator with it.
+///
+/// ```php
+/// $a = [0, 1, 2, 3];
+/// foreach ($a as &$v) { echo $v; if ($v == 1) { array_shift($a); } }
+/// echo "\n";
+/// ```
+/// ```expect
+/// 0123
+/// ```
 #[php_function]
 fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
     let mut stack = Stack::of(req, array)?;
@@ -318,9 +330,49 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown>
     if rebuilt.next_free() == i64::MIN {
         rebuilt.set_next_free(req, 0)?;
     }
+    shifted_iterators(req, stack.array);
+    stack.array.iterators_carry(req, &rebuilt);
     stack.replace(req, rebuilt)?;
     stack.finish(req);
     Ok(unwrapped(req, first))
+}
+
+/// The hash iterators on the table `array_shift` renumbers moved where
+/// php's in-place renumbering leaves them: over a packed table, each
+/// iterator on an element that moves goes with it to its index `k`, as
+/// the arm walks them (`Z/ext/standard/array.c:3668`); over a hash,
+/// `zend_hash_rehash` closes the holes, and every iterator at or before
+/// an element goes to the index it takes, the end to the new end. The
+/// rebuilt table has no holes, so an iterator php leaves on one reads
+/// the element after it there as here.
+fn shifted_iterators(req: &mut Request, table: PhpArray) {
+    let Some((first, _, _)) = table.live_from(0) else {
+        return;
+    };
+    let packed = table.is_packed();
+    let mut iter_pos = table.iterators_lower_pos(req, 0);
+    let mut idx = first.saturating_add(1);
+    let mut k = 0;
+    while let Some((at, _, _)) = table.live_from(idx) {
+        idx = at.saturating_add(1);
+        if packed {
+            if at != k && at == iter_pos {
+                table.iterators_update(req, at, k);
+                iter_pos = table.iterators_lower_pos(req, iter_pos.saturating_add(1));
+            }
+        } else {
+            while iter_pos <= at {
+                if iter_pos != k {
+                    table.iterators_update(req, iter_pos, k);
+                }
+                iter_pos = table.iterators_lower_pos(req, iter_pos.saturating_add(1));
+            }
+        }
+        k += 1;
+    }
+    if !packed && idx != k {
+        table.iterators_update(req, idx, k);
+    }
 }
 
 /// `array_unshift(array &$array, mixed ...$values): int`, php's
@@ -346,6 +398,22 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown>
 /// }
 /// int(4)
 /// ```
+///
+/// A `foreach` by reference over the array goes on past the values put
+/// before it, php's `zend_hash_iterators_advance` over the table it
+/// swaps the new data into (#1216).
+///
+/// ```php
+/// $a = [1, 2, 3];
+/// foreach ($a as &$v) { echo "$v\n"; if ($v == 2) { array_unshift($a, 0, 0, 0, 0, 0, 0, 0, 0); } }
+/// var_dump(count($a));
+/// ```
+/// ```expect
+/// 1
+/// 2
+/// 3
+/// int(11)
+/// ```
 #[php_function]
 fn array_unshift(
     req: &mut Request,
@@ -354,6 +422,7 @@ fn array_unshift(
 ) -> Result<i64, Thrown> {
     let mut stack = Stack::of(req, array)?;
     let mut rebuilt = PhpArray::new(req)?;
+    let argc = values.0.len();
     for value in values.0 {
         req.addref(&value);
         rebuilt.append(req, value)?;
@@ -369,6 +438,12 @@ fn array_unshift(
         }
     }
     let count = i64::try_from(rebuilt.len()).unwrap_or(i64::MAX);
+    // `zend_hash_iterators_advance(Z_ARRVAL_P(stack), argc)` and the
+    // swap: a `foreach` by reference over the array goes on past the
+    // values put before it.
+    let argc = u32::try_from(argc).unwrap_or(u32::MAX);
+    stack.array.iterators_advance(req, argc);
+    stack.array.iterators_carry(req, &rebuilt);
     stack.replace(req, rebuilt)?;
     stack.finish(req);
     Ok(count)
@@ -497,6 +572,23 @@ fn array_unshift(
 ///   int(4)
 /// }
 /// ```
+///
+/// A `foreach` by reference over the array goes on where php's
+/// `php_splice` moves its iterator: past the elements removed before
+/// it, and past the replacement where it stood on a removed one.
+///
+/// ```php
+/// $a = [0, 1, 2, 3, 4];
+/// foreach ($a as &$v) { echo $v; if ($v == 3) { array_splice($a, 1, 2); } }
+/// echo "\n";
+/// $a = [0, 1, 2, 3, 4];
+/// foreach ($a as &$v) { echo $v; if ($v == 2) { array_splice($a, 1, 3, ['x', 'y', 'z']); } }
+/// echo "\n";
+/// ```
+/// ```expect
+/// 01234
+/// 0124
+/// ```
 #[php_function]
 fn array_splice(
     req: &mut Request,
@@ -516,8 +608,7 @@ fn array_splice(
         }),
         Passed::Omitted => None,
     };
-    let rows = stack.array.snapshot_refs();
-    let num_in = i64::try_from(rows.len()).unwrap_or(i64::MAX);
+    let num_in = i64::try_from(stack.array.len()).unwrap_or(i64::MAX);
     let length = length.unwrap_or(num_in);
     let (start, taken) = clamp_splice(num_in, offset, length);
     // `USED_RET()`: the removed elements are gathered only where the
@@ -528,63 +619,52 @@ fn array_splice(
         None
     };
     let mut rebuilt = PhpArray::new(req)?;
-    let mut holder = Holder::Shared;
-    for (at, (key, element)) in rows.into_iter().enumerate() {
-        let at = i64::try_from(at).unwrap_or(i64::MAX);
-        if at == start
-            && let Some(replacement) = replacement
-        {
-            for (_, value) in replacement.snapshot_refs() {
-                req.addref(&value);
-                rebuilt.append(req, value)?;
-            }
-        }
-        if at >= start && at < start + taken {
-            // `zend_hash_packed_del_val` and `zend_hash_del_bucket` with
-            // `ZVAL_PTR_DTOR`, under the owner `GC_ADDREF(in_hash)` took:
-            // a destructor served here that writes the array separates it.
-            // `zend_hash_add_new(removed, p->key, entry)`: a string key is
-            // kept, copied before the delete gives the bucket's up.
-            let kept = match (&removed, &key) {
-                (Some(_), Key::Str(_)) => Some(key_copy(req, &key)),
-                _ => None,
-            };
-            req.addref(&element);
-            stack.array.unset(req, &key)?;
-            let table = stack.array.to_value();
-            if holder == Holder::Shared {
-                req.addref(&table);
-            }
-            match (removed.as_mut(), kept) {
-                (Some(removed), Some(key)) => removed.set(req, key, element)?,
-                (Some(removed), None) => removed.append(req, element)?,
-                (None, _) => req.release(element),
-            }
-            if holder == Holder::Shared {
-                if table.refcount() == 1 {
-                    holder = Holder::Alone;
-                } else {
-                    req.release(table);
-                }
-            }
-            continue;
-        }
-        req.addref(&element);
-        match key {
-            Key::Str(_) => {
-                let key = key_copy(req, &key);
-                rebuilt.set(req, key, element)?;
-            }
-            Key::Int(_) => rebuilt.append(req, element)?,
-        }
+    // php walks the table's buckets, `idx`, beside the position each
+    // kept element takes in the new one, `pos`, and moves the hash
+    // iterators a `foreach` by reference holds from the one to the other
+    // as it passes them (`zend_hash_iterators_update`), so the loop goes
+    // on in the rebuilt table at the element it stood before.
+    let packed = stack.array.is_packed();
+    let mut walk = Walk {
+        iter_pos: stack.array.iterators_lower_pos(req, 0),
+        idx: 0,
+        pos: 0,
+    };
+    while walk.pos < start {
+        let Some((at, key, element)) = stack.array.live_from(walk.idx) else {
+            break;
+        };
+        walk.idx = at.saturating_add(1);
+        keep(req, &mut rebuilt, &key, element)?;
+        walk.moved(req, stack.array, at);
     }
-    if start >= num_in
-        && let Some(replacement) = replacement
-    {
+    let (gone, holder) = remove_range(
+        req,
+        &mut stack,
+        &mut walk,
+        removed.as_mut(),
+        (start, taken),
+        packed,
+    )?;
+    // The removed arm counts `pos` over what it takes, and the other
+    // counts beside it; the hash arm looks for the lowest iterator again.
+    if removed.is_some() {
+        walk.pos += gone;
+    }
+    if !packed {
+        walk.iter_pos = stack.array.iterators_lower_pos(req, walk.iter_pos);
+    }
+    if let Some(replacement) = replacement {
         for (_, value) in replacement.snapshot_refs() {
             req.addref(&value);
             rebuilt.append(req, value)?;
+            walk.pos += 1;
         }
+    }
+    while let Some((at, key, element)) = stack.array.live_from(walk.idx) {
+        walk.idx = at.saturating_add(1);
+        keep(req, &mut rebuilt, &key, element)?;
+        walk.moved(req, stack.array, at);
     }
     if let Some(replacement) = replacement {
         req.release(replacement.to_value());
@@ -607,11 +687,116 @@ fn array_splice(
     if rebuilt.next_free() == i64::MIN {
         rebuilt.set_next_free(req, 0)?;
     }
+    stack.array.iterators_carry(req, &rebuilt);
     stack.replace(req, rebuilt)?;
     stack.finish(req);
     match removed {
         Some(removed) => Ok(removed),
         None => PhpArray::new(req),
+    }
+}
+
+/// `php_splice`'s middle loop: `taken` elements from the walk's bucket
+/// deleted from the table, gathered into `removed` where the call's value
+/// is read, and the iterators the packed arm bumps moved. Answers how
+/// many it took and who held the table after (`GC_ADDREF(in_hash)`).
+fn remove_range(
+    req: &mut Request,
+    stack: &mut Stack,
+    walk: &mut Walk,
+    mut removed: Option<&mut PhpArray>,
+    range: (i64, i64),
+    packed: bool,
+) -> Result<(i64, Holder), Thrown> {
+    let (start, taken) = range;
+    let mut holder = Holder::Shared;
+    let mut gone = 0;
+    while gone < taken {
+        let Some((at, key, element)) = stack.array.live_from(walk.idx) else {
+            break;
+        };
+        walk.idx = at.saturating_add(1);
+        gone += 1;
+        // `zend_hash_packed_del_val` and `zend_hash_del_bucket` with
+        // `ZVAL_PTR_DTOR`, under the owner `GC_ADDREF(in_hash)` took:
+        // a destructor served here that writes the array separates it.
+        // `zend_hash_add_new(removed, p->key, entry)`: a string key is
+        // kept, copied before the delete gives the bucket's up.
+        let kept = match (&removed, &key) {
+            (Some(_), Key::Str(_)) => Some(key_copy(req, &key)),
+            _ => None,
+        };
+        req.addref(&element);
+        stack.array.unset(req, &key)?;
+        let table = stack.array.to_value();
+        if holder == Holder::Shared {
+            req.addref(&table);
+        }
+        match (removed.as_deref_mut(), kept) {
+            (Some(removed), Some(key)) => removed.set(req, key, element)?,
+            (Some(removed), None) => removed.append(req, element)?,
+            (None, _) => req.release(element),
+        }
+        if holder == Holder::Shared {
+            if table.refcount() == 1 {
+                holder = Holder::Alone;
+            } else {
+                req.release(table);
+            }
+        }
+        // The packed arm bumps an iterator on a removed element to the
+        // element after the replacement.
+        if packed && at == walk.iter_pos {
+            let after = u32::try_from(start + taken).unwrap_or(u32::MAX);
+            stack.array.iterators_update(req, at, after);
+            walk.iter_pos = stack
+                .array
+                .iterators_lower_pos(req, walk.iter_pos.saturating_add(1));
+        }
+    }
+    Ok((gone, holder))
+}
+
+/// Where `php_splice` stands in the table it rebuilds: the bucket it
+/// looks at next, the position the next kept element takes in the new
+/// table, and the lowest position a hash iterator on the old one stands
+/// at from there (`zend_hash_iterators_lower_pos`).
+struct Walk {
+    iter_pos: u32,
+    idx: u32,
+    pos: i64,
+}
+
+impl Walk {
+    /// A kept element at bucket `at` copied: the iterators standing at it
+    /// moved to the position it takes (`zend_hash_iterators_update`).
+    fn moved(&mut self, req: &mut Request, table: PhpArray, at: u32) {
+        if at == self.iter_pos {
+            if i64::from(at) != self.pos {
+                let to = u32::try_from(self.pos).unwrap_or(u32::MAX);
+                table.iterators_update(req, at, to);
+            }
+            self.iter_pos = table.iterators_lower_pos(req, self.iter_pos.saturating_add(1));
+        }
+        self.pos += 1;
+    }
+}
+
+/// An element `php_splice` keeps, into the new table: a string key kept,
+/// an integer one renumbered.
+fn keep(
+    req: &mut Request,
+    rebuilt: &mut PhpArray,
+    key: &Key,
+    element: Value,
+) -> Result<(), Thrown> {
+    req.addref(&element);
+    match key {
+        Key::Str(_) => {
+            let key = key_copy(req, key);
+            rebuilt.set(req, key, element)
+        }
+        Key::Int(_) => rebuilt.append(req, element),
     }
 }
 
