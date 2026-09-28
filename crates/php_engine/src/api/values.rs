@@ -1473,10 +1473,12 @@ impl PhpRef {
     /// (`Z/Zend/zend_API.h`): a cell a typed property's slot holds is held
     /// to every type its sources declare, under the calling code's
     /// `strict_types`, as `zend_try_assign_typed_ref` holds it, and
-    /// coerced to what they agree on; any other cell takes the value as it
-    /// is. `value` is the cell's from here and what the cell held is
-    /// released last, where a destructor is served; on the `TypeError`
-    /// the value is given up and the cell keeps what it held.
+    /// coerced to what they agree on, `value` the cell's from here and
+    /// what it held released last (`zend_safe_assign_to_variable_noref`);
+    /// any other cell takes the value as it is, after `zval_ptr_safe_dtor`
+    /// has left it `null` and released what it held, so a destructor that
+    /// release serves reads `null` there and not the value. On the
+    /// `TypeError` the value is given up and the cell keeps what it held.
     ///
     /// ```php
     /// class T { public int $i = 0; public ?string $s = null; }
@@ -1497,7 +1499,26 @@ impl PhpRef {
     ///   &NULL
     /// }
     /// ```
+    ///
+    /// ```php
+    /// class Test { function __destruct() { global $box; var_dump($box); } }
+    /// $box = [new Test];
+    /// getimagesize("dummy", $box);
+    /// var_dump($box);
+    /// ```
+    /// ```expect
+    /// NULL
+    ///
+    /// Warning: getimagesize(dummy): Failed to open stream: No such file or directory in %s on line 4
+    /// array(0) {
+    /// }
+    /// ```
     pub fn set(&self, req: &mut Request, value: Value) -> Result<(), Thrown> {
+        if self.0.sources() == 0 {
+            req.reference_set(self.0, Value::null());
+            req.reference_set(self.0, value);
+            return Ok(());
+        }
         let strict = req.strict_types();
         req.assign_to_reference(self.0, value, strict)
     }
