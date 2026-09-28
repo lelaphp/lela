@@ -149,7 +149,7 @@ use php_ext::call::lookup_class;
 use php_ext::coerce::to_string;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw};
-use php_ext::request::{Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
+use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 /// `file.c`'s `auto_detect_line_endings`, `PHP_INI_ALL` and off, which
@@ -2805,20 +2805,23 @@ fn fscanf(
     })
 }
 
-/// `php_stream_sync_supported`: the plain files kind, and the host's
-/// standard streams, are the ones with an `fsync(2)`.
-fn sync(req: &mut Request, stream: Stream) -> bool {
+/// `php_stream_sync_supported`, which the plain files kind and the
+/// host's standard streams are, php's warning and `false` for any other;
+/// then what was written flushed, and `php_stream_sync`, which is
+/// `fsync(2)`, or `fdatasync(2)` for `data_only`, of the stream's fd.
+fn sync(req: &mut Request, stream: Stream, data_only: bool) -> bool {
     if !stream.is_stdio(req) {
         docref(req, Level::Warning, "Can't fsync this stream!");
         return false;
     }
     stream.flush(req)
+        && stream.set_option(req, StreamOption::Sync { data_only }) == OptionAnswer::Ok
 }
 
 /// `fsync($stream): bool`, `PHP_FUNCTION(fsync)`
 /// (`Z/ext/standard/file.c:1266`): php's warning for a stream with no
-/// `fsync(2)`, else what was written handed to the file. The flush is
-/// what a program sees of it: durability is not observable here.
+/// `fsync(2)`, else what was written handed to the file and what
+/// `fsync(2)` of its fd answers, which a pipe refuses.
 ///
 /// ```php
 /// $f = fopen(__DIR__ . '/fsync.txt', 'w'); fwrite($f, 'x');
@@ -2830,26 +2833,42 @@ fn sync(req: &mut Request, stream: Stream) -> bool {
 /// string(1) "x"
 /// bool(false)
 /// ```
+///
+/// ```php
+/// $p = proc_open(['/bin/cat'], [['pipe', 'r'], ['pipe', 'w']], $pipes);
+/// var_dump(fsync($pipes[0]), fsync($pipes[1]));
+/// fclose($pipes[0]); fclose($pipes[1]); proc_close($p);
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// ```
 #[php_function]
 fn fsync(req: &mut Request, stream: Stream) -> bool {
-    sync(req, stream)
+    sync(req, stream, false)
 }
 
 /// `fdatasync($stream): bool`, `PHP_FUNCTION(fdatasync)`
-/// (`Z/ext/standard/file.c:1282`): `fsync`'s answer with `data_only`.
+/// (`Z/ext/standard/file.c:1282`): `fsync`'s answer with `data_only`,
+/// `fdatasync(2)` of the fd.
 ///
 /// ```php
 /// $f = fopen(__DIR__ . '/fdatasync.txt', 'w'); fwrite($f, 'y');
 /// var_dump(fdatasync($f), fdatasync(fopen('php://temp', 'r')));
+/// $p = proc_open(['/bin/cat'], [['pipe', 'r'], ['pipe', 'w']], $pipes);
+/// var_dump(fdatasync($pipes[0]), fdatasync($pipes[1]));
+/// fclose($pipes[0]); fclose($pipes[1]); proc_close($p);
 /// ```
 /// ```expect
 /// Warning: fdatasync(): Can't fsync this stream! in %s on line 3
 /// bool(true)
 /// bool(false)
+/// bool(false)
+/// bool(false)
 /// ```
 #[php_function]
 fn fdatasync(req: &mut Request, stream: Stream) -> bool {
-    sync(req, stream)
+    sync(req, stream, true)
 }
 
 /// The one-byte `$separator` or `$enclosure` at `position`, or the

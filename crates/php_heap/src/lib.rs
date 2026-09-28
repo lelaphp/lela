@@ -62,7 +62,7 @@ pub use collector::GcStatus;
 pub use compare::{Scalar, compare, identical};
 pub use fd::{
     BUFSIZ, Readiness, SockOpt, bind_fd, connect_fd, dup_fd, fd_table_size, listen_fd, new_socket,
-    peek_fd, poll_fd, set_fd_blocking, set_sockopt,
+    peek_fd, poll_fd, set_fd_blocking, set_sockopt, sync_fd,
 };
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, HeapHooks};

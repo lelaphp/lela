@@ -377,6 +377,11 @@ pub enum StreamOption {
     /// there to read, [`OptionAnswer::Err`] for one that is not, which
     /// `php_stream_eof` asks before it answers no.
     Liveness,
+    /// `PHP_STREAM_OPTION_SYNC_API` under `PHP_STREAM_SYNC_FSYNC`, or
+    /// `PHP_STREAM_SYNC_FDSYNC` for `data_only`: what was written made
+    /// durable, `fsync(2)` or `fdatasync(2)` of a plain file's fd, which
+    /// a pipe refuses. What `fsync()` and `fdatasync()` ask.
+    Sync { data_only: bool },
 }
 
 /// What `php_stream_set_option` answers: `PHP_STREAM_OPTION_RETURN_OK`,
