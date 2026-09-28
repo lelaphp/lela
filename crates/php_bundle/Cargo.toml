@@ -11,8 +11,10 @@
 # 35); `sockets` is an `--enable` the `php` binary turns on and a
 # server host may, since sockets are sound on threads (revision 36),
 # `bz2`, php's `--with-bz2`, which the `php` binary turns on (revision
-# 39), and `bcmath` the last, php's `--enable-bcmath`, which the `php`
-# binary turns on as the oracle is built with it (#1163). So this file and the manifest name one default build and neither is
+# 39), `bcmath`, php's `--enable-bcmath`, which the `php` binary turns
+# on as the oracle is built with it (#1163), and `calendar` the last,
+# php's `--enable-calendar`, which the `php` binary turns on for the same
+# reason (#1163). So this file and the manifest name one default build and neither is
 # read over the other (harness §7). `xtask new-ext <name>` appends the
 # dependency and the feature and lists the crate in `default`; a person
 # removes a non-default extension from `default` when porting it.
@@ -73,6 +75,7 @@ uri = ["dep:php_ext_uri", "lexbor"] # php_uri.c: ZEND_MOD_REQUIRED("lexbor")
 opcache = ["dep:php_ext_opcache"]
 bcmath = ["dep:php_ext_bcmath"] # the `php` binary and the phpt lane, as php builds it with --enable-bcmath (#1163)
 simplexml = ["dep:php_ext_simplexml"]
+calendar = ["dep:php_ext_calendar"] # the `php` binary and the phpt lane, as php builds it with --enable-calendar (#1163)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -109,6 +112,7 @@ php_ext_uri = { path = "../../ext/uri", optional = true }
 php_ext_opcache = { path = "../../ext/opcache", optional = true }
 php_ext_bcmath = { path = "../../ext/bcmath", optional = true }
 php_ext_simplexml = { path = "../../ext/simplexml", optional = true }
+php_ext_calendar = { path = "../../ext/calendar", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

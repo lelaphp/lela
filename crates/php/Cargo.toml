@@ -32,12 +32,14 @@ required-features = ["witness-trace"]
 witness-trace = ["php_bundle/witness-trace"]
 
 [dependencies]
-# The bundle's default set and six it turns on: `pcntl` and `posix`,
+# The bundle's default set and seven it turns on: `pcntl` and `posix`,
 # which php builds for the CLI and which no server host carries (design
 # §7.2, revision 35), `sockets`, php's `--enable-sockets` (revision 36),
 # `bz2`, php's `--with-bz2` (revision 39), `openssl`, php's
 # `--with-openssl`, which the oracle is built with and ext/phar's
-# OpenSSL signatures call into (#1108), and `bcmath`, php's
-# `--enable-bcmath`, which the oracle is built with (#1163, #1166).
-php_bundle = { path = "../php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath"] }
+# OpenSSL signatures call into (#1108), `bcmath`, php's
+# `--enable-bcmath`, which the oracle is built with (#1163, #1166), and
+# `calendar`, php's `--enable-calendar`, which the oracle is built with
+# (#1163, #1206).
+php_bundle = { path = "../php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar"] }
 php_sapi = { path = "../php_sapi" }

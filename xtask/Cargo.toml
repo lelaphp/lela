@@ -34,6 +34,7 @@ php_bundle = { path = "../crates/php_bundle", features = [
     "pdo", "dom", "random", "pdo_mysql", "filter", "tokenizer", "json",
     "openssl", "curl", "iconv", "pdo_sqlite", "ctype", "hash", "libxml",
     "lexbor", "zlib", "posix", "sockets", "phar", "bz2", "uri", "opcache", "bcmath", "simplexml",
+    "calendar",
 ] }
 
 anyhow.workspace = true

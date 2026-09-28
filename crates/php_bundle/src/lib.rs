@@ -84,6 +84,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_bcmath::extension,
         #[cfg(feature = "simplexml")]
         php_ext_simplexml::extension,
+        #[cfg(feature = "calendar")]
+        php_ext_calendar::extension,
     ]
 }
 

@@ -202,6 +202,7 @@ Options:
 ├── CLAUDE.md
 ├── bcmath
 ├── bz2
+├── calendar
 ├── clippy.toml
 ├── ctype
 ├── curl
@@ -234,4 +235,4 @@ Options:
 ├── uri
 └── zlib
 ```
-<!-- /computed in=700a23c928c49242f6218e923d93f28b755f34bbe6763cc26925f416c7e8b8eb out=13f7540540e6a0dceca7aeefa4d2d59f35702896dd0f7eaed4fb0899e9806b64 -->
+<!-- /computed in=ad0e73f07ddfa419db2579e8315eae227926a331cd98a3863b419c2bd220c36c out=06fd5b22292e333053445277b1f5010686c24594ee58fcb9bc7407ea46ea8833 -->
