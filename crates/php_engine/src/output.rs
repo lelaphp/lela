@@ -828,6 +828,19 @@ fn settle(req: &mut Request, at: usize, status: Status, context: &mut Context) {
 /// Deprecated: ob_end_flush(): Producing output from user output handler talks is deprecated in %s on line 3
 /// [four]
 /// ```
+///
+/// A handler that threw failed, whatever took the throwable: at the
+/// request's end the handler `set_exception_handler` set takes it and
+/// echoes into the buffer, which is passed along as it stands.
+///
+/// ```php
+/// set_exception_handler(function (Throwable $e) { echo "Caught: ", $e->getMessage(), "\n"; });
+/// ob_start(function () { throw new Exception("ob_start"); });
+/// echo "x";
+/// ```
+/// ```expect
+/// xCaught: ob_start
+/// ```
 fn user_handler(
     req: &mut Request,
     at: usize,
@@ -840,6 +853,12 @@ fn user_handler(
     let returned = call::call(req, callable, &arguments);
     req.release(Value::string(data));
     let returned = returned?;
+    // `Z_TYPE(retval) != IS_UNDEF`: a handler that threw, even where
+    // the exception handler took it at the request's end, failed, and
+    // its buffer is passed along as it stands.
+    if returned.tag() == crate::api::values::TypeTag::Undef {
+        return Ok(Status::Failure);
+    }
     produced_output(req, at);
     let status = match returned.as_ref() {
         ValueRef::Bool(false) => Status::Failure,

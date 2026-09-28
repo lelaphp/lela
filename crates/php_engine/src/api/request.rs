@@ -4425,7 +4425,8 @@ impl Request {
     /// (`Z/Zend/zend_execute_API.c:1069`), as in an extension's
     /// `RSHUTDOWN` or a shutdown function: `zend_throw_exception_internal`
     /// with no frame hands a throwable to the handler `set_exception_handler` set,
-    /// and the call is done where the handler took it; otherwise it is
+    /// and the call is done where the handler took it, with the `UNDEF`
+    /// the callee never replaced as what it returned; otherwise it is
     /// rendered as the uncaught fatal, and the unwind exit is dropped,
     /// and either leaves by `zend_bailout`, which is the `Thrown` with
     /// no throwable handed back. The session's write at request end is
@@ -4439,7 +4440,7 @@ impl Request {
                 self.bailout = true;
                 Err(Thrown::of(None))
             }
-            Ok(()) if threw => Ok(Value::null()),
+            Ok(()) if threw => Ok(Value::undef()),
             Ok(()) => {
                 self.bailout = true;
                 Err(Thrown::of(None))
