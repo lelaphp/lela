@@ -13,7 +13,7 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
-use crate::streamsfuncs::stream_ctx_option;
+use crate::streamsfuncs::{NullContext, context_of, stream_ctx_option};
 
 pub(super) use constants::PHP_QUERY_RFC3986;
 use constants::{
@@ -56,14 +56,15 @@ pub(crate) mod constants {
 
 /// `get_headers(string $url, bool $associative = false, $context = null):
 /// array|false`, php's `PHP_FUNCTION(get_headers)`: the URL opened `r`
-/// under `STREAM_USE_URL` ([`Request::open_url`]), and the header lines
-/// its wrapper left in the stream's `wrapper_data`, each as a string, or
-/// with `$associative` keyed by the name before its first `:` with the
-/// blanks after it skipped, a repeated name a list, and a line with no
-/// `:` under the next integer key; `false` where nothing opened or the
-/// wrapper left no array. A path whose wrapper is no URL wrapper is
-/// php's warning. This engine's streams have no http wrapper yet, and a
-/// registered one's `wrapper_data` is its object.
+/// under `STREAM_USE_URL | STREAM_ONLY_GET_HEADERS` ([`Request::open_url`])
+/// within the `context` given or the default one, and the header lines its
+/// wrapper left in the stream's `wrapper_data`, each as a string, or with
+/// `$associative` keyed by the name before its first `:` with the blanks
+/// after it skipped, a repeated name a list, and a line with no `:` under
+/// the next integer key; `false` where nothing opened or the wrapper left
+/// no array, as a user-space wrapper's object is. A path whose wrapper is
+/// no URL wrapper is php's warning. The http wrapper keeps the stream of a
+/// response that is no success, since only the head is asked.
 ///
 /// ```php
 /// class W { public $context; function stream_open($p, $m, $o, &$op) { return true; } function stream_read($n) { return ""; } function stream_eof() { return true; } }
@@ -78,6 +79,36 @@ pub(crate) mod constants {
 /// get_headers(): Argument #3 ($context) must be of type resource or null, int given
 /// get_headers(): Argument #1 ($url) must not contain any null bytes
 /// ```
+///
+/// ```php
+/// $srv = stream_socket_server('tcp://127.0.0.1:0');
+/// $addr = stream_socket_get_name($srv, false);
+/// if (pcntl_fork() === 0) {
+///     $c = stream_socket_accept($srv);
+///     $asked = str_contains(fread($c, 1024), "X-Asked: yes") ? 'yes' : 'no';
+///     fwrite($c, "HTTP/1.0 404 Not Found\r\nX-A: 1\r\nX-A: 2\r\nX-Got: $asked\r\n\r\nbody");
+///     fclose($c);
+///     exit(0);
+/// }
+/// $ctx = stream_context_create(['http' => ['header' => 'X-Asked: yes']]);
+/// var_dump(get_headers("http://$addr/", true, $ctx));
+/// pcntl_wait($status);
+/// ```
+/// ```expect process
+/// array(3) {
+///   [0]=>
+///   string(22) "HTTP/1.0 404 Not Found"
+///   ["X-A"]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "1"
+///     [1]=>
+///     string(1) "2"
+///   }
+///   ["X-Got"]=>
+///   string(3) "yes"
+/// }
+/// ```
 #[php_function]
 fn get_headers(
     req: &mut Request,
@@ -85,9 +116,9 @@ fn get_headers(
     #[php(default = false)] associative: bool,
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<OrFalse<PhpArray>, Thrown> {
-    // No wrapper here reads a `$context`: it is taken and not read.
-    let _ = context;
-    let Some(stream) = req.open_url(url.0.as_bytes(), b"r")? else {
+    let context = context_of(req, context, NullContext::Default)?;
+    let Some(stream) = req.with_stream_ctx(context, |req| req.open_url(url.0.as_bytes(), b"r"))?
+    else {
         return Ok(OrFalse::False);
     };
     let meta = stream.meta_data(req)?;
