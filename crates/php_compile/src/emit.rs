@@ -12496,17 +12496,43 @@ impl Emit<'_> {
     /// `zend_try_ct_eval_binary_op` over `is_smaller_function` and its
     /// kin, and `zend_ct_eval_greater`, which calls the same two with
     /// the constants swapped: the bool each comparison reads off
-    /// [`php_heap::compare`]'s ordering, the long `compare_function`
-    /// writes for `<=>`, and [`php_heap::identical`] for `===` and `!==`,
-    /// at the compile-time `precision` a double is rendered at against a
-    /// string that is not numeric.
+    /// [`php_heap::compare_constants`]' ordering, the long
+    /// `compare_function` writes for `<=>`, and
+    /// [`php_heap::identical_constants`] for `===` and `!==`, at the
+    /// compile-time `precision` a double is rendered at against a string
+    /// that is not numeric. A constant array is compared as the kernel
+    /// compares it, since `zend_binary_op_produces_error` refuses no
+    /// comparison:
+    ///
+    /// ```php
+    /// var_dump([1] === [2], [1] == [2], [1, 2, 3] <=> [], [1] === [], [1] == [1], [1] < [2]);
+    /// var_dump(['a' => 1, 'b' => 2] == ['b' => 2, 'a' => 1], ['a' => 1, 'b' => 2] === ['b' => 2, 'a' => 1], [1] == ['1'], [1] === ['1']);
+    /// var_dump([] == false, [0] == true, [] < null, [1] > 5, 'x' < [], ['a' => 1] <=> ['b' => 1], [[1, 2]] < [[1, 3]]);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// int(1)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// int(1)
+    /// bool(true)
+    /// ```
     fn compare_fold(&self, op: BinaryOp, left: Zval, right: Zval) -> Zval {
-        let (a, b) = (left.as_str(), right.as_str());
-        let (left, right) = (scalar(left, a.as_ref()), scalar(right, b.as_ref()));
-        let compare = |l, r| php_heap::compare(l, r, self.precision);
+        let compare = |l, r| php_heap::compare_constants(l, r, self.precision);
         match op {
-            BinaryOp::IsIdentical => Zval::bool(php_heap::identical(left, right)),
-            BinaryOp::IsNotIdentical => Zval::bool(!php_heap::identical(left, right)),
+            BinaryOp::IsIdentical => Zval::bool(php_heap::identical_constants(left, right)),
+            BinaryOp::IsNotIdentical => Zval::bool(!php_heap::identical_constants(left, right)),
             BinaryOp::Greater => Zval::bool(compare(right, left) == Ordering::Less),
             BinaryOp::GreaterOrEqual => Zval::bool(compare(right, left) != Ordering::Greater),
             BinaryOp::IsSmaller => Zval::bool(compare(left, right) == Ordering::Less),

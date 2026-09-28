@@ -59,7 +59,7 @@ pub use array::{Arr, ArrIter, Key, SortEntry, canonical_int};
 pub use block::Block;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use collector::GcStatus;
-pub use compare::{Scalar, compare, identical};
+pub use compare::{Scalar, compare, compare_constants, identical, identical_constants};
 pub use fd::{
     BUFSIZ, Readiness, SockOpt, bind_fd, connect_fd, dup_fd, fd_table_size, listen_fd, new_socket,
     peek_fd, poll_fd, set_fd_blocking, set_sockopt, sync_fd,

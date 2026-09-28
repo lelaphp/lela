@@ -281,11 +281,13 @@ call_stack_bounds
 call_stack_default_size
 canonical_int
 compare
+compare_constants
 connect_fd
 double_to_string
 dup_fd
 fd_table_size
 identical
+identical_constants
 listen_fd
 new_socket
 numeric_prefix
