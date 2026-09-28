@@ -4270,6 +4270,44 @@ impl Request {
         }
     }
 
+    /// `zend_throw_exception_internal`'s chain
+    /// (`Z/Zend/zend_exceptions.c:193-206`) for a handler php carries on
+    /// past a diagnostic whose handler threw, as the dimension writes carry
+    /// on past `ZVAL_UNDEFINED_OP1` and `zend_false_to_array_deprecated`:
+    /// a throwable the handler raised after it takes the slot, and the
+    /// one the diagnostic left pending, `ran_on`, is chained under it as
+    /// its `previous`. Where anything else stands pending by then, a
+    /// destructor's throwable the handler's own releases served, nothing
+    /// is chained here. Everywhere else the loop stops at the first,
+    /// which is where php tests `EG(exception)`, and
+    /// [`Request::leave_pending`] gives a second up.
+    ///
+    /// ```php
+    /// set_error_handler(function (y $y) {});
+    /// $k = [];
+    /// try { $y[$k]++; } catch (TypeError $e) {
+    ///     echo $e->getMessage(), "\n", $e->getPrevious()::class, "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// Cannot access offset of type array on array
+    /// TypeError
+    /// ```
+    pub(crate) fn raised_over(&mut self, thrown: Thrown, ran_on: Option<PhpObject>) -> Thrown {
+        let (Some(new), Some(ran_on)) = (thrown.exception().copied(), ran_on) else {
+            return thrown;
+        };
+        if let Some(Raised::Throwable(old)) = self.raised
+            && !self.bailout
+            && old.index() == ran_on.index()
+            && old.index() != new.index()
+        {
+            self.raised = None;
+            self.set_previous(new, old);
+        }
+        thrown
+    }
+
     /// A release php makes with `EG(exception)` set, `OBJ_RELEASE` or
     /// `FREE_OP1` on a handler's way out: `free` served while `thrown`
     /// stands pending, so a destructor it serves sees the throwable
