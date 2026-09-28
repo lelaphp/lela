@@ -1803,7 +1803,7 @@ impl Engine {
                 };
                 req.write(&written);
             }
-            return self.shutdown(req, sink);
+            return self.shutdown(&mut req, sink);
         }
         let compiled = if let Some(source) = source {
             Some(
@@ -1845,11 +1845,14 @@ impl Engine {
             }
             None => {}
         }
-        self.shutdown(req, sink)
+        self.shutdown(&mut req, sink)
     }
 
-    /// `php_request_shutdown` and what the host is handed after it.
-    fn shutdown(&self, mut req: Request, sink: &mut dyn OutputSink) -> (Observables, Trace) {
+    /// `php_request_shutdown` and what the host is handed after it. The
+    /// request is shut down where it was served and never moved first: a
+    /// fiber still suspended holds the address it was resumed with, and
+    /// is resumed with it again to be destroyed.
+    fn shutdown(&self, req: &mut Request, sink: &mut dyn OutputSink) -> (Observables, Trace) {
         // `php_request_shutdown`'s order (design §5.10): the shutdown
         // functions first, which is `php_call_shutdown_functions`; then
         // the destructors of what is still live, which is
@@ -1871,20 +1874,20 @@ impl Engine {
         // the step it was raised in and the next is served.
         req.enter_phase(crate::api::request::Phase::Shutdown);
         req.catch_bailout();
-        crate::natives::call_shutdown_functions(&mut req);
+        crate::natives::call_shutdown_functions(req);
         req.catch_bailout();
         req.shutdown_destructors();
         req.call_destructors();
         req.catch_bailout();
-        crate::output::end_all(&mut req);
+        crate::output::end_all(req);
         req.catch_bailout();
         for extension in self.shared.extensions.iter().rev() {
             if let Some(rshutdown) = extension.rshutdown {
-                rshutdown(&mut req);
+                rshutdown(req);
             }
         }
         req.catch_bailout();
-        crate::output::deactivate(&mut req);
+        crate::output::deactivate(req);
         req.catch_bailout();
         req.free_shutdown_functions();
         req.destroy_http_globals();

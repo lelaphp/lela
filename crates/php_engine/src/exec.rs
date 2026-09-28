@@ -347,10 +347,11 @@ pub(crate) struct FastCall {
     /// `Z_OPLINE_NUM_P`: the `FAST_CALL` the block is to return past,
     /// and none where an unwind entered it, php's `(uint32_t)-1`.
     pub(crate) from: Option<u32>,
-    /// `Z_OBJ_P`: the throwable an unwind delayed while the block runs,
-    /// one owner held here until a `FAST_RET` makes it pending again, a
-    /// `DISCARD_EXCEPTION` gives it up, or the unwinder chains it.
-    pub(crate) delayed: Option<PhpObject>,
+    /// `Z_OBJ_P`: what an unwind delayed while the block runs, a
+    /// throwable with one owner held here or the graceful exit, until a
+    /// `FAST_RET` makes it pending again, a `DISCARD_EXCEPTION` gives it
+    /// up, or the unwinder chains it.
+    pub(crate) delayed: Option<crate::api::request::Raised>,
 }
 
 /// One slot of the runtime cache, the `void *` at `CACHE_ADDR(num)`,

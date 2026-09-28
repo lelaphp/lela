@@ -1700,17 +1700,10 @@ pub struct Request {
     /// execution state of the stack that resumed it, and where each
     /// suspends to (design §5.11, `crate::fiber`).
     fibers: crate::fiber::Fibers,
-    /// php's `EG(exception)`: the throwable a handler left pending, which
-    /// the loop reads at the `Threw` edge.
-    pending: Option<PhpObject>,
-    /// php's `zend_is_unwind_exit(EG(exception))`: the unwind exit an
-    /// `exit` threw is standing where a throwable would, and nothing is
-    /// in `pending` while it does. What `exit` leaves for the unwinder,
-    /// which skips every `finally` block for it and gives up every
-    /// throwable it meets, and for a native whose callback exited; the
-    /// outermost serving's end releases it, as `zend_exception_error`
-    /// does.
-    unwind_exit: bool,
+    /// php's `EG(exception)`: what a handler left pending, a throwable or
+    /// one of php's two exits ([`Raised`]), which the loop reads at the
+    /// `Threw` edge.
+    raised: Option<Raised>,
     /// php's `zend_bailout` under way: a fatal was rendered where it was
     /// raised and the request is leaving for the `zend_try` that catches
     /// it, the outermost serving's end or the step of
@@ -2225,8 +2218,7 @@ impl Request {
             cwd,
             stream_type,
             fibers: crate::fiber::Fibers::default(),
-            pending: None,
-            unwind_exit: false,
+            raised: None,
             bailout: false,
             display_direct: false,
             phase: Phase::Startup,
@@ -3400,7 +3392,7 @@ impl Request {
             while self.vm.frames().len() > standing {
                 self.pop_frame();
             }
-            return match self.pending.take() {
+            return match self.take_pending() {
                 Some(pending) => Err(Thrown::of(Some(pending))),
                 None => Ok(Value::null()),
             };
@@ -3416,14 +3408,14 @@ impl Request {
             self.pop_frame();
         }
         served?;
-        match self.pending.take() {
+        match self.take_pending() {
             Some(pending) => Err(Thrown::of(Some(pending))),
             // The callback exited: what the native reads is php's
-            // `EG(exception)` holding the unwind exit, and the native
-            // returns with it standing, for the unwinder to go on
-            // from the call opline; a fatal leaves the native as it left
-            // the callback.
-            None if self.unwinding() => Err(Thrown::of(None)),
+            // `EG(exception)` holding the unwind exit or the graceful
+            // one, and the native returns with it standing, for the
+            // unwinder to go on from the call opline; a fatal leaves the
+            // native as it left the callback.
+            None if self.is_pending() => Err(Thrown::of(None)),
             None => Ok(std::mem::replace(&mut self.returned, Value::null())),
         }
     }
@@ -4202,15 +4194,17 @@ impl Request {
     /// which arrives with `catch`. One raised while the unwind exit
     /// stands is given up too, which is php's own arm there: what is
     /// unwinding is not replaced by a different throwable
-    /// (`Z/Zend/zend_exceptions.c:195-199`).
+    /// (`Z/Zend/zend_exceptions.c:195-199`). The graceful exit is
+    /// replaced, `zend_exception_set_previous` giving it up.
     pub(crate) fn leave_pending(&mut self, thrown: &Thrown) {
         let Some(object) = thrown.exception().copied() else {
             return;
         };
-        if self.pending.is_none() && !self.unwinding() {
-            self.pending = Some(object);
-        } else {
-            self.release(object.as_value());
+        match self.raised {
+            None | Some(Raised::GracefulExit) if !self.bailout => {
+                self.raised = Some(Raised::Throwable(object));
+            }
+            _ => self.release(object.as_value()),
         }
     }
 
@@ -4286,12 +4280,19 @@ impl Request {
         // no frame standing: a user exception handler takes the
         // throwable first, and what it leaves is rendered.
         self.user_exception_handler();
-        let Some(throwable) = self.pending.take() else {
-            // `zend_exception_error` on the unwind exit: "We
-            // successfully unwound, nothing more to do", and the
-            // object is released (`Z/Zend/zend_exceptions.c:1005`); a
-            // fatal's bailout is caught where the serving is left.
-            self.unwind_exit = false;
+        self.exception_error()
+    }
+
+    /// `zend_exception_error` (`Z/Zend/zend_exceptions.c:936`): what is
+    /// pending rendered as the uncaught fatal, with no handler asked,
+    /// and nothing rendered for either exit.
+    pub(crate) fn exception_error(&mut self) -> Result<(), Fatal> {
+        let Some(throwable) = self.take_pending() else {
+            // `zend_exception_error` on either exit: "We successfully
+            // unwound, nothing more to do", and the object is released
+            // (`Z/Zend/zend_exceptions.c:1005`); a fatal's bailout is
+            // caught where the serving is left.
+            self.raised = None;
             self.bailout = false;
             return Ok(());
         };
@@ -5733,7 +5734,7 @@ impl Request {
                 Level::Warning | Level::CoreWarning | Level::CompileWarning | Level::UserWarning
             )
         {
-            if self.pending.is_none() && self.error_handling_thrown.is_none() {
+            if self.raised.is_none() && self.error_handling_thrown.is_none() {
                 let thrown = crate::api::raising::throw(self, &class, message);
                 self.error_handling_thrown = Some(thrown);
             }
@@ -5741,7 +5742,7 @@ impl Request {
         }
         // "Always clear the last backtrace."
         self.last_fatal_error_backtrace = None;
-        if self.pending.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
+        if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
         if self.user_error_handler(level, message, file, line) {
@@ -6104,8 +6105,17 @@ impl Request {
     /// unwinder to read; php asserts nothing else is pending, and a
     /// raiser that found something pending returns it instead.
     pub(crate) fn throw_unwind_exit(&mut self) {
-        if self.pending.is_none() {
-            self.unwind_exit = true;
+        if self.raised.is_none() {
+            self.raised = Some(Raised::UnwindExit);
+        }
+    }
+
+    /// `zend_throw_graceful_exit` (`Z/Zend/zend_exceptions.c:1069`): the
+    /// graceful exit standing where a throwable would, which is what
+    /// `zend_fiber_object_destroy` resumes a suspended fiber with.
+    pub(crate) fn throw_graceful_exit(&mut self) {
+        if self.raised.is_none() {
+            self.raised = Some(Raised::GracefulExit);
         }
     }
 
@@ -6115,14 +6125,14 @@ impl Request {
     /// [`Request::serve_user`] where a native reads what its callback
     /// left.
     pub(crate) fn unwind_exit(&self) -> bool {
-        self.unwind_exit
+        self.raised == Some(Raised::UnwindExit)
     }
 
     /// What the unwinder leaves by that no `catch` takes and no `finally`
     /// is served for: the unwind exit, or a fatal leaving for its
     /// `zend_try`.
     pub(crate) fn unwinding(&self) -> bool {
-        self.unwind_exit || self.bailout
+        self.unwind_exit() || self.bailout
     }
 
     /// `zend_end_try()` over a fatal's `zend_bailout`: the `zend_try` it left
@@ -6172,7 +6182,7 @@ impl Request {
     /// handler returns (`ps_call_handler`).
     #[must_use]
     pub fn is_unwind_exit(&self) -> bool {
-        self.unwind_exit
+        self.unwind_exit()
     }
 
     /// The request's [`Phase`].
@@ -10486,19 +10496,12 @@ impl Request {
     /// this builds what the release cannot, and #458 is the question
     /// that leaves for a person.
     fn save_pending(&mut self, object: PhpObject) -> Saved {
-        match self.pending {
-            Some(pending) if pending.index() == object.index() => {
+        match self.raised {
+            Some(Raised::Throwable(pending)) if pending.index() == object.index() => {
                 self.end_in_core_error("Attempt to destruct pending exception");
                 Saved::TheObject
             }
-            _ => match self.pending.take() {
-                Some(pending) => Saved::Throwable(pending),
-                None if self.unwind_exit => {
-                    self.unwind_exit = false;
-                    Saved::UnwindExit
-                }
-                None => Saved::Nothing,
-            },
+            _ => Saved::Raised(self.raised.take()),
         }
     }
 
@@ -10540,22 +10543,46 @@ impl Request {
     ///   thrown in %s on line 5
     /// ```
     fn restore_pending(&mut self, saved: Saved) {
-        match saved {
-            Saved::Throwable(old) => match self.pending {
-                Some(new) => self.set_previous(new, old),
-                None => self.pending = Some(old),
-            },
-            // `zend_exception_set_previous(EG(exception), old_exception)`
-            // with the unwind exit as the old one releases it
-            // (`Z/Zend/zend_exceptions.c:113-116`): what the destructor
-            // raised is what is unwound from here, and the `exit`'s
-            // status stands only until that throwable is rendered.
-            Saved::UnwindExit => {
-                if self.pending.is_none() {
-                    self.unwind_exit = true;
-                }
-            }
-            Saved::Nothing | Saved::TheObject => {}
+        if let Saved::Raised(Some(old)) = saved {
+            self.raise_under(old);
+        }
+    }
+
+    /// The restore php writes after each step it protects from what was
+    /// pending before it, a destructor, a generator's `finally` on
+    /// destruction and a fiber's graceful unwind: `old` is pending again
+    /// where nothing is, and where something is,
+    /// `zend_exception_set_previous(EG(exception), old)` chains a
+    /// throwable under the one pending and gives up an exit
+    /// (`Z/Zend/zend_exceptions.c:113-116`), so what the step raised is
+    /// what is unwound from here and an `exit`'s status stands only
+    /// until that throwable is rendered. An exit pending keeps the slot,
+    /// and a throwable under it is given up with it.
+    pub(crate) fn raise_under(&mut self, old: Raised) {
+        match (self.raised, old) {
+            (None, old) if !self.bailout => self.raised = Some(old),
+            (Some(Raised::Throwable(new)), Raised::Throwable(old)) => self.set_previous(new, old),
+            (_, old) => self.release_raised(old),
+        }
+    }
+
+    /// What was pending out of php's slot, any of the three, its owner
+    /// the caller's: `EG(exception) = NULL` beside the object taken.
+    pub(crate) fn take_raised(&mut self) -> Option<Raised> {
+        self.raised.take()
+    }
+
+    /// `EG(exception) = Z_OBJ_P(fast_call)`: what a `finally` block
+    /// delayed standing in the slot again, which `FAST_RET` writes.
+    pub(crate) fn set_raised(&mut self, raised: Option<Raised>) {
+        self.raised = raised;
+    }
+
+    /// What was pending, a throwable's owner given up; an exit holds no
+    /// object here.
+    pub(crate) fn release_raised(&mut self, raised: Raised) {
+        if let Raised::Throwable(object) = raised {
+            self.release(object.as_value());
         }
     }
 
@@ -12474,21 +12501,32 @@ impl Request {
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        self.pending.is_some() || self.unwinding()
+        self.raised.is_some() || self.bailout
+    }
+
+    /// What stands in php's slot, a view, no owner taken.
+    pub(crate) fn raised(&self) -> Option<Raised> {
+        self.raised
     }
 
     /// The pending throwable as a view, no owner taken: what `CATCH`
-    /// tests its class against and what the unwinder chains onto.
+    /// tests its class against and what the unwinder chains onto. None
+    /// while an exit stands.
     pub(crate) fn pending(&self) -> Option<PhpObject> {
-        self.pending
+        match self.raised {
+            Some(Raised::Throwable(object)) => Some(object),
+            _ => None,
+        }
     }
 
     /// The pending throwable out, the slot left empty and its one owner
     /// the caller's: php's `EG(exception) = NULL` beside the object it
-    /// took, which is what a matching `CATCH` and an unwind into a
-    /// `finally` block do with it.
+    /// took, which is what a matching `CATCH` does with it. An exit
+    /// standing is left where it stands.
     pub(crate) fn take_pending(&mut self) -> Option<PhpObject> {
-        self.pending.take()
+        let object = self.pending()?;
+        self.raised = None;
+        Some(object)
     }
 
     fn ini_number(&self, name: &[u8], default: i32) -> i32 {
@@ -15347,7 +15385,7 @@ impl Request {
         if self.exception_handler.is_none() {
             return;
         }
-        let Some(throwable) = self.pending.take() else {
+        let Some(throwable) = self.take_pending() else {
             return;
         };
         let handler = self.exception_handler.take();
@@ -18743,10 +18781,26 @@ impl HeapHooks for Hooks<'_> {
 /// destroyed, which is php's one `E_CORE_ERROR` and no call at all.
 #[derive(Clone, Copy)]
 enum Saved {
-    Nothing,
-    Throwable(PhpObject),
-    UnwindExit,
+    Raised(Option<Raised>),
     TheObject,
+}
+
+/// What stands in php's `EG(exception)`: a throwable, or one of the two
+/// exits php unwinds as objects of internal classes no `catch` names
+/// and `zend_exception_error` renders nothing for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Raised {
+    /// A throwable, whose one owner is the slot's.
+    Throwable(PhpObject),
+    /// `zend_ce_unwind_exit`, what `exit` throws: no `finally` block is
+    /// served for it, every throwable it meets is given up, and none
+    /// raised while it stands replaces it.
+    UnwindExit,
+    /// `zend_ce_graceful_exit`, what `zend_fiber_object_destroy` resumes
+    /// a suspended fiber with: the fiber's `finally` blocks are served
+    /// for it, a throwable one of them delayed is given up, and one
+    /// raised while it stands replaces it.
+    GracefulExit,
 }
 
 /// Where `display_errors` sends a diagnostic.
@@ -19293,12 +19347,12 @@ mod tests {
         let Ok(object) = request.new_object_of("Destructible") else {
             return;
         };
-        request.pending = Some(object);
+        request.raised = Some(super::Raised::Throwable(object));
 
         request.destruct(object);
 
         assert!(
-            request.pending.is_some(),
+            request.pending().is_some(),
             "the throwable is pending still, since nothing was served"
         );
         assert_eq!(

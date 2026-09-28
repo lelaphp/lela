@@ -47,7 +47,7 @@ impl Request {
         };
         crate::engine::note_compiled(self, &unit);
         if !self.declare_classes(&unit) || !self.declare_functions(&unit) {
-            return Err(Thrown::of(self.pending.take()));
+            return Err(Thrown::of(self.take_pending()));
         }
         self.serve_top_code(unit)?;
         Ok(true)
@@ -92,9 +92,9 @@ impl Request {
         served?;
         let returned = std::mem::replace(&mut self.returned, Value::null());
         self.release(returned);
-        match self.pending.take() {
+        match self.take_pending() {
             Some(pending) => Err(Thrown::of(Some(pending))),
-            None if self.unwinding() => Err(Thrown::of(None)),
+            None if self.is_pending() => Err(Thrown::of(None)),
             None => Ok(()),
         }
     }

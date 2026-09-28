@@ -1102,7 +1102,7 @@ fn pending_as_err(req: &mut Request) -> Result<(), Thrown> {
     if let Some(pending) = req.take_pending() {
         return Err(Thrown::of(Some(pending)));
     }
-    if req.unwinding() {
+    if req.is_pending() {
         return Err(Thrown::of(None));
     }
     Ok(())
@@ -1191,14 +1191,6 @@ fn finish_on_stack(req: &mut Request, generator: PhpObject, finished: bool) {
         },
         finished,
     );
-}
-
-/// A generator's frame on top of a stack a fiber's teardown unwinds,
-/// given up with the generator closed, as the unwinding of that frame
-/// closes it in `zend_dispatch_try_catch_finally_helper`: its unfinished
-/// calls and its live temporaries with it.
-pub(crate) fn close_unwound(req: &mut Request, generator: PhpObject) {
-    finish_on_stack(req, generator, false);
 }
 
 /// What a closed frame held, given up in `zend_generator_close`'s
@@ -1365,7 +1357,7 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
                     .fast_call(frame, var)
                     .and_then(|cell| cell.delayed.take());
                 if let Some(delayed) = delayed {
-                    req.release(delayed.as_value());
+                    req.release_raised(delayed);
                 }
             }
         }
@@ -1390,16 +1382,13 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
     if suspend(req, object).is_err() {
         return;
     }
-    let old_exception = req.take_pending();
+    let old_exception = req.take_raised();
     with(req, object, |g| g.forced_close = true);
     if let Err(fatal) = resume(req, object) {
         req.end_in(&fatal);
     }
     if let Some(old) = old_exception {
-        match req.pending() {
-            Some(pending) => req.set_previous(pending, old),
-            None => req.leave_pending(&Thrown::of(Some(old))),
-        }
+        req.raise_under(old);
     }
     close(req, object, false);
 }

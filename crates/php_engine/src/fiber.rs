@@ -46,7 +46,7 @@ use php_macros::php_class;
 use crate::api::abi::{Callable, CloneObj, Instance, NamedVariadic, ObjectHandlers, This};
 use crate::api::call::call_named;
 use crate::api::raising::{Thrown, throw};
-use crate::api::request::Request;
+use crate::api::request::{Raised, Request};
 use crate::api::values::{PhpObject, PhpString, Value};
 use crate::classes::{Error, Throwable};
 use crate::exec::Vm;
@@ -77,12 +77,15 @@ enum Status {
 /// What one switch carries, `zend_fiber_transfer`: a value, one owner
 /// the other side takes; a throwable the other side raises
 /// (`ZEND_FIBER_TRANSFER_FLAG_ERROR`), or the unwind exit an `exit`
-/// left standing, which rides the request; or the `Bailout` of a fatal
-/// the fiber already recorded (`ZEND_FIBER_TRANSFER_FLAG_BAILOUT`).
+/// left standing, which rides the request; the graceful exit
+/// `zend_fiber_object_destroy` resumes a suspended fiber with, which
+/// the suspend raises; or the `Bailout` of a fatal the fiber already
+/// recorded (`ZEND_FIBER_TRANSFER_FLAG_BAILOUT`).
 #[derive(Debug)]
 pub enum Transfer {
     Value(Value),
     Throw(Thrown),
+    GracefulExit,
     Fatal,
 }
 
@@ -103,6 +106,21 @@ pub(crate) struct Execution {
 struct Running {
     fiber: PhpObject,
     below: Execution,
+    by: Resumer,
+}
+
+/// What resumed a running fiber, which is whether php's
+/// `stack_bottom->prev_execute_data` names the resumer's frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resumer {
+    /// `zend_fiber_resume`, under `start`, `resume` and `throw`: the
+    /// native's frame is the bottom's `prev_execute_data`, and the chain
+    /// runs on into the resumer's.
+    Native,
+    /// `zend_fiber_object_destroy`, whose `zend_fiber_resume_internal`
+    /// writes no `prev_execute_data`: the chain ends at the fiber, and a
+    /// trace inside it closes with `{main}` after the fiber's callable.
+    Destroy,
 }
 
 /// The request's fibers: the running ones, innermost last, and their
@@ -124,9 +142,14 @@ impl Fibers {
 
     /// The execution states below the running stack, the innermost
     /// resumer's first and the request's own last: the rest of php's
-    /// one `prev_execute_data` chain.
+    /// one `prev_execute_data` chain, which ends at a fiber a destroy
+    /// resumed.
     pub(crate) fn below(&self) -> impl Iterator<Item = &Execution> {
-        self.running.iter().rev().map(|running| &running.below)
+        self.running
+            .iter()
+            .rev()
+            .take_while(|running| running.by == Resumer::Native)
+            .map(|running| &running.below)
     }
 }
 
@@ -634,7 +657,7 @@ impl Fiber {
         fiber.stack = Some(stack);
         fiber.execution = Some(execution);
         let back = switch_into(req, this, Transfer::Value(Value::null()))?;
-        delegate(back)
+        delegate(req, back)
     }
 
     /// `Fiber::resume(mixed $value = null): mixed`: the suspended fiber runs
@@ -689,7 +712,7 @@ impl Fiber {
         }
         req.addref(&value);
         let back = switch_into(req, this, Transfer::Value(value))?;
-        delegate(back)
+        delegate(req, back)
     }
 
     /// `Fiber::throw(Throwable $exception): mixed`: the suspended fiber runs
@@ -739,7 +762,7 @@ impl Fiber {
         }
         req.addref(&throwable.as_value());
         let back = switch_into(req, this, Transfer::Throw(Thrown::of(Some(throwable))))?;
-        delegate(back)
+        delegate(req, back)
     }
 
     /// `Fiber::isStarted()`, `isSuspended()`, `isRunning()` and
@@ -893,7 +916,7 @@ impl Fiber {
         req.addref(&value);
         let back = php_heap::suspend(req, Transfer::Value(value));
         let back = req.fatal_of(back)?;
-        delegate(back)
+        delegate(req, back)
     }
 }
 
@@ -1058,7 +1081,21 @@ fn run(
             Transfer::Value(Value::null())
         }
         Err(thrown) => {
-            let threw = thrown.exception().is_some() || req.unwind_exit();
+            let exited = matches!(
+                req.raised(),
+                Some(Raised::UnwindExit | Raised::GracefulExit)
+            );
+            let destroyed = object
+                .native::<ZendFiber>(req)
+                .is_some_and(|fiber| fiber.destroyed);
+            // A fiber being destroyed that ends in either exit ended as
+            // it was asked to, and the exit is cleared, whatever `exit`
+            // its `finally` blocks called.
+            if destroyed && exited {
+                req.take_raised();
+                return Transfer::Value(Value::null());
+            }
+            let threw = thrown.exception().is_some() || exited;
             if let Some(fiber) = object.native_mut::<ZendFiber>(req) {
                 if threw {
                     fiber.threw = true;
@@ -1121,10 +1158,15 @@ fn switch_into(
         ));
     };
     fiber.status = Status::Running;
+    let by = match transfer {
+        Transfer::GracefulExit => Resumer::Destroy,
+        Transfer::Value(_) | Transfer::Throw(_) | Transfer::Fatal => Resumer::Native,
+    };
     req.switch_execution(&mut execution);
     req.fibers_mut().running.push(Running {
         fiber: object,
         below: execution,
+        by,
     });
     let switched = stack.resume(req, transfer);
     let mut execution = match req.fibers_mut().running.pop() {
@@ -1160,11 +1202,16 @@ fn switch_into(
 
 /// `zend_fiber_delegate_transfer_result`: a value is the native's
 /// return, one owner; an error transfer is raised where the switch
-/// returned; the `Bailout` is the fatal already recorded.
-fn delegate(transfer: Transfer) -> Result<Value, Thrown> {
+/// returned, the graceful exit among them; the `Bailout` is the fatal
+/// already recorded.
+fn delegate(req: &mut Request, transfer: Transfer) -> Result<Value, Thrown> {
     match transfer {
         Transfer::Value(value) => Ok(value),
         Transfer::Throw(thrown) => Err(thrown),
+        Transfer::GracefulExit => {
+            req.throw_graceful_exit();
+            Err(Thrown::of(None))
+        }
         Transfer::Fatal => Err(Thrown::of(None)),
     }
 }
@@ -1175,25 +1222,34 @@ fn status_is(req: &mut Request, this: PhpObject, test: fn(Status) -> bool) -> Re
     Ok(test(status))
 }
 
-/// `zend_fiber_object_destroy` for a fiber that is suspended, in the
-/// shape this engine can give it until its unwinder has php's graceful
-/// exit: the machine stack unwound without a PHP frame being served on
-/// it, then the fiber's own execution state swapped in as a resume
-/// would swap it, with the fiber the active one and marked destroyed so
-/// a destructor that asks to suspend is refused as php refuses it, and
-/// every frame and call on it given up innermost first; the fiber is
-/// dead after it. A fiber that is not suspended is left alone, as php
-/// leaves it.
+/// `zend_fiber_object_destroy` (`Z/Zend/zend_fibers.c:769`): a
+/// suspended fiber is resumed with the graceful exit, marked destroyed
+/// so a suspend inside it is refused, and runs its `finally` blocks on
+/// the way out of every frame it holds, as an unwind would; what was
+/// pending before is kept aside meanwhile. A throwable the unwind
+/// raised is pending after it, with what was pending before chained
+/// under it, and where no frame stands to take it, at the request's
+/// end, it is rendered uncaught there (`zend_exception_error`). A
+/// fiber that is not suspended is left alone, as php leaves it.
 ///
 /// ```php
-/// class D { public function __destruct() { echo "destructed\n"; } }
-/// $f = new Fiber(function () { $d = new D; Fiber::suspend(); echo "never\n"; });
+/// $f = new Fiber(function () {
+///     try {
+///         try { Fiber::suspend(); } finally { echo "inner finally\n"; }
+///     } catch (Throwable $t) {
+///         echo "never caught\n";
+///     } finally {
+///         try { Fiber::suspend(); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
+///     }
+///     echo "never\n";
+/// });
 /// $f->start();
 /// unset($f);
 /// echo "done\n";
 /// ```
 /// ```expect
-/// destructed
+/// inner finally
+/// Cannot suspend in a force-closed fiber
 /// done
 /// ```
 fn destroy(req: &mut Request, object: PhpObject) {
@@ -1207,57 +1263,30 @@ fn destroy(req: &mut Request, object: PhpObject) {
         return;
     }
     fiber.destroyed = true;
-    let stack = fiber.stack.take();
-    let execution = fiber.execution.take();
-    // The machine stack goes first: its frames are Rust's alone and
-    // hold no owner the request counts, so unwinding them gives up
-    // nothing a program sees.
-    drop(stack);
-    let Some(mut execution) = execution else {
-        return;
-    };
-    req.switch_execution(&mut execution);
-    req.fibers_mut().running.push(Running {
-        fiber: object,
-        below: execution,
-    });
-    loop {
-        let calls = req.vm().calls().len();
-        let above = req
-            .vm()
-            .frames()
-            .last()
-            .map_or(0, |frame| usize::try_from(frame.calls_below).unwrap_or(0));
-        if calls > above {
-            req.pop_call();
-        } else if let Some(frame) = req.vm().frames().last() {
-            // A generator resumed inside the fiber has its frame here,
-            // and is closed with it rather than left pointing at a frame
-            // no stack holds.
-            match frame.generator {
-                Some(generator) => crate::generator::close_unwound(req, generator),
-                None => req.pop_frame(),
+    let before = req.take_raised();
+    let transfer = switch_into(req, object, Transfer::GracefulExit);
+    match transfer {
+        Ok(Transfer::Throw(thrown)) => {
+            req.leave_pending(&thrown);
+            if let Some(before) = before {
+                req.raise_under(before);
             }
-        } else {
-            break;
+            if !req.executing()
+                && let Err(fatal) = req.exception_error()
+            {
+                req.end_in(&fatal);
+            }
         }
-    }
-    let mut execution = match req.fibers_mut().running.pop() {
-        Some(running) => running.below,
-        None => Execution::default(),
-    };
-    req.switch_execution(&mut execution);
-    execution.stack.close(req.heap_mut());
-    let Some(fiber) = object.native_mut::<ZendFiber>(req) else {
-        return;
-    };
-    fiber.status = Status::Dead;
-    let callable = fiber.callable.take();
-    let blocks = std::mem::take(&mut fiber.blocks);
-    if let Some(callable) = callable {
-        req.release(callable.value());
-    }
-    for block in blocks {
-        req.heap_mut().free_block(block);
+        Ok(Transfer::Value(value)) => {
+            req.release(value);
+            if let Some(before) = before {
+                req.raise_under(before);
+            }
+        }
+        Ok(Transfer::GracefulExit | Transfer::Fatal) | Err(_) => {
+            if let Some(before) = before {
+                req.release_raised(before);
+            }
+        }
     }
 }

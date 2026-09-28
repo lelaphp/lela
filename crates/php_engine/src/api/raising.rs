@@ -600,7 +600,7 @@ pub fn clear(req: &mut Request, thrown: Thrown) -> Result<(), Thrown> {
 pub fn pending(req: &mut Request) -> Result<(), Thrown> {
     match req.take_pending() {
         Some(pending) => Err(Thrown::of(Some(pending))),
-        None if req.unwinding() => Err(Thrown::of(None)),
+        None if req.is_pending() => Err(Thrown::of(None)),
         None => Ok(()),
     }
 }

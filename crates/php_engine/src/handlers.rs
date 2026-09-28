@@ -61,7 +61,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::request::{Hold, Opened, Request};
+use crate::api::request::{Hold, Opened, Raised, Request};
 use crate::api::values::{
     ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
@@ -19053,7 +19053,7 @@ pub(crate) fn catch<T: Tier>(
 ) -> Edge {
     let pending = match req.pending() {
         Some(pending) => Some(pending),
-        None if req.unwinding() => None,
+        None if req.is_pending() => None,
         None => return jump_to(req, frame, op.op2),
     };
     let slot = Some(CacheSlot(op.extended_value & !LAST_CATCH));
@@ -19121,8 +19121,8 @@ pub(crate) fn fast_call<T: Tier>(
     // php's temporary is dead at every `FAST_CALL` and holds no object;
     // a cell this engine kept from an earlier pass is given up rather
     // than written over.
-    if let Some(object) = left {
-        req.release(object.as_value());
+    if let Some(left) = left {
+        req.release_raised(left);
     }
     jump_to(req, frame, op.op1)
 }
@@ -19157,8 +19157,8 @@ pub(crate) fn fast_ret<T: Tier>(
     if let Some(from) = from {
         return jump_to(req, frame, from.saturating_add(1));
     }
-    if let Some(object) = delayed {
-        req.leave_pending(&Thrown::of(Some(object)));
+    if let Some(delayed) = delayed {
+        req.raise_under(delayed);
     }
     let at = req.vm().opline(frame);
     let enclosing = (op.op2 != u32::MAX).then_some(op.op2);
@@ -19192,8 +19192,8 @@ pub(crate) fn discard_exception<T: Tier>(
     if let Some(from) = from {
         free_carried_value(req, frame, code, from);
     }
-    if let Some(object) = delayed {
-        req.release(object.as_value());
+    if let Some(delayed) = delayed {
+        req.release_raised(delayed);
     }
     Ok(advance(req, frame))
 }
@@ -19354,7 +19354,7 @@ fn unwind_from<T: Tier>(
                 )));
             };
             cleanup_live_vars(req, frame, code, op_num, element.finally_op.0);
-            let delayed = req.take_pending();
+            let delayed = req.take_raised();
             if let Some(cell) = req.vm_mut().fast_call(frame, var) {
                 cell.delayed = delayed;
                 cell.from = None;
@@ -19379,10 +19379,14 @@ fn unwind_from<T: Tier>(
                 .fast_call(frame, var)
                 .and_then(|cell| cell.delayed.take());
             if let Some(delayed) = delayed {
-                match req.pending() {
-                    Some(pending) => req.set_previous(pending, delayed),
-                    None if req.unwinding() => req.release(delayed.as_value()),
-                    None => req.leave_pending(&Thrown::of(Some(delayed))),
+                match (req.raised(), delayed) {
+                    (Some(Raised::Throwable(pending)), Raised::Throwable(delayed)) => {
+                        req.set_previous(pending, delayed);
+                    }
+                    (None, delayed) if !req.bailing_out() => req.set_raised(Some(delayed)),
+                    // Either exit, or a fatal, gives up what the block
+                    // delayed; a throwable gives up a delayed exit.
+                    (_, delayed) => req.release_raised(delayed),
                 }
             }
         }
