@@ -730,6 +730,7 @@ dependencies = [
  "php_ext",
  "php_ext_date",
  "php_ext_random",
+ "php_ext_uri",
 ]
 
 [[package]]

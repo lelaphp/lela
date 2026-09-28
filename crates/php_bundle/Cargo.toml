@@ -41,7 +41,7 @@ test = ["php_ext/test"]
 # The witness runner's trace (harness §4.5 condition 2, revision 58); xtask
 # alone enables it.
 witness-trace = ["test", "php_ext/witness-trace"]
-standard = ["dep:php_ext_standard", "random", "date"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h
+standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
 spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
 date = ["dep:php_ext_date"]
 reflection = ["dep:php_ext_reflection"]

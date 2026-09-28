@@ -24,14 +24,16 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_date::extension,
         #[cfg(feature = "random")]
         php_ext_random::extension,
+        #[cfg(feature = "lexbor")]
+        php_ext_lexbor::extension,
+        #[cfg(feature = "uri")]
+        php_ext_uri::extension,
         #[cfg(feature = "standard")]
         php_ext_standard::extension,
         #[cfg(feature = "pcre")]
         php_ext_pcre::extension,
         #[cfg(feature = "spl")]
         php_ext_spl::extension,
-        #[cfg(feature = "lexbor")]
-        php_ext_lexbor::extension,
         #[cfg(feature = "reflection")]
         php_ext_reflection::extension,
         #[cfg(feature = "mbstring")]
@@ -46,8 +48,6 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_dom::extension,
         #[cfg(feature = "pdo_mysql")]
         php_ext_pdo_mysql::extension,
-        #[cfg(feature = "uri")]
-        php_ext_uri::extension,
         #[cfg(feature = "filter")]
         php_ext_filter::extension,
         #[cfg(feature = "tokenizer")]

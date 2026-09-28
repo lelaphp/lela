@@ -20,6 +20,10 @@ php_ext_random = { path = "../random" }
 # ext/date, whose default zone `gettimeofday` reads its offset from
 # (`ext/date/php_date.h`'s `get_timezone_info`, design §4.10).
 php_ext_date = { path = "../date" }
+# ext/uri, whose parsers the http and ftp wrappers read a URL with
+# under `uri_parser_class` (`ext/uri/php_uri.h`, design §4.10), as
+# `basic_functions.c` requires `uri`.
+php_ext_uri = { path = "../uri" }
 # `access(2)`, `utime(2)` and the user and group lookups `filestat.c`
 # makes, in `src/ffi/` alone (`unsafe.homes`).
 libc = { workspace = true }

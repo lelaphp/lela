@@ -50,6 +50,7 @@ mod head;
 mod hrtime;
 mod html;
 mod http;
+mod http_fopen_wrapper;
 mod image;
 pub use image::{ImageHandler, ImageSize};
 mod info;
@@ -148,6 +149,9 @@ struct State {
     session_rewriter: url_scanner::Rewriter,
     assert: assert::Stage,
     var: var::Nesting,
+    /// `BG(last_http_headers)`: the headers the http wrapper's last
+    /// request read, one owner the state's, given back in `rshutdown`.
+    last_http_headers: Option<php_ext::values::PhpArray>,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -743,6 +747,7 @@ pub fn extension() -> Extension {
         .class::<user_filters::StreamBucket>()
         .class::<dir::Directory>()
         .ini(var::ini())
+        .ini(http_fopen_wrapper::ini())
         .ini(sockets::ini())
         .ini(file::ini())
         .dependencies(dependencies())
@@ -753,7 +758,7 @@ pub fn extension() -> Extension {
         .into_iter()
         .fold(builder, |b, (name, handler)| b.on_modify(name, handler))
         .request_state::<State>()
-        .rshutdown(syslog::close)
+        .rshutdown(rshutdown)
         .rinit(rinit)
         .build("standard")
 }
@@ -782,18 +787,33 @@ fn ini_handlers() -> [(&'static [u8], OnModify); 8] {
 /// request's wrapper and filter tables (`filters::register`). The
 /// wrappers go in as `PHP_MINIT(basic)` registers them
 /// (`Z/ext/standard/basic_functions.c:341-346`): `php`, `file`, `glob`,
-/// `data`, the engine keeping the kinds of all but `glob`; `http` and
-/// `ftp` follow when they land. The `assert.*` entries' startup
-/// deprecations are their on-modify rules, which the engine serves over
-/// the host's values as it starts.
+/// `data`, `http`, and `ftp` once it lands, the engine keeping the kinds
+/// of the first four but `glob`. The `assert.*` entries' startup deprecations are their
+/// on-modify rules, which the engine serves over the host's values as
+/// it starts.
+///
+/// ```php
+/// echo implode(' ', array_intersect(stream_get_wrappers(), ['php', 'file', 'glob', 'data', 'http'])), "\n";
+/// ```
+/// ```expect
+/// php file glob data http
+/// ```
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::rinit`'s signature
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
     req.register_engine_wrapper(EngineWrapper::Php);
     req.register_engine_wrapper(EngineWrapper::Plain);
     req.register_wrapper(dir::glob_wrapper());
     req.register_engine_wrapper(EngineWrapper::Data);
+    req.register_wrapper(http_fopen_wrapper::wrapper());
     filters::register(req);
     Ok(())
+}
+
+/// `PHP_RSHUTDOWN(basic)`'s share here: the syslog closed and
+/// `BG(last_http_headers)` given back.
+fn rshutdown(req: &mut Request) {
+    syslog::close(req);
+    http_fopen_wrapper::clear_last_headers(req);
 }
 
 /// `standard_deps` (`Z/ext/standard/basic_functions.c:143`): `uri`
