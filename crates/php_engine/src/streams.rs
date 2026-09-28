@@ -36,8 +36,8 @@ use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
 use crate::api::request::{
-    Cast, DirListing, EngineWrapper, FdStream, FilterFlags, OptionAnswer, Request, Stream,
-    StreamOption, Whence,
+    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, Notifier, OptionAnswer,
+    Request, Stream, StreamOption, Whence,
 };
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 
@@ -105,6 +105,13 @@ pub(crate) trait Ops: Send {
     /// `ops->stat`, `None` where the kind has none or `fstat(2)` failed.
     fn stat(&mut self, _req: &mut Request) -> Option<StatBuf> {
         None
+    }
+
+    /// Whether what `ops->read` and `ops->write` take counts into the
+    /// notifier's `progress`, as `php_sockop_read` and `php_sockop_write`
+    /// count it (`Z/main/streams/xp_socket.c:117`, `:205`): a socket's.
+    fn counts_progress(&self) -> bool {
+        false
     }
 
     /// `PHP_STREAM_OPTION_TRUNCATE_API`: `None` where the kind does not
@@ -353,6 +360,24 @@ pub(crate) struct PhpStream {
     /// `stream->writefilters`, the chain every write passes through
     /// before the kind.
     writefilters: Vec<filters::Attached>,
+    /// What a wrapper set on the stream, boxed apart since a stream of
+    /// the engine's own kinds has none of it.
+    wrapped: Option<Box<Wrapped>>,
+}
+
+/// The fields of `php_stream` a wrapper writes on a stream it opened
+/// over another kind: `PHP_STREAM_CONTEXT(stream)`'s notifier,
+/// `stream->wrapperthis` with the wrapper's `stream_closer`,
+/// `stream->wrapperdata` (one owner the stream's, which
+/// `stream_get_meta_data` prints ahead of what the kind keeps), and
+/// `stream->wrapper->wops->stream_stat`, which `fstat()` asks in place of
+/// the kind's.
+#[derive(Default)]
+struct Wrapped {
+    notifier: Option<Box<dyn Notifier>>,
+    closer: Option<Box<dyn Closer>>,
+    wrapperdata: Option<Value>,
+    stat: Option<fn(&mut Request, Stream) -> Option<StatBuf>>,
 }
 
 /// `stream->flags`, the four of `PHP_STREAM_FLAG_*` the generic
@@ -410,6 +435,7 @@ impl PhpStream {
             res: None,
             readfilters: Vec::new(),
             writefilters: Vec::new(),
+            wrapped: None,
         }
     }
 
@@ -444,15 +470,108 @@ impl PhpStream {
         self.orig_path.as_deref()
     }
 
-    /// `_php_stream_fill_read_buffer` (`Z/main/streams/streams.c:564`)
-    /// without a filter chain: nothing when the buffer already holds
-    /// `size` bytes; otherwise the buffer compacted and grown by one
-    /// chunk where the chunk would not fit, and one read of the kind
-    /// into the room after `writepos`. `false` is the read that failed.
-    fn fill_read_buffer(&mut self, req: &mut Request, size: usize) -> bool {
-        if !self.readfilters.is_empty() {
-            return self.fill_filtered(req, size);
+    /// `php_stream_context_set`'s notifier: the one given in place, the
+    /// one the stream had handed back.
+    pub(crate) fn set_notifier(
+        &mut self,
+        notifier: Option<Box<dyn Notifier>>,
+    ) -> Option<Box<dyn Notifier>> {
+        std::mem::replace(&mut self.wrapped_mut().notifier, notifier)
+    }
+
+    /// `stream->wrapperthis`: the closer given in place, where the
+    /// stream has none yet; one it has already is kept, and the new one
+    /// is left in `closer` for the caller to close.
+    pub(crate) fn set_closer(&mut self, closer: Option<Box<dyn Closer>>) -> Option<()> {
+        let wrapped = self.wrapped_mut();
+        if wrapped.closer.is_some() {
+            return None;
         }
+        wrapped.closer = closer;
+        Some(())
+    }
+
+    /// `stream->wrapperdata`: the value given in place, the one the
+    /// stream held handed back.
+    pub(crate) fn set_wrapper_data(&mut self, value: Option<Value>) -> Option<Value> {
+        std::mem::replace(&mut self.wrapped_mut().wrapperdata, value)
+    }
+
+    /// `stream->wrapper->wops->stream_stat`, where the wrapper has one.
+    pub(crate) fn set_wrapper_stat(
+        &mut self,
+        stat: Option<fn(&mut Request, Stream) -> Option<StatBuf>>,
+    ) {
+        if stat.is_some() {
+            self.wrapped_mut().stat = stat;
+        }
+    }
+
+    /// What a wrapper set on the stream, made where it set nothing yet.
+    fn wrapped_mut(&mut self) -> &mut Wrapped {
+        self.wrapped.get_or_insert_with(Box::default)
+    }
+
+    /// The notifier the stream's `context` has, where a wrapper set one.
+    fn notifier_mut(&mut self) -> Option<&mut Box<dyn Notifier>> {
+        self.wrapped.as_mut()?.notifier.as_mut()
+    }
+
+    /// `stream->position = 0` and `strlcpy(stream->mode, mode)`, cut to
+    /// the fifteen bytes `char mode[16]` holds.
+    pub(crate) fn rewind_as(&mut self, mode: &[u8]) {
+        self.position = 0;
+        self.mode = mode[..mode.len().min(15)].to_vec();
+    }
+
+    /// `php_stream_notify_progress_increment(PHP_STREAM_CONTEXT(stream),
+    /// n, 0)` for what a socket's read or write took; a throwable the
+    /// callback leaves is kept for the native.
+    fn count_progress(&mut self, req: &mut Request, n: usize) {
+        if n == 0 || !self.ops.counts_progress() {
+            return;
+        }
+        if let Some(notifier) = self.notifier_mut()
+            && let Err(thrown) = notifier.progress(req, n)
+        {
+            filters::defer(req, thrown);
+        }
+    }
+
+    /// `out_check_eof`'s `php_stream_notify_completed`: the notifier told
+    /// where the read or write changed `eof` from `old_eof`.
+    fn notify_eof_change(&mut self, req: &mut Request, old_eof: bool) {
+        if old_eof == self.eof {
+            return;
+        }
+        if let Some(notifier) = self.notifier_mut()
+            && let Err(thrown) = notifier.completed(req)
+        {
+            filters::defer(req, thrown);
+        }
+    }
+
+    /// `_php_stream_fill_read_buffer` (`Z/main/streams/streams.c:564`):
+    /// through the filter chain where the stream has one, else as
+    /// [`PhpStream::fill_unfiltered`] does; a fill that changed `eof`
+    /// notifies `PHP_STREAM_NOTIFY_COMPLETED`.
+    fn fill_read_buffer(&mut self, req: &mut Request, size: usize) -> bool {
+        let old_eof = self.eof;
+        let filled = if self.readfilters.is_empty() {
+            self.fill_unfiltered(req, size)
+        } else {
+            self.fill_filtered(req, size)
+        };
+        self.notify_eof_change(req, old_eof);
+        filled
+    }
+
+    /// `_php_stream_fill_read_buffer` without a filter chain: nothing
+    /// when the buffer already holds `size` bytes; otherwise the buffer
+    /// compacted and grown by one chunk where the chunk would not fit,
+    /// and one read of the kind into the room after `writepos`. `false`
+    /// is the read that failed.
+    fn fill_unfiltered(&mut self, req: &mut Request, size: usize) -> bool {
         if self.writepos - self.readpos >= size {
             return true;
         }
@@ -474,6 +593,7 @@ impl PhpStream {
         match ops.read(req, &mut readbuf[*writepos..], eof) {
             Some(justread) => {
                 *writepos += justread;
+                self.count_progress(req, justread);
                 true
             }
             None => false,
@@ -506,7 +626,10 @@ impl PhpStream {
             let toread = if self.readfilters.is_empty() && direct {
                 let Self { ops, eof, .. } = self;
                 match ops.read(req, &mut buf[didread..], eof) {
-                    Some(n) => n,
+                    Some(n) => {
+                        self.count_progress(req, n);
+                        n
+                    }
                     None if didread == 0 => return None,
                     None => break,
                 }
@@ -589,6 +712,15 @@ impl PhpStream {
     /// `_php_stream_write_buffer` (`Z/main/streams/streams.c:1189`): the
     /// kind written past the filters, as [`PhpStream::write`] describes.
     fn write_buffer(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
+        let old_eof = self.eof;
+        let wrote = self.write_kind(req, buf);
+        self.notify_eof_change(req, old_eof);
+        wrote
+    }
+
+    /// The body of [`PhpStream::write_buffer`]: the kind written until
+    /// every byte is taken or one write takes none.
+    fn write_kind(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         if buf.is_empty() {
             return Some(0);
         }
@@ -611,6 +743,7 @@ impl PhpStream {
             let Self { ops, .. } = self;
             match ops.write(req, &rest[..rest.len().min(chunk)]) {
                 Some(justwrote) if justwrote > 0 => {
+                    self.count_progress(req, justwrote);
                     rest = &rest[justwrote..];
                     didwrite += justwrote;
                     self.position += i64::try_from(justwrote).unwrap_or(i64::MAX);
@@ -926,9 +1059,13 @@ impl PhpStream {
         out
     }
 
-    /// `_php_stream_stat` (`Z/main/streams/streams.c:888`): the kind's
-    /// `ops->stat`, since no wrapper here has a `stream_stat`.
+    /// `_php_stream_stat` (`Z/main/streams/streams.c:888`): the
+    /// `stream_stat` of the wrapper that opened the stream where it has
+    /// one, else the kind's `ops->stat`.
     pub(crate) fn stat(&mut self, req: &mut Request) -> Option<StatBuf> {
+        if let Some(stat) = self.wrapped.as_ref().and_then(|w| w.stat) {
+            return self.res.and_then(|res| stat(req, Stream::of(res)));
+        }
         self.ops.stat(req)
     }
 
@@ -1097,6 +1234,25 @@ impl PhpStream {
         let Self { ops, .. } = &mut self;
         let ret = ops.close(req);
         self.free_filters(req);
+        if let Some(wrapped) = self.wrapped.take() {
+            let Wrapped {
+                notifier,
+                closer,
+                wrapperdata,
+                ..
+            } = *wrapped;
+            if let Some(closer) = closer
+                && let Err(thrown) = closer.close(req)
+            {
+                filters::defer(req, thrown);
+            }
+            if let Some(data) = wrapperdata {
+                req.release(data);
+            }
+            if let Some(notifier) = notifier {
+                notifier.release(req);
+            }
+        }
         ret
     }
 
@@ -2338,6 +2494,8 @@ pub(crate) struct OpenOptions {
     /// `STREAM_MUST_SEEK` makes is a temporary file,
     /// `PHP_STREAM_PREFER_STDIO`.
     pub(crate) will_cast: bool,
+    /// `STREAM_ONLY_GET_HEADERS`: the open `get_headers` makes.
+    pub(crate) only_get_headers: bool,
 }
 
 impl OpenOptions {
@@ -2349,6 +2507,7 @@ impl OpenOptions {
         for_include: false,
         must_seek: false,
         will_cast: false,
+        only_get_headers: false,
     };
 
     /// `options & ~REPORT_ERRORS`, what a wrapper's opener is handed.
@@ -2362,15 +2521,18 @@ impl OpenOptions {
     /// The bits as php numbers them, what a user-space wrapper's
     /// `stream_open` is handed: `STREAM_USE_PATH` 1, `REPORT_ERRORS` 8,
     /// `STREAM_MUST_SEEK` 16, `STREAM_WILL_CAST` 32,
-    /// `STREAM_OPEN_FOR_INCLUDE` 128, with `STREAM_OPEN_FOR_ZEND_STREAM`
-    /// 0x10000 beside it, since the include's is the one open that sets
-    /// it here (`php_stream_open_for_zend_ex`).
+    /// `STREAM_OPEN_FOR_INCLUDE` 128, `STREAM_USE_URL` 256 and
+    /// `STREAM_ONLY_GET_HEADERS` 512, with `STREAM_OPEN_FOR_ZEND_STREAM`
+    /// 0x10000 beside the include's, since it is the one open that sets it
+    /// here (`php_stream_open_for_zend_ex`).
     const fn bits(self) -> i64 {
         (self.use_path as i64)
             | (self.report as i64) << 3
             | (self.must_seek as i64) << 4
             | (self.will_cast as i64) << 5
             | (self.for_include as i64) << 7
+            | (self.use_url as i64) << 8
+            | (self.only_get_headers as i64) << 9
             | (self.for_include as i64) << 16
     }
 }
@@ -2764,11 +2926,12 @@ impl Registered {
 impl Located {
     /// `wrapper->is_url`: the `data:` wrapper, and one a program
     /// registered with `STREAM_IS_URL`.
-    pub(crate) fn is_url(&self) -> bool {
+    pub(crate) fn is_url(&self, req: &Request) -> bool {
         match self {
             Located::Data => true,
             Located::Space(user) => user.is_url,
-            Located::Plain | Located::Php | Located::Ext(_) | Located::Nothing => false,
+            Located::Ext(at) => req.wrappers.get(*at).is_some_and(|w| w.is_url),
+            Located::Plain | Located::Php | Located::Nothing => false,
         }
     }
 }
@@ -2921,7 +3084,7 @@ impl Request {
         };
         let allowed =
             |req: &Request, name: &[u8]| req.ini_get(name).is_none_or(Request::ini_parse_bool);
-        if found.is_url() {
+        if found.is_url(self) {
             let refused = if !allowed(self, b"allow_url_fopen") {
                 Some("allow_url_fopen")
             } else if (options.for_include || self.in_user_include)
@@ -3077,12 +3240,25 @@ impl Request {
         self.open_wrapper_ex(path, mode, options)
     }
 
-    /// `_php_stream_open_wrapper_ex` under `REPORT_ERRORS | STREAM_USE_URL`,
-    /// what `get_headers` opens with: a wrapper located that is no URL
-    /// wrapper, the plain files one, `php://` and a registered one not
-    /// flagged `STREAM_IS_URL` among them, is php's warning that the
-    /// function may only be used against URLs, and nothing is opened
-    /// (`Z/main/streams/streams.c:2278`).
+    /// `_php_stream_open_wrapper_ex` under `REPORT_ERRORS | STREAM_USE_URL
+    /// | STREAM_ONLY_GET_HEADERS`, what `get_headers` opens with: a wrapper
+    /// located that is no URL wrapper, the plain files one, `php://` and a
+    /// registered one not flagged `STREAM_IS_URL` among them, is php's
+    /// warning that the function may only be used against URLs, and
+    /// nothing is opened (`Z/main/streams/streams.c:2278`); a URL wrapper
+    /// is handed the two bits, as a user-space one's `stream_open` shows.
+    ///
+    /// ```php
+    /// class W { public $context; function stream_open($p, $m, $o, &$op) { var_dump($o); return true; } function stream_eof() { return true; } }
+    /// stream_wrapper_register('web', 'W', STREAM_IS_URL);
+    /// var_dump(get_headers('web://x'));
+    /// fopen('web://x', 'r');
+    /// ```
+    /// ```expect
+    /// int(768)
+    /// bool(false)
+    /// int(0)
+    /// ```
     pub(crate) fn open_url_wrapper(
         &mut self,
         path: &[u8],
@@ -3090,6 +3266,7 @@ impl Request {
     ) -> Result<Option<Stream>, Thrown> {
         let options = OpenOptions {
             use_url: true,
+            only_get_headers: true,
             ..OpenOptions::REPORT
         };
         self.open_wrapper_ex(path, mode, options)
@@ -3120,7 +3297,7 @@ impl Request {
             }
         }
         let (wrapper, path_to_open) = self.locate(&to_open, options);
-        if options.use_url && !wrapper.is_url() {
+        if options.use_url && !wrapper.is_url(self) {
             let text = format!(
                 "{}(): This function may only be used against URLs",
                 self.active_native()
@@ -3146,32 +3323,7 @@ impl Request {
                 php_open(self, &path_to_open, mode, options.unreported())?,
             ),
             Located::Data => ("RFC2397", rfc2397::open(self, &path_to_open, mode)?),
-            Located::Ext(at) => {
-                let wrapper = &self.wrappers[at];
-                let (label, open) = (wrapper.label, wrapper.open);
-                match open {
-                    Some(open) => {
-                        let opening = crate::api::request::Opening {
-                            use_path,
-                            warn: false,
-                            for_include: options.for_include,
-                            must_seek: options.must_seek,
-                            will_cast: options.will_cast,
-                        };
-                        let outer = std::mem::take(&mut self.wrapper_errors);
-                        let opened = open(self, &path_to_open, mode, opening);
-                        let logged = std::mem::replace(&mut self.wrapper_errors, outer);
-                        (
-                            label,
-                            opened?.ok_or_else(|| self.wrapper_errors_text(&logged)),
-                        )
-                    }
-                    None => (
-                        label,
-                        Err(String::from("wrapper does not support stream open")),
-                    ),
-                }
-            }
+            Located::Ext(at) => self.open_ext(at, &path_to_open, mode, use_path, options)?,
             Located::Space(user) => (
                 "user-space",
                 userspace::open(
@@ -3205,6 +3357,48 @@ impl Request {
                 Ok(None)
             }
         }
+    }
+
+    /// `_php_stream_open_wrapper_ex`'s call of an extension wrapper's
+    /// `stream_opener`, handed the `options` less `REPORT_ERRORS` with
+    /// the errors it logs kept apart from any logged before: the stream
+    /// it opened, with the wrapper's `stream_stat` on it, or the text
+    /// the open's warning shows.
+    fn open_ext(
+        &mut self,
+        at: usize,
+        path: &[u8],
+        mode: &[u8],
+        use_path: bool,
+        options: OpenOptions,
+    ) -> Result<(&'static str, Result<Stream, String>), Thrown> {
+        let wrapper = &self.wrappers[at];
+        let (label, open, stream_stat) = (wrapper.label, wrapper.open, wrapper.stream_stat);
+        let Some(open) = open else {
+            return Ok((
+                label,
+                Err(String::from("wrapper does not support stream open")),
+            ));
+        };
+        let opening = crate::api::request::Opening {
+            use_path,
+            warn: false,
+            for_include: options.for_include,
+            must_seek: options.must_seek,
+            will_cast: options.will_cast,
+            only_get_headers: options.only_get_headers,
+        };
+        let outer = std::mem::take(&mut self.wrapper_errors);
+        let opened = open(self, path, mode, opening);
+        let logged = std::mem::replace(&mut self.wrapper_errors, outer);
+        let opened = opened?;
+        if let Some(stream) = opened {
+            self.stream_op(stream, |_, s| s.set_wrapper_stat(stream_stat));
+        }
+        Ok((
+            label,
+            opened.ok_or_else(|| self.wrapper_errors_text(&logged)),
+        ))
     }
 
     /// `_php_stream_open_wrapper_ex` for a stream opened for append
@@ -3411,7 +3605,11 @@ impl Request {
             return Ok(out);
         };
         let wrapper = s.wrapper;
-        let wrapper_data = s.ops.wrapper_data();
+        let wrapper_data = s
+            .wrapped
+            .as_ref()
+            .and_then(|w| w.wrapperdata)
+            .or_else(|| s.ops.wrapper_data());
         let stream_type = s.ops.label();
         let mode = s.mode.clone();
         let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);

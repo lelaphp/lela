@@ -332,6 +332,8 @@ request::BufferHandler
 request::CacheStatus
 request::CachedFile
 request::Cast
+request::Closer
+request::Closer::close
 request::ContentType
 request::DirListing
 request::EngineWrapper
@@ -351,6 +353,10 @@ request::Interrupt::raise
 request::Interrupt::raised
 request::Interrupt::receive_signals
 request::Invalidation
+request::Notifier
+request::Notifier::completed
+request::Notifier::progress
+request::Notifier::release
 request::Opening
 request::OptionAnswer
 request::OutputOp
@@ -564,9 +570,13 @@ request::Stream::read
 request::Stream::read_dir
 request::Stream::recvfrom
 request::Stream::resource
+request::Stream::rewind_as
 request::Stream::seek
 request::Stream::sendto
+request::Stream::set_closer
+request::Stream::set_notifier
 request::Stream::set_option
+request::Stream::set_wrapper_data
 request::Stream::shutdown
 request::Stream::socket_name
 request::Stream::stat

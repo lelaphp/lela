@@ -307,6 +307,7 @@ pub(crate) fn wrapper() -> StreamWrapper {
     StreamWrapper {
         scheme: "compress.zlib".into(),
         label: "ZLIB",
+        is_url: false,
         open: Some(wrapper_open),
         open_dir: None,
         stat: None,
@@ -315,6 +316,7 @@ pub(crate) fn wrapper() -> StreamWrapper {
         mkdir: None,
         rmdir: None,
         set_stat: None,
+        stream_stat: None,
     }
 }
 

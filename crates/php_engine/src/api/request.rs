@@ -898,6 +898,55 @@ impl Stream {
         self.close(req);
         req.release(self.as_value());
     }
+
+    /// `php_stream_context_set(stream, context)` as a wrapper sets the
+    /// `context` it opened under on a stream of the `transport`'s: the
+    /// notifier the stream's reads, writes and `eof` reach from here, the
+    /// one it had given back. A stream that is closed, or inside a call,
+    /// gives the new one back at once.
+    pub fn set_notifier(self, req: &mut Request, notifier: Box<dyn Notifier>) {
+        let mut notifier = Some(notifier);
+        let old = req
+            .stream_op(self, |_, stream| stream.set_notifier(notifier.take()))
+            .flatten();
+        for left in [old, notifier].into_iter().flatten() {
+            left.release(req);
+        }
+    }
+
+    /// `stream->wrapperthis`, with the wrapper's `stream_closer` the
+    /// stream's free runs over it ([`Closer`]); where the stream is closed
+    /// or inside a call, it is closed at once.
+    pub fn set_closer(self, req: &mut Request, closer: Box<dyn Closer>) -> Result<(), Thrown> {
+        let mut closer = Some(closer);
+        req.stream_op(self, |_, stream| stream.set_closer(closer.take()));
+        match closer {
+            Some(left) => left.close(req),
+            None => Ok(()),
+        }
+    }
+
+    /// `ZVAL_COPY(&stream->wrapperdata, value)`: what `stream_get_meta_data`
+    /// prints as `wrapper_data`, the headers the http wrapper read, one
+    /// owner moving to the stream; where it is closed, the owner is
+    /// given up.
+    pub fn set_wrapper_data(self, req: &mut Request, value: Value) {
+        let mut value = Some(value);
+        let old = req
+            .stream_op(self, |_, stream| stream.set_wrapper_data(value.take()))
+            .flatten();
+        for left in [old, value].into_iter().flatten() {
+            req.release(left);
+        }
+    }
+
+    /// The end of `php_stream_url_wrap_http_ex` on the stream it read a
+    /// head off: `stream->position = 0`, since as far as streams are
+    /// concerned it is at its start, and `strlcpy(stream->mode, mode)`,
+    /// the `mode` the program opened it with over the `transport`'s `r+`.
+    pub fn rewind_as(self, req: &mut Request, mode: &[u8]) {
+        req.stream_op(self, |_, stream| stream.rewind_as(mode));
+    }
 }
 
 /// `php_stream_ops` for a kind of stream an extension implements, which
@@ -1005,6 +1054,10 @@ pub struct StreamWrapper {
     /// `wrapper_type` and a directory's `stream_type`, and the refusals
     /// of `unlink` and `rename` name.
     pub label: &'static str,
+    /// `wrapper->is_url`: a URL wrapper, which `allow_url_fopen=0`
+    /// refuses every open of, `allow_url_include=0` an include's, and
+    /// which `get_headers` alone opens through (`STREAM_USE_URL`).
+    pub is_url: bool,
     /// `stream_opener`, `None` for a wrapper that opens no stream, php's
     /// `wrapper does not support stream open`; the opener's own `None`
     /// is the open that failed, which `php_stream_display_wrapper_errors`
@@ -1024,6 +1077,41 @@ pub struct StreamWrapper {
     /// [`WrapperOp::Owner`] and [`WrapperOp::Group`], with the path as
     /// the program wrote it.
     pub set_stat: Option<fn(&mut Request, &[u8], WrapperOp<'_>) -> Result<bool, Thrown>>,
+    /// `stream_stat`, which `fstat()` of a stream the wrapper opened asks
+    /// in place of the stream's kind (`_php_stream_stat`): `None` where
+    /// the wrapper has none and the kind answers; the function's `None`
+    /// is php's `-1`, as the http and ftp wrappers answer always.
+    pub stream_stat: Option<fn(&mut Request, Stream) -> Option<[i64; 13]>>,
+}
+
+/// `php_stream_notifier` as a stream reaches it through
+/// `PHP_STREAM_CONTEXT(stream)`, set by [`Stream::set_notifier`], as
+/// `php_stream_context_set` sets the `context` a wrapper opened under:
+/// what a socket's reads and writes took counted into the notifier's
+/// `progress` (`php_stream_notify_progress_increment`, `xp_socket.c`),
+/// and a read or a write that changed the stream's `eof`, which notifies
+/// `PHP_STREAM_NOTIFY_COMPLETED` (`_php_stream_fill_read_buffer`,
+/// `_php_stream_write_buffer`). A throwable the callback leaves is the
+/// native's to raise once it returns, as a filter's is. The stream's
+/// free gives it back last, [`Notifier::release`], as `_php_stream_free`
+/// deletes its `context` once everything else is gone.
+pub trait Notifier: Send {
+    /// `php_stream_notify_progress_increment(context, bytes, 0)`.
+    fn progress(&mut self, req: &mut Request, bytes: usize) -> Result<(), Thrown>;
+    /// `php_stream_notify_completed(context)`.
+    fn completed(&mut self, req: &mut Request) -> Result<(), Thrown>;
+    /// `zend_list_delete(context->res)`: what the notifier holds let go.
+    fn release(self: Box<Self>, req: &mut Request);
+}
+
+/// `stream->wrapperthis` with its wrapper's `wops->stream_closer`: what a
+/// wrapper keeps beside a stream it opened, set by [`Stream::set_closer`]
+/// and handed back by the stream's free once the kind is closed and its
+/// filters are off, as `php_stream_ftp_stream_close` then reads the
+/// control connection's last reply and quits it.
+pub trait Closer: Send {
+    /// `wops->stream_closer(wrapper, stream)`.
+    fn close(self: Box<Self>, req: &mut Request) -> Result<(), Thrown>;
 }
 
 /// What a wrapper's directory opener lists, which the engine serves as
@@ -1053,7 +1141,9 @@ pub enum DirListing {
 /// open an `include` makes; `STREAM_MUST_SEEK`, a stream whose kind
 /// cannot seek copied into one that can, `php_stream_make_seekable`; and
 /// `STREAM_WILL_CAST`, the caller about to cast the stream to a fd, which
-/// makes that copy a temporary file rather than a `php://temp`. The
+/// makes that copy a temporary file rather than a `php://temp`; and
+/// `STREAM_ONLY_GET_HEADERS`, the open `get_headers` makes, for which the
+/// http wrapper reads the head alone and fails on no status. The
 /// engine clears `warn` before it asks an opener, as php does, so what
 /// fails inside one is what the opener logged
 /// ([`Request::wrapper_log_error`]), or the generic `operation failed`.
@@ -1065,6 +1155,7 @@ pub struct Opening {
     pub for_include: bool,
     pub must_seek: bool,
     pub will_cast: bool,
+    pub only_get_headers: bool,
 }
 
 /// A wrapper whose kinds the engine keeps, which the extension that

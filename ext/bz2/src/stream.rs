@@ -497,6 +497,7 @@ pub(crate) fn wrapper() -> StreamWrapper {
     StreamWrapper {
         scheme: "compress.bzip2".into(),
         label: "BZip2",
+        is_url: false,
         open: Some(open),
         open_dir: None,
         stat: None,
@@ -505,6 +506,7 @@ pub(crate) fn wrapper() -> StreamWrapper {
         mkdir: None,
         rmdir: None,
         set_stat: None,
+        stream_stat: None,
     }
 }
 

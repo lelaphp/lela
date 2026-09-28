@@ -248,6 +248,10 @@ impl Ops for Socket {
         self.label
     }
 
+    fn counts_progress(&self) -> bool {
+        true
+    }
+
     /// `php_sockop_write` (`Z/main/streams/xp_socket.c:63`): one
     /// `send(2)`, a socket that does not block answering `0` where it
     /// would, and php's notice with `errno` where it failed.
