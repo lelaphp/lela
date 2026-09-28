@@ -13078,10 +13078,32 @@ fn stepped_entry(
 /// `zend_binary_assign_op_obj_dim` (`Z/Zend/zend_execute.c:1638`), the
 /// arm `ZEND_ASSIGN_DIM_OP` takes over an object: `offsetGet` with the
 /// dimension under `BP_VAR_R`, the kernel over what it answered and the
-/// value, and `offsetSet` with what it made. php's `Error` `Cannot use
-/// object of type C as array` is what a class that is no `ArrayAccess`
-/// raises, and the temporary takes what the operation made and
-/// never what `offsetSet` returned.
+/// value, and `offsetSet` with what it made, and the value given up
+/// after it. Where `offsetGet` raised, or the class is no `ArrayAccess`
+/// and raised php's `Error` `Cannot use object of type C as array`,
+/// `zend_use_object_as_array` raises that `Error` once more, chained
+/// over it. The temporary takes what the operation made and never what
+/// `offsetSet` returned.
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     function offsetGet($x): mixed { echo "get\n"; return 1; }
+///     function offsetSet($x, $y): void { echo "set $y\n"; }
+///     function offsetExists($x): bool { return true; }
+///     function offsetUnset($x): void {}
+/// }
+/// class D { function __toString(): string { return "d"; } function __destruct() { echo "dtor\n"; } }
+/// $a = new A;
+/// $a[0] .= new D;
+/// $o = new stdClass;
+/// try { $o[0] .= 1; } catch (Error $e) { echo $e->getMessage(), " / ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// get
+/// set 1d
+/// dtor
+/// Cannot use object of type stdClass as array / Cannot use object of type stdClass as array
+/// ```
 fn binary_assign_op_obj_dim(
     req: &mut Request,
     frame: FrameRef,
@@ -13096,14 +13118,26 @@ fn binary_assign_op_obj_dim(
     let read = table.read_dimension(req, object, dim.as_ref(), DimensionRead::Warning);
     let held = match read {
         Ok(held) => held,
-        Err(thrown) => {
-            exec::free_operand(req, frame, code, data.op1_type, data.op1);
-            return Err(thrown);
+        // `zend_use_object_as_array`: php's `read_dimension` answered
+        // `NULL`, so the `Error` is raised over what it raised, chained.
+        Err(thrown) if thrown.exception().is_some() => {
+            req.leave_pending(&thrown);
+            let ran_on = req.pending();
+            let class = req.class_name(object.class());
+            let error = crate::api::raising::throw(
+                req,
+                "Error",
+                &format!("Cannot use object of type {class} as array"),
+            );
+            return Err(req.raised_over(error, ran_on));
         }
+        Err(thrown) => return Err(thrown),
     };
     let computed = kernel(req, &held, &value);
     req.release(held);
-    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+    // `if (zend_binary_op(...) == SUCCESS) write_dimension`, and
+    // `FREE_OP_DATA` after it: a destructor the value's release serves
+    // is served after `offsetSet`, and over what the operator raised.
     let stepped = computed?;
     // `write_dimension` gives its value up, where php's copies it, so
     // the owner the temporary and the release below read is taken first.
@@ -13115,6 +13149,7 @@ fn binary_assign_op_obj_dim(
     }
     write_out(req, frame, code, op, &stepped);
     req.release(stepped);
+    exec::free_operand(req, frame, code, data.op1_type, data.op1);
     Ok(())
 }
 
