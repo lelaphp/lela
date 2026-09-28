@@ -408,7 +408,6 @@ request::Request::extension_ini
 request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number
-request::Request::fibers_blocked
 request::Request::flush
 request::Request::forbid_dynamic_call
 request::Request::frame_args
@@ -514,6 +513,7 @@ request::Request::url_stat
 request::Request::url_stat_quiet
 request::Request::variadic_arguments
 request::Request::virtual_file_ex
+request::Request::with_fiber_switch_blocked
 request::Request::with_stream_ctx
 request::Request::wrapper_log_error
 request::Request::wrapper_op

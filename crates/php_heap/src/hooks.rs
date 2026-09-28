@@ -96,8 +96,8 @@ pub trait HeapHooks {
     /// collection interrupted. `false` is the phase served in place by
     /// the heap, the entries below `end` walked for their destructors;
     /// a heap with no fibers always answers so.
-    fn gc_destructors_in_fiber(&mut self, end: u32) -> bool {
-        let _ = end;
+    fn gc_destructors_in_fiber(&mut self, from: u32, end: u32) -> bool {
+        let _ = (from, end);
         false
     }
     /// The temporaries live where every frame of the running execution

@@ -226,8 +226,9 @@ pub(crate) fn pcntl_signal_dispatch(req: &mut Request) -> Result<bool, Thrown> {
 /// holds `SIG_DFL` or `SIG_IGN` for is dropped. Every signal is blocked
 /// while the queue plays, as php blocks them, and a handler that throws
 /// ends the dispatch with what is left dropped. The engine's interrupt
-/// check serves it as php's `pcntl_interrupt_function`. No fiber
-/// switches while the handlers are served:
+/// check serves it as php's `pcntl_interrupt_function`. No fiber may
+/// switch while the handlers play, `zend_fiber_switch_block`, so a
+/// handler served inside a fiber cannot suspend it:
 ///
 /// ```php
 /// pcntl_signal(SIGUSR1, function () {
@@ -261,7 +262,7 @@ pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
     .is_ok();
     req.state::<State>().signals.dispatching = true;
     // "Prevent switching fibers when handling signals".
-    let played = req.fibers_blocked(|req| play(req, &taken));
+    let played = req.with_fiber_switch_blocked(|req| play(req, &taken));
     req.state::<State>().signals.dispatching = false;
     if masked {
         let _ = sigprocmask(SigmaskHow::SIG_SETMASK, Some(&unmasked), None);

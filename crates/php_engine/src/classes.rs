@@ -1585,8 +1585,7 @@ impl Exception {
     /// #0 {main}
     /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        let text = req.throwable_to_string(this.object());
-        PhpString::new(req, text.as_bytes())
+        req.exception_string(this.object())
     }
 }
 

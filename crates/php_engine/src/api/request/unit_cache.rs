@@ -158,7 +158,9 @@ impl UnitCache<'_> {
     pub fn compile(&mut self, written: &[u8]) -> Result<bool, Thrown> {
         let req = &mut *self.req;
         let resolved = if written.contains(&0) {
-            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            Err(super::Unresolved::Missing(std::io::Error::from(
+                std::io::ErrorKind::NotFound,
+            )))
         } else {
             req.resolve_path(written)
         };
@@ -172,7 +174,8 @@ impl UnitCache<'_> {
                     .failed_opening(IncludeKind::Include, written)
                     .map(|_| false);
             }
-            Err(reason) => {
+            Err(super::Unresolved::Threw(thrown)) => return Err(thrown),
+            Err(super::Unresolved::Missing(reason)) => {
                 if !written.contains(&0) {
                     req.open_stream_failed(IncludeKind::Include, written, &reason);
                 }

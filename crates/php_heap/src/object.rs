@@ -904,6 +904,19 @@ impl Heap {
         }
     }
 
+    /// `zend_objects_store_mark_destructed`
+    /// (`Z/Zend/zend_objects_API.c:69`): every live object's destructor
+    /// flagged as served, what a fatal does before it bails out, so none
+    /// of the objects that stand then is destructed, and an object made
+    /// after it, in a shutdown function, still is.
+    pub fn mark_destructed(&mut self) {
+        for handle in 1..self.store.top {
+            if let Some(o) = self.store.get(handle) {
+                o.add_flag(gc::OBJ_DESTRUCTOR_CALLED);
+            }
+        }
+    }
+
     /// `zend_objects_store_call_destructors`
     /// (`Z/Zend/zend_objects_API.c:43`), the shutdown walk: every live
     /// object's destructor not yet served, in id order, with reuse of a

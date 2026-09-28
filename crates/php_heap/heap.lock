@@ -68,6 +68,8 @@ Heap::call_destructors
 Heap::close_resources
 Heap::free_block
 Heap::free_object_storage
+Heap::gc_call_destructor
+Heap::gc_check_possible_root
 Heap::gc_collect_cycles
 Heap::gc_enable
 Heap::gc_enabled
@@ -83,6 +85,7 @@ Heap::iterator_pos
 Heap::iterator_pos_ex
 Heap::iterator_set_lead
 Heap::iterator_set_pos
+Heap::mark_destructed
 Heap::memory_limit
 Heap::memory_peak
 Heap::memory_real_peak

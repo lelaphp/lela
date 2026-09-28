@@ -6,7 +6,7 @@
 
 use php_heap::VmStack;
 
-use super::{Link, Request, links_of};
+use super::{Link, Request, Slots, links_of};
 use crate::api::abi::Callable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -181,7 +181,13 @@ impl Request {
                 return Ok(None);
             };
             let (stack, vm) = self.stack_of(&standing);
-            let links = links_of(stack, vm, 0..vm.frames().len(), 0..vm.calls().len());
+            let links = links_of(
+                stack,
+                vm,
+                0..vm.frames().len(),
+                0..vm.calls().len(),
+                &|root| self.placeholder_links(root),
+            );
             self.trace_rows(&links)
         };
         self.render_trace(rows, options).map(Some)
@@ -249,6 +255,21 @@ impl Request {
             };
             return self.render_trace(rows, options).map(Some);
         }
+        // The root runs, and `object` delegates to it: php links the
+        // root's frame to `object`'s `execute_fake`, which the walk
+        // expands into the frames between, cut under `object`'s.
+        if let Some((stack, vm, at)) = self.running_frame(root)
+            && let Some(state) = vm.frames().get(at)
+        {
+            let mut links = vec![Link::Frame(Slots::Stack(stack, at), state)];
+            links.extend(
+                generator::kept_frames(self, object, root)
+                    .into_iter()
+                    .map(|(slots, state)| Link::Frame(Slots::Kept(slots), state)),
+            );
+            let rows = self.trace_rows(&links);
+            return self.render_trace(rows, options).map(Some);
+        }
         generator::with_frames(self, object, |req, floor| {
             let top = req.vm.frames().len().saturating_sub(1);
             let rows = if top < floor {
@@ -299,5 +320,10 @@ fn frames_between<'a>(stack: &'a VmStack, vm: &'a Vm, from: usize, to: usize) ->
         })
     };
     let calls = calls_below(from)..calls_below(to);
-    links_of(stack, vm, from..to.saturating_add(1), calls)
+    // The generators a delegation runs through stand on the stack here,
+    // put there by the reader ([`generator::with_frames`]), so no
+    // placeholder is expanded a second time.
+    links_of(stack, vm, from..to.saturating_add(1), calls, &|_| {
+        Vec::new()
+    })
 }

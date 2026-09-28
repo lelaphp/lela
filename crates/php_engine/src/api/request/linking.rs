@@ -159,7 +159,19 @@ impl Request {
         if self.pending() == Some(exception) {
             self.take_pending();
         }
-        let rendered = self.throwable_to_string(exception);
+        // `zval_get_string` over the throwable: its class's own
+        // `__toString`, which a user class may override.
+        let rendered = match crate::ops::to_string(self, &exception.as_value()) {
+            Ok(string) => {
+                let text = String::from_utf8_lossy(string.as_bytes()).into_owned();
+                self.release(crate::api::values::Value::string(string));
+                text
+            }
+            Err(inner) => {
+                self.release(exception.as_value());
+                return inner;
+            }
+        };
         self.release(exception.as_value());
         self.emit_recorded();
         crate::api::raising::fatal(self, &format!("{prefix}: Uncaught {rendered}"))
