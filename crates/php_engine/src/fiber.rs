@@ -49,7 +49,7 @@ use crate::api::raising::{Thrown, throw};
 use crate::api::request::{Raised, Request};
 use crate::api::values::{PhpObject, PhpString, Value};
 use crate::classes::{Error, Throwable};
-use crate::exec::Vm;
+use crate::exec::{self, Vm};
 
 /// `sizeof(zend_fiber_stack)` on a 64-bit build without Valgrind or
 /// sanitizers: the pointer and the size `zend_fiber_stack_allocate`
@@ -223,14 +223,12 @@ impl ObjectHandlers for FiberHandlers {
 
     /// `zend_fiber_object_gc` (`Z/Zend/zend_fibers.c:817`): the callable
     /// and `fiber->result`, and for a suspended fiber every frame it
-    /// holds, innermost first, as `zend_unfinished_execution_gc_ex`
-    /// names each: the receiver and the closure, the slots, the extra
-    /// arguments and the extra named ones; then the calls its frames
-    /// were building, their receivers, closures and arguments
-    /// (`zend_unfinished_calls_gc`). Each is an owner the fiber's frames
-    /// hold, so a cycle through a suspended fiber's variables is found.
-    /// A running fiber's frames are the running execution's, and are
-    /// not named.
+    /// holds, innermost first, each by [`exec::unfinished_execution_gc`]
+    /// or, for a generator running on it, by
+    /// [`crate::generator::running_frame_gc`]; then the calls its frames
+    /// were building. Each is an owner the fiber's frames hold, so a
+    /// cycle through a suspended fiber's variables is found. A running
+    /// fiber's frames are the running execution's, and are not named.
     ///
     /// ```php
     /// function park() {
@@ -252,6 +250,23 @@ impl ObjectHandlers for FiberHandlers {
     /// int(1)
     /// done
     /// ```
+    ///
+    /// A variable a frame made by name lives in its symbol table, which
+    /// the walk names too:
+    ///
+    /// ```php
+    /// class C { function __destruct() { echo "C::__destruct\n"; } }
+    /// function f() { $c = new C; $y = 'a'; $$y = Fiber::getCurrent(); Fiber::suspend(); }
+    /// $fiber = new Fiber(function () { f(); });
+    /// $fiber->start();
+    /// $fiber = null;
+    /// gc_collect_cycles();
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// C::__destruct
+    /// done
+    /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         let Some(fiber) = object.native::<ZendFiber>(req) else {
             return;
@@ -267,40 +282,18 @@ impl ObjectHandlers for FiberHandlers {
             return;
         };
         for (at, state) in execution.vm.frames().iter().enumerate().rev() {
-            if let Some(this) = state.this {
-                visit(this.as_value());
-            }
-            if let Some(closure) = state.closure {
-                visit(closure.as_value());
-            }
             let frame = php_heap::FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
-            if let Some(slots) = execution.stack.frame(frame) {
-                for slot in 0..slots.len() {
-                    let slot = php_heap::Slot(u32::try_from(slot).unwrap_or(u32::MAX));
-                    visit(Value::of_zval(slots.slot(slot)));
+            let Some(slots) = execution.stack.frame(frame) else {
+                continue;
+            };
+            match state.generator {
+                Some(generator) => {
+                    crate::generator::running_frame_gc(req, generator, slots, state, visit);
                 }
-            }
-            for extra in &state.extra_args {
-                visit(*extra);
-            }
-            for (_, value) in &state.extra_named {
-                visit(*value);
+                None => exec::unfinished_execution_gc(req, slots, state, &[], visit),
             }
         }
-        for call in execution.vm.calls().iter().rev() {
-            if let Some(this) = call.this {
-                visit(this.as_value());
-            }
-            if let Some(closure) = call.closure {
-                visit(closure.as_value());
-            }
-            for argument in &call.arguments {
-                visit(*argument);
-            }
-            for (_, value) in &call.extra_named {
-                visit(*value);
-            }
-        }
+        exec::unfinished_calls_gc(execution.vm.calls(), visit);
     }
 }
 

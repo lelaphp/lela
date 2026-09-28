@@ -10644,6 +10644,22 @@ impl Request {
         self.release(previous.as_value());
     }
 
+    /// What a symbol table holds that is no CV of its frame, for the
+    /// collector: the frame's walk names the CVs themselves, which is
+    /// where php's `IS_INDIRECT` buckets point.
+    pub(crate) fn gc_symbol_table(&self, table: TableId, visit: &mut dyn FnMut(Value)) {
+        let Some(table) = self.tables.get(table.0 as usize) else {
+            return;
+        };
+        for (_, symbol) in &table.entries {
+            match symbol {
+                Symbol::Value(value) => visit(*value),
+                Symbol::Held(cell) => visit(cell.as_value()),
+                Symbol::Indirect(..) => {}
+            }
+        }
+    }
+
     /// The `previous` property of a throwable, when it holds one.
     fn previous_of(&self, throwable: PhpObject) -> Option<PhpObject> {
         throwable
@@ -18650,11 +18666,26 @@ impl HeapHooks for Hooks<'_> {
 
     /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`:
     /// the class declares or inherits `__destruct`, or its handler
-    /// table serves a destructor of its own, which `Fiber`'s does.
+    /// table serves a destructor of its own, which `Fiber`'s and
+    /// `Generator`'s do. A generator the collector finds is destroyed
+    /// before it is freed, its `finally` blocks served, and it is freed
+    /// by the release of what held it, not counted among what the
+    /// collection freed.
+    ///
+    /// ```php
+    /// $a = new stdClass; $b = new stdClass; $a->b = $b; $b->a = $a;
+    /// $a->gen = (function () { yield 1; })();
+    /// unset($a, $b);
+    /// var_dump(gc_collect_cycles());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// ```
     fn has_destructor(&mut self, obj: Obj) -> bool {
         let class = ClassId(obj.class());
         self.0.method_named(class, b"__destruct").is_some()
             || crate::fiber::serves_destructor(self.0.object_handlers(obj))
+            || crate::generator::is_generator(self.0, PhpObject::of(obj))
     }
 
     /// The live temporaries of every frame of the running execution,

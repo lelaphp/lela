@@ -1538,6 +1538,81 @@ fn stays_in_split_loop(code: &OpArray, range: &php_unit::LiveRange, catch_op: u3
         .is_some_and(|to_end| catch_op < range.end.0.saturating_add(to_end))
 }
 
+/// `zend_unfinished_execution_gc_ex` (`Z/Zend/zend_execute.c:4658`):
+/// what one frame that is not running holds, named for the collector.
+/// The receiver and the closure its call released, the CVs, the extra
+/// arguments and the extra named ones, the calls it was building
+/// ([`unfinished_calls_gc`]), the temporaries and loop variables live
+/// where it stands, and what its symbol table holds beside the CVs
+/// attached to it. Every frame the collector reads is walked here, a
+/// suspended generator's and each frame of a suspended fiber alike.
+pub(crate) fn unfinished_execution_gc(
+    req: &Request,
+    slots: &php_heap::Frame,
+    state: &FrameState,
+    calls: &[CallState],
+    visit: &mut dyn FnMut(Value),
+) {
+    if let Some(this) = state.this {
+        visit(this.as_value());
+    }
+    if let Some(closure) = state.closure {
+        visit(closure.as_value());
+    }
+    let Some(code) = body_of(&state.unit, state.body) else {
+        return;
+    };
+    let slot = |at: u32| Value::of_zval(slots.slot(php_heap::Slot(at)));
+    for cv in 0..code.num_cvs {
+        visit(slot(cv));
+    }
+    for extra in &state.extra_args {
+        visit(*extra);
+    }
+    for (_, value) in &state.extra_named {
+        visit(*value);
+    }
+    unfinished_calls_gc(calls, visit);
+    if state.opline != 0 {
+        for range in &code.live_ranges {
+            if range.start.0 > state.opline {
+                break;
+            }
+            if state.opline < range.end.0
+                && matches!(
+                    range.kind,
+                    php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop
+                )
+            {
+                visit(slot(temporary_slot(code, range.var)));
+            }
+        }
+    }
+    if let Some(table) = state.symbol_table {
+        req.gc_symbol_table(table, visit);
+    }
+}
+
+/// `zend_unfinished_calls_gc`: the calls a frame was building,
+/// innermost first, each with the arguments it has placed, its
+/// receiver, its extra named arguments and its closure.
+pub(crate) fn unfinished_calls_gc(calls: &[CallState], visit: &mut dyn FnMut(Value)) {
+    for call in calls.iter().rev() {
+        for argument in &call.arguments {
+            visit(*argument);
+        }
+        if let Some(this) = call.this {
+            visit(this.as_value());
+        }
+        for (_, value) in &call.extra_named {
+            visit(*value);
+        }
+        if let Some(closure) = call.closure {
+            visit(closure.as_value());
+        }
+    }
+}
+
 /// `cleanup_unfinished_calls` (`Z/Zend/zend_execute.c`): the calls the
 /// frame was still building or serving when the throwable was raised,
 /// given up innermost first. A frame records how many calls stood below

@@ -197,31 +197,51 @@ impl ObjectHandlers for GeneratorHandlers {
         ))
     }
 
-    /// `zend_generator_get_gc`: the value, the key, what the body
-    /// returned, a closed generator's closure, the delegated values and
-    /// the generator delegated to.
-    /// A suspended frame's slots are not walked yet (#687's neighbour),
-    /// which keeps what they hold alive through a collection and frees
-    /// nothing early.
+    /// `zend_generator_get_gc` (`Z/Zend/zend_generators.c:440`): a
+    /// closed generator's value, key, what the body returned and its
+    /// closure; nothing for one that is running, whose frame the stack
+    /// it runs on holds; and a suspended one's frame as
+    /// [`frame_gc`] names it, so a cycle through a suspended
+    /// generator's variables is found.
+    ///
+    /// ```php
+    /// class C { public $g; function __destruct() { echo "C::__destruct\n"; } }
+    /// function gen() { $c = new C; $c->g = yield; yield; }
+    /// $g = gen();
+    /// $g->send($g);
+    /// unset($g);
+    /// var_dump(gc_collect_cycles() > 0);
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// C::__destruct
+    /// bool(true)
+    /// done
+    /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         let Some(generator) = object.native::<ZendGenerator>(req) else {
             return;
         };
-        visit(generator.value);
-        visit(generator.key);
-        visit(generator.retval);
-        // The closure of a closed generator; a frame's own closure is
-        // among what its slots hold, which are not walked yet.
-        if let (Some(closure), Execution::Closed) = (generator.closure, &generator.execution) {
-            visit(closure.as_value());
-        }
-        match &generator.values {
-            Delegated::Nothing => {}
-            Delegated::Array { array, .. } => visit(*array),
-            Delegated::Iterator(iterator) => visit(iterator.as_value()),
-        }
-        if let Some(parent) = generator.parent {
-            visit(parent.as_value());
+        match &generator.execution {
+            Execution::Closed => {
+                visit(generator.value);
+                visit(generator.key);
+                visit(generator.retval);
+                if let Some(closure) = generator.closure {
+                    visit(closure.as_value());
+                }
+            }
+            Execution::Running => {}
+            Execution::Suspended(frame) => {
+                frame_gc(
+                    req,
+                    generator,
+                    &frame.slots,
+                    &frame.state,
+                    &frame.calls,
+                    visit,
+                );
+            }
         }
     }
 }
@@ -245,6 +265,51 @@ fn with<R>(
 /// A read of the payload.
 fn read<R>(req: &Request, object: PhpObject, f: impl FnOnce(&ZendGenerator) -> R) -> Option<R> {
     object.native::<ZendGenerator>(req).map(f)
+}
+
+/// `zend_generator_frame_gc` (`Z/Zend/zend_generators.c:399`): what a
+/// generator with a frame holds, its value, key, return value and
+/// delegated values, its frame by [`exec::unfinished_execution_gc`]
+/// with the calls it was building, and the generator it delegates to.
+/// The frame is the one the generator keeps while it is suspended, or
+/// the one on the stack of a suspended fiber it runs on.
+pub(crate) fn frame_gc(
+    req: &Request,
+    generator: &ZendGenerator,
+    slots: &php_heap::Frame,
+    state: &FrameState,
+    calls: &[CallState],
+    visit: &mut dyn FnMut(Value),
+) {
+    visit(generator.value);
+    visit(generator.key);
+    visit(generator.retval);
+    match &generator.values {
+        Delegated::Nothing => {}
+        Delegated::Array { array, .. } => visit(*array),
+        Delegated::Iterator(iterator) => visit(iterator.as_value()),
+    }
+    exec::unfinished_execution_gc(req, slots, state, calls, visit);
+    if let Some(parent) = generator.parent {
+        visit(parent.as_value());
+    }
+}
+
+/// [`frame_gc`] over a running generator's frame on a suspended
+/// fiber's stack, which the generator's own `get_gc` leaves to the
+/// fiber; none for an object that is no running generator.
+pub(crate) fn running_frame_gc(
+    req: &Request,
+    object: PhpObject,
+    slots: &php_heap::Frame,
+    state: &FrameState,
+    visit: &mut dyn FnMut(Value),
+) {
+    if let Some(generator) = object.native::<ZendGenerator>(req)
+        && matches!(generator.execution, Execution::Running)
+    {
+        frame_gc(req, generator, slots, state, &[], visit);
+    }
 }
 
 /// `ZEND_GENERATOR_CURRENTLY_RUNNING`: a resumption holds the frame on
