@@ -68,7 +68,7 @@ posix = ["dep:php_ext_posix"] # the `php` binary and the phpt lane alone (design
 sockets = ["dep:php_ext_sockets"] # the `php` binary and the phpt lane, as php builds it with --enable-sockets (design §7.2, revision 36)
 phar = ["dep:php_ext_phar"]
 bz2 = ["dep:php_ext_bz2"] # the `php` binary and the phpt lane, as php builds it with --with-bz2 (design §7.2, revision 39)
-uri = ["dep:php_ext_uri"]
+uri = ["dep:php_ext_uri", "lexbor"] # php_uri.c: ZEND_MOD_REQUIRED("lexbor")
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]

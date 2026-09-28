@@ -16,13 +16,17 @@ workspace = true
 # `FILTER_VALIDATE_REGEXP` and `FILTER_VALIDATE_EMAIL` match through,
 # and config.m4's `PHP_ADD_EXTENSION_DEP(filter, pcre)`; and ext/standard
 # for what `sanitizing_filters.c` includes of it: `php_strip_tags_ex`
-# (`php_string.h`) and `php_escape_html_entities_ex` (`html.h`).
+# (`php_string.h`) and `php_escape_html_entities_ex` (`html.h`); and
+# ext/uri for the parser registry `logical_filters.c` includes of it,
+# `php_uri_get_parser` and `php_uri_parse_to_struct` (`php_uri.h`), which
+# `FILTER_VALIDATE_URL` parses through.
 # ADR-0004's edge where php-src includes the other extension's headers.
 # The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 php_ext_pcre = { path = "../pcre" }
 php_ext_standard = { path = "../standard" }
+php_ext_uri = { path = "../uri" }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

@@ -39,9 +39,10 @@ use php_ext::raising::{Thrown, fatal, throw, throw_chained};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 
-/// `php_uri_component_read_mode`: how a component is read.
+/// `php_uri_component_read_mode`: how a component is read, as it was
+/// written or normalized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReadMode {
+pub enum ReadAs {
     Raw,
     NormalizedAscii,
     NormalizedUnicode,
@@ -97,14 +98,14 @@ pub(crate) trait UriParser: Sized + Send + 'static {
     /// `to_string`, `None` where the URI cannot be recomposed.
     fn recompose(&mut self, mode: Recomposition, exclude_fragment: bool) -> Option<Vec<u8>>;
 
-    fn scheme(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
-    fn username(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
-    fn password(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
-    fn host(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
-    fn port(&mut self, mode: ReadMode) -> Read<Option<i64>>;
-    fn path(&mut self, mode: ReadMode) -> Read<Vec<u8>>;
-    fn query(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
-    fn fragment(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>>;
+    fn scheme(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
+    fn username(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
+    fn password(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
+    fn host(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
+    fn port(&mut self, mode: ReadAs) -> Read<Option<i64>>;
+    fn path(&mut self, mode: ReadAs) -> Read<Vec<u8>>;
+    fn query(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
+    fn fragment(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
 
     fn set_scheme(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown>;
     fn set_host(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown>;
@@ -112,6 +113,113 @@ pub(crate) trait UriParser: Sized + Send + 'static {
     fn set_path(&mut self, req: &mut Request, value: &[u8]) -> Result<(), Thrown>;
     fn set_query(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown>;
     fn set_fragment(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown>;
+}
+
+/// A parser `php_uri_get_parser` finds by name, what `php_uri.h` exports
+/// to ext/filter's `FILTER_VALIDATE_URL` (design §4.10). php's
+/// `uri_parsers` table holds a third, `parse_url`, which
+/// `uri_parser_php_parse_url.c` makes of ext/standard's
+/// `php_url_parse_ex2`; here it stays with
+/// ext/standard, whose http and ftp wrappers need this crate
+/// (`ZEND_MOD_REQUIRED("uri")`), so a caller that names no class, or
+/// names `parse_url`, reads `parse_url` itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Parser {
+    /// `php_uri_parser_rfc3986`, `Uri\Rfc3986\Uri`.
+    Rfc3986,
+    /// `php_uri_parser_whatwg`, `Uri\WhatWg\Url`.
+    WhatWg,
+}
+
+/// `php_uri`: the components `php_uri_parse_to_struct` read, each
+/// string that was one and the number that was an integer.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct UriStruct {
+    pub scheme: Option<Vec<u8>>,
+    pub user: Option<Vec<u8>>,
+    pub password: Option<Vec<u8>>,
+    pub host: Option<Vec<u8>>,
+    pub port: Option<i64>,
+    pub path: Option<Vec<u8>>,
+    pub query: Option<Vec<u8>>,
+    pub fragment: Option<Vec<u8>>,
+}
+
+impl Parser {
+    /// `php_uri_get_parser`: the parser registered under the class name
+    /// `name`.
+    #[must_use]
+    pub fn named(name: &[u8]) -> Option<Parser> {
+        [Parser::Rfc3986, Parser::WhatWg]
+            .into_iter()
+            .find(|parser| parser.name().as_bytes() == name)
+    }
+
+    /// `php_uri_parser.name`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Parser::Rfc3986 => rfc3986::Rfc3986::CLASS,
+            Parser::WhatWg => whatwg::WhatWg::CLASS,
+        }
+    }
+
+    /// `php_uri_parse_to_struct`: `text` parsed and each component read
+    /// as `form` asks; `None` where the text is no URI or a component
+    /// cannot be read, with the parser's throw unless `silent`.
+    ///
+    /// ```php
+    /// foreach ([Uri\Rfc3986\Uri::class, Uri\WhatWg\Url::class] as $p) {
+    ///     foreach (["http:///example.com", "http://exa%23mple.org", "http://u%zz@h.com"] as $u) echo $p, " ", var_export(filter_var($u, FILTER_VALIDATE_URL, ["options" => ["uri_parser_class" => $p]]), true), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// Uri\Rfc3986\Uri 'http:///example.com'
+    /// Uri\Rfc3986\Uri 'http://exa%23mple.org'
+    /// Uri\Rfc3986\Uri false
+    /// Uri\WhatWg\Url 'http:///example.com'
+    /// Uri\WhatWg\Url false
+    /// Uri\WhatWg\Url 'http://u%zz@h.com'
+    /// ```
+    pub fn parse_to_struct(
+        self,
+        req: &mut Request,
+        text: &[u8],
+        form: ReadAs,
+        silent: bool,
+    ) -> Result<Option<UriStruct>, Thrown> {
+        match self {
+            Parser::Rfc3986 => to_struct::<rfc3986::Rfc3986>(req, text, form, silent),
+            Parser::WhatWg => to_struct::<whatwg::WhatWg>(req, text, form, silent),
+        }
+    }
+}
+
+fn to_struct<P: UriParser>(
+    req: &mut Request,
+    text: &[u8],
+    form: ReadAs,
+    silent: bool,
+) -> Result<Option<UriStruct>, Thrown> {
+    let Some(mut uri) = P::parse(req, text, None, false, silent)?.uri else {
+        return Ok(None);
+    };
+    Ok(components(&mut uri, form).ok())
+}
+
+/// Each component in `php_uri_parse_to_struct`'s order, the first a
+/// parser cannot read ending the read.
+fn components<P: UriParser>(uri: &mut P, form: ReadAs) -> Read<UriStruct> {
+    Ok(UriStruct {
+        scheme: uri.scheme(form)?,
+        user: uri.username(form)?,
+        password: uri.password(form)?,
+        host: uri.host(form)?,
+        port: uri.port(form)?,
+        path: Some(uri.path(form)?),
+        query: uri.query(form)?,
+        fragment: uri.fragment(form)?,
+    })
 }
 
 /// `php_uri_object`'s `uri`: `None` until a constructor, `parse()`,
@@ -493,7 +601,7 @@ fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArr
     if !is_set::<P>(req, this) {
         return Ok(out);
     }
-    let raw = ReadMode::Raw;
+    let raw = ReadAs::Raw;
     let (scheme, username, password, host, port, path, query, fragment) =
         read::<P, _>(req, this, |u| {
             (

@@ -532,6 +532,7 @@ dependencies = [
  "php_ext",
  "php_ext_pcre",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]

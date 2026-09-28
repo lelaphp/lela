@@ -12,7 +12,7 @@ use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 use php_ext_lexbor::ffi::url::{self as lxb, ErrorKind, Host, Url as LxbUrl, ValidationError};
 
 use crate::{
-    Handlers, InvalidUriException, Parsed, Read, ReadMode, Recomposition, Slot, UriComparisonMode,
+    Handlers, InvalidUriException, Parsed, Read, ReadAs, Recomposition, Slot, UriComparisonMode,
     UriParser,
 };
 
@@ -223,19 +223,19 @@ impl UriParser for WhatWg {
         })
     }
 
-    fn scheme(&mut self, _: ReadMode) -> Read<Option<Vec<u8>>> {
+    fn scheme(&mut self, _: ReadAs) -> Read<Option<Vec<u8>>> {
         Ok(Some(self.0.scheme().to_vec()))
     }
 
     /// `php_uri_parser_whatwg_username_read`: `null` unless the URL
     /// includes credentials.
-    fn username(&mut self, _: ReadMode) -> Read<Option<Vec<u8>>> {
+    fn username(&mut self, _: ReadAs) -> Read<Option<Vec<u8>>> {
         Ok(self
             .includes_credentials()
             .then(|| self.0.username().to_vec()))
     }
 
-    fn password(&mut self, _: ReadMode) -> Read<Option<Vec<u8>>> {
+    fn password(&mut self, _: ReadAs) -> Read<Option<Vec<u8>>> {
         Ok(self
             .includes_credentials()
             .then(|| self.0.password().to_vec()))
@@ -243,7 +243,7 @@ impl UriParser for WhatWg {
 
     /// `php_uri_parser_whatwg_host_read`: an IPv6 address in brackets, a
     /// domain in Unicode for the Unicode read.
-    fn host(&mut self, mode: ReadMode) -> Read<Option<Vec<u8>>> {
+    fn host(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>> {
         Ok(self.0.host().map(|host| match host {
             Host::Ipv4(address) => lxb::ipv4_text(address),
             Host::Ipv6(pieces) => {
@@ -254,25 +254,25 @@ impl UriParser for WhatWg {
             }
             Host::Empty => Vec::new(),
             Host::Domain(name) | Host::Opaque(name) => match mode {
-                ReadMode::NormalizedUnicode => self.0.host_unicode(),
-                ReadMode::NormalizedAscii | ReadMode::Raw => name.to_vec(),
+                ReadAs::NormalizedUnicode => self.0.host_unicode(),
+                ReadAs::NormalizedAscii | ReadAs::Raw => name.to_vec(),
             },
         }))
     }
 
-    fn port(&mut self, _: ReadMode) -> Read<Option<i64>> {
+    fn port(&mut self, _: ReadAs) -> Read<Option<i64>> {
         Ok(self.0.port().map(i64::from))
     }
 
-    fn path(&mut self, _: ReadMode) -> Read<Vec<u8>> {
+    fn path(&mut self, _: ReadAs) -> Read<Vec<u8>> {
         Ok(self.0.path().to_vec())
     }
 
-    fn query(&mut self, _: ReadMode) -> Read<Option<Vec<u8>>> {
+    fn query(&mut self, _: ReadAs) -> Read<Option<Vec<u8>>> {
         Ok(self.0.query().map(<[u8]>::to_vec))
     }
 
-    fn fragment(&mut self, _: ReadMode) -> Read<Option<Vec<u8>>> {
+    fn fragment(&mut self, _: ReadAs) -> Read<Option<Vec<u8>>> {
         Ok(self.0.fragment().map(<[u8]>::to_vec))
     }
 
@@ -641,7 +641,7 @@ impl Url {
     /// ```
     fn getScheme(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let scheme = crate::component_string::<W>(req, this.object(), "scheme", |u| {
-            u.scheme(ReadMode::NormalizedAscii)
+            u.scheme(ReadAs::NormalizedAscii)
         })?;
         match scheme {
             Some(scheme) => Ok(scheme),
@@ -681,7 +681,7 @@ impl Url {
     /// ```
     fn getUsername(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
         crate::component_string::<W>(req, this.object(), "username", |u| {
-            u.username(ReadMode::NormalizedAscii)
+            u.username(ReadAs::NormalizedAscii)
         })
     }
 
@@ -714,7 +714,7 @@ impl Url {
     /// ```
     fn getPassword(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
         crate::component_string::<W>(req, this.object(), "password", |u| {
-            u.password(ReadMode::NormalizedAscii)
+            u.password(ReadAs::NormalizedAscii)
         })
     }
 
@@ -750,7 +750,7 @@ impl Url {
     /// ```
     fn getAsciiHost(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
         crate::component_string::<W>(req, this.object(), "host", |u| {
-            u.host(ReadMode::NormalizedAscii)
+            u.host(ReadAs::NormalizedAscii)
         })
     }
 
@@ -765,7 +765,7 @@ impl Url {
     /// ```
     fn getUnicodeHost(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
         crate::component_string::<W>(req, this.object(), "host", |u| {
-            u.host(ReadMode::NormalizedUnicode)
+            u.host(ReadAs::NormalizedUnicode)
         })
     }
 
@@ -798,7 +798,7 @@ impl Url {
     /// int(8443)
     /// ```
     fn getPort(req: &mut Request, this: This<Self>) -> Result<Option<i64>, Thrown> {
-        crate::component::<W, _>(req, this.object(), "port", |u| u.port(ReadMode::Raw))
+        crate::component::<W, _>(req, this.object(), "port", |u| u.port(ReadAs::Raw))
     }
 
     /// `withPort(?int $port): static`.
@@ -828,7 +828,7 @@ impl Url {
     /// ```
     fn getPath(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let path = crate::component::<W, _>(req, this.object(), "path", |u| {
-            u.path(ReadMode::NormalizedAscii)
+            u.path(ReadAs::NormalizedAscii)
         })?;
         PhpString::new(req, &path)
     }
@@ -858,7 +858,7 @@ impl Url {
     /// ```
     fn getQuery(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
         crate::component_string::<W>(req, this.object(), "query", |u| {
-            u.query(ReadMode::NormalizedAscii)
+            u.query(ReadAs::NormalizedAscii)
         })
     }
 
@@ -891,7 +891,7 @@ impl Url {
     /// ```
     fn getFragment(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
         crate::component_string::<W>(req, this.object(), "fragment", |u| {
-            u.fragment(ReadMode::NormalizedUnicode)
+            u.fragment(ReadAs::NormalizedUnicode)
         })
     }
 
