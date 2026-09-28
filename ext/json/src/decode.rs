@@ -1,7 +1,10 @@
 //! `php_json_parser`: `json_scanner.re` and `json_parser.y` at the tag,
 //! the scanner's conditions as one walk over the bytes and bison's
-//! grammar as the descent below it, since the grammar is `start: value
-//! EOI` over two bracketed forms and reads the same language either way.
+//! grammar as a walk over the brackets below it, since the grammar is
+//! `start: value EOI` over two bracketed forms and reads the same
+//! language either way. The open brackets are a stack on the heap and
+//! bison's own state count is kept beside them, so a nest is refused
+//! where php's `YYMAXDEPTH` refuses it and never by the machine.
 //!
 //! What is copied exactly, because it is observable: the token a byte
 //! begins, longest match first and the earlier condition where two are
@@ -386,6 +389,63 @@ enum Holder {
     Nothing,
 }
 
+/// A bracket the walk is inside, its rule half reduced on bison's
+/// stack: the count of states the stack held before its bracket, what
+/// it is building, and for an object the key its next value goes under.
+enum Open {
+    Array {
+        at: usize,
+        array: Option<PhpArray>,
+    },
+    Object {
+        at: usize,
+        holder: Holder,
+        key: Vec<u8>,
+    },
+}
+
+/// What [`Parser::begin`] made of the lookahead.
+enum Begun {
+    /// A scalar, or a pair with nothing inside, whole.
+    Value(Value),
+    /// A bracket left open on the walk's stack, its first value next.
+    Opened,
+    /// The parse refused, the code the scanner's.
+    Refused,
+}
+
+/// What [`Parser::attach`] left the bracket at.
+enum Attached {
+    /// A comma: its next value.
+    Next,
+    /// No comma: its closing token.
+    Close,
+    /// The parse refused, the code the scanner's.
+    Refused,
+}
+
+impl Open {
+    /// What the bracket became, `null` where nothing was built.
+    fn into_value(self) -> Value {
+        match self {
+            Open::Array { array, .. } => array.map_or_else(Value::null, PhpArray::to_value),
+            Open::Object { holder, .. } => holder.into_value(),
+        }
+    }
+
+    /// The owner given up where the parse was refused inside it.
+    fn give_up(&self, req: &mut Request) {
+        match self {
+            Open::Array { array, .. } => {
+                if let Some(array) = array {
+                    req.release(array.to_value());
+                }
+            }
+            Open::Object { holder, .. } => holder.give_up(req),
+        }
+    }
+}
+
 /// `php_json_parser`: the scanner, one token of lookahead, and the
 /// depth bison's `PHP_JSON_DEPTH_INC` counts.
 struct Parser<'a> {
@@ -393,15 +453,59 @@ struct Parser<'a> {
     token: Token,
     depth: i64,
     max_depth: i64,
+    /// How many states bison's stack holds, state 0 counted: what the
+    /// grammar's shifts and gotos push and its reductions pop, kept
+    /// beside the descent so it stops where php's parser does
+    /// ([`Parser::push`]).
+    stack: usize,
     /// `php_json_get_validate_methods`: nothing is built and the
     /// scanner's strings are dropped, which is what `json_validate` runs.
     validating: bool,
 }
 
+/// Bison's `YYMAXDEPTH`, which `json_parser.y` leaves at the skeleton's
+/// 10000: the states the parser's stack may grow to before `yyparse`
+/// gives up with "memory exhausted", which `php_json_yyerror` records
+/// as `JSON_ERROR_SYNTAX`.
+const YYMAXDEPTH: usize = 10000;
+
 impl Parser<'_> {
     /// `php_json_yylex`.
     fn advance(&mut self) {
         self.token = self.scanner.scan();
+    }
+
+    /// One state pushed on bison's stack, a shift or a goto, and
+    /// `yyexhaustedlab` where the stack has reached [`YYMAXDEPTH`]:
+    /// php's parser keeps its states on the heap, so a nest is refused
+    /// by this count and not by the machine, at 4998 arrays one inside
+    /// the next, 2499 objects each under a key, and fewer where every
+    /// level holds a member or an element before the nested one.
+    ///
+    /// ```php
+    /// foreach ([4998, 4999] as $n) { var_dump(json_decode(str_repeat('[', $n) . str_repeat(']', $n), true, 100000) !== null, json_last_error_msg()); }
+    /// foreach ([2499, 2500] as $n) { var_dump(json_validate(str_repeat('{"a":', $n) . '1' . str_repeat('}', $n), 100000), json_last_error_msg()); }
+    /// var_dump(json_decode(str_repeat('{"x":0,"a":', 1667) . '1' . str_repeat('}', 1667), false, 100000), json_last_error_msg());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(8) "No error"
+    /// bool(false)
+    /// string(12) "Syntax error"
+    /// bool(true)
+    /// string(8) "No error"
+    /// bool(false)
+    /// string(12) "Syntax error"
+    /// NULL
+    /// string(12) "Syntax error"
+    /// ```
+    fn push(&mut self) -> bool {
+        self.stack += 1;
+        if self.stack >= YYMAXDEPTH {
+            self.syntax();
+            return false;
+        }
+        true
     }
 
     /// `php_json_yyerror`: the code a syntax error leaves, which stands
@@ -413,32 +517,251 @@ impl Parser<'_> {
     }
 
     /// One `value` of the grammar; `None` where the parse was refused
-    /// and the code is the scanner's.
+    /// and the code is the scanner's. The brackets the walk is inside
+    /// are a stack of its own, as bison keeps its states on the heap, so
+    /// a nest costs memory and never the machine's stack; where the
+    /// parse is refused, each is given up innermost first, bison's
+    /// `%destructor` over what it had built.
     fn value(&mut self, req: &mut Request) -> Result<Option<Value>, Thrown> {
+        let mut open = Vec::new();
+        let parsed = self.walk(req, &mut open);
+        while let Some(frame) = open.pop() {
+            frame.give_up(req);
+        }
+        parsed
+    }
+
+    /// [`Parser::value`]'s loop: a value begun, then handed to the
+    /// bracket it is inside, which asks for the next or closes and is
+    /// itself the value handed on.
+    fn walk(&mut self, req: &mut Request, open: &mut Vec<Open>) -> Result<Option<Value>, Thrown> {
+        'value: loop {
+            let mut done = match self.begin(req, open)? {
+                Begun::Value(value) => value,
+                Begun::Opened => continue 'value,
+                Begun::Refused => return Ok(None),
+            };
+            loop {
+                let Some(frame) = open.last_mut() else {
+                    return Ok(Some(done));
+                };
+                match self.attach(req, frame, done)? {
+                    Attached::Next => continue 'value,
+                    Attached::Close => {}
+                    Attached::Refused => return Ok(None),
+                }
+                let Some(frame) = open.pop() else {
+                    return Ok(None);
+                };
+                let Some(closed) = self.close(frame, req) else {
+                    return Ok(None);
+                };
+                done = closed;
+            }
+        }
+    }
+
+    /// A value at the lookahead: a scalar shifted and built, or a bracket
+    /// opened, `'[' $@2` and `'{' $@1` with the midrule's depth test
+    /// between the shift and the goto. An empty pair is the value
+    /// whole; one with something inside is left open on `open`, its
+    /// first value next.
+    fn begin(&mut self, req: &mut Request, open: &mut Vec<Open>) -> Result<Begun, Thrown> {
         let token = std::mem::replace(&mut self.token, Token::Eoi);
+        let bracket = matches!(token, Token::ArrayOpen | Token::ObjectOpen);
+        if matches!(token, Token::Error) {
+            return Ok(Begun::Refused);
+        }
+        let known = bracket
+            || matches!(
+                token,
+                Token::Null
+                    | Token::True
+                    | Token::False
+                    | Token::Int(_)
+                    | Token::Double(_)
+                    | Token::Str(_)
+            );
+        if !known {
+            self.syntax();
+            return Ok(Begun::Refused);
+        }
+        let at = self.stack;
+        if !self.push() || bracket && (!self.deeper() || !self.push()) {
+            return Ok(Begun::Refused);
+        }
         let built = match token {
-            Token::Null => Value::null(),
             Token::True => Value::bool(true),
             Token::False => Value::bool(false),
             Token::Int(n) => Value::int(n),
             Token::Double(d) => Value::float(d),
-            Token::Str(bytes) => {
-                if self.validating {
-                    Value::null()
+            Token::Str(bytes) if !self.validating => Value::string(PhpString::new(req, &bytes)?),
+            Token::ArrayOpen => {
+                self.advance();
+                let array = if self.validating {
+                    None
                 } else {
-                    Value::string(PhpString::new(req, &bytes)?)
-                }
+                    Some(PhpArray::new(req)?)
+                };
+                let frame = Open::Array { at, array };
+                return self.opened(req, frame, open);
             }
-            Token::ObjectOpen => return self.object(req),
-            Token::ArrayOpen => return self.array(req),
-            Token::Error => return Ok(None),
-            _ => {
-                self.syntax();
-                return Ok(None);
+            Token::ObjectOpen => {
+                self.advance();
+                let frame = Open::Object {
+                    at,
+                    holder: Holder::Nothing,
+                    key: Vec::new(),
+                };
+                return self.opened(req, frame, open);
             }
+            _ => Value::null(),
         };
         self.advance();
-        Ok(Some(built))
+        Ok(Begun::Value(built))
+    }
+
+    /// A bracket just opened: `elements: %empty` or `members: %empty`
+    /// where the next token closes it, the latter building the holder,
+    /// and the pair closed; else the first member's key read and the
+    /// bracket left open.
+    fn opened(
+        &mut self,
+        req: &mut Request,
+        mut frame: Open,
+        open: &mut Vec<Open>,
+    ) -> Result<Begun, Thrown> {
+        if matches!(self.token, Token::ArrayClose | Token::ObjectClose) {
+            if !self.push() {
+                frame.give_up(req);
+                return Ok(Begun::Refused);
+            }
+            if let Open::Object { holder, .. } = &mut frame {
+                *holder = self.holder(req)?;
+            }
+            return Ok(self.close(frame, req).map_or(Begun::Refused, Begun::Value));
+        }
+        if let Open::Object { key, .. } = &mut frame {
+            let Some(read) = self.key() else {
+                frame.give_up(req);
+                return Ok(Begun::Refused);
+            };
+            *key = read;
+        }
+        open.push(frame);
+        Ok(Begun::Opened)
+    }
+
+    /// `key ':'` of a `member`, both shifted, the key's bytes answered.
+    fn key(&mut self) -> Option<Vec<u8>> {
+        let Token::Str(key) = std::mem::replace(&mut self.token, Token::Eoi) else {
+            self.syntax();
+            return None;
+        };
+        if !self.push() {
+            return None;
+        }
+        self.advance();
+        if !matches!(self.token, Token::Colon) {
+            self.syntax();
+            return None;
+        }
+        if !self.push() {
+            return None;
+        }
+        self.advance();
+        Some(key)
+    }
+
+    /// `value` handed to the bracket it closes: appended as an `element`,
+    /// or written under its key by `php_json_parser_object_update` as a
+    /// `member`, the holder built at the first; then the next after a
+    /// comma, or the bracket to close.
+    fn attach(
+        &mut self,
+        req: &mut Request,
+        frame: &mut Open,
+        value: Value,
+    ) -> Result<Attached, Thrown> {
+        let at = match frame {
+            Open::Array { at, array } => {
+                if let Some(array) = array.as_mut() {
+                    array.append(req, value)?;
+                }
+                *at
+            }
+            Open::Object { at, holder, key } => {
+                if matches!(holder, Holder::Nothing) {
+                    *holder = self.holder(req)?;
+                }
+                match holder {
+                    Holder::Array(array) => {
+                        let name = Key::from_string(PhpString::new(req, key)?);
+                        array.set(req, name, value)?;
+                    }
+                    Holder::Object(object) => {
+                        if key.first() == Some(&0) {
+                            // A name php mangles a private or protected
+                            // property into; `zend_std_write_property`
+                            // may not be handed one.
+                            self.scanner.errcode = JSON_ERROR_INVALID_PROPERTY_NAME;
+                            req.release(value);
+                            return Ok(Attached::Refused);
+                        }
+                        let name = PhpString::new(req, key)?;
+                        object.set_prop(req, name, value)?;
+                    }
+                    Holder::Nothing => req.release(value),
+                }
+                *at
+            }
+        };
+        // `element` or `member`, reduced over the one before the comma.
+        self.stack = at + 3;
+        if !matches!(self.token, Token::Comma) {
+            return Ok(Attached::Close);
+        }
+        if !self.push() {
+            return Ok(Attached::Refused);
+        }
+        self.advance();
+        if let Open::Object { key, .. } = frame {
+            let Some(read) = self.key() else {
+                return Ok(Attached::Refused);
+            };
+            *key = read;
+        }
+        Ok(Attached::Next)
+    }
+
+    /// `array_end` or `object_end` shifted and the rule reduced to the
+    /// one `value` it is: the other bracket is the state mismatch and
+    /// anything else a syntax error, the bracket given up on either.
+    fn close(&mut self, frame: Open, req: &mut Request) -> Option<Value> {
+        let (at, closes, other) = match &frame {
+            Open::Array { at, .. } => (*at, Token::ArrayClose, Token::ObjectClose),
+            Open::Object { at, .. } => (*at, Token::ObjectClose, Token::ArrayClose),
+        };
+        let token = std::mem::discriminant(&self.token);
+        let refused = if token == std::mem::discriminant(&closes) {
+            !self.push()
+        } else if token == std::mem::discriminant(&other) {
+            if self.push() {
+                self.scanner.errcode = JSON_ERROR_STATE_MISMATCH;
+            }
+            true
+        } else {
+            self.syntax();
+            true
+        };
+        if refused {
+            frame.give_up(req);
+            return None;
+        }
+        self.advance();
+        self.depth -= 1;
+        self.stack = at + 1;
+        Some(frame.into_value())
     }
 
     /// `PHP_JSON_DEPTH_INC`: one level deeper, or the depth refusal.
@@ -449,99 +772,6 @@ impl Parser<'_> {
         }
         self.depth += 1;
         true
-    }
-
-    /// The `array` rule: `elements` between the bracket and `array_end`,
-    /// whose `'}'` is the state mismatch.
-    fn array(&mut self, req: &mut Request) -> Result<Option<Value>, Thrown> {
-        if !self.deeper() {
-            return Ok(None);
-        }
-        self.advance();
-        let mut array = if self.validating {
-            None
-        } else {
-            Some(PhpArray::new(req)?)
-        };
-        let give_up = |req: &mut Request, array: Option<PhpArray>| {
-            if let Some(array) = array {
-                req.release(array.to_value());
-            }
-        };
-        if !matches!(self.token, Token::ArrayClose | Token::ObjectClose) {
-            loop {
-                let Some(element) = self.value(req)? else {
-                    give_up(req, array);
-                    return Ok(None);
-                };
-                if let Some(array) = array.as_mut() {
-                    array.append(req, element)?;
-                }
-                if matches!(self.token, Token::Comma) {
-                    self.advance();
-                    continue;
-                }
-                break;
-            }
-        }
-        match self.token {
-            Token::ArrayClose => self.advance(),
-            Token::ObjectClose => {
-                self.scanner.errcode = JSON_ERROR_STATE_MISMATCH;
-                give_up(req, array);
-                return Ok(None);
-            }
-            _ => {
-                self.syntax();
-                give_up(req, array);
-                return Ok(None);
-            }
-        }
-        self.depth -= 1;
-        Ok(Some(array.map_or_else(Value::null, PhpArray::to_value)))
-    }
-
-    /// The `object` rule: `members` between the brace and `object_end`,
-    /// whose `']'` is the state mismatch. The holder is built where
-    /// bison reduces `members` or `member`, which is after the first
-    /// value, so a nested object is the earlier store entry and prints
-    /// the lower number.
-    fn object(&mut self, req: &mut Request) -> Result<Option<Value>, Thrown> {
-        if !self.deeper() {
-            return Ok(None);
-        }
-        self.advance();
-        let mut holder = Holder::Nothing;
-        if matches!(self.token, Token::ObjectClose | Token::ArrayClose) {
-            holder = self.holder(req)?;
-        } else {
-            loop {
-                if self.member(req, &mut holder)?.is_none() {
-                    holder.give_up(req);
-                    return Ok(None);
-                }
-                if matches!(self.token, Token::Comma) {
-                    self.advance();
-                    continue;
-                }
-                break;
-            }
-        }
-        match self.token {
-            Token::ObjectClose => self.advance(),
-            Token::ArrayClose => {
-                self.scanner.errcode = JSON_ERROR_STATE_MISMATCH;
-                holder.give_up(req);
-                return Ok(None);
-            }
-            _ => {
-                self.syntax();
-                holder.give_up(req);
-                return Ok(None);
-            }
-        }
-        self.depth -= 1;
-        Ok(Some(holder.into_value()))
     }
 
     /// `php_json_parser_object_create`: the `stdClass` an object decodes
@@ -558,46 +788,6 @@ impl Parser<'_> {
             return Ok(Holder::Nothing);
         };
         Ok(Holder::Object(call::new_object(req, class)?))
-    }
-
-    /// One `key ':' value` of `member`, written into the holder by
-    /// `php_json_parser_object_update`.
-    fn member(&mut self, req: &mut Request, holder: &mut Holder) -> Result<Option<()>, Thrown> {
-        let Token::Str(key) = std::mem::replace(&mut self.token, Token::Eoi) else {
-            self.syntax();
-            return Ok(None);
-        };
-        self.advance();
-        if !matches!(self.token, Token::Colon) {
-            self.syntax();
-            return Ok(None);
-        }
-        self.advance();
-        let Some(value) = self.value(req)? else {
-            return Ok(None);
-        };
-        if matches!(holder, Holder::Nothing) {
-            *holder = self.holder(req)?;
-        }
-        match holder {
-            Holder::Array(array) => {
-                let name = Key::from_string(PhpString::new(req, &key)?);
-                array.set(req, name, value)?;
-            }
-            Holder::Object(object) => {
-                if key.first() == Some(&0) {
-                    // A name php mangles a private or protected property
-                    // into; `zend_std_write_property` may not be handed one.
-                    self.scanner.errcode = JSON_ERROR_INVALID_PROPERTY_NAME;
-                    req.release(value);
-                    return Ok(None);
-                }
-                let name = PhpString::new(req, &key)?;
-                object.set_prop(req, name, value)?;
-            }
-            Holder::Nothing => req.release(value),
-        }
-        Ok(Some(()))
     }
 }
 
@@ -641,6 +831,7 @@ fn parse(
         token: Token::Eoi,
         depth: 1,
         max_depth: depth,
+        stack: 1,
         validating,
     };
     parser.advance();
