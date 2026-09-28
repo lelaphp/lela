@@ -11,6 +11,7 @@
 //! contributes.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -79,9 +80,10 @@ impl<'a> Adapter<'a> {
             Err(why) => return Ok(Judged::new(&id, &name, Judgement::Skip, why)),
         };
         ini.extend(self.lane.map(Lane::ini));
+        let env = self.environment(&phpt, test, &ini);
         let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
         if let Some(body) = phpt.filled("SKIPIF") {
-            let out = self.run_section(subset, test, "skip", body)?;
+            let out = self.run_section(subset, test, &env, "skip", body)?;
             let said = String::from_utf8_lossy(&out.stdout).into_owned();
             if let Some(reason) = reason_after("skip", &said) {
                 return Ok(Judged::new(&id, &name, Judgement::Skip, reason));
@@ -91,7 +93,7 @@ impl<'a> Adapter<'a> {
             }
         }
 
-        let actual = match self.run_program(subset, &phpt, test, &ini)? {
+        let actual = match self.run_program(subset, &phpt, test, &ini, &env)? {
             Ok(actual) => actual,
             Err((judgement, why)) => return Ok(Judged::new(&id, &name, judgement, why)),
         };
@@ -157,6 +159,7 @@ impl<'a> Adapter<'a> {
         phpt: &Phpt,
         test: &Path,
         ini: &[String],
+        env: &[(String, String)],
     ) -> Result<Result<Vec<u8>, (Judgement, String)>> {
         let program = beside(test, None);
         if program.exists() {
@@ -171,12 +174,10 @@ impl<'a> Adapter<'a> {
         let body = phpt.section("FILE").unwrap_or_default().to_vec();
         let written = Written::new(&program, &body)?;
         let args = words(&phpt.text("ARGS").unwrap_or_default());
-        let mut env = executable(self.binary);
-        env.extend(env_of(phpt, test));
         let ran = self.oracle.run_under(&Invocation {
             ini,
             args: &args,
-            env: &env,
+            env,
             stdin: phpt.section("STDIN"),
             merge_streams: merges_streams(phpt),
             cwd: Some(&subset.root),
@@ -191,7 +192,7 @@ impl<'a> Adapter<'a> {
             },
         };
         if let Some(body) = phpt.filled("CLEAN") {
-            self.run_section(subset, test, "clean", body)?;
+            self.run_section(subset, test, env, "clean", body)?;
         }
         Ok(output)
     }
@@ -205,11 +206,14 @@ impl<'a> Adapter<'a> {
     /// cleanup. Upstream runs them under the binary it is testing, so a
     /// `SKIPIF` that asks what the engine has is answered here by php; it
     /// is the runner's one known difference from upstream's verdicts. Both
-    /// run from php-src's root, as the test's program does.
+    /// run from php-src's root and in the test's environment, as the test's
+    /// program does, so a `SKIPIF` that asks `TEST_PHP_EXECUTABLE` what it
+    /// can do asks the binary under test, as upstream's asks it.
     fn run_section(
         &self,
         subset: &Subset,
         test: &Path,
+        env: &[(String, String)],
         kind: &str,
         body: &[u8],
     ) -> Result<Observation> {
@@ -220,6 +224,7 @@ impl<'a> Adapter<'a> {
         let out = self
             .oracle
             .run_under(&Invocation {
+                env,
                 cwd: Some(&subset.root),
                 ..Invocation::new(pinned, Program::Beside(&program))
             })
@@ -244,6 +249,37 @@ impl<'a> Adapter<'a> {
             if missing.len() > 1 { "s" } else { "" },
             missing.join(", ")
         ))
+    }
+
+    /// What a test's programs find in their environment over the
+    /// recipe's, as upstream hands it to the `SKIPIF`, the `FILE` and the
+    /// `CLEAN` alike: the binary under test by the names the corpus spawns
+    /// it by (run-tests.php:670-677), the test's own `--ENV--`
+    /// (run-tests.php:2009-2018), and last `TEST_PHP_EXTRA_ARGS`, which is
+    /// the recipe's flags and every ini entry the test runs under
+    /// (run-tests.php:2115). The recipe's `TEST_PHP_EXECUTABLE`
+    /// names the pinned php, which is right for a witness and wrong here:
+    /// what a test spawns is the binary being measured. No CGI or debugger
+    /// host stands beside that binary, so their two names are empty, as
+    /// upstream's `get_binary` leaves them when it finds none
+    /// (run-tests.php:1003-1019).
+    fn environment(&self, phpt: &Phpt, test: &Path, ini: &[String]) -> Vec<(String, String)> {
+        let binary = self.binary.to_string_lossy().into_owned();
+        let recipe = &self.oracle.pin().recipe;
+        let mut env = vec![
+            ("TEST_PHP_EXECUTABLE_ESCAPED".to_owned(), escaped(&binary)),
+            ("TEST_PHP_EXECUTABLE".to_owned(), binary),
+        ];
+        for host in ["TEST_PHP_CGI_EXECUTABLE", "TEST_PHPDBG_EXECUTABLE"] {
+            env.push((host.to_owned(), String::new()));
+            env.push((format!("{host}_ESCAPED"), escaped("")));
+        }
+        env.extend(env_of(phpt, test));
+        env.push((
+            "TEST_PHP_EXTRA_ARGS".to_owned(),
+            extra_args(&recipe.args, recipe.ini.iter().chain(ini)),
+        ));
+        env
     }
 }
 
@@ -437,18 +473,56 @@ fn ini_of(phpt: &Phpt, test: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// The binary under test, under the two names the corpus spawns it by
-/// (run-tests.php:670-673). The recipe's `TEST_PHP_EXECUTABLE` names the
-/// pinned oracle, which is right for a witness and wrong for a phpt lane:
-/// what a test spawns is the binary being measured, so these two stand
-/// over the recipe's and under the test's own `--ENV--`.
-fn executable(binary: &Path) -> Vec<(String, String)> {
-    let path = binary.to_string_lossy().into_owned();
-    let escaped = format!("'{}'", path.replace('\'', r"'\''"));
-    vec![
-        ("TEST_PHP_EXECUTABLE".to_owned(), path),
-        ("TEST_PHP_EXECUTABLE_ESCAPED".to_owned(), escaped),
-    ]
+/// php's `escapeshellarg` on a POSIX host: the word in single quotes,
+/// each quote inside closed, escaped and reopened.
+fn escaped(word: &str) -> String {
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+/// `TEST_PHP_EXTRA_ARGS` as upstream renders it: the flags, each after a
+/// space, then a space, then every ini entry as ` -d "name=value"`
+/// (run-tests.php:2115). The entries are gathered as `settings2array`
+/// gathers them, a later value for a name taking the earlier one's place
+/// (run-tests.php:2950-2969), and each value goes through `addslashes`
+/// as `settings2params` puts it (run-tests.php:2971-2996).
+fn extra_args<'a>(flags: &[String], ini: impl IntoIterator<Item = &'a String>) -> String {
+    let mut settings: Vec<(&str, &str)> = Vec::new();
+    for entry in ini {
+        let Some((name, value)) = entry.split_once('=') else {
+            continue;
+        };
+        let (name, value) = (name.trim(), value.trim());
+        match settings.iter_mut().find(|(had, _)| *had == name) {
+            Some(setting) => setting.1 = value,
+            None => settings.push((name, value)),
+        }
+    }
+    let mut rendered = String::new();
+    for flag in flags {
+        let _ = write!(rendered, " {flag}");
+    }
+    rendered.push(' ');
+    for (name, value) in settings {
+        let _ = write!(rendered, " -d \"{name}={}\"", addslashes(value));
+    }
+    rendered
+}
+
+/// php's `addslashes`: a backslash before each `'`, `"` and `\`, and a
+/// NUL written as `\0`.
+fn addslashes(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\'' | '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\0' => out.push_str("\\0"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// A test's `--ENV--`, one `NAME=value` a line.
@@ -567,6 +641,16 @@ mod tests {
             ini_of(&phpt, Path::new("x.phpt")).unwrap(),
             ["input_encoding=ISO-8859-1", "precision=14", "a==b"]
         );
+    }
+
+    #[test]
+    fn the_extra_args_are_the_flags_and_each_setting_once_with_its_last_value_slashed() {
+        let ini = ["precision=14", "error_log=", "precision = 3", "x=a\"b'c\\d"].map(String::from);
+        assert_eq!(
+            extra_args(&["-n".to_owned()], &ini),
+            r#" -n  -d "precision=3" -d "error_log=" -d "x=a\"b\'c\\d""#
+        );
+        assert_eq!(escaped("/a/it's/php"), r"'/a/it'\''s/php'");
     }
 
     #[test]

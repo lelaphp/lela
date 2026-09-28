@@ -204,6 +204,23 @@ fn a_test_s_dir_is_its_own_directory_and_stands_in_what_it_printed() {
 }
 
 #[test]
+fn a_test_and_its_skipif_spawn_the_binary_under_test_with_its_extra_args() {
+    let Some(binary) = oracle() else {
+        return;
+    };
+    // The SKIPIF runs under the oracle and still names the binary under
+    // test; the FILE spawns that binary with TEST_PHP_EXTRA_ARGS, which
+    // carries the test's own --INI-- (#906).
+    let (_root, subset) = rooted(
+        "spawn",
+        "--TEST--\nspawn\n--INI--\nprecision=3\n--SKIPIF--\n<?php if (getenv('TEST_PHP_EXTRA_ARGS') === false || getenv('TEST_PHP_CGI_EXECUTABLE') !== '') echo 'skip no environment';\n--FILE--\n<?php\n$php = getenv('TEST_PHP_EXECUTABLE_ESCAPED');\n$extra = getenv('TEST_PHP_EXTRA_ARGS');\necho shell_exec(\"$php $extra -r 'echo 1/3, ini_get(\\\"error_reporting\\\");'\"), \"\\n\";\nvar_dump(getenv('TEST_PHP_EXECUTABLE') === realpath(getenv('TEST_PHP_EXECUTABLE')));\n--EXPECT--\n0.33332767\nbool(true)\n",
+    );
+    let tally = run(&subset, &registry(""));
+    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+    assert!(binary.is_absolute());
+}
+
+#[test]
 fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
     if oracle().is_none() {
         return;
