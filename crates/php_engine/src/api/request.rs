@@ -6294,10 +6294,25 @@ impl Request {
 
     /// `php_error_cb`'s `_zend_bailout` (`Z/main/main.c:1492-1520`) for a level
     /// it cannot recover from that the built-in handler served, raised
-    /// where the request stands: every object marked destructed,
-    /// `zend_objects_store_mark_destructed`, so no destructor is served
-    /// after it, and the request ended at the level. What
-    /// `trigger_error()` reaches with `E_USER_ERROR`.
+    /// where the request stands: every object standing marked
+    /// destructed, `zend_objects_store_mark_destructed`, so none of them
+    /// is destructed after it, while one a shutdown function makes is;
+    /// and the request ended at the level. What `trigger_error()` reaches
+    /// with `E_USER_ERROR`.
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// $d = new D;
+    /// register_shutdown_function(function () { $e = new D; echo "sd\n"; });
+    /// trigger_error("boom", E_USER_ERROR);
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 5
+    ///
+    /// Fatal error: boom in %s on line 5
+    /// sd
+    /// d
+    /// ```
     pub(crate) fn bail_out(&mut self, level: Level, message: &str) {
         let (file, line) = if self.executing() {
             let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
@@ -6305,7 +6320,7 @@ impl Request {
         } else {
             (b"Unknown".to_vec(), 0)
         };
-        self.marked_destructed = true;
+        self.heap.mark_destructed();
         self.end_at_level(level, message, &file, line);
     }
 
