@@ -1131,6 +1131,17 @@ impl ObjectHandlers for Handlers {
 
     /// `bcmath_number_cast_object`: a bool is whether the number is not
     /// zero; the rest is `zend_std_cast_object_tostring`'s.
+    ///
+    /// ```php
+    /// var_dump((bool) new BcMath\Number('0.00'), (bool) new BcMath\Number('0.01'), !new BcMath\Number(0));
+    /// if (new BcMath\Number(0)) { echo "set\n"; } else { echo "zero\n"; }
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// zero
+    /// ```
     fn cast_object(
         &self,
         req: &mut Request,
@@ -1148,6 +1159,30 @@ impl ObjectHandlers for Handlers {
     /// number and a number, an int, a string or a float, into a fresh
     /// number; any other operand is `FAILURE`, the operator's own
     /// `TypeError`.
+    ///
+    /// ```php
+    /// $n = new BcMath\Number('1.5');
+    /// var_dump((string) ($n + 1), (string) ('2.25' - $n), (string) ($n * $n), (string) ($n / 4), (string) (7 % $n), (string) ($n ** 2));
+    /// $m = $n; $m += '0.5'; $m++; var_dump((string) $m, (string) $n);
+    /// try { $n + []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { $n + 'x'; } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// try { 'x' - $n; } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// try { $n ** '0.5'; } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(3) "2.5"
+    /// string(4) "0.75"
+    /// string(4) "2.25"
+    /// string(5) "0.375"
+    /// string(3) "1.0"
+    /// string(4) "2.25"
+    /// string(3) "3.0"
+    /// string(3) "1.5"
+    /// Unsupported operand types: BcMath\Number + array
+    /// Right string operand cannot be converted to BcMath\Number
+    /// Left string operand cannot be converted to BcMath\Number
+    /// exponent cannot have a fractional part
+    /// ```
     fn do_operation(
         &self,
         req: &mut Request,
@@ -1189,7 +1224,7 @@ impl ObjectHandlers for Handlers {
     ///
     /// ```php
     /// $n = new BcMath\Number('1.50');
-    /// var_dump($n == '1.5', $n < 2, $n <=> new BcMath\Number('-1'), $n == 'x', $n > 'x', 'x' < $n, $n == null);
+    /// var_dump($n == '1.5', $n < 2, $n <=> new BcMath\Number('-1'), $n == 'x', $n > 'x', 'x' < $n, $n == null, new BcMath\Number(0) == false);
     /// ```
     /// ```expect
     /// bool(true)
@@ -1199,6 +1234,7 @@ impl ObjectHandlers for Handlers {
     /// bool(false)
     /// bool(false)
     /// bool(false)
+    /// bool(true)
     /// ```
     fn compare(
         &self,
