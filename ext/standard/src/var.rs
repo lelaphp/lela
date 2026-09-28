@@ -364,13 +364,51 @@ impl ObjectHandlers for Incomplete {
         Err(throw(req, "Error", &message))
     }
 
+    /// `incomplete_class_get_property_ptr_ptr`: every place refused with
+    /// the "modify a property" `Error`, so a write by reference, a
+    /// compound write and an increment each meet it, as a plain write
+    /// does.
+    ///
+    /// ```php
+    /// $o = unserialize('O:1:"C":1:{s:1:"p";i:1;}');
+    /// $x = 1;
+    /// foreach ([fn () => $o->p = &$x, fn () => $o->p .= 'x', fn () => $o->p++] as $f) {
+    ///     try { $f(); } catch (Error $e) { echo substr($e->getMessage(), 0, 50), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// The script tried to modify a property on an incomp
+    /// The script tried to modify a property on an incomp
+    /// The script tried to modify a property on an incomp
+    /// ```
     fn get_property_ptr_ptr(
         &self,
-        _req: &mut Request,
-        _object: php_ext::values::PhpObject,
+        req: &mut Request,
+        object: php_ext::values::PhpObject,
         _name: &[u8],
-    ) -> PropertyPlace {
-        PropertyPlace::Handlers
+    ) -> Result<PropertyPlace, Thrown> {
+        let message = incomplete_message(req, object, "modify a property");
+        Err(throw(req, "Error", &message))
+    }
+
+    /// `incomplete_class_get_method`: every method refused with the
+    /// "call a method" `Error`, before any lookup.
+    ///
+    /// ```php
+    /// $o = unserialize('O:1:"C":0:{}');
+    /// try { $o->f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// The script tried to call a method on an incomplete object. Please ensure that the class definition "C" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition
+    /// ```
+    fn get_method(
+        &self,
+        req: &mut Request,
+        object: php_ext::values::PhpObject,
+        _lowered: &[u8],
+    ) -> Result<Option<php_ext::call::Function>, Thrown> {
+        let message = incomplete_message(req, object, "call a method");
+        Err(throw(req, "Error", &message))
     }
 
     fn has_property(
@@ -692,11 +730,7 @@ pub(super) fn render(
         let own = object.debug_info(req)?;
         let rows: Vec<(Key, Value)> = match own {
             Some(own) => own.snapshot(),
-            None => object
-                .props_for(req, PropertyPurpose::Debug)?
-                .into_iter()
-                .map(|(name, value)| (Key::from_string(name), value))
-                .collect(),
+            None => object.props_for(req, PropertyPurpose::Debug)?,
         };
         object.protect();
         let rendered = hash(req, out, &rows, indent, true);
@@ -1024,10 +1058,17 @@ fn export_object(
     if !is_enum {
         for (key, element) in rows? {
             out.extend(std::iter::repeat_n(b' ', level + 2));
-            let (_, name) = unmangle(key.as_bytes());
-            out.push(b'\'');
-            escaped(out, name);
-            out.push(b'\'');
+            // `php_object_element_export`: a name quoted, unmangled; an
+            // integer key as it stands.
+            match key {
+                Key::Str(key) => {
+                    let (_, name) = unmangle(key.as_bytes());
+                    out.push(b'\'');
+                    escaped(out, name);
+                    out.push(b'\'');
+                }
+                Key::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
+            }
             out.extend_from_slice(b" => ");
             written = export(req, out, &element, level + 2);
             if written.is_err() {

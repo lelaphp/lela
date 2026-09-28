@@ -379,7 +379,7 @@ fn rows_view(
     object: PhpObject,
     fields: Vec<(&[u8], Value)>,
     keep: fn(&mut Request, PhpObject) -> Option<&mut Vec<Value>>,
-) -> Result<Vec<(PhpString, Value)>, Thrown> {
+) -> Result<Vec<(Key, Value)>, Thrown> {
     let mut rows = std_rows(req, object)?;
     let mut made = Vec::with_capacity(fields.len());
     for (name, value) in fields {
@@ -392,7 +392,10 @@ fn rows_view(
     for value in old.into_iter().flatten() {
         req.release(value);
     }
-    Ok(rows)
+    Ok(rows
+        .into_iter()
+        .map(|(name, value)| (Key::Str(name), value))
+        .collect())
 }
 
 /// What `free_obj` gives back of the kept rows.
@@ -404,7 +407,7 @@ fn release_rows(req: &mut Request, rows: Option<Vec<Value>>) {
 
 /// Whether the class declares `__debugInfo`, php's `ce->__debugInfo`.
 fn has_debug_info(req: &mut Request, object: PhpObject) -> bool {
-    Std.get_method(req, object, b"__debuginfo").is_some()
+    matches!(Std.get_method(req, object, b"__debuginfo"), Ok(Some(_)))
 }
 
 /// `date_object_to_hash`: `date`, and where the time is local its
@@ -594,7 +597,7 @@ impl ObjectHandlers for DateHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         // `date_object_get_properties_for`'s `default:`, the standard
         // table, for the debug reader and for `get_object_vars()`.
         if matches!(
@@ -711,7 +714,7 @@ impl ObjectHandlers for TzHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         // `date_object_get_properties_for`'s `default:`, the standard
         // table, for the debug reader and for `get_object_vars()`.
         if matches!(
@@ -854,9 +857,9 @@ impl ObjectHandlers for IntervalHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
+    ) -> Result<PropertyPlace, Thrown> {
         if INTERVAL_FIELDS.contains(&name) {
-            return PropertyPlace::Handlers;
+            return Ok(PropertyPlace::Handlers);
         }
         Std.get_property_ptr_ptr(req, object, name)
     }
@@ -919,7 +922,7 @@ impl ObjectHandlers for IntervalHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         if purpose == PropertyPurpose::Debug {
             return Ok(None);
         }
@@ -1082,9 +1085,9 @@ impl ObjectHandlers for PeriodHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
+    ) -> Result<PropertyPlace, Thrown> {
         if PERIOD_FIELDS.contains(&name) {
-            return PropertyPlace::Handlers;
+            return Ok(PropertyPlace::Handlers);
         }
         Std.get_property_ptr_ptr(req, object, name)
     }
@@ -1173,7 +1176,7 @@ impl ObjectHandlers for PeriodHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         if purpose == PropertyPurpose::Debug {
             return Ok(None);
         }

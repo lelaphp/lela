@@ -22,7 +22,7 @@ use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{
-    ClassId, ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
 };
 
 mod class;
@@ -798,6 +798,34 @@ pub type CloneObjWith =
 /// the caller's; `None` past the last element.
 pub type CurrentPlace = fn(&mut Request, PhpObject) -> Result<Option<PhpRef>, Thrown>;
 
+/// The `zend_object_iterator` a class hands out from its own
+/// `get_iterator` and walks in C, as [`ObjectHandlers::get_iterator`]
+/// answers it: `iter->funcs` over the state the iterator keeps apart
+/// from the object it walks, handed that object at every step, as
+/// `spl_dllist_get_iterator`'s keeps a traverse pointer of its own, so
+/// two loops over one list never move each other. Each step is served
+/// in no frame of its own, as php's functions are, so a method one of
+/// them calls is called from the loop's frame. The state names no value
+/// of the heap; what it walks is the object's.
+pub trait ClassIterator: Send {
+    /// `funcs->rewind`.
+    fn rewind(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown>;
+    /// `funcs->valid`, `SUCCESS` as `true`.
+    fn valid(&mut self, req: &mut Request, object: PhpObject) -> Result<bool, Thrown>;
+    /// `funcs->get_current_data`, one owner, the caller's.
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown>;
+    /// `funcs->get_current_key`, one owner, the caller's.
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown>;
+    /// `funcs->move_forward`.
+    fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown>;
+    /// `funcs->dtor`, when the loop gives the iterator up, before the
+    /// object it walked is: `spl_recursive_it_dtor` cuts the walk back
+    /// to its root. Nothing by default.
+    fn release(&mut self, req: &mut Request, object: PhpObject) {
+        let _ = (req, object);
+    }
+}
+
 /// Seam 2 (design §4.3, §5.4): Zend's 25 handler slots in 8.5 order
 /// (`Z/Zend/zend_object_handlers.h:206-235`), one method each, the
 /// default bodies being [`Std`]'s, the user-class semantics, so an
@@ -947,7 +975,9 @@ pub trait ObjectHandlers: Send + Sync {
     }
 
     /// `get_property_ptr_ptr`, `zend_std_get_property_ptr_ptr` at
-    /// `Std`: where a write to `name` goes, [`PropertyPlace::Std`] for
+    /// `Std`: where a write to `name` goes, the `Err` where the class
+    /// refuses any write with a throwable, php's `&EG(error_zval)` beside
+    /// it (`incomplete_class_get_property_ptr_ptr`), [`PropertyPlace::Std`] for
     /// the standard place the kernel lays down itself, and
     /// [`PropertyPlace::Handlers`], php's `NULL`, for a name the class
     /// serves. The answer is a verdict with no effect, so `ASSIGN_OBJ`
@@ -985,8 +1015,8 @@ pub trait ObjectHandlers: Send + Sync {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
-        req.property_place(object, name)
+    ) -> Result<PropertyPlace, Thrown> {
+        Ok(req.property_place(object, name))
     }
 
     /// `has_property`, `zend_std_has_property` at `Std`: whether the
@@ -1057,9 +1087,18 @@ pub trait ObjectHandlers: Send + Sync {
     /// `get_method`, `zend_std_get_method` at `Std`: the method under
     /// the lowered name, by identity, and none where the class has no
     /// entry of that name. The access rule is the caller's, as php's
-    /// `INIT_METHOD_CALL` applies it after the lookup.
-    fn get_method(&self, req: &mut Request, object: PhpObject, lowered: &[u8]) -> Option<Function> {
-        req.method_named(object.class(), lowered)
+    /// `INIT_METHOD_CALL` applies it after the lookup. A class whose
+    /// handler refuses the call itself, as php's answers `NULL` with a
+    /// throwable left pending, answers the `Err`: `spl_recursive_it_get_method`
+    /// over an iterator whose constructor never ran, and
+    /// `incomplete_class_get_method` over any name.
+    fn get_method(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        lowered: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
+        Ok(req.method_named(object.class(), lowered))
     }
 
     /// The object a method `get_method` did not find is looked up on
@@ -1224,14 +1263,52 @@ pub trait ObjectHandlers: Send + Sync {
         None
     }
 
-    /// `get_properties_for`: the rows one purpose reads; `None` at
-    /// `Std`, php's null slot, so every purpose reads `get_properties`.
+    /// `ce->get_iterator` of a class that walks its objects in C, what
+    /// a `foreach`, a `yield from` or a spread over an object of it
+    /// walks: the iterator, or php's refusal of the walk, such as
+    /// `spl_recursive_it_get_iterator`'s over an object whose
+    /// constructor never ran. `None` at `Std`, php's
+    /// `zend_user_it_get_iterator`, so each step serves one of the
+    /// `Iterator` methods. Asked only while none of the five is a
+    /// user's, since `zend_implement_iterator` puts
+    /// `zend_user_it_get_iterator` in place of the class's own on a
+    /// class that overrides any of them; `by_ref` is a walk by
+    /// reference, which the class refuses in its words.
+    ///
+    /// ```php
+    /// $l = new SplDoublyLinkedList; $l->push(1); $l->push(2);
+    /// foreach ($l as $a) { foreach ($l as $b) echo "$a$b,"; }
+    /// echo "\n";
+    /// class Own extends SplDoublyLinkedList { function current(): mixed { return 'own'; } }
+    /// $o = new Own; $o->push(1);
+    /// foreach ($o as $v) echo $v, "\n";
+    /// ```
+    /// ```expect
+    /// 11,12,21,22,
+    /// own
+    /// ```
+    fn get_iterator(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        by_ref: bool,
+    ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        let _ = (req, object, by_ref);
+        Ok(None)
+    }
+
+    /// `get_properties_for`: the rows one purpose reads, each under the
+    /// key php's table holds it by, a property's name as a string key
+    /// even where it reads as a number and an element a class shows
+    /// among its properties as an integer one
+    /// (`spl_fixedarray_object_get_properties_for`); `None` at `Std`,
+    /// php's null slot, so every purpose reads `get_properties`.
     fn get_properties_for(
         &self,
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         let _ = (req, object, purpose);
         Ok(None)
     }

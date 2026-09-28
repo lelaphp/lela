@@ -697,6 +697,57 @@ impl Stream {
         req.stream_meta_data(self)
     }
 
+    /// `stream->orig_path`: the path the stream was opened by, the one
+    /// the include path resolved where it was searched, as
+    /// `stream_get_meta_data` answers it under `uri`, read without asking
+    /// the stream anything; `None` for a closed stream and one opened by
+    /// no path.
+    ///
+    /// ```php
+    /// $d = sys_get_temp_dir() . '/spl-orig-' . getmypid(); @mkdir("$d/sub", 0777, true); touch("$d/sub/x.txt");
+    /// set_include_path('sub'); chdir($d);
+    /// $o = new SplFileObject('x.txt', 'r', true);
+    /// var_dump($o->getPath() === realpath("$d/sub"), $o->getFilename(), $o->getRealPath() === realpath("$d/sub/x.txt"));
+    /// unlink("$d/sub/x.txt"); rmdir("$d/sub"); rmdir($d);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(5) "x.txt"
+    /// bool(true)
+    /// ```
+    #[must_use]
+    pub fn orig_path(self, req: &Request) -> Option<Vec<u8>> {
+        req.stream_ref(self)
+            .and_then(|stream| stream.orig_path().map(<[u8]>::to_vec))
+    }
+
+    /// `stream->flags |= PHP_STREAM_FLAG_NO_FCLOSE`: an object keeps the
+    /// stream, and `fclose()` over its resource refuses it with php's
+    /// warning; the object's own close is not refused.
+    ///
+    /// ```php
+    /// $o = new SplFileObject(__FILE__);
+    /// $r = get_resources(); var_dump(fclose(end($r)), $o->fgets());
+    /// ```
+    /// ```expect
+    /// Warning: fclose(): cannot close the provided stream, as it must not be manually closed in %s on line 3
+    /// bool(false)
+    /// string(6) "<?php
+    /// "
+    /// ```
+    pub fn forbid_fclose(self, req: &mut Request) {
+        req.stream_op(self, |_, stream| stream.forbid_fclose());
+    }
+
+    /// Whether `fclose()` refuses the stream,
+    /// `PHP_STREAM_FLAG_NO_FCLOSE`: a directory, and a stream an object
+    /// keeps ([`Stream::forbid_fclose`]).
+    #[must_use]
+    pub fn no_fclose(self, req: &Request) -> bool {
+        req.stream_ref(self)
+            .is_some_and(crate::streams::PhpStream::no_fclose)
+    }
+
     /// Whether `opendir` opened the stream, `PHP_STREAM_FLAG_IS_DIR`,
     /// which is what `readdir` and `closedir` accept and `fclose`
     /// refuses.
@@ -4092,6 +4143,22 @@ impl Request {
         }
     }
 
+    /// A release php makes with `EG(exception)` set, `OBJ_RELEASE` or
+    /// `FREE_OP1` on a handler's way out: `free` served while `thrown`
+    /// stands pending, so a destructor it serves sees the throwable
+    /// pending and chains it as its own's `previous`, as
+    /// `zend_objects_destroy_object` does, and what is pending after it
+    /// is handed on. A fatal or an `exit` is freed past.
+    pub(crate) fn free_pending(&mut self, thrown: Thrown, free: impl FnOnce(&mut Self)) -> Thrown {
+        if thrown.exception().is_none() {
+            free(self);
+            return thrown;
+        }
+        self.leave_pending(&thrown);
+        free(self);
+        Thrown::of(self.take_pending())
+    }
+
     /// The pending throwable at the end of a serving, php's
     /// `zend_exception_error` (design §5.9): the throwable's own
     /// `__toString` behind `Uncaught `, with `\n  thrown` after it, given
@@ -5723,6 +5790,12 @@ impl Request {
     /// fatal where the request stands, on the streams the two ini entries
     /// say, and the request ends in it. It is rendered once, here, and
     /// `serve` writes nothing of its own.
+    /// Whether a `zend_bailout` is under way, which leaves every step
+    /// it passes through at once.
+    pub(crate) fn bailing_out(&self) -> bool {
+        self.bailout
+    }
+
     pub(crate) fn end_in_fatal(&mut self, message: &str) {
         // One raised while a bailout is under way is not rendered: php
         // left what raised it at the first. One raised after the bailout
@@ -9833,6 +9906,26 @@ impl Request {
         for slot in 0..o.slots() {
             o.set_slot_bit(slot, php_heap::PropBit::Reinitable, on);
         }
+    }
+
+    /// `zend_objects_clone_members(new, old)` over an object a class's
+    /// `clone_obj` made itself: a dynamic table `new` has given up, the
+    /// members of `old` copied onto it, what its slots held given up,
+    /// and `__clone` served on it.
+    pub(crate) fn clone_members_into(
+        &mut self,
+        new: PhpObject,
+        old: PhpObject,
+    ) -> Result<(), Thrown> {
+        if let Some(table) = self.heap.object_take_properties(new.heap()) {
+            self.release(Value::of_zval(Zval::array(table)));
+        }
+        let displaced = self.heap.object_clone_members_into(new.heap(), old.heap());
+        for held in displaced {
+            self.release(Value::of_zval(held));
+        }
+        self.clone_slot_sources(new);
+        self.serve_clone_method(new)
     }
 
     /// [`PhpObject::clone_with`]: the members copied beside `payload`,
@@ -16058,14 +16151,88 @@ impl Request {
         self.in_autoload.retain(|name| name != lowered);
     }
 
-    /// `spl_autoload_functions()`.
-    #[must_use]
-    pub fn autoload_functions(&self) -> Vec<Value> {
-        self.autoloaders
+    /// `spl_autoload_functions()`: each loader as its
+    /// `autoload_func_info` lists it, one owner each, the caller's: a
+    /// closure or an invokable object itself; a method as the pair of its receiver, or of the
+    /// class the callable resolved to where it has none (`alfi->ce`), so
+    /// `['self', 'load']` lists the class `self` named where it was
+    /// registered, and the method's declared name; a function by its
+    /// declared name.
+    ///
+    /// ```php
+    /// class First { static function init() { spl_autoload_register(['self', 'LOAD']); } static function load($c) {} }
+    /// First::init();
+    /// spl_autoload_register('first::load');
+    /// spl_autoload_register('Strlen');
+    /// $f = fn ($c) => null; spl_autoload_register($f);
+    /// class Inv { function __invoke($c) {} } spl_autoload_register(new Inv);
+    /// foreach (spl_autoload_functions() as $l) echo is_array($l) ? implode('::', $l) : (is_string($l) ? $l : get_class($l)), "\n";
+    /// ```
+    /// ```expect
+    /// Deprecated: Use of "self" in callables is deprecated in %s on line 2
+    /// First::load
+    /// strlen
+    /// Closure
+    /// Inv
+    /// ```
+    pub fn autoload_functions(&mut self) -> Result<Vec<Value>, Thrown> {
+        let loaders: Vec<(Target, Value)> = self
+            .autoloaders
             .iter()
-            .cloned()
-            .map(Callable::into_value)
-            .collect()
+            .map(|loader| (loader.target(), loader.value()))
+            .collect();
+        let mut out = Vec::with_capacity(loaders.len());
+        for (target, value) in loaders {
+            match self.autoload_listed(target, &value) {
+                Ok(listed) => out.push(listed),
+                Err(thrown) => {
+                    for listed in out {
+                        self.release(listed);
+                    }
+                    return Err(thrown);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// One loader as [`Request::autoload_functions`] lists it: one
+    /// registered as an object, a closure or an invokable one, is that
+    /// object (`alfi->closure`).
+    fn autoload_listed(&mut self, target: Target, value: &Value) -> Result<Value, Thrown> {
+        if let Some(object) = value.deref().as_object().copied() {
+            self.addref(&object.as_value());
+            return Ok(object.as_value());
+        }
+        match target {
+            Target::Closure(object) => {
+                self.addref(&object.as_value());
+                Ok(object.as_value())
+            }
+            Target::Function(function) => {
+                let name = self.function_name(function);
+                Ok(Value::string(PhpString::new(self, name.as_bytes())?))
+            }
+            Target::Method {
+                function,
+                scope,
+                this,
+            } => {
+                let first = if let Some(object) = this {
+                    self.addref(&object.as_value());
+                    object.as_value()
+                } else {
+                    let class = self.class_name(scope);
+                    Value::string(PhpString::new(self, class.as_bytes())?)
+                };
+                let name = self.function_name(function);
+                let mut pair = PhpArray::new(self)?;
+                pair.append(self, first)?;
+                let name = Value::string(PhpString::new(self, name.as_bytes())?);
+                pair.append(self, name)?;
+                Ok(Value::array(pair))
+            }
+        }
     }
 
     /// `get_included_files()`: the paths, as `EG(included_files)` holds

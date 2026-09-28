@@ -528,10 +528,12 @@ fn object_value(
     let incomplete = write_class_name(req, out, object);
     let props = object.props_for(req, PropertyPurpose::Serialize)?;
     let mut table = PhpArray::new(req)?;
-    for (prop, value) in props {
+    for (key, value) in props {
         req.addref(&value);
-        req.addref(&Value::string(prop));
-        table.set(req, Key::Str(prop), value)?;
+        if let Key::Str(prop) = key {
+            req.addref(&Value::string(prop));
+        }
+        table.set(req, key, value)?;
     }
     let written = nested(req, out, &object.as_value(), table, hash, false, incomplete);
     req.release(table.to_value());
@@ -691,10 +693,10 @@ fn sleep_props(
         protected.extend_from_slice(&text);
         let candidates = [text.clone(), private, protected];
         let found = candidates.iter().find_map(|candidate| {
-            props
-                .iter()
-                .find(|(prop, _)| prop.as_bytes() == candidate.as_slice())
-                .map(|(prop, value)| (*prop, *value))
+            props.iter().find_map(|(key, value)| match key {
+                Key::Str(prop) if prop.as_bytes() == candidate.as_slice() => Some((*prop, *value)),
+                _ => None,
+            })
         });
         let shown = String::from_utf8_lossy(&text).into_owned();
         // A typed property nothing has written yet is left out quietly.

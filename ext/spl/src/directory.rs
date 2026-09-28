@@ -11,10 +11,10 @@
 
 use php_ext::abi::{
     CloneObj, ExtensionBuilder, False, Instance, Null, ObjectHandlers, OrFalse, Passed,
-    Path as PathArg, Raw, Ref, This, Union, Untyped, Variadic,
+    Path as PathArg, Raw, Ref, Std, This, Union, Untyped, Variadic,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{call_method, instantiate, lookup_class, new_object};
+use php_ext::call::{Function, call_method, instantiate, lookup_class, new_object};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw};
@@ -153,9 +153,11 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
-/// `spl_filesystem_object_check_handlers`, `SplFileObject`'s and
-/// `SplTempFileObject`'s: the same slots with `clone_obj` null, so the
-/// two are uncloneable as php's are.
+/// `spl_filesystem_object_check_handlers`, `GlobIterator`'s,
+/// `SplFileObject`'s and `SplTempFileObject`'s: the same slots with
+/// `clone_obj` null, so the three are uncloneable as php's are, and a
+/// `get_method` that refuses every call on an object whose constructor
+/// never ran.
 pub(crate) struct FileHandlers;
 
 pub(crate) static FILE_HANDLERS: FileHandlers = FileHandlers;
@@ -397,6 +399,9 @@ impl SplFileInfo {
         if let Some((_, s)) = stat(req, this, true)? {
             return Ok(OrFalse::Value(PhpString::new(req, kind_name(s[2]))?));
         }
+        if unnamed(req, this)? {
+            return Ok(OrFalse::False);
+        }
         let name = String::from_utf8_lossy(&file_name(req, this)?).into_owned();
         Err(throw(
             req,
@@ -480,6 +485,25 @@ impl SplFileInfo {
     }
 
     /// `getRealPath(): string|false`.
+    ///
+    /// A `GlobIterator` that matched nothing stands on no entry: its
+    /// name is `""`, which every stat answers `false` for quietly
+    /// (`php_stat`), and whose real path is the working directory's.
+    ///
+    /// ```php
+    /// $o = new GlobIterator(__DIR__ . "/*.no-such-extension");
+    /// var_dump($o->getATime(), $o->getType(), $o->getSize(), $o->getFilename(), $o->getRealPath() === getcwd(), $o->count());
+    /// echo str_replace(__DIR__, "", var_export($o->__debugInfo()["\0DirectoryIterator\0glob"], true)), "\n";
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// string(0) ""
+    /// bool(true)
+    /// int(0)
+    /// 'glob:///*.no-such-extension'
+    /// ```
     #[php(tentative)]
     fn getRealPath(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
         let this = this.object();
@@ -494,10 +518,15 @@ impl SplFileInfo {
         if kind == Type::Dir && !known && entry {
             file_name(req, this)?;
         }
+        // A directory's name is its entry's where the name is not known,
+        // which a `GlobIterator` on no entry answers as `""`, php's
+        // `VCWD_REALPATH("")`, the working directory.
         let name = match orig {
             Some(orig) => Some(orig),
+            None if kind == Type::Dir => Some(file_name(req, this)?),
             None => fs(req, this, |it| it.file_name.clone())?,
         };
+        let name = name.map(|n| if n.is_empty() { b".".to_vec() } else { n });
         match name.and_then(|n| req.realpath(&n)) {
             Some(real) => Ok(OrFalse::Value(PhpString::new(
                 req,
@@ -1086,7 +1115,12 @@ impl RecursiveDirectoryIterator {
 /// /a.txt a.txt
 /// /b.txt b.txt
 /// ```
-#[php_class(extends(FilesystemIterator), implements(Countable))]
+#[php_class(
+    extends(FilesystemIterator),
+    implements(Countable),
+    payload = Fs,
+    handlers = FILE_HANDLERS
+)]
 pub(crate) struct GlobIterator;
 
 #[php_class]
@@ -1230,15 +1264,17 @@ impl SplFileObject {
             return Err(throw(req, "Error", "Cannot call constructor twice"));
         }
         file_open(req, this, &name, mode.as_bytes(), useIncludePath)?;
-        let mut len = name.len();
-        if len > 1 && slash(name[len - 1]) {
+        // The path is the directory of the path the stream opened.
+        let orig = fs(req, this, |it| it.orig_path.clone())?.unwrap_or(name);
+        let mut len = orig.len();
+        if len > 1 && slash(orig[len - 1]) {
             len -= 1;
         }
-        while len > 1 && !slash(name[len - 1]) {
+        while len > 1 && !slash(orig[len - 1]) {
             len -= 1;
         }
         len = len.saturating_sub(1);
-        let path = name[..len].to_vec();
+        let path = orig[..len].to_vec();
         fs(req, this, |it| it.path = Some(path))
     }
 
@@ -1433,7 +1469,16 @@ impl SplFileObject {
                 [one] => (Some(*one), true),
                 _ => return Err(arg_value_error(req, 3, "be empty or a single character")),
             },
-            Passed::Omitted => (Some(b'\\'), false),
+            Passed::Omitted => {
+                // `php_csv_handle_escape_argument(NULL, 3)`.
+                php_ext::raising::docref(
+                    req,
+                    php_ext::raising::Level::Deprecated,
+                    "the $escape parameter must be provided as its default value will change",
+                );
+                php_ext::raising::pending(req)?;
+                (Some(b'\\'), false)
+            }
         };
         fs(req, this.object(), |it| {
             it.delimiter = delimiter;
@@ -2021,6 +2066,33 @@ impl ObjectHandlers for Handlers {
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_fs)
     }
+
+    /// `spl_filesystem_object_destroy_object`: the class's `__destruct`,
+    /// then the directory or the file closed, so a method served on the
+    /// object after its destructor finds no stream.
+    ///
+    /// ```php
+    /// class Target { public $f; function __destruct() { try { $this->f->flock(LOCK_SH); } catch (Error $e) { echo $e->getMessage(), "\n"; } } }
+    /// class Run { static $f; static $t; }
+    /// Run::$f = new SplTempFileObject; Run::$t = new Target; Run::$t->f = Run::$f;
+    /// ```
+    /// ```expect
+    /// Object not initialized
+    /// ```
+    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.dtor_obj(req, object);
+        let held = object
+            .native_mut::<Fs>(req)
+            .map(|it| (it.dir.take(), it.stream.take()));
+        if let Some((dir, stream)) = held {
+            if let Some(dir) = dir {
+                dir.close(req);
+            }
+            if let Some(stream) = stream {
+                stream.close(req);
+            }
+        }
+    }
 }
 
 impl ObjectHandlers for FileHandlers {
@@ -2028,8 +2100,47 @@ impl ObjectHandlers for FileHandlers {
         HANDLERS.free_obj(req, object);
     }
 
+    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
+        HANDLERS.dtor_obj(req, object);
+    }
+
     fn clone_obj(&self) -> Option<CloneObj> {
         None
+    }
+
+    /// `spl_filesystem_object_get_method_check`: every method, the
+    /// class's own and one a user class declares alike, refused with
+    /// php's `Error` while the object opened neither a directory nor a
+    /// file, which is an object whose constructor never ran.
+    ///
+    /// ```php
+    /// class F extends SplFileObject { function __construct() {} function fpassthru(): int { return 0; } }
+    /// class G extends GlobIterator { function __construct() {} }
+    /// foreach ([new F, new G] as $o) {
+    ///     try { $o->fpassthru(); } catch (Error $e) { echo count($e->getTrace()), " ", $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// 0 The parent constructor was not called: the object is in an invalid state
+    /// 0 The parent constructor was not called: the object is in an invalid state
+    /// ```
+    fn get_method(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        lowered: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
+        let unopened = fs(req, object, |it| {
+            it.dir.is_none() && it.glob.is_none() && it.orig_path.is_none()
+        })?;
+        if unopened {
+            return Err(throw(
+                req,
+                "Error",
+                "The parent constructor was not called: the object is in an invalid state",
+            ));
+        }
+        Std.get_method(req, object, lowered)
     }
 }
 
@@ -2092,6 +2203,13 @@ fn stat(req: &mut Request, this: PhpObject, link: bool) -> Result<Option<Stat>, 
     Ok(got.map(|s| (name, s)))
 }
 
+/// Whether the object's file name is empty, which `php_stat` answers
+/// `false` for before it stats anything and raises nothing for: a
+/// `GlobIterator` standing on no entry.
+fn unnamed(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
+    Ok(file_name(req, this)?.is_empty())
+}
+
 /// One field of the object's stat, php's `RuntimeException` naming the
 /// method `what` where the stat fails.
 fn stat_field(
@@ -2102,6 +2220,9 @@ fn stat_field(
 ) -> Result<OrFalse<i64>, Thrown> {
     if let Some((_, s)) = stat(req, this, false)? {
         return Ok(OrFalse::Value(s[field]));
+    }
+    if unnamed(req, this)? {
+        return Ok(OrFalse::False);
     }
     let name = String::from_utf8_lossy(&file_name(req, this)?).into_owned();
     Err(throw(
@@ -2266,7 +2387,7 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
         let value = crate::string_value(req, &name)?;
         set(req, &mut out, b"SplFileInfo", b"fileName", value)?;
     }
-    let (kind, glob, sub_path, mode, delimiter, enclosure, path) = fs(req, this, |it| {
+    let (kind, glob, sub_path, mode, delimiter, enclosure) = fs(req, this, |it| {
         (
             it.kind,
             it.glob.as_ref().map(|(p, _)| p.clone()),
@@ -2274,12 +2395,13 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
             it.open_mode.clone(),
             it.delimiter,
             it.enclosure,
-            it.path.clone(),
         )
     })?;
     if kind == Type::Dir {
+        // `intern->path` of a glob stream's iterator, the pattern as
+        // `spl_filesystem_dir_open` was handed it, `glob://` first.
         let value = match glob {
-            Some(_) => crate::string_value(req, &path.unwrap_or_default())?,
+            Some(pattern) => crate::string_value(req, &[b"glob://".as_slice(), &pattern].concat())?,
             None => Value::bool(false),
         };
         set(req, &mut out, b"DirectoryIterator", b"glob", value)?;
@@ -2477,10 +2599,15 @@ fn file_open(
     } else {
         name
     };
+    // `PHP_STREAM_FLAG_NO_FCLOSE`: the object keeps the stream, and
+    // `orig_path` is the path the stream opened, the one the include
+    // path resolved where it was searched.
+    stream.forbid_fclose(req);
+    let orig = stream.orig_path(req).unwrap_or_else(|| name.to_vec());
     fs(req, this, |it| {
         it.stream = Some(stream);
         it.file_name = Some(trimmed.to_vec());
-        it.orig_path = Some(name.to_vec());
+        it.orig_path = Some(orig);
         it.open_mode = mode.to_vec();
         it.delimiter = b',';
         it.enclosure = b'"';

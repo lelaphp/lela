@@ -39,7 +39,7 @@ pub(crate) use iterators::{RecursiveIterator, SeekableIterator};
 
 use php_ext::abi::{Extension, ExtensionBuilder, FromArgument, ObjectHandlers, Raw, Std};
 use php_ext::attr::php_class;
-use php_ext::call::{call_method, lookup_class};
+use php_ext::call::{Iter, call_method, iterate, lookup_class};
 use php_ext::coerce::{key_of, truthy};
 use php_ext::decl::{ClassKind, Name};
 use php_ext::raising::{Thrown, throw};
@@ -373,73 +373,65 @@ fn owned(req: &mut Request, value: Value) -> Value {
     bare
 }
 
-/// `zend_user_it_get_new_iterator`: an `Iterator` is its own and an
-/// `IteratorAggregate` is asked with `getIterator()` until what it
-/// answers is one. The iterator comes back with one owner, the
-/// caller's.
-fn iterator_of(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
-    let mut current = object;
-    req.addref(&current.as_value());
-    loop {
-        if is_a(req, current.class(), b"Iterator") {
-            return Ok(current);
-        }
-        let answered = method(req, current, b"getIterator");
-        let class = current.class();
-        req.release(current.as_value());
-        let answered = answered?;
-        match answered.as_object().copied() {
-            Some(next) if is_a(req, next.class(), b"Traversable") => current = next,
-            _ => {
-                req.release(answered);
-                let name = String::from_utf8_lossy(&class_name(req, class)).into_owned();
-                return Err(throw(
-                    req,
-                    "Exception",
-                    &format!(
-                        "Objects returned by {name}::getIterator() must be traversable or implement interface Iterator"
-                    ),
-                ));
-            }
-        }
-    }
-}
-
 /// `spl_iterator_apply`, exported to ext/phar for `phar_build` (design
 /// §4.10, the `spl` → `phar` row): [`apply`].
 pub fn iterator_apply(
     req: &mut Request,
     object: PhpObject,
-    each: impl FnMut(&mut Request, PhpObject) -> Result<bool, Thrown>,
+    each: impl FnMut(&mut Request, Iter) -> Result<bool, Thrown>,
 ) -> Result<(), Thrown> {
     apply(req, object, each)
 }
 
-/// `spl_iterator_apply`: `each` served per element with the iterator,
-/// until it answers `false` or throws.
+/// `spl_iterator_apply`: the object's iterator (`ce->get_iterator`)
+/// rewound, then `each` served per element with it, the iterator moved
+/// on after each, until `valid` says no, `each` answers `false` or
+/// something throws; the iterator given up either way.
 fn apply(
     req: &mut Request,
     object: PhpObject,
-    mut each: impl FnMut(&mut Request, PhpObject) -> Result<bool, Thrown>,
+    mut each: impl FnMut(&mut Request, Iter) -> Result<bool, Thrown>,
 ) -> Result<(), Thrown> {
-    let iterator = iterator_of(req, object)?;
+    let iter = iterate(req, &object)?;
     let walked = (|| {
-        effect(req, iterator, b"rewind")?;
-        while valid(req, iterator)? {
-            if !each(req, iterator)? {
+        iter.rewind(req)?;
+        while iter.valid(req)? {
+            if !each(req, iter)? {
                 break;
             }
-            effect(req, iterator, b"next")?;
+            iter.next(req)?;
         }
         Ok(())
     })();
-    req.release(iterator.as_value());
+    req.release(iter.as_value());
     walked
 }
 
-/// `array_set_zval_key`: the value under the key a value makes, php's
-/// offset rules through [`key_of`]; the value is the array's, or given
-/// up where the key is refused.
+/// `array_set_zval_key` (`Z/Zend/zend_API.c:2256`): the value under the
+/// key a value makes, a numeric string as its integer, a bool as `0` or
+/// `1`, a float through [`float_key`], a resource by its number with
+/// php's warning, `null` as `""` with its deprecation, and php's
+/// `TypeError` for an array or an object; the value is the array's, or
+/// given up where the key is refused.
+///
+/// ```php
+/// function g() { yield "1" => 'a'; yield true => 'b'; yield 2.5 => 'c'; yield null => 'd'; yield [] => 'e'; }
+/// try { var_dump(iterator_to_array(g())); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// function h() { yield "1" => 'a'; yield true => 'b'; yield 2.0 => 'c'; }
+/// var_dump(iterator_to_array(h()));
+/// ```
+/// ```expect
+/// Deprecated: Implicit conversion from float 2.5 to int loses precision in %s on line 3
+///
+/// Deprecated: Using null as an array offset is deprecated, use an empty string instead in %s on line 3
+/// Cannot access offset of type array on array
+/// array(2) {
+///   [1]=>
+///   string(1) "b"
+///   [2]=>
+///   string(1) "c"
+/// }
+/// ```
 fn set_key(
     req: &mut Request,
     array: &mut PhpArray,
@@ -447,7 +439,7 @@ fn set_key(
     value: Value,
 ) -> Result<(), Thrown> {
     let value = owned(req, value);
-    let key: Key = match key_of(req, &key.deref()) {
+    let key = match zval_key(req, &key.deref()) {
         Ok(key) => key,
         Err(thrown) => {
             req.release(value);
@@ -455,6 +447,45 @@ fn set_key(
         }
     };
     array.set(req, key, value)
+}
+
+/// The key [`set_key`] places a value under, one owner of a string key.
+fn zval_key(req: &mut Request, key: &Value) -> Result<Key, Thrown> {
+    if let Some(s) = key.as_php_string() {
+        return key_of(req, &Value::string(*s));
+    }
+    if let Some(n) = key.as_int() {
+        return Ok(Key::Int(n));
+    }
+    if let Some(b) = key.as_bool() {
+        return Ok(Key::Int(i64::from(b)));
+    }
+    if let Some(f) = key.as_float() {
+        return Ok(Key::Int(float_key(req, f)?));
+    }
+    if let Some(resource) = key.as_resource() {
+        let id = resource.id();
+        php_ext::raising::warning(
+            req,
+            &format!("Resource ID#{id} used as offset, casting to integer ({id})"),
+        );
+        php_ext::raising::pending(req)?;
+        return Ok(Key::Int(id));
+    }
+    if key.as_array().is_none() && key.as_object().is_none() {
+        php_ext::raising::deprecated(
+            req,
+            "Using null as an array offset is deprecated, use an empty string instead",
+        );
+        php_ext::raising::pending(req)?;
+        return Ok(Key::Str(PhpString::new(req, b"")?));
+    }
+    let name = zval_type_name(req, key);
+    Err(throw(
+        req,
+        "TypeError",
+        &format!("Cannot access offset of type {name} on array"),
+    ))
 }
 
 // ---- what several classes share
@@ -482,6 +513,8 @@ fn float_key(req: &mut Request, f: f64) -> Result<i64, Thrown> {
 /// answers is not one this crate serves.
 fn overridden(req: &mut Request, object: PhpObject, lowered: &[u8]) -> bool {
     Std.get_method(req, object, lowered)
+        .ok()
+        .flatten()
         .and_then(|method| req.function_decl(method))
         .is_some_and(|decl| !decl.file.0.is_empty())
 }

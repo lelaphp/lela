@@ -724,9 +724,13 @@ fn write_property(
 /// `dom_get_property_ptr_ptr`: php's `NULL` for a name a handler
 /// serves, so every write to it reaches `dom_write_property`, and the
 /// standard place for every other name.
-fn property_place(req: &mut Request, object: PhpObject, name: &[u8]) -> PropertyPlace {
+fn property_place(
+    req: &mut Request,
+    object: PhpObject,
+    name: &[u8],
+) -> Result<PropertyPlace, Thrown> {
     if handler(req, object, name).is_some() {
-        return PropertyPlace::Handlers;
+        return Ok(PropertyPlace::Handlers);
     }
     Std.get_property_ptr_ptr(req, object, name)
 }
@@ -771,14 +775,14 @@ fn unset_property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<(
 /// handled property read with deprecations quiet, an object shown as
 /// `(object value omitted)`.
 fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<PhpArray>, Thrown> {
-    if Std.get_method(req, object, b"__debuginfo").is_some() {
+    if matches!(Std.get_method(req, object, b"__debuginfo"), Ok(Some(_))) {
         return Std.get_debug_info(req, object);
     }
     let own = object.props_for(req, PropertyPurpose::ArrayCast)?;
     let mut out = PhpArray::new(req)?;
-    for (name, value) in own {
+    for (key, value) in own {
         req.addref(&value);
-        out.set(req, Key::Str(name), value)?;
+        out.set(req, key, value)?;
     }
     let Some(table) = table_of(req, object) else {
         return Ok(Some(out));
@@ -1890,7 +1894,7 @@ fn ns_list(first: Option<Ns>) -> Vec<Ns> {
 }
 
 fn has_to_string(req: &mut Request, object: PhpObject) -> bool {
-    Std.get_method(req, object, b"__tostring").is_some()
+    matches!(Std.get_method(req, object, b"__tostring"), Ok(Some(_)))
 }
 
 /// The declared type of a handled property, as the stub writes it: a

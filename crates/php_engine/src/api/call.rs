@@ -104,34 +104,59 @@ impl PartialEq for Target {
     }
 }
 
-/// A position in an `iterable`: an array's elements, or a `Traversable`
-/// served through its iterator methods.
-#[derive(Debug, Clone)]
-pub struct Iter {
-    entries: Vec<(Value, Value)>,
-    at: Option<usize>,
-}
+/// The iterator a `Traversable` object's `get_iterator` hands out,
+/// `zend_object_iterator` (`Z/Zend/zend_iterators.h`), held by a native
+/// and stepped through its functions, as `spl_iterator_apply` and SPL's
+/// outer iterators step the iterator of their inner one: a `Generator`
+/// resumed, a user's `Iterator` served its methods, with what `current()`
+/// answered kept until the walk moves, as `zend_user_iterator` keeps it,
+/// and a class that walks its objects in C walked by its own functions,
+/// in no frame of their own. One owner of the iterator, the holder's,
+/// who names it to the collector and gives it up by its value
+/// ([`Iter::as_value`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Iter(PhpObject);
 
 impl Iter {
-    /// Advance one element, serving `Iterator::next()` for an
-    /// object; `false` past the end.
-    pub fn next(&mut self, req: &mut Request) -> Result<bool, Thrown> {
-        let _ = req;
-        let at = self.at.map_or(0, |i| i + 1);
-        self.at = Some(at);
-        Ok(at < self.entries.len())
+    /// `funcs->rewind`.
+    pub fn rewind(self, req: &mut Request) -> Result<(), Thrown> {
+        crate::interfaces::rewind(req, self.0)
     }
 
-    /// The key at the position.
-    #[must_use]
-    pub fn key(&self) -> Option<&Value> {
-        self.entries.get(self.at?).map(|(k, _)| k)
+    /// `funcs->valid`, `SUCCESS` as `true`.
+    pub fn valid(self, req: &mut Request) -> Result<bool, Thrown> {
+        crate::interfaces::valid(req, self.0)
     }
 
-    /// The value at the position.
+    /// The value at the position, `funcs->get_current_data`, one owner,
+    /// the caller's.
+    pub fn value(self, req: &mut Request) -> Result<Value, Thrown> {
+        crate::interfaces::current(req, self.0)
+    }
+
+    /// `funcs->get_current_key`, one owner, the caller's.
+    pub fn key(self, req: &mut Request) -> Result<Value, Thrown> {
+        crate::interfaces::key(req, self.0)
+    }
+
+    /// `funcs->move_forward`.
+    pub fn next(self, req: &mut Request) -> Result<(), Thrown> {
+        crate::interfaces::move_forward(req, self.0)
+    }
+
+    /// `funcs->invalidate_current`: what `current()` answered last,
+    /// which a user's `Iterator` keeps, given up, as `spl_dual_it_free`
+    /// asks before a step that moves the inner object behind the
+    /// iterator's back, such as `seek()`.
+    pub fn invalidate(self, req: &mut Request) {
+        crate::interfaces::invalidate_current(req, self.0);
+    }
+
+    /// The iterator as a value: what its holder names to the collector
+    /// and gives up with [`Request::release`], `zend_iterator_dtor`.
     #[must_use]
-    pub fn value(&self) -> Option<&Value> {
-        self.entries.get(self.at?).map(|(_, v)| v)
+    pub fn as_value(self) -> Value {
+        self.0.as_value()
     }
 }
 
@@ -1137,6 +1162,31 @@ pub fn clone_with<T: std::any::Any + Send>(
     Ok(copy)
 }
 
+/// `zend_objects_clone_members(new, old)`, what a class's `clone_obj`
+/// that makes its copy itself calls once the copy holds what the class
+/// keeps (`spl_object_storage_clone`, after `addall`): the members of
+/// `old` copied onto `new`, a fresh object of its class, and `__clone`
+/// served on `new`. Until then `new`'s members are its class's
+/// defaults.
+///
+/// ```php
+/// class H extends SplObjectStorage {
+///     public $tag = 'default';
+///     public function getHash($o): string { echo "getHash {$this->tag}\n"; return spl_object_hash($o); }
+///     public function __clone() { echo "__clone {$this->tag}\n"; }
+/// }
+/// $h = new H; $h->tag = 'set'; $h[new stdClass] = 1;
+/// $k = clone $h;
+/// ```
+/// ```expect
+/// getHash set
+/// getHash default
+/// __clone set
+/// ```
+pub fn clone_members(req: &mut Request, new: &PhpObject, old: &PhpObject) -> Result<(), Thrown> {
+    req.clone_members_into(*new, *old)
+}
+
 /// `zend_create_internal_iterator_zval`: an `InternalIterator` over
 /// `object`, walking the elements its class's
 /// [`crate::api::abi::ObjectHandlers::iterator_element`] answers, which
@@ -1166,9 +1216,24 @@ pub fn passthrough(req: &mut Request, first: Option<Value>) -> Result<Value, Thr
     entry(req)
 }
 
-/// `zend_lookup_class`: the linked class named, autoloading if needed.
+/// The linked class named, `zend_lookup_class_ex` with
+/// `ZEND_FETCH_CLASS_NO_AUTOLOAD`: one leading backslash stands for the
+/// global namespace and is not part of the name.
+///
+/// ```php
+/// namespace NS { class P {} class C extends P {} }
+/// namespace { var_dump(class_parents('\\NS\\C', false), class_parents('\\\\NS\\C', false)); }
+/// ```
+/// ```expect
+/// Warning: class_parents(): Class \\NS\C does not exist in %s on line 3
+/// array(1) {
+///   ["NS\P"]=>
+///   string(4) "NS\P"
+/// }
+/// bool(false)
+/// ```
 pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
-    Ok(req.class_named(name))
+    Ok(req.class_named(name.strip_prefix(b"\\").unwrap_or(name)))
 }
 
 /// The linked function named, without autoloading.
@@ -2212,34 +2277,38 @@ fn binary(req: &mut Request, op: &[u8], lhs: &Value, rhs: &Value) -> Result<Valu
     }
 }
 
-/// `foreach` over `value`: an array's elements now, a `Traversable`
-/// through its iterator, a scalar php's `TypeError`.
-pub fn iterate(req: &mut Request, value: &Value) -> Result<Iter, Thrown> {
-    let Some(array) = value.as_array() else {
-        // `zend_type_error("foreach() argument must be of type
-        // array|object, %s given", zend_zval_value_name(array_ptr))` at
-        // `ZEND_FE_RESET_R`: the value's name, not its type's.
-        let given = crate::api::coerce::value_name(req, value);
-        return Err(throw(
-            req,
-            "TypeError",
-            &format!("foreach() argument must be of type array|object, {given} given"),
-        ));
-    };
-    Ok(Iter {
-        entries: array
-            .snapshot()
-            .into_iter()
-            .map(|(k, v)| {
-                let key = match k {
-                    crate::api::values::Key::Int(n) => Value::int(n),
-                    crate::api::values::Key::Str(s) => Value::string(s),
-                };
-                (key, v)
-            })
-            .collect(),
-        at: None,
-    })
+/// `ce->get_iterator(ce, object, 0)` over a `Traversable` object: its
+/// iterator ([`Iter`]), one owner, the caller's. An `IteratorAggregate`
+/// is asked `getIterator()` until it answers an `Iterator`, php's
+/// `Exception` naming the class where it answers anything else; a
+/// finished `Generator` is php's refusal to traverse it.
+///
+/// ```php
+/// function g() { yield 'k' => 1; }
+/// $gen = g();
+/// var_dump(iterator_to_array($gen));
+/// try { iterator_to_array($gen); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// class Two implements Iterator {
+///     private $i = 0;
+///     function current(): mixed { echo "current "; return $this->i; }
+///     function key(): mixed { return $this->i; }
+///     function next(): void { $this->i++; }
+///     function rewind(): void { $this->i = 0; }
+///     function valid(): bool { return $this->i < 2; }
+/// }
+/// $n = new NoRewindIterator(new Two);
+/// echo $n->current(), $n->current(), "\n";
+/// ```
+/// ```expect
+/// array(1) {
+///   ["k"]=>
+///   int(1)
+/// }
+/// Cannot traverse an already closed generator
+/// current 00
+/// ```
+pub fn iterate(req: &mut Request, object: &PhpObject) -> Result<Iter, Thrown> {
+    crate::interfaces::get_iterator(req, *object, false).map(Iter)
 }
 
 /// `zend_create_fake_closure` over a resolved callable, what

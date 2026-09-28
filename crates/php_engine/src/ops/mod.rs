@@ -676,7 +676,7 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
             // object is cast as it stands.
             let rows = match table.get_properties_for(req, o, PropertyPurpose::ArrayCast)? {
                 Some(rows) => rows,
-                None => req.properties_no_lazy_init(o)?,
+                None => named_rows(req.properties_no_lazy_init(o)?),
             };
             mangled_array(req, o, rows)
         }
@@ -725,12 +725,20 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
 pub(crate) fn mangled_array(
     req: &mut Request,
     object: PhpObject,
-    rows: Vec<(PhpString, Value)>,
+    rows: Vec<(Key, Value)>,
 ) -> Result<PhpArray, Thrown> {
     let mangled = mangled_names(req, object.class());
     let mut array = PhpArray::new(req)?;
     let mut at = 0;
-    for (name, entry) in rows {
+    for (key, entry) in rows {
+        let name = match key {
+            Key::Int(n) => {
+                req.addref(&entry);
+                array.set(req, Key::Int(n), entry)?;
+                continue;
+            }
+            Key::Str(name) => name,
+        };
         let key = if let Some(prefix) = mangled_prefix(&mangled, &mut at, name) {
             let bytes = [prefix.as_slice(), name.as_bytes()].concat();
             Key::Str(PhpString::new(req, &bytes)?)
@@ -1396,7 +1404,7 @@ pub(crate) fn properties_for(
     req: &mut Request,
     object: PhpObject,
     purpose: PropertyPurpose,
-) -> Result<Vec<(PhpString, Value)>, Thrown> {
+) -> Result<Vec<(Key, Value)>, Thrown> {
     let table = req.object_handlers(object.heap());
     // What `get_properties_for` answers is the table php hands back as
     // it stands, whose names are already what a reader shows; what
@@ -1408,7 +1416,7 @@ pub(crate) fn properties_for(
         // readers that run hooks.
         None if matches!(purpose, PropertyPurpose::Json | PropertyPurpose::VarExport) => {
             if let Some(rows) = req.hooked_properties_for(object)? {
-                return Ok(rows);
+                return Ok(named_rows(rows));
             }
             table.get_properties(req, object)?
         }
@@ -1420,7 +1428,7 @@ pub(crate) fn properties_for(
             PropertyPurpose::Debug => {
                 if let Some(instance) = req.lazy_instance(object.heap()) {
                     let name = req.interned(b"instance")?;
-                    return Ok(vec![(name, instance.as_value())]);
+                    return Ok(vec![(Key::Str(name), instance.as_value())]);
                 }
                 req.properties_no_lazy_init(object)?
             }
@@ -1442,9 +1450,17 @@ pub(crate) fn properties_for(
             }
             None => name,
         };
-        out.push((name, entry));
+        out.push((Key::Str(name), entry));
     }
     Ok(out)
+}
+
+/// Rows keyed by property names, each a string key as a property
+/// table holds it.
+pub(crate) fn named_rows(rows: Vec<(PhpString, Value)>) -> Vec<(Key, Value)> {
+    rows.into_iter()
+        .map(|(name, value)| (Key::Str(name), value))
+        .collect()
 }
 
 /// `zend_cast_zval_to_object` (`Z/Zend/zend_execute.h:225`) under the

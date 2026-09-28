@@ -14,7 +14,7 @@ use php_ext::abi::{
     This, Union, Untyped,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{call_method, clone_with};
+use php_ext::call::{call_method, clone_members, new_object};
 use php_ext::coerce::{compare, identical, truthy, value_name};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -682,6 +682,25 @@ impl SplObjectStorage {
     /// Error at offset 6 of 20 bytes
     /// Error at offset 0 of 1 bytes
     /// ```
+    ///
+    /// A row read again replaces its information, and the old
+    /// information and the object are held until the reader is done, as
+    /// `var_push_dtor` holds them, so what they free comes back to the
+    /// store in php's order.
+    ///
+    /// ```php
+    /// foreach (['x:i:3;O:8:"stdClass":0:{},O:8:"stdClass":0:{};R:2;,i:1;;O:8:"stdClass":0:{},r:2;;m:a:0:{}', 'x:i:3;O:8:"stdClass":0:{},O:8:"stdClass":0:{};r:2;,i:1;;O:8:"stdClass":0:{},r:2;;m:a:0:{}'] as $blob) {
+    ///     try {
+    ///         $so = new SplObjectStorage; $so->unserialize($blob);
+    ///         $ids = []; foreach ($so as $i => $o) $ids[] = spl_object_id($o) . ":" . (is_object($so[$o]) ? spl_object_id($so[$o]) : $so[$o]);
+    ///         echo implode(" ", $ids), "\n";
+    ///     } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Error at offset 46 of 89 bytes
+    /// 1:1 2:1
+    /// ```
     #[php(tentative)]
     fn unserialize(req: &mut Request, this: This<Self>, data: PhpString) -> Result<(), Thrown> {
         let this = this.object();
@@ -690,8 +709,12 @@ impl SplObjectStorage {
             return Ok(());
         }
         let mut reader = php_ext_standard::Unserializer::new(req, &data);
-        let read = read_storage(req, this, &mut reader, &data);
+        let mut replaced = Vec::new();
+        let read = read_storage(req, this, &mut reader, &data, &mut replaced);
         let finished = reader.finish(req);
+        for held in replaced {
+            req.release(held);
+        }
         let broke_at = read?;
         finished?;
         match broke_at {
@@ -794,8 +817,28 @@ impl SplObjectStorage {
         storage_attach(req, this.object(), object.0, info)
     }
 
-    /// `offsetUnset($object): void`, php's alias of `detach()`; the
-    /// witness is the class's.
+    /// `offsetUnset($object): void`, php's alias of `detach()`: the row
+    /// given up object first, then its information
+    /// ([`give_up_row`]), as a detach, an `unset` and the storage's own
+    /// end give every row up.
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo "dtor {$this->n}\n"; } }
+    /// class S extends SplObjectStorage { function getHash($o): string { return 'k'; } }
+    /// $s = new S; $s[new D('o1')] = new D('i1');
+    /// $s->offsetUnset(new D('x'));
+    /// echo "--\n";
+    /// $t = new SplObjectStorage; $t[new D('o2')] = new D('i2');
+    /// unset($t);
+    /// ```
+    /// ```expect
+    /// dtor o1
+    /// dtor i1
+    /// dtor x
+    /// --
+    /// dtor o2
+    /// dtor i2
+    /// ```
     #[php(tentative)]
     fn offsetUnset(
         req: &mut Request,
@@ -946,9 +989,9 @@ impl SplObjectStorage {
         let this = this.object();
         let rows = with(req, this, |s| s.live())?;
         let mut out = PhpArray::new(req)?;
-        for (name, value) in this.props_for(req, PropertyPurpose::Debug)? {
+        for (key, value) in this.props_for(req, PropertyPurpose::Debug)? {
             req.addref(&value);
-            out.set(req, Key::Str(name), value)?;
+            out.set(req, key, value)?;
         }
         let mut storage = PhpArray::new(req)?;
         for (object, inf) in rows {
@@ -1188,6 +1231,27 @@ impl MultipleIterator {
     /// gone a
     /// gone d
     /// ```
+    ///
+    /// A sub-iterator's `current()` or `key()` that throws is php's
+    /// `RuntimeException` with what it threw as its previous; a `valid()`
+    /// that throws reads as not valid, what it threw handed on, or
+    /// chained under the `MIT_NEED_ALL` refusal.
+    ///
+    /// ```php
+    /// class It extends ArrayIterator { function current(): mixed { throw new Exception("inner"); } }
+    /// $m = new MultipleIterator; $m->attachIterator(new It([1]));
+    /// try { $m->current(); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " / ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// class V extends ArrayIterator { function valid(): bool { throw new Exception("valid"); } }
+    /// $n = new MultipleIterator(MultipleIterator::MIT_NEED_ANY); $n->attachIterator(new V([1])); $n->attachIterator(new ArrayIterator([2]));
+    /// try { var_dump($n->current()); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " / ", $e->getPrevious()?->getMessage() ?? '-', "\n"; }
+    /// $n = new MultipleIterator(MultipleIterator::MIT_NEED_ALL); $n->attachIterator(new V([1]));
+    /// try { var_dump($n->key()); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " / ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// RuntimeException: Failed to call sub iterator method / inner
+    /// Exception: valid / -
+    /// RuntimeException: Called key() with non valid sub iterator / valid
+    /// ```
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         get_all(req, this.object(), "current")
@@ -1331,12 +1395,20 @@ fn storage_detach(req: &mut Request, this: PhpObject, object: PhpObject) -> Resu
     let key = row_key(req, this, object)?;
     match with(req, this, |s| s.detach(&key))? {
         Some((object, inf)) => {
-            req.release(inf);
-            req.release(object.as_value());
+            give_up_row(req, object, inf);
             Ok(true)
         }
         None => Ok(false),
     }
+}
+
+/// `spl_object_storage_dtor`, the table's destructor for every row a
+/// detach or the storage's end gives up: the object released, then the
+/// information, `zend_object_release(el->obj)` before
+/// `zval_ptr_dtor(&el->inf)`.
+fn give_up_row(req: &mut Request, object: PhpObject, inf: Value) {
+    req.release(object.as_value());
+    req.release(inf);
 }
 
 /// `SplObjectStorage::detach`'s body: the row gone and the position
@@ -1365,8 +1437,7 @@ impl ObjectHandlers for Handlers {
             })
             .unwrap_or_default();
         for (_, object, inf) in rows.into_iter().flatten() {
-            req.release(inf);
-            req.release(object.as_value());
+            give_up_row(req, object, inf);
         }
     }
 
@@ -1474,8 +1545,7 @@ impl ObjectHandlers for Handlers {
             Some(target) if overridden_bits(req, object)? & SOS_OVERRIDDEN_UNSET == 0 => {
                 let key = RowKey::Id(target.index());
                 if let Some((object, inf)) = with(req, object, |s| s.detach(&key))? {
-                    req.release(inf);
-                    req.release(object.as_value());
+                    give_up_row(req, object, inf);
                 }
                 Ok(())
             }
@@ -1620,24 +1690,53 @@ fn overridden_bits(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> 
     Ok(bits)
 }
 
-/// `spl_object_storage_clone`: every row attached anew to the copy.
+/// `spl_object_storage_clone`: `spl_object_storage_new_ex(ce, orig)`, a
+/// fresh object of the class whose rows are the original's attached
+/// through [`add_all`], each keyed by the copy's own `getHash` while the
+/// copy's members are its class's defaults, then the members copied and
+/// `__clone` served (`zend_objects_clone_members`). `MultipleIterator`'s
+/// flags are the constructor's and a copy starts without them, as php's
+/// does.
+///
+/// ```php
+/// class H extends SplObjectStorage {
+///     public $tag = 'default';
+///     public $b;
+///     public function getHash($o): string { global $orig; echo "getHash {$o->n} {$this->tag}\n"; if ($o->n == 'a' && $orig->b) { $orig->offsetUnset($orig->b); } return spl_object_hash($o); }
+///     public function __clone() { echo "__clone ", count($this), " {$this->tag}\n"; }
+/// }
+/// $orig = new H; $orig->tag = 'orig';
+/// $a = new stdClass; $a->n = 'a'; $b = new stdClass; $b->n = 'b';
+/// $orig[$a] = 1; $orig[$b] = 2;
+/// echo "clone\n"; $k = clone $orig;
+/// $orig->b = $b;
+/// echo "clone\n"; $j = clone $orig;
+/// $m = new MultipleIterator(MultipleIterator::MIT_KEYS_ASSOC | MultipleIterator::MIT_NEED_ANY);
+/// var_dump(count($orig), count($j), (clone $m)->getFlags());
+/// ```
+/// ```expect
+/// getHash a orig
+/// getHash b orig
+/// clone
+/// getHash a default
+/// getHash b default
+/// __clone 2 orig
+/// clone
+/// getHash a default
+/// getHash b orig
+/// __clone 1 orig
+/// int(1)
+/// int(1)
+/// int(0)
+/// ```
 fn clone_storage(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
-    let (rows, flags) = with(req, object, |s| {
-        (
-            s.rows.iter().flatten().cloned().collect::<Vec<_>>(),
-            s.flags,
-        )
-    })?;
-    let mut copy = Storage {
-        flags,
-        ..Storage::default()
-    };
-    for (key, row_object, inf) in rows {
-        req.addref(&row_object.as_value());
-        req.addref(&inf);
-        let _ = copy.attach(key, row_object, inf);
+    let copy = new_object(req, object.class())?;
+    let filled = add_all(req, copy, object).and_then(|()| clone_members(req, &copy, &object));
+    if let Err(thrown) = filled {
+        req.release(copy.as_value());
+        return Err(thrown);
     }
-    clone_with(req, &object, copy)
+    Ok(copy)
 }
 
 /// `SplObjectStorage::serialize`'s walk over the storage, live by a
@@ -1683,6 +1782,7 @@ fn read_storage(
     this: PhpObject,
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
+    replaced: &mut Vec<Value>,
 ) -> Result<Option<usize>, Thrown> {
     if !data.starts_with(b"x:") {
         return Ok(Some(0));
@@ -1721,6 +1821,28 @@ fn read_storage(
             req.release(inf);
             return Ok(Some(reader.offset()));
         };
+        // A row read again keeps its information and its object until
+        // the var hash is destroyed (`var_push_dtor`), so the attach that
+        // replaces the information frees nothing meanwhile.
+        let key = match row_key(req, this, target) {
+            Ok(key) => key,
+            Err(thrown) => {
+                req.release(entry);
+                req.release(inf);
+                return Err(thrown);
+            }
+        };
+        let found = with(req, this, |s| {
+            s.places
+                .get(&key)
+                .and_then(|at| s.rows[*at].as_ref().map(|row| (row.1, row.2)))
+        })?;
+        if let Some((object, old)) = found {
+            req.addref(&old);
+            replaced.push(old);
+            req.addref(&object.as_value());
+            replaced.push(object.as_value());
+        }
         let attached = storage_attach(req, this, target, inf);
         req.release(entry);
         req.release(inf);
@@ -1825,17 +1947,36 @@ fn get_one(
     method: &str,
     out: &mut PhpArray,
 ) -> Result<(), Thrown> {
-    let answered = crate::method(req, iterator, b"valid")?;
-    let valid = answered.as_bool() == Some(true);
-    req.release(answered);
+    // A `valid()` that throws is read as not valid, with what it threw
+    // pending: the walk stops after this row, and a `MIT_NEED_ALL`
+    // refusal chains it.
+    let (valid, pending) = match crate::method(req, iterator, b"valid") {
+        Ok(answered) => {
+            let valid = answered.as_bool() == Some(true);
+            req.release(answered);
+            (valid, None)
+        }
+        Err(thrown) => (false, Some(thrown)),
+    };
     let value = if valid {
-        crate::method(req, iterator, method.as_bytes())?
+        crate::method(req, iterator, method.as_bytes()).map_err(|thrown| {
+            php_ext::raising::throw_chained(
+                req,
+                thrown,
+                "RuntimeException",
+                "Failed to call sub iterator method",
+            )
+        })?
     } else if with(req, this, |s| s.flags)? & MultipleIterator::MIT_NEED_ALL != 0 {
-        return Err(throw(
-            req,
-            "RuntimeException",
-            &format!("Called {method}() with non valid sub iterator"),
-        ));
+        let message = format!("Called {method}() with non valid sub iterator");
+        return Err(match pending {
+            Some(thrown) => {
+                php_ext::raising::throw_chained(req, thrown, "RuntimeException", &message)
+            }
+            None => throw(req, "RuntimeException", &message),
+        });
+    } else if let Some(thrown) = pending {
+        return Err(thrown);
     } else {
         Value::null()
     };

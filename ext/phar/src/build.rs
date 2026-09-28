@@ -708,8 +708,8 @@ fn class_name(req: &mut Request, object: PhpObject) -> String {
 }
 
 /// The key the iterator gives, which must be a string.
-fn string_key(req: &mut Request, b: &Build, it: PhpObject) -> Result<Vec<u8>, Thrown> {
-    let key = php_ext::call::call_method(req, &it, b"key", &[])?;
+fn string_key(req: &mut Request, b: &Build, it: php_ext::call::Iter) -> Result<Vec<u8>, Thrown> {
+    let key = it.key(req)?;
     let bytes = key.deref().as_str_bytes().map(<[u8]>::to_vec);
     req.release(key);
     bytes.ok_or_else(|| {
@@ -727,8 +727,8 @@ fn string_key(req: &mut Request, b: &Build, it: PhpObject) -> Result<Vec<u8>, Th
 /// `phar_build`: one element added, a file named by a string or an
 /// `SplFileInfo`, or a stream under its key; `false` to stop.
 #[allow(clippy::too_many_lines)] // php's one function, its refusals in its order
-fn build_one(req: &mut Request, b: &mut Build, it: PhpObject) -> Result<bool, Thrown> {
-    let value = php_ext::call::call_method(req, &it, b"current", &[])?;
+fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Result<bool, Thrown> {
+    let value = it.value(req)?;
     let current = value.deref();
     let bad = |req: &mut Request, class: &str, m: String| Err(throw(req, class, &m));
     let mut fname: Vec<u8>;

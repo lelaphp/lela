@@ -340,51 +340,12 @@ fn spl_autoload_extensions(
 /// ```
 #[php_function]
 fn spl_autoload_functions(req: &mut Request) -> Result<PhpArray, Thrown> {
-    let loaders = req.autoload_functions();
+    let loaders = req.autoload_functions()?;
     let mut out = PhpArray::new(req)?;
     for loader in loaders {
-        let loader = match static_pair(req, &loader)? {
-            Some(pair) => pair,
-            None => crate::copied(req, loader),
-        };
         out.append(req, loader)?;
     }
     Ok(out)
-}
-
-/// A loader written `'Class::method'` as the pair `[Class, method]`,
-/// the class by its declared name and the method by the name its class
-/// declares it with; `None` for any other loader.
-fn static_pair(req: &mut Request, loader: &Value) -> Result<Option<Value>, Thrown> {
-    let held = loader.deref();
-    let ValueRef::Str(text) = held.as_ref() else {
-        return Ok(None);
-    };
-    let text = text.as_bytes().to_vec();
-    let Some(at) = text.windows(2).position(|w| w == b"::") else {
-        return Ok(None);
-    };
-    let (class, method) = (&text[..at], &text[at + 2..]);
-    let class = class.strip_prefix(b"\\").unwrap_or(class);
-    let Some(id) = lookup_class(req, class).ok().flatten() else {
-        return Ok(None);
-    };
-    let declared = crate::class_name(req, id);
-    let method = req
-        .class_decl(id)
-        .and_then(|decl| {
-            decl.methods
-                .iter()
-                .find(|m| m.function.name.0.eq_ignore_ascii_case(method))
-                .map(|m| m.function.name.0.to_vec())
-        })
-        .unwrap_or_else(|| method.to_vec());
-    let mut pair = PhpArray::new(req)?;
-    let class = crate::string_value(req, &declared)?;
-    pair.append(req, class)?;
-    let method = crate::string_value(req, &method)?;
-    pair.append(req, method)?;
-    Ok(Some(Value::array(pair)))
 }
 
 /// `spl_autoload_register(?callable $callback = null, bool $throw =
@@ -514,10 +475,11 @@ fn spl_autoload_unregister(req: &mut Request, callback: Raw<Callable>) -> Result
             Level::Deprecated,
             "Using spl_autoload_call() as a callback for spl_autoload_unregister() is deprecated, to remove all registered autoloaders, call spl_autoload_unregister() for all values returned from spl_autoload_functions()",
         );
-        for held in req.autoload_functions() {
-            if let Ok(held) = callable_checked(req, &held) {
+        for listed in req.autoload_functions()? {
+            if let Ok(held) = callable_checked(req, &listed) {
                 req.autoload_unregister(&held);
             }
+            req.release(listed);
         }
         return Ok(true);
     }
@@ -784,9 +746,9 @@ fn iterator_to_array(
     };
     let mut out = PhpArray::new(req)?;
     let walked = crate::apply(req, object, |req, iterator| {
-        let current = crate::method(req, iterator, b"current")?;
+        let current = iterator.value(req)?;
         if keys {
-            let key = match crate::method(req, iterator, b"key") {
+            let key = match iterator.key(req) {
                 Ok(key) => key,
                 Err(thrown) => {
                     req.release(current);

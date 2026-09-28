@@ -184,11 +184,16 @@ impl ObjectHandlers for ClosureHandlers {
     /// #0 {main}
     ///   thrown in %s on line 3
     /// ```
-    fn get_method(&self, req: &mut Request, object: PhpObject, lowered: &[u8]) -> Option<Function> {
+    fn get_method(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        lowered: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
         if lowered.eq_ignore_ascii_case(INVOKE) {
-            return req.invoke_trampoline(object);
+            return Ok(req.invoke_trampoline(object));
         }
-        req.method_named(object.class(), lowered)
+        Ok(req.method_named(object.class(), lowered))
     }
 
     /// `zend_closure_get_debug_info` (`Z/Zend/zend_closures.c:602`): the

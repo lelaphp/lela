@@ -1411,9 +1411,10 @@ fn dynamic_call_array(
     };
     let class = object.class();
     let table = req.object_handlers(object.heap());
-    let found = table
-        .get_method(req, object, &method.to_ascii_lowercase())
-        .or_else(|| req.call_trampoline(class, &method, false));
+    let found = match table.get_method(req, object, &method.to_ascii_lowercase())? {
+        Some(function) => Some(function),
+        None => req.call_trampoline(class, &method, false),
+    };
     let Some(function) = found else {
         let written = Value::string(PhpString::new(req, &method)?);
         let thrown = undefined_method(req, class, &written);
@@ -5122,40 +5123,69 @@ pub(crate) fn init_method_call<T: Tier>(
 /// name on the object, the trampoline of its class's `__call` where the
 /// class has no such method (`zend_std_get_method`), or the method on
 /// the receiver its class hands the call to instead
-/// ([`ObjectHandlers::method_receiver`]); `Call to undefined method
-/// X::m()` where none answers. A method the scope may not call is
-/// `__call`'s too where the class has one, and `zend_std_get_method`'s
-/// access rule's `Error` where it has none.
+/// ([`ObjectHandlers::method_receiver`]), found on that receiver the
+/// same way, so a chain of outer iterators hands an unknown method on
+/// to the innermost that has it; `Call to undefined method X::m()`,
+/// naming the object called on, where none answers. A method the scope
+/// may not call is `__call`'s too where the class it was found on has
+/// one, and `zend_std_get_method`'s access rule's `Error` where it has
+/// none. A class's handler that refuses the call raises here.
+///
+/// ```php
+/// class Deep extends ArrayIterator { function deep() { return get_class($this); } }
+/// $it = new CachingIterator(new LimitIterator(new IteratorIterator(new Deep([1, 2])), 0, 1));
+/// echo $it->deep(), "\n";
+/// ```
+/// ```expect
+/// Deep
+/// ```
 fn method_on(
     req: &mut Request,
     object: PhpObject,
     method: &exec::MethodName,
 ) -> Result<(Function, Option<PhpObject>), Thrown> {
     let written = method.written.as_str_bytes().unwrap_or_default().to_vec();
-    let table = req.object_handlers(object.heap());
-    let found = match table.get_method(req, object, &method.lowered) {
-        Some(function) => Some((function, None)),
-        None => match req.call_trampoline(object.class(), &written, false) {
-            Some(trampoline) => Some((trampoline, None)),
-            None => table.method_receiver(req, object).and_then(|inner| {
-                let inner_table = req.object_handlers(inner.heap());
-                inner_table
-                    .get_method(req, inner, &method.lowered)
-                    .map(|function| (function, Some(inner)))
-            }),
-        },
-    };
-    let Some((function, receiver)) = found else {
+    let Some((function, receiver)) = method_found(req, object, &method.lowered, &written)? else {
         return Err(undefined_method(req, object.class(), &method.written));
     };
+    let on = receiver.unwrap_or(object).class();
     let function = if req.method_accessible(function) {
         function
     } else {
-        req.call_trampoline(object.class(), &written, false)
-            .unwrap_or(function)
+        req.call_trampoline(on, &written, false).unwrap_or(function)
     };
     req.check_method_access(function, &written)?;
     Ok((function, receiver))
+}
+
+/// The lookup [`method_on`] holds to its rules: the class's
+/// `get_method`, then its `__call`, then the same on the receiver its
+/// class hands the call to, until a class answers or hands it to none.
+/// The receiver is `None` where the object itself answered.
+fn method_found(
+    req: &mut Request,
+    object: PhpObject,
+    lowered: &[u8],
+    written: &[u8],
+) -> Result<Option<(Function, Option<PhpObject>)>, Thrown> {
+    let mut on = object;
+    let mut receiver = None;
+    loop {
+        let table = req.object_handlers(on.heap());
+        if let Some(function) = table.get_method(req, on, lowered)? {
+            return Ok(Some((function, receiver)));
+        }
+        if let Some(trampoline) = req.call_trampoline(on.class(), written, false) {
+            return Ok(Some((trampoline, receiver)));
+        }
+        match table.method_receiver(req, on) {
+            Some(inner) => {
+                on = inner;
+                receiver = Some(inner);
+            }
+            None => return Ok(None),
+        }
+    }
 }
 
 /// `ZEND_FETCH_THIS` (`Z/Zend/zend_vm_def.h:9214`): `$this` read as a
@@ -7405,7 +7435,17 @@ fn property_place(
             )));
         }
     };
-    let placed = match place_of(req, object, &name) {
+    let place = match place_of(req, object, &name) {
+        Ok(place) => place,
+        // The class refused the place with a throwable, php's
+        // `&EG(error_zval)`.
+        Err(thrown) => {
+            return Ok(PropertyFound::Threw(freeing_container(
+                req, frame, code, op, thrown,
+            )));
+        }
+    };
+    let placed = match place {
         // `if (NULL == ptr) ptr = zobj->handlers->read_property(...)`:
         // a name the class serves is read, not placed.
         PropertyPlace::Handlers => return Ok(PropertyFound::Served(object, name)),
@@ -10956,7 +10996,13 @@ fn assign_property(
     let place = if lazy {
         PropertyPlace::Handlers
     } else {
-        place_of(req, object, bytes)
+        match place_of(req, object, bytes) {
+            Ok(place) => place,
+            Err(thrown) => {
+                req.release(value);
+                return Ok(Err(thrown));
+            }
+        }
     };
     let placed = match place {
         // `zobj->handlers->write_property`: the class serves the name,
@@ -13078,7 +13124,15 @@ fn step_property(
         }
     };
     let mut precomputed: Option<Value> = None;
-    let placed = match place_of(req, object, &bytes) {
+    let place = match place_of(req, object, &bytes) {
+        Ok(place) => place,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, data.op1_type, data.op1);
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+    };
+    let placed = match place {
         // php's `NULL` from the class's own slot: the class serves the
         // name, so the pair of handlers takes the site.
         PropertyPlace::Handlers => {
@@ -13740,7 +13794,14 @@ fn incdec_property(
             return Ok(Err(thrown));
         }
     };
-    let placed = match place_of(req, object, &bytes) {
+    let place = match place_of(req, object, &bytes) {
+        Ok(place) => place,
+        Err(thrown) => {
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+    };
+    let placed = match place {
         // php's `NULL` from the class's own slot: the class serves the
         // name, so the pair of handlers takes the site.
         PropertyPlace::Handlers => {
@@ -13966,7 +14027,7 @@ fn overloaded_incdec(
 /// ([`PropertyPlace`]): whether a write to `name` on the object is the
 /// standard place, which the property kernels lay down themselves, or
 /// goes through the class's `read_property` and `write_property`.
-fn place_of(req: &mut Request, object: PhpObject, name: &[u8]) -> PropertyPlace {
+fn place_of(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<PropertyPlace, Thrown> {
     let table = req.object_handlers(object.heap());
     table.get_property_ptr_ptr(req, object, name)
 }
@@ -15435,6 +15496,18 @@ pub(crate) fn fe_reset_r<T: Tier>(
 /// ```expect
 /// [start]a=1 b=2 [empty]
 /// ```
+///
+/// What the reset threw stands pending while the operand and the
+/// iterator are given up, so a destructor that throws there chains it.
+///
+/// ```php
+/// class D extends RecursiveArrayIterator { function __destruct() { throw new Exception("dtor"); } }
+/// class R extends RecursiveIteratorIterator { function beginIteration(): void { throw new Exception("rewind"); } }
+/// try { foreach (new R(new D([1])) as $v) {} } catch (Exception $e) { echo $e->getMessage(), " ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// dtor rewind
+/// ```
 fn fe_reset_iterator(
     req: &mut Request,
     frame: FrameRef,
@@ -15450,14 +15523,23 @@ fn fe_reset_iterator(
     };
     let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), held);
     req.release(previous);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let free = |req: &mut Request| exec::free_operand(req, frame, code, op.op1_type, op.op1);
     match reset {
-        Ok((_, false)) => Ok(advance(req, frame)),
-        Ok((_, true)) => {
-            req.vm_mut().jump(frame, op.op2);
-            Ok(Stepped::Same(frame))
+        Ok((_, empty)) => {
+            free(req);
+            if empty {
+                req.vm_mut().jump(frame, op.op2);
+                Ok(Stepped::Same(frame))
+            } else {
+                Ok(advance(req, frame))
+            }
         }
-        Err(thrown) => threw(req, frame, &thrown),
+        // `FREE_OP1()` with `EG(exception)` set, so a destructor it
+        // serves chains what the reset threw.
+        Err(thrown) => {
+            let thrown = req.free_pending(thrown, free);
+            threw(req, frame, &thrown)
+        }
     }
 }
 

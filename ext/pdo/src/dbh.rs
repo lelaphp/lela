@@ -202,16 +202,23 @@ impl ObjectHandlers for Handlers {
     /// `dbh_method_get`: the class's own method, else one the connection's
     /// connector lays on `PDO`, `pdo_hash_methods` over
     /// `get_driver_methods`.
-    fn get_method(&self, req: &mut Request, object: PhpObject, lowered: &[u8]) -> Option<Function> {
-        if let Some(found) = Std.get_method(req, object, lowered) {
-            return Some(found);
+    fn get_method(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        lowered: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
+        if let Some(found) = Std.get_method(req, object, lowered)? {
+            return Ok(Some(found));
         }
-        let driver = object.native::<Dbh>(req)?.driver?;
+        let Some(driver) = object.native::<Dbh>(req).and_then(|dbh| dbh.driver) else {
+            return Ok(None);
+        };
         if !driver.methods().contains(&lowered) {
-            return None;
+            return Ok(None);
         }
-        let pdo = lookup_class(req, b"PDO").ok().flatten()?;
-        req.trampoline(pdo, lowered)
+        let pdo = lookup_class(req, b"PDO").ok().flatten();
+        Ok(pdo.and_then(|pdo| req.trampoline(pdo, lowered)))
     }
 }
 

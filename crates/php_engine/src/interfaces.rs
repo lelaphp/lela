@@ -23,7 +23,9 @@
 use php_macros::php_class;
 use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, Name};
 
-use crate::api::abi::{CurrentPlace, ExtensionBuilder, Instance, ObjectHandlers, This, Untyped};
+use crate::api::abi::{
+    ClassIterator, CurrentPlace, ExtensionBuilder, Instance, ObjectHandlers, This, Untyped,
+};
 use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, PhpString, Value};
@@ -188,6 +190,12 @@ enum Funcs {
     /// the class's [`ObjectHandlers::iterator_element`] answers at the
     /// iterator's position, served in no frame of its own.
     Element,
+    /// The functions of an internal class's own `get_iterator` over an
+    /// `Iterator`, whose iterator keeps a state of its own
+    /// ([`ClassIterator`], in the wrapper's [`ObjectIterator::class`]):
+    /// `spl_dllist_it_funcs`, `spl_recursive_it_iterator_funcs`. Each
+    /// step is that iterator's, served in no frame of its own.
+    Class,
 }
 
 impl Funcs {
@@ -198,6 +206,7 @@ impl Funcs {
         let Walk { wrapper, data } = it;
         match self {
             Funcs::User | Funcs::Places(_) => {
+                invalidate_current(req, wrapper);
                 let answered = crate::api::call::call_method(req, &data, b"rewind", &[])?;
                 req.release(answered);
                 Ok(())
@@ -206,6 +215,9 @@ impl Funcs {
             Funcs::Element => {
                 set_position(req, wrapper, 0);
                 Ok(())
+            }
+            Funcs::Class => {
+                class_step(req, it, |iter, req, data| iter.rewind(req, data)).unwrap_or(Ok(()))
             }
         }
     }
@@ -231,6 +243,9 @@ impl Funcs {
                 }
                 None => false,
             }),
+            Funcs::Class => {
+                class_step(req, it, |iter, req, data| iter.valid(req, data)).unwrap_or(Ok(false))
+            }
         }
     }
 
@@ -239,6 +254,7 @@ impl Funcs {
         let Walk { wrapper, data } = it;
         match self {
             Funcs::User | Funcs::Places(_) => {
+                invalidate_current(req, wrapper);
                 let answered = crate::api::call::call_method(req, &data, b"next", &[])?;
                 req.release(answered);
                 Ok(())
@@ -249,6 +265,8 @@ impl Funcs {
                 set_position(req, wrapper, at.saturating_add(1));
                 Ok(())
             }
+            Funcs::Class => class_step(req, it, |iter, req, data| iter.move_forward(req, data))
+                .unwrap_or(Ok(())),
         }
     }
 
@@ -265,8 +283,21 @@ impl Funcs {
             Funcs::Places(place) if by_ref => {
                 Ok(place(req, data)?.map_or_else(Value::null, |cell| cell.as_value()))
             }
-            Funcs::User | Funcs::Places(_) => {
-                crate::api::call::call_method(req, &data, b"current", &[])
+            Funcs::Places(_) => crate::api::call::call_method(req, &data, b"current", &[]),
+            Funcs::User => {
+                if let Some(kept) = wrapper
+                    .native::<ObjectIterator>(req)
+                    .and_then(|it| it.value)
+                {
+                    req.addref(&kept);
+                    return Ok(kept);
+                }
+                let value = crate::api::call::call_method(req, &data, b"current", &[])?;
+                req.addref(&value);
+                if let Some(it) = wrapper.native_mut::<ObjectIterator>(req) {
+                    it.value = Some(value);
+                }
+                Ok(value)
             }
             Funcs::Generator if by_ref => {
                 crate::generator::iterator_current_ref(req, data).map(|cell| cell.as_value())
@@ -285,6 +316,8 @@ impl Funcs {
                 }
                 None => Value::null(),
             }),
+            Funcs::Class => class_step(req, it, |iter, req, data| iter.current(req, data))
+                .unwrap_or_else(|| Ok(Value::null())),
         }
     }
 
@@ -309,8 +342,42 @@ impl Funcs {
                 }
                 None => Value::null(),
             }),
+            Funcs::Class => class_step(req, it, |iter, req, data| iter.key(req, data))
+                .unwrap_or_else(|| Ok(Value::null())),
         }
     }
+}
+
+/// `zend_user_it_invalidate_current`: the value `current()` answered
+/// last given up, before a step that moves the walk.
+pub(crate) fn invalidate_current(req: &mut Request, wrapper: PhpObject) {
+    if let Some(kept) = wrapper
+        .native_mut::<ObjectIterator>(req)
+        .and_then(|it| it.value.take())
+    {
+        req.release(kept);
+    }
+}
+
+/// One step of a [`Funcs::Class`] walk: the class's iterator taken out
+/// of the wrapper for the length of the step, which may call PHP code
+/// and so may not borrow the wrapper, and put back after it. `None`
+/// where the wrapper holds none, which only a wrapper nothing made an
+/// iterator of does; the step's own answer is the `Some`.
+fn class_step<R>(
+    req: &mut Request,
+    it: Walk,
+    step: impl FnOnce(&mut dyn ClassIterator, &mut Request, PhpObject) -> R,
+) -> Option<R> {
+    let Walk { wrapper, data } = it;
+    let mut iter = wrapper
+        .native_mut::<ObjectIterator>(req)
+        .and_then(|it| it.class.take())?;
+    let answered = step(iter.as_mut(), req, data);
+    if let Some(it) = wrapper.native_mut::<ObjectIterator>(req) {
+        it.class = Some(iter);
+    }
+    Some(answered)
 }
 
 /// The iterator an [`ObjectIterator`] is and the object it walks, what
@@ -384,6 +451,13 @@ pub(crate) struct ObjectIterator {
     /// The steps an `Element` walk has moved since its rewind, what
     /// `date_period_it`'s `current_index` counts.
     position: usize,
+    /// A `Class` walk's iterator, the state php's `spl_dllist_it`
+    /// extends `zend_object_iterator` with.
+    class: Option<Box<dyn ClassIterator>>,
+    /// `zend_user_iterator.value`: what a `User` walk's `current()`
+    /// answered, one owner, kept until the walk moves, so asking twice
+    /// between two steps serves `current()` once.
+    value: Option<Value>,
 }
 
 /// `iterator_object_handlers` (`Z/Zend/zend_iterators.c:28`):
@@ -397,10 +471,15 @@ static WRAPPER: WrapperHandlers = WrapperHandlers;
 
 impl ObjectHandlers for WrapperHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        if let Some(held) = object
+        invalidate_current(req, object);
+        let (held, class_iter) = object
             .native_mut::<ObjectIterator>(req)
-            .and_then(|it| it.data.take())
-        {
+            .map(|it| (it.data.take(), it.class.take()))
+            .unwrap_or_default();
+        if let (Some(held), Some(mut class_iter)) = (held, class_iter) {
+            class_iter.release(req, held);
+        }
+        if let Some(held) = held {
             req.release(held.as_value());
         }
     }
@@ -410,8 +489,13 @@ impl ObjectHandlers for WrapperHandlers {
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(held) = object.native::<ObjectIterator>(req).and_then(|it| it.data) {
-            visit(held.as_value());
+        if let Some(it) = object.native::<ObjectIterator>(req) {
+            if let Some(held) = it.data {
+                visit(held.as_value());
+            }
+            if let Some(kept) = it.value {
+                visit(kept);
+            }
         }
     }
 
@@ -512,7 +596,7 @@ pub(crate) fn get_iterator(
     object: PhpObject,
     by_ref: bool,
 ) -> Result<PhpObject, Thrown> {
-    let (funcs, data) = iterated(req, object, by_ref)?;
+    let (funcs, data, class_iter) = iterated(req, object, by_ref)?;
     let wrapper = match req.class_named(ITERATOR_WRAPPER) {
         Some(class) => req.new_object_with(
             class,
@@ -521,6 +605,8 @@ pub(crate) fn get_iterator(
                 data: Some(data),
                 index: None,
                 position: 0,
+                class: class_iter,
+                value: None,
             },
         ),
         None => Err(crate::api::raising::fatal(
@@ -531,22 +617,30 @@ pub(crate) fn get_iterator(
     wrapper.inspect_err(|_| req.release(data.as_value()))
 }
 
-/// The table [`get_iterator`] chooses for `object` and the object it
-/// walks, one owner the caller's.
-fn iterated(
-    req: &mut Request,
-    object: PhpObject,
-    by_ref: bool,
-) -> Result<(Funcs, PhpObject), Thrown> {
+/// The table [`get_iterator`] chooses for `object`, the object it
+/// walks, one owner the caller's, and the iterator of a class that
+/// walks its objects with one of its own ([`Funcs::Class`]).
+type Iterated = (Funcs, PhpObject, Option<Box<dyn ClassIterator>>);
+
+/// The table [`get_iterator`] chooses for `object` and what it walks
+/// ([`Iterated`]).
+fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterated, Thrown> {
     if crate::generator::is_generator(req, object) {
         crate::generator::get_iterator(req, object, by_ref)?;
         req.addref(&object.as_value());
-        return Ok((Funcs::Generator, object));
+        return Ok((Funcs::Generator, object, None));
     }
     if req
         .class_named(b"iterator")
         .is_some_and(|iterator| req.instance_of(object.class(), iterator))
     {
+        if iterator_methods_native(req, object) {
+            let table = req.object_handlers(object.heap());
+            if let Some(class_iter) = table.get_iterator(req, object, by_ref)? {
+                req.addref(&object.as_value());
+                return Ok((Funcs::Class, object, Some(class_iter)));
+            }
+        }
         let funcs = match by_ref_places(req, object) {
             Some(place) => Funcs::Places(place),
             None if by_ref => {
@@ -559,7 +653,7 @@ fn iterated(
             None => Funcs::User,
         };
         req.addref(&object.as_value());
-        return Ok((funcs, object));
+        return Ok((funcs, object, None));
     }
     // `zend_implement_aggregate`: an internal class keeps its own
     // `get_iterator` while `getIterator()` is the one it declared, and
@@ -580,7 +674,7 @@ fn iterated(
                 ));
             }
             req.addref(&object.as_value());
-            Ok((Funcs::Element, object))
+            Ok((Funcs::Element, object, None))
         }
         Some(inner) if inner != object && is_traversable(req, inner.class()) => {
             let walked = iterated(req, inner, by_ref);
@@ -609,13 +703,19 @@ fn iterated(
 /// that overrides any of them.
 fn by_ref_places(req: &Request, object: PhpObject) -> Option<CurrentPlace> {
     let place = req.object_handlers(object.heap()).current_place()?;
-    let natives = [b"rewind".as_slice(), b"valid", b"key", b"current", b"next"]
+    iterator_methods_native(req, object).then_some(place)
+}
+
+/// Whether none of the five `Iterator` methods of the object's class is
+/// a user's, which is when `zend_implement_iterator` leaves the class
+/// the `get_iterator` it inherits from an internal class.
+fn iterator_methods_native(req: &Request, object: PhpObject) -> bool {
+    [b"rewind".as_slice(), b"valid", b"key", b"current", b"next"]
         .iter()
         .all(|name| {
             req.method_named(object.class(), name)
                 .is_some_and(|function| req.is_native_function(function))
-        });
-    natives.then_some(place)
+        })
 }
 
 /// `zend_fe_reset_iterator` (`Z/Zend/zend_execute.c:5368`) over a
@@ -636,10 +736,7 @@ pub(crate) fn reset(
     let valid = funcs.rewind(req, it).and_then(|()| funcs.valid(req, it));
     match valid {
         Ok(valid) => Ok((wrapper, !valid)),
-        Err(thrown) => {
-            req.release(wrapper.as_value());
-            Err(thrown)
-        }
+        Err(thrown) => Err(req.free_pending(thrown, |req| req.release(wrapper.as_value()))),
     }
 }
 
@@ -723,6 +820,39 @@ pub(crate) fn delegated(
             req.release(current);
             Err(thrown)
         }
+    }
+}
+
+/// `iter->funcs->valid` over the iterator `wrapper` holds, `false` for
+/// a wrapper nothing made an iterator of.
+pub(crate) fn valid(req: &mut Request, wrapper: PhpObject) -> Result<bool, Thrown> {
+    match walked(req, wrapper) {
+        Some((funcs, data)) => funcs.valid(req, Walk { wrapper, data }),
+        None => Ok(false),
+    }
+}
+
+/// `iter->funcs->get_current_data`, one owner the caller's.
+pub(crate) fn current(req: &mut Request, wrapper: PhpObject) -> Result<Value, Thrown> {
+    match walked(req, wrapper) {
+        Some((funcs, data)) => funcs.current(req, Walk { wrapper, data }, false),
+        None => Ok(Value::null()),
+    }
+}
+
+/// `iter->funcs->get_current_key`, one owner the caller's.
+pub(crate) fn key(req: &mut Request, wrapper: PhpObject) -> Result<Value, Thrown> {
+    match walked(req, wrapper) {
+        Some((funcs, data)) => funcs.key(req, Walk { wrapper, data }),
+        None => Ok(Value::null()),
+    }
+}
+
+/// `iter->funcs->move_forward`.
+pub(crate) fn move_forward(req: &mut Request, wrapper: PhpObject) -> Result<(), Thrown> {
+    match walked(req, wrapper) {
+        Some((funcs, data)) => funcs.move_forward(req, Walk { wrapper, data }),
+        None => Ok(()),
     }
 }
 
