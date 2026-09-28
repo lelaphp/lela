@@ -12,7 +12,7 @@ use std::ffi::{CStr, CString};
 use php_ext::abi::{Instance, Union};
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, argument_error, docref, raise};
-use php_ext::request::{PathIntent, Request, Resolve};
+use php_ext::request::{Request, Resolve};
 use php_ext::values::{PhpString, Value, ValueRef};
 
 use crate::csr::OpenSSLCertificateSigningRequest;
@@ -93,37 +93,37 @@ pub(crate) fn c_string(bytes: &[u8]) -> CString {
 }
 
 /// `php_openssl_check_path_ex`: the path made absolute, `file://` taken
-/// off first where `scheme`; the empty path is itself. `None` where it
-/// cannot be, after the warning php raises, and a `ValueError` for a NUL
-/// in it where a parameter gave it.
+/// off first where `scheme`, and held to the `open_basedir` guard; the
+/// empty path is itself. `None` where it cannot be or is refused, after
+/// the warning php raises, and a `ValueError` for a NUL in it where a
+/// parameter gave it.
 pub(crate) fn check_path(
     req: &mut Request,
     path: &[u8],
     origin: Origin,
     scheme: bool,
-) -> Result<Option<CString>, Thrown> {
+) -> Option<CString> {
     if path.is_empty() {
-        return Ok(Some(CString::default()));
+        return Some(CString::default());
     }
     let path = if scheme {
-        match path
-            .strip_prefix(b"file://")
-            .filter(|rest| !rest.is_empty())
-        {
-            Some(rest) => rest,
-            None => return Ok(None),
-        }
+        path.strip_prefix(b"file://")
+            .filter(|rest| !rest.is_empty())?
     } else {
         path
     };
     let (fatal, text) = if path.contains(&0) {
         (true, "must not contain any null bytes")
     } else {
-        let cwd = req.cwd().0.into_os_string().into_encoded_bytes();
+        let cwd = req.cwd().into_os_string().into_encoded_bytes();
         match req.virtual_file_ex(&cwd, path, Resolve::FilePath) {
+            // The expanded path is held to the `open_basedir` guard,
+            // which warns (`php_check_open_basedir`).
             Some(real) => {
-                req.fs_guard(&req.absolutize(&real), PathIntent::Read)?;
-                return Ok(Some(c_string(&real)));
+                return req
+                    .check_open_basedir(&real, true)
+                    .ok()
+                    .map(|_| c_string(&real));
             }
             None => (false, "must be a valid file path"),
         }
@@ -132,7 +132,7 @@ pub(crate) fn check_path(
         Origin::Setting(option) => {
             let message = format!("Path for {option} option {text}");
             docref(req, Level::Warning, &message);
-            return Ok(None);
+            return None;
         }
         Origin::Arg(arg) => (arg, text.to_owned()),
         Origin::Item(arg, Some(option)) => (arg, format!("option {option} array item {text}")),
@@ -141,13 +141,13 @@ pub(crate) fn check_path(
     if fatal {
         let thrown = argument_error(req, "ValueError", arg.position, &tail);
         defer(req, thrown);
-        return Ok(None);
+        return None;
     }
     // `php_verror(NULL, arg_name, E_WARNING, ...)`: the parameter's name
     // between the parentheses.
     let message = format!("{}({}): {tail}", req.active_function_name(), arg.name);
     raise(req, Level::Warning, &message);
-    Ok(None)
+    None
 }
 
 /// `OpenSSLCertificate|string`, `Z_PARAM_OBJ_OF_CLASS_OR_STR`.
@@ -159,31 +159,25 @@ pub(crate) type CsrParam = Union<Instance<OpenSSLCertificateSigningRequest>, Php
 /// `php_openssl_x509_from_str`: a certificate from a `file://` path (any
 /// PEM certificate label) or from the string itself (`CERTIFICATE`
 /// alone), what the library said of a failure stored.
-pub(crate) fn cert_from_str(
-    req: &mut Request,
-    text: &[u8],
-    origin: Origin,
-) -> Result<Option<Certificate>, Thrown> {
+pub(crate) fn cert_from_str(req: &mut Request, text: &[u8], origin: Origin) -> Option<Certificate> {
     let cert = if text.len() > 7 && text.starts_with(b"file://") {
-        let Some(path) = check_path(req, text, origin, true)? else {
-            return Ok(None);
-        };
+        let path = check_path(req, text, origin, true)?;
         let Some(bio) = Bio::file(&path, c"r") else {
             store_errors(req);
-            return Ok(None);
+            return None;
         };
         Certificate::read_pem(&bio)
     } else {
         let Some(bio) = Bio::reading(text) else {
             store_errors(req);
-            return Ok(None);
+            return None;
         };
         Certificate::read_pem_certificate(&bio)
     };
     if cert.is_none() {
         store_errors(req);
     }
-    Ok(cert)
+    cert
 }
 
 /// `php_openssl_x509_from_param`: the certificate an object holds, or
@@ -195,7 +189,7 @@ pub(crate) fn cert_from_param(
 ) -> Result<Option<Certificate>, Thrown> {
     match param {
         Union::A(object) => Ok(object.payload_mut(req)?.cert.clone()),
-        Union::B(text) => cert_from_str(req, text.as_bytes(), Origin::Arg(arg)),
+        Union::B(text) => Ok(cert_from_str(req, text.as_bytes(), Origin::Arg(arg))),
     }
 }
 
@@ -212,7 +206,7 @@ pub(crate) fn cert_from_value(
         return Ok(held.cert.clone());
     }
     let text = to_string(req, value)?;
-    cert_from_str(req, text.as_bytes(), origin)
+    Ok(cert_from_str(req, text.as_bytes(), origin))
 }
 
 /// `php_openssl_array_to_X509_sk`: the certificates an array lists, or
@@ -251,24 +245,22 @@ pub(crate) fn cert_stack(
 
 /// `php_openssl_csr_from_str`: a request from a `file://` path or from
 /// the string itself.
-fn csr_from_str(req: &mut Request, text: &[u8], arg: Arg) -> Result<Option<Csr>, Thrown> {
+fn csr_from_str(req: &mut Request, text: &[u8], arg: Arg) -> Option<Csr> {
     let bio = if text.len() > 7 && text.starts_with(b"file://") {
-        let Some(path) = check_path(req, text, Origin::Arg(arg), true)? else {
-            return Ok(None);
-        };
+        let path = check_path(req, text, Origin::Arg(arg), true)?;
         Bio::file(&path, c"r")
     } else {
         Bio::reading(text)
     };
     let Some(bio) = bio else {
         store_errors(req);
-        return Ok(None);
+        return None;
     };
     let csr = Csr::read_pem(&bio);
     if csr.is_none() {
         store_errors(req);
     }
-    Ok(csr)
+    csr
 }
 
 /// `php_openssl_csr_from_param`: a copy of the request an object holds,
@@ -284,21 +276,15 @@ pub(crate) fn csr_from_param(
             .csr
             .as_ref()
             .and_then(Csr::duplicate)),
-        Union::B(text) => csr_from_str(req, text.as_bytes(), arg),
+        Union::B(text) => Ok(csr_from_str(req, text.as_bytes(), arg)),
     }
 }
 
 /// `php_openssl_load_all_certs_from_file`: every certificate of a PEM
 /// file, after php's warnings for a file that does not open, read, or
 /// hold one.
-pub(crate) fn certs_from_file(
-    req: &mut Request,
-    file: &[u8],
-    arg: Arg,
-) -> Result<Option<CertStack>, Thrown> {
-    let Some(path) = check_path(req, file, Origin::Arg(arg), false)? else {
-        return Ok(None);
-    };
+pub(crate) fn certs_from_file(req: &mut Request, file: &[u8], arg: Arg) -> Option<CertStack> {
+    let path = check_path(req, file, Origin::Arg(arg), false)?;
     let shown = String::from_utf8_lossy(path.as_bytes()).into_owned();
     let Some(bio) = Bio::file(&path, c"r") else {
         store_errors(req);
@@ -307,7 +293,7 @@ pub(crate) fn certs_from_file(
             Level::Warning,
             &format!("Error opening the file, {shown}"),
         );
-        return Ok(None);
+        return None;
     };
     let Some(stack) = read_all_certs(&bio) else {
         store_errors(req);
@@ -316,7 +302,7 @@ pub(crate) fn certs_from_file(
             Level::Warning,
             &format!("Error reading the file, {shown}"),
         );
-        return Ok(None);
+        return None;
     };
     if stack.len() == 0 {
         docref(
@@ -324,9 +310,9 @@ pub(crate) fn certs_from_file(
             Level::Warning,
             &format!("No certificates in file, {shown}"),
         );
-        return Ok(None);
+        return None;
     }
-    Ok(Some(stack))
+    Some(stack)
 }
 
 /// `php_openssl_bio_new_file`: the file a path parameter names, opened
@@ -337,13 +323,11 @@ pub(crate) fn open_file(
     file: &[u8],
     arg: Arg,
     mode: &CStr,
-) -> Result<Option<Bio<'static>>, Thrown> {
-    let Some(path) = check_path(req, file, Origin::Arg(arg), false)? else {
-        return Ok(None);
-    };
+) -> Option<Bio<'static>> {
+    let path = check_path(req, file, Origin::Arg(arg), false)?;
     let bio = Bio::file(&path, mode);
     if bio.is_none() {
         store_errors(req);
     }
-    Ok(bio)
+    bio
 }

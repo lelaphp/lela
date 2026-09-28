@@ -492,7 +492,7 @@ pub(crate) fn stat(req: &mut Request, url: &[u8]) -> Result<Option<[i64; 13]>, T
         };
         let mut test = tmp;
         test.extend_from_slice(&internal[mounted.len()..]);
-        if req.url_stat(&test, false, false)?.is_none() {
+        if req.url_stat(&test, false, false)?.found().is_none() {
             continue;
         }
         if !entry::mount(req, id, &test, internal)? {

@@ -94,7 +94,7 @@ fn popen(req: &Request, command: &[u8]) -> Option<Child> {
     Command::new("/bin/sh")
         .arg("-c")
         .arg(OsStr::from_bytes(command))
-        .current_dir(req.cwd().0)
+        .current_dir(req.cwd())
         .env_clear()
         .envs(
             req.env_pairs()

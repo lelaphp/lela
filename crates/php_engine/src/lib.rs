@@ -36,6 +36,7 @@ mod ini_syntax;
 mod interfaces;
 mod interrupt;
 mod natives;
+mod open_basedir;
 mod ops;
 mod output;
 #[cfg(test)]

@@ -311,7 +311,14 @@ pub(super) fn php_mail(
             let mut entry = format!("[{}] ", log_date()).into_bytes();
             entry.extend_from_slice(&line);
             entry.push(b'\n');
-            if let Some(stream) = req.open_stream(&log, b"a", false)? {
+            // `REPORT_ERRORS | STREAM_DISABLE_OPEN_BASEDIR`: the log is
+            // the system's, opened past the guard.
+            let opening = php_ext::request::Opening {
+                warn: true,
+                disable_open_basedir: true,
+                ..php_ext::request::Opening::default()
+            };
+            if let Some(stream) = req.open_stream_with(&log, b"a", opening)? {
                 stream.write(req, &entry);
                 stream.free(req);
             }
@@ -367,7 +374,7 @@ pub(super) fn php_mail(
     let child = Command::new("/bin/sh")
         .arg("-c")
         .arg(OsStr::from_bytes(&command))
-        .current_dir(req.cwd().0)
+        .current_dir(req.cwd())
         .env_clear()
         .envs(
             req.env_pairs()

@@ -56,7 +56,7 @@ fn prepare(
     let path = match to_file {
         Some(file) => {
             let origin = Origin::Arg(Arg::new(2, "output_filename"));
-            match check_path(req, file.0.as_bytes(), origin, false)? {
+            match check_path(req, file.0.as_bytes(), origin, false) {
                 Some(path) => Some(path),
                 None => return Ok(None),
             }

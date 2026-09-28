@@ -82,14 +82,24 @@ pub(crate) struct RealpathCache {
 impl RealpathCache {
     /// The cache a request starts with: empty, its limit and time to
     /// live the startup values of `realpath_cache_size` and
-    /// `realpath_cache_ttl`, `PHP_INI_SYSTEM` both, read into `CWDG` once.
+    /// `realpath_cache_ttl`, `PHP_INI_SYSTEM` both, read into `CWDG` once;
+    /// a startup `open_basedir` turns it off, the limit zero
+    /// (`php_request_startup`, `Z/main/main.c:1918`).
     pub(crate) fn startup(shared: &crate::engine::Shared) -> RealpathCache {
         let read = |name: &[u8]| {
             shared
                 .ini_default(name)
                 .map_or(0, crate::api::request::Request::ini_parse_bytes)
         };
-        RealpathCache::new(read(b"realpath_cache_size"), read(b"realpath_cache_ttl"))
+        let guarded = shared
+            .ini_default(b"open_basedir")
+            .is_some_and(|list| !list.is_empty());
+        let limit = if guarded {
+            0
+        } else {
+            read(b"realpath_cache_size")
+        };
+        RealpathCache::new(limit, read(b"realpath_cache_ttl"))
     }
 
     fn new(limit: i64, ttl: i64) -> RealpathCache {

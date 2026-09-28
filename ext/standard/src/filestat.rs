@@ -49,13 +49,12 @@
 
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 
 use php_ext::abi::{OrFalse, Passed, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref, throw};
-use php_ext::request::{PathIntent, Request, WrapperOp};
+use php_ext::request::{Request, UrlStat, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi;
@@ -218,7 +217,7 @@ fn realpath_cache_size(req: &mut Request) -> i64 {
 /// disk_total_space(): Argument #1 ($directory) must not contain any null bytes
 /// ```
 #[php_function]
-fn disk_total_space(req: &mut Request, directory: Path) -> Result<OrFalse<f64>, Thrown> {
+fn disk_total_space(req: &mut Request, directory: Path) -> OrFalse<f64> {
     disk_space(req, directory, |space| space.total)
 }
 
@@ -237,25 +236,27 @@ fn disk_total_space(req: &mut Request, directory: Path) -> Result<OrFalse<f64>, 
 /// bool(false)
 /// ```
 #[php_function(aliases(diskfreespace))]
-fn disk_free_space(req: &mut Request, directory: Path) -> Result<OrFalse<f64>, Thrown> {
+fn disk_free_space(req: &mut Request, directory: Path) -> OrFalse<f64> {
     disk_space(req, directory, |space| space.available)
 }
 
-/// The two natives' one body: `Z_PARAM_PATH`, `expand_filepath`, the
-/// `open_basedir` check and `statvfs`, the answer read off it.
-fn disk_space(
-    req: &mut Request,
-    directory: Path,
-    read: fn(&ffi::Space) -> f64,
-) -> Result<OrFalse<f64>, Thrown> {
-    let full = req.absolutize(directory.0.as_bytes());
-    req.fs_guard(&full, PathIntent::Stat)?;
-    match ffi::statvfs(full.0.as_os_str().as_bytes()) {
-        Ok(space) => Ok(OrFalse::Value(read(&space))),
+/// The two natives' one body: `Z_PARAM_PATH`, `expand_filepath`, which
+/// answers `false` for the empty path, the `open_basedir` guard of the
+/// expanded path, which warns, and `statvfs`, the answer read off it.
+fn disk_space(req: &mut Request, directory: Path, read: fn(&ffi::Space) -> f64) -> OrFalse<f64> {
+    let cwd = req.cwd().into_os_string().into_encoded_bytes();
+    let Some(full) = crate::virtual_cwd::expand_filepath(req, directory.0.as_bytes(), &cwd) else {
+        return OrFalse::False;
+    };
+    let Ok(full) = req.check_open_basedir(&full, true) else {
+        return OrFalse::False;
+    };
+    match ffi::statvfs(full.as_os_str().as_bytes()) {
+        Ok(space) => OrFalse::Value(read(&space)),
         Err(errno) => {
             let text = strerror(&std::io::Error::from_raw_os_error(errno));
             docref(req, Level::Warning, &text);
-            Ok(OrFalse::False)
+            OrFalse::False
         }
     }
 }
@@ -284,21 +285,14 @@ fn is_stream_path(path: &[u8]) -> bool {
 /// The path an access check asks `access(2)` of: "if the wrapper is not
 /// found, we need to expand path to match open behavior", so a path that
 /// still reads as a scheme's is `expand_filepath`'s, `.` and `..` taken
-/// out as the open's resolution takes them, and any other as it is.
-fn access_path(req: &mut Request, local: Vec<u8>) -> Vec<u8> {
-    if !is_stream_path(&local) {
-        return local;
+/// out as the open's resolution takes them; `None` for any other, which
+/// is asked as the guard let it through.
+fn access_path(req: &mut Request, local: &[u8]) -> Option<Vec<u8>> {
+    if !is_stream_path(local) {
+        return None;
     }
-    let cwd = req.cwd().0.as_os_str().as_encoded_bytes().to_vec();
-    crate::virtual_cwd::expand_filepath(req, &local, &cwd).unwrap_or(local)
-}
-
-fn host(req: &Request, path: &[u8]) -> PathBuf {
-    if path.is_empty() {
-        PathBuf::new()
-    } else {
-        req.absolutize(path).0
-    }
+    let cwd = req.cwd().as_os_str().as_encoded_bytes().to_vec();
+    crate::virtual_cwd::expand_filepath(req, local, &cwd)
 }
 
 /// The permission bits of a file `fopen(3)` made, `0666 & ~umask` as the
@@ -327,6 +321,27 @@ fn is_plain_direct(req: &mut Request, filename: &[u8]) -> bool {
 /// `strncasecmp("file://", filename, 7) == 0`.
 fn has_file_scheme(filename: &[u8]) -> bool {
     filename.len() >= 7 && filename[..7].eq_ignore_ascii_case(b"file://")
+}
+
+/// `php_stat`'s access check of a plain file: the `open_basedir` guard,
+/// which warns and answers `false`, then `access(2)` of the path as
+/// [`access_path`] has it; `None` for a path another wrapper serves.
+fn plain_access(req: &mut Request, filename: &[u8], ty: Fs) -> Option<bool> {
+    let local = req.plain_path(filename)?;
+    let Ok(guarded) = req.check_open_basedir(&local, true) else {
+        return Some(false);
+    };
+    let mode = match ty {
+        Fs::IsW => ffi::W_OK,
+        Fs::IsR => ffi::R_OK,
+        Fs::IsX => ffi::X_OK,
+        _ => ffi::F_OK,
+    };
+    let asked = match access_path(req, &local) {
+        Some(expanded) => req.absolutize(&expanded),
+        None => guarded.into(),
+    };
+    Some(ffi::access(&asked, mode))
 }
 
 /// `php_stat` (`Z/ext/standard/filestat.c:743`): an access check of a
@@ -387,15 +402,8 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thr
         if bad {
             return Ok(Value::bool(false));
         }
-        if let Some(local) = req.plain_path(filename) {
-            let mode = match ty {
-                Fs::IsW => ffi::W_OK,
-                Fs::IsR => ffi::R_OK,
-                Fs::IsX => ffi::X_OK,
-                _ => ffi::F_OK,
-            };
-            let check = access_path(req, local);
-            return Ok(Value::bool(ffi::access(&host(req, &check), mode)));
+        if let Some(answer) = plain_access(req, filename, ty) {
+            return Ok(Value::bool(answer));
         }
     }
     if bad {
@@ -410,16 +418,21 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thr
     } else {
         req.url_stat(filename, link, true)?
     };
-    let Some(sb) = answered else {
-        if !ty.is_exists_check() {
-            let text = format!(
-                "{}stat failed for {}",
-                if link { "L" } else { "" },
-                String::from_utf8_lossy(filename)
-            );
-            docref(req, Level::Warning, &text);
+    let sb = match answered {
+        UrlStat::Found(sb) => sb,
+        // `php_stat`'s own guard refused it, with its warning.
+        UrlStat::Refused => return Ok(Value::bool(false)),
+        UrlStat::Failed | UrlStat::Unsupported => {
+            if !ty.is_exists_check() {
+                let text = format!(
+                    "{}stat failed for {}",
+                    if link { "L" } else { "" },
+                    String::from_utf8_lossy(filename)
+                );
+                docref(req, Level::Warning, &text);
+            }
+            return Ok(Value::bool(false));
         }
-        return Ok(Value::bool(false));
     };
     let mode = sb[2];
     let (mut rmask, mut wmask, mut xmask) = (0o4, 0o2, 0o1);
@@ -910,7 +923,9 @@ fn owner_change(
     } else {
         (Some(id), None)
     };
-    let path = host(req, filename);
+    let Ok(path) = req.check_open_basedir(filename, true) else {
+        return Ok(false);
+    };
     let done = if link {
         std::os::unix::fs::lchown(&path, uid, gid)
     } else {
@@ -1061,10 +1076,11 @@ fn chmod(req: &mut Request, filename: Path, permissions: i64) -> Result<bool, Th
     if !is_plain_direct(req, filename) {
         return req.wrapper_op(filename, WrapperOp::Chmod(mode));
     }
+    let Ok(path) = req.check_open_basedir(filename, true) else {
+        return Ok(false);
+    };
     let bits = u32::try_from(mode & 0o7777).unwrap_or(0);
-    if let Err(error) =
-        std::fs::set_permissions(host(req, filename), std::fs::Permissions::from_mode(bits))
-    {
+    if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(bits)) {
         docref(req, Level::Warning, &strerror(&error));
         return Ok(false);
     }
@@ -1137,7 +1153,9 @@ fn touch(
     if !is_plain_direct(req, filename) {
         return req.wrapper_op(filename, WrapperOp::Touch(times));
     }
-    let path = host(req, filename);
+    let Ok(path) = req.check_open_basedir(filename, true) else {
+        return Ok(false);
+    };
     if !ffi::access(&path, ffi::F_OK) {
         if let Err(error) = std::fs::OpenOptions::new()
             .write(true)

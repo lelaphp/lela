@@ -539,7 +539,7 @@ impl SessionHandler {
         let Some(module) = sanity(req, true)? else {
             return Ok(false);
         };
-        Ok(module == Module::Files && files::destroy(req, id.as_bytes())?)
+        Ok(module == Module::Files && files::destroy(req, id.as_bytes()))
     }
 
     /// `SessionHandler::gc(int $max_lifetime): int|false`: the default
@@ -560,7 +560,7 @@ impl SessionHandler {
             return Ok(OrFalse::False);
         };
         let deleted = match module {
-            Module::Files => files::gc(req, max_lifetime)?,
+            Module::Files => files::gc(req, max_lifetime),
             Module::User => -1,
         };
         Ok(if deleted == -1 {
@@ -591,7 +591,7 @@ impl SessionHandler {
             ));
         };
         let id = match module {
-            Module::Files => files::create_sid(req)?,
+            Module::Files => files::create_sid(req),
             Module::User => session::create_id(req),
         };
         let id = id.unwrap_or_default();

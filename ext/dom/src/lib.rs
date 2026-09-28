@@ -1371,7 +1371,7 @@ fn file_path(req: &mut Request, source: &[u8]) -> Option<Vec<u8>> {
         source
     };
     let resolved = req.realpath(local).unwrap_or_else(|| req.absolutize(local));
-    let bytes = resolved.0.to_string_lossy().into_owned().into_bytes();
+    let bytes = resolved.to_string_lossy().into_owned().into_bytes();
     (bytes.len() < MAXPATHLEN).then_some(bytes)
 }
 

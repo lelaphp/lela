@@ -355,9 +355,9 @@ request::Opening
 request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
-request::PathIntent
 request::RealpathEntry
 request::Receiving
+request::Refused
 request::Request
 request::Request::absolutize
 request::Request::active_function_name
@@ -376,6 +376,7 @@ request::Request::called_scope
 request::Request::caller_var
 request::Request::captured
 request::Request::cfg_entry
+request::Request::check_open_basedir
 request::Request::class_alias
 request::Request::class_decl
 request::Request::class_extension
@@ -416,7 +417,6 @@ request::Request::forbid_dynamic_call
 request::Request::frame_args
 request::Request::frame_vars
 request::Request::frameless
-request::Request::fs_guard
 request::Request::function_decl
 request::Request::function_extension
 request::Request::gc_collect
@@ -599,6 +599,7 @@ request::UnitCache::invalidate
 request::UnitCache::reset
 request::UnitCache::status
 request::UrlStat
+request::UrlStat::found
 request::Whence
 request::Whence::from_int
 request::WrapperOp

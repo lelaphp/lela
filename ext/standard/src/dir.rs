@@ -58,13 +58,13 @@
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path as PathArg, This};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
-use php_ext::request::{HostPath, Request, Resolve, Stream, Whence};
+use php_ext::request::{Request, Resolve, Stream, Whence};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::file::set_default_dir;
@@ -387,11 +387,14 @@ fn host(bytes: &[u8]) -> &Path {
 #[php_function]
 fn chdir(req: &mut Request, directory: PathArg) -> Result<bool, Thrown> {
     let PathArg(directory) = directory;
-    let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
+    let Ok(guarded) = req.check_open_basedir(directory.as_bytes(), true) else {
+        return Ok(false);
+    };
+    let cwd = req.cwd().as_os_str().as_bytes().to_vec();
     let refused = |code: i32| Err(std::io::Error::from_raw_os_error(code));
     let target = match req.virtual_file_ex(&cwd, directory.as_bytes(), Resolve::RealPath) {
         None if directory.as_bytes().is_empty() => refused(libc_errno::ENOENT),
-        None => std::fs::metadata(req.absolutize(directory.as_bytes()).0)
+        None => std::fs::metadata(req.absolutize(directory.as_bytes()))
             .and_then(|_| refused(libc_errno::ENOENT)),
         Some(path) => match std::fs::metadata(host(&path)) {
             Ok(meta) if !meta.is_dir() => refused(libc_errno::ENOTDIR),
@@ -401,8 +404,8 @@ fn chdir(req: &mut Request, directory: PathArg) -> Result<bool, Thrown> {
         },
     };
     match target {
-        Ok(path) => {
-            req.set_cwd(HostPath(PathBuf::from(OsStr::from_bytes(&path))))?;
+        Ok(_) => {
+            req.set_cwd(&guarded)?;
             Ok(true)
         }
         Err(error) => {
@@ -439,7 +442,7 @@ fn getcwd(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
     let cwd = req.cwd();
     Ok(OrFalse::Value(PhpString::new(
         req,
-        cwd.0.as_os_str().as_bytes(),
+        cwd.as_os_str().as_bytes(),
     )?))
 }
 
@@ -503,12 +506,17 @@ fn scandir(
     let Some(stream) = req.with_stream_ctx(context, |req| req.open_dir(directory.as_bytes()))?
     else {
         // The errno the open left, which `php_stream_opendir` does not
-        // hand back: the stat of the path says which it was.
-        let path = req.absolutize(directory.as_bytes()).0;
-        let error = match std::fs::metadata(&path) {
-            Ok(meta) if !meta.is_dir() => std::io::Error::from_raw_os_error(libc_errno::ENOTDIR),
-            Ok(_) => std::io::Error::from_raw_os_error(libc_errno::EACCES),
-            Err(error) => error,
+        // hand back: the guard's `EPERM` where it refused, and otherwise
+        // the stat of the path says which it was.
+        let error = match req.check_open_basedir(directory.as_bytes(), false) {
+            Err(refused) => refused.into(),
+            Ok(path) => match std::fs::metadata(&path) {
+                Ok(meta) if !meta.is_dir() => {
+                    std::io::Error::from_raw_os_error(libc_errno::ENOTDIR)
+                }
+                Ok(_) => std::io::Error::from_raw_os_error(libc_errno::EACCES),
+                Err(error) => error,
+            },
         };
         let text = crate::filestat::strerror(&error);
         let code = error.raw_os_error().unwrap_or(0);
@@ -604,7 +612,7 @@ fn glob(
     let mut work = pattern.as_bytes().to_vec();
     let mut cwd_skip = 0;
     if work.first() != Some(&b'/') {
-        let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
+        let cwd = req.cwd().as_os_str().as_bytes().to_vec();
         cwd_skip = cwd.len() + 1;
         let mut prefixed = cwd;
         prefixed.push(b'/');
@@ -622,13 +630,23 @@ fn glob(
     };
     let only_dirs = flags & i64::from(php_glob::PHP_GLOB_ONLYDIR) != 0;
     let mut array = PhpArray::new(req)?;
+    let mut basedir_limit = false;
     for path in paths {
+        if req.check_open_basedir(&path, false).is_err() {
+            basedir_limit = true;
+            continue;
+        }
         if only_dirs && !std::fs::metadata(host(&path)).is_ok_and(|m| m.is_dir()) {
             continue;
         }
         let shown = path.get(cwd_skip..).unwrap_or_default();
         let shown = Value::string(PhpString::new(req, shown)?);
         array.append(req, shown)?;
+    }
+    // Every match refused by the guard is `false`, not the empty array.
+    if basedir_limit && array.is_empty() {
+        req.release(Value::array(array));
+        return Ok(OrFalse::False);
     }
     Ok(OrFalse::Value(array))
 }

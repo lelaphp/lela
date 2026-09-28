@@ -132,8 +132,7 @@ fn openssl_cms_verify(
             input_filename.0.as_bytes(),
             Arg::new(1, "input_filename"),
             c"r",
-        )?
-        else {
+        ) else {
             return Ok(false);
         };
         let detached = flags & CMS_DETACHED != 0;
@@ -147,7 +146,7 @@ fn openssl_cms_verify(
                     );
                     return Ok(false);
                 }
-                match open_file(req, file.0.as_bytes(), Arg::new(1, "input_filename"), c"r")? {
+                match open_file(req, file.0.as_bytes(), Arg::new(1, "input_filename"), c"r") {
                     Some(bio) => Some(bio),
                     None => return Ok(false),
                 }
@@ -178,7 +177,7 @@ fn openssl_cms_verify(
         let others = match &untrusted_certificates_filename {
             Some(file) => {
                 let arg = Arg::new(5, "untrusted_certificates_filename");
-                match certs_from_file(req, file.0.as_bytes(), arg)? {
+                match certs_from_file(req, file.0.as_bytes(), arg) {
                     Some(stack) => Some(stack),
                     None => return Ok(false),
                 }
@@ -188,11 +187,11 @@ fn openssl_cms_verify(
         let Some(store) = setup_verify(req, Some(ca_info), Arg::new(4, "ca_info"))? else {
             return Ok(false);
         };
-        let data_out = output(req, content, Arg::new(6, "content"))?;
+        let data_out = output(req, content, Arg::new(6, "content"));
         if matches!(data_out, Output::Unopened) {
             return Ok(false);
         }
-        let p7b_out = output(req, pk7, Arg::new(7, "pk7"))?;
+        let p7b_out = output(req, pk7, Arg::new(7, "pk7"));
         if matches!(p7b_out, Output::Unopened) {
             return Ok(false);
         }
@@ -203,7 +202,7 @@ fn openssl_cms_verify(
         }
         let mut verdict = true;
         if let Some(file) = certificates {
-            verdict = signers_file(req, file, Arg::new(3, "certificates"), || cms.signers())?;
+            verdict = signers_file(req, file, Arg::new(3, "certificates"), || cms.signers());
             if let Some(out) = p7b_out.bio()
                 && !cms.write_pem(out)
             {
@@ -269,8 +268,7 @@ fn openssl_cms_encrypt(
             input_filename.0.as_bytes(),
             Arg::new(1, "input_filename"),
             c"r",
-        )?
-        else {
+        ) else {
             return Ok(false);
         };
         let Some(out) = open_file(
@@ -278,8 +276,7 @@ fn openssl_cms_encrypt(
             output_filename.0.as_bytes(),
             Arg::new(2, "output_filename"),
             c"w",
-        )?
-        else {
+        ) else {
             return Ok(false);
         };
         let Some(certs) = recipients(req, &certificate.0, Arg::new(3, "certificate"))? else {
@@ -399,7 +396,7 @@ fn openssl_cms_sign(
             );
             return Ok(false);
         }
-        let Some((input, out)) = signing_files(req, input_filename, output_filename)? else {
+        let Some((input, out)) = signing_files(req, input_filename, output_filename) else {
             return Ok(false);
         };
         let unsigned = u32::from_ne_bytes(as_int(flags).to_ne_bytes());
@@ -464,8 +461,7 @@ fn openssl_cms_decrypt(
             input_filename.0.as_bytes(),
             Arg::new(1, "input_filename"),
             c"r",
-        )?
-        else {
+        ) else {
             return Ok(false);
         };
         let Some(out) = open_file(
@@ -473,8 +469,7 @@ fn openssl_cms_decrypt(
             output_filename.0.as_bytes(),
             Arg::new(2, "output_filename"),
             c"w",
-        )?
-        else {
+        ) else {
             return Ok(false);
         };
         let cms = match Encoding::of(encoding) {

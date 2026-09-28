@@ -788,6 +788,7 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
                     name.extend_from_slice(&entry);
                     if req
                         .url_stat(&name, false, false)?
+                        .found()
                         .is_some_and(|sb| sb[2] & 0o170_000 == 0o040_000)
                     {
                         return Ok(true);
@@ -857,6 +858,17 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
             rest = &rest[1..];
         }
         key = rest.to_vec();
+    }
+    if req.check_open_basedir(&fname, true).is_err() {
+        return bad(
+            req,
+            "UnexpectedValueException",
+            format!(
+                "Iterator {} returned a path \"{}\" that open_basedir prevents opening",
+                b.class,
+                lossy(&fname)
+            ),
+        );
     }
     let Some(stream) = req.open_stream_with(&fname, b"rb", php_ext::request::Opening::default())?
     else {

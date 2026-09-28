@@ -99,6 +99,9 @@ pub(crate) fn open_from_filename(
         Err(Some(error)) => return Ok(Err(Some(error))),
         Err(None) => {}
     }
+    if req.check_open_basedir(fname, true).is_err() {
+        return Ok(Err(None));
+    }
     let Some((actual, bytes)) = open_file(req, fname)? else {
         return Ok(Err(report.then(|| {
             format!("unable to open phar for reading \"{}\"", lossy(fname))
@@ -521,6 +524,9 @@ pub(crate) fn create_or_parse(
     is_data: bool,
     report: bool,
 ) -> Result<Opened, Thrown> {
+    if req.check_open_basedir(fname, true).is_err() {
+        return Ok(Err(None));
+    }
     if let Some((actual, bytes)) = open_file(req, fname)? {
         let opened = open_from_fp(req, bytes, &actual, alias)?;
         if let Ok(id) = opened {
@@ -683,6 +689,9 @@ pub(crate) fn open_executed(
                 "__HALT_COMPILER(); must be declared in a phar".into(),
             )));
         }
+    }
+    if req.check_open_basedir(&fname, true).is_err() {
+        return Ok(Err(None));
     }
     let Some(bytes) = archive::read_file(req, &fname, true)? else {
         return Ok(Err(Some(format!(

@@ -900,7 +900,7 @@ fn get_current_user(req: &mut Request) -> Result<PhpString, Thrown> {
         .script_name()
         .map(<[u8]>::to_vec)
         .and_then(|script| req.realpath(&script))
-        .and_then(|path| std::fs::metadata(path.0).ok())
+        .and_then(|path| std::fs::metadata(path).ok())
         .and_then(|meta| crate::ffi::user_name(meta.uid()));
     PhpString::new(req, &owner.unwrap_or_default())
 }
@@ -1347,12 +1347,14 @@ fn move_uploaded_file(req: &mut Request, from: Path, to: Path) -> bool {
     if !req.is_uploaded_file(from.as_bytes()) {
         return false;
     }
-    let target = req.absolutize(to.as_bytes());
+    let Ok(target) = req.check_open_basedir(to.as_bytes(), true) else {
+        return false;
+    };
     let Some(source) = req.take_uploaded_file(from.as_bytes()) else {
         return false;
     };
-    let moved = std::fs::rename(&source.0, &target.0).is_ok()
-        || (std::fs::copy(&source.0, &target.0).is_ok() && std::fs::remove_file(&source.0).is_ok());
+    let moved = std::fs::rename(&source, &target).is_ok()
+        || (std::fs::copy(&source, &target).is_ok() && std::fs::remove_file(&source).is_ok());
     if !moved {
         let text = format!(
             "Unable to move \"{}\" to \"{}\"",
@@ -1420,8 +1422,10 @@ fn ftok(req: &mut Request, filename: Path, project_id: PhpString) -> Result<i64,
     let &[project] = project.as_bytes() else {
         return Err(arg_value_error(req, 2, "be a single character"));
     };
-    let full = req.absolutize(path.as_bytes());
-    match crate::ffi::ftok(full.0.as_os_str().as_bytes(), project) {
+    let Ok(full) = req.check_open_basedir(path.as_bytes(), true) else {
+        return Ok(-1);
+    };
+    match crate::ffi::ftok(full.as_os_str().as_bytes(), project) {
         Ok(key) => Ok(key),
         Err(errno) => {
             let error = std::io::Error::from_raw_os_error(errno);
@@ -1549,8 +1553,9 @@ fn highlight_file(
     #[php(default = false)] r#return: bool,
 ) -> Result<Union<PhpString, bool>, Thrown> {
     let (Path(filename), returned) = (filename, r#return);
-    let full = req.absolutize(filename.as_bytes());
-    req.fs_guard(&full, php_ext::request::PathIntent::Read)?;
+    if req.check_open_basedir(filename.as_bytes(), true).is_err() {
+        return Ok(Union::B(false));
+    }
     let Some(source) = scanned_file(req, filename.as_bytes())? else {
         let text = format!(
             "Failed opening '{}' for highlighting",
