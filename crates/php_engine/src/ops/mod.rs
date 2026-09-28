@@ -3743,7 +3743,8 @@ pub(crate) fn array_entry(
 /// float and an unwritten variable warn `String offset cast occurred` and
 /// then convert, the float silently since the warning has been raised
 /// ([`dval_to_lval_silent`]). An array, an object and a resource are the
-/// `TypeError`.
+/// `TypeError`, the offset named as `zend_zval_type_name` names it, an
+/// object by its class, under a `??` as under a plain read.
 ///
 /// ```php
 /// $s = "abc";
@@ -3758,6 +3759,18 @@ pub(crate) fn array_entry(
 /// string(1) "b"
 /// bool(false)
 /// ```
+///
+/// ```php
+/// $s = "string";
+/// try { var_dump($s[new stdClass()] ?? 'default'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { var_dump($s[new ArrayObject]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { var_dump($s[[]] ?? 'default'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot access offset of type stdClass on string
+/// Cannot access offset of type ArrayObject on string
+/// Cannot access offset of type array on string
+/// ```
 pub(crate) fn string_dim_offset(
     req: &mut Request,
     dim: &Value,
@@ -3768,7 +3781,10 @@ pub(crate) fn string_dim_offset(
         throw(
             req,
             "TypeError",
-            &format!("Cannot access offset of type {} on string", dim.type_name()),
+            &format!(
+                "Cannot access offset of type {} on string",
+                zval_type_name(req, dim)
+            ),
         )
     };
     match dim.as_ref() {
