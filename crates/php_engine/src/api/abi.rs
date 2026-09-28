@@ -114,6 +114,52 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
         entries.insert(key, Arc::clone(&value));
         value
     }
+
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<K, Arc<V>>> {
+        match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// The value held for `key`, built by nothing: what the unit cache
+    /// asks before it compiles, so a hit and a miss are told apart.
+    pub(crate) fn get(&self, key: &K) -> Option<Arc<V>> {
+        self.entries().get(key).map(Arc::clone)
+    }
+
+    /// `value` held for `key`, or what another thread put there while
+    /// this one built it, which is kept: the one both are answered.
+    pub(crate) fn insert(&self, key: K, value: V) -> Arc<V> {
+        let mut entries = self.entries();
+        if let Some(found) = entries.get(&key) {
+            return Arc::clone(found);
+        }
+        if entries.len() >= self.capacity {
+            let keep = self.capacity / 2;
+            let keys: Vec<K> = entries.keys().skip(keep).cloned().collect();
+            for k in keys {
+                entries.remove(&k);
+            }
+        }
+        let value = Arc::new(value);
+        entries.insert(key, Arc::clone(&value));
+        value
+    }
+
+    /// Every value held, with its key, in no order.
+    pub(crate) fn snapshot(&self) -> Vec<(K, Arc<V>)> {
+        self.entries()
+            .iter()
+            .map(|(key, value)| (key.clone(), Arc::clone(value)))
+            .collect()
+    }
+
+    /// The values `keep` answers false for, dropped: a value a caller
+    /// still holds lives until it lets go.
+    pub(crate) fn retain(&self, mut keep: impl FnMut(&K, &V) -> bool) {
+        self.entries().retain(|key, value| keep(key, value));
+    }
 }
 
 pub(crate) use crate::api::__private::Entry;
@@ -134,6 +180,10 @@ pub(crate) type InterruptHook = fn(&mut Request) -> Result<(), Thrown>;
 /// The compile hook, php's `zend_compile_file` as an extension overrides
 /// it: the source a file compiles from, where the extension replaces it.
 pub(crate) type CompileFileHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
+/// The unit cache's blacklist, opcache's `zend_accel_blacklist_is_blacklisted`
+/// and its `max_file_size` refusal: whether the file at a resolved path
+/// is compiled for the request alone and never published.
+pub(crate) type BlacklistHook = fn(&mut Request, &[u8]) -> bool;
 
 /// An ini entry's `on_modify`, php's `PHP_INI_MH`: served by `ini_set()`
 /// with the new value before the entry takes it
@@ -209,6 +259,8 @@ pub struct Extension {
     pub(crate) rshutdown: Option<fn(&mut Request)>,
     pub(crate) interrupt: Option<InterruptHook>,
     pub(crate) compile_file: Option<CompileFileHook>,
+    /// What [`ExtensionBuilder::blacklist`] was handed.
+    pub(crate) blacklist: Option<BlacklistHook>,
     /// What [`ExtensionBuilder::intercept`] was handed: each native of
     /// another extension this one replaces, by name, with its entry.
     pub(crate) intercepts: Vec<(Name, Entry)>,
@@ -251,6 +303,7 @@ pub struct ExtensionBuilder {
     rshutdown: Option<fn(&mut Request)>,
     interrupt: Option<InterruptHook>,
     compile_file: Option<CompileFileHook>,
+    blacklist: Option<BlacklistHook>,
     intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
     registered: Vec<Arc<dyn Any + Send + Sync>>,
@@ -467,6 +520,19 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The unit cache's blacklist (design §6.3), what opcache's
+    /// `persistent_compile_file` asks of `accel_blacklist` and of
+    /// `opcache.max_file_size` once a file is opened: `hook` is handed
+    /// the file's resolved path, and a file it answers `true` for is
+    /// compiled as the request's own unit, published nowhere and counted
+    /// among the cache's blacklist misses. Hooks are asked in bundle
+    /// order and the first `true` answers.
+    #[must_use]
+    pub fn blacklist(mut self, hook: fn(&mut Request, &[u8]) -> bool) -> ExtensionBuilder {
+        self.blacklist = Some(hook);
+        self
+    }
+
     /// A native another extension declares, its entry replaced by `entry`
     /// as the engine is built, as phar's `MINIT` replaces `fopen`,
     /// `file_get_contents`, `stat` and their kin in the function table
@@ -574,6 +640,7 @@ impl ExtensionBuilder {
             rshutdown: self.rshutdown,
             interrupt: self.interrupt,
             compile_file: self.compile_file,
+            blacklist: self.blacklist,
             intercepts: self.intercepts,
             info: self.info,
             registered: self.registered,

@@ -44,6 +44,7 @@ use crate::output::Output;
 use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
 pub use execution::Execution;
+pub use unit_cache::{CacheStatus, CachedFile, Invalidation, Restart, UnitCache};
 
 mod class_data;
 mod execution;
@@ -55,6 +56,7 @@ mod linking;
 mod load_file;
 mod site_override;
 mod table;
+mod unit_cache;
 mod variables;
 
 pub(crate) use hooks::parent_hook_trampolines;
@@ -14704,9 +14706,7 @@ impl Request {
             }
             return Ok(Opened::Unit(unit));
         }
-        let cwd = self.cwd.clone();
-        let stack = self.stack_limit();
-        match self.shared.cached(&path, &cwd, stack) {
+        match self.cached_file(&path) {
             Some(Ok(unit)) => {
                 if !self.included_files.contains(&path) {
                     self.included_files.push(path);
@@ -14992,7 +14992,7 @@ impl Request {
             .map_or(reason.as_str(), |(text, _)| text);
         let message = format!(
             "{}({}): Failed to open stream: {reason}",
-            kind.name(),
+            self.opener(kind),
             String::from_utf8_lossy(written)
         );
         crate::api::raising::warning(self, &message);
@@ -15013,14 +15013,25 @@ impl Request {
                 &format!("Failed opening required '{shown}' (include_path='{include_path}')"),
             ));
         }
+        let opener = self.opener(kind);
         crate::api::raising::warning(
             self,
             &format!(
-                "{}(): Failed opening '{shown}' for inclusion (include_path='{include_path}')",
-                kind.name()
+                "{opener}(): Failed opening '{shown}' for inclusion (include_path='{include_path}')"
             ),
         );
         Ok(Opened::Failed)
+    }
+
+    /// What `php_verror` names a file's opening by: the construct where
+    /// the program's own `include` opens it, and the native being served
+    /// where one opens it as an include does, `opcache_compile_file`.
+    fn opener(&self, kind: IncludeKind) -> String {
+        if self.vm_serving_native() {
+            self.active_native()
+        } else {
+            String::from(kind.name())
+        }
     }
 
     /// What the compiler refused an included file with, raised as php

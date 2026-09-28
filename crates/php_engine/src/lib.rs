@@ -49,6 +49,7 @@ mod streams;
 pub mod test;
 pub mod tier;
 mod trampoline;
+mod unit_cache;
 mod virtual_cwd;
 mod weakrefs;
 mod wrapper;

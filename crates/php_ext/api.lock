@@ -42,6 +42,7 @@ abi::DependencyKind
 abi::DimensionRead
 abi::Extension
 abi::ExtensionBuilder
+abi::ExtensionBuilder::blacklist
 abi::ExtensionBuilder::build
 abi::ExtensionBuilder::class
 abi::ExtensionBuilder::class_constants
@@ -321,6 +322,8 @@ raising::warning
 request::BindTo
 request::Brigade
 request::BufferHandler
+request::CacheStatus
+request::CachedFile
 request::Cast
 request::ContentType
 request::DirListing
@@ -340,6 +343,7 @@ request::Interrupt
 request::Interrupt::raise
 request::Interrupt::raised
 request::Interrupt::receive_signals
+request::Invalidation
 request::Opening
 request::OptionAnswer
 request::OutputOp
@@ -498,6 +502,7 @@ request::Request::tmpfile
 request::Request::trampoline
 request::Request::transports
 request::Request::umask
+request::Request::unit_cache
 request::Request::unregister_tick_function
 request::Request::url_stat
 request::Request::url_stat_quiet
@@ -517,6 +522,7 @@ request::Resolve
 request::ResourceDtor
 request::Resources
 request::Resources::register_type
+request::Restart
 request::SIGNAL_POST
 request::Siginfo
 request::SocketOptions
@@ -576,6 +582,12 @@ request::StreamOps::stat
 request::StreamOps::write
 request::StreamOption
 request::StreamWrapper
+request::UnitCache
+request::UnitCache::compile
+request::UnitCache::holds
+request::UnitCache::invalidate
+request::UnitCache::reset
+request::UnitCache::status
 request::UrlStat
 request::Whence
 request::Whence::from_int
