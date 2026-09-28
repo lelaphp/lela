@@ -197,16 +197,39 @@ enum Offset {
 enum Scoped {
     Constant {
         class: ClassSpec,
-        name: Vec<u8>,
+        name: ScopedName,
     },
     Property {
         class: ClassSpec,
-        name: Vec<u8>,
+        name: ScopedName,
     },
     /// `C::class`, php's `ZEND_AST_CLASS_NAME`.
     ClassName {
         class: ClassSpec,
     },
+}
+
+/// The operands of an opline over a class's property, as
+/// [`Emit::static_operands`] lays them down: the name in `op1`, the
+/// class in `op2`, and the cache slots `extended_value` carries.
+struct StaticOperands {
+    name: (OperandKind, u32),
+    class: (OperandKind, u32),
+    slots: u32,
+}
+
+/// A member's name after `::` as the tree holds it: written out, the
+/// identifier of `C::X` or the `$p` of `C::$p` without its `$`, or the
+/// expression whose value names it, `C::{expr}` (8.3), `A::$$n` and
+/// `A::${expr}`, which `zend_compile_class_const` and
+/// `zend_compile_static_prop` compile with `zend_compile_expr` like any
+/// other operand. One `$` of `A::$$n` is the property's own, so the
+/// name is the value of `$n`, php's `ZEND_AST_VAR` under
+/// `ZEND_AST_STATIC_PROP`.
+#[derive(Clone)]
+enum ScopedName {
+    Written(Vec<u8>),
+    Computed(tree::Expr),
 }
 
 /// One element of an array expression as `zend_compile_array` reads
@@ -873,7 +896,7 @@ enum Base {
         out: u32,
     },
     StaticProp {
-        name_at: u32,
+        name: (OperandKind, u32),
         class: (OperandKind, u32),
         out: u32,
         slots: u32,
@@ -2303,30 +2326,45 @@ impl Emit<'_> {
     ) -> Result<Scoped, CompileError> {
         let node = &self.parsed.tree[id];
         let class = self.class_spec(node.scope);
+        let tree = &self.parsed.tree;
+        let computed = |inner: Option<tree::Expr>, what| {
+            inner
+                .map(ScopedName::Computed)
+                .ok_or_else(|| walk::unread(line, what))
+        };
         match node.member {
             Some(tree::ScopedSelector::MemberName(member)) => {
-                let Some(name) = self.parsed.tree[member].name else {
+                let Some(name) = tree[member].name else {
                     return Err(walk::unread(line, "a class constant"));
                 };
                 Ok(Scoped::Constant {
                     class,
-                    name: self.text(name).to_vec(),
+                    name: ScopedName::Written(self.text(name).to_vec()),
                 })
             }
+            Some(tree::ScopedSelector::BracedMember(braced)) => Ok(Scoped::Constant {
+                class,
+                name: computed(tree[braced].inner, "a class constant")?,
+            }),
             Some(tree::ScopedSelector::SimpleVarExpr(var)) => {
-                let Some(var) = self.parsed.tree[var].var else {
+                let Some(var) = tree[var].var else {
                     return Err(walk::unread(line, "a static property"));
                 };
                 Ok(Scoped::Property {
                     class,
-                    name: self.variable_name(var),
+                    name: ScopedName::Written(self.variable_name(var)),
                 })
             }
+            Some(tree::ScopedSelector::VarVarExpr(var)) => Ok(Scoped::Property {
+                class,
+                name: computed(tree[var].inner, "a static property")?,
+            }),
+            Some(tree::ScopedSelector::DynamicVarExpr(var)) => Ok(Scoped::Property {
+                class,
+                name: computed(tree[var].inner, "a static property")?,
+            }),
             Some(tree::ScopedSelector::ClassKw(_)) => Ok(Scoped::ClassName { class }),
-            Some(tree::ScopedSelector::VarVarExpr(_) | tree::ScopedSelector::DynamicVarExpr(_)) => {
-                Err(walk::unread(line, "a static property named at run time"))
-            }
-            _ => Err(walk::unread(line, "a class member named at run time")),
+            None => Err(walk::unread(line, "a class member")),
         }
     }
 
@@ -2341,16 +2379,27 @@ impl Emit<'_> {
         (node.lhs, node.op.map(|op| self.kind(op)), node.rhs)
     }
 
-    /// Whether `expr` is `C::$p`, php's `ZEND_AST_STATIC_PROP`: a scoped
-    /// access whose member is one `T_VARIABLE`.
+    /// Whether `expr` is `C::$p`, `C::$$p` or `C::${expr}`, php's
+    /// `ZEND_AST_STATIC_PROP`: a scoped access whose member is a
+    /// variable.
     fn is_static_prop(&self, expr: tree::Expr) -> bool {
         match self.peel(expr) {
-            tree::Expr::ScopedAccessExpr(id) => matches!(
-                self.parsed.tree[id].member,
-                Some(tree::ScopedSelector::SimpleVarExpr(_))
-            ),
+            tree::Expr::ScopedAccessExpr(id) => self.names_property(id),
             _ => false,
         }
+    }
+
+    /// Whether the member after a `::` is a variable, `$p`, `$$p` or
+    /// `${expr}`, which makes the access a class's property.
+    pub(super) fn names_property(&self, id: NodeId<tree::ScopedAccessExpr>) -> bool {
+        matches!(
+            self.parsed.tree[id].member,
+            Some(
+                tree::ScopedSelector::SimpleVarExpr(_)
+                    | tree::ScopedSelector::VarVarExpr(_)
+                    | tree::ScopedSelector::DynamicVarExpr(_)
+            )
+        )
     }
 
     /// `zend_is_call` (`Z/Zend/zend_compile.c:2728`): a call by name, a
@@ -2594,15 +2643,15 @@ impl Emit<'_> {
                 });
             }
             Target::StaticProp { class, name } => {
-                let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-                let name = self.string(&name)?;
-                let name_at = self.literal(name);
-                let slots = self.cache_slots(3);
-                let (op2_type, op2) = self.class_operand(&class)?;
+                let StaticOperands {
+                    name: (op1_type, op1),
+                    class: (op2_type, op2),
+                    slots,
+                } = self.static_operands(class, &name)?;
                 self.push(Opline {
                     opcode: Opcode::UnsetStaticProp,
-                    op1_type: OperandKind::Const,
-                    op1: name_at,
+                    op1_type,
+                    op1,
                     op2_type,
                     op2,
                     extended_value: slots,
@@ -6798,12 +6847,26 @@ impl Emit<'_> {
             // compile-time fatals.
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => {
-                    let ClassSpec::Name(token) = class else {
-                        return Err(self.compile_error(
-                            "Dynamic class names are not allowed in compile-time class constant references",
-                        ));
+                    let written = match class {
+                        ClassSpec::Name(token) => self.text(token).to_vec(),
+                        // `zend_eval_const_expr` folded the class to a
+                        // constant, which names it where it is a string.
+                        ClassSpec::Expr(expr) => match self.constant_of(expr)? {
+                            Some(value) => match value.as_str() {
+                                Some(text) => text.bytes().to_vec(),
+                                None => {
+                                    return Err(self.compile_error(
+                                        "Class name must be a valid object or a string",
+                                    ));
+                                }
+                            },
+                            None => {
+                                return Err(self.compile_error(
+                                    "Dynamic class names are not allowed in compile-time class constant references",
+                                ));
+                            }
+                        },
                     };
-                    let written = self.text(token).to_vec();
                     if class_fetch_type(&written) == FETCH_CLASS_STATIC {
                         return Err(self.compile_error(
                             "\"static::\" is not allowed in compile-time constants",
@@ -6815,6 +6878,20 @@ impl Emit<'_> {
                         self.resolve_class_marked(&written)
                     } else {
                         (written, NameKind::NotFullyQualified)
+                    };
+                    // `self::{'X'}` folds to the name; one that does
+                    // not fold to a string is kept as its own tree,
+                    // evaluated before the class.
+                    let Some(name) = self.folded_name(&name)? else {
+                        let ScopedName::Computed(expr) = name else {
+                            return Err(self.fatal("a written name that folded to nothing"));
+                        };
+                        return Ok(ConstExpr::DynamicClassConstant {
+                            class: Name(class.into_boxed_slice()),
+                            class_kind,
+                            name: Box::new(self.const_expr(expr)?),
+                            line,
+                        });
                     };
                     Ok(ConstExpr::ClassConstant {
                         class: Name(class.into_boxed_slice()),
@@ -10931,15 +11008,15 @@ impl Emit<'_> {
                 let Scoped::Property { class, name } = self.scoped_of(id, line)? else {
                     return Err(self.fatal("a `??` over a class constant, which is no variable"));
                 };
-                let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-                let name = self.string(&name)?;
-                let name_at = self.literal(name);
+                let StaticOperands {
+                    name,
+                    class: (op2_type, op2),
+                    slots: extended_value,
+                } = self.static_operands(class, &name)?;
                 let out = self.temporary();
-                let extended_value = self.cache_slots(3);
-                let (op2_type, op2) = self.class_operand(&class)?;
                 delayed.push(IsLink {
                     opcode: Opcode::FetchStaticPropIs,
-                    op1: Some((OperandKind::Const, name_at)),
+                    op1: Some(name),
                     op2_type,
                     op2,
                     out,
@@ -10958,10 +11035,7 @@ impl Emit<'_> {
     fn is_fetch(&self, expr: tree::Expr) -> bool {
         match self.peel(expr) {
             tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => true,
-            tree::Expr::ScopedAccessExpr(id) => matches!(
-                self.parsed.tree[id].member,
-                Some(tree::ScopedSelector::SimpleVarExpr(_))
-            ),
+            tree::Expr::ScopedAccessExpr(id) => self.names_property(id),
             _ => false,
         }
     }
@@ -11620,14 +11694,10 @@ impl Emit<'_> {
                 let Scoped::Property { class, name } = self.scoped_of(id, line)? else {
                     return Err(self.fatal("a class constant that is no property"));
                 };
-                let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-                let name = self.string(&name)?;
-                let name_at = self.literal(name);
+                let StaticOperands { name, class, slots } = self.static_operands(class, &name)?;
                 let out = self.temporary();
-                let slots = self.cache_slots(3);
-                let class = self.class_operand(&class)?;
                 Base::StaticProp {
-                    name_at,
+                    name,
                     class,
                     out,
                     slots,
@@ -11818,7 +11888,7 @@ impl Emit<'_> {
                 (out_type, out)
             }
             Base::StaticProp {
-                name_at,
+                name: (name_type, name_at),
                 class: (class_type, class_at),
                 out,
                 slots,
@@ -11832,7 +11902,7 @@ impl Emit<'_> {
                         Fetch::FuncArg => Opcode::FetchStaticPropFuncArg,
                         Fetch::Unset => Opcode::FetchStaticPropUnset,
                     },
-                    op1_type: OperandKind::Const,
+                    op1_type: name_type,
                     op1: name_at,
                     op2_type: class_type,
                     op2: class_at,
@@ -12020,15 +12090,15 @@ impl Emit<'_> {
     fn assign_static_prop(
         &mut self,
         class: ClassSpec,
-        name: &[u8],
+        name: &ScopedName,
         value: Source,
     ) -> Result<Where, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let StaticOperands {
+            name: (name_type, name_at),
+            class: (class_type, class_at),
+            slots,
+        } = self.static_operands(class, name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (class_type, class_at) = self.class_operand(&class)?;
         // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
         let line = self.line;
         let value = self.source(value)?;
@@ -12036,7 +12106,7 @@ impl Emit<'_> {
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignStaticProp,
-            op1_type: OperandKind::Const,
+            op1_type: name_type,
             op1: name_at,
             op2_type: class_type,
             op2: class_at,
@@ -12240,16 +12310,16 @@ impl Emit<'_> {
     fn assign_static_prop_op(
         &mut self,
         class: ClassSpec,
-        name: &[u8],
+        name: &ScopedName,
         op: BinaryOp,
         value: tree::Expr,
     ) -> Result<Where, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let StaticOperands {
+            name: (name_type, name_at),
+            class: (class_type, class_at),
+            slots,
+        } = self.static_operands(class, name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (class_type, class_at) = self.class_operand(&class)?;
         // The delayed fetch's line, as [`Self::assign_static_prop`]
         // keeps it.
         let line = self.line;
@@ -12258,7 +12328,7 @@ impl Emit<'_> {
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignStaticPropOp,
-            op1_type: OperandKind::Const,
+            op1_type: name_type,
             op1: name_at,
             op2_type: class_type,
             op2: class_at,
@@ -12289,15 +12359,15 @@ impl Emit<'_> {
     fn static_prop_step(
         &mut self,
         class: ClassSpec,
-        name: &[u8],
+        name: &ScopedName,
         step: Step,
     ) -> Result<Where, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let StaticOperands {
+            name: (name_type, name_at),
+            class: (class_type, class_at),
+            slots,
+        } = self.static_operands(class, name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (class_type, class_at) = self.class_operand(&class)?;
         self.push(Opline {
             opcode: match step {
                 Step::PreInc => Opcode::PreIncStaticProp,
@@ -12305,7 +12375,7 @@ impl Emit<'_> {
                 Step::PostInc => Opcode::PostIncStaticProp,
                 Step::PostDec => Opcode::PostDecStaticProp,
             },
-            op1_type: OperandKind::Const,
+            op1_type: name_type,
             op1: name_at,
             op2_type: class_type,
             op2: class_at,
@@ -12335,19 +12405,19 @@ impl Emit<'_> {
     fn assign_static_prop_ref(
         &mut self,
         class: ClassSpec,
-        name: &[u8],
+        name: &ScopedName,
         source: Source,
     ) -> Result<Where, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let StaticOperands {
+            name: (name_type, name_at),
+            class: (class_type, class_at),
+            slots,
+        } = self.static_operands(class, name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (class_type, class_at) = self.class_operand(&class)?;
         let (data_type, data, flags) = self.ref_source_of(source, false)?;
         self.push(Opline {
             opcode: Opcode::AssignStaticPropRef,
-            op1_type: OperandKind::Const,
+            op1_type: name_type,
             op1: name_at,
             op2_type: class_type,
             op2: class_at,
@@ -13760,10 +13830,13 @@ impl Emit<'_> {
                 Scoped::Constant {
                     class: ClassSpec::Name(token),
                     name,
-                } => match self.active_class_constant(token, &name)? {
-                    Some(value) => Ok(value),
-                    None => Err(self.fatal("a class constant is fetched at run time")),
-                },
+                } => {
+                    let folded = match self.folded_name(&name)? {
+                        Some(name) => self.active_class_constant(token, &name)?,
+                        None => None,
+                    };
+                    folded.ok_or_else(|| self.fatal("a class constant is fetched at run time"))
+                }
                 Scoped::Constant { .. } => {
                     Err(self.fatal("a class constant is fetched at run time"))
                 }
@@ -15225,30 +15298,52 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Cannot use "parent" when current class scope has no parent in %s on line 2
     /// ```
-    fn class_const(&mut self, class: ClassSpec, name: &[u8]) -> Result<Where, CompileError> {
+    fn class_const(&mut self, class: ClassSpec, name: &ScopedName) -> Result<Where, CompileError> {
+        let written = self.folded_name(name)?;
         if let ClassSpec::Name(token) = class
-            && let Some(value) = self.active_class_constant(token, name)?
+            && let Some(written) = &written
+            && let Some(value) = self.active_class_constant(token, written)?
         {
             return Ok(Where::Constant(value));
         }
         let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let name = match name {
+            ScopedName::Written(bytes) => Where::Constant(self.string(bytes)?),
+            ScopedName::Computed(expr) => self.expr(*expr)?,
+        };
+        let (op2_type, op2) = self.operand(name);
         let out = self.temporary();
         let (op1_type, op1) = self.class_operand(&class)?;
-        let slots = self.cache_slots(2);
+        let slots = if op1_type == OperandKind::Const || op2_type == OperandKind::Const {
+            self.cache_slots(2)
+        } else {
+            0
+        };
         self.push(Opline {
             opcode: Opcode::FetchClassConstant,
             op1_type,
             op1,
-            op2_type: OperandKind::Const,
-            op2: name_at,
+            op2_type,
+            op2,
             out_type: OperandKind::Tmp,
             out,
             extended_value: slots,
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_eval_const_expr` over a name after `::`: the name written
+    /// out, or the string a computed one folds to, so `C::{'X'}` and
+    /// `C::{'X' . ''}` are `C::X`; nothing where it folds to no string or
+    /// does not fold.
+    fn folded_name(&mut self, name: &ScopedName) -> Result<Option<Vec<u8>>, CompileError> {
+        Ok(match name {
+            ScopedName::Written(bytes) => Some(bytes.clone()),
+            ScopedName::Computed(expr) => self
+                .constant_of(*expr)?
+                .and_then(|value| value.as_str().map(|s| s.bytes().to_vec())),
+        })
     }
 
     /// `zend_try_ct_eval_class_const`'s one arm opcache leaves standing,
@@ -15330,17 +15425,17 @@ impl Emit<'_> {
     /// #0 {main}
     ///   thrown in %s on line 12
     /// ```
-    fn static_prop(&mut self, class: ClassSpec, name: &[u8]) -> Result<Where, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+    fn static_prop(&mut self, class: ClassSpec, name: &ScopedName) -> Result<Where, CompileError> {
+        let StaticOperands {
+            name: (op1_type, op1),
+            class: (op2_type, op2),
+            slots,
+        } = self.static_operands(class, name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (op2_type, op2) = self.class_operand(&class)?;
         self.push(Opline {
             opcode: Opcode::FetchStaticPropR,
-            op1_type: OperandKind::Const,
-            op1: name_at,
+            op1_type,
+            op1,
             op2_type,
             op2,
             out_type: OperandKind::Tmp,
@@ -15349,6 +15444,56 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_static_prop`'s operands (`Z/Zend/zend_compile.c:3202`),
+    /// which every opline over a class's property takes: the class
+    /// compiled first (`zend_compile_class_ref`), then the name
+    /// (`zend_compile_expr`), a name written out or one the compiler
+    /// folds being the constant string `convert_to_string` leaves in
+    /// `op1` with three cache slots, and any other the operand its
+    /// expression left, with one slot where the class is a constant pair
+    /// and none where the class is fetched; `op2` the class.
+    ///
+    /// ```php
+    /// class A { public static $b = 1; public static $c = [0, 1]; }
+    /// $b = 'b'; $c = 'c'; $n = 42;
+    /// var_dump(A::$$b, A::${'b'}, A::${$b}, A::$$c[1], A::${'' . $b});
+    /// try { var_dump(A::${$n}); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { var_dump(A::${42}); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(1)
+    /// int(1)
+    /// int(1)
+    /// int(1)
+    /// Access to undeclared static property A::$42
+    /// Access to undeclared static property A::$42
+    /// ```
+    fn static_operands(
+        &mut self,
+        class: ClassSpec,
+        name: &ScopedName,
+    ) -> Result<StaticOperands, CompileError> {
+        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+        let name = match name {
+            ScopedName::Written(bytes) => Where::Constant(self.string(bytes)?),
+            ScopedName::Computed(expr) => match self.expr(*expr)? {
+                Where::Constant(value) => {
+                    Where::Constant(self.stringified(value)?.unwrap_or(value))
+                }
+                computed => computed,
+            },
+        };
+        let name = self.operand(name);
+        let slots = match (name.0, &class) {
+            (OperandKind::Const, _) => self.cache_slots(3),
+            (_, ClassRef::Named(_)) => self.cache_slots(1),
+            _ => 0,
+        };
+        let class = self.class_operand(&class)?;
+        Ok(StaticOperands { name, class, slots })
     }
 
     /// `zend_emit_op(result, ZEND_FETCH_THIS, NULL, NULL)`: `$this` into

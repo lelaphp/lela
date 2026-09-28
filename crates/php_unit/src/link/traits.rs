@@ -823,7 +823,13 @@ fn unlined(expr: &ConstExpr) -> ConstExpr {
             | E::ClassName { line, .. } => {
                 *line = 0;
             }
-            E::Unary { operand, line, .. } | E::Cast { operand, line, .. } => {
+            E::Unary { operand, line, .. }
+            | E::Cast { operand, line, .. }
+            | E::DynamicClassConstant {
+                name: operand,
+                line,
+                ..
+            } => {
                 *line = 0;
                 clear(operand);
             }

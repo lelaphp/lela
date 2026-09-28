@@ -1634,6 +1634,23 @@ fn evaluate_node(
         ConstExpr::ClassConstant { class, name, .. } => {
             class_constant_expr(req, class, name, scope)
         }
+        // `zend_ast_evaluate`'s `ZEND_AST_CLASS_CONST` arm over a name
+        // that is no string the compiler folded: the name first, its
+        // `TypeError` where it is no string
+        // (`zend_invalid_class_constant_type_error`), and then the class.
+        ConstExpr::DynamicClassConstant { class, name, .. } => {
+            let named = evaluate(req, name, scope)?;
+            let Some(bytes) = named.as_str_bytes().map(<[u8]>::to_vec) else {
+                let message = format!(
+                    "Cannot use value of type {} as class constant name",
+                    named.type_name()
+                );
+                req.release(named);
+                return Err(throw(req, "TypeError", &message));
+            };
+            req.release(named);
+            class_constant_expr(req, class, &Name(bytes.into_boxed_slice()), scope)
+        }
         // `ZEND_AST_CONST_ENUM_INIT` read back as the case it made: the
         // enum's one instance for the case (`zend_enum_get_case`), which
         // is what its constant of the case's name holds.

@@ -333,6 +333,16 @@ pub enum ConstExpr {
         name: Name,
         line: u32,
     },
+    /// `class::{expr}`, php's `ZEND_AST_CLASS_CONST` whose name the
+    /// compiler could not fold to a string: the name evaluated first,
+    /// then the constant it names fetched as [`ConstExpr::ClassConstant`]
+    /// fetches one, php's `TypeError` where the name is no string.
+    DynamicClassConstant {
+        class: Name,
+        class_kind: NameKind,
+        name: Box<ConstExpr>,
+        line: u32,
+    },
     EnumCase {
         class: Name,
         case: Name,
@@ -437,6 +447,7 @@ impl ConstExpr {
         match self {
             ConstExpr::Constant { line, .. }
             | ConstExpr::ClassConstant { line, .. }
+            | ConstExpr::DynamicClassConstant { line, .. }
             | ConstExpr::EnumCase { line, .. }
             | ConstExpr::ClassName { line, .. }
             | ConstExpr::Unary { line, .. }

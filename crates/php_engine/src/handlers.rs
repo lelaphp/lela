@@ -5843,6 +5843,57 @@ fn fetched_name(
     Ok(bytes)
 }
 
+/// `zend_fetch_static_property_address_ex`'s first half
+/// (`Z/Zend/zend_execute.c:3715`), which every opline over a `static`
+/// property shares: the class `op2` names, php's `Error` where nothing
+/// declares it, and then the property's name `op1` holds, the constant
+/// the compiler wrote or, for `A::$$n` and `A::${expr}`, the value
+/// converted as [`fetched_name`] converts it after the class; `op1`
+/// given up either way (`FREE_OP(op1_type, opline->op1.var)`).
+///
+/// ```php
+/// class A { public static $b = 0; public static $c = [0, 1]; }
+/// $b = 'b'; $c = 'c';
+/// A::$$b = 5; A::${'c'}[] = 2; A::$$b++;
+/// var_dump(A::$$b, A::${'c'}, isset(A::${'b'}), A::${$c}[1]);
+/// try { var_dump(A::${42}); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { var_dump(Missing::$$b); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { unset(A::$$b); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(6)
+/// array(3) {
+///   [0]=>
+///   int(0)
+///   [1]=>
+///   int(1)
+///   [2]=>
+///   int(2)
+/// }
+/// bool(true)
+/// int(1)
+/// Access to undeclared static property A::$42
+/// Class "Missing" not found
+/// Attempt to unset static property A::$b
+/// ```
+fn static_member(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<(crate::api::values::ClassId, Vec<u8>), Thrown> {
+    let class = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
+        Ok(class) => class,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return Err(thrown);
+        }
+    };
+    let name = fetched_name(req, frame, code, op);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    Ok((class, name?))
+}
+
 /// `zend_fetch_this_var` (`Z/Zend/zend_execute.c:4185`): `$this` read
 /// by name is the receiver, with php's warning where the frame has none
 /// under `BP_VAR_R`; under a write it is `Cannot re-assign $this`, and
@@ -5999,6 +6050,30 @@ pub(crate) fn end_silence<T: Tier>(
 /// not read here; the lookup is made on every pass, which nothing
 /// observes.
 ///
+/// A name the program computes, `C::{expr}` (8.3), is read as any
+/// operand is: `class` names the class, and what is no string is php's
+/// `TypeError`:
+///
+/// ```php
+/// class Foo { const BAR = 'bar'; }
+/// $n = 'BAR'; $f = 'Foo'; $i = 42;
+/// var_dump(Foo::{$n}, $f::{$n}, Foo::{strtolower('CLASS')}, Foo::{'B' . 'AR'});
+/// try { var_dump(Foo::{$i}); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { var_dump(Foo::{[]}); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { var_dump(Foo::{$undefined}); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(3) "bar"
+/// string(3) "bar"
+/// string(3) "Foo"
+/// string(3) "bar"
+/// Cannot use value of type int as class constant name
+/// Cannot use value of type array as class constant name
+///
+/// Warning: Undefined variable $undefined in %s on line 7
+/// Cannot use value of type null as class constant name
+/// ```
+///
 /// ```php
 /// class A { const X = 1 + 2; const S = 'a' . 'b'; protected const P = 3; private const Q = 4; static function q() { return A::Q + A::P; } }
 /// echo A::X, A::S, A::q(), "\n";
@@ -6055,16 +6130,35 @@ pub(crate) fn fetch_class_constant<T: Tier>(
         Some(CacheSlot(op.extended_value)),
     ) {
         Ok(class) => class,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op2_type, op.op2);
+            return threw(req, frame, &thrown);
+        }
     };
-    if op.op2_type != OperandKind::Const {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_FETCH_CLASS_CONSTANT over a constant named at run time",
-        )));
-    }
-    let name = exec::constant(code, ConstIdx(op.op2));
-    let name = name.as_str_bytes().unwrap_or_default().to_vec();
-    let value = match req.class_constant(class, &name) {
+    // `GET_OP2_ZVAL_PTR_DEREF(BP_VAR_R)`: a name the program computed,
+    // `C::{expr}`, read as any operand is, a variable nothing wrote
+    // warning first; what is no string is `TypeError`
+    // (`zend_invalid_class_constant_type_error`), and `class` in any
+    // case is the class's name, the compiler having caught only the
+    // spelling it saw.
+    let named = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
+    let Some(name) = named.as_str_bytes().map(<[u8]>::to_vec) else {
+        let message = format!(
+            "Cannot use value of type {} as class constant name",
+            named.type_name()
+        );
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+        let thrown = crate::api::raising::throw(req, "TypeError", &message);
+        return threw(req, frame, &thrown);
+    };
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    let value = if op.op2_type != OperandKind::Const && name.eq_ignore_ascii_case(b"class") {
+        let written = req.class_name_bytes(class);
+        PhpString::new(req, &written).map(Value::string)
+    } else {
+        req.class_constant(class, &name)
+    };
+    let value = match value {
         Ok(value) => value,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -6435,17 +6529,10 @@ fn static_prop_place(
     mode: StaticFetch,
 ) -> Edge {
     let rw = mode == StaticFetch::ReadWrite;
-    if op.op1_type != OperandKind::Const {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_FETCH_STATIC_PROP_W over a property named at run time",
-        )));
-    }
-    let class = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
-        Ok(class) => class,
+    let (class, name) = match static_member(req, frame, code, op) {
+        Ok(member) => member,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let name = exec::constant(code, ConstIdx(op.op1));
-    let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let scope = req.executed_scope();
     if rw {
         match req.static_property(class, &name, scope, PropertyRead::Warning) {
@@ -6534,17 +6621,10 @@ fn fetch_static_prop(
     op: &Opline,
     fetch: PropertyRead,
 ) -> Edge {
-    if op.op1_type != OperandKind::Const {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_FETCH_STATIC_PROP_R over a property named at run time",
-        )));
-    }
-    let class = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
-        Ok(class) => class,
+    let (class, name) = match static_member(req, frame, code, op) {
+        Ok(member) => member,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let name = exec::constant(code, ConstIdx(op.op1));
-    let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let scope = req.executed_scope();
     let value = match req.static_property(class, &name, scope, fetch) {
         Ok(value) => value,
@@ -11265,11 +11345,6 @@ pub(crate) fn assign_static_prop<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op1_type != OperandKind::Const {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP over a property named at run time",
-        )));
-    }
     let at = req.vm().opline(frame);
     let Some(data) = exec::opline_at(code, at.saturating_add(1))
         .filter(|next| next.opcode == php_unit::Opcode::OpData)
@@ -11279,12 +11354,13 @@ pub(crate) fn assign_static_prop<T: Tier>(
         )));
     };
     let (data_type, data_at) = (data.op1_type, data.op1);
-    let name = exec::constant(code, ConstIdx(op.op1));
-    let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let scope = req.executed_scope();
-    let addressed = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
-        Ok(class) => req.static_slot(class, &name, scope, PropertyRead::Warning),
-        Err(thrown) => Err(thrown),
+    let (addressed, name) = match static_member(req, frame, code, op) {
+        Ok((class, name)) => (
+            req.static_slot(class, &name, scope, PropertyRead::Warning),
+            name,
+        ),
+        Err(thrown) => (Err(thrown), Vec::new()),
     };
     let placed = match addressed {
         // A write is never `BP_VAR_IS`, so the silent miss cannot stand
@@ -11336,10 +11412,8 @@ fn static_place(
     code: &OpArray,
     op: &Opline,
 ) -> Result<Option<Placed>, Thrown> {
-    let name = exec::constant(code, ConstIdx(op.op1));
-    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let (class, name) = static_member(req, frame, code, op)?;
     let scope = req.executed_scope();
-    let class = class_operand(req, frame, code, op.op2_type, op.op2, None)?;
     match req.static_slot(class, &name, scope, PropertyRead::Warning)? {
         Some((declaring, property)) => {
             if let Some(thrown) = req.set_refused(declaring, &property, "indirectly modify") {
@@ -11542,11 +11616,6 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op1_type != OperandKind::Const {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP_OP over a property named at run time",
-        )));
-    }
     let Some(kernel) = binary_op_of(op.extended_value) else {
         return Err(Fatal::Error(format!(
             "InternalError: ZEND_ASSIGN_STATIC_PROP_OP over the operator {} , which is no binary operation",
@@ -11704,11 +11773,6 @@ fn static_prop_step(
     } else {
         crate::ops::decrement
     };
-    if op.op1_type != OperandKind::Const {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a step over a static property named at run time",
-        )));
-    }
     let placed = match static_place(req, frame, code, op) {
         Ok(placed) => placed,
         Err(thrown) => return threw(req, frame, &thrown),
@@ -12001,11 +12065,6 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op1_type != OperandKind::Const {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP_REF over a property named at run time",
-        )));
-    }
     let at = req.vm().opline(frame);
     let Some(data) =
         exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
@@ -14334,19 +14393,9 @@ pub(crate) fn unset_static_prop<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let class = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
-        Ok(class) => class,
-        Err(thrown) => {
-            exec::free_operand(req, frame, code, op.op1_type, op.op1);
-            return threw(req, frame, &thrown);
-        }
-    };
-    let name = match fetched_name(req, frame, code, op) {
-        Ok(name) => name,
-        Err(thrown) => {
-            exec::free_operand(req, frame, code, op.op1_type, op.op1);
-            return threw(req, frame, &thrown);
-        }
+    let (class, name) = match static_member(req, frame, code, op) {
+        Ok(member) => member,
+        Err(thrown) => return threw(req, frame, &thrown),
     };
     let class = req.class_name(class);
     let thrown = crate::api::raising::throw(
@@ -14357,7 +14406,6 @@ pub(crate) fn unset_static_prop<T: Tier>(
             String::from_utf8_lossy(&name)
         ),
     );
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
     threw(req, frame, &thrown)
 }
 
@@ -17524,17 +17572,10 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op1_type != OperandKind::Const {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ISSET_ISEMPTY_STATIC_PROP over a property named at run time",
-        )));
-    }
-    let class = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
-        Ok(class) => class,
+    let (class, name) = match static_member(req, frame, code, op) {
+        Ok(member) => member,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let name = exec::constant(code, ConstIdx(op.op1));
-    let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let scope = req.executed_scope();
     let held = match req.static_property(class, &name, scope, PropertyRead::Silent) {
         Ok(held) => held,

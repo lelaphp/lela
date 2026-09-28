@@ -483,13 +483,31 @@ impl Emit<'_> {
         if !self.text(scope).eq_ignore_ascii_case(b"parent") {
             return Ok(None);
         }
-        let Some(ScopedSelector::SimpleVarExpr(var)) = inner.member else {
-            return Ok(None);
+        // `class_ast->child[1]->kind != ZEND_AST_ZVAL`: `$p`, or
+        // `${0}` and its kin, a name its parser wrote as one value, which
+        // `zval_get_string` reads.
+        let property = match inner.member {
+            Some(ScopedSelector::SimpleVarExpr(var)) => match self.parsed.tree[var].var {
+                Some(var) => self.variable_name(var),
+                None => return Ok(None),
+            },
+            Some(ScopedSelector::DynamicVarExpr(var)) => {
+                let Some(written) = self.parsed.tree[var]
+                    .inner
+                    .filter(|expr| self.is_written_value(*expr))
+                else {
+                    return Ok(None);
+                };
+                let Some(value) = self.constant_of(written)? else {
+                    return Ok(None);
+                };
+                match self.stringified(value)?.and_then(php_heap::Zval::as_str) {
+                    Some(text) => text.bytes().to_vec(),
+                    None => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
         };
-        let Some(var) = self.parsed.tree[var].var else {
-            return Ok(None);
-        };
-        let property = self.variable_name(var);
         let shown = String::from_utf8_lossy(&property).into_owned();
         let hook_shown = String::from_utf8_lossy(&hook).into_owned();
         if self.active_class.is_none() {

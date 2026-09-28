@@ -4649,12 +4649,13 @@ mod tests {
 
     /// What stands beside a `C::$p` read and is not read yet is refused
     /// as such (#372): a compound assignment over what is no variable,
-    /// the property the program names as it serves, `self`, `parent`
-    /// and `static` as the class, and such a fetch in a constant
-    /// expression, which php refuses outright. `C::$p = &$o->q` was one
-    /// of them until #611 made the source of a `= &` `zend_compile_var`'s,
-    /// and `C::$p()`, whose method the local `$p` names, until it was
-    /// read as `INIT_STATIC_METHOD_CALL` over the CV.
+    /// `self`, `parent` and `static` as the class, and such a fetch in a
+    /// constant expression, which php refuses outright. `C::$p = &$o->q`
+    /// was one of them until #611 made the source of a `= &`
+    /// `zend_compile_var`'s, `C::$p()`, whose method the local `$p`
+    /// names, until it was read as `INIT_STATIC_METHOD_CALL` over the
+    /// CV, and the property the program names as it serves, `C::$$p`
+    /// and `C::${'p'}`, until #1189.
     #[test]
     fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
         let refused = |source: &[u8]| {
@@ -4671,14 +4672,8 @@ mod tests {
             refused(b"<?php $this += 1;").as_deref(),
             Some("a compound assignment to what is no variable this compiler cannot read yet")
         );
-        assert_eq!(
-            refused(b"<?php C::$$p;").as_deref(),
-            Some("a static property named at run time this compiler cannot read yet")
-        );
-        assert_eq!(
-            refused(b"<?php C::${'p'};").as_deref(),
-            Some("a static property named at run time this compiler cannot read yet")
-        );
+        assert_eq!(refused(b"<?php C::$$p;").as_deref(), None);
+        assert_eq!(refused(b"<?php C::${'p'};").as_deref(), None);
         assert_eq!(refused(b"<?php C::$p();").as_deref(), None);
         assert_eq!(refused(b"<?php echo self::$p;").as_deref(), None);
         assert_eq!(

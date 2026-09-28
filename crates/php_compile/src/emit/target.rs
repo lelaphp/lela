@@ -12,7 +12,7 @@
 
 use php_syntax::tree::{self, NodeId};
 
-use super::{ClassSpec, Emit, Member, Scoped, SimpleVar, Where, walk};
+use super::{ClassSpec, Emit, Member, Scoped, ScopedName, SimpleVar, Where, walk};
 use crate::CompileError;
 
 /// The value a write stores: an expression the write compiles where
@@ -35,7 +35,7 @@ pub(super) enum Target {
     /// `$o->name` or `$o->$name`, `ZEND_AST_PROP`.
     Prop { object: tree::Expr, name: Member },
     /// `C::$name`, `ZEND_AST_STATIC_PROP`.
-    StaticProp { class: ClassSpec, name: Vec<u8> },
+    StaticProp { class: ClassSpec, name: ScopedName },
     /// `list(…)` or `[…]`, `ZEND_AST_ARRAY` as a target.
     List(List),
     /// `$$x` or `${expr}`, a `ZEND_AST_VAR` whose name is no `ZEND_AST_ZVAL`,
@@ -178,10 +178,7 @@ impl Emit<'_> {
                 self.is_nullsafe(id) || self.is_short_circuited(tree[id].obj)
             }
             tree::Expr::ScopedAccessExpr(id) => {
-                matches!(
-                    tree[id].member,
-                    Some(tree::ScopedSelector::SimpleVarExpr(_))
-                ) && self.is_short_circuited(tree[id].scope)
+                self.names_property(id) && self.is_short_circuited(tree[id].scope)
             }
             // The callee as written: `($o?->f)()` calls a value, php's
             // `ZEND_AST_CALL`, which no `?->` short-circuits.
@@ -222,10 +219,7 @@ impl Emit<'_> {
             | tree::Expr::SubscriptExpr(_)
             | tree::Expr::MemberAccessExpr(_)
             | tree::Expr::CallExpr(_) => true,
-            tree::Expr::ScopedAccessExpr(id) => matches!(
-                self.parsed.tree[id].member,
-                Some(tree::ScopedSelector::SimpleVarExpr(_))
-            ),
+            tree::Expr::ScopedAccessExpr(id) => self.names_property(id),
             _ => false,
         }
     }
