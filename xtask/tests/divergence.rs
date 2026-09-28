@@ -396,7 +396,14 @@ since = "2026-09-18"
         md.contains(&counts_line(&registry, Some(Kind::Crosscheck))),
         "the kind's row of counts:\n{md}"
     );
-    assert!(md.contains("| crosscheck | 0 | 1 | 0 | 1 |"), "{md}");
+    // The workspace's own registry may carry crosscheck rows already
+    // (#1236's), so the fixture's row is one more on top of those.
+    let accepted = registry
+        .rows()
+        .iter()
+        .filter(|r| r.kind == Kind::Crosscheck && r.status == Status::Accepted)
+        .count();
+    assert!(accepted >= 1, "the fixture's row is counted: {md}");
     assert!(md.contains(&counts_line(&registry, None)), "{md}");
     let (ok, json, _) = xtask(
         &root,
@@ -404,7 +411,7 @@ since = "2026-09-18"
     );
     assert!(ok);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["counts"]["crosscheck"]["accepted"], 1);
+    assert_eq!(value["counts"]["crosscheck"]["accepted"], accepted);
 }
 
 #[test]
