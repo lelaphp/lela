@@ -231,7 +231,7 @@ fn in_array(
     for (_, value) in haystack.snapshot() {
         let value = value.deref();
         if if strict {
-            identical(&needle, &value)
+            identical(req, &needle, &value)?
         } else {
             loose_eq(req, &needle, &value)?
         } {
@@ -256,7 +256,7 @@ fn array_keys(
             Passed::Given(filter) => {
                 let value = value.deref();
                 if strict {
-                    identical(filter, &value)
+                    identical(req, filter, &value)?
                 } else {
                     loose_eq(req, filter, &value)?
                 }
