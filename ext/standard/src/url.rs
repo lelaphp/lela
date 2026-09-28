@@ -614,6 +614,11 @@ pub(super) fn php_url_decode(s: &[u8]) -> Vec<u8> {
     decode(s, true)
 }
 
+/// `php_raw_url_decode(str, len)`.
+pub(super) fn php_raw_url_decode(s: &[u8]) -> Vec<u8> {
+    decode(s, false)
+}
+
 /// The parser `php_stream_context_get_uri_parser` names for a wrapper,
 /// decoded once: `parse_url`, the default, which this crate keeps, or a
 /// class of ext/uri's (design §4.10).

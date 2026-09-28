@@ -45,6 +45,7 @@ mod file;
 mod filestat;
 mod filters;
 mod formatted_print;
+mod ftp_fopen_wrapper;
 mod getopt;
 mod head;
 mod hrtime;
@@ -787,16 +788,16 @@ fn ini_handlers() -> [(&'static [u8], OnModify); 8] {
 /// request's wrapper and filter tables (`filters::register`). The
 /// wrappers go in as `PHP_MINIT(basic)` registers them
 /// (`Z/ext/standard/basic_functions.c:341-346`): `php`, `file`, `glob`,
-/// `data`, `http`, and `ftp` once it lands, the engine keeping the kinds
-/// of the first four but `glob`. The `assert.*` entries' startup deprecations are their
+/// `data`, `http`, `ftp`, the engine keeping the kinds of the first four
+/// but `glob`. The `assert.*` entries' startup deprecations are their
 /// on-modify rules, which the engine serves over the host's values as
 /// it starts.
 ///
 /// ```php
-/// echo implode(' ', array_intersect(stream_get_wrappers(), ['php', 'file', 'glob', 'data', 'http'])), "\n";
+/// echo implode(' ', array_intersect(stream_get_wrappers(), ['php', 'file', 'glob', 'data', 'http', 'ftp'])), "\n";
 /// ```
 /// ```expect
-/// php file glob data http
+/// php file glob data http ftp
 /// ```
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::rinit`'s signature
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
@@ -805,6 +806,7 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
     req.register_wrapper(dir::glob_wrapper());
     req.register_engine_wrapper(EngineWrapper::Data);
     req.register_wrapper(http_fopen_wrapper::wrapper());
+    req.register_wrapper(ftp_fopen_wrapper::wrapper());
     filters::register(req);
     Ok(())
 }
