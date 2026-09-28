@@ -1,26 +1,30 @@
-//! `OpenSSLAsymmetricKey` and the natives that make, read and write one:
-//! `php_openssl_pkey_object`, `php_openssl_pkey_from_zval` (a key, a
-//! PEM string, a `file://` path, or an array of one and its passphrase)
-//! and the `openssl_pkey_*` natives of `openssl.c`.
+//! `OpenSSLAsymmetricKey` and the natives that make, read, write and
+//! combine one: `php_openssl_pkey_object`, `php_openssl_pkey_from_zval`
+//! (a key, a certificate, a PEM string, a `file://` path, or an array of
+//! one and its passphrase) and the `openssl_pkey_*`,
+//! `openssl_dh_compute_key` and `openssl_get_curve_names` natives of
+//! `openssl.c`.
 
-use std::cmp::Ordering;
 use std::ffi::CString;
 
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Passed, Ref, Untyped};
+use php_ext::abi::{Instance, OrFalse, Passed, Path, Ref, Untyped};
 use php_ext::attr::{php_class, php_function};
-use php_ext::call::{Function, lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::to_string;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, raise, throw};
-use php_ext::request::{Request, Resolve};
-use php_ext::values::{Key as ArrayKey, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, pending, throw};
+use php_ext::request::Request;
+use php_ext::values::{Key as ArrayKey, PhpArray, PhpString, Value, ValueRef};
 
-use crate::config::{self, field};
 use crate::constants::{
     OPENSSL_KEYTYPE_DH, OPENSSL_KEYTYPE_DSA, OPENSSL_KEYTYPE_EC, OPENSSL_KEYTYPE_ED448,
     OPENSSL_KEYTYPE_ED25519, OPENSSL_KEYTYPE_RSA, OPENSSL_KEYTYPE_X448, OPENSSL_KEYTYPE_X25519,
 };
-use crate::ffi::{Bio, Certificate, Cipher, KeyKind, PKey};
-use crate::{errors_restore_mark, errors_set_mark, store_errors};
+use crate::decode::{Arg, Origin, c_string, cert_from_str, check_path, defer, finish, raised};
+use crate::ffi::key::{KeyContext, Operation};
+use crate::ffi::{self, Bio, Cipher, KeyKind, PKey};
+use crate::{
+    Handlers, config, errors_restore_mark, errors_set_mark, keydata, put, put_bytes, store_errors,
+};
 
 /// A `php_openssl_pkey_object`: the key, and whether it was made as a
 /// private one, which is what the natives that take a key check.
@@ -63,44 +67,13 @@ pub(crate) struct OpenSSLAsymmetricKey;
 #[php_class]
 impl OpenSSLAsymmetricKey {}
 
-/// `php_openssl_pkey_object_handlers`: `std_object_handlers` with
-/// `get_constructor` refusing, `clone_obj` php's null slot and `compare`
-/// `zend_objects_not_comparable`.
-pub(crate) struct Handlers;
-
-pub(crate) static HANDLERS: Handlers = Handlers;
-
-impl ObjectHandlers for Handlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
-            req,
-            "Error",
-            "Cannot directly construct OpenSSLAsymmetricKey, use openssl_pkey_new() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
-    }
-}
+/// `php_openssl_pkey_object_handlers`.
+pub(crate) static HANDLERS: Handlers =
+    Handlers("Cannot directly construct OpenSSLAsymmetricKey, use openssl_pkey_new() instead");
 
 /// `php_openssl_pkey_object_init`: a new `OpenSSLAsymmetricKey` holding
 /// the key.
-fn object_of(
+pub(crate) fn object_of(
     req: &mut Request,
     pkey: PKey,
     private: bool,
@@ -120,7 +93,10 @@ fn object_of(
 }
 
 /// The key an `OpenSSLAsymmetricKey` holds, and whether it is private.
-fn held(req: &mut Request, key: Instance<OpenSSLAsymmetricKey>) -> Result<(PKey, bool), Thrown> {
+pub(crate) fn held(
+    req: &mut Request,
+    key: Instance<OpenSSLAsymmetricKey>,
+) -> Result<(PKey, bool), Thrown> {
     let payload = key.payload_mut(req)?;
     let private = payload.private;
     match payload.pkey.clone() {
@@ -132,14 +108,6 @@ fn held(req: &mut Request, key: Instance<OpenSSLAsymmetricKey>) -> Result<(PKey,
     }
 }
 
-/// A parameter a key or a path is read from, as its messages name it:
-/// one-based position and declared name.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Arg {
-    pub(crate) position: u32,
-    pub(crate) name: &'static str,
-}
-
 /// Which half of a key pair a native asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Half {
@@ -147,86 +115,33 @@ pub(crate) enum Half {
     Public,
 }
 
-/// `PHP_OPENSSL_CHECK_SIZE_T_TO_INT`: a length past `INT_MAX` refused.
-pub(crate) fn check_int_len(req: &mut Request, len: usize, arg: u32) -> Result<(), Thrown> {
+/// `PHP_OPENSSL_CHECK_SIZE_T_TO_INT`: a length past `INT_MAX` refused
+/// with php's `ValueError`, `Argument #N ($x) {what} is too long`.
+pub(crate) fn check_int_len(
+    req: &mut Request,
+    len: usize,
+    what: &str,
+    arg: u32,
+) -> Result<(), Thrown> {
     if i32::try_from(len).is_err() {
-        return Err(arg_value_error(req, arg, "is too long"));
+        let tail = format!("{what} is too long");
+        return Err(php_ext::raising::argument_error(
+            req,
+            "ValueError",
+            arg,
+            &tail,
+        ));
     }
     Ok(())
 }
 
-/// `php_openssl_check_path_ex` for a path a parameter names, `file://`
-/// taken off: the path made absolute; `None` where it cannot be, after
-/// the warning php raises, and a `ValueError` for a NUL in it.
-pub(crate) fn check_path(
-    req: &mut Request,
-    path: &[u8],
-    arg: Arg,
-) -> Result<Option<CString>, Thrown> {
-    let Some(path) = path
-        .strip_prefix(b"file://")
-        .filter(|rest| !rest.is_empty())
-    else {
-        return Ok(None);
-    };
-    if path.contains(&0) {
-        return Err(arg_value_error(
-            req,
-            arg.position,
-            "not contain any null bytes",
-        ));
-    }
-    let cwd = req.cwd().0.into_os_string().into_encoded_bytes();
-    if let Some(real) = req.virtual_file_ex(&cwd, path, Resolve::FilePath) {
-        return Ok(CString::new(real).ok());
-    }
-    // `php_verror(NULL, arg_name, E_WARNING, ...)`: the parameter's name
-    // between the parentheses.
-    let text = format!(
-        "{}({}): must be a valid file path",
-        req.active_function_name(),
-        arg.name
-    );
-    raise(req, Level::Warning, &text);
-    Ok(None)
-}
-
-/// `php_openssl_x509_from_str`: a certificate from a `file://` path (any
-/// PEM certificate label) or from the string itself (`CERTIFICATE`
-/// alone), what the library said of a failure stored.
-fn certificate_from(
-    req: &mut Request,
-    text: &[u8],
-    arg: Arg,
-) -> Result<Option<Certificate>, Thrown> {
-    let cert = if text.len() > 7 && text.starts_with(b"file://") {
-        let Some(path) = check_path(req, text, arg)? else {
-            return Ok(None);
-        };
-        let Some(bio) = Bio::file(&path) else {
-            store_errors(req);
-            return Ok(None);
-        };
-        Certificate::read_pem(&bio)
-    } else {
-        let Some(bio) = Bio::reading(text) else {
-            store_errors(req);
-            return Ok(None);
-        };
-        Certificate::read_pem_certificate(&bio)
-    };
-    if cert.is_none() {
-        store_errors(req);
-    }
-    Ok(cert)
-}
-
 /// `php_openssl_pkey_from_zval`: the key a parameter gives. An array is
 /// `[key, passphrase]`; an `OpenSSLAsymmetricKey` must be the half asked
-/// for; anything else is read as a string, a `file://` path or the PEM
-/// itself, a certificate's key where the public half is asked for and
-/// the string is one. `None` where there is no key, after the warnings
-/// php raises and with the library's reasons stored.
+/// for; an `OpenSSLCertificate` gives its public key; anything else is
+/// read as a string, a `file://` path or the PEM itself, a certificate's
+/// key where the public half is asked for and the string is one. `None`
+/// where there is no key, after the warnings php raises and with the
+/// library's reasons stored.
 ///
 /// ```php
 /// $k = openssl_pkey_new(['private_key_bits' => 512]);
@@ -238,6 +153,8 @@ fn certificate_from(
 /// var_dump(openssl_sign('x', $sig, openssl_pkey_get_public($pub)));
 /// var_dump(openssl_pkey_get_public(42));
 /// try { openssl_pkey_get_private("file://a\0b"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// $x = openssl_csr_sign(openssl_csr_new(['commonName' => 'a'], $k), null, $k, 1);
+/// var_dump(openssl_pkey_get_details(openssl_pkey_get_public($x))['key'] === $pub, openssl_pkey_get_private($x));
 /// ```
 /// ```expect
 /// bool(true)
@@ -253,6 +170,8 @@ fn certificate_from(
 /// bool(false)
 /// bool(false)
 /// openssl_pkey_get_private(): Argument #1 ($private_key) must not contain any null bytes
+/// bool(true)
+/// bool(false)
 /// ```
 pub(crate) fn key_from(
     req: &mut Request,
@@ -266,18 +185,24 @@ pub(crate) fn key_from(
     if let ValueRef::Array(array) = value.as_ref() {
         let form = "Key array must be of the form array(0 => key, 1 => phrase)";
         let Some(given) = array.get(&ArrayKey::Int(1)) else {
-            return Err(throw(req, "ValueError", form));
+            let thrown = throw(req, "ValueError", form);
+            defer(req, thrown);
+            return Ok(None);
         };
         phrase = Some(match given.as_ref() {
             ValueRef::Str(s) => s.as_bytes().to_vec(),
             _ => to_string(req, &given)?.as_bytes().to_vec(),
         });
         let Some(inner) = array.get(&ArrayKey::Int(0)) else {
-            return Err(throw(req, "ValueError", form));
+            let thrown = throw(req, "ValueError", form);
+            defer(req, thrown);
+            return Ok(None);
         };
         value = inner;
     }
 
+    let mut cert = None;
+    let mut key = None;
     if let ValueRef::Object(object) = value.as_ref()
         && let Some(held) = object.native::<Key>(req)
     {
@@ -296,54 +221,59 @@ pub(crate) fn key_from(
             return Ok(None);
         }
         return Ok(pkey);
-    }
-    if !matches!(value.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
-        return Ok(None);
-    }
-    let text = to_string(req, &value)?;
-    let text = text.as_bytes();
-    let mut file = None;
-    if text.len() > 7 && text.starts_with(b"file://") {
-        let Some(path) = check_path(req, text, arg)? else {
+    } else if let ValueRef::Object(object) = value.as_ref()
+        && let Some(held) = object.native::<crate::x509::Cert>(req)
+    {
+        cert.clone_from(&held.cert);
+    } else {
+        if !matches!(value.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
             return Ok(None);
-        };
-        file = Some(path);
-    }
-    let bio = |file: &Option<CString>| match file {
-        Some(path) => Bio::file(path),
-        None => Bio::reading(text),
-    };
-
-    let mut cert = None;
-    let key = match half {
-        Half::Public => {
-            errors_set_mark(req);
-            cert = certificate_from(req, text, arg)?;
-            if cert.is_some() {
-                None
-            } else {
-                errors_restore_mark(req);
-                let Some(bio) = bio(&file) else {
-                    store_errors(req);
-                    return Ok(None);
-                };
-                PKey::read_public(&bio)
-            }
         }
-        Half::Private => {
-            let Some(bio) = bio(&file) else {
+        let text = to_string(req, &value)?;
+        let text = text.as_bytes();
+        let mut file: Option<CString> = None;
+        if text.len() > 7 && text.starts_with(b"file://") {
+            let Some(path) = check_path(req, text, Origin::Arg(arg), true)? else {
                 return Ok(None);
             };
-            PKey::read_private(&bio, phrase.as_deref())
+            file = Some(path);
         }
-    };
+        let bio = |file: &Option<CString>| match file {
+            Some(path) => Bio::file(path, c"r"),
+            None => Bio::reading(text),
+        };
+        match half {
+            Half::Public => {
+                errors_set_mark(req);
+                cert = cert_from_str(req, text, Origin::Arg(arg))?;
+                if cert.is_none() {
+                    errors_restore_mark(req);
+                    let Some(bio) = bio(&file) else {
+                        store_errors(req);
+                        return Ok(None);
+                    };
+                    key = PKey::read_public(&bio);
+                }
+            }
+            Half::Private => {
+                let Some(bio) = bio(&file) else {
+                    return Ok(None);
+                };
+                key = PKey::read_private(&bio, phrase.as_deref());
+            }
+        }
+    }
     if key.is_some() {
         return Ok(key);
     }
     store_errors(req);
-    let key = cert.as_ref().and_then(Certificate::public_key);
-    if cert.is_some() && key.is_none() {
-        store_errors(req);
+    if half == Half::Public
+        && let Some(cert) = &cert
+    {
+        key = cert.public_key();
+        if key.is_none() {
+            store_errors(req);
+        }
     }
     Ok(key)
 }
@@ -351,7 +281,9 @@ pub(crate) fn key_from(
 /// `openssl_pkey_new(?array $options = null): OpenSSLAsymmetricKey|false`:
 /// a new private key of the type and size the options and the
 /// configuration say, RSA of the configuration's `default_bits` unless
-/// told otherwise.
+/// told otherwise; or, where the options hold an `rsa`, `dsa`, `dh`,
+/// `ec`, `x25519`, `ed25519`, `x448` or `ed448` array, the key its
+/// parameters make.
 ///
 /// ```php
 /// $k = openssl_pkey_new(['private_key_bits' => 512]);
@@ -361,6 +293,15 @@ pub(crate) fn key_from(
 /// var_dump(openssl_pkey_new(['private_key_bits' => 128]));
 /// var_dump(openssl_pkey_new(['private_key_type' => 42]));
 /// var_dump(openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC]));
+/// $r = openssl_pkey_get_details($k)['rsa'];
+/// var_dump(openssl_pkey_get_details(openssl_pkey_new(['rsa' => ['n' => $r['n'], 'e' => $r['e'], 'd' => $r['d']]]))['key'] === openssl_pkey_get_details($k)['key']);
+/// var_dump(openssl_pkey_new(['rsa' => ['n' => $r['n']]]));
+/// $e = openssl_pkey_get_details(openssl_pkey_new(['ec' => ['curve_name' => 'prime256v1']]));
+/// var_dump($e['bits'], strlen($e['ec']['d']));
+/// var_dump(openssl_pkey_new(['ec' => ['curve_name' => 'nope']]), openssl_pkey_new(['ec' => []]));
+/// $x = openssl_pkey_get_details(openssl_pkey_new(['x25519' => []]));
+/// var_dump($x['type'] === OPENSSL_KEYTYPE_X25519, strlen($x['x25519']['pub_key']));
+/// var_dump(openssl_pkey_get_details(openssl_pkey_new(['dh' => ['p' => "\xff\xff\xff\xff\xff\xff\xff\xc5", 'g' => "\x02", 'priv_key' => "\x03"]]))['dh']['pub_key'] === "\x08");
 /// ```
 /// ```expect
 /// bool(true)
@@ -377,45 +318,142 @@ pub(crate) fn key_from(
 ///
 /// Warning: openssl_pkey_new(): Missing configuration value: "curve_name" not set in %s on line 8
 /// bool(false)
+/// bool(true)
+/// bool(false)
+/// int(256)
+/// int(32)
+///
+/// Warning: openssl_pkey_new(): Unknown elliptic curve (short) name nope in %s on line 14
+///
+/// Warning: openssl_pkey_new(): Missing params: curve_name in %s on line 14
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// int(32)
+/// bool(true)
 /// ```
 #[php_function]
 fn openssl_pkey_new(
     req: &mut Request,
     #[php(default = null)] options: Option<PhpArray>,
 ) -> Result<OrFalse<Instance<OpenSSLAsymmetricKey>>, Thrown> {
-    if let Some(array) = &options {
-        for form in [
-            &b"rsa"[..],
-            b"dsa",
-            b"dh",
-            b"ec",
-            b"x25519",
-            b"ed25519",
-            b"x448",
-            b"ed448",
-        ] {
-            if field(req, *array, form)?.is_some_and(|v| matches!(v.as_ref(), ValueRef::Array(_))) {
-                let text = format!(
-                    "InternalError: openssl_pkey_new() from the \"{}\" key's parameters is not ported",
-                    String::from_utf8_lossy(form)
-                );
-                return Err(fatal(req, &text));
-            }
-        }
+    if let Some(array) = options
+        && let Some((kind, data)) = keydata::entry(req, array)?
+    {
+        let made = match kind {
+            KeyKind::Rsa => keydata::rsa(req, data)?.map(|key| (key, true)),
+            KeyKind::Dsa | KeyKind::Dh => keydata::ffc(req, kind, data)?,
+            KeyKind::Ec => keydata::ec(req, data)?,
+            _ => keydata::curve(req, kind, data)?,
+        };
+        return Ok(match made {
+            Some((key, private)) => OrFalse::Value(object_of(req, key, private)?),
+            None => OrFalse::False,
+        });
     }
-    let Some(request) = config::parse(req, options)? else {
+    let Some(settings) = config::parse(req, options)? else {
         return Ok(OrFalse::False);
     };
-    let Some(key) = request.generate(req) else {
+    let Some(key) = settings.generate(req) else {
         return Ok(OrFalse::False);
     };
     Ok(OrFalse::Value(object_of(req, key, true)?))
 }
 
-/// `openssl_pkey_export($key, &$output, ?string $passphrase = null,
-/// ?array $options = null): bool`: the private key as PEM, encrypted
-/// under the passphrase with the options' cipher (`DES-EDE3-CBC` unless
-/// named) where one is given and the configuration encrypts keys.
+/// The private key as PEM into `out`, encrypted under the passphrase
+/// with the options' cipher (`DES-EDE3-CBC` unless named) where one is
+/// given and the configuration encrypts keys.
+fn write_private(
+    req: &mut Request,
+    pkey: &PKey,
+    settings: &config::Settings,
+    phrase: Option<&[u8]>,
+    out: &Bio<'_>,
+) -> bool {
+    let fallback;
+    let encryption = match phrase {
+        Some(phrase) if settings.encrypt => {
+            let cipher = if let Some(cipher) = &settings.cipher {
+                Some(cipher)
+            } else {
+                fallback = Cipher::des_ede3_cbc();
+                fallback.as_ref()
+            };
+            cipher.map(|cipher| (cipher, phrase))
+        }
+        _ => None,
+    };
+    if pkey.write_private(out, encryption) {
+        return true;
+    }
+    store_errors(req);
+    false
+}
+
+/// `openssl_pkey_export_to_file($key, string $output_filename, ?string`
+/// `$passphrase = null, ?array $options = null): bool`: the private key
+/// as PEM, written to the file.
+///
+/// ```php
+/// $k = openssl_pkey_new(['private_key_bits' => 512]);
+/// $f = __DIR__ . '/k.pem';
+/// var_dump(openssl_pkey_export_to_file($k, $f), substr(file_get_contents($f), 0, 27));
+/// var_dump(openssl_pkey_export_to_file($k, $f, 'pw'), openssl_pkey_get_private('file://' . $f, 'pw') instanceof OpenSSLAsymmetricKey);
+/// unlink($f);
+/// var_dump(openssl_pkey_export_to_file('nope', $f));
+/// ```
+/// ```expect
+/// bool(true)
+/// string(27) "-----BEGIN PRIVATE KEY-----"
+/// bool(true)
+/// bool(true)
+///
+/// Warning: openssl_pkey_export_to_file(): Cannot get key from parameter 1 in %s on line 7
+/// bool(false)
+/// ```
+#[php_function]
+fn openssl_pkey_export_to_file(
+    req: &mut Request,
+    #[php(sensitive)] key: Untyped<Value>,
+    output_filename: Path,
+    #[php(sensitive, default = null)] passphrase: Option<PhpString>,
+    #[php(default = null)] options: Option<PhpArray>,
+) -> Result<bool, Thrown> {
+    finish(req, move |req| {
+        let phrase = passphrase.as_ref().map(|p| p.as_bytes().to_vec());
+        if let Some(phrase) = &phrase {
+            check_int_len(req, phrase.len(), "passphrase", 3)?;
+        }
+        let arg = Arg::new(1, "key");
+        let Some(pkey) = key_from(req, &key.0, Half::Private, phrase.as_deref(), arg)? else {
+            if !raised(req) {
+                docref(req, Level::Warning, "Cannot get key from parameter 1");
+            }
+            return Ok(false);
+        };
+        let origin = Origin::Arg(Arg::new(2, "output_filename"));
+        let Some(path) = check_path(req, output_filename.0.as_bytes(), origin, false)? else {
+            return Ok(false);
+        };
+        let Some(settings) = config::parse(req, options)? else {
+            return Ok(false);
+        };
+        let Some(out) = Bio::file(&path, c"w") else {
+            store_errors(req);
+            return Ok(false);
+        };
+        Ok(write_private(
+            req,
+            &pkey,
+            &settings,
+            phrase.as_deref(),
+            &out,
+        ))
+    })
+}
+
+/// `openssl_pkey_export($key, &$output, ?string $passphrase = null,`
+/// `?array $options = null): bool`: the private key as PEM.
 ///
 /// ```php
 /// $k = openssl_pkey_new(['private_key_bits' => 512]);
@@ -446,41 +484,32 @@ fn openssl_pkey_export(
     #[php(sensitive, default = null)] passphrase: Option<PhpString>,
     #[php(default = null)] options: Option<PhpArray>,
 ) -> Result<bool, Thrown> {
-    let phrase = passphrase.as_ref().map(|p| p.as_bytes().to_vec());
-    if let Some(phrase) = &phrase {
-        check_int_len(req, phrase.len(), 3)?;
-    }
-    let arg = Arg {
-        position: 1,
-        name: "key",
-    };
-    let Some(pkey) = key_from(req, &key.0, Half::Private, phrase.as_deref(), arg)? else {
-        docref(req, Level::Warning, "Cannot get key from parameter 1");
-        return Ok(false);
-    };
-    let Some(request) = config::parse(req, options)? else {
-        return Ok(false);
-    };
-    let fallback;
-    let encryption = match &phrase {
-        Some(phrase) if request.encrypt => {
-            let cipher = if let Some(cipher) = &request.cipher {
-                Some(cipher)
-            } else {
-                fallback = Cipher::des_ede3_cbc();
-                fallback.as_ref()
-            };
-            cipher.map(|cipher| (cipher, phrase.as_slice()))
+    finish(req, move |req| {
+        let phrase = passphrase.as_ref().map(|p| p.as_bytes().to_vec());
+        if let Some(phrase) = &phrase {
+            check_int_len(req, phrase.len(), "passphrase", 3)?;
         }
-        _ => None,
-    };
-    let Some(pem) = pkey.private_pem(encryption) else {
-        store_errors(req);
-        return Ok(false);
-    };
-    let pem = PhpString::new(req, &pem)?;
-    output.set(req, Untyped(Value::string(pem)))?;
-    Ok(true)
+        let arg = Arg::new(1, "key");
+        let Some(pkey) = key_from(req, &key.0, Half::Private, phrase.as_deref(), arg)? else {
+            if !raised(req) {
+                docref(req, Level::Warning, "Cannot get key from parameter 1");
+            }
+            return Ok(false);
+        };
+        let Some(settings) = config::parse(req, options)? else {
+            return Ok(false);
+        };
+        let Some(out) = Bio::memory() else {
+            store_errors(req);
+            return Ok(false);
+        };
+        if !write_private(req, &pkey, &settings, phrase.as_deref(), &out) {
+            return Ok(false);
+        }
+        let pem = PhpString::new(req, &out.contents())?;
+        output.set(req, Untyped(Value::string(pem)))?;
+        Ok(true)
+    })
 }
 
 /// `openssl_pkey_get_public($public_key): OpenSSLAsymmetricKey|false`,
@@ -505,14 +534,13 @@ fn openssl_pkey_get_public(
     req: &mut Request,
     public_key: Untyped<Value>,
 ) -> Result<OrFalse<Instance<OpenSSLAsymmetricKey>>, Thrown> {
-    let arg = Arg {
-        position: 1,
-        name: "public_key",
-    };
-    let Some(pkey) = key_from(req, &public_key.0, Half::Public, None, arg)? else {
-        return Ok(OrFalse::False);
-    };
-    Ok(OrFalse::Value(object_of(req, pkey, false)?))
+    finish(req, move |req| {
+        let arg = Arg::new(1, "public_key");
+        let Some(pkey) = key_from(req, &public_key.0, Half::Public, None, arg)? else {
+            return Ok(OrFalse::False);
+        };
+        Ok(OrFalse::Value(object_of(req, pkey, false)?))
+    })
 }
 
 /// `openssl_pkey_free(OpenSSLAsymmetricKey $key): void`, and its alias
@@ -523,7 +551,6 @@ fn openssl_pkey_get_public(
 /// openssl_free_key(openssl_pkey_new(['private_key_bits' => 512]));
 /// ```
 /// ```expect
-///
 /// Deprecated: Function openssl_pkey_free() is deprecated since 8.0, as OpenSSLAsymmetricKey objects are freed automatically in %s on line 2
 ///
 /// Deprecated: Function openssl_free_key() is deprecated since 8.0, as OpenSSLAsymmetricKey objects are freed automatically in %s on line 3
@@ -539,8 +566,8 @@ fn openssl_pkey_free(req: &mut Request, key: Instance<OpenSSLAsymmetricKey>) {
     let _ = (req, key);
 }
 
-/// `openssl_pkey_get_private($private_key, ?string $passphrase = null):
-/// OpenSSLAsymmetricKey|false`, and its alias `openssl_get_privatekey`:
+/// `openssl_pkey_get_private($private_key, ?string $passphrase = null):`
+/// `OpenSSLAsymmetricKey|false`, and its alias `openssl_get_privatekey`:
 /// the private key a PEM holds, decrypted with the passphrase, which is
 /// the empty one when none is passed and none at all when it is null.
 ///
@@ -568,22 +595,22 @@ fn openssl_pkey_get_private(
     #[php(sensitive)] private_key: Untyped<Value>,
     #[php(sensitive, default = null)] passphrase: Passed<Option<PhpString>>,
 ) -> Result<OrFalse<Instance<OpenSSLAsymmetricKey>>, Thrown> {
-    let phrase = match &passphrase {
-        Passed::Omitted => Some(Vec::new()),
-        Passed::Given(None) => None,
-        Passed::Given(Some(phrase)) => {
-            check_int_len(req, phrase.as_bytes().len(), 2)?;
-            Some(phrase.as_bytes().to_vec())
-        }
-    };
-    let arg = Arg {
-        position: 1,
-        name: "private_key",
-    };
-    let Some(pkey) = key_from(req, &private_key.0, Half::Private, phrase.as_deref(), arg)? else {
-        return Ok(OrFalse::False);
-    };
-    Ok(OrFalse::Value(object_of(req, pkey, true)?))
+    finish(req, move |req| {
+        let phrase = match &passphrase {
+            Passed::Omitted => Some(Vec::new()),
+            Passed::Given(None) => None,
+            Passed::Given(Some(phrase)) => {
+                check_int_len(req, phrase.as_bytes().len(), "passphrase", 2)?;
+                Some(phrase.as_bytes().to_vec())
+            }
+        };
+        let arg = Arg::new(1, "private_key");
+        let Some(pkey) = key_from(req, &private_key.0, Half::Private, phrase.as_deref(), arg)?
+        else {
+            return Ok(OrFalse::False);
+        };
+        Ok(OrFalse::Value(object_of(req, pkey, true)?))
+    })
 }
 
 /// The `OPENSSL_KEYTYPE_*` of a kind, -1 for one php names none of.
@@ -665,13 +692,6 @@ fn layout(kind: KeyKind) -> Option<Layout> {
     })
 }
 
-/// A string entry of an array under construction.
-fn put(req: &mut Request, array: &mut PhpArray, name: &[u8], bytes: &[u8]) -> Result<(), Thrown> {
-    let key = ArrayKey::Str(PhpString::new(req, name)?);
-    let value = Value::string(PhpString::new(req, bytes)?);
-    array.set(req, key, value)
-}
-
 /// `openssl_pkey_get_details(OpenSSLAsymmetricKey $key): array|false`:
 /// `bits`, the public half as PEM under `key`, the key's own parameters
 /// under its kind's name, and `type`.
@@ -732,21 +752,20 @@ fn openssl_pkey_get_details(
         return Ok(OrFalse::False);
     };
     let mut out = PhpArray::new(req)?;
-    let bits = ArrayKey::Str(PhpString::new(req, b"bits")?);
-    out.set(req, bits, Value::int(pkey.bits()))?;
-    put(req, &mut out, b"key", &pem)?;
+    put(req, &mut out, b"bits", Value::int(pkey.bits()))?;
+    put_bytes(req, &mut out, b"key", &pem)?;
     let kind = pkey.kind();
     if let Some((name, params)) = layout(kind) {
         let mut inner = PhpArray::new(req)?;
         if kind == KeyKind::Ec
             && let Some(curve) = pkey.utf8_param(c"group")
         {
-            put(req, &mut inner, b"curve_name", &curve)?;
-            let nid = crate::ffi::short_name_nid(&config::c_string(&curve));
+            put_bytes(req, &mut inner, b"curve_name", &curve)?;
+            let nid = ffi::short_name_nid(&c_string(&curve));
             if nid != 0
-                && let Some(oid) = crate::ffi::nid_oid(nid)
+                && let Some(oid) = ffi::nid_oid(nid)
             {
-                put(req, &mut inner, b"curve_oid", &oid)?;
+                put_bytes(req, &mut inner, b"curve_oid", &oid)?;
             }
         }
         for (entry, param) in params {
@@ -755,13 +774,152 @@ fn openssl_pkey_get_details(
                 Param::Octets(name) => pkey.octet_param(name),
             };
             if let Some(bytes) = found {
-                put(req, &mut inner, entry, &bytes)?;
+                put_bytes(req, &mut inner, entry, &bytes)?;
             }
         }
-        let name = ArrayKey::Str(PhpString::new(req, name)?);
-        out.set(req, name, Value::array(inner))?;
+        put(req, &mut out, name, Value::array(inner))?;
     }
-    let type_key = ArrayKey::Str(PhpString::new(req, b"type")?);
-    out.set(req, type_key, Value::int(key_type(kind)))?;
+    put(req, &mut out, b"type", Value::int(key_type(kind)))?;
+    Ok(OrFalse::Value(out))
+}
+
+/// `php_openssl_pkey_derive`: the secret `key` and `peer` agree on,
+/// `size` bytes of it, or all of it where `size` is 0; `None` with the
+/// library's reasons stored.
+fn derive(req: &mut Request, key: &PKey, peer: &PKey, size: usize) -> Option<Vec<u8>> {
+    let mut ctx = KeyContext::of_key(key)?;
+    let secret = (ctx.init(Operation::Derive) && ctx.set_peer(peer))
+        .then(|| ctx.apply(Operation::Derive, &[], size))
+        .flatten();
+    if secret.is_none() {
+        store_errors(req);
+    }
+    secret
+}
+
+/// `openssl_dh_compute_key(string $public_key, OpenSSLAsymmetricKey`
+/// `$private_key): string|false`: the secret a DH key shares with the
+/// peer whose public value is given.
+///
+/// ```php
+/// $p = "\xff\xff\xff\xff\xff\xff\xff\xc5";
+/// $a = openssl_pkey_new(['dh' => ['p' => $p, 'g' => "\x02", 'priv_key' => "\x03"]]);
+/// $b = openssl_pkey_new(['dh' => ['p' => $p, 'g' => "\x02", 'priv_key' => "\x05"]]);
+/// $pb = openssl_pkey_get_details($b)['dh']['pub_key'];
+/// $pa = openssl_pkey_get_details($a)['dh']['pub_key'];
+/// var_dump(bin2hex(openssl_dh_compute_key($pb, $a)), openssl_dh_compute_key($pb, $a) === openssl_dh_compute_key($pa, $b));
+/// var_dump(openssl_dh_compute_key($pb, openssl_pkey_new(['private_key_bits' => 512])));
+/// ```
+/// ```expect
+/// string(0) ""
+/// bool(true)
+/// bool(false)
+/// ```
+#[php_function]
+fn openssl_dh_compute_key(
+    req: &mut Request,
+    public_key: PhpString,
+    #[php(sensitive)] private_key: Instance<OpenSSLAsymmetricKey>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    check_int_len(req, public_key.as_bytes().len(), "pub_key", 1)?;
+    let (pkey, _) = held(req, private_key)?;
+    if !pkey.is_dh() {
+        return Ok(OrFalse::False);
+    }
+    let Some(peer) = pkey.peer_of(public_key.as_bytes()) else {
+        store_errors(req);
+        return Ok(OrFalse::False);
+    };
+    let Some(secret) = derive(req, &pkey, &peer, 0) else {
+        return Ok(OrFalse::False);
+    };
+    Ok(OrFalse::Value(PhpString::new(req, &secret)?))
+}
+
+/// `openssl_pkey_derive($public_key, $private_key, int $key_length = 0):`
+/// `string|false`: the secret a DH, ECDH, X25519 or X448 private key
+/// agrees on with the peer's public key.
+///
+/// ```php
+/// $a = openssl_pkey_new(['x25519' => []]);
+/// $b = openssl_pkey_new(['x25519' => []]);
+/// $pa = openssl_pkey_get_details($a)['key'];
+/// $pb = openssl_pkey_get_details($b)['key'];
+/// var_dump(strlen(openssl_pkey_derive($pb, $a)), openssl_pkey_derive($pb, $a) === openssl_pkey_derive($pa, $b));
+/// var_dump(strlen(openssl_pkey_derive($pb, $a, 16)));
+/// try { openssl_pkey_derive($pb, $a, -1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(openssl_pkey_derive('nope', $a));
+/// ```
+/// ```expect
+/// int(32)
+/// bool(true)
+///
+/// Deprecated: openssl_pkey_derive(): the $key_length parameter is deprecated as it is either ignored or truncates the key in %s on line 7
+/// int(0)
+///
+/// Deprecated: openssl_pkey_derive(): the $key_length parameter is deprecated as it is either ignored or truncates the key in %s on line 8
+/// openssl_pkey_derive(): Argument #3 ($key_length) must be greater than or equal to 0
+/// bool(false)
+/// ```
+#[php_function]
+fn openssl_pkey_derive(
+    req: &mut Request,
+    public_key: Untyped<Value>,
+    #[php(sensitive)] private_key: Untyped<Value>,
+    #[php(default = 0)] key_length: Passed<i64>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    finish(req, move |req| {
+        let length = match key_length {
+            Passed::Omitted => 0,
+            Passed::Given(length) => {
+                docref(
+                    req,
+                    Level::Deprecated,
+                    "the $key_length parameter is deprecated as it is either ignored or truncates the key",
+                );
+                pending(req)?;
+                length
+            }
+        };
+        let Ok(length) = usize::try_from(length) else {
+            return Err(arg_value_error(req, 3, "be greater than or equal to 0"));
+        };
+        let arg = Arg::new(2, "private_key");
+        let Some(key) = key_from(req, &private_key.0, Half::Private, Some(b""), arg)? else {
+            return Ok(OrFalse::False);
+        };
+        let arg = Arg::new(1, "public_key");
+        let Some(peer) = key_from(req, &public_key.0, Half::Public, None, arg)? else {
+            return Ok(OrFalse::False);
+        };
+        let Some(secret) = derive(req, &key, &peer, length) else {
+            return Ok(OrFalse::False);
+        };
+        Ok(OrFalse::Value(PhpString::new(req, &secret)?))
+    })
+}
+
+/// `openssl_get_curve_names(): array|false`: the short name of every
+/// curve the library carries.
+///
+/// ```php
+/// $c = openssl_get_curve_names();
+/// var_dump(in_array('prime256v1', $c), in_array('secp384r1', $c), count($c) > 50);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+#[php_function]
+fn openssl_get_curve_names(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+    let Some(names) = ffi::cipher::curve_names() else {
+        return Ok(OrFalse::False);
+    };
+    let mut out = PhpArray::new(req)?;
+    for name in names {
+        let name = PhpString::new(req, &name)?;
+        out.append(req, Value::string(name))?;
+    }
     Ok(OrFalse::Value(out))
 }

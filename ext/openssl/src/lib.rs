@@ -3,13 +3,17 @@
 //! (design §7.2). Its state on the value (ADR-0005). The phpt subset is
 //! `php-src/ext/openssl/tests`, through `xtask phpt --subset`.
 //!
-//! Declared by the attributes as `openssl.stub.php` at the tag declares
-//! it: the ini entries, the constants, the asymmetric keys with
-//! `OpenSSLAsymmetricKey` ([`key`]) and the configuration they are made
-//! under ([`config`]), the signatures ([`sign`]) and the ring of library
-//! errors `openssl_error_string` reads ([`Errors`]). ext/phar's OpenSSL
-//! signatures call `openssl_sign` and `openssl_verify` through the
-//! function table, as php's do.
+//! Declared by the attributes as `openssl.stub.php` at the tag declares it:
+//! the ini entries, the constants, the three classes, and the natives by
+//! area: certificates ([`x509`]), signing requests ([`csr`]), asymmetric
+//! keys ([`key`], [`keydata`]) and the configuration they are made under
+//! ([`config`]), signatures and raw RSA ([`sign`]), ciphers, digests and
+//! envelopes ([`cipher`]), PKCS#7 ([`pkcs7`]), CMS ([`cms`]), PKCS#12
+//! ([`pkcs12`]), and SPKAC ([`spki`]), with the arguments they share
+//! decoded once ([`decode`]) and the ring of library errors
+//! `openssl_error_string` reads ([`Errors`]). ext/phar's OpenSSL signatures
+//! call `openssl_sign` and `openssl_verify` through the function table, as
+//! php's do.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -23,19 +27,30 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod cipher;
+mod cms;
 mod config;
+mod csr;
+mod decode;
 mod ffi;
 mod key;
+mod keydata;
+mod pkcs12;
+mod pkcs7;
 mod sign;
+mod spki;
+mod x509;
 
+use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
 
-use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
+use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, ObjectHandlers, OrFalse, StartupIni};
 use php_ext::attr::{php_const, php_function};
+use php_ext::call::Function;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::Thrown;
+use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
 /// `register_openssl_symbols`: the constants in `openssl.stub.php`'s
 /// order, as the oracle's OpenSSL 3 build declares them (no `MD2`, no
@@ -142,6 +157,67 @@ pub(crate) mod constants {
     pub(crate) const OPENSSL_ENCODING_PEM: i64 = 2;
 }
 
+/// The object handlers of the three classes: `std_object_handlers` with
+/// `get_constructor` refusing in the class's words, `clone_obj` php's
+/// null slot and `compare` `zend_objects_not_comparable`.
+pub(crate) struct Handlers(pub(crate) &'static str);
+
+impl ObjectHandlers for Handlers {
+    fn get_constructor(
+        &self,
+        req: &mut Request,
+        _object: PhpObject,
+    ) -> Result<Option<Function>, Thrown> {
+        Err(throw(req, "Error", self.0))
+    }
+
+    fn clone_obj(&self) -> Option<CloneObj> {
+        None
+    }
+
+    fn compare(
+        &self,
+        req: &mut Request,
+        left: &Value,
+        right: &Value,
+    ) -> Result<Option<Ordering>, Thrown> {
+        let _ = (req, left, right);
+        Ok(None)
+    }
+}
+
+/// `add_assoc_*`: a value under a string key, a numeric one taken as
+/// the integer, as `zend_symtable_str_update` takes it.
+pub(crate) fn put(
+    req: &mut Request,
+    array: &mut PhpArray,
+    name: &[u8],
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = Key::from_string(PhpString::new(req, name)?);
+    array.set(req, key, value)
+}
+
+/// `add_assoc_stringl`: bytes as a string under a string key.
+pub(crate) fn put_bytes(
+    req: &mut Request,
+    array: &mut PhpArray,
+    name: &[u8],
+    bytes: &[u8],
+) -> Result<(), Thrown> {
+    let value = Value::string(PhpString::new(req, bytes)?);
+    put(req, array, name, value)
+}
+
+/// `make_digest_ex`: bytes as lowercase hex.
+pub(crate) fn hex(bytes: &[u8]) -> Vec<u8> {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|&b| [DIGITS[usize::from(b >> 4)], DIGITS[usize::from(b & 15)]])
+        .collect()
+}
+
 /// `PHP_OPENSSL_ERR_BUFFER_SIZE`: how many codes the ring keeps.
 const ERR_BUFFER_SIZE: usize = 16;
 
@@ -164,6 +240,9 @@ pub(crate) struct Errors {
 struct State {
     errors: Option<Errors>,
     mark: Option<Errors>,
+    /// What a function below a native threw that php leaves standing in `EG(exception)`
+    /// while the native goes on to its end ([`decode::defer`]).
+    thrown: Option<Thrown>,
 }
 
 /// `php_openssl_store_errors`: every code on the library's queue moved
@@ -270,7 +349,7 @@ pub fn extension() -> Extension {
         default: default.as_bytes().into(),
         user: false,
         per_dir: true,
-        system: true,
+        system: false,
     };
     ExtensionBuilder::default()
         .ini(vec![
@@ -279,9 +358,30 @@ pub fn extension() -> Extension {
             ini("openssl.libctx", "custom"),
         ])
         .constants(constants::declared())
+        .class::<x509::OpenSSLCertificate>()
+        .class::<csr::OpenSSLCertificateSigningRequest>()
         .class::<key::OpenSSLAsymmetricKey>()
         .functions(vec![
+            x509::openssl_x509_export_to_file::declared(),
+            x509::openssl_x509_export::declared(),
+            x509::openssl_x509_fingerprint::declared(),
+            x509::openssl_x509_check_private_key::declared(),
+            x509::openssl_x509_verify::declared(),
+            x509::openssl_x509_parse::declared(),
+            x509::openssl_x509_checkpurpose::declared(),
+            x509::openssl_x509_read::declared(),
+            x509::openssl_x509_free::declared(),
+            pkcs12::openssl_pkcs12_export_to_file::declared(),
+            pkcs12::openssl_pkcs12_export::declared(),
+            pkcs12::openssl_pkcs12_read::declared(),
+            csr::openssl_csr_export_to_file::declared(),
+            csr::openssl_csr_export::declared(),
+            csr::openssl_csr_sign::declared(),
+            csr::openssl_csr_new::declared(),
+            csr::openssl_csr_get_subject::declared(),
+            csr::openssl_csr_get_public_key::declared(),
             key::openssl_pkey_new::declared(),
+            key::openssl_pkey_export_to_file::declared(),
             key::openssl_pkey_export::declared(),
             key::openssl_pkey_get_public::declared(),
             key::openssl_get_publickey::declared(),
@@ -290,13 +390,100 @@ pub fn extension() -> Extension {
             key::openssl_pkey_get_private::declared(),
             key::openssl_get_privatekey::declared(),
             key::openssl_pkey_get_details::declared(),
+            cipher::openssl_pbkdf2::declared(),
+            pkcs7::openssl_pkcs7_verify::declared(),
+            pkcs7::openssl_pkcs7_encrypt::declared(),
+            pkcs7::openssl_pkcs7_sign::declared(),
+            pkcs7::openssl_pkcs7_decrypt::declared(),
+            pkcs7::openssl_pkcs7_read::declared(),
+            cms::openssl_cms_verify::declared(),
+            cms::openssl_cms_encrypt::declared(),
+            cms::openssl_cms_sign::declared(),
+            cms::openssl_cms_decrypt::declared(),
+            cms::openssl_cms_read::declared(),
+            sign::openssl_private_encrypt::declared(),
+            sign::openssl_private_decrypt::declared(),
+            sign::openssl_public_encrypt::declared(),
+            sign::openssl_public_decrypt::declared(),
             openssl_error_string::declared(),
             sign::openssl_sign::declared(),
             sign::openssl_verify::declared(),
+            cipher::openssl_seal::declared(),
+            cipher::openssl_open::declared(),
+            cipher::openssl_get_md_methods::declared(),
+            cipher::openssl_get_cipher_methods::declared(),
+            key::openssl_get_curve_names::declared(),
+            cipher::openssl_digest::declared(),
+            cipher::openssl_encrypt::declared(),
+            cipher::openssl_decrypt::declared(),
+            cipher::openssl_cipher_iv_length::declared(),
+            cipher::openssl_cipher_key_length::declared(),
+            key::openssl_dh_compute_key::declared(),
+            key::openssl_pkey_derive::declared(),
+            cipher::openssl_random_pseudo_bytes::declared(),
+            spki::openssl_spki_new::declared(),
+            spki::openssl_spki_verify::declared(),
+            spki::openssl_spki_export::declared(),
+            spki::openssl_spki_export_challenge::declared(),
+            x509::openssl_get_cert_locations::declared(),
         ])
+        .on_modify(b"openssl.libctx", on_update_libctx)
+        .engine_state(started)
         .request_state::<State>()
+        .rinit(rinit)
         .info(info)
         .build("openssl")
+}
+
+/// `OnUpdateLibCtx`: `default` and `custom` name the two library
+/// contexts php keeps; any other value is refused, fatally as the engine
+/// starts and with a warning after. The entry is `PHP_INI_PERDIR`, so
+/// `ini_set()` refuses it before the handler and a program meets the
+/// value the host started with.
+///
+/// ```php
+/// var_dump(ini_get('openssl.libctx'), ini_set('openssl.libctx', 'default'));
+/// ```
+/// ```expect
+/// string(6) "custom"
+/// bool(false)
+/// ```
+#[allow(clippy::unnecessary_wraps)] // the ABI's `OnModify`
+fn on_update_libctx(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+    if value == b"default" || value == b"custom" {
+        return Ok(true);
+    }
+    let level = if req.at_startup() {
+        php_ext::raising::Level::Error
+    } else {
+        php_ext::raising::Level::Warning
+    };
+    let text = format!(
+        "OpenSSL libctx \"{}\" cannot be found",
+        String::from_utf8_lossy(value)
+    );
+    php_ext::raising::docref(req, level, &text);
+    Ok(false)
+}
+
+/// `PHP_MINIT_FUNCTION(openssl)`'s `php_openssl_backend_init`, called
+/// once as the engine is built: nothing is kept but the mark of the call.
+struct Started;
+
+fn started(ini: &StartupIni) -> Started {
+    let _ = ini;
+    ffi::start();
+    Started
+}
+
+/// The library's error queue emptied as a request starts: it is the
+/// thread's, and a thread may have served a request before, where php's
+/// CLI starts each program in a fresh process with an empty queue.
+#[allow(clippy::unnecessary_wraps)] // the ABI's `rinit` hook
+fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    let _ = req;
+    ffi::clear_errors();
+    Ok(())
 }
 
 /// `PHP_MINFO_FUNCTION(openssl)`: the table, then `DISPLAY_INI_ENTRIES`.

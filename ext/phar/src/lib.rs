@@ -219,6 +219,13 @@ fn rshutdown(req: &mut Request) {
 /// them.
 ///
 /// ```php
+/// $e = new ReflectionExtension('phar'); ob_start(); $e->info(); preg_match('/.*OpenSSL.*/', ob_get_clean(), $m); echo $m[0], "\n";
+/// ```
+/// ```expect
+/// Native OpenSSL support => enabled
+/// ```
+///
+/// ```php
 /// $e = new ReflectionExtension('phar'); ob_start(); $e->info(); echo strstr(ob_get_clean(), 'Phar based');
 /// ```
 /// ```expect
@@ -241,10 +248,14 @@ fn info(req: &mut Request) {
     } else {
         "disabled (install ext/bz2)"
     };
+    // `PHAR_HAVE_OPENSSL`: php built with openssl in the binary reports
+    // phar's OpenSSL as native, and one without it may load the
+    // extension later. The bundle is linked at build and loads nothing
+    // after, so an openssl in it is the native one and none is none.
     let openssl = if req.extension_named(b"openssl").is_some() {
-        "enabled"
+        ["Native OpenSSL support", "enabled"]
     } else {
-        "disabled (install ext/openssl)"
+        ["OpenSSL support", "disabled (install ext/openssl)"]
     };
     req.info_table(&[
         &["Phar: PHP Archive support", "enabled"],
@@ -254,9 +265,10 @@ fn info(req: &mut Request) {
         &["ZIP-based phar archives", "enabled"],
         &["gzip compression", zlib],
         &["bzip2 compression", bz2],
-        &["OpenSSL support", openssl],
+        &openssl,
     ]);
-    req.write(b"\nPhar based on pear/PHP_Archive, original concept by Davey Shafik.\nPhar fully realized by Gregory Beaver and Marcus Boerger.\nPortions of tar implementation Copyright (c) 2003-2009 Tim Kientzle.");
+    // `php_info_print_box_start(0)`: the table start's newline, then the box's.
+    req.write(b"\n\nPhar based on pear/PHP_Archive, original concept by Davey Shafik.\nPhar fully realized by Gregory Beaver and Marcus Boerger.\nPortions of tar implementation Copyright (c) 2003-2009 Tim Kientzle.");
     let entries = req.ini_entries();
     let shown = |name: &str, value: &[u8]| -> String {
         if name != CACHE_LIST {
