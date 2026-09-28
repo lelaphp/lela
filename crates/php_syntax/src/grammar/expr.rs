@@ -1333,6 +1333,16 @@ enum Trailer {
 /// ```expect exit=255
 /// Parse error: syntax error, unexpected token "{" in %s on line 2
 /// ```
+///
+/// Nor does anything after a `clone`, 8.5's argument list included:
+///
+/// ```php
+/// $o = new stdClass;
+/// var_dump(clone($o, [])->p);
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token "->", expecting ")" in %s on line 3
+/// ```
 fn at_trailer(p: &mut Parser<'_>, lhs: &Lhs) -> Option<Trailer> {
     // The 8.4 new-dereference rule: `new A()->p` and an anonymous class
     // chain, but a bare `new A` takes no trailer; the dangling `->`, `[`
@@ -1344,9 +1354,12 @@ fn at_trailer(p: &mut Parser<'_>, lhs: &Lhs) -> Option<Trailer> {
     // An `instanceof` whose class reference took what it may: the `->`,
     // `[` or `(` after it is the enclosing construct's (`$x instanceof
     // A->p;` and `$x instanceof $y();` are the bare unexpected token,
-    // probed 8.5.9).
+    // probed 8.5.9). A `clone` is none of php's `dereferenceable`
+    // productions either: the keyword form's operand took every trailer
+    // it may, and 8.5's `clone($o, [...])` is a whole `expr`, so
+    // `clone($o, [])->p` is the unexpected `->`.
     if let Lhs::Done(cm) = lhs
-        && cm.kind == K::INSTANCEOF_EXPR
+        && matches!(cm.kind, K::INSTANCEOF_EXPR | K::CLONE_EXPR)
     {
         return None;
     }
