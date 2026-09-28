@@ -389,6 +389,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "openssl-sys"
+version = "0.9.117"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "pcre2-sys"
 version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -576,6 +588,7 @@ dependencies = [
 name = "php_ext_openssl"
 version = "0.0.0"
 dependencies = [
+ "openssl-sys",
  "php_ext",
 ]
 
