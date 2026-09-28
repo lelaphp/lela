@@ -28,7 +28,7 @@ use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
     Callable, Dependency, DimensionRead, Extension, IniVerdict, NativeNew, ObjectHandlers,
-    PropertyRead, PropertyTest, Std,
+    PropertyRead, PropertyTest, Std, ZendExtension,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Level, Thrown};
@@ -16467,6 +16467,19 @@ impl Request {
     pub fn loaded_extensions(&self) -> Vec<String> {
         std::iter::once(String::from("Core"))
             .chain(self.shared.extensions.iter().map(|e| e.name.clone()))
+            .collect()
+    }
+
+    /// `zend_extensions`, the Zend extensions in the order they were
+    /// loaded, each its `zend_extension` row: what
+    /// `get_loaded_extensions(true)` lists and `ReflectionZendExtension`
+    /// finds by name.
+    #[must_use]
+    pub fn zend_extensions(&self) -> Vec<ZendExtension> {
+        self.shared
+            .extensions
+            .iter()
+            .filter_map(|e| e.zend.clone())
             .collect()
     }
 

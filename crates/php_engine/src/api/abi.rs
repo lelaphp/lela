@@ -162,6 +162,21 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 }
 
+/// A Zend extension's `zend_extension` row (`Z/Zend/zend_extensions.h`),
+/// for an extension php loads both as a `zend_module_entry` and as a Zend extension, as
+/// opcache's `zend_extension_entry` stands beside its
+/// `opcache_module_entry`: what `php -m` lists under `[Zend Modules]`,
+/// `get_loaded_extensions(true)` answers and `ReflectionZendExtension`
+/// reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZendExtension {
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    pub url: String,
+    pub copyright: String,
+}
+
 pub(crate) use crate::api::__private::Entry;
 /// Builds one extension's request state at request start.
 pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
@@ -261,6 +276,8 @@ pub struct Extension {
     pub(crate) compile_file: Option<CompileFileHook>,
     /// What [`ExtensionBuilder::blacklist`] was handed.
     pub(crate) blacklist: Option<BlacklistHook>,
+    /// What [`ExtensionBuilder::zend_extension`] was handed.
+    pub(crate) zend: Option<ZendExtension>,
     /// What [`ExtensionBuilder::intercept`] was handed: each native of
     /// another extension this one replaces, by name, with its entry.
     pub(crate) intercepts: Vec<(Name, Entry)>,
@@ -304,6 +321,7 @@ pub struct ExtensionBuilder {
     interrupt: Option<InterruptHook>,
     compile_file: Option<CompileFileHook>,
     blacklist: Option<BlacklistHook>,
+    zend: Option<ZendExtension>,
     intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
     registered: Vec<Arc<dyn Any + Send + Sync>>,
@@ -533,6 +551,17 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The extension is a Zend extension too, php's `zend_extension`
+    /// beside its `zend_module_entry` (`Z/Zend/zend_extensions.c`), as
+    /// opcache is: `row` is what `php -m` lists under `[Zend Modules]`,
+    /// `get_loaded_extensions(true)` answers and `ReflectionZendExtension`
+    /// reads.
+    #[must_use]
+    pub fn zend_extension(mut self, row: ZendExtension) -> ExtensionBuilder {
+        self.zend = Some(row);
+        self
+    }
+
     /// A native another extension declares, its entry replaced by `entry`
     /// as the engine is built, as phar's `MINIT` replaces `fopen`,
     /// `file_get_contents`, `stat` and their kin in the function table
@@ -641,6 +670,7 @@ impl ExtensionBuilder {
             interrupt: self.interrupt,
             compile_file: self.compile_file,
             blacklist: self.blacklist,
+            zend: self.zend,
             intercepts: self.intercepts,
             info: self.info,
             registered: self.registered,

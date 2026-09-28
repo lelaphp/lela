@@ -31,7 +31,7 @@
 mod blacklist;
 mod ini;
 
-use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, StartupIni};
+use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, StartupIni, ZendExtension};
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::to_callable;
 use php_ext::raising::{Thrown, notice, warning};
@@ -94,9 +94,9 @@ impl Accelerator {
     }
 }
 
-/// The extension value (design §7.1): `Zend OPcache`, its eight
-/// natives, its ini entries each with its handler, its state, and the
-/// blacklist the unit cache asks.
+/// The extension value (design §7.1): `Zend OPcache`, a Zend
+/// extension too, its eight natives, its ini entries each with its
+/// handler, its state, and the blacklist the unit cache asks.
 ///
 /// ```php
 /// var_dump(extension_loaded('Zend OPcache'), extension_loaded('opcache'), count(get_extension_funcs('Zend OPcache')));
@@ -128,6 +128,13 @@ pub fn extension() -> Extension {
     .rinit(rinit)
     .blacklist(blacklisted)
     .info(info)
+    .zend_extension(ZendExtension {
+        name: PRODUCT.to_owned(),
+        version: PHP_VERSION.to_owned(),
+        author: String::from("Zend Technologies"),
+        url: String::from("http://www.zend.com/"),
+        copyright: String::from("Copyright (c)"),
+    })
     .build(PRODUCT)
 }
 

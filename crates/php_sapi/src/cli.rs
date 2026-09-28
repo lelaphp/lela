@@ -673,8 +673,8 @@ pub fn info() -> String {
 
 /// `print_modules` and `print_extensions`: the loaded extensions sorted
 /// as `module_name_cmp` sorts them, without regard to case, under
-/// `[PHP Modules]`, and the Zend extensions, of which this engine has
-/// none, under `[Zend Modules]`.
+/// `[PHP Modules]`, and the Zend extensions in the order they were
+/// loaded under `[Zend Modules]`, opcache's `Zend OPcache` being both.
 #[must_use]
 pub fn extensions(engine: &Engine) -> String {
     let mut names = engine.loaded_extensions();
@@ -684,7 +684,12 @@ pub fn extensions(engine: &Engine) -> String {
         text.push_str(&name);
         text.push('\n');
     }
-    text.push_str("\n[Zend Modules]\n\n");
+    text.push_str("\n[Zend Modules]\n");
+    for name in engine.loaded_zend_extensions() {
+        text.push_str(&name);
+        text.push('\n');
+    }
+    text.push('\n');
     text
 }
 

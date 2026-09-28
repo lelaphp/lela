@@ -554,19 +554,25 @@ fn get_resources(
 
 /// `get_loaded_extensions(bool $zend_extensions = false): array`, php's
 /// `ZEND_FUNCTION(get_loaded_extensions)` (`Z/Zend/zend_builtin_functions.c:1633`):
-/// the names in `module_registry`, `Core` first; the engine loads no Zend
-/// extension, so the list of those is empty.
+/// the names in `module_registry`, `Core` first, or with
+/// `$zend_extensions` the names in `zend_extensions`, opcache's
+/// `Zend OPcache` where the bundle carries it.
 ///
 /// ```php
 /// $loaded = get_loaded_extensions(); $seen = [];
 /// foreach ($loaded as $name) { $seen[$name] = true; }
 /// var_dump($loaded[0], isset($seen['standard']), isset($seen['json']), isset($seen['nope']));
+/// var_dump(get_loaded_extensions(true));
 /// ```
 /// ```expect
 /// string(4) "Core"
 /// bool(true)
 /// bool(true)
 /// bool(false)
+/// array(1) {
+///   [0]=>
+///   string(12) "Zend OPcache"
+/// }
 /// ```
 #[php_function]
 fn get_loaded_extensions(
@@ -574,7 +580,10 @@ fn get_loaded_extensions(
     #[php(default = false)] zend_extensions: bool,
 ) -> Result<PhpArray, Thrown> {
     let names = if zend_extensions {
-        Vec::new()
+        req.zend_extensions()
+            .into_iter()
+            .map(|row| row.name)
+            .collect()
     } else {
         req.loaded_extensions()
     };

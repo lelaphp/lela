@@ -1557,6 +1557,19 @@ impl Engine {
             .collect()
     }
 
+    /// The Zend extensions this engine loaded, in startup order, each the
+    /// name its `zend_extension` row carries: what the CLI's `-m` lists
+    /// under `[Zend Modules]`.
+    #[must_use]
+    pub fn loaded_zend_extensions(&self) -> Vec<String> {
+        self.shared
+            .extensions
+            .iter()
+            .filter_map(|e| e.zend.as_ref())
+            .map(|row| row.name.clone())
+            .collect()
+    }
+
     /// The compiled unit for `source`, as the cache holds it: its
     /// constant strings interned into this engine's table, so two units
     /// carrying one constant carry the one `zend_string` (design §5.2).

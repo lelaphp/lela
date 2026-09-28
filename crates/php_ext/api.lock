@@ -65,6 +65,7 @@ abi::ExtensionBuilder::request_state
 abi::ExtensionBuilder::rinit
 abi::ExtensionBuilder::rshutdown
 abi::ExtensionBuilder::trampolines
+abi::ExtensionBuilder::zend_extension
 abi::False
 abi::FromArgument
 abi::FromArgument::BY_REF
@@ -165,6 +166,7 @@ abi::Typed::new
 abi::Union
 abi::Untyped
 abi::Variadic
+abi::ZendExtension
 attr::php_class
 attr::php_const
 attr::php_function
@@ -518,6 +520,7 @@ request::Request::wrapper_url_stat
 request::Request::write
 request::Request::write_stderr
 request::Request::xport_create
+request::Request::zend_extensions
 request::Resolve
 request::ResourceDtor
 request::Resources
@@ -639,6 +642,7 @@ test::Engine::frameless
 test::Engine::highlight
 test::Engine::lint
 test::Engine::loaded_extensions
+test::Engine::loaded_zend_extensions
 test::Engine::serve
 test::Engine::serve_capture
 test::Engine::serve_capture_as
