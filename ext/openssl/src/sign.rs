@@ -2,7 +2,11 @@
 //! name or by `OPENSSL_ALGO_*`, the key read as
 //! `php_openssl_pkey_from_zval` reads it, and `EVP_DigestSign` or
 //! `EVP_DigestVerify` under the padding `php_openssl_setup_rsa_padding`
-//! allows.
+//! allows; and the raw RSA operations `openssl_private_encrypt`,
+//! `openssl_private_decrypt`, `openssl_public_encrypt` and
+//! `openssl_public_decrypt` over `EVP_PKEY_CTX`.
+
+use std::ffi::c_int;
 
 use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
@@ -10,9 +14,11 @@ use php_ext::raising::{Level, Thrown, argument_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value};
 
-use crate::constants::{OPENSSL_PKCS1_PADDING, OPENSSL_PKCS1_PSS_PADDING};
+use crate::constants::{
+    OPENSSL_PKCS1_OAEP_PADDING, OPENSSL_PKCS1_PADDING, OPENSSL_PKCS1_PSS_PADDING,
+};
 use crate::decode::{Arg, c_string, finish, raised};
-use crate::ffi::key::{DigestContext, Direction};
+use crate::ffi::key::{DigestContext, Direction, KeyContext, Operation};
 use crate::ffi::{Digest, KeyKind, PKey};
 use crate::key::{Half, key_from};
 use crate::store_errors;
@@ -249,5 +255,264 @@ fn openssl_verify(
             store_errors(req);
         }
         Ok(OrFalse::Value(i64::from(verdict)))
+    })
+}
+
+/// One raw RSA operation as the four natives make it: `EVP_PKEY_CTX_new`,
+/// the operation's init, the padding (and for encryption and decryption
+/// the OAEP digest `php_openssl_set_rsa_padding_and_digest` sets), then
+/// the two-call operation; `None` with the library's reasons stored.
+fn rsa_operation(
+    req: &mut Request,
+    key: &PKey,
+    operation: Operation,
+    padding: i64,
+    digest_algo: Option<&PhpString>,
+    data: &[u8],
+) -> Option<Vec<u8>> {
+    let padding = c_int::try_from(padding).unwrap_or(c_int::MAX);
+    let out = (|| {
+        let mut ctx = KeyContext::of_key(key)?;
+        if !ctx.init(operation) || !ctx.set_rsa_padding(padding) {
+            return None;
+        }
+        let digest = match digest_algo {
+            Some(name) => {
+                let Some(md) = Digest::by_name(&c_string(name.as_bytes())) else {
+                    let text = format!(
+                        "Unknown digest algorithm: {}",
+                        String::from_utf8_lossy(c_string(name.as_bytes()).as_bytes())
+                    );
+                    docref(req, Level::Warning, &text);
+                    return None;
+                };
+                Some(md)
+            }
+            None => None,
+        };
+        if let Some(md) = &digest
+            && i64::from(padding) == OPENSSL_PKCS1_OAEP_PADDING
+            && !ctx.set_oaep_md(md)
+        {
+            return None;
+        }
+        ctx.apply(operation, data, 0)
+    })();
+    if out.is_none() {
+        store_errors(req);
+    }
+    out
+}
+
+/// The bytes of a raw RSA operation written to `$out`, or false.
+fn written(
+    req: &mut Request,
+    out: &Ref<Untyped<Value>>,
+    bytes: Option<Vec<u8>>,
+) -> Result<bool, Thrown> {
+    let Some(bytes) = bytes else {
+        return Ok(false);
+    };
+    let bytes = PhpString::new(req, &bytes)?;
+    out.set(req, Untyped(Value::string(bytes)))?;
+    Ok(true)
+}
+
+/// `openssl_private_encrypt(string $data, &$encrypted_data, $private_key,`
+/// `int $padding = OPENSSL_PKCS1_PADDING): bool`: `EVP_PKEY_sign` of the
+/// data itself, what `openssl_public_decrypt` recovers.
+///
+/// ```php
+/// $k = openssl_pkey_new(['private_key_bits' => 1024]);
+/// $pub = openssl_pkey_get_details($k)['key'];
+/// var_dump(openssl_private_encrypt('data', $c, $k), strlen($c), openssl_public_decrypt($c, $d, $pub), $d);
+/// var_dump(openssl_private_encrypt('data', $c, 'nope'), openssl_public_decrypt('bad', $d, $pub), openssl_public_decrypt($c, $d, 'nope'));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(128)
+/// bool(true)
+/// string(4) "data"
+///
+/// Warning: openssl_private_encrypt(): key param is not a valid private key in %s on line 5
+///
+/// Warning: openssl_public_decrypt(): key parameter is not a valid public key in %s on line 5
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+#[php_function]
+fn openssl_private_encrypt(
+    req: &mut Request,
+    #[php(sensitive)] data: PhpString,
+    encrypted_data: Ref<Untyped<Value>>,
+    #[php(sensitive)] private_key: Untyped<Value>,
+    #[php(default = OPENSSL_PKCS1_PADDING)] padding: i64,
+) -> Result<bool, Thrown> {
+    finish(req, move |req| {
+        let arg = Arg::new(3, "private_key");
+        let Some(key) = key_from(req, &private_key.0, Half::Private, Some(b""), arg)? else {
+            if !raised(req) {
+                docref(req, Level::Warning, "key param is not a valid private key");
+            }
+            return Ok(false);
+        };
+        let out = rsa_operation(req, &key, Operation::Sign, padding, None, data.as_bytes());
+        written(req, &encrypted_data, out)
+    })
+}
+
+/// `openssl_private_decrypt(string $data, &$decrypted_data,`
+/// `$private_key, int $padding = OPENSSL_PKCS1_PADDING, ?string`
+/// `$digest_algo = null): bool`: `EVP_PKEY_decrypt` of what
+/// `openssl_public_encrypt` made, OAEP under the digest named.
+///
+/// ```php
+/// $k = openssl_pkey_new(['private_key_bits' => 1024]);
+/// $pub = openssl_pkey_get_details($k)['key'];
+/// var_dump(openssl_public_encrypt('data', $c, $pub, OPENSSL_PKCS1_OAEP_PADDING, 'sha256'), openssl_private_decrypt($c, $d, $k, OPENSSL_PKCS1_OAEP_PADDING, 'sha256'), $d);
+/// var_dump(openssl_private_decrypt($c, $d, $k, OPENSSL_PKCS1_OAEP_PADDING, 'nope'), openssl_private_decrypt($c, $d, 'nope'));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// string(4) "data"
+///
+/// Warning: openssl_private_decrypt(): Unknown digest algorithm: nope in %s on line 5
+///
+/// Warning: openssl_private_decrypt(): key parameter is not a valid private key in %s on line 5
+/// bool(false)
+/// bool(false)
+/// ```
+#[php_function]
+fn openssl_private_decrypt(
+    req: &mut Request,
+    data: PhpString,
+    #[php(sensitive)] decrypted_data: Ref<Untyped<Value>>,
+    #[php(sensitive)] private_key: Untyped<Value>,
+    #[php(default = OPENSSL_PKCS1_PADDING)] padding: i64,
+    #[php(default = null)] digest_algo: Option<php_ext::abi::Path>,
+) -> Result<bool, Thrown> {
+    finish(req, move |req| {
+        let arg = Arg::new(3, "private_key");
+        let Some(key) = key_from(req, &private_key.0, Half::Private, Some(b""), arg)? else {
+            if !raised(req) {
+                docref(
+                    req,
+                    Level::Warning,
+                    "key parameter is not a valid private key",
+                );
+            }
+            return Ok(false);
+        };
+        let digest = digest_algo.as_ref().map(|p| &p.0);
+        let out = rsa_operation(
+            req,
+            &key,
+            Operation::Decrypt,
+            padding,
+            digest,
+            data.as_bytes(),
+        );
+        written(req, &decrypted_data, out)
+    })
+}
+
+/// `openssl_public_encrypt(string $data, &$encrypted_data, $public_key,`
+/// `int $padding = OPENSSL_PKCS1_PADDING, ?string $digest_algo = null):`
+/// `bool`: `EVP_PKEY_encrypt`, OAEP under the digest named.
+///
+/// ```php
+/// $k = openssl_pkey_new(['private_key_bits' => 1024]);
+/// $pub = openssl_pkey_get_details($k)['key'];
+/// var_dump(openssl_public_encrypt('data', $c, $pub), strlen($c), openssl_private_decrypt($c, $d, $k), $d);
+/// var_dump(openssl_public_encrypt('data', $c, 'nope'), openssl_public_encrypt(str_repeat('x', 200), $c, $pub));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(128)
+/// bool(true)
+/// string(4) "data"
+///
+/// Warning: openssl_public_encrypt(): key parameter is not a valid public key in %s on line 5
+/// bool(false)
+/// bool(false)
+/// ```
+#[php_function]
+fn openssl_public_encrypt(
+    req: &mut Request,
+    #[php(sensitive)] data: PhpString,
+    encrypted_data: Ref<Untyped<Value>>,
+    public_key: Untyped<Value>,
+    #[php(default = OPENSSL_PKCS1_PADDING)] padding: i64,
+    #[php(default = null)] digest_algo: Option<php_ext::abi::Path>,
+) -> Result<bool, Thrown> {
+    finish(req, move |req| {
+        let arg = Arg::new(3, "public_key");
+        let Some(key) = key_from(req, &public_key.0, Half::Public, None, arg)? else {
+            if !raised(req) {
+                docref(
+                    req,
+                    Level::Warning,
+                    "key parameter is not a valid public key",
+                );
+            }
+            return Ok(false);
+        };
+        let digest = digest_algo.as_ref().map(|p| &p.0);
+        let out = rsa_operation(
+            req,
+            &key,
+            Operation::Encrypt,
+            padding,
+            digest,
+            data.as_bytes(),
+        );
+        written(req, &encrypted_data, out)
+    })
+}
+
+/// `openssl_public_decrypt(string $data, &$decrypted_data, $public_key,`
+/// `int $padding = OPENSSL_PKCS1_PADDING): bool`:
+/// `EVP_PKEY_verify_recover`, the data `openssl_private_encrypt` signed.
+///
+/// ```php
+/// $k = openssl_pkey_new(['private_key_bits' => 1024]);
+/// openssl_private_encrypt('data', $c, $k);
+/// var_dump(openssl_public_decrypt($c, $d, openssl_pkey_get_details($k)['key']), $d);
+/// ```
+/// ```expect
+/// bool(true)
+/// string(4) "data"
+/// ```
+#[php_function]
+fn openssl_public_decrypt(
+    req: &mut Request,
+    data: PhpString,
+    #[php(sensitive)] decrypted_data: Ref<Untyped<Value>>,
+    public_key: Untyped<Value>,
+    #[php(default = OPENSSL_PKCS1_PADDING)] padding: i64,
+) -> Result<bool, Thrown> {
+    finish(req, move |req| {
+        let arg = Arg::new(3, "public_key");
+        let Some(key) = key_from(req, &public_key.0, Half::Public, None, arg)? else {
+            if !raised(req) {
+                docref(
+                    req,
+                    Level::Warning,
+                    "key parameter is not a valid public key",
+                );
+            }
+            return Ok(false);
+        };
+        let out = rsa_operation(
+            req,
+            &key,
+            Operation::VerifyRecover,
+            padding,
+            None,
+            data.as_bytes(),
+        );
+        written(req, &decrypted_data, out)
     })
 }

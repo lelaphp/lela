@@ -6,11 +6,12 @@
 //! Declared by the attributes as `openssl.stub.php` at the tag declares it:
 //! the ini entries, the constants, the three classes, and the natives by
 //! area: certificates ([`x509`]), signing requests ([`csr`]), asymmetric
-//! keys ([`key`]) and the configuration they are made under ([`config`]),
-//! and signatures ([`sign`]), with the arguments they share decoded once
-//! ([`decode`]) and the ring of library errors `openssl_error_string` reads
-//! ([`Errors`]). ext/phar's OpenSSL signatures call `openssl_sign` and
-//! `openssl_verify` through the function table, as php's do.
+//! keys ([`key`], [`keydata`]) and the configuration they are made under
+//! ([`config`]), and signatures and raw RSA ([`sign`]), with the arguments
+//! they share decoded once ([`decode`]) and the ring of library errors
+//! `openssl_error_string` reads ([`Errors`]). ext/phar's OpenSSL signatures
+//! call `openssl_sign` and `openssl_verify` through the function table, as
+//! php's do.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -29,6 +30,7 @@ mod csr;
 mod decode;
 mod ffi;
 mod key;
+mod keydata;
 mod sign;
 mod x509;
 
@@ -369,6 +371,7 @@ pub fn extension() -> Extension {
             csr::openssl_csr_get_subject::declared(),
             csr::openssl_csr_get_public_key::declared(),
             key::openssl_pkey_new::declared(),
+            key::openssl_pkey_export_to_file::declared(),
             key::openssl_pkey_export::declared(),
             key::openssl_pkey_get_public::declared(),
             key::openssl_get_publickey::declared(),
@@ -377,9 +380,16 @@ pub fn extension() -> Extension {
             key::openssl_pkey_get_private::declared(),
             key::openssl_get_privatekey::declared(),
             key::openssl_pkey_get_details::declared(),
+            sign::openssl_private_encrypt::declared(),
+            sign::openssl_private_decrypt::declared(),
+            sign::openssl_public_encrypt::declared(),
+            sign::openssl_public_decrypt::declared(),
             openssl_error_string::declared(),
             sign::openssl_sign::declared(),
             sign::openssl_verify::declared(),
+            key::openssl_get_curve_names::declared(),
+            key::openssl_dh_compute_key::declared(),
+            key::openssl_pkey_derive::declared(),
             x509::openssl_get_cert_locations::declared(),
         ])
         .on_modify(b"openssl.libctx", on_update_libctx)

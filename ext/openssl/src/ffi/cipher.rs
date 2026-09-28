@@ -1,10 +1,28 @@
 //! Digests and symmetric ciphers as the key natives find them:
-//! [`Digest`] (`EVP_MD`) and [`Cipher`] (`EVP_CIPHER`).
+//! [`Digest`] (`EVP_MD`) and [`Cipher`] (`EVP_CIPHER`); and the names of
+//! the curves the library carries.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, c_char, c_int};
 use std::ptr;
 
 use openssl_sys as sys;
+
+use super::nid_short_name;
+
+// SAFETY: libcrypto's own declaration, from `openssl/ec.h` of OpenSSL
+// 3, which `openssl-sys` does not declare; the library `openssl-sys`
+// links defines it.
+unsafe extern "C" {
+    fn EC_get_builtin_curves(r: *mut BuiltinCurve, nitems: usize) -> usize;
+}
+
+/// `EC_builtin_curve`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BuiltinCurve {
+    nid: c_int,
+    comment: *const c_char,
+}
 
 owned!(
     /// An `EVP_MD`, as `php_openssl_get_evp_md_by_name` finds it and
@@ -67,4 +85,26 @@ impl Cipher {
         // SAFETY: the answer is the library's static table.
         Cipher::owned(unsafe { sys::EVP_des_ede3_cbc() }.cast_mut())
     }
+}
+
+/// `EC_get_builtin_curves` and `OBJ_nid2sn`: the short name of every
+/// curve the library carries, `None` where it would not list them.
+pub(crate) fn curve_names() -> Option<Vec<Vec<u8>>> {
+    // SAFETY: a null buffer asks for the count.
+    let len = unsafe { EC_get_builtin_curves(ptr::null_mut(), 0) };
+    let empty = BuiltinCurve {
+        nid: 0,
+        comment: ptr::null(),
+    };
+    let mut curves = vec![empty; len];
+    // SAFETY: the buffer holds `len` entries.
+    if unsafe { EC_get_builtin_curves(curves.as_mut_ptr(), len) } == 0 {
+        return None;
+    }
+    Some(
+        curves
+            .iter()
+            .filter_map(|c| nid_short_name(c.nid))
+            .collect(),
+    )
 }

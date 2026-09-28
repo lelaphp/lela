@@ -1,26 +1,30 @@
-//! `OpenSSLAsymmetricKey` and the natives that make, read and write one:
-//! `php_openssl_pkey_object`, `php_openssl_pkey_from_zval` (a key, a
-//! certificate, a PEM string, a `file://` path, or an array of one and
-//! its passphrase) and the `openssl_pkey_*` natives of `openssl.c`.
+//! `OpenSSLAsymmetricKey` and the natives that make, read, write and
+//! combine one: `php_openssl_pkey_object`, `php_openssl_pkey_from_zval`
+//! (a key, a certificate, a PEM string, a `file://` path, or an array of
+//! one and its passphrase) and the `openssl_pkey_*`,
+//! `openssl_dh_compute_key` and `openssl_get_curve_names` natives of
+//! `openssl.c`.
 
 use std::ffi::CString;
 
-use php_ext::abi::{Instance, OrFalse, Passed, Ref, Untyped};
+use php_ext::abi::{Instance, OrFalse, Passed, Path, Ref, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::to_string;
-use php_ext::raising::{Level, Thrown, docref, fatal, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, pending, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key as ArrayKey, PhpArray, PhpString, Value, ValueRef};
 
-use crate::config::{self, field};
 use crate::constants::{
     OPENSSL_KEYTYPE_DH, OPENSSL_KEYTYPE_DSA, OPENSSL_KEYTYPE_EC, OPENSSL_KEYTYPE_ED448,
     OPENSSL_KEYTYPE_ED25519, OPENSSL_KEYTYPE_RSA, OPENSSL_KEYTYPE_X448, OPENSSL_KEYTYPE_X25519,
 };
 use crate::decode::{Arg, Origin, c_string, cert_from_str, check_path, defer, finish, raised};
+use crate::ffi::key::{KeyContext, Operation};
 use crate::ffi::{self, Bio, Cipher, KeyKind, PKey};
-use crate::{Handlers, errors_restore_mark, errors_set_mark, put, put_bytes, store_errors};
+use crate::{
+    Handlers, config, errors_restore_mark, errors_set_mark, keydata, put, put_bytes, store_errors,
+};
 
 /// A `php_openssl_pkey_object`: the key, and whether it was made as a
 /// private one, which is what the natives that take a key check.
@@ -277,7 +281,9 @@ pub(crate) fn key_from(
 /// `openssl_pkey_new(?array $options = null): OpenSSLAsymmetricKey|false`:
 /// a new private key of the type and size the options and the
 /// configuration say, RSA of the configuration's `default_bits` unless
-/// told otherwise.
+/// told otherwise; or, where the options hold an `rsa`, `dsa`, `dh`,
+/// `ec`, `x25519`, `ed25519`, `x448` or `ed448` array, the key its
+/// parameters make.
 ///
 /// ```php
 /// $k = openssl_pkey_new(['private_key_bits' => 512]);
@@ -287,6 +293,15 @@ pub(crate) fn key_from(
 /// var_dump(openssl_pkey_new(['private_key_bits' => 128]));
 /// var_dump(openssl_pkey_new(['private_key_type' => 42]));
 /// var_dump(openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC]));
+/// $r = openssl_pkey_get_details($k)['rsa'];
+/// var_dump(openssl_pkey_get_details(openssl_pkey_new(['rsa' => ['n' => $r['n'], 'e' => $r['e'], 'd' => $r['d']]]))['key'] === openssl_pkey_get_details($k)['key']);
+/// var_dump(openssl_pkey_new(['rsa' => ['n' => $r['n']]]));
+/// $e = openssl_pkey_get_details(openssl_pkey_new(['ec' => ['curve_name' => 'prime256v1']]));
+/// var_dump($e['bits'], strlen($e['ec']['d']));
+/// var_dump(openssl_pkey_new(['ec' => ['curve_name' => 'nope']]), openssl_pkey_new(['ec' => []]));
+/// $x = openssl_pkey_get_details(openssl_pkey_new(['x25519' => []]));
+/// var_dump($x['type'] === OPENSSL_KEYTYPE_X25519, strlen($x['x25519']['pub_key']));
+/// var_dump(openssl_pkey_get_details(openssl_pkey_new(['dh' => ['p' => "\xff\xff\xff\xff\xff\xff\xff\xc5", 'g' => "\x02", 'priv_key' => "\x03"]]))['dh']['pub_key'] === "\x08");
 /// ```
 /// ```expect
 /// bool(true)
@@ -303,36 +318,43 @@ pub(crate) fn key_from(
 ///
 /// Warning: openssl_pkey_new(): Missing configuration value: "curve_name" not set in %s on line 8
 /// bool(false)
+/// bool(true)
+/// bool(false)
+/// int(256)
+/// int(32)
+///
+/// Warning: openssl_pkey_new(): Unknown elliptic curve (short) name nope in %s on line 14
+///
+/// Warning: openssl_pkey_new(): Missing params: curve_name in %s on line 14
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// int(32)
+/// bool(true)
 /// ```
 #[php_function]
 fn openssl_pkey_new(
     req: &mut Request,
     #[php(default = null)] options: Option<PhpArray>,
 ) -> Result<OrFalse<Instance<OpenSSLAsymmetricKey>>, Thrown> {
-    if let Some(array) = &options {
-        for form in [
-            &b"rsa"[..],
-            b"dsa",
-            b"dh",
-            b"ec",
-            b"x25519",
-            b"ed25519",
-            b"x448",
-            b"ed448",
-        ] {
-            if field(req, *array, form)?.is_some_and(|v| matches!(v.as_ref(), ValueRef::Array(_))) {
-                let text = format!(
-                    "InternalError: openssl_pkey_new() from the \"{}\" key's parameters is not ported",
-                    String::from_utf8_lossy(form)
-                );
-                return Err(fatal(req, &text));
-            }
-        }
+    if let Some(array) = options
+        && let Some((kind, data)) = keydata::entry(req, array)?
+    {
+        let made = match kind {
+            KeyKind::Rsa => keydata::rsa(req, data)?.map(|key| (key, true)),
+            KeyKind::Dsa | KeyKind::Dh => keydata::ffc(req, kind, data)?,
+            KeyKind::Ec => keydata::ec(req, data)?,
+            _ => keydata::curve(req, kind, data)?,
+        };
+        return Ok(match made {
+            Some((key, private)) => OrFalse::Value(object_of(req, key, private)?),
+            None => OrFalse::False,
+        });
     }
-    let Some(request) = config::parse(req, options)? else {
+    let Some(settings) = config::parse(req, options)? else {
         return Ok(OrFalse::False);
     };
-    let Some(key) = request.generate(req) else {
+    let Some(key) = settings.generate(req) else {
         return Ok(OrFalse::False);
     };
     Ok(OrFalse::Value(object_of(req, key, true)?))
@@ -366,6 +388,68 @@ fn write_private(
     }
     store_errors(req);
     false
+}
+
+/// `openssl_pkey_export_to_file($key, string $output_filename, ?string`
+/// `$passphrase = null, ?array $options = null): bool`: the private key
+/// as PEM, written to the file.
+///
+/// ```php
+/// $k = openssl_pkey_new(['private_key_bits' => 512]);
+/// $f = __DIR__ . '/k.pem';
+/// var_dump(openssl_pkey_export_to_file($k, $f), substr(file_get_contents($f), 0, 27));
+/// var_dump(openssl_pkey_export_to_file($k, $f, 'pw'), openssl_pkey_get_private('file://' . $f, 'pw') instanceof OpenSSLAsymmetricKey);
+/// unlink($f);
+/// var_dump(openssl_pkey_export_to_file('nope', $f));
+/// ```
+/// ```expect
+/// bool(true)
+/// string(27) "-----BEGIN PRIVATE KEY-----"
+/// bool(true)
+/// bool(true)
+///
+/// Warning: openssl_pkey_export_to_file(): Cannot get key from parameter 1 in %s on line 7
+/// bool(false)
+/// ```
+#[php_function]
+fn openssl_pkey_export_to_file(
+    req: &mut Request,
+    #[php(sensitive)] key: Untyped<Value>,
+    output_filename: Path,
+    #[php(sensitive, default = null)] passphrase: Option<PhpString>,
+    #[php(default = null)] options: Option<PhpArray>,
+) -> Result<bool, Thrown> {
+    finish(req, move |req| {
+        let phrase = passphrase.as_ref().map(|p| p.as_bytes().to_vec());
+        if let Some(phrase) = &phrase {
+            check_int_len(req, phrase.len(), "passphrase", 3)?;
+        }
+        let arg = Arg::new(1, "key");
+        let Some(pkey) = key_from(req, &key.0, Half::Private, phrase.as_deref(), arg)? else {
+            if !raised(req) {
+                docref(req, Level::Warning, "Cannot get key from parameter 1");
+            }
+            return Ok(false);
+        };
+        let origin = Origin::Arg(Arg::new(2, "output_filename"));
+        let Some(path) = check_path(req, output_filename.0.as_bytes(), origin, false)? else {
+            return Ok(false);
+        };
+        let Some(settings) = config::parse(req, options)? else {
+            return Ok(false);
+        };
+        let Some(out) = Bio::file(&path, c"w") else {
+            store_errors(req);
+            return Ok(false);
+        };
+        Ok(write_private(
+            req,
+            &pkey,
+            &settings,
+            phrase.as_deref(),
+            &out,
+        ))
+    })
 }
 
 /// `openssl_pkey_export($key, &$output, ?string $passphrase = null,`
@@ -696,5 +780,146 @@ fn openssl_pkey_get_details(
         put(req, &mut out, name, Value::array(inner))?;
     }
     put(req, &mut out, b"type", Value::int(key_type(kind)))?;
+    Ok(OrFalse::Value(out))
+}
+
+/// `php_openssl_pkey_derive`: the secret `key` and `peer` agree on,
+/// `size` bytes of it, or all of it where `size` is 0; `None` with the
+/// library's reasons stored.
+fn derive(req: &mut Request, key: &PKey, peer: &PKey, size: usize) -> Option<Vec<u8>> {
+    let mut ctx = KeyContext::of_key(key)?;
+    let secret = (ctx.init(Operation::Derive) && ctx.set_peer(peer))
+        .then(|| ctx.apply(Operation::Derive, &[], size))
+        .flatten();
+    if secret.is_none() {
+        store_errors(req);
+    }
+    secret
+}
+
+/// `openssl_dh_compute_key(string $public_key, OpenSSLAsymmetricKey`
+/// `$private_key): string|false`: the secret a DH key shares with the
+/// peer whose public value is given.
+///
+/// ```php
+/// $p = "\xff\xff\xff\xff\xff\xff\xff\xc5";
+/// $a = openssl_pkey_new(['dh' => ['p' => $p, 'g' => "\x02", 'priv_key' => "\x03"]]);
+/// $b = openssl_pkey_new(['dh' => ['p' => $p, 'g' => "\x02", 'priv_key' => "\x05"]]);
+/// $pb = openssl_pkey_get_details($b)['dh']['pub_key'];
+/// $pa = openssl_pkey_get_details($a)['dh']['pub_key'];
+/// var_dump(bin2hex(openssl_dh_compute_key($pb, $a)), openssl_dh_compute_key($pb, $a) === openssl_dh_compute_key($pa, $b));
+/// var_dump(openssl_dh_compute_key($pb, openssl_pkey_new(['private_key_bits' => 512])));
+/// ```
+/// ```expect
+/// string(0) ""
+/// bool(true)
+/// bool(false)
+/// ```
+#[php_function]
+fn openssl_dh_compute_key(
+    req: &mut Request,
+    public_key: PhpString,
+    #[php(sensitive)] private_key: Instance<OpenSSLAsymmetricKey>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    check_int_len(req, public_key.as_bytes().len(), "pub_key", 1)?;
+    let (pkey, _) = held(req, private_key)?;
+    if !pkey.is_dh() {
+        return Ok(OrFalse::False);
+    }
+    let Some(peer) = pkey.peer_of(public_key.as_bytes()) else {
+        store_errors(req);
+        return Ok(OrFalse::False);
+    };
+    let Some(secret) = derive(req, &pkey, &peer, 0) else {
+        return Ok(OrFalse::False);
+    };
+    Ok(OrFalse::Value(PhpString::new(req, &secret)?))
+}
+
+/// `openssl_pkey_derive($public_key, $private_key, int $key_length = 0):`
+/// `string|false`: the secret a DH, ECDH, X25519 or X448 private key
+/// agrees on with the peer's public key.
+///
+/// ```php
+/// $a = openssl_pkey_new(['x25519' => []]);
+/// $b = openssl_pkey_new(['x25519' => []]);
+/// $pa = openssl_pkey_get_details($a)['key'];
+/// $pb = openssl_pkey_get_details($b)['key'];
+/// var_dump(strlen(openssl_pkey_derive($pb, $a)), openssl_pkey_derive($pb, $a) === openssl_pkey_derive($pa, $b));
+/// var_dump(strlen(openssl_pkey_derive($pb, $a, 16)));
+/// try { openssl_pkey_derive($pb, $a, -1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(openssl_pkey_derive('nope', $a));
+/// ```
+/// ```expect
+/// int(32)
+/// bool(true)
+///
+/// Deprecated: openssl_pkey_derive(): the $key_length parameter is deprecated as it is either ignored or truncates the key in %s on line 7
+/// int(0)
+///
+/// Deprecated: openssl_pkey_derive(): the $key_length parameter is deprecated as it is either ignored or truncates the key in %s on line 8
+/// openssl_pkey_derive(): Argument #3 ($key_length) must be greater than or equal to 0
+/// bool(false)
+/// ```
+#[php_function]
+fn openssl_pkey_derive(
+    req: &mut Request,
+    public_key: Untyped<Value>,
+    #[php(sensitive)] private_key: Untyped<Value>,
+    #[php(default = 0)] key_length: Passed<i64>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    finish(req, move |req| {
+        let length = match key_length {
+            Passed::Omitted => 0,
+            Passed::Given(length) => {
+                docref(
+                    req,
+                    Level::Deprecated,
+                    "the $key_length parameter is deprecated as it is either ignored or truncates the key",
+                );
+                pending(req)?;
+                length
+            }
+        };
+        let Ok(length) = usize::try_from(length) else {
+            return Err(arg_value_error(req, 3, "be greater than or equal to 0"));
+        };
+        let arg = Arg::new(2, "private_key");
+        let Some(key) = key_from(req, &private_key.0, Half::Private, Some(b""), arg)? else {
+            return Ok(OrFalse::False);
+        };
+        let arg = Arg::new(1, "public_key");
+        let Some(peer) = key_from(req, &public_key.0, Half::Public, None, arg)? else {
+            return Ok(OrFalse::False);
+        };
+        let Some(secret) = derive(req, &key, &peer, length) else {
+            return Ok(OrFalse::False);
+        };
+        Ok(OrFalse::Value(PhpString::new(req, &secret)?))
+    })
+}
+
+/// `openssl_get_curve_names(): array|false`: the short name of every
+/// curve the library carries.
+///
+/// ```php
+/// $c = openssl_get_curve_names();
+/// var_dump(in_array('prime256v1', $c), in_array('secp384r1', $c), count($c) > 50);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+#[php_function]
+fn openssl_get_curve_names(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+    let Some(names) = ffi::cipher::curve_names() else {
+        return Ok(OrFalse::False);
+    };
+    let mut out = PhpArray::new(req)?;
+    for name in names {
+        let name = PhpString::new(req, &name)?;
+        out.append(req, Value::string(name))?;
+    }
     Ok(OrFalse::Value(out))
 }
