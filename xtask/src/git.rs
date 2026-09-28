@@ -417,7 +417,8 @@ mod tests {
 
     /// The stamp computed in process is the one git would compute: the
     /// tree hash matches `hash-object` over the same listing and the
-    /// commit matches `rev-parse --short=7 HEAD`.
+    /// commit is the first seven characters of `rev-parse HEAD`, a fixed
+    /// width, where `--short=7` grows past seven once they are ambiguous.
     #[test]
     fn the_stamp_agrees_with_git() {
         let root = built_root();
@@ -438,7 +439,7 @@ mod tests {
         };
         assert_eq!(
             head_commit(&root).unwrap(),
-            out(&["rev-parse", "--short=7", "HEAD"], None).trim()
+            out(&["rev-parse", "HEAD"], None).trim()[..7]
         );
         let paths = files(&root, Path::new("docs")).unwrap();
         let absolute = paths
