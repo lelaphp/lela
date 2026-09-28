@@ -6018,6 +6018,28 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
         ConstExpr::ClassName { class, .. } => {
             format!("{}::class", String::from_utf8_lossy(&class.0))
         }
+        // `zend_ast_export_name` over a name that is no string: the
+        // expression written between the braces, without them.
+        ConstExpr::DynamicClassConstant {
+            class,
+            class_kind,
+            name,
+            ..
+        } => {
+            let mark = match class_kind {
+                NameKind::NotFullyQualified => "",
+                NameKind::FullyQualified => "\\",
+                NameKind::Relative => "namespace\\",
+            };
+            format!(
+                "{mark}{}::{}",
+                String::from_utf8_lossy(&class.0),
+                ast_export(req, name, 0)
+            )
+        }
+        ConstExpr::Closure { .. }
+        | ConstExpr::FunctionCallable { .. }
+        | ConstExpr::MethodCallable { .. } => callable_string(expr),
         ConstExpr::Unary { .. }
         | ConstExpr::Binary { .. }
         | ConstExpr::Dim { .. }
@@ -6026,6 +6048,39 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
         | ConstExpr::Cast { .. }
         | ConstExpr::New { .. } => ast_export(req, expr, 0),
         _ => String::from("<default>"),
+    }
+}
+
+/// `zend_ast_export` over the three nodes 8.5 makes a `Closure` of: the
+/// closure as `Closure(` its function's name `)`, and a first-class
+/// callable as its name after the mark `zend_ast_export_ns_name` puts
+/// before it and `(...)`.
+fn callable_string(expr: &ConstExpr) -> String {
+    match expr {
+        // `ZEND_AST_OP_ARRAY`: `Closure(` the function's name `)`.
+        ConstExpr::Closure { name, .. } => {
+            format!("Closure({})", String::from_utf8_lossy(&name.0))
+        }
+        // `ZEND_AST_CALL` over `ZEND_AST_CALLABLE_CONVERT`, the name as
+        // `zend_ast_export_ns_name` writes it.
+        ConstExpr::FunctionCallable {
+            name, name_kind, ..
+        } => {
+            let mark = if *name_kind == NameKind::FullyQualified {
+                "\\"
+            } else {
+                ""
+            };
+            format!("{mark}{}(...)", String::from_utf8_lossy(&name.0))
+        }
+        // `ZEND_AST_STATIC_CALL`, its class marked as a `new`'s is by
+        // `zend_compile_const_expr_class_reference`.
+        ConstExpr::MethodCallable { class, method, .. } => format!(
+            "{}::{}(...)",
+            new_class_name(&class.0),
+            String::from_utf8_lossy(&method.0)
+        ),
+        _ => String::new(),
     }
 }
 

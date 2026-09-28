@@ -820,10 +820,18 @@ fn unlined(expr: &ConstExpr) -> ConstExpr {
             E::Constant { line, .. }
             | E::ClassConstant { line, .. }
             | E::EnumCase { line, .. }
-            | E::ClassName { line, .. } => {
+            | E::ClassName { line, .. }
+            | E::FunctionCallable { line, .. }
+            | E::MethodCallable { line, .. } => {
                 *line = 0;
             }
-            E::Unary { operand, line, .. } | E::Cast { operand, line, .. } => {
+            E::Unary { operand, line, .. }
+            | E::Cast { operand, line, .. }
+            | E::DynamicClassConstant {
+                name: operand,
+                line,
+                ..
+            } => {
                 *line = 0;
                 clear(operand);
             }
@@ -877,7 +885,7 @@ fn unlined(expr: &ConstExpr) -> ConstExpr {
             | E::Long { .. }
             | E::Double(_)
             | E::Str(_)
-            | E::Closure(_)
+            | E::Closure { .. }
             | E::ScopeClass => {}
         }
     }

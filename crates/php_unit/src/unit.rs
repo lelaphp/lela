@@ -1,8 +1,46 @@
 //! A unit (design §4.7): one compiled file, immutable once published, its
 //! declarations beside their op arrays.
 
+use std::sync::{Arc, OnceLock, Weak};
+
 use crate::decl::{ClassDecl, ConstDecl, FunctionDecl, HookKind, Name};
 use crate::op::OpArray;
+
+/// The unit a constant expression's closure belongs to
+/// ([`crate::decl::ConstExpr::Closure`]), as the engine shares it:
+/// empty while the unit compiles, and bound once to the unit's shared
+/// copy by [`Unit::published`], which is what php's `ZEND_AST_OP_ARRAY`
+/// reaches directly, its `zend_op_array` pointer. Every closure node of
+/// a unit holds a share of the unit's one cell; the cell holds the unit
+/// weakly, so nothing keeps a unit alive but its sharers.
+#[derive(Clone, Default)]
+pub struct UnitCell(Arc<OnceLock<Weak<Unit>>>);
+
+impl UnitCell {
+    /// The unit the cell was bound to, while it is shared; none before
+    /// [`Unit::published`] and after the last share is gone.
+    #[must_use]
+    pub fn unit(&self) -> Option<Arc<Unit>> {
+        self.0.get().and_then(Weak::upgrade)
+    }
+}
+
+/// Two nodes name one cell, which is one unit's.
+impl PartialEq for UnitCell {
+    fn eq(&self, other: &UnitCell) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for UnitCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.get().is_some() {
+            "UnitCell(bound)"
+        } else {
+            "UnitCell(unbound)"
+        })
+    }
+}
 
 /// A compiled PHP program: the main op array, the functions with their
 /// bodies at the same index, the classes and the constants declared,
@@ -74,6 +112,23 @@ pub struct Unit {
     /// hit (`Z/ext/opcache/zend_accelerator_util_funcs.c:380`). The
     /// engine registers it where it raises [`Unit::diagnostics`].
     pub halt_offset: Option<i64>,
+    /// The cell every closure of the unit's constant expressions reaches
+    /// the unit through, bound when the unit is published.
+    pub cell: UnitCell,
+}
+
+impl Unit {
+    /// The unit shared, as the engine publishes every unit it compiles,
+    /// with its [`UnitCell`] bound to the shared copy, so a closure its
+    /// constant expressions hold can be made where they are evaluated.
+    #[must_use]
+    pub fn published(self) -> Arc<Unit> {
+        let shared = Arc::new(self);
+        // A unit is published once; a clone published again keeps the
+        // first binding, the cell being the clone's too.
+        let _ = shared.cell.0.set(Arc::downgrade(&shared));
+        shared
+    }
 }
 
 /// An auto-global that makes a variable: one of the names

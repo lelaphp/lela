@@ -186,8 +186,13 @@ pub(crate) struct Shared {
     pub(crate) extensions: Vec<Extension>,
     /// `CG(function_table)`'s natives, the engine's own and then each
     /// extension's in bundle order, less what the startup ini's
-    /// `disable_functions` took out of it ([`function_table`]).
-    pub(crate) functions: Vec<(FunctionDecl, Entry)>,
+    /// `disable_functions` took out of it ([`function_table`]): the
+    /// declarations alone, which the compiler reads as they stand on
+    /// every compile ([`Declared`]).
+    pub(crate) functions: Vec<FunctionDecl>,
+    /// Each native's entry, one row per row of `functions`, the
+    /// interception's where an extension intercepts it.
+    pub(crate) entries: Vec<Entry>,
     /// The entry an extension's interception replaced, one row per row
     /// of `functions`, none where nothing intercepts the native
     /// ([`crate::api::abi::ExtensionBuilder::intercept`]).
@@ -514,7 +519,7 @@ struct Origin<'a> {
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Declared<'a> {
     pub(crate) constants: &'a [ConstDecl],
-    pub(crate) functions: &'a [(FunctionDecl, Entry)],
+    pub(crate) functions: &'a [FunctionDecl],
     pub(crate) classes: &'a [ClassDecl],
 }
 
@@ -1210,18 +1215,19 @@ fn function_table(
 /// each native an extension intercepts has its entry replaced, the one
 /// it replaced kept in its row of what this answers.
 fn intercept(
-    functions: &mut [(FunctionDecl, Entry)],
+    functions: &[FunctionDecl],
+    entries: &mut [Entry],
     extensions: &[Extension],
 ) -> Vec<Option<Entry>> {
     let mut replaced = vec![None; functions.len()];
     for (name, entry) in extensions.iter().flat_map(|e| e.intercepts.iter()) {
         let found = functions
             .iter()
-            .position(|(decl, _)| decl.name.0.eq_ignore_ascii_case(&name.0));
+            .position(|decl| decl.name.0.eq_ignore_ascii_case(&name.0));
         if let Some(at) = found
-            && let Some(row) = functions.get_mut(at)
+            && let Some(row) = entries.get_mut(at)
         {
-            replaced[at] = Some(std::mem::replace(&mut row.1, *entry));
+            replaced[at] = Some(std::mem::replace(row, *entry));
         }
     }
     replaced
@@ -1344,13 +1350,15 @@ impl EngineBuilder {
             ini.retain(|(n, _)| *n != name);
             ini.push((name, value));
         }
-        let (function_modules, mut functions) = function_table(&core, &extensions, &ini);
-        let replaced = intercept(&mut functions, &extensions);
+        let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) =
+            function_table(&core, &extensions, &ini);
+        let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
+        let replaced = intercept(&functions, &mut entries, &extensions);
         let function_flags = functions
             .iter()
-            .map(|(decl, _)| crate::attributes::Flags::of(&decl.attributes))
+            .map(|decl| crate::attributes::Flags::of(&decl.attributes))
             .collect();
-        let frameless = frameless_table(functions.iter().map(|(decl, _)| decl));
+        let frameless = frameless_table(functions.iter());
         let LinkedClasses {
             classes,
             handlers,
@@ -1371,6 +1379,7 @@ impl EngineBuilder {
             shared: Arc::new(Shared {
                 extensions,
                 functions,
+                entries,
                 replaced,
                 function_modules,
                 function_flags,
@@ -1477,7 +1486,7 @@ impl Engine {
                 self.shared
                     .functions
                     .get(entry.function as usize)
-                    .map(|(decl, _)| decl.name.clone())
+                    .map(|decl| decl.name.clone())
                     .unwrap_or_default()
             })
             .collect()
@@ -2013,19 +2022,15 @@ fn compile(
         precision: ini.precision,
         short_open_tag: ini.short_open_tag,
         assertions: ini.assertions,
-        persistent: declared.constants.to_vec(),
-        functions: declared
-            .functions
-            .iter()
-            .map(|(decl, _)| decl.clone())
-            .collect(),
-        classes: declared.classes.to_vec(),
+        persistent: declared.constants,
+        functions: declared.functions,
+        classes: declared.classes,
         stack,
         keys_before: origin.keys_before,
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
-    Ok(Arc::new(unit))
+    Ok(unit.published())
 }
 
 /// What compiling the unit raised, raised now, each through the
@@ -2528,10 +2533,10 @@ mod tests {
     #[test]
     fn a_source_the_compiler_refuses_names_the_construct_it_could_not_read() {
         let engine = Engine::builder().build();
-        let (body, observables) = served(&engine, "<?php\ndeclare(ticks=1);");
+        let (body, observables) = served(&engine, "<?php\ndeclare(ticks=0): enddeclare;");
         assert_eq!(
             body,
-            "\nParse error: a `declare(ticks)` of a count this compiler cannot read yet in witness.php on line 2\n"
+            "\nParse error: a `declare` in the alternative syntax this compiler cannot read yet in witness.php on line 2\n"
         );
         assert_eq!(observables.exit_code, 255);
         assert_eq!(
@@ -2549,19 +2554,22 @@ mod tests {
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php\ndeclare(ticks=1);"), &mut logged);
+            .serve(
+                description("<?php\ndeclare(ticks=0): enddeclare;"),
+                &mut logged,
+            );
         assert!(logged.body.is_empty());
         assert_eq!(
             logged.logged(),
-            "PHP Parse error:  a `declare(ticks)` of a count this compiler cannot read yet in witness.php on line 2\n"
+            "PHP Parse error:  a `declare` in the alternative syntax this compiler cannot read yet in witness.php on line 2\n"
         );
         assert_eq!(observables.exit_code, 255);
 
         let mut masked = Kept::default();
-        let observables = Engine::builder()
-            .ini("error_reporting", "0")
-            .build()
-            .serve(description("<?php\ndeclare(ticks=1);"), &mut masked);
+        let observables = Engine::builder().ini("error_reporting", "0").build().serve(
+            description("<?php\ndeclare(ticks=0): enddeclare;"),
+            &mut masked,
+        );
         assert!(masked.body.is_empty(), "E_PARSE is masked out");
         assert_eq!(observables.exit_code, 255, "the status is php's regardless");
     }
@@ -3544,7 +3552,7 @@ mod tests {
             },
             ..Unit::default()
         };
-        let frame = req.pushed(Arc::new(unit));
+        let frame = req.pushed(unit.published());
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
@@ -3564,7 +3572,7 @@ mod tests {
             .unit(b"<?php echo 1;", b"witness.php")
             .unwrap_or_default();
         let unit = Unit::clone(&unit);
-        let frame = req.pushed(Arc::new(unit));
+        let frame = req.pushed(unit.published());
         assert_eq!(crate::tier::execute::<Probe>(&mut req, frame), Ok(()));
         assert_eq!(
             req.state::<Asked>().sites,

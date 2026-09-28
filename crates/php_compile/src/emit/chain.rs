@@ -115,11 +115,7 @@ impl Emit<'_> {
         let tree = &self.parsed.tree;
         match expr {
             tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => Some(ChainEnd::Expr),
-            tree::Expr::ScopedAccessExpr(id) => matches!(
-                tree[id].member,
-                Some(tree::ScopedSelector::SimpleVarExpr(_))
-            )
-            .then_some(ChainEnd::Expr),
+            tree::Expr::ScopedAccessExpr(id) => self.names_property(id).then_some(ChainEnd::Expr),
             // The callee as written: a parenthesised one is a value
             // whose own chain ended inside the parentheses.
             tree::Expr::CallExpr(id) => matches!(

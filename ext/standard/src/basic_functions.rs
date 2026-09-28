@@ -1256,6 +1256,20 @@ fn ignore_user_abort(
 /// NULL
 /// register_tick_function(): Argument #1 ($callback) must be a valid callback, function "nope" not found or invalid function name
 /// ```
+///
+/// Under a `declare(ticks)` scope each statement after it serves the
+/// callback with the arguments kept:
+///
+/// ```php
+/// declare(ticks=1);
+/// register_tick_function(function (stdClass $o, array $a) { echo get_class($o), " ", count($a), "\n"; }, new stdClass, [1, 2]);
+/// echo "x\n";
+/// ```
+/// ```expect
+/// stdClass 2
+/// x
+/// stdClass 2
+/// ```
 #[php_function]
 fn register_tick_function(req: &mut Request, callback: Callable, args: Variadic<Value>) -> bool {
     req.register_tick_function(callback, args.0)
@@ -1274,9 +1288,26 @@ fn register_tick_function(req: &mut Request, callback: Callable, args: Variadic<
 /// NULL
 /// unregister_tick_function(): Argument #1 ($callback) must be a valid callback, function "nope" not found or invalid function name
 /// ```
+///
+/// The entry a `ZEND_TICKS` round is serving is php's `Error` to
+/// unregister from inside it:
+///
+/// ```php
+/// declare(ticks=1);
+/// function a() {
+///     try { unregister_tick_function('a'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// register_tick_function('a');
+/// unregister_tick_function('a');
+/// echo "gone\n";
+/// ```
+/// ```expect
+/// Registered tick function cannot be unregistered while it is being executed
+/// gone
+/// ```
 #[php_function]
-fn unregister_tick_function(req: &mut Request, callback: Callable) {
-    req.unregister_tick_function(&callback);
+fn unregister_tick_function(req: &mut Request, callback: Callable) -> Result<(), Thrown> {
+    req.unregister_tick_function(&callback).map(drop)
 }
 
 /// `is_uploaded_file(string $filename): bool`: whether the request's

@@ -92,6 +92,7 @@
 //! after it, as `zend_compile_array` emits them.
 
 use std::cmp::Ordering;
+use std::num::NonZeroI64;
 
 use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
 use php_syntax::{Holder, Parsed, SyntaxKind, TokenValue};
@@ -197,16 +198,39 @@ enum Offset {
 enum Scoped {
     Constant {
         class: ClassSpec,
-        name: Vec<u8>,
+        name: ScopedName,
     },
     Property {
         class: ClassSpec,
-        name: Vec<u8>,
+        name: ScopedName,
     },
     /// `C::class`, php's `ZEND_AST_CLASS_NAME`.
     ClassName {
         class: ClassSpec,
     },
+}
+
+/// The operands of an opline over a class's property, as
+/// [`Emit::static_operands`] lays them down: the name in `op1`, the
+/// class in `op2`, and the cache slots `extended_value` carries.
+struct StaticOperands {
+    name: (OperandKind, u32),
+    class: (OperandKind, u32),
+    slots: u32,
+}
+
+/// A member's name after `::` as the tree holds it: written out, the
+/// identifier of `C::X` or the `$p` of `C::$p` without its `$`, or the
+/// expression whose value names it, `C::{expr}` (8.3), `A::$$n` and
+/// `A::${expr}`, which `zend_compile_class_const` and
+/// `zend_compile_static_prop` compile with `zend_compile_expr` like any
+/// other operand. One `$` of `A::$$n` is the property's own, so the
+/// name is the value of `$n`, php's `ZEND_AST_VAR` under
+/// `ZEND_AST_STATIC_PROP`.
+#[derive(Clone)]
+enum ScopedName {
+    Written(Vec<u8>),
+    Computed(tree::Expr),
 }
 
 /// One element of an array expression as `zend_compile_array` reads
@@ -424,6 +448,13 @@ pub(crate) struct Emit<'a> {
     /// `eval` and an `include` compile under, is
     /// [`Options::strict_types`].
     typing: Typing,
+    /// `FC(declarables).ticks`: the count `declare(ticks=N)` set, none
+    /// where no declaration stands or it declared zero. A file-level
+    /// fact, which a function's body compiled inside the scope takes and
+    /// [`Emit::begin_body`] does not save; a `declare` with a statement
+    /// after its `)` puts back what stood before it once the statement
+    /// is compiled.
+    ticks: Option<NonZeroI64>,
     /// The thread's stack limit, [`Options::stack`], held to where the
     /// emitter recurses.
     stack: StackLimit,
@@ -483,6 +514,12 @@ pub(crate) struct Emit<'a> {
     /// made them. A slot is taken before the body compiles, as php takes
     /// its offset there, and filled when it has.
     dynamic: Vec<Option<(FunctionDecl, OpArray)>>,
+    /// [`Unit::cell`]: the one cell every closure of the file's constant
+    /// expressions holds a share of ([`ConstExpr::Closure`]).
+    cell: php_unit::UnitCell,
+    /// How many `name(...)` of the file's constant expressions were
+    /// compiled, each one's number in [`ConstExpr::FunctionCallable`].
+    function_callables: u32,
     /// `op_array->dynamic_func_defs` of the op array being compiled:
     /// which entries of [`Emit::dynamic`] it declares, in the order a
     /// `DECLARE_FUNCTION`'s `op2` indexes them.
@@ -873,7 +910,7 @@ enum Base {
         out: u32,
     },
     StaticProp {
-        name_at: u32,
+        name: (OperandKind, u32),
         class: (OperandKind, u32),
         out: u32,
         slots: u32,
@@ -1125,7 +1162,7 @@ fn dirname(path: &[u8]) -> Vec<u8> {
 #[allow(clippy::too_many_lines)] // the emitter laid down a field a line, and the unit taken off it
 pub(crate) fn unit(
     parsed: &Parsed,
-    options: &Options,
+    options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
     let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
@@ -1134,10 +1171,10 @@ pub(crate) fn unit(
         strings,
         precision: options.precision,
         assertions: assert::Assertions::of(options.assertions),
-        persistent: &options.persistent,
-        functions: &options.functions,
-        known_classes: &options.classes,
-        frameless: frameless_table(&options.functions),
+        persistent: options.persistent,
+        functions: options.functions,
+        known_classes: options.classes,
+        frameless: frameless_table(options.functions),
         namespace: None,
         namespacing: Namespacing::Global,
         imports: Imports::default(),
@@ -1154,6 +1191,7 @@ pub(crate) fn unit(
         in_jmp_frameless_branch: false,
         statements_seen: 0,
         typing: Typing::of(options.strict_types),
+        ticks: None,
         stack: options.stack,
         oplines: Vec::new(),
         short_circuits: Vec::new(),
@@ -1176,6 +1214,8 @@ pub(crate) fn unit(
         keys_before: options.keys_before,
         functions_declared: Vec::new(),
         dynamic: Vec::new(),
+        cell: php_unit::UnitCell::default(),
+        function_callables: 0,
         dynamic_func_defs: Vec::new(),
         static_vars: Vec::new(),
         fold: Fold::Compile,
@@ -1232,6 +1272,7 @@ pub(crate) fn unit(
         runtime_keys: emit.runtime_keys,
         constants: emit.attributed_constants,
         halt_offset: emit.halted,
+        cell: emit.cell,
     })
 }
 
@@ -1558,7 +1599,7 @@ impl Emit<'_> {
     /// at the node's line in the one-line `cannot read yet` shape the
     /// phpt lane counts as unread.
     #[allow(clippy::too_many_lines)]
-    fn statement(&mut self, stmt: Stmt) -> Result<(), CompileError> {
+    pub(super) fn statement(&mut self, stmt: Stmt) -> Result<(), CompileError> {
         let tree = &self.parsed.tree;
         match stmt {
             Stmt::EmptyStmt(_) => return Ok(()),
@@ -1584,6 +1625,11 @@ impl Emit<'_> {
                     ..Opline::default()
                 });
             }
+            // php's parser makes `echo a, b;`, `unset($a, $b);`,
+            // `global $a, $b;` and `static $a, $b;` a `ZEND_AST_STMT_LIST`
+            // of one statement per element, each compiled by
+            // `zend_compile_stmt` and so each ticked where a
+            // `declare(ticks)` scope stands ([`Self::tick`]).
             Stmt::EchoStmt(id) => {
                 for part in &tree[id].exprs {
                     let value = self.expr(*part)?;
@@ -1594,6 +1640,7 @@ impl Emit<'_> {
                         op1,
                         ..Opline::default()
                     });
+                    self.tick();
                 }
             }
             Stmt::ExprStmt(id) => {
@@ -1648,12 +1695,14 @@ impl Emit<'_> {
             Stmt::UnsetStmt(id) => {
                 for target in &tree[id].targets {
                     self.unset(*target)?;
+                    self.tick();
                 }
             }
             Stmt::IfStmt(id) => self.r#if(id)?,
             Stmt::GlobalStmt(id) => {
                 for var in tree[id].vars.clone() {
                     self.global_var(var)?;
+                    self.tick();
                 }
             }
             Stmt::StaticVarStmt(id) => self.static_var(id)?,
@@ -2304,30 +2353,45 @@ impl Emit<'_> {
     ) -> Result<Scoped, CompileError> {
         let node = &self.parsed.tree[id];
         let class = self.class_spec(node.scope);
+        let tree = &self.parsed.tree;
+        let computed = |inner: Option<tree::Expr>, what| {
+            inner
+                .map(ScopedName::Computed)
+                .ok_or_else(|| walk::unread(line, what))
+        };
         match node.member {
             Some(tree::ScopedSelector::MemberName(member)) => {
-                let Some(name) = self.parsed.tree[member].name else {
+                let Some(name) = tree[member].name else {
                     return Err(walk::unread(line, "a class constant"));
                 };
                 Ok(Scoped::Constant {
                     class,
-                    name: self.text(name).to_vec(),
+                    name: ScopedName::Written(self.text(name).to_vec()),
                 })
             }
+            Some(tree::ScopedSelector::BracedMember(braced)) => Ok(Scoped::Constant {
+                class,
+                name: computed(tree[braced].inner, "a class constant")?,
+            }),
             Some(tree::ScopedSelector::SimpleVarExpr(var)) => {
-                let Some(var) = self.parsed.tree[var].var else {
+                let Some(var) = tree[var].var else {
                     return Err(walk::unread(line, "a static property"));
                 };
                 Ok(Scoped::Property {
                     class,
-                    name: self.variable_name(var),
+                    name: ScopedName::Written(self.variable_name(var)),
                 })
             }
+            Some(tree::ScopedSelector::VarVarExpr(var)) => Ok(Scoped::Property {
+                class,
+                name: computed(tree[var].inner, "a static property")?,
+            }),
+            Some(tree::ScopedSelector::DynamicVarExpr(var)) => Ok(Scoped::Property {
+                class,
+                name: computed(tree[var].inner, "a static property")?,
+            }),
             Some(tree::ScopedSelector::ClassKw(_)) => Ok(Scoped::ClassName { class }),
-            Some(tree::ScopedSelector::VarVarExpr(_) | tree::ScopedSelector::DynamicVarExpr(_)) => {
-                Err(walk::unread(line, "a static property named at run time"))
-            }
-            _ => Err(walk::unread(line, "a class member named at run time")),
+            None => Err(walk::unread(line, "a class member")),
         }
     }
 
@@ -2342,16 +2406,27 @@ impl Emit<'_> {
         (node.lhs, node.op.map(|op| self.kind(op)), node.rhs)
     }
 
-    /// Whether `expr` is `C::$p`, php's `ZEND_AST_STATIC_PROP`: a scoped
-    /// access whose member is one `T_VARIABLE`.
+    /// Whether `expr` is `C::$p`, `C::$$p` or `C::${expr}`, php's
+    /// `ZEND_AST_STATIC_PROP`: a scoped access whose member is a
+    /// variable.
     fn is_static_prop(&self, expr: tree::Expr) -> bool {
         match self.peel(expr) {
-            tree::Expr::ScopedAccessExpr(id) => matches!(
-                self.parsed.tree[id].member,
-                Some(tree::ScopedSelector::SimpleVarExpr(_))
-            ),
+            tree::Expr::ScopedAccessExpr(id) => self.names_property(id),
             _ => false,
         }
+    }
+
+    /// Whether the member after a `::` is a variable, `$p`, `$$p` or
+    /// `${expr}`, which makes the access a class's property.
+    pub(super) fn names_property(&self, id: NodeId<tree::ScopedAccessExpr>) -> bool {
+        matches!(
+            self.parsed.tree[id].member,
+            Some(
+                tree::ScopedSelector::SimpleVarExpr(_)
+                    | tree::ScopedSelector::VarVarExpr(_)
+                    | tree::ScopedSelector::DynamicVarExpr(_)
+            )
+        )
     }
 
     /// `zend_is_call` (`Z/Zend/zend_compile.c:2728`): a call by name, a
@@ -2595,15 +2670,15 @@ impl Emit<'_> {
                 });
             }
             Target::StaticProp { class, name } => {
-                let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-                let name = self.string(&name)?;
-                let name_at = self.literal(name);
-                let slots = self.cache_slots(3);
-                let (op2_type, op2) = self.class_operand(&class)?;
+                let StaticOperands {
+                    name: (op1_type, op1),
+                    class: (op2_type, op2),
+                    slots,
+                } = self.static_operands(class, &name)?;
                 self.push(Opline {
                     opcode: Opcode::UnsetStaticProp,
-                    op1_type: OperandKind::Const,
-                    op1: name_at,
+                    op1_type,
+                    op1,
                     op2_type,
                     op2,
                     extended_value: slots,
@@ -3371,6 +3446,7 @@ impl Emit<'_> {
                     extended_value: slot | BIND_REF,
                     ..Opline::default()
                 });
+                self.tick();
                 continue;
             };
             let jump = self.push(Opline {
@@ -3392,6 +3468,7 @@ impl Emit<'_> {
                 ..Opline::default()
             });
             self.update_jump_target_to_next(jump);
+            self.tick();
         }
         Ok(())
     }
@@ -3999,6 +4076,9 @@ impl Emit<'_> {
                 }
                 Short::Assign(value) => self.assign_backing_value(value)?,
             }
+            // The one statement php's walk makes of the body, compiled
+            // by `zend_compile_stmt` as any other.
+            self.tick();
             self.depth = self.depth.saturating_sub(1);
         }
         self.line = function.end_line;
@@ -6799,12 +6879,26 @@ impl Emit<'_> {
             // compile-time fatals.
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => {
-                    let ClassSpec::Name(token) = class else {
-                        return Err(self.compile_error(
-                            "Dynamic class names are not allowed in compile-time class constant references",
-                        ));
+                    let written = match class {
+                        ClassSpec::Name(token) => self.text(token).to_vec(),
+                        // `zend_eval_const_expr` folded the class to a
+                        // constant, which names it where it is a string.
+                        ClassSpec::Expr(expr) => match self.constant_of(expr)? {
+                            Some(value) => match value.as_str() {
+                                Some(text) => text.bytes().to_vec(),
+                                None => {
+                                    return Err(self.compile_error(
+                                        "Class name must be a valid object or a string",
+                                    ));
+                                }
+                            },
+                            None => {
+                                return Err(self.compile_error(
+                                    "Dynamic class names are not allowed in compile-time class constant references",
+                                ));
+                            }
+                        },
                     };
-                    let written = self.text(token).to_vec();
                     if class_fetch_type(&written) == FETCH_CLASS_STATIC {
                         return Err(self.compile_error(
                             "\"static::\" is not allowed in compile-time constants",
@@ -6816,6 +6910,20 @@ impl Emit<'_> {
                         self.resolve_class_marked(&written)
                     } else {
                         (written, NameKind::NotFullyQualified)
+                    };
+                    // `self::{'X'}` folds to the name; one that does
+                    // not fold to a string is kept as its own tree,
+                    // evaluated before the class.
+                    let Some(name) = self.folded_name(&name)? else {
+                        let ScopedName::Computed(expr) = name else {
+                            return Err(self.fatal("a written name that folded to nothing"));
+                        };
+                        return Ok(ConstExpr::DynamicClassConstant {
+                            class: Name(class.into_boxed_slice()),
+                            class_kind,
+                            name: Box::new(self.const_expr(expr)?),
+                            line,
+                        });
                     };
                     Ok(ConstExpr::ClassConstant {
                         class: Name(class.into_boxed_slice()),
@@ -7056,6 +7164,8 @@ impl Emit<'_> {
                 })
             }
             tree::Expr::NewExpr(id) => self.const_new(id),
+            tree::Expr::ClosureExpr(_) => self.const_closure(expr, line),
+            tree::Expr::CallExpr(id) => self.const_callable(id, line),
             // `zend_is_allowed_in_const_expr` refuses these in php's
             // words: a variable, a call, an assignment, an increment,
             // `@`, `throw`, `include`, `isset` and an interpolated
@@ -7064,7 +7174,7 @@ impl Emit<'_> {
             | tree::Expr::VarVarExpr(_)
             | tree::Expr::DynamicVarExpr(_)
             | tree::Expr::AssignExpr(_)
-            | tree::Expr::CallExpr(_)
+            | tree::Expr::ArrowFnExpr(_)
             | tree::Expr::CloneExpr(_)
             | tree::Expr::ExitExpr(_)
             | tree::Expr::PrefixIncDecExpr(_)
@@ -7206,6 +7316,232 @@ impl Emit<'_> {
         })
     }
 
+    /// `zend_compile_const_expr_closure` (`Z/Zend/zend_compile.c:11481`,
+    /// 8.5): a closure in a constant expression is `static` and binds
+    /// no variable, each php's compile-time fatal where it is not, and
+    /// is compiled as `zend_compile_func_decl` compiles one at
+    /// `FUNC_DECL_LEVEL_CONSTEXPR`: a function of the unit named as
+    /// every closure is, which no op array declares and no opline
+    /// makes, kept in the tree for the engine to make a closure of in
+    /// the scope that evaluates it.
+    ///
+    /// ```php
+    /// const G = static function (int $x): int { return $x + 1; };
+    /// var_dump((G)(1), G instanceof Closure);
+    /// #[Attribute] class A { public function __construct(public Closure $c) {} }
+    /// #[A(static function () { return 'attr'; })] class U {}
+    /// var_dump(((new ReflectionClass('U'))->getAttributes()[0]->newInstance()->c)());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// bool(true)
+    /// string(4) "attr"
+    /// ```
+    ///
+    /// ```php
+    /// const F = function () {};
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Closures in constant expressions must be static in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// const F = static function () use ($x) {};
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use(...) variables in constant expression in %s on line 2
+    /// ```
+    fn const_closure(&mut self, expr: tree::Expr, line: u32) -> Result<ConstExpr, CompileError> {
+        let closure = self.walk_closure(expr, line)?;
+        if !closure.is_static {
+            return Err(self.compile_error("Closures in constant expressions must be static"));
+        }
+        if !closure.uses.is_empty() {
+            return Err(self.compile_error("Cannot use(...) variables in constant expression"));
+        }
+        let name = self.closure_name(closure.function.line);
+        let at = u32::try_from(self.dynamic.len()).unwrap_or(u32::MAX);
+        self.dynamic.push(None);
+        let flags = FnFlags {
+            closure: true,
+            is_static: true,
+            ..FnFlags::default()
+        };
+        let saved = self.begin_body(&name, false, flags);
+        let outcome = self.parameters_and_body(&closure.function, &name, None, &[], None);
+        self.end_body(saved);
+        if let Some(slot) = self.dynamic.get_mut(at as usize) {
+            *slot = Some(outcome?);
+        }
+        Ok(ConstExpr::Closure {
+            at,
+            name: Name(name.into_boxed_slice()),
+            unit: self.cell.clone(),
+        })
+    }
+
+    /// `zend_compile_const_expr_fcc` (`Z/Zend/zend_compile.c:11501`,
+    /// 8.5): a call in a constant expression is a first-class callable,
+    /// `f(...)` or `C::m(...)`, and any other call php's `Constant
+    /// expression contains invalid operations`. The function is named
+    /// as written, resolved as a call resolves it and marked fully
+    /// qualified where no global fallback applies; a name the program
+    /// computes, and a value that is no string, are php's fatals. The
+    /// class is a name, `self` or `parent`, never `static` nor one the
+    /// program computes, and the method a name as written.
+    ///
+    /// ```php
+    /// function f($cb = strlen(...), $up = strtoupper(...)) { return [$cb('abc'), $up('x')]; }
+    /// var_dump(f());
+    /// class C { static function m() { return 'm'; } const M = C::m(...); const N = C::{'m'}(...); }
+    /// var_dump((C::M)(), (C::N)());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(3)
+    ///   [1]=>
+    ///   string(1) "X"
+    /// }
+    /// string(1) "m"
+    /// string(1) "m"
+    /// ```
+    ///
+    /// ```php
+    /// const F = strlen('x');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Constant expression contains invalid operations in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// const F = (0)(...);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Illegal function name in %s on line 2
+    /// ```
+    fn const_callable(
+        &mut self,
+        id: NodeId<tree::CallExpr>,
+        line: u32,
+    ) -> Result<ConstExpr, CompileError> {
+        let (callee, args) = (self.parsed.tree[id].callee, self.parsed.tree[id].args);
+        if !matches!(self.arguments(args, line)?, Args::CallableConvert) {
+            return Err(self.compile_error("Constant expression contains invalid operations"));
+        }
+        // php's parser drops the parentheses around a callee, so what
+        // they hold is the node itself: `(C)(...)` a constant's fetch,
+        // which is no name, and `('f')(...)` a value it wrote.
+        let peeled = self.peel(callee);
+        let named = matches!(callee, tree::Expr::NameRef(_));
+        match peeled {
+            // `ZEND_AST_METHOD_CALL` and `ZEND_AST_NULLSAFE_METHOD_CALL`
+            // are none of the nodes `zend_is_allowed_in_const_expr` allows.
+            tree::Expr::MemberAccessExpr(_) => {
+                Err(self.compile_error("Constant expression contains invalid operations"))
+            }
+            tree::Expr::NameRef(name) if named => {
+                let written = self.text(name).to_vec();
+                let (resolved, fully_qualified) =
+                    self.resolve_non_class(&written, Symbol::Function);
+                let name_kind = if fully_qualified {
+                    NameKind::FullyQualified
+                } else {
+                    NameKind::NotFullyQualified
+                };
+                Ok(self.function_callable(resolved, name_kind, line))
+            }
+            // `name_ast->kind == ZEND_AST_ZVAL`: a value the parser
+            // wrote, which names the function where it is a string and
+            // is php's fatal where it is not; the string is no name
+            // written and carries `ZEND_NAME_FQ`.
+            written if self.is_written_value(written) => {
+                let value = self.constant_of(written)?;
+                let Some(text) = value.and_then(php_heap::Zval::as_str) else {
+                    return Err(self.compile_error("Illegal function name"));
+                };
+                Ok(self.function_callable(text.bytes().to_vec(), NameKind::FullyQualified, line))
+            }
+            tree::Expr::ScopedAccessExpr(scoped) => self.const_method_callable(scoped, line),
+            _ => Err(self.compile_error("Cannot use dynamic function name in constant expression")),
+        }
+    }
+
+    /// One `name(...)` node, numbered among the unit's.
+    fn function_callable(&mut self, name: Vec<u8>, name_kind: NameKind, line: u32) -> ConstExpr {
+        let at = self.function_callables;
+        self.function_callables = self.function_callables.saturating_add(1);
+        ConstExpr::FunctionCallable {
+            name: Name(name.into_boxed_slice()),
+            name_kind,
+            line,
+            at,
+            unit: self.cell.clone(),
+        }
+    }
+
+    /// [`Self::const_callable`]'s `ZEND_AST_STATIC_CALL` arm, over
+    /// `zend_compile_const_expr_class_reference`.
+    fn const_method_callable(
+        &mut self,
+        scoped: NodeId<tree::ScopedAccessExpr>,
+        line: u32,
+    ) -> Result<ConstExpr, CompileError> {
+        let node = &self.parsed.tree[scoped];
+        let (scope, member) = (node.scope, node.member);
+        let class = match self.peel(scope) {
+            tree::Expr::NameRef(token) => self.text(token).to_vec(),
+            tree::Expr::NewExpr(_) => {
+                return Err(self.compile_error("Cannot use anonymous class in constant expression"));
+            }
+            _ => {
+                return Err(
+                    self.compile_error("Cannot use dynamic class name in constant expression")
+                );
+            }
+        };
+        let class = match class_fetch_type(&class) {
+            FETCH_CLASS_STATIC => {
+                return Err(
+                    self.compile_error("\"static\" is not allowed in compile-time constants")
+                );
+            }
+            FETCH_CLASS_DEFAULT => self.resolve_class(&class),
+            _ => class,
+        };
+        let method = match member {
+            Some(tree::ScopedSelector::MemberName(member)) => match self.parsed.tree[member].name {
+                Some(name) => self.text(name).to_vec(),
+                None => return Err(self.unread("a method name")),
+            },
+            Some(tree::ScopedSelector::BracedMember(braced)) => {
+                let written = self.parsed.tree[braced]
+                    .inner
+                    .filter(|inner| self.is_written_value(*inner));
+                let Some(written) = written else {
+                    return Err(
+                        self.compile_error("Cannot use dynamic method name in constant expression")
+                    );
+                };
+                let value = self.constant_of(written)?;
+                let Some(text) = value.and_then(php_heap::Zval::as_str) else {
+                    return Err(self.compile_error("Illegal method name"));
+                };
+                text.bytes().to_vec()
+            }
+            _ => {
+                return Err(
+                    self.compile_error("Cannot use dynamic method name in constant expression")
+                );
+            }
+        };
+        Ok(ConstExpr::MethodCallable {
+            class: Name(class.into_boxed_slice()),
+            method: Name(method.into_boxed_slice()),
+            line,
+        })
+    }
+
     /// `zend_is_allowed_in_const_expr`'s refusal, php's
     /// `Constant expression contains invalid operations`, unless the
     /// node is one this compiler cannot read yet, whose own refusal
@@ -7235,10 +7571,10 @@ impl Emit<'_> {
     /// A 1 sets [`Emit::typing`] to [`Typing::Strict`], which every op
     /// array of the file then carries.
     ///
-    /// `ticks` a count of zero is the declarable php's compiler ignores
-    /// and is taken as php takes it; a count php would emit a
-    /// `ZEND_TICKS` after every statement for is refused, since no
-    /// opcode here serves one. `encoding` is refused for the scanner's
+    /// `ticks` is the count [`Emit::tick`] emits `ZEND_TICKS` with after
+    /// every statement in its scope, the value read as `zval_get_long`
+    /// reads it and zero turning the ticks off, and the scope the rest of
+    /// the file or the statement after the `)`. `encoding` is refused for the scanner's
     /// own warning, which this compiler does not raise. Every other
     /// name is php's `E_COMPILE_WARNING`, and the file compiles on.
     fn declare(&mut self, id: NodeId<tree::DeclareStmt>) -> Result<(), CompileError> {
@@ -7247,10 +7583,11 @@ impl Emit<'_> {
             return Err(self.unread("a `declare` in the alternative syntax"));
         }
         let body = node.body.filter(|body| !matches!(body, Stmt::EmptyStmt(_)));
+        let before = self.ticks;
         for directive in &node.declare_directives {
             let directive = &self.parsed.tree[*directive];
             self.line = directive.line();
-            let Some(value) = directive.value else {
+            let Some(written_value) = directive.value else {
                 return Err(self.unread("a `declare` directive"));
             };
             let written = self.text(directive.name);
@@ -7258,7 +7595,7 @@ impl Emit<'_> {
             // `(*value_ast_ptr)->kind != ZEND_AST_ZVAL`: the value is one
             // token the scanner made a zval of, so `-1`, `true` and
             // `1 + 0` are each the fatal and not a fold.
-            let Some(value) = self.literal_of(value) else {
+            let Some(value) = self.literal_of(written_value) else {
                 return Err(self.compile_error(format!("declare({name}) value must be a literal")));
             };
             if written.eq_ignore_ascii_case(b"strict_types") {
@@ -7282,11 +7619,12 @@ impl Emit<'_> {
                     }
                 }
             } else if written.eq_ignore_ascii_case(b"ticks") {
-                if !matches!(value, Literal::Int(0)) {
-                    return Err(
-                        self.fatal("a `declare(ticks)` of a count this compiler cannot read yet")
-                    );
-                }
+                // `zend_const_expr_to_zval` and `zval_get_long`.
+                let count = match value {
+                    Literal::Int(n) => n,
+                    Literal::Other => self.constant_of(written_value)?.map_or(0, long_of),
+                };
+                self.ticks = NonZeroI64::new(count);
             } else if written.eq_ignore_ascii_case(b"encoding") {
                 return Err(self.fatal("a `declare(encoding)` this compiler cannot read yet"));
             } else {
@@ -7302,6 +7640,7 @@ impl Emit<'_> {
         // statement at its own line, as a body's is.
         if let Some(body) = body {
             self.statements(&[body])?;
+            self.ticks = before;
         }
         Ok(())
     }
@@ -7460,10 +7799,76 @@ impl Emit<'_> {
                 continue;
             }
             self.line = stmt.line(self.parsed);
-            self.statement(*stmt)?;
+            self.stmt(*stmt)?;
         }
         self.depth = self.depth.saturating_sub(1);
         Ok(())
+    }
+
+    /// `zend_compile_stmt` (`Z/Zend/zend_compile.c:11685`): the
+    /// statement, then a `ZEND_TICKS` where a `declare(ticks)` scope
+    /// stands and the statement is none of `zend_is_unticked_stmt`'s, a
+    /// block or a label here (the class members it also names are no
+    /// statements of this walk).
+    pub(super) fn stmt(&mut self, stmt: Stmt) -> Result<(), CompileError> {
+        self.statement(stmt)?;
+        if !matches!(stmt, Stmt::Block(_) | Stmt::LabelStmt(_)) {
+            self.tick();
+        }
+        Ok(())
+    }
+
+    /// `zend_emit_tick`: `ZEND_TICKS` with the count in
+    /// `extended_value`, where a `declare(ticks)` scope stands and the
+    /// op array's last opline is not already one, which is what keeps
+    /// `declare(ticks=1) { … }` from ticking twice at its end.
+    ///
+    /// ```php
+    /// declare(ticks=1);
+    /// register_tick_function(function () { echo "."; });
+    /// echo "a";
+    /// if (true) { echo "b"; echo "c"; }
+    /// function f() { echo "f"; return 1; }
+    /// f();
+    /// $g = fn() => print "g";
+    /// $g();
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// .a.b.c.f...g.
+    /// .
+    /// ```
+    ///
+    /// ```php
+    /// register_tick_function(function () { echo "."; });
+    /// echo "a";
+    /// declare(ticks=1) { echo "b"; echo "c"; }
+    /// echo "d";
+    /// declare(ticks=2);
+    /// echo "e"; echo "f"; echo "g"; echo "\n";
+    /// ```
+    /// ```expect
+    /// ab.c.de.fg.
+    /// ```
+    pub(super) fn tick(&mut self) {
+        let Some(ticks) = self.ticks else {
+            return;
+        };
+        if self
+            .oplines
+            .last()
+            .is_some_and(|last| last.opcode == Opcode::Ticks)
+        {
+            return;
+        }
+        // `opline->extended_value = FC(declarables).ticks`, a
+        // `uint32_t` over the `zend_long`.
+        let every = u32::try_from(ticks.get() & i64::from(u32::MAX)).unwrap_or(u32::MAX);
+        self.push(Opline {
+            opcode: Opcode::Ticks,
+            extended_value: every,
+            ..Opline::default()
+        });
     }
 
     /// `zend_compile_for`: the initialisers, a `JMP` forward to the
@@ -9816,25 +10221,17 @@ impl Emit<'_> {
                 self.silence(operand)
             }
             // `clone` and `exit` are the calls php's parser makes of
-            // them, `\clone` and `\exit` in the function table.
+            // them, `\clone` and `\exit` in the function table: `clone
+            // $o` one argument, and `clone(...)` its argument list as
+            // written, 8.5's `clone($o, ['p' => 1])` among them, which
+            // `zend_compile_func_clone` leaves to the function.
             tree::Expr::CloneExpr(id) => {
                 let node = &tree[id];
-                let operand = match (node.operand, node.args) {
-                    (Some(operand), _) => operand,
-                    (None, Some(args)) => {
-                        let arguments = self.arguments(args, line)?;
-                        if let Args::CallableConvert = arguments {
-                            return self.call(b"\\clone", &arguments);
-                        }
-                        let arguments = arguments.positional();
-                        let Some([operand]) = arguments.as_deref() else {
-                            return Err(self.unread("a `clone` with an argument list"));
-                        };
-                        *operand
-                    }
+                let arguments = match (node.operand, node.args) {
+                    (Some(operand), _) => Args::of(&[operand], self.line_of(operand)),
+                    (None, Some(args)) => self.arguments(args, line)?,
                     (None, None) => return Err(self.unread("a `clone`")),
                 };
-                let arguments = Args::of(&[operand], self.line_of(operand));
                 self.call(b"\\clone", &arguments)
             }
             tree::Expr::ExitExpr(id) => {
@@ -9927,10 +10324,16 @@ impl Emit<'_> {
             }
             tree::Expr::IssetExpr(id) => {
                 let targets = tree[id].targets.clone();
-                let [target] = targets[..] else {
-                    return Err(self.unread("an `isset` over more than one variable"));
+                let Some((&first, rest)) = targets.split_first() else {
+                    return Err(self.unread("an `isset`"));
                 };
-                self.isset_or_empty(target, false)
+                let mut held = self.isset_or_empty(first, false)?;
+                for &target in rest {
+                    held = self.short_circuit_from(false, held, |emit| {
+                        emit.isset_or_empty(target, false)
+                    })?;
+                }
+                Ok(held)
             }
             tree::Expr::EmptyExpr(id) => {
                 let target = self.required(tree[id].target, "an `empty`")?;
@@ -10715,12 +11118,44 @@ impl Emit<'_> {
         right: tree::Expr,
     ) -> Result<Where, CompileError> {
         let left = self.expr(left)?;
+        self.short_circuit_from(or, left, |emit| emit.expr(right))
+    }
+
+    /// [`Self::short_circuiting`] once its left side stands compiled,
+    /// the right side compiled by `right` where the left side does not
+    /// settle it: what `isset($a, $b)` shares with `&&`, since php's
+    /// parser makes it the `ZEND_AST_AND` of one `isset` per variable
+    /// (`isset_variables`). The first unset variable settles it and the
+    /// ones after are never asked:
+    ///
+    /// ```php
+    /// $a = 1; $b = null; $c = [0];
+    /// class O { function __isset($n) { echo "asked $n\n"; return true; } }
+    /// $o = new O;
+    /// var_dump(isset($a, $c[0]), isset($a, $b, $o->p), isset($o->p, $a, $o->q));
+    /// var_dump(isset($this, $a), isset($a, $c, $a));
+    /// ```
+    /// ```expect
+    /// asked p
+    /// asked q
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    fn short_circuit_from(
+        &mut self,
+        or: bool,
+        left: Where,
+        right: impl FnOnce(&mut Self) -> Result<Where, CompileError>,
+    ) -> Result<Where, CompileError> {
         if let Where::Constant(value) = left {
             let held = truth(value);
             if held == or {
                 return Ok(Where::Constant(Zval::bool(held)));
             }
-            let right = self.expr(right)?;
+            let right = right(self)?;
             if let Where::Constant(value) = right {
                 return Ok(Where::Constant(Zval::bool(truth(value))));
             }
@@ -10739,7 +11174,7 @@ impl Emit<'_> {
             out,
             ..Opline::default()
         });
-        let otherwise = self.expr(right)?;
+        let otherwise = right(self)?;
         let (op1_type, op1) = self.operand(otherwise);
         self.push(Opline {
             opcode: Opcode::Bool,
@@ -10894,15 +11329,15 @@ impl Emit<'_> {
                 let Scoped::Property { class, name } = self.scoped_of(id, line)? else {
                     return Err(self.fatal("a `??` over a class constant, which is no variable"));
                 };
-                let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-                let name = self.string(&name)?;
-                let name_at = self.literal(name);
+                let StaticOperands {
+                    name,
+                    class: (op2_type, op2),
+                    slots: extended_value,
+                } = self.static_operands(class, &name)?;
                 let out = self.temporary();
-                let extended_value = self.cache_slots(3);
-                let (op2_type, op2) = self.class_operand(&class)?;
                 delayed.push(IsLink {
                     opcode: Opcode::FetchStaticPropIs,
-                    op1: Some((OperandKind::Const, name_at)),
+                    op1: Some(name),
                     op2_type,
                     op2,
                     out,
@@ -10921,10 +11356,7 @@ impl Emit<'_> {
     fn is_fetch(&self, expr: tree::Expr) -> bool {
         match self.peel(expr) {
             tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => true,
-            tree::Expr::ScopedAccessExpr(id) => matches!(
-                self.parsed.tree[id].member,
-                Some(tree::ScopedSelector::SimpleVarExpr(_))
-            ),
+            tree::Expr::ScopedAccessExpr(id) => self.names_property(id),
             _ => false,
         }
     }
@@ -11583,14 +12015,10 @@ impl Emit<'_> {
                 let Scoped::Property { class, name } = self.scoped_of(id, line)? else {
                     return Err(self.fatal("a class constant that is no property"));
                 };
-                let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-                let name = self.string(&name)?;
-                let name_at = self.literal(name);
+                let StaticOperands { name, class, slots } = self.static_operands(class, &name)?;
                 let out = self.temporary();
-                let slots = self.cache_slots(3);
-                let class = self.class_operand(&class)?;
                 Base::StaticProp {
-                    name_at,
+                    name,
                     class,
                     out,
                     slots,
@@ -11781,7 +12209,7 @@ impl Emit<'_> {
                 (out_type, out)
             }
             Base::StaticProp {
-                name_at,
+                name: (name_type, name_at),
                 class: (class_type, class_at),
                 out,
                 slots,
@@ -11795,7 +12223,7 @@ impl Emit<'_> {
                         Fetch::FuncArg => Opcode::FetchStaticPropFuncArg,
                         Fetch::Unset => Opcode::FetchStaticPropUnset,
                     },
-                    op1_type: OperandKind::Const,
+                    op1_type: name_type,
                     op1: name_at,
                     op2_type: class_type,
                     op2: class_at,
@@ -11983,15 +12411,15 @@ impl Emit<'_> {
     fn assign_static_prop(
         &mut self,
         class: ClassSpec,
-        name: &[u8],
+        name: &ScopedName,
         value: Source,
     ) -> Result<Where, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let StaticOperands {
+            name: (name_type, name_at),
+            class: (class_type, class_at),
+            slots,
+        } = self.static_operands(class, name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (class_type, class_at) = self.class_operand(&class)?;
         // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
         let line = self.line;
         let value = self.source(value)?;
@@ -11999,7 +12427,7 @@ impl Emit<'_> {
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignStaticProp,
-            op1_type: OperandKind::Const,
+            op1_type: name_type,
             op1: name_at,
             op2_type: class_type,
             op2: class_at,
@@ -12203,16 +12631,16 @@ impl Emit<'_> {
     fn assign_static_prop_op(
         &mut self,
         class: ClassSpec,
-        name: &[u8],
+        name: &ScopedName,
         op: BinaryOp,
         value: tree::Expr,
     ) -> Result<Where, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let StaticOperands {
+            name: (name_type, name_at),
+            class: (class_type, class_at),
+            slots,
+        } = self.static_operands(class, name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (class_type, class_at) = self.class_operand(&class)?;
         // The delayed fetch's line, as [`Self::assign_static_prop`]
         // keeps it.
         let line = self.line;
@@ -12221,7 +12649,7 @@ impl Emit<'_> {
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignStaticPropOp,
-            op1_type: OperandKind::Const,
+            op1_type: name_type,
             op1: name_at,
             op2_type: class_type,
             op2: class_at,
@@ -12252,15 +12680,15 @@ impl Emit<'_> {
     fn static_prop_step(
         &mut self,
         class: ClassSpec,
-        name: &[u8],
+        name: &ScopedName,
         step: Step,
     ) -> Result<Where, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let StaticOperands {
+            name: (name_type, name_at),
+            class: (class_type, class_at),
+            slots,
+        } = self.static_operands(class, name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (class_type, class_at) = self.class_operand(&class)?;
         self.push(Opline {
             opcode: match step {
                 Step::PreInc => Opcode::PreIncStaticProp,
@@ -12268,7 +12696,7 @@ impl Emit<'_> {
                 Step::PostInc => Opcode::PostIncStaticProp,
                 Step::PostDec => Opcode::PostDecStaticProp,
             },
-            op1_type: OperandKind::Const,
+            op1_type: name_type,
             op1: name_at,
             op2_type: class_type,
             op2: class_at,
@@ -12298,19 +12726,19 @@ impl Emit<'_> {
     fn assign_static_prop_ref(
         &mut self,
         class: ClassSpec,
-        name: &[u8],
+        name: &ScopedName,
         source: Source,
     ) -> Result<Where, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let StaticOperands {
+            name: (name_type, name_at),
+            class: (class_type, class_at),
+            slots,
+        } = self.static_operands(class, name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (class_type, class_at) = self.class_operand(&class)?;
         let (data_type, data, flags) = self.ref_source_of(source, false)?;
         self.push(Opline {
             opcode: Opcode::AssignStaticPropRef,
-            op1_type: OperandKind::Const,
+            op1_type: name_type,
             op1: name_at,
             op2_type: class_type,
             op2: class_at,
@@ -12459,17 +12887,43 @@ impl Emit<'_> {
     /// `zend_try_ct_eval_binary_op` over `is_smaller_function` and its
     /// kin, and `zend_ct_eval_greater`, which calls the same two with
     /// the constants swapped: the bool each comparison reads off
-    /// [`php_heap::compare`]'s ordering, the long `compare_function`
-    /// writes for `<=>`, and [`php_heap::identical`] for `===` and `!==`,
-    /// at the compile-time `precision` a double is rendered at against a
-    /// string that is not numeric.
+    /// [`php_heap::compare_constants`]' ordering, the long
+    /// `compare_function` writes for `<=>`, and
+    /// [`php_heap::identical_constants`] for `===` and `!==`, at the
+    /// compile-time `precision` a double is rendered at against a string
+    /// that is not numeric. A constant array is compared as the kernel
+    /// compares it, since `zend_binary_op_produces_error` refuses no
+    /// comparison:
+    ///
+    /// ```php
+    /// var_dump([1] === [2], [1] == [2], [1, 2, 3] <=> [], [1] === [], [1] == [1], [1] < [2]);
+    /// var_dump(['a' => 1, 'b' => 2] == ['b' => 2, 'a' => 1], ['a' => 1, 'b' => 2] === ['b' => 2, 'a' => 1], [1] == ['1'], [1] === ['1']);
+    /// var_dump([] == false, [0] == true, [] < null, [1] > 5, 'x' < [], ['a' => 1] <=> ['b' => 1], [[1, 2]] < [[1, 3]]);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// int(1)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// int(1)
+    /// bool(true)
+    /// ```
     fn compare_fold(&self, op: BinaryOp, left: Zval, right: Zval) -> Zval {
-        let (a, b) = (left.as_str(), right.as_str());
-        let (left, right) = (scalar(left, a.as_ref()), scalar(right, b.as_ref()));
-        let compare = |l, r| php_heap::compare(l, r, self.precision);
+        let compare = |l, r| php_heap::compare_constants(l, r, self.precision);
         match op {
-            BinaryOp::IsIdentical => Zval::bool(php_heap::identical(left, right)),
-            BinaryOp::IsNotIdentical => Zval::bool(!php_heap::identical(left, right)),
+            BinaryOp::IsIdentical => Zval::bool(php_heap::identical_constants(left, right)),
+            BinaryOp::IsNotIdentical => Zval::bool(!php_heap::identical_constants(left, right)),
             BinaryOp::Greater => Zval::bool(compare(right, left) == Ordering::Less),
             BinaryOp::GreaterOrEqual => Zval::bool(compare(right, left) != Ordering::Greater),
             BinaryOp::IsSmaller => Zval::bool(compare(left, right) == Ordering::Less),
@@ -12507,6 +12961,12 @@ impl Emit<'_> {
         left: Zval,
         right: Zval,
     ) -> Result<Option<Zval>, CompileError> {
+        // `zend_binary_op_produces_error`'s concatenation arm: an array
+        // on either side is the warning left to the request, and no
+        // conversion is made of the other side here.
+        if left.as_arr().is_some() || right.as_arr().is_some() {
+            return Ok(None);
+        }
         let (Some(a), Some(b)) = (self.stringified(left)?, self.stringified(right)?) else {
             return Ok(None);
         };
@@ -12518,9 +12978,28 @@ impl Emit<'_> {
     }
 
     /// A constant operand of a `.` as the string `zend_compile_binary_op`
-    /// converts it to; any other operand as it is.
+    /// converts it to, a constant array as the `CAST (string)` it emits
+    /// for one, and any other operand as it is. The cast stands after
+    /// both sides are compiled and before the `CONCAT`, so the array's
+    /// warning is raised before an object on the other side throws:
+    ///
+    /// ```php
+    /// set_error_handler(function ($n, $s) { echo "warning: $s\n"; });
+    /// try { new stdClass . []; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { [] . new stdClass; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $a = 1; echo $a . [], "\n";
+    /// ```
+    /// ```expect
+    /// warning: Array to string conversion
+    /// Object of class stdClass could not be converted to string
+    /// warning: Array to string conversion
+    /// Object of class stdClass could not be converted to string
+    /// warning: Array to string conversion
+    /// 1Array
+    /// ```
     fn string_operand(&mut self, value: Where) -> Result<Where, CompileError> {
         match value {
+            Where::Constant(v) if v.as_arr().is_some() => Ok(self.emit_cast(value, CastTo::Str)),
             Where::Constant(v) => Ok(Where::Constant(self.stringified(v)?.unwrap_or(v))),
             other => Ok(other),
         }
@@ -13604,9 +14083,10 @@ impl Emit<'_> {
                 Err(self.compile_error("Cannot use list() as standalone expression"))
             }
             // `zend_is_allowed_in_const_expr` allows `ZEND_AST_CALL`
-            // for the first-class callable alone, `f(...)`, which this
-            // compiler does not read; the arguments are read before the
-            // callee so that refusal is the one that stands.
+            // for the first-class callable alone, `f(...)`, which folds
+            // to nothing and is kept as the tree
+            // ([`Self::const_callable`]); the arguments are read before
+            // the callee.
             tree::Expr::CallExpr(_) if self.fold == Fold::EvalConstExpr => {
                 Err(self.fatal("a call is no constant expression"))
             }
@@ -13615,7 +14095,7 @@ impl Emit<'_> {
                 let (callee, args) = (node.callee, node.args);
                 let arguments = self.arguments(args, line)?;
                 if let Args::CallableConvert = arguments {
-                    return Err(walk::unread(line, "a first-class callable"));
+                    return Err(self.fatal("a first-class callable folds to no constant"));
                 }
                 let Some(arguments) = arguments.positional() else {
                     return Err(walk::unread(
@@ -13672,10 +14152,13 @@ impl Emit<'_> {
                 Scoped::Constant {
                     class: ClassSpec::Name(token),
                     name,
-                } => match self.active_class_constant(token, &name)? {
-                    Some(value) => Ok(value),
-                    None => Err(self.fatal("a class constant is fetched at run time")),
-                },
+                } => {
+                    let folded = match self.folded_name(&name)? {
+                        Some(name) => self.active_class_constant(token, &name)?,
+                        None => None,
+                    };
+                    folded.ok_or_else(|| self.fatal("a class constant is fetched at run time"))
+                }
                 Scoped::Constant { .. } => {
                     Err(self.fatal("a class constant is fetched at run time"))
                 }
@@ -15137,30 +15620,52 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Cannot use "parent" when current class scope has no parent in %s on line 2
     /// ```
-    fn class_const(&mut self, class: ClassSpec, name: &[u8]) -> Result<Where, CompileError> {
+    fn class_const(&mut self, class: ClassSpec, name: &ScopedName) -> Result<Where, CompileError> {
+        let written = self.folded_name(name)?;
         if let ClassSpec::Name(token) = class
-            && let Some(value) = self.active_class_constant(token, name)?
+            && let Some(written) = &written
+            && let Some(value) = self.active_class_constant(token, written)?
         {
             return Ok(Where::Constant(value));
         }
         let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let name = match name {
+            ScopedName::Written(bytes) => Where::Constant(self.string(bytes)?),
+            ScopedName::Computed(expr) => self.expr(*expr)?,
+        };
+        let (op2_type, op2) = self.operand(name);
         let out = self.temporary();
         let (op1_type, op1) = self.class_operand(&class)?;
-        let slots = self.cache_slots(2);
+        let slots = if op1_type == OperandKind::Const || op2_type == OperandKind::Const {
+            self.cache_slots(2)
+        } else {
+            0
+        };
         self.push(Opline {
             opcode: Opcode::FetchClassConstant,
             op1_type,
             op1,
-            op2_type: OperandKind::Const,
-            op2: name_at,
+            op2_type,
+            op2,
             out_type: OperandKind::Tmp,
             out,
             extended_value: slots,
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_eval_const_expr` over a name after `::`: the name written
+    /// out, or the string a computed one folds to, so `C::{'X'}` and
+    /// `C::{'X' . ''}` are `C::X`; nothing where it folds to no string or
+    /// does not fold.
+    fn folded_name(&mut self, name: &ScopedName) -> Result<Option<Vec<u8>>, CompileError> {
+        Ok(match name {
+            ScopedName::Written(bytes) => Some(bytes.clone()),
+            ScopedName::Computed(expr) => self
+                .constant_of(*expr)?
+                .and_then(|value| value.as_str().map(|s| s.bytes().to_vec())),
+        })
     }
 
     /// `zend_try_ct_eval_class_const`'s one arm opcache leaves standing,
@@ -15242,17 +15747,17 @@ impl Emit<'_> {
     /// #0 {main}
     ///   thrown in %s on line 12
     /// ```
-    fn static_prop(&mut self, class: ClassSpec, name: &[u8]) -> Result<Where, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+    fn static_prop(&mut self, class: ClassSpec, name: &ScopedName) -> Result<Where, CompileError> {
+        let StaticOperands {
+            name: (op1_type, op1),
+            class: (op2_type, op2),
+            slots,
+        } = self.static_operands(class, name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (op2_type, op2) = self.class_operand(&class)?;
         self.push(Opline {
             opcode: Opcode::FetchStaticPropR,
-            op1_type: OperandKind::Const,
-            op1: name_at,
+            op1_type,
+            op1,
             op2_type,
             op2,
             out_type: OperandKind::Tmp,
@@ -15261,6 +15766,56 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_static_prop`'s operands (`Z/Zend/zend_compile.c:3202`),
+    /// which every opline over a class's property takes: the class
+    /// compiled first (`zend_compile_class_ref`), then the name
+    /// (`zend_compile_expr`), a name written out or one the compiler
+    /// folds being the constant string `convert_to_string` leaves in
+    /// `op1` with three cache slots, and any other the operand its
+    /// expression left, with one slot where the class is a constant pair
+    /// and none where the class is fetched; `op2` the class.
+    ///
+    /// ```php
+    /// class A { public static $b = 1; public static $c = [0, 1]; }
+    /// $b = 'b'; $c = 'c'; $n = 42;
+    /// var_dump(A::$$b, A::${'b'}, A::${$b}, A::$$c[1], A::${'' . $b});
+    /// try { var_dump(A::${$n}); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { var_dump(A::${42}); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(1)
+    /// int(1)
+    /// int(1)
+    /// int(1)
+    /// Access to undeclared static property A::$42
+    /// Access to undeclared static property A::$42
+    /// ```
+    fn static_operands(
+        &mut self,
+        class: ClassSpec,
+        name: &ScopedName,
+    ) -> Result<StaticOperands, CompileError> {
+        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+        let name = match name {
+            ScopedName::Written(bytes) => Where::Constant(self.string(bytes)?),
+            ScopedName::Computed(expr) => match self.expr(*expr)? {
+                Where::Constant(value) => {
+                    Where::Constant(self.stringified(value)?.unwrap_or(value))
+                }
+                computed => computed,
+            },
+        };
+        let name = self.operand(name);
+        let slots = match (name.0, &class) {
+            (OperandKind::Const, _) => self.cache_slots(3),
+            (_, ClassRef::Named(_)) => self.cache_slots(1),
+            _ => 0,
+        };
+        let class = self.class_operand(&class)?;
+        Ok(StaticOperands { name, class, slots })
     }
 
     /// `zend_emit_op(result, ZEND_FETCH_THIS, NULL, NULL)`: `$this` into
@@ -17395,16 +17950,16 @@ mod tests {
     fn in_namespace<'a>(
         parsed: &'a Parsed,
         strings: &'a mut php_heap::Strings,
-        options: &'a Options,
+        options: &'a Options<'a>,
     ) -> Emit<'a> {
         Emit {
             parsed,
             strings,
             precision: options.precision,
             assertions: assert::Assertions::of(options.assertions),
-            persistent: &options.persistent,
-            functions: &options.functions,
-            known_classes: &options.classes,
+            persistent: options.persistent,
+            functions: options.functions,
+            known_classes: options.classes,
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
             namespacing: Namespacing::Unbracketed,
@@ -17424,6 +17979,7 @@ mod tests {
             in_jmp_frameless_branch: false,
             statements_seen: 0,
             typing: Typing::of(options.strict_types),
+            ticks: None,
             stack: options.stack,
             oplines: Vec::new(),
             short_circuits: Vec::new(),
@@ -17446,6 +18002,8 @@ mod tests {
             keys_before: 0,
             functions_declared: Vec::new(),
             dynamic: Vec::new(),
+            cell: php_unit::UnitCell::default(),
+            function_callables: 0,
             dynamic_func_defs: Vec::new(),
             static_vars: Vec::new(),
             fold: Fold::Compile,

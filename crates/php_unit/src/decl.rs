@@ -304,8 +304,9 @@ pub enum NameKind {
 
 /// An unevaluated constant expression: Zend's `zend_ast` for constant
 /// expressions, evaluated by the engine on first use and kept as written
-/// for Reflection. A closure or a first-class callable is an index into
-/// the owning unit's function table.
+/// for Reflection. A closure is an index into the owning unit's function
+/// table and a first-class callable the name it resolves at evaluation,
+/// as php's `zend_ast_fcc` resolves it.
 ///
 /// `line` is `zend_ast_get_lineno` of a node whose evaluation can raise,
 /// the line of its first child as `zend_ast_create` gives it one: where
@@ -341,6 +342,16 @@ pub enum ConstExpr {
         class: Name,
         class_kind: NameKind,
         name: Name,
+        line: u32,
+    },
+    /// `class::{expr}`, php's `ZEND_AST_CLASS_CONST` whose name the
+    /// compiler could not fold to a string: the name evaluated first,
+    /// then the constant it names fetched as [`ConstExpr::ClassConstant`]
+    /// fetches one, php's `TypeError` where the name is no string.
+    DynamicClassConstant {
+        class: Name,
+        class_kind: NameKind,
+        name: Box<ConstExpr>,
         line: u32,
     },
     EnumCase {
@@ -421,7 +432,46 @@ pub enum ConstExpr {
         arguments: Vec<(Option<Name>, ConstExpr)>,
         line: u32,
     },
-    Closure(u32),
+    /// `static function (...) { ... }` (8.5), php's `ZEND_AST_OP_ARRAY`:
+    /// the body is function `at` of the unit's [`Unit::dynamic`], which
+    /// no op array declares (`FUNC_DECL_LEVEL_CONSTEXPR`), reached
+    /// through `unit` once the engine has published the unit, and made
+    /// a closure over the evaluating scope each time the expression is
+    /// evaluated (`zend_create_closure`); `name` is the
+    /// `{closure:...}` php prints the node as.
+    ///
+    /// [`Unit::dynamic`]: crate::Unit::dynamic
+    Closure {
+        at: u32,
+        name: Name,
+        unit: crate::unit::UnitCell,
+    },
+    /// `name(...)` (8.5), php's `ZEND_AST_CALL` over
+    /// `ZEND_AST_CALLABLE_CONVERT`: the function's name as
+    /// `zend_resolve_function_name` left it and whether it was written
+    /// fully qualified, which is what keeps the global fallback from an
+    /// unqualified name in a namespace; the fake closure is made of the
+    /// function found at evaluation. The function a request finds first
+    /// is the one it keeps for the node, php's `zend_ast_fcc.fptr` map
+    /// pointer, so the node is named by its unit and its number `at`
+    /// among the unit's callables.
+    FunctionCallable {
+        name: Name,
+        name_kind: NameKind,
+        line: u32,
+        at: u32,
+        unit: crate::unit::UnitCell,
+    },
+    /// `Class::method(...)` (8.5), php's `ZEND_AST_STATIC_CALL` over
+    /// `ZEND_AST_CALLABLE_CONVERT`: the class resolved, `self` and
+    /// `parent` as written, and the method as written; the fake closure
+    /// is made of the static method found at evaluation, with the class
+    /// as its called scope.
+    MethodCallable {
+        class: Name,
+        method: Name,
+        line: u32,
+    },
     /// `__CLASS__` in a trait's constant expression, php's
     /// `ZEND_AST_CONSTANT_CLASS`: the name of the scope the expression
     /// is evaluated in, which is the class that took the member from the
@@ -447,6 +497,9 @@ impl ConstExpr {
         match self {
             ConstExpr::Constant { line, .. }
             | ConstExpr::ClassConstant { line, .. }
+            | ConstExpr::DynamicClassConstant { line, .. }
+            | ConstExpr::FunctionCallable { line, .. }
+            | ConstExpr::MethodCallable { line, .. }
             | ConstExpr::EnumCase { line, .. }
             | ConstExpr::ClassName { line, .. }
             | ConstExpr::Unary { line, .. }
@@ -463,7 +516,7 @@ impl ConstExpr {
             | ConstExpr::Str(_)
             | ConstExpr::Unpack(_)
             | ConstExpr::Conditional { .. }
-            | ConstExpr::Closure(_)
+            | ConstExpr::Closure { .. }
             | ConstExpr::ScopeClass => None,
         }
     }

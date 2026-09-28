@@ -68,14 +68,32 @@ struct State {
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
-/// the constants, the request's end and the interrupt hook, php's
-/// `zend_interrupt_function` as `PHP_MINIT(pcntl)` sets it.
+/// the constants, the request's end, the interrupt hook, php's
+/// `zend_interrupt_function` as `PHP_MINIT(pcntl)` sets it, and the hook
+/// `ZEND_TICKS` serves, the `pcntl_signal_dispatch_tick_function` its
+/// `MINIT` adds with `php_add_tick_function`, which serves the signals
+/// taken since the last dispatch after each statement of a
+/// `declare(ticks)` scope.
 ///
 /// ```php
 /// var_dump(extension_loaded('pcntl'));
 /// ```
 /// ```expect process
 /// bool(true)
+/// ```
+///
+/// ```php
+/// declare(ticks=1);
+/// pcntl_signal(SIGUSR1, function ($signo) { echo "handled\n"; });
+/// echo "start\n";
+/// posix_kill(posix_getpid(), SIGUSR1);
+/// $i = 0;
+/// echo "done\n";
+/// ```
+/// ```expect process
+/// start
+/// handled
+/// done
 /// ```
 pub fn extension() -> Extension {
     let builder = ExtensionBuilder::default();
@@ -115,6 +133,7 @@ pub fn extension() -> Extension {
         .request_state::<State>()
         .rshutdown(signals::rshutdown)
         .interrupt(signals::dispatch)
+        .ticks(signals::dispatch)
         .info(pcntl_info)
         .build("pcntl")
 }

@@ -1420,6 +1420,17 @@ struct DirtyTemporary {
     held: php_heap::ZvalType,
 }
 
+/// One entry of `BG(user_tick_functions)`, php's
+/// `user_tick_function_entry`: the callable and the arguments it is
+/// served with, each held by one owner, and whether a round is serving
+/// it now (`calling`), which keeps a `ZEND_TICKS` inside it from serving
+/// it again and `unregister_tick_function()` from dropping it.
+struct TickFunction {
+    callback: Callable,
+    arguments: Vec<Value>,
+    calling: bool,
+}
+
 /// One request (design §5.14): `Send`, single-threaded, dropped at the
 /// end of `serve`. Everything a native may touch is a method here or on
 /// a value it hands out.
@@ -1686,7 +1697,17 @@ pub struct Request {
     exception_handlers: Vec<Option<Callable>>,
     /// `BG(user_shutdown_function_names)`.
     shutdown_functions: ShutdownFunctions,
-    tick_functions: Vec<(Callable, Vec<Value>)>,
+    /// `BG(user_tick_functions)`, in registration order.
+    tick_functions: Vec<TickFunction>,
+    /// `EG(ticks_count)`: the `ZEND_TICKS` passed since the functions
+    /// they serve were last served.
+    ticks_count: u32,
+    /// The function each `name(...)` of a constant expression found the
+    /// first time this request evaluated it, php's `zend_ast_fcc.fptr`
+    /// map pointer, by the node's unit and number
+    /// ([`php_unit::decl::ConstExpr::FunctionCallable`]); the cell held
+    /// here keeps the key's identity while the entry stands.
+    function_callables: Vec<(php_unit::UnitCell, u32, Function)>,
     autoloaders: Vec<Callable>,
     /// `EG(in_autoload)`: the lowered names an autoloader is loading.
     in_autoload: Vec<Vec<u8>>,
@@ -2223,6 +2244,8 @@ impl Request {
             exception_handlers: Vec::new(),
             shutdown_functions: ShutdownFunctions::default(),
             tick_functions: Vec::new(),
+            ticks_count: 0,
+            function_callables: Vec::new(),
             autoloaders: Vec::new(),
             in_autoload: Vec::new(),
             assert_callback: None,
@@ -3477,7 +3500,7 @@ impl Request {
         }
         let at = usize::try_from(function.0).ok()?;
         match at.checked_sub(self.shared.functions.len()) {
-            None => self.shared.functions.get(at).map(|(_, entry)| *entry),
+            None => self.shared.entries.get(at).copied(),
             Some(method) => self.shared.methods.get(method).map(|m| m.entry),
         }
     }
@@ -3988,14 +4011,31 @@ impl Request {
         function: Function,
         written: &[u8],
     ) -> Result<(), Thrown> {
-        if self.method_accessible(function) {
+        let scope = self.executed_scope();
+        self.check_method_access_from(function, written, scope)
+    }
+
+    /// [`Request::check_method_access`] measured against `scope` rather
+    /// than the executed one, as `zend_check_method_accessible(fptr,
+    /// scope)` measures a callable a constant expression names from the
+    /// scope that evaluates it.
+    pub(crate) fn check_method_access_from(
+        &mut self,
+        function: Function,
+        written: &[u8],
+        scope: Option<ClassId>,
+    ) -> Result<(), Thrown> {
+        if self.method_accessible_from(function, scope) {
             return Ok(());
         }
         let shown = visibility_string(self.method_visibility(function));
         let class = self
             .method_class(function)
             .map_or_else(|| String::from("object"), |class| self.class_name(class));
-        let from = self.scope_phrase();
+        let from = match scope {
+            Some(scope) => format!("scope {}", self.class_name(scope)),
+            None => String::from("global scope"),
+        };
         Err(crate::api::raising::throw(
             self,
             "Error",
@@ -8924,12 +8964,11 @@ impl Request {
         {
             return Err(self.readonly_modification(placed.declaring, name, operation));
         }
-        // An initialised readonly property is refused as readonly, the
-        // caller's, ahead of its set visibility
-        // (`zend_std_write_property`).
-        let readonly_first = placed.readonly && initialized;
+        // The set visibility after the readonly arm, which a readonly
+        // property `IS_PROP_REINITABLE` has passed: `__clone` and a
+        // `clone with` write it once more only from a scope that may set
+        // it (`zend_std_write_property`).
         if let Some(set) = placed.set_visibility
-            && !readonly_first
             && !self.has_set_access(placed.declaring, set)
         {
             return Err(self.set_inaccessible_property(
@@ -10212,27 +10251,73 @@ impl Request {
 
     /// `zend_objects_clone_obj_with`, the `Std` `clone_obj_with` slot:
     /// the class's `clone_obj`, then each of `properties` written on the
-    /// copy through the class's `write_property`, a reference with one
-    /// owner followed and one with more php's `Error`; the copy is given
-    /// up with what a write threw. The scope php writes under as
-    /// `fake_scope` is not modelled, so the writes are the executed
-    /// scope's.
+    /// copy as `zend_std_write_property` writes it, a reference with one
+    /// owner followed and one with more php's `Error`, under
+    /// `EG(fake_scope)` the scope `clone()` was called from, so a
+    /// property that scope may not reach is php's `Error` and a parent's
+    /// private one a dynamic property; the copy is given up with what a
+    /// write threw. Every readonly property is writable once more for
+    /// the writes, and each is locked again by the write that lands on
+    /// it, so a hook that initialised one leaves it closed to the next.
+    ///
+    /// ```php
+    /// class P { public $a = 'a'; protected $b = 'b'; private $c = 'c';
+    ///     public function __construct(public readonly int $r = 1) {}
+    ///     function with() { return clone($this, ['b' => 'B', 'c' => 'C', 'r' => 2]); }
+    ///     function again() { return clone($this, ['r' => 3]); } }
+    /// class C extends P { function mine() { return clone($this, ['c' => 'dynamic']); } }
+    /// var_dump((new P)->with());
+    /// try { clone(new P, ['b' => 'x']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { clone(new P, ['r' => 3]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump((new P)->again()->r);
+    /// #[AllowDynamicProperties] class D extends C {}
+    /// var_dump((new D)->mine());
+    /// ```
+    /// ```expect
+    /// object(P)#2 (4) {
+    ///   ["a"]=>
+    ///   string(1) "a"
+    ///   ["b":protected]=>
+    ///   string(1) "B"
+    ///   ["c":"P":private]=>
+    ///   string(1) "C"
+    ///   ["r"]=>
+    ///   int(2)
+    /// }
+    /// Cannot access protected property P::$b
+    /// Cannot modify protected(set) readonly property P::$r from global scope
+    /// int(3)
+    /// object(D)#3 (5) {
+    ///   ["a"]=>
+    ///   string(1) "a"
+    ///   ["b":protected]=>
+    ///   string(1) "b"
+    ///   ["c":"P":private]=>
+    ///   string(1) "c"
+    ///   ["r"]=>
+    ///   int(1)
+    ///   ["c"]=>
+    ///   string(7) "dynamic"
+    /// }
+    /// ```
     pub(crate) fn clone_members_with(
         &mut self,
         object: PhpObject,
         scope: Option<ClassId>,
         properties: PhpArray,
     ) -> Result<PhpObject, Thrown> {
-        let _ = scope;
         let table = self.object_handlers(object.heap());
         let Some(clone_obj) = table.clone_obj() else {
             return Err(self.uncloneable(object));
         };
         let new = clone_obj(self, object)?;
         // "Unlock readonly properties once more" for the writes, and lock
-        // them again after, whatever a write threw.
+        // them again after, whatever a write threw; `EG(fake_scope) =
+        // scope` for the writes and put back after them.
         Self::mark_reinitable(new, true);
+        let saved = std::mem::replace(&mut self.fake_scope, scope);
         let written = self.clone_with_writes(new, table, properties);
+        self.fake_scope = saved;
         Self::mark_reinitable(new, false);
         if let Err(thrown) = written {
             self.release(new.as_value());
@@ -10249,7 +10334,7 @@ impl Request {
         table: &'static dyn crate::api::abi::ObjectHandlers,
         properties: PhpArray,
     ) -> Result<(), Thrown> {
-        for (key, value) in properties.snapshot() {
+        for (key, value) in properties.snapshot_refs() {
             let value = match value.as_php_ref() {
                 Some(r) if r.as_value().refcount() > 1 => {
                     return Err(crate::api::raising::throw(
@@ -10263,7 +10348,53 @@ impl Request {
             };
             let name = key.to_prop_name(self)?;
             self.addref(&value);
-            table.write_property(self, new, name, value)?;
+            self.write_cloned_property(new, table, name, value)?;
+        }
+        Ok(())
+    }
+
+    /// `zend_std_write_property` over one property of a `clone with`:
+    /// where the name is the standard place, it is placed first
+    /// ([`Request::declared_slot_for_write`]), which raises what the
+    /// scope may not reach, a readonly property already written and a
+    /// set visibility the scope lacks, and a declared slot the write
+    /// lands on is locked again (`Z_PROP_FLAG_P(variable_ptr) &=
+    /// ~IS_PROP_REINITABLE`); the write itself is the class's
+    /// `write_property`, which serves a hook, a `__set` and a dynamic
+    /// property.
+    fn write_cloned_property(
+        &mut self,
+        object: PhpObject,
+        table: &'static dyn crate::api::abi::ObjectHandlers,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let bytes = name.as_bytes().to_vec();
+        let place = match table.get_property_ptr_ptr(self, object, &bytes) {
+            Ok(place) => place,
+            Err(thrown) => {
+                self.release(value);
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        };
+        if place == crate::api::abi::PropertyPlace::Handlers {
+            return table.write_property(self, object, name, value);
+        }
+        let silent = self.serves_accessor(object.class(), b"__set");
+        let slot = match self.declared_slot_for_write(object, &bytes, "modify", silent) {
+            Ok(placed) => placed.map(|(slot, _)| slot),
+            Err(thrown) => {
+                self.release(value);
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        };
+        table.write_property(self, object, name, value)?;
+        if let Some(slot) = slot {
+            object
+                .heap()
+                .set_slot_bit(slot, php_heap::PropBit::Reinitable, false);
         }
         Ok(())
     }
@@ -13294,7 +13425,11 @@ impl Request {
     /// the scope given rather than read: a private method is its own
     /// class's, a protected one a scope `zend_check_protected` relates
     /// to its class.
-    fn method_accessible_from(&self, function: Function, scope: Option<ClassId>) -> bool {
+    pub(crate) fn method_accessible_from(
+        &self,
+        function: Function,
+        scope: Option<ClassId>,
+    ) -> bool {
         let Some(class) = self.method_class(function) else {
             return true;
         };
@@ -14303,7 +14438,7 @@ impl Request {
             .shared
             .functions
             .iter()
-            .position(|(decl, _)| decl.name.0.to_ascii_lowercase() == wanted)
+            .position(|decl| decl.name.0.eq_ignore_ascii_case(&wanted))
         {
             return u32::try_from(i).ok().map(Function);
         }
@@ -15301,7 +15436,12 @@ impl Request {
         // `PHP_RSHUTDOWN(basic)`'s `zend_llist_destroy` of
         // `BG(user_tick_functions)`, and `SG(callback_func)` where the
         // header block was never sent.
-        for (callback, arguments) in std::mem::take(&mut self.tick_functions) {
+        for TickFunction {
+            callback,
+            arguments,
+            ..
+        } in std::mem::take(&mut self.tick_functions)
+        {
             callback.release(self);
             for value in arguments {
                 self.release(value);
@@ -16055,7 +16195,7 @@ impl Request {
     pub fn function_decl(&self, function: Function) -> Option<&FunctionDecl> {
         let at = usize::try_from(function.0).ok()?;
         if at < self.shared.functions.len() {
-            return self.shared.functions.get(at).map(|(decl, _)| decl);
+            return self.shared.functions.get(at);
         }
         if let Some(decl) = self.user_function(function).and_then(user_function_decl) {
             return Some(decl);
@@ -16082,7 +16222,7 @@ impl Request {
             .shared
             .functions
             .iter()
-            .map(|(decl, _)| decl.name.0.to_ascii_lowercase())
+            .map(|decl| decl.name.0.to_ascii_lowercase())
             .collect();
         let user: Vec<Vec<u8>> = self
             .user_functions
@@ -17687,23 +17827,118 @@ impl Request {
         for value in &arguments {
             self.addref(value);
         }
-        self.tick_functions.push((callback, arguments));
+        self.tick_functions.push(TickFunction {
+            callback,
+            arguments,
+            calling: false,
+        });
         true
     }
 
     /// `unregister_tick_function()`: `zend_llist_del_element`, the first
     /// entry for the same callee, scope and object dropped and its
-    /// owners given up.
-    pub fn unregister_tick_function(&mut self, callback: &Callable) -> bool {
-        let Some(at) = self.tick_functions.iter().position(|(c, _)| c == callback) else {
-            return false;
+    /// owners given up; php's `Error` where that entry is the one being
+    /// served (`user_tick_function_compare`).
+    pub fn unregister_tick_function(&mut self, callback: &Callable) -> Result<bool, Thrown> {
+        let Some(at) = self
+            .tick_functions
+            .iter()
+            .position(|entry| entry.callback == *callback)
+        else {
+            return Ok(false);
         };
-        let (held, arguments) = self.tick_functions.remove(at);
+        if self.tick_functions[at].calling {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                "Registered tick function cannot be unregistered while it is being executed",
+            ));
+        }
+        let TickFunction {
+            callback: held,
+            arguments,
+            ..
+        } = self.tick_functions.remove(at);
         held.release(self);
         for value in arguments {
             self.release(value);
         }
-        true
+        Ok(true)
+    }
+
+    /// The function a `name(...)` node found earlier in this request,
+    /// `ZEND_MAP_PTR_GET(fcc_ast->fptr)`.
+    pub(crate) fn kept_callable(&self, unit: &php_unit::UnitCell, at: u32) -> Option<Function> {
+        self.function_callables
+            .iter()
+            .find(|(held, number, _)| held == unit && *number == at)
+            .map(|(_, _, function)| *function)
+    }
+
+    /// `ZEND_MAP_PTR_SET(fcc_ast->fptr, fptr)`: the function the node
+    /// found, kept for the rest of the request.
+    pub(crate) fn keep_callable(&mut self, unit: &php_unit::UnitCell, at: u32, function: Function) {
+        self.function_callables.push((unit.clone(), at, function));
+    }
+
+    /// `ZEND_TICKS`' count (`Z/Zend/zend_vm_def.h:8024`): `EG(ticks_count)`
+    /// stepped, and where it reaches `every` it starts again and the
+    /// round is served, `zend_ticks_function` as `php_run_ticks`
+    /// runs `PG(tick_functions)`: each extension's hook in bundle order,
+    /// then each function `register_tick_function()` kept, in
+    /// registration order, one already running passed over
+    /// (`user_tick_function_call`), all with fiber switching blocked
+    /// (`zend_fiber_switch_block`). The first throw ends the round, as
+    /// php's `zend_call_function` calls nothing while one is pending.
+    pub(crate) fn tick(&mut self, every: u32) -> Result<(), Thrown> {
+        self.ticks_count = self.ticks_count.saturating_add(1);
+        if self.ticks_count < every {
+            return Ok(());
+        }
+        self.ticks_count = 0;
+        self.fibers_blocked(Request::serve_ticks)
+    }
+
+    /// `zend_fiber_switch_block()` before `f` and
+    /// `zend_fiber_switch_unblock()` after it: while `f` is under way no
+    /// fiber starts, suspends, resumes or is thrown into, each php's
+    /// `FiberError`, `Cannot switch fibers in current execution context`,
+    /// as a `ZEND_TICKS` round holds the functions it serves and
+    /// pcntl's `pcntl_signal_dispatch` its handlers.
+    pub fn fibers_blocked<R>(&mut self, f: impl FnOnce(&mut Request) -> R) -> R {
+        self.fibers.block_switch();
+        let done = f(self);
+        self.fibers.unblock_switch();
+        done
+    }
+
+    /// [`Request::tick`]'s round, while fiber switching is blocked.
+    fn serve_ticks(&mut self) -> Result<(), Thrown> {
+        let shared = Arc::clone(&self.shared);
+        for extension in &shared.extensions {
+            if let Some(hook) = extension.ticks {
+                hook(self)?;
+            }
+        }
+        let mut at = 0;
+        while let Some(entry) = self.tick_functions.get_mut(at) {
+            at += 1;
+            if entry.calling {
+                continue;
+            }
+            entry.calling = true;
+            let (callback, arguments) = (entry.callback.clone(), entry.arguments.clone());
+            let called = crate::api::call::call(self, &callback, &arguments);
+            if let Some(entry) = self
+                .tick_functions
+                .iter_mut()
+                .find(|entry| entry.calling && entry.callback == callback)
+            {
+                entry.calling = false;
+            }
+            self.release(called?);
+        }
+        Ok(())
     }
 
     // -------------------------------------------------- memory and gc

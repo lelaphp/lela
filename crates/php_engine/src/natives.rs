@@ -395,6 +395,28 @@ fn gc_status(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// int(2)
 /// int(1)
 /// ```
+///
+/// A readonly property is written once more by the copy's own class,
+/// php's wither, and refused from a scope that may not set it:
+///
+/// ```php
+/// final class Point {
+///     public function __construct(public readonly int $x, public readonly int $y) {}
+///     public function withX(int $x): static { return clone($this, ['x' => $x]); }
+/// }
+/// $p = new Point(1, 2);
+/// $q = $p->withX(3);
+/// var_dump($q->x, $q->y, $p->x);
+/// try { $q->x = 4; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { clone($p, ['x' => 'no']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(3)
+/// int(2)
+/// int(1)
+/// Cannot modify readonly property Point::$x
+/// Cannot modify protected(set) readonly property Point::$x from global scope
+/// ```
 #[php_function]
 fn clone(
     req: &mut Request,
@@ -1374,6 +1396,24 @@ fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, 
 /// mark after the last one, so an object reached twice down one path is
 /// `*RECURSION*` the second time and an object reached twice side by
 /// side is printed in full both times.
+///
+/// A dynamic property is its own row whatever a parent declared private
+/// under its name:
+///
+/// ```php
+/// class P { private $c = 'declared'; }
+/// class C extends P { function f() { $this->c = 'dynamic'; } }
+/// $o = new C; @$o->f();
+/// var_dump($o);
+/// ```
+/// ```expect
+/// object(C)#1 (2) {
+///   ["c":"P":private]=>
+///   string(8) "declared"
+///   ["c"]=>
+///   string(7) "dynamic"
+/// }
+/// ```
 fn dump_object(
     req: &mut Request,
     out: &mut Vec<u8>,
@@ -1505,14 +1545,22 @@ fn dump_members(
     // dynamic rows are the walk's to hold, so a nested `__debugInfo` that
     // unsets one leaves this walk printing what it had, as php's
     // separated table does.
-    let dynamic: Vec<(PhpString, Value)> = object.props(req).unwrap_or_default();
+    // The dynamic table alone, which may hold a name a parent declared
+    // private: that one is its own row, `["c"]` beside `["c":"P":private]`.
+    let dynamic: Vec<(PhpString, Value)> = object
+        .heap()
+        .properties()
+        .map(|table| {
+            table
+                .iter()
+                .filter_map(|(key, held)| match key {
+                    php_heap::Key::Str(name) => Some((PhpString::of(name), Value::of_zval(held))),
+                    php_heap::Key::Long(_) => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     for (name, value) in dynamic {
-        if declared
-            .iter()
-            .any(|(declared, _, _, _)| declared == name.as_bytes())
-        {
-            continue;
-        }
         req.addref(&Value::string(name));
         req.addref(&value);
         rows.push(MemberRow::Dynamic { name, value });

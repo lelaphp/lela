@@ -30,6 +30,9 @@ OplineIdx
 TryCatch
 Unit
 Unit::dump
+Unit::published
+UnitCell
+UnitCell::unit
 decl::AliasModifier
 decl::Attribute
 decl::AttributeArgument

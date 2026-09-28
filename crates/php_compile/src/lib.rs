@@ -51,7 +51,7 @@ use php_unit::{Diagnostic, Level, Unit};
 
 /// What the compiler is told beside the source (design §4.1).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Options {
+pub struct Options<'a> {
     /// The file name the unit and its errors carry.
     pub filename: Name,
     /// Whether the source is a file or the string an `eval` hands over.
@@ -95,7 +95,7 @@ pub struct Options {
     /// The persistent constants the engine's extensions declared
     /// (`CONST_PERSISTENT`), which `zend_try_ct_eval_const` substitutes
     /// where they are written; a name not here is fetched as the program serves.
-    pub persistent: Vec<ConstDecl>,
+    pub persistent: &'a [ConstDecl],
     /// The natives the engine's bundle declared, php's `CG(function_table)`
     /// as `zend_compile_call` reads it: what `zend_try_compile_special_func`
     /// requires a name to be one of before it serves the call itself
@@ -104,7 +104,7 @@ pub struct Options {
     /// `INIT_FCALL_BY_NAME`, resolved as the program serves. Every
     /// function here is a native; a user function is declared by nothing
     /// this compiler reads yet.
-    pub functions: Vec<FunctionDecl>,
+    pub functions: &'a [FunctionDecl],
     /// The classes the engine's bundle declared, php's `CG(class_table)`
     /// as `zend_compile_static_call` reads it: a class the table has
     /// with a public method of the name written is a callee the
@@ -112,7 +112,7 @@ pub struct Options {
     /// arguments are sent as a known callee's are; any other class or
     /// method is resolved as the program serves. Every class here is a
     /// native one; a class the file itself declares stands beside them.
-    pub classes: Vec<ClassDecl>,
+    pub classes: &'a [ClassDecl],
     /// The stack limit of the thread the compiler runs on, php's
     /// `EG(stack_limit)`, which the engine works out once per request
     /// (`zend_call_stack_init`) and the compiler's recursion is held to
@@ -128,8 +128,8 @@ pub struct Options {
     pub keys_before: u32,
 }
 
-impl Default for Options {
-    fn default() -> Options {
+impl Default for Options<'_> {
+    fn default() -> Self {
         Options {
             filename: Name::default(),
             kind: SourceKind::File,
@@ -138,9 +138,9 @@ impl Default for Options {
             precision: 14,
             short_open_tag: true,
             assertions: true,
-            persistent: Vec::new(),
-            functions: Vec::new(),
-            classes: Vec::new(),
+            persistent: &[],
+            functions: &[],
+            classes: &[],
             stack: StackLimit::UNCHECKED,
             keys_before: 0,
         }
@@ -231,7 +231,7 @@ pub struct CompileError {
 /// ```
 pub fn compile_source(
     source: &[u8],
-    options: &Options,
+    options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
     let syntax = php_syntax::Options {
@@ -251,7 +251,7 @@ pub fn compile_source(
 /// into `strings`.
 pub fn compile(
     parsed: &Parsed,
-    options: &Options,
+    options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
     // `Parsed::diagnostics` is in php's order (design §6.1): the
@@ -337,7 +337,7 @@ mod tests {
     fn dump_of(source: &[u8]) -> String {
         let (unit, _strings) = unit_and_strings(source);
         let functions = bundled().functions;
-        let names: Vec<Name> = frameless_table(&functions)
+        let names: Vec<Name> = frameless_table(functions)
             .iter()
             .map(|entry| functions[entry.function as usize].name.clone())
             .collect();
@@ -442,9 +442,9 @@ mod tests {
     /// php's `-n` has, and then [`frameless_natives`]: what
     /// `zend_compile_call` reads as `CG(function_table)`, so the tests
     /// below compile under the table php compiles under.
-    fn bundled() -> Options {
-        Options {
-            functions: special::TABLE
+    fn bundled() -> Options<'static> {
+        static NATIVES: std::sync::LazyLock<Vec<FunctionDecl>> = std::sync::LazyLock::new(|| {
+            special::TABLE
                 .iter()
                 .map(|(name, _)| *name)
                 .chain(CALLED)
@@ -462,7 +462,10 @@ mod tests {
                     frameless: Vec::new(),
                 })
                 .chain(frameless_natives())
-                .collect(),
+                .collect()
+        });
+        Options {
+            functions: &NATIVES,
             ..Options::default()
         }
     }
@@ -711,7 +714,7 @@ mod tests {
         use php_unit::decl::ConstExpr;
         let mut strings = php_heap::Strings::new();
         let options = Options {
-            persistent: vec![
+            persistent: &[
                 ConstDecl {
                     name: Name(b"T_LNUMBER".to_vec().into_boxed_slice()),
                     value: ConstExpr::long(260),
@@ -3438,11 +3441,12 @@ mod tests {
             line: 0,
             raised: Vec::new(),
         };
-        let error = refused(b"<?php\n$a = (clone($o, []));\n").unwrap_or_else(compiled);
+        let error = refused(b"<?php\n$a = (function () { declare(ticks=0): enddeclare; });\n")
+            .unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
         assert_eq!(
             error.message,
-            "a `clone` with an argument list this compiler cannot read yet"
+            "a `declare` in the alternative syntax this compiler cannot read yet"
         );
         assert_eq!(error.line, 2);
         let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);
@@ -4218,13 +4222,10 @@ mod tests {
             refused(b"<?php declare(ticks=-1);").as_deref(),
             Some("declare(ticks) value must be a literal")
         );
-        // What php compiles and this compiler does not: a tick count php
-        // emits a `ZEND_TICKS` after every statement for, the encoding
-        // pragma the scanner answers, and the alternative syntax.
-        assert_eq!(
-            refused(b"<?php declare(ticks=1); echo 1;").as_deref(),
-            Some("a `declare(ticks)` of a count this compiler cannot read yet")
-        );
+        // What php compiles and this compiler does not: the encoding
+        // pragma the scanner answers, and the alternative syntax. A tick
+        // count was one of them until #1190.
+        assert_eq!(refused(b"<?php declare(ticks=1); echo 1;").as_deref(), None);
         assert_eq!(
             refused(b"<?php declare(encoding=\"UTF-8\");").as_deref(),
             Some("a `declare(encoding)` this compiler cannot read yet")
@@ -4646,12 +4647,13 @@ mod tests {
 
     /// What stands beside a `C::$p` read and is not read yet is refused
     /// as such (#372): a compound assignment over what is no variable,
-    /// the property the program names as it serves, `self`, `parent`
-    /// and `static` as the class, and such a fetch in a constant
-    /// expression, which php refuses outright. `C::$p = &$o->q` was one
-    /// of them until #611 made the source of a `= &` `zend_compile_var`'s,
-    /// and `C::$p()`, whose method the local `$p` names, until it was
-    /// read as `INIT_STATIC_METHOD_CALL` over the CV.
+    /// `self`, `parent` and `static` as the class, and such a fetch in a
+    /// constant expression, which php refuses outright. `C::$p = &$o->q`
+    /// was one of them until #611 made the source of a `= &`
+    /// `zend_compile_var`'s, `C::$p()`, whose method the local `$p`
+    /// names, until it was read as `INIT_STATIC_METHOD_CALL` over the
+    /// CV, and the property the program names as it serves, `C::$$p`
+    /// and `C::${'p'}`, until #1189.
     #[test]
     fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
         let refused = |source: &[u8]| {
@@ -4668,14 +4670,8 @@ mod tests {
             refused(b"<?php $this += 1;").as_deref(),
             Some("a compound assignment to what is no variable this compiler cannot read yet")
         );
-        assert_eq!(
-            refused(b"<?php C::$$p;").as_deref(),
-            Some("a static property named at run time this compiler cannot read yet")
-        );
-        assert_eq!(
-            refused(b"<?php C::${'p'};").as_deref(),
-            Some("a static property named at run time this compiler cannot read yet")
-        );
+        assert_eq!(refused(b"<?php C::$$p;").as_deref(), None);
+        assert_eq!(refused(b"<?php C::${'p'};").as_deref(), None);
         assert_eq!(refused(b"<?php C::$p();").as_deref(), None);
         assert_eq!(refused(b"<?php echo self::$p;").as_deref(), None);
         assert_eq!(
@@ -4693,7 +4689,7 @@ mod tests {
     fn a_method_of_a_namespaced_class_is_a_known_callee_in_its_namespace() {
         use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, MethodDecl};
         let options = Options {
-            classes: vec![ClassDecl {
+            classes: &[ClassDecl {
                 name: Name(b"A\\M".as_slice().into()),
                 kind: ClassKind::Class,
                 flags: ClassFlags::default(),
@@ -6410,7 +6406,7 @@ class C {
             tentative_return: false,
         };
         let options = Options {
-            classes: vec![ClassDecl {
+            classes: &[ClassDecl {
                 name: Name(b"PhpToken".as_slice().into()),
                 kind: ClassKind::Class,
                 flags: ClassFlags::default(),

@@ -14,7 +14,9 @@
 
 use std::cmp::Ordering;
 
+use crate::array::Arr;
 use crate::numeric::{Exponent, Number, double_to_string, numeric_read};
+use crate::zval::{Zval, ZvalType};
 
 /// One scalar as `zend_compare` switches on it: php's `IS_NULL`,
 /// `IS_FALSE` and `IS_TRUE`, `IS_LONG`, `IS_DOUBLE` and `IS_STRING`, in
@@ -322,6 +324,114 @@ pub fn identical(left: Scalar, right: Scalar) -> bool {
         (Scalar::Double(a), Scalar::Double(b)) => a == b,
         (Scalar::Str(a), Scalar::Str(b)) => a == b,
         _ => false,
+    }
+}
+
+/// `zend_compare` over two values of a constant table, the scalars and
+/// the immutable arrays of them a compiler folds, which is what
+/// `zend_try_ct_eval_binary_op` reads for `[1] == [2]`, `[1] < [2]` and
+/// `[1, 2, 3] <=> []`: two scalars as [`compare`] orders them; two
+/// arrays as `zend_compare_arrays`, one table against itself equal and
+/// otherwise [`compare_tables`]; and an array against a scalar through
+/// `zend_compare`'s default arm, a null or a bool as the array's truth
+/// and the array greater than anything else. No constant holds an
+/// object, a resource or a reference, and an immutable array cannot
+/// hold itself, so nothing here needs the request or throws; the
+/// kernel's own comparison takes every other pair.
+#[must_use]
+pub fn compare_constants(left: Zval, right: Zval, precision: i32) -> Ordering {
+    match (left.as_arr(), right.as_arr()) {
+        (Some(a), Some(b)) => compare_tables(a, b, precision),
+        (Some(a), None) => against_array(a, right.kind()).reverse(),
+        (None, Some(b)) => against_array(b, left.kind()),
+        (None, None) => {
+            let (a, b) = (left.as_str(), right.as_str());
+            compare(
+                scalar(left, a.as_ref()),
+                scalar(right, b.as_ref()),
+                precision,
+            )
+        }
+    }
+}
+
+/// `zend_is_identical` over two values of a constant table: the scalars
+/// as [`identical`] has them, and two arrays when `zend_hash_compare`
+/// with `ordered` on finds them the same, the same count and, walked
+/// together, the same key at each step and identical values.
+#[must_use]
+pub fn identical_constants(left: Zval, right: Zval) -> bool {
+    match (left.as_arr(), right.as_arr()) {
+        (Some(a), Some(b)) => {
+            a.is_same(b)
+                || (a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|((k, v), (l, w))| k == l && identical_constants(v, w)))
+        }
+        (None, None) => {
+            let (a, b) = (left.as_str(), right.as_str());
+            identical(scalar(left, a.as_ref()), scalar(right, b.as_ref()))
+        }
+        _ => false,
+    }
+}
+
+/// `zend_hash_compare_impl` with `ordered` off
+/// (`Z/Zend/zend_hash.c:3104`) over two constant arrays: the counts
+/// first, then each key of the left array looked up in the right one, a
+/// key the right one lacks making the left the greater, and the values
+/// compared by [`compare_constants`] until one pair differs.
+fn compare_tables(left: Arr, right: Arr, precision: i32) -> Ordering {
+    if left.is_same(right) {
+        return Ordering::Equal;
+    }
+    if left.len() != right.len() {
+        return left.len().cmp(&right.len());
+    }
+    for (key, value) in &left {
+        let Some(other) = right.get(key) else {
+            return Ordering::Greater;
+        };
+        let ordering = compare_constants(value, other, precision);
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+/// `zend_compare`'s default arm with a scalar of type `other` on the
+/// left and an array on the right: a null or a false less than a
+/// non-empty array and equal to an empty one, a true equal to a
+/// non-empty array and greater than an empty one, and anything else
+/// less than the array.
+fn against_array(array: Arr, other: ZvalType) -> Ordering {
+    let full = !array.is_empty();
+    match other {
+        ZvalType::Null | ZvalType::False if full => Ordering::Less,
+        ZvalType::Null | ZvalType::False => Ordering::Equal,
+        ZvalType::True if full => Ordering::Equal,
+        ZvalType::True => Ordering::Greater,
+        _ => Ordering::Less,
+    }
+}
+
+/// The scalar a constant is, its string's bytes borrowed from `string`.
+fn scalar(value: Zval, string: Option<&crate::string::Str>) -> Scalar<'_> {
+    if let Some(s) = string {
+        return Scalar::Str(s.bytes());
+    }
+    if let Some(n) = value.as_long() {
+        return Scalar::Long(n);
+    }
+    if let Some(d) = value.as_double() {
+        return Scalar::Double(d);
+    }
+    match value.kind() {
+        ZvalType::True => Scalar::Bool(true),
+        ZvalType::False => Scalar::Bool(false),
+        _ => Scalar::Null,
     }
 }
 

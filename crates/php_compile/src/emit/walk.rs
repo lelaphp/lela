@@ -236,9 +236,21 @@ impl Emit<'_> {
                 continue;
             }
             self.line = stmt.line(self.parsed);
+            // A function or a class is `zend_compile_func_decl` or
+            // `zend_compile_class_decl` straight from the top statement,
+            // which ticks nothing after it; every other goes through
+            // `zend_compile_stmt`, `__halt_compiler` among them.
             match stmt {
-                Stmt::HaltCompilerStmt(id) => self.halt_compiler(*id)?,
-                _ => self.statement(*stmt)?,
+                Stmt::HaltCompilerStmt(id) => {
+                    self.halt_compiler(*id)?;
+                    self.tick();
+                }
+                Stmt::FunctionDecl(_)
+                | Stmt::ClassDecl(_)
+                | Stmt::InterfaceDecl(_)
+                | Stmt::TraitDecl(_)
+                | Stmt::EnumDecl(_) => self.statement(*stmt)?,
+                _ => self.stmt(*stmt)?,
             }
             match stmt {
                 Stmt::NamespaceDef(_) | Stmt::HaltCompilerStmt(_) => continue,

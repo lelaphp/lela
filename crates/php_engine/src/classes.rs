@@ -1104,6 +1104,61 @@ pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<
     create_closure(req, &fake, scope, called_scope, this)
 }
 
+/// `zend_ast_evaluate`'s `ZEND_AST_OP_ARRAY` arm: a closure of a
+/// constant expression, function `at` of `unit`, made over the scope
+/// that evaluates it as `zend_create_closure(result, func, scope, scope,
+/// NULL)` makes it, with its own copy of the static variables the body
+/// starts with.
+///
+/// ```php
+/// class C {
+///     const F = static function () { return static::class; };
+///     public $p = static function () { static $n = 0; return ++$n; };
+/// }
+/// class D extends C {}
+/// $c = new C;
+/// var_dump((C::F)(), (D::F)(), ($c->p)(), ($c->p)(), ((new C)->p)());
+/// function f($g = static function ($x) { return $x * 2; }) { return $g(21); }
+/// var_dump(f());
+/// ```
+/// ```expect
+/// string(1) "C"
+/// string(1) "C"
+/// int(1)
+/// int(2)
+/// int(3)
+/// int(42)
+/// ```
+pub(crate) fn const_expr_closure(
+    req: &mut Request,
+    unit: &std::sync::Arc<php_unit::Unit>,
+    at: u32,
+    scope: Option<ClassId>,
+) -> Result<PhpObject, Thrown> {
+    let Some((_, body)) = unit.dynamic.get(at as usize) else {
+        return Err(crate::api::raising::fatal(
+            req,
+            "InternalError: a constant expression's closure naming a function its unit has not",
+        ));
+    };
+    let bound = crate::exec::starting_statics(body);
+    let Some(function) = req.closure_function(unit, at) else {
+        return Err(crate::api::raising::fatal(
+            req,
+            "InternalError: a constant expression's closure naming a function its unit has not",
+        ));
+    };
+    let info = ClosureInfo {
+        function,
+        this: None,
+        scope,
+        called_scope: scope,
+        bound,
+        fake: false,
+    };
+    create_closure(req, &info, scope, scope, None)
+}
+
 /// `Closure::__invoke(mixed ...$args): mixed`, `ZEND_METHOD(Closure,
 /// __invoke)` (`Z/Zend/zend_closures.c:45`): the payload's function
 /// served with the frame's arguments, the extra named ones handed on
