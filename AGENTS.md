@@ -199,6 +199,7 @@ Options:
 .
 ├── AGENTS.md
 ├── CLAUDE.md
+├── bz2
 ├── clippy.toml
 ├── ctype
 ├── curl
@@ -228,4 +229,4 @@ Options:
 ├── tokenizer
 └── zlib
 ```
-<!-- /computed in=9241627a342129783bb05a98a8080e129953c8b26ea26aa0b119ca2da1ae60dc out=9324e8cb9df51c2075a1642ab2e419236ede0faa363c3a7117470be8bea33430 -->
+<!-- /computed in=5782a2be24e46d094f785e632e0bc7550cf8b8d5e69ac7de8b71ab87392aae18 out=5907ef6b9cd901b53c1492cbd0f86e7c6ae5adee0f9e2dc5addb7d84774fdd7e -->

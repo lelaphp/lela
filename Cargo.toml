@@ -4,7 +4,7 @@
 # only `api.lock` today.
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor", "ext/zlib", "ext/pcntl", "ext/posix", "ext/sockets", "ext/phar"]
+members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor", "ext/zlib", "ext/pcntl", "ext/posix", "ext/sockets", "ext/phar", "ext/bz2"]
 
 # On macOS the dev profile's default, `split-debuginfo = "unpacked"`, keeps
 # every codegen unit's object in target/debug/deps for its debuginfo, under a
@@ -56,3 +56,4 @@ pcre2-sys = "0.2.10"                # libpcre2-8 with its JIT, built from the cr
 pkg-config = "0.3"                  # ext/libxml's build.rs finds the platform's libxml2 (design §7.2, #731)
 libsqlite3-sys = { version = "0.38", features = ["bundled"] } # ext/pdo_sqlite's libsqlite3, built from the crate's bundled amalgamation (design §7.2, `.cargo/config.toml`'s LIBSQLITE3_FLAGS)
 libz-sys = { version = "1.1", default-features = false, features = ["libc"] }  # ext/zlib: the platform's zlib, whose deflate bytes are the oracle's at every level (design §7.2, revision 34; #950)
+libbz2-rs-sys = { version = "0.2.5", default-features = false, features = ["rust-allocator"] }  # ext/bz2: libbzip2 ported to Rust, whose bytes are the oracle's libbz2 1.0.8's at every block size and work factor (design §7.2, revision 39; #1116)

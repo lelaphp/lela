@@ -74,6 +74,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_sockets::extension,
         #[cfg(feature = "phar")]
         php_ext_phar::extension,
+        #[cfg(feature = "bz2")]
+        php_ext_bz2::extension,
     ]
 }
 
