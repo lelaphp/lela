@@ -162,11 +162,18 @@ pub fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> 
     crate::ops::to_string(req, value)
 }
 
-/// `zval_get_number`: an `int` or a `float`.
+/// `convert_scalar_to_number`: an `int` or a `float`, a string the
+/// number it opens with (`is_numeric_string` with `allow_errors`,
+/// silently) and zero for none, what a class's `cast_object` to
+/// [`TypeTag::Number`] answers from its text.
 pub fn to_number(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     match value.as_ref() {
         ValueRef::Float(f) => Ok(Value::float(f)),
-        ValueRef::Str(s) => Ok(numeric_string(s.as_bytes()).unwrap_or(Value::int(0))),
+        ValueRef::Str(s) => Ok(match php_heap::numeric_prefix(s.as_bytes()) {
+            Some((php_heap::Number::Long(n), _)) => Value::int(n),
+            Some((php_heap::Number::Double(d), _)) => Value::float(d),
+            None => Value::int(0),
+        }),
         ValueRef::Reference(r) => to_number(req, &r.get()),
         _ => to_long(req, value).map(Value::int),
     }
@@ -324,6 +331,7 @@ pub fn is_type(value: &Value, tag: TypeTag) -> bool {
         TypeTag::Object => 1 << (ZvalType::Object as u32),
         TypeTag::Resource => 1 << (ZvalType::Resource as u32),
         TypeTag::Reference => 1 << (ZvalType::Reference as u32),
+        TypeTag::Number => (1 << (ZvalType::Long as u32)) | (1 << (ZvalType::Double as u32)),
     };
     crate::ops::type_check(value, mask)
 }

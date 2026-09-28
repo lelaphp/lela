@@ -17893,6 +17893,11 @@ pub(crate) fn jmpnz<T: Tier>(
     if !taken {
         return Ok(advance(req, frame));
     }
+    // `ZEND_VM_JMP` reads `EG(exception)` first: a conversion the
+    // test served may have thrown.
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
     let back = op.op2 <= req.vm().opline(frame);
     req.vm_mut().jump(frame, op.op2);
     if back {
@@ -17928,6 +17933,11 @@ pub(crate) fn jmpz<T: Tier>(
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     if !taken {
         return Ok(advance(req, frame));
+    }
+    // `ZEND_VM_JMP` reads `EG(exception)` first: a conversion the
+    // test served may have thrown.
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
     }
     let back = op.op2 <= req.vm().opline(frame);
     req.vm_mut().jump(frame, op.op2);
@@ -17979,6 +17989,9 @@ pub(crate) fn jmpz_ex<T: Tier>(
     if held {
         return Ok(advance(req, frame));
     }
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
     req.vm_mut().jump(frame, op.op2);
     Ok(Stepped::Same(frame))
 }
@@ -18010,6 +18023,9 @@ pub(crate) fn jmpnz_ex<T: Tier>(
     write_out(req, frame, code, op, &Value::bool(held));
     if !held {
         return Ok(advance(req, frame));
+    }
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
     }
     req.vm_mut().jump(frame, op.op2);
     Ok(Stepped::Same(frame))

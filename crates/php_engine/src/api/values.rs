@@ -34,7 +34,8 @@ use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 
-/// The type of a value, php's `zend_zval_type_name` set.
+/// The type of a value, php's `zend_zval_type_name` set, and the one
+/// pseudo type php's `cast_object` is asked for beside them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypeTag {
     Undef,
@@ -47,6 +48,10 @@ pub enum TypeTag {
     Object,
     Resource,
     Reference,
+    /// `_IS_NUMBER`: no value's type, but what arithmetic asks an object's
+    /// `cast_object` for, an `Int` or a `Float`
+    /// (`zendi_try_convert_scalar_to_number`).
+    Number,
 }
 
 /// The identity of a linked class.
