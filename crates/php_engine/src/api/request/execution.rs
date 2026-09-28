@@ -181,7 +181,13 @@ impl Request {
                 return Ok(None);
             };
             let (stack, vm) = self.stack_of(&standing);
-            let links = links_of(stack, vm, 0..vm.frames().len(), 0..vm.calls().len());
+            let links = links_of(
+                stack,
+                vm,
+                0..vm.frames().len(),
+                0..vm.calls().len(),
+                &|root| self.placeholder_links(root),
+            );
             self.trace_rows(&links)
         };
         self.render_trace(rows, options).map(Some)
@@ -299,5 +305,10 @@ fn frames_between<'a>(stack: &'a VmStack, vm: &'a Vm, from: usize, to: usize) ->
         })
     };
     let calls = calls_below(from)..calls_below(to);
-    links_of(stack, vm, from..to.saturating_add(1), calls)
+    // The generators a delegation runs through stand on the stack here,
+    // put there by the reader ([`generator::with_frames`]), so no
+    // placeholder is expanded a second time.
+    links_of(stack, vm, from..to.saturating_add(1), calls, &|_| {
+        Vec::new()
+    })
 }

@@ -1863,35 +1863,56 @@ fn links_of<'a>(
     vm: &'a Vm,
     frames: std::ops::Range<usize>,
     calls: std::ops::Range<usize>,
+    expand: &dyn Fn(PhpObject) -> Vec<Link<'a>>,
 ) -> Vec<Link<'a>> {
+    /// The calls being served below `below`, from where the walk stands.
+    fn take_below<'a>(
+        served: &'a [exec::CallState],
+        taken: &mut usize,
+        below: usize,
+        links: &mut Vec<Link<'a>>,
+    ) {
+        while *taken < below {
+            if let Some(call) = served.get(*taken)
+                && call.stage == exec::CallStage::Serving
+            {
+                links.push(Link::Call(call));
+            }
+            *taken += 1;
+        }
+    }
     let states = vm.frames();
     let served = vm.calls();
     let end = calls.end.min(served.len());
     let mut links: Vec<Link> = Vec::new();
     let mut taken = calls.start;
-    let mut take_below = |below: usize, links: &mut Vec<Link<'a>>| {
-        while taken < below {
-            if let Some(call) = served.get(taken)
-                && call.stage == exec::CallStage::Serving
-            {
-                links.push(Link::Call(call));
-            }
-            taken += 1;
+    // A placeholder standing at `at`, where a generator's frame stood,
+    // and the generators it expands into, outermost first here since
+    // the walk goes up the stack and is reversed at the end.
+    let placed = |at: usize, taken: &mut usize, links: &mut Vec<Link<'a>>| {
+        for mark in vm.placeholders().iter().filter(|mark| mark.frame == at) {
+            take_below(served, taken, mark.calls.min(end), links);
+            links.extend(expand(mark.generator).into_iter().rev());
         }
     };
-    for at in frames {
+    for at in frames.clone() {
+        placed(at, &mut taken, &mut links);
         let Some(state) = states.get(at) else {
             break;
         };
         let below = usize::try_from(state.calls_below)
             .unwrap_or(usize::MAX)
             .min(end);
-        take_below(below, &mut links);
+        take_below(served, &mut taken, below, &mut links);
+        if let Some(generator) = state.generator {
+            links.extend(expand(generator).into_iter().rev());
+        }
         if !state.leaving {
-            links.push(Link::Frame(stack, at, state));
+            links.push(Link::Frame(Slots::Stack(stack, at), state));
         }
     }
-    take_below(end, &mut links);
+    placed(frames.end, &mut taken, &mut links);
+    take_below(served, &mut taken, end, &mut links);
     links.reverse();
     links
 }
@@ -1983,8 +2004,27 @@ enum Resolved {
 /// a user frame, with its place among the frames, or a call a native
 /// is serving.
 enum Link<'a> {
-    Frame(&'a VmStack, usize, &'a exec::FrameState),
+    Frame(Slots<'a>, &'a exec::FrameState),
     Call(&'a exec::CallState),
+}
+
+/// Where the slots of a frame on the chain are: on a VM stack at its
+/// place, or kept by a suspended generator a running one was resumed
+/// through, which php's `execute_fake` placeholder stands for until a
+/// backtrace expands it.
+#[derive(Clone, Copy)]
+enum Slots<'a> {
+    Stack(&'a VmStack, usize),
+    Kept(&'a php_heap::Frame),
+}
+
+impl<'a> Slots<'a> {
+    fn frame(self) -> Option<&'a php_heap::Frame> {
+        match self {
+            Slots::Stack(stack, at) => stack.frame(FrameRef(u32::try_from(at).unwrap_or(u32::MAX))),
+            Slots::Kept(frame) => Some(frame),
+        }
+    }
 }
 
 /// What `zend_get_property_offset` places a declared instance property
@@ -2979,7 +3019,7 @@ impl Request {
     /// function (`ZEND_ACC_FAKE_CLOSURE`).
     pub(crate) fn calling_closure(&self) -> Option<PhpObject> {
         for link in self.chain() {
-            if let Link::Frame(_, _, state) = link {
+            if let Link::Frame(_, state) = link {
                 let closure = state.closure?;
                 return closure
                     .closure(self)
@@ -3910,7 +3950,7 @@ impl Request {
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, closure, carried) = match link {
-                Link::Frame(_, _, state) => (state.function, state.closure, state.scope),
+                Link::Frame(_, state) => (state.function, state.closure, state.scope),
                 Link::Call(call) => (
                     Some(call.function),
                     call.closure,
@@ -4913,6 +4953,11 @@ impl Request {
     /// `stack_bottom->prev_execute_data` names the frame that resumed
     /// it: each stack's links innermost first, the running stack's
     /// before the stacks below it (design §5.11).
+    ///
+    /// A generator a resumption runs through another stands on the
+    /// placeholder php links it to (`execute_fake`), which the walk
+    /// expands into the kept frames of the generators between
+    /// ([`crate::generator::placeholder_frames`]).
     fn chain(&self) -> impl Iterator<Item = Link<'_>> {
         let mut chain: Vec<Link> = Vec::new();
         for (stack, vm) in self.executions() {
@@ -4921,9 +4966,18 @@ impl Request {
                 vm,
                 0..vm.frames().len(),
                 0..vm.calls().len(),
+                &|root| self.placeholder_links(root),
             ));
         }
         chain.into_iter()
+    }
+
+    /// The links a placeholder for `root` expands into, innermost first.
+    fn placeholder_links(&self, root: PhpObject) -> Vec<Link<'_>> {
+        crate::generator::placeholder_frames(self, root)
+            .into_iter()
+            .map(|(slots, state)| Link::Frame(Slots::Kept(slots), state))
+            .collect()
     }
 
     /// The rows of `chain`, `EG(current_execute_data)` and its
@@ -4955,12 +5009,12 @@ impl Request {
         let mut rows = Vec::new();
         for at in 0..chain.len() {
             let site = match chain.get(at.saturating_add(1)) {
-                Some(Link::Frame(_, _, below)) => exec::body_of(&below.unit, below.body)
+                Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
                     .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
                 Some(Link::Call(_)) | None => None,
             };
             match &chain[at] {
-                Link::Frame(stack, place, state) => {
+                Link::Frame(slots, state) => {
                     let Some(function) = state.function else {
                         // A code frame: named by the includer's opline
                         // where that is an `INCLUDE_OR_EVAL`, and the
@@ -4970,7 +5024,7 @@ impl Request {
                         let Some(kind) = chain
                             .get(at.saturating_add(1))
                             .and_then(|below| match below {
-                                Link::Frame(_, _, below) => Some(below),
+                                Link::Frame(_, below) => Some(below),
                                 Link::Call(_) => None,
                             })
                             .and_then(|below| {
@@ -4997,14 +5051,13 @@ impl Request {
                         ));
                         continue;
                     };
-                    let frame = FrameRef(u32::try_from(*place).unwrap_or(u32::MAX));
                     let passed = usize::try_from(state.num_args).unwrap_or(0);
                     let mut arguments: Vec<Value> = (0..passed
                         .saturating_sub(state.extra_args.len()))
                         .map(|slot| {
                             let slot = Slot(u32::try_from(slot).unwrap_or(u32::MAX));
-                            stack
-                                .frame(frame)
+                            slots
+                                .frame()
                                 .map_or(Value::undef(), |f| Value::of_zval(f.slot(slot)))
                         })
                         .collect();
@@ -13077,7 +13130,7 @@ impl Request {
     /// array's frame, and none where no user frame stands.
     fn callable_frame(&self) -> CallFrame {
         for link in self.chain() {
-            let Link::Frame(_, _, state) = link else {
+            let Link::Frame(_, state) = link else {
                 continue;
             };
             let scope = self
@@ -15860,7 +15913,7 @@ impl Request {
             // resumer: a native that is a fiber's own callable was called
             // from the fiber's bottom frame, which is `zend_fiber_function`,
             // a native's, so it answers as a native caller below.
-            Some(Link::Frame(stack, place, state))
+            Some(Link::Frame(Slots::Stack(stack, place), state))
                 if std::ptr::eq(stack, &raw const self.stack) && state.function.is_some() =>
             {
                 let frame = FrameRef(u32::try_from(place).unwrap_or(u32::MAX));
@@ -15871,7 +15924,9 @@ impl Request {
                 arguments.extend(state.extra_args.iter().copied());
                 NativeCaller::Function(frame, arguments)
             }
-            Some(Link::Frame(stack, place, _)) if std::ptr::eq(stack, &raw const self.stack) => {
+            Some(Link::Frame(Slots::Stack(stack, place), _))
+                if std::ptr::eq(stack, &raw const self.stack) =>
+            {
                 NativeCaller::Code(FrameRef(u32::try_from(place).unwrap_or(u32::MAX)))
             }
             Some(Link::Frame(..) | Link::Call(_)) | None => NativeCaller::Native,
@@ -16009,7 +16064,7 @@ impl Request {
     pub fn called_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, this, called) = match link {
-                Link::Frame(_, _, state) => (state.function, state.this, state.called_scope),
+                Link::Frame(_, state) => (state.function, state.this, state.called_scope),
                 Link::Call(call) => (Some(call.function), call.this, call.called_scope),
             };
             if let Some(this) = this {
@@ -16059,7 +16114,7 @@ impl Request {
     pub fn this_object(&self) -> Option<PhpObject> {
         for link in self.chain() {
             let (function, this) = match link {
-                Link::Frame(_, _, state) => (state.function, state.this),
+                Link::Frame(_, state) => (state.function, state.this),
                 Link::Call(call) => (Some(call.function), call.this),
             };
             if this.is_some() {

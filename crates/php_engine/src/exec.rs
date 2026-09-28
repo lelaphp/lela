@@ -493,6 +493,9 @@ pub(crate) enum CallStage {
 pub(crate) struct Vm {
     frames: Vec<FrameState>,
     calls: Vec<CallState>,
+    /// php's `execute_fake` placeholders that outlive the generator frame
+    /// they stood under, while what the frame held is released.
+    placeholders: Vec<Placeholder>,
     /// How many times a kernel has looked a name up among the linked
     /// functions or the linked classes, which is what a primed cache
     /// slot spares: the tests count it across two passes of one opline.
@@ -525,7 +528,40 @@ pub(crate) fn find_class(req: &mut Request, lowered: &[u8]) -> Option<ClassId> {
     req.class_named(lowered)
 }
 
+/// php's `execute_fake` placeholder standing where a generator's frame
+/// stood, the frame gone from the stack while `zend_generator_close`
+/// releases what it held, since `EG(current_execute_data)` is moved back
+/// to the placeholder and not past it: a backtrace a destructor takes
+/// still reads the generators the resumption came through
+/// ([`crate::generator::placeholder_frames`]). `frame` and `calls` are
+/// where on the stack the generator's frame stood.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Placeholder {
+    pub(crate) frame: usize,
+    pub(crate) calls: usize,
+    pub(crate) generator: PhpObject,
+}
+
 impl Vm {
+    /// The placeholders standing, the innermost last.
+    pub(crate) fn placeholders(&self) -> &[Placeholder] {
+        &self.placeholders
+    }
+
+    /// A placeholder where `generator`'s frame stood, the frame just
+    /// taken off the stack, until [`Vm::pop_placeholder`].
+    pub(crate) fn push_placeholder(&mut self, generator: PhpObject) {
+        self.placeholders.push(Placeholder {
+            frame: self.frames.len(),
+            calls: self.calls.len(),
+            generator,
+        });
+    }
+
+    pub(crate) fn pop_placeholder(&mut self) {
+        self.placeholders.pop();
+    }
+
     /// Push one frame's state; its place is the `FrameRef` the VM stack
     /// gave the frame, and the two are pushed and popped together. The
     /// slots are the stack's, every one `IS_UNDEF` until an opline
