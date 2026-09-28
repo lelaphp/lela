@@ -1313,6 +1313,14 @@ impl AsRef<AtomicBool> for State {
 /// extension holds no atomic (ADR-0005).
 pub use crate::signal::{Receiving, SIGNAL_POST, Siginfo, take_signals};
 
+/// Why [`Request::resolve_path`] found no file: the last attempt's
+/// reason, or the throwable a wrapper's `url_stat` raised.
+#[derive(Debug)]
+pub(crate) enum Unresolved {
+    Missing(std::io::Error),
+    Threw(Thrown),
+}
+
 /// The fatal the request is ending in, when it is one: `E_ERROR` and
 /// its kin, or a source that did not compile. An `exit` is not one:
 /// php unwinds it as a throwable ([`Request::throw_unwind_exit`]) and
@@ -15112,13 +15120,14 @@ impl Request {
             // php's `resolved_path = zend_string_copy(inc_filename)` for a
             // path it could not resolve, which a stream wrapper opens.
             Ok(path) => return self.include_stream(kind, written, &path),
+            Err(Unresolved::Threw(thrown)) => return Err(thrown),
             Err(_) if is_wrapper_url(written) => {
                 if kind.once() && self.included_files.iter().any(|p| p == written) {
                     return Ok(Opened::Already);
                 }
                 return self.include_stream(kind, written, written);
             }
-            Err(reason) => {
+            Err(Unresolved::Missing(reason)) => {
                 self.open_stream_failed(kind, written, &reason);
                 return self.failed_opening(kind, written);
             }
@@ -15346,9 +15355,21 @@ impl Request {
     /// holds an include to when it opens; php reports a directory with
     /// whatever `errno` the failed open left, and this engine as a file
     /// that is not there. The `Err` is the last attempt's reason, which
-    /// the stream warning prints.
-    pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-        let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
+    /// the stream warning prints, or the throwable a wrapper's
+    /// `url_stat` raised, which ends the walk with nothing reported
+    /// (`if (EG(exception)) return NULL`).
+    ///
+    /// ```php
+    /// class W { public $context; function url_stat($path, $flags) { throw new Exception("stat failed"); } }
+    /// stream_wrapper_register("test", "W");
+    /// set_include_path("test://foo");
+    /// try { include "missing.php"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// stat failed
+    /// ```
+    pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, Unresolved> {
+        let not_found = || Unresolved::Missing(std::io::Error::from(std::io::ErrorKind::NotFound));
         let for_include = crate::streams::OpenOptions {
             for_include: true,
             report: false,
@@ -15356,14 +15377,16 @@ impl Request {
         };
         if scheme_length(written).is_some() {
             return match self.locate_for(written, for_include) {
-                (crate::streams::Located::Plain, local) => self.realpath_file(&local),
+                (crate::streams::Located::Plain, local) => {
+                    self.realpath_file(&local).map_err(Unresolved::Missing)
+                }
                 _ => Err(not_found()),
             };
         }
         let include_path = self.ini_get(b"include_path").unwrap_or_default().to_vec();
         let dot_relative = written.starts_with(b"./") || written.starts_with(b"../");
         if dot_relative || written.starts_with(b"/") || include_path.is_empty() {
-            return self.realpath_file(written);
+            return self.realpath_file(written).map_err(Unresolved::Missing);
         }
         let mut last = not_found();
         let mut entries: Vec<Vec<u8>> = include_path_entries(&include_path);
@@ -15382,19 +15405,21 @@ impl Request {
                     (crate::streams::Located::Nothing, _) => continue,
                     (crate::streams::Located::Plain, local) => match self.realpath_file(&local) {
                         Ok(path) => return Ok(path),
-                        Err(reason) => last = reason,
+                        Err(reason) => last = Unresolved::Missing(reason),
                     },
-                    _ => {
-                        if matches!(self.url_stat_quiet(&candidate, false), Ok(Some(_))) {
-                            return Ok(candidate);
+                    _ => match self.url_stat_quiet(&candidate, false) {
+                        Ok(Some(_)) => return Ok(candidate),
+                        Err(thrown) if thrown.exception().is_some() => {
+                            return Err(Unresolved::Threw(thrown));
                         }
-                    }
+                        Ok(None) | Err(_) => {}
+                    },
                 }
                 continue;
             }
             match self.realpath_file(&candidate) {
                 Ok(path) => return Ok(path),
-                Err(reason) => last = reason,
+                Err(reason) => last = Unresolved::Missing(reason),
             }
         }
         Err(last)

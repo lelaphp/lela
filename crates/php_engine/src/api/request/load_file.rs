@@ -24,8 +24,10 @@ impl Request {
         if written.contains(&0) {
             return Ok(false);
         }
-        let Ok(path) = self.resolve_path(written) else {
-            return Ok(false);
+        let path = match self.resolve_path(written) {
+            Ok(path) => path,
+            Err(super::Unresolved::Threw(thrown)) => return Err(thrown),
+            Err(super::Unresolved::Missing(_)) => return Ok(false),
         };
         if self.included_files.contains(&path) {
             return Ok(false);
