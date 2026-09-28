@@ -13988,7 +13988,19 @@ fn typed_step(
 /// `zend_post_incdec_overloaded_property` (`Z/Zend/zend_execute.c:2367`):
 /// `read_property` under `BP_VAR_R`, the step over a dereferenced copy
 /// of what it answered, the temporary written with the value before or
-/// after it, and `write_property` with the stepped value.
+/// after it, and `write_property` with the stepped value, or with the
+/// copy unchanged where the step was refused.
+///
+/// ```php
+/// $o = new class { public $bar; function __construct() { $this->bar = new stdClass; } function &__get($x) { return $this->bar; } };
+/// try { $o->foo++; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(isset($o->foo));
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property class@anonymous::$foo is deprecated in %s on line 3
+/// Cannot increment stdClass
+/// bool(true)
+/// ```
 fn overloaded_incdec(
     req: &mut Request,
     frame: FrameRef,
@@ -14010,12 +14022,13 @@ fn overloaded_incdec(
     let copy = held.deref();
     req.addref(&copy);
     req.release(held);
-    let stepped = match step.kernel()(req, &copy) {
-        Ok(stepped) => stepped,
+    // A step `increment_function` refuses leaves the copy as it was,
+    // and php writes it back all the same, the refusal standing.
+    let (stepped, refused) = match step.kernel()(req, &copy) {
+        Ok(stepped) => (stepped, None),
         Err(thrown) => {
-            req.release(copy);
-            write_out(req, frame, code, op, &Value::null());
-            return Err(thrown);
+            req.addref(&copy);
+            (copy, Some(thrown))
         }
     };
     write_out(
@@ -14030,7 +14043,20 @@ fn overloaded_incdec(
     // the stepped value's own and one more of the name.
     req.addref(&Value::string(name));
     let table = req.object_handlers(object.heap());
-    table.write_property(req, object, name, stepped)
+    let wrote = table.write_property(req, object, name, stepped);
+    match (refused, wrote) {
+        (None, wrote) => wrote,
+        (Some(refusal), Ok(())) => Err(refusal),
+        // What the write raised is thrown over the refusal, which
+        // becomes its previous as `zend_throw_exception_internal` makes it.
+        (Some(refusal), Err(raised)) => match (refusal.exception(), raised.exception()) {
+            (Some(&first), Some(&second)) => {
+                req.set_previous(second, first);
+                Err(raised)
+            }
+            _ => Err(raised),
+        },
+    }
 }
 
 /// `zobj->handlers->get_property_ptr_ptr` asked for its verdict alone
