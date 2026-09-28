@@ -53,6 +53,7 @@ use std::path::PathBuf;
 
 use php_ext::abi::{OrFalse, Passed, Path, Union};
 use php_ext::attr::php_function;
+use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::{PathIntent, Request, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
@@ -359,6 +360,27 @@ fn has_file_scheme(filename: &[u8]) -> bool {
 /// Warning: file_exists(): Unable to find the wrapper "nowrapper" - did you forget to enable it when you configured PHP? in %s on line 6
 /// bool(true)
 /// ```
+///
+/// The bits another wrapper's file is read by are the owner's where the
+/// process's user owns it, the group's where its group or one of its
+/// supplementary groups does, and the others' otherwise.
+///
+/// ```php
+/// class W { public $context; static $st; function url_stat($p, $f) { return W::$st; } }
+/// stream_wrapper_register('ww', 'W');
+/// $u = posix_getuid(); $g = posix_getgid(); $gs = posix_getgroups(); $o = max([$g, ...$gs]) + 1;
+/// foreach ([[0400, $u, $o], [0040, $u + 1, $g], [0040, $u + 1, $gs[0] ?? $g], [0004, $u + 1, $o], [0400, $u + 1, $o]] as $i => [$m, $uid, $gid]) {
+///     W::$st = ['mode' => 0100000 | $m, 'uid' => $uid, 'gid' => $gid];
+///     var_dump(is_readable("ww://$i"));
+/// }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
 pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thrown> {
     let bad = filename.is_empty() || filename.contains(&0);
     if ty.is_access_check() {
@@ -403,10 +425,13 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thr
     let (mut rmask, mut wmask, mut xmask) = (0o4, 0o2, 0o1);
     if ty.is_able_check() {
         let group = || (0o40, 0o20, 0o10);
-        if sb[4] == i64::from(ffi::uid()) {
+        if sb[4] == i64::from(process::uid()) {
             (rmask, wmask, xmask) = (0o400, 0o200, 0o100);
-        } else if sb[5] == i64::from(ffi::gid())
-            || ffi::groups().iter().any(|gid| sb[5] == i64::from(*gid))
+        } else if sb[5] == i64::from(process::gid())
+            || process::groups()
+                .unwrap_or_default()
+                .into_iter()
+                .any(|gid| sb[5] == i64::from(gid))
         {
             (rmask, wmask, xmask) = group();
         }

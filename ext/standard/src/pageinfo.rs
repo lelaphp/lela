@@ -10,6 +10,7 @@ use std::os::unix::fs::MetadataExt;
 
 use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
+use php_ext::process;
 use php_ext::request::Request;
 
 use crate::State;
@@ -45,8 +46,8 @@ fn statpage(req: &mut Request) -> Page {
             mtime: meta.mtime(),
         },
         None => Page {
-            uid: i64::from(crate::ffi::uid()),
-            gid: i64::from(crate::ffi::gid()),
+            uid: i64::from(process::uid()),
+            gid: i64::from(process::gid()),
             inode: -1,
             mtime: -1,
         },

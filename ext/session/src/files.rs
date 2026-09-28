@@ -11,6 +11,7 @@
 use std::fs::{File, OpenOptions, Permissions};
 use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 
+use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref, raise};
 use php_ext::request::{Request, WrapperOp};
 
@@ -194,7 +195,7 @@ fn open_key(req: &mut Request, key: &[u8]) {
     let owner = file
         .metadata()
         .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta));
-    if owner.is_err() || owner.is_ok_and(|owner| foreign(owner, crate::ffi::uids())) {
+    if owner.is_err() || owner.is_ok_and(|owner| foreign(owner, uids())) {
         drop(file);
         docref(
             req,
@@ -218,8 +219,23 @@ fn open_key(req: &mut Request, key: &[u8]) {
 /// neither root nor the process's real or effective uid belongs to
 /// another uid, unless the process's real uid is root, which reads every
 /// session.
-fn foreign(owner: u32, uids: crate::ffi::Uids) -> bool {
+fn foreign(owner: u32, uids: Uids) -> bool {
     owner != 0 && owner != uids.real && owner != uids.effective && uids.real != 0
+}
+
+/// The process's real and effective user ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Uids {
+    real: u32,
+    effective: u32,
+}
+
+/// `getuid()`, the engine's, and `geteuid()`.
+fn uids() -> Uids {
+    Uids {
+        real: process::uid(),
+        effective: crate::ffi::euid(),
+    }
 }
 
 /// `ps_files_write`: the file for `key` reopened where the id changed,
@@ -537,8 +553,7 @@ pub(super) fn validate_sid(req: &mut Request, key: &[u8]) -> Result<bool, Thrown
 
 #[cfg(test)]
 mod tests {
-    use super::foreign;
-    use crate::ffi::{Uids, uids};
+    use super::{Uids, foreign, uids};
     use std::os::unix::fs::MetadataExt;
 
     /// `ps_files_open`'s rule over the owners it tells apart: root's, the

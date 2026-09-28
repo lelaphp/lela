@@ -1,14 +1,14 @@
 //! The facade (ADR-0004; design §4.1, §7.1): a page of re-exports and
 //! nothing defined. An extension depends on this crate and on no other
 //! engine crate, so the "api only" rule is crate visibility, not a lint
-//! over the bodies. The eight groups of `php_engine::api`, `tier::Nop`
+//! over the bodies. The nine groups of `php_engine::api`, `tier::Nop`
 //! for the bundle's alias, the three attributes under `attr` and
 //! `__private` for what they expand to, and, behind the `test` feature,
 //! the `Capture` sink and `Engine::serve_capture` for an extension's own
 //! tests. `api.lock` lists every public item here.
 #![forbid(unsafe_code)]
 
-pub use php_engine::api::{abi, call, coerce, decl, raising, request, syntax, values};
+pub use php_engine::api::{abi, call, coerce, decl, process, raising, request, syntax, values};
 
 /// What only a macro expansion names (design §4.4): listed in `api.lock`
 /// under a cap of its own, and named by no extension's source.
