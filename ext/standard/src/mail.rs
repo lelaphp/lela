@@ -313,7 +313,7 @@ pub(super) fn php_mail(
             entry.push(b'\n');
             if let Some(stream) = req.open_stream(&log, b"a", false)? {
                 stream.write(req, &entry);
-                stream.close(req);
+                stream.free(req);
             }
         }
     }

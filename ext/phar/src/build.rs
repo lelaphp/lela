@@ -887,8 +887,7 @@ fn add_built(
 ) -> Result<bool, Thrown> {
     let done = |req: &mut Request| {
         if close {
-            source.close(req);
-            req.release(source.as_value());
+            source.free(req);
         }
     };
     if path::is_magic(key) {

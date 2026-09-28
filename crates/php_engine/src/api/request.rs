@@ -14587,8 +14587,9 @@ impl Request {
     ///     function stream_stat() { return []; }
     ///     function stream_set_option($o, $a, $b) { return false; }
     ///     function url_stat($p, $f) { return []; } }
-    /// stream_wrapper_register('mm', 'M');
+    /// stream_wrapper_register('mm', 'M'); $b = get_resources();
     /// var_dump(include 'mm://one', include_once 'mm://two', include_once 'mm://two');
+    /// echo count(array_diff_key(get_resources(), $b)), " left open\n";
     /// set_include_path('mm://dir:' . get_include_path());
     /// var_dump(include 'three');
     /// set_include_path('.');
@@ -14601,6 +14602,7 @@ impl Request {
     /// int(7)
     /// int(7)
     /// bool(true)
+    /// 0 left open
     /// mm://dir/three 14
     /// int(7)
     /// include(): data:// wrapper is disabled in the server configuration by allow_url_include=0
@@ -14638,7 +14640,7 @@ impl Request {
                 let source = self
                     .stream_op(*stream, |req, s| s.copy_to_mem(req, None))
                     .unwrap_or_default();
-                stream.close(self);
+                stream.free(self);
                 Some(source)
             }
             _ => None,

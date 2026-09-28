@@ -262,7 +262,7 @@ fn pump(req: &mut Request, stream: Stream, state: &mut dyn State) -> Result<bool
             Err(thrown) => break Err(thrown),
         }
     };
-    stream.close(req);
+    stream.free(req);
     read
 }
 
@@ -329,7 +329,7 @@ fn hash_file(
     let mut state = match (algo.init)(req, Options(Some(options))) {
         Ok(state) => state,
         Err(thrown) => {
-            stream.close(req);
+            stream.free(req);
             return Err(thrown);
         }
     };
@@ -658,7 +658,7 @@ fn hash_update_file(
         return Ok(false);
     };
     let Some(mut state) = take(req, object) else {
-        stream.close(req);
+        stream.free(req);
         return Err(finalized(req, 1));
     };
     let read = pump(req, stream, state.as_mut());

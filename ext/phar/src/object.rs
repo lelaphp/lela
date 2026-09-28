@@ -460,8 +460,7 @@ impl Phar {
         };
         let name = localName.map_or(file, |n| n.as_bytes().to_vec());
         let added = crate::build::add_file(req, id, &name, crate::build::Source::Stream(stream));
-        stream.close(req);
-        req.release(stream.as_value());
+        stream.free(req);
         added
     }
 

@@ -1448,6 +1448,36 @@ fn no_default_context(flags: i64) -> NullContext {
 /// bool(true)
 /// string(0) ""
 /// ```
+///
+/// A native that opens a stream of its own closes it with
+/// `php_stream_close`, which gives up the owner the open handed it
+/// ([`Stream::free`]), so nothing it opened is left in `get_resources()`:
+/// this one, and every native here that reads or writes a file whole.
+///
+/// ```php
+/// stream_context_get_default();
+/// $d = __DIR__; $n = fn($b) => count(array_diff_key(get_resources(), $b));
+/// $b = get_resources(); file_put_contents("$d/r.txt", "abc"); echo "fpc ", $n($b), "\n";
+/// $b = get_resources(); file_get_contents("$d/r.txt"); echo "fgc ", $n($b), "\n";
+/// $b = get_resources(); file("$d/r.txt"); echo "file ", $n($b), "\n";
+/// $b = get_resources(); readfile("$d/r.txt"); echo " readfile ", $n($b), "\n";
+/// $b = get_resources(); md5_file("$d/r.txt"); sha1_file("$d/r.txt"); hash_file('md5', "$d/r.txt"); echo "hash ", $n($b), "\n";
+/// $b = get_resources(); parse_ini_file("$d/r.txt"); echo "ini ", $n($b), "\n";
+/// $b = get_resources(); get_meta_tags("$d/r.txt"); @getimagesize("$d/r.txt"); echo "meta ", $n($b), "\n";
+/// $b = get_resources(); highlight_file("$d/r.txt", true); php_strip_whitespace("$d/r.txt"); echo "source ", $n($b), "\n";
+/// $b = get_resources(); scandir($d); copy("$d/r.txt", "$d/s.txt"); error_log("x", 3, "$d/r.log"); echo "dir ", $n($b), "\n";
+/// ```
+/// ```expect
+/// fpc 0
+/// fgc 0
+/// file 0
+/// abc readfile 0
+/// hash 0
+/// ini 0
+/// meta 0
+/// source 0
+/// dir 0
+/// ```
 #[php_function]
 fn file_get_contents(
     req: &mut Request,
@@ -1487,12 +1517,12 @@ fn file_get_contents(
                 Level::Warning,
                 &format!("Failed to seek to position {offset} in the stream"),
             );
-            stream.close(req);
+            stream.free(req);
             return Ok(OrFalse::False);
         }
     }
     let contents = stream.copy_to_mem(req, maxlen)?;
-    stream.close(req);
+    stream.free(req);
     Ok(OrFalse::Value(contents))
 }
 
@@ -1603,7 +1633,7 @@ fn file_put_contents(
         return Ok(OrFalse::False);
     };
     if flags & FLOCK_EX != 0 && !stream.flock(req, FLOCK_EX) {
-        stream.close(req);
+        stream.free(req);
         docref(
             req,
             Level::Warning,
@@ -1615,7 +1645,7 @@ fn file_put_contents(
         stream.truncate(req, 0)?;
     }
     let written = write_data(req, stream, source, &data, name);
-    stream.close(req);
+    stream.free(req);
     Ok(match written? {
         Some(n) => OrFalse::Value(i64::try_from(n).unwrap_or(i64::MAX)),
         None => OrFalse::False,
@@ -2064,9 +2094,9 @@ fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Th
     let mut done = false;
     if let Some(to) = req.open_stream(target, b"wb", false)? {
         done = copy_to_stream(req, from, to)?;
-        close_stream(req, to);
+        to.free(req);
     }
-    close_stream(req, from);
+    from.free(req);
     Ok(done)
 }
 
@@ -2089,13 +2119,6 @@ fn copy_to_stream(req: &mut Request, from: Stream, to: Stream) -> Result<bool, T
             }
         }
     }
-}
-
-/// `php_stream_close`: the resource closed and the owner the open gave
-/// it let go.
-fn close_stream(req: &mut Request, stream: Stream) {
-    stream.close(req);
-    req.release(stream.as_value());
 }
 
 /// `copy(string $from, string $to, $context = null): bool`,
@@ -2285,7 +2308,7 @@ fn file(
         return Ok(OrFalse::False);
     };
     let contents = stream.copy_to_mem(req, None)?;
-    stream.close(req);
+    stream.free(req);
     let buf = contents.as_bytes().to_vec();
     let mut lines: Vec<&[u8]> = Vec::new();
     let mut s = 0;
@@ -2649,7 +2672,7 @@ fn get_meta_tags(
             break;
         }
     }
-    md.stream.close(req);
+    md.stream.free(req);
     Ok(OrFalse::Value(array))
 }
 
@@ -2702,7 +2725,7 @@ fn readfile(
         return Ok(OrFalse::False);
     };
     let size = passthru(req, stream)?;
-    stream.close(req);
+    stream.free(req);
     Ok(OrFalse::Value(size))
 }
 

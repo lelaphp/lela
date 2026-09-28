@@ -519,7 +519,7 @@ fn scandir(
     while let Some(name) = stream.read_dir(req)? {
         names.push(name);
     }
-    stream.close(req);
+    stream.free(req);
     match order {
         SCANDIR_SORT_NONE => {}
         SCANDIR_SORT_ASCENDING => names.sort_by(|a, b| collate(a.as_bytes(), b.as_bytes())),

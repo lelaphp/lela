@@ -90,7 +90,11 @@ impl Handle {
         }
     }
 
-    /// `fclose(handle)`, and `php_stream_free` of the stream under it.
+    /// `fclose(handle)`, and `php_stream_free` of the stream under it:
+    /// php's `GC_ADDREF` on that stream (`php_stream_bz2open_from_BZFILE`)
+    /// is the owner its `zend_list_delete` gives up, and this one takes
+    /// none, so the stream is closed and whatever owner it had is left,
+    /// [`Stream::close`] and not [`Stream::free`].
     fn close(self, req: &mut Request) {
         if let Handle::Stream(inner) = self {
             inner.close(req);
@@ -428,13 +432,16 @@ fn open(
             return Ok(None);
         };
         if inner.cast(req, Cast::Fd, true).is_none() {
-            inner.close(req);
+            inner.free(req);
             return Ok(None);
         }
         Handle::Stream(inner)
     };
     let Some(direction) = parsed.direction() else {
-        handle.close(req);
+        // `php_stream_close(stream)`: what this open opened, given up.
+        if let Handle::Stream(inner) = handle {
+            inner.free(req);
+        }
         return Ok(None);
     };
     from_file(req, handle, mode, direction).map(Some)

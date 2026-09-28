@@ -827,7 +827,7 @@ pub(crate) fn dump_to_file(
         }
         None => -1,
     };
-    stream.close(req);
+    stream.free(req);
     Ok(written)
 }
 

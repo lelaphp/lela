@@ -700,7 +700,7 @@ fn parse_ini_file(
             _ => break,
         }
     }
-    stream.close(req);
+    stream.free(req);
     let name = filename.as_bytes().to_vec();
     parse_ini(req, &bytes, &name, sections, mode)
 }
@@ -1013,7 +1013,7 @@ fn error_log(
         LogTo::File(path) => match req.open_stream(path, b"a", false)? {
             Some(stream) => {
                 let written = stream.write(req, message);
-                stream.close(req);
+                stream.free(req);
                 written == Some(message.len())
             }
             None => false,
@@ -1481,7 +1481,7 @@ fn scanned_file(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>>, T
         return Ok(None);
     };
     let source = stream.copy_to_mem(req, None)?;
-    stream.close(req);
+    stream.free(req);
     Ok(Some(source.as_bytes().to_vec()))
 }
 

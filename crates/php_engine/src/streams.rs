@@ -1473,8 +1473,7 @@ impl Temp {
             return Ok(false);
         };
         req.stream_op(file, |req, f| f.write(req, &membuf));
-        inner.resource().close(req);
-        req.release(inner.resource().as_value());
+        inner.free(req);
         self.inner = Some(file);
         req.stream_op(file, |req, f| f.seek(req, pos, Some(Whence::Set)));
         Ok(true)
@@ -1519,8 +1518,7 @@ impl Ops for Temp {
     /// unlinks a spilled file.
     fn close(&mut self, req: &mut Request) -> i32 {
         if let Some(inner) = self.inner.take() {
-            inner.resource().close(req);
-            req.release(inner.resource().as_value());
+            inner.free(req);
         }
         0
     }
@@ -2242,7 +2240,7 @@ impl Request {
         }
         let [Some(stdin), Some(stdout), Some(stderr)] = opened[..] else {
             for stream in opened.into_iter().flatten() {
-                stream.close(self);
+                stream.free(self);
             }
             return Ok(());
         };
@@ -2516,7 +2514,7 @@ fn filter_open(
             let name = rfc2397::url_decode(name);
             // `if (EG(exception)) { php_stream_close(stream); return NULL; }`
             if let Err(thrown) = stream.apply_filter(req, &name, chains) {
-                stream.close(req);
+                stream.free(req);
                 return Err(thrown);
             }
         }

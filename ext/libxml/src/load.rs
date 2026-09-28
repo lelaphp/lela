@@ -158,12 +158,6 @@ impl Loader {
         req.release(Value::string(chunk));
         Ok(Some(bytes))
     }
-
-    /// `php_stream_close`, and the input's owner of the stream given up.
-    pub(crate) fn close(req: &mut Request, stream: Stream) {
-        stream.close(req);
-        req.release(stream.as_value());
-    }
 }
 
 /// `ZVAL_STRING` or `ZVAL_NULL` of the two identifiers, and the `$context`
