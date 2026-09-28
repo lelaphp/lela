@@ -171,6 +171,9 @@ porting = true
 name = "ext/openssl"
 budget = 13500
 feature = "openssl"
+# The port is partial: 197 of 228 missed at 7ec36601, so `phpt` is the
+# meter until #725 replaces the key (#1212).
+porting = true
 [[crate]]
 name = "ext/curl"
 budget = 6000

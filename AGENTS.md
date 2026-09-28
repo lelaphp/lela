@@ -109,9 +109,9 @@ third-engine-design.md
 | api | api.lock | 772 | 800 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
-| harness | xtask.lock | 335 |  | pass |
+| harness | xtask.lock | 337 |  | pass |
 
-<!-- /computed in=7444b7beb33229caf786ae01667645d938a9fca525469a1159a64fd16b95fcdb out=11a3e44e15d316277f8ffa6753b4ed3c8fdcecf3d7df07a8df8ac212bf89ce85 -->
+<!-- /computed in=55477e79ca8a8830794c378a22dff052ecc9646ed461592fce181833195ab505 out=c61da97b54f1deeb6fed78d42e80b9e2861b4bfd4e0851776655fdaaf83b1148 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -136,12 +136,12 @@ third-engine-design.md
 | ticket.close-api |  | deny_pattern | no reading | The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. |
 | ticket.reply-unfiled |  | deny_pattern | fail | A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes. |
 | lanes.nightly |  | deny_pattern | fail | Nightly lanes run in CI only; run the per-crate subset. |
-| lanes.builder-subset |  | deny_pattern | no reading | A builder runs its crates' subsets, and Zend/tests when it touches php_engine, php_compile, php_syntax or php_heap; the whole lane is the merge check's (specs §6). |
+| lanes.builder-subset |  | deny_pattern | fail | A builder runs its crates' subsets, and Zend/tests when it touches php_engine, php_compile, php_syntax or php_heap; the whole lane is the merge check's (specs §6). |
 | computed.force |  | deny_pattern | fail | `computed run --force` discards a hand edit; a person decides that. |
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=c7842e8ef4745b057fe6a28bacb5c0af830c2cad037bc7ce419afa4ed4b5ae07 out=51c0c623998d57bdae697fe71a8d84d1fe3199423b74c204e2538611f77e3f89 -->
+<!-- /computed in=a7fd6d1e4e9c252498912a7e2b6a25f31ff9681392fa90eef6ea535823783fd2 out=91c764b55affb53e159ff3b31261ff6e1233123dafa3bcd36c010db97124847e -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
