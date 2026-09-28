@@ -1905,7 +1905,8 @@ fn links_of<'a>(
 
 /// One row of a backtrace before it is an array: the callee, its
 /// receiver, the scope it was called in where the callee is a closure,
-/// its arguments, the extra named arguments the callee collected, and
+/// its arguments and the extra named arguments the callee collected,
+/// both borrowed from the frame or the call with no owner taken, and
 /// the file and line of its call site, which a call a native made has
 /// none of. php reads the scope off `func->common.scope` of the
 /// closure's own copy of the function; the copy here is the `Closure`
@@ -4509,6 +4510,33 @@ impl Request {
     /// #1 %s(6): f()
     /// #2 {main}
     /// ```
+    ///
+    /// The row leaves the arguments where they stand: an object or a
+    /// counted string the frame holds is still the frame's once the
+    /// trace is built without it, and is released as the frame is.
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', '1');
+    /// function f($o, $s) { throw new Exception('f'); }
+    /// try { f(new stdClass, str_repeat('s', 3)); } catch (Exception $e) { var_dump($e->getTrace()); echo $e->getTraceAsString(), "\n"; }
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   [0]=>
+    ///   array(3) {
+    ///     ["file"]=>
+    ///     string(%d) "%s.php"
+    ///     ["line"]=>
+    ///     int(4)
+    ///     ["function"]=>
+    ///     string(1) "f"
+    ///   }
+    /// }
+    /// #0 %s(4): f()
+    /// #1 {main}
+    /// done
+    /// ```
     fn debug_backtrace(&mut self) -> Result<PhpArray, Thrown> {
         let options = if self.exception_ignore_args() {
             DEBUG_BACKTRACE_IGNORE_ARGS
@@ -4553,27 +4581,23 @@ impl Request {
         let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
         let mut trace = PhpArray::new(self)?;
         self.constant_expression_row(&mut trace)?;
-        for (traced, this, scope, mut arguments, named, site) in links {
+        for (traced, this, scope, arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
             let is_function = matches!(traced, Traced::Function(_));
             let sensitive = match traced {
                 Traced::Function(function) => self.sensitive_parameters(function),
                 Traced::Include { .. } => Sensitive::default(),
             };
-            let (name, method) = match traced {
+            let (name, method, included) = match traced {
                 Traced::Function(function) => (
                     self.declared_name(function),
                     self.method_class(function).or(scope).map(|class| {
                         let class = self.class_name(class);
                         (class, if this.is_some() { "->" } else { "::" })
                     }),
+                    None,
                 ),
-                Traced::Include { kind, file } => {
-                    if let Some(file) = file {
-                        arguments.push(Value::string(PhpString::new(self, &file)?));
-                    }
-                    (kind.name().to_owned(), None)
-                }
+                Traced::Include { kind, file } => (kind.name().to_owned(), None, file),
             };
             if let Some((file, line)) = site {
                 let file = Value::string(PhpString::new(self, &file)?);
@@ -4595,10 +4619,17 @@ impl Request {
             // A code frame's row has an `args` only where it has the
             // file, and a function's always, `debug_backtrace_get_args`,
             // which adds the extra named arguments under their names
-            // after the positional ones.
-            let with_args = is_function || !arguments.is_empty();
+            // after the positional ones. The frame's arguments are
+            // borrowed from its slots, so each one the row keeps takes
+            // an owner and one it leaves out is left alone; the included
+            // file is made here, with the row as its one owner.
+            let with_args = is_function || included.is_some();
             if !ignore_arguments && with_args {
                 let mut args = PhpArray::new(self)?;
+                if let Some(file) = included {
+                    let file = Value::string(PhpString::new(self, &file)?);
+                    args.append(self, file)?;
+                }
                 for (at, argument) in arguments.into_iter().enumerate() {
                     let argument = argument.deref();
                     let argument = if sensitive.at(at) {
@@ -4621,10 +4652,6 @@ impl Request {
                     args.set(self, Key::Str(name), argument)?;
                 }
                 self.set_string_key(&mut row, b"args", Value::array(args))?;
-            } else {
-                for argument in arguments {
-                    self.release(argument);
-                }
             }
             trace.append(self, Value::array(row))?;
         }
