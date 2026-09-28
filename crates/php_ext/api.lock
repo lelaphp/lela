@@ -167,12 +167,12 @@ attr::php_function
 call::Function
 call::Iter
 call::Iter::as_value
-call::Iter::current
 call::Iter::invalidate
 call::Iter::key
 call::Iter::next
 call::Iter::rewind
 call::Iter::valid
+call::Iter::value
 call::autoload
 call::bound_variables
 call::call

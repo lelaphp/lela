@@ -1413,7 +1413,7 @@ impl NoRewindIterator {
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         match no_rewind_iter(req, this.object())? {
             Some(iter) => {
-                let data = iter.current(req)?;
+                let data = iter.value(req)?;
                 Ok(crate::owned(req, data))
             }
             None => Ok(Value::null()),
@@ -2330,7 +2330,7 @@ fn dual_fetch(req: &mut Request, this: PhpObject, check_more: bool) -> Result<bo
     let Some(iter) = inner_iter(req, this)? else {
         return Ok(false);
     };
-    let data = iter.current(req)?;
+    let data = iter.value(req)?;
     let data = crate::owned(req, data);
     dual(req, this, |it| it.data = Some(data))?;
     let key = iter.key(req)?;

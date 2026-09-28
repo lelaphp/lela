@@ -128,8 +128,9 @@ impl Iter {
         crate::interfaces::valid(req, self.0)
     }
 
-    /// `funcs->get_current_data`, one owner, the caller's.
-    pub fn current(self, req: &mut Request) -> Result<Value, Thrown> {
+    /// The value at the position, `funcs->get_current_data`, one owner,
+    /// the caller's.
+    pub fn value(self, req: &mut Request) -> Result<Value, Thrown> {
         crate::interfaces::current(req, self.0)
     }
 
