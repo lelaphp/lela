@@ -1024,7 +1024,13 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         };
         let delegating =
             read(req, generator, |g| !matches!(g.values, Delegated::Nothing)).unwrap_or(false);
-        if delegating && next_delegated(req, generator) {
+        if delegating && req.is_pending() {
+            // `zend_generator_throw_exception`: a throwable raised into a
+            // generator stops the `yield from` over values it stands in,
+            // and their release is served with the generator's frame
+            // current, so a destructor it serves is called from there.
+            drop_values(req, generator);
+        } else if delegating && next_delegated(req, generator) {
             suspend(req, generator)?;
             unwind_chain(req, &chain);
             with(req, orig, |g| {
@@ -1058,7 +1064,6 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
                 return Ok(());
             }
             generator = current(req, orig);
-            throw_into_generator(req, generator);
             with(req, orig, |g| g.do_init = false);
             continue;
         }
@@ -1143,13 +1148,6 @@ fn unwind_chain(req: &mut Request, chain: &[PhpObject]) {
     for link in chain.iter().rev() {
         let _ = suspend(req, *link);
     }
-}
-
-/// `zend_generator_throw_exception(generator, NULL)`: the pending
-/// throwable is the generator's to raise at the opline it stands at,
-/// and a `yield from` over values stops.
-fn throw_into_generator(req: &mut Request, generator: PhpObject) {
-    drop_values(req, generator);
 }
 
 /// [`resume`] for a native: a fatal ends the request, and what the body
@@ -1782,6 +1780,22 @@ impl Generator {
     /// int(2)
     /// out x
     /// ```
+    ///
+    /// A `yield from` over values stops where the throwable arrives, and
+    /// what it still held is released with the generator's frame current
+    /// (`zend_generator_throw_exception`):
+    ///
+    /// ```php
+    /// function gen() { yield from [1, new class { function __destruct() { debug_print_backtrace(); } }]; }
+    /// $g = gen(); $g->current();
+    /// try { $g->throw(new Exception("x")); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// #0 %s(2): class@anonymous->__destruct()
+    /// #1 [internal function]: gen()
+    /// #2 %s(4): Generator->throw(Object(Exception))
+    /// x
+    /// ```
     fn throw(
         req: &mut Request,
         this: This<Self>,
@@ -1807,7 +1821,6 @@ impl Generator {
             ));
         }
         req.leave_pending(&Thrown::of(Some(throwable)));
-        throw_into_generator(req, root);
         resumed(req, this)?;
         Ok(yielded_now(req, this, |g| g.value))
     }
