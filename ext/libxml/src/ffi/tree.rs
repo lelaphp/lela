@@ -1268,6 +1268,87 @@ impl Node {
     }
 }
 
+// ---- the tree calls php's simplexml makes
+
+impl Node {
+    /// `xmlNewChild(parent, ns, name, content)`: a child element appended,
+    /// `content` read as markup whose entity references become nodes.
+    pub fn new_child(self, ns: Option<Ns>, name: &[u8], content: Option<&[u8]>) -> Option<Node> {
+        let n = cstr(name);
+        let c = content.map(cstr);
+        // SAFETY: a live parent, a namespace or none, NUL-terminated
+        // strings or null.
+        Node::from_raw(unsafe {
+            sys::xmlNewChild(
+                self.raw(),
+                ns.map_or(ptr::null_mut(), Ns::raw),
+                n.as_ptr(),
+                opt_ptr(c.as_ref()),
+            )
+        })
+    }
+
+    /// `xmlNewTextChild(parent, ns, name, content)`: a child element
+    /// appended, `content` its one text node as it is.
+    pub fn new_text_child(
+        self,
+        ns: Option<Ns>,
+        name: &[u8],
+        content: Option<&[u8]>,
+    ) -> Option<Node> {
+        let n = cstr(name);
+        let c = content.map(cstr);
+        // SAFETY: as above.
+        Node::from_raw(unsafe {
+            sys::xmlNewTextChild(
+                self.raw(),
+                ns.map_or(ptr::null_mut(), Ns::raw),
+                n.as_ptr(),
+                opt_ptr(c.as_ref()),
+            )
+        })
+    }
+
+    /// `xmlNewNsProp(node, ns, name, value)`, which `xmlNewProp(node, name,
+    /// value)` is with no namespace: an attribute appended whatever the
+    /// element already has.
+    pub fn new_ns_prop(self, ns: Option<Ns>, name: &[u8], value: Option<&[u8]>) -> Option<Node> {
+        let n = cstr(name);
+        let v = value.map(cstr);
+        // SAFETY: a live element, a namespace or none, NUL-terminated
+        // strings or null.
+        Node::from_raw(
+            unsafe {
+                sys::xmlNewNsProp(
+                    self.raw(),
+                    ns.map_or(ptr::null_mut(), Ns::raw),
+                    n.as_ptr(),
+                    opt_ptr(v.as_ref()),
+                )
+            }
+            .cast(),
+        )
+    }
+
+    /// `xmlEncodeEntitiesReentrant(node->doc, text)`: the text with `&`,
+    /// `<` and `>` (and what the document's encoding cannot carry) made
+    /// references.
+    pub fn encode_entities(self, text: &[u8]) -> Option<Vec<u8>> {
+        let t = cstr(text);
+        // SAFETY: the node's document or null, and a NUL-terminated string.
+        taken(unsafe { sys::xmlEncodeEntitiesReentrant(doc_ptr(self.doc()), t.as_ptr()) })
+    }
+
+    /// `xmlCopyDoc(doc, recursive)`: a document of the caller's own.
+    pub fn copy_doc(self, recursive: bool) -> Option<Node> {
+        if !self.kind().is_document() {
+            return None;
+        }
+        // SAFETY: a live document.
+        Node::from_raw(unsafe { sys::xmlCopyDoc(self.raw().cast(), c_int::from(recursive)) }.cast())
+    }
+}
+
 // ---- names
 
 /// A name as libxml2 validates and splits it.
@@ -1393,7 +1474,7 @@ impl NodeObject {
         }
         // SAFETY: a live node, and this is the half of the object standing
         // for it.
-        unsafe { self.increment_node_ptr(node.raw()) };
+        unsafe { self.increment_node_ptr(node.raw(), true) };
     }
 
     /// `intern->document = NULL; php_libxml_increment_doc_ref(intern, doc)`:
@@ -1417,7 +1498,15 @@ impl NodeObject {
     /// `php_libxml_increment_node_ptr(intern, node, intern)`.
     pub fn take_node(&mut self, node: Node) {
         // SAFETY: a live node the object will stand for.
-        unsafe { self.increment_node_ptr(node.raw()) };
+        unsafe { self.increment_node_ptr(node.raw(), true) };
+    }
+
+    /// `php_libxml_increment_node_ptr(intern, node, NULL)`: the node counted
+    /// and nothing named as the object that stands for it, as simplexml
+    /// holds its nodes, so dom still answers a node of its own for one.
+    pub fn hold_node(&mut self, node: Node) {
+        // SAFETY: a live node, and no object named.
+        unsafe { self.increment_node_ptr(node.raw(), false) };
     }
 }
 

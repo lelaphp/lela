@@ -82,6 +82,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_opcache::extension,
         #[cfg(feature = "bcmath")]
         php_ext_bcmath::extension,
+        #[cfg(feature = "simplexml")]
+        php_ext_simplexml::extension,
     ]
 }
 

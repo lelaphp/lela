@@ -7590,7 +7590,9 @@ fn property_place(
     let placed = match place {
         // `if (NULL == ptr) ptr = zobj->handlers->read_property(...)`:
         // a name the class serves is read, not placed.
-        PropertyPlace::Handlers => return Ok(PropertyFound::Served(object, name)),
+        PropertyPlace::Handlers | PropertyPlace::Apart => {
+            return Ok(PropertyFound::Served(object, name));
+        }
         // php places the name here with `zend_std_get_property_ptr_ptr`,
         // whose silence is `ce->__get != NULL`, and a property the scope
         // may not reach is the `Error`; the arms below are the names it
@@ -7598,14 +7600,13 @@ fn property_place(
         // A readonly or set-restricted property holding an object is
         // read, as php's `read_property` returns it under `BP_VAR_W`: the
         // write goes through the object and the property is untouched.
+        // And `zend_std_get_property_ptr_ptr`'s `NULL` for a name the
+        // class's `__get` answers: the fetch falls back to
+        // `read_property` (#513).
         PropertyPlace::Std
-            if req.write_fetch_reads_object(object, &name, op.opcode == Opcode::FetchObjUnset) =>
+            if req.write_fetch_reads_object(object, &name, op.opcode == Opcode::FetchObjUnset)
+                || req.overloaded_fetch(object, &name) =>
         {
-            return Ok(PropertyFound::Served(object, name));
-        }
-        // `zend_std_get_property_ptr_ptr`'s `NULL` for a name the class's
-        // `__get` answers: the fetch falls back to `read_property` (#513).
-        PropertyPlace::Std if req.overloaded_fetch(object, &name) => {
             return Ok(PropertyFound::Served(object, name));
         }
         // `BP_VAR_RW` reads the slot before anything is placed, so an
@@ -11159,8 +11160,9 @@ fn assign_property(
     let placed = match place {
         // `zobj->handlers->write_property`: the class serves the name,
         // declared or not, so the write is its handler's, as a name no
-        // class declared is.
-        PropertyPlace::Handlers => None,
+        // class declared is; php's `ASSIGN_OBJ` asks no place, so one the
+        // class keeps apart is its `write_property`'s too.
+        PropertyPlace::Handlers | PropertyPlace::Apart => None,
         // `zend_get_property_offset(ce, name, ce->__set != NULL, ...)`:
         // a class with a `__set` places the name quietly, so a property
         // the scope may not reach reaches `write_property` and the
@@ -13266,9 +13268,12 @@ fn step_property(
     let placed = match place {
         // php's `NULL` from the class's own slot: the class serves the
         // name, so the pair of handlers takes the site.
-        PropertyPlace::Handlers => {
-            return Ok(overloaded_property_step(
-                req, frame, code, step, object, key,
+        // or php's pointer into what the class keeps apart, which the
+        // operation changes with nothing written back.
+        served @ (PropertyPlace::Handlers | PropertyPlace::Apart) => {
+            let back = WriteBack::of(served);
+            return Ok(served_property_step(
+                req, frame, code, step, object, key, back,
             ));
         }
         // `zend_std_get_property_ptr_ptr`, whose silence is
@@ -13607,10 +13612,24 @@ fn overloaded_property_step(
     object: PhpObject,
     name: crate::api::values::PhpString,
 ) -> Result<(), Thrown> {
+    served_property_step(req, frame, code, step, object, name, WriteBack::Property)
+}
+
+/// [`overloaded_property_step`] with the stepped value written back as `back`
+/// says.
+fn served_property_step(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    object: PhpObject,
+    name: crate::api::values::PhpString,
+    back: WriteBack,
+) -> Result<(), Thrown> {
     let Compound { op, data, kernel } = step;
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
     let table = req.object_handlers(object.heap());
-    let held = match table.read_property(req, object, name.as_bytes(), PropertyRead::Warning) {
+    let held = match table.read_property(req, object, name.as_bytes(), back.read()) {
         Ok(held) => held,
         Err(thrown) => {
             exec::free_operand(req, frame, code, data.op1_type, data.op1);
@@ -13629,6 +13648,10 @@ fn overloaded_property_step(
         }
     };
     write_out(req, frame, code, op, &stepped);
+    if back == WriteBack::Apart {
+        req.release(stepped);
+        return Ok(());
+    }
     req.addref(&stepped);
     let table = req.object_handlers(object.heap());
     let written = table.write_property(req, object, name, stepped);
@@ -13636,6 +13659,37 @@ fn overloaded_property_step(
         req.release(stepped);
     }
     written
+}
+
+/// Where a compound write or a step over a property the class serves
+/// goes after the operation: back through `write_property`
+/// (`zend_assign_op_overloaded_property`), or nowhere, the class having
+/// answered a place of its own ([`PropertyPlace::Apart`], php's pointer
+/// into `sxe->tmp`) that the operation changes in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteBack {
+    Property,
+    Apart,
+}
+
+impl WriteBack {
+    /// Where the class's verdict sends the stepped value.
+    fn of(place: PropertyPlace) -> WriteBack {
+        match place {
+            PropertyPlace::Apart => WriteBack::Apart,
+            PropertyPlace::Handlers | PropertyPlace::Std => WriteBack::Property,
+        }
+    }
+
+    /// The read the operation makes: `BP_VAR_R` through the pair of
+    /// handlers, and the write fetch that lays the place down for one
+    /// the class keeps apart.
+    fn read(self) -> PropertyRead {
+        match self {
+            WriteBack::Property => PropertyRead::Warning,
+            WriteBack::Apart => PropertyRead::Write,
+        }
+    }
 }
 
 /// `ZEND_PRE_INC_OBJ` (`Z/Zend/zend_vm_def.h:1288`), `++$o->p`: the
@@ -13935,8 +13989,9 @@ fn incdec_property(
     let placed = match place {
         // php's `NULL` from the class's own slot: the class serves the
         // name, so the pair of handlers takes the site.
-        PropertyPlace::Handlers => {
-            return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
+        served @ (PropertyPlace::Handlers | PropertyPlace::Apart) => {
+            let back = WriteBack::of(served);
+            return Ok(served_incdec(req, frame, code, op, step, object, key, back));
         }
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
@@ -14131,8 +14186,32 @@ fn overloaded_incdec(
     object: PhpObject,
     name: crate::api::values::PhpString,
 ) -> Result<(), Thrown> {
+    served_incdec(
+        req,
+        frame,
+        code,
+        op,
+        step,
+        object,
+        name,
+        WriteBack::Property,
+    )
+}
+
+/// [`overloaded_incdec`] with the stepped value written back as `back` says.
+#[allow(clippy::too_many_arguments)] // the site's operands, and where the result goes
+fn served_incdec(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    step: IncDec,
+    object: PhpObject,
+    name: crate::api::values::PhpString,
+    back: WriteBack,
+) -> Result<(), Thrown> {
     let table = req.object_handlers(object.heap());
-    let read = table.read_property(req, object, name.as_bytes(), PropertyRead::Warning);
+    let read = table.read_property(req, object, name.as_bytes(), back.read());
     let held = match read {
         Ok(held) => held,
         Err(thrown) => {
@@ -14160,6 +14239,10 @@ fn overloaded_incdec(
         if step.post { &copy } else { &stepped },
     );
     req.release(copy);
+    if back == WriteBack::Apart {
+        req.release(stepped);
+        return Ok(());
+    }
     // `write_property` takes an owner of the value and of the name,
     // the stepped value's own and one more of the name.
     req.addref(&Value::string(name));
@@ -18022,6 +18105,11 @@ pub(crate) fn jmpnz<T: Tier>(
     if !taken {
         return Ok(advance(req, frame));
     }
+    // `ZEND_VM_JMP` reads `EG(exception)` first: a conversion the
+    // test served may have thrown.
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
     let back = op.op2 <= req.vm().opline(frame);
     req.vm_mut().jump(frame, op.op2);
     if back {
@@ -18057,6 +18145,11 @@ pub(crate) fn jmpz<T: Tier>(
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     if !taken {
         return Ok(advance(req, frame));
+    }
+    // `ZEND_VM_JMP` reads `EG(exception)` first: a conversion the
+    // test served may have thrown.
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
     }
     let back = op.op2 <= req.vm().opline(frame);
     req.vm_mut().jump(frame, op.op2);
@@ -18108,6 +18201,9 @@ pub(crate) fn jmpz_ex<T: Tier>(
     if held {
         return Ok(advance(req, frame));
     }
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
     req.vm_mut().jump(frame, op.op2);
     Ok(Stepped::Same(frame))
 }
@@ -18139,6 +18235,9 @@ pub(crate) fn jmpnz_ex<T: Tier>(
     write_out(req, frame, code, op, &Value::bool(held));
     if !held {
         return Ok(advance(req, frame));
+    }
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
     }
     req.vm_mut().jump(frame, op.op2);
     Ok(Stepped::Same(frame))

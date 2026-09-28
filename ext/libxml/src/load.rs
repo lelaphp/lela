@@ -268,7 +268,29 @@ fn contains_nul_escape(path: &[u8]) -> bool {
 /// first and a path it cannot stat left unopened and unwarned, since
 /// libxml tries paths that need not exist (a DTD); then the stream opened
 /// under `REPORT_ERRORS`. A document is read, and saved, through a
-/// program's own wrapper as through the plain files one.
+/// program's own wrapper as through the plain files one, opened with
+/// what `libxml_set_streams_context` kept (`LIBXML(stream_context)`), and
+/// with `FG(default_context)` where it kept none
+/// (`php_stream_context_from_zval(NULL, 0)`).
+///
+/// ```php
+/// class W { public $context;
+///   function stream_open($path, $mode, $options, &$opened) { echo stream_context_get_options($this->context)['wr']['k'], "\n"; return false; }
+///   function url_stat($path, $flags) { return []; }
+/// }
+/// stream_wrapper_register('wr', 'W');
+/// stream_context_set_default(['wr' => ['k' => 'default']]);
+/// @(new DOMDocument)->load('wr://x');
+/// libxml_set_streams_context(stream_context_create(['wr' => ['k' => 'kept']]));
+/// @(new DOMDocument)->load('wr://x');
+/// @(new DOMDocument)->save('wr://y');
+/// ```
+/// ```expect
+/// default
+/// kept
+/// kept
+/// kept
+/// ```
 ///
 /// ```php
 /// class Mem { public $context; static $data = ['doc' => '<r><a/></r>'];
@@ -330,5 +352,16 @@ fn open(
     if read_only && req.wrapper_url_stat(&path)? == UrlStat::Failed {
         return Ok(None);
     }
-    req.open_stream(&path, mode, false)
+    // `php_stream_context_from_zval(LIBXML(stream_context), 0)`: the
+    // context `libxml_set_streams_context` kept, the default one else.
+    let kept = req
+        .state::<State>()
+        .stream_context
+        .as_ref()
+        .and_then(|v| v.as_resource().copied());
+    let context = match kept {
+        Some(context) => context,
+        None => php_ext_standard::default_stream_ctx(req)?,
+    };
+    req.with_stream_ctx(Some(context), |req| req.open_stream(&path, mode, false))
 }

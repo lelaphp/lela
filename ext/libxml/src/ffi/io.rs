@@ -141,6 +141,45 @@ impl Parser {
         })
     }
 
+    /// `xmlReadMemory(data, len, NULL, NULL, options)` or `xmlReadFile(path,
+    /// NULL, options)`, simplexml's parse: a parser php never configures,
+    /// so what it raises is libxml's own text through the generic
+    /// handler, and a tree only where it was well formed or `options`
+    /// recover. What it loads reads through `req`'s streams.
+    pub fn read(
+        req: &mut Request,
+        source: Source<'_>,
+        options: c_int,
+    ) -> (Option<Node>, Vec<Raised>, Option<Thrown>) {
+        Library::init();
+        let unconfigured = Routing::Parser {
+            sax: ptr::null_mut(),
+        };
+        Raised::capture_io(req, Some(unconfigured), || {
+            let doc = match source {
+                Source::Memory(bytes) => {
+                    let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
+                    // SAFETY: `len` readable bytes, no base URL and no encoding.
+                    unsafe {
+                        sys::xmlReadMemory(
+                            bytes.as_ptr().cast(),
+                            len,
+                            ptr::null(),
+                            ptr::null(),
+                            options,
+                        )
+                    }
+                }
+                Source::File(path) => {
+                    let p = cstr(path);
+                    // SAFETY: a NUL-terminated path and no encoding.
+                    unsafe { sys::xmlReadFile(p.as_ptr().cast(), ptr::null(), options) }
+                }
+            };
+            Node::from_raw(doc.cast())
+        })
+    }
+
     /// `dom_load_html`'s parse: the HTML parser over `source`, `options` put
     /// on the parser where any are given, and whatever tree it built; what
     /// it loads reads through `req`'s streams.
@@ -318,6 +357,42 @@ impl Save {
                     )
                 })
             })
+        })
+    }
+
+    /// `php_libxml_dump_node_to_file`: `node` dumped with `xmlNodeDumpOutput`
+    /// into `xmlOutputBufferCreateFilename(file)`; what closing the buffer
+    /// answers, `-1` where the file could not be opened. The file opens
+    /// through `req`'s wrappers.
+    pub fn node_file(
+        req: &mut Request,
+        path: &[u8],
+        doc: Node,
+        node: Node,
+        format: bool,
+    ) -> (i64, Vec<Raised>, Option<Thrown>) {
+        let p = cstr(path);
+        Raised::capture_io(req, None, || {
+            // SAFETY: a NUL-terminated path, no encoder and no compression.
+            let out = unsafe {
+                sys::xmlOutputBufferCreateFilename(p.as_ptr().cast(), ptr::null_mut(), 0)
+            };
+            if out.is_null() {
+                return -1;
+            }
+            // SAFETY: the buffer just made, a live document and a node of it.
+            unsafe {
+                sys::xmlNodeDumpOutput(
+                    out,
+                    doc.raw().cast(),
+                    node.raw(),
+                    0,
+                    c_int::from(format),
+                    ptr::null(),
+                );
+            }
+            // SAFETY: the buffer, closed once.
+            i64::from(unsafe { sys::xmlOutputBufferClose(out) })
         })
     }
 

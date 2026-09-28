@@ -58,7 +58,9 @@ use php_ext::raising::{
 };
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
-use php_ext_libxml::ffi::{DocProps, Kind, Name, Node, Ns, SharedDoc, XML_ATTRIBUTE_ID};
+use php_ext_libxml::ffi::{
+    ClassType, DocProps, Exported, Kind, Name, Node, Ns, SharedDoc, XML_ATTRIBUTE_ID,
+};
 
 use document::{XML_NS, XMLNS_NS};
 use map::{Map, MapKind};
@@ -149,6 +151,8 @@ pub fn extension() -> Extension {
             modern::import_simplexml::declared(),
         ])
         .constants([constants::declared(), modern_constants::declared()].concat())
+        .register(php_ext_libxml::register_export(b"DOMNode", export_node))
+        .register(php_ext_libxml::register_export(b"Dom\\Node", export_node))
         .dependencies(vec![
             dependency("libxml", DependencyKind::Required),
             dependency("lexbor", DependencyKind::Required),
@@ -350,43 +354,102 @@ fn dom_info(req: &mut Request) {
 /// `dom_import_simplexml`'s answer, `DOMAttr|DOMElement`.
 type Imported = Raw<Union<Instance<classes::DOMAttr>, Instance<element::DOMElement>>>;
 
-/// `dom_import_simplexml(object $node): DOMAttr|DOMElement`: a dom
-/// element or attribute answers as itself, as php's export of a dom node
-/// hands it back; there is no simplexml here.
+/// `dom_import_simplexml(object $node): DOMAttr|DOMElement`: the element
+/// or attribute any XML extension's object stands for, through libxml's
+/// table of exports (`php_libxml_import_node`), as the legacy node sharing that
+/// object's document.
 ///
 /// ```php
 /// $d = new DOMDocument;
 /// $d->loadXML('<r/>');
 /// var_dump(dom_import_simplexml($d->documentElement) === $d->documentElement);
+/// $s = simplexml_load_string('<r a="1"><c/></r>');
+/// $e = dom_import_simplexml($s->c);
+/// var_dump(get_class($e), $e->ownerDocument->saveXML($e->parentNode), dom_import_simplexml($s->c) === $e);
+/// var_dump(dom_import_simplexml($s->attributes())->value);
 /// try { dom_import_simplexml(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { Dom\import_simplexml($s); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// bool(true)
+/// string(10) "DOMElement"
+/// string(17) "<r a="1"><c/></r>"
+/// bool(true)
+/// string(1) "1"
 /// dom_import_simplexml(): Argument #1 ($node) is not a valid node type
+/// Dom\import_simplexml(): Argument #1 ($node) must not be already imported as a DOMNode
 /// ```
 #[php_function]
 fn dom_import_simplexml(req: &mut Request, node: PhpObject) -> Result<Imported, Thrown> {
-    let object = node;
-    let node = instance_of(req, object, "DOMNode")
-        .then(|| node_of(req, object))
-        .flatten();
-    match node {
-        Some(n)
-            if matches!(
-                n.kind(),
-                php_ext_libxml::ffi::Kind::Element | php_ext_libxml::ffi::Kind::Attribute
-            ) =>
-        {
-            let found = object_for(req, n, Some(object))?;
-            returned(req, found)
-        }
-        _ => Err(argument_error(
+    let found = import_simplexml_common(req, node, ClassType::Legacy)?;
+    returned(req, found)
+}
+
+/// `dom_import_simplexml_common`: the node an object exports, locked to
+/// `new_class` on its document and answered as that family's node.
+fn import_simplexml_common(
+    req: &mut Request,
+    object: PhpObject,
+    new_class: ClassType,
+) -> Result<Value, Thrown> {
+    let exported = php_ext_libxml::import_node(req, object)
+        .filter(|e| e.document().is_some())
+        .filter(|e| matches!(e.node().kind(), Kind::Element | Kind::Attribute));
+    let Some(exported) = exported else {
+        return Err(argument_error(
             req,
             "TypeError",
             1,
             "is not a valid node type",
-        )),
+        ));
+    };
+    let old = exported.class_type();
+    if old != ClassType::Unset && old != new_class {
+        let family = if new_class == ClassType::Modern {
+            "a DOMNode"
+        } else {
+            "a Dom\\Node"
+        };
+        let tail = format!("must not be already imported as {family}");
+        return Err(argument_error(req, "TypeError", 1, &tail));
     }
+    exported.set_class_type(new_class);
+    let node = exported.node();
+    if let Some(existing) = node.object() {
+        let value = existing.as_value();
+        req.addref(&value);
+        return Ok(value);
+    }
+    let Some(name) = class_for(node, new_class == ClassType::Modern) else {
+        let n = node.kind().number();
+        return Err(throw(req, "Error", &format!("Unsupported node type: {n}")));
+    };
+    let base = class(req, name)?;
+    let class = mapped(&exported.props(), base);
+    let made = new_object(req, class)?;
+    if let Some(d) = dom_mut(req, made) {
+        d.obj.set_object(made);
+        d.obj.attach(node, exported.document());
+    }
+    if old != ClassType::Modern
+        && new_class == ClassType::Modern
+        && let Some(doc) = node.doc()
+    {
+        if let Some(d) = dom_mut(req, made) {
+            d.obj
+                .set_private_data(Box::new(private::Private::default()));
+        }
+        modern::convert_to_modern(req, made, doc);
+    }
+    Ok(made.as_value())
+}
+
+/// `php_dom_export_node`: the node a dom object stands for, and its
+/// document, what `php_libxml_import_node` answers for `DOMNode` and
+/// `Dom\Node`.
+fn export_node(req: &mut Request, object: PhpObject) -> Option<Exported> {
+    let d = dom(req, object)?;
+    Some(Exported::of(d.obj.bound()?, &d.obj))
 }
 
 // ---- the helpers every class module shares
@@ -1090,11 +1153,13 @@ fn clone_node(node: Node, doc: Option<Node>, recursive: bool) -> Option<Node> {
     node.copy(doc, extended)
 }
 
-/// `dom_copy_document_ref`: the switches and the class map carried to a
-/// copy's document.
+/// `dom_copy_document_ref`: the switches, the class map, the class family
+/// and the serialiser carried to a copy's document.
 fn copy_document_ref(req: &mut Request, from: PhpObject, to: PhpObject) {
-    let (props, class_type) = match dom(req, from) {
-        Some(d) if d.obj.has_document() => (d.obj.props(), d.obj.class_type()),
+    let (props, class_type, handlers) = match dom(req, from) {
+        Some(d) if d.obj.has_document() => {
+            (d.obj.props(), d.obj.class_type(), d.obj.document_handlers())
+        }
         _ => return,
     };
     if let Some(d) = dom_mut(req, to) {
@@ -1102,6 +1167,7 @@ fn copy_document_ref(req: &mut Request, from: PhpObject, to: PhpObject) {
             *p = props;
         }
         d.obj.set_class_type(class_type);
+        d.obj.set_document_handlers(handlers);
     }
 }
 

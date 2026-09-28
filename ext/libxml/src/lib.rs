@@ -33,10 +33,11 @@ use php_ext::abi::{
     True, Untyped,
 };
 use php_ext::attr::{php_class, php_const, php_function};
+use php_ext::call::lookup_class;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 
 use ffi::{Raised, Route, sys};
 
@@ -429,6 +430,188 @@ impl Errors {
             }
         }
     }
+}
+
+// ---- the face php_libxml.h declares: the document handlers
+
+/// `php_libxml_document_handlers`: how one document's nodes serialise,
+/// which the extension that made the document chooses and every
+/// extension that saves one of its nodes calls through (`dom_set_xml_class`
+/// gives dom's modern documents their own). Each routes what libxml
+/// raised as php's handlers would have met it.
+pub trait DocumentHandlers: Sync {
+    /// `dump_doc_to_str`: the document with the save `options`, `None`
+    /// where a step failed.
+    fn dump_doc_to_str(
+        &self,
+        req: &mut Request,
+        doc: ffi::Node,
+        options: i32,
+        no_empty: bool,
+        encoding: Option<&[u8]>,
+    ) -> Option<Vec<u8>>;
+
+    /// `dump_node_to_str`: one node of the document.
+    fn dump_node_to_str(
+        &self,
+        req: &mut Request,
+        doc: ffi::Node,
+        node: ffi::Node,
+        format: bool,
+        no_empty: bool,
+        encoding: Option<&[u8]>,
+    ) -> Option<Vec<u8>>;
+
+    /// `dump_doc_to_file`: the bytes written to `path`, `-1` where it
+    /// failed.
+    fn dump_doc_to_file(
+        &self,
+        req: &mut Request,
+        path: &[u8],
+        doc: ffi::Node,
+        format: bool,
+        no_empty: bool,
+        encoding: Option<&[u8]>,
+    ) -> Result<i64, Thrown>;
+
+    /// `dump_node_to_file`: what closing the file answered, `-1` where it
+    /// would not open.
+    fn dump_node_to_file(
+        &self,
+        req: &mut Request,
+        path: &[u8],
+        doc: ffi::Node,
+        node: ffi::Node,
+        format: bool,
+    ) -> Result<i64, Thrown>;
+}
+
+/// `php_libxml_default_document_handlers`: libxml's own serialisers.
+///
+/// ```php
+/// $s = simplexml_load_string('<?xml version="1.0"?><r><a>t</a></r>');
+/// echo $s->asXML(), $s->a->asXML(), "\n";
+/// $d = new DOMDocument;
+/// $d->loadXML('<r><a/></r>');
+/// echo $d->saveXML($d->documentElement), "\n";
+/// ```
+/// ```expect
+/// <?xml version="1.0"?>
+/// <r><a>t</a></r>
+/// <a>t</a>
+/// <r><a/></r>
+/// ```
+pub struct DefaultHandlers;
+
+impl DocumentHandlers for DefaultHandlers {
+    fn dump_doc_to_str(
+        &self,
+        req: &mut Request,
+        doc: ffi::Node,
+        options: i32,
+        no_empty: bool,
+        encoding: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
+        let (saved, raised) = ffi::Save::doc(doc, options, no_empty, encoding);
+        Errors::route(req, raised);
+        saved
+    }
+
+    fn dump_node_to_str(
+        &self,
+        req: &mut Request,
+        doc: ffi::Node,
+        node: ffi::Node,
+        format: bool,
+        no_empty: bool,
+        encoding: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
+        let (saved, raised) = ffi::Save::node(doc, node, format, no_empty, encoding);
+        Errors::route(req, raised);
+        saved
+    }
+
+    fn dump_doc_to_file(
+        &self,
+        req: &mut Request,
+        path: &[u8],
+        doc: ffi::Node,
+        format: bool,
+        no_empty: bool,
+        encoding: Option<&[u8]>,
+    ) -> Result<i64, Thrown> {
+        let (written, raised, thrown) = ffi::Save::file(req, path, doc, encoding, format, no_empty);
+        Errors::settle(req, raised, thrown)?;
+        Ok(written)
+    }
+
+    fn dump_node_to_file(
+        &self,
+        req: &mut Request,
+        path: &[u8],
+        doc: ffi::Node,
+        node: ffi::Node,
+        format: bool,
+    ) -> Result<i64, Thrown> {
+        let (written, raised, thrown) = ffi::Save::node_file(req, path, doc, node, format);
+        Errors::settle(req, raised, thrown)?;
+        Ok(written)
+    }
+}
+
+// ---- the face php_libxml.h declares: the exports
+
+/// `php_libxml_export_node`: what an XML extension answers for one of its
+/// objects, the node it stands for and the document it counts, or `None`.
+pub type ExportNode = fn(&mut Request, PhpObject) -> Option<ffi::Exported>;
+
+/// One row of `php_libxml_exports`: the root class it answers for, by
+/// name, and its export. An extension hands it to
+/// `ExtensionBuilder::register` at startup, so the table is immutable
+/// once the engine is built (ADR-0005).
+pub struct Export {
+    class: &'static [u8],
+    export: ExportNode,
+}
+
+/// `php_libxml_register_export(ce, export_function)`: the row for `class`,
+/// the root of the classes whose objects `export` answers for.
+#[must_use]
+pub fn register_export(class: &'static [u8], export: ExportNode) -> Export {
+    Export { class, export }
+}
+
+/// `php_libxml_import_node`: the node an object of any XML extension
+/// stands for, through the export the first extension registered for the
+/// root of the object's class (`zend_hash_add_ptr` keeps the first), and
+/// `None` for an object no export answers.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r><a/></r>');
+/// $s = simplexml_import_dom($d->documentElement->firstChild);
+/// var_dump($s->getName(), dom_import_simplexml($s)->nodeName);
+/// ```
+/// ```expect
+/// string(1) "a"
+/// string(1) "a"
+/// ```
+pub fn import_node(req: &mut Request, object: PhpObject) -> Option<ffi::Exported> {
+    let mut class = object.class();
+    let mut depth = 0;
+    while let Some(parent) = req.class_decl(class).and_then(|d| d.parent.clone()) {
+        class = lookup_class(req, &parent.0).ok().flatten()?;
+        depth += 1;
+        if depth > 64 {
+            return None;
+        }
+    }
+    let root = req.class_decl(class)?.name.0.clone();
+    let export = req
+        .registered::<Export>()
+        .find(|row| row.class == &root[..])
+        .map(|row| row.export)?;
+    export(req, object)
 }
 
 // ---- the natives

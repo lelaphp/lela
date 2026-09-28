@@ -804,6 +804,8 @@ struct DocRef {
     class_type: ClassType,
     quirks: Quirks,
     private: Option<Box<dyn PrivateData>>,
+    /// `handlers`: `None` is `php_libxml_default_document_handlers`.
+    handlers: Option<&'static dyn crate::DocumentHandlers>,
 }
 
 /// `php_libxml_node_ptr`: what a node's `_private` names while an object
@@ -897,12 +899,20 @@ impl NodeObject {
         !unsafe { (*self.w()).node }.is_null()
     }
 
-    /// `php_libxml_increment_node_ptr`.
+    /// `php_libxml_increment_node_ptr(object, node, private_data)`, where
+    /// `claim` is dom's `private_data`, the object named as the one that
+    /// stands for the node where none is yet, and its absence simplexml's
+    /// `NULL`, the node counted and nothing named ("only dom uses
+    /// `_private`").
     ///
     /// # Safety
-    /// `node` is a live node, and this object is the one that stands for
-    /// it or will.
-    pub(crate) unsafe fn increment_node_ptr(&mut self, node: *mut sys::xmlNode) -> u32 {
+    /// `node` is a live node, and where `claim` this object is the one
+    /// that stands for it or will.
+    pub(crate) unsafe fn increment_node_ptr(
+        &mut self,
+        node: *mut sys::xmlNode,
+        claim: bool,
+    ) -> u32 {
         if node.is_null() {
             return 0;
         }
@@ -919,11 +929,12 @@ impl NodeObject {
         }
         // SAFETY: the caller's contract: a live node.
         let private = unsafe { (*node).private }.cast::<NodePtr>();
+        let named = if claim { w } else { ptr::null_mut() };
         if private.is_null() {
             let proxy = Box::into_raw(Box::new(NodePtr {
                 node,
                 refcount: 1,
-                wrapper: w,
+                wrapper: named,
             }));
             // SAFETY: the wrapper this owns.
             unsafe { (*w).node = proxy };
@@ -935,22 +946,27 @@ impl NodeObject {
         let proxy = unsafe { &mut *private };
         proxy.refcount += 1;
         if proxy.wrapper.is_null() {
-            proxy.wrapper = w;
+            proxy.wrapper = named;
         }
         // SAFETY: the wrapper this owns.
         unsafe { (*w).node = private };
         proxy.refcount
     }
 
-    /// `php_libxml_decrement_node_ptr`.
+    /// `php_libxml_decrement_node_ptr`: the proxy counted once less, and
+    /// this object naming none after (`object->node = NULL`).
     pub fn decrement_node_ptr(&mut self) -> u32 {
+        let w = self.w();
         // SAFETY: the wrapper this owns.
-        let proxy = unsafe { (*self.w()).node };
+        let proxy = unsafe { (*w).node };
         if proxy.is_null() {
             return 0;
         }
         // SAFETY: a proxy the wrapper names is live.
-        unsafe { decrement_node_ptr_ref(proxy) }
+        let left = unsafe { decrement_node_ptr_ref(proxy) };
+        // SAFETY: the wrapper this owns.
+        unsafe { (*w).node = ptr::null_mut() };
+        left
     }
 
     /// `php_libxml_increment_doc_ref`: one more owner of the document
@@ -980,6 +996,7 @@ impl NodeObject {
             class_type: ClassType::Unset,
             quirks: Quirks::NoQuirks,
             private: None,
+            handlers: None,
         }));
         // SAFETY: the wrapper this owns.
         unsafe { (*w).document = d };
@@ -1223,6 +1240,23 @@ impl NodeObject {
         }
     }
 
+    /// `document->handlers`: how the document serialises, libxml's own
+    /// dumps where the extension that made it set none.
+    #[must_use]
+    pub fn document_handlers(&self) -> &'static dyn crate::DocumentHandlers {
+        self.doc_ref()
+            .and_then(|d| d.handlers)
+            .unwrap_or(&crate::DefaultHandlers)
+    }
+
+    /// Set `document->handlers`, as `dom_set_xml_class` gives a modern
+    /// document dom's own serialiser.
+    pub fn set_document_handlers(&mut self, handlers: &'static dyn crate::DocumentHandlers) {
+        if let Some(d) = self.doc_ref_mut() {
+            d.handlers = Some(handlers);
+        }
+    }
+
     /// `dom_add_element_ns_hook`: the element given a namespace of its
     /// own, a copy of the one it has kept on the document's old list,
     /// tagged so that `php_libxml_node_free` calls this document's
@@ -1276,6 +1310,67 @@ impl SharedDoc {
     pub unsafe fn invalidate(self) {
         // SAFETY: the caller's contract.
         unsafe { (*self.0.as_ptr()).modification += 1 };
+    }
+}
+
+/// What an export answers for an object, `php_libxml_import_node`'s node
+/// and the `php_libxml_node_object` php reads beside it through the
+/// object's handler offset: the node the object stands for and the
+/// document it counts, read off the live object within one native call.
+#[derive(Debug, Clone, Copy)]
+pub struct Exported {
+    node: Node,
+    document: Option<NonNull<DocRef>>,
+}
+
+impl Exported {
+    /// The export of `node` for the object whose libxml half is `obj`.
+    #[must_use]
+    pub fn of(node: Node, obj: &NodeObject) -> Exported {
+        Exported {
+            node,
+            document: obj.shared_doc().map(|d| d.0),
+        }
+    }
+
+    /// The node, `php_libxml_import_node`'s answer.
+    #[must_use]
+    pub fn node(&self) -> Node {
+        self.node
+    }
+
+    /// The document reference the object counts, to share with an object
+    /// standing for the node; `None` is php's `nodeobj->document == NULL`.
+    #[must_use]
+    pub fn document(&self) -> Option<SharedDoc> {
+        self.document.map(SharedDoc)
+    }
+
+    /// `nodeobj->document->class_type`.
+    #[must_use]
+    pub fn class_type(&self) -> ClassType {
+        // SAFETY: an export is made off a live object that counts the
+        // document, within the native call that reads it.
+        self.document
+            .map_or(ClassType::Unset, |d| unsafe { (*d.as_ptr()).class_type })
+    }
+
+    /// Set `nodeobj->document->class_type`, as `dom_import_simplexml`
+    /// locks the classes the document's nodes are handed out as.
+    pub fn set_class_type(&self, class_type: ClassType) {
+        if let Some(d) = self.document {
+            // SAFETY: as in `class_type`.
+            unsafe { (*d.as_ptr()).class_type = class_type };
+        }
+    }
+
+    /// `dom_get_doc_props_read_only(nodeobj->document)`.
+    #[must_use]
+    pub fn props(&self) -> DocProps {
+        // SAFETY: as in `class_type`.
+        self.document
+            .and_then(|d| unsafe { (*d.as_ptr()).props.clone() })
+            .unwrap_or_default()
     }
 }
 

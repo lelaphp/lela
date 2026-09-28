@@ -520,11 +520,12 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
     }
 }
 
-/// `zend_object_is_true` (`Z/Zend/zend_operators.c:2911`): what the
-/// class's `cast_object` answers for `_IS_BOOL`, which is `true` at
-/// `Std` and whether the number is not zero for `BcMath\Number`; a
-/// class whose handler refuses the cast is php's `E_RECOVERABLE_ERROR`
-/// and false, and a throw from the handler is left pending.
+/// `zend_object_is_true` (`Z/Zend/zend_operators.c:2911`): the class's
+/// `cast_object` to `_IS_BOOL`, which is `true` at `Std`, whether the
+/// number is not zero for `BcMath\Number`, and whether the element exists
+/// for `SimpleXMLElement`; php's `E_RECOVERABLE_ERROR` and `false` for a
+/// class whose handler refuses the cast, and a throw from the handler left
+/// pending, as php's `EG(exception)`.
 ///
 /// ```php
 /// var_dump((bool) new stdClass, (bool) new BcMath\Number('0.0'), !new BcMath\Number('-1'));
@@ -533,6 +534,18 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
 /// bool(true)
 /// bool(false)
 /// bool(false)
+/// ```
+///
+/// ```php
+/// $e = simplexml_load_string('<r><a/></r>');
+/// var_dump((bool) $e->a, (bool) $e->b, !$e->b, $e->b ? 'y' : 'n', (bool) new stdClass);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// string(1) "n"
+/// bool(true)
 /// ```
 fn object_is_true(req: &mut Request, object: PhpObject) -> bool {
     let table = req.object_handlers(object.heap());
@@ -550,6 +563,30 @@ fn object_is_true(req: &mut Request, object: PhpObject) -> bool {
         Err(thrown) => {
             req.leave_pending(&thrown);
             false
+        }
+    }
+}
+
+/// `convert_object_to_type` (`Z/Zend/zend_operators.c:232`) over one
+/// object: its class's `cast_object` to `to`, and php's warning naming
+/// `shown` where the class answers none; a throw is left pending, as
+/// php leaves `EG(exception)` set.
+fn object_converted(
+    req: &mut Request,
+    object: PhpObject,
+    to: TypeTag,
+    shown: &str,
+) -> Option<Value> {
+    let table = req.object_handlers(object.heap());
+    match table.cast_object(req, object, to) {
+        Ok(Some(converted)) => Some(converted),
+        Ok(None) => {
+            not_converted(req, &object.as_value(), shown);
+            None
+        }
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            None
         }
     }
 }
@@ -1640,10 +1677,10 @@ pub(crate) fn get_long(req: &mut Request, value: &Value) -> i64 {
             None => 0,
         },
         ValueRef::Array(a) => i64::from(!a.is_empty()),
-        ValueRef::Object(_) => {
-            not_converted(req, value, "int");
-            1
-        }
+        ValueRef::Object(&o) => match object_converted(req, o, TypeTag::Int, "int") {
+            Some(converted) => converted.as_int().unwrap_or(1),
+            None => 1,
+        },
         // `deref` followed the reference already.
         ValueRef::Reference(r) => get_long(req, &r.get()),
     }
@@ -1684,16 +1721,16 @@ pub(crate) fn get_double(req: &mut Request, value: &Value) -> f64 {
             None => 0.0,
         },
         ValueRef::Array(a) => f64::from(u8::from(!a.is_empty())),
-        ValueRef::Object(_) => {
-            not_converted(req, value, "float");
-            1.0
-        }
+        ValueRef::Object(&o) => match object_converted(req, o, TypeTag::Float, "float") {
+            Some(converted) => converted.as_float().unwrap_or(1.0),
+            None => 1.0,
+        },
         ValueRef::Reference(r) => get_double(req, &r.get()),
     }
 }
 
 /// `convert_object_to_type`'s warning, for an object whose class has no
-/// conversion to the type named, which is every class here.
+/// conversion to the type named.
 fn not_converted(req: &mut Request, value: &Value, to: &str) {
     let class = value_name(req, value);
     warning(
@@ -3233,14 +3270,18 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
             req.addref(value);
             Ok(*value)
         }
-        ValueRef::Object(o) => {
-            // `increment_function`'s object arm: `do_operation(ZEND_ADD)`
-            // with one, where the class answers it.
+        ValueRef::Object(&o) => {
+            // `increment_function`'s object arm: `do_operation(ZEND_ADD)` with one,
+            // where the class answers it, then `cast_object` to
+            // `_IS_NUMBER` and the step over the number.
             let table = req.object_handlers(o.heap());
             if let Some(stepped) =
                 table.do_operation(req, BinaryOp::Add, value, Some(&Value::int(1)))?
             {
                 return Ok(stepped);
+            }
+            if let Some(number) = object_number(req, o)? {
+                return increment(req, &number);
             }
             let name = value_name(req, value);
             Err(throw(req, "TypeError", &format!("Cannot increment {name}")))
@@ -3359,14 +3400,18 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
             req.addref(value);
             Ok(*value)
         }
-        ValueRef::Object(o) => {
-            // `decrement_function`'s object arm: `do_operation(ZEND_SUB)`
-            // with one.
+        ValueRef::Object(&o) => {
+            // `decrement_function`'s object arm: `do_operation(ZEND_SUB)` with one,
+            // where the class answers it, then `cast_object` to
+            // `_IS_NUMBER` and the step over the number.
             let table = req.object_handlers(o.heap());
             if let Some(stepped) =
                 table.do_operation(req, BinaryOp::Sub, value, Some(&Value::int(1)))?
             {
                 return Ok(stepped);
+            }
+            if let Some(number) = object_number(req, o)? {
+                return decrement(req, &number);
             }
             let name = value_name(req, value);
             Err(throw(req, "TypeError", &format!("Cannot decrement {name}")))
@@ -4496,10 +4541,10 @@ fn numbers(
             ),
         )
     };
-    let Some(a) = to_number(req, left) else {
+    let Some(a) = to_number(req, left)? else {
         return Err(unsupported(req));
     };
-    let Some(b) = to_number(req, right) else {
+    let Some(b) = to_number(req, right)? else {
         return Err(unsupported(req));
     };
     Ok((a, b))
@@ -4527,10 +4572,10 @@ fn longs(
             ),
         )
     };
-    let Some(a) = to_long(req, left) else {
+    let Some(a) = to_long(req, left)? else {
         return Err(unsupported(req));
     };
-    let Some(b) = to_long(req, right) else {
+    let Some(b) = to_long(req, right)? else {
         return Err(unsupported(req));
     };
     Ok((a, b))
@@ -4563,21 +4608,23 @@ fn longs(
 /// A non-numeric value encountered
 /// int(77)
 /// ```
-fn to_long(req: &mut Request, value: &Value) -> Option<i64> {
+fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
     if let Some(n) = value.as_int() {
-        return Some(n);
+        return Ok(Some(n));
     }
     if let Some(d) = value.as_float() {
-        return Some(double_to_long(req, d));
+        return Ok(Some(double_to_long(req, d)));
     }
     if let Some(s) = value.as_php_string().copied() {
-        let (number, trailing) = numeric_prefix(s.as_bytes())?;
+        let Some((number, trailing)) = numeric_prefix(s.as_bytes()) else {
+            return Ok(None);
+        };
         let d = match number {
             Number::Long(n) => {
                 if trailing {
                     warning(req, "A non-numeric value encountered");
                 }
-                return Some(n);
+                return Ok(Some(n));
             }
             Number::Double(d) => d,
         };
@@ -4599,16 +4646,24 @@ fn to_long(req: &mut Request, value: &Value) -> Option<i64> {
             );
         }
         req.let_go(held);
-        return Some(capped);
+        return Ok(Some(capped));
     }
     if let Some(b) = value.as_bool() {
-        return Some(i64::from(b));
+        return Ok(Some(i64::from(b)));
     }
-    match value.tag() {
+    if let Some(o) = value.as_object().copied() {
+        // `cast_object(zobj, &dst, IS_LONG)`, failing where the class
+        // converts to nothing or threw.
+        let table = req.object_handlers(o.heap());
+        return Ok(table
+            .cast_object(req, o, TypeTag::Int)?
+            .and_then(|c| c.as_int()));
+    }
+    Ok(match value.tag() {
         // php's `IS_NULL` arm; an uninitialised zval reads as null here.
         TypeTag::Null | TypeTag::Undef => Some(0),
         _ => None,
-    }
+    })
 }
 
 /// `zend_parse_arg_long_weak` (`Z/Zend/zend_API.c:567`), the two arms a
@@ -4849,34 +4904,80 @@ fn modular(d: f64) -> i64 {
     (dmod as u64) as i64
 }
 
+/// The object's `cast_object` to `_IS_NUMBER`, an int or a float value,
+/// or none where its class converts to no number: what
+/// `increment_function` and `decrement_function` step in the object's
+/// place, as `zendi_try_convert_scalar_to_number` reads it for the other
+/// operators.
+///
+/// ```php
+/// $e = simplexml_load_string('<r><a>1</a><b>2.5</b></r>');
+/// $e->a++; $e->b--; $n = $e->a; $n++;
+/// var_dump((string) $e->a, (string) $e->b, $n);
+/// try { $o = new stdClass; $o++; } catch (TypeError $t) { echo $t->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "2"
+/// string(3) "1.5"
+/// int(3)
+/// Cannot increment stdClass
+/// ```
+fn object_number(req: &mut Request, object: PhpObject) -> Result<Option<Value>, Thrown> {
+    let table = req.object_handlers(object.heap());
+    let converted = table.cast_object(req, object, TypeTag::Number)?;
+    Ok(converted.filter(|c| matches!(c.as_ref(), ValueRef::Int(_) | ValueRef::Float(_))))
+}
+
 /// `zendi_try_convert_scalar_to_number`: the number php works in, or
-/// nothing for an array, an object or a resource, which is the failure
-/// `zend_binop_error` reports. A string is read by [`numeric_prefix`],
-/// the one reader php's compiler folds through as well, and one with
-/// anything past the number it opens with raises php's warning and keeps
-/// the number.
-fn to_number(req: &mut Request, value: &Value) -> Option<Number> {
+/// nothing for an array, a resource or an object whose class converts
+/// to no number, which is the failure `zend_binop_error` reports; what
+/// an object's `cast_object` to `_IS_NUMBER` threw is the `Err`. A
+/// string is read by [`numeric_prefix`], the one reader php's compiler
+/// folds through as well, and one with anything past the number it opens
+/// with raises php's warning and keeps the number.
+///
+/// ```php
+/// $e = simplexml_load_string('<r><a>5</a><b>1.5</b><c>x</c></r>');
+/// var_dump($e->a * 2, $e->b + 1, $e->c + 0);
+/// try { $r = new stdClass + 1; } catch (TypeError $t) { echo $t->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(10)
+/// float(2.5)
+/// int(0)
+/// Unsupported operand types: stdClass + int
+/// ```
+fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown> {
     if let Some(n) = value.as_int() {
-        return Some(Number::Long(n));
+        return Ok(Some(Number::Long(n)));
     }
     if let Some(f) = value.as_float() {
-        return Some(Number::Double(f));
+        return Ok(Some(Number::Double(f)));
     }
     if let Some(s) = value.as_php_string() {
-        let (number, trailing) = numeric_prefix(s.as_bytes())?;
+        let Some((number, trailing)) = numeric_prefix(s.as_bytes()) else {
+            return Ok(None);
+        };
         if trailing {
             warning(req, "A non-numeric value encountered");
         }
-        return Some(number);
+        return Ok(Some(number));
     }
     if let Some(b) = value.as_bool() {
-        return Some(Number::Long(i64::from(b)));
+        return Ok(Some(Number::Long(i64::from(b))));
     }
-    match value.tag() {
+    if let Some(o) = value.as_object().copied() {
+        return Ok(object_number(req, o)?.and_then(|c| match c.as_ref() {
+            ValueRef::Int(n) => Some(Number::Long(n)),
+            ValueRef::Float(d) => Some(Number::Double(d)),
+            _ => None,
+        }));
+    }
+    Ok(match value.tag() {
         // php's `IS_NULL` arm; an uninitialised zval reads as null here.
         TypeTag::Null | TypeTag::Undef => Some(Number::Long(0)),
         _ => None,
-    }
+    })
 }
 
 #[cfg(test)]

@@ -153,6 +153,13 @@ impl XPath {
         Some(context)
     }
 
+    /// `xmlXPathNewContext(doc)` alone, as simplexml makes its evaluator:
+    /// no function of php's registered.
+    pub fn bare(doc: Node) -> Option<XPath> {
+        // SAFETY: a live document.
+        NonNull::new(unsafe { sys::xmlXPathNewContext(doc.raw().cast()) }).map(XPath)
+    }
+
     /// `ctx->doc`.
     pub fn doc(&self) -> Option<Node> {
         // SAFETY: the live context this owns.

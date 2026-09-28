@@ -887,6 +887,13 @@ pub enum PropertyPlace {
     /// `write_property`, and a compound write, an increment and a write
     /// fetch read through its `read_property` first.
     Handlers,
+    /// php's pointer to a value the class keeps apart from its
+    /// properties (`sxe_property_get_adr`'s `&sxe->tmp`): a write fetch,
+    /// a compound write and an increment read it through `read_property`
+    /// under [`PropertyRead::Write`], which lays it down, and change it
+    /// in place, nothing written back; a plain write, which php's
+    /// `ASSIGN_OBJ` makes without asking, reaches `write_property`.
+    Apart,
 }
 
 /// What `get_properties_for` is asked for, php's `zend_prop_purpose`:

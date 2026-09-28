@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=d109e599e0e4a8239ebed64d5ca719901f8f4d865d2d678b8f97fc9522f46eef out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=85600c59b2a60b21de177656b7296f1894965a954bd631992660eeba4e85f13f out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -226,6 +226,7 @@ Options:
 ├── random
 ├── reflection
 ├── session
+├── simplexml
 ├── sockets
 ├── spl
 ├── standard
@@ -233,4 +234,4 @@ Options:
 ├── uri
 └── zlib
 ```
-<!-- /computed in=85a6e395104616b7937764828bb17b4656c9b82c79ecb5ce1c7d52ea2d872eaa out=85e4fa36594fb2f488bf7096927b3cefc5eda3e7022c76b3ece0407be6cc5b37 -->
+<!-- /computed in=700a23c928c49242f6218e923d93f28b755f34bbe6763cc26925f416c7e8b8eb out=13f7540540e6a0dceca7aeefa4d2d59f35702896dd0f7eaed4fb0899e9806b64 -->
