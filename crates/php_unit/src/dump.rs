@@ -156,7 +156,10 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
                     .and_then(|hooks| hooks.of(hook.kind))
                     .map(|decl| (decl, &hook.body))
             }));
-        for (decl, body) in bodies {
+        // `!(op_array->fn_flags & ZEND_ACC_ABSTRACT)`: an abstract
+        // method's body, its `RECV` prologue alone, is no op array
+        // `zend_foreach_op_array` walks.
+        for (decl, body) in bodies.filter(|(decl, _)| !decl.is_abstract) {
             let name = format!(
                 "{}::{}",
                 crate::decl::shown(&class.name.0),
