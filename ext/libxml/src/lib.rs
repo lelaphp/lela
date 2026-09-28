@@ -27,6 +27,7 @@
 pub mod ffi;
 mod image_svg;
 mod load;
+mod mime_sniff;
 
 use php_ext::abi::{
     Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, Instance, OrFalse, Raw,
@@ -40,6 +41,7 @@ use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 
 use ffi::{Raised, Route, sys};
+pub use mime_sniff::sniff_charset_from_stream;
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or

@@ -994,6 +994,14 @@ pub(crate) fn create_from_file(
             &format!("Cannot open file '{name}'"),
         ));
     };
+    // The MIME sniff: the charset of the http headers the stream carries,
+    // where no encoding was given and lexbor knows the one named.
+    let mut encoding = encoding;
+    if encoding.is_none()
+        && let Some(charset) = php_ext_libxml::sniff_charset_from_stream(req, stream)?
+    {
+        encoding = Encoding::by_name(&charset);
+    }
     let mut source = Vec::new();
     let mut chunks = Vec::new();
     let read = loop {
