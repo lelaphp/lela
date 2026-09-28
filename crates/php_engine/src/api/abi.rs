@@ -103,6 +103,14 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
         if let Some(found) = entries.get(&key) {
             return Arc::clone(found);
         }
+        self.make_room(&mut entries);
+        let value = Arc::new(build(&key));
+        entries.insert(key, Arc::clone(&value));
+        value
+    }
+
+    /// php's partial clean at the bound: half the values dropped.
+    fn make_room(&self, entries: &mut HashMap<K, Arc<V>>) {
         if entries.len() >= self.capacity {
             let keep = self.capacity / 2;
             let keys: Vec<K> = entries.keys().skip(keep).cloned().collect();
@@ -110,9 +118,6 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
                 entries.remove(&k);
             }
         }
-        let value = Arc::new(build(&key));
-        entries.insert(key, Arc::clone(&value));
-        value
     }
 
     fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<K, Arc<V>>> {
@@ -135,16 +140,29 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
         if let Some(found) = entries.get(&key) {
             return Arc::clone(found);
         }
-        if entries.len() >= self.capacity {
-            let keep = self.capacity / 2;
-            let keys: Vec<K> = entries.keys().skip(keep).cloned().collect();
-            for k in keys {
-                entries.remove(&k);
-            }
-        }
+        self.make_room(&mut entries);
         let value = Arc::new(value);
         entries.insert(key, Arc::clone(&value));
         value
+    }
+
+    /// `value`, held already, held under `key` too, in place of what
+    /// the key held.
+    pub(crate) fn alias(&self, key: K, value: &Arc<V>) {
+        let mut entries = self.entries();
+        if entries
+            .get(&key)
+            .is_some_and(|found| Arc::ptr_eq(found, value))
+        {
+            return;
+        }
+        self.make_room(&mut entries);
+        entries.insert(key, Arc::clone(value));
+    }
+
+    /// `value` dropped under every key it is held under.
+    pub(crate) fn remove_all(&self, value: &Arc<V>) {
+        self.entries().retain(|_, held| !Arc::ptr_eq(held, value));
     }
 
     /// Every value held, with its key, in no order.
@@ -198,10 +216,67 @@ pub(crate) type TicksHook = fn(&mut Request) -> Result<(), Thrown>;
 /// The compile hook, php's `zend_compile_file` as an extension overrides
 /// it: the source a file compiles from, where the extension replaces it.
 pub(crate) type CompileFileHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
-/// The unit cache's blacklist, opcache's `zend_accel_blacklist_is_blacklisted`
-/// and its `max_file_size` refusal: whether the file at a resolved path
-/// is compiled for the request alone and never published.
-pub(crate) type BlacklistHook = fn(&mut Request, &[u8]) -> bool;
+/// The one question the unit cache asks an extension about a file
+/// (design §6.3): [`ExtensionBuilder::admission`].
+pub(crate) type AdmissionHook = fn(&mut Request, &[u8]) -> Admission;
+
+/// What the unit cache does with a file for the request asking, the
+/// answer to [`ExtensionBuilder::admission`] (design §6.3, revision 45):
+/// what `persistent_compile_file` decides from `accelerator_enabled`,
+/// the blacklist and `opcache.validate_timestamps`,
+/// `opcache.revalidate_freq` and `opcache.revalidate_path`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    /// Kept out: compiled as the request's own unit, published nowhere
+    /// and counted among the cache's blacklist misses, as
+    /// `accel_blacklist` and `opcache.max_file_size` keep a file out.
+    KeptOut,
+    /// Held, a hit validated as `validation` says and looked for as
+    /// `lookup` says; a file compiled at a request that starts within
+    /// `protection` seconds of the file's last write is compiled and not
+    /// held, `opcache.file_update_protection`, since the second a file
+    /// was written in cannot tell a later write in the same second.
+    Held {
+        validation: Validation,
+        lookup: Lookup,
+        protection: u32,
+    },
+}
+
+/// When a hit on a held file is held to the file as it stands.
+/// A held unit is never changed: one that fails is compiled again and
+/// replaced, and whoever holds the old one keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Validation {
+    /// Never: `opcache.validate_timestamps=0`, which serves a file as it
+    /// was when it was cached, changed or deleted, until it is
+    /// invalidated.
+    Never,
+    /// Once per `seconds`, `validate_timestamp_and_record` under
+    /// `opcache.revalidate_freq`: the file's `mtime` in whole seconds
+    /// held to the one it was cached with, and not again until the
+    /// window after the request that validated it has passed; zero
+    /// validates every hit.
+    Window { seconds: u32 },
+    /// Every hit, against the file's `mtime` to the nanosecond and its
+    /// size: php without the cache, which compiles a file afresh each
+    /// time, and what a request whose accelerator is off, or a bundle
+    /// with no extension that answers, gets.
+    EveryHit,
+}
+
+/// How a hit is looked for, `opcache.revalidate_path`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lookup {
+    /// By the path as written first, the working directory, the
+    /// `include_path` and the including file's directory beside a
+    /// relative one, and trusted without resolving the path where the
+    /// hit is not due to be validated (`accel_make_persistent_key`):
+    /// `revalidate_path=0`.
+    AsWritten,
+    /// By the resolved path alone: `revalidate_path=1`.
+    Resolved,
+}
 
 /// An ini entry's `on_modify`, php's `PHP_INI_MH`: served by `ini_set()`
 /// with the new value before the entry takes it
@@ -278,8 +353,8 @@ pub struct Extension {
     pub(crate) interrupt: Option<InterruptHook>,
     pub(crate) ticks: Option<TicksHook>,
     pub(crate) compile_file: Option<CompileFileHook>,
-    /// What [`ExtensionBuilder::blacklist`] was handed.
-    pub(crate) blacklist: Option<BlacklistHook>,
+    /// What [`ExtensionBuilder::admission`] was handed.
+    pub(crate) admission: Option<AdmissionHook>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
     /// What [`ExtensionBuilder::intercept`] was handed: each native of
@@ -325,7 +400,7 @@ pub struct ExtensionBuilder {
     interrupt: Option<InterruptHook>,
     ticks: Option<TicksHook>,
     compile_file: Option<CompileFileHook>,
-    blacklist: Option<BlacklistHook>,
+    admission: Option<AdmissionHook>,
     zend: Option<ZendExtension>,
     intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
@@ -556,16 +631,16 @@ impl ExtensionBuilder {
         self
     }
 
-    /// The unit cache's blacklist (design §6.3), what opcache's
-    /// `persistent_compile_file` asks of `accel_blacklist` and of
-    /// `opcache.max_file_size` once a file is opened: `hook` is handed
-    /// the file's resolved path, and a file it answers `true` for is
-    /// compiled as the request's own unit, published nowhere and counted
-    /// among the cache's blacklist misses. Hooks are asked in bundle
-    /// order and the first `true` answers.
+    /// The one question the unit cache asks about a file (design §6.3,
+    /// revision 45), what opcache's `persistent_compile_file` decides:
+    /// `hook` is handed the file's full path, resolved, and answers
+    /// whether the file is kept out of the cache and, where it is held,
+    /// how a hit is found and validated ([`Admission`]). The first
+    /// extension in bundle order with a hook answers; with none, every
+    /// file is held and validated on every hit.
     #[must_use]
-    pub fn blacklist(mut self, hook: fn(&mut Request, &[u8]) -> bool) -> ExtensionBuilder {
-        self.blacklist = Some(hook);
+    pub fn admission(mut self, hook: fn(&mut Request, &[u8]) -> Admission) -> ExtensionBuilder {
+        self.admission = Some(hook);
         self
     }
 
@@ -688,7 +763,7 @@ impl ExtensionBuilder {
             interrupt: self.interrupt,
             ticks: self.ticks,
             compile_file: self.compile_file,
-            blacklist: self.blacklist,
+            admission: self.admission,
             zend: self.zend,
             intercepts: self.intercepts,
             info: self.info,

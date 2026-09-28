@@ -24,7 +24,9 @@ use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
-use crate::api::abi::{Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni};
+use crate::api::abi::{
+    Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni, Validation,
+};
 use crate::api::raising::Level;
 use crate::api::request::{Ending, ExtensionId, Request, Sink};
 use crate::api::values::{ClassId, Value};
@@ -33,7 +35,7 @@ use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::streams::Standard;
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 pub(crate) use crate::unit_cache::Cached;
-use crate::unit_cache::{UnitCache, UnitKey};
+use crate::unit_cache::UnitCache;
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
@@ -653,25 +655,39 @@ impl Shared {
         }
     }
 
-    /// The unit for the file `path` names: compiled and published once,
-    /// and shared by every request that asks for it afterwards (design
-    /// §6.3). A file the engine cannot stat is no unit at all, which is
-    /// the `None` `serve` serves nothing for.
+    /// The unit for the file `path` names, as the unit cache holds it for
+    /// no request: compiled and published once, and shared by every
+    /// caller that asks for it afterwards while the file stands as it
+    /// was (design §6.3). A file the engine cannot read is no unit at
+    /// all, which is the `None` `serve` serves nothing for.
     pub(crate) fn cached(&self, path: &[u8], cwd: &Path, stack: StackLimit) -> Cached {
-        let key = UnitKey::of(path, cwd)?;
-        self.units.file(key, || {
-            let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
-            Some(self.publish(
-                &source,
-                Origin {
-                    filename: path,
-                    cwd,
-                    kind: SourceKind::File,
-                    keys_before: 0,
-                },
-                stack,
-            ))
-        })
+        let full = crate::unit_cache::full_path(path, cwd);
+        let now = crate::unit_cache::now();
+        self.units
+            .file(&full, None, Validation::EveryHit, 0, now, |source| {
+                self.publish_file(source, path, cwd, stack)
+            })
+    }
+
+    /// `source`, read from the file `path` names, compiled and published
+    /// as a file of its own.
+    pub(crate) fn publish_file(
+        &self,
+        source: &[u8],
+        path: &[u8],
+        cwd: &Path,
+        stack: StackLimit,
+    ) -> Result<Arc<Unit>, CompileError> {
+        self.publish(
+            source,
+            Origin {
+                filename: path,
+                cwd,
+                kind: SourceKind::File,
+                keys_before: 0,
+            },
+            stack,
+        )
     }
 
     /// How many strings the engine's table holds, opcache's
@@ -1849,7 +1865,7 @@ impl Engine {
                             .compile_for(&mut req, &source, &script, SourceKind::File),
                     )
                 }
-                Ok(None) => req.cached_file(&script),
+                Ok(None) => req.cached_file(&script, Some(&script)),
                 Err(thrown) => {
                     req.leave_pending(&thrown);
                     None

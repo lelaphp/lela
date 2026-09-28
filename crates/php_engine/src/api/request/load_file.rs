@@ -38,7 +38,7 @@ impl Request {
                 let shared = Arc::clone(&self.shared);
                 Some(shared.compile_for(self, &source, &path, php_compile::SourceKind::File))
             }
-            None => self.cached_file(&path),
+            None => self.cached_file(&path, Some(written)),
         };
         let unit = match replaced {
             Some(Ok(unit)) => unit,

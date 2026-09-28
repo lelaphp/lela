@@ -1730,6 +1730,10 @@ pub struct Request {
     /// [`Request::virtual_file_ex`] is entered in (`crate::virtual_cwd`).
     realpath_cache: RealpathCache,
     cwd: PathBuf,
+    /// `sapi_get_request_time`: when the request started, since the
+    /// epoch. The host keeps no time of its own, so it is the moment the
+    /// request is made, as `php_time()` makes it.
+    started: std::time::Duration,
     /// `le_stream`, the resource type every stream is registered under.
     stream_type: ResourceType,
     /// The fibers running on this request, innermost last, each with the
@@ -2295,6 +2299,9 @@ impl Request {
             umask: 0o022,
             stat_cache: crate::wrapper::StatCache::default(),
             cwd,
+            started: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default(),
             stream_type,
             fibers: crate::fiber::Fibers::default(),
             raised: None,
@@ -15335,6 +15342,28 @@ impl Request {
         Ok(None)
     }
 
+    /// `sapi_get_request_time`, when the request started, as `$_SERVER`
+    /// and opcache's `ZCG(request_time)` read it.
+    ///
+    /// ```php
+    /// $t = $_SERVER['REQUEST_TIME_FLOAT'];
+    /// usleep(10000);
+    /// var_dump($t <= microtime(true), (int) $t === $_SERVER['REQUEST_TIME'], $_SERVER['REQUEST_TIME'] <= time());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    pub(crate) fn started(&self) -> std::time::Duration {
+        self.started
+    }
+
+    /// `ZCG(request_time)`: when the request started, in whole seconds.
+    pub(crate) fn request_time(&self) -> i64 {
+        i64::try_from(self.started.as_secs()).unwrap_or(i64::MAX)
+    }
+
     /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
     /// into `EG(included_files)` under its expanded path before it runs,
     /// so a once form over the file being served answers `true`. A source
@@ -15356,7 +15385,9 @@ impl Request {
     /// the path in the table after (`Z/Zend/zend_language_scanner.l:709`).
     /// The file is compiled once and published through the unit cache
     /// (design §6.3), as opcache keeps it, and every request after
-    /// reads the same unit.
+    /// reads the same unit; it is looked for first under the path as
+    /// written, and served without the path resolved where the answer
+    /// for it trusts the hit ([`Request::held_as_written`]).
     ///
     /// A path nothing opens is `zend_stream_open`'s warning, the stream
     /// layer's `Failed to open stream` with the construct and the path
@@ -15380,7 +15411,11 @@ impl Request {
         if written.contains(&0) {
             return self.failed_opening(kind, written);
         }
-        let resolved = self.resolve_path(written);
+        let held = self.held_as_written(written);
+        let resolved = match &held {
+            Some(held) => Ok(held.path.clone()),
+            None => self.resolve_path(written),
+        };
         if kind.once()
             && let Ok(path) = &resolved
             && self.included_files.contains(path)
@@ -15421,7 +15456,11 @@ impl Request {
             }
             return Ok(Opened::Unit(unit));
         }
-        match self.cached_file(&path) {
+        let cached = match held {
+            Some(held) => Some(held.unit.clone()),
+            None => self.cached_file(&path, Some(written)),
+        };
+        match cached {
             Some(Ok(unit)) => {
                 if !self.included_files.contains(&path) {
                     self.included_files.push(path);
