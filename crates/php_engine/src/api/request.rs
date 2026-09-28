@@ -4296,16 +4296,56 @@ impl Request {
             self.bailout = false;
             return Ok(());
         };
-        let (file, line) = self.throw_site(throwable);
         let class = self.class_name_of(throwable);
         let compile_time = match class.as_str() {
             "ParseError" => Some(Level::Parse),
             "CompileError" => Some(Level::CompileError),
             _ => None,
         };
-        let message = match compile_time {
-            Some(_) => string_prop(self, throwable, b"message"),
-            None => format!("Uncaught {}\n  thrown", self.throwable_to_string(throwable)),
+        let message = if compile_time.is_some() {
+            string_prop(self, throwable, b"message")
+        } else {
+            // The class's own `__toString`, which a user class may
+            // override; a string it answers is kept in the base class's
+            // `string` property, and a throwable it raises has no frame
+            // to take it, so it is rendered uncaught in its turn and the
+            // request leaves (`zend_call_function`'s tail,
+            // [`Request::thrown_without_frame`]).
+            match crate::api::call::call_method(self, &throwable, b"__tostring", &[]) {
+                Ok(returned) => {
+                    let text = returned.deref();
+                    if text.as_str_bytes().is_some() {
+                        if let Ok(name) = PhpString::new(self, b"string") {
+                            self.addref(&text);
+                            let _ = throwable.set_prop(self, name, text);
+                        }
+                    } else {
+                        crate::api::raising::warning(
+                            self,
+                            &format!("{class}::__toString() must return a string"),
+                        );
+                    }
+                    self.release(returned);
+                }
+                Err(inner) => {
+                    self.release(throwable.as_value());
+                    let _ = self.thrown_without_frame(&inner);
+                    return Err(Fatal::Error(String::new()));
+                }
+            }
+            format!(
+                "Uncaught {}\n  thrown",
+                string_prop(self, throwable, b"string")
+            )
+        };
+        let (file, line) = self.throw_site(throwable);
+        // `zend_error_va` with no file for a throwable that recorded an
+        // empty one, which `php_error_cb` names `Unknown`; a
+        // `ParseError`'s is handed on as it stands.
+        let file = if file.is_empty() && compile_time.is_none() {
+            b"Unknown".to_vec()
+        } else {
+            file
         };
         self.end_in_uncaught(compile_time.unwrap_or(Level::Error), &message, &file, line);
         let fatal = Fatal::Error(message);
@@ -4352,61 +4392,102 @@ impl Request {
     }
 
     /// `Exception::__toString` (`Z/Zend/zend_exceptions.c:692`): each
-    /// throwable of the `previous` chain rendered by
-    /// [`Request::rendering_of`], the deepest first and `this` last,
-    /// with `\n\nNext ` between them, which is php's `prev_str` carried
-    /// through the loop and put after the one it is rendering. The
-    /// walk stops at a throwable it has already rendered, php's
-    /// `Z_PROTECT_RECURSION_P`; a chain is a path through live objects,
-    /// so the store's count is a length it cannot pass.
+    /// throwable of the `previous` chain rendered, the deepest last in
+    /// the text php builds by putting what it has so far after `\n\nNext `
+    /// behind the one it is rendering: the class, the message where
+    /// there is one, the site behind a colon and the trace under `Stack
+    /// trace:`. The message and the file are read as `zval_get_string`
+    /// reads them, so an object there is its `__toString`, and the line
+    /// as `zval_get_long`; a throwable raised on the way is handed back
+    /// once the text is built, as php leaves it pending past the loop.
+    /// The walk stops at a throwable it has already rendered, php's
+    /// `Z_PROTECT_RECURSION_P`. The text is kept in the base class's
+    /// private `string` property, which the uncaught rendering reads.
     ///
-    /// The ` and defined` a `TypeError` whose message names a call site
-    /// takes arrives with the frames that make it reachable.
-    pub(crate) fn throwable_to_string(&self, throwable: PhpObject) -> String {
-        let mut chain = vec![throwable];
-        for _ in 0..=self.heap.objects() {
-            let Some(at) = chain.last().copied() else {
+    /// ```php
+    /// class M { function __toString(): string { return "late"; } }
+    /// class E extends Exception { function __construct() { $this->message = new M; } }
+    /// $e = new E;
+    /// echo substr((string) $e, 0, 7), "\n";
+    /// var_dump(str_starts_with(((array) $e)["\0Exception\0string"], "E: late in "));
+    /// ```
+    /// ```expect
+    /// E: late
+    /// bool(true)
+    /// ```
+    pub(crate) fn exception_string(&mut self, this: PhpObject) -> Result<PhpString, Thrown> {
+        let mut text: Vec<u8> = Vec::new();
+        let mut seen: Vec<PhpObject> = Vec::new();
+        let mut raised: Option<Thrown> = None;
+        let mut at = Some(this);
+        while let Some(exception) = at {
+            let Some(throwable) = self.class_named(b"Throwable") else {
                 break;
             };
-            let Some(previous) = self.previous_of(at) else {
-                break;
-            };
-            if chain.iter().any(|seen| seen.index() == previous.index()) {
+            if !self.instance_of(exception.class(), throwable) {
                 break;
             }
-            chain.push(previous);
+            let mut read = |req: &mut Request, name: &[u8]| -> Vec<u8> {
+                let value = exception.prop(req, name).unwrap_or_else(Value::null);
+                match crate::ops::to_string(req, &value) {
+                    Ok(string) => {
+                        let bytes = string.as_bytes().to_vec();
+                        req.release(Value::string(string));
+                        bytes
+                    }
+                    Err(thrown) => {
+                        if raised.is_none() {
+                            raised = Some(thrown);
+                        } else {
+                            req.leave_pending(&thrown);
+                        }
+                        Vec::new()
+                    }
+                }
+            };
+            let mut message = read(self, b"message");
+            let file = read(self, b"file");
+            let line = exception.prop(self, b"line").unwrap_or_else(Value::null);
+            let line = crate::ops::get_long(self, &line);
+            let class = self.class_name_of(exception);
+            // `Z/Zend/zend_exceptions.c:740`: a `TypeError` or an
+            // `ArgumentCountError` whose message names the call site is
+            // closed with ` and defined`, the class itself and not what
+            // descends from it.
+            if (class == "TypeError" || class == "ArgumentCountError")
+                && message.windows(12).any(|window| window == b", called in ")
+            {
+                message.extend_from_slice(b" and defined");
+            }
+            let trace = self.trace_string_of(exception);
+            let mut rendered = class.into_bytes();
+            if !message.is_empty() {
+                rendered.extend_from_slice(b": ");
+                rendered.extend_from_slice(&message);
+            }
+            rendered.extend_from_slice(b" in ");
+            rendered.extend_from_slice(&file);
+            rendered.extend_from_slice(format!(":{line}\nStack trace:\n{trace}").as_bytes());
+            if !text.is_empty() {
+                rendered.extend_from_slice(b"\n\nNext ");
+                rendered.extend_from_slice(&text);
+            }
+            text = rendered;
+            seen.push(exception);
+            at = self
+                .previous_of(exception)
+                .filter(|previous| !seen.iter().any(|done| done.index() == previous.index()));
         }
-        chain
-            .iter()
-            .rev()
-            .map(|throwable| self.rendering_of(*throwable))
-            .collect::<Vec<String>>()
-            .join("\n\nNext ")
-    }
-
-    /// One throwable of that chain: the class, the message where there
-    /// is one, the site behind a colon and the trace under `Stack
-    /// trace:`.
-    fn rendering_of(&self, throwable: PhpObject) -> String {
-        let class = self.class_name_of(throwable);
-        let mut message = string_prop(self, throwable, b"message");
-        // `Z/Zend/zend_exceptions.c:740`: a `TypeError` or an
-        // `ArgumentCountError` whose message names the call site is
-        // closed with ` and defined`, so the site the rendering puts
-        // after it reads as the function's own. php compares the class
-        // itself and not what it descends from.
-        if (class == "TypeError" || class == "ArgumentCountError")
-            && message.contains(", called in ")
-        {
-            message.push_str(" and defined");
-        }
-        let (file, line) = self.throw_site(throwable);
-        let file = String::from_utf8_lossy(&file);
-        let trace = self.trace_string_of(throwable);
-        if message.is_empty() {
-            format!("{class} in {file}:{line}\nStack trace:\n{trace}")
-        } else {
-            format!("{class}: {message} in {file}:{line}\nStack trace:\n{trace}")
+        let string = PhpString::new(self, &text)?;
+        let name = PhpString::new(self, b"string")?;
+        self.addref(&Value::string(string));
+        this.set_prop(self, name, Value::string(string))?;
+        match raised {
+            Some(thrown) => {
+                self.release(Value::string(string));
+                Err(thrown)
+            }
+            None => Ok(string),
         }
     }
 
@@ -10664,7 +10745,7 @@ impl Request {
     fn previous_of(&self, throwable: PhpObject) -> Option<PhpObject> {
         throwable
             .prop(self, b"previous")
-            .and_then(|value| value.as_object().copied())
+            .and_then(|value| value.deref().as_object().copied())
     }
 
     /// `zend_objects_destroy_object`'s visibility branch: a public
