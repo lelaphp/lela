@@ -154,19 +154,25 @@ fn a_test_and_its_skipif_run_from_the_php_src_root_as_run_tests_php_runs_them() 
     if oracle().is_none() {
         return;
     }
-    // The tests stand at `<root>/ext/fixture/tests`, as they would in
-    // php-src; the program and its SKIPIF each ask where they run (#952).
-    let root = Tree::new("phpt-judge-cwd").unwrap();
-    let dir = root.join("ext/fixture/tests");
-    fs::create_dir_all(&dir).unwrap();
+    // The program and its SKIPIF each ask where they run (#952).
     let asks = "getcwd() === realpath(__DIR__ . '/../../..')";
-    fs::write(
-        dir.join("cwd.phpt"),
-        format!(
+    let (_root, subset) = rooted(
+        "cwd",
+        &format!(
             "--TEST--\ncwd\n--SKIPIF--\n<?php if (!({asks})) echo 'skip ', getcwd();\n--FILE--\n<?php var_dump({asks});\n--EXPECT--\nbool(true)\n"
         ),
-    )
-    .unwrap();
+    );
+    let tally = run(&subset, &registry(""));
+    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+}
+
+/// A subset of one test standing at `<root>/ext/fixture/tests`, as a
+/// test stands in php-src, run from `root` as the lane runs every test.
+fn rooted(name: &str, text: &str) -> (Tree, Subset) {
+    let root = Tree::new(&format!("phpt-judge-{name}")).unwrap();
+    let dir = root.join("ext/fixture/tests");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{name}.phpt")), text).unwrap();
     let subset = Subset {
         scope: "ext/fixture".to_owned(),
         dirs: vec![Dir {
@@ -175,8 +181,43 @@ fn a_test_and_its_skipif_run_from_the_php_src_root_as_run_tests_php_runs_them() 
         }],
         root: root.path().to_path_buf(),
     };
+    (root, subset)
+}
+
+#[test]
+fn a_test_s_dir_is_its_own_directory_and_stands_in_what_it_printed() {
+    if oracle().is_none() {
+        return;
+    }
+    // The EXPECTF asks for the directory's last segment, which a token in
+    // the directory's place would have taken (#1089, #906).
+    let (_root, subset) = rooted(
+        "dir",
+        "--TEST--\n__DIR__\n--FILE--\n<?php\nvar_dump(__DIR__);\nvar_dump(__DIR__ === realpath('ext/fixture/tests'));\nvar_dump(basename(__FILE__));\n--EXPECTF--\nstring(%d) \"%s%efixture%etests\"\nbool(true)\nstring(7) \"dir.php\"\n",
+    );
     let tally = run(&subset, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+    assert!(
+        !subset.dirs[0].dir.join("dir.php").exists(),
+        "the program is taken away after its run"
+    );
+}
+
+#[test]
+fn a_test_and_its_skipif_spawn_the_binary_under_test_with_its_extra_args() {
+    let Some(binary) = oracle() else {
+        return;
+    };
+    // The SKIPIF runs under the oracle and still names the binary under
+    // test; the FILE spawns that binary with TEST_PHP_EXTRA_ARGS, which
+    // carries the test's own --INI-- (#906).
+    let (_root, subset) = rooted(
+        "spawn",
+        "--TEST--\nspawn\n--INI--\nprecision=3\n--SKIPIF--\n<?php if (getenv('TEST_PHP_EXTRA_ARGS') === false || getenv('TEST_PHP_CGI_EXECUTABLE') !== '') echo 'skip no environment';\n--FILE--\n<?php\n$php = getenv('TEST_PHP_EXECUTABLE_ESCAPED');\n$extra = getenv('TEST_PHP_EXTRA_ARGS');\necho shell_exec(\"$php $extra -r 'echo 1/3, ini_get(\\\"error_reporting\\\");'\"), \"\\n\";\nvar_dump(getenv('TEST_PHP_EXECUTABLE') === realpath(getenv('TEST_PHP_EXECUTABLE')));\n--EXPECT--\n0.33332767\nbool(true)\n",
+    );
+    let tally = run(&subset, &registry(""));
+    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+    assert!(binary.is_absolute());
 }
 
 #[test]

@@ -435,6 +435,13 @@ impl Pin {
 pub enum Program<'a> {
     Snippet(&'a str),
     File(&'a Path),
+    /// A program written beside a `.phpt` test, its `FILE`, `SKIPIF` or
+    /// `CLEAN`: run as a file is, and what it wrote left with the test's
+    /// directory as it printed it, since run-tests.php matches a test's
+    /// expectation against the raw bytes and an `EXPECTF` asks for text
+    /// inside that directory, `%s%etests` (#1089). A snippet's directory
+    /// and a file's are the pin's token; a test's is not.
+    Beside(&'a Path),
 }
 
 /// What one run wrote and how it ended, normalised.
@@ -942,6 +949,9 @@ fn renumber(haystack: &[u8], token: &[u8]) -> Vec<u8> {
 pub(crate) struct Scratch {
     pub(crate) dir: PathBuf,
     script: PathBuf,
+    /// Whether `dir` is replaced by the pin's token in what the program
+    /// wrote: every program's but one written beside a test.
+    tokenised: bool,
     _snippet: Option<Tree>,
 }
 
@@ -956,21 +966,28 @@ impl Scratch {
                 Scratch {
                     dir: own.path().to_path_buf(),
                     script,
+                    tokenised: true,
                     _snippet: Some(own),
                 }
             }
-            Program::File(path) => Scratch {
+            Program::File(path) | Program::Beside(path) => Scratch {
                 dir: dir_of(path),
                 script: run_by(path)?,
+                tokenised: matches!(program, Program::File(_)),
                 _snippet: None,
             },
         })
     }
 
     /// The recipe's normalisation of a stream: [`normalise_in`] over the
-    /// directory the program ran in.
+    /// directory the program ran in, or [`normalise`] alone for a program
+    /// written beside a test.
     pub(crate) fn normalise(&self, rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
-        normalise_in(rules, &self.dir, bytes)
+        if self.tokenised {
+            normalise_in(rules, &self.dir, bytes)
+        } else {
+            normalise(rules, bytes)
+        }
     }
 }
 
