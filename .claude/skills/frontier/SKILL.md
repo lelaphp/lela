@@ -55,7 +55,7 @@ The chart takes no sub-issues, and there is one per track per row for as long as
 
 ## A ticket
 
-One concern of the row, sized to one session, filed with the track's label and no parent (`gh issue create --label track:<name>`) in the body shape every ticket in this repository has, since `xtask ticket read` holds a ticket to the boxes under `## Acceptance criteria`:
+One concern of the row, sized to one session, filed with the track's label and no parent (`gh issue create --label track:<name>`) in the body shape every ticket in this repository has, since `xtask ticket read` holds a ticket to the boxes under `## Acceptance criteria`. Before filing, search the open tickets for the construct, `gh issue list --state open --search "<construct>"`, and extend one that covers it rather than file a second; a batch cut from a subset's failures is one ticket per cause, naming the tests each explains, never one per failing test:
 
 ```markdown
 ## What to build
