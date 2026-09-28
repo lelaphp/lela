@@ -1729,12 +1729,12 @@ pub struct Request {
     /// `php_execute_script` and `php_request_shutdown`, what `php_verror`
     /// names a diagnostic's origin by when no function is active.
     phase: Phase,
-    /// `zend_objects_store_mark_destructed`: every object behind the
-    /// request, set where `shutdown_destructors` catches the
-    /// `zend_bailout` a destructor's raise ends the walk with
-    /// (`Z/Zend/zend_execute_API.c:258-266`). No destructor is served
-    /// once it stands.
-    marked_destructed: bool,
+    /// Where `shutdown_destructors` caught the `zend_bailout` a
+    /// destructor's raise ends the walk with
+    /// (`Z/Zend/zend_execute_API.c:258-266`): the walk over the symbol
+    /// table stops, and the objects then standing are marked destructed
+    /// in the heap, `zend_objects_store_mark_destructed`.
+    shutdown_walk_ended: bool,
     /// What the entry frame of the innermost serving returned.
     returned: Value,
     /// The interrupt, shared with whatever thread sets it (design §5.8).
@@ -2270,7 +2270,7 @@ impl Request {
             bailout: false,
             display_direct: false,
             phase: Phase::Startup,
-            marked_destructed: false,
+            shutdown_walk_ended: false,
             returned: Value::null(),
             interrupt: Interrupt::default(),
             timer: None,
@@ -10666,9 +10666,6 @@ impl Request {
     /// after
     /// ```
     pub(crate) fn destruct(&mut self, object: PhpObject) {
-        if self.marked_destructed {
-            return;
-        }
         let class = object.class();
         let Some(destructor) = self.method_named(class, b"__destruct") else {
             return;
@@ -10760,7 +10757,8 @@ impl Request {
     ///   thrown in %s on line 5
     /// ```
     fn end_the_walk(&mut self) {
-        self.marked_destructed = true;
+        self.shutdown_walk_ended = true;
+        self.heap.mark_destructed();
         if let Err(fatal) = self.uncaught() {
             self.end_in(&fatal);
         }
@@ -11514,7 +11512,7 @@ impl Request {
         loop {
             let symbols = self.globals().len();
             let mut at = symbols;
-            while at > 0 && !self.marked_destructed {
+            while at > 0 && !self.shutdown_walk_ended {
                 at -= 1;
                 let alone = self.globals().get(at).is_some_and(|(_, symbol)| {
                     let value = match symbol {
@@ -11529,7 +11527,7 @@ impl Request {
                     self.release_symbol(symbol);
                 }
             }
-            if symbols == self.globals().len() || self.marked_destructed {
+            if symbols == self.globals().len() || self.shutdown_walk_ended {
                 break;
             }
         }
@@ -19068,14 +19066,8 @@ impl HeapHooks for Hooks<'_> {
         &mut self.0.heap
     }
 
-    /// `dtor_obj`, through the table of the object's class (design §5.4),
-    /// unless `zend_objects_store_mark_destructed` has marked the store,
-    /// which flags every object's destructor served, a generator's and a
-    /// fiber's among them.
+    /// `dtor_obj`, through the table of the object's class (design §5.4).
     fn destruct(&mut self, obj: Obj) {
-        if self.0.marked_destructed {
-            return;
-        }
         let table = self.0.object_handlers(obj);
         table.dtor_obj(self.0, PhpObject::of(obj));
     }
