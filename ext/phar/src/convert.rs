@@ -348,7 +348,7 @@ fn rename(
             a.refcount -= 1;
         }
     };
-    if req.url_stat(&stat_path, false, false)?.is_some() {
+    if req.url_stat(&stat_path, false, false)?.found().is_some() {
         unwind(req);
         return bad(
             req,

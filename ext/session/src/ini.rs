@@ -208,7 +208,24 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool
     let deprecated =
         |req: &mut Request, message: &str| stage.raise(req, Level::Deprecated, message);
     match name {
-        b"session.save_path" => !value.contains(&0),
+        b"session.save_path" => {
+            if value.contains(&0) {
+                return false;
+            }
+            // `OnUpdateSaveDir`: at runtime the directory, after the
+            // `N;` and `MODE;` it may begin with, is held to the guard.
+            let dir = match value.iter().position(|b| *b == b';') {
+                Some(first) => {
+                    let rest = &value[first + 1..];
+                    match rest.iter().position(|b| *b == b';') {
+                        Some(second) => &rest[second + 1..],
+                        None => rest,
+                    }
+                }
+                None => value,
+            };
+            stage != Stage::Runtime || dir.is_empty() || req.check_open_basedir(dir, true).is_ok()
+        }
         b"session.name" => {
             let forbidden = value.iter().any(|c| b"=,;.[ \t\r\n\x0b\x0c".contains(c));
             if value.is_empty()

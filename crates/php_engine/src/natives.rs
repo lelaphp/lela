@@ -2064,6 +2064,16 @@ fn ini_set(
         ));
     }
     let value = to_string(req, value)?;
+    // "open basedir check": four entries that name a path are held to
+    // the guard before they are set.
+    if matches!(
+        option.as_bytes(),
+        b"java.class.path" | b"java.home" | b"java.library.path" | b"vpopmail.directory"
+    ) && req.check_open_basedir(value.as_bytes(), true).is_err()
+    {
+        req.release(Value::string(value));
+        return Ok(OrFalse::False);
+    }
     let set = req.ini_set(option.as_bytes(), value.as_bytes());
     req.release(Value::string(value));
     Ok(match set? {

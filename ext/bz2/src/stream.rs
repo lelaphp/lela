@@ -19,7 +19,7 @@ use php_ext::abi::{OrFalse, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
-use php_ext::request::{Cast, Opening, Request, Stream, StreamOps, StreamWrapper};
+use php_ext::request::{Cast, HostPath, Opening, Request, Stream, StreamOps, StreamWrapper};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::State;
@@ -154,17 +154,16 @@ impl Mode {
         parsed
     }
 
-    /// `fopen(path, mode2)`, `mode2` being `wb` or `rb`: the path against
-    /// the request's working directory, created or truncated for writing.
-    fn open(&self, req: &Request, path: &[u8]) -> Option<File> {
-        let path = req.absolutize(path);
+    /// `fopen(path, mode2)`, `mode2` being `wb` or `rb`: the path the
+    /// guard let through, created or truncated for writing.
+    fn open(&self, path: &HostPath) -> Option<File> {
         let mut options = OpenOptions::new();
         if self.writing {
             options.write(true).create(true).truncate(true);
         } else {
             options.read(true);
         }
-        options.open(&path.0).ok()
+        options.open(path).ok()
     }
 
     /// `BZ2_bzWriteOpen` at the block size clamped to 1..9 and a work
@@ -405,7 +404,7 @@ fn from_file(
 
 /// `_php_stream_bz2open`: a `mode` of more than one character that starts
 /// with neither `r` nor `w` refused; the path after `compress.bzip2://`
-/// opened directly as `bzopen_or_bzdopen` reads `mode`, `rb` or `wb`, and
+/// held to the `open_basedir` guard, which warns, and opened directly as `bzopen_or_bzdopen` reads `mode`, `rb` or `wb`, and
 /// where that fails opened as a php stream in `mode` and cast to its fd,
 /// as php's `BZ2_bzdopen` needs one; a `BZip2` stream over the one that
 /// opened.
@@ -424,8 +423,11 @@ fn open(
     if mode.is_empty() || (mode[0] != b'w' && mode[0] != b'r' && mode.len() > 1) {
         return Ok(None);
     }
+    let Ok(host) = req.check_open_basedir(path, true) else {
+        return Ok(None);
+    };
     let parsed = Mode::parse(mode);
-    let handle = if let Some(file) = parsed.open(req, path) {
+    let handle = if let Some(file) = parsed.open(&host) {
         Handle::File { file, eof: false }
     } else {
         let Some(inner) = req.open_stream_with(path, mode, opening)? else {

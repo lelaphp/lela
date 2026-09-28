@@ -23,7 +23,7 @@ fn os(req: &Request, path: &[u8]) -> std::path::PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
-        req.cwd().0.join(path)
+        req.cwd().join(path)
     }
 }
 
@@ -89,7 +89,12 @@ fn extract_file(
         }));
     }
     let full = lossy(&fullpath).into_owned();
-    if !overwrite && req.url_stat(&fullpath, false, false)?.is_some() {
+    if req.check_open_basedir(&fullpath, true).is_err() {
+        return Ok(Err(format!(
+            "Cannot extract \"{shown}\" to \"{full}\", openbasedir/safe mode restrictions in effect"
+        )));
+    }
+    if !overwrite && req.url_stat(&fullpath, false, false)?.found().is_some() {
         return Ok(Err(format!(
             "Cannot extract \"{shown}\" to \"{full}\", path already exists"
         )));
@@ -99,7 +104,7 @@ fn extract_file(
         None => dest.len(),
     };
     let dir = &fullpath[..dir_end];
-    if req.url_stat(dir, false, false)?.is_none() {
+    if req.url_stat(dir, false, false)?.found().is_none() {
         let mode = if is_dir { flags & ENT_PERM_MASK } else { 0o777 };
         if !mkdir_all(req, dir, mode) {
             return Ok(Err(format!(
@@ -224,7 +229,7 @@ pub(crate) fn extract_to(
             ),
         ));
     }
-    match req.url_stat(dest, false, false)? {
+    match req.url_stat(dest, false, false)?.found() {
         None => {
             if !mkdir_all(req, dest, 0o777) {
                 return Err(throw(

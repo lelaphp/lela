@@ -150,9 +150,10 @@ pub(super) fn open_basedir(req: &Request) -> bool {
 
 /// `make_filename_safe`: a `file:` URI as given, refused under
 /// `open_basedir`; `:memory:` and the empty name as given; any other
-/// name made absolute against the request's directory; `None` for no
-/// name at all.
-pub(super) fn safe_filename(req: &Request, name: Option<&[u8]>) -> Option<Vec<u8>> {
+/// name expanded against the request's directory (`expand_filepath`)
+/// and held to the `open_basedir` guard, which warns; `None` for no name
+/// at all and for a name refused.
+pub(super) fn safe_filename(req: &mut Request, name: Option<&[u8]>) -> Option<Vec<u8>> {
     let name = name?;
     let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
     let name = &name[..end];
@@ -162,13 +163,10 @@ pub(super) fn safe_filename(req: &Request, name: Option<&[u8]>) -> Option<Vec<u8
     if name.is_empty() || name == b":memory:" {
         return Some(name.to_vec());
     }
-    Some(
-        req.absolutize(name)
-            .0
-            .to_string_lossy()
-            .into_owned()
-            .into_bytes(),
-    )
+    let cwd = req.cwd().into_os_string().into_encoded_bytes();
+    let full = req.virtual_file_ex(&cwd, name, php_ext::request::Resolve::FilePath)?;
+    let full = req.check_open_basedir(&full, true).ok()?;
+    Some(full.as_os_str().as_encoded_bytes().to_vec())
 }
 
 /// `pdo_sqlite_db_handle`: the connection, the functions and collations

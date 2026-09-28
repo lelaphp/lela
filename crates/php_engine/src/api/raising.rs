@@ -189,7 +189,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
     // `PHP Startup`, no function and so no `()`.
     let text = if req.at_startup() {
         format!("PHP Startup: {message}")
-    } else if req.vm_serving_native() {
+    } else if req.vm_serving_native() || req.serving_include() {
         format!("{}(): {message}", req.active_native())
     } else {
         let origin = match req.phase() {

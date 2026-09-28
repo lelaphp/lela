@@ -1,6 +1,9 @@
 //! `Z/ext/standard/link.c`: `readlink`, `linkinfo`, `symlink` and
 //! `link`, each a system call over a path the program wrote, with
-//! `strerror(errno)` as the warning where it failed. The two that make
+//! `strerror(errno)` as the warning where it failed. Each asks the
+//! `open_basedir` guard first: `readlink` of the link, `linkinfo` of the
+//! directory it stands in, and the two that make one of the target and
+//! then of the link, each refusal a warning and `false`. The two that make
 //! a link expand their paths first with `expand_filepath`
 //! (`crate::virtual_cwd`), which resolves a link that is already there,
 //! so `symlink` onto an existing link makes the link at what it points
@@ -73,13 +76,13 @@ fn plain(req: &Request, path: &[u8]) -> Vec<u8> {
     if path.is_empty() {
         return Vec::new();
     }
-    req.absolutize(path).0.as_os_str().as_bytes().to_vec()
+    req.absolutize(path).as_os_str().as_bytes().to_vec()
 }
 
 /// The request's working directory as bytes, what `VCWD_GETCWD` gives
 /// `expand_filepath`.
 fn cwd(req: &Request) -> Vec<u8> {
-    req.cwd().0.as_os_str().as_bytes().to_vec()
+    req.cwd().as_os_str().as_bytes().to_vec()
 }
 
 /// `php_error_docref(NULL, E_WARNING, "%s", strerror(errno))`, and the
@@ -116,8 +119,10 @@ fn failed(req: &mut Request, error: &std::io::Error) -> bool {
 /// ```
 #[php_function]
 fn readlink(req: &mut Request, path: Path) -> Result<OrFalse<PhpString>, Thrown> {
-    let path = plain(req, path.0.as_bytes());
-    match std::fs::read_link(host(&path)) {
+    let Ok(path) = req.check_open_basedir(path.0.as_bytes(), true) else {
+        return Ok(OrFalse::False);
+    };
+    match std::fs::read_link(&path) {
         Ok(target) => {
             let target = target.as_os_str().as_bytes();
             let target = target.get(..MAXPATHLEN - 1).unwrap_or(target);
@@ -152,6 +157,11 @@ fn readlink(req: &mut Request, path: Path) -> Result<OrFalse<PhpString>, Thrown>
 /// ```
 #[php_function]
 fn linkinfo(req: &mut Request, path: Path) -> OrFalse<i64> {
+    // The guard is asked of the directory the link stands in.
+    let dirname = zend_dirname(path.0.as_bytes());
+    if req.check_open_basedir(&dirname, true).is_err() {
+        return OrFalse::False;
+    }
     let path = plain(req, path.0.as_bytes());
     match std::fs::symlink_metadata(host(&path)) {
         Ok(meta) => OrFalse::Value(i64::try_from(meta.dev()).unwrap_or(i64::MAX)),
@@ -205,10 +215,18 @@ fn symlink(req: &mut Request, target: Path, link: Path) -> bool {
         return no_such_file(req);
     };
     let dirname = zend_dirname(&source);
-    if expand_filepath(req, target.as_bytes(), &dirname).is_none() {
+    let Some(dest) = expand_filepath(req, target.as_bytes(), &dirname) else {
         return no_such_file(req);
+    };
+    if req.check_open_basedir(&dest, true).is_err() {
+        return false;
     }
-    match std::os::unix::fs::symlink(host(target.as_bytes()), host(&source)) {
+    let Ok(source) = req.check_open_basedir(&source, true) else {
+        return false;
+    };
+    // The target is written into the link as given, relative to the
+    // link and not to the working directory.
+    match std::os::unix::fs::symlink(host(target.as_bytes()), &source) {
         Ok(()) => true,
         Err(error) => failed(req, &error),
     }
@@ -252,7 +270,13 @@ fn link(req: &mut Request, target: Path, link: Path) -> bool {
     ) else {
         return no_such_file(req);
     };
-    match std::fs::hard_link(host(&dest), host(&source)) {
+    let Ok(dest) = req.check_open_basedir(&dest, true) else {
+        return false;
+    };
+    let Ok(source) = req.check_open_basedir(&source, true) else {
+        return false;
+    };
+    match std::fs::hard_link(&dest, &source) {
         Ok(()) => true,
         Err(error) => failed(req, &error),
     }

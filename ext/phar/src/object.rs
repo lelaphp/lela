@@ -447,6 +447,16 @@ impl Phar {
     ) -> Result<(), Thrown> {
         let id = held(req, this.object())?;
         let file = filename.0.as_bytes().to_vec();
+        if !file.windows(3).any(|w| w == b"://") && req.check_open_basedir(&file, true).is_err() {
+            return Err(throw(
+                req,
+                "RuntimeException",
+                &format!(
+                    "phar error: unable to open file \"{}\" to add to phar archive, open_basedir restrictions prevent this",
+                    lossy(&file)
+                ),
+            ));
+        }
         let opening = php_ext::request::Opening::default();
         let Some(stream) = req.open_stream_with(&file, b"rb", opening)? else {
             return Err(throw(
@@ -985,7 +995,7 @@ impl Phar {
             return Ok(false);
         }
         let (fname, brandnew) = (a.fname.clone(), a.is_brandnew);
-        Ok(match req.url_stat(&fname, false, false)? {
+        Ok(match req.url_stat(&fname, false, false)?.found() {
             Some(sb) => sb[2] & 0o222 != 0,
             None => brandnew,
         })

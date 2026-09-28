@@ -1015,7 +1015,7 @@ pub(crate) fn create_from_file(
     } else {
         let absolute = req.realpath(&path).map_or_else(
             || path.clone(),
-            |p| p.0.to_string_lossy().into_owned().into_bytes(),
+            |p| p.to_string_lossy().into_owned().into_bytes(),
         );
         let uri = php_ext_libxml::ffi::Library::path_to_uri(&absolute).unwrap_or(absolute);
         if uri.starts_with(b"file:/") {

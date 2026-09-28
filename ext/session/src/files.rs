@@ -9,11 +9,11 @@
 //! `VCWD_OPEN_MODE` reads it.
 
 use std::fs::{File, OpenOptions, Permissions};
-use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref, raise};
-use php_ext::request::{Request, WrapperOp};
+use php_ext::request::Request;
 
 use crate::{State, session};
 
@@ -97,9 +97,17 @@ fn errno_text(req: &Request, error: &std::io::Error) -> String {
     format!("{} ({errno})", req.os_error_text(errno))
 }
 
-/// Whether `path` names something, `stat(2)` without the cache.
-fn exists(req: &mut Request, path: &[u8]) -> Result<Option<[i64; 13]>, Thrown> {
-    req.url_stat(path, false, false)
+/// `VCWD_STAT`: the host's `stat(2)` of the path against the working
+/// directory, as `mod_files.c` makes it, past every wrapper and so past
+/// the `open_basedir` guard, which php asks only of the save path.
+fn exists(req: &Request, path: &[u8]) -> Option<std::fs::Metadata> {
+    std::fs::metadata(req.absolutize(path)).ok()
+}
+
+/// `VCWD_UNLINK`, as [`exists`] states: `false` where it failed, with
+/// nothing said.
+fn unlink(req: &Request, path: &[u8]) -> bool {
+    std::fs::remove_file(req.absolutize(path)).is_ok()
 }
 
 /// `ps_files_open`: the file for `key` opened and locked, unless it is
@@ -164,7 +172,7 @@ fn open_key(req: &mut Request, key: &[u8]) {
     if let Some(files) = data(req) {
         files.last_key = Some(key.to_vec());
     }
-    let host = req.absolutize(&path).0;
+    let host = req.absolutize(&path);
     let existed = std::fs::symlink_metadata(&host).is_ok();
     let filemode = data(req).map_or(0o600, |d| d.filemode);
     let mode = u32::try_from(filemode & 0o7777).unwrap_or(0o600);
@@ -287,14 +295,19 @@ fn write_key(req: &mut Request, key: &[u8], val: &[u8]) -> Result<bool, Thrown> 
 /// ```
 pub(super) fn open(req: &mut Request, save_path: &[u8]) -> bool {
     let path = if save_path.is_empty() {
-        let dir = req.temp_dir().0;
+        let dir = req.temp_dir();
         let dir = dir.to_string_lossy();
         let trimmed = dir.trim_end_matches('/');
-        if trimmed.is_empty() {
+        let dir = if trimmed.is_empty() {
             b"/".to_vec()
         } else {
             trimmed.as_bytes().to_vec()
+        };
+        // The temporary directory is held to the guard, which warns.
+        if req.check_open_basedir(&dir, true).is_err() {
+            return false;
         }
+        dir
     } else {
         save_path.to_vec()
     };
@@ -440,25 +453,34 @@ pub(super) fn update_timestamp(req: &mut Request, key: &[u8], val: &[u8]) -> Res
     let Some(path) = data(req).and_then(|d| path_create(d, key)) else {
         return Ok(false);
     };
-    if exists(req, &path)?.is_none() {
+    // `VCWD_UTIME(buf, newtime)`, and a file written where it fails.
+    let now = std::time::SystemTime::now();
+    let times = std::fs::FileTimes::new()
+        .set_accessed(now)
+        .set_modified(now);
+    let host = req.absolutize(&path);
+    let touched = File::open(&host)
+        .or_else(|_| OpenOptions::new().write(true).open(&host))
+        .and_then(|file| file.set_times(times));
+    if touched.is_err() {
         return write_key(req, key, val);
     }
-    req.wrapper_op(&path, WrapperOp::Touch(None))
+    Ok(true)
 }
 
 /// `PS_DESTROY_FUNC(files)`: the open file closed and removed; a file
 /// never written is not an error.
-pub(super) fn destroy(req: &mut Request, key: &[u8]) -> Result<bool, Thrown> {
+pub(super) fn destroy(req: &mut Request, key: &[u8]) -> bool {
     let Some(path) = data(req).and_then(|d| path_create(d, key)) else {
-        return Ok(false);
+        return false;
     };
     if data(req).is_some_and(|d| d.fd.is_some()) {
         close_fd(req);
-        if exists(req, &path)?.is_some() && !req.wrapper_op(&path, WrapperOp::Unlink)? {
-            return Ok(exists(req, &path)?.is_none());
+        if exists(req, &path).is_some() && !unlink(req, &path) {
+            return exists(req, &path).is_none();
         }
     }
-    Ok(true)
+    true
 }
 
 /// `PS_GC_FUNC(files)` over `ps_files_cleanup_dir`: every `sess_` file
@@ -480,14 +502,14 @@ pub(super) fn destroy(req: &mut Request, key: &[u8]) -> Result<bool, Thrown> {
 /// Warning: session_gc(): Session cannot be garbage collected when there is no active session in %s on line 5
 /// bool(false)
 /// ```
-pub(super) fn gc(req: &mut Request, maxlifetime: i64) -> Result<i64, Thrown> {
+pub(super) fn gc(req: &mut Request, maxlifetime: i64) -> i64 {
     let Some((dir, depth)) = data(req).map(|d| (d.basedir.clone(), d.dirdepth)) else {
-        return Ok(-1);
+        return -1;
     };
     if depth != 0 {
-        return Ok(-1);
+        return -1;
     }
-    if exists(req, &dir)?.is_none() {
+    if exists(req, &dir).is_none() {
         docref(
             req,
             Level::Notice,
@@ -497,10 +519,10 @@ pub(super) fn gc(req: &mut Request, maxlifetime: i64) -> Result<i64, Thrown> {
                 req.os_error_text(2)
             ),
         );
-        return Ok(-1);
+        return -1;
     }
-    let Ok(listing) = std::fs::read_dir(req.absolutize(&dir).0) else {
-        return Ok(-1);
+    let Ok(listing) = std::fs::read_dir(req.absolutize(&dir)) else {
+        return -1;
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -514,40 +536,40 @@ pub(super) fn gc(req: &mut Request, maxlifetime: i64) -> Result<i64, Thrown> {
         let mut path = dir.clone();
         path.push(b'/');
         path.extend_from_slice(&name);
-        if let Some(stat) = exists(req, &path)?
-            && now - stat[9] > maxlifetime
+        if let Some(stat) = exists(req, &path)
+            && now - stat.mtime() > maxlifetime
         {
-            req.wrapper_op(&path, WrapperOp::Unlink)?;
+            unlink(req, &path);
             deleted += 1;
         }
     }
-    Ok(deleted)
+    deleted
 }
 
 /// `ps_files_key_exists`.
-fn key_exists(req: &mut Request, key: &[u8]) -> Result<bool, Thrown> {
+fn key_exists(req: &mut Request, key: &[u8]) -> bool {
     let Some(path) = data(req).and_then(|d| path_create(d, key)) else {
-        return Ok(false);
+        return false;
     };
-    Ok(exists(req, &path)?.is_some())
+    exists(req, &path).is_some()
 }
 
 /// `PS_CREATE_SID_FUNC(files)`: a new id with no file of its name, three
 /// tries.
-pub(super) fn create_sid(req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
+pub(super) fn create_sid(req: &mut Request) -> Option<Vec<u8>> {
     for _ in 0..4 {
         let Some(sid) = session::create_id(req) else {
             continue;
         };
-        if data(req).is_none() || !key_exists(req, &sid)? {
-            return Ok(Some(sid));
+        if data(req).is_none() || !key_exists(req, &sid) {
+            return Some(sid);
         }
     }
-    Ok(None)
+    None
 }
 
 /// `PS_VALIDATE_SID_FUNC(files)`: whether the id's file exists.
-pub(super) fn validate_sid(req: &mut Request, key: &[u8]) -> Result<bool, Thrown> {
+pub(super) fn validate_sid(req: &mut Request, key: &[u8]) -> bool {
     key_exists(req, key)
 }
 

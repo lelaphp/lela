@@ -599,7 +599,7 @@ impl Shared {
             short_open_tag: req.short_open_tag(),
             assertions: req.assertions() >= 0,
         };
-        let cwd = req.cwd().0;
+        let cwd = req.cwd();
         let origin = Origin {
             filename,
             cwd: &cwd,
@@ -767,7 +767,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 58] = [
+const CORE_INI: [(&str, &str); 59] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -797,6 +797,11 @@ const CORE_INI: [(&str, &str); 58] = [
     // for an include (`php_stream_locate_url_wrapper`).
     ("allow_url_fopen", "1"),
     ("allow_url_include", "0"),
+    // `open_basedir`, `PHP_INI_ALL` and `NULL` in php's table
+    // (`Z/main/main.c:841`): the base directories the guard holds a path
+    // to ([`Request::check_open_basedir`]), any list at startup and only
+    // a tighter one after (`OnUpdateBaseDir`).
+    ("open_basedir", ""),
     ("zend.exception_ignore_args", "0"),
     ("zend.exception_string_param_max_len", "15"),
     ("zend.max_allowed_stack_size", "0"),

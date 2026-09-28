@@ -233,7 +233,7 @@ impl Sqlite {
             else {
                 return Ok(());
             };
-            let path = full.0.to_string_lossy().into_owned();
+            let path = full.to_string_lossy().into_owned();
             match handle.db.load_extension(path.as_bytes()) {
                 Ok(()) => Ok(()),
                 Err(text) => {

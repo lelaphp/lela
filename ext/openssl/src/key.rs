@@ -156,8 +156,9 @@ pub(crate) fn check_int_len(req: &mut Request, len: usize, arg: u32) -> Result<(
 }
 
 /// `php_openssl_check_path_ex` for a path a parameter names, `file://`
-/// taken off: the path made absolute; `None` where it cannot be, after
-/// the warning php raises, and a `ValueError` for a NUL in it.
+/// taken off: the path made absolute and held to the `open_basedir`
+/// guard; `None` where it cannot be or is refused, after the warning php
+/// raises, and a `ValueError` for a NUL in it.
 pub(crate) fn check_path(
     req: &mut Request,
     path: &[u8],
@@ -176,9 +177,14 @@ pub(crate) fn check_path(
             "not contain any null bytes",
         ));
     }
-    let cwd = req.cwd().0.into_os_string().into_encoded_bytes();
+    let cwd = req.cwd().into_os_string().into_encoded_bytes();
     if let Some(real) = req.virtual_file_ex(&cwd, path, Resolve::FilePath) {
-        return Ok(CString::new(real).ok());
+        // The expanded path is held to the `open_basedir` guard, which
+        // warns.
+        let Ok(real) = req.check_open_basedir(&real, true) else {
+            return Ok(None);
+        };
+        return Ok(CString::new(real.as_os_str().as_encoded_bytes()).ok());
     }
     // `php_verror(NULL, arg_name, E_WARNING, ...)`: the parameter's name
     // between the parentheses.

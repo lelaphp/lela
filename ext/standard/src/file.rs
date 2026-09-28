@@ -2061,7 +2061,7 @@ fn rename(
 fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Thrown> {
     const S_IFMT: i64 = 0o170_000;
     const S_IFDIR: i64 = 0o040_000;
-    if let Some(src) = req.url_stat(source, false, false)? {
+    if let Some(src) = req.url_stat(source, false, false)?.found() {
         if src[2] & S_IFMT == S_IFDIR {
             docref(
                 req,
@@ -2070,7 +2070,7 @@ fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Th
             );
             return Ok(false);
         }
-        if let Some(dest) = req.url_stat(target, false, false)? {
+        if let Some(dest) = req.wrapper_url_stat(target)?.found() {
             if dest[2] & S_IFMT == S_IFDIR {
                 docref(
                     req,
@@ -2157,8 +2157,12 @@ fn copy(
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<bool, Thrown> {
     let (Path(source), Path(target)) = (from, to);
+    if let Some(local) = req.plain_path(source.as_bytes())
+        && req.check_open_basedir(&local, true).is_err()
+    {
+        return Ok(false);
+    }
     let context = context_of(req, context, NullContext::Default)?;
-    let _ = req.plain_path(source.as_bytes());
     req.with_stream_ctx(context, |req| {
         copy_file(req, source.as_bytes(), target.as_bytes())
     })
@@ -3149,7 +3153,7 @@ fn fgetcsv(
 #[php_function]
 fn realpath(req: &mut Request, path: Path) -> Result<OrFalse<PhpString>, Thrown> {
     let Path(path) = path;
-    let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
+    let cwd = req.cwd().as_os_str().as_bytes().to_vec();
     let written = if path.as_bytes().is_empty() {
         cwd.clone()
     } else {
@@ -3161,8 +3165,11 @@ fn realpath(req: &mut Request, path: Path) -> Result<OrFalse<PhpString>, Thrown>
         &cwd
     };
     match req.virtual_file_ex(cwd, &written, Resolve::RealPath) {
-        Some(resolved) => Ok(OrFalse::Value(PhpString::new(req, &resolved)?)),
-        None => Ok(OrFalse::False),
+        // The guard is asked of the resolved path, and warns.
+        Some(resolved) if req.check_open_basedir(&resolved, true).is_ok() => {
+            Ok(OrFalse::Value(PhpString::new(req, &resolved)?))
+        }
+        Some(_) | None => Ok(OrFalse::False),
     }
 }
 
@@ -3231,6 +3238,6 @@ fn fnmatch(
 /// ```
 #[php_function]
 fn sys_get_temp_dir(req: &mut Request) -> Result<PhpString, Thrown> {
-    let dir = req.temp_dir().0;
+    let dir = req.temp_dir();
     PhpString::new(req, dir.as_os_str().as_encoded_bytes())
 }

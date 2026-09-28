@@ -483,7 +483,7 @@ impl SplFileInfo {
     fn getLinkTarget(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
         let name = file_name(req, this.object())?;
         let host = req.absolutize(&name);
-        match std::fs::read_link(&host.0) {
+        match std::fs::read_link(&host) {
             Ok(target) => Ok(OrFalse::Value(PhpString::new(
                 req,
                 target.as_os_str().as_encoded_bytes(),
@@ -554,7 +554,7 @@ impl SplFileInfo {
         match name.and_then(|n| req.realpath(&n)) {
             Some(real) => Ok(OrFalse::Value(PhpString::new(
                 req,
-                real.0.as_os_str().as_encoded_bytes(),
+                real.as_os_str().as_encoded_bytes(),
             )?)),
             None => Ok(OrFalse::False),
         }
@@ -1056,7 +1056,7 @@ impl RecursiveDirectoryIterator {
             return Ok(false);
         }
         let name = file_name(req, this)?;
-        let Some(lstat) = req.url_stat(&name, true, true)? else {
+        let Some(lstat) = req.url_stat(&name, true, true)?.found() else {
             return Ok(false);
         };
         if lstat[2] & 0o170_000 != 0o120_000 {
@@ -1065,7 +1065,7 @@ impl RecursiveDirectoryIterator {
         if !allowLinks && flags & FilesystemIterator::FOLLOW_SYMLINKS == 0 {
             return Ok(false);
         }
-        let stat = req.url_stat(&name, false, true)?;
+        let stat = req.url_stat(&name, false, true)?.found();
         Ok(stat.is_some_and(|s| s[2] & 0o170_000 == 0o040_000))
     }
 
@@ -2232,10 +2232,15 @@ fn clone_fs(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
 type Stat = (Vec<u8>, [i64; 13]);
 
 /// The stat of the object's file, of the link itself where `link`
-/// asks: `None` where it fails.
+/// asks, as `FileInfoFunction` makes it under `EH_THROW`: a warning
+/// raised on the way, the `open_basedir` guard's among them, is the
+/// `RuntimeException`; `None` where it fails.
 fn stat(req: &mut Request, this: PhpObject, link: bool) -> Result<Option<Stat>, Thrown> {
     let name = file_name(req, this)?;
-    let got = req.url_stat(&name, link, true)?;
+    let got = php_ext::raising::throwing_warnings(req, "RuntimeException", |req| {
+        req.url_stat(&name, link, true)
+    })?
+    .found();
     Ok(got.map(|s| (name, s)))
 }
 
@@ -2283,7 +2288,9 @@ fn access(
     ty: php_ext_standard::Fs,
 ) -> Result<Raw<bool>, Thrown> {
     let name = file_name(req, this)?;
-    let answered = php_ext_standard::php_stat(req, &name, ty)?;
+    let answered = php_ext::raising::throwing_warnings(req, "RuntimeException", |req| {
+        php_ext_standard::php_stat(req, &name, ty)
+    })?;
     crate::answered(req, answered)
 }
 
@@ -2569,6 +2576,7 @@ fn file_open(
     fs(req, this, |it| it.kind = Type::File)?;
     if req
         .url_stat(name, false, true)?
+        .found()
         .is_some_and(|s| s[2] & 0o170_000 == 0o040_000)
     {
         return Err(throw(
