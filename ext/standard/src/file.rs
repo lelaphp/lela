@@ -2186,6 +2186,19 @@ fn copy(
 /// bool(true)
 /// int(60)
 /// ```
+///
+/// The fallback is `php_get_temporary_directory`'s, the directory
+/// `sys_get_temp_dir()` names.
+///
+/// ```php
+/// $f = tempnam(__DIR__ . '/none/x', 't'); var_dump(dirname($f) === realpath(sys_get_temp_dir())); unlink($f);
+/// $f = tmpfile(); var_dump(dirname(stream_get_meta_data($f)['uri']) === realpath(sys_get_temp_dir()));
+/// ```
+/// ```expect
+/// Notice: tempnam(): file created in the system's temporary directory in %s on line 2
+/// bool(true)
+/// bool(true)
+/// ```
 #[php_function]
 fn tempnam(req: &mut Request, directory: Path, prefix: Path) -> Result<OrFalse<PhpString>, Thrown> {
     let (Path(dir), Path(prefix)) = (directory, prefix);
@@ -3206,9 +3219,8 @@ fn fnmatch(
 
 /// `sys_get_temp_dir(): string`, `PHP_FUNCTION(sys_get_temp_dir)`
 /// (`Z/ext/standard/file.c:2269`) over `php_get_temporary_directory`
-/// (`Z/main/php_open_temporary_file.c:236`): `sys_temp_dir` where it is
-/// set, else `TMPDIR` from the environment, else `P_tmpdir`, `/tmp`;
-/// one trailing slash taken off the first two.
+/// (`Z/main/php_open_temporary_file.c:236`), the one directory
+/// [`Request::temp_dir`] names.
 ///
 /// ```php
 /// $t = sys_get_temp_dir(); var_dump($t[0], is_dir($t));
@@ -3219,18 +3231,6 @@ fn fnmatch(
 /// ```
 #[php_function]
 fn sys_get_temp_dir(req: &mut Request) -> Result<PhpString, Thrown> {
-    // A `sys_temp_dir` of `/` alone is passed over, as php's two tests
-    // pass it over.
-    let from_ini = req
-        .ini_get(b"sys_temp_dir")
-        .filter(|dir| !dir.is_empty() && *dir != b"/")
-        .map(|dir| dir.strip_suffix(b"/").unwrap_or(dir).to_vec());
-    let dir = if let Some(dir) = from_ini {
-        dir
-    } else if let Some(dir) = req.env(b"TMPDIR").filter(|dir| !dir.is_empty()) {
-        dir.strip_suffix(b"/").unwrap_or(dir).to_vec()
-    } else {
-        b"/tmp".to_vec()
-    };
-    PhpString::new(req, &dir)
+    let dir = req.temp_dir().0;
+    PhpString::new(req, dir.as_os_str().as_encoded_bytes())
 }

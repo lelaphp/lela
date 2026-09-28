@@ -17157,10 +17157,20 @@ impl Request {
         Ok(())
     }
 
-    /// `sys_get_temp_dir()`.
+    /// `php_get_temporary_directory`
+    /// (`Z/main/php_open_temporary_file.c:236`): what `sys_get_temp_dir()`
+    /// answers, and where `tempnam()` falls back to and `tmpfile()` and a
+    /// spilling `php://temp` make their files. `sys_temp_dir` where it is
+    /// set to more than a lone `/`, else `TMPDIR` from the environment,
+    /// one trailing slash taken off either; else `/tmp`.
     #[must_use]
     pub fn temp_dir(&self) -> HostPath {
-        HostPath(std::env::temp_dir())
+        let chosen = self
+            .ini_get(b"sys_temp_dir")
+            .filter(|dir| !dir.is_empty() && *dir != b"/")
+            .or_else(|| self.env(b"TMPDIR").filter(|dir| !dir.is_empty()));
+        let dir = chosen.map_or(&b"/tmp"[..], |dir| dir.strip_suffix(b"/").unwrap_or(dir));
+        HostPath(PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
     }
 
     /// `umask()` as it stands.
