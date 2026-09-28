@@ -10561,16 +10561,46 @@ impl Request {
 
     /// `zend_exception_set_previous` (`Z/Zend/zend_exceptions.c:103`):
     /// `previous` is chained onto the end of the chain `throwable`
-    /// already carries, its one owner the property's from here. A
-    /// throwable that is already in that chain, or is `throwable`
-    /// itself, takes its owner back instead, since php refuses to make
-    /// a cycle. A chain is a path through live objects, so the store's
-    /// count is a length no walk of it passes.
+    /// already carries, its one owner the property's from here. php
+    /// refuses to make a cycle, and walks the two chains together to
+    /// find one: at each throwable of `throwable`'s chain, where that
+    /// throwable is already among `previous`'s own ancestors, or where
+    /// `previous` is `throwable` itself or already in its chain,
+    /// `previous` takes its owner back and nothing is chained. A chain
+    /// is a path through live objects, so the store's count is a length
+    /// no walk of it passes.
+    ///
+    /// A `finally` that rethrows the previous of the throwable it
+    /// delayed chains nothing, and the one it rethrows is what leaves:
+    ///
+    /// ```php
+    /// try {
+    ///     $e = new Exception("Foo");
+    ///     try { throw new Exception("Bar", 0, $e); } finally { throw $e; }
+    /// } catch (Exception $e) {
+    ///     echo $e->getMessage(), " ", var_export($e->getPrevious(), true), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// Foo NULL
+    /// ```
     pub(crate) fn set_previous(&mut self, throwable: PhpObject, previous: PhpObject) {
+        let bound = self.heap.objects();
         let mut at = throwable;
-        for _ in 0..=self.heap.objects() {
+        for _ in 0..=bound {
             if at.index() == previous.index() {
                 break;
+            }
+            let mut ancestor = self.previous_of(previous);
+            for _ in 0..=bound {
+                let Some(held) = ancestor else {
+                    break;
+                };
+                if held.index() == at.index() {
+                    self.release(previous.as_value());
+                    return;
+                }
+                ancestor = self.previous_of(held);
             }
             if let Some(next) = self.previous_of(at) {
                 at = next;
