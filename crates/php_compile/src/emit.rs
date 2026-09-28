@@ -12570,6 +12570,12 @@ impl Emit<'_> {
         left: Zval,
         right: Zval,
     ) -> Result<Option<Zval>, CompileError> {
+        // `zend_binary_op_produces_error`'s concatenation arm: an array
+        // on either side is the warning left to the request, and no
+        // conversion is made of the other side here.
+        if left.as_arr().is_some() || right.as_arr().is_some() {
+            return Ok(None);
+        }
         let (Some(a), Some(b)) = (self.stringified(left)?, self.stringified(right)?) else {
             return Ok(None);
         };
@@ -12581,9 +12587,28 @@ impl Emit<'_> {
     }
 
     /// A constant operand of a `.` as the string `zend_compile_binary_op`
-    /// converts it to; any other operand as it is.
+    /// converts it to, a constant array as the `CAST (string)` it emits
+    /// for one, and any other operand as it is. The cast stands after
+    /// both sides are compiled and before the `CONCAT`, so the array's
+    /// warning is raised before an object on the other side throws:
+    ///
+    /// ```php
+    /// set_error_handler(function ($n, $s) { echo "warning: $s\n"; });
+    /// try { new stdClass . []; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { [] . new stdClass; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $a = 1; echo $a . [], "\n";
+    /// ```
+    /// ```expect
+    /// warning: Array to string conversion
+    /// Object of class stdClass could not be converted to string
+    /// warning: Array to string conversion
+    /// Object of class stdClass could not be converted to string
+    /// warning: Array to string conversion
+    /// 1Array
+    /// ```
     fn string_operand(&mut self, value: Where) -> Result<Where, CompileError> {
         match value {
+            Where::Constant(v) if v.as_arr().is_some() => Ok(self.emit_cast(value, CastTo::Str)),
             Where::Constant(v) => Ok(Where::Constant(self.stringified(v)?.unwrap_or(v))),
             other => Ok(other),
         }
