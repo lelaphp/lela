@@ -9926,10 +9926,16 @@ impl Emit<'_> {
             }
             tree::Expr::IssetExpr(id) => {
                 let targets = tree[id].targets.clone();
-                let [target] = targets[..] else {
-                    return Err(self.unread("an `isset` over more than one variable"));
+                let Some((&first, rest)) = targets.split_first() else {
+                    return Err(self.unread("an `isset`"));
                 };
-                self.isset_or_empty(target, false)
+                let mut held = self.isset_or_empty(first, false)?;
+                for &target in rest {
+                    held = self.short_circuit_from(false, held, |emit| {
+                        emit.isset_or_empty(target, false)
+                    })?;
+                }
+                Ok(held)
             }
             tree::Expr::EmptyExpr(id) => {
                 let target = self.required(tree[id].target, "an `empty`")?;
@@ -10714,12 +10720,44 @@ impl Emit<'_> {
         right: tree::Expr,
     ) -> Result<Where, CompileError> {
         let left = self.expr(left)?;
+        self.short_circuit_from(or, left, |emit| emit.expr(right))
+    }
+
+    /// [`Self::short_circuiting`] once its left side stands compiled,
+    /// the right side compiled by `right` where the left side does not
+    /// settle it: what `isset($a, $b)` shares with `&&`, since php's
+    /// parser makes it the `ZEND_AST_AND` of one `isset` per variable
+    /// (`isset_variables`). The first unset variable settles it and the
+    /// ones after are never asked:
+    ///
+    /// ```php
+    /// $a = 1; $b = null; $c = [0];
+    /// class O { function __isset($n) { echo "asked $n\n"; return true; } }
+    /// $o = new O;
+    /// var_dump(isset($a, $c[0]), isset($a, $b, $o->p), isset($o->p, $a, $o->q));
+    /// var_dump(isset($this, $a), isset($a, $c, $a));
+    /// ```
+    /// ```expect
+    /// asked p
+    /// asked q
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    fn short_circuit_from(
+        &mut self,
+        or: bool,
+        left: Where,
+        right: impl FnOnce(&mut Self) -> Result<Where, CompileError>,
+    ) -> Result<Where, CompileError> {
         if let Where::Constant(value) = left {
             let held = truth(value);
             if held == or {
                 return Ok(Where::Constant(Zval::bool(held)));
             }
-            let right = self.expr(right)?;
+            let right = right(self)?;
             if let Where::Constant(value) = right {
                 return Ok(Where::Constant(Zval::bool(truth(value))));
             }
@@ -10738,7 +10776,7 @@ impl Emit<'_> {
             out,
             ..Opline::default()
         });
-        let otherwise = self.expr(right)?;
+        let otherwise = right(self)?;
         let (op1_type, op1) = self.operand(otherwise);
         self.push(Opline {
             opcode: Opcode::Bool,
