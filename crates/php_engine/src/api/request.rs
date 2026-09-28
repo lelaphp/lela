@@ -9356,6 +9356,58 @@ impl Request {
         }
     }
 
+    /// `zend_std_write_property`'s `typed_property` arm around
+    /// [`Request::hold_to_property_type`]: the object held one owner more
+    /// while the value is verified (`GC_ADDREF(zobj)`), since a
+    /// `__toString` the weak rule serves may give its last owner up, and
+    /// where that hold was the last one, php's `Error` and the object
+    /// destroyed after it, the value given up (`GC_DELREF(zobj) == 0`,
+    /// `Z/Zend/zend_object_handlers.c:1113`).
+    ///
+    /// ```php
+    /// class A { public string $prop; }
+    /// class B { public function __toString() { global $a; $a = null; return "a"; } }
+    /// $a = new A();
+    /// try { $a->prop = new B(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $a = new A(); $a->prop = '';
+    /// try { $a->prop = new B(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($a);
+    /// ```
+    /// ```expect
+    /// Object was released while assigning to property A::$prop
+    /// Object was released while assigning to property A::$prop
+    /// NULL
+    /// ```
+    pub(crate) fn hold_to_property_type_of(
+        &mut self,
+        object: PhpObject,
+        typed: &TypedProperty,
+        name: &[u8],
+        value: Value,
+        strict: bool,
+    ) -> Result<Value, Thrown> {
+        let held = self.take_hold(object.as_value());
+        let verified = self.hold_to_property_type(typed, name, value, strict);
+        let Ok(landing) = verified else {
+            self.let_go(held);
+            return verified;
+        };
+        if object.as_value().refcount() > 1 {
+            self.let_go(held);
+            return Ok(landing);
+        }
+        let class = self.class_name(typed.declaring);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        let error = crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Object was released while assigning to property {class}::${shown}"),
+        );
+        self.let_go(held);
+        self.release(landing);
+        Err(error)
+    }
+
     /// `zend_assign_to_variable` over a declared slot, `ASSIGN_OBJ`'s
     /// fast path over a slot that holds a value (`fast_assign_obj`):
     /// `value` is the slot's from here and what it held is released
@@ -9730,7 +9782,8 @@ impl Request {
                     ))));
                 };
                 let strict = self.property_strict_types();
-                match self.hold_to_property_type(&typed, name.as_bytes(), value, strict) {
+                match self.hold_to_property_type_of(object, &typed, name.as_bytes(), value, strict)
+                {
                     Ok(value) => value,
                     Err(thrown) => {
                         self.release(Value::string(name));
@@ -9778,9 +9831,7 @@ impl Request {
                 let strict = self.property_strict_types();
                 return self.assign_to_reference(cell.heap(), value.undef_as_null(), strict);
             }
-            if !held
-                && let Err(thrown) = self.dynamic_property_creation(object.class(), name.as_bytes())
-            {
+            if !held && let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
                 self.release(value);
                 self.release(Value::string(name));
                 return Err(thrown);
@@ -9861,7 +9912,7 @@ impl Request {
         let held = o
             .properties()
             .is_some_and(|table| table.contains(table_key));
-        if !held && let Err(thrown) = self.dynamic_property_creation(class, &name) {
+        if !held && let Err(thrown) = self.dynamic_property_creation(object, &name) {
             self.release(value);
             self.release(Value::string(key));
             return Err(thrown);
@@ -10013,15 +10064,29 @@ impl Request {
     /// with neither.
     ///
     /// php's raiser holds one more owner of the object across the
-    /// deprecation and turns the last release into the same `Error`;
-    /// nothing here can drop the object under a diagnostic, since the
-    /// handler that reached this holds it.
+    /// deprecation (`GC_ADDREF(obj)`), and where the handler the
+    /// deprecation reached gave up every other one, the object is
+    /// destroyed and the creation refused with the same `Error`, unless
+    /// the handler threw.
+    ///
+    /// ```php
+    /// set_error_handler(function ($code, $msg) { echo "Err: $msg\n"; $GLOBALS['a'] = null; });
+    /// $a = new class {};
+    /// try { [&$a->y]; } catch (Throwable $ex) { echo "Exception: ", $ex->getMessage(), "\n"; }
+    /// var_dump($a);
+    /// ```
+    /// ```expect
+    /// Err: Creation of dynamic property class@anonymous::$y is deprecated
+    /// Exception: Cannot create dynamic property class@anonymous::$y
+    /// NULL
+    /// ```
     pub(crate) fn dynamic_property_creation(
         &mut self,
-        class: ClassId,
+        object: PhpObject,
         name: &[u8],
     ) -> Result<(), Thrown> {
         use php_unit::decl::DynamicProperties;
+        let class = object.class();
         let Some(flags) = self.class_flags(class) else {
             return Ok(());
         };
@@ -10038,11 +10103,24 @@ impl Request {
                 &format!("Cannot create dynamic property {class_name}::${shown}"),
             ));
         }
+        let held = self.take_hold(object.as_value());
         crate::api::raising::deprecated(
             self,
             &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
         );
-        Ok(())
+        if object.as_value().refcount() > 1 {
+            self.let_go(held);
+            return Ok(());
+        }
+        self.let_go(held);
+        if self.is_pending() {
+            return Err(Thrown::of(None));
+        }
+        Err(crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Cannot create dynamic property {class_name}::${shown}"),
+        ))
     }
 
     /// `ZEND_FE_RESET_R`'s separation of a shared property table
@@ -10284,9 +10362,7 @@ impl Request {
         let o = object.heap();
         let key = php_heap::Key::Str(name.heap());
         let held = o.properties().is_some_and(|table| table.contains(key));
-        if !held
-            && let Err(thrown) = self.dynamic_property_creation(object.class(), name.as_bytes())
-        {
+        if !held && let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
             self.release(Value::string(name));
             return Err(thrown);
         }

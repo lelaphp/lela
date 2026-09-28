@@ -11260,7 +11260,7 @@ fn assign_property(
                 )));
             }
             let strict = req.frame_strict_types(frame);
-            let value = match req.hold_to_property_type(&typed, bytes, value, strict) {
+            let value = match req.hold_to_property_type_of(object, &typed, bytes, value, strict) {
                 Ok(value) => value,
                 Err(thrown) => return Ok(Err(thrown)),
             };
