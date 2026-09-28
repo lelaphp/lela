@@ -128,6 +128,36 @@ impl Serving {
     }
 }
 
+/// `EX(prev_execute_data)` as far as a diagnostic reads it: the frame
+/// that was php's `EG(current_execute_data)` when this one was pushed,
+/// where that is user code, which php's `zend_missing_arg_error` and
+/// `zend_verify_arg_error` test with `ZEND_USER_CODE(ptr->func->common.type)`
+/// and `ZEND_ARG_USES_STRICT_TYPES()` reads the regime of; and whether
+/// an opline of it pushed the call or the call was served from outside
+/// the loop, which a backtrace's fake include row reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Caller {
+    /// An opline of that frame pushed the call: a `DO_*CALL`, an include.
+    Opline(FrameRef),
+    /// Served from outside the loop, `zend_call_function`, while the
+    /// loop stood in that frame with no native above it: an error
+    /// handler, an autoloader or a magic method a handler reached.
+    Loop(FrameRef),
+    /// Served from outside the loop with no user code current: by a
+    /// native, by `serve` itself, or a generator resumed.
+    Outside,
+}
+
+impl Caller {
+    /// The user frame php's `prev_execute_data` is, if it is one.
+    pub(crate) fn frame(self) -> Option<FrameRef> {
+        match self {
+            Caller::Opline(frame) | Caller::Loop(frame) => Some(frame),
+            Caller::Outside => None,
+        }
+    }
+}
+
 /// One frame's engine state.
 pub(crate) struct FrameState {
     /// The unit being served, shared with every other request serving it
@@ -145,15 +175,9 @@ pub(crate) struct FrameState {
     /// The caller's slot for what this frame returns, when the call that
     /// pushed it wants the value.
     pub(crate) returns_to: Option<(FrameRef, u32)>,
-    /// `EX(prev_execute_data)` as far as a diagnostic reads it: the
-    /// frame whose opline pushed the call, and `None` for the frame
-    /// `serve` pushed and for one a native re-entered the loop on
-    /// ([`Request::serve_call`]), which php's `zend_missing_arg_error`
-    /// and `zend_verify_arg_error` both test with
-    /// `ZEND_USER_CODE(ptr->func->common.type)`. Every frame here
-    /// serves user code, so the caller standing is the whole of that
-    /// test.
-    pub(crate) caller: Option<FrameRef>,
+    /// `EX(prev_execute_data)` as far as a diagnostic reads it
+    /// ([`Caller`]).
+    pub(crate) caller: Caller,
     /// `EX(This)` as an object: the receiver of a method call, one owner
     /// the frame holds until it is popped (`ZEND_CALL_RELEASE_THIS`);
     /// none for the main op array, a function or a method declared `static`.
@@ -568,7 +592,7 @@ impl Vm {
     /// writes it (`i_init_func_execute_data`), which is what a read of
     /// a CV warns of.
     pub(crate) fn push(&mut self, unit: Arc<Unit>) {
-        self.push_body(unit, Body::Main, None, None, None, 0, None, None);
+        self.push_body(unit, Body::Main, None, None, None, 0, None, Caller::Outside);
     }
 
     /// Push the state of a frame serving `body` of `unit`: the function
@@ -587,7 +611,7 @@ impl Vm {
         called_scope: Option<ClassId>,
         num_args: u32,
         returns_to: Option<(FrameRef, u32)>,
-        caller: Option<FrameRef>,
+        caller: Caller,
     ) {
         let runtime_cache = body_of(&unit, body).map_or(MapPtr::new(0), runtime_cache_of);
         let calls_below = u32::try_from(self.calls.len()).unwrap_or(u32::MAX);

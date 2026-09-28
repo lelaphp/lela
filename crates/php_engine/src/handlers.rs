@@ -3294,7 +3294,7 @@ fn enter(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
     let passed = call.arguments.len();
-    let callee = req.push_user_frame(function, call, returns_to, Some(frame))?;
+    let callee = req.push_user_frame(function, call, returns_to, exec::Caller::Opline(frame))?;
     let Some(serving) = req.vm().serving(callee) else {
         return Err(Fatal::Error(String::from(
             "InternalError: the frame just pushed is serving no op array",
@@ -4100,6 +4100,28 @@ pub(crate) fn callable_convert<T: Tier>(
 /// f(): Argument #1 ($a) must be of type int, string given, called in %s on line 3
 /// f(): Argument #1 ($a) must be of type int, string given
 /// ```
+///
+/// A function served from outside the loop while the loop stood in
+/// user code with no native above it, an error handler a handler's
+/// warning reached or an autoloader a class fetch reached, names that
+/// frame as its call site and verifies under its regime, since php's
+/// `prev_execute_data` is the frame `EG(current_execute_data)` was; one
+/// a native served names none ([`exec::Caller`]).
+///
+/// ```php
+/// declare(strict_types=1);
+/// set_error_handler(function (string $no, string $m) { return true; });
+/// try { echo $u; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// set_error_handler(null);
+/// try { array_map(function (int $x) {}, ["a"]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// spl_autoload_register(function (int $c) {});
+/// try { new Nope; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// {closure:%s:3}(): Argument #1 ($no) must be of type string, int given, called in %s on line 4
+/// {closure:%s:6}(): Argument #1 ($x) must be of type int, string given
+/// {closure:%s:7}(): Argument #1 ($c) must be of type int, string given, called in %s on line 8
+/// ```
 fn arg_type_error(
     req: &mut Request,
     frame: FrameRef,
@@ -4148,7 +4170,7 @@ fn arg_type_error(
 /// `zend_verify_arg_error` drop the clause that names the call site
 /// where this is nothing.
 fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
-    let caller = req.vm().at(frame)?.caller?;
+    let caller = req.vm().at(frame)?.caller.frame()?;
     let caller = req.vm().at(caller)?;
     Some((
         exec::body_of(&caller.unit, caller.body)
@@ -20344,7 +20366,7 @@ mod tests {
                 coerced: Vec::new(),
             };
             let frame = req
-                .push_user_frame(f, state, None, Some(main))
+                .push_user_frame(f, state, None, crate::exec::Caller::Opline(main))
                 .unwrap_or(main);
             assert_eq!(
                 init_fcall_by_name::<Nop>(&mut req, frame, &code, &init),

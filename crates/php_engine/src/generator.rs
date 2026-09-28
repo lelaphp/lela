@@ -605,7 +605,7 @@ fn push(req: &mut Request, generator: PhpObject) -> Option<FrameRef> {
         mut state,
         calls,
     } = *suspended;
-    state.caller = None;
+    state.caller = crate::exec::Caller::Outside;
     let frame = req.stack_mut().resume_frame(slots);
     req.vm_mut().resume(state, calls);
     Some(frame)

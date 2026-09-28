@@ -2479,7 +2479,7 @@ impl Request {
             called_scope,
             0,
             returns_to,
-            Some(caller),
+            exec::Caller::Opline(caller),
         );
         if let Some(state) = self.vm.at_mut(frame) {
             state.scope = scope;
@@ -2543,7 +2543,7 @@ impl Request {
         function: Function,
         call: exec::CallState,
         returns_to: Option<(FrameRef, u32)>,
-        caller: Option<FrameRef>,
+        caller: exec::Caller,
     ) -> Result<FrameRef, Fatal> {
         let no_body = || {
             Fatal::Error(String::from(
@@ -3407,7 +3407,10 @@ impl Request {
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
-        let pushed = self.push_user_frame(function, call, None, None);
+        let caller = self
+            .current_user_frame()
+            .map_or(exec::Caller::Outside, exec::Caller::Loop);
+        let pushed = self.push_user_frame(function, call, None, caller);
         let frame = self.fatal_of(pushed)?;
         // `enter`'s own prologue, so a body reached from here stands
         // where a body reached from `DO_UCALL` stands: every `RECV*`
@@ -5118,7 +5121,7 @@ impl Request {
                     // include's own row, whose argument is php's
                     // `include_filename`, the site of the row before the
                     // function's, and none where it is the first.
-                    if state.caller.is_none()
+                    if !matches!(state.caller, exec::Caller::Opline(_))
                         && let Some(kind) = including(at)
                     {
                         let file = (kind != IncludeKind::Eval)
@@ -12984,16 +12987,24 @@ impl Request {
     /// innermost frame's own file, where the write a handler table makes
     /// on an opcode's behalf stands.
     pub(crate) fn property_strict_types(&self) -> bool {
-        let Some(innermost) = self.vm.innermost() else {
-            return false;
-        };
+        self.current_user_frame()
+            .and_then(|frame| self.vm.at(frame))
+            .is_some_and(crate::exec::strict_types_of)
+    }
+
+    /// `EG(current_execute_data)` where it is user code: the innermost
+    /// frame, and nothing while a native is being served above it or
+    /// no frame stands.
+    pub(crate) fn current_user_frame(&self) -> Option<FrameRef> {
+        let innermost = self.vm.innermost()?;
         let floor = usize::try_from(innermost.calls_below).unwrap_or(usize::MAX);
         let serving = self.vm.calls().get(floor..).is_some_and(|above| {
             above
                 .iter()
                 .any(|call| call.stage == exec::CallStage::Serving)
         });
-        !serving && crate::exec::strict_types_of(innermost)
+        let at = self.vm.frames().len().checked_sub(1)?;
+        (!serving).then(|| FrameRef(u32::try_from(at).unwrap_or(u32::MAX)))
     }
 
     /// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`):
@@ -13006,7 +13017,7 @@ impl Request {
     pub(crate) fn caller_strict_types(&self, frame: FrameRef) -> bool {
         self.vm
             .at(frame)
-            .and_then(|state| state.caller)
+            .and_then(|state| state.caller.frame())
             .is_some_and(|caller| self.frame_strict_types(caller))
     }
 
