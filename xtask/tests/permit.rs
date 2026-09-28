@@ -2454,7 +2454,10 @@ fn probe(with: impl FnOnce(&mut Rule)) -> Manifest {
 
 fn denied(manifest: &Manifest, root: &Path, line: &str) -> bool {
     let judged = judge(manifest, root, &bash(line)).unwrap();
-    judged.denial().is_some_and(|f| f.rule == "probe.phpt")
+    judged
+        .findings
+        .iter()
+        .any(|f| f.rule == "probe.phpt" && f.kind == Kind::Deny)
 }
 
 /// `where = "ticketed"` (#1149): the rule judges a call in a checkout
@@ -2509,4 +2512,27 @@ fn unless_pattern_allows_a_call_its_deny_pattern_matches() {
         refused.contains("`unless_pattern` beside `deny`"),
         "{refused}"
     );
+}
+
+/// `lanes.builder-subset`'s fixture (#1145, #1149): in a checkout whose
+/// branch records a ticket the lane without `--subset` is denied, and the
+/// subsets, an extension's and Zend/tests, pass; the merge check's call
+/// passes in a checkout that records none, and is denied in one that
+/// does, so it is `where` that lets it through.
+#[test]
+fn the_builder_subset_rule_denies_the_lane_in_a_ticketed_checkout_alone() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let dir = fixtures().join("rules/lanes.builder-subset");
+    let ticketed = checkout("builder-subset-ticketed", Some(1145));
+    let main = checkout("builder-subset-main", None);
+    let rule = |root: &Path, file: &str| {
+        let judged = judge(&manifest, root, &call(&dir.join(file))).unwrap();
+        judged.denial().map(|f| f.rule.clone())
+    };
+    let denied = Some("lanes.builder-subset".to_owned());
+    assert_eq!(rule(ticketed.path(), "deny.json"), denied);
+    assert_eq!(rule(ticketed.path(), "allow.json"), None);
+    assert_eq!(rule(ticketed.path(), "allow-zend.json"), None);
+    assert_eq!(rule(main.path(), "allow-main.json"), None);
+    assert_eq!(rule(ticketed.path(), "allow-main.json"), denied);
 }

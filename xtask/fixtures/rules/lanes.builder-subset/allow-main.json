@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask phpt --census --against e7f3b27a","description":"The merge check over main"}}
