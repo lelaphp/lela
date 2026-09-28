@@ -3219,10 +3219,14 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
             req.addref(value);
             Ok(*value)
         }
-        ValueRef::Array(_)
-        | ValueRef::Resource(_)
-        | ValueRef::Object(_)
-        | ValueRef::Reference(_) => {
+        ValueRef::Object(&o) => {
+            if let Some(number) = object_number(req, o)? {
+                return increment(req, &number);
+            }
+            let name = value_name(req, value);
+            Err(throw(req, "TypeError", &format!("Cannot increment {name}")))
+        }
+        ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => {
             let name = value_name(req, value);
             Err(throw(req, "TypeError", &format!("Cannot increment {name}")))
         }
@@ -3336,10 +3340,14 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
             req.addref(value);
             Ok(*value)
         }
-        ValueRef::Array(_)
-        | ValueRef::Resource(_)
-        | ValueRef::Object(_)
-        | ValueRef::Reference(_) => {
+        ValueRef::Object(&o) => {
+            if let Some(number) = object_number(req, o)? {
+                return decrement(req, &number);
+            }
+            let name = value_name(req, value);
+            Err(throw(req, "TypeError", &format!("Cannot decrement {name}")))
+        }
+        ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => {
             let name = value_name(req, value);
             Err(throw(req, "TypeError", &format!("Cannot decrement {name}")))
         }
@@ -4789,6 +4797,30 @@ fn modular(d: f64) -> i64 {
     (dmod as u64) as i64
 }
 
+/// The object's `cast_object` to `_IS_NUMBER`, an int or a float value,
+/// or none where its class converts to no number: what
+/// `increment_function` and `decrement_function` step in the object's
+/// place, as `zendi_try_convert_scalar_to_number` reads it for the other
+/// operators.
+///
+/// ```php
+/// $e = simplexml_load_string('<r><a>1</a><b>2.5</b></r>');
+/// $e->a++; $e->b--; $n = $e->a; $n++;
+/// var_dump((string) $e->a, (string) $e->b, $n);
+/// try { $o = new stdClass; $o++; } catch (TypeError $t) { echo $t->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "2"
+/// string(3) "1.5"
+/// int(3)
+/// Cannot increment stdClass
+/// ```
+fn object_number(req: &mut Request, object: PhpObject) -> Result<Option<Value>, Thrown> {
+    let table = req.object_handlers(object.heap());
+    let converted = table.cast_object(req, object, TypeTag::Number)?;
+    Ok(converted.filter(|c| matches!(c.as_ref(), ValueRef::Int(_) | ValueRef::Float(_))))
+}
+
 /// `zendi_try_convert_scalar_to_number`: the number php works in, or
 /// nothing for an array, a resource or an object whose class converts
 /// to no number, which is the failure `zend_binop_error` reports; what
@@ -4828,9 +4860,7 @@ fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown>
         return Ok(Some(Number::Long(i64::from(b))));
     }
     if let Some(o) = value.as_object().copied() {
-        let table = req.object_handlers(o.heap());
-        let converted = table.cast_object(req, o, TypeTag::Number)?;
-        return Ok(converted.and_then(|c| match c.as_ref() {
+        return Ok(object_number(req, o)?.and_then(|c| match c.as_ref() {
             ValueRef::Int(n) => Some(Number::Long(n)),
             ValueRef::Float(d) => Some(Number::Double(d)),
             _ => None,
