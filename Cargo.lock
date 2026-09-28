@@ -426,6 +426,7 @@ dependencies = [
  "php_ext",
  "php_ext_bcmath",
  "php_ext_bz2",
+ "php_ext_calendar",
  "php_ext_ctype",
  "php_ext_curl",
  "php_ext_date",
@@ -500,6 +501,13 @@ dependencies = [
  "libbz2-rs-sys",
  "php_ext",
  "php_ext_standard",
+]
+
+[[package]]
+name = "php_ext_calendar"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
 ]
 
 [[package]]

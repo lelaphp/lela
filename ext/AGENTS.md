@@ -13,6 +13,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 .
 ├── bcmath
 ├── bz2
+├── calendar
 ├── ctype
 ├── curl
 ├── date
@@ -44,7 +45,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── uri
 └── zlib
 ```
-<!-- /computed in=871a97aee6e2818f775add2343064e0d68e119a7fc54ce94cae1ef3f1feb3cef out=4c27d653750c939d8c6208c160514a173c2f11a6b968bfb9e4679cd8679ea9c1 -->
+<!-- /computed in=3b3cafa4ffe272b547669da9e4c2996af3c95dc63237a7f24acd661a7260ee19 out=3ecef294552d8f6597dc787db93fe2a97b74ed4682848b259d790a96029bf0a8 -->
 
 <!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
 
