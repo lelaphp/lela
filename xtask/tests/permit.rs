@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use xtask::divergence::Registry;
-use xtask::manifest::{Manifest, OneOrMany, Rule};
+use xtask::manifest::{Manifest, OneOrMany, Rule, Where};
 use xtask::oracle::Promise;
 use xtask::permit::{Call, Kind, judge, judged_at_the_call};
 use xtask::reading::{Reading, Status, Store};
@@ -42,9 +42,16 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
         "{:?}",
         judged.iter().map(|r| &r.id).collect::<Vec<_>>()
     );
+    // A rule scoped by `where` is judged in a checkout whose branch
+    // records a ticket, which the tree the tests run in need not be.
+    let ticketed = checkout("fixtures-ticketed", Some(1));
     for rule in judged {
         let dir = fixtures().join("rules").join(&rule.id);
         let kind = Kind::of(rule);
+        let workspace = || match rule.within {
+            Where::Anywhere => workspace(),
+            Where::Ticketed => ticketed.path(),
+        };
         let fires = dir.join(match kind {
             Kind::Deny => "deny.json",
             Kind::Note => "note.json",
@@ -2404,4 +2411,102 @@ fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
         String::from_utf8(out.stdout).unwrap(),
         String::from_utf8(out.stderr).unwrap(),
     )
+}
+
+// ------------------------------------------ `where` and `unless_pattern`
+
+/// A scratch checkout whose branch records `ticket` as `xtask worktree
+/// add --ticket` writes it, or records none, as main's checkout.
+fn checkout(name: &str, ticket: Option<u32>) -> Tree {
+    let dir = scratch(name);
+    if let Some(ticket) = ticket {
+        let head = Command::new("git")
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let key = format!(
+            "branch.{}.ticket",
+            String::from_utf8_lossy(&head.stdout).trim()
+        );
+        let set = Command::new("git")
+            .args(["config", &key, &ticket.to_string()])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(set.success(), "git config {key}");
+    }
+    dir
+}
+
+/// A `Bash` rule denying `xtask phpt`, with its qualifiers set by `with`.
+fn probe(with: impl FnOnce(&mut Rule)) -> Manifest {
+    let mut manifest = Manifest::load(workspace()).unwrap();
+    let mut rule = Rule::named("probe.phpt", "");
+    rule.scope = OneOrMany::None;
+    rule.tool = OneOrMany::One("Bash".to_owned());
+    rule.predicate.deny = None;
+    rule.predicate.deny_pattern = Some(r"xtask\s+phpt\b".to_owned());
+    with(&mut rule);
+    manifest.rules.push(rule);
+    manifest
+}
+
+fn denied(manifest: &Manifest, root: &Path, line: &str) -> bool {
+    let judged = judge(manifest, root, &bash(line)).unwrap();
+    judged.denial().is_some_and(|f| f.rule == "probe.phpt")
+}
+
+/// `where = "ticketed"` (#1149): the rule judges a call in a checkout
+/// whose branch records a ticket, a builder's worktree, and not one in a
+/// checkout that records none, main's, where the merge check runs; a
+/// leading `cd` moves the call to the checkout it names.
+#[test]
+fn a_rule_where_ticketed_judges_only_a_checkout_whose_branch_records_a_ticket() {
+    let manifest = probe(|rule| rule.within = Where::Ticketed);
+    let ticketed = checkout("where-ticketed", Some(1149));
+    let main = checkout("where-main", None);
+    let line = "cargo xtask phpt --census";
+    assert!(denied(&manifest, ticketed.path(), line));
+    assert!(!denied(&manifest, main.path(), line));
+    let moved = format!("cd {} && {line}", ticketed.path().display());
+    assert!(denied(&manifest, main.path(), &moved));
+    let moved = format!("cd {} && {line}", main.path().display());
+    assert!(!denied(&manifest, ticketed.path(), &moved));
+    // Without `where`, both.
+    let manifest = probe(|_| {});
+    assert!(denied(&manifest, main.path(), line));
+}
+
+/// `unless_pattern` (#1149): a hit of the `deny_pattern` whose own command
+/// also matches it is let through, and a hit in another command of the
+/// same line is not.
+#[test]
+fn unless_pattern_allows_a_call_its_deny_pattern_matches() {
+    let manifest = probe(|rule| rule.predicate.unless_pattern = Some("--subset".to_owned()));
+    let root = workspace();
+    assert!(denied(&manifest, root, "cargo xtask phpt --census"));
+    assert!(!denied(
+        &manifest,
+        root,
+        "cargo xtask phpt --subset ext/zlib"
+    ));
+    assert!(!denied(
+        &manifest,
+        root,
+        "cargo xtask phpt --census --subset Zend/tests; echo ok"
+    ));
+    assert!(denied(
+        &manifest,
+        root,
+        "cargo xtask phpt --subset ext/zlib && cargo xtask phpt"
+    ));
+    // The row that carries one without a `deny_pattern` is refused.
+    let text = std::fs::read_to_string(workspace().join("seams.toml")).unwrap()
+        + "\n[[rule]]\nid = \"orphan\"\ntool = \"Bash\"\ndeny = true\nunless_pattern = \"x\"\ntext = \"t\"\n";
+    let refused = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(
+        refused.contains("`unless_pattern` beside `deny`"),
+        "{refused}"
+    );
 }
