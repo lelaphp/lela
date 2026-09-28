@@ -1659,6 +1659,9 @@ fn evaluate_node(
             req.class_constant(id, &case.0)
         }
         ConstExpr::ClassName { class, .. } => class_name_node(req, &class.0, scope),
+        ConstExpr::Closure { .. }
+        | ConstExpr::FunctionCallable { .. }
+        | ConstExpr::MethodCallable { .. } => callable_node(req, expr, scope),
         // `zend_ast_evaluate`'s `ZEND_AST_CONSTANT_CLASS` arm.
         ConstExpr::ScopeClass => {
             let name = scope
@@ -1720,7 +1723,7 @@ fn evaluate_node(
         ConstExpr::New {
             class, arguments, ..
         } => construct(req, &class.0, arguments, scope),
-        _ => Err(invalid_operations(req)),
+        ConstExpr::Unpack(_) => Err(invalid_operations(req)),
     }
 }
 
@@ -2163,6 +2166,202 @@ fn class_constant_expr(
         scope,
         crate::api::request::ConstantFetch::Lookup,
     )
+}
+
+/// The three nodes of a constant expression that evaluate to a
+/// `Closure` (8.5): `ZEND_AST_OP_ARRAY`, `zend_create_closure(result,
+/// func, scope, scope, NULL)` over the unit's function, and the
+/// first-class callables of `ZEND_AST_CALL` and `ZEND_AST_STATIC_CALL`.
+fn callable_node(
+    req: &mut Request,
+    expr: &ConstExpr,
+    scope: Option<ClassId>,
+) -> Result<Value, Thrown> {
+    match expr {
+        ConstExpr::Closure { at, unit, .. } => {
+            let Some(unit) = unit.unit() else {
+                return Err(crate::api::raising::fatal(
+                    req,
+                    "InternalError: a constant expression's closure whose unit was never published",
+                ));
+            };
+            crate::classes::const_expr_closure(req, &unit, *at, scope).map(|made| made.as_value())
+        }
+        ConstExpr::FunctionCallable {
+            name,
+            name_kind,
+            at,
+            unit,
+            ..
+        } => function_callable(req, name, *name_kind, (unit, *at)),
+        ConstExpr::MethodCallable { class, method, .. } => {
+            method_callable(req, class, method, scope)
+        }
+        _ => Err(invalid_operations(req)),
+    }
+}
+
+/// `zend_ast_evaluate`'s `ZEND_AST_CALL` arm over `name(...)`: the
+/// function the node found earlier in the request, else the one the
+/// lowered name finds, and for a name not written fully qualified the
+/// global one its last segment names where the namespaced one is none,
+/// kept for the node's next evaluation; php's `Error` where neither is;
+/// then `zend_create_fake_closure` over it, with no called scope. What
+/// a node found once it keeps, so a namespaced function declared later
+/// in the request does not take a fallback's place.
+///
+/// ```php
+/// namespace N;
+/// function mine($s) { return "mine $s"; }
+/// const A = strrev(...);
+/// const B = \strrev(...);
+/// const C = mine(...);
+/// var_dump((A)('ab'), (B)('cd'), (C)('x'));
+/// #[\Attribute] class At { public function __construct(public \Closure $c) {} }
+/// #[At(strtoupper(...))] class U {}
+/// var_dump(((new \ReflectionClass(U::class))->getAttributes()[0]->newInstance()->c)('attr'));
+/// class Z { const D = nope(...); }
+/// try { Z::D; } catch (\Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(2) "ba"
+/// string(2) "dc"
+/// string(6) "mine x"
+/// string(4) "ATTR"
+/// Call to undefined function N\nope()
+/// ```
+///
+/// ```php
+/// namespace N;
+/// function f($c = strrev(...)) { return $c('ab'); }
+/// echo f(), "\n";
+/// if (true) { function strrev($s) { return 'mine'; } }
+/// echo f(), " ", strrev('ab'), "\n";
+/// ```
+/// ```expect
+/// ba
+/// ba mine
+/// ```
+fn function_callable(
+    req: &mut Request,
+    name: &Name,
+    name_kind: php_unit::decl::NameKind,
+    (unit, at): (&php_unit::UnitCell, u32),
+) -> Result<Value, Thrown> {
+    if let Some(function) = req.kept_callable(unit, at) {
+        let frame = crate::classes::CallFrame::Callee {
+            function,
+            this: None,
+            called_scope: None,
+        };
+        return crate::classes::closure_from_frame(req, frame).map(|made| made.as_value());
+    }
+    let lowered = name.0.to_ascii_lowercase();
+    let found = req.function_named(&lowered).or_else(|| {
+        if name_kind == php_unit::decl::NameKind::FullyQualified {
+            return None;
+        }
+        let at = lowered.iter().rposition(|b| *b == b'\\')?;
+        req.function_named(&lowered[at + 1..])
+    });
+    let Some(function) = found else {
+        return Err(throw(
+            req,
+            "Error",
+            &format!(
+                "Call to undefined function {}()",
+                String::from_utf8_lossy(&name.0)
+            ),
+        ));
+    };
+    req.keep_callable(unit, at, function);
+    let frame = crate::classes::CallFrame::Callee {
+        function,
+        this: None,
+        called_scope: None,
+    };
+    crate::classes::closure_from_frame(req, frame).map(|made| made.as_value())
+}
+
+/// `zend_ast_evaluate`'s `ZEND_AST_STATIC_CALL` arm over
+/// `Class::method(...)`: the class fetched in the evaluating scope, the
+/// method the lowered name finds where that scope may call it, an
+/// instance method, an abstract one and a trait's each refused as php
+/// refuses them, a class with `__callStatic` refused in the words 8.5
+/// has for a constant expression; then `zend_create_fake_closure` over
+/// the method with the class as its called scope.
+///
+/// ```php
+/// class A {
+///     public static function make() { return static::class; }
+///     private static function hidden() { return 'hidden'; }
+///     public function inst() {}
+///     const M = self::make(...);
+///     const H = self::hidden(...);
+/// }
+/// class B extends A { const N = parent::make(...); const I = A::inst(...); const J = A::hidden(...); }
+/// var_dump((A::M)(), (B::N)(), (A::H)());
+/// try { B::I; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { B::J; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "A"
+/// string(1) "A"
+/// string(6) "hidden"
+/// Non-static method A::inst() cannot be called statically
+/// Call to private method A::hidden() from scope B
+/// ```
+fn method_callable(
+    req: &mut Request,
+    class: &Name,
+    method: &Name,
+    scope: Option<ClassId>,
+) -> Result<Value, Thrown> {
+    let ce = const_class(req, &class.0, scope)?;
+    let lowered = method.0.to_ascii_lowercase();
+    let magic = req.method_named(ce, b"__callstatic").is_some();
+    let magic_refused = |req: &mut Request| {
+        throw(
+            req,
+            "Error",
+            "Creating a callable for the magic __callStatic() method is not supported in constant expressions",
+        )
+    };
+    let found = req.method_named(ce, &lowered);
+    let reached = found.is_some_and(|function| req.method_accessible_from(function, scope));
+    if magic && !reached {
+        return Err(magic_refused(req));
+    }
+    let Some(function) = found else {
+        let shown = req.class_name(ce);
+        return Err(throw(
+            req,
+            "Error",
+            &format!(
+                "Call to undefined method {shown}::{}()",
+                String::from_utf8_lossy(&method.0)
+            ),
+        ));
+    };
+    req.check_method_access_from(function, &method.0, scope)?;
+    if req
+        .method_decl(function)
+        .is_some_and(|decl| decl.is_instance)
+    {
+        let shown = req.qualified_name_of(function);
+        return Err(throw(
+            req,
+            "Error",
+            &format!("Non-static method {shown}() cannot be called statically"),
+        ));
+    }
+    req.static_method_found(function)?;
+    let frame = crate::classes::CallFrame::Callee {
+        function,
+        this: None,
+        called_scope: Some(ce),
+    };
+    crate::classes::closure_from_frame(req, frame).map(|made| made.as_value())
 }
 
 /// `zend_fetch_class_with_scope` under `ZEND_FETCH_CLASS_EXCEPTION`, the

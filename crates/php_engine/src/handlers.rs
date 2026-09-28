@@ -20361,7 +20361,7 @@ mod tests {
             ..Unit::default()
         };
         crate::engine::assign_map_ptrs(&mut unit, &engine.shared.map_ptr_last);
-        Arc::new(unit)
+        unit.published()
     }
 
     /// The runtime cache is the op array's for the request and not the

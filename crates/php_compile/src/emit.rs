@@ -514,6 +514,12 @@ pub(crate) struct Emit<'a> {
     /// made them. A slot is taken before the body compiles, as php takes
     /// its offset there, and filled when it has.
     dynamic: Vec<Option<(FunctionDecl, OpArray)>>,
+    /// [`Unit::cell`]: the one cell every closure of the file's constant
+    /// expressions holds a share of ([`ConstExpr::Closure`]).
+    cell: php_unit::UnitCell,
+    /// How many `name(...)` of the file's constant expressions were
+    /// compiled, each one's number in [`ConstExpr::FunctionCallable`].
+    function_callables: u32,
     /// `op_array->dynamic_func_defs` of the op array being compiled:
     /// which entries of [`Emit::dynamic`] it declares, in the order a
     /// `DECLARE_FUNCTION`'s `op2` indexes them.
@@ -1207,6 +1213,8 @@ pub(crate) fn unit(
         keys_before: options.keys_before,
         functions_declared: Vec::new(),
         dynamic: Vec::new(),
+        cell: php_unit::UnitCell::default(),
+        function_callables: 0,
         dynamic_func_defs: Vec::new(),
         static_vars: Vec::new(),
         fold: Fold::Compile,
@@ -1263,6 +1271,7 @@ pub(crate) fn unit(
         runtime_keys: emit.runtime_keys,
         constants: emit.attributed_constants,
         halt_offset: emit.halted,
+        cell: emit.cell,
     })
 }
 
@@ -7154,6 +7163,8 @@ impl Emit<'_> {
                 })
             }
             tree::Expr::NewExpr(id) => self.const_new(id),
+            tree::Expr::ClosureExpr(_) => self.const_closure(expr, line),
+            tree::Expr::CallExpr(id) => self.const_callable(id, line),
             // `zend_is_allowed_in_const_expr` refuses these in php's
             // words: a variable, a call, an assignment, an increment,
             // `@`, `throw`, `include`, `isset` and an interpolated
@@ -7162,7 +7173,7 @@ impl Emit<'_> {
             | tree::Expr::VarVarExpr(_)
             | tree::Expr::DynamicVarExpr(_)
             | tree::Expr::AssignExpr(_)
-            | tree::Expr::CallExpr(_)
+            | tree::Expr::ArrowFnExpr(_)
             | tree::Expr::CloneExpr(_)
             | tree::Expr::ExitExpr(_)
             | tree::Expr::PrefixIncDecExpr(_)
@@ -7301,6 +7312,232 @@ impl Emit<'_> {
             class: Name(class.into_boxed_slice()),
             arguments,
             line: class_line,
+        })
+    }
+
+    /// `zend_compile_const_expr_closure` (`Z/Zend/zend_compile.c:11481`,
+    /// 8.5): a closure in a constant expression is `static` and binds
+    /// no variable, each php's compile-time fatal where it is not, and
+    /// is compiled as `zend_compile_func_decl` compiles one at
+    /// `FUNC_DECL_LEVEL_CONSTEXPR`: a function of the unit named as
+    /// every closure is, which no op array declares and no opline
+    /// makes, kept in the tree for the engine to make a closure of in
+    /// the scope that evaluates it.
+    ///
+    /// ```php
+    /// const G = static function (int $x): int { return $x + 1; };
+    /// var_dump((G)(1), G instanceof Closure);
+    /// #[Attribute] class A { public function __construct(public Closure $c) {} }
+    /// #[A(static function () { return 'attr'; })] class U {}
+    /// var_dump(((new ReflectionClass('U'))->getAttributes()[0]->newInstance()->c)());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// bool(true)
+    /// string(4) "attr"
+    /// ```
+    ///
+    /// ```php
+    /// const F = function () {};
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Closures in constant expressions must be static in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// const F = static function () use ($x) {};
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use(...) variables in constant expression in %s on line 2
+    /// ```
+    fn const_closure(&mut self, expr: tree::Expr, line: u32) -> Result<ConstExpr, CompileError> {
+        let closure = self.walk_closure(expr, line)?;
+        if !closure.is_static {
+            return Err(self.compile_error("Closures in constant expressions must be static"));
+        }
+        if !closure.uses.is_empty() {
+            return Err(self.compile_error("Cannot use(...) variables in constant expression"));
+        }
+        let name = self.closure_name(closure.function.line);
+        let at = u32::try_from(self.dynamic.len()).unwrap_or(u32::MAX);
+        self.dynamic.push(None);
+        let flags = FnFlags {
+            closure: true,
+            is_static: true,
+            ..FnFlags::default()
+        };
+        let saved = self.begin_body(&name, false, flags);
+        let outcome = self.parameters_and_body(&closure.function, &name, None, &[], None);
+        self.end_body(saved);
+        if let Some(slot) = self.dynamic.get_mut(at as usize) {
+            *slot = Some(outcome?);
+        }
+        Ok(ConstExpr::Closure {
+            at,
+            name: Name(name.into_boxed_slice()),
+            unit: self.cell.clone(),
+        })
+    }
+
+    /// `zend_compile_const_expr_fcc` (`Z/Zend/zend_compile.c:11501`,
+    /// 8.5): a call in a constant expression is a first-class callable,
+    /// `f(...)` or `C::m(...)`, and any other call php's `Constant
+    /// expression contains invalid operations`. The function is named
+    /// as written, resolved as a call resolves it and marked fully
+    /// qualified where no global fallback applies; a name the program
+    /// computes, and a value that is no string, are php's fatals. The
+    /// class is a name, `self` or `parent`, never `static` nor one the
+    /// program computes, and the method a name as written.
+    ///
+    /// ```php
+    /// function f($cb = strlen(...), $up = strtoupper(...)) { return [$cb('abc'), $up('x')]; }
+    /// var_dump(f());
+    /// class C { static function m() { return 'm'; } const M = C::m(...); const N = C::{'m'}(...); }
+    /// var_dump((C::M)(), (C::N)());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(3)
+    ///   [1]=>
+    ///   string(1) "X"
+    /// }
+    /// string(1) "m"
+    /// string(1) "m"
+    /// ```
+    ///
+    /// ```php
+    /// const F = strlen('x');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Constant expression contains invalid operations in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// const F = (0)(...);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Illegal function name in %s on line 2
+    /// ```
+    fn const_callable(
+        &mut self,
+        id: NodeId<tree::CallExpr>,
+        line: u32,
+    ) -> Result<ConstExpr, CompileError> {
+        let (callee, args) = (self.parsed.tree[id].callee, self.parsed.tree[id].args);
+        if !matches!(self.arguments(args, line)?, Args::CallableConvert) {
+            return Err(self.compile_error("Constant expression contains invalid operations"));
+        }
+        // php's parser drops the parentheses around a callee, so what
+        // they hold is the node itself: `(C)(...)` a constant's fetch,
+        // which is no name, and `('f')(...)` a value it wrote.
+        let peeled = self.peel(callee);
+        let named = matches!(callee, tree::Expr::NameRef(_));
+        match peeled {
+            // `ZEND_AST_METHOD_CALL` and `ZEND_AST_NULLSAFE_METHOD_CALL`
+            // are none of the nodes `zend_is_allowed_in_const_expr` allows.
+            tree::Expr::MemberAccessExpr(_) => {
+                Err(self.compile_error("Constant expression contains invalid operations"))
+            }
+            tree::Expr::NameRef(name) if named => {
+                let written = self.text(name).to_vec();
+                let (resolved, fully_qualified) =
+                    self.resolve_non_class(&written, Symbol::Function);
+                let name_kind = if fully_qualified {
+                    NameKind::FullyQualified
+                } else {
+                    NameKind::NotFullyQualified
+                };
+                Ok(self.function_callable(resolved, name_kind, line))
+            }
+            // `name_ast->kind == ZEND_AST_ZVAL`: a value the parser
+            // wrote, which names the function where it is a string and
+            // is php's fatal where it is not; the string is no name
+            // written and carries `ZEND_NAME_FQ`.
+            written if self.is_written_value(written) => {
+                let value = self.constant_of(written)?;
+                let Some(text) = value.and_then(php_heap::Zval::as_str) else {
+                    return Err(self.compile_error("Illegal function name"));
+                };
+                Ok(self.function_callable(text.bytes().to_vec(), NameKind::FullyQualified, line))
+            }
+            tree::Expr::ScopedAccessExpr(scoped) => self.const_method_callable(scoped, line),
+            _ => Err(self.compile_error("Cannot use dynamic function name in constant expression")),
+        }
+    }
+
+    /// One `name(...)` node, numbered among the unit's.
+    fn function_callable(&mut self, name: Vec<u8>, name_kind: NameKind, line: u32) -> ConstExpr {
+        let at = self.function_callables;
+        self.function_callables = self.function_callables.saturating_add(1);
+        ConstExpr::FunctionCallable {
+            name: Name(name.into_boxed_slice()),
+            name_kind,
+            line,
+            at,
+            unit: self.cell.clone(),
+        }
+    }
+
+    /// [`Self::const_callable`]'s `ZEND_AST_STATIC_CALL` arm, over
+    /// `zend_compile_const_expr_class_reference`.
+    fn const_method_callable(
+        &mut self,
+        scoped: NodeId<tree::ScopedAccessExpr>,
+        line: u32,
+    ) -> Result<ConstExpr, CompileError> {
+        let node = &self.parsed.tree[scoped];
+        let (scope, member) = (node.scope, node.member);
+        let class = match self.peel(scope) {
+            tree::Expr::NameRef(token) => self.text(token).to_vec(),
+            tree::Expr::NewExpr(_) => {
+                return Err(self.compile_error("Cannot use anonymous class in constant expression"));
+            }
+            _ => {
+                return Err(
+                    self.compile_error("Cannot use dynamic class name in constant expression")
+                );
+            }
+        };
+        let class = match class_fetch_type(&class) {
+            FETCH_CLASS_STATIC => {
+                return Err(
+                    self.compile_error("\"static\" is not allowed in compile-time constants")
+                );
+            }
+            FETCH_CLASS_DEFAULT => self.resolve_class(&class),
+            _ => class,
+        };
+        let method = match member {
+            Some(tree::ScopedSelector::MemberName(member)) => match self.parsed.tree[member].name {
+                Some(name) => self.text(name).to_vec(),
+                None => return Err(self.unread("a method name")),
+            },
+            Some(tree::ScopedSelector::BracedMember(braced)) => {
+                let written = self.parsed.tree[braced]
+                    .inner
+                    .filter(|inner| self.is_written_value(*inner));
+                let Some(written) = written else {
+                    return Err(
+                        self.compile_error("Cannot use dynamic method name in constant expression")
+                    );
+                };
+                let value = self.constant_of(written)?;
+                let Some(text) = value.and_then(php_heap::Zval::as_str) else {
+                    return Err(self.compile_error("Illegal method name"));
+                };
+                text.bytes().to_vec()
+            }
+            _ => {
+                return Err(
+                    self.compile_error("Cannot use dynamic method name in constant expression")
+                );
+            }
+        };
+        Ok(ConstExpr::MethodCallable {
+            class: Name(class.into_boxed_slice()),
+            method: Name(method.into_boxed_slice()),
+            line,
         })
     }
 
@@ -13845,9 +14082,10 @@ impl Emit<'_> {
                 Err(self.compile_error("Cannot use list() as standalone expression"))
             }
             // `zend_is_allowed_in_const_expr` allows `ZEND_AST_CALL`
-            // for the first-class callable alone, `f(...)`, which this
-            // compiler does not read; the arguments are read before the
-            // callee so that refusal is the one that stands.
+            // for the first-class callable alone, `f(...)`, which folds
+            // to nothing and is kept as the tree
+            // ([`Self::const_callable`]); the arguments are read before
+            // the callee.
             tree::Expr::CallExpr(_) if self.fold == Fold::EvalConstExpr => {
                 Err(self.fatal("a call is no constant expression"))
             }
@@ -13856,7 +14094,7 @@ impl Emit<'_> {
                 let (callee, args) = (node.callee, node.args);
                 let arguments = self.arguments(args, line)?;
                 if let Args::CallableConvert = arguments {
-                    return Err(walk::unread(line, "a first-class callable"));
+                    return Err(self.fatal("a first-class callable folds to no constant"));
                 }
                 let Some(arguments) = arguments.positional() else {
                     return Err(walk::unread(
@@ -17763,6 +18001,8 @@ mod tests {
             keys_before: 0,
             functions_declared: Vec::new(),
             dynamic: Vec::new(),
+            cell: php_unit::UnitCell::default(),
+            function_callables: 0,
             dynamic_func_defs: Vec::new(),
             static_vars: Vec::new(),
             fold: Fold::Compile,

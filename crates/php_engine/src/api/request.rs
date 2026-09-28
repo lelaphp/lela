@@ -1697,6 +1697,12 @@ pub struct Request {
     /// `EG(ticks_count)`: the `ZEND_TICKS` passed since the functions
     /// they serve were last served.
     ticks_count: u32,
+    /// The function each `name(...)` of a constant expression found the
+    /// first time this request evaluated it, php's `zend_ast_fcc.fptr`
+    /// map pointer, by the node's unit and number
+    /// ([`php_unit::decl::ConstExpr::FunctionCallable`]); the cell held
+    /// here keeps the key's identity while the entry stands.
+    function_callables: Vec<(php_unit::UnitCell, u32, Function)>,
     autoloaders: Vec<Callable>,
     /// `EG(in_autoload)`: the lowered names an autoloader is loading.
     in_autoload: Vec<Vec<u8>>,
@@ -2233,6 +2239,7 @@ impl Request {
             shutdown_functions: ShutdownFunctions::default(),
             tick_functions: Vec::new(),
             ticks_count: 0,
+            function_callables: Vec::new(),
             autoloaders: Vec::new(),
             in_autoload: Vec::new(),
             assert_callback: None,
@@ -3998,14 +4005,31 @@ impl Request {
         function: Function,
         written: &[u8],
     ) -> Result<(), Thrown> {
-        if self.method_accessible(function) {
+        let scope = self.executed_scope();
+        self.check_method_access_from(function, written, scope)
+    }
+
+    /// [`Request::check_method_access`] measured against `scope` rather
+    /// than the executed one, as `zend_check_method_accessible(fptr,
+    /// scope)` measures a callable a constant expression names from the
+    /// scope that evaluates it.
+    pub(crate) fn check_method_access_from(
+        &mut self,
+        function: Function,
+        written: &[u8],
+        scope: Option<ClassId>,
+    ) -> Result<(), Thrown> {
+        if self.method_accessible_from(function, scope) {
             return Ok(());
         }
         let shown = visibility_string(self.method_visibility(function));
         let class = self
             .method_class(function)
             .map_or_else(|| String::from("object"), |class| self.class_name(class));
-        let from = self.scope_phrase();
+        let from = match scope {
+            Some(scope) => format!("scope {}", self.class_name(scope)),
+            None => String::from("global scope"),
+        };
         Err(crate::api::raising::throw(
             self,
             "Error",
@@ -13322,7 +13346,11 @@ impl Request {
     /// the scope given rather than read: a private method is its own
     /// class's, a protected one a scope `zend_check_protected` relates
     /// to its class.
-    fn method_accessible_from(&self, function: Function, scope: Option<ClassId>) -> bool {
+    pub(crate) fn method_accessible_from(
+        &self,
+        function: Function,
+        scope: Option<ClassId>,
+    ) -> bool {
         let Some(class) = self.method_class(function) else {
             return true;
         };
@@ -17732,6 +17760,21 @@ impl Request {
             self.release(value);
         }
         Ok(true)
+    }
+
+    /// The function a `name(...)` node found earlier in this request,
+    /// `ZEND_MAP_PTR_GET(fcc_ast->fptr)`.
+    pub(crate) fn kept_callable(&self, unit: &php_unit::UnitCell, at: u32) -> Option<Function> {
+        self.function_callables
+            .iter()
+            .find(|(held, number, _)| held == unit && *number == at)
+            .map(|(_, _, function)| *function)
+    }
+
+    /// `ZEND_MAP_PTR_SET(fcc_ast->fptr, fptr)`: the function the node
+    /// found, kept for the rest of the request.
+    pub(crate) fn keep_callable(&mut self, unit: &php_unit::UnitCell, at: u32, function: Function) {
+        self.function_callables.push((unit.clone(), at, function));
     }
 
     /// `ZEND_TICKS`' count (`Z/Zend/zend_vm_def.h:8024`): `EG(ticks_count)`

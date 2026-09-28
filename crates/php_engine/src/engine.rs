@@ -2030,7 +2030,7 @@ fn compile(
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
-    Ok(Arc::new(unit))
+    Ok(unit.published())
 }
 
 /// What compiling the unit raised, raised now, each through the
@@ -3552,7 +3552,7 @@ mod tests {
             },
             ..Unit::default()
         };
-        let frame = req.pushed(Arc::new(unit));
+        let frame = req.pushed(unit.published());
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
@@ -3572,7 +3572,7 @@ mod tests {
             .unit(b"<?php echo 1;", b"witness.php")
             .unwrap_or_default();
         let unit = Unit::clone(&unit);
-        let frame = req.pushed(Arc::new(unit));
+        let frame = req.pushed(unit.published());
         assert_eq!(crate::tier::execute::<Probe>(&mut req, frame), Ok(()));
         assert_eq!(
             req.state::<Asked>().sites,
