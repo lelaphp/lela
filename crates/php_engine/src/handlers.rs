@@ -12956,6 +12956,23 @@ fn undefined_key_write(
 /// set 2 = int(11)
 /// Error: Cannot use object of type stdClass as array
 /// ```
+///
+/// Over a string the offset is checked as a write checks it first,
+/// `zend_check_string_offset` under `BP_VAR_RW`, its warning before the
+/// `Error`, and a handler of that warning that threw is all there is.
+///
+/// ```php
+/// $s = "abc";
+/// try { $s[true] .= "x"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// set_error_handler(function ($no, $m) { throw new Exception($m); });
+/// try { $s[null] += 1; } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Warning: String offset cast occurred in %s on line 3
+/// Cannot use assign-op operators with string offsets
+/// Exception: String offset cast occurred
+/// ```
 pub(crate) fn assign_dim_op<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -13009,15 +13026,25 @@ pub(crate) fn assign_dim_op<T: Tier>(
         Ok(Container::Object(object)) => object_held(req, object, |req| {
             binary_assign_op_obj_dim(req, frame, code, step, object)
         }),
-        Ok(Container::Text(_)) => Err(crate::api::raising::throw(
-            req,
-            "Error",
-            if op.op2_type == OperandKind::Unused {
-                "[] operator not supported for strings"
-            } else {
-                "Cannot use assign-op operators with string offsets"
-            },
-        )),
+        Ok(Container::Text(_)) if op.op2_type == OperandKind::Unused => Err(
+            crate::api::raising::throw(req, "Error", "[] operator not supported for strings"),
+        ),
+        // `zend_binary_assign_op_dim_slow`: `zend_check_string_offset`
+        // under `BP_VAR_RW`, its warnings and its `Error`, and then
+        // `zend_wrong_string_offset_error`, nothing over a throwable a
+        // handler of those warnings left.
+        Ok(Container::Text(_)) => {
+            let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+            match string_dim_offset(req, &dim, DimRead::Warning) {
+                Err(thrown) => Err(thrown),
+                Ok(_) if req.is_pending() => Err(Thrown::of(None)),
+                Ok(_) => Err(crate::api::raising::throw(
+                    req,
+                    "Error",
+                    "Cannot use assign-op operators with string offsets",
+                )),
+            }
+        }
         // `assign_dim_op_ret_null`.
         Ok(Container::Gone) => {
             exec::free_operand(req, frame, code, data.op1_type, data.op1);
@@ -18072,7 +18099,7 @@ fn string_isset_offset(req: &mut Request, offset: &Value) -> Option<i64> {
         ValueRef::Int(n) => Some(n),
         ValueRef::Undef | ValueRef::Null => Some(0),
         ValueRef::Bool(b) => Some(i64::from(b)),
-        ValueRef::Float(f) => Some(crate::ops::double_to_long(req, f)),
+        ValueRef::Float(f) => Some(crate::ops::double_to_long_strict(req, f)),
         ValueRef::Str(s) => match php_heap::numeric_prefix(s.as_bytes()) {
             Some((php_heap::Number::Long(n), false)) => Some(n),
             _ => None,

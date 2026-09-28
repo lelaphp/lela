@@ -4611,6 +4611,44 @@ pub(crate) fn double_to_long(req: &mut Request, d: f64) -> i64 {
     l
 }
 
+/// `zval_get_long_func` with `is_strict` on over a double
+/// (`Z/Zend/zend_operators.c:971`), what `zval_get_long_ex(offset, true)`
+/// reads a float offset over a string as under `isset` and `empty`:
+/// `zend_dval_to_lval` with its warning, and then the deprecation
+/// wherever the long is not the double, a double past the long's range
+/// among them, where [`double_to_long`] deprecates only one in range.
+///
+/// ```php
+/// $s = "abc";
+/// var_dump(isset($s[1.5]), isset($s[1.8446744073709552E+19]), empty($s[NAN]));
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 3
+///
+/// Warning: The float 1.8446744073709552E+19 is not representable as an int, cast occurred in %s on line 3
+///
+/// Deprecated: Implicit conversion from float 1.8446744073709552E+19 to int loses precision in %s on line 3
+///
+/// Warning: The float NAN is not representable as an int, cast occurred in %s on line 3
+///
+/// Deprecated: Implicit conversion from float NAN to int loses precision in %s on line 3
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+pub(crate) fn double_to_long_strict(req: &mut Request, d: f64) -> i64 {
+    let l = dval_to_lval(req, d);
+    if !long_compatible(d, l) {
+        let text = rendered(d);
+        deprecated(
+            req,
+            &format!("Implicit conversion from float {text} to int loses precision"),
+        );
+    }
+    l
+}
+
 /// `zend_dval_to_lval`: the truncated long for a double in range and,
 /// with php's warning (`zend_oob_double_to_long_error`), zero for one
 /// that is not finite and the modular reading of `zend_dval_to_lval_slow`
