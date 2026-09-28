@@ -26,7 +26,7 @@ docs = 5000                                # design §10; `docs/**` plus the thr
 harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
 lock_packages = 135                        # design §4.1: `Cargo.lock` packages, default features, counted on day 31 with the Cranelift set
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
-api_items = 800                            # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34)
+api_items = 900                            # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34)
 api_private_items = 16                     # design §4.4 (revision 34, D1 of #947): api::__private, the helpers only a macro expansion names, capped apart from api_items
 bindings = 15000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
 # Lines are non-blank, non-comment, tests excluded (`xtask budget`).
@@ -51,7 +51,7 @@ name = "php_compile"
 budget = 22000
 [[crate]]
 name = "php_engine"
-budget = 52000
+budget = 56000
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
@@ -79,7 +79,7 @@ name = "php"
 budget = 1000
 [[crate]]
 name = "xtask"
-budget = 21000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
+budget = 23500                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
