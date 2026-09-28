@@ -75,11 +75,9 @@ impl Open {
     }
 
     /// `php_stream_close`: the stream closed, then the object's hold on
-    /// its resource given up (`zend_list_delete` in `_php_stream_free`),
-    /// so `get_resources()` lists it no longer once no value holds it.
+    /// its resource given up, [`Stream::free`].
     fn close(self, req: &mut Request) {
-        self.0.close(req);
-        req.release(self.0.as_value());
+        self.0.free(req);
     }
 }
 

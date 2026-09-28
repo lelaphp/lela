@@ -74,11 +74,29 @@ impl StreamOps for GzStream {
         usize::try_from(read).ok()
     }
 
-    /// `php_gziop_close`: the `gzFile` closed, then the stream under it.
+    /// `php_gziop_close`: the `gzFile` closed, then the stream under it
+    /// with `php_stream_close`, which gives its resource up, so a closed
+    /// `gzopen` stream leaves `get_resources()` as it found it.
+    ///
+    /// ```php
+    /// stream_context_get_default();
+    /// $b = get_resources();
+    /// $f = gzopen(sys_get_temp_dir().'/gzclose-witness.gz', 'w'); gzclose($f); unset($f);
+    /// foreach (array_diff_key(get_resources(), $b) as $k => $r) echo $k, "=", get_resource_type($r), "\n";
+    /// $h = fopen('compress.zlib://'.sys_get_temp_dir().'/gzclose-witness.gz', 'r'); fclose($h); unset($h);
+    /// gzfile(sys_get_temp_dir().'/gzclose-witness.gz'); readgzfile(sys_get_temp_dir().'/gzclose-witness.gz');
+    /// var_dump(count(array_diff_key(get_resources(), $b)));
+    /// unlink(sys_get_temp_dir().'/gzclose-witness.gz');
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// end
+    /// ```
     fn close(&mut self, req: &mut Request) {
         self.file = None;
         if let Some(inner) = self.inner.take() {
-            inner.close(req);
+            inner.free(req);
         }
     }
 
@@ -169,14 +187,14 @@ fn open(
         return Ok(None);
     };
     let Some(fd) = inner.cast(req, Cast::Fd, true) else {
-        inner.close(req);
+        inner.free(req);
         return Ok(None);
     };
     let Some(file) = gzdopen(req, fd, mode)? else {
         if opening.warn {
             docref(req, Level::Warning, "gzopen failed");
         }
-        inner.close(req);
+        inner.free(req);
         return Ok(None);
     };
     let kind = GzStream {
@@ -413,6 +431,13 @@ fn gzfile(
     let Some(stream) = open_plain(req, filename.as_bytes(), b"rb", use_include_path)? else {
         return Ok(OrFalse::False);
     };
+    let lines = read_lines(req, stream);
+    stream.free(req);
+    Ok(OrFalse::Value(lines?))
+}
+
+/// `gzfile`'s loop: each line of `stream` into a new array.
+fn read_lines(req: &mut Request, stream: Stream) -> Result<PhpArray, Thrown> {
     let mut lines = PhpArray::new(req)?;
     while let Some(line) = stream.get_line(req, Some(8191))? {
         let bytes = line.as_bytes();
@@ -420,8 +445,7 @@ fn gzfile(
         let line = PhpString::new(req, &bytes[..end])?;
         lines.append(req, php_ext::values::Value::string(line))?;
     }
-    stream.close(req);
-    Ok(OrFalse::Value(lines))
+    Ok(lines)
 }
 
 /// `readgzfile(string $filename, bool $use_include_path = false):
@@ -450,9 +474,9 @@ fn readgzfile(
     let Some(stream) = open_plain(req, filename.as_bytes(), b"rb", use_include_path)? else {
         return Ok(OrFalse::False);
     };
-    let size = php_ext_standard::fpassthru(req, stream)?;
-    stream.close(req);
-    Ok(OrFalse::Value(size))
+    let size = php_ext_standard::fpassthru(req, stream);
+    stream.free(req);
+    Ok(OrFalse::Value(size?))
 }
 
 /// `gzwrite($stream, string $data, ?int $length = null): int|false`,

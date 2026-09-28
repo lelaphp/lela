@@ -827,7 +827,8 @@ impl Stream {
             .unwrap_or(false)
     }
 
-    /// `php_stream_close`, what `fclose` does past its checks: the
+    /// `php_stream_free(stream, PHP_STREAM_FREE_KEEP_RSRC |
+    /// PHP_STREAM_FREE_CLOSE)`, what `fclose` does past its checks: the
     /// resource closed and its destructor served, which flushes what was
     /// written and closes the kind; the resource stays for its owners,
     /// `resource(N) of type (Unknown)` under `var_dump`. `false`, and
@@ -860,6 +861,16 @@ impl Stream {
         }
         crate::streams::PhpStream::close_open(req, self);
         true
+    }
+
+    /// `php_stream_close`, `_php_stream_free` under
+    /// `PHP_STREAM_FREE_CLOSE`, what a native or a kind does to a stream
+    /// it opened: [`Stream::close`], then the owner the open handed the
+    /// caller given up, `zend_list_delete`, so `get_resources()` lists the
+    /// stream no longer once no value holds it.
+    pub fn free(self, req: &mut Request) {
+        self.close(req);
+        req.release(self.as_value());
     }
 }
 

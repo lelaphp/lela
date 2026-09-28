@@ -527,6 +527,7 @@ request::Stream::eof
 request::Stream::flock
 request::Stream::flush
 request::Stream::forbid_fclose
+request::Stream::free
 request::Stream::from_value
 request::Stream::get_line
 request::Stream::get_record
