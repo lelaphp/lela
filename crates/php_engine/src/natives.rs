@@ -393,6 +393,28 @@ fn gc_status(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// int(2)
 /// int(1)
 /// ```
+///
+/// A readonly property is written once more by the copy's own class,
+/// php's wither, and refused from a scope that may not set it:
+///
+/// ```php
+/// final class Point {
+///     public function __construct(public readonly int $x, public readonly int $y) {}
+///     public function withX(int $x): static { return clone($this, ['x' => $x]); }
+/// }
+/// $p = new Point(1, 2);
+/// $q = $p->withX(3);
+/// var_dump($q->x, $q->y, $p->x);
+/// try { $q->x = 4; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { clone($p, ['x' => 'no']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(3)
+/// int(2)
+/// int(1)
+/// Cannot modify readonly property Point::$x
+/// Cannot modify protected(set) readonly property Point::$x from global scope
+/// ```
 #[php_function]
 fn clone(
     req: &mut Request,

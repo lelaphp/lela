@@ -9983,25 +9983,17 @@ impl Emit<'_> {
                 self.silence(operand)
             }
             // `clone` and `exit` are the calls php's parser makes of
-            // them, `\clone` and `\exit` in the function table.
+            // them, `\clone` and `\exit` in the function table: `clone
+            // $o` one argument, and `clone(...)` its argument list as
+            // written, 8.5's `clone($o, ['p' => 1])` among them, which
+            // `zend_compile_func_clone` leaves to the function.
             tree::Expr::CloneExpr(id) => {
                 let node = &tree[id];
-                let operand = match (node.operand, node.args) {
-                    (Some(operand), _) => operand,
-                    (None, Some(args)) => {
-                        let arguments = self.arguments(args, line)?;
-                        if let Args::CallableConvert = arguments {
-                            return self.call(b"\\clone", &arguments);
-                        }
-                        let arguments = arguments.positional();
-                        let Some([operand]) = arguments.as_deref() else {
-                            return Err(self.unread("a `clone` with an argument list"));
-                        };
-                        *operand
-                    }
+                let arguments = match (node.operand, node.args) {
+                    (Some(operand), _) => Args::of(&[operand], self.line_of(operand)),
+                    (None, Some(args)) => self.arguments(args, line)?,
                     (None, None) => return Err(self.unread("a `clone`")),
                 };
-                let arguments = Args::of(&[operand], self.line_of(operand));
                 self.call(b"\\clone", &arguments)
             }
             tree::Expr::ExitExpr(id) => {

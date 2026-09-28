@@ -8857,12 +8857,11 @@ impl Request {
         {
             return Err(self.readonly_modification(placed.declaring, name, operation));
         }
-        // An initialised readonly property is refused as readonly, the
-        // caller's, ahead of its set visibility
-        // (`zend_std_write_property`).
-        let readonly_first = placed.readonly && initialized;
+        // The set visibility after the readonly arm, which a readonly
+        // property `IS_PROP_REINITABLE` has passed: `__clone` and a
+        // `clone with` write it once more only from a scope that may set
+        // it (`zend_std_write_property`).
         if let Some(set) = placed.set_visibility
-            && !readonly_first
             && !self.has_set_access(placed.declaring, set)
         {
             return Err(self.set_inaccessible_property(
@@ -10145,27 +10144,73 @@ impl Request {
 
     /// `zend_objects_clone_obj_with`, the `Std` `clone_obj_with` slot:
     /// the class's `clone_obj`, then each of `properties` written on the
-    /// copy through the class's `write_property`, a reference with one
-    /// owner followed and one with more php's `Error`; the copy is given
-    /// up with what a write threw. The scope php writes under as
-    /// `fake_scope` is not modelled, so the writes are the executed
-    /// scope's.
+    /// copy as `zend_std_write_property` writes it, a reference with one
+    /// owner followed and one with more php's `Error`, under
+    /// `EG(fake_scope)` the scope `clone()` was called from, so a
+    /// property that scope may not reach is php's `Error` and a parent's
+    /// private one a dynamic property; the copy is given up with what a
+    /// write threw. Every readonly property is writable once more for
+    /// the writes, and each is locked again by the write that lands on
+    /// it, so a hook that initialised one leaves it closed to the next.
+    ///
+    /// ```php
+    /// class P { public $a = 'a'; protected $b = 'b'; private $c = 'c';
+    ///     public function __construct(public readonly int $r = 1) {}
+    ///     function with() { return clone($this, ['b' => 'B', 'c' => 'C', 'r' => 2]); }
+    ///     function again() { return clone($this, ['r' => 3]); } }
+    /// class C extends P { function mine() { return clone($this, ['c' => 'dynamic']); } }
+    /// var_dump((new P)->with());
+    /// try { clone(new P, ['b' => 'x']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { clone(new P, ['r' => 3]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump((new P)->again()->r);
+    /// #[AllowDynamicProperties] class D extends C {}
+    /// var_dump((new D)->mine());
+    /// ```
+    /// ```expect
+    /// object(P)#2 (4) {
+    ///   ["a"]=>
+    ///   string(1) "a"
+    ///   ["b":protected]=>
+    ///   string(1) "B"
+    ///   ["c":"P":private]=>
+    ///   string(1) "C"
+    ///   ["r"]=>
+    ///   int(2)
+    /// }
+    /// Cannot access protected property P::$b
+    /// Cannot modify protected(set) readonly property P::$r from global scope
+    /// int(3)
+    /// object(D)#3 (5) {
+    ///   ["a"]=>
+    ///   string(1) "a"
+    ///   ["b":protected]=>
+    ///   string(1) "b"
+    ///   ["c":"P":private]=>
+    ///   string(1) "c"
+    ///   ["r"]=>
+    ///   int(1)
+    ///   ["c"]=>
+    ///   string(7) "dynamic"
+    /// }
+    /// ```
     pub(crate) fn clone_members_with(
         &mut self,
         object: PhpObject,
         scope: Option<ClassId>,
         properties: PhpArray,
     ) -> Result<PhpObject, Thrown> {
-        let _ = scope;
         let table = self.object_handlers(object.heap());
         let Some(clone_obj) = table.clone_obj() else {
             return Err(self.uncloneable(object));
         };
         let new = clone_obj(self, object)?;
         // "Unlock readonly properties once more" for the writes, and lock
-        // them again after, whatever a write threw.
+        // them again after, whatever a write threw; `EG(fake_scope) =
+        // scope` for the writes and put back after them.
         Self::mark_reinitable(new, true);
+        let saved = std::mem::replace(&mut self.fake_scope, scope);
         let written = self.clone_with_writes(new, table, properties);
+        self.fake_scope = saved;
         Self::mark_reinitable(new, false);
         if let Err(thrown) = written {
             self.release(new.as_value());
@@ -10182,7 +10227,7 @@ impl Request {
         table: &'static dyn crate::api::abi::ObjectHandlers,
         properties: PhpArray,
     ) -> Result<(), Thrown> {
-        for (key, value) in properties.snapshot() {
+        for (key, value) in properties.snapshot_refs() {
             let value = match value.as_php_ref() {
                 Some(r) if r.as_value().refcount() > 1 => {
                     return Err(crate::api::raising::throw(
@@ -10196,7 +10241,53 @@ impl Request {
             };
             let name = key.to_prop_name(self)?;
             self.addref(&value);
-            table.write_property(self, new, name, value)?;
+            self.write_cloned_property(new, table, name, value)?;
+        }
+        Ok(())
+    }
+
+    /// `zend_std_write_property` over one property of a `clone with`:
+    /// where the name is the standard place, it is placed first
+    /// ([`Request::declared_slot_for_write`]), which raises what the
+    /// scope may not reach, a readonly property already written and a
+    /// set visibility the scope lacks, and a declared slot the write
+    /// lands on is locked again (`Z_PROP_FLAG_P(variable_ptr) &=
+    /// ~IS_PROP_REINITABLE`); the write itself is the class's
+    /// `write_property`, which serves a hook, a `__set` and a dynamic
+    /// property.
+    fn write_cloned_property(
+        &mut self,
+        object: PhpObject,
+        table: &'static dyn crate::api::abi::ObjectHandlers,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let bytes = name.as_bytes().to_vec();
+        let place = match table.get_property_ptr_ptr(self, object, &bytes) {
+            Ok(place) => place,
+            Err(thrown) => {
+                self.release(value);
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        };
+        if place == crate::api::abi::PropertyPlace::Handlers {
+            return table.write_property(self, object, name, value);
+        }
+        let silent = self.serves_accessor(object.class(), b"__set");
+        let slot = match self.declared_slot_for_write(object, &bytes, "modify", silent) {
+            Ok(placed) => placed.map(|(slot, _)| slot),
+            Err(thrown) => {
+                self.release(value);
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        };
+        table.write_property(self, object, name, value)?;
+        if let Some(slot) = slot {
+            object
+                .heap()
+                .set_slot_bit(slot, php_heap::PropBit::Reinitable, false);
         }
         Ok(())
     }
