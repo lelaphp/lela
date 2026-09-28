@@ -3514,6 +3514,21 @@ impl Request {
         self.user_function(function).is_none()
     }
 
+    /// The native function no table carries whose declaration is named
+    /// `name` ([`MethodAt::Unlisted`]).
+    pub(crate) fn unlisted_function(&self, name: &[u8]) -> Option<Function> {
+        let at = self.shared.methods.iter().position(|method| {
+            matches!(method.at, MethodAt::Unlisted { at } if self
+                .shared
+                .trampolines
+                .get(at as usize)
+                .is_some_and(|decl| decl.function.name.0.as_ref() == name))
+        })?;
+        u32::try_from(self.shared.functions.len().checked_add(at)?)
+            .ok()
+            .map(Function)
+    }
+
     /// The native method `function` is, if it is one: its class and its
     /// index among the class's declared methods.
     fn native_method(&self, function: Function) -> Option<&NativeMethod> {
@@ -3799,7 +3814,9 @@ impl Request {
                     .class_decl(class)?
                     .methods
                     .get(usize::try_from(at).ok()?),
-                MethodAt::Trampoline { at: index, .. } | MethodAt::ParentHook { at: index, .. } => {
+                MethodAt::Trampoline { at: index, .. }
+                | MethodAt::ParentHook { at: index, .. }
+                | MethodAt::Unlisted { at: index } => {
                     self.shared.trampolines.get(usize::try_from(index).ok()?)
                 }
             };
@@ -18264,6 +18281,20 @@ impl Request {
         Heap::gc_collect_cycles(&mut Hooks(self))
     }
 
+    /// One entry of the collector's destructor phase served
+    /// ([`Heap::gc_call_destructor`]), for the fiber the phase is served
+    /// in: the object whose destructor was served.
+    pub(crate) fn gc_call_destructor(&mut self, idx: u32) -> Option<PhpObject> {
+        Heap::gc_call_destructor(&mut Hooks(self), idx).map(PhpObject::of)
+    }
+
+    /// `gc_check_possible_root` over an object: a possible root again,
+    /// where its release left it owners.
+    pub(crate) fn gc_possible_root(&mut self, object: PhpObject) {
+        let zval = object.as_value().to_zval();
+        Heap::gc_check_possible_root(&mut Hooks(self), zval);
+    }
+
     /// `gc_enable()` and `gc_disable()`: `zend.enable_gc` altered, whose
     /// `OnUpdateGCEnabled` is `gc_enable`, so `ini_get` reads what the
     /// call left.
@@ -18915,6 +18946,12 @@ impl HeapHooks for Hooks<'_> {
     /// ```expect
     /// int(2)
     /// ```
+    /// The destructor phase served in the collector's own fiber while
+    /// a fiber runs ([`crate::fiber::gc_destructors_in_fiber`]).
+    fn gc_destructors_in_fiber(&mut self, from: u32, end: u32) -> bool {
+        crate::fiber::gc_destructors_in_fiber(self.0, from, end)
+    }
+
     fn has_destructor(&mut self, obj: Obj) -> bool {
         let class = ClassId(obj.class());
         self.0.method_named(class, b"__destruct").is_some()

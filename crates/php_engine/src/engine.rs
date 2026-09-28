@@ -337,6 +337,12 @@ pub(crate) enum MethodAt {
     /// class, carried on the call, and its declaration is the index
     /// among [`Shared::trampolines`].
     ParentHook { kind: HookKind, at: u32 },
+    /// A native function no function table carries, which php declares
+    /// as a `zend_internal_function` of its own and serves only by
+    /// pointer, `gc_destructor_fiber`: no lookup by name finds it, and a
+    /// backtrace names it; its declaration is the index among
+    /// [`Shared::trampolines`].
+    Unlisted { at: u32 },
 }
 
 impl MethodAt {
@@ -345,7 +351,7 @@ impl MethodAt {
     pub(crate) fn class(self) -> Option<ClassId> {
         match self {
             MethodAt::Declared { class, .. } | MethodAt::Trampoline { class, .. } => Some(class),
-            MethodAt::ParentHook { .. } => None,
+            MethodAt::ParentHook { .. } | MethodAt::Unlisted { .. } => None,
         }
     }
 }
@@ -483,6 +489,15 @@ fn link_trampolines(
         let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
         methods.push(NativeMethod {
             at: MethodAt::ParentHook { kind, at: index },
+            entry,
+            flags: crate::attributes::Flags::of(&method.function.attributes),
+        });
+        trampolines.push(method);
+    }
+    for (method, entry) in crate::fiber::unlisted_functions() {
+        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
+        methods.push(NativeMethod {
+            at: MethodAt::Unlisted { at: index },
             entry,
             flags: crate::attributes::Flags::of(&method.function.attributes),
         });

@@ -703,7 +703,7 @@ impl Heap {
     /// that left owners does with the value. A reference is looked
     /// through to the value it holds; an array or an object not in the
     /// buffer yet and not marked uncollectable is a possible root.
-    pub(crate) fn gc_check_possible_root(hooks: &mut dyn HeapHooks, z: Zval) {
+    pub fn gc_check_possible_root(hooks: &mut dyn HeapHooks, z: Zval) {
         let node = match Node::of(z) {
             Some(Node::Ref(r)) => match Node::of(r.val()) {
                 Some(Node::Ref(_)) | None => return,
@@ -1207,24 +1207,37 @@ impl Heap {
     }
 
     /// `gc_call_destructors`: the destructor of every object in the
-    /// entries from `from` to `end` that is to have one served, each
-    /// entry made a root again for the next collection, and an object whose
-    /// destructor another destructor served already passed over. The
-    /// buffer may grow meanwhile, so each entry is read afresh.
+    /// entries from `from` to `end` that is to have one served
+    /// ([`Heap::gc_call_destructor`]). The buffer may grow meanwhile, so
+    /// each entry is read afresh.
     fn gc_call_destructors(hooks: &mut dyn HeapHooks, from: u32, end: u32) {
-        let mut idx = from;
-        while idx != end {
-            if let Some(Entry::DtorGarbage(o)) = hooks.heap().gc.entry(idx) {
-                hooks.heap().gc.set(idx, Entry::Root(Node::Obj(o)));
-                if !o.has_flag(gc::OBJ_DESTRUCTOR_CALLED) {
-                    o.add_flag(gc::OBJ_DESTRUCTOR_CALLED);
-                    o.addref();
-                    hooks.destruct(o);
-                    o.delref();
-                }
-            }
-            idx += 1;
+        for idx in from..end {
+            Heap::gc_call_destructor(hooks, idx);
         }
+    }
+
+    /// One entry of `gc_call_destructors` (`Z/Zend/zend_gc.c:1872`): the
+    /// entry at `idx`, where it is garbage whose destructor is to be
+    /// served, made a root again for the next collection, and the
+    /// object's destructor served unless another destructor served it
+    /// already. The object served, for a walk that is not the heap's own:
+    /// the engine's, from the fiber [`HeapHooks::gc_destructors_in_fiber`]
+    /// serves the phase in, which hands an object whose destructor
+    /// suspended that fiber back to [`Heap::gc_check_possible_root`] once
+    /// the destructor returns.
+    pub fn gc_call_destructor(hooks: &mut dyn HeapHooks, idx: u32) -> Option<Obj> {
+        let Some(Entry::DtorGarbage(o)) = hooks.heap().gc.entry(idx) else {
+            return None;
+        };
+        hooks.heap().gc.set(idx, Entry::Root(Node::Obj(o)));
+        if o.has_flag(gc::OBJ_DESTRUCTOR_CALLED) {
+            return None;
+        }
+        o.add_flag(gc::OBJ_DESTRUCTOR_CALLED);
+        o.addref();
+        hooks.destruct(o);
+        o.delref();
+        Some(o)
     }
 
     /// The free phase of `zend_gc_collect_cycles`: every garbage object
@@ -1337,7 +1350,7 @@ impl Heap {
                     }
                 }
                 let dtor_start = Instant::now();
-                if !hooks.gc_destructors_in_fiber(end) {
+                if !hooks.gc_destructors_in_fiber(FIRST_ROOT, end) {
                     Heap::gc_call_destructors(hooks, FIRST_ROOT, end);
                 }
                 hooks.heap().gc.destructing += dtor_start.elapsed();

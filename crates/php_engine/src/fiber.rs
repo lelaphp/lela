@@ -131,6 +131,20 @@ pub(crate) struct Fibers {
     suspensions: Suspensions<Request>,
     running: Vec<Running>,
     stack_size: Option<usize>,
+    gc: GcFiber,
+}
+
+/// `GC_G(dtor_fiber)` and the walk it serves (`Z/Zend/zend_gc.c:1859-1990`,
+/// `:2321-2354`): the collector's fiber for destructors, one owner while
+/// it is the collector's; whether it is serving the walk, which a
+/// destructor that suspended it leaves set; and where the walk stands
+/// in the root buffer and where it ends.
+#[derive(Default)]
+struct GcFiber {
+    fiber: Option<PhpObject>,
+    running: bool,
+    at: u32,
+    end: u32,
 }
 
 impl Fibers {
@@ -597,68 +611,7 @@ impl Fiber {
         args: NamedVariadic<Value>,
     ) -> Result<Value, Thrown> {
         let named: Vec<(PhpString, Value)> = args.named().to_vec();
-        let arguments = args.positional;
-        let this = this.object();
-        let size = stack_size(req);
-        let reserved = u64::try_from(Request::ini_parse_bytes(
-            req.ini_get(b"zend.reserved_stack_size").unwrap_or(b"0"),
-        ))
-        .unwrap_or(0);
-        let fiber = payload(req, this)?;
-        if fiber.status != Status::Init {
-            return Err(fiber_error(
-                req,
-                "Cannot start a fiber that has already been started",
-            ));
-        }
-        let Some(callable) = fiber.callable.clone() else {
-            return Err(throw(
-                req,
-                "Error",
-                "Cannot start a fiber whose constructor was not called",
-            ));
-        };
-        let stack = FiberStack::new(size, move |req: &mut Request, _first: Transfer| {
-            run(req, this, &callable, &arguments, &named)
-        });
-        let stack = match stack {
-            Ok(stack) => stack,
-            Err(StackRefused::TooSmall(least)) => {
-                return Err(throw(
-                    req,
-                    "Exception",
-                    &format!(
-                        "Fiber stack size is too small, it needs to be at least {least} bytes"
-                    ),
-                ));
-            }
-            Err(StackRefused::Allocate(error)) => {
-                let errno = error.raw_os_error().unwrap_or(0);
-                let text = error.to_string();
-                let text = text
-                    .strip_suffix(&format!(" (os error {errno})"))
-                    .unwrap_or(&text)
-                    .to_string();
-                return Err(throw(
-                    req,
-                    "Exception",
-                    &format!("Fiber stack allocate failed: mmap failed: {text} ({errno})"),
-                ));
-            }
-        };
-        let execution = Execution {
-            stack: php_heap::VmStack::fiber(),
-            vm: Vm::default(),
-            error_reporting: req.ini_error_reporting(),
-            stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
-        };
-        let record = req.heap_mut().block(STACK_RECORD);
-        let record = req.fatal_of(record)?;
-        let fiber = payload(req, this)?;
-        fiber.blocks.push(record);
-        fiber.stack = Some(stack);
-        fiber.execution = Some(execution);
-        let back = switch_into(req, this, Transfer::Value(Value::null()))?;
+        let back = start(req, this.object(), args.positional, named)?;
         delegate(req, back)
     }
 
@@ -1200,6 +1153,265 @@ fn switch_into(
             Ok(Transfer::Fatal)
         }
     }
+}
+
+/// The natives no function table carries that fibers serve:
+/// `gc_destructor_fiber`, the collector's fiber's function
+/// ([`crate::engine::MethodAt::Unlisted`]).
+pub(crate) fn unlisted_functions() -> Vec<(php_unit::decl::MethodDecl, crate::api::abi::Entry)> {
+    let function = php_unit::decl::FunctionDecl {
+        name: php_unit::decl::Name(b"gc_destructor_fiber".as_slice().into()),
+        parameters: Vec::new(),
+        return_type: None,
+        returns_by_ref: false,
+        is_generator: false,
+        attributes: Vec::new(),
+        doc_comment: None,
+        file: php_unit::decl::Name(Box::new([])),
+        line: 0,
+        end_line: 0,
+        frameless: Vec::new(),
+    };
+    let method = php_unit::decl::MethodDecl {
+        function,
+        visibility: php_unit::decl::Visibility::Public,
+        is_instance: false,
+        is_abstract: false,
+        is_final: false,
+        tentative_return: false,
+    };
+    vec![(method, gc_destructor_fiber)]
+}
+
+/// `gc_call_destructors_in_fiber` (`Z/Zend/zend_gc.c:1947`): while a
+/// fiber runs, the collector's destructor phase is served in a fiber of
+/// its own, so a destructor that suspends suspends that one and not the
+/// fiber the collection interrupted. The collector's fiber is resumed,
+/// or made and started where it has none; where a destructor suspended
+/// it, it is the collector's no more, and a new one goes on from the
+/// entry after that destructor's. What was pending before, and what
+/// each start left, is kept aside and chained, and pending again after.
+/// `false`, the phase left to the heap, where no fiber runs.
+///
+/// ```php
+/// class Cycle {
+///     public $self; public $id;
+///     function __construct($id) { $this->id = $id; $this->self = $this; }
+///     function __destruct() {
+///         echo "{$this->id}: start\n";
+///         if ($this->id === 0) { global $held; $held = Fiber::getCurrent(); Fiber::suspend(); }
+///         echo "{$this->id}: end\n";
+///     }
+/// }
+/// $f = new Fiber(function () { new Cycle(0); new Cycle(1); gc_collect_cycles(); $GLOBALS['held']->resume(); });
+/// $f->start();
+/// ```
+/// ```expect
+/// 1: start
+/// 1: end
+/// 0: start
+/// 0: end
+/// ```
+pub(crate) fn gc_destructors_in_fiber(req: &mut Request, from: u32, end: u32) -> bool {
+    if req.fibers().active().is_none() {
+        return false;
+    }
+    {
+        let gc = &mut req.fibers_mut().gc;
+        gc.at = from;
+        gc.end = end;
+    }
+    let mut kept = None;
+    remember_raised(req, &mut kept);
+    match req.fibers().gc.fiber {
+        Some(fiber) => {
+            let back = switch_into(req, fiber, Transfer::Value(Value::null()));
+            settle(req, back);
+        }
+        None => start_gc_fiber(req),
+    }
+    remember_raised(req, &mut kept);
+    while req.fibers().gc.running {
+        // A destructor suspended the collector's fiber: it is the
+        // program's from here, and the walk goes on after it in a new one.
+        let gc = &mut req.fibers_mut().gc;
+        let abandoned = gc.fiber.take();
+        gc.at = gc.at.saturating_add(1);
+        gc.running = false;
+        if let Some(abandoned) = abandoned {
+            req.release(abandoned.as_value());
+        }
+        remember_raised(req, &mut kept);
+        start_gc_fiber(req);
+        remember_raised(req, &mut kept);
+    }
+    req.set_raised(kept);
+    true
+}
+
+/// `remember_prev_exception`: what is pending taken aside, with what was
+/// taken aside before chained under it.
+fn remember_raised(req: &mut Request, kept: &mut Option<Raised>) {
+    let Some(now) = req.take_raised() else {
+        return;
+    };
+    req.set_raised(Some(now));
+    if let Some(before) = kept.take() {
+        req.raise_under(before);
+    }
+    *kept = req.take_raised();
+}
+
+/// What a switch into the collector's fiber handed back, given up; a
+/// throwable is left pending for [`remember_raised`].
+fn settle(req: &mut Request, back: Result<Transfer, Thrown>) {
+    match back {
+        Ok(Transfer::Value(value)) => req.release(value),
+        Ok(Transfer::Throw(thrown)) | Err(thrown) => req.leave_pending(&thrown),
+        Ok(Transfer::GracefulExit | Transfer::Fatal) => {}
+    }
+}
+
+/// `gc_create_destructor_fiber`: a `Fiber` whose callable is
+/// `gc_destructor_fiber`, the collector's from here, started, which
+/// serves the walk from where it stands up to its first suspend.
+fn start_gc_fiber(req: &mut Request) {
+    let Some(function) = req.unlisted_function(b"gc_destructor_fiber") else {
+        return;
+    };
+    let Ok(fiber) = req.new_object_of("Fiber") else {
+        return;
+    };
+    let callable = Callable::of(
+        Value::null(),
+        b"gc_destructor_fiber",
+        crate::api::call::Target::Function(function),
+    );
+    if let Some(payload) = fiber.native_mut::<ZendFiber>(req) {
+        payload.callable = Some(callable);
+    }
+    req.fibers_mut().gc.fiber = Some(fiber);
+    let started = start(req, fiber, Vec::new(), Vec::new());
+    settle(req, started);
+}
+
+/// `ZEND_FUNCTION(gc_destructor_fiber)` (`Z/Zend/zend_gc.c:2321`): the
+/// walk served from where it stands to its end, each destructor from
+/// its own entry; then the fiber suspends until the next collection
+/// resumes it. A destructor that suspended it and was resumed later by
+/// the program finds the fiber the collector's no more, and the
+/// function returns, the object a possible root again. A fiber
+/// destroyed at the request's end while it waits returns too.
+fn gc_destructor_fiber(req: &mut Request) -> Result<Value, Thrown> {
+    let Some(fiber) = req.fibers().gc.fiber else {
+        return Err(throw(
+            req,
+            "Error",
+            "InternalError: gc_destructor_fiber served with no collector's fiber",
+        ));
+    };
+    loop {
+        req.fibers_mut().gc.running = true;
+        let (from, end) = (req.fibers().gc.at, req.fibers().gc.end);
+        for at in from..end {
+            req.fibers_mut().gc.at = at;
+            let served = req.gc_call_destructor(at);
+            if let Some(object) = served
+                && req.fibers().gc.fiber.map(|gc| gc.index()) != Some(fiber.index())
+            {
+                req.gc_possible_root(object);
+                // What the destructor left, the graceful exit of a destroy
+                // among it, is what the fiber ends in.
+                crate::api::raising::pending(req)?;
+                return Ok(Value::null());
+            }
+        }
+        req.fibers_mut().gc.running = false;
+        let back = php_heap::suspend(req, Transfer::Value(Value::null()));
+        let back = req.fatal_of(back)?;
+        if payload(req, fiber)?.destroyed {
+            // Destroyed by the store's walk at the request's end: the
+            // collector's owner is dropped with the store, as php's
+            // `GC_DELREF` drops it without freeing what it is running on.
+            let gc = &mut req.fibers_mut().gc;
+            if gc.fiber.map(|gc| gc.index()) == Some(fiber.index()) {
+                gc.fiber = None;
+            }
+            return delegate(req, back);
+        }
+        if let Transfer::Value(value) = back {
+            req.release(value);
+        }
+    }
+}
+
+/// `zend_fiber_start`: the stack laid down at `fiber.stack_size` for
+/// a fiber not started yet, and its callable served on it with the
+/// arguments up to its first suspend; what came back is the caller's.
+fn start(
+    req: &mut Request,
+    this: PhpObject,
+    arguments: Vec<Value>,
+    named: Vec<(PhpString, Value)>,
+) -> Result<Transfer, Thrown> {
+    let size = stack_size(req);
+    let reserved = u64::try_from(Request::ini_parse_bytes(
+        req.ini_get(b"zend.reserved_stack_size").unwrap_or(b"0"),
+    ))
+    .unwrap_or(0);
+    let fiber = payload(req, this)?;
+    if fiber.status != Status::Init {
+        return Err(fiber_error(
+            req,
+            "Cannot start a fiber that has already been started",
+        ));
+    }
+    let Some(callable) = fiber.callable.clone() else {
+        return Err(throw(
+            req,
+            "Error",
+            "Cannot start a fiber whose constructor was not called",
+        ));
+    };
+    let stack = FiberStack::new(size, move |req: &mut Request, _first: Transfer| {
+        run(req, this, &callable, &arguments, &named)
+    });
+    let stack = match stack {
+        Ok(stack) => stack,
+        Err(StackRefused::TooSmall(least)) => {
+            return Err(throw(
+                req,
+                "Exception",
+                &format!("Fiber stack size is too small, it needs to be at least {least} bytes"),
+            ));
+        }
+        Err(StackRefused::Allocate(error)) => {
+            let errno = error.raw_os_error().unwrap_or(0);
+            let text = error.to_string();
+            let text = text
+                .strip_suffix(&format!(" (os error {errno})"))
+                .unwrap_or(&text)
+                .to_string();
+            return Err(throw(
+                req,
+                "Exception",
+                &format!("Fiber stack allocate failed: mmap failed: {text} ({errno})"),
+            ));
+        }
+    };
+    let execution = Execution {
+        stack: php_heap::VmStack::fiber(),
+        vm: Vm::default(),
+        error_reporting: req.ini_error_reporting(),
+        stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
+    };
+    let record = req.heap_mut().block(STACK_RECORD);
+    let record = req.fatal_of(record)?;
+    let fiber = payload(req, this)?;
+    fiber.blocks.push(record);
+    fiber.stack = Some(stack);
+    fiber.execution = Some(execution);
+    switch_into(req, this, Transfer::Value(Value::null()))
 }
 
 /// `zend_fiber_delegate_transfer_result`: a value is the native's
