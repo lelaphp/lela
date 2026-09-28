@@ -83,7 +83,7 @@ fn counts_line(registry: &Registry, kind: Option<Kind>) -> String {
         Some(kind) => counts.cell(kind, status),
         None => counts.by_status.get(&status).copied().unwrap_or(0),
     };
-    let rows = kind.map_or(u64::try_from(registry.rows.len()).unwrap(), |k| {
+    let rows = kind.map_or(u64::try_from(registry.rows().len()).unwrap(), |k| {
         counts.by_kind[&k]
     });
     format!(
@@ -111,11 +111,11 @@ fn the_tracked_registry_loads_with_its_rows() {
         assert!(registry.accepted(id).is_some());
     }
     assert!(registry.accepted("trace:no-such").is_none());
-    assert!(registry.rows.iter().all(|r| !r.reason.is_empty()));
+    assert!(registry.rows().iter().all(|r| !r.reason.is_empty()));
     let counts = registry.counts();
     assert_eq!(
         counts.by_kind.values().sum::<u64>(),
-        u64::try_from(registry.rows.len()).unwrap()
+        u64::try_from(registry.rows().len()).unwrap()
     );
     assert!(counts.by_kind[&Kind::Trace] >= 3);
     // The row #178 settled, the registry's first witness row.
@@ -173,7 +173,7 @@ fn a_proposed_row_is_open_with_an_empty_reason_and_keeps_the_file_s_prose() {
     let root = scratch("propose");
     let mut registry = Registry::load(&root).unwrap();
     let before = std::fs::read_to_string(root.join(divergence::FILE)).unwrap();
-    let rows = registry.rows.len();
+    let rows = registry.rows().len();
     let row = registry.propose("witness:deadbeef", Kind::Witness).unwrap();
     assert_eq!(row.status, Status::Open);
     assert_eq!(row.reason, "");
@@ -185,7 +185,7 @@ fn a_proposed_row_is_open_with_an_empty_reason_and_keeps_the_file_s_prose() {
         "the file is appended to, not rewritten"
     );
     let back = Registry::load(&root).unwrap();
-    assert_eq!(back.rows.len(), rows + 1);
+    assert_eq!(back.rows().len(), rows + 1);
     assert_eq!(back.row("witness:deadbeef").unwrap().status, Status::Open);
     assert!(back.accepted("witness:deadbeef").is_none());
 
@@ -218,7 +218,7 @@ fn the_reason_instrument_passes_the_tracked_registry() {
     assert_eq!(reading.rule, "divergence.reason");
     assert_eq!(
         reading.numbers["rows"],
-        xtask::reading::Number::count(registry.rows.len())
+        xtask::reading::Number::count(registry.rows().len())
     );
     assert_eq!(reading.numbers["unreasoned"], 0.into());
 }
@@ -303,9 +303,9 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     assert!(ok, "{err}");
     let (cut_ok, cut, cut_err) = xtask(&root, &["status", "--section", "divergence"]);
     assert!(cut_ok, "{cut_err}");
-    for row in &registry.rows {
-        assert!(cut.contains(&row.id), "{cut}");
-        assert!(md.contains(&row.id), "{md}");
+    for row in registry.rows() {
+        assert!(cut.contains(row.id.as_str()), "{cut}");
+        assert!(md.contains(row.id.as_str()), "{md}");
         // A multi-line reason renders on one line of the table, so the
         // newline TOML leaves at its end is a space here.
         assert!(
@@ -326,8 +326,11 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     );
     assert!(ok);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["rows"].as_array().unwrap().len(), registry.rows.len());
-    assert_eq!(value["rows"][0]["id"], registry.rows[0].id);
+    assert_eq!(
+        value["rows"].as_array().unwrap().len(),
+        registry.rows().len()
+    );
+    assert_eq!(value["rows"][0]["id"], registry.rows()[0].id.as_str());
     assert_eq!(
         value["counts"]["trace"]["accepted"],
         registry.counts().cell(Kind::Trace, Status::Accepted)
@@ -350,7 +353,7 @@ status = "accepted"
 since = "2026-09-18"
 "#;
     let parsed = Registry::parse(row).unwrap();
-    assert_eq!(parsed.rows[0].kind, Kind::Crosscheck);
+    assert_eq!(parsed.rows()[0].kind, Kind::Crosscheck);
     assert_eq!(Kind::Crosscheck.prefix(), "crosscheck:");
     assert_eq!(Kind::Crosscheck.as_str(), "crosscheck");
     assert!(parsed.accepted("crosscheck:ctype").is_some());
@@ -446,4 +449,210 @@ fn docs_divergence_md_is_the_status_section_as_a_computed_region() {
         md.trim(),
         "docs/divergence.md is stale: run `computed run docs/divergence.md`"
     );
+}
+
+/// A registry of one accepted row whose reason holds for two tests it
+/// covers and not for its own id, which names the cause (revision 62).
+const COVERING: &str = r#"
+[[divergence]]
+id = "phpt:fixture-optimizer"
+kind = "phpt"
+reason = "The fixture's one reason (fixture)."
+status = "accepted"
+since = "2026-09-28"
+covers = [
+    "phpt:php-src/ext/fixture/tests/a.phpt",
+    "phpt:php-src/ext/fixture/tests/opt/b.phpt",
+]
+"#;
+
+/// The negative control harness §4.3 names: a `phpt:` id listed only in
+/// `covers` is diverged under the accepted row, and the same registry
+/// without the row reads it as `Differs`.
+#[test]
+fn an_id_listed_only_in_covers_is_diverged_and_differs_without_the_row() {
+    use xtask::oracle::{Verdict, compare};
+    let covered = "phpt:php-src/ext/fixture/tests/opt/b.phpt";
+    let registry = Registry::parse(COVERING).unwrap();
+    let row = registry
+        .row(covered)
+        .expect("a covered id answers with its row");
+    assert_eq!(row.id.as_str(), "phpt:fixture-optimizer");
+    match compare(&registry, covered, b"five\n", b"four\n") {
+        Verdict::Diverged(row) => assert_eq!(row.reason, "The fixture's one reason (fixture)."),
+        other => panic!("covered, so diverged: {other:?}"),
+    }
+    assert_eq!(compare(&registry, covered, b"4\n", b"4\n"), Verdict::Same);
+    assert!(
+        matches!(
+            compare(
+                &registry,
+                "phpt:php-src/ext/fixture/tests/c.phpt",
+                b"5",
+                b"4"
+            ),
+            Verdict::Differs(_)
+        ),
+        "an id the row does not name is not held"
+    );
+    assert_eq!(
+        registry
+            .row("phpt:fixture-optimizer")
+            .map(|r| r.covers.len()),
+        Some(2),
+        "the row's own id answers too"
+    );
+
+    let without = Registry::parse("").unwrap();
+    assert!(
+        matches!(
+            compare(&without, covered, b"five\n", b"four\n"),
+            Verdict::Differs(_)
+        ),
+        "without the row the difference is not accepted"
+    );
+
+    let open = Registry::parse(&COVERING.replace("\"accepted\"", "\"open\"")).unwrap();
+    assert!(
+        matches!(compare(&open, covered, b"5", b"4"), Verdict::Differs(_)),
+        "an open covering row accepts nothing, as an open row does"
+    );
+
+    let counts = registry.counts();
+    assert_eq!(registry.rows().len(), 1);
+    assert_eq!(counts.by_kind[&Kind::Phpt], 1, "a covering row counts once");
+    assert_eq!(counts.ids, 3, "its own id and the two it covers");
+}
+
+/// An id in `covers` is held to its row's kind as the row's own id is, in
+/// the same words; and an id is held by one row only, as its own or
+/// covered, and named once within a row.
+#[test]
+fn a_covered_id_is_held_to_the_kind_and_to_one_row() {
+    let rule = |err: &str| err.contains("is of kind phpt, whose ids start with \"phpt:\"");
+    let own = Registry::parse(&COVERING.replace(
+        "id = \"phpt:fixture-optimizer\"",
+        "id = \"fixture-optimizer\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(rule(&own), "{own}");
+    let covered = Registry::parse(&COVERING.replace(
+        "\"phpt:php-src/ext/fixture/tests/a.phpt\"",
+        "\"php-src/ext/fixture/tests/a.phpt\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        rule(&covered) && covered.contains("php-src/ext/fixture/tests/a.phpt"),
+        "the rule's words, as a row's own id is refused: {covered}"
+    );
+    assert!(
+        covered.contains("phpt:fixture-optimizer"),
+        "the row is named: {covered}"
+    );
+
+    let twice = Registry::parse(&COVERING.replace(
+        "\"phpt:php-src/ext/fixture/tests/opt/b.phpt\"",
+        "\"phpt:php-src/ext/fixture/tests/a.phpt\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(twice.contains("named twice"), "{twice}");
+    let itself = Registry::parse(&COVERING.replace(
+        "\"phpt:php-src/ext/fixture/tests/opt/b.phpt\"",
+        "\"phpt:fixture-optimizer\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(itself.contains("named twice"), "{itself}");
+
+    let other = r#"
+[[divergence]]
+id = "phpt:php-src/ext/fixture/tests/a.phpt"
+kind = "phpt"
+reason = "Another reason."
+status = "accepted"
+since = "2026-09-28"
+"#;
+    for text in [format!("{COVERING}{other}"), format!("{other}{COVERING}")] {
+        let err = Registry::parse(&text).unwrap_err().to_string();
+        assert!(
+            err.contains("phpt:php-src/ext/fixture/tests/a.phpt") && err.contains("two rows"),
+            "an id covered by one row and another's own: {err}"
+        );
+    }
+    let again = COVERING.replace("phpt:fixture-optimizer", "phpt:fixture-optimizer-2");
+    let err = Registry::parse(&format!("{COVERING}{again}"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("two rows") && err.contains("rows 1 and 2"),
+        "an id two rows cover: {err}"
+    );
+
+    let root = scratch("propose-covered");
+    std::fs::write(root.join(divergence::FILE), COVERING).unwrap();
+    let mut registry = Registry::load(&root).unwrap();
+    let err = registry
+        .propose("phpt:php-src/ext/fixture/tests/a.phpt", Kind::Phpt)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("phpt:fixture-optimizer"),
+        "a covered id already has its row: {err}"
+    );
+}
+
+#[test]
+fn status_and_the_reason_instrument_count_a_covering_row_once() {
+    let root = scratch("covering");
+    let path = root.join(divergence::FILE);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{text}\n{COVERING}")).unwrap();
+    let registry = Registry::load(&root).unwrap();
+    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence"]);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains("| phpt:fixture-optimizer (covers 2) | phpt | accepted | 2026-09-28 |"),
+        "the row once, with how many ids it covers:\n{md}"
+    );
+    assert!(
+        !md.contains("tests/opt/b.phpt"),
+        "a covered id is counted in the row, not listed as one:\n{md}"
+    );
+    assert!(
+        md.contains(&counts_line(&registry, Some(Kind::Phpt))),
+        "{md}"
+    );
+    assert!(md.contains(&counts_line(&registry, None)), "{md}");
+    let (ok, json, _) = xtask(
+        &root,
+        &["status", "--section", "divergence", "--format", "json"],
+    );
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let row = value["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "phpt:fixture-optimizer")
+        .unwrap();
+    assert_eq!(row["covers"].as_array().map(Vec::len), Some(2), "{row}");
+
+    let manifest = Manifest::load(workspace()).unwrap();
+    let unreasoned =
+        Registry::parse(&COVERING.replace("The fixture's one reason (fixture).", "")).unwrap();
+    let reading = divergence::reason(&unreasoned, &manifest, workspace()).unwrap();
+    assert_eq!(reading.status, xtask::reading::Status::Fail);
+    assert!(
+        reading
+            .message
+            .contains("phpt:fixture-optimizer (covering 2 ids)"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(reading.numbers["rows"], 1.into());
+    assert_eq!(reading.numbers["ids"], 3.into());
+    assert_eq!(reading.numbers["unreasoned"], 1.into());
 }

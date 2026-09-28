@@ -597,7 +597,7 @@ fn compare_is_diverged_for_an_accepted_row() {
     );
     match verdict {
         Verdict::Diverged(row) => {
-            assert_eq!(row.id, "trace:nested-entry-return");
+            assert_eq!(row.id.as_str(), "trace:nested-entry-return");
             assert!(row.reason.contains("one opline earlier"));
         }
         other => panic!("{other:?}"),
@@ -699,7 +699,7 @@ fn verdict_is_compare_with_the_callers_match_in_place_of_equal_bytes() {
         b"TRACE stop at 3",
     );
     match missed {
-        Verdict::Diverged(row) => assert_eq!(row.id, "trace:nested-entry-return"),
+        Verdict::Diverged(row) => assert_eq!(row.id.as_str(), "trace:nested-entry-return"),
         other => panic!("{other:?}"),
     }
     let unaccepted = oracle::verdict(&registry, "phpt:php-src/no-row.phpt", false, b"%d", b"x");

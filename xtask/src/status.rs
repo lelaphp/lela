@@ -457,9 +457,10 @@ fn fold_uncreated(rows: Vec<Row>, key: &str) -> Result<Vec<Row>> {
     Ok(kept)
 }
 
-/// The divergence section: the registry's rows, then counts by kind (rows)
-/// and status (columns) with a total. It reads no reading; the registry is
-/// the truth and this is its view (harness-design.md §4.3).
+/// The divergence section: the registry's rows, a covering row's id with
+/// how many ids it covers beside its own, then counts by kind (rows) and status (columns)
+/// with a total, a covering row counted once. It reads no reading; the
+/// registry is the truth and this is its view (harness-design.md §4.3).
 fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String> {
     let counts = registry.counts();
     let kinds = Kind::ALL
@@ -469,7 +470,7 @@ fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String
     match format {
         Format::Json => {
             let rows: Vec<Value> = registry
-                .rows
+                .rows()
                 .iter()
                 .map(|r| {
                     json!({
@@ -477,6 +478,7 @@ fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String
                         "kind": r.kind.as_str(),
                         "status": r.status.as_str(),
                         "since": r.since,
+                        "covers": r.covers,
                         "reason": r.reason,
                     })
                 })
@@ -503,11 +505,14 @@ fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String
             let mut out = String::new();
             let _ = writeln!(out, "| id | kind | status | since | reason |");
             let _ = writeln!(out, "|---|---|---|---|---|");
-            for row in &registry.rows {
+            for row in registry.rows() {
+                let id = match row.covers.len() {
+                    0 => cell(row.id.as_str()),
+                    n => format!("{} (covers {n})", cell(row.id.as_str())),
+                };
                 let _ = writeln!(
                     out,
-                    "| {} | {} | {} | {} | {} |",
-                    cell(&row.id),
+                    "| {id} | {} | {} | {} | {} |",
                     row.kind.as_str(),
                     row.status.as_str(),
                     row.since,
@@ -538,7 +543,7 @@ fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String
                 of(Status::Open),
                 of(Status::Accepted),
                 of(Status::Fixed),
-                registry.rows.len()
+                registry.rows().len()
             );
             Ok(out)
         }
