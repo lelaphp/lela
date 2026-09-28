@@ -1695,7 +1695,29 @@ impl ObjectHandlers for Handlers {
     /// after an overriding `offsetExists` said yes under `BP_VAR_IS`; else
     /// `spl_array_get_dimension_ptr` over the storage, and under a write
     /// fetch the element made a reference in place (`ZVAL_NEW_REF`) and
-    /// handed back as the place the write goes through.
+    /// handed back as the place the write goes through. `$o[]` hands the
+    /// overriding `offsetGet` an argument it was not passed.
+    ///
+    /// ```php
+    /// class B extends ArrayObject {
+    ///     public function offsetGet($offset): mixed { var_dump($offset); return 5; }
+    /// }
+    /// $b = new B;
+    /// try { $b[][5] = 'value'; } catch (Throwable $e) { echo $e::class, ': ', $e->getMessage(), "\n"; }
+    /// class C extends ArrayObject {
+    ///     public function offsetGet($offset = 'd'): mixed { var_dump($offset); return [1]; }
+    /// }
+    /// $c = new C;
+    /// $c[][5] = 'value';
+    /// ```
+    /// ```expect
+    ///
+    /// Notice: Indirect modification of overloaded element of B has no effect in %s on line 6
+    /// ArgumentCountError: B::offsetGet(): Argument #1 ($offset) not passed
+    /// string(1) "d"
+    ///
+    /// Notice: Indirect modification of overloaded element of C has no effect in %s on line 11
+    /// ```
     fn read_dimension(
         &self,
         req: &mut Request,
@@ -1712,9 +1734,30 @@ impl ObjectHandlers for Handlers {
                     return Ok(Value::null());
                 }
             }
+            // `if (!offset) { ZVAL_UNDEF(&tmp); offset = &tmp; }`: `$o[]`
+            // hands the method an argument it was not passed.
             if get {
-                let offset = offset.copied().unwrap_or_default();
-                return call_method(req, &object, b"offsetGet", &[offset]);
+                let offset = offset.copied().unwrap_or_else(Value::unpassed);
+                let got = call_method(req, &object, b"offsetGet", &[offset]);
+                // A method that threw leaves `rv` undefined and the answer
+                // `&EG(uninitialized_zval)`, which a write fetch takes for
+                // no place: `zend_fetch_dimension_address`'s notice.
+                if got.is_err()
+                    && matches!(
+                        read,
+                        DimensionRead::Write | DimensionRead::ReadWrite | DimensionRead::Unset
+                    )
+                {
+                    let class = String::from_utf8_lossy(&crate::class_name(req, object.class()))
+                        .into_owned();
+                    php_ext::raising::notice(
+                        req,
+                        &format!(
+                            "Indirect modification of overloaded element of {class} has no effect"
+                        ),
+                    );
+                }
+                return got;
             }
         }
         let Some(offset) = offset else {

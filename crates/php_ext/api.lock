@@ -787,5 +787,6 @@ values::Value::resource
 values::Value::string
 values::Value::tag
 values::Value::type_name
+values::Value::unpassed
 values::ValueRef
 values::zend_sort

@@ -1738,6 +1738,17 @@ impl Value {
         Value::of(Inner::Undef)
     }
 
+    /// An argument left unpassed, the `IS_UNDEF` slot `zend_call_function`
+    /// forwards (`ZEND_CALL_MAY_HAVE_UNDEF`): a call served with one fills
+    /// it from the parameter's default or raises php's `ArgumentCountError`
+    /// that it was not passed, so the callee never reads one. What
+    /// `spl_array_read_dimension_ex` hands an overriding `offsetGet` for
+    /// `$o[]`.
+    #[must_use]
+    pub const fn unpassed() -> Value {
+        Value::of(Inner::Undef)
+    }
+
     /// `true` or `false`.
     #[must_use]
     pub const fn bool(b: bool) -> Value {
