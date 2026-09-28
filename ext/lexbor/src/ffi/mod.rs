@@ -14,6 +14,11 @@
 //!   the `<meta>` pre-scan the same files drive;
 //! - [`css`]: the selector parser of `parentnode/css_selectors.c`, its
 //!   list copied into an owned tree for the matcher.
+//!
+//! and to ext/uri, whose `uri_parser_whatwg.c` includes `lexbor/url`:
+//!
+//! - [`url`]: the WHATWG URL parser, its setters and serialisers, and the
+//!   validation errors it logs.
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
@@ -24,3 +29,4 @@ pub mod css;
 pub mod encoding;
 pub mod html;
 mod sys;
+pub mod url;

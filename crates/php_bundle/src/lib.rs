@@ -46,6 +46,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_dom::extension,
         #[cfg(feature = "pdo_mysql")]
         php_ext_pdo_mysql::extension,
+        #[cfg(feature = "uri")]
+        php_ext_uri::extension,
         #[cfg(feature = "filter")]
         php_ext_filter::extension,
         #[cfg(feature = "tokenizer")]

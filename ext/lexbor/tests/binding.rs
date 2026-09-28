@@ -306,3 +306,96 @@ fn a_selector_is_refused_with_lexbor_message() {
     assert!(!message.is_empty(), "{}", String::from_utf8_lossy(&message));
     assert!(List::parse(b"").is_err());
 }
+
+#[test]
+fn a_url_is_parsed_read_and_serialised() {
+    use php_ext_lexbor::ffi::url::{Host, Url};
+    let parsed = Url::parse(
+        b"HTTPS://us%65r:pa ss@EXAMPLE.com:8080/a/../b?q=1#frag",
+        None,
+    );
+    assert!(parsed.errors.is_empty() || parsed.url.is_some());
+    let url = parsed.url.expect("a URL");
+    assert_eq!(url.scheme(), b"https");
+    assert_eq!(url.username(), b"us%65r");
+    assert_eq!(url.password(), b"pa%20ss");
+    assert_eq!(url.host(), Some(Host::Domain(b"example.com")));
+    assert_eq!(url.port(), Some(8080));
+    assert_eq!(url.path(), b"/b");
+    assert_eq!(url.query(), Some(b"q=1".as_slice()));
+    assert_eq!(url.fragment(), Some(b"frag".as_slice()));
+    assert_eq!(
+        url.serialize(true),
+        b"https://us%65r:pa%20ss@example.com:8080/b?q=1"
+    );
+    let copy = url.try_clone().expect("a clone");
+    drop(url);
+    assert_eq!(
+        copy.serialize(false),
+        b"https://us%65r:pa%20ss@example.com:8080/b?q=1#frag"
+    );
+}
+
+#[test]
+fn a_url_logs_its_validation_errors_last_first() {
+    use php_ext_lexbor::ffi::url::{ErrorKind, Url};
+    let parsed = Url::parse(b"https://example.com:99999", None);
+    assert!(parsed.url.is_none());
+    assert_eq!(parsed.errors.len(), 1);
+    assert_eq!(parsed.errors[0].kind, ErrorKind::PortOutOfRange);
+    assert_eq!(
+        parsed.errors[0].data, b"",
+        "the position past the port, as php shows it"
+    );
+    let parsed = Url::parse(
+        b" \\\\example.com\\a\tb",
+        Url::parse(b"https://x/", None).url.as_ref(),
+    );
+    let url = parsed.url.expect("a URL");
+    assert_eq!(url.serialize(false), b"https://example.com/ab");
+    let kinds: Vec<ErrorKind> = parsed.errors.iter().map(|e| e.kind).collect();
+    assert_eq!(kinds.first(), Some(&ErrorKind::InvalidReverseSolidus));
+    assert_eq!(kinds.last(), Some(&ErrorKind::InvalidUrlUnit));
+}
+
+#[test]
+fn a_url_is_changed_by_its_setters() {
+    use php_ext_lexbor::ffi::url::{ErrorKind, Host, Url, ipv4_text, ipv6_text};
+    let mut url = Url::parse(b"https://example.com/", None)
+        .url
+        .expect("a URL");
+    url.set_protocol(b"http").expect("a scheme");
+    url.set_username(b"u").expect("a username");
+    url.set_password(b"p").expect("a password");
+    url.set_port(b"81").expect("a port");
+    url.set_pathname(b"x y").expect("a path");
+    url.set_search(b"a=b").expect("a query");
+    url.set_hash(b"h").expect("a fragment");
+    assert_eq!(
+        url.serialize(false),
+        b"http://u:p@example.com:81/x%20y?a=b#h"
+    );
+    let refused = url.set_hostname(b"exa[mple").expect_err("a malformed host");
+    assert_eq!(
+        refused.0.first().map(|e| e.kind),
+        Some(ErrorKind::DomainInvalidCodePoint)
+    );
+    url.set_hostname(b"192.168.0.1").expect("an IPv4 host");
+    let Some(Host::Ipv4(v4)) = url.host() else {
+        panic!("an IPv4 host")
+    };
+    assert_eq!(ipv4_text(v4), b"192.168.0.1");
+    url.set_hostname(b"[2001:db8::1]").expect("an IPv6 host");
+    let Some(Host::Ipv6(v6)) = url.host() else {
+        panic!("an IPv6 host")
+    };
+    assert_eq!(ipv6_text(&v6), b"2001:db8::1");
+    url.set_hostname(b"xn--mnchen-3ya.de").expect("a domain");
+    assert_eq!(url.host_unicode(), "münchen.de".as_bytes());
+    assert_eq!(
+        url.serialize_idna(true),
+        "http://u:p@münchen.de:81/x%20y?a=b".as_bytes()
+    );
+    url.set_port(b"").expect("no port");
+    assert_eq!(url.port(), None);
+}

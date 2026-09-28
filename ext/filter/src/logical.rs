@@ -10,6 +10,7 @@ use php_ext::raising::{Thrown, fatal, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, Value, ValueRef};
 use php_ext_pcre::Regex;
+use php_ext_uri::{Parser, ReadAs, UriStruct};
 
 use crate::constants::{
     FILTER_FLAG_ALLOW_HEX, FILTER_FLAG_ALLOW_OCTAL, FILTER_FLAG_ALLOW_THOUSAND,
@@ -637,17 +638,22 @@ fn userinfo_ok(s: &[u8]) -> bool {
 }
 
 /// `php_filter_validate_url`, `FILTER_VALIDATE_URL`: nothing the URL
-/// sanitizer would strip, then the components `parse_url` reads, which
-/// is the parser `php_uri_get_parser` answers without the
-/// `uri_parser_class` option: a scheme, a host for all but `mailto`,
-/// `news` and `file`, a hostname or a bracketed IPv6 address for `http`
-/// and `https`, and the user and password as `is_userinfo_valid` holds
-/// them.
+/// sanitizer would strip, then the components of the parser the
+/// `uri_parser_class` option names (`php_uri_get_parser`): ext/uri's for
+/// a class, `parse_url` where none is named, read raw as
+/// `php_uri_parse_to_struct` reads them: a scheme, a host for all but `mailto`,
+/// `news` and `file`, and, for `parse_url` alone, whose parse checks
+/// less than the two standards', a hostname or a bracketed IPv6 address
+/// for `http` and `https` and the user and password as
+/// `is_userinfo_valid` holds them.
 ///
 /// ```php
 /// foreach (["http://example.com", "https://a.b/p?q=1#f", "http://-bad.com", "http://[::1]:80/", "mailto:a@b.c", "news:x", "foo", "http://ex ample.com", "http://u:p@h.com", "http://u%zz@h.com", "ftp://h", "//h.com"] as $s) var_dump(filter_var($s, FILTER_VALIDATE_URL));
 /// var_dump(filter_var("http://h.com", FILTER_VALIDATE_URL, FILTER_FLAG_PATH_REQUIRED), filter_var("http://h.com/p", FILTER_VALIDATE_URL, FILTER_FLAG_QUERY_REQUIRED), filter_var("http://h.com/p?x", FILTER_VALIDATE_URL, FILTER_FLAG_PATH_REQUIRED | FILTER_FLAG_QUERY_REQUIRED));
 /// try { filter_var("http://h.com", FILTER_VALIDATE_URL, ["options" => ["uri_parser_class" => "nope"]]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// foreach (["parse_url", Uri\Rfc3986\Uri::class, Uri\WhatWg\Url::class] as $p) {
+///     foreach (["http:///example.com", "http://exa%23mple.org", "http://a_b.com/", "http://u%zz@h.com"] as $u) echo $p, " ", var_export(filter_var($u, FILTER_VALIDATE_URL, ["options" => ["uri_parser_class" => $p]]), true), "\n";
+/// }
 /// ```
 /// ```expect
 /// string(18) "http://example.com"
@@ -666,18 +672,76 @@ fn userinfo_ok(s: &[u8]) -> bool {
 /// bool(false)
 /// string(16) "http://h.com/p?x"
 /// filter_var(): "uri_parser_class" option has invalid value
+/// parse_url false
+/// parse_url false
+/// parse_url false
+/// parse_url false
+/// Uri\Rfc3986\Uri 'http:///example.com'
+/// Uri\Rfc3986\Uri 'http://exa%23mple.org'
+/// Uri\Rfc3986\Uri 'http://a_b.com/'
+/// Uri\Rfc3986\Uri false
+/// Uri\WhatWg\Url 'http:///example.com'
+/// Uri\WhatWg\Url false
+/// Uri\WhatWg\Url 'http://a_b.com/'
+/// Uri\WhatWg\Url 'http://u%zz@h.com'
 /// ```
 pub(crate) fn url(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
     if sanitizing::url_bytes(s).len() != s.len() {
         return Ok(Outcome::Failed);
     }
-    if string_option(run, b"uri_parser_class").is_some_and(|name| name != b"parse_url") {
-        return Err(value_error(
-            req,
-            run,
-            "\"uri_parser_class\" option has invalid value",
-        ));
+    let name = string_option(run, b"uri_parser_class");
+    let parser = match name.as_deref() {
+        None | Some(b"parse_url") => None,
+        Some(name) => match Parser::named(name) {
+            Some(parser) => Some(parser),
+            None => {
+                return Err(value_error(
+                    req,
+                    run,
+                    "\"uri_parser_class\" option has invalid value",
+                ));
+            }
+        },
+    };
+    let uri = match parser {
+        Some(parser) => parser.parse_to_struct(req, s, ReadAs::Raw, true)?,
+        None => parse_url(req, s)?,
+    };
+    let Some(uri) = uri else {
+        return Ok(Outcome::Failed);
+    };
+    let parse_url = parser.is_none();
+    let web = uri
+        .scheme
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case(b"http") || s.eq_ignore_ascii_case(b"https"));
+    let ipv6_host = |h: &[u8]| {
+        h.len() >= 2 && h[0] == b'[' && h[h.len() - 1] == b']' && ipv6(&h[1..h.len() - 1]).is_some()
+    };
+    let host_ok = match uri.host.as_deref() {
+        None => false,
+        Some(h) => !parse_url || ipv6_host(h) || domain_ok(h, FILTER_FLAG_HOSTNAME),
+    };
+    let valid = (!web || host_ok)
+        && uri.scheme.as_deref().is_some_and(|scheme| {
+            uri.host.is_some() || matches!(scheme, b"mailto" | b"news" | b"file")
+        })
+        && (run.flags & FILTER_FLAG_PATH_REQUIRED == 0 || uri.path.is_some())
+        && (run.flags & FILTER_FLAG_QUERY_REQUIRED == 0 || uri.query.is_some())
+        && (!parse_url
+            || (uri.user.as_deref().is_none_or(userinfo_ok)
+                && uri.password.as_deref().is_none_or(userinfo_ok)));
+    if valid {
+        same(req, s)
+    } else {
+        Ok(Outcome::Failed)
     }
+}
+
+/// The `parse_url` parser of php's `uri_parsers`, `php_url_parse_ex2` read raw
+/// into a `php_uri`: ext/standard's `parse_url`, called as the function
+/// table has it, since ext/standard, which will need ext/uri, keeps it.
+fn parse_url(req: &mut Request, s: &[u8]) -> Result<Option<UriStruct>, Thrown> {
     let name = string_value(req, b"parse_url")?;
     let parse_url = callable_checked(req, &name);
     req.release(name);
@@ -693,7 +757,7 @@ pub(crate) fn url(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thr
     let parts = parts?;
     let Some(array) = parts.as_array().copied() else {
         req.release(parts);
-        return Ok(Outcome::Failed);
+        return Ok(None);
     };
     let entries = array.snapshot();
     let part = |name: &[u8]| {
@@ -702,30 +766,21 @@ pub(crate) fn url(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thr
             _ => None,
         })
     };
-    let (scheme, host) = (part(b"scheme"), part(b"host"));
-    let web = scheme
-        .as_deref()
-        .is_some_and(|s| s.eq_ignore_ascii_case(b"http") || s.eq_ignore_ascii_case(b"https"));
-    let ipv6_host = |h: &[u8]| {
-        h.len() >= 2 && h[0] == b'[' && h[h.len() - 1] == b']' && ipv6(&h[1..h.len() - 1]).is_some()
+    let uri = UriStruct {
+        scheme: part(b"scheme"),
+        user: part(b"user"),
+        password: part(b"pass"),
+        host: part(b"host"),
+        port: entries.iter().find_map(|(key, value)| match key {
+            Key::Str(k) if k.as_bytes() == b"port" => value.as_int(),
+            _ => None,
+        }),
+        path: part(b"path"),
+        query: part(b"query"),
+        fragment: part(b"fragment"),
     };
-    let valid = !(web
-        && host
-            .as_deref()
-            .is_none_or(|h| !ipv6_host(h) && !domain_ok(h, FILTER_FLAG_HOSTNAME)))
-        && scheme.as_deref().is_some_and(|scheme| {
-            host.is_some() || matches!(scheme, b"mailto" | b"news" | b"file")
-        })
-        && (run.flags & FILTER_FLAG_PATH_REQUIRED == 0 || part(b"path").is_some())
-        && (run.flags & FILTER_FLAG_QUERY_REQUIRED == 0 || part(b"query").is_some())
-        && part(b"user").is_none_or(|u| userinfo_ok(&u))
-        && part(b"pass").is_none_or(|p| userinfo_ok(&p));
     req.release(parts);
-    if valid {
-        same(req, s)
-    } else {
-        Ok(Outcome::Failed)
-    }
+    Ok(Some(uri))
 }
 
 /// `_php_filter_validate_ipv4`: four decimal parts of at most three

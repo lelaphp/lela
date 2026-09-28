@@ -371,6 +371,7 @@ request::Request::class_decl
 request::Request::class_extension
 request::Request::class_extension_name
 request::Request::class_flags
+request::Request::class_has_create_object
 request::Request::clear_last_error
 request::Request::clear_stat_cache
 request::Request::closure_refuses_receiver

@@ -61,7 +61,7 @@ _Avoid_: request context (the implementation behind the face), runtime API
 
 **Facet**:
 One named group of the native face with a short interface and a deep implementation: diagnostics, symbols, callbacks, output, ini, streams and resources, request environment. Zend builtins that need frames use a privileged facet inside the engine.
-_Avoid_: port, capability, service
+_Avoid_: port (a URL's is php's and lexbor's word, ext/lexbor's `ffi::url::Url::port`, `ffi::url::Url::set_port`, `ffi::url::ErrorKind::PortOutOfRange` and `ffi::url::ErrorKind::PortInvalid`), capability, service
 
 **Extension**:
 One module of natives, classes, constants, ini entries and lifecycle hooks, registered as a value and linked at module startup. Order of registration is derived from the declarations, never from call position.
