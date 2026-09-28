@@ -1405,18 +1405,29 @@ pub(crate) fn properties_for(
     object: PhpObject,
     purpose: PropertyPurpose,
 ) -> Result<Vec<(Key, Value)>, Thrown> {
+    properties_answered(req, object, purpose).map(|(rows, _)| rows)
+}
+
+/// [`properties_for`], and whether the rows are a table the class built
+/// for the reader (`get_properties_for` answering, php's `*is_temp`)
+/// rather than the object's own.
+pub(crate) fn properties_answered(
+    req: &mut Request,
+    object: PhpObject,
+    purpose: PropertyPurpose,
+) -> Result<(Vec<(Key, Value)>, bool), Thrown> {
     let table = req.object_handlers(object.heap());
     // What `get_properties_for` answers is the table php hands back as
     // it stands, whose names are already what a reader shows; what
     // `get_properties` answers is the members, whose names the slot
     // carries unmangled here.
     let rows = match table.get_properties_for(req, object, purpose)? {
-        Some(rows) => return Ok(rows),
+        Some(rows) => return Ok((rows, true)),
         // `zend_std_get_properties_for`'s `num_hooked_props` arm for the
         // readers that run hooks.
         None if matches!(purpose, PropertyPurpose::Json | PropertyPurpose::VarExport) => {
             if let Some(rows) = req.hooked_properties_for(object)? {
-                return Ok(named_rows(rows));
+                return Ok((named_rows(rows), false));
             }
             table.get_properties(req, object)?
         }
@@ -1428,7 +1439,7 @@ pub(crate) fn properties_for(
             PropertyPurpose::Debug => {
                 if let Some(instance) = req.lazy_instance(object.heap()) {
                     let name = req.interned(b"instance")?;
-                    return Ok(vec![(Key::Str(name), instance.as_value())]);
+                    return Ok((vec![(Key::Str(name), instance.as_value())], false));
                 }
                 req.properties_no_lazy_init(object)?
             }
@@ -1452,7 +1463,7 @@ pub(crate) fn properties_for(
         };
         out.push((Key::Str(name), entry));
     }
-    Ok(out)
+    Ok((out, false))
 }
 
 /// Rows keyed by property names, each a string key as a property

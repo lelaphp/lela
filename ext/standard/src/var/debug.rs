@@ -101,6 +101,29 @@ use super::class_name;
 ///   int(3)
 /// }
 /// ```
+///
+/// A class that builds its table for the reader holds one owner of each
+/// row while the dump reads it, as `zend_get_properties_for` hands php's
+/// dump a temporary table until `zend_release_properties`, so an
+/// `SplFixedArray` that holds itself counts that row, and a string
+/// element one owner more.
+///
+/// ```php
+/// $a = new SplFixedArray(1); $a[0] = $a; debug_zval_dump($a);
+/// $b = new SplFixedArray(2); $b[0] = "x" . rand(1, 1); debug_zval_dump($b);
+/// ```
+/// ```expect
+/// object(SplFixedArray)#1 (1) refcount(4){
+///   [0]=>
+///   *RECURSION*
+/// }
+/// object(SplFixedArray)#2 (2) refcount(2){
+///   [0]=>
+///   string(2) "x1" refcount(2)
+///   [1]=>
+///   NULL
+/// }
+/// ```
 #[php_function]
 fn debug_zval_dump(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<(), Thrown> {
     let values = std::iter::once(value).chain(values.0);
@@ -185,7 +208,18 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                 return Ok(());
             }
             object.protect();
-            let props = object.props_for(req, PropertyPurpose::Debug)?;
+            // Held from here to the closing brace, as php holds the
+            // table from `zend_get_properties_for` to
+            // `zend_release_properties`, so the refcount printed counts
+            // the owners a class's own table takes.
+            let held = match object.props_held(req, PropertyPurpose::Debug) {
+                Ok(held) => held,
+                Err(thrown) => {
+                    object.unprotect();
+                    return Err(thrown);
+                }
+            };
+            let props = held.rows().to_vec();
             // `ZSTR_VAL(class_name)` under `%s`: up to the NUL of an
             // anonymous class's name.
             let full = class_name(req, *object);
@@ -249,6 +283,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                     break;
                 }
             }
+            held.release(req);
             object.unprotect();
             dumped?;
             pad(out, level);

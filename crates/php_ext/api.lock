@@ -644,6 +644,9 @@ values::HashIterator::new
 values::HashIterator::position
 values::HashIterator::release
 values::HashIterator::set_position
+values::HeldProperties
+values::HeldProperties::release
+values::HeldProperties::rows
 values::Key
 values::Key::from_string
 values::Key::to_prop_name
@@ -708,6 +711,7 @@ values::PhpObject::native_mut_or_fatal
 values::PhpObject::prop
 values::PhpObject::props
 values::PhpObject::props_for
+values::PhpObject::props_held
 values::PhpObject::protect
 values::PhpObject::row
 values::PhpObject::row_place

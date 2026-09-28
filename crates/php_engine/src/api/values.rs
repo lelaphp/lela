@@ -694,6 +694,34 @@ impl ArrayIter {
     }
 }
 
+/// The table `zend_get_properties_for` hands a reader, held until
+/// `zend_release_properties`: [`PhpObject::props_held`]'s rows, each one
+/// more owner of its value where the class built the table for the
+/// reader, views of the object's own rows otherwise.
+#[derive(Debug)]
+#[must_use = "the rows are held until they are released"]
+pub struct HeldProperties {
+    rows: Vec<(Key, Value)>,
+    owned: bool,
+}
+
+impl HeldProperties {
+    /// The rows in the table's order.
+    #[must_use]
+    pub fn rows(&self) -> &[(Key, Value)] {
+        &self.rows
+    }
+
+    /// `zend_release_properties`: the owners the rows held given back.
+    pub fn release(self, req: &mut Request) {
+        if self.owned {
+            for (_, value) in self.rows {
+                req.release(value);
+            }
+        }
+    }
+}
+
 /// Where a value stands in a table, php's `zval *` into a bucket, which
 /// a dimension fetch for a write lays into its `VAR` as `IS_INDIRECT`
 /// so the write, and an `ASSIGN_REF`, reaches the table itself. Naming
@@ -960,6 +988,29 @@ impl PhpObject {
         purpose: PropertyPurpose,
     ) -> Result<Vec<(Key, Value)>, Thrown> {
         crate::ops::properties_for(req, *self, purpose)
+    }
+
+    /// [`PhpObject::props_for`] for a reader that holds the table while
+    /// it reads, `zend_get_properties_for` to `zend_release_properties`:
+    /// where the class builds the table for the reader
+    /// (`get_properties_for`, php's `*is_temp`), each row is one more
+    /// owner of its value until [`HeldProperties::release`], as
+    /// `spl_fixedarray_object_get_properties_for`'s `Z_TRY_ADDREF_P` makes
+    /// it, so an element that is the object itself counts while the
+    /// reader prints its refcount; the object's own table, which php
+    /// hands out with `GC_TRY_ADDREF` on the table alone, takes none.
+    pub fn props_held(
+        &self,
+        req: &mut Request,
+        purpose: PropertyPurpose,
+    ) -> Result<HeldProperties, Thrown> {
+        let (rows, owned) = crate::ops::properties_answered(req, *self, purpose)?;
+        if owned {
+            for (_, value) in &rows {
+                req.addref(value);
+            }
+        }
+        Ok(HeldProperties { rows, owned })
     }
 
     /// The object's property table as `get_properties` holds it,
