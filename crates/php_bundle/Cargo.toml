@@ -8,8 +8,10 @@
 # `posix` are two more, which the `php` binary turns on and no server
 # host does, as php builds pcntl for the CLI and a `fork()` in a process
 # that serves requests on threads keeps one thread (design §7.2, revision
-# 35); `sockets` is the last, an `--enable` the `php` binary turns on and a
-# server host may, since sockets are sound on threads (revision 36). So this file and the manifest name one default build and neither is
+# 35); `sockets` is an `--enable` the `php` binary turns on and a
+# server host may, since sockets are sound on threads (revision 36), and
+# `bz2` the last, php's `--with-bz2`, which the `php` binary turns on
+# (revision 39). So this file and the manifest name one default build and neither is
 # read over the other (harness §7). `xtask new-ext <name>` appends the
 # dependency and the feature and lists the crate in `default`; a person
 # removes a non-default extension from `default` when porting it.
@@ -65,6 +67,7 @@ pcntl = ["dep:php_ext_pcntl"] # the `php` binary and the phpt lane alone (design
 posix = ["dep:php_ext_posix"] # the `php` binary and the phpt lane alone (design §7.2, revision 35)
 sockets = ["dep:php_ext_sockets"] # the `php` binary and the phpt lane, as php builds it with --enable-sockets (design §7.2, revision 36)
 phar = ["dep:php_ext_phar"]
+bz2 = ["dep:php_ext_bz2"] # the `php` binary and the phpt lane, as php builds it with --with-bz2 (design §7.2, revision 39)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -96,6 +99,7 @@ php_ext_pcntl = { path = "../../ext/pcntl", optional = true }
 php_ext_posix = { path = "../../ext/posix", optional = true }
 php_ext_sockets = { path = "../../ext/sockets", optional = true }
 php_ext_phar = { path = "../../ext/phar", optional = true }
+php_ext_bz2 = { path = "../../ext/bz2", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

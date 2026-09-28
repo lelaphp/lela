@@ -32,8 +32,9 @@ required-features = ["witness-trace"]
 witness-trace = ["php_bundle/witness-trace"]
 
 [dependencies]
-# The bundle's default set and three it turns on: `pcntl` and `posix`,
+# The bundle's default set and four it turns on: `pcntl` and `posix`,
 # which php builds for the CLI and which no server host carries (design
-# §7.2, revision 35), and `sockets`, php's `--enable-sockets` (revision 36).
-php_bundle = { path = "../php_bundle", features = ["pcntl", "posix", "sockets"] }
+# §7.2, revision 35), `sockets`, php's `--enable-sockets` (revision 36),
+# and `bz2`, php's `--with-bz2` (revision 39).
+php_bundle = { path = "../php_bundle", features = ["pcntl", "posix", "sockets", "bz2"] }
 php_sapi = { path = "../php_sapi" }

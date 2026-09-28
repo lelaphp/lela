@@ -1,0 +1,27 @@
+# ext/bz2: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_bz2"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The bz2 extension, php-src/ext/bz2"
+
+[lints]
+workspace = true
+
+# The facade, and `standard`, whose `file.h` natives `bzwrite` and
+# `bzclose` are (design §4.10). The engine is out of reach (`[[edge]]`
+# ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+php_ext_standard = { path = "../standard" }
+# bzip2 is libbz2-rs-sys, libbzip2 ported to Rust and bound in `src/ffi/`
+# alone (`unsafe.homes`): it writes the oracle's libbz2 bytes at every
+# block size and work factor (design §7.2, revision 39; #1116).
+libbz2-rs-sys = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }
