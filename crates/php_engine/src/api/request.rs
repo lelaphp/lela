@@ -4575,7 +4575,46 @@ impl Request {
     /// The rows of a trace as `zend_fetch_debug_backtrace` builds each
     /// array: `options`, `DEBUG_BACKTRACE_PROVIDE_OBJECT` for an
     /// `object` row of a method's receiver between `class` and `type`,
-    /// and `DEBUG_BACKTRACE_IGNORE_ARGS` for no `args`.
+    /// and `DEBUG_BACKTRACE_IGNORE_ARGS` for no `args` on a function's
+    /// row. A code frame's row keeps the included file as its `args`
+    /// under it, between `line` and `function`, where php's
+    /// `build_filename_arg` adds it.
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', '1');
+    /// if (!isset($go)) { function boom($o) { return new Exception('boom'); } $go = 1; $e = include __FILE__; var_dump($e->getTrace()); echo $e->getTraceAsString(), "\n"; return; }
+    /// return boom(new stdClass);
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   array(3) {
+    ///     ["file"]=>
+    ///     string(%d) "%s.php"
+    ///     ["line"]=>
+    ///     int(4)
+    ///     ["function"]=>
+    ///     string(4) "boom"
+    ///   }
+    ///   [1]=>
+    ///   array(4) {
+    ///     ["file"]=>
+    ///     string(%d) "%s.php"
+    ///     ["line"]=>
+    ///     int(3)
+    ///     ["args"]=>
+    ///     array(1) {
+    ///       [0]=>
+    ///       string(%d) "%s.php"
+    ///     }
+    ///     ["function"]=>
+    ///     string(7) "include"
+    ///   }
+    /// }
+    /// #0 %s(4): boom()
+    /// #1 %s(3): include('%s...')
+    /// #2 {main}
+    /// ```
     fn render_trace(&mut self, links: Vec<TraceRow>, options: i64) -> Result<PhpArray, Thrown> {
         let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
         let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
@@ -4583,79 +4622,89 @@ impl Request {
         self.constant_expression_row(&mut trace)?;
         for (traced, this, scope, arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
-            let is_function = matches!(traced, Traced::Function(_));
-            let sensitive = match traced {
-                Traced::Function(function) => self.sensitive_parameters(function),
-                Traced::Include { .. } => Sensitive::default(),
-            };
-            let (name, method, included) = match traced {
-                Traced::Function(function) => (
-                    self.declared_name(function),
-                    self.method_class(function).or(scope).map(|class| {
-                        let class = self.class_name(class);
-                        (class, if this.is_some() { "->" } else { "::" })
-                    }),
-                    None,
-                ),
-                Traced::Include { kind, file } => (kind.name().to_owned(), None, file),
-            };
             if let Some((file, line)) = site {
                 let file = Value::string(PhpString::new(self, &file)?);
                 self.set_string_key(&mut row, b"file", file)?;
                 self.set_string_key(&mut row, b"line", Value::int(line))?;
             }
-            let name = Value::string(PhpString::new(self, name.as_bytes())?);
-            self.set_string_key(&mut row, b"function", name)?;
-            if let Some((class, join)) = method {
-                let class = Value::string(PhpString::new(self, class.as_bytes())?);
-                self.set_string_key(&mut row, b"class", class)?;
-                if provide_object && let Some(this) = this {
-                    self.addref(&this.as_value());
-                    self.set_string_key(&mut row, b"object", this.as_value())?;
+            match traced {
+                Traced::Function(function) => {
+                    let name = self.declared_name(function);
+                    let name = Value::string(PhpString::new(self, name.as_bytes())?);
+                    self.set_string_key(&mut row, b"function", name)?;
+                    if let Some(class) = self.method_class(function).or(scope) {
+                        let class = self.class_name(class);
+                        let class = Value::string(PhpString::new(self, class.as_bytes())?);
+                        self.set_string_key(&mut row, b"class", class)?;
+                        if provide_object && let Some(this) = this {
+                            self.addref(&this.as_value());
+                            self.set_string_key(&mut row, b"object", this.as_value())?;
+                        }
+                        let join: &[u8] = if this.is_some() { b"->" } else { b"::" };
+                        let join = Value::string(PhpString::new(self, join)?);
+                        self.set_string_key(&mut row, b"type", join)?;
+                    }
+                    if !ignore_arguments {
+                        let args = self.trace_row_arguments(function, arguments, named)?;
+                        self.set_string_key(&mut row, b"args", Value::array(args))?;
+                    }
                 }
-                let join = Value::string(PhpString::new(self, join.as_bytes())?);
-                self.set_string_key(&mut row, b"type", join)?;
-            }
-            // A code frame's row has an `args` only where it has the
-            // file, and a function's always, `debug_backtrace_get_args`,
-            // which adds the extra named arguments under their names
-            // after the positional ones. The frame's arguments are
-            // borrowed from its slots, so each one the row keeps takes
-            // an owner and one it leaves out is left alone; the included
-            // file is made here, with the row as its one owner.
-            let with_args = is_function || included.is_some();
-            if !ignore_arguments && with_args {
-                let mut args = PhpArray::new(self)?;
-                if let Some(file) = included {
-                    let file = Value::string(PhpString::new(self, &file)?);
-                    args.append(self, file)?;
+                Traced::Include { kind, file } => {
+                    // `build_filename_arg`: the included file is the
+                    // row's one argument, ahead of `function` and under
+                    // `DEBUG_BACKTRACE_IGNORE_ARGS` as without it, made
+                    // here with the row as its one owner.
+                    if let Some(file) = file {
+                        let file = Value::string(PhpString::new(self, &file)?);
+                        let mut args = PhpArray::new(self)?;
+                        args.append(self, file)?;
+                        self.set_string_key(&mut row, b"args", Value::array(args))?;
+                    }
+                    let name = Value::string(PhpString::new(self, kind.name().as_bytes())?);
+                    self.set_string_key(&mut row, b"function", name)?;
                 }
-                for (at, argument) in arguments.into_iter().enumerate() {
-                    let argument = argument.deref();
-                    let argument = if sensitive.at(at) {
-                        self.sensitive_value(argument)?
-                    } else {
-                        self.addref(&argument);
-                        argument
-                    };
-                    args.append(self, argument)?;
-                }
-                for (name, argument) in named {
-                    let argument = argument.deref();
-                    let argument = if sensitive.variadic {
-                        self.sensitive_value(argument)?
-                    } else {
-                        self.addref(&argument);
-                        argument
-                    };
-                    self.addref(&Value::string(name));
-                    args.set(self, Key::Str(name), argument)?;
-                }
-                self.set_string_key(&mut row, b"args", Value::array(args))?;
             }
             trace.append(self, Value::array(row))?;
         }
         Ok(trace)
+    }
+
+    /// `debug_backtrace_get_args` over a function's row: the positional
+    /// arguments, then the extra named ones under their names, each
+    /// followed through a reference and given the row's owner, since the
+    /// row has them borrowed from the frame, or the
+    /// `SensitiveParameterValue` in its place where
+    /// [`Request::sensitive_parameters`] marks it.
+    fn trace_row_arguments(
+        &mut self,
+        function: Function,
+        arguments: Vec<Value>,
+        named: Vec<(PhpString, Value)>,
+    ) -> Result<PhpArray, Thrown> {
+        let sensitive = self.sensitive_parameters(function);
+        let mut args = PhpArray::new(self)?;
+        for (at, argument) in arguments.into_iter().enumerate() {
+            let argument = argument.deref();
+            let argument = if sensitive.at(at) {
+                self.sensitive_value(argument)?
+            } else {
+                self.addref(&argument);
+                argument
+            };
+            args.append(self, argument)?;
+        }
+        for (name, argument) in named {
+            let argument = argument.deref();
+            let argument = if sensitive.variadic {
+                self.sensitive_value(argument)?
+            } else {
+                self.addref(&argument);
+                argument
+            };
+            self.addref(&Value::string(name));
+            args.set(self, Key::Str(name), argument)?;
+        }
+        Ok(args)
     }
 
     /// `zend_fetch_debug_backtrace`'s first row while a constant
