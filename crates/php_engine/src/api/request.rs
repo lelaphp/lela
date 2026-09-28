@@ -13564,6 +13564,43 @@ impl Request {
         Ok(())
     }
 
+    /// `zend_std_get_method`'s lookup (`Z/Zend/zend_object_handlers.c:1945`):
+    /// the method `class` has under the lowered name, but where the
+    /// executed scope is a class `class` descends from that declares a
+    /// private method of that name itself, that one, which the one found
+    /// overrides (`ZEND_ACC_CHANGED`, `zend_get_parent_private_method`):
+    /// a private method is its class's, whatever a child redeclares.
+    ///
+    /// ```php
+    /// class M { private function f() { return "M"; } function g() { return $this->f(); } }
+    /// class P extends M { private function f() { return "P"; } }
+    /// echo (new P)->g(), "\n";
+    /// ```
+    /// ```expect
+    /// M
+    /// ```
+    pub(crate) fn std_method(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
+        let found = self.method_named(class, lowered)?;
+        let Some(scope) = self.executed_scope() else {
+            return Some(found);
+        };
+        if self.method_class(found) == Some(scope)
+            || scope == class
+            || !self.instance_of(class, scope)
+        {
+            return Some(found);
+        }
+        match self.method_named(scope, lowered) {
+            Some(own)
+                if self.method_class(own) == Some(scope)
+                    && self.method_visibility(own) == Visibility::Private =>
+            {
+                Some(own)
+            }
+            _ => Some(found),
+        }
+    }
+
     /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`) with
     /// the scope given rather than read: a private method is its own
     /// class's, a protected one a scope `zend_check_protected` relates
