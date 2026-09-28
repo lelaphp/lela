@@ -16,7 +16,7 @@ use php_unit::decl::Visibility;
 
 use crate::api::abi::PropertyPurpose;
 use crate::api::raising::{Thrown, deprecated, throw, warning};
-use crate::api::request::{Request, append_escaped};
+use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
@@ -322,14 +322,15 @@ fn found(target: Option<Value>) -> Switched {
     }
 }
 
-/// `zend_match_unhandled_error` (`Z/Zend/zend_execute.c`): the
+/// `zend_match_unhandled_error` (`Z/Zend/zend_execute.c:884`): the
 /// `UnhandledMatchError` a `MATCH_ERROR` throws over the subject no arm
-/// took. A scalar is rendered by `smart_str_append_scalar`: `NULL`,
-/// `true` or `false`, a long in decimal, a double at `precision`
-/// (`smart_str_append_double`), a string in `'` escaped as
-/// `smart_str_append_escaped` escapes it and cut at
-/// `zend.exception_string_param_max_len` bytes with `...`; anything else
-/// is named by its type, `zend_zval_type_name`, a class for an object.
+/// took, quoted by [`Request::zval_text`] cut at
+/// `zend.exception_string_param_max_len` bytes. The subject is named by
+/// its type instead, `of type` and `zend_zval_type_name`, a class for an
+/// object, under `zend.exception_ignore_args`, for a string when the cut
+/// is `0`, and where `zval_text` has no text: an array, an object that
+/// is no enum case, a resource, and a reference, which php tests before
+/// it follows one.
 ///
 /// ```php
 /// $a = 9;
@@ -389,40 +390,55 @@ fn found(target: Option<Value>) -> Switched {
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A double keeps its `.0` and an enum case is `Enum::Case`, as a
+/// trace's argument is; a subject that is a reference is named by the
+/// type it refers to.
+///
+/// ```php
+/// enum E { case A; }
+/// $a = 5; $r = &$a;
+/// foreach ([5.0, E::A, "long enough to be cut"] as $v) { try { echo match ($v) { 1 => 'x' }; } catch (UnhandledMatchError $e) { echo $e->getMessage(), "\n"; } }
+/// try { echo match ($a) { 1 => 'x' }; } catch (UnhandledMatchError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Unhandled match case 5.0
+/// Unhandled match case E::A
+/// Unhandled match case 'long enough to ...'
+/// Unhandled match case of type int
+/// ```
+///
+/// Under `zend.exception_ignore_args` every subject is named by its
+/// type, and so is a string when the cut is `0`.
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', '1');
+/// class Beep {}
+/// foreach ([null, 5.0, "foo", [1], new Beep] as $v) { try { echo match ($v) { 1 => 'x' }; } catch (UnhandledMatchError $e) { echo $e->getMessage(), "\n"; } }
+/// ini_set('zend.exception_ignore_args', '0'); ini_set('zend.exception_string_param_max_len', '0');
+/// try { echo match ("foo") { 1 => 'x' }; } catch (UnhandledMatchError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Unhandled match case of type null
+/// Unhandled match case of type float
+/// Unhandled match case of type string
+/// Unhandled match case of type array
+/// Unhandled match case of type Beep
+/// Unhandled match case of type string
+/// ```
 pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Thrown {
-    let subject = subject.deref();
-    let message = match subject.as_ref() {
-        ValueRef::Undef | ValueRef::Null => String::from("Unhandled match case NULL"),
-        ValueRef::Bool(b) => format!("Unhandled match case {}", if b { "true" } else { "false" }),
-        ValueRef::Int(n) => format!("Unhandled match case {n}"),
-        ValueRef::Float(f) => {
-            let precision = match req.precision() {
-                0 => 1,
-                precision => precision,
-            };
-            format!(
-                "Unhandled match case {}",
-                double_to_string(f, precision, Exponent::Upper)
-            )
-        }
-        ValueRef::Str(s) => {
-            let mut text = String::from("Unhandled match case '");
-            let cut = req.exception_string_param_max_len();
-            append_escaped(&mut text, &s.as_bytes()[..cut.min(s.len())]);
-            if s.len() > cut {
-                text.push_str("...");
-            }
-            text.push('\'');
-            text
-        }
-        ValueRef::Array(_)
-        | ValueRef::Object(_)
-        | ValueRef::Resource(_)
-        | ValueRef::Reference(_) => {
-            format!("Unhandled match case of type {}", type_name(req, &subject))
-        }
+    let cut = req.exception_string_param_max_len();
+    let quoted = if req.exception_ignore_args() || (subject.tag() == TypeTag::String && cut == 0) {
+        None
+    } else {
+        req.zval_text(subject, cut)
     };
-    throw(req, "UnhandledMatchError", &message)
+    let text = quoted.unwrap_or_else(|| format!("of type {}", type_name(req, subject)));
+    throw(
+        req,
+        "UnhandledMatchError",
+        &format!("Unhandled match case {text}"),
+    )
 }
 
 /// `zend_zval_type_name` (`Z/Zend/zend_API.c:174`): `ZVAL_DEREF`, then
