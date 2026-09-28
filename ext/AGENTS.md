@@ -23,6 +23,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── lexbor
 ├── libxml
 ├── mbstring
+├── opcache
 ├── openssl
 ├── pcntl
 ├── pcre
@@ -41,7 +42,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── uri
 └── zlib
 ```
-<!-- /computed in=d05d4ba9e83aa1b14b568d813d9f25d5fe349a1243db9fe099fd872e6dcc0cb7 out=7b7988f8f96a7284c3dae1db60e8877baa1b4858ebbb9e15bac0aefd3b404575 -->
+<!-- /computed in=a5e74f089b90eeedb481eee10af465dcaf1b3ecb5e1d8bf3f2d40b016827b98e out=cea393124bc9a7b3b7e8593f933022d030fedbad7f45b4e870d17e5bab80673c -->
 
 <!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
 

@@ -29,7 +29,7 @@ description = "The enabled set of extensions and the tier's name"
 workspace = true
 
 [features]
-default = ["standard", "spl", "date", "reflection", "pcre", "session", "pdo", "dom", "random", "filter", "tokenizer", "json", "iconv", "pdo_sqlite", "ctype", "hash", "libxml", "lexbor", "zlib", "phar", "uri"]
+default = ["standard", "spl", "date", "reflection", "pcre", "session", "pdo", "dom", "random", "filter", "tokenizer", "json", "iconv", "pdo_sqlite", "ctype", "hash", "libxml", "lexbor", "zlib", "phar", "uri", "opcache"]
 # The compiled tier (design §4.1, §11): a name that enables nothing until
 # php_jit exists, when it enables the crate on the four targets.
 jit = []
@@ -69,6 +69,7 @@ sockets = ["dep:php_ext_sockets"] # the `php` binary and the phpt lane, as php b
 phar = ["dep:php_ext_phar"]
 bz2 = ["dep:php_ext_bz2"] # the `php` binary and the phpt lane, as php builds it with --with-bz2 (design §7.2, revision 39)
 uri = ["dep:php_ext_uri", "lexbor"] # php_uri.c: ZEND_MOD_REQUIRED("lexbor")
+opcache = ["dep:php_ext_opcache"]
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -102,6 +103,7 @@ php_ext_sockets = { path = "../../ext/sockets", optional = true }
 php_ext_phar = { path = "../../ext/phar", optional = true }
 php_ext_bz2 = { path = "../../ext/bz2", optional = true }
 php_ext_uri = { path = "../../ext/uri", optional = true }
+php_ext_opcache = { path = "../../ext/opcache", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

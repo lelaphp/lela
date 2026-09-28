@@ -729,6 +729,33 @@ impl<'a> Oracle<'a> {
 /// The engine's binary, the one `crates/php` builds (design §4.1).
 pub const ENGINE: &str = "php";
 
+/// The extensions php names otherwise than their crates, the module's
+/// name beside the crate's, as upstream's own runner pairs them
+/// (`remap_loaded_extensions_names`, run-tests.php:2908-2916): opcache
+/// registers as `Zend OPcache`, the name `php -m`, `php --re` and
+/// `ReflectionExtension` answer to, and every other extension is its
+/// crate's name in php's casing, which php looks up without regard to
+/// case. The one table both directions read.
+const RENAMED: [(&str, &str); 1] = [("Zend OPcache", "opcache")];
+
+/// The name php knows the extension of crate `ext/<krate>` by: what a
+/// lane hands `--re`, `--ri` and `ReflectionExtension`.
+pub(crate) fn module_name(krate: &str) -> &str {
+    RENAMED
+        .iter()
+        .find(|(_, own)| *own == krate)
+        .map_or(krate, |(module, _)| module)
+}
+
+/// The crate's name for the module php lists as `module`, lowered as
+/// upstream lowers every other name: what `--EXTENSIONS--` spells.
+pub(crate) fn crate_name(module: &str) -> String {
+    RENAMED
+        .iter()
+        .find(|(named, _)| *named == module)
+        .map_or_else(|| module.to_lowercase(), |(_, own)| (*own).to_owned())
+}
+
 /// What ran the program a lane measures: the fresh-process adapter of
 /// design §8's `ScriptExec` seam, shared by `phpt` and `witness`.
 #[derive(Debug, Clone, PartialEq, Eq)]

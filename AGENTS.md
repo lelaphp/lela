@@ -103,15 +103,15 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 316 |  | pass |
-| unit | unit.lock | 99 |  | pass |
+| heap | heap.lock | 318 |  | pass |
+| unit | unit.lock | 102 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 778 | 900 | pass |
+| api | api.lock | 780 | 900 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 337 |  | pass |
 
-<!-- /computed in=bc9304fbacf1ee754094e3fb024c422d27a95f9d8e397689d403f885429bb2aa out=5149be67922f78777dd32d5ad35fe081f38f079447af0d4f1dd18e0f0540c22e -->
+<!-- /computed in=6bcef3710a75cec98462205ebbc334663c77482d2bffb9428ef3e1e9a060252b out=bf40952e52849d8c44a1426094e89894a5adadc7501309880edaa7c917abf431 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -213,6 +213,7 @@ Options:
 ├── lexbor
 ├── libxml
 ├── mbstring
+├── opcache
 ├── openssl
 ├── pcntl
 ├── pcre
@@ -231,4 +232,4 @@ Options:
 ├── uri
 └── zlib
 ```
-<!-- /computed in=c3cf4203549e5573848bbe5b4d94c70e5960a5c09e01c937ed63def005951849 out=b024126313a73279167cb384a316a2a5103e1cef5869e18dc485e52f406726dd -->
+<!-- /computed in=8b9fdeca60b947b8ea6ed9c46d10151d3784521544c1fbc18ab68fbe97208653 out=0982f4425b5865b8b1804af4e61adc63e7913dca7ba65cbf3218839c820d616d -->

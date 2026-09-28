@@ -28,7 +28,7 @@ use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
     Callable, Dependency, DimensionRead, Extension, IniVerdict, NativeNew, ObjectHandlers,
-    PropertyRead, PropertyTest, Std,
+    PropertyRead, PropertyTest, Std, ZendExtension,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Level, Thrown};
@@ -44,6 +44,7 @@ use crate::output::Output;
 use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
 pub use execution::Execution;
+pub use unit_cache::{CacheStatus, CachedFile, Invalidation, Restart, UnitCache};
 
 mod class_data;
 mod execution;
@@ -55,6 +56,7 @@ mod linking;
 mod load_file;
 mod site_override;
 mod table;
+mod unit_cache;
 mod variables;
 
 pub(crate) use hooks::parent_hook_trampolines;
@@ -12417,6 +12419,30 @@ impl Request {
         self.startup.take().unwrap_or_default()
     }
 
+    /// A startup value an entry's handler took, in force for the handlers
+    /// after it, as `zend_register_ini_entries_ex` sets each entry's
+    /// value before it walks to the next: `opcache.log_verbosity_level`
+    /// decides what opcache's handlers after it log.
+    pub(crate) fn take_startup_value(&mut self, name: &[u8], value: &[u8]) {
+        self.ini.retain(|(n, _)| n.as_slice() != name);
+        self.ini.push((name.to_vec(), value.to_vec()));
+    }
+
+    /// What the startup's handlers wrote to the error stream, php's
+    /// `fprintf(stderr)` before the first request, in order.
+    pub(crate) fn startup_stderr(&mut self) -> Vec<u8> {
+        let Sink::Kept(kept) = &mut self.sink else {
+            return Vec::new();
+        };
+        let mut written = Vec::new();
+        for aside in kept.aside.drain(..) {
+            if let Aside::Stderr(bytes) = aside {
+                written.extend_from_slice(&bytes);
+            }
+        }
+        written
+    }
+
     /// `php_during_module_startup()`, which `php_verror` names the
     /// origin of a docref by, `PHP Startup` for a native's name, and
     /// what an extension's on-modify rule reads as
@@ -14918,9 +14944,7 @@ impl Request {
             }
             return Ok(Opened::Unit(unit));
         }
-        let cwd = self.cwd.clone();
-        let stack = self.stack_limit();
-        match self.shared.cached(&path, &cwd, stack) {
+        match self.cached_file(&path) {
             Some(Ok(unit)) => {
                 if !self.included_files.contains(&path) {
                     self.included_files.push(path);
@@ -15206,7 +15230,7 @@ impl Request {
             .map_or(reason.as_str(), |(text, _)| text);
         let message = format!(
             "{}({}): Failed to open stream: {reason}",
-            kind.name(),
+            self.opener(kind),
             String::from_utf8_lossy(written)
         );
         crate::api::raising::warning(self, &message);
@@ -15227,14 +15251,25 @@ impl Request {
                 &format!("Failed opening required '{shown}' (include_path='{include_path}')"),
             ));
         }
+        let opener = self.opener(kind);
         crate::api::raising::warning(
             self,
             &format!(
-                "{}(): Failed opening '{shown}' for inclusion (include_path='{include_path}')",
-                kind.name()
+                "{opener}(): Failed opening '{shown}' for inclusion (include_path='{include_path}')"
             ),
         );
         Ok(Opened::Failed)
+    }
+
+    /// What `php_verror` names a file's opening by: the construct where
+    /// the program's own `include` opens it, and the native being served
+    /// where one opens it as an include does, `opcache_compile_file`.
+    fn opener(&self, kind: IncludeKind) -> String {
+        if self.vm_serving_native() {
+            self.active_native()
+        } else {
+            String::from(kind.name())
+        }
     }
 
     /// What the compiler refused an included file with, raised as php
@@ -16676,6 +16711,19 @@ impl Request {
     pub fn loaded_extensions(&self) -> Vec<String> {
         std::iter::once(String::from("Core"))
             .chain(self.shared.extensions.iter().map(|e| e.name.clone()))
+            .collect()
+    }
+
+    /// `zend_extensions`, the Zend extensions in the order they were
+    /// loaded, each its `zend_extension` row: what
+    /// `get_loaded_extensions(true)` lists and `ReflectionZendExtension`
+    /// finds by name.
+    #[must_use]
+    pub fn zend_extensions(&self) -> Vec<ZendExtension> {
+        self.shared
+            .extensions
+            .iter()
+            .filter_map(|e| e.zend.clone())
             .collect()
     }
 

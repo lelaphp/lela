@@ -18,14 +18,13 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, UNIX_EPOCH};
 
 use php_compile::{CompileError, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
-use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni};
+use crate::api::abi::{Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni};
 use crate::api::raising::Level;
 use crate::api::request::{Ending, ExtensionId, Request, Sink};
 use crate::api::values::{ClassId, Value};
@@ -33,6 +32,8 @@ use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::streams::Standard;
 use crate::tier::{Nop, Tier, execute, reenter, resume};
+pub(crate) use crate::unit_cache::Cached;
+use crate::unit_cache::{UnitCache, UnitKey};
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
@@ -158,24 +159,6 @@ pub struct Observables {
 /// The loop bound to the engine's tier, `execute::<T>` for one `T`.
 type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 
-/// What the unit cache holds for one file: the published unit, the
-/// refusal the compiler gave for it, or nothing at all for a file that
-/// could not be read when it was asked for.
-pub(crate) type Cached = Option<Result<Arc<Unit>, CompileError>>;
-
-/// What the unit cache is keyed by (design §6.3): the file's name and
-/// what says it has not changed under the engine, php's realpath with
-/// its `(mtime, size)`. A file edited in place is a key of its own, so
-/// what was cached for the old bytes is never served for the new.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct UnitKey {
-    path: Vec<u8>,
-    /// What the system reports as the file's last write, php's
-    /// `zend_stat_t.st_mtime`.
-    modified: Option<Duration>,
-    size: u64,
-}
-
 /// php's `opcache.max_accelerated_files` default: the units one engine
 /// keeps before it drops half of them.
 const MAX_ACCELERATED_FILES: usize = 10_000;
@@ -247,7 +230,9 @@ pub(crate) struct Shared {
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
     sapi_names: Vec<(Box<[u8]>, Zval)>,
     /// What reading the host's ini entries wrote to `stderr` in php
-    /// ([`Configuration`]), for the host to write before it serves.
+    /// ([`Configuration`]), and after it what the extensions' `on_modify`
+    /// wrote there over the host's values, as opcache's handlers log a
+    /// refused setting: for the host to write before it serves.
     startup_errors: String,
     /// What the extensions' `on_modify` raised as the engine registered
     /// their ini entries ([`Engine::register_ini`]), which php shows once
@@ -278,7 +263,7 @@ pub(crate) struct Shared {
     /// host handed over is not in it, because php caches neither `-r`
     /// nor `eval`. It stands above the table its units' constants are
     /// interned into, so a dropped engine drops its units first.
-    units: Cache<UnitKey, Cached>,
+    pub(crate) units: UnitCache,
     /// The engine's interned strings (design §5.2, §5.14): what a unit's
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
@@ -658,18 +643,9 @@ impl Shared {
     /// §6.3). A file the engine cannot stat is no unit at all, which is
     /// the `None` `serve` serves nothing for.
     pub(crate) fn cached(&self, path: &[u8], cwd: &Path, stack: StackLimit) -> Cached {
-        let name = String::from_utf8_lossy(path).into_owned();
-        let described = std::fs::metadata(&name).ok()?;
-        let key = UnitKey {
-            path: path.to_vec(),
-            modified: described
-                .modified()
-                .ok()
-                .and_then(|at| at.duration_since(UNIX_EPOCH).ok()),
-            size: described.len(),
-        };
-        let held = self.units.get_or_build(key, |_| {
-            let source = std::fs::read(&name).ok()?;
+        let key = UnitKey::of(path, cwd)?;
+        self.units.file(key, || {
+            let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
             Some(self.publish(
                 &source,
                 Origin {
@@ -680,8 +656,16 @@ impl Shared {
                 },
                 stack,
             ))
-        });
-        Cached::clone(&held)
+        })
+    }
+
+    /// How many strings the engine's table holds, opcache's
+    /// `interned_strings_usage.number_of_strings`.
+    pub(crate) fn interned_strings(&self) -> usize {
+        match self.strings.lock() {
+            Ok(strings) => strings.count(),
+            Err(poisoned) => poisoned.into_inner().count(),
+        }
     }
 
     pub(crate) fn ini_default(&self, name: &[u8]) -> Option<&[u8]> {
@@ -1402,7 +1386,7 @@ impl EngineBuilder {
                 entry: self.entry,
                 reenter: self.reenter,
                 resume: self.resume,
-                units: Cache::new(MAX_ACCELERATED_FILES),
+                units: UnitCache::new(MAX_ACCELERATED_FILES),
                 strings: Mutex::new(strings),
                 map_ptr_last: AtomicU32::new(0),
             }),
@@ -1526,6 +1510,7 @@ impl Engine {
         held.sort_by_key(|(name, _)| declared_at(name));
         let mut taken = Vec::new();
         let mut raised = Vec::new();
+        let mut written = Vec::new();
         if !held.is_empty() {
             let mut req = Request::new(Arc::clone(&self.shared), RequestDescription::default());
             req.begin_startup();
@@ -1533,10 +1518,12 @@ impl Engine {
                 let accepted = on_modify(&self.shared.extensions, &name)
                     .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
                 if accepted {
+                    req.take_startup_value(&name, &value);
                     taken.push((name, value));
                 }
             }
             raised = req.end_startup();
+            written = req.startup_stderr();
         }
         let Some(shared) = Arc::get_mut(&mut self.shared) else {
             return;
@@ -1546,6 +1533,9 @@ impl Engine {
             shared.ini.push((name, value));
         }
         shared.startup_raised = raised;
+        shared
+            .startup_errors
+            .push_str(&String::from_utf8_lossy(&written));
         let startup = StartupIni {
             entries: shared.ini.clone(),
         };
@@ -1573,6 +1563,19 @@ impl Engine {
     pub fn loaded_extensions(&self) -> Vec<String> {
         std::iter::once(String::from("Core"))
             .chain(self.shared.extensions.iter().map(|e| e.name.clone()))
+            .collect()
+    }
+
+    /// The Zend extensions this engine loaded, in startup order, each the
+    /// name its `zend_extension` row carries: what the CLI's `-m` lists
+    /// under `[Zend Modules]`.
+    #[must_use]
+    pub fn loaded_zend_extensions(&self) -> Vec<String> {
+        self.shared
+            .extensions
+            .iter()
+            .filter_map(|e| e.zend.as_ref())
+            .map(|row| row.name.clone())
             .collect()
     }
 
@@ -1779,6 +1782,9 @@ impl Engine {
         for (level, message) in &self.shared.startup_raised {
             req.note_startup_error(*level, message);
         }
+        // `accel_activate`: a reset a request asked for empties the unit
+        // cache at the next request's start.
+        self.shared.units.restart_if_pending();
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {
                 let _ = rinit(&mut req);
@@ -1828,7 +1834,7 @@ impl Engine {
                             .compile_for(&mut req, &source, &script, SourceKind::File),
                     )
                 }
-                Ok(None) => self.shared.cached(&script, &cwd, req.stack_limit()),
+                Ok(None) => req.cached_file(&script),
                 Err(thrown) => {
                     req.leave_pending(&thrown);
                     None
@@ -2313,6 +2319,42 @@ mod tests {
         for written in ["0", "2", "abc", "stderr", "1M", "of", " off", ""] {
             assert_eq!(read(written).as_deref(), Some(written), "{written:?}");
         }
+    }
+
+    /// `zend_register_ini_entries_ex` sets each entry before it walks to
+    /// the next, so a handler at startup sees the host's value of an
+    /// entry declared before its own, and what it writes to the error
+    /// stream is kept for the host to write before it serves, as
+    /// opcache's handlers log a refused setting.
+    #[test]
+    fn a_startup_handler_sees_the_entries_before_it_and_its_stderr_is_kept() {
+        let second: OnModify = |req, value| {
+            let mut line = req.ini_get(b"t.first").unwrap_or_default().to_vec();
+            line.extend_from_slice(b" then ");
+            line.extend_from_slice(value);
+            line.push(b'\n');
+            req.write_stderr(&line);
+            Ok(true)
+        };
+        let first: OnModify = |_, _| Ok(true);
+        let entry = |name: &str| php_unit::decl::IniDecl {
+            name: Name(name.as_bytes().into()),
+            default: b"0"[..].into(),
+            user: true,
+            per_dir: true,
+            system: true,
+        };
+        let extension = crate::api::abi::ExtensionBuilder::default()
+            .ini(vec![entry("t.first"), entry("t.second")])
+            .on_modify(b"t.first", first)
+            .on_modify(b"t.second", second)
+            .build("t");
+        let engine = Engine::builder()
+            .extensions(&[extension])
+            .ini("t.second", "2")
+            .ini("t.first", "1")
+            .build();
+        assert!(engine.startup_errors().ends_with("1 then 2\n"));
     }
 
     /// What the pinned oracle answers for `ini_get` under `-n` and one

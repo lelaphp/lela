@@ -31,14 +31,12 @@ impl Request {
             return Ok(false);
         }
         self.included_files.push(path.clone());
-        let cwd = self.cwd.clone();
-        let stack = self.stack_limit();
         let replaced = match self.compile_file_source(&path)? {
             Some(source) => {
                 let shared = Arc::clone(&self.shared);
                 Some(shared.compile_for(self, &source, &path, php_compile::SourceKind::File))
             }
-            None => self.shared.cached(&path, &cwd, stack),
+            None => self.cached_file(&path),
         };
         let unit = match replaced {
             Some(Ok(unit)) => unit,

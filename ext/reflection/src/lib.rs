@@ -68,7 +68,7 @@ use std::fmt::Write as _;
 
 use php_ext::abi::{
     CloneObj, DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance, ObjectHandlers,
-    OrFalse, PropertyPlace, Raw, Std, This, Union,
+    OrFalse, PropertyPlace, Raw, Std, This, Union, ZendExtension,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
@@ -8012,37 +8012,48 @@ impl ReflectionZendExtension {
     fn __clone(this: This<Self>);
 
     /// `ReflectionZendExtension::__construct(string $name)`:
-    /// `zend_get_extension(name)` or php's `ReflectionException`. The
-    /// engine loads no Zend extension, `zend_extensions` being empty, so
-    /// every name is refused and no reflector of this class ever holds one.
+    /// `zend_get_extension(name)`, the Zend extension of that name
+    /// exactly, case and all, with `$name` written, or php's
+    /// `ReflectionException`.
     ///
     /// ```php
     /// try { new ReflectionZendExtension('zend_opcache'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// try { new ReflectionZendExtension('zend opcache'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
     /// try { new ReflectionZendExtension([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump((new ReflectionZendExtension('Zend OPcache'))->name);
     /// ```
     /// ```expect
     /// Zend Extension "zend_opcache" does not exist
+    /// Zend Extension "zend opcache" does not exist
     /// ReflectionZendExtension::__construct(): Argument #1 ($name) must be of type string, array given
+    /// string(12) "Zend OPcache"
     /// ```
-    fn __construct(req: &mut Request, _: This<Self>, name: PhpString) -> Result<(), Thrown> {
+    fn __construct(req: &mut Request, this: This<Self>, name: PhpString) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
-        Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Zend Extension \"{}\" does not exist",
-                String::from_utf8_lossy(&name)
-            ),
-        ))
+        if zend_extension_named(req, &name).is_none() {
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "Zend Extension \"{}\" does not exist",
+                    String::from_utf8_lossy(&name)
+                ),
+            ));
+        }
+        set_name(req, this.object(), &name)
     }
 
-    /// `ReflectionZendExtension`'s six readers, `__toString`, `getName`,
-    /// `getVersion`, `getAuthor`, `getURL` and `getCopyright`: each reads
-    /// `intern->ptr`, which only the constructor writes and which it never
-    /// writes here ([`reflection_zend_extension_construct`]), so each is
-    /// `GET_REFLECTION_OBJECT_PTR`'s `Error` after its count check.
+    /// `ReflectionZendExtension::__toString()`, `_zend_extension_string`:
+    /// the name, then the version, the copyright, `by` the author and the
+    /// URL in angle brackets, each where the row carries one. Its five
+    /// readers each read one field of the row the constructor found; a
+    /// reflector no constructor ran is `GET_REFLECTION_OBJECT_PTR`'s
+    /// `Error` after the count check.
     ///
     /// ```php
+    /// $z = new ReflectionZendExtension('Zend OPcache');
+    /// echo $z;
+    /// var_dump($z->getName(), $z->getVersion() === PHP_VERSION, $z->getAuthor(), $z->getURL(), $z->getCopyright());
     /// $r = (new ReflectionClass('ReflectionZendExtension'))->newInstanceWithoutConstructor();
     /// foreach (['getName', 'getVersion', 'getAuthor', 'getURL', 'getCopyright', '__toString'] as $m) {
     ///     try { call_user_func([$r, $m]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
@@ -8050,6 +8061,12 @@ impl ReflectionZendExtension {
     /// try { $r->getName(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect
+    /// Zend Extension [ Zend OPcache %s Copyright (c) by Zend Technologies <http://www.zend.com/> ]
+    /// string(12) "Zend OPcache"
+    /// bool(true)
+    /// string(17) "Zend Technologies"
+    /// string(20) "http://www.zend.com/"
+    /// string(13) "Copyright (c)"
     /// Internal error: Failed to retrieve the reflection object
     /// Internal error: Failed to retrieve the reflection object
     /// Internal error: Failed to retrieve the reflection object
@@ -8058,28 +8075,117 @@ impl ReflectionZendExtension {
     /// Internal error: Failed to retrieve the reflection object
     /// ReflectionZendExtension::getName() expects exactly 0 arguments, 1 given
     /// ```
-    fn __toString(req: &mut Request, _: This<Self>) -> Result<PhpString, Thrown> {
-        Err(throw(
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let row = this_zend_extension(req, this.object())?;
+        let mut text = format!("Zend Extension [ {} ", row.name);
+        for (field, before, after) in [
+            (&row.version, "", ""),
+            (&row.copyright, "", ""),
+            (&row.author, "by ", ""),
+            (&row.url, "<", ">"),
+        ] {
+            if !field.is_empty() {
+                let _ = write!(text, "{before}{field}{after} ");
+            }
+        }
+        text.push_str("]\n");
+        PhpString::new(req, text.as_bytes())
+    }
+
+    /// `ReflectionZendExtension::getName()`: the row's `name`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionZendExtension('Zend OPcache'))->getName());
+    /// ```
+    /// ```expect
+    /// string(12) "Zend OPcache"
+    /// ```
+    #[php(tentative)]
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let row = this_zend_extension(req, this.object())?;
+        PhpString::new(req, row.name.as_bytes())
+    }
+
+    /// `ReflectionZendExtension::getVersion()`: the row's `version`, opcache's being `PHP_VERSION`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionZendExtension('Zend OPcache'))->getVersion() === PHP_VERSION);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// ```
+    #[php(tentative)]
+    fn getVersion(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let row = this_zend_extension(req, this.object())?;
+        PhpString::new(req, row.version.as_bytes())
+    }
+
+    /// `ReflectionZendExtension::getAuthor()`: the row's `author`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionZendExtension('Zend OPcache'))->getAuthor());
+    /// ```
+    /// ```expect
+    /// string(17) "Zend Technologies"
+    /// ```
+    #[php(tentative)]
+    fn getAuthor(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let row = this_zend_extension(req, this.object())?;
+        PhpString::new(req, row.author.as_bytes())
+    }
+
+    /// `ReflectionZendExtension::getURL()`: the row's `URL`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionZendExtension('Zend OPcache'))->getURL());
+    /// ```
+    /// ```expect
+    /// string(20) "http://www.zend.com/"
+    /// ```
+    #[php(tentative)]
+    fn getURL(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let row = this_zend_extension(req, this.object())?;
+        PhpString::new(req, row.url.as_bytes())
+    }
+
+    /// `ReflectionZendExtension::getCopyright()`: the row's `copyright`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionZendExtension('Zend OPcache'))->getCopyright());
+    /// ```
+    /// ```expect
+    /// string(13) "Copyright (c)"
+    /// ```
+    #[php(tentative)]
+    fn getCopyright(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let row = this_zend_extension(req, this.object())?;
+        PhpString::new(req, row.copyright.as_bytes())
+    }
+}
+
+/// `zend_get_extension`: the Zend extension named `name`, compared as
+/// `strcmp` compares, case and all.
+fn zend_extension_named(req: &Request, name: &[u8]) -> Option<ZendExtension> {
+    req.zend_extensions()
+        .into_iter()
+        .find(|row| row.name.as_bytes() == name)
+}
+
+/// `GET_REFLECTION_OBJECT_PTR(extension)` for a `ReflectionZendExtension`:
+/// the row the constructor found under `$name`; a reflector whose
+/// constructor never ran is php's `Error`.
+fn this_zend_extension(req: &mut Request, this: PhpObject) -> Result<ZendExtension, Thrown> {
+    let name = this
+        .prop(req, b"name")
+        .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
+    match name.and_then(|name| zend_extension_named(req, &name)) {
+        Some(row) => Ok(row),
+        None => Err(throw(
             req,
             "Error",
             "Internal error: Failed to retrieve the reflection object",
-        ))
+        )),
     }
-
-    #[php(tentative, implementation = ReflectionZendExtension::__toString)]
-    fn getName(this: This<Self>) -> PhpString;
-
-    #[php(tentative, implementation = ReflectionZendExtension::__toString)]
-    fn getVersion(this: This<Self>) -> PhpString;
-
-    #[php(tentative, implementation = ReflectionZendExtension::__toString)]
-    fn getAuthor(this: This<Self>) -> PhpString;
-
-    #[php(tentative, implementation = ReflectionZendExtension::__toString)]
-    fn getURL(this: This<Self>) -> PhpString;
-
-    #[php(tentative, implementation = ReflectionZendExtension::__toString)]
-    fn getCopyright(this: This<Self>) -> PhpString;
 }
 
 /// `ReflectionReference` as the stub declares it.

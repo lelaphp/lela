@@ -344,8 +344,8 @@ pub(super) fn batch(apart: &[Apart], jobs: NonZeroUsize) -> NonZeroUsize {
 }
 
 /// The extensions a binary loads under the recipe, as upstream asks for
-/// them: `Core` dropped, `Zend OPcache` mapped to `opcache` and the rest
-/// lowered (run-tests.php:2908-2916). Upstream asks a program,
+/// them: `Core` dropped and each module under its crate's name,
+/// [`crate::oracle::crate_name`] (run-tests.php:2908-2916). Upstream asks a program,
 /// `get_loaded_extensions()` joined by `implode`; this lane asks the
 /// binary's own listing, `-m`, which ends at the first blank line, so
 /// the answer is the host's and stands before the engine serves one
@@ -363,13 +363,7 @@ fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> 
         .take_while(|line| !line.trim().is_empty())
         .map(str::trim)
         .filter(|name| !name.is_empty() && *name != "Core")
-        .map(|name| {
-            if name == "Zend OPcache" {
-                "opcache".to_owned()
-            } else {
-                name.to_lowercase()
-            }
-        })
+        .map(crate::oracle::crate_name)
         .collect())
 }
 
