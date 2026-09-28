@@ -226,6 +226,13 @@ impl PKey {
         i64::from(unsafe { sys::EVP_PKEY_get_bits(self.as_ptr()) })
     }
 
+    /// `EVP_PKEY_size(key)`: the most bytes a signature or an encrypted
+    /// key of it takes.
+    pub(crate) fn size(&self) -> c_int {
+        // SAFETY: the key is live.
+        unsafe { sys::EVP_PKEY_get_size(self.as_ptr()) }
+    }
+
     /// The key's kind as `php_openssl_pkey_get_details` reads it: the
     /// base id of a legacy key, or the kind its type name names for one a
     /// provider holds.

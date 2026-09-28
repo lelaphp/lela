@@ -374,6 +374,15 @@ pub(crate) fn rand_status() -> bool {
     unsafe { sys::RAND_status() == 1 }
 }
 
+/// `RAND_bytes(buf, len)`: `len` bytes from the generator, `None` where
+/// it refused.
+pub(crate) fn rand_bytes(len: c_int) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; usize::try_from(len).ok()?];
+    // SAFETY: the buffer holds `len` bytes.
+    let ok = unsafe { sys::RAND_bytes(out.as_mut_ptr(), len) };
+    (ok > 0).then_some(out)
+}
+
 /// A `BIO`: a read-only view of the caller's bytes, a memory sink, or a
 /// file, freed on drop. The lifetime is the bytes a view reads.
 pub(crate) struct Bio<'a>(NonNull<sys::BIO>, PhantomData<&'a [u8]>);

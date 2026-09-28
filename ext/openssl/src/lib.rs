@@ -7,11 +7,11 @@
 //! the ini entries, the constants, the three classes, and the natives by
 //! area: certificates ([`x509`]), signing requests ([`csr`]), asymmetric
 //! keys ([`key`], [`keydata`]) and the configuration they are made under
-//! ([`config`]), and signatures and raw RSA ([`sign`]), with the arguments
-//! they share decoded once ([`decode`]) and the ring of library errors
-//! `openssl_error_string` reads ([`Errors`]). ext/phar's OpenSSL signatures
-//! call `openssl_sign` and `openssl_verify` through the function table, as
-//! php's do.
+//! ([`config`]), signatures and raw RSA ([`sign`]), and ciphers, digests
+//! and envelopes ([`cipher`]), with the arguments they share decoded once
+//! ([`decode`]) and the ring of library errors `openssl_error_string` reads
+//! ([`Errors`]). ext/phar's OpenSSL signatures call `openssl_sign` and
+//! `openssl_verify` through the function table, as php's do.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -25,6 +25,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod cipher;
 mod config;
 mod csr;
 mod decode;
@@ -380,6 +381,7 @@ pub fn extension() -> Extension {
             key::openssl_pkey_get_private::declared(),
             key::openssl_get_privatekey::declared(),
             key::openssl_pkey_get_details::declared(),
+            cipher::openssl_pbkdf2::declared(),
             sign::openssl_private_encrypt::declared(),
             sign::openssl_private_decrypt::declared(),
             sign::openssl_public_encrypt::declared(),
@@ -387,9 +389,19 @@ pub fn extension() -> Extension {
             openssl_error_string::declared(),
             sign::openssl_sign::declared(),
             sign::openssl_verify::declared(),
+            cipher::openssl_seal::declared(),
+            cipher::openssl_open::declared(),
+            cipher::openssl_get_md_methods::declared(),
+            cipher::openssl_get_cipher_methods::declared(),
             key::openssl_get_curve_names::declared(),
+            cipher::openssl_digest::declared(),
+            cipher::openssl_encrypt::declared(),
+            cipher::openssl_decrypt::declared(),
+            cipher::openssl_cipher_iv_length::declared(),
+            cipher::openssl_cipher_key_length::declared(),
             key::openssl_dh_compute_key::declared(),
             key::openssl_pkey_derive::declared(),
+            cipher::openssl_random_pseudo_bytes::declared(),
             x509::openssl_get_cert_locations::declared(),
         ])
         .on_modify(b"openssl.libctx", on_update_libctx)
