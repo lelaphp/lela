@@ -1,8 +1,10 @@
 //! The unit cache (design §6.3): what a file compiled to, held for every
-//! request that asks for the same file unchanged, over the engine's one
-//! [`Cache`] (ADR-0005), with the counters opcache keeps beside its
-//! shared hash. php's `zend_persistent_script` is [`Held`], its
-//! `dynamic_members` the hits and the last use on it; `ZCSG(hits)`,
+//! request that asks for the same file, over the engine's one [`Cache`]
+//! (ADR-0005), keyed by path and validated as the one question it asks
+//! an extension answers (revision 45, [`crate::api::abi::Admission`]),
+//! with the counters opcache keeps beside its shared hash. php's
+//! `zend_persistent_script` is [`Held`], its `dynamic_members` the hits,
+//! the last use and the next revalidation on it; `ZCSG(hits)`,
 //! `ZCSG(misses)`, `ZCSG(blacklist_misses)`, the restart counters and
 //! `ZCSG(restart_pending)` are [`UnitCache`]'s. What reads them is the
 //! request's face, [`crate::api::request::UnitCache`], which `opcache_*`
@@ -16,67 +18,171 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use php_compile::CompileError;
 use php_unit::Unit;
 
-use crate::api::abi::Cache;
+use crate::api::abi::{Cache, Validation};
 use crate::api::request::{CacheStatus, CachedFile, Restart};
 
-/// What the unit cache holds for one file: the published unit, the
+/// What the unit cache answers for one file: the published unit, the
 /// refusal the compiler gave for it, or nothing at all for a file that
-/// could not be read when it was asked for.
+/// could not be read.
 pub(crate) type Cached = Option<Result<Arc<Unit>, CompileError>>;
 
-/// What the unit cache is keyed by (design §6.3): the file's name and
-/// what says it has not changed under the engine, php's realpath with
-/// its `(mtime, size)`. A file edited in place is a key of its own, so
-/// what was cached for the old bytes is never served for the new.
+/// What the unit cache files a held file under, one space of names as
+/// php's `ZCSG(hash)` is (design §6.3, revision 45): the file's full
+/// path, and beside it the path as written, `accel_make_persistent_key`.
+/// The file's stamp is on the [`Held`] file and not in the name, so one
+/// path holds one file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct UnitKey {
-    path: Vec<u8>,
-    /// What the system reports as the file's last write, php's
-    /// `zend_stat_t.st_mtime`.
-    modified: Option<Duration>,
+pub(crate) struct UnitKey(Vec<u8>);
+
+impl UnitKey {
+    /// The name of the file at the full path `path`, which is also an
+    /// absolute path as written.
+    pub(crate) fn full(path: &[u8]) -> UnitKey {
+        UnitKey(path.to_vec())
+    }
+
+    /// `accel_make_persistent_key` for a relative path as written: the
+    /// path with what resolves it beside it, the working directory `cwd`,
+    /// the `include_path` and the directory of the file `including` it,
+    /// each apart by a byte no path holds.
+    pub(crate) fn relative(
+        written: &[u8],
+        cwd: &[u8],
+        include_path: &[u8],
+        including: Option<&[u8]>,
+    ) -> UnitKey {
+        let mut key = [written, cwd, include_path].join(&0);
+        if let Some(file) = including {
+            let dir = file
+                .iter()
+                .rposition(|b| *b == b'/')
+                .map_or(&[][..], |at| &file[..at]);
+            key.push(0);
+            key.extend_from_slice(dir);
+        }
+        UnitKey(key)
+    }
+}
+
+/// The full path of the file `path` names, as the cache files it: an
+/// absolute path as it is, and a relative one made whole against `cwd`
+/// where it resolves.
+pub(crate) fn full_path(path: &[u8], cwd: &Path) -> Vec<u8> {
+    if path.starts_with(b"/") {
+        return path.to_vec();
+    }
+    std::fs::canonicalize(cwd.join(String::from_utf8_lossy(path).as_ref())).map_or_else(
+        |_| path.to_vec(),
+        |full| full.into_os_string().into_encoded_bytes(),
+    )
+}
+
+/// What the system reported of a file as it was compiled, the
+/// `zend_stat_t` php's `validate_timestamps` reads: when it was last
+/// written and its size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Stamp {
+    modified: Duration,
     size: u64,
 }
 
-impl UnitKey {
-    /// The key of the file at `path` as the system reports it now, the
-    /// path made whole against `cwd` where it is relative, as php keys a
-    /// file by its full path; none where nothing is there.
-    pub(crate) fn of(path: &[u8], cwd: &Path) -> Option<UnitKey> {
-        let name = String::from_utf8_lossy(path).into_owned();
-        let described = std::fs::metadata(&name).ok()?;
-        let path = if path.starts_with(b"/") {
-            path.to_vec()
-        } else {
-            std::fs::canonicalize(cwd.join(&name)).map_or_else(
-                |_| path.to_vec(),
-                |full| full.into_os_string().into_encoded_bytes(),
-            )
-        };
-        Some(UnitKey {
-            path,
-            modified: described
-                .modified()
-                .ok()
-                .and_then(|at| at.duration_since(UNIX_EPOCH).ok()),
+impl Stamp {
+    /// The file at `path` as the system reports it now; none where
+    /// nothing is there or the system keeps no time for it.
+    pub(crate) fn of(path: &[u8]) -> Option<Stamp> {
+        let described = std::fs::metadata(String::from_utf8_lossy(path).as_ref()).ok()?;
+        let modified = described.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+        Some(Stamp {
+            modified,
             size: described.len(),
         })
     }
 
-    /// The file's full path, what `opcache_get_status()` keys a file by.
-    pub(crate) fn path(&self) -> &[u8] {
-        &self.path
+    /// `st_mtime`, the whole seconds php compares and never the size.
+    fn seconds(self) -> i64 {
+        i64::try_from(self.modified.as_secs()).unwrap_or(i64::MAX)
     }
 }
 
 /// One file the cache holds, php's `zend_persistent_script`: what it
-/// compiled to and its `dynamic_members`, the hits since it was cached
-/// and when it was last served.
+/// compiled to, the path it was compiled from and the stamp it was
+/// compiled at, and its `dynamic_members`, the hits since it was cached,
+/// when it was last served and when it is next validated. The unit is
+/// never changed; the members are atomics a racing request may write
+/// over, which costs at most one more stat.
 pub(crate) struct Held {
-    pub(crate) unit: Cached,
+    pub(crate) unit: Result<Arc<Unit>, CompileError>,
+    /// The full path, php's `script.filename`.
+    pub(crate) path: Vec<u8>,
+    /// The file as it was compiled; none for one held under
+    /// [`Validation::Never`], php's zero timestamp, which a window never
+    /// validates and nothing else finds fresh.
+    stamp: Option<Stamp>,
+    /// The bytes it was compiled from.
+    size: u64,
     /// The order the cache took it in, which its status lists it by.
     order: u64,
     hits: AtomicU64,
     last_used: AtomicI64,
+    /// `dynamic_members.revalidate`: the request time up to which a hit
+    /// under a window is served without a stat.
+    revalidate: AtomicI64,
+}
+
+/// What a hit on a held file is held to before it is served.
+enum Due {
+    /// Nothing: it is served as held.
+    Nothing,
+    /// The file's `mtime` in whole seconds, `was`, and `next` recorded
+    /// as the file's revalidation time where it matches.
+    Seconds { was: i64, next: i64 },
+    /// The file to the nanosecond and the byte, which a file held with
+    /// no stamp never matches.
+    Exact(Option<Stamp>),
+}
+
+impl Held {
+    /// What a hit under `validation` at the request time `now` is due.
+    fn due(&self, validation: Validation, now: i64) -> Due {
+        match (validation, self.stamp) {
+            (Validation::Never, _) | (Validation::Window { .. }, None) => Due::Nothing,
+            (Validation::Window { seconds }, Some(stamp)) => {
+                if seconds > 0 && self.revalidate.load(Ordering::Relaxed) >= now {
+                    Due::Nothing
+                } else {
+                    Due::Seconds {
+                        was: stamp.seconds(),
+                        next: now.saturating_add(i64::from(seconds)),
+                    }
+                }
+            }
+            (Validation::EveryHit, stamp) => Due::Exact(stamp),
+        }
+    }
+
+    /// Whether a hit under `validation` at `now` is served without a
+    /// stat.
+    pub(crate) fn trusted(&self, validation: Validation, now: i64) -> bool {
+        matches!(self.due(validation, now), Due::Nothing)
+    }
+
+    /// `validate_timestamp_and_record`: whether a hit under `validation`
+    /// at `now` is served, the file as it stands stat'ed only where a
+    /// hit is due, and the next revalidation time recorded where a
+    /// window's stat finds the file unchanged.
+    pub(crate) fn validated(&self, validation: Validation, now: i64) -> bool {
+        match self.due(validation, now) {
+            Due::Nothing => true,
+            Due::Seconds { was, next } => {
+                let fresh = Stamp::of(&self.path).is_some_and(|stamp| stamp.seconds() == was);
+                if fresh {
+                    self.revalidate.store(next, Ordering::Relaxed);
+                }
+                fresh
+            }
+            Due::Exact(held) => held.is_some() && Stamp::of(&self.path) == held,
+        }
+    }
 }
 
 /// The unit cache and opcache's counters over it.
@@ -103,7 +209,7 @@ pub(crate) fn now() -> i64 {
 }
 
 impl UnitCache {
-    /// An empty cache holding at most `capacity` files.
+    /// An empty cache holding at most `capacity` names.
     pub(crate) fn new(capacity: usize) -> UnitCache {
         UnitCache {
             held: Cache::new(capacity),
@@ -118,36 +224,95 @@ impl UnitCache {
         }
     }
 
-    /// `persistent_compile_file` over the cache: the file under `key` as
-    /// held, a hit counted on the cache and on the file; else a miss,
-    /// `build` compiling it, and what it compiled to held in place of
-    /// what the cache had for an older copy of the same path, which
-    /// `validate_timestamps` discards. While a restart is pending a miss
-    /// is compiled and held nowhere, as php behaves without the cache.
-    pub(crate) fn file(&self, key: UnitKey, build: impl FnOnce() -> Cached) -> Cached {
-        if let Some(found) = self.held.get(&key) {
-            self.hits.fetch_add(1, Ordering::Relaxed);
-            found.hits.fetch_add(1, Ordering::Relaxed);
-            found.last_used.store(now(), Ordering::Relaxed);
-            return found.unit.clone();
+    /// The file held under `key`, a full path or a path as written.
+    pub(crate) fn find(&self, key: &UnitKey) -> Option<Arc<Held>> {
+        self.held.get(key)
+    }
+
+    /// A hit on `held`, counted on the cache and on the file, which was
+    /// served at the request time `now`; php without the cache,
+    /// [`Validation::EveryHit`], counts nothing.
+    pub(crate) fn hit(&self, held: &Held, validation: Validation, now: i64) {
+        if validation == Validation::EveryHit {
+            return;
         }
-        self.misses.fetch_add(1, Ordering::Relaxed);
-        let unit = build();
-        if self.restart_pending.load(Ordering::Relaxed) {
-            return unit;
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        held.hits.fetch_add(1, Ordering::Relaxed);
+        held.last_used.store(now, Ordering::Relaxed);
+    }
+
+    /// `persistent_compile_file` by the file's full path: the file held
+    /// under `path` where `validation` finds it fresh at the request time
+    /// `now`, a hit; else the stale copy discarded under every name it
+    /// was filed under, a miss, the file read and `compile`d, and what it
+    /// compiled to held, or what another request held for the path
+    /// meanwhile, and filed under `written` too where given. A file whose
+    /// stamp the validation or the `protection` needs and the system
+    /// does not give, one written within `protection` seconds of `now`,
+    /// and any miss while a restart is pending, is compiled and held
+    /// nowhere, as php behaves without the cache. Nothing where the file
+    /// cannot be read.
+    pub(crate) fn file(
+        &self,
+        path: &[u8],
+        written: Option<UnitKey>,
+        validation: Validation,
+        protection: u32,
+        now: i64,
+        compile: impl FnOnce(&[u8]) -> Result<Arc<Unit>, CompileError>,
+    ) -> Cached {
+        let stale = self.held.get(&UnitKey::full(path));
+        if let Some(held) = &stale
+            && held.validated(validation, now)
+        {
+            self.hit(held, validation, now);
+            if let Some(written) = written {
+                self.held.alias(written, held);
+            }
+            return Some(held.unit.clone());
         }
-        self.held
-            .retain(|held, _| held.path != key.path || *held == key);
+        if let Some(stale) = &stale {
+            self.held.remove_all(stale);
+        }
+        if validation != Validation::EveryHit {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        let stamped = validation != Validation::Never || protection > 0;
+        let observed = if stamped { Stamp::of(path) } else { None };
+        let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
+        let unit = compile(&source);
+        let unheld = stamped
+            && observed.is_none_or(|stamp| {
+                protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
+            });
+        if unheld || self.restart_pending.load(Ordering::Relaxed) {
+            return Some(unit);
+        }
+        let stamp = match validation {
+            Validation::Never => None,
+            Validation::Window { .. } | Validation::EveryHit => observed,
+        };
+        let revalidate = match validation {
+            Validation::Window { seconds } => now.saturating_add(i64::from(seconds)),
+            Validation::Never | Validation::EveryHit => 0,
+        };
         let held = self.held.insert(
-            key,
+            UnitKey::full(path),
             Held {
                 unit,
+                path: path.to_vec(),
+                stamp,
+                size: u64::try_from(source.len()).unwrap_or(u64::MAX),
                 order: self.taken.fetch_add(1, Ordering::Relaxed),
                 hits: AtomicU64::new(0),
-                last_used: AtomicI64::new(now()),
+                last_used: AtomicI64::new(now),
+                revalidate: AtomicI64::new(revalidate),
             },
         );
-        held.unit.clone()
+        if let Some(written) = written {
+            self.held.alias(written, &held);
+        }
+        Some(held.unit.clone())
     }
 
     /// `ZCSG(blacklist_misses)++`: a file the blacklist kept out of the
@@ -156,29 +321,28 @@ impl UnitCache {
         self.blacklist_misses.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Whether the cache holds a unit for the file as `key` has it,
-    /// `filename_is_in_cache` with its timestamps validated: a refusal
-    /// is no unit, as php persists none.
-    pub(crate) fn holds(&self, key: &UnitKey) -> bool {
-        self.held
-            .get(key)
-            .is_some_and(|held| matches!(held.unit, Some(Ok(_))))
-    }
-
-    /// `zend_accel_invalidate`'s discard over what the cache holds for
-    /// `path`: every copy where `force`, and otherwise the copy whose
-    /// file changed since, `current` being the file as it stands. Whether
-    /// the cache held a unit for the path at all.
-    pub(crate) fn discard(&self, path: &[u8], current: Option<&UnitKey>, force: bool) -> bool {
-        let mut found = false;
-        self.held.retain(|key, held| {
-            if key.path != path || !matches!(held.unit, Some(Ok(_))) {
-                return true;
-            }
-            found = true;
-            !force && current == Some(key)
-        });
-        found
+    /// `zend_accel_invalidate`'s discard of the file held under `key`,
+    /// with every name it is filed under: where `force`, and otherwise
+    /// where it changed since, `do_validate_timestamps` finding it filed
+    /// under another full path, held with no stamp, or written at
+    /// another second. Whether a unit was held under the name at all; a
+    /// refusal is none, as php persists none.
+    pub(crate) fn discard(&self, key: &UnitKey, force: bool) -> bool {
+        let Some(held) = self.held.get(key) else {
+            return false;
+        };
+        if held.unit.is_err() {
+            return false;
+        }
+        let changed = force
+            || key.0 != held.path
+            || held.stamp.is_none_or(|was| {
+                Stamp::of(&held.path).is_none_or(|stamp| stamp.seconds() != was.seconds())
+            });
+        if changed {
+            self.held.remove_all(&held);
+        }
+        true
     }
 
     /// `zend_accel_schedule_restart(ACCEL_RESTART_USER)`: the cache is
@@ -211,23 +375,24 @@ impl UnitCache {
         self.last_restart_time.store(stamped, Ordering::Relaxed);
     }
 
-    /// What `opcache_get_status()` reads: the counters and every file
-    /// held, in the order the cache took them.
+    /// What `opcache_get_status()` reads: the counters, the names held,
+    /// and every file held under its full path, in the order the cache
+    /// took them; a refusal is none of either.
     pub(crate) fn status(&self, interned_strings: usize) -> CacheStatus {
         let mut held = self.held.snapshot();
+        held.retain(|(_, held)| held.unit.is_ok());
+        let keys = u64::try_from(held.len()).unwrap_or(u64::MAX);
+        held.retain(|(key, held)| key.0 == held.path);
         held.sort_by_key(|(_, held)| held.order);
         let files = held
             .into_iter()
-            .filter(|(_, held)| matches!(held.unit, Some(Ok(_))))
-            .map(|(key, held)| CachedFile {
-                path: key.path,
+            .map(|(_, held)| CachedFile {
+                path: held.path.clone(),
                 hits: held.hits.load(Ordering::Relaxed),
-                size: key.size,
+                size: held.size,
                 last_used: held.last_used.load(Ordering::Relaxed),
-                timestamp: key
-                    .modified
-                    .and_then(|at| i64::try_from(at.as_secs()).ok())
-                    .unwrap_or(0),
+                timestamp: held.stamp.map_or(0, Stamp::seconds),
+                revalidate: held.revalidate.load(Ordering::Relaxed),
             })
             .collect();
         CacheStatus {
@@ -239,6 +404,7 @@ impl UnitCache {
             last_restart_time: self.last_restart_time.load(Ordering::Relaxed),
             manual_restarts: self.manual_restarts.load(Ordering::Relaxed),
             interned_strings: u64::try_from(interned_strings).unwrap_or(u64::MAX),
+            keys,
             files,
         }
     }

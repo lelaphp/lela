@@ -13,6 +13,7 @@ __private::entered
 __private::native_function
 __private::parameter
 __private::property
+abi::Admission
 abi::Cache
 abi::Cache::get_or_build
 abi::Cache::new
@@ -42,7 +43,7 @@ abi::DependencyKind
 abi::DimensionRead
 abi::Extension
 abi::ExtensionBuilder
-abi::ExtensionBuilder::blacklist
+abi::ExtensionBuilder::admission
 abi::ExtensionBuilder::build
 abi::ExtensionBuilder::class
 abi::ExtensionBuilder::class_constants
@@ -95,6 +96,7 @@ abi::IntoReturn::UNDECLARED
 abi::IntoReturn::declared
 abi::IntoReturn::into_return
 abi::Iterable
+abi::Lookup
 abi::Members
 abi::Members::members
 abi::NamedVariadic
@@ -166,6 +168,7 @@ abi::Typed
 abi::Typed::new
 abi::Union
 abi::Untyped
+abi::Validation
 abi::Variadic
 abi::ZendExtension
 attr::php_class

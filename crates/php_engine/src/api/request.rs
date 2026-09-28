@@ -15385,7 +15385,9 @@ impl Request {
     /// the path in the table after (`Z/Zend/zend_language_scanner.l:709`).
     /// The file is compiled once and published through the unit cache
     /// (design §6.3), as opcache keeps it, and every request after
-    /// reads the same unit.
+    /// reads the same unit; it is looked for first under the path as
+    /// written, and served without the path resolved where the answer
+    /// for it trusts the hit ([`Request::held_as_written`]).
     ///
     /// A path nothing opens is `zend_stream_open`'s warning, the stream
     /// layer's `Failed to open stream` with the construct and the path
@@ -15409,7 +15411,11 @@ impl Request {
         if written.contains(&0) {
             return self.failed_opening(kind, written);
         }
-        let resolved = self.resolve_path(written);
+        let held = self.held_as_written(written);
+        let resolved = match &held {
+            Some(held) => Ok(held.path.clone()),
+            None => self.resolve_path(written),
+        };
         if kind.once()
             && let Ok(path) = &resolved
             && self.included_files.contains(path)
@@ -15450,7 +15456,11 @@ impl Request {
             }
             return Ok(Opened::Unit(unit));
         }
-        match self.cached_file(&path) {
+        let cached = match held {
+            Some(held) => Some(held.unit.clone()),
+            None => self.cached_file(&path, Some(written)),
+        };
+        match cached {
             Some(Ok(unit)) => {
                 if !self.included_files.contains(&path) {
                     self.included_files.push(path);

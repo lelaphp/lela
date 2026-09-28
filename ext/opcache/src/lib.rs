@@ -31,7 +31,10 @@
 mod blacklist;
 mod ini;
 
-use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, StartupIni, ZendExtension};
+use php_ext::abi::{
+    Admission, Extension, ExtensionBuilder, Instance, Lookup, OrFalse, StartupIni, Validation,
+    ZendExtension,
+};
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::to_callable;
 use php_ext::raising::{Thrown, notice, warning};
@@ -96,7 +99,7 @@ impl Accelerator {
 
 /// The extension value (design §7.1): `Zend OPcache`, a Zend
 /// extension too, its eight natives, its ini entries each with its
-/// handler, its state, and the blacklist the unit cache asks.
+/// handler, its state, and the answer the unit cache asks for a file.
 ///
 /// ```php
 /// var_dump(extension_loaded('Zend OPcache'), extension_loaded('opcache'), count(get_extension_funcs('Zend OPcache')));
@@ -126,7 +129,7 @@ pub fn extension() -> Extension {
     .engine_state(Accelerator::start)
     .request_state::<State>()
     .rinit(rinit)
-    .blacklist(blacklisted)
+    .admission(admission)
     .info(info)
     .zend_extension(ZendExtension {
         name: PRODUCT.to_owned(),
@@ -162,22 +165,97 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// The blacklist the unit cache asks of a file it is about to compile
-/// (`persistent_compile_file`): an entry matching a prefix of the file's
-/// real path, or a file larger than a positive `opcache.max_file_size`.
-fn blacklisted(req: &mut Request, path: &[u8]) -> bool {
-    let real = std::fs::canonicalize(String::from_utf8_lossy(path).as_ref()).map_or_else(
-        |_| path.to_vec(),
-        |real| real.into_os_string().into_encoded_bytes(),
-    );
+/// What the unit cache does with the file at the full path `path`, as
+/// `persistent_compile_file` decides it: without the accelerator, php
+/// without the cache; a file the blacklist names, or one larger than a
+/// positive `opcache.max_file_size`, kept out; any other held, validated
+/// as `opcache.validate_timestamps` and `opcache.revalidate_freq` say,
+/// looked for as `opcache.revalidate_path` says, and held only once
+/// `opcache.file_update_protection` has passed since it was written.
+///
+/// ```php
+/// $file = __DIR__ . '/window.inc';
+/// file_put_contents($file, '<?php return 1;');
+/// ini_set('opcache.revalidate_freq', 60);
+/// var_dump(include $file);
+/// file_put_contents($file, '<?php return 22;');
+/// touch($file, time() - 10);
+/// $s = opcache_get_status()['scripts'][$file];
+/// var_dump(include $file, opcache_is_script_cached($file), $s['revalidate'] - $s['last_used_timestamp']);
+/// ini_set('opcache.revalidate_freq', 0);
+/// var_dump(include $file);
+/// unlink($file);
+/// ```
+/// ```expect regime=jit-off
+/// int(1)
+/// int(1)
+/// bool(true)
+/// int(60)
+/// int(22)
+/// ```
+///
+/// A relative path is filed under the path as written, with the working
+/// directory and the `include_path` beside it, and a hit found by it is
+/// served without the path resolved where nothing is due; with
+/// `opcache.revalidate_path` on, the path is resolved on every hit.
+///
+/// ```php
+/// ini_set('opcache.validate_timestamps', 0);
+/// chdir(__DIR__);
+/// file_put_contents('relative.inc', '<?php return 5;');
+/// $keys = fn () => opcache_get_status()['opcache_statistics']['num_cached_keys'];
+/// $before = $keys();
+/// var_dump(include 'relative.inc', $keys() - $before);
+/// unlink('relative.inc');
+/// var_dump(include 'relative.inc', opcache_is_script_cached('relative.inc'));
+/// ini_set('opcache.revalidate_path', 1);
+/// var_dump(@include 'relative.inc');
+/// ```
+/// ```expect regime=jit-off
+/// int(5)
+/// int(2)
+/// int(5)
+/// bool(true)
+/// bool(false)
+/// ```
+fn admission(req: &mut Request, path: &[u8]) -> Admission {
+    let (_, enabled) = state(req);
+    if !enabled {
+        return Admission::Held {
+            validation: Validation::EveryHit,
+            lookup: Lookup::Resolved,
+            protection: 0,
+        };
+    }
     let listed = req
         .engine::<Accelerator>()
-        .is_some_and(|accelerator| accelerator.blacklist.is_blacklisted(&real));
+        .is_some_and(|accelerator| accelerator.blacklist.is_blacklisted(path));
     let limit = long(req, "opcache.max_file_size");
-    listed
-        || limit > 0
-            && std::fs::metadata(String::from_utf8_lossy(&real).as_ref())
-                .is_ok_and(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX) > limit)
+    let large = limit > 0
+        && std::fs::metadata(String::from_utf8_lossy(path).as_ref())
+            .is_ok_and(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX) > limit);
+    if listed || large {
+        return Admission::KeptOut;
+    }
+    let validation = if flag(req, "opcache.validate_timestamps") {
+        let seconds = long(req, "opcache.revalidate_freq");
+        Validation::Window {
+            seconds: u32::try_from(seconds.max(0)).unwrap_or(u32::MAX),
+        }
+    } else {
+        Validation::Never
+    };
+    let lookup = if flag(req, "opcache.revalidate_path") {
+        Lookup::Resolved
+    } else {
+        Lookup::AsWritten
+    };
+    let protection = long(req, "opcache.file_update_protection");
+    Admission::Held {
+        validation,
+        lookup,
+        protection: u32::try_from(protection.max(0)).unwrap_or(u32::MAX),
+    }
 }
 
 /// The startup verdict and `accelerator_enabled`.
@@ -489,7 +567,7 @@ fn statistics(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Throw
         req,
         vec![
             ("num_cached_scripts", int(scripts)),
-            ("num_cached_keys", int(scripts)),
+            ("num_cached_keys", int(status.keys)),
             ("max_cached_keys", Value::int(keys)),
             ("hits", int(status.hits)),
             ("start_time", Value::int(status.start_time)),
@@ -514,7 +592,6 @@ fn statistics(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Throw
 /// `accelerator_get_scripts`: each file held under its full path.
 fn scripts(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Thrown> {
     let validated = flag(req, "opcache.validate_timestamps");
-    let freq = long(req, "opcache.revalidate_freq");
     let mut listed = PhpArray::new(req)?;
     for script in &status.files {
         let path = text(req, &script.path)?;
@@ -529,10 +606,7 @@ fn scripts(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Thrown> 
         if validated {
             rows.push(("timestamp", Value::int(script.timestamp)));
         }
-        rows.push((
-            "revalidate",
-            Value::int(script.last_used.saturating_add(freq)),
-        ));
+        rows.push(("revalidate", Value::int(script.revalidate)));
         let row = assoc(req, rows)?;
         let at = Key::Str(PhpString::new(req, &script.path)?);
         listed.set(req, at, Value::array(row))?;
@@ -627,18 +701,31 @@ fn opcache_compile_file(req: &mut Request, filename: PhpString) -> Result<bool, 
 /// bool(false)
 /// bool(false)
 /// ```
+///
+/// The path is resolved as an include resolves it, and what a wrapper's
+/// `url_stat` throws on the way is thrown.
+///
+/// ```php
+/// class W { public $context; function url_stat($path, $flags) { throw new Exception("stat failed"); } }
+/// stream_wrapper_register('test', 'W');
+/// set_include_path('test://dir');
+/// try { opcache_invalidate('missing.php'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect regime=jit-off
+/// stat failed
+/// ```
 #[php_function]
 fn opcache_invalidate(
     req: &mut Request,
     filename: PhpString,
     #[php(default = false)] force: bool,
-) -> bool {
+) -> Result<bool, Thrown> {
     if !api_allowed(req) {
-        return false;
+        return Ok(false);
     }
     let (_, enabled) = state(req);
     if !enabled {
-        return false;
+        return Ok(false);
     }
     let how = if force || !flag(req, "opcache.validate_timestamps") {
         Invalidation::Forced
@@ -817,13 +904,13 @@ const CONFIGURATION: [&str; 54] = [
 /// bool(false)
 /// ```
 #[php_function]
-fn opcache_is_script_cached(req: &mut Request, filename: PhpString) -> bool {
+fn opcache_is_script_cached(req: &mut Request, filename: PhpString) -> Result<bool, Thrown> {
     if !api_allowed(req) {
-        return false;
+        return Ok(false);
     }
     let (_, enabled) = state(req);
     if !enabled {
-        return false;
+        return Ok(false);
     }
     let written = filename.as_bytes().to_vec();
     req.unit_cache().holds(&written)
