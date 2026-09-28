@@ -1313,10 +1313,7 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
                     );
                 }
                 let value = take(&mut slots, slot);
-                if range.kind == php_unit::LiveKind::Silence {
-                    exec::restore_silenced(req, &value);
-                }
-                req.release(value);
+                exec::release_live(req, range.kind, value);
             }
         }
     } else {

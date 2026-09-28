@@ -1498,20 +1498,40 @@ pub(crate) fn cleanup_live_vars(
             crate::handlers::ForeachVar::iterator_del(req, held);
         }
         let garbage = req.take_slot(frame, slot);
-        match range.kind {
-            php_unit::LiveKind::Silence => restore_silenced(req, &garbage),
-            // `zend_object_store_ctor_failed`: the object whose
-            // constructor threw is marked as though its destructor had
-            // been served, so releasing it serves none.
-            php_unit::LiveKind::New => {
-                if let Some(object) = garbage.as_object() {
-                    object.heap().set_destructor_called(true);
-                }
-            }
-            php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop | php_unit::LiveKind::Rope => {}
-        }
-        req.release(garbage);
+        release_live(req, range.kind, garbage);
     }
+}
+
+/// What one live range held, given up as its kind says, for the
+/// unwinder and for a generator closed before it finished alike: the
+/// `error_reporting` a `BEGIN_SILENCE` saved put back, the object whose
+/// constructor never ran marked as `zend_object_store_ctor_failed`
+/// marks it, as though its destructor had been served, so releasing it
+/// serves none; and every kind released. A loop variable's iterator is
+/// the caller's to delete first, while the slot still holds it.
+///
+/// A generator destroyed while it waits inside the arguments of a `new`
+/// gives the object up with no destructor served, as an unwind would:
+///
+/// ```php
+/// class D { function __destruct() { echo "D::__destruct\n"; } }
+/// function g() { new D(yield); }
+/// $g = g(); $g->current(); unset($g); echo "done\n";
+/// ```
+/// ```expect
+/// done
+/// ```
+pub(crate) fn release_live(req: &mut Request, kind: php_unit::LiveKind, garbage: Value) {
+    match kind {
+        php_unit::LiveKind::Silence => restore_silenced(req, &garbage),
+        php_unit::LiveKind::New => {
+            if let Some(object) = garbage.as_object() {
+                object.heap().set_destructor_called(true);
+            }
+        }
+        php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop | php_unit::LiveKind::Rope => {}
+    }
+    req.release(garbage);
 }
 
 /// `ZEND_FREE_ON_RETURN` (`Z/Zend/zend_compile.h:1104`): the bit on the
