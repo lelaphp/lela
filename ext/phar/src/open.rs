@@ -739,8 +739,7 @@ pub(crate) fn compile_file(req: &mut Request, path: &[u8]) -> Result<Option<Vec<
             return Ok(None);
         };
         let source = archive::copy_all(req, stream);
-        stream.close(req);
-        req.release(stream.as_value());
+        stream.free(req);
         return Ok(Some(source?));
     }
     if a.flags & FILE_COMPRESSION_MASK != 0 {

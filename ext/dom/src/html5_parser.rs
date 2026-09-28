@@ -1007,7 +1007,7 @@ pub(crate) fn create_from_file(
             Err(thrown) => break Err(thrown),
         }
     };
-    stream.close(req);
+    stream.free(req);
     read?;
     let (parsed, found) = parse(req, &path, &Input::File(&source, chunks), options, encoding)?;
     let url = if crate::modern::is_stream_path(&path) {

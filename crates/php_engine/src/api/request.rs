@@ -377,6 +377,11 @@ pub enum StreamOption {
     /// there to read, [`OptionAnswer::Err`] for one that is not, which
     /// `php_stream_eof` asks before it answers no.
     Liveness,
+    /// `PHP_STREAM_OPTION_SYNC_API` under `PHP_STREAM_SYNC_FSYNC`, or
+    /// `PHP_STREAM_SYNC_FDSYNC` for `data_only`: what was written made
+    /// durable, `fsync(2)` or `fdatasync(2)` of a plain file's fd, which
+    /// a pipe refuses. What `fsync()` and `fdatasync()` ask.
+    Sync { data_only: bool },
 }
 
 /// What `php_stream_set_option` answers: `PHP_STREAM_OPTION_RETURN_OK`,
@@ -14587,8 +14592,9 @@ impl Request {
     ///     function stream_stat() { return []; }
     ///     function stream_set_option($o, $a, $b) { return false; }
     ///     function url_stat($p, $f) { return []; } }
-    /// stream_wrapper_register('mm', 'M');
+    /// stream_wrapper_register('mm', 'M'); $b = get_resources();
     /// var_dump(include 'mm://one', include_once 'mm://two', include_once 'mm://two');
+    /// echo count(array_diff_key(get_resources(), $b)), " left open\n";
     /// set_include_path('mm://dir:' . get_include_path());
     /// var_dump(include 'three');
     /// set_include_path('.');
@@ -14601,6 +14607,7 @@ impl Request {
     /// int(7)
     /// int(7)
     /// bool(true)
+    /// 0 left open
     /// mm://dir/three 14
     /// int(7)
     /// include(): data:// wrapper is disabled in the server configuration by allow_url_include=0
@@ -14638,7 +14645,7 @@ impl Request {
                 let source = self
                     .stream_op(*stream, |req, s| s.copy_to_mem(req, None))
                     .unwrap_or_default();
-                stream.close(self);
+                stream.free(self);
                 Some(source)
             }
             _ => None,
@@ -17150,10 +17157,20 @@ impl Request {
         Ok(())
     }
 
-    /// `sys_get_temp_dir()`.
+    /// `php_get_temporary_directory`
+    /// (`Z/main/php_open_temporary_file.c:236`): what `sys_get_temp_dir()`
+    /// answers, and where `tempnam()` falls back to and `tmpfile()` and a
+    /// spilling `php://temp` make their files. `sys_temp_dir` where it is
+    /// set to more than a lone `/`, else `TMPDIR` from the environment,
+    /// one trailing slash taken off either; else `/tmp`.
     #[must_use]
     pub fn temp_dir(&self) -> HostPath {
-        HostPath(std::env::temp_dir())
+        let chosen = self
+            .ini_get(b"sys_temp_dir")
+            .filter(|dir| !dir.is_empty() && *dir != b"/")
+            .or_else(|| self.env(b"TMPDIR").filter(|dir| !dir.is_empty()));
+        let dir = chosen.map_or(&b"/tmp"[..], |dir| dir.strip_suffix(b"/").unwrap_or(dir));
+        HostPath(PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
     }
 
     /// `umask()` as it stands.

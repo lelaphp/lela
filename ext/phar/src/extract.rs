@@ -120,22 +120,18 @@ fn extract_file(
             "Cannot extract \"{shown}\", could not open for writing \"{full}\""
         )));
     };
-    let close = |req: &mut Request| {
-        out.close(req);
-        req.release(out.as_value());
-    };
     let target = Target::Slot(slot);
     if (compressed_fp || entry::efp(req, id, &target)?.is_none())
         && let Err(error) = entry::open_entry_fp(req, id, slot, true)?
     {
-        close(req);
+        out.free(req);
         return Ok(Err(format!(
             "Cannot extract \"{shown}\" to \"{full}\", unable to open internal file pointer: {error}"
         )));
     }
     let bytes = entry::contents(req, id, slot)?;
     let written = out.write(req, &bytes);
-    close(req);
+    out.free(req);
     if !bytes.is_empty() && written != Some(bytes.len()) {
         return Ok(Err(format!(
             "Cannot extract \"{shown}\" to \"{full}\", copying contents failed"

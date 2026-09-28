@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::api::raising::{Level, Thrown, docref, warning};
-use crate::api::request::{Request, Stream, UrlStat, WrapperOp};
+use crate::api::request::{Request, UrlStat, WrapperOp};
 use crate::api::values::{Key, PhpString};
 use crate::streams::{Located, StatBuf, stat_buf, strerror};
 
@@ -727,9 +727,7 @@ impl Request {
                 let Some(stream) = self.open_stream_wrapper(path, b"c", false)? else {
                     return Ok(false);
                 };
-                let res = Stream::resource(stream);
-                res.close(self);
-                self.release(res.as_value());
+                stream.free(self);
                 return Ok(true);
             }
             WrapperOp::Touch(Some(_)) => "touch",

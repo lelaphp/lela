@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Opening, Request, Stream};
+use php_ext::request::{Opening, Request};
 
 use crate::archive::{
     self, API_VERSION_NODIR, API_VERSION_NUM, ArchiveId, Content, ENT_COMPRESSED_GZ,
@@ -401,7 +401,7 @@ pub(crate) fn write_out(
         let packed = archive::filter_bytes(req, b"zlib.deflate", Some(&params), &newfile);
         req.release(params);
         let Some(packed) = packed? else {
-            close(req, out);
+            out.free(req);
             return Ok(Some(format!(
                 "unable to compress all contents of phar \"{}\" using zlib, PHP versions older than 5.2.6 have a buggy zlib",
                 lossy(&fname)
@@ -421,14 +421,8 @@ pub(crate) fn write_out(
             _ => break,
         }
     }
-    close(req, out);
+    out.free(req);
     Ok(None)
-}
-
-/// A stream closed and its resource given up.
-fn close(req: &mut Request, stream: Stream) {
-    stream.close(req);
-    req.release(stream.as_value());
 }
 
 /// `phar_create_default_stub`: the stub `makestub.php` writes, naming

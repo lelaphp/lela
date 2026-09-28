@@ -149,7 +149,7 @@ use php_ext::call::lookup_class;
 use php_ext::coerce::to_string;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw};
-use php_ext::request::{Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
+use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 /// `file.c`'s `auto_detect_line_endings`, `PHP_INI_ALL` and off, which
@@ -1448,6 +1448,36 @@ fn no_default_context(flags: i64) -> NullContext {
 /// bool(true)
 /// string(0) ""
 /// ```
+///
+/// A native that opens a stream of its own closes it with
+/// `php_stream_close`, which gives up the owner the open handed it
+/// ([`Stream::free`]), so nothing it opened is left in `get_resources()`:
+/// this one, and every native here that reads or writes a file whole.
+///
+/// ```php
+/// stream_context_get_default();
+/// $d = __DIR__; $n = fn($b) => count(array_diff_key(get_resources(), $b));
+/// $b = get_resources(); file_put_contents("$d/r.txt", "abc"); echo "fpc ", $n($b), "\n";
+/// $b = get_resources(); file_get_contents("$d/r.txt"); echo "fgc ", $n($b), "\n";
+/// $b = get_resources(); file("$d/r.txt"); echo "file ", $n($b), "\n";
+/// $b = get_resources(); readfile("$d/r.txt"); echo " readfile ", $n($b), "\n";
+/// $b = get_resources(); md5_file("$d/r.txt"); sha1_file("$d/r.txt"); hash_file('md5', "$d/r.txt"); echo "hash ", $n($b), "\n";
+/// $b = get_resources(); parse_ini_file("$d/r.txt"); echo "ini ", $n($b), "\n";
+/// $b = get_resources(); get_meta_tags("$d/r.txt"); @getimagesize("$d/r.txt"); echo "meta ", $n($b), "\n";
+/// $b = get_resources(); highlight_file("$d/r.txt", true); php_strip_whitespace("$d/r.txt"); echo "source ", $n($b), "\n";
+/// $b = get_resources(); scandir($d); copy("$d/r.txt", "$d/s.txt"); error_log("x", 3, "$d/r.log"); echo "dir ", $n($b), "\n";
+/// ```
+/// ```expect
+/// fpc 0
+/// fgc 0
+/// file 0
+/// abc readfile 0
+/// hash 0
+/// ini 0
+/// meta 0
+/// source 0
+/// dir 0
+/// ```
 #[php_function]
 fn file_get_contents(
     req: &mut Request,
@@ -1487,12 +1517,12 @@ fn file_get_contents(
                 Level::Warning,
                 &format!("Failed to seek to position {offset} in the stream"),
             );
-            stream.close(req);
+            stream.free(req);
             return Ok(OrFalse::False);
         }
     }
     let contents = stream.copy_to_mem(req, maxlen)?;
-    stream.close(req);
+    stream.free(req);
     Ok(OrFalse::Value(contents))
 }
 
@@ -1603,7 +1633,7 @@ fn file_put_contents(
         return Ok(OrFalse::False);
     };
     if flags & FLOCK_EX != 0 && !stream.flock(req, FLOCK_EX) {
-        stream.close(req);
+        stream.free(req);
         docref(
             req,
             Level::Warning,
@@ -1615,7 +1645,7 @@ fn file_put_contents(
         stream.truncate(req, 0)?;
     }
     let written = write_data(req, stream, source, &data, name);
-    stream.close(req);
+    stream.free(req);
     Ok(match written? {
         Some(n) => OrFalse::Value(i64::try_from(n).unwrap_or(i64::MAX)),
         None => OrFalse::False,
@@ -2064,9 +2094,9 @@ fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Th
     let mut done = false;
     if let Some(to) = req.open_stream(target, b"wb", false)? {
         done = copy_to_stream(req, from, to)?;
-        close_stream(req, to);
+        to.free(req);
     }
-    close_stream(req, from);
+    from.free(req);
     Ok(done)
 }
 
@@ -2089,13 +2119,6 @@ fn copy_to_stream(req: &mut Request, from: Stream, to: Stream) -> Result<bool, T
             }
         }
     }
-}
-
-/// `php_stream_close`: the resource closed and the owner the open gave
-/// it let go.
-fn close_stream(req: &mut Request, stream: Stream) {
-    stream.close(req);
-    req.release(stream.as_value());
 }
 
 /// `copy(string $from, string $to, $context = null): bool`,
@@ -2162,6 +2185,19 @@ fn copy(
 /// string(%d) "%s/n%s"
 /// bool(true)
 /// int(60)
+/// ```
+///
+/// The fallback is `php_get_temporary_directory`'s, the directory
+/// `sys_get_temp_dir()` names.
+///
+/// ```php
+/// $f = tempnam(__DIR__ . '/none/x', 't'); var_dump(dirname($f) === realpath(sys_get_temp_dir())); unlink($f);
+/// $f = tmpfile(); var_dump(dirname(stream_get_meta_data($f)['uri']) === realpath(sys_get_temp_dir()));
+/// ```
+/// ```expect
+/// Notice: tempnam(): file created in the system's temporary directory in %s on line 2
+/// bool(true)
+/// bool(true)
 /// ```
 #[php_function]
 fn tempnam(req: &mut Request, directory: Path, prefix: Path) -> Result<OrFalse<PhpString>, Thrown> {
@@ -2285,7 +2321,7 @@ fn file(
         return Ok(OrFalse::False);
     };
     let contents = stream.copy_to_mem(req, None)?;
-    stream.close(req);
+    stream.free(req);
     let buf = contents.as_bytes().to_vec();
     let mut lines: Vec<&[u8]> = Vec::new();
     let mut s = 0;
@@ -2649,7 +2685,7 @@ fn get_meta_tags(
             break;
         }
     }
-    md.stream.close(req);
+    md.stream.free(req);
     Ok(OrFalse::Value(array))
 }
 
@@ -2702,7 +2738,7 @@ fn readfile(
         return Ok(OrFalse::False);
     };
     let size = passthru(req, stream)?;
-    stream.close(req);
+    stream.free(req);
     Ok(OrFalse::Value(size))
 }
 
@@ -2782,20 +2818,23 @@ fn fscanf(
     })
 }
 
-/// `php_stream_sync_supported`: the plain files kind, and the host's
-/// standard streams, are the ones with an `fsync(2)`.
-fn sync(req: &mut Request, stream: Stream) -> bool {
+/// `php_stream_sync_supported`, which the plain files kind and the
+/// host's standard streams are, php's warning and `false` for any other;
+/// then what was written flushed, and `php_stream_sync`, which is
+/// `fsync(2)`, or `fdatasync(2)` for `data_only`, of the stream's fd.
+fn sync(req: &mut Request, stream: Stream, data_only: bool) -> bool {
     if !stream.is_stdio(req) {
         docref(req, Level::Warning, "Can't fsync this stream!");
         return false;
     }
     stream.flush(req)
+        && stream.set_option(req, StreamOption::Sync { data_only }) == OptionAnswer::Ok
 }
 
 /// `fsync($stream): bool`, `PHP_FUNCTION(fsync)`
 /// (`Z/ext/standard/file.c:1266`): php's warning for a stream with no
-/// `fsync(2)`, else what was written handed to the file. The flush is
-/// what a program sees of it: durability is not observable here.
+/// `fsync(2)`, else what was written handed to the file and what
+/// `fsync(2)` of its fd answers, which a pipe refuses.
 ///
 /// ```php
 /// $f = fopen(__DIR__ . '/fsync.txt', 'w'); fwrite($f, 'x');
@@ -2807,26 +2846,42 @@ fn sync(req: &mut Request, stream: Stream) -> bool {
 /// string(1) "x"
 /// bool(false)
 /// ```
+///
+/// ```php
+/// $p = proc_open(['/bin/cat'], [['pipe', 'r'], ['pipe', 'w']], $pipes);
+/// var_dump(fsync($pipes[0]), fsync($pipes[1]));
+/// fclose($pipes[0]); fclose($pipes[1]); proc_close($p);
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// ```
 #[php_function]
 fn fsync(req: &mut Request, stream: Stream) -> bool {
-    sync(req, stream)
+    sync(req, stream, false)
 }
 
 /// `fdatasync($stream): bool`, `PHP_FUNCTION(fdatasync)`
-/// (`Z/ext/standard/file.c:1282`): `fsync`'s answer with `data_only`.
+/// (`Z/ext/standard/file.c:1282`): `fsync`'s answer with `data_only`,
+/// `fdatasync(2)` of the fd.
 ///
 /// ```php
 /// $f = fopen(__DIR__ . '/fdatasync.txt', 'w'); fwrite($f, 'y');
 /// var_dump(fdatasync($f), fdatasync(fopen('php://temp', 'r')));
+/// $p = proc_open(['/bin/cat'], [['pipe', 'r'], ['pipe', 'w']], $pipes);
+/// var_dump(fdatasync($pipes[0]), fdatasync($pipes[1]));
+/// fclose($pipes[0]); fclose($pipes[1]); proc_close($p);
 /// ```
 /// ```expect
 /// Warning: fdatasync(): Can't fsync this stream! in %s on line 3
 /// bool(true)
 /// bool(false)
+/// bool(false)
+/// bool(false)
 /// ```
 #[php_function]
 fn fdatasync(req: &mut Request, stream: Stream) -> bool {
-    sync(req, stream)
+    sync(req, stream, true)
 }
 
 /// The one-byte `$separator` or `$enclosure` at `position`, or the
@@ -3164,9 +3219,8 @@ fn fnmatch(
 
 /// `sys_get_temp_dir(): string`, `PHP_FUNCTION(sys_get_temp_dir)`
 /// (`Z/ext/standard/file.c:2269`) over `php_get_temporary_directory`
-/// (`Z/main/php_open_temporary_file.c:236`): `sys_temp_dir` where it is
-/// set, else `TMPDIR` from the environment, else `P_tmpdir`, `/tmp`;
-/// one trailing slash taken off the first two.
+/// (`Z/main/php_open_temporary_file.c:236`), the one directory
+/// [`Request::temp_dir`] names.
 ///
 /// ```php
 /// $t = sys_get_temp_dir(); var_dump($t[0], is_dir($t));
@@ -3177,18 +3231,6 @@ fn fnmatch(
 /// ```
 #[php_function]
 fn sys_get_temp_dir(req: &mut Request) -> Result<PhpString, Thrown> {
-    // A `sys_temp_dir` of `/` alone is passed over, as php's two tests
-    // pass it over.
-    let from_ini = req
-        .ini_get(b"sys_temp_dir")
-        .filter(|dir| !dir.is_empty() && *dir != b"/")
-        .map(|dir| dir.strip_suffix(b"/").unwrap_or(dir).to_vec());
-    let dir = if let Some(dir) = from_ini {
-        dir
-    } else if let Some(dir) = req.env(b"TMPDIR").filter(|dir| !dir.is_empty()) {
-        dir.strip_suffix(b"/").unwrap_or(dir).to_vec()
-    } else {
-        b"/tmp".to_vec()
-    };
-    PhpString::new(req, &dir)
+    let dir = req.temp_dir().0;
+    PhpString::new(req, dir.as_os_str().as_encoded_bytes())
 }

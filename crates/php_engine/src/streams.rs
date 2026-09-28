@@ -1473,8 +1473,7 @@ impl Temp {
             return Ok(false);
         };
         req.stream_op(file, |req, f| f.write(req, &membuf));
-        inner.resource().close(req);
-        req.release(inner.resource().as_value());
+        inner.free(req);
         self.inner = Some(file);
         req.stream_op(file, |req, f| f.seek(req, pos, Some(Whence::Set)));
         Ok(true)
@@ -1519,8 +1518,7 @@ impl Ops for Temp {
     /// unlinks a spilled file.
     fn close(&mut self, req: &mut Request) -> i32 {
         if let Some(inner) = self.inner.take() {
-            inner.resource().close(req);
-            req.release(inner.resource().as_value());
+            inner.free(req);
         }
         0
     }
@@ -1906,7 +1904,8 @@ impl Ops for Stdio {
 
     /// `php_stdiop_set_option` (`Z/main/streams/plain_wrapper.c:803`):
     /// `PHP_STREAM_OPTION_BLOCKING` is `O_NONBLOCK` set or cleared on the
-    /// fd, and `PHP_STREAM_OPTION_WRITE_BUFFER` `setvbuf` on a `FILE *`,
+    /// fd, `PHP_STREAM_OPTION_SYNC_API` `php_stdiop_sync`'s `fsync(2)` or
+    /// `fdatasync(2)` of it, and `PHP_STREAM_OPTION_WRITE_BUFFER` `setvbuf` on a `FILE *`,
     /// which a stream opened over a fd, as every one here is, has not:
     /// `-1`.
     fn set_option(&mut self, _req: &mut Request, option: StreamOption) -> OptionAnswer {
@@ -1921,6 +1920,12 @@ impl Ops for Stdio {
                 self.blocking = blocking;
                 OptionAnswer::Ok
             }
+            StreamOption::Sync { data_only } => match self.file.as_ref() {
+                Some(file) if php_heap::sync_fd(file.as_fd(), data_only).is_ok() => {
+                    OptionAnswer::Ok
+                }
+                _ => OptionAnswer::Err,
+            },
             StreamOption::WriteBuffer { .. } => OptionAnswer::Err,
             _ => OptionAnswer::NotImplemented,
         }
@@ -2163,6 +2168,19 @@ impl Ops for HostFd {
         )
     }
 
+    /// `php_stdiop_set_option`'s `PHP_STREAM_OPTION_SYNC_API` over the
+    /// host's fd, `php_stdiop_sync`: `fsync(2)` or `fdatasync(2)` of it,
+    /// which a pipe refuses, and refused where the host handed no fd.
+    fn set_option(&mut self, req: &mut Request, option: StreamOption) -> OptionAnswer {
+        let StreamOption::Sync { data_only } = option else {
+            return OptionAnswer::NotImplemented;
+        };
+        match req.host_fd(self.standard()) {
+            Some(fd) if php_heap::sync_fd(fd, data_only).is_ok() => OptionAnswer::Ok,
+            _ => OptionAnswer::Err,
+        }
+    }
+
     fn meta_data(&self) -> MetaData {
         MetaData::Stdio { blocked: true }
     }
@@ -2242,7 +2260,7 @@ impl Request {
         }
         let [Some(stdin), Some(stdout), Some(stderr)] = opened[..] else {
             for stream in opened.into_iter().flatten() {
-                stream.close(self);
+                stream.free(self);
             }
             return Ok(());
         };
@@ -2516,7 +2534,7 @@ fn filter_open(
             let name = rfc2397::url_decode(name);
             // `if (EG(exception)) { php_stream_close(stream); return NULL; }`
             if let Err(thrown) = stream.apply_filter(req, &name, chains) {
-                stream.close(req);
+                stream.free(req);
                 return Err(thrown);
             }
         }

@@ -1804,7 +1804,7 @@ fn getimagesize(
         return Ok(OrFalse::False);
     };
     let bytes = stream.copy_to_mem(req, None)?;
-    stream.close(req);
+    stream.free(req);
     answer(req, bytes.as_bytes(), filename.as_bytes(), image_info)
 }
 

@@ -599,8 +599,7 @@ fn list_dir(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thro
         out.push(name.as_bytes().to_vec());
         req.release(Value::string(name));
     }
-    dir.close(req);
-    req.release(dir.as_value());
+    dir.free(req);
     Ok(Some(out))
 }
 

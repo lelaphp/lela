@@ -503,7 +503,7 @@ fn dsn_from_uri(req: &mut Request, uri: &[u8]) -> Result<Option<Vec<u8>>, Thrown
         return Ok(None);
     };
     let line = stream.get_line(req, Some(512))?;
-    stream.close(req);
+    stream.free(req);
     Ok(line.map(|line| line.as_bytes().to_vec()))
 }
 

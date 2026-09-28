@@ -313,4 +313,5 @@ set_sockopt
 shift_left
 shift_right
 suspend
+sync_fd
 zend_sort

@@ -586,7 +586,7 @@ pub(crate) fn save_html_file(
     let doc = match fetch(req, this) {
         Ok(found) => found,
         Err(thrown) => {
-            stream.close(req);
+            stream.free(req);
             return Err(thrown);
         }
     };
@@ -597,10 +597,10 @@ pub(crate) fn save_html_file(
         common_save(&mut out, &templates, doc, &encoding)
     };
     if !saved {
-        stream.close(req);
+        stream.free(req);
         return Ok(None);
     }
     let written = stream.tell(req);
-    stream.close(req);
+    stream.free(req);
     Ok(Some(written))
 }

@@ -534,7 +534,7 @@ unsafe extern "C" fn stream_close(context: *mut c_void) -> c_int {
     if let Some((_, io)) = lent() {
         // SAFETY: the running call's `Io`.
         let req = unsafe { request(io) };
-        Loader::close(req, stream);
+        stream.free(req);
     }
     0
 }

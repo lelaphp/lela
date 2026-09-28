@@ -311,7 +311,7 @@ pub(super) fn file_bytes(
         }
     }
     let complete = stream.eof(req);
-    stream.close(req);
+    stream.free(req);
     Ok(complete.then_some(bytes))
 }
 

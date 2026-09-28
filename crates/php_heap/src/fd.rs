@@ -4,6 +4,7 @@
 //! socket's timed read and `accept` wait on, and `fcntl(2)`'s
 //! `O_NONBLOCK`, which `PHP_STREAM_OPTION_BLOCKING` sets on a pipe; and
 //! `recv(2)` under `MSG_PEEK`, which `STREAM_PEEK` asks of any socket;
+//! and `fsync(2)` and `fdatasync(2)`, which `fsync()` asks of a file;
 //! and `dup(2)` of an fd named by its number with `getdtablesize(2)`,
 //! which `php://fd/` opens; and the socket calls `main/network.c` makes
 //! where `std`'s sockets decide for it, `socket(2)`, `setsockopt(2)`,
@@ -82,6 +83,35 @@ pub fn set_fd_blocking(fd: BorrowedFd<'_>, blocking: bool) -> std::io::Result<bo
     }
     Ok(was_blocking)
 }
+
+/// `fsync(2)` of the fd, or `fdatasync(2)` for `data_only`, the call
+/// `php_stdiop_sync` (`Z/main/streams/plain_wrapper.c:595`) makes for
+/// `PHP_STREAM_OPTION_SYNC_API`; the `Err` is the `errno` of a `-1`,
+/// `EINVAL` for a pipe or a socket. `std`'s `sync_all` is
+/// `F_FULLFSYNC` on macOS, which is not the call php makes.
+pub fn sync_fd(fd: BorrowedFd<'_>, data_only: bool) -> std::io::Result<()> {
+    let raw = fd.as_raw_fd();
+    let n = if data_only {
+        // SAFETY: `fdatasync` reads nothing through its argument, a number.
+        unsafe { fdatasync(raw) }
+    } else {
+        // SAFETY: `fsync` reads nothing through its argument, a number.
+        unsafe { libc::fsync(raw) }
+    };
+    if n == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+// The symbol is in macOS's C library but not in its header, which is how
+// php declares it there (`Z/main/streams/plain_wrapper.c:68`).
+#[cfg(target_vendor = "apple")]
+unsafe extern "C" {
+    fn fdatasync(fd: libc::c_int) -> libc::c_int;
+}
+#[cfg(not(target_vendor = "apple"))]
+use libc::fdatasync;
 
 /// `recv(fd, buf, len, MSG_PEEK)`: the bytes queued on a socket, left
 /// queued; how many there were, or the `errno` of a `-1`.

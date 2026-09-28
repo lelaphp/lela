@@ -357,7 +357,7 @@ impl Archive {
         for mut entry in self.manifest.clear() {
             entry.metadata.free(req);
             if let Content::Tmp(Some(stream)) = entry.content {
-                stream.close(req);
+                stream.free(req);
             }
         }
     }
@@ -667,8 +667,7 @@ pub(crate) fn read_file(
         return Ok(None);
     };
     let bytes = copy_all(req, stream)?;
-    stream.close(req);
-    req.release(stream.as_value());
+    stream.free(req);
     Ok(Some(bytes))
 }
 
@@ -727,7 +726,6 @@ pub(crate) fn filter_bytes(
         Ok(None) => Ok(None),
         Err(thrown) => Err(thrown),
     };
-    temp.close(req);
-    req.release(temp.as_value());
+    temp.free(req);
     out
 }

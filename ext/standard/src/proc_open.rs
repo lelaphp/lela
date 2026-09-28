@@ -361,8 +361,10 @@ fn process_dtor(req: &mut Request, res: Resource) {
     };
     let pipes = std::mem::take(&mut process.pipes);
     for pipe in pipes {
-        pipe.close(req);
-        req.release(pipe.as_value());
+        match Stream::from_value(req, &pipe.as_value()) {
+            Some(stream) => stream.free(req),
+            None => req.release(pipe.as_value()),
+        }
     }
     let wait = req.state::<State>().proc_open.pclose_wait;
     let Some(process) = res.native_mut::<Process>(req) else {
@@ -584,8 +586,7 @@ fn file_descriptor(
     };
     let fd = stream.cast(req, Cast::Fd, true);
     let childend = fd.and_then(|fd| dup_descriptor(req, fd, nindex));
-    stream.close(req);
-    req.release(stream.as_value());
+    stream.free(req);
     Ok(childend)
 }
 

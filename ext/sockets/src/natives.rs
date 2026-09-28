@@ -457,10 +457,10 @@ fn socket_close(req: &mut Request, socket: Instance<Socket>) -> Result<(), Throw
     valid(req, socket)?;
     let handle = std::mem::take(&mut sock(req, socket)?.handle);
     if let Handle::Stream { stream, .. } = handle {
-        if let Some(open) = live_stream(req, stream) {
-            open.close(req);
+        match live_stream(req, stream) {
+            Some(open) => open.free(req),
+            None => req.release(Value::resource(stream)),
         }
-        req.release(Value::resource(stream));
     }
     Ok(())
 }

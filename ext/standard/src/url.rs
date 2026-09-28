@@ -93,7 +93,7 @@ fn get_headers(
         .get(&wrapper_data)
         .and_then(|value| value.deref().as_array().copied());
     let Some(lines) = lines else {
-        stream.close(req);
+        stream.free(req);
         return Ok(OrFalse::False);
     };
     let mut headers = PhpArray::new(req)?;
@@ -104,7 +104,7 @@ fn get_headers(
         };
         add_header(req, &mut headers, line.as_bytes(), associative)?;
     }
-    stream.close(req);
+    stream.free(req);
     Ok(OrFalse::Value(headers))
 }
 
