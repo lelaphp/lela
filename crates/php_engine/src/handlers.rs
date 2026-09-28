@@ -12311,7 +12311,25 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
 /// value is held to each type the cell carries and may be converted by
 /// them, so what landed is not always what was written. The pair is
 /// that value, a view the caller copies into `result`, and what the
-/// place held, which the caller releases last.
+/// place held, which the caller releases last there too
+/// (`zend_assign_to_typed_ref_ex`'s `garbage_ptr`), so a destructor it
+/// serves that writes the cell does so after `result` took the value.
+///
+/// ```php
+/// class Test {
+///     static ?Test $test;
+///     function __destruct() { $GLOBALS['a'] = null; }
+/// }
+/// $a = new Test;
+/// Test::$test = &$a;
+/// var_dump($a = new Test);
+/// var_dump($a);
+/// ```
+/// ```expect
+/// object(Test)#2 (0) {
+/// }
+/// NULL
+/// ```
 fn assign_to_place(
     req: &mut Request,
     at: php_heap::ZvalRef,
@@ -12320,11 +12338,21 @@ fn assign_to_place(
 ) -> Result<(Value, Value), Thrown> {
     let mut at = at;
     let mut held = exec::value_of(at.read());
+    let mut value = value;
     if let Some(cell) = held.as_php_ref() {
         let cell = *cell;
         if !req.ref_type_sources(cell.heap()).is_empty() {
-            req.assign_to_reference(cell.heap(), value, strict)?;
-            return Ok((cell.get(), Value::default()));
+            value = match crate::ops::verify_ref_assignable(req, cell.heap(), &value, strict) {
+                Ok(None) => value,
+                Ok(Some(coerced)) => {
+                    req.release(value);
+                    coerced
+                }
+                Err(thrown) => {
+                    req.release(value);
+                    return Err(thrown);
+                }
+            };
         }
         at = cell.heap().val_ref();
         held = exec::value_of(at.read());
