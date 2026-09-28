@@ -38,6 +38,9 @@ php_bundle = { path = "../crates/php_bundle", features = [
 
 anyhow.workspace = true
 clap.workspace = true
+# The oracle module's runner kills a program's process group whole, so what a
+# test started goes with it (harness §4.3, #1211).
+nix = { workspace = true, features = ["signal"] }
 regex-lite.workspace = true
 sha1_smol.workspace = true
 md5.workspace = true

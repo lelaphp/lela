@@ -1052,3 +1052,52 @@ fn a_test_past_the_limit_holds_up_only_its_batch_and_what_it_conflicts_with() {
     let went: Vec<Judgement> = pooled.judged.iter().map(|j| j.judgement).collect();
     assert_eq!(went, [Judgement::Fail, Judgement::Pass, Judgement::Pass]);
 }
+
+/// Whether a process of this pid stands, as `kill -0` asks, waiting out
+/// the moment a killed one takes to be reaped by whoever adopted it.
+fn stands(pid: i32) -> bool {
+    let pid = nix::unistd::Pid::from_raw(pid);
+    let since = std::time::Instant::now();
+    while nix::sys::signal::kill(pid, None).is_ok() {
+        if since.elapsed() > std::time::Duration::from_secs(5) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+/// A test whose program leaves a child sleeping and exits, and one whose
+/// program leaves one and passes the limit (#1211): each child is in its
+/// program's process group, which the runner kills whole, so neither
+/// outlives its run. Each program writes the child's pid beside itself,
+/// which is how the test learns it; the child ran, which is the control.
+#[test]
+fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
+    if oracle().is_none() {
+        return;
+    }
+    let leaves = |then: &str| {
+        format!(
+            "--TEST--\nleaves a child\n--FILE--\n<?php\n\
+             $pid = (int) shell_exec('sleep 120 > /dev/null 2>&1 & echo $!');\n\
+             file_put_contents(__DIR__ . '/child.pid', $pid);\n\
+             var_dump(posix_kill($pid, 0));\n{then}\n--EXPECT--\nbool(true)\n"
+        )
+    };
+    for (name, then, went) in [
+        ("exits", "", Judgement::Pass),
+        ("past-limit", "sleep(60);", Judgement::Fail),
+    ] {
+        let (root, subset) = rooted(name, &leaves(then));
+        let tally = run_on(&subset, 1, 2);
+        assert_eq!(only(&tally).0, went, "{name}: {tally:#?}");
+        let pid: i32 = fs::read_to_string(root.join("ext/fixture/tests/child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(pid > 0, "{name}: the child never started");
+        assert!(!stands(pid), "{name}: the child {pid} outlived its run");
+    }
+}

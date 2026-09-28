@@ -1,6 +1,7 @@
 //! The fresh-process adapter of design §8's `ScriptExec` seam: how one
 //! `.phpt` is judged. The test's program is written where upstream writes
-//! it and run through the binary under test by its absolute path, as
+//! it, beside the test in the tree the subset stands in, the run's copy
+//! of the pinned one (#1183), and run through the binary under test by its absolute path, as
 //! upstream hands it (#331), with the sections that shape one run
 //! (`--INI--`, `--ARGS--`, `--ENV--`, `--STDIN--`, `--CAPTURE_STDIO--`),
 //! its `SKIPIF` and `CLEAN` sections run beside it under the oracle by the
@@ -26,7 +27,6 @@ use crate::oracle::expect::Expectation;
 use crate::oracle::{
     self, Invocation, Observation, Oracle, PastLimit, Pin, Program, Verdict as Compared,
 };
-use crate::scratch::Tree;
 use crate::tally::{Apart, Within};
 
 /// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
@@ -80,7 +80,7 @@ impl<'a> Adapter<'a> {
             Err(why) => return Ok(Judged::new(&id, &name, Judgement::Skip, why)),
         };
         ini.extend(self.lane.map(Lane::ini));
-        let env = self.environment(&phpt, test, &ini);
+        let env = self.environment(&phpt, test, &ini, &subset.root);
         let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
         if let Some(body) = phpt.filled("SKIPIF") {
             let out = self.run_section(subset, test, &env, "skip", body)?;
@@ -151,8 +151,9 @@ impl<'a> Adapter<'a> {
     /// (run-tests.php:1187), and past it upstream kills the process and
     /// holds what it wrote, with its `** ERROR: process timed out **`
     /// line, to the expectation, which fails (run-tests.php:1205-1209).
-    /// The working directory is php-src's root, the subset's, as upstream
-    /// runs every program from `TEST_PHP_SRCDIR` (run-tests.php:1173).
+    /// The working directory is the root of the tree the subset stands in,
+    /// as upstream runs every program from `TEST_PHP_SRCDIR`
+    /// (run-tests.php:1173).
     fn run_program(
         &self,
         subset: &Subset,
@@ -206,7 +207,7 @@ impl<'a> Adapter<'a> {
     /// cleanup. Upstream runs them under the binary it is testing, so a
     /// `SKIPIF` that asks what the engine has is answered here by php; it
     /// is the runner's one known difference from upstream's verdicts. Both
-    /// run from php-src's root and in the test's environment, as the test's
+    /// run from the tree's root and in the test's environment, as the test's
     /// program does, so a `SKIPIF` that asks `TEST_PHP_EXECUTABLE` what it
     /// can do asks the binary under test, as upstream's asks it.
     fn run_section(
@@ -257,18 +258,31 @@ impl<'a> Adapter<'a> {
     /// it by (run-tests.php:670-677), the test's own `--ENV--`
     /// (run-tests.php:2009-2018), and last `TEST_PHP_EXTRA_ARGS`, which is
     /// the recipe's flags and every ini entry the test runs under
-    /// (run-tests.php:2115). The recipe's `TEST_PHP_EXECUTABLE`
+    /// (run-tests.php:2115). `TEST_PHP_SRCDIR` names `root`, the tree the
+    /// programs run in, as the variable names upstream's own
+    /// (run-tests.php:179-183), and never the pinned tree, which a test
+    /// does not write in (#1183). The recipe's `TEST_PHP_EXECUTABLE`
     /// names the pinned php, which is right for a witness and wrong here:
     /// what a test spawns is the binary being measured. No CGI or debugger
     /// host stands beside that binary, so their two names are empty, as
     /// upstream's `get_binary` leaves them when it finds none
     /// (run-tests.php:1003-1019).
-    fn environment(&self, phpt: &Phpt, test: &Path, ini: &[String]) -> Vec<(String, String)> {
+    fn environment(
+        &self,
+        phpt: &Phpt,
+        test: &Path,
+        ini: &[String],
+        root: &Path,
+    ) -> Vec<(String, String)> {
         let binary = self.binary.to_string_lossy().into_owned();
         let recipe = &self.oracle.pin().recipe;
         let mut env = vec![
             ("TEST_PHP_EXECUTABLE_ESCAPED".to_owned(), escaped(&binary)),
             ("TEST_PHP_EXECUTABLE".to_owned(), binary),
+            (
+                oracle::TREE_VARIABLE.to_owned(),
+                root.to_string_lossy().into_owned(),
+            ),
         ];
         for host in ["TEST_PHP_CGI_EXECUTABLE", "TEST_PHPDBG_EXECUTABLE"] {
             env.push((host.to_owned(), String::new()));
@@ -290,14 +304,11 @@ fn beside(test: &Path, kind: Option<&str>) -> PathBuf {
     test.with_extension(kind.map_or_else(|| "php".to_owned(), |kind| format!("{kind}.php")))
 }
 
-/// What a test may not run beside: its conflict keys and the three files
-/// its run writes beside it, so no two tests whose files would stand at
-/// one path run at once, in this run or another; alone in its run where
-/// its conflict keys name `all`, as upstream has it
-/// (run-tests.php:1365-1370); and its directory, which no other run has a
-/// test going in while it goes (#1097). The files and the directory are
-/// keyed by their canonical path, so two runs that spell the tree two ways
-/// hold one key for one file and one directory.
+/// What a test may not run beside in its run: its conflict keys and the
+/// three files its run writes beside it, so no two tests whose files would
+/// stand at one path run at once; alone where its conflict keys name
+/// `all`, as upstream has it (run-tests.php:1365-1370). Another run is in
+/// a copy of its own and holds nothing against this one (#1183).
 pub(super) fn apart(test: &Path, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Apart {
     let mut keys = file::conflicts(test, dirs);
     let within = if keys.iter().any(|key| key == "all") {
@@ -306,16 +317,10 @@ pub(super) fn apart(test: &Path, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> A
         Within::Batch
     };
     keys.retain(|key| key != "all");
-    let canonical = fs::canonicalize(test).unwrap_or_else(|_| test.to_path_buf());
     keys.extend(
-        [None, Some("skip"), Some("clean")]
-            .map(|kind| beside(&canonical, kind).display().to_string()),
+        [None, Some("skip"), Some("clean")].map(|kind| beside(test, kind).display().to_string()),
     );
-    Apart {
-        within,
-        keys,
-        directory: canonical.parent().map(Path::to_path_buf),
-    }
+    Apart { within, keys }
 }
 
 /// How many neighbours one thread judges in sequence: upstream's batch,
@@ -585,22 +590,18 @@ fn words(text: &str) -> Vec<String> {
 }
 
 /// A file written beside a test for the length of its run and taken away
-/// after, which is where upstream puts a test's program too; and the
-/// scratch tree that names it, so a run killed while it stands, which
-/// drops nothing, leaves it for the next run's sweep to take away rather
-/// than for every later run to bork on (#860).
+/// after, which is where upstream puts a test's program too. A run killed
+/// while it stands leaves it in the run's copy, which the next run's sweep
+/// takes away whole (#1183).
 struct Written {
     path: PathBuf,
-    _claim: Tree,
 }
 
 impl Written {
     fn new(path: &Path, body: &[u8]) -> Result<Written> {
-        let claim = Tree::claiming("phpt-beside", path)?;
         fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
         Ok(Written {
             path: path.to_path_buf(),
-            _claim: claim,
         })
     }
 }

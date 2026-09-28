@@ -36,14 +36,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::{self, File};
+use std::fs;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, PoisonError, mpsc};
 use std::thread;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 
 use crate::oracle::Runner;
 use crate::reading::{Reading, Status, listed};
@@ -185,9 +185,7 @@ impl<J: Judgement> Tally<J> {
 
     /// [`Tally::judge`] on a pool of `threads`, each item held apart from
     /// the items `apart[n]` says it may not run beside, as [`Queue::take`]
-    /// holds them within this run and [`Held::take`] across every run, and
-    /// its directory held against every other run as [`Directories`]
-    /// holds it.
+    /// holds them.
     /// The items are cut into batches of `batch` neighbours in their
     /// order, and a batch's items are judged one after another, as one of
     /// upstream's workers runs the batch it is handed
@@ -208,13 +206,11 @@ impl<J: Judgement> Tally<J> {
         J: Send,
     {
         let queue = Mutex::new(Queue::new(apart, batch));
-        let directories = Directories::default();
         let freed = Condvar::new();
         let (sent, received) = mpsc::channel();
         thread::scope(|scope| {
             for _ in 0..threads.get().min(items.len()) {
                 let (sent, queue, freed) = (sent.clone(), &queue, &freed);
-                let directories = &directories;
                 let judge = &judge;
                 scope.spawn(move || {
                     let lock = || queue.lock().unwrap_or_else(PoisonError::into_inner);
@@ -231,23 +227,9 @@ impl<J: Judgement> Tally<J> {
                         };
                         drop(waiting);
                         // A judge that panics gives its keys back all the
-                        // same, so no thread waits on them for ever; and
-                        // the directory, then the keys, are held across
-                        // processes for as long as the judge runs.
-                        let judged =
-                            directories
-                                .enter(apart[at].directory.as_deref())
-                                .and_then(|entered| {
-                                    let held =
-                                        Held::take(apart[at].keys.iter().map(String::as_str))?;
-                                    let judged =
-                                        panic::catch_unwind(AssertUnwindSafe(|| judge(&items[at])))
-                                            .unwrap_or_else(|_| {
-                                                Err(anyhow!("judging item {at} panicked"))
-                                            });
-                                    drop((held, entered));
-                                    judged
-                                });
+                        // same, so no thread waits on them for ever.
+                        let judged = panic::catch_unwind(AssertUnwindSafe(|| judge(&items[at])))
+                            .unwrap_or_else(|_| Err(anyhow!("judging item {at} panicked")));
                         lock().done(at, &apart[at]);
                         freed.notify_all();
                         // A send that fails is the receiver gone, a verdict
@@ -390,31 +372,16 @@ impl<J: Judgement> Tally<J> {
     }
 }
 
-/// What one item may not run beside: upstream's conflict keys
+/// What one item may not run beside in its run: upstream's conflict keys
 /// (run-tests.php:1341-1372). No two items holding one key run at once,
 /// and an item alone runs with nothing of its run beside it; an item
-/// holding no key runs beside anything but an item alone. A key holds
-/// across every run on the machine and not only within one (#990):
-/// [`Queue::take`] keeps one run's items apart and [`Held::take`] keeps
-/// them apart from every other process's, since two checkouts run their
-/// tests in one pinned tree. Alone is the run's word, as upstream's `all`
-/// is its invocation's: another run's items are not held off by it.
-///
-/// The directory an item stands in is held apart across runs and shared
-/// within one (#1097): while any batch of a run has an item going in it,
-/// no other run has an item going there, and the run's own batches go on
-/// beside each other as upstream's workers do. Upstream runs one
-/// invocation over its tree, whose tests share its directories as they
-/// share its root; two runs over one tree meet in neither, whatever path
-/// a test makes that no key names.
+/// holding no key runs beside anything but an item alone. Two runs share
+/// no tree to be held apart in: a phpt run stands in a copy of the pinned
+/// tree of its own (#1183), and a witness in a scratch tree of its own.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Apart {
     pub within: Within,
     pub keys: Vec<String>,
-    /// The directory held against every other run, none for an item that
-    /// stands in no shared tree, as a witness in a scratch tree of its
-    /// own.
-    pub directory: Option<PathBuf>,
 }
 
 /// How an item stands among the items of its own run.
@@ -425,180 +392,6 @@ pub enum Within {
     Batch,
     /// Upstream's `all`: in no batch, and nothing of its run beside it.
     Alone,
-}
-
-/// Where [`Held::take`] takes its locks: one directory under the
-/// temporary directory, the one every run of the harness on this machine
-/// shares, as the scratch trees' sweep shares it.
-const HELD: &str = "xtask-held";
-
-/// Keys held against every other process: a file per key, locked, and
-/// removed again when the value drops. The operating system releases a
-/// lock however the process ends, so a killed run leaves a file and never
-/// a key held.
-pub(crate) struct Held {
-    locks: Vec<(PathBuf, File)>,
-}
-
-impl Held {
-    /// `keys`, held against every other process on the machine until the
-    /// value is dropped: each key the file named by its SHA-1, locked
-    /// whole, taken in the order of those names so no two holders wait on
-    /// each other in a cycle. No key holds nothing and waits on nothing.
-    ///
-    /// A holder removes its file before it lets go, so a lock taken on a
-    /// file that is no longer the one at its path is on a file nobody else
-    /// will find; it is let go and the path opened again.
-    pub(crate) fn take<'k>(keys: impl IntoIterator<Item = &'k str>) -> Result<Held> {
-        use std::os::unix::fs::MetadataExt;
-        let names: BTreeSet<String> = keys
-            .into_iter()
-            .map(|key| sha1_smol::Sha1::from(key).digest().to_string())
-            .collect();
-        let mut held = Held { locks: Vec::new() };
-        if names.is_empty() {
-            return Ok(held);
-        }
-        let dir = std::env::temp_dir().join(HELD);
-        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        for name in names {
-            let path = dir.join(name);
-            let file = loop {
-                let file = File::options()
-                    .write(true)
-                    .create(true)
-                    .truncate(false)
-                    .open(&path)
-                    .with_context(|| format!("opening {}", path.display()))?;
-                file.lock()
-                    .with_context(|| format!("holding {}", path.display()))?;
-                let at = fs::metadata(&path).ok();
-                let this = file.metadata()?;
-                if at.is_some_and(|at| (at.dev(), at.ino()) == (this.dev(), this.ino())) {
-                    break file;
-                }
-            };
-            held.locks.push((path, file));
-        }
-        Ok(held)
-    }
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        // Each file goes while its lock is still held, and the lock with
-        // the file's closing, after this body.
-        for (path, _) in &self.locks {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-
-/// The directories one run's items stand in, each held against every
-/// other process while the run has a batch in it, and shared by the
-/// run's batches (#1097). One run's state and not the process's, so two
-/// runs in one process, as the harness's own tests are, are two runs.
-#[derive(Default)]
-struct Directories {
-    held: Mutex<BTreeMap<PathBuf, Directory>>,
-    changed: Condvar,
-}
-
-/// One directory of a run's.
-enum Directory {
-    /// A thread of the run waits on the lock; the run's others wait on it.
-    Taking,
-    /// Held, by as many of the run's batches as have an item going in it;
-    /// the lock lets go when the value drops.
-    Held { batches: NonZeroUsize, _held: Held },
-}
-
-/// An item's batch in its directory, until the value drops.
-struct Entered<'a> {
-    directories: &'a Directories,
-    directory: Option<&'a Path>,
-}
-
-impl Directories {
-    /// The batch of an item going in `directory` counted in, the first of
-    /// the run's batches there taking the directory's lock with
-    /// [`Held::take`] and the rest sharing it. An item takes its
-    /// directory before its keys and waits on it holding nothing across
-    /// processes; the holder it waits on is an item going or one taking
-    /// its keys, which waits on no directory, so no two runs wait on each
-    /// other in a cycle.
-    fn enter<'a>(&'a self, directory: Option<&'a Path>) -> Result<Entered<'a>> {
-        let entered = Entered {
-            directories: self,
-            directory: None,
-        };
-        let Some(directory) = directory else {
-            return Ok(entered);
-        };
-        let lock = || self.held.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut held = lock();
-        loop {
-            match held.get_mut(directory) {
-                Some(Directory::Held { batches, .. }) => {
-                    *batches = batches.saturating_add(1);
-                    break;
-                }
-                Some(Directory::Taking) => {
-                    held = self
-                        .changed
-                        .wait(held)
-                        .unwrap_or_else(PoisonError::into_inner);
-                }
-                None => {
-                    held.insert(directory.to_path_buf(), Directory::Taking);
-                    drop(held);
-                    let taken = Held::take([directory.to_string_lossy().as_ref()]);
-                    held = lock();
-                    let taken = match taken {
-                        Ok(taken) => taken,
-                        Err(err) => {
-                            held.remove(directory);
-                            self.changed.notify_all();
-                            return Err(err);
-                        }
-                    };
-                    held.insert(
-                        directory.to_path_buf(),
-                        Directory::Held {
-                            batches: NonZeroUsize::MIN,
-                            _held: taken,
-                        },
-                    );
-                    self.changed.notify_all();
-                    break;
-                }
-            }
-        }
-        Ok(Entered {
-            directory: Some(directory),
-            ..entered
-        })
-    }
-}
-
-impl Drop for Entered<'_> {
-    /// The batch counted out, and the lock let go with the last.
-    fn drop(&mut self) {
-        let Some(directory) = self.directory else {
-            return;
-        };
-        let mut held = self
-            .directories
-            .held
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(Directory::Held { batches, .. }) = held.get_mut(directory) {
-            match NonZeroUsize::new(batches.get() - 1) {
-                Some(left) => *batches = left,
-                None => drop(held.remove(directory)),
-            }
-        }
-    }
 }
 
 /// The pool a lane runs on unless it is told otherwise: as many threads
@@ -1039,59 +832,6 @@ mod tests {
         assert_eq!(
             queue.batch,
             [Some(0), Some(0), None, Some(1), Some(1), Some(2)]
-        );
-    }
-
-    /// Items standing in `directory`, a path of this test's own, since
-    /// the key it names is held across every process on the machine.
-    fn standing(directory: &str, count: usize) -> Vec<Apart> {
-        let directory =
-            std::env::temp_dir().join(format!("xtask-tally-{}-{directory}", std::process::id()));
-        vec![
-            Apart {
-                directory: Some(directory),
-                ..Apart::default()
-            };
-            count
-        ]
-    }
-
-    /// One run's batches in one directory go on beside each other, as
-    /// upstream's workers do, however the directory is held against other
-    /// runs (#1097).
-    #[test]
-    fn one_runs_batches_in_one_directory_go_on_beside_each_other() {
-        let apart = standing("shared", 4);
-        let (spans, _) = spans(&apart, 8, 2, |_| 60);
-        assert!(overlap(spans[0], spans[2]), "{spans:?}");
-        assert!(overlap(spans[1], spans[3]), "{spans:?}");
-    }
-
-    /// Two runs over one directory at once, here two in one process as
-    /// two checkouts are two processes, never have an item going in it at
-    /// once: the first to enter holds it until its last batch there is
-    /// done (#1097). Over two directories they go on beside each other,
-    /// the control that shows the two runs run at once at all.
-    #[test]
-    fn two_runs_never_have_items_going_in_one_directory_at_once() {
-        let two_runs = |one: &[Apart], two: &[Apart]| {
-            thread::scope(|scope| {
-                let first = scope.spawn(|| spans(one, 4, 2, |_| 60).0);
-                let second = scope.spawn(|| spans(two, 4, 2, |_| 60).0);
-                (first.join().unwrap(), second.join().unwrap())
-            })
-        };
-        let apart = standing("one", 4);
-        let (first, second) = two_runs(&apart, &apart);
-        for a in &first {
-            for b in &second {
-                assert!(!overlap(*a, *b), "{first:?} {second:?}");
-            }
-        }
-        let (first, second) = two_runs(&standing("left", 4), &standing("right", 4));
-        assert!(
-            first.iter().any(|a| second.iter().any(|b| overlap(*a, *b))),
-            "the control: {first:?} {second:?}"
         );
     }
 

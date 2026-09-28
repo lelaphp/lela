@@ -28,6 +28,7 @@ pub(crate) mod linked;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -282,7 +283,7 @@ impl Source {
     /// repository's checkout. `how` says which place the tree was found
     /// through, so the refusal names it beside both revisions.
     fn held(&self, tree: &Path, how: &str) -> Result<()> {
-        if !tree.join(".git").exists() {
+        if !checkout(tree) {
             return Ok(());
         }
         let head = crate::git::git(tree, &["rev-parse", "--verify", "HEAD^{commit}"], None)
@@ -303,6 +304,36 @@ impl Source {
         }
         Ok(())
     }
+
+    /// The files the pinned tree at `tree` holds, relative to it, as the
+    /// tree is held to the pin: in a checkout, the files git tracks there,
+    /// so what a run or a person left standing in it is not the pin's
+    /// (#1183); in a tree that is no checkout, every file, taken at its
+    /// word as its commit is.
+    pub(crate) fn files(tree: &Path) -> Result<Vec<PathBuf>> {
+        if checkout(tree) {
+            let listed = crate::git::git(tree, &["ls-files", "-z"], None)
+                .with_context(|| format!("listing the php-src checkout at {}", tree.display()))?;
+            return Ok(listed
+                .split('\0')
+                .filter(|file| !file.is_empty())
+                .map(PathBuf::from)
+                .collect());
+        }
+        let mut found = Vec::new();
+        crate::tally::files_under(tree, &mut found)
+            .with_context(|| format!("listing the php-src tree at {}", tree.display()))?;
+        Ok(found
+            .into_iter()
+            .filter_map(|file| file.strip_prefix(tree).ok().map(Path::to_path_buf))
+            .collect())
+    }
+}
+
+/// Whether the tree at `tree` is a checkout: it has a `.git`, a directory
+/// or a worktree's file.
+fn checkout(tree: &Path) -> bool {
+    tree.join(".git").exists()
 }
 
 /// `[recipe]`: how a program is run and how its streams are normalised.
@@ -538,6 +569,29 @@ impl<'a> Invocation<'a> {
     }
 }
 
+/// The process group a program leads, which it was spawned into
+/// (`process_group(0)`) so that whatever it starts is in the group too: a
+/// server a test forks, a `php -S`, a worker it leaves running (#1211). The
+/// group is killed whole when this value drops, past the limit, after the
+/// program exits and on every error between, so nothing a program started
+/// outlives its run, as `proc_terminate` ends upstream's on its timeout
+/// (run-tests.php `system_with_timeout`). A kill that finds the group
+/// empty is no error.
+struct Group(nix::unistd::Pid);
+
+impl Group {
+    fn of(child: &std::process::Child) -> Result<Group> {
+        let pid = i32::try_from(child.id()).context("a process id past pid_t")?;
+        Ok(Group(nix::unistd::Pid::from_raw(pid)))
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        let _ = nix::sys::signal::killpg(self.0, nix::sys::signal::Signal::SIGKILL);
+    }
+}
+
 /// The pinned oracle for the length of one run: the pin, and whether its
 /// digest has been asserted yet. Made by [`Pin::oracle`], once per run;
 /// every program the run executes goes through it.
@@ -593,7 +647,8 @@ impl<'a> Oracle<'a> {
         cmd.args(call.flags)
             .arg(&scratch.script)
             .args(call.args)
-            .current_dir(call.cwd.unwrap_or(&scratch.dir));
+            .current_dir(call.cwd.unwrap_or(&scratch.dir))
+            .process_group(0);
         if recipe.env_clear {
             cmd.env_clear();
         }
@@ -622,16 +677,17 @@ impl<'a> Oracle<'a> {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("running {}", call.binary.display()))?;
+        let group = Group::of(&child)?;
         let limit = Duration::from_secs(recipe.limits.timeout_s);
         let status = loop {
             if let Some(status) = child.try_wait().context("waiting for php")? {
                 break status;
             }
             if started.elapsed() > limit {
-                // Killed and then reaped, so the process is gone and not a
-                // zombie when the caller hears of it. A kill that finds it
-                // already exited is no error: the wait reaps it either way.
-                let _ = child.kill();
+                // The group killed while its leader still stands, so the
+                // number is its own, and then the leader reaped, so it is
+                // gone and not a zombie when the caller hears of it.
+                drop(group);
                 child.wait().context("reaping php past the limit")?;
                 return Err(PastLimit {
                     binary: call.binary.to_path_buf(),

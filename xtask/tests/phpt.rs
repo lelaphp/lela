@@ -887,7 +887,8 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
 /// One tree standing where the pinned php-src would, a stand-in engine
 /// over the pinned oracle, and the checkouts that run `xtask phpt` over
 /// the tree as processes of their own, as two builders' lanes do: what the
-/// tests of runs held apart across processes share (#990, #1097).
+/// tests of runs at once share (#990, #1097), each run in a copy of the
+/// tree of its own (#1183).
 struct OneTree {
     corpus: Tree,
     engine: PathBuf,
@@ -965,7 +966,8 @@ fn kept(root: &Tree, child: std::process::Child) -> serde_json::Value {
 /// read `theirs`, or bork on the other's program still standing; and each
 /// prints `__FILE__` and `__DIR__` by name and a sibling included by
 /// `__DIR__` and by the include path, which are run-tests.php's. The lone
-/// run first is the control the two are held to.
+/// run first is the control the two are held to, and the tree holds only
+/// what it held before any of them, each run being in a copy (#1183).
 #[test]
 fn two_runs_over_one_subset_at_once_each_read_as_a_lone_run_does() {
     if oracle().is_none() {
@@ -1022,12 +1024,11 @@ fn two_runs_over_one_subset_at_once_each_read_as_a_lone_run_does() {
 /// and remove `relative_temp` relative to the tree's root, where every
 /// program runs, as ext/zlib's `readgzfile_basic.phpt` and
 /// `readgzfile_basic2.phpt` make `readgzfile_temp` (#1091): a run judges the
-/// two in one batch, one after the other, and #990's keys hold each test
-/// apart from the other run's same test, but not the one run's first from
-/// the other's second, which met on `mkdir(): File exists`. The directory
-/// is held against every other run while any of a run's batches has a
-/// test going in it, so both keep the lone run's verdicts, on twenty runs
-/// of twenty. The lone run first is the control they are held to.
+/// two in one batch, one after the other, and the one run's first met the
+/// other's second on `mkdir(): File exists` while both ran in the tree
+/// itself. Each run's root is its own copy's (#1183), so both keep the
+/// lone run's verdicts, on twenty runs of twenty. The lone run first is
+/// the control they are held to.
 #[test]
 fn two_runs_over_one_directory_at_once_never_meet_in_it() {
     if oracle().is_none() {
@@ -1065,16 +1066,14 @@ fn two_runs_over_one_directory_at_once_never_meet_in_it() {
     }
 }
 
-/// A run killed while it holds a directory holds nothing (#1097): the
-/// operating system lets its lock go with the process. The first run's
-/// one test stands in the directory until it is killed; once it has
-/// started, its file goes and another comes, so the second run over the
-/// directory has a test of its own and no key of #990's in common with
-/// the first. The second waits on the directory while the first holds it,
-/// so its test starts only after the first is killed, and then reads as a
-/// lone run does.
+/// A run killed mid-subset leaves the pinned tree as it stood (#1183):
+/// its one test, standing in the run's copy, writes beside itself and
+/// sleeps until the run is killed, and the tree holds only what it held
+/// before. The copy it leaves, which a killed run drops nothing of, is the
+/// next run's sweep's: that run passes, and the dead one's copy is gone.
 #[test]
-fn a_run_killed_holding_a_directory_holds_nothing() {
+fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
+    use std::io::{BufRead, BufReader};
     const PATIENCE: Duration = Duration::from_mins(2);
     if oracle().is_none() {
         return;
@@ -1082,56 +1081,54 @@ fn a_run_killed_holding_a_directory_holds_nothing() {
     let tree = OneTree::new("killed");
     let dir = tree.corpus.join("Zend/tests");
     fs::create_dir_all(&dir).unwrap();
-    let (held, started) = (dir.join("held"), dir.join("started"));
+    let signal = Tree::new("phpt-killed-signal").unwrap();
+    let held = signal.join("held");
     fs::write(
         dir.join("a-held.phpt"),
-        "--TEST--\nheld\n--FILE--\n<?php\nfile_put_contents(__DIR__ . '/held', getmypid());\n\
-         sleep(60);\n--EXPECT--\n",
+        format!(
+            "--TEST--\nheld\n--FILE--\n<?php\nfile_put_contents(__DIR__ . '/beside', 1);\n\
+             file_put_contents({:?}, getmypid());\nsleep(60);\n--EXPECT--\n",
+            held.display().to_string()
+        ),
     )
     .unwrap();
-    let (one, two) = (
-        OneTree::checkout("killed-one"),
-        OneTree::checkout("killed-two"),
-    );
+    let before = listing(tree.corpus.path());
+    let one = OneTree::checkout("killed-one");
     let mut first = tree.run(&one, "Zend/tests");
+    let mut lines = BufReader::new(first.stdout.take().unwrap()).lines();
+    let copy = loop {
+        let line = lines.next().expect("the run named no copy").unwrap();
+        if let Some((_, copy)) = line.split_once(" files, is ") {
+            break PathBuf::from(copy);
+        }
+    };
     let since = std::time::Instant::now();
     while !held.exists() {
         assert!(
             since.elapsed() < PATIENCE,
-            "the first run's test never started"
+            "the killed run's test never started"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    fs::remove_file(dir.join("a-held.phpt")).unwrap();
-    fs::write(
-        dir.join("b-quick.phpt"),
-        "--TEST--\nquick\n--FILE--\n<?php\nfile_put_contents(__DIR__ . '/started', microtime(true));\n\
-         echo \"ok\\n\";\n--EXPECT--\nok\n",
-    )
-    .unwrap();
-    let mut second = tree.run(&two, "Zend/tests");
-    std::thread::sleep(Duration::from_secs(2));
     assert!(
-        !started.exists(),
-        "the second run's test started beside the first's"
+        copy.join("Zend/tests/beside").exists(),
+        "the test ran in {copy:?}"
     );
-    let killed = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
     first.kill().unwrap();
     first.wait().unwrap();
     let pid = fs::read_to_string(&held).unwrap();
     let _ = Command::new("kill").args(["-9", pid.trim()]).status();
-    let since = std::time::Instant::now();
-    while second.try_wait().unwrap().is_none() {
-        assert!(
-            since.elapsed() < PATIENCE,
-            "the second run still waits on the killed one"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let run = kept(&two, second);
+    assert_eq!(listing(tree.corpus.path()), before, "the pinned tree moved");
+    assert!(copy.is_dir(), "a killed run drops nothing");
+
+    fs::remove_file(dir.join("a-held.phpt")).unwrap();
+    fs::write(
+        dir.join("b-quick.phpt"),
+        "--TEST--\nquick\n--FILE--\n<?php\necho \"ok\\n\";\n--EXPECT--\nok\n",
+    )
+    .unwrap();
+    let two = OneTree::checkout("killed-two");
+    let run = kept(&two, tree.run(&two, "Zend/tests"));
     assert_eq!(
         run["verdicts"]
             .as_object()
@@ -1141,6 +1138,75 @@ fn a_run_killed_holding_a_directory_holds_nothing() {
         ["pass"],
         "{run}"
     );
-    let start: f64 = fs::read_to_string(&started).unwrap().parse().unwrap();
-    assert!(start >= killed, "{start} started before {killed}");
+    assert!(!copy.exists(), "the next run's sweep left {copy:?}");
+}
+
+/// Every path under `dir` with its bytes, a directory's as none, sorted:
+/// what a tree holds, to hold it to what it held before a run.
+fn listing(dir: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, Option<Vec<u8>>)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.push((path.clone(), None));
+                walk(&path, out);
+            } else {
+                out.push((path.clone(), Some(fs::read(&path).unwrap())));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, &mut out);
+    out.sort();
+    out
+}
+
+/// The fixture at `xtask/fixtures/phpt/writes` (#1183), run over a pinned
+/// tree that is a checkout of its own with the fixture committed and an
+/// untracked `stray.php` standing where `stray.phpt`'s program goes, as a
+/// killed run's program stood in the pinned tree. Every test passes, the
+/// stray borking none since the run's copy holds what git tracks, and the
+/// tree holds, path for path and byte for byte, what it held before. A
+/// runner that writes into the pinned tree fails here: the fixture's tests
+/// leave six paths behind them there.
+#[test]
+fn a_run_writes_nothing_into_the_pinned_tree() {
+    if oracle().is_none() {
+        return;
+    }
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/writes");
+    let tests: Vec<(String, String)> = fs::read_dir(&fixture)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "phpt"))
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, fs::read_to_string(&path).unwrap())
+        })
+        .collect();
+    assert_eq!(tests.len(), 4, "{tests:?}");
+    let tests: Vec<(&str, &str)> = tests
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let mut scratch = Scratch::new("writes", &tests);
+    let corpus = scratch.root.join("corpus");
+    let init = Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(&corpus)
+        .status()
+        .unwrap();
+    assert!(init.success());
+    scratch.manifest.pin.source.commit = commit_all(&corpus, "the pin");
+    fs::write(
+        corpus.join("ext/fixture/tests/stray.php"),
+        "<?php echo 'a stray';\n",
+    )
+    .unwrap();
+    let before = listing(&corpus);
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "passed"), 4, "{reading:#?}");
+    assert_eq!(count(&reading, "borked"), 0, "{reading:#?}");
+    assert_eq!(listing(&corpus), before, "the pinned tree moved");
 }
