@@ -18831,12 +18831,14 @@ fn no_table(opcode: &str) -> Fatal {
 /// is one rule for both, because nothing is pending after a handler php
 /// gives the unchecked macro to, and the release a handler makes last
 /// is where a destructor is served (design §5.10), which is PHP code
-/// between this opline and the next.
+/// between this opline and the next. The frame stays at the opline that
+/// raised, php's `EG(opline_before_exception)`, for the unwinder to
+/// read which `try` element and live ranges it stands in.
 fn advance(req: &mut Request, frame: FrameRef) -> Stepped {
-    req.vm_mut().advance(frame);
     if req.is_pending() {
         return Stepped::Threw(frame);
     }
+    req.vm_mut().advance(frame);
     Stepped::Same(frame)
 }
 
@@ -19196,6 +19198,24 @@ pub(crate) fn discard_exception<T: Tier>(
 /// ```expect
 /// outer x
 /// f
+/// ```
+///
+/// A throwable a loop variable's destructor raises from the `FE_FREE`
+/// of a `return`, after the `finally` block the return called, is
+/// raised past the loop's `try`, whose `catch` never takes it:
+///
+/// ```php
+/// class A { public $x = 1; function __destruct() { throw new Exception("d"); } }
+/// function f() {
+///     foreach (new A as $a) {
+///         try { return $a; } catch (Exception $e) { echo "inner\n"; } finally { echo "finally\n"; }
+///     }
+/// }
+/// try { f(); } catch (Exception $e) { echo "outer ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// finally
+/// outer d
 /// ```
 pub(crate) fn handle_exception<T: Tier>(
     req: &mut Request,
