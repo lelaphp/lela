@@ -48,14 +48,14 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
 }
 
 /// `--staged`: the crates with a staged change, pre-commit's touched
-/// crates (harness-design.md §6); no readings when no crate is touched.
-pub fn run_staged(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
-    let touched = sources::staged_crates(root, manifest)?;
-    if touched.is_empty() {
-        println!("clippy: no crate has a staged change");
+/// crates (harness-design.md §6), less those whose reading stands for
+/// what is staged (#1143); no readings when none is left.
+pub fn run_staged(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<Reading>> {
+    let measured = sources::for_commit(root, manifest, store, INSTRUMENT)?;
+    if measured.is_empty() {
         return Ok(Vec::new());
     }
-    run(root, manifest, &touched)
+    run(root, manifest, &measured)
 }
 
 /// The command line's entry: the crates named, or with `--staged` the
@@ -68,7 +68,7 @@ pub(crate) fn command(
     staged: bool,
 ) -> Result<()> {
     let readings = if staged {
-        run_staged(root, manifest)?
+        run_staged(root, manifest, store)?
     } else {
         run(root, manifest, crates)?
     };

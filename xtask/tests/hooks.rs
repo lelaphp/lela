@@ -276,10 +276,10 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
             "fmt --check".to_owned(),
             "xtask clippy --staged".to_owned(),
             "xtask test --staged".to_owned(),
-            "xtask api-check".to_owned(),
-            "xtask budget".to_owned(),
-            "xtask unsafe-audit".to_owned(),
-            "xtask vocab".to_owned(),
+            "xtask api-check --staged".to_owned(),
+            "xtask budget --staged".to_owned(),
+            "xtask unsafe-audit --staged".to_owned(),
+            "xtask vocab --staged".to_owned(),
             "xtask witness --staged".to_owned(),
             "xtask crosscheck".to_owned(),
             "xtask permit --diff".to_owned(),
@@ -447,11 +447,14 @@ fn a_failing_instrument_refuses_the_commit_and_the_rest_still_run() {
     assert_eq!(code, 1, "{out}");
     assert_eq!(scratch.head(), before, "the commit was refused: {out}");
     assert!(
-        out.contains("pre-commit: cargo xtask budget failed"),
+        out.contains("pre-commit: cargo xtask budget --staged failed"),
         "{out}"
     );
     let calls = scratch.calls("cargo");
-    assert!(calls.iter().any(|c| c == "xtask vocab"), "{calls:?}");
+    assert!(
+        calls.iter().any(|c| c == "xtask vocab --staged"),
+        "{calls:?}"
+    );
     assert!(
         calls.iter().any(|c| c.starts_with("xtask regions")),
         "{calls:?}"

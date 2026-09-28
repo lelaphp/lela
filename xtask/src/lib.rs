@@ -80,6 +80,7 @@ use cli::{Cli, Command, TicketCommand, TrackCommand, UsageCommand, WorktreeComma
 use divergence::Registry;
 use manifest::Manifest;
 use reading::{Outcome, Reading, Store};
+use sources::Standing;
 
 /// The workspace this binary was built in: the parent of `xtask/`.
 pub(crate) fn built_root() -> PathBuf {
@@ -165,7 +166,9 @@ fn command_line() -> Result<()> {
             }
         }
         Command::Bench(ask) => bench_command(&root, &store, &ask),
-        Command::Budget => record(&store, &budget::run(&root, &manifest)?),
+        Command::Budget { staged } => {
+            record(&store, &budget::measure(&root, &manifest, &store, staged)?)
+        }
         Command::Clippy { crates, staged } => {
             clippy::command(&root, &manifest, &store, &crates, staged)
         }
@@ -176,9 +179,14 @@ fn command_line() -> Result<()> {
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
         Command::CompileIdentity(ask) => identity_command(&root, &manifest, &store, ask),
         Command::Crosscheck { ext } => crosscheck_command(&root, &manifest, &store, ext),
-        Command::UnsafeAudit => record(&store, &unsafe_audit::run(&root, &manifest)?),
+        Command::UnsafeAudit { staged } => record(
+            &store,
+            &unsafe_audit::measure(&root, &manifest, &store, staged)?,
+        ),
         Command::Generate => generate_command(&root, &manifest),
-        Command::ApiCheck { write } => api_check::run(&manifest, &root, &store, write),
+        Command::ApiCheck { write, staged } => {
+            api_check::run(&manifest, &root, &store, write, staged)
+        }
         Command::DivergenceReason => divergence_command(&root, &manifest, &store),
         Command::NewExt { name } => {
             let laid = new_ext::run(&root, &manifest, &name)?;
@@ -191,12 +199,9 @@ fn command_line() -> Result<()> {
             Ok(())
         }
         Command::Witness(ask) => witness::command(&root, &manifest, &store, ask),
-        Command::Vocab { crates } => match vocab::run(&root, &manifest, &store, &crates)? {
-            Outcome::Met => Ok(()),
-            Outcome::Unmet { .. } => {
-                bail!("vocab: an avoided word is in use; the findings are above")
-            }
-        },
+        Command::Vocab { crates, staged } => {
+            vocab_command(&root, &manifest, &store, crates, staged)
+        }
         Command::Ticket { command } => ticket_command(&root, &manifest, &store, command),
         Command::Usage {
             command: UsageCommand::Record { session, turn },
@@ -218,6 +223,32 @@ fn steer(root: &Path, store: &Store, file: &str, from: &Path, dry: bool) -> Resu
 /// the set recorded, whose outcome is the exit.
 pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
     recorded(store, readings)?.exit()
+}
+
+/// `xtask vocab`: the crates named, or with `--staged` every crate less
+/// those whose reading stands for the commit (#1143).
+fn vocab_command(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    crates: Vec<String>,
+    staged: bool,
+) -> Result<()> {
+    let crates = if staged {
+        let all: Vec<String> = manifest.crates.iter().map(|c| c.name.clone()).collect();
+        let standing = Standing::of_every_crate(true, root, manifest, store, vocab::INSTRUMENT)?;
+        let left = standing.unmeasured(&all);
+        if left.is_empty() {
+            return Ok(());
+        }
+        left
+    } else {
+        crates
+    };
+    match vocab::run(root, manifest, store, &crates)? {
+        Outcome::Met => Ok(()),
+        Outcome::Unmet { .. } => bail!("vocab: an avoided word is in use; the findings are above"),
+    }
 }
 
 /// [`record`] without the exit: every reading printed and written, and

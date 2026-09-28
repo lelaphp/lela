@@ -129,16 +129,70 @@ pub fn files(root: &Path, scope: &Path) -> Result<Vec<String>> {
 /// file, then the blob id of the sorted `<id> <path>` listing, which is
 /// what `git hash-object` would print for the same bytes.
 pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
-    let mut manifest = String::new();
+    let mut listing = Vec::new();
     for path in files(root, scope)? {
         let file = root.join(&path);
         let bytes = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-        manifest.push_str(&blob_id(&bytes));
-        manifest.push(' ');
-        manifest.push_str(&path);
-        manifest.push('\n');
+        listing.push((path, blob_id(&bytes)));
     }
-    Ok(blob_id(manifest.as_bytes()))
+    Ok(listing_id(&listing))
+}
+
+/// The index as a commit takes it (#1143): each tracked file's staged
+/// blob id by path, read once from `ls-files --stage`, under the
+/// `GIT_INDEX_FILE` git hands a hook when it keeps one of its own.
+#[derive(Debug, Clone, Default)]
+pub struct Index(Vec<(String, String)>);
+
+impl Index {
+    pub fn read(root: &Path) -> Result<Index> {
+        let mut entries = Vec::new();
+        for entry in git(root, &["ls-files", "--stage", "-z"], None)?
+            .split('\0')
+            .filter(|e| !e.is_empty())
+        {
+            let (head, path) = entry
+                .split_once('\t')
+                .with_context(|| format!("git ls-files wrote {entry:?}"))?;
+            // `<mode> <id> <stage>`: a submodule is no file of a scope's,
+            // and a conflicted path has no stage 0, so no scope holding
+            // one matches what is on disk.
+            if let [mode, id, "0"] = head.split(' ').collect::<Vec<_>>()[..]
+                && mode != "160000"
+            {
+                entries.push((path.to_owned(), id.to_owned()));
+            }
+        }
+        entries.sort_unstable();
+        Ok(Index(entries))
+    }
+
+    /// [`tree_hash`] over what the index holds under `scope`: the hash the
+    /// scope would have on disk were the working tree the index, with no
+    /// untracked file beside it.
+    pub fn hash(&self, scope: &Path) -> String {
+        let whole = scope == Path::new(".") || scope.as_os_str().is_empty();
+        let under: Vec<(String, String)> = self
+            .0
+            .iter()
+            .filter(|(path, _)| whole || Path::new(path).starts_with(scope))
+            .cloned()
+            .collect();
+        listing_id(&under)
+    }
+}
+
+/// The blob id of the sorted `<id> <path>` listing of `(path, id)` pairs:
+/// the one shape every hash of a scope here is taken in.
+fn listing_id(listing: &[(String, String)]) -> String {
+    let mut text = String::new();
+    for (path, id) in listing {
+        text.push_str(id);
+        text.push(' ');
+        text.push_str(path);
+        text.push('\n');
+    }
+    blob_id(text.as_bytes())
 }
 
 /// One object id over the tracked files under `paths`, taken as
@@ -178,14 +232,7 @@ pub(crate) fn tracked_hash(root: &Path, paths: &[&str], at: Option<&str>) -> Res
     }
     listing.sort_unstable();
     listing.dedup();
-    let mut text = String::new();
-    for (path, id) in &listing {
-        text.push_str(id);
-        text.push(' ');
-        text.push_str(path);
-        text.push('\n');
-    }
-    Ok(blob_id(text.as_bytes()))
+    Ok(listing_id(&listing))
 }
 
 /// The id git gives a blob: SHA-1 over `blob <len>\0<content>`.

@@ -162,6 +162,14 @@ impl Reading {
         &self.tree
     }
 
+    /// Whether the reading was taken over the content `hash` names: the
+    /// scope's [`crate::git::tree_hash`] now, `done`'s question, or the
+    /// index's hash of it, pre-commit's (#1143). The one statement of
+    /// fresh (harness-design.md §4.2, §4.5 condition 1).
+    pub fn fresh_for(&self, hash: &str) -> bool {
+        self.tree == hash
+    }
+
     /// Record one count under `key`.
     pub fn count(&mut self, key: &str, n: u64) -> Result<()> {
         let n = i64::try_from(n).with_context(|| format!("{key} = {n} overflows a reading"))?;

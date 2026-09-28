@@ -4,6 +4,8 @@
 # on the crates with a staged change, api-check, budget, unsafe-audit,
 # vocab and witness on the crates with a staged change, each a reading,
 # so `done` has the readings its condition 1 asks a touched crate for;
+# with `--staged` each leaves out a crate whose reading passes and was
+# taken over exactly what is staged, naming the reading (#1143);
 # crosscheck over the default extensions writes its readings the same way
 # and refuses nothing here, since a red row is an extension not yet
 # ported and `done` is what holds a touched one to it (#269);
@@ -88,10 +90,10 @@ fi
 step cargo fmt --check
 step $X clippy --staged
 step $X test --staged
-step $X api-check
-step $X budget
-step $X unsafe-audit
-step $X vocab
+step $X api-check --staged
+step $X budget --staged
+step $X unsafe-audit --staged
+step $X vocab --staged
 step $X witness --staged
 $X crosscheck || echo "pre-commit: crosscheck: a default extension's rendering is not the oracle's; done holds a touched one to its row" >&2
 step $X permit --diff
