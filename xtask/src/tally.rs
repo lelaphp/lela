@@ -5,8 +5,8 @@
 //! print loop, the counts, the runner ladder and the reading's status. A
 //! lane is a scheduled run of a corpus, the per-commit subsets or the
 //! nightly whole (harness §7), and never this module; a lane contributes
-//! its [`Judgement`], a per-item judge and the words of its message, and
-//! nothing else.
+//! its [`Judgement`], what it keeps of an item that missed, a per-item
+//! judge and the words of its message, and nothing else.
 //!
 //! **The runner ladder.** What ran decides what a green tally means. A
 //! [`Runner::Control`] is the pinned oracle standing where the engine
@@ -51,6 +51,10 @@ use crate::reading::{Reading, Status, listed};
 /// What one item of a lane came to. A lane's enum carries the variants
 /// upstream gives it; the tally reads three things of any of them.
 pub trait Judgement: Copy + Eq + fmt::Debug {
+    /// What the lane keeps of an item that missed, beside its note: the
+    /// phpt lane's first differing lines and signature (#1185). A lane
+    /// that keeps nothing more than the note names `Infallible`.
+    type Miss: Clone + Eq + fmt::Debug + Send;
     /// The one judgement the print loop leaves out.
     const PASS: Self;
     fn as_str(self) -> &'static str;
@@ -63,7 +67,7 @@ pub trait Judgement: Copy + Eq + fmt::Debug {
 
 /// One item's verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Judged<J> {
+pub struct Judged<J: Judgement> {
     /// The divergence key, whatever the judgement.
     pub id: String,
     /// What the reading names the item by when it counts against.
@@ -76,9 +80,12 @@ pub struct Judged<J> {
     /// Why: the skip's reason, the borkage, the accepted row's reason, or
     /// the difference.
     pub note: String,
+    /// What the lane keeps of the miss, decoded where the verdict was
+    /// made; none where the item did not miss or the lane keeps nothing.
+    pub miss: Option<J::Miss>,
 }
 
-impl<J> Judged<J> {
+impl<J: Judgement> Judged<J> {
     pub fn new(id: &str, name: &str, judgement: J, note: impl Into<String>) -> Judged<J> {
         Judged {
             id: id.to_owned(),
@@ -86,20 +93,27 @@ impl<J> Judged<J> {
             place: String::new(),
             judgement,
             note: note.into(),
+            miss: None,
         }
+    }
+
+    /// The verdict with what the lane keeps of its miss.
+    pub fn keeping(mut self, miss: J::Miss) -> Judged<J> {
+        self.miss = Some(miss);
+        self
     }
 }
 
 /// What one run of a corpus came to: the verdicts, and the counts that
 /// read off them.
 #[derive(Debug, Clone)]
-pub struct Tally<J> {
+pub struct Tally<J: Judgement> {
     pub judged: Vec<Judged<J>>,
     /// The items found, which is more than `judged` when nothing ran.
     pub found: usize,
 }
 
-impl<J> Default for Tally<J> {
+impl<J: Judgement> Default for Tally<J> {
     fn default() -> Tally<J> {
         Tally {
             judged: Vec::new(),
@@ -534,6 +548,7 @@ mod tests {
     }
 
     impl Judgement for Went {
+        type Miss = std::convert::Infallible;
         const PASS: Went = Went::Pass;
 
         fn as_str(self) -> &'static str {

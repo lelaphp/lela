@@ -65,6 +65,72 @@ impl Expectation {
     }
 }
 
+/// One line of an expectation, held to one line of what ran: where a
+/// test's first difference is found (phpt's miss, #1185). An
+/// `--EXPECT--` line is its bytes; a line of either pattern form is its
+/// own pattern, anchored at the line's ends, and its text where it is no
+/// pattern this engine takes alone. Upstream matches the whole section at
+/// once, and a line is not always a pattern by itself, so this says where
+/// two runs part and never whether a test passes.
+#[derive(Debug)]
+pub(crate) struct Line {
+    text: String,
+    pattern: Option<Regex>,
+    spans: bool,
+}
+
+impl Line {
+    /// The line as the section wrote it.
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Whether `actual`, one line of what ran, is what this line asks for.
+    pub(crate) fn meets(&self, actual: &str) -> bool {
+        match &self.pattern {
+            Some(pattern) => pattern.is_match(actual),
+            None => self.text == actual,
+        }
+    }
+
+    /// Whether the line may stand for more lines than one, as `%a`, `%A`
+    /// and a `%r` section of an `--EXPECTF--`, and `.*` and `.+` of an
+    /// `--EXPECTREGEX--` under the `s` flag, may.
+    pub(crate) fn spans(&self) -> bool {
+        self.spans
+    }
+}
+
+impl Expectation {
+    /// The expectation line by line, each held to one line of what ran.
+    pub(crate) fn lines(&self) -> Vec<Line> {
+        let text = String::from_utf8_lossy(self.text());
+        text.lines()
+            .map(|line| {
+                let (source, spans) = match self {
+                    Expectation::Exact(_) => (None, false),
+                    Expectation::Format(_) => (
+                        line.contains('%').then(|| expectf_to_regex(line)),
+                        ["%a", "%A", "%r"].iter().any(|w| line.contains(w)),
+                    ),
+                    Expectation::Pattern(_) => (
+                        Some(line.to_owned()),
+                        line.contains(".*") || line.contains(".+"),
+                    ),
+                };
+                let pattern = source.and_then(|source| {
+                    Regex::new(&format!("^(?:{})$", pcre_literals(&source))).ok()
+                });
+                Line {
+                    text: line.to_owned(),
+                    pattern,
+                    spans,
+                }
+            })
+            .collect()
+    }
+}
+
 /// php's `expectf_to_regex` (run-tests.php:2856-2904): everything outside a
 /// `%r`-delimited section is quoted, each such section is inserted as a
 /// group, and the twelve wildcards are then substituted.

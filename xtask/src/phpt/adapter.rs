@@ -21,6 +21,7 @@ use anyhow::{Context, Result};
 use regex_lite::Regex;
 
 use super::file::{self, Phpt};
+use super::miss::Miss;
 use super::{Judged, Judgement, Lane, Subset};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
@@ -67,7 +68,10 @@ impl<'a> Adapter<'a> {
         let name = subset.name(test);
         let phpt = match Phpt::load(test) {
             Ok(phpt) => phpt,
-            Err(borked) => return Ok(Judged::new(&id, &name, Judgement::Bork, borked.0)),
+            Err(borked) => {
+                let miss = Miss::bork(&borked.0);
+                return Ok(Judged::new(&id, &name, Judgement::Bork, borked.0).keeping(miss));
+            }
         };
         if let Some(why) = unhosted(&phpt) {
             return Ok(Judged::new(&id, &name, Judgement::Skip, why));
@@ -95,18 +99,23 @@ impl<'a> Adapter<'a> {
 
         let actual = match self.run_program(subset, &phpt, test, &ini, &env)? {
             Ok(actual) => actual,
-            Err((judgement, why)) => return Ok(Judged::new(&id, &name, judgement, why)),
+            Err(Stopped::PastLimit(why)) => {
+                return Ok(
+                    Judged::new(&id, &name, Judgement::Fail, why).keeping(Miss::past_limit())
+                );
+            }
+            Err(Stopped::Occupied(why)) => {
+                let miss = Miss::bork(&why);
+                return Ok(Judged::new(&id, &name, Judgement::Bork, why).keeping(miss));
+            }
         };
         if let Some(construct) = unread(&actual) {
-            return Ok(Judged::new(&id, &name, Judgement::Unread, construct));
+            let miss = Miss::unread(&construct);
+            return Ok(Judged::new(&id, &name, Judgement::Unread, construct).keeping(miss));
         }
         let Some(expectation) = expectation_of(self.oracle.pin(), &phpt) else {
-            return Ok(Judged::new(
-                &id,
-                &name,
-                Judgement::Bork,
-                "missing section --EXPECT--, --EXPECTF-- or --EXPECTREGEX--",
-            ));
+            let why = "missing section --EXPECT--, --EXPECTF-- or --EXPECTREGEX--";
+            return Ok(Judged::new(&id, &name, Judgement::Bork, why).keeping(Miss::bork(why)));
         };
         let (met, trouble) = match expectation.met(&actual) {
             Ok(met) => (met, String::new()),
@@ -135,7 +144,8 @@ impl<'a> Adapter<'a> {
                     "{trouble}the {} section is not what ran:\n{difference}",
                     expectation.section()
                 ),
-            ),
+            )
+            .keeping(Miss::of(&expectation, &actual)),
         })
     }
 
@@ -161,16 +171,13 @@ impl<'a> Adapter<'a> {
         test: &Path,
         ini: &[String],
         env: &[(String, String)],
-    ) -> Result<Result<Vec<u8>, (Judgement, String)>> {
+    ) -> Result<Result<Vec<u8>, Stopped>> {
         let program = beside(test, None);
         if program.exists() {
-            return Ok(Err((
-                Judgement::Bork,
-                format!(
-                    "a file already stands where the test's program goes, {}",
-                    program.display()
-                ),
-            )));
+            return Ok(Err(Stopped::Occupied(format!(
+                "a file already stands where the test's program goes, {}",
+                program.display()
+            ))));
         }
         let body = phpt.section("FILE").unwrap_or_default().to_vec();
         let written = Written::new(&program, &body)?;
@@ -188,7 +195,7 @@ impl<'a> Adapter<'a> {
         let output = match ran {
             Ok(output) => Ok(output.stdout),
             Err(e) => match e.downcast_ref::<PastLimit>() {
-                Some(past) => Err((Judgement::Fail, past.to_string())),
+                Some(past) => Err(Stopped::PastLimit(past.to_string())),
                 None => return Err(e.context(format!("running {}", test.display()))),
             },
         };
@@ -295,6 +302,15 @@ impl<'a> Adapter<'a> {
         ));
         env
     }
+}
+
+/// Why a test's program gave nothing to hold to its expectation, each
+/// with its words.
+enum Stopped {
+    /// It was still running at the recipe's limit: a fail.
+    PastLimit(String),
+    /// A file already stood where it goes: a bork.
+    Occupied(String),
 }
 
 /// Where a test's run writes a file beside it, as upstream does: its

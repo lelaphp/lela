@@ -1,0 +1,75 @@
+{
+  "commit": "88b4a94",
+  "corpus": "php-8.5.9 dd6e76cc",
+  "engine": "target/release/php md5 0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "verdicts": {
+    "phpt:php-src/Zend/tests/bork.phpt": "bork",
+    "phpt:php-src/Zend/tests/class.phpt": "fail",
+    "phpt:php-src/Zend/tests/diverged.phpt": "diverged",
+    "phpt:php-src/Zend/tests/function_a.phpt": "fail",
+    "phpt:php-src/Zend/tests/function_b.phpt": "fail",
+    "phpt:php-src/Zend/tests/function_c.phpt": "fail",
+    "phpt:php-src/Zend/tests/hang.phpt": "fail",
+    "phpt:php-src/Zend/tests/passed.phpt": "pass",
+    "phpt:php-src/Zend/tests/php_only.phpt": "fail",
+    "phpt:php-src/Zend/tests/skipped.phpt": "skip",
+    "phpt:php-src/Zend/tests/unread_a.phpt": "unread",
+    "phpt:php-src/Zend/tests/unread_b.phpt": "unread",
+    "phpt:php-src/Zend/tests/warning_a.phpt": "fail",
+    "phpt:php-src/Zend/tests/warning_b.phpt": "fail",
+    "phpt:php-src/Zend/tests/wrong.phpt": "fail",
+    "phpt:php-src/Zend/tests/xfailed.phpt": "xfail"
+  },
+  "misses": {
+    "phpt:php-src/Zend/tests/bork.phpt": {
+      "signature": { "bork": "missing section --EXPECT--, --EXPECTF-- or --EXPECTREGEX--" }
+    },
+    "phpt:php-src/Zend/tests/class.phpt": {
+      "expected": "object(Foo)#1 (0) {",
+      "actual": "Fatal error: Uncaught Error: Class \"Foo\" not found in /tmp/phpt-tree/Zend/tests/class.php:3",
+      "signature": { "undefined": { "class_like": { "kind": "Class", "name": "Foo" } } }
+    },
+    "phpt:php-src/Zend/tests/function_a.phpt": {
+      "expected": "int(3)",
+      "actual": "Fatal error: Uncaught Error: Call to undefined function array_any() in /tmp/phpt-tree/Zend/tests/function_a.php:2",
+      "signature": { "undefined": { "function": "array_any" } }
+    },
+    "phpt:php-src/Zend/tests/function_b.phpt": {
+      "expected": "bool(true)",
+      "actual": "Fatal error: Uncaught Error: Call to undefined function array_any() in /tmp/phpt-tree/Zend/tests/function_b.php:7",
+      "signature": { "undefined": { "function": "array_any" } }
+    },
+    "phpt:php-src/Zend/tests/function_c.phpt": {
+      "expected": "string(1) \"a\"",
+      "actual": "Fatal error: Uncaught Error: Call to undefined function array_any() in /tmp/phpt-tree/Zend/tests/function_c.php:4",
+      "signature": { "undefined": { "function": "array_any" } }
+    },
+    "phpt:php-src/Zend/tests/hang.phpt": {
+      "signature": "past_limit"
+    },
+    "phpt:php-src/Zend/tests/php_only.phpt": {
+      "expected": "Fatal error: Cannot redeclare function f() (previously declared in %s:%d) in %s on line %d",
+      "signature": { "php_only": "Fatal error: Cannot redeclare function f() (previously declared in _:_) in _ on line _" }
+    },
+    "phpt:php-src/Zend/tests/unread_a.phpt": {
+      "signature": { "unread": "a `declare(encoding)` this compiler cannot read yet" }
+    },
+    "phpt:php-src/Zend/tests/unread_b.phpt": {
+      "signature": { "unread": "a `declare(encoding)` this compiler cannot read yet" }
+    },
+    "phpt:php-src/Zend/tests/warning_a.phpt": {
+      "expected": "int(1)",
+      "actual": "Warning: Undefined variable $x in /tmp/phpt-tree/Zend/tests/warning_a.php on line 4",
+      "signature": { "diagnostic": "Warning: Undefined variable $x in _ on line _" }
+    },
+    "phpt:php-src/Zend/tests/warning_b.phpt": {
+      "actual": "Warning: Undefined variable $x in /tmp/phpt-tree/Zend/tests/warning_b.php on line 9",
+      "signature": { "diagnostic": "Warning: Undefined variable $x in _ on line _" }
+    },
+    "phpt:php-src/Zend/tests/wrong.phpt": {
+      "expected": "int(2)",
+      "actual": "int(3)",
+      "signature": "differs"
+    }
+  }
+}

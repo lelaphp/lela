@@ -14,6 +14,11 @@
 //! from any worktree by the commit alone, and a run over sources that are
 //! no commit's is found by none.
 //!
+//! **What a miss keeps.** Beside its verdict, each test that missed keeps
+//! its first differing lines and its signature under `misses`, by the same
+//! key (#1185), so a run says why a test missed without being run again.
+//! A run kept before the field was is read with none.
+//!
 //! **What gives no verdict.** A comparison is made or it is a skip that
 //! says why, and never a pass: no run stored at the commit, a run at the
 //! head that measured no engine (no binary, one the tree has moved past,
@@ -35,6 +40,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use super::miss::Miss;
 use super::{CORPUS, INSTRUMENT, Judgement, Tally};
 use crate::git;
 use crate::manifest::Manifest;
@@ -61,6 +67,10 @@ pub(crate) struct Run {
     /// The engine that ran: the binary's path and md5, or the linked one.
     pub engine: String,
     pub verdicts: BTreeMap<String, Judgement>,
+    /// What each test that missed keeps, by the same key: every fail,
+    /// bork and unread verdict has one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub misses: BTreeMap<String, Miss>,
 }
 
 /// What a head's run comes to against the stored one.
@@ -196,6 +206,11 @@ impl Runs {
                 .judged
                 .iter()
                 .map(|j| (j.id.clone(), j.judgement))
+                .collect(),
+            misses: tally
+                .judged
+                .iter()
+                .filter_map(|j| Some((j.id.clone(), j.miss.clone()?)))
                 .collect(),
         })
     }

@@ -189,6 +189,7 @@ pub(crate) enum Judgement {
 }
 
 impl tally::Judgement for Judgement {
+    type Miss = std::convert::Infallible;
     const PASS: Judgement = Judgement::Pass;
 
     fn as_str(self) -> &'static str {

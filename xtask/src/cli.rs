@@ -420,10 +420,11 @@ pub(crate) struct Phpt {
     /// where cargo puts it.
     #[arg(long, value_name = "PATH")]
     pub engine: Option<PathBuf>,
-    /// The unread census beside the run: the tests the compiler refused,
-    /// grouped by the construct it refused them for, the widest first,
-    /// and carried on each reading. One more rendering of the same lane;
-    /// nothing runs twice and no count changes.
+    /// The census beside the run: every missed test grouped by the
+    /// signature its miss kept, and the tests the compiler refused grouped
+    /// by the construct it refused them for, carried on each reading; each
+    /// the widest first. One more rendering of the same lane; nothing runs
+    /// twice and no count changes.
     #[arg(long)]
     pub census: bool,
     /// Hold each subset, test by test, to the run kept at this commit, the

@@ -294,6 +294,16 @@ fn a_missed_expectation_fails_with_the_difference() {
     assert_eq!(judgement, Judgement::Fail, "{tally:#?}");
     assert!(note.contains("-five") && note.contains("+four"), "{note}");
     assert_eq!(tally.against(), ["missed.phpt"]);
+    // The miss keeps the lines where the two part and what they come to,
+    // decoded where the verdict was made (#1185).
+    assert_eq!(
+        tally.judged[0].miss,
+        Some(miss::Miss {
+            expected: Some("five".to_owned()),
+            actual: Some("four".to_owned()),
+            signature: miss::Signature::Differs,
+        })
+    );
 }
 
 #[test]
@@ -345,6 +355,7 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
     let note = &tally.judged[1].note;
     assert!(note.contains("the recipe's limit of 1 s"), "{note}");
     assert_eq!(tally.against(), ["b.phpt"]);
+    assert_eq!(tally.judged[1].miss, Some(miss::Miss::past_limit()));
     // The process the test ran is gone: `kill -0` finds no process by
     // that number, which it would for one still running or one killed and
     // never reaped.
@@ -540,6 +551,10 @@ fn a_file_that_is_not_a_test_borks_and_the_subset_fails_on_it() {
     assert_eq!(judgement, Judgement::Bork);
     assert!(note.contains("must start with --TEST--"), "{note}");
     assert_eq!(tally.against(), ["borked.phpt"]);
+    assert!(
+        matches!(&tally.judged[0].miss, Some(miss::Miss { signature: miss::Signature::Bork(why), .. }) if why.contains("must start with --TEST--")),
+        "{tally:#?}"
+    );
 }
 
 #[test]
@@ -790,99 +805,215 @@ fn every_expectf_section_of_the_pinned_pcre_subset_compiles() {
     assert!(seen > 30, "the subset carried {seen} patterns");
 }
 
-/// The census folds the unread verdicts by the construct their refusal
-/// named, the widest construct first, and a tie is broken by the
-/// construct's own text so one run prints the same twice (#617). A
-/// verdict of any other judgement carries a note too — a skip's reason, a
-/// difference — and none of them is the compiler's refusal, so none is
-/// counted here however its note reads.
+/// A verdict as the adapter reaches it, with the miss it keeps.
+fn missed(name: &str, judgement: Judgement, miss: Option<miss::Miss>) -> Judged {
+    let judged = Judged::new(
+        &format!("phpt:php-src/Zend/tests/{name}"),
+        name,
+        judgement,
+        "",
+    );
+    match miss {
+        Some(miss) => judged.keeping(miss),
+        None => judged,
+    }
+}
+
+/// The census folds the misses by the signature each kept, the widest
+/// first, and a tie is broken by the signature's own order so one run
+/// prints the same twice (#617, #1185). The unread census is the groups
+/// whose signature is the compiler's refusal; a fail whose line reads
+/// like one is not one, and a skip keeps nothing.
 #[test]
-fn the_census_groups_the_unread_by_construct_widest_first() {
-    let judged = |name: &str, judgement, note: &str| {
-        let mut one = Judged::new(name, name, judgement, note);
-        one.place = String::new();
-        one
+fn the_census_groups_every_miss_by_signature_and_the_unread_by_construct() {
+    let foreach = || {
+        Some(miss::Miss::unread(
+            "a `foreach` this compiler cannot read yet",
+        ))
+    };
+    let eval = || {
+        Some(miss::Miss::unread(
+            "an `eval` this compiler cannot read yet",
+        ))
     };
     let tally = Tally {
         judged: vec![
-            judged(
-                "a.phpt",
-                Judgement::Unread,
-                "a `foreach` this compiler cannot read yet",
-            ),
-            judged(
-                "b.phpt",
-                Judgement::Unread,
-                "an `eval` this compiler cannot read yet",
-            ),
-            judged(
-                "c.phpt",
-                Judgement::Unread,
-                "a `foreach` this compiler cannot read yet",
-            ),
-            judged(
+            missed("a.phpt", Judgement::Unread, foreach()),
+            missed("b.phpt", Judgement::Unread, eval()),
+            missed("c.phpt", Judgement::Unread, foreach()),
+            missed(
                 "d.phpt",
                 Judgement::Fail,
-                "a `foreach` this compiler cannot read yet",
+                Some(miss::Miss::bork(
+                    "a `foreach` this compiler cannot read yet",
+                )),
             ),
-            judged("e.phpt", Judgement::Skip, "the extension is not built"),
-            judged(
-                "f.phpt",
-                Judgement::Unread,
-                "a class this compiler cannot read yet",
-            ),
+            missed("e.phpt", Judgement::Skip, None),
+            missed("f.phpt", Judgement::Fail, Some(miss::Miss::past_limit())),
+            missed("g.phpt", Judgement::Fail, Some(miss::Miss::past_limit())),
+            missed("h.phpt", Judgement::Fail, Some(miss::Miss::past_limit())),
         ],
-        found: 6,
+        found: 8,
     };
     let mut census = census::Census::default();
-    census.add(&tally);
+    census.add(census::misses(&tally));
+    census.accounts_for(census::verdicts(&tally)).unwrap();
 
-    // The fail's note reads like a refusal and is not one: four unread.
-    assert_eq!(census.unread(), 4);
+    assert_eq!(census.missed(), 7);
+    assert_eq!(census.unread(), 3);
     let rows = census.rows();
-    assert_eq!(rows.len(), 3);
+    let widths: Vec<(String, usize)> = rows
+        .iter()
+        .map(|row| (row.signature.to_string(), row.tests.len()))
+        .collect();
     assert_eq!(
-        rows[0].construct,
-        "a `foreach` this compiler cannot read yet"
+        widths,
+        [
+            ("ran past the recipe's limit".to_owned(), 3),
+            ("a `foreach` this compiler cannot read yet".to_owned(), 2),
+            ("an `eval` this compiler cannot read yet".to_owned(), 1),
+            (
+                "bork: a `foreach` this compiler cannot read yet".to_owned(),
+                1
+            ),
+        ]
     );
+    // Each test by its path in the corpus, so a lane's groups tell two
+    // subsets' `001.phpt` apart.
+    assert_eq!(rows[1].tests, ["Zend/tests/a.phpt", "Zend/tests/c.phpt"]);
+    let unread: Vec<String> = census
+        .unread_rows()
+        .iter()
+        .map(|row| row.signature.to_string())
+        .collect();
     assert_eq!(
-        rows[0].tests,
-        vec!["a.phpt".to_owned(), "c.phpt".to_owned()]
+        unread,
+        [
+            "a `foreach` this compiler cannot read yet",
+            "an `eval` this compiler cannot read yet"
+        ]
     );
-    // One test each, so the tie is the construct's own text: `a class`
-    // before `an `eval``.
-    assert_eq!(rows[1].construct, "a class this compiler cannot read yet");
-    assert_eq!(rows[2].construct, "an `eval` this compiler cannot read yet");
 
-    // A second subset folded in adds to the group it shares and makes a
-    // group of its own, which is what the lane's census is.
-    census.add(&Tally {
-        judged: vec![judged(
-            "g.phpt",
-            Judgement::Unread,
-            "an `eval` this compiler cannot read yet",
-        )],
+    // A second subset folded in adds to the group it shares, which is
+    // what the lane's census is.
+    census.add(census::misses(&Tally {
+        judged: vec![missed("i.phpt", Judgement::Unread, eval())],
         found: 1,
-    });
-    let rows = census.rows();
-    assert_eq!(census.unread(), 5);
-    assert_eq!(rows[1].construct, "an `eval` this compiler cannot read yet");
-    assert_eq!(rows[1].tests.len(), 2);
+    }));
+    assert_eq!(census.unread(), 4);
+    assert_eq!(census.unread_rows()[1].tests.len(), 2);
 }
 
-/// A census with nothing in it is the answer a subset the compiler read
-/// through gives, and it says so rather than printing a heading over no
-/// rows.
+/// A census with nothing in it is the answer a subset that met every
+/// expectation gives, and it says so rather than printing a heading over
+/// no rows.
 #[test]
-fn a_subset_with_no_unread_test_has_an_empty_census() {
-    let mut census = census::Census::default();
-    census.add(&Tally {
+fn a_subset_that_missed_nothing_has_an_empty_census() {
+    let tally = Tally {
         judged: vec![Judged::new("a.phpt", "a.phpt", Judgement::Pass, "")],
         found: 1,
-    });
-    assert!(census.is_empty());
+    };
+    let mut census = census::Census::default();
+    census.add(census::misses(&tally));
+    census.accounts_for(census::verdicts(&tally)).unwrap();
+    assert_eq!(census.missed(), 0);
     assert_eq!(census.unread(), 0);
     assert!(census.rows().is_empty());
+}
+
+/// The run at `xtask/fixtures/phpt/census/run.json`, as `xtask phpt`
+/// keeps one.
+fn census_fixture() -> against::Run {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/census/run.json");
+    serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap()
+}
+
+/// The kept run's verdicts as [`census::Census::accounts_for`] reads them.
+fn kept(run: &against::Run) -> impl Iterator<Item = (&str, Judgement, Option<&miss::Miss>)> {
+    run.verdicts
+        .iter()
+        .map(|(id, judgement)| (id.as_str(), *judgement, run.misses.get(id)))
+}
+
+/// The census of the fixture run groups each of its twelve misses under
+/// its signature, the widest first, and nothing the run met, skipped or
+/// expected to fail (#1185).
+#[test]
+fn the_census_of_a_kept_run_groups_every_miss_it_kept() {
+    let run = census_fixture();
+    let mut census = census::Census::default();
+    census.add(run.misses.iter().map(|(id, miss)| (id.as_str(), miss)));
+    census.accounts_for(kept(&run)).unwrap();
+    assert_eq!(census.missed(), 12);
+    let rows: Vec<(String, Vec<String>)> = census
+        .rows()
+        .into_iter()
+        .map(|row| (row.signature.to_string(), row.tests))
+        .collect();
+    let row = |signature: &str, tests: &[&str]| {
+        (
+            signature.to_owned(),
+            tests.iter().map(|t| format!("Zend/tests/{t}")).collect(),
+        )
+    };
+    assert_eq!(
+        rows,
+        [
+            row(
+                "undefined function array_any",
+                &["function_a.phpt", "function_b.phpt", "function_c.phpt"]
+            ),
+            row(
+                "a `declare(encoding)` this compiler cannot read yet",
+                &["unread_a.phpt", "unread_b.phpt"]
+            ),
+            row(
+                "Warning: Undefined variable $x in _ on line _",
+                &["warning_a.phpt", "warning_b.phpt"]
+            ),
+            row("Class \"Foo\" not found", &["class.phpt"]),
+            row("output differs", &["wrong.phpt"]),
+            row(
+                "php only: Fatal error: Cannot redeclare function f() (previously declared in _:_) in _ on line _",
+                &["php_only.phpt"]
+            ),
+            row("ran past the recipe's limit", &["hang.phpt"]),
+            row(
+                "bork: missing section --EXPECT--, --EXPECTF-- or --EXPECTREGEX--",
+                &["bork.phpt"]
+            ),
+        ]
+    );
+}
+
+/// The negative control: a census that drops a miss from its groups
+/// fails, and so does one built from a run that dropped a miss, naming
+/// the test either way.
+#[test]
+fn a_census_that_drops_a_miss_fails() {
+    let run = census_fixture();
+    let mut census = census::Census::default();
+    census.add(
+        run.misses
+            .iter()
+            .filter(|(id, _)| !id.ends_with("/warning_b.phpt"))
+            .map(|(id, miss)| (id.as_str(), miss)),
+    );
+    let why = census.accounts_for(kept(&run)).unwrap_err();
+    assert!(
+        why.starts_with("Zend/tests/warning_b.phpt missed with"),
+        "{why}"
+    );
+
+    let mut dropped = run.clone();
+    dropped.misses.remove("phpt:php-src/Zend/tests/hang.phpt");
+    let mut census = census::Census::default();
+    census.add(dropped.misses.iter().map(|(id, miss)| (id.as_str(), miss)));
+    let why = census.accounts_for(kept(&dropped)).unwrap_err();
+    assert_eq!(
+        why,
+        "Zend/tests/hang.phpt is a fail and kept no miss, so no group of the census holds it"
+    );
 }
 
 /// A fixture directory under `xtask/fixtures/phpt` laid down in a scratch
