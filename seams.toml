@@ -99,6 +99,10 @@ budget = 16500
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 [[crate]]
+name = "timelib_sys"
+budget = 1500
+# timelib, vendored byte for byte from php-src ext/date/lib at the pinned tag, and its bindings (#711)
+[[crate]]
 name = "ext/date"
 budget = 10000
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
@@ -309,7 +313,7 @@ to = ["php_engine", "php_macros"]
 reexports_only = true
 [[edge]]
 from = "ext/*"
-to = ["php_ext", "ext/*"]
+to = ["php_ext", "ext/*", "timelib_sys"]
 only = true
 adr = "0004" # ext/* edges are the ones each crate declares; never php_engine, php_compile, php_syntax, php_bundle
 [[edge]]
@@ -354,13 +358,13 @@ text = "Extension state is request-scoped or immutable; no lock or cell in ext/*
 
 [[rule]]
 id = "unsafe.homes"
-allow = ["php_heap", "ext/*/src/ffi/", "php_jit::table::code", "php_jit::enter"]
+allow = ["php_heap", "ext/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter"]
 adr = "0006"
-text = "unsafe is permitted in four places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit and an extension with bindings are #![deny(unsafe_code)] with the allowance on the named module alone."
+text = "unsafe is permitted in five places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit and an extension with bindings are #![deny(unsafe_code)] with the allowance on the named module alone."
 
 [[rule]]
 id = "unsafe.one-op"
-scope = ["crates/php_heap/**", "ext/*/src/ffi/**", "crates/php_jit/src/table/code.rs", "crates/php_jit/src/enter.rs"]
+scope = ["crates/php_heap/**", "ext/*/src/ffi/**", "crates/timelib_sys/src/**", "crates/php_jit/src/table/code.rs", "crates/php_jit/src/enter.rs"]
 deny_lints = ["clippy::undocumented_unsafe_blocks", "clippy::multiple_unsafe_ops_per_block"]   # grammar: deny_lints, design §10
 text = "Every unsafe block is one operation with a SAFETY comment."
 
@@ -467,7 +471,7 @@ text = "A session that closed a ticket names what it found and did not do in a t
 [[rule]]
 id = "lanes.nightly"
 tool = "Bash"
-deny_pattern = '(?m)xtask (-- )?(phpt|bench)\b[^|;&]*--(full|jit)|(^|[|;&]\s*|\bphp[0-9.]*\s+)\S*run-tests\.php|compile-identity --corpus'   # the flag wherever it stands in the call, and upstream's runner where it is run, never where it is cited
+deny_pattern = '(?m)xtask (-- )?(phpt|bench)\b[^|;&]*--(full|jit)|(\A|[|;&]\s*|\bphp[0-9.]*\s+)\S*run-tests\.php|compile-identity --corpus'   # the flag wherever it stands in the call, and upstream's runner where it is run (first in the call, after a separator, or under php), never where it is cited, a message's line included (#790)
 text = "Nightly lanes run in CI only; run the per-crate subset."
 
 [[rule]]
