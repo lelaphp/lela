@@ -548,6 +548,34 @@ impl PhpArray {
     /// `EG(exception)` is set, so the sort runs to its end over the
     /// positions alone and the array is left as php leaves it before what
     /// was thrown is raised from here.
+    ///
+    /// The table is held one owner more while it is sorted,
+    /// `zend_array_sort_ex`'s `GC_ADDREF(ht)`, so a comparison whose code
+    /// writes the array separates it: the variable takes the copy with the
+    /// write, and the table sorted is given up after, destroyed where
+    /// nothing else holds it.
+    ///
+    /// ```php
+    /// function resize_arr() { global $arr; for ($i = 0; $i < 4; $i++) { $arr[$i] = $i; } }
+    /// class C { function __toString() { resize_arr(); return '3'; } }
+    /// $arr = ['a' => '1', '3' => new C, '2' => '2'];
+    /// asort($arr);
+    /// var_dump($arr);
+    /// ```
+    /// ```expect
+    /// array(5) {
+    ///   ["a"]=>
+    ///   string(1) "1"
+    ///   [3]=>
+    ///   int(3)
+    ///   [2]=>
+    ///   int(2)
+    ///   [0]=>
+    ///   int(0)
+    ///   [1]=>
+    ///   int(1)
+    /// }
+    /// ```
     pub fn sort_by(
         &mut self,
         req: &mut Request,
@@ -559,8 +587,9 @@ impl PhpArray {
         ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
         self.separate(req)?;
+        let held = req.take_hold(self.to_value());
         let mut pending: Option<Thrown> = None;
-        req.array_sort(self.0, renumber, &mut |req, x, y| {
+        let sorted = req.array_sort(self.0, renumber, &mut |req, x, y| {
             let ordering = if pending.is_some() {
                 Ordering::Equal
             } else {
@@ -575,7 +604,9 @@ impl PhpArray {
                 }
             };
             ordering.then(x.position.cmp(&y.position))
-        })?;
+        });
+        req.release_hold(held);
+        sorted?;
         pending.map_or(Ok(()), Err)
     }
 
