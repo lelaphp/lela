@@ -10352,7 +10352,25 @@ impl Request {
     /// raises the two in and the reverse of the order the pair
     /// [`Request::read_property`] and [`Request::write_property`]
     /// raises them in over the same name. A name the table already
-    /// holds raises neither, php returning before both.
+    /// holds raises neither, php returning before both. The entry is
+    /// added after the warning, to the table the handler it reached left,
+    /// so a value that handler wrote under the name is what the compound
+    /// assignment reads.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class C {
+    ///     function error($_, $msg) { echo $msg, "\n"; $this->a = 12345; }
+    /// }
+    /// $c = new C;
+    /// set_error_handler([$c, 'error']);
+    /// $c->a %= 10;
+    /// var_dump($c->a);
+    /// ```
+    /// ```expect
+    /// Undefined property: C::$a
+    /// int(5)
+    /// ```
     pub(crate) fn dynamic_property_ref(
         &mut self,
         object: PhpObject,
@@ -10366,19 +10384,19 @@ impl Request {
             self.release(Value::string(name));
             return Err(thrown);
         }
+        if !held && read == PropertyRead::Warning {
+            let class = self.class_name(object.class());
+            let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
+            crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        }
+        // `zend_hash_add(zobj->properties, name, &EG(uninitialized_zval))`
+        // after the warning: the table as the handler the warning reached
+        // left it, and a name it wrote kept as it wrote it.
         let table = self.heap.object_properties(o);
         let table = self.fatal_of(table)?;
         let table = self.array_separate(table)?;
         self.heap.object_set_properties(o, table);
-        if !held {
-            if read == PropertyRead::Warning {
-                let class = self.class_name(object.class());
-                let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
-                crate::api::raising::warning(
-                    self,
-                    &format!("Undefined property: {class}::${shown}"),
-                );
-            }
+        if !table.contains(key) {
             self.array_update(table, key, Value::null())?;
         }
         self.release(Value::string(name));
