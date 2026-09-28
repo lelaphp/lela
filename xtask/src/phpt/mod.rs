@@ -96,6 +96,8 @@
 
 mod adapter;
 pub(crate) mod against;
+/// The suffix of a control run's scope: the subset under the oracle.
+pub(crate) const CONTROL: &str = "@control";
 mod census;
 pub(crate) mod file;
 
@@ -360,7 +362,7 @@ impl Subset {
     pub(crate) fn scope(&self, runner: &Runner, lane: Option<Lane>) -> String {
         let mut scope = self.scope.clone();
         if matches!(runner, Runner::Control(_)) {
-            scope.push_str("@control");
+            scope.push_str(CONTROL);
         }
         if let Some(lane) = lane {
             scope.push('@');

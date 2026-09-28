@@ -106,41 +106,41 @@ third-engine-design.md
 | heap | heap.lock | 316 |  | pass |
 | unit | unit.lock | 99 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 755 | 800 | pass |
+| api | api.lock | 772 | 800 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 334 |  | pass |
 
-<!-- /computed in=d68be93cdb4b99bb3ee03da09dd8fe0f48382434a722c7e80b87040d2394cb50 out=24c96bf10120b7796cb43bb64dde93c9a458a7c4c9756d70f26fbf5d4ae68227 -->
+<!-- /computed in=dbfa2f9086a27e8780a3376a7143b5a3163aec79f16358a080bcfd9cd7541d43 out=7cf3a4bae28c5467534494aef72393b38cbd7f3672cc2f68bc0f4db3cd75fb6c -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
 |---|---|---|---|---|
 | ext.no-locks | ADR-0005 | deny_types | no reading | Extension state is request-scoped or immutable; no lock or cell in ext/*. Cross-request caching is api::Cache. |
-| unsafe.homes | ADR-0006 | allow | pass | unsafe is permitted in four places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit and an extension with bindings are #![deny(unsafe_code)] with the allowance on the named module alone. |
+| unsafe.homes | ADR-0006 | allow | pass | unsafe is permitted in five places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit and an extension with bindings are #![deny(unsafe_code)] with the allowance on the named module alone. |
 | unsafe.one-op |  | deny_lints | no reading | Every unsafe block is one operation with a SAFETY comment. |
 | lints.no-panic |  | deny_lints | no reading | Internal invariant failures are InternalError fatals with a message, not panics (design §10). |
 | engine.reentry-signature |  | check | no reading | A function in php_engine that calls execute or release takes &mut Request. |
 | api.no-hot |  | deny_pattern | no reading | php_heap::hot is for the handlers; api never re-exports it (design §4.4, §10). |
-| ext.no-private |  | deny_pattern | fail | Only a macro expansion names php_ext::__private; an extension's source never does (design §4.4, revision 34). |
+| ext.no-private |  | deny_pattern | no reading | Only a macro expansion names php_ext::__private; an extension's source never does (design §4.4, revision 34). |
 | api.lock-line |  | on | pass | A new pub item in api needs its api.lock line in the same commit; api holds to [budget] api_items (design §4.4). |
 | xtask.lock-line |  | on | pass | A new pub item in xtask needs its xtask.lock line in the same commit. |
 | ext.pub-beyond-extension |  | on | pass | api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12). |
 | witness.exit-authored |  | deny_pattern | no reading | exit= in a witness is captured by `xtask witness --accept`, never authored. |
-| witness.coverage |  | check | pass | A kernel or a native without a witness fails CI (design §8). |
+| witness.coverage |  | check | no reading | A kernel or a native without a witness fails CI (design §8). |
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | vocab.harness |  | avoid_from | pass | The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read. |
 | generated.committed |  | generated | pass | ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget. |
-| git.no-verify |  | deny_argv | fail | Commits run the pre-commit hook; --no-verify is not available to agents. |
-| ticket.close |  | deny_argv | fail | A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents. |
+| git.no-verify |  | deny_argv | no reading | Commits run the pre-commit hook; --no-verify is not available to agents. |
+| ticket.close |  | deny_argv | no reading | A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents. |
 | ticket.close-api |  | deny_pattern | no reading | The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. |
 | ticket.reply-unfiled |  | deny_pattern | no reading | A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes. |
-| lanes.nightly |  | deny_pattern | fail | Nightly lanes run in CI only; run the per-crate subset. |
-| computed.force |  | deny_pattern | fail | `computed run --force` discards a hand edit; a person decides that. |
-| harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
-| divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
+| lanes.nightly |  | deny_pattern | no reading | Nightly lanes run in CI only; run the per-crate subset. |
+| computed.force |  | deny_pattern | no reading | `computed run --force` discards a hand edit; a person decides that. |
+| harness.self |  | deny | no reading | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
+| divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=d30e4e2bcf58772d97890618c5881bbb6a73ed075a299cb7d2527ff5b3b46ff3 out=da96a26aa4c796961aaf8c21b35a765a2574cbb266d2b1a0c668be9df2a8c945 -->
+<!-- /computed in=471cb075778f577f19e304f415ade612414ab0fae3d8b89c8d62a2e1cd2254e0 out=84d000ca713925ff1f6d1133e012195bc4c2417c9edfba545859a9361977a19e -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

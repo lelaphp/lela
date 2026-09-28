@@ -349,13 +349,23 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
         );
     }
     // What `session()` appends after the local file: the rules this
-    // session fired, a subset of the permits rows, so the whole section
-    // once more bounds it; and the unreadable-log note, one line.
-    let _ = write!(
-        facts,
-        "\n## permits this session\n\n{}\n",
-        section("permits")
+    // session fired, each with its count, and the unreadable-log note,
+    // one line. Every rule of the permits section with its count across
+    // sessions bounds the block: a session fires no rule the section
+    // does not list, and no rule more often than the log does.
+    let mut this_session = String::from("| rule | this session |\n|---|---|\n");
+    for row in section("permits").lines().skip(2) {
+        let cells: Vec<&str> = row.split(" | ").collect();
+        let [rule, _, _, _, denials, ..] = cells[..] else {
+            break;
+        };
+        let _ = writeln!(this_session, "{rule} | {denials} |");
+    }
+    assert!(
+        this_session.contains("| harness.self | "),
+        "the bound lists the permits rows: {this_session}"
     );
+    let _ = write!(facts, "\n## permits this session\n\n{this_session}\n");
     if let Some(why) = over("facts", &facts, cap) {
         panic!("{why}");
     }

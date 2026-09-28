@@ -211,7 +211,13 @@ fn the_rows_of_crates_not_yet_created_fold_into_one() {
         md.lines().any(|l| l.starts_with("| ext/pcre | skip |")),
         "a lone row stays: {md}"
     );
-    assert!(md.contains("| ext/pcre@control |"), "{md}");
+    assert!(
+        md.contains(
+            "| ext/pcre | skip |  |  | skip | not yet created; the subset holds 165 tests |"
+        ),
+        "the control folds into its subset's row: {md}"
+    );
+    assert!(!md.contains("| ext/pcre@control |"), "{md}");
     assert!(!md.contains("crates not yet created"), "{md}");
 }
 
@@ -504,10 +510,10 @@ fn a_row_clips_its_message_and_leaves_zeros_out_and_the_json_has_them() {
     let row = md.lines().find(|l| l.starts_with("| ext/dom |")).unwrap();
     let cells: Vec<&str> = row.trim_matches('|').split(" | ").collect();
     assert_eq!(cells[2], "failed=691", "{row}");
-    let message = cells[3].trim_end();
+    let message = cells[5].trim_end();
     assert_eq!(message.chars().count(), 120, "{message}");
     assert!(
-        message.starts_with("ext/dom: 691 of 871 missed: t000.phpt"),
+        message.starts_with("691 of 871 missed: t000.phpt"),
         "{message}"
     );
     assert!(
@@ -1214,7 +1220,10 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     assert!(text.starts_with("# The map\n"), "{text}");
     assert!(text.contains("## permits this session"), "{text}");
     let row = text.lines().find(|l| l.contains("harness.self")).unwrap();
-    assert!(row.contains("| 3 | 0 | 1 |"), "{row}");
+    assert_eq!(
+        row, "| harness.self | 1 |",
+        "the rule and this session's count"
+    );
     assert!(
         !text.lines().any(|l| l.contains("ext.no-locks")),
         "only the rules this session fired: {text}"
