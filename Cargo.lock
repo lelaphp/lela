@@ -424,6 +424,7 @@ name = "php_bundle"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_bcmath",
  "php_ext_bz2",
  "php_ext_ctype",
  "php_ext_curl",
@@ -482,6 +483,13 @@ version = "0.0.0"
 dependencies = [
  "php_engine",
  "php_macros",
+]
+
+[[package]]
+name = "php_ext_bcmath"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
 ]
 
 [[package]]

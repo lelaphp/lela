@@ -15,7 +15,8 @@ use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_pre
 use php_unit::decl::Visibility;
 
 use crate::api::abi::PropertyPurpose;
-use crate::api::raising::{Thrown, deprecated, throw, warning};
+use crate::api::coerce::BinaryOp;
+use crate::api::raising::{Level, Thrown, deprecated, raise, throw, warning};
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
@@ -502,7 +503,8 @@ pub(crate) fn type_name(req: &Request, value: &Value) -> String {
 pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
     match value.deref().as_ref() {
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => false,
-        ValueRef::Bool(true) | ValueRef::Object(_) => true,
+        ValueRef::Bool(true) => true,
+        ValueRef::Object(o) => object_is_true(req, *o),
         ValueRef::Int(n) => n != 0,
         ValueRef::Float(f) => {
             if f.is_nan() {
@@ -515,6 +517,40 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
         ValueRef::Resource(r) => r.id() != 0,
         // `deref` followed the reference already.
         ValueRef::Reference(r) => is_true(req, &r.get()),
+    }
+}
+
+/// `zend_object_is_true` (`Z/Zend/zend_operators.c:2911`): what the
+/// class's `cast_object` answers for `_IS_BOOL`, which is `true` at
+/// `Std` and whether the number is not zero for `BcMath\Number`; a
+/// class whose handler refuses the cast is php's `E_RECOVERABLE_ERROR`
+/// and false, and a throw from the handler is left pending.
+///
+/// ```php
+/// var_dump((bool) new stdClass, (bool) new BcMath\Number('0.0'), !new BcMath\Number('-1'));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ```
+fn object_is_true(req: &mut Request, object: PhpObject) -> bool {
+    let table = req.object_handlers(object.heap());
+    match table.cast_object(req, object, TypeTag::Bool) {
+        Ok(Some(value)) => value.as_bool() == Some(true),
+        Ok(None) => {
+            let class = req.class_name(object.class());
+            raise(
+                req,
+                Level::RecoverableError,
+                &format!("Object of class {class} could not be converted to bool"),
+            );
+            false
+        }
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            false
+        }
     }
 }
 
@@ -1701,6 +1737,9 @@ pub(crate) fn add(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
     if let (Some(a), Some(b)) = (left.deref().as_array(), right.deref().as_array()) {
         return Ok(Value::array(merged(req, *a, *b)?));
     }
+    if let Some(value) = object_operation(req, BinaryOp::Add, left, right)? {
+        return Ok(value);
+    }
     let (a, b) = numbers(req, "+", left, right)?;
     Ok(match (a, b) {
         (Number::Long(a), Number::Long(b)) => promoted(a.checked_add(b), wide(a) + wide(b)),
@@ -1719,6 +1758,9 @@ pub(crate) fn add(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 /// 0|0|1|-9.2233720368548E+18
 /// ```
 pub(crate) fn sub(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = object_operation(req, BinaryOp::Sub, left, right)? {
+        return Ok(value);
+    }
     let (a, b) = numbers(req, "-", left, right)?;
     Ok(match (a, b) {
         (Number::Long(a), Number::Long(b)) => promoted(a.checked_sub(b), wide(a) - wide(b)),
@@ -1737,6 +1779,9 @@ pub(crate) fn sub(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 /// 6|3.75|6|9.2233720368548E+18
 /// ```
 pub(crate) fn mul(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = object_operation(req, BinaryOp::Mul, left, right)? {
+        return Ok(value);
+    }
     let (a, b) = numbers(req, "*", left, right)?;
     Ok(match (a, b) {
         (Number::Long(a), Number::Long(b)) => promoted(a.checked_mul(b), wide(a) * wide(b)),
@@ -1771,6 +1816,9 @@ pub(crate) fn mul(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = object_operation(req, BinaryOp::Div, left, right)? {
+        return Ok(value);
+    }
     let (a, b) = numbers(req, "/", left, right)?;
     match (a, b) {
         (Number::Long(a), Number::Long(b)) => {
@@ -1861,6 +1909,9 @@ pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = object_operation(req, BinaryOp::Mod, left, right)? {
+        return Ok(value);
+    }
     let (a, b) = longs(req, "%", left, right)?;
     if b == 0 {
         return Err(throw(req, "DivisionByZeroError", "Modulo by zero"));
@@ -1901,6 +1952,9 @@ pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Va
 /// INF
 /// ```
 pub(crate) fn pow(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = object_operation(req, BinaryOp::Pow, left, right)? {
+        return Ok(value);
+    }
     let (a, b) = numbers(req, "**", left, right)?;
     if let (Number::Long(a), Number::Long(b)) = (a, b)
         && let Ok(exponent) = u64::try_from(b)
@@ -1944,6 +1998,9 @@ pub(crate) fn pow(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn shift_left(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = object_operation(req, BinaryOp::ShiftLeft, left, right)? {
+        return Ok(value);
+    }
     let (a, b) = longs(req, "<<", left, right)?;
     match u64::try_from(b) {
         Ok(by) => Ok(Value::int(php_heap::shift_left(a, by))),
@@ -1975,6 +2032,9 @@ pub(crate) fn shift_left(req: &mut Request, left: &Value, right: &Value) -> Resu
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn shift_right(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = object_operation(req, BinaryOp::ShiftRight, left, right)? {
+        return Ok(value);
+    }
     let (a, b) = longs(req, ">>", left, right)?;
     match u64::try_from(b) {
         Ok(by) => Ok(Value::int(php_heap::shift_right(a, by))),
@@ -2004,6 +2064,15 @@ impl Bitwise {
             Bitwise::Or => "|",
             Bitwise::Xor => "^",
             Bitwise::And => "&",
+        }
+    }
+
+    /// The opcode a class's `do_operation` is asked for.
+    const fn binary_op(self) -> BinaryOp {
+        match self {
+            Bitwise::Or => BinaryOp::BitwiseOr,
+            Bitwise::Xor => BinaryOp::BitwiseXor,
+            Bitwise::And => BinaryOp::BitwiseAnd,
         }
     }
 
@@ -2060,6 +2129,9 @@ fn bitwise(req: &mut Request, op: Bitwise, left: &Value, right: &Value) -> Resul
             }
         })?;
         return Ok(Value::string(joined));
+    }
+    if let Some(value) = object_operation(req, op.binary_op(), left, right)? {
+        return Ok(value);
     }
     let (x, y) = longs(req, op.spelling(), left, right)?;
     Ok(Value::int(op.long(x, y)))
@@ -2628,6 +2700,10 @@ pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<
     Ok(match (left.as_ref(), right.as_ref()) {
         (ValueRef::Array(a), ValueRef::Array(b)) => compare_arrays(req, *a, *b)?,
         (ValueRef::Object(a), ValueRef::Object(b)) if a == b => Ordering::Equal,
+        // `TYPE_PAIR(IS_OBJECT, IS_NULL)` and its mirror: an object is
+        // greater than a null whatever its truth.
+        (ValueRef::Object(_), ValueRef::Undef | ValueRef::Null) => Ordering::Greater,
+        (ValueRef::Undef | ValueRef::Null, ValueRef::Object(_)) => Ordering::Less,
         // php's default arm: a null or a bool as the other side's truth,
         // which is also what its own `IS_NULL` and `IS_OBJECT` pairs
         // answer and what `cast_object` to `_IS_BOOL` answers for an
@@ -3157,10 +3233,19 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
             req.addref(value);
             Ok(*value)
         }
-        ValueRef::Array(_)
-        | ValueRef::Resource(_)
-        | ValueRef::Object(_)
-        | ValueRef::Reference(_) => {
+        ValueRef::Object(o) => {
+            // `increment_function`'s object arm: `do_operation(ZEND_ADD)`
+            // with one, where the class answers it.
+            let table = req.object_handlers(o.heap());
+            if let Some(stepped) =
+                table.do_operation(req, BinaryOp::Add, value, Some(&Value::int(1)))?
+            {
+                return Ok(stepped);
+            }
+            let name = value_name(req, value);
+            Err(throw(req, "TypeError", &format!("Cannot increment {name}")))
+        }
+        ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => {
             let name = value_name(req, value);
             Err(throw(req, "TypeError", &format!("Cannot increment {name}")))
         }
@@ -3274,10 +3359,19 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
             req.addref(value);
             Ok(*value)
         }
-        ValueRef::Array(_)
-        | ValueRef::Resource(_)
-        | ValueRef::Object(_)
-        | ValueRef::Reference(_) => {
+        ValueRef::Object(o) => {
+            // `decrement_function`'s object arm: `do_operation(ZEND_SUB)`
+            // with one.
+            let table = req.object_handlers(o.heap());
+            if let Some(stepped) =
+                table.do_operation(req, BinaryOp::Sub, value, Some(&Value::int(1)))?
+            {
+                return Ok(stepped);
+            }
+            let name = value_name(req, value);
+            Err(throw(req, "TypeError", &format!("Cannot decrement {name}")))
+        }
+        ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => {
             let name = value_name(req, value);
             Err(throw(req, "TypeError", &format!("Cannot decrement {name}")))
         }
@@ -4340,6 +4434,44 @@ fn merged(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<PhpArray
         }
     }
     Ok(union)
+}
+
+/// `ZEND_TRY_BINARY_OBJECT_OPERATION`: an object operand's `do_operation`
+/// slot asked first, the left side's then the right side's, before an
+/// operator converts either; `None` where neither side is an object or
+/// neither table answers, which leaves the operator to its own
+/// conversions and their `TypeError`. Every arithmetic, shift and bitwise
+/// kernel asks it where php's does.
+///
+/// ```php
+/// $n = new BcMath\Number('1.5');
+/// var_dump((string) ($n + 1), (string) (2 * $n), (string) ($n ** 2));
+/// $n++; var_dump((string) $n);
+/// try { $n | 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(3) "2.5"
+/// string(3) "3.0"
+/// string(4) "2.25"
+/// string(3) "2.5"
+/// Unsupported operand types: BcMath\Number | int
+/// ```
+fn object_operation(
+    req: &mut Request,
+    op: BinaryOp,
+    left: &Value,
+    right: &Value,
+) -> Result<Option<Value>, Thrown> {
+    let (left, right) = (left.deref(), right.deref());
+    for side in [left, right] {
+        if let ValueRef::Object(o) = side.as_ref() {
+            let table = req.object_handlers(o.heap());
+            if let Some(value) = table.do_operation(req, op, &left, Some(&right))? {
+                return Ok(Some(value));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Both operands as `zendi_try_convert_scalar_to_number` converts them,

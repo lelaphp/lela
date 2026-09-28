@@ -80,6 +80,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_bz2::extension,
         #[cfg(feature = "opcache")]
         php_ext_opcache::extension,
+        #[cfg(feature = "bcmath")]
+        php_ext_bcmath::extension,
     ]
 }
 
