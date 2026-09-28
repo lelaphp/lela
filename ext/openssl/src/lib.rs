@@ -7,11 +7,12 @@
 //! the ini entries, the constants, the three classes, and the natives by
 //! area: certificates ([`x509`]), signing requests ([`csr`]), asymmetric
 //! keys ([`key`], [`keydata`]) and the configuration they are made under
-//! ([`config`]), signatures and raw RSA ([`sign`]), and ciphers, digests
-//! and envelopes ([`cipher`]), with the arguments they share decoded once
-//! ([`decode`]) and the ring of library errors `openssl_error_string` reads
-//! ([`Errors`]). ext/phar's OpenSSL signatures call `openssl_sign` and
-//! `openssl_verify` through the function table, as php's do.
+//! ([`config`]), signatures and raw RSA ([`sign`]), ciphers, digests and
+//! envelopes ([`cipher`]), and PKCS#7 ([`pkcs7`]), with the arguments they
+//! share decoded once ([`decode`]) and the ring of library errors
+//! `openssl_error_string` reads ([`Errors`]). ext/phar's OpenSSL signatures
+//! call `openssl_sign` and `openssl_verify` through the function table, as
+//! php's do.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -32,6 +33,7 @@ mod decode;
 mod ffi;
 mod key;
 mod keydata;
+mod pkcs7;
 mod sign;
 mod x509;
 
@@ -382,6 +384,11 @@ pub fn extension() -> Extension {
             key::openssl_get_privatekey::declared(),
             key::openssl_pkey_get_details::declared(),
             cipher::openssl_pbkdf2::declared(),
+            pkcs7::openssl_pkcs7_verify::declared(),
+            pkcs7::openssl_pkcs7_encrypt::declared(),
+            pkcs7::openssl_pkcs7_sign::declared(),
+            pkcs7::openssl_pkcs7_decrypt::declared(),
+            pkcs7::openssl_pkcs7_read::declared(),
             sign::openssl_private_encrypt::declared(),
             sign::openssl_private_decrypt::declared(),
             sign::openssl_public_encrypt::declared(),

@@ -1,17 +1,19 @@
 //! The arguments openssl.c reads the same way in many natives, each
 //! decoded once at the boundary by one function: a path
 //! (`php_openssl_check_path_ex`), a certificate
-//! (`php_openssl_x509_from_param`), a signing request
-//! (`php_openssl_csr_from_param`) and the certificates of a file
-//! (`php_openssl_load_all_certs_from_file`). The key an argument gives is
-//! [`crate::key::key_from`].
+//! (`php_openssl_x509_from_param`, `php_openssl_x509_from_zval`), a
+//! signing request (`php_openssl_csr_from_param`), a list of
+//! certificates (`php_openssl_array_to_X509_sk`) and the certificates of
+//! a file (`php_openssl_load_all_certs_from_file`). The key an argument
+//! gives is [`crate::key::key_from`].
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 use php_ext::abi::{Instance, Union};
+use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, argument_error, docref, raise};
 use php_ext::request::{PathIntent, Request, Resolve};
-use php_ext::values::PhpString;
+use php_ext::values::{PhpString, Value, ValueRef};
 
 use crate::csr::OpenSSLCertificateSigningRequest;
 use crate::ffi::x509::{CertStack, Csr, read_all_certs};
@@ -197,6 +199,56 @@ pub(crate) fn cert_from_param(
     }
 }
 
+/// `php_openssl_x509_from_zval`: an `OpenSSLCertificate`'s, or the one
+/// the value's string names; a string conversion that throws is thrown.
+pub(crate) fn cert_from_value(
+    req: &mut Request,
+    value: &Value,
+    origin: Origin,
+) -> Result<Option<Certificate>, Thrown> {
+    if let ValueRef::Object(object) = value.as_ref()
+        && let Some(held) = object.native::<crate::x509::Cert>(req)
+    {
+        return Ok(held.cert.clone());
+    }
+    let text = to_string(req, value)?;
+    cert_from_str(req, text.as_bytes(), origin)
+}
+
+/// `php_openssl_array_to_X509_sk`: the certificates an array lists, or
+/// the one certificate a single value is; `None` once one is not a
+/// certificate.
+pub(crate) fn cert_stack(
+    req: &mut Request,
+    value: &Value,
+    arg: Arg,
+    option: Option<&'static str>,
+) -> Result<Option<CertStack>, Thrown> {
+    let Some(mut stack) = CertStack::new() else {
+        return Ok(None);
+    };
+    let values: Vec<Value> = match value.as_ref() {
+        ValueRef::Array(array) => array.snapshot().into_iter().map(|(_, v)| v).collect(),
+        _ => vec![*value],
+    };
+    let from_array = matches!(value.as_ref(), ValueRef::Array(_));
+    for item in values {
+        let origin = if from_array {
+            Origin::Item(arg, option)
+        } else {
+            Origin::Arg(arg)
+        };
+        let Some(cert) = cert_from_value(req, &item, origin)? else {
+            return Ok(None);
+        };
+        if !stack.push(cert) {
+            store_errors(req);
+            return Ok(None);
+        }
+    }
+    Ok(Some(stack))
+}
+
 /// `php_openssl_csr_from_str`: a request from a `file://` path or from
 /// the string itself.
 fn csr_from_str(req: &mut Request, text: &[u8], arg: Arg) -> Result<Option<Csr>, Thrown> {
@@ -275,4 +327,23 @@ pub(crate) fn certs_from_file(
         return Ok(None);
     }
     Ok(Some(stack))
+}
+
+/// `php_openssl_bio_new_file`: the file a path parameter names, opened
+/// for `mode`; `None` after php's warning or with the library's reasons
+/// stored.
+pub(crate) fn open_file(
+    req: &mut Request,
+    file: &[u8],
+    arg: Arg,
+    mode: &CStr,
+) -> Result<Option<Bio<'static>>, Thrown> {
+    let Some(path) = check_path(req, file, Origin::Arg(arg), false)? else {
+        return Ok(None);
+    };
+    let bio = Bio::file(&path, mode);
+    if bio.is_none() {
+        store_errors(req);
+    }
+    Ok(bio)
 }

@@ -6,10 +6,10 @@
 //!
 //! One owned type per OpenSSL object, each freeing what it owns on drop,
 //! so no native frees by hand: the keys and their operations in [`key`],
-//! the digests and ciphers in [`cipher`], and certificates, signing
-//! requests, names and stores in [`x509`]; this file holds what they
-//! share, the `BIO`, the `CONF`, stacks, object names and the error
-//! queue. Every call is made on the
+//! the digests and ciphers in [`cipher`], certificates, signing requests,
+//! names and stores in [`x509`], and PKCS#7 in [`smime`]; this file
+//! holds what they share, the `BIO`, the `CONF`, stacks, object names and
+//! the error queue. Every call is made on the
 //! default `OSSL_LIB_CTX` with no property query; the oracle's
 //! `openssl.libctx=custom` `OSSL_LIB_CTX` is one loaded from the same
 //! configuration and has the same providers, so what the natives answer
@@ -59,6 +59,7 @@ macro_rules! owned {
 
 pub(crate) mod cipher;
 pub(crate) mod key;
+pub(crate) mod smime;
 pub(crate) mod x509;
 
 pub(crate) use cipher::{Cipher, Digest};
@@ -104,6 +105,9 @@ unsafe extern "C" {
     fn RAND_load_file(file: *const c_char, max_bytes: c_long) -> c_int;
     fn RAND_write_file(file: *const c_char) -> c_int;
 }
+
+/// `BIO_CTRL_RESET`, the control `BIO_reset` is.
+const BIO_CTRL_RESET: c_int = 1;
 
 /// `ERR_get_error()`: the oldest code on this thread's queue, taken off
 /// it, or `None` once the queue is empty.
@@ -437,8 +441,21 @@ impl<'a> Bio<'a> {
         len == 0 || unsafe { sys::BIO_write(self.0.as_ptr(), bytes.as_ptr().cast(), len) } > 0
     }
 
+    /// `BIO_reset(bio)`: a file back to its start, a memory view to its
+    /// first byte.
+    pub(crate) fn reset(&self) -> bool {
+        // SAFETY: the BIO is live; the reset control takes no argument.
+        let done = unsafe { sys::BIO_ctrl(self.0.as_ptr(), BIO_CTRL_RESET, 0, ptr::null_mut()) };
+        done == 0
+    }
+
     pub(in crate::ffi) fn as_ptr(&self) -> *mut sys::BIO {
         self.0.as_ptr()
+    }
+
+    /// A BIO the library made and handed over, owned from here.
+    pub(in crate::ffi) fn adopt(bio: *mut sys::BIO) -> Option<Bio<'static>> {
+        NonNull::new(bio).map(|bio| Bio(bio, PhantomData))
     }
 }
 

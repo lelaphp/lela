@@ -12,7 +12,7 @@ use openssl_sys as sys;
 
 use super::cipher::Digest;
 use super::key::PKey;
-use super::{Bio, Conf, bytes_at, copied, int_len, object_oid, stack_items, taken};
+use super::{Bio, Conf, bytes_at, copied, int_len, object_oid, stack_items, taken, written};
 
 // SAFETY: libcrypto's own declarations, from `openssl/x509.h`,
 // `openssl/x509v3.h`, `openssl/x509_vfy.h`, `openssl/asn1.h` and
@@ -833,6 +833,27 @@ impl CertStack {
         // SAFETY: the stack is live.
         usize::try_from(unsafe { sys::OPENSSL_sk_num(self.as_ptr()) }).unwrap_or(0)
     }
+}
+
+/// Each certificate of a list as PEM, `None` where one would not write.
+pub(crate) type Pems = Vec<Option<Vec<u8>>>;
+
+/// Each certificate of a stack as PEM, `None` where one would not write.
+///
+/// # Safety
+///
+/// `stack` is null or a live `STACK_OF(X509)`.
+pub(in crate::ffi) unsafe fn pems_of(stack: *const sys::OPENSSL_STACK) -> Pems {
+    if stack.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: the caller's live stack.
+    let items = unsafe { stack_items(stack) };
+    let pem = |cert: *mut c_void| {
+        // SAFETY: each item is a live certificate.
+        written(|out| unsafe { sys::PEM_write_bio_X509(out, cert.cast()) })
+    };
+    items.into_iter().map(pem).collect()
 }
 
 /// `php_openssl_load_all_certs_from_file` after the file is open:
