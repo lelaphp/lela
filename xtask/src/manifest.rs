@@ -347,7 +347,8 @@ impl Edge {
 /// shape it parses. `exempt_label` is the same idea for a call that names
 /// an issue rather than a file: the tracker's labels under which the rule
 /// does not judge the call (#341), which only a rule `permit` judges over
-/// a command may carry.
+/// a command may carry. `where` is the same idea for the checkout a call
+/// runs in ([`Where`]), and the same rules alone may carry it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -361,6 +362,9 @@ pub struct Rule {
     pub exempt: Vec<String>,
     #[serde(default)]
     pub exempt_label: Vec<String>,
+    /// `where`: the checkouts the rule judges a call in (#1149).
+    #[serde(default, rename = "where")]
+    pub within: Where,
     #[serde(default)]
     pub adr: OneOrMany,
     pub text: String,
@@ -368,10 +372,36 @@ pub struct Rule {
     pub predicate: Predicates,
 }
 
+/// `where`: the checkouts a rule judges a call in. A builder works in a
+/// worktree whose branch records its ticket (`branch.<b>.ticket`, which
+/// `xtask worktree add --ticket` writes and `xtask track` reads), and the
+/// merge check runs in main's checkout, which records none; a rule on
+/// what a builder may run is one on the first alone (#1145, #1149).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Where {
+    /// Every checkout: a row without `where`.
+    #[default]
+    Anywhere,
+    /// A checkout whose branch records a ticket, read through
+    /// [`crate::track`]'s record; a record that is not a number is one.
+    Ticketed,
+}
+
+impl Where {
+    /// Whether a call run in `dir` stands where the rule judges.
+    pub(crate) fn holds_in(self, dir: &Path) -> bool {
+        match self {
+            Where::Anywhere => true,
+            Where::Ticketed => !matches!(crate::track::head_ticket(dir), Ok(None)),
+        }
+    }
+}
+
 /// The predicates of harness-design.md §4.1, ten there and `require_argv`
 /// beside them (#33), each optional in the grammar so the file parses;
-/// `Manifest::parse` then holds every rule to exactly one. `unless`
-/// qualifies `deny_pattern`; `with` qualifies `deny_argv` and
+/// `Manifest::parse` then holds every rule to exactly one. `unless` and
+/// `unless_pattern` qualify `deny_pattern`; `with` qualifies `deny_argv` and
 /// `require_argv`, one phrase or a list of them, a word or a command and
 /// its subcommand (`"git add"`); each is refused beside any other
 /// predicate.
@@ -383,6 +413,11 @@ pub struct Predicates {
     pub allow: Option<Vec<String>>,
     pub deny_pattern: Option<String>,
     pub unless: Option<String>,
+    /// A hit of `deny_pattern` whose command, the text between the shell
+    /// separators around it, also matches this is let through (#1149):
+    /// the `regex` crate has no look-ahead, so "without `--subset`" is a
+    /// second pattern and not a clause of the first.
+    pub unless_pattern: Option<String>,
     pub deny_argv: Option<Vec<String>>,
     pub require_argv: Option<String>,
     #[serde(default)]
@@ -485,6 +520,8 @@ impl Predicates {
     pub fn orphaned_qualifier(&self) -> Option<&'static str> {
         if self.unless.is_some() && self.deny_pattern.is_none() {
             Some("unless")
+        } else if self.unless_pattern.is_some() && self.deny_pattern.is_none() {
+            Some("unless_pattern")
         } else if !self.with.is_empty() && self.deny_argv.is_none() && self.require_argv.is_none() {
             Some("with")
         } else {
@@ -511,6 +548,7 @@ impl Rule {
             tool: OneOrMany::None,
             exempt: Vec::new(),
             exempt_label: Vec::new(),
+            within: Where::Anywhere,
             adr: OneOrMany::None,
             text: id.to_owned(),
             predicate: Predicates {
@@ -768,6 +806,13 @@ impl Manifest {
                     rule.id
                 );
             }
+            if rule.within != Where::Anywhere && !rule.predicate.describes_a_call() {
+                bail!(
+                    "rule \"{}\" has `where` beside `{}`; the checkout is the one a call runs in, so `where` qualifies a rule permit judges at the call",
+                    rule.id,
+                    named[0]
+                );
+            }
             if !rule.exempt_label.is_empty() && !rule.predicate.describes_a_call() {
                 bail!(
                     "rule \"{}\" has `exempt_label` beside `{}`; a label is read off the issue a command names, so `exempt_label` qualifies a rule permit judges at the call",
@@ -777,7 +822,7 @@ impl Manifest {
             }
             if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
                 bail!(
-                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` qualifies deny_pattern and `with` qualifies deny_argv or require_argv",
+                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern and `with` qualifies deny_argv or require_argv",
                     rule.id,
                     named[0]
                 );

@@ -475,6 +475,14 @@ deny_pattern = '(?m)xtask (-- )?(phpt|bench)\b[^|;&]*--(full|jit)|(\A|[|;&]\s*|\
 text = "Nightly lanes run in CI only; run the per-crate subset."
 
 [[rule]]
+id = "lanes.builder-subset"
+tool = "Bash"
+where = "ticketed"   # grammar: where, a builder's worktree (branch.<b>.ticket); main's checkout, where the merge check runs the lane, records none (#1145, #1149)
+deny_pattern = '(?m)(^\s*|[|;&(]\s*|cargo\s+|-p\s+|--package\s+|/)xtask\s+(--\s+)?phpt\b'   # the instrument where it is run, never where it is cited
+unless_pattern = '--subset\b'   # grammar: unless_pattern, the command around the hit names its subset
+text = "A builder runs its crates' subsets, and Zend/tests when it touches php_engine, php_compile, php_syntax or php_heap; the whole lane is the merge check's (specs §6)."
+
+[[rule]]
 id = "computed.force"
 tool = "Bash"
 deny_pattern = 'computed\s+run\b.*--force'

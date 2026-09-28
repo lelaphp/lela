@@ -380,6 +380,19 @@ pub(crate) struct Witness {
     /// does not already pin it; the only thing that writes an `exit`.
     #[arg(long)]
     pub accept: bool,
+    /// Only the fences in rustdoc under this source file, from the
+    /// workspace root or any tail of it; prints and writes no reading.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "crates",
+        conflicts_with = "item"
+    )]
+    pub file: Option<PathBuf>,
+    /// Only the fences on this item, by the name its declaration
+    /// writes (`preg_quote`, a method's `add`); prints and writes no reading.
+    #[arg(long, value_name = "NAME", requires = "crates")]
+    pub item: Option<String>,
     /// Serve the run in this process and append what it judged to
     /// this file, for the process watching it to write: how
     /// `witness` starts itself, never typed.

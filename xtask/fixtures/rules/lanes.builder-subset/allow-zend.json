@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask phpt --subset Zend/tests","description":"Run the engine subset"}}

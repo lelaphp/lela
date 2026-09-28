@@ -103,6 +103,7 @@ manifest::Seam
 manifest::Seam::named
 manifest::Telemetry
 manifest::Week
+manifest::Where
 manifest::scope_matches
 new_ext::Laid
 new_ext::run
@@ -330,6 +331,7 @@ usage::scope_of
 vocab::hold
 vocab::run
 witness::Ask
+witness::Scope
 witness::run
 worktree::add
 worktree::retire

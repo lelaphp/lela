@@ -175,6 +175,21 @@ fn evaluate(
     } else if let Some(pattern) = &p.deny_pattern {
         let regex = Regex::new(pattern)
             .with_context(|| format!("rule \"{}\": deny_pattern is not a regex", rule.id))?;
+        let unless_pattern = p
+            .unless_pattern
+            .as_deref()
+            .map(Regex::new)
+            .transpose()
+            .with_context(|| format!("rule \"{}\": unless_pattern is not a regex", rule.id))?;
+        // A hit whose own command the `unless_pattern` matches is let
+        // through; the rule fires on any other.
+        let unexcused = |subject: &str| {
+            regex.find_iter(subject).any(|hit| {
+                unless_pattern
+                    .as_ref()
+                    .is_none_or(|unless| !unless.is_match(command_around(subject, hit.range())))
+            })
+        };
         // A hit the rule's `unless` accounts for is the named instrument's
         // own and not this call's ([`unless::captured`]).
         let excused = |subject: &str| {
@@ -188,13 +203,15 @@ fn evaluate(
         // file already carries (#510): a write that leaves every hit where
         // it stood adds none and fires on nothing.
         match call.command() {
-            Some(command) => regex.is_match(command) && !excused(command),
+            Some(command) => unexcused(command) && !excused(command),
             // Text the call writes with no hit in it adds none whatever
             // the file holds, so the file is read only where there is a
             // hit to place.
             None => match call.written().filter(|text| regex.is_match(text)) {
                 Some(_) => match call.rewrite(root, path) {
-                    Some((before, after)) => adds(&regex, &after, &before) && !excused(&after),
+                    Some((before, after)) => {
+                        adds(&regex, &after, &before) && unexcused(&after) && !excused(&after)
+                    }
                     None => false,
                 },
                 None => false,
@@ -222,7 +239,36 @@ fn evaluate(
     {
         return Ok(None);
     }
+    // A rule scoped by `where` judges a call only in the checkout it
+    // names: the call's, moved by a leading `cd` ([`runs_in`]).
+    if fired && !rule.within.holds_in(&runs_in(root, call)) {
+        return Ok(None);
+    }
     Ok(fired.then(|| Finding::of(Kind::of(rule), rule)))
+}
+
+/// The command a hit stands in: the text from the shell separator before
+/// it (`|`, `;`, `&` or a line end) to the one after it.
+fn command_around(text: &str, hit: std::ops::Range<usize>) -> &str {
+    let separator = |c: char| matches!(c, '|' | ';' | '&' | '\n');
+    let start = text[..hit.start].rfind(separator).map_or(0, |at| at + 1);
+    let end = text[hit.end..]
+        .find(separator)
+        .map_or(text.len(), |at| hit.end + at);
+    &text[start..end]
+}
+
+/// The directory a call runs in: its workspace, or the directory a shell
+/// line's leading `cd` moves to, which is how a session whose shell stands
+/// in one checkout runs a command in another.
+fn runs_in(root: &Path, call: &Call) -> std::path::PathBuf {
+    let first = call
+        .command()
+        .and_then(|line| commands(line).into_iter().next());
+    match first.as_ref().map(super::argv::Argv::words) {
+        Some([cd, dir]) if cd == "cd" => root.join(dir),
+        _ => root.to_path_buf(),
+    }
 }
 
 fn is_rust_source(path: &Path) -> bool {

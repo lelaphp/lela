@@ -351,6 +351,88 @@ pub struct Ask {
     /// Only the crates with a staged change, pre-commit's touched crates
     /// (harness §6), as `clippy --staged` runs over; with `crates` empty.
     pub staged: bool,
+    /// Which of each crate's fences the run serves, and so whether what it
+    /// judged is a reading.
+    pub scope: Scope,
+}
+
+/// Which of a crate's fences a run serves (#1146). A crate's reading is a
+/// claim over every fence it carries and the coverage beside them, and
+/// only [`Scope::Crate`] makes it: a narrowed run serves the fences it
+/// names, `--accept` pins those alone, coverage is not counted, and what
+/// it judged is printed and never written, so `done` and pre-commit
+/// never take it for the crate's reading.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Scope {
+    /// Every fence of the crate, and the kernels and natives without one.
+    #[default]
+    Crate,
+    /// The fences in rustdoc under one source file, by its path from the
+    /// workspace root or any tail of it (`src/natives.rs`).
+    File(PathBuf),
+    /// The fences on one item, by the name its declaration writes
+    /// ([`fence::Witness::item`]).
+    Item(String),
+}
+
+impl Scope {
+    /// The part of a crate's fences this scope serves: all of them for the
+    /// crate; for a narrowed run the named ones, the grammar's problems
+    /// where they stand in the named file, and no subject.
+    fn narrow(&self, mut found: Extracted) -> Extracted {
+        let keeps = |file: &Path, item: Option<&str>| match self {
+            Scope::Crate => true,
+            Scope::File(path) => file.ends_with(path),
+            Scope::Item(name) => item == Some(name.as_str()),
+        };
+        if *self != Scope::Crate {
+            found
+                .witnesses
+                .retain(|w| keeps(&w.file, w.item.as_deref()));
+            found.problems.retain(|p| keeps(&p.file, None));
+            found.subjects.clear();
+            found.anchored = None;
+        }
+        found
+    }
+
+    /// The flags that carry this scope to the served process ([`watch`]).
+    fn args(&self) -> Vec<std::ffi::OsString> {
+        match self {
+            Scope::Crate => Vec::new(),
+            Scope::File(path) => vec!["--file".into(), path.into()],
+            Scope::Item(name) => vec!["--item".into(), name.into()],
+        }
+    }
+
+    /// What becomes of the readings a run judged: the crate's are
+    /// recorded, a narrowed run's printed, with the exit either way.
+    fn record(&self, store: &Store, readings: &[Reading]) -> Result<()> {
+        if *self == Scope::Crate {
+            return crate::record(store, readings);
+        }
+        for reading in readings {
+            println!(
+                "{} {} {}: {}",
+                reading.status.as_str(),
+                reading.instrument,
+                reading.scope,
+                reading.message
+            );
+        }
+        println!("witness: a run narrowed to the fences {self} writes no reading");
+        crate::reading::Outcome::of(readings).exit()
+    }
+}
+
+impl std::fmt::Display for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Scope::Crate => write!(f, "of the crate"),
+            Scope::File(path) => write!(f, "under {}", path.display()),
+            Scope::Item(name) => write!(f, "on {name}"),
+        }
+    }
 }
 
 /// Run what was asked for: one reading per crate, each written by the
@@ -398,6 +480,7 @@ fn run_in(
     // One binary for the fences marked `process`, built at the first.
     let binary = Binary::of(root);
     let mut readings = Vec::new();
+    let mut served = 0;
     for krate in &manifest.crates {
         if !crates.is_empty() && !crates.iter().any(|n| n == &krate.name) {
             continue;
@@ -418,7 +501,7 @@ fn run_in(
             continue;
         }
         let found = match extract(root, krate, rule, Target::built()) {
-            Ok(found) => found,
+            Ok(found) => ask.scope.narrow(found),
             // A source the grammar could not read: the crate's reading
             // fails and names it, since `done` asks the crate for a
             // witness reading and a pass over sources never seen would
@@ -434,6 +517,7 @@ fn run_in(
         for problem in &found.problems {
             println!("bork {}", problem.at_line());
         }
+        served += found.witnesses.len();
         let watch = journal.map(|j| j.over(&krate.name));
         let tally = judge(&oracle, &binary, registry, ask, &found, watch)?;
         for missing in &tally.missing {
@@ -470,6 +554,12 @@ fn run_in(
             journal.judged(&judged)?;
         }
         readings.push(judged);
+    }
+    if ask.scope != Scope::Crate && served == 0 {
+        bail!(
+            "witness: no fence stands {} in the crates asked for",
+            ask.scope
+        );
     }
     Ok(readings)
 }
@@ -690,10 +780,16 @@ pub(crate) fn command(
     store: &Store,
     asked: crate::cli::Witness,
 ) -> Result<()> {
+    let scope = match (asked.file, asked.item) {
+        (Some(file), _) => Scope::File(file.strip_prefix(root).unwrap_or(&file).to_path_buf()),
+        (None, Some(item)) => Scope::Item(item),
+        (None, None) => Scope::Crate,
+    };
     let ask = Ask {
         crates: asked.crates,
         accept: asked.accept,
         staged: asked.staged,
+        scope,
     };
     let Some(journal) = asked.journal else {
         return watch::watch(root, manifest, store, &ask);

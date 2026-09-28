@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask phpt --census","description":"Run the per-commit lane"}}

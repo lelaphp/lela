@@ -269,15 +269,16 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     if ask.accept {
         served.arg("--accept");
     }
+    served.args(ask.scope.args());
     served.arg("--journal").arg(&journal);
     let status = served
         .status()
         .with_context(|| format!("starting {} witness", exe.display()))?;
     let kept = Kept::read(&journal)?;
     match Ended::of(status) {
-        Ended::Exited(0) => crate::record(store, &kept.readings),
+        Ended::Exited(0) => ask.scope.record(store, &kept.readings),
         Ended::Exited(code) => {
-            crate::record(store, &kept.readings)?;
+            ask.scope.record(store, &kept.readings)?;
             bail!("witness: the served run ended with exit {code}; the line above it says why")
         }
         Ended::Signalled(signal) => {
@@ -287,7 +288,7 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
                 "witness: the served run died on {signal}; {}",
                 in_flight(&kept)
             );
-            crate::record(store, &readings)
+            ask.scope.record(store, &readings)
         }
     }
 }

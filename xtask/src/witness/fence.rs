@@ -104,6 +104,10 @@ pub struct Witness {
     /// The item the block documents, as the line writes it (`pub fn
     /// extension`); empty for a witness in a file's own doc.
     pub subject: String,
+    /// The name of the declaration the `///` block stands on, at any
+    /// indentation, so a method's fences are its own (`add`); what
+    /// `xtask witness --item` names. Nothing for a file's own doc.
+    pub item: Option<String>,
     /// 1-based, the `php` fence's line: where a person looks.
     pub line: usize,
     /// 1-based, the `expect` fence's line: the one `--accept` rewrites.
@@ -221,6 +225,9 @@ pub fn extract(file: &Path, text: &str) -> Extracted {
     // The witnesses read since the last item line, which that item's line
     // will name; a `//!` block's belong to the file and wait for nothing.
     let mut waiting: Vec<usize> = Vec::new();
+    // The same witnesses, waiting for the next declaration at any
+    // indentation, which names their item.
+    let mut unnamed: Vec<usize> = Vec::new();
     let mut index = 0;
     while index < lines.len() {
         if let Some((on_an_item, body)) = doc_of(lines[index]) {
@@ -229,6 +236,7 @@ pub fn extract(file: &Path, text: &str) -> Extracted {
                     Ok((witness, next)) => {
                         if on_an_item {
                             waiting.push(out.witnesses.len());
+                            unnamed.push(out.witnesses.len());
                         }
                         out.witnesses.push(witness);
                         index = next;
@@ -239,6 +247,15 @@ pub fn extract(file: &Path, text: &str) -> Extracted {
             }
             index += 1;
             continue;
+        }
+        // An attribute, a comment or a blank line stands between a doc
+        // block and its declaration; any other line ends the wait.
+        let line = lines[index].trim_start();
+        if !(line.is_empty() || line.starts_with("#[") || line.starts_with("//")) {
+            let name = item_of(line).map(|item| item.name);
+            for at in unnamed.drain(..) {
+                out.witnesses[at].item.clone_from(&name);
+            }
         }
         if let Some(item) = item_of(lines[index]) {
             let witnessed = !waiting.is_empty();
@@ -307,6 +324,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
         Witness {
             file: file.to_path_buf(),
             subject: String::new(),
+            item: None,
             line: start + 1,
             fence: opened + 1,
             fence_line: (*lines.get(opened).unwrap_or(&"")).to_owned(),
@@ -448,6 +466,8 @@ fn duration(text: &str) -> Option<Duration> {
 struct Item {
     /// The head as the line writes it, `pub fn extension`.
     head: String,
+    /// The name it declares, `extension`.
+    name: String,
     /// Whether the coverage rule counts it: a function visible past its
     /// own module.
     counted: bool,
@@ -512,6 +532,7 @@ fn item_of(line: &str) -> Option<Item> {
     Some(Item {
         counted: function && visible,
         head,
+        name,
     })
 }
 
@@ -583,6 +604,23 @@ mod tests {
         };
         assert!(subject.witnessed);
         assert_eq!(subject.name, "pub fn ctype_digit");
+    }
+
+    #[test]
+    fn a_block_s_item_is_the_declaration_below_it_at_any_indentation() {
+        let found = php(concat!(
+            "//! ```php\n//! x\n//! ```\n//! ```expect\n//! ```\n",
+            "impl List {\n",
+            "    /// ```php\n    /// x\n    /// ```\n    /// ```expect\n    /// ```\n",
+            "    #[php(tentative)]\n",
+            "    fn add() {}\n",
+            "}\n",
+            "/// ```php\n/// y\n/// ```\n/// ```expect\n/// ```\n",
+            "// a comment\n",
+            "pub(crate) fn r#mod() {}\n",
+        ));
+        let items: Vec<_> = found.witnesses.iter().map(|w| w.item.as_deref()).collect();
+        assert_eq!(items, [None, Some("add"), Some("r#mod")]);
     }
 
     #[test]
