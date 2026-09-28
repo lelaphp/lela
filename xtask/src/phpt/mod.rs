@@ -39,7 +39,8 @@
 //! **Why a test missed.** A test that fails, borks or that the compiler
 //! refused keeps its first differing lines and a signature on its verdict,
 //! decoded once where the verdict is made (the `miss` module), and the
-//! kept run carries them (#1185).
+//! kept run carries them; `--census` groups every miss of the run by that
+//! signature, the widest first (#1185).
 //!
 //! **Held against a commit.** Every run the engine judged whole is kept
 //! as its verdicts, and `--against <commit>` holds each subset to the run
@@ -417,6 +418,14 @@ pub(crate) enum Judgement {
     Unread,
 }
 
+impl Judgement {
+    /// Whether the test missed and keeps why: it fails the reading, or the
+    /// compiler refused it. Each such verdict carries a [`miss::Miss`].
+    pub(crate) fn misses(self) -> bool {
+        matches!(self, Judgement::Fail | Judgement::Bork | Judgement::Unread)
+    }
+}
+
 impl tally::Judgement for Judgement {
     /// A fail, a bork or an unread test keeps its first differing lines
     /// and its signature on the run (#1185).
@@ -643,10 +652,11 @@ pub struct Ask {
     /// The binary the process adapter runs; without it, the engine's own
     /// where cargo puts it.
     pub engine: Option<PathBuf>,
-    /// Render the unread census beside the run and carry its groups on
-    /// each reading (#617). The lane, the verdicts and every count are
-    /// the same either way: this asks for one more rendering of what the
-    /// run already reached, never for a second run.
+    /// Render the census beside the run: every miss grouped by the
+    /// signature it kept (#1185), and the unread constructs among them,
+    /// whose groups each reading carries (#617). The lane, the verdicts
+    /// and every count are the same either way: this asks for one more
+    /// rendering of what the run already reached, never for a second run.
     pub census: bool,
     /// The commit whose kept run each subset is held to, test by test:
     /// one more reading per subset, at its scope with `@against` after it,
@@ -729,8 +739,8 @@ pub fn run(
     };
     let mut readings = Vec::new();
     // The lane's census, folded over the subsets as each is run, so the
-    // widest construct of the whole corpus is one line at the end and not
-    // a sum a reader does by hand.
+    // widest cause of the whole corpus is one line at the end and not a
+    // sum a reader does by hand.
     let mut lane = census::Census::default();
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     for subset in &subsets {
@@ -745,12 +755,15 @@ pub fn run(
         let held = runs.after(manifest, &scope, &tally, &runner, &reading)?;
         if ask.census {
             let mut counted = census::Census::default();
-            counted.add(&tally);
+            counted.add(census::misses(&tally));
+            counted
+                .accounts_for(census::verdicts(&tally))
+                .map_err(|why| anyhow::anyhow!("{}: {why}", subset.scope))?;
             counted.print(&subset.scope);
-            for row in counted.rows() {
-                reading.group(&row.construct, row.tests.len() as u64)?;
+            for row in counted.unread_rows() {
+                reading.group(&row.signature.to_string(), row.tests.len() as u64)?;
             }
-            lane.add(&tally);
+            lane.add(census::misses(&tally));
         }
         readings.push(reading);
         readings.extend(held);

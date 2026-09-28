@@ -1,37 +1,44 @@
-//! The unread census: the tests `php_compile` refused, grouped by the
-//! construct it refused them for (#617).
+//! The census: every test a run missed, grouped by the signature its miss
+//! kept (#1185), and among them the tests `php_compile` refused, grouped
+//! by the construct it refused them for (#617).
 //!
-//! A test is [`Judgement::Unread`] when everything the engine wrote was
-//! one `Parse error` line ending in the compiler's own `cannot read yet`
-//! sentence, before any test code ran ([`super::adapter::unread`]). That
-//! sentence is captured per test and carried as the verdict's note, so the
-//! census is a fold over verdicts the run already reached and nothing is
-//! run twice: `--census` is one more rendering of the same lane.
+//! A test that fails, borks or is [`Judgement::Unread`] keeps a
+//! [`Miss`] on its verdict, decoded once where the adapter reached it
+//! (the `miss` module), so the census is a fold over what the run already
+//! kept and nothing is run twice: `--census` is one more rendering of the
+//! same lane. Every miss stands in exactly one group, the group of its
+//! signature, and [`Census::accounts_for`] holds the census to that.
 //!
-//! **Why it is worth a rendering.** Unread stops a test before anything
-//! else can: the corpus at a44c6b3 reads 1,432 of 7,856 run refused this
-//! way, over 46 constructs. Which construct holds the most tests
-//! is therefore the sharpest thing the corpus can say about what to build
-//! next, and until this it was counted by eye, one subset at a time, into
-//! the body of each ticket that named a construct (#580, #581, #582, #583).
+//! **Why it is worth a rendering.** Which cause holds the most tests is
+//! the sharpest thing the corpus can say about what to build next. Until
+//! the unread census it was counted by eye, one subset at a time, into the
+//! body of each ticket that named a construct (#580, #581, #582, #583);
+//! until the signatures were kept, the rest was re-run and read off a
+//! printed run by `.claude/skills/specs/first-failures.awk`.
 //!
-//! The note is grouped by equality and never normalised. The compiler's
-//! refusals are a closed set of sentences it writes itself, so two tests
-//! stopped by one construct carry one string; a sentence that carried a
-//! name the program chose would group only with itself, which is the
-//! honest reading of it and not a bucket to be widened by guesswork.
+//! The unread construct is grouped by equality and never normalised. The
+//! compiler's refusals are a closed set of sentences it writes itself, so
+//! two tests stopped by one construct carry one string; a sentence that
+//! carried a name the program chose would group only with itself, which
+//! is the honest reading of it and not a bucket to be widened by
+//! guesswork. The other signatures are masked where the miss was decoded,
+//! and grouped here by value.
 
 use std::collections::BTreeMap;
 
-use super::{Judgement, Tally};
+use super::miss::{Miss, Signature};
+use super::{CORPUS, Judgement, Tally};
+use crate::tally::Judgement as _;
 
-/// At most this many tests are named under a group; the rest are counted.
-/// The house's rendering of a long list (`reading::Log::unreadable_note`).
+/// At most this many tests are named under an unread construct; the rest
+/// are counted. The house's rendering of a long list
+/// (`reading::Log::unreadable_note`).
 const NAMED: usize = 5;
 
-/// One construct and the tests it stopped, as [`Census::rows`] orders them.
+/// One signature and the tests that missed with it, as [`Census::rows`]
+/// orders them: each test by its path in the corpus.
 pub(crate) struct Row {
-    pub construct: String,
+    pub signature: Signature,
     pub tests: Vec<String>,
 }
 
@@ -49,45 +56,109 @@ impl Row {
     }
 }
 
-/// The unread verdicts of one run, or of a lane's subsets folded together.
+/// The misses of one run, or of a lane's subsets folded together, by
+/// signature.
 #[derive(Default)]
 pub(crate) struct Census {
-    by_construct: BTreeMap<String, Vec<String>>,
+    by_signature: BTreeMap<Signature, Vec<String>>,
+}
+
+/// Every miss a subset's run kept, by the test's divergence key.
+pub(crate) fn misses(tally: &Tally) -> impl Iterator<Item = (&str, &Miss)> {
+    tally
+        .judged
+        .iter()
+        .filter_map(|judged| Some((judged.id.as_str(), judged.miss.as_ref()?)))
+}
+
+/// Every verdict of a subset's run, as [`Census::accounts_for`] reads it.
+pub(crate) fn verdicts(tally: &Tally) -> impl Iterator<Item = (&str, Judgement, Option<&Miss>)> {
+    tally
+        .judged
+        .iter()
+        .map(|judged| (judged.id.as_str(), judged.judgement, judged.miss.as_ref()))
+}
+
+/// A test's path in the corpus, from its divergence key.
+fn test_of(id: &str) -> &str {
+    id.strip_prefix("phpt:")
+        .and_then(|path| path.strip_prefix(CORPUS))
+        .and_then(|path| path.strip_prefix('/'))
+        .unwrap_or(id)
 }
 
 impl Census {
-    /// Every unread verdict of `tally` added under its construct. A
-    /// verdict of any other judgement is not the compiler's refusal and is
-    /// not counted here, whatever its note says.
-    pub(crate) fn add(&mut self, tally: &Tally) {
-        for judged in &tally.judged {
-            if judged.judgement == Judgement::Unread {
-                self.by_construct
-                    .entry(judged.note.clone())
-                    .or_default()
-                    .push(judged.name.clone());
-            }
+    /// Every miss added under its signature, each test by its divergence
+    /// key.
+    pub(crate) fn add<'a>(&mut self, misses: impl IntoIterator<Item = (&'a str, &'a Miss)>) {
+        for (id, miss) in misses {
+            self.by_signature
+                .entry(miss.signature.clone())
+                .or_default()
+                .push(test_of(id).to_owned());
         }
     }
 
-    /// The tests counted, over every construct.
+    /// Whether every test that missed kept a miss, stands in the group of
+    /// its signature, and the census groups nothing else: the words of
+    /// the first that does not. `verdicts` is every test of the run, by
+    /// its divergence key, with its judgement and what it kept.
+    pub(crate) fn accounts_for<'a>(
+        &self,
+        verdicts: impl IntoIterator<Item = (&'a str, Judgement, Option<&'a Miss>)>,
+    ) -> Result<(), String> {
+        let mut counted = 0;
+        for (id, judgement, miss) in verdicts {
+            if !judgement.misses() {
+                continue;
+            }
+            counted += 1;
+            let test = test_of(id);
+            let Some(miss) = miss else {
+                return Err(format!(
+                    "{test} is a {} and kept no miss, so no group of the census holds it",
+                    judgement.as_str()
+                ));
+            };
+            let grouped = self
+                .by_signature
+                .get(&miss.signature)
+                .is_some_and(|tests| tests.iter().any(|t| t == test));
+            if !grouped {
+                return Err(format!(
+                    "{test} missed with `{}` and stands in no group of the census",
+                    miss.signature
+                ));
+            }
+        }
+        if self.missed() != counted {
+            return Err(format!(
+                "the census groups {} tests and the run missed {counted}",
+                self.missed()
+            ));
+        }
+        Ok(())
+    }
+
+    /// The tests counted, over every signature.
+    pub(crate) fn missed(&self) -> usize {
+        self.by_signature.values().map(Vec::len).sum()
+    }
+
+    /// The tests the compiler refused, over every construct.
     pub(crate) fn unread(&self) -> usize {
-        self.by_construct.values().map(Vec::len).sum()
+        self.unread_rows().iter().map(|row| row.tests.len()).sum()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.by_construct.is_empty()
-    }
-
-    /// The groups, the construct holding the most tests first. A tie is
-    /// broken by the construct's own text, so the order is total and one
+    /// The groups, the signature holding the most tests first. A tie is
+    /// broken by the signature's own order, so the order is total and one
     /// run's census prints the same twice.
     pub(crate) fn rows(&self) -> Vec<Row> {
         let mut rows: Vec<Row> = self
-            .by_construct
+            .by_signature
             .iter()
-            .map(|(construct, tests)| Row {
-                construct: construct.clone(),
+            .map(|(signature, tests)| Row {
+                signature: signature.clone(),
                 tests: tests.clone(),
             })
             .collect();
@@ -95,23 +166,52 @@ impl Census {
             b.tests
                 .len()
                 .cmp(&a.tests.len())
-                .then_with(|| a.construct.cmp(&b.construct))
+                .then_with(|| a.signature.cmp(&b.signature))
         });
         rows
     }
 
-    /// The census under `scope`, the widest construct first. An empty
-    /// census says so rather than printing a heading over nothing: a
-    /// subset with no unread test is the answer, not the absence of one.
+    /// The groups of the tests the compiler refused, in [`Census::rows`]'
+    /// order: the unread census.
+    pub(crate) fn unread_rows(&self) -> Vec<Row> {
+        self.rows()
+            .into_iter()
+            .filter(|row| matches!(row.signature, Signature::Unread(_)))
+            .collect()
+    }
+
+    /// The census under `scope`: the unread constructs, then every miss
+    /// by signature with every test of its group, each the widest first.
+    /// An empty one says so rather than printing a heading over nothing:
+    /// a subset with no such test is the answer, not the absence of one.
     pub(crate) fn print(&self, scope: &str) {
-        if self.is_empty() {
+        let unread = self.unread_rows();
+        if unread.is_empty() {
             println!("phpt census {scope}: no test was refused by the compiler");
-            return;
+        } else {
+            println!(
+                "phpt census {scope}: {} unread over {} construct{}",
+                self.unread(),
+                unread.len(),
+                if unread.len() == 1 { "" } else { "s" }
+            );
+            for row in &unread {
+                println!(
+                    "  {:>5}  {}: {}",
+                    row.tests.len(),
+                    row.signature,
+                    row.named()
+                );
+            }
         }
         let rows = self.rows();
+        if rows.is_empty() {
+            println!("phpt census {scope}: no test missed");
+            return;
+        }
         println!(
-            "phpt census {scope}: {} unread over {} construct{}",
-            self.unread(),
+            "phpt census {scope}: {} missed over {} signature{}",
+            self.missed(),
             rows.len(),
             if rows.len() == 1 { "" } else { "s" }
         );
@@ -119,8 +219,8 @@ impl Census {
             println!(
                 "  {:>5}  {}: {}",
                 row.tests.len(),
-                row.construct,
-                row.named()
+                row.signature,
+                row.tests.join(", ")
             );
         }
     }
