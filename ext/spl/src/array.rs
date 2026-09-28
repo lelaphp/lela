@@ -30,7 +30,7 @@ use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{Level, Thrown, deprecated, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{
-    ClassId, HashIterator, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
+    ClassId, HashIterator, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, Value, ValueRef,
 };
 
 use crate::{
@@ -1727,6 +1727,93 @@ impl ObjectHandlers for Handlers {
                 Ok(place(req, object, offset, read)?
                     .map_or_else(Value::null, |cell| cell.as_value()))
             }
+        }
+    }
+
+    /// `spl_array_get_dimension_ptr` under `BP_VAR_W` and `BP_VAR_RW`:
+    /// the element's own bucket, or the property's row over an object,
+    /// `null` laid down where the storage has none, which `BP_VAR_RW`
+    /// warns of; the storage separated first, as
+    /// `spl_array_get_hash_table` hands out the object's own. The fetch
+    /// lays it into its `VAR` as `IS_INDIRECT`, so `$o[$k] = &$v` binds
+    /// the element to `$v`'s reference. An overriding `offsetGet`, an
+    /// append and an unset are [`ObjectHandlers::read_dimension`]'s.
+    ///
+    /// ```php
+    /// $ao = new ArrayObject;
+    /// foreach ([1, 2, 3] as $i => $var) { $ao[$i] = &$var; }
+    /// var_dump($ao);
+    /// $x = 5; $ao['k'] = &$x; $x = 6; var_dump($ao['k']);
+    /// $it = new ArrayIterator(['a' => [1]]); $it['a'][] = 2; $it['b'] .= 'x';
+    /// var_dump($it->getArrayCopy());
+    /// $o = new stdClass; $o->a = 1; $b = @new ArrayObject($o);
+    /// $y = 5; $b['a'] = &$y; $y = 7; var_dump($o);
+    /// ```
+    /// ```expect
+    /// object(ArrayObject)#1 (1) {
+    ///   ["storage":"ArrayObject":private]=>
+    ///   array(3) {
+    ///     [0]=>
+    ///     &int(3)
+    ///     [1]=>
+    ///     &int(3)
+    ///     [2]=>
+    ///     &int(3)
+    ///   }
+    /// }
+    /// int(6)
+    ///
+    /// Warning: Undefined array key "b" in %s on line 6
+    /// array(2) {
+    ///   ["a"]=>
+    ///   array(2) {
+    ///     [0]=>
+    ///     int(1)
+    ///     [1]=>
+    ///     int(2)
+    ///   }
+    ///   ["b"]=>
+    ///   string(1) "x"
+    /// }
+    /// object(stdClass)#3 (1) {
+    ///   ["a"]=>
+    ///   &int(7)
+    /// }
+    /// ```
+    fn dimension_place(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        offset: Option<&Value>,
+        fetch: DimensionRead,
+    ) -> Result<Option<Place>, Thrown> {
+        let (DimensionRead::Write | DimensionRead::ReadWrite) = fetch else {
+            return Ok(None);
+        };
+        let Some(offset) = offset else {
+            return Ok(None);
+        };
+        if crate::overridden(req, object, b"offsetget") {
+            return Ok(None);
+        }
+        sorting_refused(req, object)?;
+        let Some(key) = hash_key(req, offset)? else {
+            return Err(illegal(req, object, offset, "write"));
+        };
+        let table = table(req, object)?;
+        if table.get(req, &key)?.is_none() {
+            if fetch == DimensionRead::ReadWrite {
+                warning(req, &format!("Undefined array key {}", shown(&key)));
+            }
+            table.set(req, &key, Value::null())?;
+        }
+        match table {
+            Table::Array(owner, mut array) => {
+                array.separate(req)?;
+                store(req, owner, array)?;
+                Ok(array.place(&key))
+            }
+            Table::Props(backing) => backing.row_place(req, &key).map(Some),
         }
     }
 

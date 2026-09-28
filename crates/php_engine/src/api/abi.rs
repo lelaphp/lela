@@ -22,7 +22,7 @@ use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{
-    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
 };
 
 mod class;
@@ -959,6 +959,26 @@ pub trait ObjectHandlers: Send + Sync {
         read: DimensionRead,
     ) -> Result<Value, Thrown> {
         req.read_dimension(object, offset, read)
+    }
+
+    /// `read_dimension` under a write fetch, `BP_VAR_W`, `BP_VAR_RW` or
+    /// `BP_VAR_UNSET` (`fetch`), where php's answers a pointer into the
+    /// object's own storage: the place the element stands, which the
+    /// fetch lays into its `VAR` as `IS_INDIRECT`, so a nested write
+    /// reaches the storage and `$o[$k] = &$v` binds it. The fetch unwraps
+    /// a reference nothing else holds (`ZVAL_UNREF`), as php's does over
+    /// the reference its `read_dimension` made in place. `None`, `Std`'s
+    /// answer, is a class whose handler answers a value: the fetch asks
+    /// [`ObjectHandlers::read_dimension`] instead.
+    fn dimension_place(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        offset: Option<&Value>,
+        fetch: DimensionRead,
+    ) -> Result<Option<Place>, Thrown> {
+        let _ = (req, object, offset, fetch);
+        Ok(None)
     }
 
     /// `write_dimension`, `zend_std_write_dimension` at `Std`:

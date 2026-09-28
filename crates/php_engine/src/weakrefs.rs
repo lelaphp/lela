@@ -25,7 +25,7 @@ use php_macros::php_class;
 use crate::api::abi::{CloneObj, DimensionRead, Instance, ObjectHandlers, This, Untyped};
 use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use crate::api::values::{Key, PhpArray, PhpObject, PhpString, Place, Value};
 use crate::classes::ArrayAccess;
 use crate::interfaces::Countable;
 
@@ -353,6 +353,43 @@ impl ObjectHandlers for WeakMapHandlers {
         Ok(value)
     }
 
+    /// `zend_weakmap_read_dimension` under `BP_VAR_W` and `BP_VAR_RW`
+    /// (`Z/Zend/zend_weakrefs.c:370`): the entry's own slot, so
+    /// `$map[$k][] = 1` writes into the entry and `$map[$k] =& $v` binds
+    /// it; php's refusals as the read raises them. php makes the slot a
+    /// reference (`ZVAL_MAKE_REF`) and the fetch unwraps it again where the
+    /// map is its one owner (`ZVAL_UNREF`), which leaves the slot as it
+    /// was.
+    ///
+    /// ```php
+    /// $obj = new stdClass;
+    /// $map = new WeakMap;
+    /// $integer = 1;
+    /// $map[$obj] = [];
+    /// $map[$obj][] = 42;
+    /// var_dump($map[$obj]);
+    /// $map[$obj] =& $integer;
+    /// $integer++;
+    /// var_dump($map[$obj], $map->offsetGet($obj));
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   [0]=>
+    ///   int(42)
+    /// }
+    /// int(2)
+    /// int(2)
+    /// ```
+    fn dimension_place(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        offset: Option<&Value>,
+        _fetch: DimensionRead,
+    ) -> Result<Option<Place>, Thrown> {
+        weakmap_place(req, object, offset).map(|at| Some(Place::of(at)))
+    }
+
     /// `zend_weakmap_write_dimension` (`Z/Zend/zend_weakrefs.c:378`): an
     /// entry the map already has takes the value in place, the old one
     /// released after the write; a new key is registered against the map
@@ -497,47 +534,6 @@ impl ObjectHandlers for WeakMapHandlers {
 }
 
 static WEAK_MAP: WeakMapHandlers = WeakMapHandlers;
-
-/// `zend_weakmap_read_dimension` under `BP_VAR_W` and `BP_VAR_RW`
-/// (`Z/Zend/zend_weakrefs.c:370`), which the dimension fetch for a write
-/// asks of a `WeakMap` where it asks `read_dimension` of any other
-/// class: the entry's own slot, so `$map[$k][] = 1` writes into the
-/// entry and `$map[$k] =& $v` binds it; php's refusals as the read
-/// raises them. php makes the slot a reference (`ZVAL_MAKE_REF`) and the
-/// fetch unwraps it again where the map is its one owner
-/// (`ZVAL_UNREF`), which leaves the slot as it was. `None` for an object
-/// of any other class.
-///
-/// ```php
-/// $obj = new stdClass;
-/// $map = new WeakMap;
-/// $integer = 1;
-/// $map[$obj] = [];
-/// $map[$obj][] = 42;
-/// var_dump($map[$obj]);
-/// $map[$obj] =& $integer;
-/// $integer++;
-/// var_dump($map[$obj], $map->offsetGet($obj));
-/// ```
-/// ```expect
-/// array(1) {
-///   [0]=>
-///   int(42)
-/// }
-/// int(2)
-/// int(2)
-/// ```
-pub(crate) fn dimension_place(
-    req: &mut Request,
-    table: &'static dyn ObjectHandlers,
-    object: PhpObject,
-    offset: Option<&Value>,
-) -> Option<Result<php_heap::ZvalRef, Thrown>> {
-    if !std::ptr::addr_eq(table, &raw const WEAK_MAP) {
-        return None;
-    }
-    Some(weakmap_place(req, object, offset))
-}
 
 fn weakmap_place(
     req: &mut Request,

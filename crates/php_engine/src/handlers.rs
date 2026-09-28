@@ -9139,10 +9139,20 @@ fn object_place(
 ) -> Result<php_heap::Zval, Thrown> {
     let dim = object_dim(req, frame, code, op);
     let table = req.object_handlers(object.heap());
-    if let Some(placed) = crate::weakrefs::dimension_place(req, table, object, dim.as_ref()) {
-        placed.map(php_heap::Zval::indirect)
-    } else {
-        match table.read_dimension(req, object, dim.as_ref(), fetch) {
+    match table.dimension_place(req, object, dim.as_ref(), fetch) {
+        Ok(Some(place)) => {
+            // `else if (Z_REFCOUNT_P(retval) == 1) ZVAL_UNREF(retval)`:
+            // a reference the storage alone holds is the value again.
+            let at = place.heap();
+            let held = Value::of_zval(at.read());
+            if held.as_php_ref().is_some() && held.refcount() == 1 {
+                let value = req.unwrap_reference(held);
+                at.write(value.to_zval());
+            }
+            Ok(php_heap::Zval::indirect(at))
+        }
+        Err(thrown) => Err(thrown),
+        Ok(None) => match table.read_dimension(req, object, dim.as_ref(), fetch) {
             // `zend_fetch_dimension_address`'s object arm: a
             // reference is the place itself and warns of
             // nothing, and one the `VAR` is the last owner of is
@@ -9172,7 +9182,7 @@ fn object_place(
                 Ok(value.to_zval())
             }
             Err(thrown) => Err(thrown),
-        }
+        },
     }
 }
 

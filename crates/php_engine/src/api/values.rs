@@ -508,6 +508,14 @@ impl PhpArray {
             .map(|(at, key, z)| (at, Key::of(key), Value::of_zval(z)))
     }
 
+    /// Where the value at `key` stands, `zend_hash_find` answering the
+    /// bucket's `zval *`; `None` where the array has no `key`. The array
+    /// is written through the place, so a caller separates it first.
+    #[must_use]
+    pub fn place(&self, key: &Key) -> Option<Place> {
+        self.0.value_ref(key.heap()).map(Place)
+    }
+
     /// The elements in order, references followed, views of them.
     #[must_use]
     pub fn snapshot(&self) -> Vec<(Key, Value)> {
@@ -683,6 +691,24 @@ impl ArrayIter {
     #[must_use]
     pub fn value(&self) -> Option<&Value> {
         self.at.as_ref().map(|(_, v)| v)
+    }
+}
+
+/// Where a value stands in a table, php's `zval *` into a bucket, which
+/// a dimension fetch for a write lays into its `VAR` as `IS_INDIRECT`
+/// so the write, and an `ASSIGN_REF`, reaches the table itself. Naming
+/// the place keeps nothing: it is good until the table is next written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place(php_heap::ZvalRef);
+
+impl Place {
+    /// The heap's place.
+    pub(crate) const fn heap(self) -> php_heap::ZvalRef {
+        self.0
+    }
+
+    pub(crate) const fn of(at: php_heap::ZvalRef) -> Place {
+        Place(at)
     }
 }
 
@@ -1063,6 +1089,15 @@ impl PhpObject {
     /// ```
     pub fn row_ref(&self, req: &mut Request, key: &Key) -> Result<PhpRef, Thrown> {
         req.table_row_ref(*self, key)
+    }
+
+    /// Where the row `key` stands in the object's property table, the
+    /// declared slot or the dynamic entry, `zend_symtable_find_ind`'s
+    /// `zval *` behind the `IS_INDIRECT`; a row the table has none of,
+    /// or a slot nothing wrote, laid down as `null` first, as
+    /// `spl_array_get_dimension_ptr` does under a write fetch.
+    pub fn row_place(&self, req: &mut Request, key: &Key) -> Result<Place, Thrown> {
+        req.table_row_place(*self, key).map(Place)
     }
 
     /// [`PhpObject::row_ref`], with the typed property whose slot the row
