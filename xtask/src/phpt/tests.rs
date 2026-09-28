@@ -421,32 +421,23 @@ fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
     assert_eq!(unread("this compiler cannot read yet"), None);
 }
 
-/// The fixture at `xtask/fixtures/phpt/UnreadInParentheses.phpt` (#395):
-/// a program php runs and this compiler cannot read, the construct it
-/// cannot read standing inside parentheses. The refusal `php_compile`
-/// gives that program ends in the words [`adapter::unread`] reads, so
-/// the lane counts the test a construct not read yet; while the refusal
-/// named the parenthesis instead, the same program's refusal was no
-/// sentence the lane knew and the test counted as a failure. The engine
-/// here is the one linked into the harness, since the fixture holds one
-/// program and not a subset to run.
+/// The fixture at `xtask/fixtures/phpt/UnreadConstruct.phpt` (#395): a
+/// program php runs and this compiler cannot read. The refusal
+/// `php_compile` gives that program ends in the words [`adapter::unread`]
+/// reads, so the lane counts the test a construct not read yet and not a
+/// failure. The engine here is the one linked into the harness, since the
+/// fixture holds one program and not a subset to run.
 ///
 /// The construct moves as the compiler grows, and the fixture moves with
-/// it: `$a and $b` was the first and `b16f247` taught the compiler to
-/// read it, `1 | 2` the second and `ad386d9` did the same, `print` the
-/// third and `e83e41e` did the same, `eval` the fourth and #573 did the
-/// same, and each time the test found no refusal at all (#483). The
-/// sentence moves too: `emit`'s walk of the tree names the construct
-/// inside the parentheses and not the parentheses (#595), so what the
-/// lane reads here is the static property named at run time, `C::$$p`,
-/// which the unread census of Zend/tests still counts. `php_compile`'s
-/// own test for this refusal,
-/// `an_unread_expression_inside_parentheses_names_the_expression`, names
-/// an anonymous class instead; this one does not follow it there while
-/// anonymous classes are being built (#777), so the two need not move
-/// together.
+/// it: `$a and $b`, `1 | 2`, `print`, `eval` and `C::$$p` were each read in
+/// turn (#483, #1214). While an expression stood unread, the fixture put it
+/// inside parentheses, since `emit`'s walk names the construct inside them
+/// and not the parentheses (#595); `php_compile`'s own test,
+/// `an_unread_expression_inside_parentheses_names_the_expression`, holds
+/// that half. With no expression left unread, the fixture is the one
+/// statement the census of Zend/tests still counts, `declare(encoding)`.
 #[test]
-fn the_refusal_for_an_unread_expression_inside_parentheses_is_read_as_unread() {
+fn a_refusal_of_the_compiler_is_read_as_unread() {
     let pin = manifest().pin;
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
     let phpt = file::Phpt::load(&fixture).unwrap();
@@ -458,14 +449,14 @@ fn the_refusal_for_an_unread_expression_inside_parentheses_is_read_as_unread() {
     let served = crate::oracle::linked::serve(&pin.recipe, None, &snippet).unwrap();
     assert_eq!(
         adapter::unread(&served.stdout),
-        Some("a static property named at run time this compiler cannot read yet".to_owned()),
+        Some("a `declare(encoding)` this compiler cannot read yet".to_owned()),
         "{}",
         String::from_utf8_lossy(&served.stdout)
     );
 }
 
 /// The one fixture the test above reads.
-const FIXTURE: &str = "fixtures/phpt/UnreadInParentheses.phpt";
+const FIXTURE: &str = "fixtures/phpt/UnreadConstruct.phpt";
 
 #[test]
 fn a_skipif_that_says_skip_skips_with_its_reason() {
