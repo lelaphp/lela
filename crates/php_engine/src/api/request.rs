@@ -1905,7 +1905,8 @@ fn links_of<'a>(
 
 /// One row of a backtrace before it is an array: the callee, its
 /// receiver, the scope it was called in where the callee is a closure,
-/// its arguments, the extra named arguments the callee collected, and
+/// its arguments and the extra named arguments the callee collected,
+/// both borrowed from the frame or the call with no owner taken, and
 /// the file and line of its call site, which a call a native made has
 /// none of. php reads the scope off `func->common.scope` of the
 /// closure's own copy of the function; the copy here is the `Closure`
@@ -4509,6 +4510,33 @@ impl Request {
     /// #1 %s(6): f()
     /// #2 {main}
     /// ```
+    ///
+    /// The row leaves the arguments where they stand: an object or a
+    /// counted string the frame holds is still the frame's once the
+    /// trace is built without it, and is released as the frame is.
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', '1');
+    /// function f($o, $s) { throw new Exception('f'); }
+    /// try { f(new stdClass, str_repeat('s', 3)); } catch (Exception $e) { var_dump($e->getTrace()); echo $e->getTraceAsString(), "\n"; }
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   [0]=>
+    ///   array(3) {
+    ///     ["file"]=>
+    ///     string(%d) "%s.php"
+    ///     ["line"]=>
+    ///     int(4)
+    ///     ["function"]=>
+    ///     string(1) "f"
+    ///   }
+    /// }
+    /// #0 %s(4): f()
+    /// #1 {main}
+    /// done
+    /// ```
     fn debug_backtrace(&mut self) -> Result<PhpArray, Thrown> {
         let options = if self.exception_ignore_args() {
             DEBUG_BACKTRACE_IGNORE_ARGS
@@ -4547,88 +4575,136 @@ impl Request {
     /// The rows of a trace as `zend_fetch_debug_backtrace` builds each
     /// array: `options`, `DEBUG_BACKTRACE_PROVIDE_OBJECT` for an
     /// `object` row of a method's receiver between `class` and `type`,
-    /// and `DEBUG_BACKTRACE_IGNORE_ARGS` for no `args`.
+    /// and `DEBUG_BACKTRACE_IGNORE_ARGS` for no `args` on a function's
+    /// row. A code frame's row keeps the included file as its `args`
+    /// under it, between `line` and `function`, where php's
+    /// `build_filename_arg` adds it.
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', '1');
+    /// if (!isset($go)) { function boom($o) { return new Exception('boom'); } $go = 1; $e = include __FILE__; var_dump($e->getTrace()); echo $e->getTraceAsString(), "\n"; return; }
+    /// return boom(new stdClass);
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   array(3) {
+    ///     ["file"]=>
+    ///     string(%d) "%s.php"
+    ///     ["line"]=>
+    ///     int(4)
+    ///     ["function"]=>
+    ///     string(4) "boom"
+    ///   }
+    ///   [1]=>
+    ///   array(4) {
+    ///     ["file"]=>
+    ///     string(%d) "%s.php"
+    ///     ["line"]=>
+    ///     int(3)
+    ///     ["args"]=>
+    ///     array(1) {
+    ///       [0]=>
+    ///       string(%d) "%s.php"
+    ///     }
+    ///     ["function"]=>
+    ///     string(7) "include"
+    ///   }
+    /// }
+    /// #0 %s(4): boom()
+    /// #1 %s(3): include('%s...')
+    /// #2 {main}
+    /// ```
     fn render_trace(&mut self, links: Vec<TraceRow>, options: i64) -> Result<PhpArray, Thrown> {
         let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
         let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
         let mut trace = PhpArray::new(self)?;
         self.constant_expression_row(&mut trace)?;
-        for (traced, this, scope, mut arguments, named, site) in links {
+        for (traced, this, scope, arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
-            let is_function = matches!(traced, Traced::Function(_));
-            let sensitive = match traced {
-                Traced::Function(function) => self.sensitive_parameters(function),
-                Traced::Include { .. } => Sensitive::default(),
-            };
-            let (name, method) = match traced {
-                Traced::Function(function) => (
-                    self.declared_name(function),
-                    self.method_class(function).or(scope).map(|class| {
-                        let class = self.class_name(class);
-                        (class, if this.is_some() { "->" } else { "::" })
-                    }),
-                ),
-                Traced::Include { kind, file } => {
-                    if let Some(file) = file {
-                        arguments.push(Value::string(PhpString::new(self, &file)?));
-                    }
-                    (kind.name().to_owned(), None)
-                }
-            };
             if let Some((file, line)) = site {
                 let file = Value::string(PhpString::new(self, &file)?);
                 self.set_string_key(&mut row, b"file", file)?;
                 self.set_string_key(&mut row, b"line", Value::int(line))?;
             }
-            let name = Value::string(PhpString::new(self, name.as_bytes())?);
-            self.set_string_key(&mut row, b"function", name)?;
-            if let Some((class, join)) = method {
-                let class = Value::string(PhpString::new(self, class.as_bytes())?);
-                self.set_string_key(&mut row, b"class", class)?;
-                if provide_object && let Some(this) = this {
-                    self.addref(&this.as_value());
-                    self.set_string_key(&mut row, b"object", this.as_value())?;
+            match traced {
+                Traced::Function(function) => {
+                    let name = self.declared_name(function);
+                    let name = Value::string(PhpString::new(self, name.as_bytes())?);
+                    self.set_string_key(&mut row, b"function", name)?;
+                    if let Some(class) = self.method_class(function).or(scope) {
+                        let class = self.class_name(class);
+                        let class = Value::string(PhpString::new(self, class.as_bytes())?);
+                        self.set_string_key(&mut row, b"class", class)?;
+                        if provide_object && let Some(this) = this {
+                            self.addref(&this.as_value());
+                            self.set_string_key(&mut row, b"object", this.as_value())?;
+                        }
+                        let join: &[u8] = if this.is_some() { b"->" } else { b"::" };
+                        let join = Value::string(PhpString::new(self, join)?);
+                        self.set_string_key(&mut row, b"type", join)?;
+                    }
+                    if !ignore_arguments {
+                        let args = self.trace_row_arguments(function, arguments, named)?;
+                        self.set_string_key(&mut row, b"args", Value::array(args))?;
+                    }
                 }
-                let join = Value::string(PhpString::new(self, join.as_bytes())?);
-                self.set_string_key(&mut row, b"type", join)?;
-            }
-            // A code frame's row has an `args` only where it has the
-            // file, and a function's always, `debug_backtrace_get_args`,
-            // which adds the extra named arguments under their names
-            // after the positional ones.
-            let with_args = is_function || !arguments.is_empty();
-            if !ignore_arguments && with_args {
-                let mut args = PhpArray::new(self)?;
-                for (at, argument) in arguments.into_iter().enumerate() {
-                    let argument = argument.deref();
-                    let argument = if sensitive.at(at) {
-                        self.sensitive_value(argument)?
-                    } else {
-                        self.addref(&argument);
-                        argument
-                    };
-                    args.append(self, argument)?;
-                }
-                for (name, argument) in named {
-                    let argument = argument.deref();
-                    let argument = if sensitive.variadic {
-                        self.sensitive_value(argument)?
-                    } else {
-                        self.addref(&argument);
-                        argument
-                    };
-                    self.addref(&Value::string(name));
-                    args.set(self, Key::Str(name), argument)?;
-                }
-                self.set_string_key(&mut row, b"args", Value::array(args))?;
-            } else {
-                for argument in arguments {
-                    self.release(argument);
+                Traced::Include { kind, file } => {
+                    // `build_filename_arg`: the included file is the
+                    // row's one argument, ahead of `function` and under
+                    // `DEBUG_BACKTRACE_IGNORE_ARGS` as without it, made
+                    // here with the row as its one owner.
+                    if let Some(file) = file {
+                        let file = Value::string(PhpString::new(self, &file)?);
+                        let mut args = PhpArray::new(self)?;
+                        args.append(self, file)?;
+                        self.set_string_key(&mut row, b"args", Value::array(args))?;
+                    }
+                    let name = Value::string(PhpString::new(self, kind.name().as_bytes())?);
+                    self.set_string_key(&mut row, b"function", name)?;
                 }
             }
             trace.append(self, Value::array(row))?;
         }
         Ok(trace)
+    }
+
+    /// `debug_backtrace_get_args` over a function's row: the positional
+    /// arguments, then the extra named ones under their names, each
+    /// followed through a reference and given the row's owner, since the
+    /// row has them borrowed from the frame, or the
+    /// `SensitiveParameterValue` in its place where
+    /// [`Request::sensitive_parameters`] marks it.
+    fn trace_row_arguments(
+        &mut self,
+        function: Function,
+        arguments: Vec<Value>,
+        named: Vec<(PhpString, Value)>,
+    ) -> Result<PhpArray, Thrown> {
+        let sensitive = self.sensitive_parameters(function);
+        let mut args = PhpArray::new(self)?;
+        for (at, argument) in arguments.into_iter().enumerate() {
+            let argument = argument.deref();
+            let argument = if sensitive.at(at) {
+                self.sensitive_value(argument)?
+            } else {
+                self.addref(&argument);
+                argument
+            };
+            args.append(self, argument)?;
+        }
+        for (name, argument) in named {
+            let argument = argument.deref();
+            let argument = if sensitive.variadic {
+                self.sensitive_value(argument)?
+            } else {
+                self.addref(&argument);
+                argument
+            };
+            self.addref(&Value::string(name));
+            args.set(self, Key::Str(name), argument)?;
+        }
+        Ok(args)
     }
 
     /// `zend_fetch_debug_backtrace`'s first row while a constant
@@ -5182,15 +5258,66 @@ impl Request {
         out
     }
 
-    /// One argument as [`Request::trace_arguments`] renders it.
+    /// One argument as [`Request::trace_arguments`] renders it,
+    /// `_build_trace_args` (`Z/Zend/zend_exceptions.c`): a reference
+    /// followed, `ZVAL_DEREF`, then [`Request::zval_text`], and where
+    /// that has no text, `Array`, `Object(ClassName)` or `Resource id #N`.
     fn trace_argument(&self, out: &mut String, argument: &Value) {
+        let argument = argument.deref();
+        if let Some(text) = self.zval_text(&argument, self.exception_string_param_max_len()) {
+            out.push_str(&text);
+            return;
+        }
         match argument.as_ref() {
+            ValueRef::Array(_) => out.push_str("Array"),
+            ValueRef::Object(object) => {
+                // `smart_str_appends(str, ZSTR_VAL(class_name))`: up to
+                // the NUL of an anonymous class's name.
+                let class = self
+                    .class_decl(object.class())
+                    .map_or_else(String::new, |decl| {
+                        php_unit::decl::shown(&decl.name.0).into_owned()
+                    });
+                out.push_str("Object(");
+                out.push_str(&class);
+                out.push(')');
+            }
+            ValueRef::Resource(resource) => {
+                out.push_str("Resource id #");
+                out.push_str(&resource.id().to_string());
+            }
+            // `zval_text` wrote every scalar and every enum case, and
+            // `deref` followed the reference.
+            ValueRef::Undef
+            | ValueRef::Null
+            | ValueRef::Bool(_)
+            | ValueRef::Int(_)
+            | ValueRef::Float(_)
+            | ValueRef::Str(_)
+            | ValueRef::Reference(_) => {}
+        }
+    }
+
+    /// `smart_str_append_zval` (`Z/Zend/zend_smart_str.c:233`): the text
+    /// php quotes a value by, in a trace's arguments and in
+    /// `UnhandledMatchError`'s message, for a scalar and an enum case,
+    /// and none for anything else. A scalar is `smart_str_append_scalar`:
+    /// `NULL` for an undefined value as for `null`, `true` or `false`, a
+    /// long in decimal, a double by `smart_str_append_double` at
+    /// `precision` (`1` for `0`) with `.0` on a finite text that carries
+    /// no `.`, so `1.0`, `-0.0` and `1.0E+20` where `echo` writes `1`,
+    /// `-0` and `1.0E+20`, and a string in `'`, escaped by
+    /// `smart_str_append_escaped` and cut at `truncate` bytes with `...`
+    /// after the cut. An enum case is `Enum::Case`. The test is on the
+    /// value's own type, before any `ZVAL_DEREF`, so a reference has no
+    /// text here and a caller that renders what it refers to derefs first.
+    pub(crate) fn zval_text(&self, value: &Value, truncate: usize) -> Option<String> {
+        let mut out = String::new();
+        match value.as_ref() {
             ValueRef::Undef | ValueRef::Null => out.push_str("NULL"),
             ValueRef::Bool(b) => out.push_str(if b { "true" } else { "false" }),
             ValueRef::Int(n) => out.push_str(&n.to_string()),
             ValueRef::Float(f) => {
-                // `smart_str_append_double`: `precision ? precision : 1`,
-                // then `.0` on a finite text that carries no `.`.
                 let precision = match self.precision() {
                     0 => 1,
                     precision => precision,
@@ -5203,48 +5330,31 @@ impl Request {
             }
             ValueRef::Str(s) => {
                 out.push('\'');
-                let cut = self.exception_string_param_max_len();
-                append_escaped(out, &s.as_bytes()[..cut.min(s.len())]);
-                if s.len() > cut {
+                append_escaped(&mut out, &s.as_bytes()[..truncate.min(s.len())]);
+                if s.len() > truncate {
                     out.push_str("...");
                 }
                 out.push('\'');
             }
-            ValueRef::Array(_) => out.push_str("Array"),
             ValueRef::Object(object) => {
-                let decl = self.class_decl(object.class());
-                // `smart_str_appends(str, ZSTR_VAL(class_name))`: up to
-                // the NUL of an anonymous class's name.
-                let class = decl.map_or_else(String::new, |decl| {
-                    php_unit::decl::shown(&decl.name.0).into_owned()
-                });
-                let case = decl
-                    .filter(|decl| decl.kind == ClassKind::Enum)
-                    .and_then(|_| object.prop(self, b"name"))
-                    .and_then(|name| name.as_php_string().copied());
+                let decl = self
+                    .class_decl(object.class())
+                    .filter(|decl| decl.kind == ClassKind::Enum)?;
                 // `zend_enum_fetch_case_name`: the case's `name`.
-                if let Some(case) = case {
-                    out.push_str(&class);
-                    out.push_str("::");
-                    out.push_str(&String::from_utf8_lossy(case.as_bytes()));
-                } else {
-                    out.push_str("Object(");
-                    out.push_str(&class);
-                    out.push(')');
-                }
+                let case = object.prop(self, b"name")?.as_php_string().copied()?;
+                out.push_str(&String::from_utf8_lossy(&decl.name.0));
+                out.push_str("::");
+                out.push_str(&String::from_utf8_lossy(case.as_bytes()));
             }
-            ValueRef::Resource(resource) => {
-                out.push_str("Resource id #");
-                out.push_str(&resource.id().to_string());
-            }
-            // `deref` followed the reference already.
-            ValueRef::Reference(r) => self.trace_argument(out, &r.get()),
+            ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => return None,
         }
+        Some(out)
     }
 
     /// `zend.exception_ignore_args`: whether a throwable's trace is
-    /// built without the frames' arguments.
-    fn exception_ignore_args(&self) -> bool {
+    /// built without the frames' arguments, and whether
+    /// `UnhandledMatchError` names its subject by type alone.
+    pub(crate) fn exception_ignore_args(&self) -> bool {
         self.ini_get(b"zend.exception_ignore_args")
             .is_some_and(Request::ini_parse_bool)
     }
