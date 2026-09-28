@@ -1,6 +1,14 @@
 {
   "env": {
-    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
+    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
+    "BASH_MAX_TIMEOUT_MS": "2700000"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(gh issue edit:*)",
+      "Bash(gh issue comment:*)",
+      "Bash(~/Projects/dax-php/target/release/xtask ticket close:*)"
+    ]
   },
   "enabledPlugins": {
     "harness@dax-php": true
@@ -12,10 +20,5 @@
         "path": "."
       }
     }
-  },
-  "permissions": {
-    "allow": [
-      "Bash(gh issue edit:*)"
-    ]
   }
 }
