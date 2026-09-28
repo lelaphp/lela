@@ -284,7 +284,7 @@ pub(crate) type StatBuf = [i64; 13];
 
 /// What a kind's `PHP_STREAM_OPTION_META_DATA_API` answers, which is
 /// what `stream_get_meta_data` puts first.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub(crate) enum MetaData {
     /// `PHP_STREAM_OPTION_RETURN_NOTIMPL`: the generic three,
     /// `timed_out`, `blocked` and `eof` as `php_stream_eof` answers it.
@@ -298,6 +298,11 @@ pub(crate) enum MetaData {
     /// `php_stream_temp_set_option`'s copy of `ts->meta`, which only
     /// `data:` fills: nothing at all for `php://temp`.
     Own,
+    /// The option handed to the kind of the stream under this one,
+    /// `self->stream->ops->set_option`, as `php_gziop_set_option` hands
+    /// it: that kind's answer, and the generic three of this stream
+    /// where that kind takes no option.
+    Of(Stream),
 }
 
 /// php's `php_stream` (`Z/main/php_streams.h`), the half every kind
@@ -1368,6 +1373,12 @@ impl Ops for OfExtension {
 
     fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
         self.0.flock(req, operation)
+    }
+
+    fn meta_data(&self) -> MetaData {
+        self.0
+            .meta_data_from()
+            .map_or(MetaData::Generic, MetaData::Of)
     }
 }
 
@@ -3234,19 +3245,16 @@ impl Request {
     /// `seekable` and, where it was opened by path, `uri`.
     pub(crate) fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown> {
         let mut out = PhpArray::new(self)?;
-        let generic_eof = match self.stream_ref(stream).map(|s| s.ops.meta_data()) {
-            Some(MetaData::Generic) => self.stream_op(stream, |req, s| s.eof(req)),
-            _ => None,
+        let head = if let Some(head) = self.kind_meta_data(stream) {
+            head
+        } else {
+            let Some(eof) = self.stream_op(stream, |req, s| s.eof(req)) else {
+                return Ok(out);
+            };
+            meta_three(false, true, eof)
         };
         let Some(s) = self.stream_ref(stream) else {
             return Ok(out);
-        };
-        let own = s.ops.own_meta();
-        let head = match s.ops.meta_data() {
-            MetaData::Generic => Some((false, true, generic_eof.unwrap_or(s.eof))),
-            MetaData::Stdio { blocked } => Some((false, blocked, s.eof)),
-            MetaData::Socket { timed_out, blocked } => Some((timed_out, blocked, s.eof)),
-            MetaData::Own => None,
         };
         let wrapper = s.wrapper;
         let wrapper_data = s.ops.wrapper_data();
@@ -3255,12 +3263,7 @@ impl Request {
         let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
         let seekable = s.ops.seekable() && !s.flags.no_seek;
         let uri = s.orig_path.clone();
-        let mut entries: Vec<(Vec<u8>, MetaValue)> = own;
-        if let Some((timed_out, blocked, eof)) = head {
-            entries.push((b"timed_out".to_vec(), MetaValue::Bool(timed_out)));
-            entries.push((b"blocked".to_vec(), MetaValue::Bool(blocked)));
-            entries.push((b"eof".to_vec(), MetaValue::Bool(eof)));
-        }
+        let mut entries = head;
         if let Some(data) = wrapper_data {
             entries.push((b"wrapper_data".to_vec(), MetaValue::Value(data)));
         }
@@ -3294,6 +3297,23 @@ impl Request {
             out.set(self, key, value)?;
         }
         Ok(out)
+    }
+
+    /// `php_stream_populate_meta_data`, `PHP_STREAM_OPTION_META_DATA_API`
+    /// asked of the stream's kind: the entries it adds, `None` for the
+    /// `PHP_STREAM_OPTION_RETURN_NOTIMPL` of a kind that takes no option
+    /// and of a stream that is closed. A kind over another stream hands
+    /// the option to that stream's kind, which answers with its own
+    /// `stream->eof`.
+    fn kind_meta_data(&self, stream: Stream) -> Option<Vec<(Vec<u8>, MetaValue)>> {
+        let s = self.stream_ref(stream)?;
+        match s.ops.meta_data() {
+            MetaData::Generic => None,
+            MetaData::Stdio { blocked } => Some(meta_three(false, blocked, s.eof)),
+            MetaData::Socket { timed_out, blocked } => Some(meta_three(timed_out, blocked, s.eof)),
+            MetaData::Own => Some(s.ops.own_meta()),
+            MetaData::Of(inner) => self.kind_meta_data(inner),
+        }
     }
 
     /// The message `php_stream_display_wrapper_errors` prints for an
@@ -3484,6 +3504,17 @@ impl Stream {
     pub fn unread(self, req: &Request) -> usize {
         req.stream_ref(self).map_or(0, |s| s.writepos - s.readpos)
     }
+}
+
+/// `timed_out`, `blocked` and `eof`, the three most kinds answer
+/// `PHP_STREAM_OPTION_META_DATA_API` with and `stream_get_meta_data`
+/// adds for one that takes no option.
+fn meta_three(timed_out: bool, blocked: bool, eof: bool) -> Vec<(Vec<u8>, MetaValue)> {
+    vec![
+        (b"timed_out".to_vec(), MetaValue::Bool(timed_out)),
+        (b"blocked".to_vec(), MetaValue::Bool(blocked)),
+        (b"eof".to_vec(), MetaValue::Bool(eof)),
+    ]
 }
 
 /// One entry of what [`Request::stream_meta_data`] puts in the array,

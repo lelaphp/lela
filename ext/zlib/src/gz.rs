@@ -141,6 +141,32 @@ impl StreamOps for GzStream {
         Some(self.inner?.flock(req, operation))
     }
 
+    /// `php_gziop_set_option`'s `PHP_STREAM_OPTION_META_DATA_API`, handed
+    /// to the stream under the `gzFile`: its `eof` is the plain file's,
+    /// which the `gzFile` reads through a duplicate of its fd, so it
+    /// stays `false` after the last byte.
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir().'/gz-meta-witness.gz';
+    /// file_put_contents($f, gzencode("abc"));
+    /// $h = gzopen($f, 'r');
+    /// var_dump(gzread($h, 10), gzeof($h));
+    /// $m = stream_get_meta_data($h);
+    /// var_dump($m['timed_out'], $m['blocked'], $m['eof']);
+    /// gzclose($h);
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// string(3) "abc"
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    fn meta_data_from(&self) -> Option<Stream> {
+        self.inner
+    }
+
     /// `PHP_STREAM_FLAG_NO_BUFFER`, which `php_stream_gzopen` sets.
     fn buffered(&self) -> bool {
         false

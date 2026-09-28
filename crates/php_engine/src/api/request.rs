@@ -949,6 +949,16 @@ pub trait StreamOps: Send {
         None
     }
 
+    /// The stream `PHP_STREAM_OPTION_META_DATA_API` is handed to, as
+    /// `php_gziop_set_option` hands it to the stream under the `gzFile`:
+    /// `stream_get_meta_data` then starts with what that stream's kind
+    /// answers, its `timed_out`, `blocked` and `eof`. `None` is a kind that
+    /// takes no option, for which the generic half answers the three with
+    /// `eof` as `php_stream_eof` reads it.
+    fn meta_data_from(&self) -> Option<Stream> {
+        None
+    }
+
     /// Whether the generic half keeps a read buffer before the kind:
     /// `false` is `PHP_STREAM_FLAG_NO_BUFFER`, set on the stream as
     /// `php_stream_gzopen` sets it, so every read reaches the kind.

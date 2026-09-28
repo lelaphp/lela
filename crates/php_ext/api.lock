@@ -560,6 +560,7 @@ request::StreamOps::close
 request::StreamOps::flock
 request::StreamOps::flush
 request::StreamOps::label
+request::StreamOps::meta_data_from
 request::StreamOps::read
 request::StreamOps::seek
 request::StreamOps::seekable
