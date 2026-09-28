@@ -83,6 +83,8 @@ use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
+use crate::ffi::locale::Mblen;
+
 /// An untyped by-reference out-parameter, `&$output = null`.
 type Out = Ref<Untyped<Value>>;
 
@@ -355,33 +357,12 @@ fn passthru(
     })
 }
 
-/// `php_mblen` under the `C.UTF-8` `LC_CTYPE` php sets at startup: the
-/// length of the UTF-8 sequence at the start of `bytes`, `None` for one
-/// that is no valid sequence. php's `mbrlen` keeps `BG(mblen_state)`
-/// from one call to the next, so a string that ends inside a sequence
-/// leaves the next string's first bytes read as its end; that state is
-/// not kept here.
-fn mblen(bytes: &[u8]) -> Option<usize> {
-    let first = *bytes.first()?;
-    let (len, range) = match first {
-        0x00..=0x7f => return Some(1),
-        0xc2..=0xdf => (2, 0x80..=0xbf),
-        0xe0 => (3, 0xa0..=0xbf),
-        0xed => (3, 0x80..=0x9f),
-        0xe1..=0xef => (3, 0x80..=0xbf),
-        0xf0 => (4, 0x90..=0xbf),
-        0xf4 => (4, 0x80..=0x8f),
-        0xf1..=0xf3 => (4, 0x80..=0xbf),
-        _ => return None,
-    };
-    let second = *bytes.get(1)?;
-    if !range.contains(&second) {
-        return None;
-    }
-    let rest = bytes.get(2..len)?;
-    rest.iter()
-        .all(|c| (0x80..=0xbf).contains(c))
-        .then_some(len)
+/// `php_mblen(str + x, l - x)` in the escaping walks: the bytes the
+/// character at the start of `rest` takes, `None` for one that is no
+/// valid character, which the walk drops without resetting the state,
+/// as php's does.
+fn character(mblen: &mut Mblen, rest: &[u8]) -> Option<usize> {
+    usize::try_from(mblen.len(rest)).ok().map(|len| len.max(1))
 }
 
 /// `php_escape_shell_cmd` (`Z/ext/standard/exec.c:274`): each byte that
@@ -397,9 +378,10 @@ pub(super) fn escape_shell_cmd(req: &mut Request, input: &[u8]) -> Result<Vec<u8
     }
     let mut out = Vec::with_capacity(input.len() * 2);
     let mut pending: Option<usize> = None;
+    let mut mblen = Mblen::new();
     let mut x = 0;
     while let Some(rest) = input.get(x..).filter(|rest| !rest.is_empty()) {
-        let Some(len) = mblen(rest) else {
+        let Some(len) = character(&mut mblen, rest) else {
             x += 1;
             continue;
         };
@@ -449,9 +431,10 @@ fn escape_shell_arg(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thrown> 
         return Err(throw(req, "ValueError", &text));
     }
     let mut out = vec![b'\''];
+    let mut mblen = Mblen::new();
     let mut x = 0;
     while let Some(rest) = input.get(x..).filter(|rest| !rest.is_empty()) {
-        let Some(len) = mblen(rest) else {
+        let Some(len) = character(&mut mblen, rest) else {
             x += 1;
             continue;
         };
@@ -481,6 +464,20 @@ fn escape_shell_arg(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thrown> 
 /// string(12) "echo 'a' \"b"
 /// string(0) ""
 /// ```
+///
+/// The walk is by `php_mblen`'s characters under the request's
+/// `LC_CTYPE`: a Shift-JIS character whose second byte is a backslash is
+/// copied whole, and under `C.UTF-8` a byte that begins no character is
+/// dropped.
+///
+/// ```php
+/// foreach (['C', 'ja_JP.SJIS', 'C.UTF-8'] as $l) { setlocale(LC_CTYPE, $l); var_dump(bin2hex(escapeshellcmd("\x95\;"))); }
+/// ```
+/// ```expect
+/// string(10) "955c5c5c3b"
+/// string(8) "955c5c3b"
+/// string(8) "5c5c5c3b"
+/// ```
 #[php_function]
 fn escapeshellcmd(req: &mut Request, command: Path) -> Result<PhpString, Thrown> {
     let escaped = escape_shell_cmd(req, command.0.as_bytes())?;
@@ -499,6 +496,18 @@ fn escapeshellcmd(req: &mut Request, command: Path) -> Result<PhpString, Thrown>
 /// string(11) "'$HOME; ls'"
 /// string(10) "'it'\''s '"
 /// escapeshellarg(): Argument #1 ($arg) must not contain any null bytes
+/// ```
+///
+/// The walk is by `php_mblen`'s characters under the request's
+/// `LC_CTYPE`, as `escapeshellcmd`'s.
+///
+/// ```php
+/// foreach (['C', 'ja_JP.SJIS', 'C.UTF-8'] as $l) { setlocale(LC_CTYPE, $l); var_dump(bin2hex(escapeshellarg("\x95'\xe9"))); }
+/// ```
+/// ```expect
+/// string(16) "2795275c2727e927"
+/// string(8) "27952727"
+/// string(12) "27275c272727"
 /// ```
 #[php_function]
 fn escapeshellarg(req: &mut Request, arg: Path) -> Result<PhpString, Thrown> {

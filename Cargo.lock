@@ -499,6 +499,7 @@ name = "php_ext_date"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "libc",
  "php_ext",
 ]
 

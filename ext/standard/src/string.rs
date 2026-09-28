@@ -32,6 +32,8 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
 
+use crate::ffi::locale::{self as c, Class};
+
 /// The request state `string.c` keeps: `BG(strtok_string)` and its
 /// cursor, and each locale category's name.
 #[derive(Default)]
@@ -2085,6 +2087,19 @@ fn similar_char(a: &[u8], b: &[u8]) -> usize {
 /// b"
 /// string(32) "61620a2ce1e00a63640ae3e20a5b785d"
 /// ```
+///
+/// Punctuation is `ispunct(3)`'s under the request's `LC_CTYPE`: macOS's
+/// `C.UTF-8` counts `\xab` in, so it joins the Hebrew block beside it.
+///
+/// ```php
+/// foreach (['C', 'C.UTF-8'] as $l) { setlocale(LC_CTYPE, $l); var_dump(bin2hex(hebrev("\xe0\xab x")), bin2hex(hebrev("cd\xab\xe0"))); }
+/// ```
+/// ```expect
+/// string(8) "ab2078e0"
+/// string(8) "e06364ab"
+/// string(8) "7820abe0"
+/// string(8) "e0ab6364"
+/// ```
 #[php_function]
 fn hebrev(
     req: &mut Request,
@@ -2100,7 +2115,8 @@ fn hebrev(
     PhpString::new(req, &out)
 }
 
-/// php's two loops of `hebrev`, a line-for-line copy.
+/// php's two loops of `hebrev`, a line-for-line copy; punctuation is
+/// `ispunct(3)`'s under the thread's `LC_CTYPE`.
 #[allow(clippy::too_many_lines)]
 fn hebrev_bytes(s: &[u8], max_chars: i64) -> Vec<u8> {
     let isheb = |c: u8| (224..=250).contains(&c);
@@ -2118,7 +2134,7 @@ fn hebrev_bytes(s: &[u8], max_chars: i64) -> Vec<u8> {
         if hebrew {
             while (isheb(at(tmp + 1))
                 || isblank(at(tmp + 1))
-                || at(tmp + 1).is_ascii_punctuation()
+                || c::is(Class::Punct, at(tmp + 1))
                 || at(tmp + 1) == b'\n')
                 && block_end < len - 1
             {
@@ -2150,7 +2166,7 @@ fn hebrev_bytes(s: &[u8], max_chars: i64) -> Vec<u8> {
                 tmp += 1;
                 block_end += 1;
             }
-            while (isblank(at(tmp)) || at(tmp).is_ascii_punctuation())
+            while (isblank(at(tmp)) || c::is(Class::Punct, at(tmp)))
                 && at(tmp) != b'/'
                 && at(tmp) != b'-'
                 && block_end > block_start

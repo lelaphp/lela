@@ -1,6 +1,7 @@
 //! `Z/ext/standard/metaphone.c`: Michael G Schwern's metaphone as php
 //! carries it, the traditional variant, over the word up to its first
-//! NUL.
+//! NUL, its letters and their capitals `isalpha(3)`'s and `toupper(3)`'s
+//! under the thread's `LC_CTYPE`.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -9,13 +10,18 @@ use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::PhpString;
 
+use crate::ffi::locale::{self as c, Class};
+
 /// `_codes`, the letter classes: 1 a vowel, 2 unchanged, 4 affects a
 /// following H, 8 softens C and G, 16 stops GH becoming F.
 const CODES: [u8; 26] = [
     1, 16, 4, 16, 9, 2, 4, 16, 9, 2, 0, 2, 2, 2, 1, 4, 0, 2, 4, 4, 1, 0, 0, 0, 8, 0,
 ];
 
-/// `encode(c)` for an uppercase letter, zero for anything else.
+/// `encode(c)` for an uppercase letter, zero for anything else. php
+/// asserts the letter is `A` to `Z` and indexes `_codes` by it; a letter
+/// outside ASCII that the locale's `isalpha` admits reads outside the
+/// table there, and is no class here.
 fn class(c: u8) -> u8 {
     if c.is_ascii_uppercase() {
         CODES[usize::from(c - b'A')]
@@ -49,10 +55,10 @@ fn phonize(word: &[u8], max: usize) -> Vec<u8> {
     // The word is read as the C string it is: to its first NUL.
     let word = word.split(|c| *c == 0).next().unwrap_or(&[]);
     let raw = |i: usize| word.get(i).copied().unwrap_or(0);
-    let up = |i: usize| raw(i).to_ascii_uppercase();
+    let up = |i: usize| c::to_upper(raw(i));
     let mut out = Vec::new();
     let mut w = 0usize;
-    while !raw(w).is_ascii_alphabetic() {
+    while !c::is(Class::Alpha, raw(w)) {
         if raw(w) == 0 {
             return out;
         }
@@ -93,7 +99,7 @@ fn phonize(word: &[u8], max: usize) -> Vec<u8> {
         _ => {}
     }
     while raw(w) != 0 && (max == 0 || out.len() < max) {
-        if !raw(w).is_ascii_alphabetic() {
+        if !c::is(Class::Alpha, raw(w)) {
             w += 1;
             continue;
         }
@@ -143,7 +149,7 @@ fn phonize(word: &[u8], max: usize) -> Vec<u8> {
             }
             b'G' if next == b'N' => {
                 let dropped =
-                    !after_next.is_ascii_alphabetic() || (after_next == b'E' && ahead(3) == b'D');
+                    !c::is(Class::Alpha, after_next) || (after_next == b'E' && ahead(3) == b'D');
                 if !dropped {
                     out.push(b'K');
                 }
@@ -227,6 +233,19 @@ fn phonize(word: &[u8], max: usize) -> Vec<u8> {
 ///   }
 ///   - Return [ string ]
 /// }
+/// ```
+///
+/// The letters are the request's `LC_CTYPE`'s: under an ISO-8859-1
+/// locale `\xe9` is one, so `GN` before it is not a word's end.
+///
+/// ```php
+/// foreach (['C', 'fr_FR.ISO8859-1'] as $l) { setlocale(LC_CTYPE, $l); var_dump(metaphone("AGN\xe9"), metaphone("\xe9TH")); }
+/// ```
+/// ```expect
+/// string(2) "AN"
+/// string(1) "0"
+/// string(3) "AKN"
+/// string(1) "0"
 /// ```
 #[php_function]
 fn metaphone(

@@ -13,6 +13,11 @@
 //! - [`RelTime`], `timelib_rel_time` by value;
 //! - [`Tzdb`], the bundled database, the data compiled into the binary, never written.
 //!
+//! Beside timelib is the one call into the platform's C library,
+//! [`strftime`], which reads the calling thread's `LC_TIME`, the
+//! request's own once ext/standard's `setlocale()` has installed one
+//! (design §5.14, revision 40).
+//!
 //! Every function timelib may point a date's `tz_info` elsewhere through
 //! is followed by [`Time::sync`], which keeps the `Arc` and the pointer
 //! the same zone: none where timelib cleared it, the zone it came from
@@ -867,4 +872,67 @@ pub(super) fn timezone_id_from_abbr(
     // SAFETY: a NUL-terminated string read only; the answer is static.
     let id = unsafe { sys::timelib_timezone_id_from_abbr(abbr.as_ptr(), gmtoffset, isdst) };
     (!id.is_null()).then(|| bytes_of(id))
+}
+
+/// The `struct tm` `php_strftime` fills from a timelib time: every field
+/// a number, the month from 0 and the year from 1900, and the zone's
+/// offset and abbreviation, `GMT` and 0 for `gmstrftime`.
+#[derive(Debug)]
+pub(crate) struct BrokenDown<'a> {
+    pub sec: i64,
+    pub min: i64,
+    pub hour: i64,
+    pub mday: i64,
+    pub mon: i64,
+    pub year: i64,
+    pub wday: i64,
+    pub yday: i64,
+    pub isdst: bool,
+    pub gmtoff: i64,
+    pub zone: &'a [u8],
+}
+
+/// `strftime(3)` under the thread's `LC_TIME`, as `php_strftime`
+/// (`Z/ext/date/php_date.c:1335`) calls it: into 256 bytes, then twice
+/// as many each time it answers nothing, up to 4096, so `None` both
+/// where the text is longer than 4095 bytes and where it is empty.
+/// The format and the zone are read to their first NUL.
+pub(crate) fn strftime(format: &[u8], tm: &BrokenDown<'_>) -> Option<Vec<u8>> {
+    let format = c_string(format);
+    let zone = c_string(tm.zone);
+    let int = |n: i64| c_int::try_from(n).unwrap_or(c_int::MAX);
+    let fields = libc::tm {
+        tm_sec: int(tm.sec),
+        tm_min: int(tm.min),
+        tm_hour: int(tm.hour),
+        tm_mday: int(tm.mday),
+        tm_mon: int(tm.mon),
+        tm_year: int(tm.year),
+        tm_wday: int(tm.wday),
+        tm_yday: int(tm.yday),
+        tm_isdst: c_int::from(tm.isdst),
+        tm_gmtoff: libc::c_long::try_from(tm.gmtoff).unwrap_or(0),
+        tm_zone: zone.as_ptr().cast_mut(),
+    };
+    let mut len = 256;
+    for _ in 0..5 {
+        let mut buf = vec![0u8; len];
+        // SAFETY: `buf` has `len` writable bytes, `strftime` writes at
+        // most that many, and the format and the `tm` it reads, whose
+        // zone points at `zone`, outlive the call.
+        let written = unsafe {
+            libc::strftime(
+                buf.as_mut_ptr().cast::<c_char>(),
+                len,
+                format.as_ptr(),
+                &raw const fields,
+            )
+        };
+        if written != 0 && written != len {
+            buf.truncate(written);
+            return Some(buf);
+        }
+        len *= 2;
+    }
+    None
 }
