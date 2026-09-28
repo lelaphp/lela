@@ -15,6 +15,7 @@ use crate::archive::{
     archives, lossy,
 };
 use crate::entry;
+use crate::ffi;
 use crate::open::{self, Failed, Opened, has_bz2, has_zlib, require_hash};
 use crate::path;
 use crate::write;
@@ -45,60 +46,84 @@ fn set32(b: &mut [u8], at: usize, v: u32) {
     b[at..at + 4].copy_from_slice(&v.to_le_bytes());
 }
 
-/// Days from 1970-01-01 to a civil date, the proleptic Gregorian calendar.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// The civil date of a day count from 1970-01-01: year, month, day.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    (yoe + era * 400 + i64::from(month <= 2), month, day)
-}
-
-/// `phar_zip_d2u_time`: a DOS time and date as `mktime` reads them, its
-/// fields normalised as `mktime` normalises them, in UTC.
+/// `phar_zip_d2u_time`: a DOS time and date as `mktime` reads them in
+/// the host's local time, over the broken-down current time so the
+/// fields it does not set (the daylight-saving field among them) are
+/// now's; the answer truncated to the entry's 32-bit timestamp as C's
+/// conversion truncates it.
 fn d2u_time(dtime: u16, ddate: u16) -> u32 {
-    let (dtime, ddate) = (i64::from(dtime), i64::from(ddate));
-    let year = ((ddate >> 9) & 127) + 1980;
-    let month0 = ((ddate >> 5) & 15) - 1;
-    let (year, month0) = (year + month0.div_euclid(12), month0.rem_euclid(12));
-    let days = days_from_civil(year, month0 + 1, 1) + (ddate & 31) - 1;
-    let secs = days * 86_400
-        + ((dtime >> 11) & 31) * 3600
-        + ((dtime >> 5) & 63) * 60
-        + ((dtime << 1) & 0x3E);
-    u32::try_from(secs).unwrap_or(0)
+    let (dtime, ddate) = (i32::from(dtime), i32::from(ddate));
+    let Some(mut tm) = ffi::local_time(i64::from(write::now())) else {
+        return 0;
+    };
+    tm.tm_year = ((ddate >> 9) & 127) + 1980 - 1900;
+    tm.tm_mon = ((ddate >> 5) & 15) - 1;
+    tm.tm_mday = ddate & 31;
+    tm.tm_hour = (dtime >> 11) & 31;
+    tm.tm_min = (dtime >> 5) & 63;
+    tm.tm_sec = (dtime << 1) & 0x3E;
+    u32::try_from(ffi::make_time(&mut tm).rem_euclid(1 << 32)).unwrap_or(0)
 }
 
-/// `phar_zip_u2d_time`: a time as a DOS time and date, 1980-01-01 for any
-/// earlier one.
+/// `phar_zip_u2d_time`: a time as a DOS time and date in the host's
+/// local time, 1980-01-01 for any earlier one.
+///
+/// The recipe's `TZ` is `UTC` and this engine's `putenv` is the
+/// request's alone, so the witness runs `PHP_BINARY` under each `TZ`,
+/// which is why it is served by the binary (`process`): a zip
+/// written from a tar whose times are fixed, its bytes and its first
+/// entry's DOS time and date under each zone, and one written under
+/// `UTC` read back under another. `mktime` reads the daylight-saving
+/// field of the current time, as php leaves it, so the zone read under
+/// keeps none and the reading holds in every season.
+///
+/// ```php
+/// file_put_contents(__DIR__ . '/zip-time.php', <<<'PHP'
+/// <?php
+/// function member($name, $data, $mtime) {
+///     $h = pack('a100a8a8a8a12a12a8a1a100a6a2a247', $name, '0000644', '', '', sprintf('%011o', strlen($data)), sprintf('%011o', $mtime), '        ', '0', '', 'ustar', '00', '');
+///     $h = substr_replace($h, sprintf('%06o', array_sum(array_map('ord', str_split($h)))) . "\0 ", 148, 8);
+///     return $h . str_pad($data, (strlen($data) + 511) & ~511, "\0");
+/// }
+/// $zip = __DIR__ . '/zip-time.zip';
+/// if ($argv[1] === 'write') {
+///     file_put_contents(__DIR__ . '/zip-time.tar', member('summer.txt', 'hi', 645446096) . member('winter.txt', 'yo', 632827696) . str_repeat("\0", 1024));
+///     (new PharData(__DIR__ . '/zip-time.tar'))->convertToData(Phar::ZIP);
+///     unlink(__DIR__ . '/zip-time.tar');
+///     $bytes = file_get_contents($zip);
+///     echo md5($bytes), ' ', bin2hex(substr($bytes, 10, 4)), "\n";
+/// } else {
+///     foreach (new PharData($zip) as $f) $read[] = $f->getFilename() . ' ' . date('Y-m-d H:i:s', $f->getMTime());
+///     echo implode('; ', $read), "\n";
+/// }
+/// PHP);
+/// foreach ([['UTC', 'write'], ['Asia/Kolkata', 'read'], ['Europe/Amsterdam', 'write'], ['America/New_York', 'write']] as [$tz, $act]) {
+///     if ($act === 'write') @unlink(__DIR__ . '/zip-time.zip');
+///     $h = proc_open([PHP_BINARY, '-n', __DIR__ . '/zip-time.php', $act], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, ['TZ' => $tz]);
+///     echo "$tz $act: ", stream_get_contents($pipes[1]), stream_get_contents($pipes[2]);
+///     proc_close($h);
+/// }
+/// unlink(__DIR__ . '/zip-time.zip');
+/// unlink(__DIR__ . '/zip-time.php');
+/// ```
+/// ```expect process
+/// UTC write: 9571c14880f7d738c64cd5db82f0eca0 5c54cf14
+/// Asia/Kolkata read: summer.txt 1990-06-15 05:04:56; winter.txt 1990-01-20 03:58:16
+/// Europe/Amsterdam write: 83eb9278b589f9e0013d39074d7af178 5c64cf14
+/// America/New_York write: 16a684fe1046f279308e9ab41bb929fe 5c34cf14
+/// ```
 fn u2d_time(time: u32) -> (u16, u16) {
-    let secs = i64::from(time);
-    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
-    let rem = secs.rem_euclid(86_400);
-    if year < 1980 {
-        return (0, (1 << 5) + 1);
+    match ffi::local_time(i64::from(time)) {
+        Some(tm) if tm.tm_year >= 80 => {
+            let cdate = ((tm.tm_year + 1900 - 1980) << 9) + ((tm.tm_mon + 1) << 5) + tm.tm_mday;
+            let ctime = (tm.tm_hour << 11) + (tm.tm_min << 5) + (tm.tm_sec >> 1);
+            (
+                u16::try_from(ctime & 0xFFFF).unwrap_or(0),
+                u16::try_from(cdate & 0xFFFF).unwrap_or(0),
+            )
+        }
+        _ => (0, (1 << 5) + 1),
     }
-    let cdate = ((year - 1980) << 9) + (month << 5) + day;
-    let ctime = ((rem / 3600) << 11) + (((rem % 3600) / 60) << 5) + ((rem % 60) >> 1);
-    (
-        u16::try_from(ctime & 0xFFFF).unwrap_or(0),
-        u16::try_from(cdate & 0xFFFF).unwrap_or(0),
-    )
 }
 
 /// `phar_find_eocd`: the end of central directory record, searched

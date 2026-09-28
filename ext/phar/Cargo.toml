@@ -21,6 +21,9 @@ php_ext = { path = "../../crates/php_ext" }
 php_ext_standard = { path = "../standard" }
 php_ext_hash = { path = "../hash" }
 php_ext_spl = { path = "../spl" }
+# `localtime_r(3)` and `mktime(3)`, which zip.c converts DOS times
+# through, in `src/ffi/` alone (`unsafe.homes`).
+libc = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

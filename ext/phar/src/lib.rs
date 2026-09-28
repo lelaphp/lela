@@ -10,7 +10,10 @@
 //! on ext/zlib's stream filters and signatures on ext/hash, as php's do;
 //! bz2 is not in the bundle, so what needs it is refused as php refuses
 //! it without bz2.
-#![forbid(unsafe_code)]
+//!
+//! The C library's local time, which zip entries' DOS times are read and
+//! written in, is bound in [`ffi`], the crate's one home of `unsafe`.
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -31,6 +34,7 @@ mod build;
 mod convert;
 mod entry;
 mod extract;
+mod ffi;
 mod fileinfo;
 mod intercept;
 mod object;
