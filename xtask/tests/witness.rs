@@ -23,7 +23,7 @@ use xtask::manifest::Manifest;
 use xtask::oracle::Promise;
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
-use xtask::witness::{self, Ask};
+use xtask::witness::{self, Ask, Scope};
 
 mod common;
 use common::scratch_workspace;
@@ -127,6 +127,7 @@ fn run(root: &Path, registry: &Registry, accept: bool) -> Reading {
             crates: vec!["ext/fixture".to_owned()],
             accept,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap();
@@ -172,6 +173,97 @@ fn a_witness_whose_bytes_are_the_oracle_s_passes() {
     assert_eq!(count(&reading, "passed"), 1);
     assert_eq!(count(&reading, "failed"), 0);
     assert_eq!(count(&reading, "missing"), 0);
+}
+
+/// A fence that prints `1` on `name`, opted in to the status `--accept`
+/// captures.
+fn bare(name: &str) -> String {
+    format!(
+        "/// ```php\n/// echo 1;\n/// ```\n/// ```expect exit\n/// 1\n/// ```\npub fn {name}() {{}}\n"
+    )
+}
+
+/// `--file` and `--item` narrow the run and `--accept` to the fences they
+/// name (#1146): of two bare fences, one in each file of the crate, a
+/// narrowed accept pins the named one and leaves the other's line as it
+/// stood, and the run judges one witness and counts no coverage.
+#[test]
+fn file_and_item_narrow_the_run_and_accept_to_the_named_fences() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = scratch("narrow", &bare("one"));
+    fs::write(root.join("ext/fixture/src/other.rs"), bare("two")).unwrap();
+    let narrowed = |scope: Scope| {
+        let readings = witness::run(
+            &root,
+            &fixture_manifest(),
+            &registry(""),
+            &Ask {
+                crates: vec!["ext/fixture".to_owned()],
+                accept: true,
+                scope,
+                ..Ask::default()
+            },
+        )
+        .unwrap();
+        let reading = readings.into_iter().next().unwrap();
+        assert_eq!(count(&reading, "run"), 1, "{reading:#?}");
+        assert_eq!(count(&reading, "accepted"), 1, "{reading:#?}");
+        assert_eq!(count(&reading, "subjects"), 0, "{reading:#?}");
+    };
+    let pinned = |file: &str| {
+        !fs::read_to_string(root.join("ext/fixture/src").join(file))
+            .unwrap()
+            .contains("```expect exit\n")
+    };
+    narrowed(Scope::File(PathBuf::from("src/other.rs")));
+    assert!(pinned("other.rs") && !pinned("lib.rs"));
+    narrowed(Scope::Item("one".to_owned()));
+    assert!(pinned("lib.rs"));
+}
+
+/// A narrowed run covers fewer fences than the crate, so what it judged
+/// is printed and no reading is written (#1146): the command over the
+/// fixture's one item leaves the store without a witness reading of the
+/// crate, and an item no fence stands on is an error naming it.
+#[test]
+fn a_narrowed_run_writes_no_reading() {
+    let root = scratch("narrow-store", &bare("one"));
+    let pin = manifest().oracle.pin;
+    fs::write(
+        root.join("seams.toml"),
+        format!(
+            "[oracle]\npin = \"{pin}\"\n[budget]\n{}[[crate]]\nname = \"ext/fixture\"\nbudget = 1000\n",
+            ["total", "new", "docs", "harness", "lock_packages", "clean_build_release_s", "api_items", "bindings"]
+                .map(|key| format!("{key} = 1000\n"))
+                .concat()
+        ),
+    )
+    .unwrap();
+    let xtask = |item: &str| {
+        Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("--root")
+            .arg(root.path())
+            .args(["witness", "--crate", "ext/fixture", "--item", item])
+            .output()
+            .unwrap()
+    };
+    let out = xtask("one");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("witness: a run narrowed to the fences on one writes no reading"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let store = Store::of_workspace(root.path());
+    assert!(store.read("witness", "ext/fixture").unwrap().is_none());
+
+    let out = xtask("nope");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no fence stands on nope"), "{stderr}");
+    assert!(store.read("witness", "ext/fixture").unwrap().is_none());
 }
 
 #[test]
@@ -319,6 +411,7 @@ fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
                 crates: vec!["ext/pcre".to_owned()],
                 accept: false,
                 staged: false,
+                ..Ask::default()
             },
         )
         .unwrap();
@@ -376,6 +469,7 @@ fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
                 crates: vec!["ext/pcre".to_owned()],
                 accept: false,
                 staged: false,
+                ..Ask::default()
             },
         )
         .unwrap();
@@ -422,6 +516,7 @@ fn a_native_under_a_cfg_the_target_denies_is_no_subject() {
             crates: vec!["ext/pcre".to_owned()],
             accept: false,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap();
@@ -482,6 +577,7 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_fails_the_crate_and_names_it()
                 crates: vec!["ext/pcre".to_owned()],
                 accept: false,
                 staged: false,
+                ..Ask::default()
             },
         )
         .unwrap();
@@ -523,6 +619,7 @@ fn a_fence_the_oracle_does_not_meet_fails_the_crate() {
             crates: vec!["ext/pcre".to_owned()],
             accept: false,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap();
@@ -550,6 +647,7 @@ fn a_crate_whose_witnesses_cannot_run_for_want_of_the_oracle_is_a_skip_never_a_p
             crates: vec!["ext/fixture".to_owned()],
             accept: false,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap();
@@ -789,6 +887,7 @@ fn a_crate_with_no_witness_and_the_oracle_absent_is_a_skip_that_says_so() {
             crates: vec!["ext/fixture".to_owned()],
             accept: false,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap();
@@ -827,6 +926,7 @@ fn a_crate_with_no_witness_under_a_drifted_oracle_refuses_the_run() {
             crates: vec!["ext/fixture".to_owned()],
             accept: false,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap_err()
@@ -855,6 +955,7 @@ fn a_kernel_without_a_witness_fails_whether_or_not_the_oracle_is_here() {
             crates: vec!["ext/fixture".to_owned()],
             accept: false,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap();
@@ -896,6 +997,7 @@ fn the_instrument_writes_one_reading_per_crate_and_names_an_unknown_one() {
             crates: vec!["php_proto".to_owned()],
             accept: false,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap();
@@ -910,6 +1012,7 @@ fn the_instrument_writes_one_reading_per_crate_and_names_an_unknown_one() {
             crates: vec!["php_nope".to_owned()],
             accept: false,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap_err()
@@ -928,6 +1031,7 @@ fn the_harness_crate_carries_no_witness_of_its_own() {
             crates: vec!["xtask".to_owned()],
             accept: false,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap();
@@ -986,6 +1090,7 @@ fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
             crates: vec!["ext/pcre".to_owned()],
             accept: false,
             staged: false,
+            ..Ask::default()
         },
     )
     .unwrap();
@@ -1014,6 +1119,7 @@ fn staged_narrows_the_run_to_the_crates_with_a_staged_change() {
                 crates,
                 accept: false,
                 staged: true,
+                ..Ask::default()
             },
         )
         .unwrap()

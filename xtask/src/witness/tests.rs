@@ -75,6 +75,7 @@ fn judged(file: &Path, text: &str, registry: &Registry, accept: bool) -> Tally {
         crates: Vec::new(),
         accept,
         staged: false,
+        ..Ask::default()
     };
     let manifest = manifest();
     let tally = judge(

@@ -329,6 +329,7 @@ usage::scope_of
 vocab::hold
 vocab::run
 witness::Ask
+witness::Scope
 witness::run
 worktree::add
 worktree::retire

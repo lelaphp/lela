@@ -2361,7 +2361,7 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
         &Ask {
             crates: vec![CRATE.to_owned()],
             accept: true,
-            staged: false,
+            ..Ask::default()
         },
     )
     .unwrap();
