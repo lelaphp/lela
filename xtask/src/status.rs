@@ -23,6 +23,7 @@ use crate::git::git;
 use crate::manifest::{Manifest, Measure, SCRIPTS, Week};
 use crate::oracle::{PROMISE_VARIABLE, Pin, TREE_VARIABLE};
 use crate::permit;
+use crate::phpt;
 use crate::port_map;
 use crate::reading::{self, Log, Reading, Store};
 use crate::sources::NOT_YET_CREATED;
@@ -85,11 +86,10 @@ pub fn render(
         Section::Divergence => return divergence(registry, format, uncut),
         Section::Phpt => {
             let rows = fold_uncreated(standing(store, root)?, "scope")?;
-            let rows = match format {
-                Format::Md => outermost(rows),
-                Format::Json => rows,
-            };
-            (rows, INSTRUMENT)
+            match format {
+                Format::Md => (compared(outermost(rows)), PHPT),
+                Format::Json => (rows, INSTRUMENT),
+            }
         }
         Section::Witness => (
             fold_uncreated(instrument(&readings, "witness"), "scope")?,
@@ -190,7 +190,7 @@ pub fn session(
             let _ = write!(
                 facts,
                 "\n## permits this session\n\n{}",
-                table(PERMITS, &rows)
+                table(THIS_SESSION, &rows)
             );
         }
         if let Some(note) = log.unreadable_note() {
@@ -596,6 +596,46 @@ fn outermost(rows: Vec<Row>) -> Vec<Row> {
                 .any(|other| *other != own && own.starts_with(&format!("{other}/")))
         })
         .collect()
+}
+
+/// The comparisons a subset's run is read beside, each folded into the
+/// subset's own row as a column: the regression verdict against the base
+/// and the runner's control under the oracle.
+const COMPARISONS: [&str; 2] = [phpt::against::SCOPE, phpt::CONTROL];
+
+/// The counts that size a run rather than judge it; the subset's row
+/// carries them, so a comparison's cell leaves them out.
+const SIZE: [&str; 7] = [
+    "passed", "percent", "run", "skipped", "tests", "unread", "xfailed",
+];
+
+/// The phpt rows as Markdown: one per subset, each comparison folded into
+/// its subset's row (#1210). A comparison is its status and the numbers
+/// that judge, `held=4833` against the base, `borked=4 failed=2` under the
+/// oracle; a comparison with no subset row stays a row of its own. The
+/// message is a failing row's, the scope it repeats cut off, since a
+/// passing row's says what its numbers say. So a subset costs one row of
+/// the local facts, not three.
+fn compared(rows: Vec<Row>) -> Vec<Row> {
+    let scope = |row: &Row| row.fact("scope");
+    let scopes: BTreeSet<String> = rows.iter().map(scope).collect();
+    let of = |s: &str| {
+        let (base, key) = s.rsplit_once('@')?;
+        (COMPARISONS.contains(&&s[base.len()..]) && scopes.contains(base))
+            .then(|| (base.to_owned(), key.to_owned()))
+    };
+    let (folded, mut kept): (Vec<Row>, Vec<Row>) =
+        rows.into_iter().partition(|row| of(&scope(row)).is_some());
+    for row in folded {
+        let (Some((base, key)), Some(r)) = (of(&scope(&row)), &row.reading) else {
+            continue;
+        };
+        let cell = format!("{} {}", r.status.as_str(), row.numbers_but(&SIZE));
+        if let Some(own) = kept.iter_mut().find(|k| scope(k) == base) {
+            own.facts.insert(key, json!(cell.trim_end()));
+        }
+    }
+    kept
 }
 
 /// The `track` section: the last run of `xtask track work`, read off the
@@ -1241,6 +1281,30 @@ const INSTRUMENT: Columns = (&["scope", "reading", "numbers", "message"], |r| {
     vec![r.fact("scope"), r.status(), r.numbers(), r.message()]
 });
 
+/// The `phpt` section as Markdown, after [`compared`].
+const PHPT: Columns = (
+    &[
+        "scope", "reading", "numbers", "against", "control", "message",
+    ],
+    |r| {
+        let failing = r
+            .reading
+            .as_ref()
+            .filter(|x| x.status != reading::Status::Pass);
+        vec![
+            r.fact("scope"),
+            r.status(),
+            r.numbers(),
+            r.fact("against"),
+            r.fact("control"),
+            failing.map_or_else(String::new, |x| {
+                let own = format!("{}: ", x.scope);
+                clipped(x.message.strip_prefix(&own).unwrap_or(&x.message))
+            }),
+        ]
+    },
+);
+
 /// The first eight characters of a session id, enough to tell sessions
 /// apart in a row.
 fn short(id: &str) -> &str {
@@ -1353,6 +1417,12 @@ const PERMITS: Columns = (
         ]
     },
 );
+
+/// The rules this session fired, each with its count: the rest of each
+/// row is the local facts' `permits` section already (#1210).
+const THIS_SESSION: Columns = (&["rule", "this session"], |r| {
+    vec![r.fact("rule"), r.fact("this_session")]
+});
 
 const BUNDLE: Columns = (
     &["crate", "order", "extensions", "reading", "message"],
