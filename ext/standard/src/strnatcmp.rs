@@ -2,7 +2,9 @@
 //! comparison as php carries it, `strnatcmp_ex` with `compare_left`
 //! for digits that start with a zero and `compare_right` for one that
 //! does not, behind `strnatcmp` and `strnatcasecmp` here and
-//! `SORT_NATURAL` once the sorts read it.
+//! `SORT_NATURAL` once the sorts read it; spaces, digits and capitals
+//! are `isspace(3)`'s, `isdigit(3)`'s and `toupper(3)`'s under the
+//! thread's `LC_CTYPE`.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -11,9 +13,16 @@ use std::cmp::Ordering;
 use php_ext::attr::php_function;
 use php_ext::values::PhpString;
 
-/// C's `isspace` under the C locale.
-const fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+use crate::ffi::locale::{self as c, Class};
+
+/// `isspace(3)` under the thread's `LC_CTYPE`.
+fn is_space(byte: u8) -> bool {
+    c::is(Class::Space, byte)
+}
+
+/// `isdigit(3)` under the thread's `LC_CTYPE`.
+fn is_digit(byte: u8) -> bool {
+    c::is(Class::Digit, byte)
 }
 
 /// `compare_right`: the longer span of digits wins, else the first
@@ -21,8 +30,8 @@ const fn is_space(c: u8) -> bool {
 fn compare_right(a: &[u8], ap: &mut usize, b: &[u8], bp: &mut usize) -> i64 {
     let mut bias = 0;
     loop {
-        let da = *ap < a.len() && a[*ap].is_ascii_digit();
-        let db = *bp < b.len() && b[*bp].is_ascii_digit();
+        let da = *ap < a.len() && is_digit(a[*ap]);
+        let db = *bp < b.len() && is_digit(b[*bp]);
         match (da, db) {
             (false, false) => return bias,
             (false, true) => return -1,
@@ -45,8 +54,8 @@ fn compare_right(a: &[u8], ap: &mut usize, b: &[u8], bp: &mut usize) -> i64 {
 /// `compare_left`: left-aligned digits, the first difference wins.
 fn compare_left(a: &[u8], ap: &mut usize, b: &[u8], bp: &mut usize) -> i64 {
     loop {
-        let da = *ap < a.len() && a[*ap].is_ascii_digit();
-        let db = *bp < b.len() && b[*bp].is_ascii_digit();
+        let da = *ap < a.len() && is_digit(a[*ap]);
+        let db = *bp < b.len() && is_digit(b[*bp]);
         match (da, db) {
             (false, false) => return 0,
             (false, true) => return -1,
@@ -75,11 +84,11 @@ pub(super) fn strnatcmp_ex(a: &[u8], b: &[u8], fold: bool) -> i64 {
     let at = |s: &[u8], i: usize| s.get(i).copied().unwrap_or(0);
     let (mut ap, mut bp) = (0usize, 0usize);
     let (mut ca, mut cb) = (a[0], b[0]);
-    while ca == b'0' && ap + 1 < a.len() && a[ap + 1].is_ascii_digit() {
+    while ca == b'0' && ap + 1 < a.len() && is_digit(a[ap + 1]) {
         ap += 1;
         ca = a[ap];
     }
-    while cb == b'0' && bp + 1 < b.len() && b[bp + 1].is_ascii_digit() {
+    while cb == b'0' && bp + 1 < b.len() && is_digit(b[bp + 1]) {
         bp += 1;
         cb = b[bp];
     }
@@ -92,7 +101,7 @@ pub(super) fn strnatcmp_ex(a: &[u8], b: &[u8], fold: bool) -> i64 {
             bp += 1;
             cb = at(b, bp);
         }
-        if ca.is_ascii_digit() && cb.is_ascii_digit() {
+        if is_digit(ca) && is_digit(cb) {
             let result = if ca == b'0' || cb == b'0' {
                 compare_left(a, &mut ap, b, &mut bp)
             } else {
@@ -112,8 +121,8 @@ pub(super) fn strnatcmp_ex(a: &[u8], b: &[u8], fold: bool) -> i64 {
             }
         }
         if fold {
-            ca = ca.to_ascii_uppercase();
-            cb = cb.to_ascii_uppercase();
+            ca = c::to_upper(ca);
+            cb = c::to_upper(cb);
         }
         match ca.cmp(&cb) {
             Ordering::Less => return -1,
@@ -163,6 +172,22 @@ pub(super) fn strnatcmp(string1: PhpString, string2: PhpString) -> i64 {
 /// ```
 /// ```expect
 /// int(0)
+/// int(-1)
+/// int(1)
+/// int(0)
+/// ```
+///
+/// The capitals and the spaces are the request's `LC_CTYPE`'s: `\xe9`
+/// folds to `\xc9` under an ISO-8859-1 locale, and macOS's `C.UTF-8`
+/// skips `\xa0` as a space.
+///
+/// ```php
+/// foreach (['C', 'fr_FR.ISO8859-1'] as $l) { setlocale(LC_CTYPE, $l); var_dump(strnatcasecmp("\xe9t\xe92", "\xc9T\xc910"), strnatcmp("a\xa01", "a1")); }
+/// setlocale(LC_CTYPE, 'C.UTF-8'); var_dump(strnatcmp("a\xa01", "a1"));
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
 /// int(-1)
 /// int(1)
 /// int(0)

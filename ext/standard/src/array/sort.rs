@@ -544,6 +544,16 @@ fn natsort(req: &mut Request, array: Ref<PhpArray>) -> Result<True, Thrown> {
 /// bool(true)
 /// {"3":"img1.png","2":"IMG2.png","1":"img10.png","0":"img12.png"}
 /// ```
+///
+/// The fold is `toupper(3)`'s under the request's `LC_CTYPE`.
+///
+/// ```php
+/// foreach (['C', 'fr_FR.ISO8859-1'] as $l) { setlocale(LC_CTYPE, $l); $a = ["\xe9a", "\xc9b", "Ea"]; natcasesort($a); echo implode(' ', array_map('bin2hex', $a)), "\n"; }
+/// ```
+/// ```expect
+/// 4561 c962 e961
+/// 4561 e961 c962
+/// ```
 #[php_function]
 fn natcasesort(req: &mut Request, array: Ref<PhpArray>) -> Result<True, Thrown> {
     natural_sort(req, &array, true)

@@ -1,9 +1,10 @@
 //! `php_fgetcsv` (`Z/ext/standard/file.c:1865`), the one CSV reader
 //! behind `str_getcsv` here and `fgetcsv` in `file`,
 //! with `php_csv_handle_escape_argument` beside it. The reader walks a
-//! byte at a time: the delimiter, the enclosure and the escape are
-//! single bytes, and under the C locale `php_mblen` never joins one of
-//! them into a longer character.
+//! character at a time by `php_mblen` under the thread's `LC_CTYPE`, so
+//! a delimiter, enclosure or escape byte inside a multibyte character
+//! is part of that character, and skips leading space by `isspace(3)`
+//! under the same locale.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -12,6 +13,8 @@ use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
+
+use crate::ffi::locale::{self as c, Class, Mblen};
 
 /// `PHP_CSV_NO_ESCAPE`: the empty `$escape`.
 pub(super) const NO_ESCAPE: Option<u8> = None;
@@ -45,18 +48,34 @@ pub(super) fn escape_of(
 }
 
 /// `php_fgetcsv_lookup_trailing_spaces(ptr, len)`: where the line ends
-/// once a trailing `\n`, `\r` or `\r\n` is set aside.
-fn trailing(buf: &[u8], len: usize) -> usize {
-    match buf[..len] {
-        [.., b'\r', b'\n'] => len - 2,
-        [.., b'\n' | b'\r'] => len - 1,
-        _ => len,
+/// once a trailing `\n`, `\r` or `\r\n` is set aside, read off the first
+/// bytes of its last two valid characters.
+fn trailing(mblen: &mut Mblen, buf: &[u8]) -> usize {
+    let mut last = [0u8; 2];
+    let mut at = 0;
+    while at < buf.len() {
+        let inc = if buf[at] == 0 {
+            1
+        } else {
+            mblen.len(&buf[at..])
+        };
+        match usize::try_from(inc) {
+            Ok(0) => break,
+            Ok(inc) => {
+                last = [last[1], buf[at]];
+                at += inc;
+            }
+            Err(_) => {
+                mblen.reset();
+                at += 1;
+            }
+        }
     }
-}
-
-/// C's `isspace` under the C locale.
-const fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+    match last {
+        [b'\r', b'\n'] => at - 2,
+        [_, b'\n' | b'\r'] => at - 1,
+        _ => at,
+    }
 }
 
 /// `php_fgetcsv(stream, delimiter, enclosure, escape, len, buf)`
@@ -104,19 +123,27 @@ pub fn fgetcsv(
     let span = |buf: &[u8], from: usize, to: usize| -> Vec<u8> {
         (from..to).map(|i| at(buf, i)).collect()
     };
+    // `inc_len`: the character at `bptr` before `limit`, 0 at `limit`.
+    let step = |mblen: &mut Mblen, buf: &[u8], bptr: usize, limit: usize| -> isize {
+        match buf.get(bptr..limit) {
+            Some([0, ..]) => 1,
+            Some(rest) if !rest.is_empty() => mblen.len(rest),
+            _ => 0,
+        }
+    };
+    let mut mblen = Mblen::new();
     let mut buf = first.to_vec();
-    let mut limit = trailing(&buf, buf.len());
+    let mut limit = trailing(&mut mblen, &buf);
     let mut line_end = limit;
     let mut values = Vec::new();
     let mut bptr = 0usize;
     let mut first_field = true;
     loop {
-        let step = |bptr: usize, limit: usize| usize::from(bptr < limit);
         let mut field: Vec<u8> = Vec::new();
-        let mut inc_len = step(bptr, limit);
+        let mut inc_len = step(&mut mblen, &buf, bptr, limit);
         if inc_len == 1 {
             let mut tmp = bptr;
-            while at(&buf, tmp) != delimiter && is_space(at(&buf, tmp)) {
+            while at(&buf, tmp) != delimiter && c::is(Class::Space, at(&buf, tmp)) {
                 tmp += 1;
             }
             if at(&buf, tmp) == enclosure && tmp < limit {
@@ -127,7 +154,8 @@ pub fn fgetcsv(
             return None;
         }
         first_field = false;
-        if inc_len != 0 && at(&buf, bptr) == enclosure {
+        let enclosed = inc_len != 0 && at(&buf, bptr) == enclosure;
+        let hunk = if enclosed {
             let mut state = 0u8;
             bptr += 1;
             let mut hunk = bptr;
@@ -135,86 +163,121 @@ pub fn fgetcsv(
             // enclosure's `inc_len`, as php's does, so a line that ends
             // on the enclosure steps once past its end.
             loop {
-                if inc_len == 0 {
-                    if state == 2 {
-                        field.extend_from_slice(&span(&buf, hunk, bptr.saturating_sub(1)));
-                        hunk = bptr;
-                        break;
-                    }
-                    if state == 1 {
-                        field.extend_from_slice(&span(&buf, hunk, bptr));
-                        hunk = bptr;
-                    }
-                    if hunk != line_end {
-                        field.extend_from_slice(&span(&buf, hunk, bptr));
-                        hunk = bptr;
-                    }
-                    field.extend_from_slice(buf.get(line_end..).unwrap_or_default());
-                    if let Some(next) = more() {
-                        buf = next;
-                        bptr = 0;
-                        hunk = 0;
-                        limit = trailing(&buf, buf.len());
-                        line_end = limit;
-                        state = 0;
-                        inc_len = step(bptr, limit);
-                        continue;
-                    }
-                    // The enclosure is unterminated.
-                    if bptr > limit {
-                        if hunk == bptr {
-                            hunk -= 1;
-                        }
-                        bptr -= 1;
-                    }
-                    break;
-                }
-                match state {
-                    1 => {
-                        bptr += 1;
-                        state = 0;
-                    }
-                    2 => {
-                        if at(&buf, bptr) != enclosure {
+                match inc_len {
+                    0 => {
+                        if state == 2 {
                             field.extend_from_slice(&span(&buf, hunk, bptr.saturating_sub(1)));
                             hunk = bptr;
                             break;
                         }
-                        field.extend_from_slice(&span(&buf, hunk, bptr));
-                        bptr += 1;
-                        hunk = bptr;
+                        if state == 1 {
+                            field.extend_from_slice(&span(&buf, hunk, bptr));
+                            hunk = bptr;
+                        }
+                        if hunk != line_end {
+                            field.extend_from_slice(&span(&buf, hunk, bptr));
+                            hunk = bptr;
+                        }
+                        field.extend_from_slice(buf.get(line_end..).unwrap_or_default());
+                        let Some(next) = more() else {
+                            // The enclosure is unterminated.
+                            if bptr > limit {
+                                if hunk == bptr {
+                                    hunk -= 1;
+                                }
+                                bptr -= 1;
+                            }
+                            break;
+                        };
+                        buf = next;
+                        bptr = 0;
+                        hunk = 0;
+                        limit = trailing(&mut mblen, &buf);
+                        line_end = limit;
                         state = 0;
                     }
-                    _ => {
-                        if at(&buf, bptr) == enclosure {
-                            state = 2;
-                        } else if escape.is_some_and(|e| at(&buf, bptr) == e) {
-                            state = 1;
+                    ..=1 => {
+                        if inc_len < 0 {
+                            mblen.reset();
                         }
-                        bptr += 1;
+                        match state {
+                            1 => {
+                                bptr += 1;
+                                state = 0;
+                            }
+                            2 => {
+                                if at(&buf, bptr) != enclosure {
+                                    field.extend_from_slice(&span(
+                                        &buf,
+                                        hunk,
+                                        bptr.saturating_sub(1),
+                                    ));
+                                    hunk = bptr;
+                                    break;
+                                }
+                                field.extend_from_slice(&span(&buf, hunk, bptr));
+                                bptr += 1;
+                                hunk = bptr;
+                                state = 0;
+                            }
+                            _ => {
+                                if at(&buf, bptr) == enclosure {
+                                    state = 2;
+                                } else if escape.is_some_and(|e| at(&buf, bptr) == e) {
+                                    state = 1;
+                                }
+                                bptr += 1;
+                            }
+                        }
+                    }
+                    wide => {
+                        let wide = usize::try_from(wide).unwrap_or(1);
+                        match state {
+                            2 => {
+                                field.extend_from_slice(&span(&buf, hunk, bptr.saturating_sub(1)));
+                                hunk = bptr;
+                                break;
+                            }
+                            1 => {
+                                bptr += wide;
+                                field.extend_from_slice(&span(&buf, hunk, bptr));
+                                hunk = bptr;
+                                state = 0;
+                            }
+                            _ => bptr += wide,
+                        }
                     }
                 }
-                inc_len = step(bptr, limit);
+                inc_len = step(&mut mblen, &buf, bptr, limit);
             }
-            // Up to the delimiter.
-            loop {
-                if inc_len == 0 || at(&buf, bptr) == delimiter {
-                    break;
-                }
-                bptr += 1;
-                inc_len = step(bptr, limit);
-            }
-            field.extend_from_slice(&span(&buf, hunk, bptr));
-            bptr += inc_len;
+            hunk
         } else {
             // 2B: the bare field.
-            let hunk = bptr;
-            while inc_len != 0 && at(&buf, bptr) != delimiter {
-                bptr += 1;
-                inc_len = step(bptr, limit);
+            bptr
+        };
+        // Up to the delimiter.
+        loop {
+            match inc_len {
+                0 => break,
+                ..=1 => {
+                    if inc_len < 0 {
+                        inc_len = 1;
+                        mblen.reset();
+                    }
+                    if at(&buf, bptr) == delimiter {
+                        break;
+                    }
+                }
+                _ => {}
             }
-            field.extend_from_slice(&span(&buf, hunk, bptr));
-            let end = trailing(&field, field.len());
+            bptr += usize::try_from(inc_len).unwrap_or(1);
+            inc_len = step(&mut mblen, &buf, bptr, limit);
+        }
+        field.extend_from_slice(&span(&buf, hunk, bptr));
+        if enclosed {
+            bptr += usize::try_from(inc_len).unwrap_or(0);
+        } else {
+            let end = trailing(&mut mblen, &field);
             field.truncate(end);
             if at(&buf, bptr) == delimiter {
                 bptr += 1;
@@ -294,6 +357,26 @@ pub fn fgetcsv(
 /// str_getcsv(): Argument #2 ($separator) must be a single character
 /// str_getcsv(): Argument #3 ($enclosure) must be a single character
 /// str_getcsv(): Argument #4 ($escape) must be empty or a single character
+/// ```
+///
+/// The walk is by `php_mblen`'s characters under the request's
+/// `LC_CTYPE`: a Shift-JIS character that ends in the delimiter's byte
+/// does not split the field.
+///
+/// ```php
+/// foreach (['C', 'ja_JP.SJIS'] as $l) { setlocale(LC_CTYPE, $l); var_dump(array_map('bin2hex', str_getcsv("\x95\\,x", "\\", '"', ""))); }
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   string(2) "95"
+///   [1]=>
+///   string(4) "2c78"
+/// }
+/// array(1) {
+///   [0]=>
+///   string(8) "955c2c78"
+/// }
 /// ```
 #[php_function]
 pub(super) fn str_getcsv(

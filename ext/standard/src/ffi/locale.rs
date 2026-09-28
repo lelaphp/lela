@@ -8,7 +8,9 @@
 //! under whatever the calling thread has installed, so a request reads
 //! its own locale and never another's, and the process's locale, `C`
 //! with the `LC_CTYPE` `php_module_startup` set, is what a thread has
-//! before any request installs one.
+//! before any request installs one. The byte-at-a-time readers of
+//! `LC_CTYPE`, `<ctype.h>`'s classes and `toupper(3)` in [`is`] and
+//! [`to_upper`] and `php_mblen` in [`Mblen`], are the C library's too.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
@@ -303,5 +305,112 @@ impl Conventions {
             grouping: Vec::new(),
             mon_grouping: Vec::new(),
         }
+    }
+}
+
+/// One of `<ctype.h>`'s classes that ext/standard's natives read of a
+/// byte under the thread's `LC_CTYPE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Class {
+    Alnum,
+    Alpha,
+    Digit,
+    Punct,
+    Space,
+}
+
+/// `isalnum((unsigned char) c)` and the rest: whether `byte` is in
+/// `class` under the thread's `LC_CTYPE`.
+pub(crate) fn is(class: Class, byte: u8) -> bool {
+    let test: unsafe extern "C" fn(c_int) -> c_int = match class {
+        Class::Alnum => libc::isalnum,
+        Class::Alpha => libc::isalpha,
+        Class::Digit => libc::isdigit,
+        Class::Punct => libc::ispunct,
+        Class::Space => libc::isspace,
+    };
+    // SAFETY: every class function takes any value an `unsigned char`
+    // holds and reads the thread's locale, nothing else.
+    unsafe { test(c_int::from(byte)) != 0 }
+}
+
+/// `toupper((unsigned char) c)` under the thread's `LC_CTYPE`, as the
+/// `unsigned char` php stores it in.
+pub(crate) fn to_upper(byte: u8) -> u8 {
+    // SAFETY: `toupper` takes any value an `unsigned char` holds and
+    // reads the thread's locale, nothing else.
+    let upper = unsafe { libc::toupper(c_int::from(byte)) };
+    upper.to_le_bytes()[0]
+}
+
+/// `mbstate_t`, as large and as aligned as the largest the platforms
+/// lay out (macOS's 128-byte union with a `long long`; glibc's is 8
+/// bytes): the C library reads and writes it and nothing here does.
+#[repr(C, align(8))]
+struct MbState([u8; 128]);
+
+unsafe extern "C" {
+    /// `mbrlen(3)`, which the `libc` crate does not declare.
+    fn mbrlen(s: *const c_char, n: usize, ps: *mut MbState) -> usize;
+    /// `MB_CUR_MAX` as macOS's and FreeBSD's `<stdlib.h>` define it.
+    #[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+    fn ___mb_cur_max() -> c_int;
+    /// `MB_CUR_MAX` as glibc's and musl's `<stdlib.h>` define it.
+    #[cfg(not(any(target_vendor = "apple", target_os = "freebsd")))]
+    fn __ctype_get_mb_cur_max() -> usize;
+}
+
+/// `MB_CUR_MAX`: the most bytes a character takes under the thread's
+/// `LC_CTYPE`.
+fn mb_cur_max() -> usize {
+    #[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+    // SAFETY: takes nothing and reads the thread's locale.
+    let max = usize::try_from(unsafe { ___mb_cur_max() }).unwrap_or(1);
+    #[cfg(not(any(target_vendor = "apple", target_os = "freebsd")))]
+    // SAFETY: takes nothing and reads the thread's locale.
+    let max = unsafe { __ctype_get_mb_cur_max() };
+    max
+}
+
+/// `CG(ascii_compatible_locale)` as `zend_update_current_locale`
+/// (`Z/Zend/zend_operators.c:2923`) computes it each time `LC_CTYPE`
+/// moves, read here off the thread's locale when asked: every character
+/// one byte, or a multibyte locale whose `CODESET` is UTF-8.
+pub(crate) fn ascii_compatible() -> bool {
+    if mb_cur_max() <= 1 {
+        return true;
+    }
+    let charmap = langinfo(libc::CODESET);
+    charmap.eq_ignore_ascii_case(b"utf-8") || charmap.eq_ignore_ascii_case(b"utf8")
+}
+
+/// `php_mblen` over one walk, the `mbrlen(3)` arm php's `php_string.h`
+/// takes on a threaded build: the length of the character at the start
+/// of a string under the thread's `LC_CTYPE`, with the shift state
+/// between calls held here, all zero at the start as `php_mb_reset`'s
+/// `memset` leaves `BG(mblen_state)`.
+pub(crate) struct Mblen(MbState);
+
+impl Mblen {
+    /// The state `php_mb_reset` leaves.
+    pub(crate) fn new() -> Mblen {
+        Mblen(MbState([0; 128]))
+    }
+
+    /// `php_mb_reset()`.
+    pub(crate) fn reset(&mut self) {
+        self.0 = MbState([0; 128]);
+    }
+
+    /// `(int) mbrlen(ptr, len, &state)`: the bytes the character at the
+    /// start of `bytes` takes, 0 for a NUL, -1 for no valid character
+    /// and -2 for one `bytes` ends inside.
+    pub(crate) fn len(&mut self, bytes: &[u8]) -> isize {
+        let ptr = bytes.as_ptr().cast::<c_char>();
+        // SAFETY: `mbrlen` reads at most `bytes.len()` bytes from `ptr`,
+        // all of them live, and writes the state this value owns.
+        let len = unsafe { mbrlen(ptr, bytes.len(), &raw mut self.0) };
+        // `(int) mbrlen(...)`: `(size_t) -1` and `-2` are -1 and -2.
+        isize::from_ne_bytes(len.to_ne_bytes())
     }
 }

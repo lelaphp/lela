@@ -1,8 +1,9 @@
 //! The path natives of `string.c`: `basename` over `php_basename`,
 //! `dirname` over `zend_dirname` (`Z/Zend/zend_compile.c:2176`), and
 //! `pathinfo` over both. The separator is `/` alone, php's on a host
-//! that is not Windows, and the locale is ASCII-compatible, so
-//! `php_basename` takes its byte loop.
+//! that is not Windows; `php_basename` walks bytes under a locale whose
+//! characters leave ASCII alone and characters, `php_mblen`'s, under any
+//! other, where a multibyte character may end in a `/` byte.
 
 use php_ext::abi::Union;
 use php_ext::attr::php_function;
@@ -13,24 +14,69 @@ use php_ext::values::{Key, PhpArray, PhpString, Value};
 use super::constants::{
     PATHINFO_ALL, PATHINFO_BASENAME, PATHINFO_DIRNAME, PATHINFO_EXTENSION, PATHINFO_FILENAME,
 };
+use crate::ffi::locale::{self as c, Mblen};
 
-/// `php_basename(s, len, suffix, suffix_len)`: the last component,
-/// trailing slashes dropped, and the suffix taken off when it ends the
-/// component and is shorter than it.
-fn php_basename<'a>(s: &'a [u8], suffix: &[u8]) -> &'a [u8] {
-    let Some(end) = s.iter().rposition(|c| *c != b'/') else {
-        return &[];
+/// `php_basename(s, len, suffix, suffix_len)`
+/// (`Z/ext/standard/string.c:1364`): the last component, trailing
+/// slashes dropped, and the suffix taken off when it ends the component
+/// and is shorter than it. `tempnam` reads it with no suffix.
+pub(crate) fn php_basename<'a>(s: &'a [u8], suffix: &[u8]) -> &'a [u8] {
+    let (start, end) = if c::ascii_compatible() {
+        let Some(end) = s.iter().rposition(|c| *c != b'/') else {
+            return &[];
+        };
+        let start = s[..end]
+            .iter()
+            .rposition(|c| *c == b'/')
+            .map_or(0, |at| at + 1);
+        (start, end + 1)
+    } else {
+        multibyte_span(s)
     };
-    let end = end + 1;
-    let start = s[..end]
-        .iter()
-        .rposition(|c| *c == b'/')
-        .map_or(0, |at| at + 1);
     let name = &s[start..end];
-    if !suffix.is_empty() && suffix.len() < name.len() && name.ends_with(suffix) {
+    if suffix.len() < name.len() && name.ends_with(suffix) {
         return &name[..name.len() - suffix.len()];
     }
     name
+}
+
+/// `php_basename`'s walk under a locale that is not ASCII-compatible:
+/// a character at a time by `php_mblen`, state 0 just after a `/` and
+/// 1 inside a component; an invalid character is one byte, and the
+/// state is reset after it.
+fn multibyte_span(s: &[u8]) -> (usize, usize) {
+    let mut mblen = Mblen::new();
+    let (mut start, mut end) = (0, 0);
+    let mut inside = false;
+    let mut at = 0;
+    while at < s.len() {
+        let inc = if s[at] == 0 { 1 } else { mblen.len(&s[at..]) };
+        let inc = match inc {
+            0 => break,
+            1 if s[at] == b'/' => {
+                if inside {
+                    inside = false;
+                    end = at;
+                }
+                1
+            }
+            inc => {
+                if !inside {
+                    start = at;
+                    inside = true;
+                }
+                usize::try_from(inc).unwrap_or_else(|_| {
+                    mblen.reset();
+                    1
+                })
+            }
+        };
+        at += inc;
+    }
+    if inside {
+        end = at;
+    }
+    (start, end)
 }
 
 /// `zend_dirname(path, len)`: the length the path is cut to, and
@@ -89,6 +135,21 @@ pub(crate) fn zend_dirname(path: &[u8]) -> Vec<u8> {
 /// string(3) "a.d"
 /// string(1) "b"
 /// string(8) "dir\file"
+/// ```
+///
+/// Under a locale that is not ASCII-compatible the walk is by
+/// character: Shift-JIS's `\x95/` is one, and no separator.
+///
+/// ```php
+/// foreach (['C', 'ja_JP.SJIS'] as $l) { setlocale(LC_CTYPE, $l); var_dump(bin2hex(basename("a/\x95/")), bin2hex(basename("\x95/b\x95/", "/")), bin2hex(pathinfo("d/\x95/", PATHINFO_BASENAME))); }
+/// ```
+/// ```expect
+/// string(2) "95"
+/// string(4) "6295"
+/// string(2) "95"
+/// string(4) "952f"
+/// string(8) "952f6295"
+/// string(4) "952f"
 /// ```
 #[php_function]
 pub(super) fn basename(

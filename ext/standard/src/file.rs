@@ -193,6 +193,7 @@ pub(crate) fn on_auto_detect_line_endings(req: &mut Request, value: &[u8]) -> Re
 use std::os::unix::ffi::OsStrExt;
 
 use crate::State;
+use crate::ffi::locale::{self as c, Class};
 use crate::streamsfuncs::{NullContext, context_of};
 use crate::virtual_cwd::MAXPATHLEN;
 
@@ -2140,15 +2141,6 @@ fn copy(
     })
 }
 
-/// `php_basename(s, len, NULL, 0)` (`Z/ext/standard/string.c:1364`)
-/// under the C locale: the last component, trailing slashes dropped.
-fn basename(path: &[u8]) -> &[u8] {
-    let end = path.len() - path.iter().rev().take_while(|b| **b == b'/').count();
-    let path = &path[..end];
-    let start = path.iter().rposition(|b| *b == b'/').map_or(0, |at| at + 1);
-    &path[start..]
-}
-
 /// `tempnam(string $directory, string $prefix): string|false`,
 /// `PHP_FUNCTION(tempnam)` (`Z/ext/standard/file.c:676`): the prefix's
 /// basename, cut to 63 bytes, and a new `0600` file made in the
@@ -2174,7 +2166,7 @@ fn basename(path: &[u8]) -> &[u8] {
 #[php_function]
 fn tempnam(req: &mut Request, directory: Path, prefix: Path) -> Result<OrFalse<PhpString>, Thrown> {
     let (Path(dir), Path(prefix)) = (directory, prefix);
-    let prefix = basename(prefix.as_bytes());
+    let prefix = crate::string::path::php_basename(prefix.as_bytes(), b"");
     let prefix = &prefix[..prefix.len().min(63)];
     Ok(req
         .temporary_name(dir.as_bytes(), prefix)?
@@ -2417,9 +2409,10 @@ impl MetaData {
     /// `php_next_meta_token` (`Z/ext/standard/file.c:2140`), a byte at
     /// a time as php reads it, `eof` read after each byte, so the byte
     /// that brings the stream to its end is dropped as php's loop drops
-    /// it.
+    /// it. A name is `isalnum(3)`'s and `isalpha(3)`'s under the thread's
+    /// `LC_CTYPE`, and `EOF` in neither.
     fn next(&mut self, req: &mut Request) -> Result<MetaToken, Thrown> {
-        let alnum = |ch: i32| u8::try_from(ch).is_ok_and(|c| c.is_ascii_alphanumeric());
+        let alnum = |ch: i32| u8::try_from(ch).is_ok_and(|c| c::is(Class::Alnum, c));
         loop {
             let mut ch = if self.lc.is_some() {
                 0
@@ -2492,7 +2485,7 @@ impl MetaData {
                             break;
                         }
                     }
-                    let alpha = u8::try_from(ch).is_ok_and(|c| c.is_ascii_alphabetic());
+                    let alpha = u8::try_from(ch).is_ok_and(|c| c::is(Class::Alpha, c));
                     if !alpha && ch != i32::from(b'-') {
                         self.lc = Some(ch);
                     }
@@ -2530,6 +2523,24 @@ impl MetaData {
 ///   string(0) ""
 /// }
 /// bool(false)
+/// ```
+///
+/// An unquoted name is `isalnum(3)`'s under the request's `LC_CTYPE`.
+///
+/// ```php
+/// $f = __DIR__ . '/meta-locale.html'; file_put_contents($f, "<meta name=caf\xe9 content=x></head>");
+/// foreach (['C', 'fr_FR.ISO8859-1'] as $l) { setlocale(LC_CTYPE, $l); var_dump(array_map('bin2hex', array_flip(get_meta_tags($f)))); }
+/// unlink($f);
+/// ```
+/// ```expect
+/// array(1) {
+///   ["x"]=>
+///   string(6) "636166"
+/// }
+/// array(1) {
+///   ["x"]=>
+///   string(8) "636166e9"
+/// }
 /// ```
 #[allow(clippy::too_many_lines)] // one C function, kept whole
 #[php_function]
@@ -2985,6 +2996,26 @@ pub fn php_fputcsv(
 ///
 /// Deprecated: fgetcsv(): the $escape parameter must be provided as its default value will change in %s on line 4
 /// fgetcsv(): Argument #2 ($length) must be between 0 and 9223372036854775806
+/// ```
+///
+/// The walk is by `php_mblen`'s characters under the request's
+/// `LC_CTYPE`, as `str_getcsv`'s.
+///
+/// ```php
+/// $f = fopen('php://memory', 'w+'); fwrite($f, "\x95\\,x\n\x95\\,x\n"); rewind($f);
+/// foreach (['C', 'ja_JP.SJIS'] as $l) { setlocale(LC_CTYPE, $l); var_dump(array_map('bin2hex', fgetcsv($f, null, "\\", '"', ""))); }
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   string(2) "95"
+///   [1]=>
+///   string(4) "2c78"
+/// }
+/// array(1) {
+///   [0]=>
+///   string(8) "955c2c78"
+/// }
 /// ```
 #[php_function]
 fn fgetcsv(
