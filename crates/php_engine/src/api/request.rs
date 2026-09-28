@@ -757,6 +757,25 @@ impl Stream {
             .is_some_and(crate::streams::PhpStream::is_dir)
     }
 
+    /// `php_glob_stream_get_count` under `php_stream_is(stream,
+    /// &php_glob_stream_ops)`: how many paths a `glob://` directory lists,
+    /// `None` for a stream that is no glob.
+    #[must_use]
+    pub fn glob_count(self, req: &Request) -> Option<usize> {
+        req.stream_ref(self)?.glob().map(|(_, count)| count)
+    }
+
+    /// `php_glob_stream_get_path`: the directory part of the match the
+    /// glob last handed out, or of its first match or pattern before any
+    /// read; `None` past the last, after a rewind, and for a stream that
+    /// is no glob.
+    #[must_use]
+    pub fn glob_path(self, req: &Request) -> Option<Vec<u8>> {
+        req.stream_ref(self)?
+            .glob()
+            .and_then(|(path, _)| path.map(<[u8]>::to_vec))
+    }
+
     /// `php_stream_readdir`: the next entry's name, `.` and `..` first,
     /// `None` past the last (`readdir` answers `false`).
     pub fn read_dir(self, req: &mut Request) -> Result<Option<PhpString>, Thrown> {
@@ -985,11 +1004,10 @@ pub struct StreamWrapper {
     /// reports as `operation failed`. It is handed the path, the `mode` and
     /// the [`Opening`] php hands it, `REPORT_ERRORS` cleared.
     pub open: Option<fn(&mut Request, &[u8], &[u8], Opening) -> Result<Option<Stream>, Thrown>>,
-    /// `dir_opener`: the directory's entries, in the order `readdir`
-    /// gives them, which the engine serves as a directory stream under
-    /// the wrapper's label (`rewinddir` back to the first); `None` is the
-    /// open that failed.
-    pub open_dir: Option<fn(&mut Request, &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thrown>>,
+    /// `dir_opener`: what the directory lists, which the engine serves
+    /// as a directory stream under the wrapper's label (`rewinddir` back
+    /// to the first); `None` is the open that failed.
+    pub open_dir: Option<fn(&mut Request, &[u8]) -> Result<Option<DirListing>, Thrown>>,
     pub stat: Option<fn(&mut Request, &[u8]) -> Result<Option<PhpArray>, Thrown>>,
     pub unlink: Option<fn(&mut Request, &[u8]) -> Result<bool, Thrown>>,
     pub rename: Option<fn(&mut Request, &[u8], &[u8]) -> Result<bool, Thrown>>,
@@ -999,6 +1017,26 @@ pub struct StreamWrapper {
     /// [`WrapperOp::Owner`] and [`WrapperOp::Group`], with the path as
     /// the program wrote it.
     pub set_stat: Option<fn(&mut Request, &[u8], WrapperOp<'_>) -> Result<bool, Thrown>>,
+}
+
+/// What a wrapper's directory opener lists, which the engine serves as
+/// a directory stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirListing {
+    /// The entries in the order `readdir` hands them out, a wrapper's own
+    /// dir stream (phar's).
+    Names(Vec<Vec<u8>>),
+    /// `php_glob_stream_ops` (`Z/main/streams/glob_wrapper.c`): the paths
+    /// `php_glob` matched, those `open_basedir` refuses left out, and
+    /// the pattern after `glob://`. `readdir` hands out the part of each
+    /// match after its last `/` and keeps the part before it as the
+    /// stream's path (`php_glob_stream_path_split`), which
+    /// [`Stream::glob_path`] reads, as [`Stream::glob_count`] reads how
+    /// many there are.
+    Glob {
+        pattern: Vec<u8>,
+        matches: Vec<Vec<u8>>,
+    },
 }
 
 /// The `options` of `php_stream_open_wrapper_ex` a wrapper's opener

@@ -323,6 +323,7 @@ request::Brigade
 request::BufferHandler
 request::Cast
 request::ContentType
+request::DirListing
 request::EngineWrapper
 request::Execution
 request::ExtensionId
@@ -535,6 +536,8 @@ request::Stream::free
 request::Stream::from_value
 request::Stream::get_line
 request::Stream::get_record
+request::Stream::glob_count
+request::Stream::glob_path
 request::Stream::is_dir
 request::Stream::is_stdio
 request::Stream::meta_data
