@@ -1800,6 +1800,13 @@ impl Value {
         }
     }
 
+    /// `Z_REFCOUNTED`: whether the value carries an owner count at all,
+    /// which a scalar, an interned string and an immutable array do not.
+    #[must_use]
+    pub fn is_refcounted(&self) -> bool {
+        self.to_zval().is_refcounted()
+    }
+
     /// The refcount of a refcounted value, `Z_REFCOUNT`; one for a
     /// scalar, an interned string or an immutable array.
     #[must_use]

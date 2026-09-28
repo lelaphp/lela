@@ -766,6 +766,7 @@ values::Value::bool
 values::Value::deref
 values::Value::float
 values::Value::int
+values::Value::is_refcounted
 values::Value::null
 values::Value::object
 values::Value::refcount

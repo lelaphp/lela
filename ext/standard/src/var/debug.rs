@@ -16,13 +16,15 @@ use super::class_name;
 /// `debug_zval_dump(mixed $value, mixed ...$values): void`, php's
 /// `PHP_FUNCTION(debug_zval_dump)` (`Z/ext/standard/var.c:434`): each
 /// argument dumped at the top level. The refcounts are the engine's, and
-/// read as php's where the engine holds a value as php does. The face
-/// reads an interned string and an immutable array as one owner, as
-/// `zend_string_refcount` does, so a value of one owner is printed as
-/// php prints a string the program wrote, `interned`.
+/// read as php's where the engine holds a value as php does. A string or
+/// an array is `interned` where it is not refcounted (`Z_REFCOUNTED_P`),
+/// an interned string or an immutable array, and a temporary of one
+/// owner is `refcount(1)`.
 ///
 /// ```php
 /// debug_zval_dump(1, 1.5, "lit", null, true, false);
+/// debug_zval_dump(array_fill(0, 2, 0), range(1, 2), str_repeat("ab", 2));
+/// $s = str_repeat("x", 3); debug_zval_dump($s);
 /// ```
 /// ```expect
 /// int(1)
@@ -31,6 +33,52 @@ use super::class_name;
 /// NULL
 /// bool(true)
 /// bool(false)
+/// array(2) packed refcount(1){
+///   [0]=>
+///   int(0)
+///   [1]=>
+///   int(0)
+/// }
+/// array(2) packed refcount(1){
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// string(4) "abab" refcount(1)
+/// string(3) "xxx" refcount(2)
+/// ```
+///
+/// The empty array written `[]` is php's one immutable `zend_empty_array`,
+/// never counted, and an enum case's name is its constant's interned
+/// name.
+///
+/// ```php
+/// enum E { case Bar; }
+/// debug_zval_dump([], E::Bar);
+/// ```
+/// ```expect
+/// array(0) interned {
+/// }
+/// object(E)#1 (1) refcount(2){
+///   ["name"]=>
+///   string(3) "Bar" interned
+/// }
+/// ```
+///
+/// Any other array written in the source is immutable under opcache's model, so it
+/// is `interned` where `php -n` counts its owners.
+///
+/// ```php
+/// debug_zval_dump([1, 2]);
+/// ```
+/// ```expect regime=immutable-literals
+/// array(2) packed interned {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
 /// ```
 ///
 /// `packed` is `HT_IS_PACKED`, how the table is laid out, not whether
@@ -86,13 +134,11 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
         ValueRef::Str(s) => {
             out.extend_from_slice(format!("string({}) \"", s.len()).as_bytes());
             out.extend_from_slice(s.as_bytes());
-            // The face reads an interned string as one owner, php's
-            // `zend_string_refcount`, so one owner is taken for interned.
-            let count = value.refcount();
-            if count <= 1 {
-                out.extend_from_slice(b"\" interned\n");
-            } else {
+            if value.is_refcounted() {
+                let count = value.refcount();
                 out.extend_from_slice(format!("\" refcount({count})\n").as_bytes());
+            } else {
+                out.extend_from_slice(b"\" interned\n");
             }
         }
         ValueRef::Array(array) => {
@@ -102,14 +148,14 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
             }
             array.protect();
             let packed = if array.is_packed() { "packed " } else { "" };
-            let count = value.refcount();
-            if count <= 1 {
+            if value.is_refcounted() {
+                let count = value.refcount();
                 out.extend_from_slice(
-                    format!("array({}) {packed}interned {{\n", array.len()).as_bytes(),
+                    format!("array({}) {packed}refcount({count}){{\n", array.len()).as_bytes(),
                 );
             } else {
                 out.extend_from_slice(
-                    format!("array({}) {packed}refcount({count}){{\n", array.len()).as_bytes(),
+                    format!("array({}) {packed}interned {{\n", array.len()).as_bytes(),
                 );
             }
             let mut dumped = Ok(());

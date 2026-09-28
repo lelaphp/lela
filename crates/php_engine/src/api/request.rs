@@ -6985,7 +6985,9 @@ impl Request {
             .class_decl(class)
             .map_or(php_unit::decl::EnumBacking::Pure, |decl| decl.backing);
         let case = self.new_object(class)?;
-        let spelled = PhpString::new(self, name)?;
+        // The case's name is the constant's, an interned string, as
+        // `zend_enum_new` copies `case_name`.
+        let spelled = self.interned(name)?;
         let slot = PhpString::new(self, b"name")?;
         case.set_prop(self, slot, Value::string(spelled))?;
         if backing != php_unit::decl::EnumBacking::Pure {
