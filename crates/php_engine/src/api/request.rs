@@ -4512,7 +4512,19 @@ impl Request {
     /// `getTraceAsString`, `__toString` and the uncaught fatal render it
     /// through [`Request::trace_string_of`] when they are asked.
     pub(crate) fn note_throw_site(&mut self, throwable: PhpObject) -> Result<(), Thrown> {
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        // `zend_get_executed_filename`, which names no script where no
+        // user frame stands, as while the uncaught rendering serves a
+        // throwable's `__toString` after the main frame has returned.
+        let file = match self.overridden_site() {
+            Some((file, _)) => file.to_vec(),
+            None => self
+                .innermost_frame()
+                .and_then(|state| exec::body_of(&state.unit, state.body))
+                .map_or_else(
+                    || b"[no active file]".to_vec(),
+                    |code| code.filename.0.to_vec(),
+                ),
+        };
         let trace = self.debug_backtrace()?;
         let line = Value::int(i64::from(self.current_line()));
         for (name, value) in [
@@ -15504,14 +15516,6 @@ impl Request {
         {
             self.exception_handler = top;
         }
-    }
-
-    /// Whether a user handler for throwables stands, which is what
-    /// decides whether a throwable the main op array did not catch is
-    /// rendered in its frame or handed to the handler once the frame is
-    /// left.
-    pub(crate) fn has_exception_handler(&self) -> bool {
-        self.exception_handler.is_some()
     }
 
     /// `assert_options(ASSERT_CALLBACK)` as it stands.

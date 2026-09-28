@@ -3595,8 +3595,8 @@ mod tests {
         let frame = req.pushed(unit);
         let outcome = crate::tier::execute::<Probe>(&mut req, frame);
         assert!(
-            outcome.is_err(),
-            "the third call's RECV throws and nothing catches it"
+            outcome.is_ok() && req.is_pending(),
+            "the third call's RECV throws and nothing catches it: it stays pending for the caller"
         );
         let callee = FrameRef(frame.0 + 1);
         assert_eq!(
