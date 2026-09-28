@@ -4,16 +4,17 @@
 //! `EVP_DigestVerify` under the padding `php_openssl_setup_rsa_padding`
 //! allows.
 
-use php_ext::abi::{Ref, Union, Untyped};
+use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref};
+use php_ext::raising::{Level, Thrown, argument_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value};
 
-use crate::config::c_string;
 use crate::constants::{OPENSSL_PKCS1_PADDING, OPENSSL_PKCS1_PSS_PADDING};
-use crate::ffi::{Digest, DigestContext, Direction, KeyKind, PKey};
-use crate::key::{Arg, Half, key_from};
+use crate::decode::{Arg, c_string, finish, raised};
+use crate::ffi::key::{DigestContext, Direction};
+use crate::ffi::{Digest, KeyKind, PKey};
+use crate::key::{Half, key_from};
 use crate::store_errors;
 
 /// `php_openssl_get_evp_md_from_algo`: the digest an `OPENSSL_ALGO_*`
@@ -79,8 +80,8 @@ fn setup_padding(req: &mut Request, ctx: &mut DigestContext, key: &PKey, padding
     true
 }
 
-/// `openssl_sign(string $data, &$signature, $private_key, string|int
-/// $algorithm = OPENSSL_ALGO_SHA1, int $padding = 0): bool`: the
+/// `openssl_sign(string $data, &$signature, $private_key, string|int`
+/// `$algorithm = OPENSSL_ALGO_SHA1, int $padding = 0): bool`: the
 /// signature over the data, written to `$signature`.
 ///
 /// ```php
@@ -136,39 +137,41 @@ fn openssl_sign(
     #[php(default = OPENSSL_ALGO_SHA1)] algorithm: Union<PhpString, i64>,
     #[php(default = 0)] padding: i64,
 ) -> Result<bool, Thrown> {
-    let arg = Arg {
-        position: 3,
-        name: "private_key",
-    };
-    let Some(key) = key_from(req, &private_key.0, Half::Private, Some(b""), arg)? else {
-        docref(
-            req,
-            Level::Warning,
-            "Supplied key param cannot be coerced into a private key",
-        );
-        return Ok(false);
-    };
-    let Ok(digest) = digest_for(&algorithm) else {
-        docref(req, Level::Warning, "Unknown digest algorithm");
-        return Ok(false);
-    };
-    let signed = DigestContext::new(Direction::Sign, digest.as_ref(), &key).and_then(|mut ctx| {
-        setup_padding(req, &mut ctx, &key, padding)
-            .then(|| ctx.sign(data.as_bytes()))
-            .flatten()
-    });
-    let Some(signed) = signed else {
-        store_errors(req);
-        return Ok(false);
-    };
-    let signed = PhpString::new(req, &signed)?;
-    signature.set(req, Untyped(Value::string(signed)))?;
-    Ok(true)
+    finish(req, move |req| {
+        let arg = Arg::new(3, "private_key");
+        let Some(key) = key_from(req, &private_key.0, Half::Private, Some(b""), arg)? else {
+            if !raised(req) {
+                docref(
+                    req,
+                    Level::Warning,
+                    "Supplied key param cannot be coerced into a private key",
+                );
+            }
+            return Ok(false);
+        };
+        let Ok(digest) = digest_for(&algorithm) else {
+            docref(req, Level::Warning, "Unknown digest algorithm");
+            return Ok(false);
+        };
+        let signed =
+            DigestContext::new(Direction::Sign, digest.as_ref(), &key).and_then(|mut ctx| {
+                setup_padding(req, &mut ctx, &key, padding)
+                    .then(|| ctx.sign(data.as_bytes()))
+                    .flatten()
+            });
+        let Some(signed) = signed else {
+            store_errors(req);
+            return Ok(false);
+        };
+        let signed = PhpString::new(req, &signed)?;
+        signature.set(req, Untyped(Value::string(signed)))?;
+        Ok(true)
+    })
 }
 
-/// `openssl_verify(string $data, string $signature, $public_key,
-/// string|int $algorithm = OPENSSL_ALGO_SHA1, int $padding = 0):
-/// int|false`: 1 where the signature is the key's over the data, 0
+/// `openssl_verify(string $data, string $signature, $public_key,`
+/// `string|int $algorithm = OPENSSL_ALGO_SHA1, int $padding = 0):`
+/// `int|false`: 1 where the signature is the key's over the data, 0
 /// where it is not, -1 for an error, false for a digest or key that
 /// cannot be had.
 ///
@@ -210,35 +213,41 @@ fn openssl_verify(
     public_key: Untyped<Value>,
     #[php(default = OPENSSL_ALGO_SHA1)] algorithm: Union<PhpString, i64>,
     #[php(default = 0)] padding: i64,
-) -> Result<php_ext::abi::OrFalse<i64>, Thrown> {
-    if u32::try_from(signature.as_bytes().len()).is_err() {
-        return Err(arg_value_error(req, 2, "is too long"));
-    }
-    let Ok(digest) = digest_for(&algorithm) else {
-        docref(req, Level::Warning, "Unknown digest algorithm");
-        return Ok(php_ext::abi::OrFalse::False);
-    };
-    let arg = Arg {
-        position: 3,
-        name: "public_key",
-    };
-    let Some(key) = key_from(req, &public_key.0, Half::Public, None, arg)? else {
-        docref(
-            req,
-            Level::Warning,
-            "Supplied key param cannot be coerced into a public key",
-        );
-        return Ok(php_ext::abi::OrFalse::False);
-    };
-    let ready = DigestContext::new(Direction::Verify, digest.as_ref(), &key)
-        .and_then(|mut ctx| setup_padding(req, &mut ctx, &key, padding).then_some(ctx));
-    let verdict = if let Some(mut ctx) = ready {
-        ctx.verify(signature.as_bytes(), data.as_bytes())
-    } else {
-        -1
-    };
-    if verdict < 0 {
-        store_errors(req);
-    }
-    Ok(php_ext::abi::OrFalse::Value(i64::from(verdict)))
+) -> Result<OrFalse<i64>, Thrown> {
+    finish(req, move |req| {
+        if u32::try_from(signature.as_bytes().len()).is_err() {
+            return Err(argument_error(
+                req,
+                "ValueError",
+                2,
+                "signature is too long",
+            ));
+        }
+        let Ok(digest) = digest_for(&algorithm) else {
+            docref(req, Level::Warning, "Unknown digest algorithm");
+            return Ok(OrFalse::False);
+        };
+        let arg = Arg::new(3, "public_key");
+        let Some(key) = key_from(req, &public_key.0, Half::Public, None, arg)? else {
+            if !raised(req) {
+                docref(
+                    req,
+                    Level::Warning,
+                    "Supplied key param cannot be coerced into a public key",
+                );
+            }
+            return Ok(OrFalse::False);
+        };
+        let ready = DigestContext::new(Direction::Verify, digest.as_ref(), &key)
+            .and_then(|mut ctx| setup_padding(req, &mut ctx, &key, padding).then_some(ctx));
+        let verdict = if let Some(mut ctx) = ready {
+            ctx.verify(signature.as_bytes(), data.as_bytes())
+        } else {
+            -1
+        };
+        if verdict < 0 {
+            store_errors(req);
+        }
+        Ok(OrFalse::Value(i64::from(verdict)))
+    })
 }

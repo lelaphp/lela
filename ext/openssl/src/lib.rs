@@ -3,13 +3,14 @@
 //! (design §7.2). Its state on the value (ADR-0005). The phpt subset is
 //! `php-src/ext/openssl/tests`, through `xtask phpt --subset`.
 //!
-//! Declared by the attributes as `openssl.stub.php` at the tag declares
-//! it: the ini entries, the constants, the asymmetric keys with
-//! `OpenSSLAsymmetricKey` ([`key`]) and the configuration they are made
-//! under ([`config`]), the signatures ([`sign`]) and the ring of library
-//! errors `openssl_error_string` reads ([`Errors`]). ext/phar's OpenSSL
-//! signatures call `openssl_sign` and `openssl_verify` through the
-//! function table, as php's do.
+//! Declared by the attributes as `openssl.stub.php` at the tag declares it:
+//! the ini entries, the constants, the three classes, and the natives by
+//! area: certificates ([`x509`]), signing requests ([`csr`]), asymmetric
+//! keys ([`key`]) and the configuration they are made under ([`config`]),
+//! and signatures ([`sign`]), with the arguments they share decoded once
+//! ([`decode`]) and the ring of library errors `openssl_error_string` reads
+//! ([`Errors`]). ext/phar's OpenSSL signatures call `openssl_sign` and
+//! `openssl_verify` through the function table, as php's do.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -24,18 +25,23 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod config;
+mod csr;
+mod decode;
 mod ffi;
 mod key;
 mod sign;
+mod x509;
 
+use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
 
-use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
+use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, ObjectHandlers, OrFalse};
 use php_ext::attr::{php_const, php_function};
+use php_ext::call::Function;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::Thrown;
+use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
 /// `register_openssl_symbols`: the constants in `openssl.stub.php`'s
 /// order, as the oracle's OpenSSL 3 build declares them (no `MD2`, no
@@ -142,6 +148,67 @@ pub(crate) mod constants {
     pub(crate) const OPENSSL_ENCODING_PEM: i64 = 2;
 }
 
+/// The object handlers of the three classes: `std_object_handlers` with
+/// `get_constructor` refusing in the class's words, `clone_obj` php's
+/// null slot and `compare` `zend_objects_not_comparable`.
+pub(crate) struct Handlers(pub(crate) &'static str);
+
+impl ObjectHandlers for Handlers {
+    fn get_constructor(
+        &self,
+        req: &mut Request,
+        _object: PhpObject,
+    ) -> Result<Option<Function>, Thrown> {
+        Err(throw(req, "Error", self.0))
+    }
+
+    fn clone_obj(&self) -> Option<CloneObj> {
+        None
+    }
+
+    fn compare(
+        &self,
+        req: &mut Request,
+        left: &Value,
+        right: &Value,
+    ) -> Result<Option<Ordering>, Thrown> {
+        let _ = (req, left, right);
+        Ok(None)
+    }
+}
+
+/// `add_assoc_*`: a value under a string key, a numeric one taken as
+/// the integer, as `zend_symtable_str_update` takes it.
+pub(crate) fn put(
+    req: &mut Request,
+    array: &mut PhpArray,
+    name: &[u8],
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = Key::from_string(PhpString::new(req, name)?);
+    array.set(req, key, value)
+}
+
+/// `add_assoc_stringl`: bytes as a string under a string key.
+pub(crate) fn put_bytes(
+    req: &mut Request,
+    array: &mut PhpArray,
+    name: &[u8],
+    bytes: &[u8],
+) -> Result<(), Thrown> {
+    let value = Value::string(PhpString::new(req, bytes)?);
+    put(req, array, name, value)
+}
+
+/// `make_digest_ex`: bytes as lowercase hex.
+pub(crate) fn hex(bytes: &[u8]) -> Vec<u8> {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|&b| [DIGITS[usize::from(b >> 4)], DIGITS[usize::from(b & 15)]])
+        .collect()
+}
+
 /// `PHP_OPENSSL_ERR_BUFFER_SIZE`: how many codes the ring keeps.
 const ERR_BUFFER_SIZE: usize = 16;
 
@@ -164,6 +231,9 @@ pub(crate) struct Errors {
 struct State {
     errors: Option<Errors>,
     mark: Option<Errors>,
+    /// What a function below a native threw that php leaves standing in `EG(exception)`
+    /// while the native goes on to its end ([`decode::defer`]).
+    thrown: Option<Thrown>,
 }
 
 /// `php_openssl_store_errors`: every code on the library's queue moved
@@ -279,8 +349,25 @@ pub fn extension() -> Extension {
             ini("openssl.libctx", "custom"),
         ])
         .constants(constants::declared())
+        .class::<x509::OpenSSLCertificate>()
+        .class::<csr::OpenSSLCertificateSigningRequest>()
         .class::<key::OpenSSLAsymmetricKey>()
         .functions(vec![
+            x509::openssl_x509_export_to_file::declared(),
+            x509::openssl_x509_export::declared(),
+            x509::openssl_x509_fingerprint::declared(),
+            x509::openssl_x509_check_private_key::declared(),
+            x509::openssl_x509_verify::declared(),
+            x509::openssl_x509_parse::declared(),
+            x509::openssl_x509_checkpurpose::declared(),
+            x509::openssl_x509_read::declared(),
+            x509::openssl_x509_free::declared(),
+            csr::openssl_csr_export_to_file::declared(),
+            csr::openssl_csr_export::declared(),
+            csr::openssl_csr_sign::declared(),
+            csr::openssl_csr_new::declared(),
+            csr::openssl_csr_get_subject::declared(),
+            csr::openssl_csr_get_public_key::declared(),
             key::openssl_pkey_new::declared(),
             key::openssl_pkey_export::declared(),
             key::openssl_pkey_get_public::declared(),
@@ -293,6 +380,7 @@ pub fn extension() -> Extension {
             openssl_error_string::declared(),
             sign::openssl_sign::declared(),
             sign::openssl_verify::declared(),
+            x509::openssl_get_cert_locations::declared(),
         ])
         .on_modify(b"openssl.libctx", on_update_libctx)
         .request_state::<State>()
