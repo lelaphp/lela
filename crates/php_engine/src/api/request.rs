@@ -827,7 +827,8 @@ impl Stream {
             .unwrap_or(false)
     }
 
-    /// `php_stream_close`, what `fclose` does past its checks: the
+    /// `php_stream_free(stream, PHP_STREAM_FREE_KEEP_RSRC |
+    /// PHP_STREAM_FREE_CLOSE)`, what `fclose` does past its checks: the
     /// resource closed and its destructor served, which flushes what was
     /// written and closes the kind; the resource stays for its owners,
     /// `resource(N) of type (Unknown)` under `var_dump`. `false`, and
@@ -860,6 +861,16 @@ impl Stream {
         }
         crate::streams::PhpStream::close_open(req, self);
         true
+    }
+
+    /// `php_stream_close`, `_php_stream_free` under
+    /// `PHP_STREAM_FREE_CLOSE`, what a native or a kind does to a stream
+    /// it opened: [`Stream::close`], then the owner the open handed the
+    /// caller given up, `zend_list_delete`, so `get_resources()` lists the
+    /// stream no longer once no value holds it.
+    pub fn free(self, req: &mut Request) {
+        self.close(req);
+        req.release(self.as_value());
     }
 }
 
@@ -938,6 +949,16 @@ pub trait StreamOps: Send {
         None
     }
 
+    /// The stream `PHP_STREAM_OPTION_META_DATA_API` is handed to, as
+    /// `php_gziop_set_option` hands it to the stream under the `gzFile`:
+    /// `stream_get_meta_data` then starts with what that stream's kind
+    /// answers, its `timed_out`, `blocked` and `eof`. `None` is a kind that
+    /// takes no option, for which the generic half answers the three with
+    /// `eof` as `php_stream_eof` reads it.
+    fn meta_data_from(&self) -> Option<Stream> {
+        None
+    }
+
     /// Whether the generic half keeps a read buffer before the kind:
     /// `false` is `PHP_STREAM_FLAG_NO_BUFFER`, set on the stream as
     /// `php_stream_gzopen` sets it, so every read reaches the kind.
@@ -983,16 +1004,22 @@ pub struct StreamWrapper {
 /// The `options` of `php_stream_open_wrapper_ex` a wrapper's opener
 /// reads and hands on to an open of its own, [`Request::open_stream_with`]:
 /// `USE_PATH`, the path looked for along `include_path` first;
-/// `REPORT_ERRORS`, a refusal a warning; and `STREAM_OPEN_FOR_INCLUDE`,
-/// the open an `include` makes. The engine clears `warn` before it asks
-/// an opener, as php does, so what fails inside one is what the opener
-/// logged ([`Request::wrapper_log_error`]), or the generic `operation
-/// failed`.
+/// `REPORT_ERRORS`, a refusal a warning; `STREAM_OPEN_FOR_INCLUDE`, the
+/// open an `include` makes; `STREAM_MUST_SEEK`, a stream whose kind
+/// cannot seek copied into one that can, `php_stream_make_seekable`; and
+/// `STREAM_WILL_CAST`, the caller about to cast the stream to a fd, which
+/// makes that copy a temporary file rather than a `php://temp`. The
+/// engine clears `warn` before it asks an opener, as php does, so what
+/// fails inside one is what the opener logged
+/// ([`Request::wrapper_log_error`]), or the generic `operation failed`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // php's options, one flag per bit
 pub struct Opening {
     pub use_path: bool,
     pub warn: bool,
     pub for_include: bool,
+    pub must_seek: bool,
+    pub will_cast: bool,
 }
 
 /// A wrapper whose kinds the engine keeps, which the extension that

@@ -284,7 +284,7 @@ pub(crate) type StatBuf = [i64; 13];
 
 /// What a kind's `PHP_STREAM_OPTION_META_DATA_API` answers, which is
 /// what `stream_get_meta_data` puts first.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub(crate) enum MetaData {
     /// `PHP_STREAM_OPTION_RETURN_NOTIMPL`: the generic three,
     /// `timed_out`, `blocked` and `eof` as `php_stream_eof` answers it.
@@ -298,6 +298,11 @@ pub(crate) enum MetaData {
     /// `php_stream_temp_set_option`'s copy of `ts->meta`, which only
     /// `data:` fills: nothing at all for `php://temp`.
     Own,
+    /// The option handed to the kind of the stream under this one,
+    /// `self->stream->ops->set_option`, as `php_gziop_set_option` hands
+    /// it: that kind's answer, and the generic three of this stream
+    /// where that kind takes no option.
+    Of(Stream),
 }
 
 /// php's `php_stream` (`Z/main/php_streams.h`), the half every kind
@@ -1369,6 +1374,12 @@ impl Ops for OfExtension {
     fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
         self.0.flock(req, operation)
     }
+
+    fn meta_data(&self) -> MetaData {
+        self.0
+            .meta_data_from()
+            .map_or(MetaData::Generic, MetaData::Of)
+    }
 }
 
 /// `_php_stream_alloc` over a kind an extension implements, with
@@ -2289,6 +2300,13 @@ pub(crate) struct OpenOptions {
     /// `STREAM_OPEN_FOR_INCLUDE`: the open is an include's, which
     /// `allow_url_include` holds a URL wrapper to.
     pub(crate) for_include: bool,
+    /// `STREAM_MUST_SEEK`: a stream whose kind cannot seek is copied
+    /// into one that can, [`Request::make_seekable`].
+    pub(crate) must_seek: bool,
+    /// `STREAM_WILL_CAST`: the stream is to be cast to a fd, so the copy
+    /// `STREAM_MUST_SEEK` makes is a temporary file,
+    /// `PHP_STREAM_PREFER_STDIO`.
+    pub(crate) will_cast: bool,
 }
 
 impl OpenOptions {
@@ -2298,6 +2316,8 @@ impl OpenOptions {
         use_url: false,
         report: true,
         for_include: false,
+        must_seek: false,
+        will_cast: false,
     };
 
     /// `options & ~REPORT_ERRORS`, what a wrapper's opener is handed.
@@ -2310,12 +2330,15 @@ impl OpenOptions {
 
     /// The bits as php numbers them, what a user-space wrapper's
     /// `stream_open` is handed: `STREAM_USE_PATH` 1, `REPORT_ERRORS` 8,
+    /// `STREAM_MUST_SEEK` 16, `STREAM_WILL_CAST` 32,
     /// `STREAM_OPEN_FOR_INCLUDE` 128, with `STREAM_OPEN_FOR_ZEND_STREAM`
     /// 0x10000 beside it, since the include's is the one open that sets
     /// it here (`php_stream_open_for_zend_ex`).
     const fn bits(self) -> i64 {
         (self.use_path as i64)
             | (self.report as i64) << 3
+            | (self.must_seek as i64) << 4
+            | (self.will_cast as i64) << 5
             | (self.for_include as i64) << 7
             | (self.for_include as i64) << 16
     }
@@ -3016,6 +3039,8 @@ impl Request {
         let options = OpenOptions {
             use_path: opening.use_path,
             report: opening.warn,
+            must_seek: opening.must_seek,
+            will_cast: opening.will_cast,
             ..OpenOptions::REPORT
         };
         self.open_wrapper_ex(path, mode, options)
@@ -3095,6 +3120,8 @@ impl Request {
                             use_path,
                             warn: false,
                             for_include: options.for_include,
+                            must_seek: options.must_seek,
+                            will_cast: options.will_cast,
                         };
                         let outer = std::mem::take(&mut self.wrapper_errors);
                         let opened = open(self, &path_to_open, mode, opening);
@@ -3124,18 +3151,16 @@ impl Request {
         };
         match opened {
             Ok(stream) => {
-                let append = mode.contains(&b'a');
-                self.stream_op(stream, |req, s| {
+                self.stream_op(stream, |_, s| {
                     s.wrapper = label;
-                    s.orig_path = Some(to_open);
-                    if append && !s.flags.no_seek && s.position == 0 {
-                        let PhpStream { ops, position, .. } = s;
-                        let mut newpos = 0;
-                        if ops.seek(req, 0, Some(Whence::Cur), &mut newpos) == Some(true) {
-                            *position = newpos;
-                        }
-                    }
+                    s.orig_path = Some(to_open.clone());
                 });
+                if options.must_seek {
+                    return self.make_seekable(stream, &to_open, options);
+                }
+                if mode.contains(&b'a') {
+                    self.learn_append_position(stream);
+                }
                 Ok(Some(stream))
             }
             Err(message) => {
@@ -3143,6 +3168,115 @@ impl Request {
                     self.display_wrapper_errors(&to_open, "Failed to open stream", &message);
                 }
                 Ok(None)
+            }
+        }
+    }
+
+    /// `_php_stream_open_wrapper_ex` for a stream opened for append
+    /// (`Z/main/streams/streams.c:2360`): a kind that seeks, at position
+    /// zero, learns where it is from `SEEK_CUR`.
+    fn learn_append_position(&mut self, stream: Stream) {
+        self.stream_op(stream, |req, s| {
+            if !s.flags.no_seek && s.position == 0 {
+                let PhpStream { ops, position, .. } = s;
+                let mut newpos = 0;
+                if ops.seek(req, 0, Some(Whence::Cur), &mut newpos) == Some(true) {
+                    *position = newpos;
+                }
+            }
+        });
+    }
+
+    /// `_php_stream_open_wrapper_ex`'s `STREAM_MUST_SEEK` arm
+    /// (`Z/main/streams/streams.c:2325`) over `_php_stream_make_seekable`
+    /// (`Z/main/streams/cast.c:373`): a stream whose kind seeks is
+    /// handed back as it is, before the append position is learnt;
+    /// anything else is copied whole into a temporary file under
+    /// `STREAM_WILL_CAST`, a `php://temp` otherwise, sought back to its
+    /// start with `path` as its `orig_path`, and closed. A copy that could
+    /// not be made or failed closes both, and under `REPORT_ERRORS` is
+    /// php's `could not make seekable` warning in place of the `Failed to
+    /// open stream` one.
+    ///
+    /// ```php
+    /// var_dump(gzopen("php://output", 14));
+    /// $f = sys_get_temp_dir().'/must-seek-witness.gz.bz2';
+    /// file_put_contents("compress.bzip2://$f", gzencode("line one\nline two\n"));
+    /// $b = count(get_resources());
+    /// var_dump(gzfile("compress.bzip2://$f"), count(get_resources()) - $b);
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// Warning: gzopen(php://output): could not make seekable - php://output in %s on line 2
+    /// bool(false)
+    /// array(2) {
+    ///   [0]=>
+    ///   string(9) "line one
+    /// "
+    ///   [1]=>
+    ///   string(9) "line two
+    /// "
+    /// }
+    /// int(0)
+    /// ```
+    fn make_seekable(
+        &mut self,
+        stream: Stream,
+        path: &[u8],
+        options: OpenOptions,
+    ) -> Result<Option<Stream>, Thrown> {
+        if self.stream_ref(stream).is_some_and(|s| s.ops.seekable()) {
+            return Ok(Some(stream));
+        }
+        let copy = if options.will_cast {
+            temporary_file(self, None, b"php")?
+        } else {
+            Some(temp(self, TempMode::Default, PHP_STREAM_MAX_MEM)?)
+        };
+        if let Some(copy) = copy {
+            if self.copy_all(stream, copy) {
+                stream.free(self);
+                self.stream_op(copy, |req, s| {
+                    s.seek(req, 0, Some(Whence::Set));
+                    s.orig_path = Some(path.to_vec());
+                });
+                return Ok(Some(copy));
+            }
+            copy.free(self);
+        }
+        stream.free(self);
+        if options.report {
+            let text = format!(
+                "{}({}): could not make seekable - {}",
+                self.active_native(),
+                String::from_utf8_lossy(path),
+                String::from_utf8_lossy(path)
+            );
+            warning(self, &text);
+        }
+        Ok(None)
+    }
+
+    /// `_php_stream_copy_to_stream_ex(from, to, PHP_STREAM_COPY_ALL)`
+    /// (`Z/main/streams/streams.c:1664`) past its `mmap` and
+    /// `copy_file_range` shortcuts: a chunk read and written whole until
+    /// a read gives nothing; `false` for a read that failed or a write
+    /// that took nothing.
+    fn copy_all(&mut self, from: Stream, to: Stream) -> bool {
+        let mut buf = vec![0; CHUNK_SIZE];
+        loop {
+            let Some(Some(didread)) = self.stream_op(from, |req, s| s.read(req, &mut buf)) else {
+                return false;
+            };
+            if didread == 0 {
+                return true;
+            }
+            let mut rest = &buf[..didread];
+            while !rest.is_empty() {
+                match self.stream_op(to, |req, s| s.write(req, rest)).flatten() {
+                    Some(n) if n > 0 => rest = &rest[n..],
+                    _ => return false,
+                }
             }
         }
     }
@@ -3234,19 +3368,16 @@ impl Request {
     /// `seekable` and, where it was opened by path, `uri`.
     pub(crate) fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown> {
         let mut out = PhpArray::new(self)?;
-        let generic_eof = match self.stream_ref(stream).map(|s| s.ops.meta_data()) {
-            Some(MetaData::Generic) => self.stream_op(stream, |req, s| s.eof(req)),
-            _ => None,
+        let head = if let Some(head) = self.kind_meta_data(stream) {
+            head
+        } else {
+            let Some(eof) = self.stream_op(stream, |req, s| s.eof(req)) else {
+                return Ok(out);
+            };
+            meta_three(false, true, eof)
         };
         let Some(s) = self.stream_ref(stream) else {
             return Ok(out);
-        };
-        let own = s.ops.own_meta();
-        let head = match s.ops.meta_data() {
-            MetaData::Generic => Some((false, true, generic_eof.unwrap_or(s.eof))),
-            MetaData::Stdio { blocked } => Some((false, blocked, s.eof)),
-            MetaData::Socket { timed_out, blocked } => Some((timed_out, blocked, s.eof)),
-            MetaData::Own => None,
         };
         let wrapper = s.wrapper;
         let wrapper_data = s.ops.wrapper_data();
@@ -3255,12 +3386,7 @@ impl Request {
         let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
         let seekable = s.ops.seekable() && !s.flags.no_seek;
         let uri = s.orig_path.clone();
-        let mut entries: Vec<(Vec<u8>, MetaValue)> = own;
-        if let Some((timed_out, blocked, eof)) = head {
-            entries.push((b"timed_out".to_vec(), MetaValue::Bool(timed_out)));
-            entries.push((b"blocked".to_vec(), MetaValue::Bool(blocked)));
-            entries.push((b"eof".to_vec(), MetaValue::Bool(eof)));
-        }
+        let mut entries = head;
         if let Some(data) = wrapper_data {
             entries.push((b"wrapper_data".to_vec(), MetaValue::Value(data)));
         }
@@ -3294,6 +3420,23 @@ impl Request {
             out.set(self, key, value)?;
         }
         Ok(out)
+    }
+
+    /// `php_stream_populate_meta_data`, `PHP_STREAM_OPTION_META_DATA_API`
+    /// asked of the stream's kind: the entries it adds, `None` for the
+    /// `PHP_STREAM_OPTION_RETURN_NOTIMPL` of a kind that takes no option
+    /// and of a stream that is closed. A kind over another stream hands
+    /// the option to that stream's kind, which answers with its own
+    /// `stream->eof`.
+    fn kind_meta_data(&self, stream: Stream) -> Option<Vec<(Vec<u8>, MetaValue)>> {
+        let s = self.stream_ref(stream)?;
+        match s.ops.meta_data() {
+            MetaData::Generic => None,
+            MetaData::Stdio { blocked } => Some(meta_three(false, blocked, s.eof)),
+            MetaData::Socket { timed_out, blocked } => Some(meta_three(timed_out, blocked, s.eof)),
+            MetaData::Own => Some(s.ops.own_meta()),
+            MetaData::Of(inner) => self.kind_meta_data(inner),
+        }
     }
 
     /// The message `php_stream_display_wrapper_errors` prints for an
@@ -3484,6 +3627,17 @@ impl Stream {
     pub fn unread(self, req: &Request) -> usize {
         req.stream_ref(self).map_or(0, |s| s.writepos - s.readpos)
     }
+}
+
+/// `timed_out`, `blocked` and `eof`, the three most kinds answer
+/// `PHP_STREAM_OPTION_META_DATA_API` with and `stream_get_meta_data`
+/// adds for one that takes no option.
+fn meta_three(timed_out: bool, blocked: bool, eof: bool) -> Vec<(Vec<u8>, MetaValue)> {
+    vec![
+        (b"timed_out".to_vec(), MetaValue::Bool(timed_out)),
+        (b"blocked".to_vec(), MetaValue::Bool(blocked)),
+        (b"eof".to_vec(), MetaValue::Bool(eof)),
+    ]
 }
 
 /// One entry of what [`Request::stream_meta_data`] puts in the array,

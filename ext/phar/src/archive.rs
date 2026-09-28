@@ -660,9 +660,8 @@ pub(crate) fn read_file(
     warn: bool,
 ) -> Result<Option<Vec<u8>>, Thrown> {
     let opening = php_ext::request::Opening {
-        use_path: false,
         warn,
-        for_include: false,
+        ..php_ext::request::Opening::default()
     };
     let Some(stream) = req.open_stream_with(path, b"rb", opening)? else {
         return Ok(None);

@@ -387,9 +387,8 @@ pub(crate) fn write_out(
         return Ok(None);
     }
     let opening = Opening {
-        use_path: false,
         warn: true,
-        for_include: false,
+        ..Opening::default()
     };
     let Some(out) = req.open_stream_with(&fname, b"w+b", opening)? else {
         return Ok(Some(format!(
