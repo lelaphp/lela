@@ -447,6 +447,7 @@ dependencies = [
  "php_ext_random",
  "php_ext_reflection",
  "php_ext_session",
+ "php_ext_simplexml",
  "php_ext_sockets",
  "php_ext_spl",
  "php_ext_standard",
@@ -676,6 +677,14 @@ dependencies = [
  "libc",
  "php_ext",
  "php_ext_standard",
+]
+
+[[package]]
+name = "php_ext_simplexml"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "php_ext_libxml",
 ]
 
 [[package]]

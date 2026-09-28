@@ -988,6 +988,44 @@ unsafe extern "C" {
     ) -> *mut xmlChar;
     pub(crate) fn xmlFreeTextReader(reader: *mut xmlTextReader);
 
+    // parser.h, tree.h, entities.h: what php's simplexml reaches beside
+    // the above
+    pub(crate) fn xmlReadMemory(
+        buffer: *const c_char,
+        size: c_int,
+        url: *const c_char,
+        encoding: *const c_char,
+        options: c_int,
+    ) -> *mut xmlDoc;
+    pub(crate) fn xmlReadFile(
+        filename: *const c_char,
+        encoding: *const c_char,
+        options: c_int,
+    ) -> *mut xmlDoc;
+    pub(crate) fn xmlNewChild(
+        parent: *mut xmlNode,
+        ns: *mut xmlNs,
+        name: *const xmlChar,
+        content: *const xmlChar,
+    ) -> *mut xmlNode;
+    pub(crate) fn xmlNewTextChild(
+        parent: *mut xmlNode,
+        ns: *mut xmlNs,
+        name: *const xmlChar,
+        content: *const xmlChar,
+    ) -> *mut xmlNode;
+    pub(crate) fn xmlNewNsProp(
+        node: *mut xmlNode,
+        ns: *mut xmlNs,
+        name: *const xmlChar,
+        value: *const xmlChar,
+    ) -> *mut xmlAttr;
+    pub(crate) fn xmlEncodeEntitiesReentrant(
+        doc: *mut xmlDoc,
+        input: *const xmlChar,
+    ) -> *mut xmlChar;
+    pub(crate) fn xmlCopyDoc(doc: *mut xmlDoc, recursive: c_int) -> *mut xmlDoc;
+
     // tree.h, xmlstring.h, globals.h: what php's dom reaches beside the above
     pub(crate) fn xmlNewProp(
         node: *mut xmlNode,

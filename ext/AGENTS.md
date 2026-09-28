@@ -34,6 +34,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── random
 ├── reflection
 ├── session
+├── simplexml
 ├── sockets
 ├── spl
 ├── standard
@@ -41,7 +42,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── uri
 └── zlib
 ```
-<!-- /computed in=d05d4ba9e83aa1b14b568d813d9f25d5fe349a1243db9fe099fd872e6dcc0cb7 out=7b7988f8f96a7284c3dae1db60e8877baa1b4858ebbb9e15bac0aefd3b404575 -->
+<!-- /computed in=d2585c91ed9524084581b2054d4937678af546760db17a17ef8885d76e5d48b8 out=197c3b4eaa4b7bb00336be06b929b7339f049bcf2b17b0daf02e84fe13768188 -->
 
 <!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
 

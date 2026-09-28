@@ -785,8 +785,9 @@ fn is_document(req: &mut Request, object: PhpObject) -> bool {
 }
 
 /// `DOMDocument::saveXML`'s body, which the `Dom\` documents' `saveXml`
-/// shares: libxml's dump for a legacy document, php's own serialiser for
-/// a modern one.
+/// shares: the document's handlers dump it (`dom_document_save_xml`),
+/// libxml's own for a legacy document and php's serialiser for a modern
+/// one.
 pub(crate) fn save_xml(
     req: &mut Request,
     this: PhpObject,
@@ -797,20 +798,15 @@ pub(crate) fn save_xml(
     let format = props_of(req, this).format;
     let no_empty = options & i64::from(php_ext_libxml::NOEMPTYTAG) != 0;
     let encoding = doc.doc_encoding();
-    let modern = crate::modern::follows_spec(req, this);
-    let (saved, raised) = if let Some(node) = node {
+    let handlers = handlers_of(req, this);
+    let saved = if let Some(node) = node {
         let node = fetch(req, node)?;
         if node.doc() != Some(doc) {
             let strict = strict(req, this);
             dom_error(req, Code::WrongDocument, strict)?;
             return Ok(Value::bool(false));
         }
-        if modern {
-            let encoding = encoding.as_deref();
-            crate::xml_serializer::dump_to_string(req, this, node, 0, format, no_empty, encoding)
-        } else {
-            Save::node(doc, node, format, no_empty, encoding.as_deref())
-        }
+        handlers.dump_node_to_str(req, doc, node, format, no_empty, encoding.as_deref())
     } else {
         let mut converted = f::XML_SAVE_AS_XML;
         if options & i64::from(f::XML_SAVE_NO_DECL) != 0 {
@@ -819,22 +815,22 @@ pub(crate) fn save_xml(
         if format {
             converted |= f::XML_SAVE_FORMAT;
         }
-        if modern {
-            let encoding = encoding.as_deref();
-            crate::xml_serializer::dump_to_string(
-                req, this, doc, converted, format, no_empty, encoding,
-            )
-        } else {
-            Save::doc(doc, converted, no_empty, encoding.as_deref())
-        }
+        handlers.dump_doc_to_str(req, doc, converted, no_empty, encoding.as_deref())
     };
-    Errors::route(req, raised);
     if let Some(bytes) = saved {
         string(req, &bytes)
     } else {
         docref(req, Level::Warning, "Could not save document");
         Ok(Value::bool(false))
     }
+}
+
+/// `intern->document->handlers` of `object`, libxml's own where the
+/// object counts no document.
+fn handlers_of(req: &Request, object: PhpObject) -> &'static dyn php_ext_libxml::DocumentHandlers {
+    crate::dom(req, object).map_or(&php_ext_libxml::DefaultHandlers, |d| {
+        d.obj.document_handlers()
+    })
 }
 
 /// `DOMDocument::saveHTML`'s body.
@@ -1722,32 +1718,10 @@ impl DOMDocument {
         let doc = fetch(req, this)?;
         let format = props_of(req, this).format;
         let no_empty = options & i64::from(php_ext_libxml::NOEMPTYTAG) != 0;
-        if crate::modern::follows_spec(req, this) {
-            let encoding = doc.doc_encoding();
-            let written = crate::xml_serializer::dump_to_file(
-                req,
-                this,
-                file,
-                doc,
-                format,
-                no_empty,
-                encoding.as_deref(),
-            )?;
-            return Ok(if written < 0 {
-                OrFalse::False
-            } else {
-                OrFalse::Value(written)
-            });
-        }
-        let (bytes, raised, thrown) = Save::file(
-            req,
-            file,
-            doc,
-            doc.doc_encoding().as_deref(),
-            format,
-            no_empty,
-        );
-        Errors::settle(req, raised, thrown)?;
+        let encoding = doc.doc_encoding();
+        let handlers = handlers_of(req, this);
+        let bytes =
+            handlers.dump_doc_to_file(req, file, doc, format, no_empty, encoding.as_deref())?;
         Ok(if bytes == -1 {
             OrFalse::False
         } else {

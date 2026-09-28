@@ -16,7 +16,7 @@ use crate::node::DOMNode;
 use crate::object::{Code, Dom};
 use crate::parent::is_parent_invalid;
 use crate::private::Private;
-use crate::{dom, dom_mut, dom_throw, fetch, invalidate, node_of, object_for, returned};
+use crate::{dom, dom_mut, dom_throw, fetch, invalidate, object_for, returned};
 
 /// `php_dom_follow_spec_intern`: whether the object's document hands out
 /// the `Dom\` classes.
@@ -61,6 +61,7 @@ pub(crate) fn document_object(
         d.obj.adopt_document(doc);
         d.obj.take_node(doc);
         d.obj.set_class_type(ClassType::Modern);
+        d.obj.set_document_handlers(&crate::xml_serializer::MODERN);
         d.obj.set_private_data(Box::new(Private::default()));
     }
     Ok(object)
@@ -256,41 +257,31 @@ pub(crate) fn convert_to_modern(req: &mut Request, object: PhpObject, doc: f::No
 /// `Dom\import_simplexml`'s answer, `Dom\Attr|Dom\Element`.
 type Imported = Raw<Union<Instance<Attr>, Instance<crate::element::Element>>>;
 
-/// `Dom\import_simplexml(object $node): Dom\Attr|Dom\Element`: there is no
-/// simplexml, so a modern element or attribute answers as itself.
+/// `Dom\import_simplexml(object $node): Dom\Attr|Dom\Element`: the
+/// element or attribute an object exports, as the modern node, its
+/// document converted to the modern classes the first time.
 ///
 /// ```php
 /// $d = Dom\XMLDocument::createFromString('<r a="1"/>');
 /// var_dump(Dom\import_simplexml($d->documentElement) === $d->documentElement);
+/// $s = simplexml_load_string('<r xmlns="urn:a">t</r>');
+/// $e = Dom\import_simplexml($s);
+/// var_dump(get_class($e), $e->attributes->length, Dom\import_simplexml($s) === $e);
 /// try { Dom\import_simplexml(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { dom_import_simplexml($s); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// bool(true)
+/// string(11) "Dom\Element"
+/// int(1)
+/// bool(true)
 /// Dom\import_simplexml(): Argument #1 ($node) is not a valid node type
+/// dom_import_simplexml(): Argument #1 ($node) must not be already imported as a Dom\Node
 /// ```
 #[php_function(namespace(Dom))]
 pub(crate) fn import_simplexml(req: &mut Request, node: PhpObject) -> Result<Imported, Thrown> {
-    let object = node;
-    let node = crate::instance_of(req, object, "Dom\\Node")
-        .then(|| node_of(req, object))
-        .flatten();
-    match node {
-        Some(n)
-            if matches!(
-                n.kind(),
-                php_ext_libxml::ffi::Kind::Element | php_ext_libxml::ffi::Kind::Attribute
-            ) =>
-        {
-            let found = crate::object_for(req, n, Some(object))?;
-            returned(req, found)
-        }
-        _ => Err(php_ext::raising::argument_error(
-            req,
-            "TypeError",
-            1,
-            "is not a valid node type",
-        )),
-    }
+    let found = crate::import_simplexml_common(req, node, ClassType::Modern)?;
+    returned(req, found)
 }
 
 // ---- the cached `[SameObject]` properties

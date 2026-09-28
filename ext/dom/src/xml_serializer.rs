@@ -763,7 +763,8 @@ fn private_of(req: &Request, object: PhpObject) -> Option<&Private> {
 
 /// `php_new_dom_dump_node_to_str_ex`: `node` serialised into `encoding`
 /// with the save `options`, `None` where a step failed, and what libxml
-/// raised. `object` is the document's.
+/// raised; the namespace mapper is the one the document's object keeps
+/// (`get_private_data_from_node`).
 ///
 /// ```php
 /// $x = Dom\XMLDocument::createFromString('<!DOCTYPE r [<!ENTITY e "v">]><r xmlns:a="urn:a" a:b="&e;"><a:c/>&e;<?p d?><![CDATA[<]]></r>');
@@ -776,24 +777,23 @@ fn private_of(req: &Request, object: PhpObject) -> Option<&Private> {
 /// ]>
 /// <r xmlns:a="urn:a" a:b="&e;"><a:c/>&e;<?p d?><![CDATA[<]]></r>
 /// ```
-pub(crate) fn dump_to_string(
-    req: &Request,
-    object: PhpObject,
+fn dump_to_string(
     node: Node,
     options: c_int,
     format: bool,
     no_empty: bool,
     encoding: Option<&[u8]>,
 ) -> (Option<Vec<u8>>, Vec<Raised>) {
-    let private = private_of(req, object);
+    let owner = node.doc().and_then(Node::wrapper);
+    let private = owner.as_ref().and_then(|o| o.private_data::<Private>());
     Dump::serialise(encoding, f::XML_SAVE_AS_XML | options, |dump| {
         serialize(dump, node, format, false, no_empty, private)
     })
 }
 
-/// `php_new_dom_dump_node_to_file` of the document: the file opened
-/// through php's streams, php's warning where it will not open, then the
-/// document serialised into it; the bytes written, `-1` where it failed.
+/// `php_new_dom_dump_node_to_file`: the file opened through php's streams,
+/// php's warning where it will not open, then `node` serialised into it;
+/// the bytes written, `-1` where it failed.
 ///
 /// ```php
 /// $e = Dom\XMLDocument::createEmpty('1.0', 'UTF-16LE');
@@ -806,11 +806,10 @@ pub(crate) fn dump_to_string(
 /// int(92)
 /// string(184) "3c003f0078006d006c002000760065007200730069006f006e003d00220031002e0030002200200065006e0063006f00640069006e0067003d0022005500540046002d00310036004c00450022003f003e000a003c0072002f003e00"
 /// ```
-pub(crate) fn dump_to_file(
+fn dump_to_file(
     req: &mut Request,
-    object: PhpObject,
     path: &[u8],
-    doc: Node,
+    node: Node,
     format: bool,
     no_empty: bool,
     encoding: Option<&[u8]>,
@@ -818,7 +817,7 @@ pub(crate) fn dump_to_file(
     let Some(stream) = req.open_stream(path, b"wb", false)? else {
         return Ok(-1);
     };
-    let (saved, raised) = dump_to_string(req, object, doc, 0, format, no_empty, encoding);
+    let (saved, raised) = dump_to_string(node, 0, format, no_empty, encoding);
     php_ext_libxml::Errors::route(req, raised);
     let written = match saved {
         Some(bytes) => {
@@ -829,6 +828,79 @@ pub(crate) fn dump_to_file(
     };
     stream.free(req);
     Ok(written)
+}
+
+/// `php_new_dom_default_document_handlers`, the serialiser
+/// `dom_set_xml_class` gives every modern document, which simplexml's
+/// `asXML` reaches too.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<root/>');
+/// $s = simplexml_import_dom($d);
+/// $s->addChild('b:child', 'v', 'urn:b');
+/// $d->documentElement->firstElementChild->appendChild($d->createElementNS('urn:c', 'c:x'));
+/// echo $s->asXML(), "\n", $s->children('urn:b')->child->asXML(), "\n";
+/// ```
+/// ```expect
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <root><b:child xmlns:b="urn:b">v<c:x xmlns:c="urn:c"/></b:child></root>
+/// <b:child xmlns:b="urn:b">v<c:x xmlns:c="urn:c"/></b:child>
+/// ```
+pub(crate) struct Modern;
+
+pub(crate) static MODERN: Modern = Modern;
+
+impl php_ext_libxml::DocumentHandlers for Modern {
+    fn dump_doc_to_str(
+        &self,
+        req: &mut Request,
+        doc: Node,
+        options: i32,
+        no_empty: bool,
+        encoding: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
+        let format = options & f::XML_SAVE_FORMAT != 0;
+        let (saved, raised) = dump_to_string(doc, options, format, no_empty, encoding);
+        php_ext_libxml::Errors::route(req, raised);
+        saved
+    }
+
+    fn dump_node_to_str(
+        &self,
+        req: &mut Request,
+        _: Node,
+        node: Node,
+        format: bool,
+        no_empty: bool,
+        encoding: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
+        let (saved, raised) = dump_to_string(node, 0, format, no_empty, encoding);
+        php_ext_libxml::Errors::route(req, raised);
+        saved
+    }
+
+    fn dump_doc_to_file(
+        &self,
+        req: &mut Request,
+        path: &[u8],
+        doc: Node,
+        format: bool,
+        no_empty: bool,
+        encoding: Option<&[u8]>,
+    ) -> Result<i64, Thrown> {
+        dump_to_file(req, path, doc, format, no_empty, encoding)
+    }
+
+    fn dump_node_to_file(
+        &self,
+        req: &mut Request,
+        path: &[u8],
+        _: Node,
+        node: Node,
+        format: bool,
+    ) -> Result<i64, Thrown> {
+        dump_to_file(req, path, node, format, false, None)
+    }
 }
 
 /// `dom_element_html_fragment_serialize`'s XML arm: each of `nodes`

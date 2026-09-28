@@ -1,0 +1,24 @@
+# ext/simplexml: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_simplexml"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The simplexml extension, php-src/ext/simplexml"
+
+[lints]
+workspace = true
+
+# The facade, and libxml. The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+# libxml2 through `ext/libxml`'s surface, `php_libxml.h`'s, as php's
+# simplexml includes it (`ZEND_MOD_REQUIRED("libxml")`, design §4.10); no
+# `src/ffi/` of its own (§7.2).
+php_ext_libxml = { path = "../libxml" }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }
