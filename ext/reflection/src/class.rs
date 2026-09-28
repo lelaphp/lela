@@ -1764,19 +1764,22 @@ impl ReflectionClass {
     }
 
     /// `ReflectionClass::newInstanceWithoutConstructor()`:
-    /// `object_init_ex` alone, refused for a native class php gives a
-    /// `create_object` handler of its own. The object's inherited
-    /// properties hold no default until the linker places them (#419), so
-    /// a read of one is `null` here where php's is the declared default.
+    /// `object_init_ex` alone, refused for an internal final class php
+    /// gives a `create_object` handler, whose objects only its constructor
+    /// may make whole. The object's inherited properties hold no default
+    /// until the linker places them (#419), so a read of one is `null` here
+    /// where php's is the declared default.
     ///
     /// ```php
     /// var_dump((new ReflectionClass('JsonException'))->newInstanceWithoutConstructor() instanceof JsonException);
     /// enum Foo { case Bar; }
     /// try { (new ReflectionClass('Foo'))->newInstanceWithoutConstructor(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { (new ReflectionClass('Generator'))->newInstanceWithoutConstructor(); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect
     /// bool(true)
     /// Cannot instantiate enum Foo
+    /// Class Generator is an internal class marked as final that cannot be instantiated without invoking its constructor
     /// ```
     #[php(tentative)]
     fn newInstanceWithoutConstructor(
@@ -1784,6 +1787,22 @@ impl ReflectionClass {
         this: This<Self>,
     ) -> Result<PhpObject, Thrown> {
         let class = this_class(req, this.object())?;
+        let final_name = req
+            .class_decl(class)
+            .filter(|decl| decl.flags.is_final)
+            .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned());
+        if let Some(name) = final_name
+            && is_internal(req, class)
+            && req.class_has_create_object(class)
+        {
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "Class {name} is an internal class marked as final that cannot be instantiated without invoking its constructor"
+                ),
+            ));
+        }
         // `object_init_ex`, whose own refusal of what cannot be instantiated
         // is the `Error` `new` raises, not a `ReflectionException`.
         let object = new_object(req, class)?;

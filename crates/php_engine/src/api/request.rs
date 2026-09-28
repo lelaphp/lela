@@ -16012,6 +16012,31 @@ impl Request {
         Some(flags)
     }
 
+    /// `ce->create_object != NULL`: whether objects of a linked class are
+    /// laid down by a `create_object` of its own or of the parent it
+    /// inherits one from, a native payload (design §5.4), a throwable's
+    /// `zend_default_exception_new` or `Closure`'s `zend_closure_new`,
+    /// rather than by `zend_objects_new`.
+    /// What `ReflectionClass::newInstanceWithoutConstructor` refuses an
+    /// internal final class for.
+    ///
+    /// ```php
+    /// foreach (['Closure', 'DOMException', 'ArithmeticError', 'stdClass'] as $c) {
+    ///     try { (new ReflectionClass($c))->newInstanceWithoutConstructor(); echo "$c\n"; } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Class Closure is an internal class marked as final that cannot be instantiated without invoking its constructor
+    /// Class DOMException is an internal class marked as final that cannot be instantiated without invoking its constructor
+    /// ArithmeticError
+    /// stdClass
+    /// ```
+    #[must_use]
+    pub fn class_has_create_object(&self, class: ClassId) -> bool {
+        self.native_new_of(class).is_some()
+            || crate::classes::core_create_object(self.handlers_of(class))
+    }
+
     /// `ZEND_FLF_FUNC(opline)`: the native and the arity the engine's
     /// frameless table holds at `at`, a `FRAMELESS_ICALL_*`'s
     /// `extended_value`; none past the table, which a unit this engine

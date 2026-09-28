@@ -57,6 +57,13 @@ pub(crate) fn records_throw_site(handlers: &'static dyn ObjectHandlers) -> bool 
     std::ptr::addr_eq(handlers, &raw const THROWABLE)
 }
 
+/// Whether `handlers` is a Core table whose class php gives a
+/// `create_object` with no native payload here: the throwables'
+/// `zend_default_exception_new` and `Closure`'s `zend_closure_new`.
+pub(crate) fn core_create_object(handlers: &'static dyn ObjectHandlers) -> bool {
+    records_throw_site(handlers) || std::ptr::addr_eq(handlers, &raw const CLOSURE)
+}
+
 /// `closure_handlers` (`Z/Zend/zend_closures.c:730`): the slots
 /// `zend_register_closure_ce` overrides over `std_object_handlers`.
 struct ClosureHandlers;
