@@ -1498,9 +1498,6 @@ fn status_is(req: &mut Request, this: PhpObject, test: fn(Status) -> bool) -> Re
 /// done
 /// ```
 fn destroy(req: &mut Request, object: PhpObject) {
-    if req.destructors_marked() {
-        return;
-    }
     let Some(fiber) = object.native_mut::<ZendFiber>(req) else {
         return;
     };

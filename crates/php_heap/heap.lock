@@ -85,6 +85,7 @@ Heap::iterator_pos
 Heap::iterator_pos_ex
 Heap::iterator_set_lead
 Heap::iterator_set_pos
+Heap::mark_destructed
 Heap::memory_limit
 Heap::memory_peak
 Heap::memory_real_peak

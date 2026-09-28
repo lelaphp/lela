@@ -2411,12 +2411,6 @@ impl Request {
         self.executions().find_map(|(_, vm)| vm.innermost())
     }
 
-    /// `zend_objects_store_mark_destructed` has marked the store: no
-    /// destructor is served from here, a fiber's teardown among them.
-    pub(crate) fn destructors_marked(&self) -> bool {
-        self.marked_destructed
-    }
-
     /// The loop over a generator's frame, bound to the engine's tier
     /// ([`crate::tier::resume`]).
     pub(crate) fn resume_loop(&self) -> fn(&mut Request, FrameRef) -> Result<(), Fatal> {
@@ -6223,16 +6217,34 @@ impl Request {
         )
     }
 
-    /// `zend_error_noreturn(E_ERROR, ...)`: `php_error_cb` renders the
-    /// fatal where the request stands, on the streams the two ini entries
-    /// say, and the request ends in it. It is rendered once, here, and
-    /// `serve` writes nothing of its own.
     /// Whether a `zend_bailout` is under way, which leaves every step
     /// it passes through at once.
     pub(crate) fn bailing_out(&self) -> bool {
         self.bailout
     }
 
+    /// `zend_error_noreturn(E_ERROR, ...)`: `php_error_cb` renders the
+    /// fatal where the request stands, on the streams the two ini entries
+    /// say, and the request ends in it. It is rendered once, here, and
+    /// `serve` writes nothing of its own. The store is marked destructed
+    /// before the request bails out (`zend_objects_store_mark_destructed`), so no
+    /// object standing then is destructed, and a delegation of
+    /// generators a frame lets go of on the way out is not given up
+    /// link by link through their destructors:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// $d = new D;
+    /// register_shutdown_function(function () { $e = new D; echo "sd\n"; });
+    /// function a() { yield from a(); }
+    /// ini_set("memory_limit", "8M");
+    /// foreach (a() as $v);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted %s
+    /// sd
+    /// d
+    /// ```
     pub(crate) fn end_in_fatal(&mut self, message: &str) {
         // One raised while a bailout is under way is not rendered: php
         // left what raised it at the first. One raised after the bailout
@@ -6240,6 +6252,9 @@ impl Request {
         if self.bailout {
             return;
         }
+        // `php_error_cb` marks the store before it bails out: no object
+        // that stands now is destructed, one a shutdown function makes is.
+        self.heap.mark_destructed();
         let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
         let line = self.current_line();
         self.note_error_in(Level::Error, message, &file, line);
@@ -6255,6 +6270,7 @@ impl Request {
         if self.bailout {
             return;
         }
+        self.heap.mark_destructed();
         self.note_error_in(Level::CoreError, message, b"Unknown", 0);
         self.end_at_level(Level::CoreError, message, b"Unknown", 0);
     }
@@ -19037,8 +19053,14 @@ impl HeapHooks for Hooks<'_> {
         &mut self.0.heap
     }
 
-    /// `dtor_obj`, through the table of the object's class (design §5.4).
+    /// `dtor_obj`, through the table of the object's class (design §5.4),
+    /// unless `zend_objects_store_mark_destructed` has marked the store,
+    /// which flags every object's destructor served, a generator's and a
+    /// fiber's among them.
     fn destruct(&mut self, obj: Obj) {
+        if self.0.marked_destructed {
+            return;
+        }
         let table = self.0.object_handlers(obj);
         table.dtor_obj(self.0, PhpObject::of(obj));
     }
