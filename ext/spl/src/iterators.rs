@@ -142,11 +142,62 @@ struct RegexIt {
     preg_flags: i64,
 }
 
-/// One level of `spl_recursive_it_object`'s stack.
+/// One level of `spl_recursive_it_object`'s stack, `spl_sub_iterator`:
+/// the level's object, `zobject`, whose `hasChildren()` and
+/// `getChildren()` the walk calls, and the iterator its class's
+/// `get_iterator` handed out, `iterator`, which the walk steps; one owner
+/// of each. The iterator is an object of the store (`zend_iterator_init`),
+/// so it takes a number, and every number handed out after a walk that
+/// went a level deep is php's.
+///
+/// ```php
+/// class D extends RecursiveArrayIterator { function __destruct() { echo "dtor ", spl_object_id($this), "\n"; } }
+/// foreach (new RecursiveIteratorIterator(new D([[1]])) as $v) {}
+/// echo spl_object_id(new stdClass), "\n";
+/// $t = new RecursiveTreeIterator(new RecursiveArrayIterator([1, [2, 3]]));
+/// foreach ($t as $k => $v) echo "$k => $v\n";
+/// echo spl_object_id(new stdClass), "\n";
+/// ```
+/// ```expect
+/// dtor 5
+/// dtor 2
+/// 4
+/// 0 => |-1
+/// 1 => \-Array
+/// 0 =>   |-2
+/// 1 =>   \-3
+/// 5
+/// ```
 #[derive(Clone, Copy)]
 struct Level {
     iterator: PhpObject,
+    sub: Iter,
     state: State,
+}
+
+impl Level {
+    /// `ce->get_iterator(ce, &zobject, 0)` over `iterator`, whose owner
+    /// the level takes.
+    fn new(req: &mut Request, iterator: PhpObject) -> Result<Level, Thrown> {
+        match iterate(req, &iterator) {
+            Ok(sub) => Ok(Level {
+                iterator,
+                sub,
+                state: State::Start,
+            }),
+            Err(thrown) => {
+                req.release(iterator.as_value());
+                Err(thrown)
+            }
+        }
+    }
+
+    /// `zend_iterator_dtor(sub_iter)` then `zval_ptr_dtor(&zobject)`, the
+    /// order the rewind, the destructor and the free give a level up in.
+    fn release(self, req: &mut Request) {
+        req.release(self.sub.as_value());
+        req.release(self.iterator.as_value());
+    }
 }
 
 /// `RecursiveIteratorState`.
@@ -2151,7 +2202,7 @@ impl RecursiveTreeIterator {
         let Some(level) = top(req, this)? else {
             return Ok(Value::null());
         };
-        let key = crate::method(req, level.iterator, b"key")?;
+        let key = level.sub.key(req)?;
         let key = crate::owned(req, key);
         if rec(req, this, |it| it.flags & Self::BYPASS_KEY != 0)? {
             return Ok(key);
@@ -2938,7 +2989,7 @@ fn rec_key(req: &mut Request, this: PhpObject) -> Result<Value, Thrown> {
     let Some(level) = top(req, this)? else {
         return Ok(Value::null());
     };
-    let key = crate::method(req, level.iterator, b"key")?;
+    let key = level.sub.key(req)?;
     Ok(crate::owned(req, key))
 }
 
@@ -2948,7 +2999,7 @@ fn rec_current(req: &mut Request, this: PhpObject) -> Result<Value, Thrown> {
     let Some(level) = top(req, this)? else {
         return Ok(Value::null());
     };
-    let current = crate::method(req, level.iterator, b"current")?;
+    let current = level.sub.value(req)?;
     Ok(crate::owned(req, current))
 }
 
@@ -3008,9 +3059,10 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
             return Ok(());
         };
         let mut iterator = level.iterator;
+        let mut sub = level.sub;
         let mut state = level.state;
         if state == State::Next {
-            if let Err(thrown) = crate::effect(req, iterator, b"next") {
+            if let Err(thrown) = sub.next(req) {
                 caught(req, this, thrown)?;
             }
             // `next()` may have rewound the walk, which cuts the stack
@@ -3019,14 +3071,15 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                 return Ok(());
             };
             iterator = level.iterator;
+            sub = level.sub;
             state = State::Start;
         }
         let mut ended = false;
         if state == State::Start {
             let depth = rec(req, this, |it| it.levels.len())?;
-            let valid = crate::valid(req, iterator)?;
+            let valid = sub.valid(req)?;
             if rec(req, this, |it| it.levels.len())? != depth
-                || top(req, this)?.map(|l| l.iterator) != Some(iterator)
+                || top(req, this)?.map(|l| l.sub) != Some(sub)
             {
                 return Ok(());
             }
@@ -3133,13 +3186,9 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                             State::Next
                         },
                     )?;
-                    rec(req, this, |it| {
-                        it.levels.push(Level {
-                            iterator: object,
-                            state: State::Start,
-                        });
-                    })?;
-                    crate::effect(req, object, b"rewind")?;
+                    let level = Level::new(req, object)?;
+                    rec(req, this, |it| it.levels.push(level))?;
+                    level.sub.rewind(req)?;
                     if let Err(thrown) = hook(req, this, b"beginchildren", b"beginChildren") {
                         caught(req, this, thrown)?;
                     }
@@ -3156,14 +3205,16 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
             caught(req, this, thrown)?;
         }
         let popped = rec(req, this, |it| {
-            if it.levels.len() > 1 && it.levels.last().map(|l| l.iterator) == Some(iterator) {
+            if it.levels.len() > 1 && it.levels.last().map(|l| l.sub) == Some(sub) {
                 it.levels.pop()
             } else {
                 None
             }
         })?;
         if let Some(level) = popped {
+            // The object before its iterator, as php's pop gives them up.
             req.release(level.iterator.as_value());
+            req.release(level.sub.as_value());
             // `while (!EG(exception))`: a sub-iterator's destructor that
             // throws ends the step.
             php_ext::raising::pending(req)?;
@@ -3177,13 +3228,13 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
 fn rec_rewind(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
     while rec(req, this, |it| it.levels.len())? > 1 {
         if let Some(level) = rec(req, this, |it| it.levels.pop())? {
-            req.release(level.iterator.as_value());
+            level.release(req);
         }
         hook(req, this, b"endchildren", b"endChildren")?;
     }
     set_state(req, this, State::Start)?;
     if let Some(root) = top(req, this)? {
-        crate::effect(req, root.iterator, b"rewind")?;
+        root.sub.rewind(req)?;
     }
     if !rec(req, this, |it| it.in_iteration)? {
         hook(req, this, b"beginiteration", b"beginIteration")?;
@@ -3197,7 +3248,7 @@ fn rec_rewind(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
 fn rec_valid(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
     let levels = rec(req, this, |it| it.levels.clone())?;
     for level in levels.iter().rev() {
-        if crate::valid(req, level.iterator)? {
+        if level.sub.valid(req)? {
             return Ok(true);
         }
     }
@@ -3251,6 +3302,7 @@ impl ObjectHandlers for RecHandlers {
         if let Some(it) = object.native::<RecIt>(req) {
             for level in &it.levels {
                 visit(level.iterator.as_value());
+                visit(level.sub.as_value());
             }
         }
     }
@@ -3362,7 +3414,7 @@ fn release_levels(req: &mut Request, object: PhpObject) {
         .map(|it| std::mem::take(&mut it.levels))
         .unwrap_or_default();
     for level in levels.into_iter().rev() {
-        req.release(level.iterator.as_value());
+        level.release(req);
     }
 }
 
@@ -3400,7 +3452,7 @@ impl ClassIterator for RecWalk {
             .map(|it| it.levels.split_off(it.levels.len().min(1)))
             .unwrap_or_default();
         for level in levels.into_iter().rev() {
-            req.release(level.iterator.as_value());
+            level.release(req);
         }
     }
 }
@@ -3444,12 +3496,10 @@ fn rec_construct(
             "An instance of RecursiveIterator or IteratorAggregate creating it is required",
         ));
     }
+    let root = Level::new(req, root)?;
     let old = rec(req, this, |it| {
         let old = std::mem::take(&mut it.levels);
-        it.levels.push(Level {
-            iterator: root,
-            state: State::Start,
-        });
+        it.levels.push(root);
         it.mode = mode;
         it.flags = flags;
         it.max_depth = -1;
@@ -3457,7 +3507,7 @@ fn rec_construct(
         old
     })?;
     for level in old {
-        req.release(level.iterator.as_value());
+        level.release(req);
     }
     Ok(())
 }
@@ -3490,7 +3540,7 @@ fn tree_entry(req: &mut Request, this: PhpObject) -> Result<Option<Vec<u8>>, Thr
     let Some(level) = top(req, this)? else {
         return Ok(None);
     };
-    let data = crate::method(req, level.iterator, b"current")?;
+    let data = level.sub.value(req)?;
     let bare = data.deref();
     let entry = if bare.as_array().is_some() {
         b"Array".to_vec()

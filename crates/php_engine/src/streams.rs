@@ -36,7 +36,8 @@ use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
 use crate::api::request::{
-    Cast, EngineWrapper, FdStream, FilterFlags, OptionAnswer, Request, Stream, StreamOption, Whence,
+    Cast, DirListing, EngineWrapper, FdStream, FilterFlags, OptionAnswer, Request, Stream,
+    StreamOption, Whence,
 };
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 
@@ -136,6 +137,13 @@ pub(crate) trait Ops: Send {
     /// `None` for every other kind, which is `php_stream_is(stream,
     /// PHP_STREAM_IS_MEMORY)` answered no.
     fn memory_buffer(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// `php_glob_stream_get_path` and `php_glob_stream_get_count` of a
+    /// glob stream, `None` for every other kind, which is
+    /// `php_stream_is(stream, &php_glob_stream_ops)` answered no.
+    fn glob(&self) -> Option<(Option<&[u8]>, usize)> {
         None
     }
 
@@ -963,6 +971,11 @@ impl PhpStream {
     /// it.
     const fn set_read_buffer(&mut self, buffered: bool) {
         self.flags.no_buffer = !buffered;
+    }
+
+    /// The glob stream's path and count ([`Ops::glob`]).
+    pub(crate) fn glob(&self) -> Option<(Option<&[u8]>, usize)> {
+        self.ops.glob()
     }
 
     /// `_php_stream_readdir` (`Z/main/streams/streams.c:2221`): the next
@@ -3341,12 +3354,8 @@ impl Request {
                 let logged = std::mem::replace(&mut self.wrapper_errors, outer);
                 match opened {
                     Some(opened) => match opened? {
-                        Some(entries) => {
-                            let kind = Listing {
-                                label,
-                                entries,
-                                at: 0,
-                            };
+                        Some(listed) => {
+                            let kind = Listing::new(label, listed);
                             (
                                 label,
                                 Ok(self.stream_alloc(PhpStream::new(Box::new(kind), b"r"))?),
@@ -3744,13 +3753,48 @@ impl Ops for Dir {
 }
 
 /// A directory an extension's wrapper listed, php's own dir stream ops
-/// for such a wrapper (`php_glob_stream_ops` among them): the entries in
+/// for such a wrapper, `php_glob_stream_ops` among them: the entries in
 /// order, `readdir` the next and `rewinddir` back to the first, under the
 /// wrapper's label.
 struct Listing {
     label: &'static str,
-    entries: Vec<Vec<u8>>,
+    listed: DirListing,
     at: usize,
+    /// `pglob->path`: the directory part of the match a glob last handed
+    /// out; nothing for any other listing.
+    path: Option<Vec<u8>>,
+}
+
+impl Listing {
+    /// `php_glob_stream_opener`'s last step for a glob, the path split
+    /// off its first match or, where it matched nothing, its pattern.
+    fn new(label: &'static str, listed: DirListing) -> Listing {
+        let path = match &listed {
+            DirListing::Names(_) => None,
+            DirListing::Glob { pattern, matches } => {
+                Some(glob_split(matches.first().unwrap_or(pattern)).0.to_vec())
+            }
+        };
+        Listing {
+            label,
+            listed,
+            at: 0,
+            path,
+        }
+    }
+}
+
+/// `php_glob_stream_path_split` (`Z/main/streams/glob_wrapper.c:95`):
+/// the directory part of a path and the name after its last `/`, the
+/// directory keeping its `/` where it is the root alone.
+fn glob_split(path: &[u8]) -> (&[u8], &[u8]) {
+    match path.iter().rposition(|b| *b == b'/') {
+        Some(at) => {
+            let dir_len = if at + 1 > 1 { at } else { at + 1 };
+            (&path[..dir_len], &path[at + 1..])
+        }
+        None => (&path[..0], path),
+    }
 }
 
 impl Ops for Listing {
@@ -3774,7 +3818,8 @@ impl Ops for Listing {
         0
     }
 
-    /// `php_glob_stream_rewind`: back to the first entry.
+    /// `php_glob_stream_rewind`: back to the first entry, a glob's path
+    /// given up.
     fn seek(
         &mut self,
         _req: &mut Request,
@@ -3783,6 +3828,7 @@ impl Ops for Listing {
         _position: &mut i64,
     ) -> Option<bool> {
         self.at = 0;
+        self.path = None;
         Some(true)
     }
 
@@ -3790,10 +3836,36 @@ impl Ops for Listing {
         true
     }
 
+    /// `php_glob_stream_read` for a glob: the name after the match's last
+    /// `/`, the part before it kept as the path (`PHP_GLOB_APPEND` is
+    /// always set), and past the last the path given up.
     fn read_dir(&mut self, _req: &mut Request) -> Option<Vec<u8>> {
-        let entry = self.entries.get(self.at)?.clone();
-        self.at += 1;
-        Some(entry)
+        match &self.listed {
+            DirListing::Names(entries) => {
+                let entry = entries.get(self.at)?.clone();
+                self.at += 1;
+                Some(entry)
+            }
+            DirListing::Glob { matches, .. } => {
+                let Some(found) = matches.get(self.at) else {
+                    self.at = matches.len();
+                    self.path = None;
+                    return None;
+                };
+                let (dir, name) = glob_split(found);
+                let name = name.to_vec();
+                self.path = Some(dir.to_vec());
+                self.at += 1;
+                Some(name)
+            }
+        }
+    }
+
+    fn glob(&self) -> Option<(Option<&[u8]>, usize)> {
+        match &self.listed {
+            DirListing::Glob { matches, .. } => Some((self.path.as_deref(), matches.len())),
+            DirListing::Names(_) => None,
+        }
     }
 }
 

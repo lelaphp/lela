@@ -1,7 +1,9 @@
 //! `glob://`, `Z/main/streams/glob_wrapper.c`'s `php_glob_stream_wrapper`,
 //! which php registers from `basic_functions.c` beside `php` and `file`:
 //! a wrapper that opens no stream and whose directory is what
-//! `php_glob` matches, each entry the part of a match after its last `/`.
+//! `php_glob` matches, which the engine serves as php's glob stream
+//! ([`DirListing::Glob`]): each entry the part of a match after its last
+//! `/`, the part before it the stream's path, and the matches its count.
 //! `php_glob` is this crate's (design §4.10), so the wrapper is too,
 //! registered at request start through the engine's one wrapper table;
 //! the table lists it after the engine's own `data`, where php registers
@@ -10,7 +12,7 @@
 use std::os::unix::ffi::OsStrExt;
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, StreamWrapper};
+use php_ext::request::{DirListing, Request, StreamWrapper};
 
 use super::php_glob;
 
@@ -60,10 +62,11 @@ pub(crate) fn wrapper() -> StreamWrapper {
 /// pattern after `glob://`, a relative one under the working directory as
 /// php's thread-safe build prefixes it and strips the prefix again, the
 /// matches `php_glob` makes of it with no flags, none for a pattern
-/// nothing matches and a refusal for one it cannot read; each match
-/// handed out as the part after its last `/` (`php_glob_stream_path_split`).
+/// nothing matches and a refusal for one it cannot read; the matches and
+/// the pattern handed to the engine's glob stream, which splits each as
+/// it reads it (`php_glob_stream_path_split`).
 #[allow(clippy::unnecessary_wraps)] // `StreamWrapper::open_dir`'s signature
-fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thrown> {
+fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown> {
     let path = path.strip_prefix(b"glob://").unwrap_or(path);
     let mut pattern = path.to_vec();
     let mut cwd_skip = 0;
@@ -82,16 +85,12 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thro
         Err(php_glob::PHP_GLOB_NOMATCH) => Vec::new(),
         Err(_) => return Ok(None),
     };
-    let entries = matches
+    let matches = matches
         .into_iter()
-        .map(|m| {
-            let m = m.get(cwd_skip..).unwrap_or(&m[..]);
-            let name = m
-                .iter()
-                .rposition(|b| *b == b'/')
-                .map_or(m, |at| &m[at + 1..]);
-            name.to_vec()
-        })
+        .map(|m| m.get(cwd_skip..).unwrap_or(&m[..]).to_vec())
         .collect();
-    Ok(Some(entries))
+    Ok(Some(DirListing::Glob {
+        pattern: path.to_vec(),
+        matches,
+    }))
 }

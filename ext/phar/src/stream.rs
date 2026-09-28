@@ -4,7 +4,7 @@
 //! and its directories (`phar_make_dirstream`), sorted as php sorts them.
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Opening, Request, Stream, StreamOps, StreamWrapper, Whence};
+use php_ext::request::{DirListing, Opening, Request, Stream, StreamOps, StreamWrapper, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 use crate::archive::{self, ArchiveId, archives, lossy};
@@ -552,7 +552,12 @@ fn make_dirstream(a: &archive::Archive, dir: &[u8]) -> Vec<Vec<u8>> {
 
 /// `phar_wrapper_open_dir`: the directory's entries, or a mounted
 /// directory's own listing.
-fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thrown> {
+fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown> {
+    Ok(list_dir_url(req, path)?.map(DirListing::Names))
+}
+
+/// The entries `phar_wrapper_open_dir` lists at `path`.
+fn list_dir_url(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thrown> {
     let Some(url) = parse_url(req, path, b"r", Report::Log)? else {
         req.wrapper_log_error(&format!("phar url \"{}\" is unknown", lossy(path)));
         return Ok(None);

@@ -106,6 +106,7 @@ abi::ObjectHandlers::clone_obj_with
 abi::ObjectHandlers::compare
 abi::ObjectHandlers::count_elements
 abi::ObjectHandlers::current_place
+abi::ObjectHandlers::dimension_place
 abi::ObjectHandlers::do_operation
 abi::ObjectHandlers::dtor_obj
 abi::ObjectHandlers::free_obj
@@ -322,6 +323,7 @@ request::Brigade
 request::BufferHandler
 request::Cast
 request::ContentType
+request::DirListing
 request::EngineWrapper
 request::Execution
 request::ExtensionId
@@ -534,6 +536,8 @@ request::Stream::free
 request::Stream::from_value
 request::Stream::get_line
 request::Stream::get_record
+request::Stream::glob_count
+request::Stream::glob_path
 request::Stream::is_dir
 request::Stream::is_stdio
 request::Stream::meta_data
@@ -638,6 +642,14 @@ values::ArrayIter::key
 values::ArrayIter::value
 values::ClassId
 values::ClosureInfo
+values::HashIterator
+values::HashIterator::new
+values::HashIterator::position
+values::HashIterator::release
+values::HashIterator::set_position
+values::HeldProperties
+values::HeldProperties::release
+values::HeldProperties::rows
 values::Key
 values::Key::from_string
 values::Key::to_prop_name
@@ -664,6 +676,7 @@ values::PhpArray::len
 values::PhpArray::live_from
 values::PhpArray::new
 values::PhpArray::next_free
+values::PhpArray::place
 values::PhpArray::protect
 values::PhpArray::replace
 values::PhpArray::separate
@@ -701,8 +714,10 @@ values::PhpObject::native_mut_or_fatal
 values::PhpObject::prop
 values::PhpObject::props
 values::PhpObject::props_for
+values::PhpObject::props_held
 values::PhpObject::protect
 values::PhpObject::row
+values::PhpObject::row_place
 values::PhpObject::row_ref
 values::PhpObject::set_prop
 values::PhpObject::set_row
@@ -729,6 +744,7 @@ values::PhpString::len
 values::PhpString::mark_valid_utf8
 values::PhpString::new
 values::PhpString::product
+values::Place
 values::Resource
 values::Resource::as_value
 values::Resource::close
@@ -757,6 +773,7 @@ values::Value::bool
 values::Value::deref
 values::Value::float
 values::Value::int
+values::Value::is_refcounted
 values::Value::null
 values::Value::object
 values::Value::refcount

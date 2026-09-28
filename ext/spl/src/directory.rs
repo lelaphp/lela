@@ -4,10 +4,12 @@
 //! `spl_filesystem_object` ([`Fs`]), and the engine's streams layer: a
 //! directory is a stream `opendir` opens and `readdir` reads, a file a
 //! stream `fopen` opens, and a stat the wrapper's `url_stat`. The CSV
-//! methods, `fscanf()`, `fstat()`, the access tests and `GlobIterator`'s
-//! pattern call `ext/standard`'s `php_fgetcsv`, `php_fputcsv`,
-//! `php_sscanf_internal`, `php_fstat`, `php_stat` and `php_glob` directly,
-//! as `spl_directory.c` does, never a native through the function table.
+//! methods, `fscanf()`, `fstat()` and the access tests call
+//! `ext/standard`'s `php_fgetcsv`, `php_fputcsv`, `php_sscanf_internal`,
+//! `php_fstat` and `php_stat` directly, as `spl_directory.c` does, never a
+//! native through the function table. A `GlobIterator`, and a
+//! `DirectoryIterator` over `glob://`, walk the glob stream `opendir`
+//! opens, whose path and count they read off it.
 
 use php_ext::abi::{
     CloneObj, ExtensionBuilder, False, Instance, Null, ObjectHandlers, OrFalse, Passed,
@@ -48,7 +50,6 @@ pub(crate) struct Fs {
     entry: Vec<u8>,
     index: i64,
     sub_path: Option<Vec<u8>>,
-    glob: Option<(Vec<u8>, Vec<Vec<u8>>)>,
     stream: Option<Open>,
     open_mode: Vec<u8>,
     orig_path: Option<Vec<u8>>,
@@ -505,16 +506,21 @@ impl SplFileInfo {
 
     /// `getRealPath(): string|false`.
     ///
-    /// A `GlobIterator` that matched nothing stands on no entry: its
-    /// name is `""`, which every stat answers `false` for quietly
-    /// (`php_stat`), and whose real path is the working directory's.
+    /// A `GlobIterator` that matched nothing stands on no entry: it has
+    /// no name, so its real path is `false`, until a call names it `""`,
+    /// which every stat answers `false` for quietly (`php_stat`), and
+    /// whose real path is the working directory's.
     ///
     /// ```php
     /// $o = new GlobIterator(__DIR__ . "/*.no-such-extension");
+    /// var_dump($o->getRealPath(), $o->getPathname(), $o->getRealPath());
     /// var_dump($o->getATime(), $o->getType(), $o->getSize(), $o->getFilename(), $o->getRealPath() === getcwd(), $o->count());
     /// echo str_replace(__DIR__, "", var_export($o->__debugInfo()["\0DirectoryIterator\0glob"], true)), "\n";
     /// ```
     /// ```expect
+    /// bool(false)
+    /// string(0) ""
+    /// bool(false)
     /// bool(false)
     /// bool(false)
     /// bool(false)
@@ -537,12 +543,11 @@ impl SplFileInfo {
         if kind == Type::Dir && !known && entry {
             file_name(req, this)?;
         }
-        // A directory's name is its entry's where the name is not known,
-        // which a `GlobIterator` on no entry answers as `""`, php's
+        // `intern->file_name` as it stands: a directory on no entry has
+        // none until a call that names it, and then `""`, php's
         // `VCWD_REALPATH("")`, the working directory.
         let name = match orig {
             Some(orig) => Some(orig),
-            None if kind == Type::Dir => Some(file_name(req, this)?),
             None => fs(req, this, |it| it.file_name.clone())?,
         };
         let name = name.map(|n| if n.is_empty() { b".".to_vec() } else { n });
@@ -1134,6 +1139,33 @@ impl RecursiveDirectoryIterator {
 /// /a.txt a.txt
 /// /b.txt b.txt
 /// ```
+///
+/// The path is the glob stream's, the directory of the match it read
+/// last (`php_glob_stream_get_path`), none for a match with no `/`; the
+/// count is the stream's; and the stream is a resource `fclose` refuses.
+///
+/// ```php
+/// $d = __DIR__ . '/spl-glob-path'; @mkdir($d); @mkdir("$d/s"); touch("$d/a.51068"); touch("$d/s/b.51068");
+/// chdir($d);
+/// foreach (new DirectoryIterator('glob://*.51068') as $f) var_dump($f->getFilename(), $f->getPath(), $f->getSize());
+/// $g = new GlobIterator('*/*.51068');
+/// foreach ($g as $k => $f) var_dump($k, $g->getPath(), $f->getPathname());
+/// var_dump($g->getPath(), count($g));
+/// $r = get_resources(); fclose(end($r));
+/// unlink("$d/s/b.51068"); rmdir("$d/s"); unlink("$d/a.51068"); rmdir($d);
+/// ```
+/// ```expect
+/// string(7) "a.51068"
+/// string(0) ""
+/// int(0)
+/// string(9) "s/b.51068"
+/// string(1) "s"
+/// string(9) "s/b.51068"
+/// string(0) ""
+/// int(1)
+///
+/// Warning: fclose(): cannot close the provided stream, as it must not be manually closed in %s on line 8
+/// ```
 #[php_class(
     extends(FilesystemIterator),
     implements(Countable),
@@ -1145,12 +1177,9 @@ pub(crate) struct GlobIterator;
 #[php_class]
 impl GlobIterator {
     /// `GlobIterator::__construct(string $pattern, int $flags =
-    /// KEY_AS_PATHNAME | CURRENT_AS_FILEINFO)`: the pattern expanded through
-    /// `ext/standard`'s `php_glob`, called directly as the `glob://` wrapper's
-    /// opener calls it (`Z/main/streams/glob_wrapper.c`), never `glob()`
-    /// through the function table: a relative pattern under the working
-    /// directory, no flags, and the directory stripped from each path again.
-    /// A pattern `php_glob` refuses is no entries.
+    /// KEY_AS_PATHNAME | CURRENT_AS_FILEINFO)`: the pattern opened as a
+    /// `glob://` directory, `glob://` put before it where it has none
+    /// (`DIT_CTOR_GLOB`).
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -1158,32 +1187,19 @@ impl GlobIterator {
         #[php(default = FilesystemIterator::KEY_AS_PATHNAME | FilesystemIterator::CURRENT_AS_FILEINFO)]
         flags: i64,
     ) -> Result<(), Thrown> {
-        let this = this.object();
-        let pattern = pattern.0.as_bytes().to_vec();
-        if pattern.is_empty() {
-            return Err(arg_value_error(req, 1, "not be empty"));
-        }
-        let bare = pattern
-            .strip_prefix(b"glob://")
-            .unwrap_or(&pattern)
-            .to_vec();
-        let entries = glob_paths(req, &bare);
-        fs(req, this, |it| {
-            it.kind = Type::Dir;
-            it.flags = flags;
-            it.path = Some(dirname(&bare));
-            it.glob = Some((bare, entries));
-            it.index = 0;
-        })?;
-        dir_read(req, this)
+        let pattern = pattern.0.as_bytes();
+        let path = if pattern.is_empty() || pattern.starts_with(b"glob://") {
+            pattern.to_vec()
+        } else {
+            [b"glob://".as_slice(), pattern].concat()
+        };
+        dir_construct(req, this.object(), &path, flags)
     }
 
     /// `GlobIterator::count(): int`.
     #[php(tentative)]
     fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
-        match fs(req, this.object(), |it| {
-            it.glob.as_ref().map(|(_, e)| e.len())
-        })? {
+        match glob_stream(req, this.object())?.and_then(|dir| dir.glob_count(req)) {
             Some(n) => Ok(i64::try_from(n).unwrap_or(i64::MAX)),
             None => Err(throw(req, "Error", "GlobIterator is not initialized")),
         }
@@ -1956,18 +1972,22 @@ fn set_filename(req: &mut Request, this: PhpObject, path: &[u8]) -> Result<(), T
     })
 }
 
-/// `spl_filesystem_object_get_path`: the path, a glob's directory for a
-/// `GlobIterator`.
+/// `spl_filesystem_object_get_path`: the path, or for a directory over
+/// a glob stream the stream's own (`php_glob_stream_get_path`), the
+/// directory of the match it last read, `NULL` where that is empty.
 fn object_path(req: &mut Request, this: PhpObject) -> Result<Option<Vec<u8>>, Thrown> {
-    fs(req, this, |it| {
-        if it.kind == Type::Dir
-            && let Some((_, entries)) = &it.glob
-        {
-            let current = usize::try_from(it.index).ok().and_then(|i| entries.get(i));
-            return current.map(|e| dirname(e));
-        }
-        it.path.clone()
-    })
+    if fs(req, this, |it| it.kind == Type::Dir)?
+        && let Some(dir) = glob_stream(req, this)?
+    {
+        return Ok(dir.glob_path(req).filter(|path| !path.is_empty()));
+    }
+    fs(req, this, |it| it.path.clone())
+}
+
+/// `spl_intern_is_glob`: the directory stream, where it is a glob's.
+fn glob_stream(req: &mut Request, this: PhpObject) -> Result<Option<Stream>, Thrown> {
+    let dir = fs(req, this, |it| it.dir.as_ref().map(Open::stream))?;
+    Ok(dir.filter(|dir| dir.glob_count(req).is_some()))
 }
 
 /// `zend_dirname` enough for a path this file builds: everything
@@ -1989,19 +2009,6 @@ fn file_name(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, Thrown> {
     let (kind, entry, flags) = fs(req, this, |it| (it.kind, it.entry.clone(), it.flags))?;
     if kind != Type::Dir {
         return Err(uninitialized(req));
-    }
-    let glob = fs(req, this, |it| it.glob.is_some())?;
-    if glob {
-        let name = fs(req, this, |it| {
-            it.glob.as_ref().and_then(|(_, e)| {
-                usize::try_from(it.index)
-                    .ok()
-                    .and_then(|i| e.get(i).cloned())
-            })
-        })?
-        .unwrap_or_default();
-        fs(req, this, |it| it.file_name = Some(name.clone()))?;
-        return Ok(name);
     }
     let path = object_path(req, this)?;
     let name = match path {
@@ -2161,9 +2168,7 @@ impl ObjectHandlers for FileHandlers {
         object: PhpObject,
         lowered: &[u8],
     ) -> Result<Option<Function>, Thrown> {
-        let unopened = fs(req, object, |it| {
-            it.dir.is_none() && it.glob.is_none() && it.orig_path.is_none()
-        })?;
+        let unopened = fs(req, object, |it| it.dir.is_none() && it.orig_path.is_none())?;
         if unopened {
             return Err(throw(
                 req,
@@ -2418,10 +2423,11 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
         let value = crate::string_value(req, &name)?;
         set(req, &mut out, b"SplFileInfo", b"fileName", value)?;
     }
-    let (kind, glob, sub_path, mode, delimiter, enclosure) = fs(req, this, |it| {
+    let glob = glob_stream(req, this)?.is_some();
+    let (kind, path, sub_path, mode, delimiter, enclosure) = fs(req, this, |it| {
         (
             it.kind,
-            it.glob.as_ref().map(|(p, _)| p.clone()),
+            it.path.clone(),
             it.sub_path.clone(),
             it.open_mode.clone(),
             it.delimiter,
@@ -2431,9 +2437,9 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
     if kind == Type::Dir {
         // `intern->path` of a glob stream's iterator, the pattern as
         // `spl_filesystem_dir_open` was handed it, `glob://` first.
-        let value = match glob {
-            Some(pattern) => crate::string_value(req, &[b"glob://".as_slice(), &pattern].concat())?,
-            None => Value::bool(false),
+        let value = match path {
+            Some(pattern) if glob => crate::string_value(req, &pattern)?,
+            _ => Value::bool(false),
         };
         set(req, &mut out, b"DirectoryIterator", b"glob", value)?;
         let value = crate::string_value(req, &sub_path.unwrap_or_default())?;
@@ -2460,22 +2466,10 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
 
 /// `spl_filesystem_dir_read`: the next entry, empty past the last.
 fn dir_read(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
-    let (dir, glob) = fs(req, this, |it| {
+    let dir = fs(req, this, |it| {
         it.file_name = None;
-        (it.dir.as_ref().map(Open::stream), it.glob.is_some())
+        it.dir.as_ref().map(Open::stream)
     })?;
-    if glob {
-        let entry = fs(req, this, |it| {
-            it.glob.as_ref().and_then(|(_, entries)| {
-                usize::try_from(it.index)
-                    .ok()
-                    .and_then(|i| entries.get(i))
-                    .map(|e| basename(e, b""))
-            })
-        })?;
-        fs(req, this, |it| it.entry = entry.unwrap_or_default())?;
-        return Ok(());
-    }
     let entry = match dir {
         Some(dir) => dir.read_dir(req)?.map(|s| s.as_bytes().to_vec()),
         None => None,
@@ -2498,7 +2492,6 @@ fn dir_step(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         if !(skip && is_dot(&entry)) {
             return Ok(());
         }
-        fs(req, this, |it| it.index += i64::from(it.glob.is_some()))?;
     }
 }
 
@@ -2555,40 +2548,10 @@ fn dir_construct(
 
 /// `CHECK_DIRECTORY_ITERATOR_IS_INITIALIZED`.
 fn dir_checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
-    if fs(req, this, |it| it.dir.is_none() && it.glob.is_none())? {
+    if fs(req, this, |it| it.dir.is_none())? {
         return Err(uninitialized(req));
     }
     Ok(this)
-}
-
-/// `php_glob_stream_opener`'s expansion under ZTS, where each request
-/// has its own working directory: a relative pattern written after
-/// `getcwd()` and a slash, cut to `MAXPATHLEN - 1` bytes as its
-/// `snprintf` cuts it, `php_glob` with no flags, and the working
-/// directory's bytes stripped from each path again. `PHP_GLOB_NOMATCH`
-/// is no paths, as php's; so is every other refusal, where php's opener
-/// answers no stream and the constructor throws.
-fn glob_paths(req: &Request, pattern: &[u8]) -> Vec<Vec<u8>> {
-    /// `MAXPATHLEN`, darwin's `PATH_MAX`.
-    const MAXPATHLEN: usize = 1024;
-    let mut work = pattern.to_vec();
-    let mut cwd_skip = 0;
-    if work.first() != Some(&b'/') {
-        let mut cwd = req.cwd().0.into_os_string().into_encoded_bytes();
-        cwd_skip = cwd.len() + 1;
-        cwd.push(b'/');
-        cwd.extend_from_slice(&work);
-        cwd.truncate(MAXPATHLEN - 1);
-        work = cwd;
-    }
-    php_ext_standard::php_glob(&work, 0)
-        .map(|paths| {
-            paths
-                .into_iter()
-                .map(|path| path.get(cwd_skip..).unwrap_or_default().to_vec())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 // ---- the file objects

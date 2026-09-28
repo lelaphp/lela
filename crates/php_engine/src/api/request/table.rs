@@ -153,21 +153,7 @@ impl Request {
     /// (`ZVAL_MAKE_REF`), `null` laid down where the table has none,
     /// and the cell handed back with one more owner, the caller's.
     pub(crate) fn table_row_ref(&mut self, object: PhpObject, key: &Key) -> Result<PhpRef, Thrown> {
-        let object = self.table_owner(object)?;
-        let o = object.heap();
-        let place = match self.table_row_of(object.class(), key)? {
-            Row::Slot(i) => o.slot_ref(i),
-            Row::Dynamic(k) => {
-                let table = self.dynamic_table(o)?;
-                self.array_lookup(table, k)?
-            }
-        };
-        let Some(place) = place else {
-            return Err(crate::api::raising::fatal(
-                self,
-                "InternalError: a row of a property table with no place to stand",
-            ));
-        };
+        let place = self.table_row_place(object, key)?;
         let held = Value::of_zval(place.read());
         let cell = if let Some(cell) = held.as_php_ref() {
             *cell
@@ -178,6 +164,32 @@ impl Request {
         };
         self.addref(&cell.as_value());
         Ok(cell)
+    }
+
+    /// [`PhpObject::row_place`]: where the row stands, a dynamic entry
+    /// laid down as `null` where the table has none (`array_lookup`); a
+    /// slot nothing wrote is left `UNDEF` for the caller, which reads it
+    /// as `null`.
+    pub(crate) fn table_row_place(
+        &mut self,
+        object: PhpObject,
+        key: &Key,
+    ) -> Result<php_heap::ZvalRef, Thrown> {
+        let object = self.table_owner(object)?;
+        let o = object.heap();
+        let place = match self.table_row_of(object.class(), key)? {
+            Row::Slot(i) => o.slot_ref(i),
+            Row::Dynamic(k) => {
+                let table = self.dynamic_table(o)?;
+                self.array_lookup(table, k)?
+            }
+        };
+        place.ok_or_else(|| {
+            crate::api::raising::fatal(
+                self,
+                "InternalError: a row of a property table with no place to stand",
+            )
+        })
     }
 
     /// [`PhpObject::typed_row_ref`]: [`Request::table_row_ref`] over a

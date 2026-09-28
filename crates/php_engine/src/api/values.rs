@@ -508,6 +508,14 @@ impl PhpArray {
             .map(|(at, key, z)| (at, Key::of(key), Value::of_zval(z)))
     }
 
+    /// Where the value at `key` stands, `zend_hash_find` answering the
+    /// bucket's `zval *`; `None` where the array has no `key`. The array
+    /// is written through the place, so a caller separates it first.
+    #[must_use]
+    pub fn place(&self, key: &Key) -> Option<Place> {
+        self.0.value_ref(key.heap()).map(Place)
+    }
+
     /// The elements in order, references followed, views of them.
     #[must_use]
     pub fn snapshot(&self) -> Vec<(Key, Value)> {
@@ -683,6 +691,89 @@ impl ArrayIter {
     #[must_use]
     pub fn value(&self) -> Option<&Value> {
         self.at.as_ref().map(|(_, v)| v)
+    }
+}
+
+/// The table `zend_get_properties_for` hands a reader, held until
+/// `zend_release_properties`: [`PhpObject::props_held`]'s rows, each one
+/// more owner of its value where the class built the table for the
+/// reader, views of the object's own rows otherwise.
+#[derive(Debug)]
+#[must_use = "the rows are held until they are released"]
+pub struct HeldProperties {
+    rows: Vec<(Key, Value)>,
+    owned: bool,
+}
+
+impl HeldProperties {
+    /// The rows in the table's order.
+    #[must_use]
+    pub fn rows(&self) -> &[(Key, Value)] {
+        &self.rows
+    }
+
+    /// `zend_release_properties`: the owners the rows held given back.
+    pub fn release(self, req: &mut Request) {
+        if self.owned {
+            for (_, value) in self.rows {
+                req.release(value);
+            }
+        }
+    }
+}
+
+/// Where a value stands in a table, php's `zval *` into a bucket, which
+/// a dimension fetch for a write lays into its `VAR` as `IS_INDIRECT`
+/// so the write, and an `ASSIGN_REF`, reaches the table itself. Naming
+/// the place keeps nothing: it is good until the table is next written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place(php_heap::ZvalRef);
+
+impl Place {
+    /// The heap's place.
+    pub(crate) const fn heap(self) -> php_heap::ZvalRef {
+        self.0
+    }
+
+    pub(crate) const fn of(at: php_heap::ZvalRef) -> Place {
+        Place(at)
+    }
+}
+
+/// php's `HashTableIterator`, one slot of `EG(ht_iterators)`: a bucket
+/// position registered at a table, which every write that moves the
+/// buckets moves with them (`zend_hash_iterators_update` in a rehash
+/// and in the packed-to-hash conversion, `zend_hash_iterators_clamp_max`
+/// in a delete), and which `zend_array_dup` copies onto the table a
+/// write separates. What a walk that outlives one call keeps, php's
+/// `spl_array_object::ht_iter`; given up with [`HashIterator::release`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HashIterator(u32);
+
+impl HashIterator {
+    /// `zend_hash_iterator_add`: an iterator over `array` at the bucket
+    /// `position`.
+    #[must_use]
+    pub fn new(req: &mut Request, array: &PhpArray, position: u32) -> HashIterator {
+        HashIterator(req.heap_mut().iterator_add(array.0, position))
+    }
+
+    /// `zend_hash_iterator_pos`: the bucket the iterator stands at in
+    /// `array`, moved onto it at the copy's position where `array` is a
+    /// separated copy of the table it walked, and at its internal
+    /// pointer where it is another table altogether.
+    pub fn position(self, req: &mut Request, array: &PhpArray) -> u32 {
+        req.heap_mut().iterator_pos(self.0, array.0)
+    }
+
+    /// `EG(ht_iterators)[idx].pos = position`.
+    pub fn set_position(self, req: &mut Request, position: u32) {
+        req.heap_mut().iterator_set_pos(self.0, position);
+    }
+
+    /// `zend_hash_iterator_del`: the slot given back.
+    pub fn release(self, req: &mut Request) {
+        req.heap_mut().iterator_del(self.0);
     }
 }
 
@@ -899,6 +990,29 @@ impl PhpObject {
         crate::ops::properties_for(req, *self, purpose)
     }
 
+    /// [`PhpObject::props_for`] for a reader that holds the table while
+    /// it reads, `zend_get_properties_for` to `zend_release_properties`:
+    /// where the class builds the table for the reader
+    /// (`get_properties_for`, php's `*is_temp`), each row is one more
+    /// owner of its value until [`HeldProperties::release`], as
+    /// `spl_fixedarray_object_get_properties_for`'s `Z_TRY_ADDREF_P` makes
+    /// it, so an element that is the object itself counts while the
+    /// reader prints its refcount; the object's own table, which php
+    /// hands out with `GC_TRY_ADDREF` on the table alone, takes none.
+    pub fn props_held(
+        &self,
+        req: &mut Request,
+        purpose: PropertyPurpose,
+    ) -> Result<HeldProperties, Thrown> {
+        let (rows, owned) = crate::ops::properties_answered(req, *self, purpose)?;
+        if owned {
+            for (_, value) in &rows {
+                req.addref(value);
+            }
+        }
+        Ok(HeldProperties { rows, owned })
+    }
+
     /// The object's property table as `get_properties` holds it,
     /// php's `zobj->properties`: the declared slots that hold a value,
     /// each keyed by the name `zend_mangle_property_name` makes (`\0*\0p`
@@ -1026,6 +1140,15 @@ impl PhpObject {
     /// ```
     pub fn row_ref(&self, req: &mut Request, key: &Key) -> Result<PhpRef, Thrown> {
         req.table_row_ref(*self, key)
+    }
+
+    /// Where the row `key` stands in the object's property table, the
+    /// declared slot or the dynamic entry, `zend_symtable_find_ind`'s
+    /// `zval *` behind the `IS_INDIRECT`; a row the table has none of,
+    /// or a slot nothing wrote, laid down as `null` first, as
+    /// `spl_array_get_dimension_ptr` does under a write fetch.
+    pub fn row_place(&self, req: &mut Request, key: &Key) -> Result<Place, Thrown> {
+        req.table_row_place(*self, key).map(Place)
     }
 
     /// [`PhpObject::row_ref`], with the typed property whose slot the row
@@ -1726,6 +1849,13 @@ impl Value {
             Inner::Undef => Value::null(),
             _ => *self,
         }
+    }
+
+    /// `Z_REFCOUNTED`: whether the value carries an owner count at all,
+    /// which a scalar, an interned string and an immutable array do not.
+    #[must_use]
+    pub fn is_refcounted(&self) -> bool {
+        self.to_zval().is_refcounted()
     }
 
     /// The refcount of a refcounted value, `Z_REFCOUNT`; one for a
