@@ -226,7 +226,22 @@ pub(crate) fn pcntl_signal_dispatch(req: &mut Request) -> Result<bool, Thrown> {
 /// holds `SIG_DFL` or `SIG_IGN` for is dropped. Every signal is blocked
 /// while the queue plays, as php blocks them, and a handler that throws
 /// ends the dispatch with what is left dropped. The engine's interrupt
-/// check serves it as php's `pcntl_interrupt_function`.
+/// check serves it as php's `pcntl_interrupt_function`. No fiber
+/// switches while the handlers are served:
+///
+/// ```php
+/// pcntl_signal(SIGUSR1, function () {
+///     if (Fiber::getCurrent()) {
+///         try { Fiber::suspend(); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
+///     }
+/// });
+/// $f = new Fiber(function () { posix_kill(posix_getpid(), SIGUSR1); pcntl_signal_dispatch(); echo "end\n"; });
+/// $f->start();
+/// ```
+/// ```expect process
+/// Cannot switch fibers in current execution context
+/// end
+/// ```
 pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
     let table = &req.state::<State>().signals;
     if table.dispatching || table.handlers.is_empty() {
@@ -245,7 +260,8 @@ pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
     )
     .is_ok();
     req.state::<State>().signals.dispatching = true;
-    let played = play(req, &taken);
+    // "Prevent switching fibers when handling signals".
+    let played = req.fibers_blocked(|req| play(req, &taken));
     req.state::<State>().signals.dispatching = false;
     if masked {
         let _ = sigprocmask(SigmaskHow::SIG_SETMASK, Some(&unmasked), None);

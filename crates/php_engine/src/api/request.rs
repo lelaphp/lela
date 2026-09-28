@@ -17792,10 +17792,20 @@ impl Request {
             return Ok(());
         }
         self.ticks_count = 0;
+        self.fibers_blocked(Request::serve_ticks)
+    }
+
+    /// `zend_fiber_switch_block()` before `f` and
+    /// `zend_fiber_switch_unblock()` after it: while `f` is under way no
+    /// fiber starts, suspends, resumes or is thrown into, each php's
+    /// `FiberError`, `Cannot switch fibers in current execution context`,
+    /// as a `ZEND_TICKS` round holds the functions it serves and
+    /// pcntl's `pcntl_signal_dispatch` its handlers.
+    pub fn fibers_blocked<R>(&mut self, f: impl FnOnce(&mut Request) -> R) -> R {
         self.fibers.block_switch();
-        let served = self.serve_ticks();
+        let done = f(self);
         self.fibers.unblock_switch();
-        served
+        done
     }
 
     /// [`Request::tick`]'s round, while fiber switching is blocked.

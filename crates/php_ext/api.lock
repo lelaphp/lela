@@ -400,6 +400,7 @@ request::Request::extension_ini
 request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number
+request::Request::fibers_blocked
 request::Request::flush
 request::Request::forbid_dynamic_call
 request::Request::frame_args
