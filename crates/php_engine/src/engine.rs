@@ -225,7 +225,9 @@ pub(crate) struct Shared {
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
     sapi_names: Vec<(Box<[u8]>, Zval)>,
     /// What reading the host's ini entries wrote to `stderr` in php
-    /// ([`Configuration`]), for the host to write before it serves.
+    /// ([`Configuration`]), and after it what the extensions' `on_modify`
+    /// wrote there over the host's values, as opcache's handlers log a
+    /// refused setting: for the host to write before it serves.
     startup_errors: String,
     /// What the extensions' `on_modify` raised as the engine registered
     /// their ini entries ([`Engine::register_ini`]), which php shows once
@@ -1499,6 +1501,7 @@ impl Engine {
         held.sort_by_key(|(name, _)| declared_at(name));
         let mut taken = Vec::new();
         let mut raised = Vec::new();
+        let mut written = Vec::new();
         if !held.is_empty() {
             let mut req = Request::new(Arc::clone(&self.shared), RequestDescription::default());
             req.begin_startup();
@@ -1506,10 +1509,12 @@ impl Engine {
                 let accepted = on_modify(&self.shared.extensions, &name)
                     .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
                 if accepted {
+                    req.take_startup_value(&name, &value);
                     taken.push((name, value));
                 }
             }
             raised = req.end_startup();
+            written = req.startup_stderr();
         }
         let Some(shared) = Arc::get_mut(&mut self.shared) else {
             return;
@@ -1519,6 +1524,9 @@ impl Engine {
             shared.ini.push((name, value));
         }
         shared.startup_raised = raised;
+        shared
+            .startup_errors
+            .push_str(&String::from_utf8_lossy(&written));
         let startup = StartupIni {
             entries: shared.ini.clone(),
         };
@@ -2293,6 +2301,42 @@ mod tests {
         for written in ["0", "2", "abc", "stderr", "1M", "of", " off", ""] {
             assert_eq!(read(written).as_deref(), Some(written), "{written:?}");
         }
+    }
+
+    /// `zend_register_ini_entries_ex` sets each entry before it walks to
+    /// the next, so a handler at startup sees the host's value of an
+    /// entry declared before its own, and what it writes to the error
+    /// stream is kept for the host to write before it serves, as
+    /// opcache's handlers log a refused setting.
+    #[test]
+    fn a_startup_handler_sees_the_entries_before_it_and_its_stderr_is_kept() {
+        let second: OnModify = |req, value| {
+            let mut line = req.ini_get(b"t.first").unwrap_or_default().to_vec();
+            line.extend_from_slice(b" then ");
+            line.extend_from_slice(value);
+            line.push(b'\n');
+            req.write_stderr(&line);
+            Ok(true)
+        };
+        let first: OnModify = |_, _| Ok(true);
+        let entry = |name: &str| php_unit::decl::IniDecl {
+            name: Name(name.as_bytes().into()),
+            default: b"0"[..].into(),
+            user: true,
+            per_dir: true,
+            system: true,
+        };
+        let extension = crate::api::abi::ExtensionBuilder::default()
+            .ini(vec![entry("t.first"), entry("t.second")])
+            .on_modify(b"t.first", first)
+            .on_modify(b"t.second", second)
+            .build("t");
+        let engine = Engine::builder()
+            .extensions(&[extension])
+            .ini("t.second", "2")
+            .ini("t.first", "1")
+            .build();
+        assert!(engine.startup_errors().ends_with("1 then 2\n"));
     }
 
     /// What the pinned oracle answers for `ini_get` under `-n` and one

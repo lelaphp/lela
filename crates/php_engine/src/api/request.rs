@@ -12209,6 +12209,30 @@ impl Request {
         self.startup.take().unwrap_or_default()
     }
 
+    /// A startup value an entry's handler took, in force for the handlers
+    /// after it, as `zend_register_ini_entries_ex` sets each entry's
+    /// value before it walks to the next: `opcache.log_verbosity_level`
+    /// decides what opcache's handlers after it log.
+    pub(crate) fn take_startup_value(&mut self, name: &[u8], value: &[u8]) {
+        self.ini.retain(|(n, _)| n.as_slice() != name);
+        self.ini.push((name.to_vec(), value.to_vec()));
+    }
+
+    /// What the startup's handlers wrote to the error stream, php's
+    /// `fprintf(stderr)` before the first request, in order.
+    pub(crate) fn startup_stderr(&mut self) -> Vec<u8> {
+        let Sink::Kept(kept) = &mut self.sink else {
+            return Vec::new();
+        };
+        let mut written = Vec::new();
+        for aside in kept.aside.drain(..) {
+            if let Aside::Stderr(bytes) = aside {
+                written.extend_from_slice(&bytes);
+            }
+        }
+        written
+    }
+
     /// `php_during_module_startup()`, which `php_verror` names the
     /// origin of a docref by, `PHP Startup` for a native's name, and
     /// what an extension's on-modify rule reads as
