@@ -817,6 +817,11 @@ impl CertStack {
         CertStack::owned(unsafe { sys::OPENSSL_sk_new_null() })
     }
 
+    /// A stack the library made and handed over.
+    pub(in crate::ffi) fn adopt(stack: *mut sys::OPENSSL_STACK) -> Option<CertStack> {
+        CertStack::owned(stack)
+    }
+
     /// `sk_X509_push(sk, cert) > 0`, the stack taking the reference.
     pub(crate) fn push(&mut self, cert: Certificate) -> bool {
         let cert = ManuallyDrop::new(cert);
@@ -832,6 +837,12 @@ impl CertStack {
     pub(crate) fn len(&self) -> usize {
         // SAFETY: the stack is live.
         usize::try_from(unsafe { sys::OPENSSL_sk_num(self.as_ptr()) }).unwrap_or(0)
+    }
+
+    /// Each certificate as PEM, `None` where one would not write.
+    pub(crate) fn pems(&self) -> Pems {
+        // SAFETY: the stack is live.
+        unsafe { pems_of(self.as_ptr()) }
     }
 }
 

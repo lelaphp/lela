@@ -424,7 +424,7 @@ fn openssl_pkcs7_sign(
     })
 }
 
-/// What `openssl_pkcs7_sign` reads before its
+/// What `openssl_pkcs7_sign` and `openssl_cms_sign` read before their
 /// files: the untrusted certificates, the private key and the
 /// certificate, each after php's warning where it cannot be had.
 pub(crate) fn signing(

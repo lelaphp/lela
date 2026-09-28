@@ -1,6 +1,7 @@
-//! Signed and enveloped messages: [`Pkcs7`] (`PKCS7`).
+//! Signed and enveloped messages: [`Pkcs7`] (`PKCS7`) and [`Cms`]
+//! (`CMS_ContentInfo`).
 
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_int, c_uint, c_void};
 use std::ptr;
 
 use openssl_sys as sys;
@@ -9,6 +10,45 @@ use super::cipher::Cipher;
 use super::key::PKey;
 use super::x509::{CertStack, Certificate, Pems, Store, pems_of};
 use super::{Bio, stack_items, written};
+
+// SAFETY: libcrypto's own declarations, from `openssl/cms.h` of OpenSSL
+// 3, which `openssl-sys` does not declare; the library `openssl-sys`
+// links defines each.
+unsafe extern "C" {
+    fn SMIME_read_CMS_ex(
+        bio: *mut sys::BIO,
+        flags: c_int,
+        bcont: *mut *mut sys::BIO,
+        ci: *mut *mut sys::CMS_ContentInfo,
+    ) -> *mut sys::CMS_ContentInfo;
+    fn d2i_CMS_bio(
+        bp: *mut sys::BIO,
+        cms: *mut *mut sys::CMS_ContentInfo,
+    ) -> *mut sys::CMS_ContentInfo;
+    fn CMS_get0_signers(cms: *mut sys::CMS_ContentInfo) -> *mut sys::OPENSSL_STACK;
+    fn CMS_final(
+        cms: *mut sys::CMS_ContentInfo,
+        data: *mut sys::BIO,
+        dcont: *mut sys::BIO,
+        flags: c_uint,
+    ) -> c_int;
+    fn i2d_CMS_bio(bp: *mut sys::BIO, cms: *mut sys::CMS_ContentInfo) -> c_int;
+    fn PEM_write_bio_CMS_stream(
+        out: *mut sys::BIO,
+        cms: *mut sys::CMS_ContentInfo,
+        input: *mut sys::BIO,
+        flags: c_int,
+    ) -> c_int;
+    fn CMS_get0_type(cms: *const sys::CMS_ContentInfo) -> *const sys::ASN1_OBJECT;
+    fn CMS_get1_certs(cms: *mut sys::CMS_ContentInfo) -> *mut sys::OPENSSL_STACK;
+    fn CMS_get1_crls(cms: *mut sys::CMS_ContentInfo) -> *mut sys::OPENSSL_STACK;
+    fn SMIME_write_CMS(
+        bio: *mut sys::BIO,
+        cms: *mut sys::CMS_ContentInfo,
+        data: *mut sys::BIO,
+        flags: c_int,
+    ) -> c_int;
+}
 
 /// `NID_pkcs7_signed` and `NID_pkcs7_signedAndEnveloped`.
 const NID_PKCS7_SIGNED: c_int = 22;
@@ -40,6 +80,12 @@ unsafe fn crl_pems(stack: *const sys::OPENSSL_STACK) -> Pems {
         written(|out| unsafe { sys::PEM_write_bio_X509_CRL(out, crl.cast()) })
     };
     items.into_iter().map(pem).collect()
+}
+
+/// `X509_CRL_free` in the shape `OPENSSL_sk_pop_free` calls.
+unsafe extern "C" fn free_crl(crl: *mut c_void) {
+    // SAFETY: the stack's items are CRLs it owns.
+    unsafe { sys::X509_CRL_free(crl.cast()) };
 }
 
 /// The certificates of a borrowed signer stack as PEM, the stack freed
@@ -218,5 +264,179 @@ impl Pkcs7 {
         };
         // SAFETY: the stacks are the structure's own, live or null.
         (unsafe { pems_of(certs) }, unsafe { crl_pems(crls) })
+    }
+}
+
+owned!(
+    /// A `CMS_ContentInfo`.
+    Cms,
+    sys::CMS_ContentInfo,
+    sys::CMS_ContentInfo_free
+);
+
+impl Cms {
+    /// `SMIME_read_CMS_ex(in, 0, &datain, NULL)`: the structure and, for a
+    /// detached signature, the content beside it.
+    pub(crate) fn read_smime(input: &Bio<'_>) -> Option<(Cms, Option<Bio<'static>>)> {
+        let mut content = ptr::null_mut();
+        // SAFETY: the BIO is live; a content BIO made is handed over.
+        let cms =
+            unsafe { SMIME_read_CMS_ex(input.as_ptr(), 0, &raw mut content, ptr::null_mut()) };
+        let content = Bio::adopt(content);
+        Some((Cms::owned(cms)?, content))
+    }
+
+    /// `PEM_read_bio_CMS(in, NULL, NULL, NULL)`.
+    pub(crate) fn read_pem(input: &Bio<'_>) -> Option<Cms> {
+        // SAFETY: the BIO is live; no callback and no user data.
+        let cms = unsafe {
+            sys::PEM_read_bio_CMS(input.as_ptr(), ptr::null_mut(), None, ptr::null_mut())
+        };
+        Cms::owned(cms)
+    }
+
+    /// `d2i_CMS_bio(in, NULL)`.
+    pub(crate) fn read_der(input: &Bio<'_>) -> Option<Cms> {
+        // SAFETY: the BIO is live.
+        Cms::owned(unsafe { d2i_CMS_bio(input.as_ptr(), ptr::null_mut()) })
+    }
+
+    /// `CMS_verify(cms, others, store, data, out, flags)`, nonzero.
+    pub(crate) fn verify(
+        &self,
+        others: Option<&CertStack>,
+        store: &Store,
+        data: Option<&Bio<'_>>,
+        out: Option<&Bio<'_>>,
+        flags: c_uint,
+    ) -> bool {
+        // SAFETY: the structure and store are live; the rest live or null.
+        unsafe {
+            sys::CMS_verify(
+                self.as_ptr(),
+                stack_or_null(others),
+                store.as_ptr(),
+                bio_or_null(data),
+                bio_or_null(out),
+                flags,
+            ) != 0
+        }
+    }
+
+    /// `CMS_get0_signers(cms)`: each signer as PEM.
+    pub(crate) fn signers(&self) -> Option<Pems> {
+        // SAFETY: the structure is live.
+        let signers = unsafe { CMS_get0_signers(self.as_ptr()) };
+        // SAFETY: the stack is ours to free, its certificates are not.
+        unsafe { signer_pems(signers) }
+    }
+
+    /// `PEM_write_bio_CMS(out, cms)`, nonzero.
+    pub(crate) fn write_pem(&self, out: &Bio<'_>) -> bool {
+        // SAFETY: the sink and the structure are live.
+        unsafe { sys::PEM_write_bio_CMS(out.as_ptr(), self.as_ptr()) != 0 }
+    }
+
+    /// `PEM_write_bio_CMS_stream(out, cms, in, flags)`, nonzero.
+    pub(crate) fn write_pem_stream(&self, out: &Bio<'_>, input: &Bio<'_>, flags: c_int) -> bool {
+        // SAFETY: every argument is live.
+        unsafe { PEM_write_bio_CMS_stream(out.as_ptr(), self.as_ptr(), input.as_ptr(), flags) != 0 }
+    }
+
+    /// `i2d_CMS_bio(out, cms) == 1`.
+    pub(crate) fn write_der(&self, out: &Bio<'_>) -> bool {
+        // SAFETY: the sink and the structure are live.
+        unsafe { i2d_CMS_bio(out.as_ptr(), self.as_ptr()) == 1 }
+    }
+
+    /// `SMIME_write_CMS(out, cms, in, flags)`, nonzero.
+    pub(crate) fn write_smime(&self, out: &Bio<'_>, input: &Bio<'_>, flags: c_int) -> bool {
+        // SAFETY: every argument is live.
+        unsafe { SMIME_write_CMS(out.as_ptr(), self.as_ptr(), input.as_ptr(), flags) != 0 }
+    }
+
+    /// `CMS_final(cms, in, NULL, flags) == 1`.
+    pub(crate) fn finish(&mut self, input: &Bio<'_>, flags: c_uint) -> bool {
+        // SAFETY: the structure and the input are live.
+        unsafe { CMS_final(self.as_ptr(), input.as_ptr(), ptr::null_mut(), flags) == 1 }
+    }
+
+    /// `CMS_encrypt(certs, in, cipher, flags)`.
+    pub(crate) fn encrypt(
+        certs: &CertStack,
+        input: &Bio<'_>,
+        cipher: &Cipher,
+        flags: c_uint,
+    ) -> Option<Cms> {
+        // SAFETY: every argument is live.
+        let cms = unsafe {
+            sys::CMS_encrypt(
+                certs.as_ptr().cast(),
+                input.as_ptr(),
+                cipher.as_ptr(),
+                flags,
+            )
+        };
+        Cms::owned(cms)
+    }
+
+    /// `CMS_sign(cert, key, others, in, flags)`.
+    pub(crate) fn sign(
+        cert: &Certificate,
+        key: &PKey,
+        others: Option<&CertStack>,
+        input: &Bio<'_>,
+        flags: c_uint,
+    ) -> Option<Cms> {
+        // SAFETY: every argument is live or null.
+        let cms = unsafe {
+            sys::CMS_sign(
+                cert.as_ptr(),
+                key.as_ptr(),
+                stack_or_null(others),
+                input.as_ptr(),
+                flags,
+            )
+        };
+        Cms::owned(cms)
+    }
+
+    /// `CMS_decrypt(cms, key, cert, NULL, out, 0)`, nonzero.
+    pub(crate) fn decrypt(&self, key: &PKey, cert: &Certificate, out: &Bio<'_>) -> bool {
+        // SAFETY: every argument is live.
+        unsafe {
+            sys::CMS_decrypt(
+                self.as_ptr(),
+                key.as_ptr(),
+                cert.as_ptr(),
+                ptr::null_mut(),
+                out.as_ptr(),
+                0,
+            ) != 0
+        }
+    }
+
+    /// For a signed, or signed and enveloped, structure, `CMS_get1_certs`
+    /// and `CMS_get1_crls` as PEM; none for any other type.
+    pub(crate) fn certs_and_crls(&self) -> (Pems, Pems) {
+        // SAFETY: the structure is live; the type is its own object.
+        let kind = unsafe { CMS_get0_type(self.as_ptr()) };
+        // SAFETY: the object is live.
+        let nid = unsafe { sys::OBJ_obj2nid(kind) };
+        if nid != NID_PKCS7_SIGNED && nid != NID_PKCS7_SIGNED_AND_ENVELOPED {
+            return (Vec::new(), Vec::new());
+        }
+        // SAFETY: the structure is live; the stack made is ours.
+        let certs = CertStack::adopt(unsafe { CMS_get1_certs(self.as_ptr()) });
+        let certs = certs.map(|c| c.pems()).unwrap_or_default();
+        // SAFETY: the structure is live; the stack made is ours.
+        let crls = unsafe { CMS_get1_crls(self.as_ptr()) };
+        // SAFETY: the stack is live or null.
+        let pems = unsafe { crl_pems(crls) };
+        if !crls.is_null() {
+            // SAFETY: the stack and its CRLs are ours, freed once.
+            unsafe { sys::OPENSSL_sk_pop_free(crls, Some(free_crl)) };
+        }
+        (certs, pems)
     }
 }

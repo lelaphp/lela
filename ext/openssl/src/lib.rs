@@ -8,11 +8,11 @@
 //! area: certificates ([`x509`]), signing requests ([`csr`]), asymmetric
 //! keys ([`key`], [`keydata`]) and the configuration they are made under
 //! ([`config`]), signatures and raw RSA ([`sign`]), ciphers, digests and
-//! envelopes ([`cipher`]), and PKCS#7 ([`pkcs7`]), with the arguments they
-//! share decoded once ([`decode`]) and the ring of library errors
-//! `openssl_error_string` reads ([`Errors`]). ext/phar's OpenSSL signatures
-//! call `openssl_sign` and `openssl_verify` through the function table, as
-//! php's do.
+//! envelopes ([`cipher`]), PKCS#7 ([`pkcs7`]), and CMS ([`cms`]), with the
+//! arguments they share decoded once ([`decode`]) and the ring of library
+//! errors `openssl_error_string` reads ([`Errors`]). ext/phar's OpenSSL
+//! signatures call `openssl_sign` and `openssl_verify` through the function
+//! table, as php's do.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -27,6 +27,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod cipher;
+mod cms;
 mod config;
 mod csr;
 mod decode;
@@ -389,6 +390,11 @@ pub fn extension() -> Extension {
             pkcs7::openssl_pkcs7_sign::declared(),
             pkcs7::openssl_pkcs7_decrypt::declared(),
             pkcs7::openssl_pkcs7_read::declared(),
+            cms::openssl_cms_verify::declared(),
+            cms::openssl_cms_encrypt::declared(),
+            cms::openssl_cms_sign::declared(),
+            cms::openssl_cms_decrypt::declared(),
+            cms::openssl_cms_read::declared(),
             sign::openssl_private_encrypt::declared(),
             sign::openssl_private_decrypt::declared(),
             sign::openssl_public_encrypt::declared(),
