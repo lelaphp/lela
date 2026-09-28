@@ -36,14 +36,15 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::sys::stat::{Mode, SFlag, mknod};
 use nix::unistd::{
-    AccessFlags, Gid, Group, Pid, Uid, User, access, getegid, geteuid, getgid, getpgid, getpgrp,
-    getpid, getppid, getsid, getuid, mkfifo, setegid, seteuid, setgid, setpgid, setsid, setuid,
+    AccessFlags, Gid, Group, Pid, Uid, User, access, getegid, geteuid, getpgid, getpgrp, getpid,
+    getppid, getsid, mkfifo, setegid, seteuid, setgid, setpgid, setsid, setuid,
 };
 
 use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::{coerce_param, to_long, value_name};
 use php_ext::decl::Type;
+use php_ext::process;
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, clear, docref, throw,
 };
@@ -343,7 +344,7 @@ fn posix_getppid() -> i64 {
     i64::from(getppid().as_raw())
 }
 
-/// `posix_getuid(): int`: `getuid(2)`.
+/// `posix_getuid(): int`: `getuid(2)`, the engine's (`php_ext::process`).
 ///
 /// ```php
 /// var_dump(posix_getuid() === posix_getpwnam(posix_getpwuid(posix_getuid())['name'])['uid']);
@@ -353,7 +354,7 @@ fn posix_getppid() -> i64 {
 /// ```
 #[php_function]
 fn posix_getuid() -> i64 {
-    i64::from(getuid().as_raw())
+    i64::from(process::uid())
 }
 
 /// `posix_setuid(int $user_id): bool`: `setuid(2)`, the errno kept where
@@ -406,7 +407,7 @@ fn posix_seteuid(req: &mut Request, user_id: i64) -> bool {
     }
 }
 
-/// `posix_getgid(): int`: `getgid(2)`.
+/// `posix_getgid(): int`: `getgid(2)`, the engine's (`php_ext::process`).
 ///
 /// ```php
 /// var_dump(posix_getgid() === posix_getpwuid(posix_getuid())['gid']);
@@ -416,7 +417,7 @@ fn posix_seteuid(req: &mut Request, user_id: i64) -> bool {
 /// ```
 #[php_function]
 fn posix_getgid() -> i64 {
-    i64::from(getgid().as_raw())
+    i64::from(process::gid())
 }
 
 /// `posix_setgid(int $group_id): bool`: `setgid(2)`.
@@ -465,7 +466,9 @@ fn posix_setegid(req: &mut Request, group_id: i64) -> bool {
     }
 }
 
-/// `posix_getgroups(): array|false`: the supplementary group ids, a list.
+/// `posix_getgroups(): array|false`: the supplementary group ids, a list,
+/// the engine's (`php_ext::process`); `false` with the errno kept where
+/// the OS refuses.
 ///
 /// ```php
 /// $g = posix_getgroups();
@@ -477,9 +480,12 @@ fn posix_setegid(req: &mut Request, group_id: i64) -> bool {
 /// ```
 #[php_function]
 fn posix_getgroups(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
-    let groups = match ffi::getgroups() {
+    let groups = match process::groups() {
         Ok(groups) => groups,
-        Err(errno) => return Ok(failed_or(req, errno)),
+        Err(error) => {
+            let errno = Errno::from_raw(error.raw_os_error().unwrap_or(0));
+            return Ok(failed_or(req, errno));
+        }
     };
     let mut array = PhpArray::new(req)?;
     for gid in groups {

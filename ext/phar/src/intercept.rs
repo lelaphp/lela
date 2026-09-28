@@ -6,12 +6,12 @@
 
 use php_ext::abi::ExtensionBuilder;
 use php_ext::call::passthrough;
+use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::archive::{self, ENT_PERM_MASK, archives, lossy};
-use crate::ffi;
 use crate::path::{self, Create, Exec};
 
 /// `phar_intercept_functions`: the request marked, as php marks it
@@ -556,10 +556,13 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Throw
 /// where its group is `group` or, asked only then, one of its
 /// supplementary groups is; 0, the others', otherwise.
 fn access_triad(owner: i64, group: i64) -> u32 {
-    if owner == i64::from(ffi::uid()) {
+    if owner == i64::from(process::uid()) {
         6
-    } else if group == i64::from(ffi::gid())
-        || ffi::groups().into_iter().any(|gid| group == i64::from(gid))
+    } else if group == i64::from(process::gid())
+        || process::groups()
+            .unwrap_or_default()
+            .into_iter()
+            .any(|gid| group == i64::from(gid))
     {
         3
     } else {

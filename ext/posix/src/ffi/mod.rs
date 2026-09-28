@@ -1,14 +1,16 @@
 //! The calls `nix` does not wrap (design §7.2, revision 35; `unsafe.homes`'
 //! `ext/*/src/ffi/`), each one `libc` call behind a safe function, and the
 //! one home of this crate's `unsafe`. `times`, `getlogin` and `ctermid`
-//! have no `nix` form at all; `getgroups` and `initgroups` have none on
-//! Apple's targets; `sysconf`, `pathconf`, `fpathconf`, `getrlimit` and
-//! `setrlimit` take the number a program passed, which `nix`'s enums cannot
-//! carry for a number the platform does not name; `strerror_r` is the C
-//! library's own text, which `posix_strerror` prints; `isatty` and
-//! `ttyname_r` take a number a program passed, which need not be an open
-//! fd `nix`'s `AsFd` could borrow; and `eaccess` is the C library's call
-//! php makes, which `nix` reaches only through `faccessat`'s `AT_EACCESS`.
+//! have no `nix` form at all; `initgroups` has none on Apple's targets;
+//! `sysconf`, `pathconf`, `fpathconf`, `getrlimit` and `setrlimit` take
+//! the number a program passed, which `nix`'s enums cannot carry for a
+//! number the platform does not name; `strerror_r` is the C library's own
+//! text, which `posix_strerror` prints; `isatty` and `ttyname_r` take a
+//! number a program passed, which need not be an open fd `nix`'s `AsFd`
+//! could borrow; and `eaccess` is the C library's call php makes, which
+//! `nix` reaches only through `faccessat`'s `AT_EACCESS`. The process's
+//! real user and group and its supplementary groups are the engine's
+//! (`php_ext::process`), not bound here.
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
@@ -111,24 +113,6 @@ pub(crate) fn controlling_terminal() -> Result<Vec<u8>, Errno> {
     Ok(unsafe { CStr::from_ptr(buffer.as_ptr()) }
         .to_bytes()
         .to_vec())
-}
-
-/// `getgroups(0, NULL)` and then `getgroups(n, list)`, as php asks twice
-/// because macOS may answer more than `NGROUPS_MAX`.
-pub(crate) fn getgroups() -> Result<Vec<u32>, Errno> {
-    // SAFETY: a count of zero asks the number alone and writes nothing.
-    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
-    let Ok(len) = usize::try_from(count) else {
-        return Err(Errno::last());
-    };
-    let mut list: Vec<libc::gid_t> = vec![0; len];
-    // SAFETY: `list` has room for `count` ids, which is what is asked.
-    let got = unsafe { libc::getgroups(count, list.as_mut_ptr()) };
-    let Ok(got) = usize::try_from(got) else {
-        return Err(Errno::last());
-    };
-    list.truncate(got);
-    Ok(list)
 }
 
 /// `initgroups(name, basegid)`: whether it succeeded.

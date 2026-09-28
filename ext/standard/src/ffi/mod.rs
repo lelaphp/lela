@@ -1,11 +1,11 @@
 //! The C library calls `filestat.c` makes that Rust's `std` has no
 //! answer for (design §4.1, `unsafe.homes`' `ext/*/src/ffi/`):
 //! `access(2)`, which is what `file_exists`, `is_readable`,
-//! `is_writable` and `is_executable` ask of a plain file; `getuid(2)`,
-//! `getgid(2)` and `getgroups(2)`, which choose the permission bits those
-//! read of any other wrapper's file; `getpwnam_r(3)` and `getgrnam_r(3)`
-//! for `chown` and `chgrp` by name; and `utime(2)`, which `touch` sets
-//! the times with. Each is one call, and a path reaches it as the bytes
+//! `is_writable` and `is_executable` ask of a plain file; `getpwnam_r(3)`
+//! and `getgrnam_r(3)` for `chown` and `chgrp` by name; and `utime(2)`,
+//! which `touch` sets the times with. The process's user and groups,
+//! which choose the permission bits an access check reads of any other
+//! wrapper's file, are the engine's (`php_ext::process`). Each is one call, and a path reaches it as the bytes
 //! the host has. Beside them are the two `streamsfuncs.c` makes of a
 //! stream's host fd: `select(2)`, which `php_select` is on every
 //! platform php builds for here, over `fd_set`s built with `FD_SET`, and
@@ -47,38 +47,6 @@ pub(super) fn access(path: &Path, mode: i32) -> bool {
     // SAFETY: `path` is a NUL-terminated string that outlives the call,
     // which reads it and nothing else.
     unsafe { libc::access(path.as_ptr(), mode) == 0 }
-}
-
-/// `getuid()`.
-pub(super) fn uid() -> u32 {
-    // SAFETY: `getuid` takes nothing and cannot fail.
-    unsafe { libc::getuid() }
-}
-
-/// `getgid()`.
-pub(super) fn gid() -> u32 {
-    // SAFETY: `getgid` takes nothing and cannot fail.
-    unsafe { libc::getgid() }
-}
-
-/// `getgroups()`: the supplementary groups, asked for their count first
-/// and then into room for that many, as `php_stat` does.
-pub(super) fn groups() -> Vec<u32> {
-    // SAFETY: a count of zero asks only for the number of groups; the
-    // null pointer is not written through.
-    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
-    let Ok(len) = usize::try_from(count) else {
-        return Vec::new();
-    };
-    if len == 0 {
-        return Vec::new();
-    }
-    let mut gids = vec![0; len];
-    // SAFETY: `gids` has room for `count` entries, which is the most the
-    // call writes.
-    let written = unsafe { libc::getgroups(count, gids.as_mut_ptr()) };
-    gids.truncate(usize::try_from(written).unwrap_or(0));
-    gids
 }
 
 /// `php_get_uid_by_name` (`Z/ext/standard/filestat.c:416`) as ZTS builds
