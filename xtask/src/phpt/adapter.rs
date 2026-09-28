@@ -180,7 +180,7 @@ impl<'a> Adapter<'a> {
             stdin: phpt.section("STDIN"),
             merge_streams: merges_streams(phpt),
             cwd: Some(&subset.root),
-            ..Invocation::new(self.binary, Program::File(&program))
+            ..Invocation::new(self.binary, Program::Beside(&program))
         });
         drop(written);
         let output = match ran {
@@ -221,7 +221,7 @@ impl<'a> Adapter<'a> {
             .oracle
             .run_under(&Invocation {
                 cwd: Some(&subset.root),
-                ..Invocation::new(pinned, Program::File(&program))
+                ..Invocation::new(pinned, Program::Beside(&program))
             })
             .with_context(|| format!("running the {kind} section of {}", test.display()))?;
         drop(written);
