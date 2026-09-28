@@ -622,6 +622,7 @@ dependencies = [
 name = "php_ext_phar"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "php_ext",
  "php_ext_hash",
  "php_ext_spl",
