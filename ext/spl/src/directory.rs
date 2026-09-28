@@ -44,12 +44,12 @@ pub(crate) struct Fs {
     flags: i64,
     file_class: Option<ClassId>,
     info_class: Option<ClassId>,
-    dir: Option<Stream>,
+    dir: Option<Open>,
     entry: Vec<u8>,
     index: i64,
     sub_path: Option<Vec<u8>>,
     glob: Option<(Vec<u8>, Vec<Vec<u8>>)>,
-    stream: Option<Stream>,
+    stream: Option<Open>,
     open_mode: Vec<u8>,
     orig_path: Option<Vec<u8>>,
     line: Option<Vec<u8>>,
@@ -60,6 +60,27 @@ pub(crate) struct Fs {
     enclosure: u8,
     escape: Option<u8>,
     escape_set: bool,
+}
+
+/// The directory or the file an object opened, `u.dir.dirp` or
+/// `u.file.stream`: the object is one owner of its resource, and the only
+/// way to let go of it is [`Open::close`], so a close that keeps the
+/// resource listed cannot be written.
+struct Open(Stream);
+
+impl Open {
+    /// The stream, for an operation on it.
+    const fn stream(&self) -> Stream {
+        self.0
+    }
+
+    /// `php_stream_close`: the stream closed, then the object's hold on
+    /// its resource given up (`zend_list_delete` in `_php_stream_free`),
+    /// so `get_resources()` lists it no longer once no value holds it.
+    fn close(self, req: &mut Request) {
+        self.0.close(req);
+        req.release(self.0.as_value());
+    }
 }
 
 /// What `FilesystemIterator::current()` answers by its flags: the path
@@ -808,7 +829,7 @@ impl DirectoryIterator {
         let this = dir_checked(req, this.object())?;
         let dir = fs(req, this, |it| {
             it.index = 0;
-            it.dir
+            it.dir.as_ref().map(Open::stream)
         })?;
         if let Some(dir) = dir {
             dir.seek(req, 0, Whence::Set);
@@ -1296,7 +1317,11 @@ impl SplFileObject {
     #[php(tentative)]
     fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (flags, has, stream) = fs(req, this.object(), |it| {
-            (it.flags, it.line.is_some() || it.csv.is_some(), it.stream)
+            (
+                it.flags,
+                it.line.is_some() || it.csv.is_some(),
+                it.stream.as_ref().map(Open::stream),
+            )
         })?;
         if flags & Self::READ_AHEAD != 0 {
             return Ok(has);
@@ -2047,15 +2072,8 @@ impl ObjectHandlers for Handlers {
             .native_mut::<Fs>(req)
             .map(|it| (it.dir.take(), it.stream.take(), it.csv.take()));
         if let Some((dir, stream, csv)) = held {
-            // `php_stream_close`, which takes the resource out of the
-            // list as it closes it.
-            if let Some(dir) = dir {
-                dir.close(req);
-                req.release(dir.as_value());
-            }
-            if let Some(stream) = stream {
-                stream.close(req);
-                req.release(stream.as_value());
+            for open in [dir, stream].into_iter().flatten() {
+                open.close(req);
             }
             if let Some(csv) = csv {
                 req.release(csv);
@@ -2079,18 +2097,33 @@ impl ObjectHandlers for Handlers {
     /// ```expect
     /// Object not initialized
     /// ```
+    ///
+    /// The close gives up the object's hold on the resource, so an object
+    /// unset leaves `get_resources()` as it found it (`bug70417`).
+    ///
+    /// ```php
+    /// stream_context_get_default();
+    /// $before = count(get_resources());
+    /// $f = new SplFileObject('php://memory', 'w+');
+    /// $t = new SplTempFileObject();
+    /// $d = new DirectoryIterator(sys_get_temp_dir());
+    /// unset($f, $t, $d);
+    /// var_dump(count(get_resources()) - $before);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
         Std.dtor_obj(req, object);
         let held = object
             .native_mut::<Fs>(req)
             .map(|it| (it.dir.take(), it.stream.take()));
-        if let Some((dir, stream)) = held {
-            if let Some(dir) = dir {
-                dir.close(req);
-            }
-            if let Some(stream) = stream {
-                stream.close(req);
-            }
+        for open in held
+            .into_iter()
+            .flat_map(|(dir, stream)| [dir, stream])
+            .flatten()
+        {
+            open.close(req);
         }
     }
 }
@@ -2431,7 +2464,7 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
 fn dir_read(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
     let (dir, glob) = fs(req, this, |it| {
         it.file_name = None;
-        (it.dir, it.glob.is_some())
+        (it.dir.as_ref().map(Open::stream), it.glob.is_some())
     })?;
     if glob {
         let entry = fs(req, this, |it| {
@@ -2496,7 +2529,7 @@ fn dir_open(req: &mut Request, this: PhpObject, path: &[u8]) -> Result<(), Throw
             &format!("Failed to open directory \"{shown}\""),
         ));
     };
-    fs(req, this, |it| it.dir = Some(dir))?;
+    fs(req, this, |it| it.dir = Some(Open(dir)))?;
     dir_step(req, this)
 }
 
@@ -2605,7 +2638,7 @@ fn file_open(
     stream.forbid_fclose(req);
     let orig = stream.orig_path(req).unwrap_or_else(|| name.to_vec());
     fs(req, this, |it| {
-        it.stream = Some(stream);
+        it.stream = Some(Open(stream));
         it.file_name = Some(trimmed.to_vec());
         it.orig_path = Some(orig);
         it.open_mode = mode.to_vec();
@@ -2618,7 +2651,7 @@ fn file_open(
 
 /// `CHECK_SPL_FILE_OBJECT_IS_INITIALIZED`: the receiver and its stream.
 fn file_checked(req: &mut Request, this: PhpObject) -> Result<(PhpObject, Stream), Thrown> {
-    match fs(req, this, |it| it.stream)? {
+    match fs(req, this, |it| it.stream.as_ref().map(Open::stream))? {
         Some(stream) => Ok((this, stream)),
         None => Err(uninitialized(req)),
     }
@@ -2656,7 +2689,13 @@ fn read_line_raw(
     csv: bool,
 ) -> Result<bool, Thrown> {
     free_line(req, this)?;
-    let (stream, max, flags) = fs(req, this, |it| (it.stream, it.max_line_len, it.flags))?;
+    let (stream, max, flags) = fs(req, this, |it| {
+        (
+            it.stream.as_ref().map(Open::stream),
+            it.max_line_len,
+            it.flags,
+        )
+    })?;
     let Some(stream) = stream else {
         return Err(uninitialized(req));
     };
@@ -2722,7 +2761,9 @@ fn read_csv(
             break;
         }
     }
-    let (line, stream) = fs(req, this, |it| (it.line.clone(), it.stream))?;
+    let (line, stream) = fs(req, this, |it| {
+        (it.line.clone(), it.stream.as_ref().map(Open::stream))
+    })?;
     let line = line.unwrap_or_default();
     let mut failed = None;
     let mut more = || {
@@ -2766,7 +2807,7 @@ fn read_line_ex(req: &mut Request, this: PhpObject, silent: bool) -> Result<bool
     }
     if crate::overridden(req, this, b"getcurrentline") {
         free_line(req, this)?;
-        let Some(stream) = fs(req, this, |it| it.stream)? else {
+        let Some(stream) = fs(req, this, |it| it.stream.as_ref().map(Open::stream))? else {
             return Err(uninitialized(req));
         };
         if stream.eof(req) {
@@ -2816,7 +2857,7 @@ fn read_line(req: &mut Request, this: PhpObject, silent: bool) -> Result<bool, T
 
 /// `spl_filesystem_file_rewind`.
 fn file_rewind_to_start(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
-    let Some(stream) = fs(req, this, |it| it.stream)? else {
+    let Some(stream) = fs(req, this, |it| it.stream.as_ref().map(Open::stream))? else {
         return Err(uninitialized(req));
     };
     if !stream.seek(req, 0, Whence::Set) {
