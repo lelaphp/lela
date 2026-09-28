@@ -1360,6 +1360,24 @@ fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, 
 /// mark after the last one, so an object reached twice down one path is
 /// `*RECURSION*` the second time and an object reached twice side by
 /// side is printed in full both times.
+///
+/// A dynamic property is its own row whatever a parent declared private
+/// under its name:
+///
+/// ```php
+/// class P { private $c = 'declared'; }
+/// class C extends P { function f() { $this->c = 'dynamic'; } }
+/// $o = new C; @$o->f();
+/// var_dump($o);
+/// ```
+/// ```expect
+/// object(C)#1 (2) {
+///   ["c":"P":private]=>
+///   string(8) "declared"
+///   ["c"]=>
+///   string(7) "dynamic"
+/// }
+/// ```
 fn dump_object(
     req: &mut Request,
     out: &mut Vec<u8>,
@@ -1491,14 +1509,22 @@ fn dump_members(
     // dynamic rows are the walk's to hold, so a nested `__debugInfo` that
     // unsets one leaves this walk printing what it had, as php's
     // separated table does.
-    let dynamic: Vec<(PhpString, Value)> = object.props(req).unwrap_or_default();
+    // The dynamic table alone, which may hold a name a parent declared
+    // private: that one is its own row, `["c"]` beside `["c":"P":private]`.
+    let dynamic: Vec<(PhpString, Value)> = object
+        .heap()
+        .properties()
+        .map(|table| {
+            table
+                .iter()
+                .filter_map(|(key, held)| match key {
+                    php_heap::Key::Str(name) => Some((PhpString::of(name), Value::of_zval(held))),
+                    php_heap::Key::Long(_) => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     for (name, value) in dynamic {
-        if declared
-            .iter()
-            .any(|(declared, _, _, _)| declared == name.as_bytes())
-        {
-            continue;
-        }
         req.addref(&Value::string(name));
         req.addref(&value);
         rows.push(MemberRow::Dynamic { name, value });
