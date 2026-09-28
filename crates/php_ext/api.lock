@@ -299,6 +299,7 @@ raising::arg_type_error
 raising::arg_value_error
 raising::argument_error
 raising::arity
+raising::call_stack_end
 raising::call_stack_limit
 raising::clear
 raising::deprecated

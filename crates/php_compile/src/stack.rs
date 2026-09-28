@@ -35,12 +35,23 @@ use php_unit::Level;
 use crate::CompileError;
 
 /// `EG(stack_base)` and `EG(stack_limit)`, the two addresses
-/// `zend_call_stack_init` leaves for the thread: both zero where nothing
-/// is checked, which is what `zend.max_allowed_stack_size=-1` asks for.
+/// `zend_call_stack_init` leaves for the thread: the limit zero where
+/// nothing is checked, which is what `zend.max_allowed_stack_size=-1`
+/// asks for.
+///
+/// Beside them the floor: the thread's own end with the same reserve
+/// above it, which is where the limit stands under detect. php checks
+/// the limit before the walks it guards, `execute_ex`'s entry, the
+/// compiler, the object comparison, `var_dump()`'s properties,
+/// `serialize()`, `http_build_query()` and `json_encode()`; this engine
+/// holds every other walk to the floor ([`exhausted`](Self::exhausted)),
+/// so a nesting php takes whole under a small limit is taken whole here
+/// too and one deeper than the thread is an `Error`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StackLimit {
     base: usize,
     limit: usize,
+    floor: usize,
 }
 
 /// `ZEND_MAX_ALLOWED_STACK_SIZE_DETECT`, the entry's default.
@@ -66,7 +77,11 @@ impl StackLimit {
     /// limit, so [`check`](Self::check) never refuses. What
     /// [`crate::Options::default`] carries, since a caller that says
     /// nothing of its thread has told the compiler nothing to hold it to.
-    pub const UNCHECKED: StackLimit = StackLimit { base: 0, limit: 0 };
+    pub const UNCHECKED: StackLimit = StackLimit {
+        base: 0,
+        limit: 0,
+        floor: 0,
+    };
 
     /// `zend_call_stack_init` on the calling thread, from the two ini
     /// entries as the engine parsed them: `max_allowed` is
@@ -88,26 +103,20 @@ impl StackLimit {
         let reserved = usize::try_from(reserved).unwrap_or(usize::MAX);
         let read = call_stack_bounds();
         let base = read.map_or_else(position, |stack| stack.base);
-        match max_allowed {
-            DETECT => {
-                let size = read.map_or_else(
-                    || call_stack_default_size().saturating_sub(32 * 1024),
-                    |stack| stack.max_size,
-                );
-                StackLimit {
-                    base,
-                    limit: limit(base, size, reserved),
-                }
-            }
+        let thread = read.map_or_else(
+            || call_stack_default_size().saturating_sub(32 * 1024),
+            |stack| stack.max_size,
+        );
+        let floor = limit(base, thread, reserved);
+        let limit = match max_allowed {
+            DETECT => floor,
             allowed if allowed > 0 => {
                 let size = usize::try_from(allowed).unwrap_or(usize::MAX);
-                StackLimit {
-                    base,
-                    limit: limit(base, size, reserved),
-                }
+                limit(base, size, reserved)
             }
-            _ => StackLimit::UNCHECKED,
-        }
+            _ => 0,
+        };
+        StackLimit { base, limit, floor }
     }
 
     /// The limit inside a fiber, which `zend_fiber_execute` writes over
@@ -131,9 +140,11 @@ impl StackLimit {
         } else {
             reserved
         };
+        let limit = end.saturating_add(reserved);
         StackLimit {
             base,
-            limit: end.saturating_add(reserved),
+            limit,
+            floor: limit,
         }
     }
 
@@ -214,6 +225,25 @@ impl StackLimit {
     pub fn max_stack_size(&self) -> usize {
         self.base.saturating_sub(self.limit)
     }
+
+    /// Whether the calling thread has come down to the floor, what a
+    /// walk php does not guard asks at each level. Under detect the
+    /// floor is the limit, so this is [`overflowed`](Self::overflowed);
+    /// under a smaller `zend.max_allowed_stack_size` it is deeper, and
+    /// under `-1` it is still the thread's end.
+    /// [`UNCHECKED`](Self::UNCHECKED) has no floor.
+    #[must_use]
+    pub fn exhausted(&self) -> bool {
+        position() <= self.floor
+    }
+
+    /// The stack's base less its floor, the size a walk held to the
+    /// floor had when it was refused, in the words of
+    /// [`max_stack_size`](Self::max_stack_size).
+    #[must_use]
+    pub fn floor_size(&self) -> usize {
+        self.base.saturating_sub(self.floor)
+    }
 }
 
 /// `zend_call_stack_limit`: the address `size` bytes below `base` and
@@ -261,12 +291,32 @@ mod tests {
         );
     }
 
-    /// `-1` is unchecked, and so is a default `Options`.
+    /// `-1` is unchecked, and so is a default `Options`; the floor of
+    /// `-1` is still the thread's, what detect's limit is.
     #[test]
     fn minus_one_is_unchecked() {
-        assert_eq!(StackLimit::init(-1, 0), StackLimit::UNCHECKED);
+        let minus_one = StackLimit::init(-1, 0);
+        assert_eq!(minus_one.limit, 0);
+        assert!(!minus_one.overflowed());
+        assert!(deeper(&minus_one).is_ok());
+        assert_eq!(minus_one.floor, StackLimit::init(0, 0).floor);
         assert!(deeper(&StackLimit::UNCHECKED).is_ok());
+        assert!(!StackLimit::UNCHECKED.exhausted());
         assert_eq!(crate::Options::default().stack, StackLimit::UNCHECKED);
+    }
+
+    /// A limit smaller than the thread leaves the floor at the thread's
+    /// end: a walk held to the floor goes on past the limit, and under
+    /// detect the two are one address.
+    #[test]
+    fn the_floor_is_the_threads_end_whatever_the_limit() {
+        let small = StackLimit::init(256 * 1024, 0);
+        let detect = StackLimit::init(0, 0);
+        assert_eq!(detect.floor, detect.limit);
+        assert_eq!(small.floor, detect.floor);
+        assert!(small.floor < small.limit);
+        assert!(!small.exhausted());
+        assert_eq!(small.floor_size(), detect.max_stack_size());
     }
 
     /// Detect on a test thread leaves room for a frame, and a size a
