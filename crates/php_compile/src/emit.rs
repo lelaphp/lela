@@ -480,6 +480,8 @@ pub(crate) struct Emit<'a> {
     /// kind `IS_CONSTANT_AST` indexes, in the order they were added.
     const_exprs: Vec<ConstExpr>,
     vars: Vec<Name>,
+    /// `CG(context).has_assigned_to_http_response_header`.
+    http_response_header: ResponseHeader,
     safepoints: Vec<OplineIdx>,
     temporaries: u32,
     cache_slots: u32,
@@ -862,6 +864,22 @@ enum Fetch {
     Unset,
 }
 
+/// The variable the http wrapper leaves in its caller's scope, and
+/// what php 8.5 says of a read of it (`Z/Zend/zend_compile.c:2893`).
+const HTTP_RESPONSE_HEADER: &[u8] = b"http_response_header";
+const HTTP_RESPONSE_HEADER_DEPRECATED: &str = "The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead";
+
+/// What `$http_response_header` is to the op array being compiled,
+/// `CG(context).has_assigned_to_http_response_header`: the variable the
+/// http wrapper leaves, whose reads php 8.5 deprecates, until the op
+/// array writes it or takes it as a parameter and it is its own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ResponseHeader {
+    #[default]
+    Predefined,
+    Own,
+}
+
 /// `ZEND_FETCH_DIM_WRITE` (`Z/Zend/zend_compile.h:1096`), the bit
 /// `zend_delayed_compile_dim` puts on the delayed `FETCH_OBJ_W` or
 /// `FETCH_STATIC_PROP_W` under it: what the handler reads to know the
@@ -1202,6 +1220,7 @@ pub(crate) fn unit(
         constants: Vec::new(),
         const_exprs: Vec::new(),
         vars: Vec::new(),
+        http_response_header: ResponseHeader::Predefined,
         safepoints: vec![OplineIdx(0)],
         temporaries: 0,
         cache_slots: 0,
@@ -1286,6 +1305,7 @@ struct Saved {
     constants: Vec<Zval>,
     const_exprs: Vec<ConstExpr>,
     vars: Vec<Name>,
+    http_response_header: ResponseHeader,
     safepoints: Vec<OplineIdx>,
     temporaries: u32,
     cache_slots: u32,
@@ -1453,6 +1473,43 @@ impl Emit<'_> {
         let at = u32::try_from(self.vars.len()).unwrap_or(u32::MAX);
         self.vars.push(Name(name.into()));
         at
+    }
+
+    /// `zend_try_compile_cv`'s arm over `$http_response_header`, which
+    /// php 8.5 deprecates for the variable the http wrapper leaves
+    /// behind: until the op array has written it, a read under
+    /// `BP_VAR_R` is the deprecation, raised again at each one, and a
+    /// write under `BP_VAR_W` makes the name the op array's own.
+    ///
+    /// ```php
+    /// function f() { echo @$http_response_header; }
+    /// function g() { $http_response_header = 1; function h() { var_dump($http_response_header); } return $http_response_header; }
+    /// function k($http_response_header) { return $http_response_header; }
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// Deprecated: The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead in %s on line 2
+    ///
+    /// Deprecated: The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead in %s on line 3
+    /// done
+    /// ```
+    fn cv_fetched(&mut self, name: &[u8], fetch: Fetch) {
+        if self.http_response_header == ResponseHeader::Own || name != HTTP_RESPONSE_HEADER {
+            return;
+        }
+        match fetch {
+            Fetch::Read => self.raise(Level::Deprecated, HTTP_RESPONSE_HEADER_DEPRECATED),
+            Fetch::Write => self.http_response_header = ResponseHeader::Own,
+            Fetch::Rw | Fetch::Is | Fetch::FuncArg | Fetch::Unset => {}
+        }
+    }
+
+    /// [`Self::cv_fetched`] over the CV numbered `cv`.
+    fn cv_numbered(&mut self, cv: u32, fetch: Fetch) {
+        let name = self.vars.get(cv as usize).map(|name| name.0.to_vec());
+        if let Some(name) = name {
+            self.cv_fetched(&name, fetch);
+        }
     }
 
     /// `zend_alloc_cache_slot`: the next slot of the op array's cache, as
@@ -2767,6 +2824,7 @@ impl Emit<'_> {
             }
             by_name::Named::Cv(name) => name,
         };
+        self.cv_fetched(&name, Fetch::Read);
         let cv = self.lookup_cv(&name);
         let name = self.string(&name)?;
         let at = self.constant(name);
@@ -4276,6 +4334,9 @@ impl Emit<'_> {
         if parameter.name == b"this" {
             return Err(self.compile_error("Cannot use $this as parameter"));
         }
+        if parameter.name == HTTP_RESPONSE_HEADER {
+            self.http_response_header = ResponseHeader::Own;
+        }
         Ok(cv)
     }
 
@@ -4531,6 +4592,7 @@ impl Emit<'_> {
             constants: std::mem::take(&mut self.constants),
             const_exprs: std::mem::take(&mut self.const_exprs),
             vars: std::mem::take(&mut self.vars),
+            http_response_header: std::mem::take(&mut self.http_response_header),
             safepoints: std::mem::replace(&mut self.safepoints, vec![OplineIdx(0)]),
             temporaries: std::mem::take(&mut self.temporaries),
             cache_slots: std::mem::take(&mut self.cache_slots),
@@ -4562,6 +4624,7 @@ impl Emit<'_> {
         self.constants = saved.constants;
         self.const_exprs = saved.const_exprs;
         self.vars = saved.vars;
+        self.http_response_header = saved.http_response_header;
         self.safepoints = saved.safepoints;
         self.temporaries = saved.temporaries;
         self.cache_slots = saved.cache_slots;
@@ -8245,7 +8308,10 @@ impl Emit<'_> {
         // `zend_emit_assign_znode` assigns it.
         let (op2_type, op2) = match (self.peel(value), list) {
             (tree::Expr::SimpleVarExpr(var), None) => match self.simple_var_of(var, self.line)? {
-                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
+                SimpleVar::Cv(name) => {
+                    self.cv_fetched(&name, Fetch::Read);
+                    (OperandKind::Cv, self.lookup_cv(&name))
+                }
                 SimpleVar::This => return Err(self.compile_error("Cannot re-assign $this")),
                 // `zend_try_compile_cv` refuses an auto-global, so the
                 // fetch writes a `VAR` the variable is assigned from; the
@@ -10168,7 +10234,10 @@ impl Emit<'_> {
             // `$this` under `BP_VAR_R` is `FETCH_THIS` into a temporary,
             // and an auto-global `FETCH_R (global)` over its name.
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => Ok(Where::Cv(self.lookup_cv(&name))),
+                SimpleVar::Cv(name) => {
+                    self.cv_fetched(&name, Fetch::Read);
+                    Ok(Where::Cv(self.lookup_cv(&name)))
+                }
                 SimpleVar::This => Ok(self.fetch_this(OperandKind::Tmp)),
                 SimpleVar::Auto(global) => self.fetch_by_name(global.name(), Symbols::Global),
                 SimpleVar::Globals => Ok(self.fetch_globals(OperandKind::Tmp)),
@@ -11526,6 +11595,7 @@ impl Emit<'_> {
         // which is this node's, and not the line its value ended on.
         let line = self.line;
         let cv = self.lookup_cv(var);
+        self.cv_fetched(var, Fetch::Write);
         let value = self.source(value)?;
         let (op2_type, op2) = self.operand(value);
         let out = self.temporary();
@@ -11577,7 +11647,10 @@ impl Emit<'_> {
         Ok(match self.peel(node) {
             node if self.is_by_name(node) => self.var_for_reference(node)?,
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
+                SimpleVar::Cv(name) => {
+                    self.cv_fetched(&name, Fetch::Write);
+                    (OperandKind::Cv, self.lookup_cv(&name))
+                }
                 SimpleVar::This => {
                     let this = self.fetch_this(OperandKind::Var);
                     self.operand(this)
@@ -11959,6 +12032,7 @@ impl Emit<'_> {
                 let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
                     return Err(self.fatal("a variable that is no CV"));
                 };
+                self.cv_fetched(&name, fetch);
                 Base::Settled((OperandKind::Cv, self.lookup_cv(&name)))
             }
             // `zend_compile_simple_var` with `delayed` over a name the
@@ -12305,6 +12379,7 @@ impl Emit<'_> {
         if self.simple_var_of(id, line)? != SimpleVar::Cv(name.clone()) {
             return self.expr(value);
         }
+        self.cv_fetched(&name, Fetch::Read);
         let cv = self.lookup_cv(&name);
         let out = self.temporary();
         self.push(Opline {
@@ -13225,7 +13300,14 @@ impl Emit<'_> {
         let line = self.line_of(operand);
         let value = match self.peel(operand) {
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => self.fetch_by_name(&name, Symbols::Local)?,
+                SimpleVar::Cv(name) => {
+                    // `zend_compile_simple_var_no_cv` under `BP_VAR_R`,
+                    // whose own deprecation asks nothing of the flag.
+                    if name == HTTP_RESPONSE_HEADER {
+                        self.raise(Level::Deprecated, HTTP_RESPONSE_HEADER_DEPRECATED);
+                    }
+                    self.fetch_by_name(&name, Symbols::Local)?
+                }
                 SimpleVar::This => self.fetch_by_name(b"this", Symbols::Local)?,
                 SimpleVar::Auto(global) => self.fetch_by_name(global.name(), Symbols::Global)?,
                 // `zend_compile_simple_var_no_cv` itself, past the
@@ -14732,7 +14814,10 @@ impl Emit<'_> {
                 self.var_for_reference(node)
             }
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => Ok((OperandKind::Cv, self.lookup_cv(&name))),
+                SimpleVar::Cv(name) => {
+                    self.cv_fetched(&name, Fetch::Write);
+                    Ok((OperandKind::Cv, self.lookup_cv(&name)))
+                }
                 SimpleVar::This => {
                     let this = self.fetch_this(OperandKind::Var);
                     Ok(self.operand(this))
@@ -17990,6 +18075,7 @@ mod tests {
             constants: Vec::new(),
             const_exprs: Vec::new(),
             vars: Vec::new(),
+            http_response_header: ResponseHeader::Predefined,
             safepoints: Vec::new(),
             temporaries: 0,
             cache_slots: 0,
