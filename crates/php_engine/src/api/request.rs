@@ -11763,6 +11763,28 @@ impl Request {
         Heap::free_object_storage(&mut Hooks(self));
     }
 
+    /// Whether no extension registered a handler table for `class` or a
+    /// class it extends, so its dimensions are `zend_std_read_dimension`'s,
+    /// whose failure answers `NULL`, where a table of an extension's
+    /// answers what its own C handler does (`spl_array_read_dimension_ex`
+    /// answers `&EG(uninitialized_zval)`).
+    pub(crate) fn std_dimensions(&self, class: ClassId) -> bool {
+        let mut at = Some(class);
+        for _ in 0..64 {
+            let Some(class) = at else {
+                return true;
+            };
+            if let Some(Some(_)) = usize::try_from(class.0)
+                .ok()
+                .and_then(|i| self.shared.handlers.get(i))
+            {
+                return false;
+            }
+            at = self.class_parent(class);
+        }
+        true
+    }
+
     /// The handler table an object of `class` is reached through
     /// (design §5.4): the class's own where it declared one, else the
     /// nearest ancestor's, as php inherits `create_object` and the table

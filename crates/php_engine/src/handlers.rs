@@ -13157,10 +13157,10 @@ fn stepped_entry(
 /// arm `ZEND_ASSIGN_DIM_OP` takes over an object: `offsetGet` with the
 /// dimension under `BP_VAR_R`, the kernel over what it answered and the
 /// value, and `offsetSet` with what it made, and the value given up
-/// after it. Where `offsetGet` raised, or the class is no `ArrayAccess`
-/// and raised php's `Error` `Cannot use object of type C as array`,
-/// `zend_use_object_as_array` raises that `Error` once more, chained
-/// over it. The temporary takes what the operation made and never what
+/// after it. Where `zend_std_read_dimension` raised, `offsetGet` having
+/// or the class being no `ArrayAccess`, `zend_use_object_as_array`
+/// raises php's `Error` `Cannot use object of type C as array` over it,
+/// chained ([`Request::std_dimensions`]). The temporary takes what the operation made and never what
 /// `offsetSet` returned.
 ///
 /// ```php
@@ -13182,6 +13182,18 @@ fn stepped_entry(
 /// dtor
 /// Cannot use object of type stdClass as array / Cannot use object of type stdClass as array
 /// ```
+///
+/// A class an extension serves answers for itself, as
+/// `spl_array_read_dimension_ex` answers `&EG(uninitialized_zval)` and
+/// no `NULL`, so nothing is chained over its own `TypeError`:
+///
+/// ```php
+/// $ao = new ArrayObject;
+/// try { $ao[[]] += 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot access offset of type array on ArrayObject
+/// ```
 fn binary_assign_op_obj_dim(
     req: &mut Request,
     frame: FrameRef,
@@ -13198,7 +13210,8 @@ fn binary_assign_op_obj_dim(
         Ok(held) => held,
         // `zend_use_object_as_array`: php's `read_dimension` answered
         // `NULL`, so the `Error` is raised over what it raised, chained.
-        Err(thrown) if thrown.exception().is_some() => {
+        // An extension's table answers for itself.
+        Err(thrown) if thrown.exception().is_some() && req.std_dimensions(object.class()) => {
             req.leave_pending(&thrown);
             let ran_on = req.pending();
             let class = req.class_name(object.class());
