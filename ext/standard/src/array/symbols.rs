@@ -8,7 +8,7 @@
 use php_ext::abi::{Passed, Ref, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpRef, PhpString, Value, ValueRef};
 
@@ -411,6 +411,7 @@ fn compact_var(
             if array.is_recursive() {
                 return Err(throw(req, "Error", "Recursion detected"));
             }
+            call_stack_end(req)?;
             array.protect();
             let mut done = Ok(());
             for (_, element) in array.snapshot_refs() {

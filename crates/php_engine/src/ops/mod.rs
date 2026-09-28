@@ -4770,6 +4770,28 @@ mod tests {
         }
     }
 
+    /// `var_dump()`'s array elements and `define()`'s walks, which php
+    /// leaves unguarded, are held to the thread's floor too: the dump
+    /// writes its refusal where the next element would stand, and
+    /// `define()` throws.
+    #[test]
+    fn var_dump_and_define_are_refused_at_the_floor() {
+        let source = "<?php\n$a = []; for ($i = 0; $i < 200000; $i++) { $a = [$a]; }\ntry { define('DEEP', $a); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\nvar_dump($a);";
+        let served = Engine::builder()
+            .build()
+            .serve_capture(source, Capture::default());
+        let stdout = String::from_utf8_lossy(&served.stdout);
+        let (refused, dumped) = stdout.split_once('\n').unwrap_or_default();
+        assert!(
+            refused.starts_with("Maximum call stack size of ")
+                && refused.ends_with(" reached. Infinite recursion?"),
+            "{refused}"
+        );
+        assert!(dumped.starts_with("array(1) {\n  [0]=>\n  array(1) {\n"));
+        assert!(dumped.contains("nesting level too deep"));
+        assert_eq!(served.fatal, None);
+    }
+
     fn array(req: &mut Request, entries: Vec<(Key, Value)>) -> Value {
         let Ok(mut a) = PhpArray::new(req) else {
             return Value::null();

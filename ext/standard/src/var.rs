@@ -15,7 +15,7 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
-use php_ext::raising::{Level, Thrown, docref, throw, warning};
+use php_ext::raising::{Level, Thrown, call_stack_end, docref, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpString, RecursionGuard, Value};
 
@@ -673,6 +673,20 @@ fn print_r(
 /// which is why the marker lands on the next line with one space before
 /// it. Without the guard a value that holds itself is unbounded
 /// recursion, which is a panic reaching a request (design §10).
+///
+/// php asks no stack limit here, so a nest deeper than a small
+/// `zend.max_allowed_stack_size` is printed whole, and this walk is
+/// held to the thread's floor instead
+/// ([`php_ext::raising::call_stack_end`]), which the small-stack
+/// regime's 256K does not move.
+///
+/// ```php
+/// $a = []; for ($i = 0; $i < 600; $i++) { $a = [$a]; }
+/// echo strlen(print_r($a, true)), "\n";
+/// ```
+/// ```expect regime=small-stack
+/// 4335610
+/// ```
 pub(super) fn render(
     req: &mut Request,
     out: &mut Vec<u8>,
@@ -682,6 +696,9 @@ pub(super) fn render(
     // `case IS_REFERENCE`: php renders what the cell holds, at this
     // level and with no mark of its own.
     let value = value.deref();
+    // php asks no stack limit here and runs to the thread's end; this
+    // walk is held to the floor short of it.
+    call_stack_end(req)?;
     if let Some(array) = value.as_array() {
         out.extend_from_slice(b"Array\n");
         // `GC_IS_RECURSIVE` and `GC_PROTECT_RECURSION`, which php takes
@@ -949,6 +966,8 @@ fn var_export(
 /// walk with `NULL` and the warning, which is what keeps the source it
 /// writes evaluable.
 fn export(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Result<(), Thrown> {
+    // Unguarded in php, held to the thread's floor here.
+    call_stack_end(req)?;
     let value = value.deref();
     if let Some(b) = value.as_bool() {
         out.extend_from_slice(if b { b"true" } else { b"false" });

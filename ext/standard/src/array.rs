@@ -12,7 +12,7 @@ use php_ext::abi::{Callable, FromArgument, Instance, Raw, Ref, Union, Variadic};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
 use php_ext::coerce::{compare, to_double, to_long, to_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref};
+use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
 
@@ -736,7 +736,7 @@ fn count(
         ));
     }
     match value.deref().as_array() {
-        Some(array) if mode == COUNT_RECURSIVE => Ok(count_recursive(req, *array)),
+        Some(array) if mode == COUNT_RECURSIVE => count_recursive(req, *array),
         _ => php_ext::coerce::count(req, &value),
     }
 }
@@ -746,16 +746,22 @@ fn count(
 /// holds, and the walk guarded as php guards it, so an array that
 /// holds itself is the warning `Recursion detected` and a zero where
 /// the walk meets itself again.
-fn count_recursive(req: &mut Request, array: PhpArray) -> i64 {
+///
+/// The walk is held to the thread's floor, where php's runs to its end.
+fn count_recursive(req: &mut Request, array: PhpArray) -> Result<i64, Thrown> {
     if array.is_recursive() {
         docref(req, Level::Warning, "Recursion detected");
-        return 0;
+        return Ok(0);
     }
+    call_stack_end(req)?;
     array.protect();
-    let mut count = i64::try_from(array.len()).unwrap_or(i64::MAX);
+    let mut count = Ok(i64::try_from(array.len()).unwrap_or(i64::MAX));
     for (_, element) in &array {
         if let Some(nested) = element.deref().as_array() {
-            count = count.saturating_add(count_recursive(req, *nested));
+            count = count.and_then(|sum| Ok(sum.saturating_add(count_recursive(req, *nested)?)));
+            if count.is_err() {
+                break;
+            }
         }
     }
     array.unprotect();

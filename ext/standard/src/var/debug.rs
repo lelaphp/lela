@@ -7,7 +7,7 @@
 use php_ext::abi::{PropertyPurpose, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format};
-use php_ext::raising::Thrown;
+use php_ext::raising::{Thrown, call_stack_end};
 use php_ext::request::Request;
 use php_ext::values::{Key, Laziness, RecursionGuard, Value, ValueRef};
 
@@ -144,6 +144,8 @@ fn pad(out: &mut Vec<u8>, level: usize) {
 // One arm per type, as php's switch has them.
 #[allow(clippy::too_many_lines)]
 fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Result<(), Thrown> {
+    // Unguarded in php, held to the thread's floor here.
+    call_stack_end(req)?;
     pad(out, level);
     match value.as_ref() {
         ValueRef::Bool(false) => out.extend_from_slice(b"bool(false)\n"),

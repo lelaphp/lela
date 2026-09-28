@@ -816,7 +816,7 @@ fn define(
         );
     }
     let value = if let Some(array) = value.as_array() {
-        if !constant_array_is_acyclic(*array) {
+        if !constant_array_is_acyclic(req, *array)? {
             return Err(throw(
                 req,
                 "ValueError",
@@ -856,15 +856,23 @@ fn define(
 
 /// `validate_constant_array_argument`: no array in the value, through
 /// any reference, is one the walk is already inside.
-fn constant_array_is_acyclic(array: PhpArray) -> bool {
+/// The walk, php's unguarded, is held to the thread's floor
+/// ([`crate::api::raising::call_stack_end`]), as the copy after it is.
+fn constant_array_is_acyclic(req: &mut Request, array: PhpArray) -> Result<bool, Thrown> {
     if array.is_recursive() {
-        return false;
+        return Ok(false);
     }
+    crate::api::raising::call_stack_end(req)?;
     array.protect();
-    let acyclic = array.snapshot().iter().all(|(_, v)| {
-        v.as_array()
-            .is_none_or(|nested| constant_array_is_acyclic(*nested))
-    });
+    let mut acyclic = Ok(true);
+    for (_, v) in array.snapshot() {
+        if let Some(nested) = v.as_array() {
+            acyclic = constant_array_is_acyclic(req, *nested);
+            if !matches!(acyclic, Ok(true)) {
+                break;
+            }
+        }
+    }
     array.unprotect();
     acyclic
 }
@@ -873,6 +881,7 @@ fn constant_array_is_acyclic(array: PhpArray) -> bool {
 /// keys, each value with its reference followed, a nested array copied
 /// the same way and everything else one more owner.
 fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
+    crate::api::raising::call_stack_end(req)?;
     let mut copy = PhpArray::new(req)?;
     for (key, value) in array.snapshot() {
         let value = if let Some(nested) = value.as_array() {
@@ -1313,6 +1322,9 @@ fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, 
         array.protect();
         out.extend_from_slice(format!("{common}array({}) {{\n", array.len()).as_bytes());
         for (key, element) in &array {
+            if too_deep(out, level, req.stack_limit().exhausted()) {
+                continue;
+            }
             out.extend(std::iter::repeat_n(b' ', level + 1));
             match key {
                 Key::Int(n) => out.extend_from_slice(format!("[{n}]=>\n").as_bytes()),
@@ -1523,7 +1535,9 @@ fn dump_members(
             // where it is typed, as php's `prop_info` row is. The value is
             // held while it prints, since its own dump may run user code
             // that overwrites the slot.
-            MemberRow::Declared { .. } | MemberRow::Dynamic { .. } if too_deep(req, out, level) => {
+            MemberRow::Declared { .. } | MemberRow::Dynamic { .. }
+                if too_deep(out, level, req.stack_limit().overflowed()) =>
+            {
                 if let MemberRow::Dynamic { name, value } = row {
                     req.release(value);
                     req.release(Value::string(name));
@@ -1581,6 +1595,12 @@ fn dump_members(
 /// is pinned. The chain is taken apart a link at a time after, so its
 /// release is no deeper than the stack either.
 ///
+/// An array's element is the same refusal at the thread's floor rather
+/// than its limit: php's `php_array_element_dump` asks nothing and runs
+/// to the thread's end, so an array nested past the limit under a small
+/// `zend.max_allowed_stack_size` is dumped whole in both engines
+/// (`php_compile::StackLimit::exhausted`).
+///
 /// ```php
 /// $o = $first = new stdClass;
 /// for ($i = 0; $i < 50000; $i++) { $o->next = new stdClass; $o = $o->next; }
@@ -1592,8 +1612,8 @@ fn dump_members(
 /// ```expect regime=small-stack
 /// nesting level too deep
 /// ```
-fn too_deep(req: &Request, out: &mut Vec<u8>, level: usize) -> bool {
-    if !req.stack_limit().overflowed() {
+fn too_deep(out: &mut Vec<u8>, level: usize, past: bool) -> bool {
+    if !past {
         return false;
     }
     out.extend(std::iter::repeat_n(b' ', level + 1));
@@ -1699,7 +1719,7 @@ fn dump_rows(
     ));
     out.extend_from_slice(format!(")#{} ({}) {{\n", object.index(), rows.len()).as_bytes());
     for (key, value) in rows.snapshot() {
-        if too_deep(req, out, level) {
+        if too_deep(out, level, req.stack_limit().overflowed()) {
             continue;
         }
         match &key {

@@ -11,7 +11,7 @@ use php_ext::abi::Passed;
 use php_ext::attr::php_function;
 use php_ext::call::{autoload, call, call_method, class_constant, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, value_name};
-use php_ext::raising::{Level, Thrown, deprecated, docref, throw, warning};
+use php_ext::raising::{Level, Thrown, call_stack_end, deprecated, docref, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{
     ClassId, Key, Layout, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
@@ -1310,8 +1310,11 @@ impl State<'_> {
         }
     }
 
-    /// The depth check `process_nested_*_data` opens with.
-    fn deeper(&mut self, req: &mut Request) -> bool {
+    /// The depth check `process_nested_*_data` opens with, and the
+    /// thread's floor before it: with `max_depth` at 0 php's parser runs
+    /// to the thread's end.
+    fn deeper(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        call_stack_end(req)?;
         if self.hash.max_depth > 0 && self.hash.depth >= self.hash.max_depth {
             let max = self.hash.max_depth;
             docref(
@@ -1321,10 +1324,10 @@ impl State<'_> {
                     "Maximum depth of {max} exceeded. The depth limit can be changed using the max_depth unserialize() option or the unserialize_max_depth ini setting"
                 ),
             );
-            return false;
+            return Ok(false);
         }
         self.hash.depth += 1;
-        true
+        Ok(true)
     }
 
     /// `"a:" uiv ":" "{"`.
@@ -1371,7 +1374,7 @@ impl State<'_> {
         array: PhpArray,
         elements: i64,
     ) -> Result<bool, Thrown> {
-        if !self.deeper(req) {
+        if !self.deeper(req)? {
             return Ok(false);
         }
         let done = self.array_body(req, array, elements);
@@ -1735,7 +1738,7 @@ impl State<'_> {
         object: PhpObject,
         elements: i64,
     ) -> Result<bool, Thrown> {
-        if !self.deeper(req) {
+        if !self.deeper(req)? {
             return Ok(false);
         }
         let done = self.object_body(req, object, elements);
