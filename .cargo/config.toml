@@ -24,3 +24,10 @@ PCRE2_SYS_STATIC = { value = "1", force = true }
 # oracle), and leaves the math functions out, which php's build carries;
 # the flags make the amalgamation the library php links (design §7.2).
 LIBSQLITE3_FLAGS = { value = "-USQLITE_DEFAULT_FOREIGN_KEYS -DSQLITE_ENABLE_MATH_FUNCTIONS", force = true }
+
+# openssl-sys looks for Homebrew's `openssl@4` before `openssl@3` on an
+# Apple silicon Mac and links the first it finds, where the oracle links
+# `openssl@3` (design §7.2, #1108); named for that target alone, the
+# variable binds ext/openssl to the major version the oracle has, and a
+# Linux host still finds its OpenSSL 3 through pkg-config.
+AARCH64_APPLE_DARWIN_OPENSSL_DIR = { value = "/opt/homebrew/opt/openssl@3", force = true }
