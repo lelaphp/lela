@@ -17,7 +17,7 @@ use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, docref, throw, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpString, Value};
+use php_ext::values::{Key, PhpString, RecursionGuard, Value};
 
 pub(crate) mod debug;
 pub(crate) mod serialize;
@@ -718,7 +718,7 @@ pub(super) fn render(
         } else {
             out.extend_from_slice(b" Object\n");
         }
-        if object.is_recursive() {
+        if object.is_recursive_in(req, RecursionGuard::Debug) {
             out.extend_from_slice(b" *RECURSION*");
             return Ok(());
         }
@@ -732,9 +732,9 @@ pub(super) fn render(
             Some(own) => own.snapshot(),
             None => object.props_for(req, PropertyPurpose::Debug)?,
         };
-        object.protect();
+        object.protect_in(req, RecursionGuard::Debug);
         let rendered = hash(req, out, &rows, indent, true);
-        object.unprotect();
+        object.unprotect_in(req, RecursionGuard::Debug);
         if let Some(own) = own {
             req.release(Value::array(own));
         }
@@ -1021,15 +1021,15 @@ fn export_object(
     object: php_ext::values::PhpObject,
     level: usize,
 ) -> Result<(), Thrown> {
-    if object.is_recursive() {
+    if object.is_recursive_in(req, RecursionGuard::Export) {
         out.extend_from_slice(b"NULL");
         circular(req);
         return Ok(());
     }
-    object.protect();
+    object.protect_in(req, RecursionGuard::Export);
     let rows = object.props_for(req, PropertyPurpose::VarExport);
     let Some(decl) = req.class_decl(object.class()) else {
-        object.unprotect();
+        object.unprotect_in(req, RecursionGuard::Export);
         return Ok(());
     };
     let (name, is_enum) = (decl.name.0.to_vec(), matches!(decl.kind, ClassKind::Enum));
@@ -1077,7 +1077,7 @@ fn export_object(
             out.extend_from_slice(b",\n");
         }
     }
-    object.unprotect();
+    object.unprotect_in(req, RecursionGuard::Export);
     written?;
     if level > 1 && !is_enum {
         out.extend(std::iter::repeat_n(b' ', level - 1));

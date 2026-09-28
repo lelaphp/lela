@@ -32,7 +32,9 @@ use crate::api::abi::{Callable, Entry, Never, OrFalse, Passed, Raw, Union, Varia
 use crate::api::coerce::to_string;
 use crate::api::raising::{Thrown, arg_type_error, deprecated, throw, warning};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use crate::api::values::{
+    ClassId, Key, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
+};
 use php_unit::decl::FunctionDecl;
 
 mod backtrace;
@@ -1388,11 +1390,11 @@ fn dump_object(
         );
         return;
     }
-    if object.heap().is_recursive() {
+    if object.is_recursive_in(req, RecursionGuard::Debug) {
         out.extend_from_slice(b"*RECURSION*\n");
         return;
     }
-    object.heap().protect();
+    object.protect_in(req, RecursionGuard::Debug);
     // `zend_get_properties_for(struc, ZEND_PROP_PURPOSE_DEBUG)`: a class
     // that shows a table of its own shows it here, which is what
     // `__debugInfo` and a `Closure` do. Every other class shows its
@@ -1401,7 +1403,7 @@ fn dump_object(
     let own = match object.debug_info(req) {
         Ok(own) => own,
         Err(thrown) => {
-            object.heap().unprotect();
+            object.unprotect_in(req, RecursionGuard::Debug);
             req.leave_pending(&thrown);
             return;
         }
@@ -1419,7 +1421,7 @@ fn dump_object(
     } else {
         dump_members(req, out, &common, object, level);
     }
-    object.heap().unprotect();
+    object.unprotect_in(req, RecursionGuard::Debug);
 }
 
 /// One row of [`dump_members`]'s walk, as php's rebuilt property table

@@ -989,6 +989,7 @@ fn class_flags(
         } else {
             dynamic_properties
         },
+        use_guards: false,
     }
 }
 

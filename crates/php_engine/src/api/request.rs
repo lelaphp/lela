@@ -1581,6 +1581,11 @@ pub struct Request {
     /// can die, so an index the store gives out again is never one an
     /// old row still names.
     guards: Vec<((php_heap::ObjectId, Vec<u8>), u32)>,
+    /// The recursion guards of objects whose class uses guards, one row
+    /// per walk inside one object (`ZEND_GUARD_RECURSION_*` on the
+    /// word `zend_get_recursion_guard` finds), named as [`Self::guards`]
+    /// names its rows and dropped the same way, when the walk leaves.
+    recursion_guards: Vec<(php_heap::ObjectId, crate::api::values::RecursionGuard)>,
     /// `zend_property_info_source_list` (`Z/Zend/zend_types.h:626`),
     /// one row per reference a typed property's slot holds: the word
     /// [`php_heap::Ref::set_sources`] carries names the row, and the row
@@ -2182,6 +2187,7 @@ impl Request {
             class_data: std::collections::HashMap::new(),
             defaults: Vec::new(),
             guards: Vec::new(),
+            recursion_guards: Vec::new(),
             ref_sources: Vec::new(),
             weakrefs: crate::weakrefs::Table::default(),
             lazy: lazy::Table::default(),
@@ -8270,6 +8276,83 @@ impl Request {
     /// ([`Request::declared_slot_for_write`]).
     pub(crate) fn serves_accessor(&self, class: ClassId, lowered: &[u8]) -> bool {
         self.magic_accessor(class, lowered).is_some()
+    }
+
+    /// `ce->ce_flags & ZEND_ACC_USE_GUARDS`: whether `class` or a class
+    /// above it declares `__get`, `__set`, `__isset`, `__unset` or
+    /// `__debugInfo` (`zend_add_magic_method` sets the bit for each,
+    /// and `zend_do_inheritance` passes it down), or implements an
+    /// interface that hands the bit on
+    /// ([`php_unit::decl::ClassFlags::use_guards`]).
+    pub(crate) fn uses_guards(&self, class: ClassId) -> bool {
+        const MAGIC: [&[u8]; 5] = [b"__get", b"__set", b"__isset", b"__unset", b"__debuginfo"];
+        MAGIC
+            .iter()
+            .any(|name| self.method_named(class, name).is_some())
+            || self.guards_handed_on(class, 0)
+    }
+
+    /// Whether `class`, a parent of it or an interface of either carries
+    /// [`php_unit::decl::ClassFlags::use_guards`]; a chain longer than any
+    /// declaration can make is cut, as [`Request::instance_of`] cuts it.
+    fn guards_handed_on(&self, class: ClassId, depth: u32) -> bool {
+        let Some(decl) = self.class_decl(class) else {
+            return false;
+        };
+        if decl.flags.use_guards {
+            return true;
+        }
+        if depth > 64 {
+            return false;
+        }
+        decl.interfaces
+            .iter()
+            .chain(decl.parent.as_ref())
+            .filter_map(|name| self.class_named(&name.0))
+            .any(|above| self.guards_handed_on(above, depth + 1))
+    }
+
+    /// [`crate::api::values::PhpObject::is_recursive_in`].
+    pub(crate) fn recursion_guarded(
+        &self,
+        object: PhpObject,
+        walk: crate::api::values::RecursionGuard,
+    ) -> bool {
+        if !self.uses_guards(object.class()) {
+            return object.is_recursive();
+        }
+        let id = object.heap().id();
+        self.recursion_guards.contains(&(id, walk))
+    }
+
+    /// [`crate::api::values::PhpObject::protect_in`].
+    pub(crate) fn recursion_protect(
+        &mut self,
+        object: PhpObject,
+        walk: crate::api::values::RecursionGuard,
+    ) {
+        if !self.uses_guards(object.class()) {
+            object.protect();
+            return;
+        }
+        let row = (object.heap().id(), walk);
+        if !self.recursion_guards.contains(&row) {
+            self.recursion_guards.push(row);
+        }
+    }
+
+    /// [`crate::api::values::PhpObject::unprotect_in`].
+    pub(crate) fn recursion_unprotect(
+        &mut self,
+        object: PhpObject,
+        walk: crate::api::values::RecursionGuard,
+    ) {
+        if !self.uses_guards(object.class()) {
+            object.unprotect();
+            return;
+        }
+        let row = (object.heap().id(), walk);
+        self.recursion_guards.retain(|held| *held != row);
     }
 
     /// `*zend_get_property_guard(zobj, name)`: the word `name` carries

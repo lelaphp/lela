@@ -92,6 +92,7 @@ const HEADER_KEYS: &[(&str, Form)] = &[
     ("readonly", Form::Flag),
     ("extern", Form::Flag),
     ("not_serializable", Form::Flag),
+    ("use_guards", Form::Flag),
     ("payload", Form::FlagOrEq),
     ("handlers", Form::Eq),
     ("new", Form::Eq),
@@ -162,6 +163,7 @@ fn flags(keys: &Keys) -> syn::Result<Tokens> {
         keys.has("readonly"),
     );
     let not_serializable = keys.has("not_serializable");
+    let use_guards = keys.has("use_guards");
     let dynamic = keys.eq("dynamic_properties").map(ToString::to_string);
     let variant = match dynamic.as_deref() {
         None | Some("deprecated") => quote!(Deprecated),
@@ -184,6 +186,7 @@ fn flags(keys: &Keys) -> syn::Result<Tokens> {
         class.flags.is_final = #is_final;
         class.flags.is_readonly = #readonly;
         class.flags.not_serializable = #not_serializable;
+        class.flags.use_guards = #use_guards;
         class.flags.dynamic_properties = #root::decl::DynamicProperties::#variant;
         class.attributes = vec![#(#attributes),*];
     })

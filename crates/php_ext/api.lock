@@ -705,6 +705,7 @@ values::PhpObject::instance_of
 values::PhpObject::is_lazy
 values::PhpObject::is_lazy_prop
 values::PhpObject::is_recursive
+values::PhpObject::is_recursive_in
 values::PhpObject::laziness
 values::PhpObject::lazy_initializer
 values::PhpObject::lazy_real
@@ -717,6 +718,7 @@ values::PhpObject::props
 values::PhpObject::props_for
 values::PhpObject::props_held
 values::PhpObject::protect
+values::PhpObject::protect_in
 values::PhpObject::row
 values::PhpObject::row_place
 values::PhpObject::row_ref
@@ -726,6 +728,7 @@ values::PhpObject::set_slot
 values::PhpObject::slot
 values::PhpObject::typed_row_ref
 values::PhpObject::unprotect
+values::PhpObject::unprotect_in
 values::PhpObject::unserialize_prop
 values::PhpObject::unserialize_verify
 values::PhpObject::unset_row
@@ -746,6 +749,7 @@ values::PhpString::mark_valid_utf8
 values::PhpString::new
 values::PhpString::product
 values::Place
+values::RecursionGuard
 values::Resource
 values::Resource::as_value
 values::Resource::close
