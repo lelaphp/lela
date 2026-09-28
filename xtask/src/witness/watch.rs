@@ -222,9 +222,15 @@ impl Signal {
 }
 
 /// The crates a run is for, by manifest name: the ones asked for, or with
-/// `--staged` the ones with a staged change, or every crate the manifest
-/// names. `None` is a staged run with nothing staged.
-fn planned(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Option<Vec<String>>> {
+/// `--staged` the ones with a staged change less those whose reading
+/// stands for what is staged (#1143), or every crate the manifest names.
+/// `None` is a staged run with nothing left to measure.
+fn planned(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    ask: &Ask,
+) -> Result<Option<Vec<String>>> {
     for name in &ask.crates {
         if manifest.crate_named(name).is_none() {
             bail!("the manifest has no crate named {name:?}");
@@ -234,8 +240,8 @@ fn planned(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Option<Vec<Str
         if !ask.crates.is_empty() {
             bail!("witness: --staged names its own crates; drop --crate");
         }
-        let touched = crate::sources::staged_crates(root, manifest)?;
-        return Ok((!touched.is_empty()).then_some(touched));
+        let measured = crate::sources::for_commit(root, manifest, store, INSTRUMENT)?;
+        return Ok((!measured.is_empty()).then_some(measured));
     }
     Ok(Some(if ask.crates.is_empty() {
         manifest.crates.iter().map(|c| c.name.clone()).collect()
@@ -249,8 +255,7 @@ fn planned(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Option<Vec<Str
 /// its readings recorded here, a failing one for every crate a death on a
 /// signal left without its own.
 pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) -> Result<()> {
-    let Some(crates) = planned(root, manifest, ask)? else {
-        println!("witness: no crate has a staged change");
+    let Some(crates) = planned(root, manifest, store, ask)? else {
         return Ok(());
     };
     let tree = Tree::new("witness-journal")?;

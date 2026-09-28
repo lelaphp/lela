@@ -196,6 +196,7 @@ reading::Reading
 reading::Reading::count
 reading::Reading::for_crate
 reading::Reading::for_scope
+reading::Reading::fresh_for
 reading::Reading::from_json
 reading::Reading::group
 reading::Reading::new

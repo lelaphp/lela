@@ -27,8 +27,12 @@ pub(crate) enum Command {
     /// `use` paths and the bundle order; one reading per seam and per crate.
     ApiCheck {
         /// Rewrite each lock file from the sources instead of failing on a diff.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "staged")]
         write: bool,
+        /// For pre-commit: leave out each crate whose reading passes and
+        /// was taken over what is staged, naming the reading (#1143).
+        #[arg(long)]
+        staged: bool,
     },
     /// Render one section from the manifest and the store, or with
     /// `--session` the map and the local facts; computes nothing else.
@@ -203,7 +207,12 @@ pub(crate) enum Command {
     Bench(Bench),
     /// Hold every crate to its line ceiling and the workspace to [budget];
     /// refuse committed generated code and a stale generated file.
-    Budget,
+    Budget {
+        /// For pre-commit: leave out each crate whose reading passes and
+        /// was taken over what is staged, naming the reading (#1143).
+        #[arg(long)]
+        staged: bool,
+    },
     /// `cargo clippy` with every warning denied, on every target of each
     /// crate, as the reading `done` reads; one reading per crate.
     Clippy {
@@ -271,7 +280,12 @@ pub(crate) enum Command {
         ext: Vec<String>,
     },
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
-    UnsafeAudit,
+    UnsafeAudit {
+        /// For pre-commit: leave out each crate whose reading passes and
+        /// was taken over what is staged, naming the reading (#1143).
+        #[arg(long)]
+        staged: bool,
+    },
     /// Write the files the manifest's `generated` rules render (ext/clippy.toml).
     Generate,
     /// Apply a proposal to one of the harness's own files, and only where it
@@ -320,8 +334,12 @@ pub(crate) enum Command {
     /// rustdoc prose, never in a lock; one reading per crate.
     Vocab {
         /// Only these crates, by manifest name; default every crate that exists.
-        #[arg(long = "crate", value_name = "NAME")]
+        #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
         crates: Vec<String>,
+        /// For pre-commit: leave out each crate whose reading passes and
+        /// was taken over what is staged, naming the reading (#1143).
+        #[arg(long)]
+        staged: bool,
     },
 }
 

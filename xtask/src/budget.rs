@@ -15,8 +15,8 @@ use crate::git;
 use crate::lines;
 use crate::lock::CargoLock;
 use crate::manifest::{self, Budget, Crate, Manifest};
-use crate::reading::{Reading, Status};
-use crate::sources;
+use crate::reading::{Number, Reading, Status, Store};
+use crate::sources::{self, Standing};
 
 /// Where the design's sentence on ceilings is, for the failure text; the
 /// `[[crate]]` row carries no text of its own.
@@ -24,9 +24,37 @@ const CEILING_TEXT: &str = "a line ceiling is design §4.1, principle 7: size is
 
 /// Measure the workspace; every reading, stamped.
 pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
+    over(root, manifest, &Standing::default())
+}
+
+/// [`run`], and with `staged` less the crates whose reading stands for
+/// the commit (#1143).
+pub(crate) fn measure(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    staged: bool,
+) -> Result<Vec<Reading>> {
+    let standing = Standing::of_every_crate(staged, root, manifest, store, "budget")?;
+    over(root, manifest, &standing)
+}
+
+/// Every reading, less a crate whose reading stands for the commit (#1143):
+/// each counts toward the workspace's total with the numbers its standing
+/// reading carries, and writes no reading of its own.
+fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Reading>> {
     let mut readings = Vec::new();
     let mut total = Count::default();
     for krate in &manifest.crates {
+        if let Some(stood) = standing.get(&krate.name) {
+            let number = |key: &str| match stood.numbers.get(key) {
+                Some(Number::Int(n)) => u64::try_from(*n).unwrap_or(0),
+                _ => 0,
+            };
+            total.lines += number("lines");
+            total.bindings += number("bindings");
+            continue;
+        }
         let (reading, count) = crate_reading(root, krate)?;
         total.lines += count.lines;
         total.bindings += count.bindings;

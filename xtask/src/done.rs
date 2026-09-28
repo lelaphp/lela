@@ -350,7 +350,7 @@ fn boxes(root: &Path, store: &Store, ticket: Ticket, unmet: &mut Vec<String>) ->
         unmet.push(format!("ticket: no reading for {ticket}; {READ}"));
         return Ok(());
     };
-    if reading.tree() != git::tree_hash(root, Path::new(ticket::STAMPED_OVER))? {
+    if !reading.fresh_for(&git::tree_hash(root, Path::new(ticket::STAMPED_OVER))?) {
         unmet.push(format!(
             "ticket: the reading for {ticket} is stale; the tree changed since it was read; {READ}"
         ));
@@ -508,7 +508,7 @@ fn fresh_readings(
                 unmet.push(format!("{instrument}: no reading for {scope}"));
                 continue;
             };
-            if reading.tree() != tree {
+            if !reading.fresh_for(&tree) {
                 unmet.push(format!(
                     "{instrument}: the reading for {scope} is stale; {name} changed since it was taken"
                 ));
@@ -585,7 +585,7 @@ fn locks(
             }
             continue;
         };
-        let fresh = reading.tree() == git::tree_hash(root, &dir)?;
+        let fresh = reading.fresh_for(&git::tree_hash(root, &dir)?);
         match reading.status {
             Status::Fail if fresh => unmet.push(format!(
                 "{shown}: {}{}",

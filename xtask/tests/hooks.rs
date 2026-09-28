@@ -105,6 +105,8 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
              printf '%s\\n' \"$*\" >> '{log}'\n\
              if [ -f '{refuse}' ] && [ \"$(cat '{refuse}')\" = \"$1 $2\" ]; then exit 1; fi\n\
              if [ \"$1 $2\" = 'xtask regions' ]; then shift 2; exec '{xtask}' --root \"$PWD\" regions \"$@\"; fi\n\
+             if [ \"$1 $2\" = 'xtask api-check' ]; then sleep 1; fi\n\
+             printf 'ran %s\\n' \"$*\"\n\
              exit 0\n",
             log = dir.join("cargo.log").display(),
             refuse = dir.join("refuse").display(),
@@ -270,22 +272,34 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
 
     let regions = format!("{} {LOCAL}", REGIONS.join(" "));
-    assert_eq!(
-        scratch.calls("cargo"),
-        [
-            "fmt --check".to_owned(),
-            "xtask clippy --staged".to_owned(),
-            "xtask test --staged".to_owned(),
-            "xtask api-check".to_owned(),
-            "xtask budget".to_owned(),
-            "xtask unsafe-audit".to_owned(),
-            "xtask vocab".to_owned(),
-            "xtask witness --staged".to_owned(),
-            "xtask crosscheck".to_owned(),
-            "xtask permit --diff".to_owned(),
-            format!("xtask regions {regions}"),
-        ]
-    );
+    // The read-only steps run at once, so they start in any order (#1144);
+    // what they print comes out whole and in the hook's order, though
+    // `api-check`, the first, ends last.
+    let at_once = [
+        "xtask api-check --staged",
+        "xtask budget --staged",
+        "xtask unsafe-audit --staged",
+        "xtask vocab --staged",
+        "xtask witness --staged",
+        "xtask crosscheck",
+        "xtask permit --diff",
+    ];
+    let mut calls = scratch.calls("cargo");
+    calls[3..10].sort_unstable();
+    let mut expected: Vec<String> = [
+        "fmt --check",
+        "xtask clippy --staged",
+        "xtask test --staged",
+    ]
+    .into_iter()
+    .chain(at_once)
+    .map(str::to_owned)
+    .collect();
+    expected[3..10].sort_unstable();
+    expected.push(format!("xtask regions {regions}"));
+    assert_eq!(calls, expected);
+    let printed: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("ran ")).collect();
+    assert_eq!(printed[3..], at_once, "{out}");
     assert_eq!(
         scratch.calls("computed"),
         [
@@ -447,11 +461,14 @@ fn a_failing_instrument_refuses_the_commit_and_the_rest_still_run() {
     assert_eq!(code, 1, "{out}");
     assert_eq!(scratch.head(), before, "the commit was refused: {out}");
     assert!(
-        out.contains("pre-commit: cargo xtask budget failed"),
+        out.contains("pre-commit: cargo xtask budget --staged failed"),
         "{out}"
     );
     let calls = scratch.calls("cargo");
-    assert!(calls.iter().any(|c| c == "xtask vocab"), "{calls:?}");
+    assert!(
+        calls.iter().any(|c| c == "xtask vocab --staged"),
+        "{calls:?}"
+    );
     assert!(
         calls.iter().any(|c| c.starts_with("xtask regions")),
         "{calls:?}"

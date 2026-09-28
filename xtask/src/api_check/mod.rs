@@ -38,6 +38,7 @@ use anyhow::{Context, Result};
 
 use crate::manifest::{Edge, Manifest, Seam};
 use crate::reading::{Number, Reading, Status, Store};
+use crate::sources::Standing;
 
 use inventory::{Inventory, Leaf, extension_calls, uses};
 use lock::{Diff, Lock, list};
@@ -46,9 +47,17 @@ use workspace::{Crates, Present};
 pub(crate) const INSTRUMENT: &str = "api-check";
 
 /// Run the instrument over `root`, print one line per reading, and record
-/// them; the outcome is the exit.
-pub fn run(manifest: &Manifest, root: &Path, store: &Store, write: bool) -> Result<()> {
-    let readings = hold(manifest, root, write)?;
+/// them; the outcome is the exit. With `staged`, a crate whose reading
+/// stands for the commit is left out ([`measure`]).
+pub fn run(
+    manifest: &Manifest,
+    root: &Path,
+    store: &Store,
+    write: bool,
+    staged: bool,
+) -> Result<()> {
+    let standing = Standing::of_every_crate(staged, root, manifest, store, INSTRUMENT)?;
+    let readings = measure(manifest, root, write, &standing)?;
     for reading in &readings {
         println!(
             "{INSTRUMENT} {:<14} {:<4} {}",
@@ -64,6 +73,20 @@ pub fn run(manifest: &Manifest, root: &Path, store: &Store, write: bool) -> Resu
 /// With `write`, a lock that differs is rewritten and its reading reports
 /// that instead of failing.
 pub fn hold(manifest: &Manifest, root: &Path, write: bool) -> Result<Vec<Reading>> {
+    measure(manifest, root, write, &Standing::default())
+}
+
+/// [`hold`] less the crates whose reading stands for the commit (#1143),
+/// save one whose verdict reads the other crates' edges, as the bundle's
+/// order does, which its own stamp does not cover. Every seam is held:
+/// an import lock reads its consumers, which its stamp does not cover
+/// either.
+pub(crate) fn measure(
+    manifest: &Manifest,
+    root: &Path,
+    write: bool,
+    standing: &Standing,
+) -> Result<Vec<Reading>> {
     let crates = Crates::scan(manifest, root)?;
     let mut inventory = Inventory::new(&crates);
     let mut readings = Vec::new();
@@ -77,6 +100,13 @@ pub fn hold(manifest: &Manifest, root: &Path, write: bool) -> Result<Vec<Reading
         )?);
     }
     for krate in crates.iter() {
+        let ordered = manifest
+            .edges
+            .iter()
+            .any(|e| e.order.is_some() && matches(&e.from, &krate.name));
+        if standing.get(&krate.name).is_some() && !ordered {
+            continue;
+        }
         readings.push(crate_reading(manifest, &crates, &mut inventory, krate)?);
     }
     Ok(readings)

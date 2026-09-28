@@ -9,15 +9,32 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::manifest::{Crate, Manifest};
-use crate::reading::{Reading, Status};
+use crate::reading::{Reading, Status, Store};
 use crate::rust;
-use crate::sources;
+use crate::sources::{self, Standing};
 
 /// The rule the audit reads.
 pub(crate) const RULE: &str = "unsafe.homes";
 
 /// Audit every created crate; one reading each.
 pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
+    over(root, manifest, &Standing::default())
+}
+
+/// [`run`], and with `staged` less the crates whose reading stands for
+/// the commit (#1143).
+pub(crate) fn measure(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    staged: bool,
+) -> Result<Vec<Reading>> {
+    let standing = Standing::of_every_crate(staged, root, manifest, store, "unsafe-audit")?;
+    over(root, manifest, &standing)
+}
+
+/// Every reading, less a crate whose reading stands for the commit.
+fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Reading>> {
     let rule = manifest
         .rule(RULE)
         .with_context(|| format!("the manifest has no rule {RULE}"))?;
@@ -30,6 +47,9 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
         .collect::<Result<_>>()?;
     let mut readings = Vec::new();
     for krate in &manifest.crates {
+        if standing.get(&krate.name).is_some() {
+            continue;
+        }
         let created = sources::exists(root, krate);
         let mut reading = Reading::for_crate("unsafe-audit", krate, root)?;
         RULE.clone_into(&mut reading.rule);
