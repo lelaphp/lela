@@ -436,6 +436,7 @@ dependencies = [
  "php_ext_lexbor",
  "php_ext_libxml",
  "php_ext_mbstring",
+ "php_ext_opcache",
  "php_ext_openssl",
  "php_ext_pcntl",
  "php_ext_pcre",
@@ -579,6 +580,13 @@ dependencies = [
 
 [[package]]
 name = "php_ext_mbstring"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+]
+
+[[package]]
+name = "php_ext_opcache"
 version = "0.0.0"
 dependencies = [
  "php_ext",
