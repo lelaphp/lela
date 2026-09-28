@@ -452,6 +452,7 @@ pub enum Landed {
 }
 
 impl Judgement for Landed {
+    type Miss = std::convert::Infallible;
     const PASS: Landed = Landed::Closed;
 
     fn as_str(self) -> &'static str {

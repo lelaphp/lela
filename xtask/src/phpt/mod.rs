@@ -36,6 +36,11 @@
 //! this module contributes [`Judgement`], the per-item judge and the words
 //! of the subset's message.
 //!
+//! **Why a test missed.** A test that fails, borks or that the compiler
+//! refused keeps its first differing lines and a signature on its verdict,
+//! decoded once where the verdict is made (the `miss` module), and the
+//! kept run carries them (#1185).
+//!
 //! **Held against a commit.** Every run the engine judged whole is kept
 //! as its verdicts, and `--against <commit>` holds each subset to the run
 //! kept at the commit, test by test, in one more reading per subset; the
@@ -97,6 +102,7 @@ pub(crate) mod against;
 pub(crate) const CONTROL: &str = "@control";
 mod census;
 pub(crate) mod file;
+pub(crate) mod miss;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -412,6 +418,9 @@ pub(crate) enum Judgement {
 }
 
 impl tally::Judgement for Judgement {
+    /// A fail, a bork or an unread test keeps its first differing lines
+    /// and its signature on the run (#1185).
+    type Miss = miss::Miss;
     const PASS: Judgement = Judgement::Pass;
 
     fn as_str(self) -> &'static str {
@@ -437,7 +446,7 @@ impl tally::Judgement for Judgement {
 }
 
 /// One test's verdict: its divergence key, its name inside the subset,
-/// the judgement and the note.
+/// the judgement, the note, and what a miss keeps.
 pub(crate) type Judged = tally::Judged<Judgement>;
 
 /// What one subset's run came to.

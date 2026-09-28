@@ -1184,34 +1184,89 @@ pub fn diff(expected: &[u8], actual: &[u8]) -> String {
     let actual = String::from_utf8_lossy(actual);
     let a: Vec<&str> = expected.lines().collect();
     let b: Vec<&str> = actual.lines().collect();
-    // Longest common subsequence by dynamic programming; outputs are short.
-    let mut table = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for i in (0..a.len()).rev() {
-        for j in (0..b.len()).rev() {
-            table[i][j] = if a[i] == b[j] {
-                table[i + 1][j + 1] + 1
-            } else {
-                table[i + 1][j].max(table[i][j + 1])
-            };
-        }
-    }
     let mut out = String::new();
-    let (mut i, mut j) = (0, 0);
-    while i < a.len() || j < b.len() {
-        let line = if i < a.len() && j < b.len() && a[i] == b[j] {
-            i += 1;
-            j += 1;
-            (' ', a[i - 1])
-        } else if j < b.len() && (i == a.len() || table[i][j + 1] >= table[i + 1][j]) {
-            j += 1;
-            ('+', b[j - 1])
-        } else {
-            i += 1;
-            ('-', a[i - 1])
+    for step in align(a.len(), b.len(), |i, j| a[i] == b[j]) {
+        let (mark, line) = match step {
+            Step::Both(i, _) => (' ', a[i]),
+            Step::Expected(i) => ('-', a[i]),
+            Step::Actual(j) => ('+', b[j]),
         };
-        out.push(line.0);
-        out.push_str(line.1);
+        out.push(mark);
+        out.push_str(line);
         out.push('\n');
     }
     out
+}
+
+/// One line of an alignment, by its place in the lines it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// An expected line and the actual line it stands for.
+    Both(usize, usize),
+    /// An expected line nothing actual stands for.
+    Expected(usize),
+    /// An actual line no expected line stands for.
+    Actual(usize),
+}
+
+/// The most cells the middle of an alignment is given a table of: past
+/// it, the middle is every actual line and then every expected line, as
+/// two whole programs that part at the first line are.
+const ALIGNED_CELLS: usize = 1 << 22;
+
+/// `expected` lines against `actual` ones, in order, where `same(i, j)`
+/// says whether expected line `i` stands for actual line `j`: the longest
+/// common subsequence, with an actual line ahead of an expected one where
+/// either would do. `diff` aligns by equality; phpt's miss aligns by what
+/// one line of an `--EXPECTF--` matches (#1185). The lines the two share
+/// at either end are taken first, so the table is the middle's alone.
+pub(crate) fn align(
+    expected: usize,
+    actual: usize,
+    same: impl Fn(usize, usize) -> bool,
+) -> Vec<Step> {
+    let mut head = 0;
+    while head < expected.min(actual) && same(head, head) {
+        head += 1;
+    }
+    let mut tail = 0;
+    while tail < (expected - head).min(actual - head)
+        && same(expected - 1 - tail, actual - 1 - tail)
+    {
+        tail += 1;
+    }
+    let (a, b) = (expected - head - tail, actual - head - tail);
+    let mut steps: Vec<Step> = (0..head).map(|n| Step::Both(n, n)).collect();
+    if a.saturating_mul(b) > ALIGNED_CELLS {
+        steps.extend((head..head + b).map(Step::Actual));
+        steps.extend((head..head + a).map(Step::Expected));
+    } else {
+        let same = |i: usize, j: usize| same(head + i, head + j);
+        let mut table = vec![vec![0usize; b + 1]; a + 1];
+        for i in (0..a).rev() {
+            for j in (0..b).rev() {
+                table[i][j] = if same(i, j) {
+                    table[i + 1][j + 1] + 1
+                } else {
+                    table[i + 1][j].max(table[i][j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < a || j < b {
+            if i < a && j < b && same(i, j) {
+                steps.push(Step::Both(head + i, head + j));
+                i += 1;
+                j += 1;
+            } else if j < b && (i == a || table[i][j + 1] >= table[i + 1][j]) {
+                steps.push(Step::Actual(head + j));
+                j += 1;
+            } else {
+                steps.push(Step::Expected(head + i));
+                i += 1;
+            }
+        }
+    }
+    steps.extend((0..tail).map(|n| Step::Both(expected - tail + n, actual - tail + n)));
+    steps
 }

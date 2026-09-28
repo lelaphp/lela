@@ -294,6 +294,16 @@ fn a_missed_expectation_fails_with_the_difference() {
     assert_eq!(judgement, Judgement::Fail, "{tally:#?}");
     assert!(note.contains("-five") && note.contains("+four"), "{note}");
     assert_eq!(tally.against(), ["missed.phpt"]);
+    // The miss keeps the lines where the two part and what they come to,
+    // decoded where the verdict was made (#1185).
+    assert_eq!(
+        tally.judged[0].miss,
+        Some(miss::Miss {
+            expected: Some("five".to_owned()),
+            actual: Some("four".to_owned()),
+            signature: miss::Signature::Differs,
+        })
+    );
 }
 
 #[test]
@@ -345,6 +355,7 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
     let note = &tally.judged[1].note;
     assert!(note.contains("the recipe's limit of 1 s"), "{note}");
     assert_eq!(tally.against(), ["b.phpt"]);
+    assert_eq!(tally.judged[1].miss, Some(miss::Miss::past_limit()));
     // The process the test ran is gone: `kill -0` finds no process by
     // that number, which it would for one still running or one killed and
     // never reaped.
@@ -540,6 +551,10 @@ fn a_file_that_is_not_a_test_borks_and_the_subset_fails_on_it() {
     assert_eq!(judgement, Judgement::Bork);
     assert!(note.contains("must start with --TEST--"), "{note}");
     assert_eq!(tally.against(), ["borked.phpt"]);
+    assert!(
+        matches!(&tally.judged[0].miss, Some(miss::Miss { signature: miss::Signature::Bork(why), .. }) if why.contains("must start with --TEST--")),
+        "{tally:#?}"
+    );
 }
 
 #[test]
