@@ -140,6 +140,15 @@ impl Fibers {
         self.running.last().map(|running| running.fiber)
     }
 
+    /// The request's own VM stack, below every fiber running, which is
+    /// the one `EG(symbol_table)`'s attached CVs stand on; none while no
+    /// fiber runs and the request runs on it.
+    pub(crate) fn request_stack_mut(&mut self) -> Option<&mut php_heap::VmStack> {
+        self.running
+            .first_mut()
+            .map(|running| &mut running.below.stack)
+    }
+
     /// The execution states below the running stack, the innermost
     /// resumer's first and the request's own last: the rest of php's
     /// one `prev_execute_data` chain, which ends at a fiber a destroy

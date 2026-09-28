@@ -11090,7 +11090,7 @@ impl Request {
                 }
             }
             Symbol::Indirect(frame, slot) => {
-                let Some(place) = self.slot_ptr(frame, slot) else {
+                let Some(place) = self.attached_ptr(TableId::GLOBAL, frame, slot) else {
                     return Err(crate::api::raising::fatal(
                         self,
                         "InternalError: a global bound to a CV the frame does not have",
@@ -11191,7 +11191,7 @@ impl Request {
             .map(|(_, symbol)| *symbol);
         match found {
             Some(Symbol::Indirect(frame, slot)) => {
-                let value = self.take_slot(frame, slot);
+                let value = self.take_attached(table, frame, slot);
                 self.release(value);
             }
             Some(_) => self.symbol_del(table, name),
@@ -11238,8 +11238,64 @@ impl Request {
         Some(match symbol {
             Symbol::Value(value) => value,
             Symbol::Held(cell) => cell.get(),
-            Symbol::Indirect(frame, at) => self.slot(frame, at),
+            Symbol::Indirect(frame, at) => self.attached(table, frame, at),
         })
+    }
+
+    /// php's `IS_INDIRECT` bucket of `table`, the CV slot an attached name
+    /// stands for, on the stack the table's frames stand on: the
+    /// request's own for `EG(symbol_table)`, below every fiber running,
+    /// and the running stack for a table rebuilt for a function frame.
+    /// php's bucket points at the slot itself, which no stack switch
+    /// moves, so a `global` inside a fiber binds the main frame's CV.
+    ///
+    /// ```php
+    /// $f = new Fiber(function () { global $x; $x = 1; $GLOBALS["y"] = 2; });
+    /// $f->start();
+    /// var_dump($x, $y);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// ```
+    fn attached_ptr(&mut self, table: TableId, frame: FrameRef, at: u32) -> Option<ZvalRef> {
+        let stack = match self.fibers.request_stack_mut() {
+            Some(own) if table == TableId::GLOBAL => own,
+            _ => &mut self.stack,
+        };
+        stack.frame_mut(frame)?.slot_ptr(Slot(at))
+    }
+
+    /// What an attached name's CV holds, a view ([`Request::attached_ptr`]).
+    fn attached(&mut self, table: TableId, frame: FrameRef, at: u32) -> Value {
+        self.attached_ptr(table, frame, at)
+            .map_or(Value::undef(), |place| Value::of_zval(place.read()))
+    }
+
+    /// What an attached name's CV holds, taken, the CV left `UNDEF`.
+    fn take_attached(&mut self, table: TableId, frame: FrameRef, at: u32) -> Value {
+        let Some(place) = self.attached_ptr(table, frame, at) else {
+            return Value::undef();
+        };
+        let held = Value::of_zval(place.read());
+        place.write(Zval::UNDEF);
+        held
+    }
+
+    /// `value` into an attached name's CV, what it held handed back.
+    pub(crate) fn set_attached(
+        &mut self,
+        table: TableId,
+        frame: FrameRef,
+        at: u32,
+        value: Value,
+    ) -> Value {
+        let Some(place) = self.attached_ptr(table, frame, at) else {
+            return value;
+        };
+        let held = Value::of_zval(place.read());
+        place.write(value.to_zval());
+        held
     }
 
     /// `zend_hash_find` in a symbol table for a fetch by name that
@@ -11269,7 +11325,7 @@ impl Request {
         };
         let symbol = entries[at].1;
         let cell = match symbol {
-            Symbol::Indirect(frame, slot) => return Ok(self.slot_ptr(frame, slot)),
+            Symbol::Indirect(frame, slot) => return Ok(self.attached_ptr(table, frame, slot)),
             Symbol::Held(cell) => cell,
             Symbol::Value(value) => {
                 let cell = self.reference(value)?;
@@ -15701,7 +15757,7 @@ impl Request {
             })?;
         let value = match symbol {
             Ok(value) => value,
-            Err((frame, at)) => self.slot(frame, at),
+            Err((frame, at)) => self.attached(table, frame, at),
         };
         (value.tag() != TypeTag::Undef).then_some(value)
     }
@@ -15730,7 +15786,7 @@ impl Request {
         });
         match indirect {
             Some((frame, at)) => {
-                let previous = self.set_slot(frame, at, value);
+                let previous = self.set_attached(table, frame, at, value);
                 self.release(previous);
             }
             None => self.symbol_update(table, name.to_vec(), value),
@@ -15983,7 +16039,7 @@ impl Request {
             let value = match symbol {
                 Symbol::Value(value) => value,
                 Symbol::Held(cell) => cell.get(),
-                Symbol::Indirect(frame, slot) => self.slot(frame, slot),
+                Symbol::Indirect(frame, slot) => self.attached(TableId::GLOBAL, frame, slot),
             };
             if value.tag() == TypeTag::Undef {
                 continue;
@@ -16015,7 +16071,7 @@ impl Request {
             let value = match symbol {
                 Symbol::Value(value) => value,
                 Symbol::Held(cell) => cell.get(),
-                Symbol::Indirect(frame, slot) => self.slot(frame, slot),
+                Symbol::Indirect(frame, slot) => self.attached(table, frame, slot),
             };
             if value.tag() == TypeTag::Undef {
                 continue;
