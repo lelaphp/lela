@@ -282,7 +282,7 @@ impl Source {
     /// repository's checkout. `how` says which place the tree was found
     /// through, so the refusal names it beside both revisions.
     fn held(&self, tree: &Path, how: &str) -> Result<()> {
-        if !tree.join(".git").exists() {
+        if !checkout(tree) {
             return Ok(());
         }
         let head = crate::git::git(tree, &["rev-parse", "--verify", "HEAD^{commit}"], None)
@@ -303,6 +303,36 @@ impl Source {
         }
         Ok(())
     }
+
+    /// The files the pinned tree at `tree` holds, relative to it, as the
+    /// tree is held to the pin: in a checkout, the files git tracks there,
+    /// so what a run or a person left standing in it is not the pin's
+    /// (#1183); in a tree that is no checkout, every file, taken at its
+    /// word as its commit is.
+    pub(crate) fn files(tree: &Path) -> Result<Vec<PathBuf>> {
+        if checkout(tree) {
+            let listed = crate::git::git(tree, &["ls-files", "-z"], None)
+                .with_context(|| format!("listing the php-src checkout at {}", tree.display()))?;
+            return Ok(listed
+                .split('\0')
+                .filter(|file| !file.is_empty())
+                .map(PathBuf::from)
+                .collect());
+        }
+        let mut found = Vec::new();
+        crate::tally::files_under(tree, &mut found)
+            .with_context(|| format!("listing the php-src tree at {}", tree.display()))?;
+        Ok(found
+            .into_iter()
+            .filter_map(|file| file.strip_prefix(tree).ok().map(Path::to_path_buf))
+            .collect())
+    }
+}
+
+/// Whether the tree at `tree` is a checkout: it has a `.git`, a directory
+/// or a worktree's file.
+fn checkout(tree: &Path) -> bool {
+    tree.join(".git").exists()
 }
 
 /// `[recipe]`: how a program is run and how its streams are normalised.

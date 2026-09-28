@@ -58,22 +58,19 @@
 //! tests' order whatever order they finish in, so the lines, the reading
 //! and the kept run are the ones a pool of one writes (#938).
 //!
-//! **Where a test writes.** Its program and its `SKIPIF` and `CLEAN`
-//! sections stand beside it in the shared php-src tree, where upstream
-//! puts them. Those three paths are among its keys, so two tests whose
-//! files would stand at one path never run at once; and each file is
-//! named in a scratch tree's lock while it stands, so a run killed with
-//! several tests going leaves them for the next run's sweep and not for a
-//! bork (#860). The keys are held across processes as well as within the
-//! run, so two runs over one subset from two checkouts wait on each other
-//! test by test and never stand in one path at once (#990); the paths are
-//! where upstream writes, so `__FILE__`, `__DIR__` and a relative include
-//! are run-tests.php's. A test's directory is held across processes too,
-//! and shared within the run: while one of a run's batches has a test
-//! going in a directory, no other run has one going there, so two runs
-//! over one tree never meet in a directory, whatever path its tests make
-//! that no key names, and one run's batches go on beside each other as
-//! upstream's workers do (#1097).
+//! **Where a test writes.** Nowhere in the pinned tree, which is read
+//! only (#1183). A run copies the files the pin holds, what git tracks in
+//! a checkout, into a scratch tree of its own, and every subset of the run
+//! stands there: each test's program and its `SKIPIF` and `CLEAN` sections
+//! beside it, where upstream puts them, the working directory and
+//! `TEST_PHP_SRCDIR` its root, so `__FILE__`, `__DIR__`, `{PWD}`, a
+//! relative path and a relative include are run-tests.php's, and whatever
+//! a test writes lands in the copy. The copy goes when the run ends, and a
+//! run killed first leaves it to the next run's sweep (the `scratch`
+//! module), never to a later test's bork. Two runs over one subset never
+//! meet, each in its own copy; within a run a test's three paths are among
+//! its keys, so two tests whose files would stand at one path never run at
+//! once.
 //!
 //! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
 //! a crate owns the directories of the corpus its row names, an extension
@@ -105,6 +102,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
@@ -112,8 +110,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
-use crate::oracle::{Oracle, Runner};
+use crate::oracle::{Oracle, Runner, Source};
 use crate::reading::{Reading, listed};
+use crate::scratch::Tree;
 use crate::sources;
 use crate::tally::{self, Outcome};
 use adapter::Adapter;
@@ -184,9 +183,11 @@ pub(crate) struct Subset {
     pub scope: String,
     /// The directories, in the order the row names them.
     pub dirs: Vec<Dir>,
-    /// The pinned php-src tree on this machine, the working directory
-    /// every program of the subset runs in, as run-tests.php runs them
-    /// from `TEST_PHP_SRCDIR` (run-tests.php:1173, #952).
+    /// The php-src tree the subset stands in: the pinned one, which it is
+    /// resolved and read against, or the run's copy of it, which it runs
+    /// in (#1183). The working directory every program of the subset runs
+    /// in, as run-tests.php runs them from `TEST_PHP_SRCDIR`
+    /// (run-tests.php:1173, #952).
     pub root: PathBuf,
 }
 
@@ -244,6 +245,21 @@ impl Subset {
             dirs,
             root: source.to_path_buf(),
         })
+    }
+
+    /// The same subset standing in the tree at `root`, a copy of the one
+    /// it was resolved in: its directories at their places there, and its
+    /// programs run from there.
+    pub(crate) fn rooted(&self, root: &Path) -> Subset {
+        Subset {
+            scope: self.scope.clone(),
+            dirs: self
+                .dirs
+                .iter()
+                .map(|place| Dir::at(root, place.under.clone()))
+                .collect(),
+            root: root.to_path_buf(),
+        }
     }
 
     /// The directories the subset names that the pinned tree does not
@@ -696,6 +712,12 @@ pub fn run(
         oracle_absent: oracle_absent.as_deref(),
         jobs: ask.jobs.unwrap_or_else(tally::cores),
     };
+    // The run's own copy of the pinned tree, which every subset runs in and
+    // which goes when the run does; none where no test will run.
+    let copy = match (runner.binary(), &oracle_absent) {
+        (Some(_), None) => Some(copy_of(&source, under.jobs)?),
+        _ => None,
+    };
     let mut readings = Vec::new();
     // The lane's census, folded over the subsets as each is run, so the
     // widest construct of the whole corpus is one line at the end and not
@@ -708,7 +730,8 @@ pub fn run(
             readings.push(unheld);
             continue;
         }
-        let tally = run_subset(&oracle, registry, subset, under)?;
+        let within = copy.as_ref().map(|copy| subset.rooted(copy));
+        let tally = run_subset(&oracle, registry, within.as_ref().unwrap_or(subset), under)?;
         let mut reading = reading(&tally, root, manifest, &source, subset, under)?;
         let held = runs.after(manifest, &scope, &tally, &runner, &reading)?;
         if ask.census {
@@ -729,6 +752,66 @@ pub fn run(
         lane.print("the lane");
     }
     Ok(readings)
+}
+
+/// A copy of the pinned tree at `source` made for one run (#1183): the
+/// files the pin holds ([`Source::files`]), each cloned where the file
+/// system clones, on `jobs` threads, into a scratch tree the run owns. A
+/// test run there writes nothing into the pinned tree, and a file some
+/// earlier run left standing there is not in the copy to bork a test.
+///
+/// [`Source::files`]: crate::oracle::Source::files
+fn copy_of(source: &Path, jobs: NonZeroUsize) -> Result<Tree> {
+    let files = Source::files(source)?;
+    let copy = Tree::new("phpt-tree")?;
+    let each = files.len().div_ceil(jobs.get()).max(1);
+    thread::scope(|scope| {
+        let copying: Vec<_> = files
+            .chunks(each)
+            .map(|files| {
+                let copy = copy.path();
+                scope.spawn(move || {
+                    files
+                        .iter()
+                        .try_for_each(|file| copy_one(&source.join(file), &copy.join(file)))
+                })
+            })
+            .collect();
+        copying.into_iter().try_for_each(|copying| {
+            copying
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("copying the pinned tree panicked")))
+        })
+    })?;
+    println!(
+        "phpt: the run's copy of the pinned tree at {}, {} files, is {}",
+        source.display(),
+        files.len(),
+        copy.display()
+    );
+    Ok(copy)
+}
+
+/// One file of the pinned tree into the run's copy: a link as a link, a
+/// file through `fs::copy`, which clones it where the file system can.
+/// A file the tree lists and no longer has is not in the tree.
+fn copy_one(from: &Path, to: &Path) -> Result<()> {
+    let kind = match fs::symlink_metadata(from) {
+        Ok(meta) => meta.file_type(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", from.display())),
+    };
+    if let Some(dir) = to.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let copied = if kind.is_symlink() {
+        fs::read_link(from).and_then(|target| std::os::unix::fs::symlink(target, to))
+    } else if kind.is_dir() {
+        fs::create_dir_all(to)
+    } else {
+        fs::copy(from, to).map(drop)
+    };
+    copied.with_context(|| format!("copying {} to {}", from.display(), to.display()))
 }
 
 /// Run one subset: every test through the runner, each verdict printed as
