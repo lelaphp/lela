@@ -99,6 +99,14 @@ pub(crate) fn next_error() -> Option<c_ulong> {
     (code != 0).then_some(code)
 }
 
+/// `ERR_clear_error()`: this thread's queue emptied, of what a request
+/// the thread served before left on it.
+pub(crate) fn clear_errors() {
+    // SAFETY: ERR_clear_error empties this thread's queue; it takes
+    // nothing.
+    unsafe { sys::ERR_clear_error() };
+}
+
 /// `ERR_error_string_n(code, buf, 256)`: the library's text for a code,
 /// `error:0480006C:PEM routines::no start line` and its kin, cut at 255
 /// bytes as php's buffer cuts it.

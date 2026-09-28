@@ -296,6 +296,7 @@ pub fn extension() -> Extension {
         ])
         .on_modify(b"openssl.libctx", on_update_libctx)
         .request_state::<State>()
+        .rinit(rinit)
         .info(info)
         .build("openssl")
 }
@@ -329,6 +330,16 @@ fn on_update_libctx(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
     );
     php_ext::raising::docref(req, level, &text);
     Ok(false)
+}
+
+/// The library's error queue emptied as a request starts: it is the
+/// thread's, and a thread may have served a request before, where php's
+/// CLI starts each program in a fresh process with an empty queue.
+#[allow(clippy::unnecessary_wraps)] // the ABI's `rinit` hook
+fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    let _ = req;
+    ffi::clear_errors();
+    Ok(())
 }
 
 /// `PHP_MINFO_FUNCTION(openssl)`: the table, then `DISPLAY_INI_ENTRIES`.
