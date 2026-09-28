@@ -12,7 +12,7 @@ Your scratch files, commit messages and run output alike, go in <scratchpad>/t<n
 
 Read first: AGENTS.md, CONTEXT.md, ext/AGENTS.md, the stage-commit skill, and <the ADRs and design sections the area names>.
 
-Validate in the build skill's four tiers (#663 holds them until the skill does). The one subset run, at the end, goes to a file read through `awk -f <checkout>/.claude/skills/specs/first-failures.awk <file> | sort | uniq -c | sort -rn`, never raw: it prints about 200k lines. Regressions against the merge base are the coordinator's.
+Validate in the build skill's four tiers (#663 holds them until the skill does). Pass `--jobs 3` to every `cargo xtask phpt`: three or four builders share the machine's 12 cores, and at a load of 70 a test's time limit fails what it would meet. Run phpt only through `cargo xtask phpt`, never a program of your own written into the pinned php-src tree. The one subset run, at the end, goes to a file read through `awk -f <checkout>/.claude/skills/specs/first-failures.awk <file> | sort | uniq -c | sort -rn`, never raw: it prints about 200k lines. Regressions against the merge base are the coordinator's.
 
 Commit each piece as soon as it's done: sessions restart, and committed work survives them.
 
@@ -26,5 +26,5 @@ Standard: modern Rust and decisions that hold as the engine grows. State is a ty
 
 Leave pushing and merging to the coordinator. Close as the build skill closes, through `cargo xtask ticket close`, with what the spec didn't do filed. A `permit` denial is a `for-a-person` ticket, filed, and the work it stops waits on it.
 
-Spec: <anything the ticket doesn't say: the neighbouring slots and what they own, the counts measured at the cut>.
+Spec: <anything the ticket doesn't say: its lane, the neighbouring slots and what they own, the counts measured at the cut>. What you file carries the spec's `track:parity-<lane>` label, as the build skill carries a ticket's label.
 ```

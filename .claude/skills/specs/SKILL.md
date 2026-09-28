@@ -11,7 +11,8 @@ The coordinator keeps the builder **slots** full and merges what they finish. A 
 - Main's checkout (`~/Projects/dax-php`, on the branch `main`) is where every merge happens, and its `target/harness` is the store. Builders work under its `.claude/worktrees/t<n>/`, on branches that name no track, so `done` measures each since `main`; `cargo xtask track` in a worktree says so. Start each batch from the pushed tip: `git pull --ff-only`.
 - The checkout is the coordinator's while `/specs` runs: other sessions work in worktrees, since a merge commit takes the whole index. A person's uncommitted edit in it (a `.gitignore` line) stays theirs: nothing here stages it, and every reset is `--keep`, which refuses where it would overwrite one.
 - `git worktree list` and `git config --get-regexp 'branch\..*\.ticket'` show the slots laid and each one's ticket. A builder this session didn't dispatch is gone; its branch's commits show how far it got.
-- `gh issue list --label ready-for-agent --state open` holds the open specs and blockers, and `--label for-a-person` the person's tickets. `df -h` shows the disk.
+- The route is [phpt parity](https://github.com/mitchellvanw/dax-php/issues/1160): parity is the engine's verdict equal to the oracle's on every test the oracle runs, worked in six lanes, each a chart labelled `frontier:chart` with a `track:parity-<lane>` label on its tickets (instruments, compiler, runtime, hosts, streams, extensions). No track is laid down for them; this loop is what works them.
+- `gh issue list --label ready-for-agent --state open` holds the open specs and blockers, and `--label for-a-person` the person's tickets; `--label track:parity-<lane>` narrows to one lane. A ticket labelled `superseded` was replaced by the parity route and is no spec, no blocker and no coverage. `df -h` shows the disk.
 - `$S` is your scratchpad. Runs and message files there are named for their commit, branch or ticket.
 
 ## The loop
@@ -22,7 +23,9 @@ Whenever a slot frees (a builder ends, a branch merges, a branch goes back), wor
 
 **Blocker first.** A crash, a regression the merge check found, or a harness defect that stops a merge takes the next slot ahead of any spec. A regression goes back to a builder on its branch, a fresh one when the first has ended, with the test names. Harness work fills a slot only when a merge waits on it (#653).
 
-Otherwise the slot gets a **spec**. A ready ticket that isn't a spec joins the spec that shares its code path (#667 bundled five compiler refusals; #668 absorbed #661, #529 and #533), or waits for one. Every slot holds a spec or a blocker.
+Otherwise the slot gets a **spec**, drawn from the parity lanes in this order: a lane's open, unblocked ticket that is already a spec's size; several of one lane's smaller tickets on one code path bundled into one spec (the first compiler batch, #1187, #1188 and #1189, is 91 tests over one emit path); then a spec cut from a chart's Not yet specified, as step 2 cuts. A ready ticket that isn't a spec joins the spec that shares its code path (#667 bundled five compiler refusals; #668 absorbed #661, #529 and #533), or waits for one. Every slot holds a spec or a blocker.
+
+Until [each run works in its own copy of the pinned tree](https://github.com/mitchellvanw/dax-php/issues/1183) has merged, it is a blocker: builders running phpt at once in the one pinned php-src tree strand programs there that bork tests the oracle meets. The crashes of the runtime lane (#1192, #1193, #1194) are blockers too.
 
 ## 2. Cut a spec
 
@@ -31,13 +34,16 @@ Otherwise the slot gets a **spec**. A ready ticket that isn't a spec joins the s
    cargo build --release -p php
    cargo xtask phpt --census > $S/lane-<tip>.out
    cargo xtask phpt --subset Zend/tests > $S/zend-<tip>.out
+   cargo xtask phpt --subset tests > $S/tests-<tip>.out
+   cargo xtask phpt --subset sapi/cli > $S/cli-<tip>.out
    ```
-2. Group the failing tests by **first failure**, the first line the engine printed that php didn't. `awk -f .claude/skills/specs/first-failures.awk $S/lane-<tip>.out | sort | uniq -c | sort -rn | head -40`; add `cut -d: -f1-2` before the `sort` for families (`php only: Fatal error` is a compile or link fatal php raises and the engine doesn't). The `phpt census` lines list the unread constructs.
-3. Gather causes into groups over one code path: one extension's classes, the natives of one php-src file (`grep -rlE 'PHP_FUNCTION\(<name>\)' <php-src>/ext`, the tree at `oracle.toml`'s `[source].path`), one compiler refusal family. Take the widest group that no open ticket covers (`gh issue list --search`) and that collides with no slot. Split a group wider than about 700 tests along its php-src files; bundle one narrower than about 150 with its neighbour.
+   The per-commit lane holds only crates that exist, so an extension the bundle lacks has no subset to fail in; its count is the nightly `--full` reading of `ext/<name>/tests` (the dashboard's `oracle-main` artifact), and its spec is the extensions lane's ticket for it.
+2. Group the failing tests by **first failure**, the first line the engine printed that php didn't. `cat $S/lane-<tip>.out $S/tests-<tip>.out $S/cli-<tip>.out | awk -f .claude/skills/specs/first-failures.awk | sort | uniq -c | sort -rn | head -40`; add `cut -d: -f1-2` before the `sort` for families (`php only: Fatal error` is a compile or link fatal php raises and the engine doesn't). The `phpt census` lines list the unread constructs.
+3. Gather causes into groups over one code path: one extension's classes, the natives of one php-src file (`grep -rlE 'PHP_FUNCTION\(<name>\)' <php-src>/ext`, the tree at `oracle.toml`'s `[source].path`), one compiler refusal family. Take the widest group that no open ticket covers (`gh issue list --search "<construct> -label:superseded"`, since a superseded ticket covers nothing) and that collides with no slot. Split a group wider than about 700 tests along its php-src files; bundle one narrower than about 150 with its neighbour.
 
-**Collisions.** Slots split by extension, by php-src file within ext/standard, or compiler against natives; two specs never share an emit path at once. A spec that would collide with a branch that is finished but not merged is laid on that branch (#742 and #751 were laid on #667's).
+**Collisions.** Slots split by lane first, then by extension, by php-src file within ext/standard, or compiler against natives; two specs never share an emit path at once. A spec that would collide with a branch that is finished but not merged is laid on that branch (#742 and #751 were laid on #667's).
 
-The cut is done when you can name the group, its test count and the commit it was measured at, its php-src files or constructs, the tickets it absorbs, and where its worktree is laid. The frontier skill cuts its batch the same way (#653).
+The cut is done when you can name the group, its lane, its test count and the commit it was measured at, its php-src files or constructs, the tickets it absorbs, and where its worktree is laid. The frontier skill cuts its batch the same way (#653).
 
 ## 3. Write the spec
 
@@ -45,7 +51,7 @@ The body is the user-level `to-spec` skill's template (Problem Statement, Soluti
 
 - The Problem Statement carries the measured counts and the commit. Out of Scope names the neighbouring spec. Further Notes names the branch the spec is laid on, when it isn't `main`.
 - The boxes cover every cause of the group, each met and witnessed or named and filed; the before and after counts in the closing comment; and `cargo xtask done` listing nothing unmet for the crates touched. Regressions are the merge check's, so no box asks the builder for them.
-- File it with the label `ready-for-agent` and a parent as the build skill files a ticket.
+- File it with the labels `ready-for-agent` and its lane's `track:parity-<lane>`, and no parent: a chart takes no sub-issues (#619), and the label is what groups the lane. A spec that absorbs lane tickets names them, and each gets a comment linking the spec.
 - Anything a person must rule on first (a manifest row, a ceiling, a porting key, a design line) is its own `for-a-person` ticket, wired with `gh issue edit <spec> --add-blocked-by <n>`. A blocked spec waits, and the slot takes the next cut.
 
 The spec is written when `cargo xtask ticket read <n>` prints its boxes.
@@ -81,7 +87,9 @@ After the last merge of a batch, before any push:
    cargo build --release -p php
    cargo xtask phpt --census --against <base> > $S/lane-<head>.out
    cargo xtask phpt --subset Zend/tests --against <base> > $S/zend-<head>.out
-   grep -E '^regressed |@against' $S/lane-<head>.out $S/zend-<head>.out
+   cargo xtask phpt --subset tests --against <base> > $S/tests-<head>.out
+   cargo xtask phpt --subset sapi/cli --against <base> > $S/cli-<head>.out
+   grep -E '^regressed |@against' $S/lane-<head>.out $S/zend-<head>.out $S/tests-<head>.out $S/cli-<head>.out
    ```
    No regression means every `@against` reading passes. A skip is no verdict (a stale binary, no run kept at the base, different subsets) and never reads as no regression. With no run kept at the base, take one in a checkout of the base with its engine built.
 4. Push only on no regressions and a fast-forward: `git fetch origin`, `git merge-base --is-ancestor origin/main HEAD`, `git push origin main`. A `main` another session moved is merged in first, and the check runs again against the moved tip.
@@ -89,6 +97,11 @@ After the last merge of a batch, before any push:
 A regression sends its branch back as a blocker (step 1), and the rest of the batch goes on without it: return the checkout to the base with `git reset --keep <base>` (the merges are unpushed, each branch keeps its own commits, and `--keep` leaves a person's uncommitted edit standing where `--hard` would discard it), merge the others again and run the check again.
 
 **What stops a merge and goes to a person.** A ceiling (`api_items`, a crate's line budget), a `done` refusal on a crate without `porting` whose subset doesn't fully pass (until #725 lands), or a design line for a cross-extension export. File it `for-a-person` with the exact refusal and the saved resolution, as #684 did, and merge the rest of the batch.
+
+## When the instruments lane lands
+
+- [Every miss keeps its reason on the run](https://github.com/mitchellvanw/dax-php/issues/1185): step 2 groups by `cargo xtask phpt --census`'s signatures, read off the run, and `first-failures.awk` is retired with the commit that says so.
+- [The oracle's verdict per test is kept as the target](https://github.com/mitchellvanw/dax-php/issues/1184): a group's count is the target tests it misses, never a test the oracle skips or misses, and the Problem Statement's counts are met-of-target.
 
 ## 7. Free the disk
 
