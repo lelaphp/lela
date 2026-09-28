@@ -105,6 +105,23 @@ fn the_program_is_echo_over_a_reflection_extension_and_the_name_is_a_literal() {
     );
 }
 
+/// An extension php registers under another name than its crate's is
+/// asked for by php's name on both sides, the oracle's flag and the
+/// engine's reflector, while its reading keeps the crate's scope:
+/// `ext/opcache` is `Zend OPcache` (run-tests.php:2908-2916), and the
+/// same table lowers `-m`'s listing back to the crate for `--EXTENSIONS--`.
+#[test]
+fn a_crate_php_names_otherwise_is_rendered_under_the_module_name() {
+    assert_eq!(
+        Column::Re.program("opcache"),
+        "echo new ReflectionExtension('Zend OPcache');"
+    );
+    assert_eq!(Column::Ri.scope("opcache"), "ext/opcache/ri");
+    assert_eq!(crate::oracle::module_name("ctype"), "ctype");
+    assert_eq!(crate::oracle::crate_name("Zend OPcache"), "opcache");
+    assert_eq!(crate::oracle::crate_name("SPL"), "spl");
+}
+
 /// The `--ri` column (#273): php's own `--ri ctype` standing for the
 /// engine's is a pass, and the one a byte apart, `Enabled` for `enabled`
 /// on line 3, is not; the fixture carries no load number to renumber.

@@ -127,11 +127,14 @@ impl Column {
     /// over a `ReflectionExtension` (`sapi/cli/php_cli.c` at the tag),
     /// which is `__toString()`, and `echo` casts the same way; `php --ri
     /// <name>` calls `php_info_print_module`, which is what
-    /// `ReflectionExtension::info()` calls. The name is quoted as a PHP
+    /// `ReflectionExtension::info()` calls. The extension is named as php
+    /// names its module, [`oracle::module_name`], and quoted as a PHP
     /// string literal, so a name no extension could have is still a
     /// program, refused by the engine in its own words.
     pub(crate) fn program(self, name: &str) -> String {
-        let literal = name.replace('\\', "\\\\").replace('\'', "\\'");
+        let literal = oracle::module_name(name)
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'");
         match self {
             Column::Re => format!("echo new ReflectionExtension('{literal}');"),
             Column::Ri => format!("(new ReflectionExtension('{literal}'))->info();"),
@@ -142,8 +145,9 @@ impl Column {
 /// What one `xtask crosscheck` run was asked for.
 #[derive(Debug, Clone, Default)]
 pub struct Ask {
-    /// The extensions, by their php names (`ctype`): `--ext <name>`,
-    /// repeatable; the bundle's default set when none is named.
+    /// The extensions, by their crates' names (`ctype`, `opcache`):
+    /// `--ext <name>`, repeatable; the bundle's default set when none is
+    /// named.
     pub ext: Vec<String>,
     /// A directory of `<name>.re` and `<name>.ri` files standing for the
     /// engine's renderings, what a test hands the lane for the negative
@@ -261,13 +265,17 @@ pub(crate) fn first_difference(diff: &str) -> String {
 /// engine renders empty is one hunk the size of the oracle's rendering.
 const HUNK: usize = 4;
 
-/// The oracle's rendering of `name` in `column`: `php --re <name>` or
-/// `php --ri <name>` under the recipe, through [`Oracle::run_under`] as
-/// every lane's oracle side runs. The recipe's program stands beside the
-/// flag, since php opens it before it prints, and prints without running
-/// it.
+/// The oracle's rendering of `name` in `column`: `php --re <module>` or
+/// `php --ri <module>` under the recipe, the module being the name php
+/// registers the crate's extension under ([`oracle::module_name`]),
+/// through [`Oracle::run_under`] as every lane's oracle side runs. The
+/// recipe's program stands beside the flag, since php opens it before it
+/// prints, and prints without running it.
 pub(crate) fn render(oracle: &Oracle<'_>, name: &str, column: Column) -> Result<Observation> {
-    let flags = [column.flag().to_owned(), name.to_owned()];
+    let flags = [
+        column.flag().to_owned(),
+        oracle::module_name(name).to_owned(),
+    ];
     oracle.run_under(&Invocation {
         flags: &flags,
         ..Invocation::new(&oracle.pin().oracle.path, Program::Snippet(""))
@@ -277,8 +285,14 @@ pub(crate) fn render(oracle: &Oracle<'_>, name: &str, column: Column) -> Result<
 /// The recipe as the reading names it: the invocation the oracle's bytes
 /// came from.
 pub(crate) fn recipe(manifest: &Manifest, name: &str, column: Column) -> String {
+    let module = oracle::module_name(name);
+    let module = if module.contains(' ') {
+        format!("'{module}'")
+    } else {
+        module.to_owned()
+    };
     format!(
-        "php {} {} {name}",
+        "php {} {} {module}",
         manifest.pin.recipe.args.join(" "),
         column.flag()
     )
