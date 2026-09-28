@@ -7,7 +7,7 @@
 //! One owned type per OpenSSL object, each freeing what it owns on drop,
 //! so no native frees by hand: the keys and their operations in [`key`],
 //! the digests and ciphers in [`cipher`], certificates, signing requests,
-//! names and stores in [`x509`], and PKCS#7, CMS and PKCS#12 in
+//! names, stores and SPKACs in [`x509`], and PKCS#7, CMS and PKCS#12 in
 //! [`smime`]; this file holds what they share, the `BIO`, the `CONF`,
 //! stacks, object names and the error queue. Every call is made on the
 //! default `OSSL_LIB_CTX` with no property query; the oracle's

@@ -25,7 +25,7 @@ use crate::store_errors;
 
 /// `php_openssl_get_evp_md_from_algo`: the digest an `OPENSSL_ALGO_*`
 /// names, of those the library carries (no MD2 in OpenSSL 3).
-fn digest_of(algo: i64) -> Option<Digest> {
+pub(crate) fn digest_of(algo: i64) -> Option<Digest> {
     let name = match algo {
         1 => c"SHA1",
         2 => c"MD5",

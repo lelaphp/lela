@@ -8,11 +8,12 @@
 //! area: certificates ([`x509`]), signing requests ([`csr`]), asymmetric
 //! keys ([`key`], [`keydata`]) and the configuration they are made under
 //! ([`config`]), signatures and raw RSA ([`sign`]), ciphers, digests and
-//! envelopes ([`cipher`]), PKCS#7 ([`pkcs7`]), CMS ([`cms`]), and PKCS#12
-//! ([`pkcs12`]), with the arguments they share decoded once ([`decode`])
-//! and the ring of library errors `openssl_error_string` reads
-//! ([`Errors`]). ext/phar's OpenSSL signatures call `openssl_sign` and
-//! `openssl_verify` through the function table, as php's do.
+//! envelopes ([`cipher`]), PKCS#7 ([`pkcs7`]), CMS ([`cms`]), PKCS#12
+//! ([`pkcs12`]), and SPKAC ([`spki`]), with the arguments they share
+//! decoded once ([`decode`]) and the ring of library errors
+//! `openssl_error_string` reads ([`Errors`]). ext/phar's OpenSSL signatures
+//! call `openssl_sign` and `openssl_verify` through the function table, as
+//! php's do.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -37,6 +38,7 @@ mod keydata;
 mod pkcs12;
 mod pkcs7;
 mod sign;
+mod spki;
 mod x509;
 
 use std::cmp::Ordering;
@@ -419,6 +421,10 @@ pub fn extension() -> Extension {
             key::openssl_dh_compute_key::declared(),
             key::openssl_pkey_derive::declared(),
             cipher::openssl_random_pseudo_bytes::declared(),
+            spki::openssl_spki_new::declared(),
+            spki::openssl_spki_verify::declared(),
+            spki::openssl_spki_export::declared(),
+            spki::openssl_spki_export_challenge::declared(),
             x509::openssl_get_cert_locations::declared(),
         ])
         .on_modify(b"openssl.libctx", on_update_libctx)

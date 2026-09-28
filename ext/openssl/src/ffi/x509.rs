@@ -1,7 +1,8 @@
 //! X.509: [`Certificate`] (`X509`), the names in it ([`Name`]), the
 //! signing request [`Csr`] (`X509_REQ`), the trust [`Store`]
 //! (`X509_STORE`) a certificate is checked against, [`CertStack`]
-//! (`STACK_OF(X509)`) and the extensions a configuration section adds.
+//! (`STACK_OF(X509)`), the extensions a configuration section adds, and
+//! the Netscape [`Spki`] (`NETSCAPE_SPKI`).
 
 use std::ffi::{CStr, c_char, c_int, c_long, c_uchar, c_ulong, c_void};
 use std::marker::PhantomData;
@@ -84,6 +85,18 @@ unsafe extern "C" {
         propq: *const c_char,
     ) -> *mut sys::OPENSSL_STACK;
     fn X509_INFO_free(info: *mut c_void);
+    fn NETSCAPE_SPKI_new() -> *mut SpkiRaw;
+    fn NETSCAPE_SPKI_free(spki: *mut SpkiRaw);
+    fn NETSCAPE_SPKI_set_pubkey(spki: *mut SpkiRaw, pkey: *mut sys::EVP_PKEY) -> c_int;
+    fn NETSCAPE_SPKI_sign(
+        spki: *mut SpkiRaw,
+        pkey: *mut sys::EVP_PKEY,
+        md: *const sys::EVP_MD,
+    ) -> c_int;
+    fn NETSCAPE_SPKI_b64_encode(spki: *mut SpkiRaw) -> *mut c_char;
+    fn NETSCAPE_SPKI_b64_decode(text: *const c_char, len: c_int) -> *mut SpkiRaw;
+    fn NETSCAPE_SPKI_verify(spki: *mut SpkiRaw, pkey: *mut sys::EVP_PKEY) -> c_int;
+    fn NETSCAPE_SPKI_get_pubkey(spki: *mut SpkiRaw) -> *mut sys::EVP_PKEY;
 }
 
 /// `MBSTRING_UTF8`, how an entry's or attribute's text is given.
@@ -995,5 +1008,101 @@ impl Store {
         // SAFETY: the context is owned here and freed once.
         unsafe { sys::X509_STORE_CTX_free(ctx.as_ptr()) };
         verdict
+    }
+}
+
+/// `NETSCAPE_SPKI`, whose first member is its `NETSCAPE_SPKAC`.
+#[repr(C)]
+pub(crate) struct SpkiRaw {
+    spkac: *mut Spkac,
+}
+
+/// `NETSCAPE_SPKAC`: the public key and the challenge.
+#[repr(C)]
+struct Spkac {
+    pubkey: *mut c_void,
+    challenge: *mut sys::ASN1_STRING,
+}
+
+owned!(
+    /// A `NETSCAPE_SPKI`, a signed public key and challenge.
+    Spki,
+    SpkiRaw,
+    NETSCAPE_SPKI_free
+);
+
+impl Spki {
+    /// `NETSCAPE_SPKI_new()`.
+    pub(crate) fn new() -> Option<Spki> {
+        // SAFETY: NETSCAPE_SPKI_new takes nothing.
+        Spki::owned(unsafe { NETSCAPE_SPKI_new() })
+    }
+
+    /// `NETSCAPE_SPKI_b64_decode(text, len)`.
+    pub(crate) fn decode(text: &[u8]) -> Option<Spki> {
+        let len = int_len(text.len())?;
+        // SAFETY: the text is `len` bytes read for the call.
+        Spki::owned(unsafe { NETSCAPE_SPKI_b64_decode(text.as_ptr().cast(), len) })
+    }
+
+    /// `ASN1_STRING_set(spki->spkac->challenge, text, len)`, nonzero.
+    pub(crate) fn set_challenge(&mut self, text: &[u8]) -> bool {
+        let Some(len) = int_len(text.len()) else {
+            return false;
+        };
+        let challenge = self.challenge_string();
+        // SAFETY: the challenge is live; the text is copied.
+        unsafe { sys::ASN1_STRING_set(challenge, text.as_ptr().cast(), len) != 0 }
+    }
+
+    /// `ASN1_STRING_get0_data(spki->spkac->challenge)`, as the C string
+    /// php reads it.
+    pub(crate) fn challenge(&self) -> Vec<u8> {
+        let challenge = self.challenge_string();
+        // SAFETY: the challenge is live; its bytes are its own.
+        let bytes = unsafe { sys::ASN1_STRING_get0_data(challenge) };
+        // SAFETY: the challenge's bytes are NUL-terminated.
+        unsafe { copied(bytes.cast()) }.unwrap_or_default()
+    }
+
+    /// `spki->spkac->challenge`.
+    fn challenge_string(&self) -> *mut sys::ASN1_STRING {
+        // SAFETY: the SPKI is live; a made or decoded one has its SPKAC.
+        let spkac = unsafe { (*self.as_ptr()).spkac };
+        // SAFETY: as above, and the SPKAC its challenge.
+        unsafe { (*spkac).challenge }
+    }
+
+    /// `NETSCAPE_SPKI_set_pubkey(spki, key)`, nonzero.
+    pub(crate) fn set_public_key(&mut self, key: &PKey) -> bool {
+        // SAFETY: the SPKI and key are live.
+        unsafe { NETSCAPE_SPKI_set_pubkey(self.as_ptr(), key.as_ptr()) != 0 }
+    }
+
+    /// `NETSCAPE_SPKI_sign(spki, key, md)`, nonzero.
+    pub(crate) fn sign(&mut self, key: &PKey, md: &Digest) -> bool {
+        // SAFETY: the SPKI, key and digest are live.
+        unsafe { NETSCAPE_SPKI_sign(self.as_ptr(), key.as_ptr(), md.as_ptr()) != 0 }
+    }
+
+    /// `NETSCAPE_SPKI_b64_encode(spki)`.
+    pub(crate) fn encode(&self) -> Option<Vec<u8>> {
+        // SAFETY: the SPKI is live; the text is the caller's to free.
+        let text = unsafe { NETSCAPE_SPKI_b64_encode(self.as_ptr()) };
+        // SAFETY: as above.
+        unsafe { taken(text) }
+    }
+
+    /// `X509_PUBKEY_get(spki->spkac->pubkey)`, as
+    /// `NETSCAPE_SPKI_get_pubkey` answers it.
+    pub(crate) fn public_key(&self) -> Option<PKey> {
+        // SAFETY: the SPKI is live; the key has a reference of its own.
+        PKey::owned(unsafe { NETSCAPE_SPKI_get_pubkey(self.as_ptr()) })
+    }
+
+    /// `NETSCAPE_SPKI_verify(spki, key)`.
+    pub(crate) fn verify(&self, key: &PKey) -> c_int {
+        // SAFETY: the SPKI and key are live.
+        unsafe { NETSCAPE_SPKI_verify(self.as_ptr(), key.as_ptr()) }
     }
 }
