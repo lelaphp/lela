@@ -1042,13 +1042,19 @@ pub(crate) fn verify_ref_assignable(
                     return Err(conflicting_coercion(req, &held, &listed, at, i));
                 }
                 (Some(at), Some(old)) => {
-                    let agrees = identical(&old, &made);
+                    let agrees = identical(req, &old, &made);
                     req.release(made);
-                    if !agrees {
-                        req.release(old);
-                        return Err(conflicting_coercion(req, &held, &listed, at, i));
+                    match agrees {
+                        Ok(true) => coerced = Some(old),
+                        Ok(false) => {
+                            req.release(old);
+                            return Err(conflicting_coercion(req, &held, &listed, at, i));
+                        }
+                        Err(thrown) => {
+                            req.release(old);
+                            return Err(thrown);
+                        }
                     }
-                    coerced = Some(old);
                 }
             }
         } else if verdict == Assignable::No {
@@ -2786,9 +2792,7 @@ pub(crate) fn spaceship(req: &mut Request, left: &Value, right: &Value) -> Resul
 /// values, each side's reference followed first. An object is identical
 /// to itself and a resource to itself, by id, so two resources of
 /// one kind are not. A reference is followed on both sides
-/// (`GET_OP*_ZVAL_PTR_DEREF`). The witness reaches the scalars; the
-/// array arm is held by the test beside it until the compiler reads an
-/// array.
+/// (`GET_OP*_ZVAL_PTR_DEREF`).
 ///
 /// ```php
 /// $i = extension_loaded('Core') + 0; $t = extension_loaded('Core'); $nan = NAN;
@@ -2805,22 +2809,66 @@ pub(crate) fn spaceship(req: &mut Request, left: &Value, right: &Value) -> Resul
 /// bool(false)
 /// bool(false)
 /// ```
-pub(crate) fn identical(left: &Value, right: &Value) -> bool {
+///
+/// Two arrays walk as [`compare_arrays`] walks, under the protection of
+/// the left one, so an array that holds itself is php's `Error` once
+/// the walk comes back to it; one table against itself is identical
+/// before anything is walked.
+///
+/// ```php
+/// $a = [&$a];
+/// try { var_dump($a === [[]]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $l = [1, [2]];
+/// var_dump($a === $a, $l === [1, [2]], $l === [1 => [2], 0 => 1]);
+/// ```
+/// ```expect
+/// Nesting level too deep - recursive dependency?
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+pub(crate) fn identical(req: &mut Request, left: &Value, right: &Value) -> Result<bool, Thrown> {
     let (left, right) = (&left.deref(), &right.deref());
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
-        return php_heap::identical(a, b);
+        return Ok(php_heap::identical(a, b));
     }
-    match (left.as_ref(), right.as_ref()) {
-        (ValueRef::Array(a), ValueRef::Array(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
-                    .all(|((k, v), (l, w))| k == l && identical(&v, &w))
-        }
+    Ok(match (left.as_ref(), right.as_ref()) {
+        (ValueRef::Array(a), ValueRef::Array(b)) => identical_arrays(req, *a, *b)?,
         (ValueRef::Object(a), ValueRef::Object(b)) => a == b,
         (ValueRef::Resource(a), ValueRef::Resource(b)) => a == b,
         _ => false,
+    })
+}
+
+/// `zend_hash_compare` with `hash_zval_identical_function` and
+/// `ordered` on (`Z/Zend/zend_hash.c:3206`), for [`identical`]: the
+/// protection [`compare_arrays`] takes, over the ordered walk, the same
+/// count and at each step the same key and identical values.
+fn identical_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<bool, Thrown> {
+    if left.heap().is_same(right.heap()) {
+        return Ok(true);
     }
+    if left.is_recursive() {
+        return Err(nesting_too_deep(req));
+    }
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    left.protect();
+    let walked = identical_entries(req, left, right);
+    left.unprotect();
+    walked
+}
+
+/// The ordered walk of `zend_hash_compare_impl` under the protection
+/// [`identical_arrays`] takes.
+fn identical_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<bool, Thrown> {
+    for ((k, v), (l, w)) in left.iter().zip(right.iter()) {
+        if k != l || !identical(req, &v, &w)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// `is_identical_function` (`Z/Zend/zend_operators.c:2508`):
@@ -2838,12 +2886,12 @@ pub(crate) fn identical(left: &Value, right: &Value) -> bool {
 /// bool(false)
 /// bool(true)
 /// ```
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the shape every binary kernel has, so one handler body serves them all"
-)]
-pub(crate) fn is_identical(_: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
-    Ok(Value::bool(identical(left, right)))
+pub(crate) fn is_identical(
+    req: &mut Request,
+    left: &Value,
+    right: &Value,
+) -> Result<Value, Thrown> {
+    Ok(Value::bool(identical(req, left, right)?))
 }
 
 /// `is_not_identical_function` (`Z/Zend/zend_operators.c:2515`): the
@@ -2862,16 +2910,12 @@ pub(crate) fn is_identical(_: &mut Request, left: &Value, right: &Value) -> Resu
 /// bool(true)
 /// bool(true)
 /// ```
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the shape every binary kernel has, so one handler body serves them all"
-)]
 pub(crate) fn is_not_identical(
-    _: &mut Request,
+    req: &mut Request,
     left: &Value,
     right: &Value,
 ) -> Result<Value, Thrown> {
-    Ok(Value::bool(!identical(left, right)))
+    Ok(Value::bool(!identical(req, left, right)?))
 }
 
 /// The scalar a value is, for [`php_heap::compare`]; nothing for an
@@ -2930,16 +2974,22 @@ fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<
         return Ok(Ordering::Equal);
     }
     if left.is_recursive() {
-        return Err(crate::api::raising::throw(
-            req,
-            "Error",
-            "Nesting level too deep - recursive dependency?",
-        ));
+        return Err(nesting_too_deep(req));
     }
     left.protect();
     let ordering = compare_entries(req, left, right);
     left.unprotect();
     ordering
+}
+
+/// php's `Error` for a table a comparison's walk is already inside,
+/// `zend_hash_compare`'s and `zend_std_compare_objects`' alike.
+pub(crate) fn nesting_too_deep(req: &mut Request) -> Thrown {
+    crate::api::raising::throw(
+        req,
+        "Error",
+        "Nesting level too deep - recursive dependency?",
+    )
 }
 
 /// `zend_hash_compare_impl` under the protection
@@ -4687,14 +4737,14 @@ mod tests {
         let start = req.memory_usage(false);
         let list = || vec![(Key::Int(0), Value::int(1)), (Key::Int(1), Value::int(2))];
         let (a, b) = (array(&mut req, list()), array(&mut req, list()));
-        assert!(identical(&a, &b));
+        assert_eq!(identical(&mut req, &a, &b), Ok(true));
         let one = array(&mut req, vec![(Key::Int(0), Value::int(1))]);
-        assert!(!identical(&a, &one));
+        assert_eq!(identical(&mut req, &a, &one), Ok(false));
         let swapped = array(
             &mut req,
             vec![(Key::Int(1), Value::int(2)), (Key::Int(0), Value::int(1))],
         );
-        assert!(!identical(&a, &swapped));
+        assert_eq!(identical(&mut req, &a, &swapped), Ok(false));
         let floated = array(
             &mut req,
             vec![
@@ -4702,14 +4752,14 @@ mod tests {
                 (Key::Int(1), Value::float(2.0)),
             ],
         );
-        assert!(!identical(&a, &floated));
+        assert_eq!(identical(&mut req, &a, &floated), Ok(false));
         let inner = (array(&mut req, list()), array(&mut req, list()));
         let nested = (
             array(&mut req, vec![(Key::Int(0), inner.0)]),
             array(&mut req, vec![(Key::Int(0), inner.1)]),
         );
-        assert!(identical(&nested.0, &nested.1));
-        assert!(!identical(&a, &Value::int(1)));
+        assert_eq!(identical(&mut req, &nested.0, &nested.1), Ok(true));
+        assert_eq!(identical(&mut req, &a, &Value::int(1)), Ok(false));
         for value in [a, b, one, swapped, floated, nested.0, nested.1] {
             req.release(value);
         }

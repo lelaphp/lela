@@ -1101,12 +1101,14 @@ impl MultipleIterator {
         });
         if let Some(info) = info {
             let rows = with(req, this, |s| s.live())?;
-            if rows.iter().any(|(_, inf)| identical(inf, &info)) {
-                return Err(throw(
-                    req,
-                    "InvalidArgumentException",
-                    "Key duplication error",
-                ));
+            for (_, inf) in &rows {
+                if identical(req, inf, &info)? {
+                    return Err(throw(
+                        req,
+                        "InvalidArgumentException",
+                        "Key duplication error",
+                    ));
+                }
             }
         }
         storage_attach(req, this, iterator.object(), info.unwrap_or_default())

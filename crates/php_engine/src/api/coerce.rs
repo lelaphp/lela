@@ -371,10 +371,11 @@ pub fn type_name(req: &Request, value: &Value) -> String {
     crate::ops::type_name(req, value)
 }
 
-/// `===`.
-#[must_use]
-pub fn identical(a: &Value, b: &Value) -> bool {
-    a.deref() == b.deref()
+/// `===`: `zend_is_identical`, the one the kernels read
+/// ([`crate::ops::identical`]), for a native. Two arrays are walked
+/// under php's protection, so one that holds itself is php's `Error`.
+pub fn identical(req: &mut Request, a: &Value, b: &Value) -> Result<bool, Thrown> {
+    crate::ops::identical(req, a, b)
 }
 
 /// `==`: [`compare`] finding the two sides equal.

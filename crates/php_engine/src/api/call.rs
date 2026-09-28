@@ -2271,8 +2271,8 @@ fn binary(req: &mut Request, op: &[u8], lhs: &Value, rhs: &Value) -> Result<Valu
                 std::cmp::Ordering::Greater => 1,
             })
         }),
-        b"===" => Ok(Value::bool(ops::identical(lhs, rhs))),
-        b"!==" => Ok(Value::bool(!ops::identical(lhs, rhs))),
+        b"===" => ops::identical(req, lhs, rhs).map(Value::bool),
+        b"!==" => ops::identical(req, lhs, rhs).map(|same| Value::bool(!same)),
         _ => Err(invalid_operations(req)),
     }
 }

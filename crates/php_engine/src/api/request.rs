@@ -6965,10 +6965,10 @@ impl Request {
                 ));
                 break;
             }
-            if let Some((_, earlier)) = seen
-                .iter()
-                .find(|(held, _)| crate::api::coerce::identical(held, &value))
-            {
+            // Each value is an int or a string by the test above, the
+            // key php's `backed_enum_table` is built on, so a duplicate
+            // is an equal value.
+            if let Some((_, earlier)) = seen.iter().find(|(held, _)| *held == value) {
                 let earlier = String::from_utf8_lossy(earlier).into_owned();
                 self.release(value);
                 outcome = Err(crate::api::raising::throw(
@@ -11960,11 +11960,7 @@ impl Request {
             return Ok(Ordering::Equal);
         }
         if x.is_recursive() {
-            return Err(crate::api::raising::throw(
-                self,
-                "Error",
-                "Nesting level too deep - recursive dependency?",
-            ));
+            return Err(crate::ops::nesting_too_deep(self));
         }
         x.protect();
         let mut order = Ordering::Equal;
