@@ -285,6 +285,9 @@ decl::Type::contains_code
 decl::Type::mask
 decl::Visibility
 decl::class_attribute_refusal
+process::gid
+process::groups
+process::uid
 raising::Level
 raising::Level::bit
 raising::Thrown
