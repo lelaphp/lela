@@ -3,6 +3,11 @@
 //! `de_DE` and one under the process's `C`, each read their own locale
 //! while the other's is installed, and the thread a request ran on runs
 //! the next request under the process's locale again.
+//!
+//! A test that names a locale asks [`has_locale`] first and, on a host
+//! whose C library lacks it, says it skipped and measures nothing; CI
+//! generates every locale these tests and the witnesses name
+//! (`.github/workflows/harness.yml`), so there it runs.
 
 use std::path::Path;
 use std::thread;
@@ -25,16 +30,34 @@ fn served(engine: &Engine, source: &str) -> String {
     String::from_utf8_lossy(&served.stdout).into_owned()
 }
 
+/// Whether the C library has the locale `name`, asked the way a phpt's
+/// `--SKIPIF--` asks: a request's `setlocale()`, which answers what
+/// `newlocale(3)` answers for the name. A test that needs the locale and
+/// finds it absent says so on stderr and returns, since a Rust test has
+/// no skip of its own.
+fn has_locale(engine: &Engine, name: &str) -> bool {
+    let probe =
+        format!(r#"<?php echo setlocale(LC_ALL, "{name}") === false ? "absent" : "present";"#);
+    let present = served(engine, &probe) == "present";
+    if !present {
+        eprintln!("skipped: the C library has no {name} locale on this host");
+    }
+    present
+}
+
 #[test]
 fn two_requests_at_once_never_read_each_other_s_locale() {
+    let engine = Engine::builder()
+        .extensions(&[php_ext_standard::extension()])
+        .build();
+    if !has_locale(&engine, "de_DE") {
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("php-locale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("the rendezvous directory");
     for marker in ["german", "c", "german-done"] {
         let _ = std::fs::remove_file(dir.join(marker));
     }
-    let engine = Engine::builder()
-        .extensions(&[php_ext_standard::extension()])
-        .build();
     let german = source(
         &dir,
         r#"setlocale(LC_ALL, "de_DE"); touch("$d/german"); wait_for("$d/c");
