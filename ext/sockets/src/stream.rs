@@ -151,7 +151,7 @@ fn transport(fd: i32, family: i32) -> Option<&'static str> {
 /// fclose($a);
 /// var_dump(@socket_write($p[0], "x"), socket_last_error($p[0]) === SOCKET_EBADF);
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// string(10) "udp_socket"
 /// string(6) "udp://"
