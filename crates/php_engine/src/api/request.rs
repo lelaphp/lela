@@ -1004,16 +1004,22 @@ pub struct StreamWrapper {
 /// The `options` of `php_stream_open_wrapper_ex` a wrapper's opener
 /// reads and hands on to an open of its own, [`Request::open_stream_with`]:
 /// `USE_PATH`, the path looked for along `include_path` first;
-/// `REPORT_ERRORS`, a refusal a warning; and `STREAM_OPEN_FOR_INCLUDE`,
-/// the open an `include` makes. The engine clears `warn` before it asks
-/// an opener, as php does, so what fails inside one is what the opener
-/// logged ([`Request::wrapper_log_error`]), or the generic `operation
-/// failed`.
+/// `REPORT_ERRORS`, a refusal a warning; `STREAM_OPEN_FOR_INCLUDE`, the
+/// open an `include` makes; `STREAM_MUST_SEEK`, a stream whose kind
+/// cannot seek copied into one that can, `php_stream_make_seekable`; and
+/// `STREAM_WILL_CAST`, the caller about to cast the stream to a fd, which
+/// makes that copy a temporary file rather than a `php://temp`. The
+/// engine clears `warn` before it asks an opener, as php does, so what
+/// fails inside one is what the opener logged
+/// ([`Request::wrapper_log_error`]), or the generic `operation failed`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // php's options, one flag per bit
 pub struct Opening {
     pub use_path: bool,
     pub warn: bool,
     pub for_include: bool,
+    pub must_seek: bool,
+    pub will_cast: bool,
 }
 
 /// A wrapper whose kinds the engine keeps, which the extension that

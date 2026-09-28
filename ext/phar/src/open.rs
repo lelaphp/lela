@@ -733,6 +733,7 @@ pub(crate) fn compile_file(req: &mut Request, path: &[u8]) -> Result<Option<Vec<
             use_path: true,
             warn: true,
             for_include: true,
+            ..php_ext::request::Opening::default()
         };
         let Some(stream) = req.open_stream_with(&url, b"rb", opening)? else {
             return Ok(None);

@@ -209,6 +209,11 @@ fn open(
     } else {
         path
     };
+    let opening = Opening {
+        must_seek: true,
+        will_cast: true,
+        ..opening
+    };
     let Some(inner) = req.open_stream_with(path, mode, opening)? else {
         return Ok(None);
     };
@@ -326,7 +331,7 @@ fn open_plain(
     let opening = Opening {
         use_path: use_include_path,
         warn: true,
-        for_include: false,
+        ..Opening::default()
     };
     req.with_stream_ctx(context, |req| open(req, filename, mode, opening))
 }

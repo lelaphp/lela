@@ -600,9 +600,8 @@ fn bzopen(
                 return Err(arg_type_error(req, 1, "not contain null bytes"));
             }
             let opening = Opening {
-                use_path: false,
                 warn: true,
-                for_include: false,
+                ..Opening::default()
             };
             open(req, name, mode, opening)?
         }
