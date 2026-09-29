@@ -13900,16 +13900,19 @@ impl Emit<'_> {
     /// (`zend_eval_const_expr`), so `(float)1` stands as an opline.
     fn cast(&mut self, to: CastTo, operand: tree::Expr) -> Result<Where, CompileError> {
         let operand = self.expr(operand)?;
-        Ok(match to {
-            CastTo::Bool => self.emit_unary(Opcode::Bool, operand, 0),
-            _ => self.emit_unary(Opcode::Cast, operand, to.type_code()),
-        })
+        Ok(self.emit_cast(operand, to))
     }
 
-    /// `ZEND_CAST` of `operand` to `to` into a temporary, what
+    /// `operand` converted to `to` into a temporary: `ZEND_BOOL` for a
+    /// bool and `ZEND_CAST` with the type in `extended_value` for the
+    /// rest. What `zend_compile_cast` emits, what `zend_compile_func_cast`
+    /// emits for `boolval`, `intval`, `floatval` and `strval`, and what
     /// `zend_compile_func_sprintf` emits before a `%d` and an array's `%s`.
     pub(crate) fn emit_cast(&mut self, operand: Where, to: CastTo) -> Where {
-        self.emit_unary(Opcode::Cast, operand, to.type_code())
+        match to {
+            CastTo::Bool => self.emit_unary(Opcode::Bool, operand, 0),
+            _ => self.emit_unary(Opcode::Cast, operand, to.type_code()),
+        }
     }
 
     /// `zend_emit_op_tmp(result, opcode, NULL, NULL)`: the opline with

@@ -2237,8 +2237,10 @@ mod tests {
             (b"<?php echo count($a, 1);", b"count"),
             (b"<?php echo is_int();", b"is_int"),
             (b"<?php echo is_int($a, $b);", b"is_int"),
-            (b"<?php echo intval($a);", b"intval"),
             (b"<?php echo gettype($a);", b"gettype"),
+            (b"<?php echo intval($a, 8);", b"intval"),
+            (b"<?php echo intval(value: $a);", b"intval"),
+            (b"<?php echo boolval(...$a);", b"boolval"),
         ] {
             assert!(
                 ordinary_call(source, name),
@@ -2602,6 +2604,50 @@ mod tests {
         );
     }
 
+    /// `zend_compile_func_cast` as the oracle at 8.5.9 dumps it (#1251):
+    /// `BOOL` for `boolval`, `CAST` with its type for `intval`,
+    /// `floatval`, `doubleval` and `strval`, a fully qualified name
+    /// alike; a second argument, an unpacked one or none is the call.
+    #[test]
+    fn the_cast_rows_are_bool_and_cast() {
+        assert_eq!(
+            dump_of(
+                b"<?php echo boolval($a), intval($a), floatval($a), doubleval($a), strval($a), intval($a, 8), boolval(...$a), \\strval(1.5), strval();"
+            ),
+            main_dump(
+                26,
+                1,
+                9,
+                "0000 T1 = BOOL CV0($a)\n\
+                 0001 ECHO T1\n\
+                 0002 T2 = CAST (long) CV0($a)\n\
+                 0003 ECHO T2\n\
+                 0004 T3 = CAST (double) CV0($a)\n\
+                 0005 ECHO T3\n\
+                 0006 T4 = CAST (double) CV0($a)\n\
+                 0007 ECHO T4\n\
+                 0008 T5 = CAST (string) CV0($a)\n\
+                 0009 ECHO T5\n\
+                 0010 INIT_FCALL 2 112 string(\"intval\")\n\
+                 0011 SEND_VAR CV0($a) 1\n\
+                 0012 SEND_VAL int(8) 2\n\
+                 0013 V6 = DO_ICALL\n\
+                 0014 ECHO V6\n\
+                 0015 INIT_FCALL 0 80 string(\"boolval\")\n\
+                 0016 SEND_UNPACK CV0($a)\n\
+                 0017 CHECK_UNDEF_ARGS\n\
+                 0018 V7 = DO_ICALL\n\
+                 0019 ECHO V7\n\
+                 0020 T8 = CAST (string) float(1.5)\n\
+                 0021 ECHO T8\n\
+                 0022 INIT_FCALL 0 80 string(\"strval\")\n\
+                 0023 V9 = DO_ICALL\n\
+                 0024 ECHO V9\n\
+                 0025 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// `zend_do_free` over what the four opcodes leave: none of them is
     /// one php marks `UNUSED`, so a value nothing reads is a `FREE`.
     #[test]
@@ -2640,7 +2686,8 @@ mod tests {
         assert_eq!(row(b"is_integer"), Some(Special::TypeCheck(0x10)));
         assert_eq!(row(b"is_scalar"), Some(Special::TypeCheck(0x7c)));
         assert_eq!(row(b"sizeof"), Some(Special::Count { sizeof: true }));
-        assert_eq!(row(b"intval"), Some(Special::Opcode));
+        assert_eq!(row(b"intval"), Some(Special::Cast(emit::CastTo::Long)));
+        assert_eq!(row(b"doubleval"), Some(Special::Cast(emit::CastTo::Double)));
         assert_eq!(row(b"var_dump"), None);
         let names: Vec<&[u8]> = TABLE.iter().map(|(n, _)| *n).collect();
         let mut sorted = names.clone();

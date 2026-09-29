@@ -90,8 +90,11 @@ pub(crate) enum Special {
     /// function, whatever the fetch it stands under; the call otherwise,
     /// whose native refuses the global scope.
     FuncGetArgs,
-    /// A shape that is an opcode of its own (`ZEND_BOOL`, `ZEND_CAST`,
-    /// `ZEND_GET_CLASS`,
+    /// `zend_compile_func_cast`: one argument, `ZEND_BOOL` over it for
+    /// `boolval` and `ZEND_CAST` to the type for `intval`, `floatval`,
+    /// `doubleval` and `strval`, as the cast written would be.
+    Cast(CastTo),
+    /// A shape that is an opcode of its own (`ZEND_GET_CLASS`,
     /// `ZEND_GET_CALLED_CLASS`, `ZEND_GET_TYPE`, `ZEND_FUNC_NUM_ARGS`,
     /// `ZEND_ARRAY_KEY_EXISTS`) and has no kernel here yet: the ordinary
     /// call.
@@ -134,11 +137,11 @@ pub(crate) const TABLE: &[(&[u8], Special)] = &[
         Special::TypeCheck(may_be(ZvalType::Resource)),
     ),
     (b"is_scalar", Special::TypeCheck(MAY_BE_SCALAR)),
-    (b"boolval", Special::Opcode),
-    (b"intval", Special::Opcode),
-    (b"floatval", Special::Opcode),
-    (b"doubleval", Special::Opcode),
-    (b"strval", Special::Opcode),
+    (b"boolval", Special::Cast(CastTo::Bool)),
+    (b"intval", Special::Cast(CastTo::Long)),
+    (b"floatval", Special::Cast(CastTo::Double)),
+    (b"doubleval", Special::Cast(CastTo::Double)),
+    (b"strval", Special::Cast(CastTo::Str)),
     (b"defined", Special::Defined),
     (b"chr", Special::Chr),
     (b"ord", Special::Ord),
@@ -184,8 +187,8 @@ impl Emit<'_> {
     /// `zend_try_compile_special_func`: where the value is once the call
     /// is served, a constant or the temporary of the opcode emitted for
     /// it, and nothing where the name is not one of the engine's
-    /// natives, is not in the table or has a row with no kernel yet,
-    /// which is the ordinary call.
+    /// natives, is not in the table or the call does not meet its row's
+    /// conditions, which is the ordinary call.
     ///
     /// ```php
     /// var_dump(1 + strlen('a'), strlen('a' . 'b'), chr(65), ord('a'), defined('INF'), defined('true'));
@@ -296,6 +299,7 @@ impl Emit<'_> {
             Some(Special::CallUserFuncArray) => self.call_user_func_array(arguments),
             Some(Special::CallUserFunc) => self.call_user_func(arguments),
             Some(Special::Sprintf) => self.sprintf(arguments),
+            Some(Special::Cast(to)) => self.cast_call(arguments, to),
             Some(Special::Opcode) | None => Ok(None),
         }
     }
@@ -327,6 +331,7 @@ impl Emit<'_> {
                 | Special::CallUserFuncArray
                 | Special::CallUserFunc
                 | Special::Sprintf
+                | Special::Cast(_)
                 | Special::Opcode,
             )
             | None => Ok(None),
@@ -446,11 +451,6 @@ impl Emit<'_> {
         Ok(value.as_str().map(|s| length(s.len())))
     }
 
-    /// `zend_compile_func_typecheck`, `zend_compile_func_is_scalar`,
-    /// `zend_compile_func_count` and `zend_compile_func_clone`: one
-    /// argument, compiled, and the opcode
-    /// over it into a temporary with `extended_value` as given; two
-    /// arguments or none is the call, whatever the arguments are.
     /// `zend_compile_func_get_args` (`Z/Zend/zend_compile.c:4575`):
     /// `ZEND_FUNC_GET_ARGS` into a temporary, with no operand, where the
     /// op array is a function's (`CG(active_op_array)->function_name`)
@@ -537,6 +537,48 @@ impl Emit<'_> {
         Some(self.emit_nullary(Opcode::FuncGetArgs))
     }
 
+    /// `zend_compile_func_cast` (`Z/Zend/zend_compile.c:4120`): the one
+    /// argument compiled and converted as the cast written would convert
+    /// it, `ZEND_BOOL` for `boolval` and `ZEND_CAST` for the rest, into a
+    /// temporary, so the native's frame is on no trace and a value that
+    /// will not convert raises where the call stands; any other count is
+    /// the call.
+    ///
+    /// ```php
+    /// var_dump(boolval("0"), intval("12abc"), floatval("1.5e3x"), doubleval(true), strval(1.0), intval("12", 8));
+    /// var_dump(strval([]), intval(new stdClass));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// int(12)
+    /// float(1500)
+    /// float(1)
+    /// string(1) "1"
+    /// int(10)
+    ///
+    /// Warning: Array to string conversion in %s on line 3
+    ///
+    /// Warning: Object of class stdClass could not be converted to int in %s on line 3
+    /// string(5) "Array"
+    /// int(1)
+    /// ```
+    fn cast_call(
+        &mut self,
+        arguments: &[tree::Expr],
+        to: CastTo,
+    ) -> Result<Option<Where>, CompileError> {
+        let [argument] = arguments else {
+            return Ok(None);
+        };
+        let value = self.expr(*argument)?;
+        Ok(Some(self.emit_cast(value, to)))
+    }
+
+    /// `zend_compile_func_typecheck`, `zend_compile_func_is_scalar`,
+    /// `zend_compile_func_count` and `zend_compile_func_clone`: one
+    /// argument, compiled, and the opcode over it into a temporary with
+    /// `extended_value` as given; two arguments or none is the call,
+    /// whatever the arguments are.
     fn over_one(
         &mut self,
         opcode: Opcode,
