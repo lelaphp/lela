@@ -250,6 +250,10 @@ pub enum Refusal {
     /// `Class %s cannot implement both Iterator and IteratorAggregate at
     /// the same time` (`zend_implement_aggregate`, `zend_implement_iterator`).
     IteratorAndAggregate { class: String },
+    /// `%s can't be implemented by user classes`, an extension's
+    /// `interface_gets_implemented` over a class that descends from none
+    /// of the classes the interface names ([`ClassDecl::implementors`]).
+    UserImplementor { interface: String },
     /// `Enum %s cannot include magic method %s`
     /// (`zend_verify_enum_magic_methods`).
     EnumMagic { class: String, method: &'static str },
@@ -423,7 +427,8 @@ impl Refusal {
             | Refusal::Throwable { .. }
             | Refusal::EnumInterface { .. }
             | Refusal::NonBackedEnumInterface { .. }
-            | Refusal::IteratorAndAggregate { .. } => Level::Error,
+            | Refusal::IteratorAndAggregate { .. }
+            | Refusal::UserImplementor { .. } => Level::Error,
             Refusal::Traversable { .. } => Level::CoreError,
             _ => Level::CompileError,
         }
@@ -726,6 +731,9 @@ impl fmt::Display for Refusal {
                 f,
                 "Class {class} cannot implement both Iterator and IteratorAggregate at the same time"
             ),
+            Refusal::UserImplementor { interface } => {
+                write!(f, "{interface} can't be implemented by user classes")
+            }
             Refusal::EnumMagic { class, method } => {
                 write!(f, "Enum {class} cannot include magic method {method}")
             }
@@ -3127,6 +3135,21 @@ impl<'a> Linker<'a> {
     /// ```expect exit=255
     /// Fatal error: Enum Foo must implement interface Traversable as part of either Iterator or IteratorAggregate in Unknown on line 0
     /// ```
+    ///
+    /// An extension's interface that names the classes an implementor
+    /// must descend from holds any other to it:
+    ///
+    /// ```php
+    /// class A extends DateTime implements DateTimeInterface {}
+    /// class B extends DateTimeImmutable {}
+    /// echo "linked\n";
+    /// class C implements DateTimeInterface {}
+    /// ```
+    /// ```expect exit=255
+    /// linked
+    ///
+    /// Fatal error: DateTimeInterface can't be implemented by user classes in %s on line 5
+    /// ```
     fn interface_refused(
         &self,
         child: &'a ClassDecl,
@@ -3169,6 +3192,15 @@ impl<'a> Linker<'a> {
             && holds(other)
         {
             return Some(Refusal::IteratorAndAggregate { class });
+        }
+        let descends = |implementor: &Name| {
+            self.class_named(&implementor.0)
+                .is_some_and(|implementor| self.instance_of(child, implementor))
+        };
+        if !interface.implementors.is_empty() && !interface.implementors.iter().any(descends) {
+            return Some(Refusal::UserImplementor {
+                interface: text(name),
+            });
         }
         let backed = name.eq_ignore_ascii_case(b"BackedEnum");
         if !backed && !name.eq_ignore_ascii_case(b"UnitEnum") {

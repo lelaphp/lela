@@ -4923,6 +4923,7 @@ impl Emit<'_> {
                 .iter()
                 .map(|i| Name(i.clone().into_boxed_slice()))
                 .collect(),
+            implementors: Vec::new(),
             traits,
             adaptations,
             backing,

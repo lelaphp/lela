@@ -20172,6 +20172,7 @@ mod tests {
             flags: ClassFlags::default(),
             parent: None,
             interfaces: Vec::new(),
+            implementors: Vec::new(),
             traits: Vec::new(),
             adaptations: Vec::new(),
             backing: EnumBacking::Pure,
