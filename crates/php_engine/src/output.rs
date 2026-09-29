@@ -1256,6 +1256,21 @@ pub(crate) fn header_remove(req: &mut Request, name: Option<&[u8]>) -> bool {
     true
 }
 
+/// `sapi_header_op` for `SAPI_HEADER_DELETE_PREFIX` (`Z/main/SAPI.c:705`):
+/// refused with the warning once the block is sent, nothing for an empty
+/// prefix, and otherwise, the trailing whitespace cut, every line that
+/// opens with the prefix, whatever its case, dropped, where the prefix
+/// runs past the header's name of `name_len` bytes; a colon in it is no
+/// refusal, since the prefix names a value too (`Set-Cookie: PHPSESSID=`).
+pub(crate) fn header_remove_prefix(req: &mut Request, prefix: &[u8], name_len: usize) -> bool {
+    if !header_modifiable(req) || prefix.is_empty() {
+        return false;
+    }
+    let prefix = trimmed_end(prefix);
+    remove_header(&mut req.output_mut().headers, prefix, name_len);
+    true
+}
+
 /// `get_default_content_type` (`Z/main/SAPI.c:299`): `default_mimetype`
 /// with `; charset=` and `default_charset` after it when the charset
 /// is set and the type is `text/`.

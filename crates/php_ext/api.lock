@@ -431,6 +431,7 @@ request::Request::gc_status
 request::Request::global
 request::Request::header_add
 request::Request::header_remove
+request::Request::header_remove_prefix
 request::Request::headers_list
 request::Request::headers_sent
 request::Request::included_files

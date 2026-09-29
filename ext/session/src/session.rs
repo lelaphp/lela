@@ -893,7 +893,32 @@ fn now() -> i64 {
 }
 
 /// `php_session_send_cookie`: `Set-Cookie` for the session's name and
-/// id with the `session.cookie_*` attributes, added beside any other.
+/// id with the `session.cookie_*` attributes, added beside any other
+/// after `php_session_remove_cookie` dropped the one an earlier id sent,
+/// so a regenerated id leaves one session cookie in the head:
+///
+/// ```php
+/// ob_start();
+/// session_start();
+/// session_regenerate_id();
+/// $cookies = array_filter(headers_list(), fn($h) => str_starts_with($h, "Set-Cookie: PHPSESSID="));
+/// var_dump(count($cookies));
+/// session_destroy();
+/// header_remove("Set-Cookie");
+/// ```
+/// ```request
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Expires: Thu, 19 Nov 1981 08:52:00 GMT
+/// Cache-Control: no-store, no-cache, must-revalidate
+/// Pragma: no-cache
+/// Content-type: text/html; charset=UTF-8
+///
+/// int(1)
+/// ```
 fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
     if headers_sent(req) {
         sent_error(
@@ -948,6 +973,11 @@ fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
         cookie.extend_from_slice(b"; SameSite=");
         cookie.extend_from_slice(&samesite);
     }
+    let name = ini(req, b"session.name");
+    let mut prefix = b"Set-Cookie: ".to_vec();
+    prefix.extend_from_slice(&name);
+    prefix.push(b'=');
+    req.header_remove_prefix(&prefix, b"Set-Cookie".len());
     req.header_add(&cookie, false, 0);
     true
 }

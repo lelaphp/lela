@@ -15300,6 +15300,14 @@ impl Request {
         crate::output::header_remove(self, name)
     }
 
+    /// `sapi_header_op` under `SAPI_HEADER_DELETE_PREFIX`: the lines that
+    /// open with `prefix`, a header's name of `name_len` bytes and more,
+    /// dropped, as `php_session_remove_cookie` drops the session's
+    /// earlier `Set-Cookie`.
+    pub fn header_remove_prefix(&mut self, prefix: &[u8], name_len: usize) -> bool {
+        crate::output::header_remove_prefix(self, prefix, name_len)
+    }
+
     /// `headers_list()`: `SG(sapi_headers).headers`, in order.
     #[must_use]
     pub fn headers_list(&self) -> Vec<Vec<u8>> {
