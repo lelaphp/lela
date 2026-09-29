@@ -103,15 +103,15 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 321 |  | pass |
+| heap | heap.lock | 325 |  | pass |
 | unit | unit.lock | 102 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 811 | 900 | pass |
+| api | api.lock | 816 | 900 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 342 |  | pass |
 
-<!-- /computed in=4bd69820c54a76b0b79a4b678700cbd6c95bb106a50d8f715d96edc9e3b92f75 out=d6be6e75fee5e2f4e5723acb2f260f821b168f3e90e2ea3aed0c9223dfbfbe8d -->
+<!-- /computed in=503a0ed77717cfd6072d22db883300e1a7a66a97c89b185e6305d1ffa1b01ec7 out=20ac52fadc0bca9ba77bef11aeda00c3de5834fb84b94153ddd16d84bc863b97 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -126,7 +126,7 @@ third-engine-design.md
 | api.lock-line |  | on | pass | A new pub item in api needs its api.lock line in the same commit; api holds to [budget] api_items (design §4.4). |
 | xtask.lock-line |  | on | pass | A new pub item in xtask needs its xtask.lock line in the same commit. |
 | ext.pub-beyond-extension |  | on | pass | api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12). |
-| witness.exit-authored |  | deny_pattern | no reading | exit= in a witness is captured by `xtask witness --accept`, never authored. |
+| witness.exit-authored |  | deny_pattern | fail | exit= in a witness is captured by `xtask witness --accept`, never authored. |
 | witness.coverage |  | check | pass | A kernel or a native without a witness fails CI (design §8). |
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | vocab.harness |  | avoid_from | pass | The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read. |
@@ -141,7 +141,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=884001bb64186c347ed251486c9d74b2cad99505b5806df7a970bd38e939a46f out=91c764b55affb53e159ff3b31261ff6e1233123dafa3bcd36c010db97124847e -->
+<!-- /computed in=ab551be35431cfd60e3fd9df1769fa4ec507d6919bf633a79ef33ed6644252f2 out=d3089b4601e9cae5433e5a339801b794aeef12dbcb5ff0dec8ff142070872bdd -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

@@ -74,6 +74,12 @@ budget = 4000
 [[crate]]
 name = "php_sapi"
 budget = 5000
+# php-src's sapi/ suites: the hosts' own tests, in the lane beside the
+# extensions' (#1161: every test the oracle runs). The port is partial:
+# `phpt` is the meter, not a condition of done, until the no-regression rule
+# replaces the key (#652, #664); fpm and phpdbg read as skips until #1165.
+phpt = ["sapi/cli/tests", "sapi/cgi/tests", "sapi/fpm/tests", "sapi/phpdbg/tests"]
+porting = true
 [[crate]]
 name = "php"
 budget = 1000
