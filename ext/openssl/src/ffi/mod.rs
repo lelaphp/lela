@@ -60,6 +60,7 @@ macro_rules! owned {
 pub(crate) mod cipher;
 pub(crate) mod key;
 pub(crate) mod smime;
+pub(crate) mod ssl;
 pub(crate) mod x509;
 
 pub(crate) use cipher::{Cipher, Digest};

@@ -40,6 +40,7 @@ mod pkcs7;
 mod sign;
 mod spki;
 mod x509;
+mod xp_ssl;
 
 use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
@@ -332,8 +333,9 @@ fn openssl_error_string(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown>
 }
 
 /// The extension value (design §7.1): the ini entries, the constants,
-/// the class and the natives in `openssl.stub.php`'s order, and the
-/// state declared on it.
+/// the class and the natives in `openssl.stub.php`'s order, the socket
+/// `transport`s `PHP_MINIT(openssl)` registers ([`xp_ssl::transports`]),
+/// and the state declared on it.
 ///
 /// ```php
 /// var_dump(extension_loaded('openssl'), ini_get('openssl.libctx'), ini_get('openssl.cafile'));
@@ -351,7 +353,10 @@ pub fn extension() -> Extension {
         per_dir: true,
         system: false,
     };
-    ExtensionBuilder::default()
+    let builder = xp_ssl::transports()
+        .into_iter()
+        .fold(ExtensionBuilder::default(), ExtensionBuilder::register);
+    builder
         .ini(vec![
             ini("openssl.cafile", ""),
             ini("openssl.capath", ""),

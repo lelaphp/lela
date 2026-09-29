@@ -306,6 +306,20 @@ fn set_option(
     wrote
 }
 
+/// `php_stream_context_set_option` (`Z/main/streams/streams.c:2457`)
+/// over a `context`, as `xp_ssl.c` keeps a captured peer certificate in
+/// the stream's: the value under `option` of the `wrapper`'s options,
+/// one owner more.
+pub fn stream_ctx_set_option(
+    req: &mut Request,
+    context: Resource,
+    wrapper: &[u8],
+    option: &[u8],
+    value: &Value,
+) -> Result<(), Thrown> {
+    set_option(req, context, wrapper, option, value)
+}
+
 /// The body of [`set_option`] over the options array taken out of the
 /// `context` for the call.
 fn put_option(
