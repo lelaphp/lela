@@ -55,6 +55,7 @@ mod hooks;
 mod lazy;
 mod linking;
 mod load_file;
+mod recording;
 mod site_override;
 mod table;
 mod unit_cache;
@@ -1900,6 +1901,9 @@ pub struct Request {
     /// The classes whose link is under way and what their links left
     /// for later ([`linking::Links`]).
     links: linking::Links,
+    /// `EG(record_errors)` and `EG(errors)`: the diagnostics held back
+    /// for a compile or a link to emit ([`recording::Record`]).
+    record: recording::Record,
     /// `CG(rtd_key_counter)` over the units this request compiled for
     /// itself: the runtime definition keys and anonymous class names
     /// they made, which the next one counts on from
@@ -2409,6 +2413,7 @@ impl Request {
             declared: Vec::new(),
             bound_at_load: Vec::new(),
             links: linking::Links::default(),
+            record: recording::Record::default(),
             keys_made: 0,
             aliases: Vec::new(),
             sapi_constant: Value::null(),
@@ -6184,6 +6189,9 @@ impl Request {
     ) -> bool {
         if let Some(held) = self.startup.as_mut() {
             held.push((level, message.to_owned()));
+            return false;
+        }
+        if self.recorded(level, message, file, line) {
             return false;
         }
         // `php_error_cb` under `EH_THROW` (`Z/main/main.c:1368`), which
@@ -15774,7 +15782,9 @@ impl Request {
             let shared = Arc::clone(&self.shared);
             let unit = match shared.compile_for(self, &source, &path, SourceKind::File) {
                 Ok(unit) => unit,
-                Err(refused) => return Err(self.refused_include(&refused, &path)),
+                Err(refused) => {
+                    return Err(self.refused_include(&refused, &path, SourceKind::File));
+                }
             };
             if !self.included_files.contains(&path) {
                 self.included_files.push(path);
@@ -15792,7 +15802,7 @@ impl Request {
                 }
                 Ok(Opened::Unit(unit))
             }
-            Some(Err(refused)) => Err(self.refused_include(&refused, &path)),
+            Some(Err(refused)) => Err(self.refused_include(&refused, &path, SourceKind::File)),
             // The file went between the stat that resolved it and the
             // read that would have compiled it.
             None => {
@@ -15915,7 +15925,7 @@ impl Request {
         let shared = Arc::clone(&self.shared);
         let unit = match shared.compile_for(self, &source, path, SourceKind::File) {
             Ok(unit) => unit,
-            Err(refused) => return Err(self.refused_include(&refused, path)),
+            Err(refused) => return Err(self.refused_include(&refused, path, SourceKind::File)),
         };
         if !self.included_files.iter().any(|p| p == path) {
             self.included_files.push(path.to_vec());
@@ -15992,7 +16002,7 @@ impl Request {
         let shared = Arc::clone(&self.shared);
         match shared.compile_for(self, code, &name, SourceKind::Eval) {
             Ok(unit) => Ok(Opened::Unit(unit)),
-            Err(refused) => Err(self.refused_include(&refused, &name)),
+            Err(refused) => Err(self.refused_include(&refused, &name, SourceKind::Eval)),
         }
     }
 
@@ -16152,25 +16162,66 @@ impl Request {
         }
     }
 
-    /// What the compiler refused an included file with, raised as php
-    /// raises it: the diagnostics before the refusal at the file's own
-    /// name, then a parse error as the `ParseError` `zendparse` throws,
-    /// at the file and the line the parser stopped on, and a refusal
-    /// after the parse as the `E_COMPILE_ERROR` that ends the request.
-    fn refused_include(&mut self, refused: &CompileError, path: &[u8]) -> Thrown {
-        for raised in &refused.raised {
-            self.note_error_in(raised.level, &raised.message, path, raised.line);
+    /// What the compiler refused an included file or an `eval` with,
+    /// raised as php raises it: the diagnostics before the refusal at the
+    /// unit's own name, then a parse error as the `ParseError`
+    /// `zendparse` throws, at the file and the line the parser stopped
+    /// on, and a refusal after the parse as the `E_COMPILE_ERROR` that
+    /// ends the request. A file's are what `compile_file` recorded, so
+    /// they are emitted with the `ParseError` pending, which no user
+    /// error handler is handed, or ahead of the fatal with the handler
+    /// masked off; an `eval`'s were raised as it compiled, before either.
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $str) { echo "handler: $str\n"; });
+    /// $f = tempnam(sys_get_temp_dir(), 'w');
+    /// file_put_contents($f, '<?php $a = (integer) 1; echo 1 +;');
+    /// try { include $f; } catch (ParseError $e) { echo get_class($e), "\n"; }
+    /// try { eval('$a = (integer) 1; echo 1 +;'); } catch (ParseError $e) { echo get_class($e), "\n"; }
+    /// restore_error_handler();
+    /// try { include $f; } catch (ParseError $e) { echo get_class($e), "\n"; }
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// ParseError
+    /// handler: Non-canonical cast (integer) is deprecated, use the (int) cast instead
+    /// ParseError
+    ///
+    /// Deprecated: Non-canonical cast (integer) is deprecated, use the (int) cast instead in %s on line 1
+    /// ParseError
+    /// ```
+    fn refused_include(&mut self, refused: &CompileError, path: &[u8], kind: SourceKind) -> Thrown {
+        let raised = refused.raised.iter();
+        if kind == SourceKind::Eval {
+            for raised in raised.clone() {
+                self.note_error_in(raised.level, &raised.message, path, raised.line);
+            }
         }
         if refused.level == Level::Parse {
-            return crate::api::raising::throw_at(
+            let thrown = crate::api::raising::throw_at(
                 self,
                 "ParseError",
                 &refused.message,
                 path,
                 refused.line,
             );
+            if kind == SourceKind::File {
+                self.while_pending(&thrown, |req| {
+                    for raised in raised {
+                        req.note_error_in(raised.level, &raised.message, path, raised.line);
+                    }
+                });
+            }
+            return thrown;
+        }
+        let recording = self.begin_recording();
+        if kind == SourceKind::File {
+            for raised in raised {
+                self.note_error_in(raised.level, &raised.message, path, raised.line);
+            }
         }
         self.end_in_compile_time(refused.level, &refused.message, path, refused.line);
+        self.emit_recorded(recording);
         Thrown::of(None)
     }
 
@@ -16410,7 +16461,9 @@ impl Request {
         })();
         let served = match arguments {
             Ok(arguments) => {
+                let record = self.record_set_aside();
                 let answer = crate::api::call::call(self, &handler, &arguments);
+                self.record_restored(record);
                 for argument in arguments {
                     self.release(argument);
                 }

@@ -1883,7 +1883,9 @@ impl Engine {
             }
             // `php_lint_script` compiles and drops the op array, and what
             // the compiler warned of it rendered as it compiled.
-            Some(Ok(unit)) => note_compiled(&mut req, &unit),
+            Some(Ok(unit)) => {
+                note_compiled(&mut req, &unit, SourceKind::File);
+            }
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
             // request ends before a frame is pushed.
@@ -2127,13 +2129,49 @@ fn compile(
 /// 7|7|7 apples|1
 /// ```
 ///
+/// Each is raised as php's `zend_error` raises one while serving, so a
+/// user error handler is handed the ones its mask and its level admit,
+/// at the unit's file and the compiler's line. An `eval`'s are raised as
+/// php's `compile_string` raises them, as it compiles; a file's are what
+/// `compile_file` recorded, emitted once the file's functions and
+/// classes are declared, and emitted ahead of a fatal its declarations
+/// raise with the handler masked off, as `zend_error_impl` emits what it
+/// holds before a fatal.
+///
+/// ```php
+/// set_error_handler(function ($no, $str) { echo "handler: $str\n"; });
+/// eval('function w() { switch (1) { case 1: continue; } }');
+/// ```
+/// ```expect
+/// handler: "continue" targeting switch is equivalent to "break"
+/// ```
+///
+/// ```php
+/// function g() {}
+/// set_error_handler(function ($no, $str) { echo "handler: $str\n"; });
+/// $f = tempnam(sys_get_temp_dir(), 'w');
+/// file_put_contents($f, '<?php function h() { switch (1) { case 1: continue; } } echo function_exists("h") ? "declared\n" : "";');
+/// include $f;
+/// file_put_contents($f, '<?php switch (1) { case 1: continue; } function g() {}');
+/// register_shutdown_function('unlink', $f);
+/// include $f;
+/// ```
+/// ```expect exit=255
+/// handler: "continue" targeting switch is equivalent to "break"
+/// declared
+///
+/// Warning: "continue" targeting switch is equivalent to "break" in %s on line 1
+///
+/// Fatal error: Cannot redeclare function g() (previously declared in %s:2) in %s on line 1
+/// ```
+///
 /// Before them, each auto-global the unit names is armed
 /// ([`Unit::arms`]), as php's compiler arms one where it meets the name
 /// and opcache arms a cached file's `ping_auto_globals_mask` on a hit
 /// (`Z/ext/opcache/ZendAccelerator.c:1941`), so one made just in time is
 /// in `EG(symbol_table)` before the unit's first line, where the file
 /// names it and whether or not the line that names it is reached.
-pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
+pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKind) -> bool {
     // `zend_compile_halt_compiler`'s constant, and opcache's again on a
     // hit, under the file's mangled name, where the file has not
     // registered it already.
@@ -2148,6 +2186,14 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
         // loop meets again at its first allocation.
         let _ = req.arm(*global);
     }
+    // `compile_file` records what it raises and emits it once the
+    // compile has declared the file's functions and early-bound its
+    // classes; `compile_string` records nothing, so an `eval` raises as
+    // it compiles, before what it declares.
+    let recording = match kind {
+        SourceKind::File => Some(req.begin_recording()),
+        SourceKind::Eval => None,
+    };
     for raised in &unit.diagnostics {
         req.note_error_in(
             raised.level,
@@ -2156,6 +2202,11 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
             raised.line,
         );
     }
+    let declared = req.declare_classes(unit) && req.declare_functions(unit);
+    if let Some(recording) = recording {
+        req.emit_recorded(recording);
+    }
+    declared
 }
 
 /// The unit's main op array served on a fresh entry frame, what it
@@ -2172,8 +2223,7 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
 /// the shutdown functions and the extensions' `rshutdown`, until
 /// `shutdown_executor` destroys the table (design §5.10).
 fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
-    note_compiled(req, unit);
-    if !req.declare_classes(unit) || !req.declare_functions(unit) {
+    if !note_compiled(req, unit, SourceKind::File) {
         return;
     }
     let frame = match req.push_frame(Arc::clone(unit)) {

@@ -3249,8 +3249,11 @@ pub(crate) fn include_or_eval<T: Tier>(
         Ok(Opened::Failed) => return answered(req, frame, returns_to, Value::bool(false)),
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    crate::engine::note_compiled(req, &unit);
-    if !req.declare_classes(&unit) || !req.declare_functions(&unit) {
+    let source = match kind {
+        exec::IncludeKind::Eval => php_compile::SourceKind::Eval,
+        _ => php_compile::SourceKind::File,
+    };
+    if !crate::engine::note_compiled(req, &unit, source) {
         return Ok(Stepped::Threw(frame));
     }
     let main = exec::code_of(&unit);

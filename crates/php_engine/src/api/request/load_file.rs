@@ -42,11 +42,12 @@ impl Request {
         };
         let unit = match replaced {
             Some(Ok(unit)) => unit,
-            Some(Err(refused)) => return Err(self.refused_include(&refused, &path)),
+            Some(Err(refused)) => {
+                return Err(self.refused_include(&refused, &path, php_compile::SourceKind::File));
+            }
             None => return Ok(false),
         };
-        crate::engine::note_compiled(self, &unit);
-        if !self.declare_classes(&unit) || !self.declare_functions(&unit) {
+        if !crate::engine::note_compiled(self, &unit, php_compile::SourceKind::File) {
             return Err(Thrown::of(self.take_pending()));
         }
         self.serve_top_code(unit)?;

@@ -323,7 +323,9 @@ impl UnitCache<'_> {
         });
         let unit = match compiled {
             Ok((Some(Ok(unit)), _)) => unit,
-            Ok((Some(Err(refused)), path)) => return Err(req.refused_include(&refused, &path)),
+            Ok((Some(Err(refused)), path)) => {
+                return Err(req.refused_include(&refused, &path, php_compile::SourceKind::File));
+            }
             Ok((None, _)) => {
                 let reason = std::io::Error::from(std::io::ErrorKind::NotFound);
                 req.open_stream_failed(IncludeKind::Include, written, &reason);
@@ -341,8 +343,7 @@ impl UnitCache<'_> {
                     .map(|_| false);
             }
         };
-        crate::engine::note_compiled(req, &unit);
-        if !req.declare_classes(&unit) || !req.declare_functions(&unit) {
+        if !crate::engine::note_compiled(req, &unit, php_compile::SourceKind::File) {
             return Err(Thrown::of(None));
         }
         Ok(true)
