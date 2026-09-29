@@ -17,15 +17,6 @@ use crate::sources;
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "clippy";
 
-/// The cargo package of a manifest crate: `php_ext_<name>` for
-/// `ext/<name>` (ADR-0004), the name itself otherwise.
-pub(crate) fn package(krate: &Crate) -> String {
-    match krate.name.strip_prefix("ext/") {
-        Some(name) => format!("php_ext_{name}"),
-        None => krate.name.clone(),
-    }
-}
-
 /// Run clippy over every crate that exists, or over `only`; one reading
 /// each. The cargo invocation is the one CI and the pre-commit hook run.
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
@@ -78,7 +69,7 @@ pub(crate) fn command(
 /// One crate's reading: pass when cargo exits 0, fail with the tail of
 /// what clippy printed otherwise.
 pub(crate) fn check(root: &Path, krate: &Crate) -> Result<Reading> {
-    let package = package(krate);
+    let package = krate.package();
     let out = Command::new("cargo")
         .args([
             "clippy",
@@ -119,13 +110,6 @@ fn tail(text: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_package_is_the_cargo_name() {
-        assert_eq!(package(&Crate::named("xtask")), "xtask");
-        assert_eq!(package(&Crate::named("php_heap")), "php_heap");
-        assert_eq!(package(&Crate::named("ext/pcre")), "php_ext_pcre");
-    }
 
     #[test]
     fn the_tail_is_the_last_lines() {

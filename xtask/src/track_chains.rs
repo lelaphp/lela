@@ -249,9 +249,18 @@ fn names(title: &str, krate: &str) -> bool {
     }
 }
 
-/// Whether a word of a title's head is a workspace crate's name.
+/// Whether a word of a title's head is a workspace crate's name: the
+/// harness, a `php_*` crate, or one under a directory crates are laid
+/// down in (`ext/pcre`, `sapi/cli`); `php`, the binary's crate before
+/// ADR-0008, names the binary still.
 fn is_crate(word: &str) -> bool {
-    word == "php" || word == "xtask" || word.starts_with("php_") || word.starts_with("ext/")
+    word == "php"
+        || word == crate::layout::HARNESS
+        || word.starts_with("php_")
+        || crate::layout::CRATE_DIRS.iter().any(|d| {
+            word.strip_prefix(d.dir)
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
 }
 
 /// `xtask track chains`: the track named, or the branch's, and its chains

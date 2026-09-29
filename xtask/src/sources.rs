@@ -11,11 +11,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::git;
+use crate::layout;
 use crate::manifest::{AvoidFrom, Crate, Manifest};
 use crate::reading::{Reading, Status, Store, listed};
-
-/// Where crates live under the root (design §4.2): `crates/*`, `ext/*`, `xtask`.
-pub const CRATE_DIRS: [&str; 3] = ["crates", "ext", "xtask"];
 
 /// Directories under a crate whose files are not its code.
 const NOT_CODE: [&str; 4] = ["tests", "benches", "examples", "fixtures"];
@@ -61,14 +59,14 @@ pub fn exists(root: &Path, krate: &Crate) -> bool {
     root.join(krate.path()).join("Cargo.toml").is_file()
 }
 
-/// Every crate directory on disk (`crates/*`, `ext/*`, `xtask`, by the
-/// presence of a `Cargo.toml`) that has no `[[crate]]` row, as its
-/// manifest name (`ext/<name>` or `<name>`).
+/// Every crate directory on disk (each of [`layout::CRATE_DIRS`]' crates
+/// and `xtask`, by the presence of a `Cargo.toml`) that has no
+/// `[[crate]]` row, as its manifest name (`ext/<name>`, `sapi/<name>` or
+/// `<name>`).
 pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
     let mut out = Vec::new();
-    for dir in CRATE_DIRS.iter().filter(|d| **d != "xtask") {
-        let prefix = if *dir == "ext" { "ext/" } else { "" };
-        let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+    for dir in layout::CRATE_DIRS {
+        let Ok(entries) = std::fs::read_dir(root.join(dir.dir)) else {
             continue;
         };
         let mut names: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
@@ -80,14 +78,15 @@ pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            let name = format!("{prefix}{name}");
+            let name = dir.name(name);
             if manifest.crate_named(&name).is_none() {
                 out.push(name);
             }
         }
     }
-    if root.join("xtask/Cargo.toml").is_file() && manifest.crate_named("xtask").is_none() {
-        out.push("xtask".to_owned());
+    let harness = layout::HARNESS;
+    if root.join(harness).join("Cargo.toml").is_file() && manifest.crate_named(harness).is_none() {
+        out.push(harness.to_owned());
     }
     out
 }

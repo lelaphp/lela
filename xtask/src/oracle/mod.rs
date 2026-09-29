@@ -920,10 +920,13 @@ impl Runner {
     }
 }
 
-/// Where the engine's binary is built from: the crates that go into it
-/// (design §4.1). `xtask` is not among them, since the harness is not
-/// linked into `php`, and `target` is no source at all.
-const ENGINE_SOURCES: [&str; 2] = ["crates", "ext"];
+/// Where the engine's binary is built from: the crates that go into it,
+/// every directory of [`crate::layout::CRATE_DIRS`] (design §4.1,
+/// ADR-0008). `xtask` is not among them, since the harness is not linked
+/// into `php`, and `target` is no source at all.
+fn engine_sources() -> impl Iterator<Item = &'static str> {
+    crate::layout::CRATE_DIRS.iter().map(|d| d.dir)
+}
 
 /// The newest source of the engine under `root`, and when it was written.
 /// `None` where the tree carries none, and then no binary is behind
@@ -931,7 +934,7 @@ const ENGINE_SOURCES: [&str; 2] = ["crates", "ext"];
 /// tree a binary can have fallen behind.
 fn newest_source(root: &Path) -> Option<(PathBuf, SystemTime)> {
     let mut found = Vec::new();
-    for dir in ENGINE_SOURCES {
+    for dir in engine_sources() {
         let _ = crate::tally::files_under(&root.join(dir), &mut found);
     }
     found
@@ -944,7 +947,7 @@ fn newest_source(root: &Path) -> Option<(PathBuf, SystemTime)> {
         .max_by_key(|(_, written)| *written)
 }
 
-/// Whether one file under [`ENGINE_SOURCES`], named relative to the root,
+/// Whether one file under [`engine_sources`], named relative to the root,
 /// is code the binary is built from: a `.rs` the crate is compiled from or
 /// a `.toml` its `build.rs` reads, and not one of the files
 /// [`crate::sources::rust`] leaves out of a crate's sources for the same

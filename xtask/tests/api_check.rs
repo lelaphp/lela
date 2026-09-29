@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use xtask::api_check;
-use xtask::manifest::{LockCeiling, Manifest, OneOrMany, Rule, Seam};
+use xtask::manifest::{Crate, Edge, LockCeiling, Manifest, OneOrMany, Rule, Seam};
 use xtask::reading::{Reading, Status};
 use xtask::scratch::Tree;
 
@@ -252,6 +252,53 @@ fn a_crate_depending_outside_its_edges_fails_with_the_adr() {
         json.message
     );
     assert_eq!(json.adr, "0004");
+}
+
+/// The rows #1249 proposes for the hosts (ADR-0008), on a manifest that
+/// does not carry them yet: a `[[crate]]` row for `sapi/cli` and
+/// `sapi/cgi`, and the `[[edge]]` that gives every `sapi/*` crate the
+/// facade, the codecs and the bundle. Once the tracked manifest carries
+/// them this adds nothing, and the test below holds the tracked rows.
+fn with_the_host_rows(mut manifest: Manifest) -> Manifest {
+    for name in ["sapi/cli", "sapi/cgi"] {
+        if manifest.crate_named(name).is_none() {
+            manifest.crates.push(Crate::named(name));
+        }
+    }
+    if !manifest.edges.iter().any(|e| e.from == "sapi/*") {
+        let mut edge = Edge::between("sapi/*", "php_sapi");
+        edge.to = OneOrMany::Many(
+            ["php_sapi", "php_proto", "php_bundle"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        edge.adr = OneOrMany::One("0008".to_owned());
+        manifest.edges.push(edge);
+    }
+    manifest
+}
+
+/// A host reaches the engine through its facade and never past it
+/// (ADR-0008): `sapi/cli` naming `php_engine` fails with the ADR, and
+/// `sapi/cgi` on the facade, the codecs and the bundle is within its
+/// edges.
+#[test]
+fn a_host_depending_on_the_engine_past_its_facade_fails_with_the_adr() {
+    let manifest = with_the_host_rows(Manifest::load(workspace()).unwrap());
+    let readings = api_check::hold(&manifest, &fixture("host-edge"), false).unwrap();
+    let cli = of(&readings, "sapi/cli");
+    assert_eq!(cli.status, Status::Fail, "{}", cli.message);
+    assert!(cli.message.contains("php_engine"), "{}", cli.message);
+    assert!(
+        cli.message
+            .contains("ADR-0008: Hosts are one crate each under `sapi/`"),
+        "the ADR's text is printed: {}",
+        cli.message
+    );
+    assert_eq!(cli.adr, "0008");
+    let cgi = of(&readings, "sapi/cgi");
+    assert_eq!(cgi.status, Status::Pass, "{}", cgi.message);
+    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
 }
 
 #[test]
