@@ -1054,6 +1054,102 @@ pub fn instantiate_named(
     }
 }
 
+/// `zend_get_attribute_object` (`Z/Zend/zend_attributes.c:336`): an
+/// object of `class` made for `attribute`, each argument evaluated as a
+/// constant expression of `scope` ([`eval_const_expr`]) and handed to
+/// the constructor, the named ones by name ([`instantiate_named`]).
+/// Where the attribute is a program's, `file` is the file it was
+/// written in, and the arguments are evaluated and the constructor
+/// served under php's dummy frame, a site of the attribute's own at
+/// that file and the attribute's line which no trace row shows: the
+/// constructor's row names it as its caller, a throwable an argument
+/// raises names it as the executing site, so no `[constant expression]`
+/// row stands over an argument written on the attribute's line, and
+/// the file's `strict_types` is the regime the constructor's arguments
+/// are checked under. A native's attribute, `file` none, has no site.
+///
+/// The traces are pinned beside `ReflectionAttribute::newInstance`, in
+/// `ext/reflection`.
+///
+/// The site answers `strict_types` as the attribute's file declares it,
+/// for a user constructor and a native one alike:
+///
+/// ```php
+/// declare(strict_types=1);
+/// #[Attribute]
+/// class A { public function __construct(int $x) {} }
+/// #[A("1")]
+/// class C {}
+/// #[Attribute("1")]
+/// class D {}
+/// foreach (['C', 'D'] as $c) {
+///     try { (new ReflectionClass($c))->getAttributes()[0]->newInstance(); echo "made\n"; }
+///     catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// A::__construct(): Argument #1 ($x) must be of type int, string given, called in %s on line 5
+/// Attribute::__construct(): Argument #1 ($flags) must be of type int, string given
+/// ```
+pub fn attribute_object(
+    req: &mut Request,
+    class: ClassId,
+    attribute: &php_unit::decl::Attribute,
+    scope: Option<ClassId>,
+    file: Option<&[u8]>,
+) -> Result<PhpObject, Thrown> {
+    if let Some(file) = file {
+        req.vm_mut()
+            .push_site(file, attribute.line, attribute.strict);
+    }
+    let made = attribute_object_at(req, class, attribute, scope);
+    if file.is_some() {
+        req.vm_mut().pop_site();
+    }
+    made
+}
+
+/// [`attribute_object`]'s body, under whatever site stands.
+fn attribute_object_at(
+    req: &mut Request,
+    class: ClassId,
+    attribute: &php_unit::decl::Attribute,
+    scope: Option<ClassId>,
+) -> Result<PhpObject, Thrown> {
+    let mut positional = Vec::new();
+    let mut named: Vec<(PhpString, Value)> = Vec::new();
+    let mut evaluated = Ok(());
+    for argument in &attribute.arguments {
+        let value = match eval_const_expr(req, &argument.value, scope) {
+            Ok(value) => value,
+            Err(thrown) => {
+                evaluated = Err(thrown);
+                break;
+            }
+        };
+        match &argument.name {
+            Some(name) => match PhpString::new(req, &name.0) {
+                Ok(name) => named.push((name, value)),
+                Err(thrown) => {
+                    req.release(value);
+                    evaluated = Err(thrown);
+                    break;
+                }
+            },
+            None => positional.push(value),
+        }
+    }
+    let made = evaluated.and_then(|()| instantiate_named(req, class, &positional, &named));
+    for value in positional {
+        req.release(value);
+    }
+    for (name, value) in named {
+        req.release(Value::string(name));
+        req.release(value);
+    }
+    made
+}
+
 /// `ce->unserialize(rval, ce, buf, buf_len, data)` over an object
 /// `object_init_ex` made of the class: the class's unserializer handed
 /// the payload of a `C:` record, `true` once it has read it. The
@@ -1211,15 +1307,28 @@ pub fn internal_iterator(req: &mut Request, object: &PhpObject) -> Result<PhpObj
     crate::interfaces::internal_iterator(req, *object)
 }
 
-/// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry an
-/// interception replaced for the native being served
+/// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry the
+/// interception serving the call replaced
 /// ([`crate::api::abi::ExtensionBuilder::intercept`]), served on the same
 /// call, its arguments and its return the caller's, the first argument
 /// replaced by `first` where one is given, as phar's interceptors open
 /// the `phar://` name they made of a relative path; `null` where the
-/// native is not intercepted.
+/// entry serving is the native's own. Interceptions stack in bundle
+/// order, as php saves each handler over the one before it, so the
+/// last passes through to the one it replaced and that one on down to
+/// the native: `file_exists` is opcache's over phar's over
+/// `ext/standard`'s, each handing on what it does not answer itself.
+///
+/// ```php
+/// var_dump(file_exists(__FILE__), is_file(__DIR__), is_readable(__DIR__ . '/nowhere'));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ```
 pub fn passthrough(req: &mut Request, first: Option<Value>) -> Result<Value, Thrown> {
-    let Some(entry) = req.replaced_entry() else {
+    let Some((entry, beneath)) = req.replaced_entry() else {
         if let Some(first) = first {
             req.release(first);
         }
@@ -1228,7 +1337,11 @@ pub fn passthrough(req: &mut Request, first: Option<Value>) -> Result<Value, Thr
     if let Some(first) = first {
         req.replace_first_argument(first);
     }
-    entry(req)
+    let above = beneath.saturating_sub(1);
+    req.serve_beneath(beneath);
+    let served = entry(req);
+    req.serve_beneath(above);
+    served
 }
 
 /// The linked class named, `zend_lookup_class_ex` with

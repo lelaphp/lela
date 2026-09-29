@@ -17,7 +17,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use php_compile::{CompileError, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
@@ -178,10 +178,11 @@ pub(crate) struct Shared {
     /// Each native's entry, one row per row of `functions`, the
     /// interception's where an extension intercepts it.
     pub(crate) entries: Vec<Entry>,
-    /// The entry an extension's interception replaced, one row per row
-    /// of `functions`, none where nothing intercepts the native
+    /// The entries the extensions' interceptions replaced, one row per
+    /// row of `functions`, the nearest first and the native's own last,
+    /// empty where nothing intercepts the native
     /// ([`crate::api::abi::ExtensionBuilder::intercept`]).
-    pub(crate) replaced: Vec<Option<Entry>>,
+    pub(crate) replaced: Vec<Vec<Entry>>,
     /// Each native's `internal_function.module`, one row per row of
     /// `functions`: the extension that declared it, or none for one the
     /// engine declares itself.
@@ -250,7 +251,7 @@ pub(crate) struct Shared {
     /// ([`EngineBuilder::trace_natives_to`]).
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
-    entry: Loop,
+    pub(crate) entry: Loop,
     /// The same loop for a serving inside a serving, `zend_call_function`
     /// over a user function: what [`Request::serve_user`] enters a
     /// destructor's or a callback's frame through, bound to the same
@@ -270,6 +271,10 @@ pub(crate) struct Shared {
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
     strings: Mutex<Strings>,
+    /// How the engine's startup finished, which the first request's
+    /// host finishes ([`Engine::started`]): serving, with what the unit
+    /// cache preloaded, or refusing to serve anything.
+    pub(crate) started: OnceLock<crate::preload::Started>,
     /// `CG(map_ptr_last)`: how many map pointers the engine has handed
     /// out (design §5.14), which is the next one's offset. Every op
     /// array of a unit takes one as the unit is published
@@ -667,6 +672,7 @@ impl Shared {
             .file(&full, None, Validation::EveryHit, 0, now, |source| {
                 self.publish_file(source, path, cwd, stack)
             })
+            .0
     }
 
     /// `source`, read from the file `path` names, compiled and published
@@ -1231,23 +1237,27 @@ fn function_table(
         .unzip()
 }
 
-/// `phar_intercept_functions_init` for every extension, in bundle order:
-/// each native an extension intercepts has its entry replaced, the one
-/// it replaced kept in its row of what this answers.
+/// `phar_intercept_functions_init` and opcache's
+/// `zend_accel_override_file_functions` for every extension, in bundle
+/// order: each native an extension intercepts has its entry replaced,
+/// and the entry it replaced goes in front of its row of what this
+/// answers, so a later interception stands over an earlier one, as
+/// opcache's handler is saved over phar's.
 fn intercept(
     functions: &[FunctionDecl],
     entries: &mut [Entry],
     extensions: &[Extension],
-) -> Vec<Option<Entry>> {
-    let mut replaced = vec![None; functions.len()];
+) -> Vec<Vec<Entry>> {
+    let mut replaced = vec![Vec::new(); functions.len()];
     for (name, entry) in extensions.iter().flat_map(|e| e.intercepts.iter()) {
         let found = functions
             .iter()
             .position(|decl| decl.name.0.eq_ignore_ascii_case(&name.0));
         if let Some(at) = found
             && let Some(row) = entries.get_mut(at)
+            && let Some(chain) = replaced.get_mut(at)
         {
-            replaced[at] = Some(std::mem::replace(row, *entry));
+            chain.insert(0, std::mem::replace(row, *entry));
         }
     }
     replaced
@@ -1425,6 +1435,7 @@ impl EngineBuilder {
                 units: UnitCache::new(MAX_ACCELERATED_FILES),
                 strings: Mutex::new(strings),
                 map_ptr_last: AtomicU32::new(0),
+                started: OnceLock::new(),
             }),
         };
         engine.register_ini(held);
@@ -1791,6 +1802,14 @@ impl Engine {
         work: Work,
         traced: bool,
     ) -> (Observables, Trace) {
+        if let crate::preload::Started::Refused(status) = self.started(&description, sink) {
+            let refused = Observables {
+                exit_code: status,
+                headers_sent: true,
+                fatal: None,
+            };
+            return (refused, Trace::default());
+        }
         let source = description.source.clone();
         let cwd = description.cwd.clone();
         let script = description
@@ -1827,6 +1846,13 @@ impl Engine {
             }
         }
         deprecated_directives(&mut req);
+        // `preload_activate`: what the preloaded code names of the auto
+        // globals, armed for every request.
+        if let Some(preloaded) = self.shared.units.preloaded() {
+            for global in &preloaded.arms {
+                let _ = req.arm(*global);
+            }
+        }
         // What `do_cli` does once `php_request_startup` has run, before
         // the program is compiled: `$_SERVER` named, which makes it
         // (`Z/sapi/cli/php_cli.c:941`), and the standard handles
@@ -1879,20 +1905,19 @@ impl Engine {
         };
         match compiled {
             Some(Ok(unit)) if work == Work::Serve => {
-                serve_unit(&mut req, &unit, self.shared.entry);
+                let _ = serve_unit(&mut req, &unit, self.shared.entry);
             }
             // `php_lint_script` compiles and drops the op array, and what
             // the compiler warned of it rendered as it compiled.
-            Some(Ok(unit)) => note_compiled(&mut req, &unit),
+            Some(Ok(unit)) => {
+                note_compiled(&mut req, &unit, SourceKind::File);
+            }
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
             // request ends before a frame is pushed.
             Some(Err(refused)) => {
                 let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-                for raised in &refused.raised {
-                    req.note_error_in(raised.level, &raised.message, &file, raised.line);
-                }
-                req.end_in_compile_time(refused.level, &refused.message, &file, refused.line);
+                refused_program(&mut req, &refused, &file);
             }
             None => {}
         }
@@ -1904,6 +1929,14 @@ impl Engine {
     /// fiber still suspended holds the address it was resumed with, and
     /// is resumed with it again to be destroyed.
     fn shutdown(&self, req: &mut Request, sink: &mut dyn OutputSink) -> (Observables, Trace) {
+        Engine::shutdown_program(req);
+        self.shutdown_request(req, sink)
+    }
+
+    /// The first steps of `php_request_shutdown`, what the program still
+    /// runs in: its shutdown functions, its destructors, and every
+    /// handler of the buffer stack popped.
+    pub(crate) fn shutdown_program(req: &mut Request) {
         // `php_request_shutdown`'s order (design §5.10): the shutdown
         // functions first, which is `php_call_shutdown_functions`; then
         // the destructors of what is still live, which is
@@ -1932,6 +1965,15 @@ impl Engine {
         req.catch_bailout();
         crate::output::end_all(req);
         req.catch_bailout();
+    }
+
+    /// The rest of `php_request_shutdown` after
+    /// [`Engine::shutdown_program`], and what the host is handed.
+    pub(crate) fn shutdown_request(
+        &self,
+        req: &mut Request,
+        sink: &mut dyn OutputSink,
+    ) -> (Observables, Trace) {
         for extension in self.shared.extensions.iter().rev() {
             if let Some(rshutdown) = extension.rshutdown {
                 rshutdown(req);
@@ -2127,13 +2169,49 @@ fn compile(
 /// 7|7|7 apples|1
 /// ```
 ///
+/// Each is raised as php's `zend_error` raises one while serving, so a
+/// user error handler is handed the ones its mask and its level admit,
+/// at the unit's file and the compiler's line. An `eval`'s are raised as
+/// php's `compile_string` raises them, as it compiles; a file's are what
+/// `compile_file` recorded, emitted once the file's functions and
+/// classes are declared, and emitted ahead of a fatal its declarations
+/// raise with the handler masked off, as `zend_error_impl` emits what it
+/// holds before a fatal.
+///
+/// ```php
+/// set_error_handler(function ($no, $str) { echo "handler: $str\n"; });
+/// eval('function w() { switch (1) { case 1: continue; } }');
+/// ```
+/// ```expect
+/// handler: "continue" targeting switch is equivalent to "break"
+/// ```
+///
+/// ```php
+/// function g() {}
+/// set_error_handler(function ($no, $str) { echo "handler: $str\n"; });
+/// $f = tempnam(sys_get_temp_dir(), 'w');
+/// file_put_contents($f, '<?php function h() { switch (1) { case 1: continue; } } echo function_exists("h") ? "declared\n" : "";');
+/// include $f;
+/// file_put_contents($f, '<?php switch (1) { case 1: continue; } function g() {}');
+/// register_shutdown_function('unlink', $f);
+/// include $f;
+/// ```
+/// ```expect exit=255
+/// handler: "continue" targeting switch is equivalent to "break"
+/// declared
+///
+/// Warning: "continue" targeting switch is equivalent to "break" in %s on line 1
+///
+/// Fatal error: Cannot redeclare function g() (previously declared in %s:2) in %s on line 1
+/// ```
+///
 /// Before them, each auto-global the unit names is armed
 /// ([`Unit::arms`]), as php's compiler arms one where it meets the name
 /// and opcache arms a cached file's `ping_auto_globals_mask` on a hit
 /// (`Z/ext/opcache/ZendAccelerator.c:1941`), so one made just in time is
 /// in `EG(symbol_table)` before the unit's first line, where the file
 /// names it and whether or not the line that names it is reached.
-pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
+pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKind) -> bool {
     // `zend_compile_halt_compiler`'s constant, and opcache's again on a
     // hit, under the file's mangled name, where the file has not
     // registered it already.
@@ -2148,6 +2226,14 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
         // loop meets again at its first allocation.
         let _ = req.arm(*global);
     }
+    // `compile_file` records what it raises and emits it once the
+    // compile has declared the file's functions and early-bound its
+    // classes; `compile_string` records nothing, so an `eval` raises as
+    // it compiles, before what it declares.
+    let recording = match kind {
+        SourceKind::File => Some(req.begin_recording()),
+        SourceKind::Eval => None,
+    };
     for raised in &unit.diagnostics {
         req.note_error_in(
             raised.level,
@@ -2156,6 +2242,22 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
             raised.line,
         );
     }
+    let declared = req.declare_classes(unit) && req.declare_functions(unit);
+    if let Some(recording) = recording {
+        req.emit_recorded(recording);
+    }
+    declared
+}
+
+/// A program in `file` the compiler refused: `php_error_cb` renders it
+/// where it renders every diagnostic, at the level the compiler refused
+/// at, what it raised before first, and the request ends before a frame
+/// is pushed.
+pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &[u8]) {
+    for raised in &refused.raised {
+        req.note_error_in(raised.level, &raised.message, file, raised.line);
+    }
+    req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
 }
 
 /// The unit's main op array served on a fresh entry frame, what it
@@ -2171,16 +2273,19 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
 /// CVs are all `UNDEF`. The variables are then the request's, through
 /// the shutdown functions and the extensions' `rshutdown`, until
 /// `shutdown_executor` destroys the table (design §5.10).
-fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
-    note_compiled(req, unit);
-    if !req.declare_classes(unit) || !req.declare_functions(unit) {
-        return;
+///
+/// Whether the program ran to its end: not a fatal, a refused
+/// declaration or an `exit`, each of which php leaves by `zend_bailout`,
+/// and not a throwable no handler took.
+pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bool {
+    if !note_compiled(req, unit, SourceKind::File) {
+        return false;
     }
     let frame = match req.push_frame(Arc::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
             req.end_in(&fatal);
-            return;
+            return false;
         }
     };
     if let Err(fatal) = entry(req, frame) {
@@ -2188,6 +2293,7 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     }
     req.detach_symbol_table(frame);
     req.pop_frame();
+    let exited = req.unwind_exit();
     // What the loop left pending for the user exception handler, served
     // with the main frame left (`zend_execute_scripts`).
     if req.is_pending()
@@ -2195,6 +2301,7 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     {
         req.end_in(&fatal);
     }
+    !exited && !req.bailing_out() && req.ending().is_none()
 }
 
 #[cfg(test)]
@@ -2394,6 +2501,138 @@ mod tests {
             .ini("t.first", "1")
             .build();
         assert!(engine.startup_errors().ends_with("1 then 2\n"));
+    }
+
+    /// Two extensions that intercept one native stack in bundle order,
+    /// as opcache's `file_exists` is saved over phar's: the later serves
+    /// first and passes through to the earlier, the earlier to the
+    /// native, and each hands on the call's own arguments.
+    #[test]
+    fn interceptions_of_one_native_stack_in_bundle_order() {
+        let earlier: Entry = |req| {
+            req.write(b"earlier ");
+            crate::api::call::passthrough(req, None)
+        };
+        let later: Entry = |req| {
+            req.write(b"later ");
+            crate::api::call::passthrough(req, None)
+        };
+        let extensions = [
+            crate::api::abi::ExtensionBuilder::default()
+                .intercept(b"strlen", earlier)
+                .build("earlier"),
+            crate::api::abi::ExtensionBuilder::default()
+                .intercept(b"strlen", later)
+                .build("later"),
+        ];
+        let served = Engine::builder()
+            .extensions(&extensions)
+            .build()
+            .serve_capture(
+                "<?php $f = 'strlen'; echo $f('abcd'), ' ', $f('ab');",
+                crate::test::Capture::default(),
+            );
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            "later earlier 4 later earlier 2"
+        );
+    }
+
+    /// An extension that names a file to preload as the engine
+    /// finishes starting up, reading it from an ini entry of its own,
+    /// and holds every file in the cache, never validated, as opcache
+    /// holds one with `opcache.validate_timestamps=0`.
+    fn preloading(script: &Path) -> Extension {
+        let entry = php_unit::decl::IniDecl {
+            name: Name(b"t.preload"[..].into()),
+            default: b""[..].into(),
+            user: false,
+            per_dir: false,
+            system: true,
+        };
+        crate::api::abi::ExtensionBuilder::default()
+            .ini(vec![entry])
+            .admission(|_, _| crate::api::abi::Admission::Held {
+                validation: Validation::Never,
+                lookup: crate::api::abi::Lookup::Resolved,
+                protection: 0,
+            })
+            .post_startup(|req| {
+                let script = req.ini_get(b"t.preload").unwrap_or_default().to_vec();
+                if script.is_empty() {
+                    crate::api::abi::PostStartup::Serve
+                } else {
+                    crate::api::abi::PostStartup::Preload(script)
+                }
+            })
+            .build(&script.to_string_lossy())
+    }
+
+    /// `opcache.preload` as the unit cache answers it (design §6.3): the
+    /// file is served once, before the first request, which writes after
+    /// it; what it declared stands in every request, a class it left
+    /// unlinked is php's warning, and the file included again declares
+    /// nothing the preload holds.
+    #[test]
+    fn a_preloaded_script_runs_once_and_its_declarations_stand_in_every_request() {
+        let dir = std::env::temp_dir().join(format!("engine-preload-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("preload.inc");
+        let _ = std::fs::write(
+            &script,
+            "<?php\necho \"preloading\\n\";\nfunction pre_f() { return 'f'; }\n\
+             class PreA { function m() { return 'm'; } }\nclass PreB extends PreA {}\n\
+             interface PreI {}\nclass PreC implements PreI {}\nreturn;\n\
+             class Late extends Missing {}\n",
+        );
+        let engine = Engine::builder()
+            .extensions(&[preloading(&script)])
+            .ini("t.preload", &script.to_string_lossy())
+            .build();
+        let program = format!(
+            "<?php echo pre_f(), (new PreB)->m(), (new PreC) instanceof PreI ? 'y' : 'n', \
+             class_exists('Late', false) ? 'y' : 'n', \"\\n\"; include '{}'; echo \"again\\n\";",
+            script.display()
+        );
+        let first = engine.serve_capture(&program, crate::test::Capture::default());
+        let second = engine.serve_capture(&program, crate::test::Capture::default());
+        let resolved = script.canonicalize().unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            String::from_utf8_lossy(&first.stdout),
+            format!(
+                "preloading\n\nWarning: Can't preload unlinked class Late: Unknown parent Missing in {} on line 9\nfmyn\npreloading\nagain\n",
+                resolved.display()
+            )
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&second.stdout),
+            "fmyn\npreloading\nagain\n"
+        );
+    }
+
+    /// A startup an extension refuses serves nothing, and every request
+    /// ends with the status it named.
+    #[test]
+    fn a_refused_startup_serves_nothing() {
+        let refusing = crate::api::abi::ExtensionBuilder::default()
+            .post_startup(|req| {
+                req.write_stderr(b"refused\n");
+                crate::api::abi::PostStartup::Refuse { status: -2 }
+            })
+            .build("t");
+        let engine = Engine::builder().extensions(&[refusing]).build();
+        let first = engine.serve_capture("<?php echo 1;", crate::test::Capture::default());
+        let second = engine.serve_capture("<?php echo 2;", crate::test::Capture::default());
+        assert_eq!(
+            (
+                first.stdout.as_slice(),
+                first.stderr.as_slice(),
+                first.exit_code
+            ),
+            (&b""[..], &b"refused\n"[..], -2)
+        );
+        assert_eq!((second.stderr.as_slice(), second.exit_code), (&b""[..], -2));
     }
 
     /// What the pinned oracle answers for `ini_get` under `-n` and one

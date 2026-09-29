@@ -609,6 +609,7 @@ name = "php_ext_opcache"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_standard",
 ]
 
 [[package]]
@@ -617,6 +618,7 @@ version = "0.0.0"
 dependencies = [
  "openssl-sys",
  "php_ext",
+ "php_ext_standard",
 ]
 
 [[package]]

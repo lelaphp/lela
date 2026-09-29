@@ -136,7 +136,9 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
-use php_ext::request::{BindTo, FdStream, Request, SocketOptions, Stream, Xport, XportFailure};
+use php_ext::request::{
+    BindTo, FdStream, Handshake, Request, SocketOptions, Stream, Xport, XportFailure,
+};
 use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::file::constants::{
@@ -341,6 +343,7 @@ fn fsockopen_stream(
     let xport = Xport::Client {
         timeout,
         socket: SocketOptions::default(),
+        context: None,
     };
     match req.xport_create(&hostname, xport)? {
         Ok(stream) => {
@@ -451,7 +454,7 @@ fn stream_socket_client(
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
     let _ = flags;
-    let socket = socket_options(req, context)?;
+    let (socket, context) = socket_options(req, context)?;
     let host = address.as_bytes().to_vec();
     let timeout = match timeout {
         Some(timeout) if !timeout.is_finite() => {
@@ -466,6 +469,7 @@ fn stream_socket_client(
         Xport::Client {
             timeout: timeval(timeout),
             socket,
+            context,
         },
     )? {
         Ok(stream) => Ok(Untyped(OrFalse::Value(stream.resource()))),
@@ -491,15 +495,23 @@ fn stream_socket_client(
 /// of what it answers, each read as its reader in `xp_socket.c` and
 /// `transports.c` reads it: `bindto` a string or refused, `backlog` by
 /// `zval_get_long`, `ipv6_v6only` where it is not `null`, and the rest by
-/// `zend_is_true`.
+/// `zend_is_true`; with the `context` itself, which the socket keeps.
 pub(crate) fn socket_options(
     req: &mut Request,
     given: Option<Resource>,
-) -> Result<SocketOptions, Thrown> {
-    let mut options = SocketOptions::default();
-    let Some(context) = context_of(req, given, NullContext::Default)? else {
-        return Ok(options);
+) -> Result<(SocketOptions, Option<Resource>), Thrown> {
+    let context = context_of(req, given, NullContext::Default)?;
+    let options = match context {
+        Some(context) => context_socket_options(req, context)?,
+        None => SocketOptions::default(),
     };
+    Ok((options, context))
+}
+
+/// The `socket` options of one `context`, as [`socket_options`] reads
+/// them.
+fn context_socket_options(req: &mut Request, context: Resource) -> Result<SocketOptions, Thrown> {
+    let mut options = SocketOptions::default();
     if let Some(value) = stream_ctx_option(req, context, b"socket", b"bindto")? {
         options.bindto = Some(match value.as_php_string() {
             Some(text) => BindTo::Address(text.as_bytes().to_vec()),
@@ -590,13 +602,14 @@ fn stream_socket_server(
     #[php(default = STREAM_SERVER_BIND | STREAM_SERVER_LISTEN)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
-    let socket = socket_options(req, context)?;
+    let (socket, context) = socket_options(req, context)?;
     let host = address.as_bytes().to_vec();
     let error = (&error_code, &error_message);
     assign_error(req, error, 0, Some(b""))?;
     let xport = Xport::Server {
         listen: flags & STREAM_SERVER_LISTEN != 0,
         socket,
+        context,
     };
     match req.xport_create(&host, xport)? {
         Ok(stream) => Ok(Untyped(OrFalse::Value(stream.resource()))),
@@ -793,11 +806,13 @@ fn stream_socket_sendto(
 /// `stream_socket_enable_crypto($stream, bool $enable, ?int
 /// $crypto_method = null, $session_stream = null): int|bool`,
 /// `PHP_FUNCTION(stream_socket_enable_crypto)`
-/// (`Z/ext/standard/streamsfuncs.c:1497`): enabling with no method is
-/// php's `ValueError`, since no `context` gives one; a stream here has no
-/// crypto layer, which is `ext/openssl`'s, so setting it up is php's
-/// warning and `false`, and turning it off is the same warning and
-/// `true`, php's answer for `PHP_STREAM_OPTION_RETURN_NOTIMPL`.
+/// (`Z/ext/standard/streamsfuncs.c:1497`): enabling takes the method the
+/// call gives or the `ssl` `crypto_method` of the stream's own `context`,
+/// and with neither is php's `ValueError`; the stream's crypto layer set
+/// up with it, `false` where that fails, then enabled or shut: `false`
+/// for a handshake that failed, `0` for one a socket that does not block
+/// has more of, `true` otherwise. A stream with no crypto layer is
+/// php's warning each time it is asked, and `true` for turning it off.
 ///
 /// ```php
 /// $f = fopen(__FILE__, 'r');
@@ -820,20 +835,37 @@ fn stream_socket_enable_crypto(
     #[php(default = null)] crypto_method: Option<i64>,
     #[php(default = null)] session_stream: Option<Stream>,
 ) -> Result<Union<i64, bool>, Thrown> {
-    let _ = (stream, session_stream);
-    if enable && crypto_method.is_none() {
-        return Err(arg_value_error(
-            req,
-            3,
-            "be specified when enabling encryption",
-        ));
+    if enable {
+        let method = if let Some(method) = crypto_method {
+            method
+        } else {
+            // `GET_CTX_OPT(stream, "ssl", "crypto_method", val)`, then
+            // `Z_LVAL_P(val)`: the integer it holds, read unconverted.
+            let found = match stream.ctx(req) {
+                Some(context) => stream_ctx_option(req, context, b"ssl", b"crypto_method")?,
+                None => None,
+            };
+            let Some(value) = found else {
+                return Err(arg_value_error(
+                    req,
+                    3,
+                    "be specified when enabling encryption",
+                ));
+            };
+            match value.as_ref() {
+                ValueRef::Int(method) => method,
+                _ => 0,
+            }
+        };
+        if !stream.crypto_setup(req, method, session_stream) {
+            return Ok(Union::B(false));
+        }
     }
-    docref(
-        req,
-        Level::Warning,
-        "This stream does not support SSL/crypto",
-    );
-    Ok(Union::B(!enable))
+    Ok(match stream.crypto_enable(req, enable) {
+        Handshake::Failed => Union::B(false),
+        Handshake::Pending => Union::A(0),
+        Handshake::Done | Handshake::Unsupported => Union::B(true),
+    })
 }
 
 /// `stream_socket_shutdown($stream, int $mode): bool`,

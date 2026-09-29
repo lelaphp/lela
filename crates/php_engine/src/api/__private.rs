@@ -112,6 +112,8 @@ pub fn attribute(name: &[u8], arguments: Vec<(Option<&[u8]>, ConstExpr)>) -> Att
                 value,
             })
             .collect(),
+        line: 0,
+        strict: false,
     }
 }
 

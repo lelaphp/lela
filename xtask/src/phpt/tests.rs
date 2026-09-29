@@ -213,7 +213,7 @@ fn a_test_and_its_skipif_spawn_the_binary_under_test_with_its_extra_args() {
     // carries the test's own --INI-- (#906).
     let (_root, subset) = rooted(
         "spawn",
-        "--TEST--\nspawn\n--INI--\nprecision=3\n--SKIPIF--\n<?php if (getenv('TEST_PHP_EXTRA_ARGS') === false || getenv('TEST_PHP_CGI_EXECUTABLE') !== '') echo 'skip no environment';\n--FILE--\n<?php\n$php = getenv('TEST_PHP_EXECUTABLE_ESCAPED');\n$extra = getenv('TEST_PHP_EXTRA_ARGS');\necho shell_exec(\"$php $extra -r 'echo 1/3, ini_get(\\\"error_reporting\\\");'\"), \"\\n\";\nvar_dump(getenv('TEST_PHP_EXECUTABLE') === realpath(getenv('TEST_PHP_EXECUTABLE')));\n--EXPECT--\n0.33332767\nbool(true)\n",
+        "--TEST--\nspawn\n--INI--\nprecision=3\n--SKIPIF--\n<?php if (getenv('TEST_PHP_EXTRA_ARGS') === false || getenv('TEST_PHP_CGI_EXECUTABLE') !== '') echo 'skip no environment';\n--FILE--\n<?php\n$php = getenv('TEST_PHP_EXECUTABLE_ESCAPED');\n$extra = getenv('TEST_PHP_EXTRA_ARGS');\necho shell_exec(\"$php $extra -r 'echo 1/3, ini_get(\\\"error_reporting\\\");'\"), \"\\n\";\nvar_dump(getenv('TEST_PHP_EXECUTABLE') === realpath(getenv('TEST_PHP_EXECUTABLE')));\n--EXPECT--\n0.33330719\nbool(true)\n",
     );
     let tally = run(&subset, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");

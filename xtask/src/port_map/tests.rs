@@ -442,9 +442,9 @@ fn the_committed_census_is_651_rows_whose_every_api_item_the_lock_carries() {
         .lines;
     let joined = join(&map, &lock, &Ported::default(), Source::Seed, &[]);
     assert_eq!(joined.rows.len(), 651);
-    assert_eq!(joined.rows_with(Status::Same), 160);
+    assert_eq!(joined.rows_with(Status::Same), 159);
     assert_eq!(joined.rows_with(Status::Renamed), 340);
-    assert_eq!(joined.rows_with(Status::Gone), 151);
+    assert_eq!(joined.rows_with(Status::Gone), 152);
     assert!(joined.unmatched().is_empty(), "{:?}", joined.unmatched());
     assert!(joined.uncovered.is_empty());
     assert_eq!(

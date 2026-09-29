@@ -489,6 +489,11 @@ pub(crate) struct CallState {
     /// php's `str_tmp`: what a coercion made for a frameless call, freed
     /// with the call as `Z_FLF_PARAM_FREE_STR` frees it at the body's end.
     pub(crate) coerced: Vec<Value>,
+    /// How far down its native's chain of interceptions the call is
+    /// served: zero for the entry the function table holds, the last
+    /// interception's, and one more for each
+    /// [`crate::api::call::passthrough`] to the entry that one replaced.
+    pub(crate) beneath: usize,
 }
 
 /// `USED_RET()`: whether a call's caller reads what it returns. It is
@@ -520,6 +525,8 @@ pub(crate) struct Vm {
     /// php's `execute_fake` placeholders that outlive the generator frame
     /// they stood under, while what the frame held is released.
     placeholders: Vec<Placeholder>,
+    /// The sites standing, `zend_get_attribute_object`'s dummy frames.
+    sites: Vec<Site>,
     /// How many times a kernel has looked a name up among the linked
     /// functions or the linked classes, which is what a primed cache
     /// slot spares: the tests count it across two passes of one opline.
@@ -566,7 +573,56 @@ pub(crate) struct Placeholder {
     pub(crate) generator: PhpObject,
 }
 
+/// `zend_get_attribute_object`'s dummy call frame
+/// (`Z/Zend/zend_attributes.c:340-370`): user code at a file and a line
+/// of its own, the attribute's, which serves nothing and shows no trace
+/// row (`ZEND_ACC_CALL_VIA_TRAMPOLINE`), so what is called from it is
+/// called from there. It is the executing site while nothing stands
+/// above it, the site the row above it names, and the caller whose
+/// `strict_types` an argument above it is checked under. `frame` and
+/// `calls` are where it stands among the frames and the calls, as a
+/// [`Placeholder`]'s are.
+#[derive(Debug, Clone)]
+pub(crate) struct Site {
+    pub(crate) frame: usize,
+    pub(crate) calls: usize,
+    pub(crate) file: Box<[u8]>,
+    pub(crate) line: u32,
+    /// `ZEND_ACC_STRICT_TYPES` on the dummy function, the attribute's
+    /// `ZEND_ATTRIBUTE_STRICT_TYPES`.
+    pub(crate) strict: bool,
+}
+
 impl Vm {
+    /// The sites standing, the innermost last.
+    pub(crate) fn sites(&self) -> &[Site] {
+        &self.sites
+    }
+
+    /// The innermost site where no frame stands above it: what php's
+    /// `EG(current_execute_data)` walk meets first as user code.
+    pub(crate) fn innermost_site(&self) -> Option<&Site> {
+        self.sites
+            .last()
+            .filter(|site| site.frame >= self.frames.len())
+    }
+
+    /// A site at `file` and `line` above everything standing, until
+    /// [`Vm::pop_site`].
+    pub(crate) fn push_site(&mut self, file: &[u8], line: u32, strict: bool) {
+        self.sites.push(Site {
+            frame: self.frames.len(),
+            calls: self.calls.len(),
+            file: file.into(),
+            line,
+            strict,
+        });
+    }
+
+    pub(crate) fn pop_site(&mut self) {
+        self.sites.pop();
+    }
+
     /// The placeholders standing, the innermost last.
     pub(crate) fn placeholders(&self) -> &[Placeholder] {
         &self.placeholders

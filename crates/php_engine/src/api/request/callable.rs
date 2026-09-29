@@ -458,6 +458,14 @@ impl Request {
                     continue;
                 }
                 super::Link::Frame(_, state) => state,
+                // `zend_get_attribute_object`'s dummy frame: user code
+                // with no scope and no `$this`.
+                super::Link::Site(_) => {
+                    return CallFrame {
+                        current_this: current_this.filter(|_| !walking),
+                        ..CallFrame::default()
+                    };
+                }
             };
             if walking {
                 current_this = state.this;

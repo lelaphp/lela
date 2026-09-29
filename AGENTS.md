@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=9937e0baeee812a5d258d4e438cd79fcfb43e41516b6c68090dad3afffe582ef out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=fff9860bb3ae2ad9e3a3a62cbff84ac2b6e5c3561f469d21a1981f3125f76c23 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -97,8 +97,9 @@ third-engine-design.md
 - ADR-0005 (accepted, 2026-09-05): Extension state is request-scoped or immutable engine-scoped, and the engine owns the only cross-request cache
 - ADR-0006 (accepted, 2026-09-07): The compiled tier is a seam on `execute` with one engine-level word per safepoint, not a second executor with a per-request feedback table
 - ADR-0007 (accepted, 2026-09-26): `php_macros` depends on no workspace crate, and `php_engine` depends on it, so Core declares its natives with the same attributes
+- ADR-0008 (accepted, 2026-09-29): Hosts are one crate each under `sapi/`, with `php_sapi` as the facade below them, as ADR-0004 laid extensions out
 
-<!-- /computed in=cd275c53f74aa46cb183bef21d9f5cbf3707cd65ed33af693a9646c2a8ece94b out=79651c9afa60ba42484b7ddc7e66010020efcdf67ee7c162e63876a9e6402e13 -->
+<!-- /computed in=d937ca1b2bc4cb999f3d389dbb1cf9092aa7ccca2ba5a01d5b2d277f08ae6ae1 out=1decbce24eec1ffda97c6ed5a80344b357a1f522e076a6e51b3c2f6ddeff4868 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
@@ -106,12 +107,12 @@ third-engine-design.md
 | heap | heap.lock | 325 |  | pass |
 | unit | unit.lock | 102 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 816 | 900 | pass |
+| api | api.lock | 841 | 900 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
-| harness | xtask.lock | 342 |  | pass |
+| harness | xtask.lock | 344 |  | pass |
 
-<!-- /computed in=503a0ed77717cfd6072d22db883300e1a7a66a97c89b185e6305d1ffa1b01ec7 out=20ac52fadc0bca9ba77bef11aeda00c3de5834fb84b94153ddd16d84bc863b97 -->
+<!-- /computed in=95710ff973e094bb58338a91e1e598f62898ecdc558aeb942a26eaa67f1d3b1e out=e5ec699e989989e5babadeb934b4e529034e3bd87b10982ba91150e0d9b13477 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -141,7 +142,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=ab551be35431cfd60e3fd9df1769fa4ec507d6919bf633a79ef33ed6644252f2 out=d3089b4601e9cae5433e5a339801b794aeef12dbcb5ff0dec8ff142070872bdd -->
+<!-- /computed in=e2240bfb6fefb6f880bafdaf6d7e3ab9e1ebb2f30e2ea0043348b615cfb4f7ad out=d3089b4601e9cae5433e5a339801b794aeef12dbcb5ff0dec8ff142070872bdd -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

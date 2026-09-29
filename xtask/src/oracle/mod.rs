@@ -163,10 +163,35 @@ pub struct Pin {
     pub recipe: Recipe,
     #[serde(default)]
     pub regime: BTreeMap<String, Regime>,
+    /// `[sapi]`: the oracle's other hosts beside `php`, pinned from the
+    /// same keg (design §1, #1161); absent until a person writes the row.
+    #[serde(default)]
+    pub sapi: Hosts,
     /// How many times the digest was asserted through this pin; not a
     /// value of the file.
     #[serde(skip)]
     asserted: Asserted,
+}
+
+/// `[sapi]`: the binaries upstream's run-tests.php finds beside `php` for
+/// `sapi/cgi`, `sapi/fpm` and `sapi/phpdbg` (`get_binary`, run-tests.php at
+/// the tag; php-fpm by `FPM\Tester::findExecutable`), each by path and
+/// digest as `[oracle]` pins `php`. What asserts them before a run that
+/// hosts a test through them is #1184's.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hosts {
+    pub cgi: Option<Host>,
+    pub fpm: Option<Host>,
+    pub phpdbg: Option<Host>,
+}
+
+/// One of `[sapi]`'s binaries: its path on this machine and its digest.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Host {
+    pub path: PathBuf,
+    pub md5: String,
 }
 
 /// A count of digest assertions: disclosure, so a test can hold a lane to

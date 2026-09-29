@@ -261,15 +261,23 @@ pub fn stream_ctx_option(
 
 /// `Z_PARAM_RESOURCE` then `decode_context_param`
 /// (`Z/ext/standard/streamsfuncs.c:937`): a `context`, or a stream's,
-/// which here is the default one; anything else is php's
-/// `must be a valid stream/context`.
+/// `PHP_STREAM_CONTEXT(stream)`, a new one made and kept by a stream that
+/// keeps none; anything else is php's `must be a valid stream/context`.
 fn context_resource(req: &mut Request, res: Resource, position: u32) -> Result<Resource, Thrown> {
     let kind = context_type(req);
     if !res.is_closed() && res.kind() == Some(kind) {
         return Ok(res);
     }
-    if Stream::from_value(req, &res.as_value()).is_some() {
-        return default_context(req);
+    if let Some(stream) = Stream::from_value(req, &res.as_value()) {
+        if let Some(context) = stream.ctx(req) {
+            return Ok(context);
+        }
+        let context = context_alloc(req)?;
+        stream.set_ctx(req, Some(context));
+        // The stream holds the owner `php_stream_context_alloc` made;
+        // `stream->ctx = context->res` takes it without one more.
+        req.release(context.as_value());
+        return Ok(context);
     }
     Err(arg_type_error(req, position, "be a valid stream/context"))
 }
@@ -296,6 +304,69 @@ fn set_option(
         context.options = Some(options);
     }
     wrote
+}
+
+/// `php_stream_context_set_option` (`Z/main/streams/streams.c:2457`)
+/// over a `context`, as `xp_ssl.c` keeps a captured peer certificate in
+/// the stream's: the value under `option` of the `wrapper`'s options,
+/// one owner more.
+pub fn stream_ctx_set_option(
+    req: &mut Request,
+    context: Resource,
+    wrapper: &[u8],
+    option: &[u8],
+    value: &Value,
+) -> Result<(), Thrown> {
+    set_option(req, context, wrapper, option, value)
+}
+
+/// `php_stream_context_unset_option` (`Z/main/streams/streams.c:2477`):
+/// the value under `option` of the `wrapper`'s options taken out, both
+/// levels separated first; nothing where the `wrapper` has none.
+pub(crate) fn stream_ctx_unset_option(
+    req: &mut Request,
+    context: Resource,
+    wrapper: &[u8],
+    option: &[u8],
+) -> Result<(), Thrown> {
+    let Some(mut options) = context
+        .native_mut::<Context>(req)
+        .and_then(|context| context.options.take())
+    else {
+        return Ok(());
+    };
+    let unset = unset_in(req, &mut options, wrapper, option);
+    if let Some(context) = context.native_mut::<Context>(req) {
+        context.options = Some(options);
+    }
+    unset
+}
+
+/// The body of [`stream_ctx_unset_option`] over the options array taken
+/// out of the `context` for the call.
+fn unset_in(
+    req: &mut Request,
+    options: &mut PhpArray,
+    wrapper: &[u8],
+    option: &[u8],
+) -> Result<(), Thrown> {
+    let name = PhpString::new(req, wrapper)?;
+    let found = options
+        .get(&Key::Str(name))
+        .map(|v| v.deref())
+        .and_then(|v| v.as_array().copied());
+    let Some(mut category) = found else {
+        req.release(Value::string(name));
+        return Ok(());
+    };
+    options.separate(req)?;
+    req.addref(&Value::array(category));
+    category.separate(req)?;
+    let option = PhpString::new(req, option)?;
+    let unset = category.unset(req, &Key::Str(option));
+    req.release(Value::string(option));
+    unset?;
+    options.set(req, Key::Str(name), Value::array(category))
 }
 
 /// The body of [`set_option`] over the options array taken out of the

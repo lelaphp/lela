@@ -1500,11 +1500,15 @@ impl ReflectionProperty {
         let (class, _, found) = this_declared(req, this.object())?;
         let scope = found.as_ref().map_or(class, |(scope, _)| *scope);
         let attributes = found.map_or_else(Vec::new, |(_, decl)| decl.attributes.clone());
+        let file = req
+            .class_decl(scope)
+            .and_then(|decl| super::attr::declared_in(&decl.file.0));
         super::attr::reflect_attributes(
             req,
             &attributes,
             Some(scope),
             super::attr::TARGET_PROPERTY,
+            file.as_deref(),
             name,
             flags,
         )
@@ -1966,11 +1970,15 @@ impl ReflectionClassConstant {
     ) -> Result<PhpArray, Thrown> {
         let (_, scope, decl) = this_constant(req, this.object())?;
         let attributes = decl.attributes.clone();
+        let file = req
+            .class_decl(scope)
+            .and_then(|decl| super::attr::declared_in(&decl.file.0));
         super::attr::reflect_attributes(
             req,
             &attributes,
             Some(scope),
             super::attr::TARGET_CLASS_CONST,
+            file.as_deref(),
             name,
             flags,
         )
@@ -2318,7 +2326,18 @@ impl ReflectionConstant {
     ) -> Result<PhpArray, Thrown> {
         let constant = this_name(req, this.object(), "ReflectionConstant")?;
         let attributes = req.constant_attributes(&constant_key(&constant)).to_vec();
-        attr::reflect_attributes(req, &attributes, None, attr::TARGET_CONST, name, flags)
+        let file = this_global_constant(req, this.object())
+            .ok()
+            .and_then(|name| req.constant_file(&name).map(<[u8]>::to_vec));
+        attr::reflect_attributes(
+            req,
+            &attributes,
+            None,
+            attr::TARGET_CONST,
+            file.as_deref(),
+            name,
+            flags,
+        )
     }
 }
 

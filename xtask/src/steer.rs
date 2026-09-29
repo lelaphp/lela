@@ -54,6 +54,8 @@ use anyhow::{Context, Result, bail};
 use toml::Value;
 
 use crate::divergence::{self, Registry};
+use crate::manifest::{self, Manifest};
+use crate::oracle::Pin;
 use crate::reading::{Reading, Status};
 
 /// The instrument name every reading of steer carries.
@@ -122,7 +124,7 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
         .with_context(|| format!("reading the proposal at {}", proposal.display()))?;
     let verdict = judge(&tracked, &proposed)?;
     let mut reading = Reading::stamped_over(INSTRUMENT, file, root, Path::new(file))?;
-    if let Err(unread) = loads(file, &proposed) {
+    if let Err(unread) = loads(file, &tracked, &proposed) {
         reading.status = Status::Fail;
         reading.message = format!(
             "{file}: the proposal would not load, so every instrument that reads the file would \
@@ -167,14 +169,27 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
     Ok(reading)
 }
 
-/// Whether the proposal loads as the file it would replace, where the
-/// harness reads that file through a grammar of its own beside TOML: the
-/// registry, whose rows decode their ids, so a `covers` list on a new row
-/// is held to its kind and to one row per id as part of the addition
-/// (harness-design.md §4.3, revision 62).
-fn loads(file: &str, proposed: &str) -> Result<()> {
-    if file == divergence::FILE {
-        Registry::parse(proposed)?;
+/// Whether the proposal loads as the file it would replace, through the
+/// reader the harness reads that file with: the registry, whose rows
+/// decode their ids, so a `covers` list on a new row is held to its kind
+/// and to one row per id as part of the addition (harness-design.md §4.3,
+/// revision 62); the pin and the manifest, whose readers refuse a key
+/// they do not know, so a table the harness cannot read yet is refused
+/// here rather than written to stop every instrument after it. The pin
+/// and the manifest are held so only where the tracked file loads, since
+/// a proposal can be held to no more than the file it replaces.
+fn loads(file: &str, tracked: &str, proposed: &str) -> Result<()> {
+    match file {
+        divergence::FILE => {
+            Registry::parse(proposed)?;
+        }
+        "oracle.toml" if Pin::parse(tracked).is_ok() => {
+            Pin::parse(proposed)?;
+        }
+        manifest::FILE if Manifest::parse(tracked).is_ok() => {
+            Manifest::parse(proposed)?;
+        }
+        _ => {}
     }
     Ok(())
 }

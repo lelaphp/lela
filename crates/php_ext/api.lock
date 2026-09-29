@@ -45,6 +45,7 @@ abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::admission
 abi::ExtensionBuilder::build
+abi::ExtensionBuilder::cached
 abi::ExtensionBuilder::class
 abi::ExtensionBuilder::class_constants
 abi::ExtensionBuilder::class_payload
@@ -61,6 +62,7 @@ abi::ExtensionBuilder::ini
 abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::on_modify
+abi::ExtensionBuilder::post_startup
 abi::ExtensionBuilder::register
 abi::ExtensionBuilder::request_state
 abi::ExtensionBuilder::rinit
@@ -140,6 +142,7 @@ abi::OnModify
 abi::OrFalse
 abi::Passed
 abi::Path
+abi::PostStartup
 abi::PropertyPlace
 abi::PropertyPurpose
 abi::PropertyRead
@@ -183,6 +186,7 @@ call::Iter::next
 call::Iter::rewind
 call::Iter::valid
 call::Iter::value
+call::attribute_object
 call::autoload
 call::bound_variables
 call::call
@@ -318,6 +322,7 @@ raising::notice
 raising::pending
 raising::raise
 raising::raise_at
+raising::raise_while_pending
 raising::startup
 raising::throw
 raising::throw_at
@@ -335,6 +340,21 @@ request::Cast
 request::Closer
 request::Closer::close
 request::ContentType
+request::Crypto
+request::Crypto::accepted
+request::Crypto::active
+request::Crypto::alive
+request::Crypto::connected
+request::Crypto::enable
+request::Crypto::meta
+request::Crypto::pending
+request::Crypto::read
+request::Crypto::setup
+request::Crypto::write
+request::CryptoSocket
+request::CryptoSocket::set_blocking
+request::CryptoSocket::shutdown
+request::CryptoSocket::wait
 request::DirListing
 request::EngineWrapper
 request::Execution
@@ -346,6 +366,7 @@ request::FilterStatus
 request::HandlerCall
 request::HandlerOp
 request::HandlerStatus
+request::Handshake
 request::HostPath
 request::IniEntry
 request::Interrupt
@@ -361,6 +382,8 @@ request::Opening
 request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
+request::PreloadStatistics
+request::Readiness
 request::RealpathEntry
 request::Receiving
 request::Refused
@@ -551,6 +574,10 @@ request::Stream::as_value
 request::Stream::cast
 request::Stream::close
 request::Stream::copy_to_mem
+request::Stream::crypto
+request::Stream::crypto_enable
+request::Stream::crypto_setup
+request::Stream::ctx
 request::Stream::eof
 request::Stream::flock
 request::Stream::flush
@@ -575,6 +602,7 @@ request::Stream::rewind_as
 request::Stream::seek
 request::Stream::sendto
 request::Stream::set_closer
+request::Stream::set_ctx
 request::Stream::set_notifier
 request::Stream::set_option
 request::Stream::set_wrapper_data
@@ -615,6 +643,7 @@ request::Whence
 request::Whence::from_int
 request::WrapperOp
 request::Xport
+request::XportFactory
 request::XportFailure
 request::take_signals
 syntax::Diagnostic

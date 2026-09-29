@@ -1205,7 +1205,16 @@ impl ReflectionFunctionAbstract {
             _ => (None, super::attr::TARGET_FUNCTION),
         };
         let attributes = decl.attributes.clone();
-        super::attr::reflect_attributes(req, &attributes, scope, target, name, flags)
+        let file = super::attr::declared_in(&decl.file.0);
+        super::attr::reflect_attributes(
+            req,
+            &attributes,
+            scope,
+            target,
+            file.as_deref(),
+            name,
+            flags,
+        )
     }
 }
 

@@ -111,7 +111,7 @@ impl Emit<'_> {
                     let name = self.text(token).to_vec();
                     let bare = name.strip_prefix(b"\\").unwrap_or(&name);
                     if !bare.eq_ignore_ascii_case(b"assert") {
-                        return self.call(&name, &arguments);
+                        return self.call(&name, &arguments, super::Fetch::Read);
                     }
                 }
                 callee @ (tree::Expr::SimpleVarExpr(_) | tree::Expr::CallExpr(_)) => {

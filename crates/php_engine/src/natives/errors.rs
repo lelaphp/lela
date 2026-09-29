@@ -154,11 +154,11 @@ fn copied(req: &mut Request, handler: Option<Value>) -> Value {
 /// ```
 /// ```expect
 /// Warning: a in %s on line 4
-/// h: b 32767
+/// h: b 30719
 /// h: c 4437
 ///
 /// Warning: Undefined variable $undefined in %s on line 7
-/// h: Undefined variable $undefined 32767
+/// h: Undefined variable $undefined 30719
 /// |
 /// ```
 ///

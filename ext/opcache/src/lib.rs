@@ -29,7 +29,9 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod blacklist;
+mod file_override;
 mod ini;
+mod startup;
 
 use php_ext::abi::{
     Admission, Extension, ExtensionBuilder, Instance, Lookup, OrFalse, StartupIni, Validation,
@@ -38,11 +40,13 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::to_callable;
 use php_ext::raising::{Thrown, notice, warning};
-use php_ext::request::{CacheStatus, Invalidation, PHP_VERSION, Request, Restart};
+use php_ext::request::{
+    CacheStatus, Invalidation, PHP_VERSION, PreloadStatistics, Request, Restart,
+};
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 use crate::blacklist::Blacklist;
-use crate::ini::{Stored, flag, long, value};
+use crate::ini::{Log, Stored, accel_log, flag, long, value};
 
 /// `ACCELERATOR_PRODUCT_NAME`, the extension's name and the Zend
 /// extension's.
@@ -122,23 +126,26 @@ pub fn extension() -> Extension {
             opcache_is_script_cached_in_file_cache::declared(),
         ])
         .ini(ini::declared());
-    ini::handlers!(builder;
+    let builder = ini::handlers!(builder;
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
         24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
-        46, 47, 48, 49, 50, 51, 52, 53)
-    .engine_state(Accelerator::start)
-    .request_state::<State>()
-    .rinit(rinit)
-    .admission(admission)
-    .info(info)
-    .zend_extension(ZendExtension {
-        name: PRODUCT.to_owned(),
-        version: PHP_VERSION.to_owned(),
-        author: String::from("Zend Technologies"),
-        url: String::from("http://www.zend.com/"),
-        copyright: String::from("Copyright (c)"),
-    })
-    .build(PRODUCT)
+        46, 47, 48, 49, 50, 51, 52, 53);
+    file_override::install(builder)
+        .engine_state(Accelerator::start)
+        .request_state::<State>()
+        .rinit(rinit)
+        .admission(admission)
+        .post_startup(startup::post_startup)
+        .cached(cached)
+        .info(info)
+        .zend_extension(ZendExtension {
+            name: PRODUCT.to_owned(),
+            version: PHP_VERSION.to_owned(),
+            author: String::from("Zend Technologies"),
+            url: String::from("http://www.zend.com/"),
+            copyright: String::from("Copyright (c)"),
+        })
+        .build(PRODUCT)
 }
 
 /// `accel_startup`'s verdict and `ZEND_RINIT_FUNCTION(zend_accelerator)`:
@@ -150,19 +157,28 @@ pub fn extension() -> Extension {
     reason = "the engine's `RINIT` shape, which a hook that can throw needs"
 )]
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    let cli = matches!(req.sapi_name(), "cli" | "phpdbg");
-    let startup = if cli && !flag(req, "opcache.enable_cli") {
-        Startup::DisabledForCli
-    } else if !flag(req, "opcache.enable") {
-        Startup::Off
-    } else {
-        Startup::Ok
-    };
+    let startup = verdict(req);
     let enabled = startup == Startup::Ok && !flag(req, "opcache.file_cache_only");
     let state = req.state::<State>();
     state.startup = startup;
     state.accelerator_enabled = enabled;
     Ok(())
+}
+
+/// `accel_startup`'s verdict, from the host's name and the startup ini.
+pub(crate) fn verdict(req: &Request) -> Startup {
+    if cli(req) && !flag(req, "opcache.enable_cli") {
+        Startup::DisabledForCli
+    } else if !flag(req, "opcache.enable") {
+        Startup::Off
+    } else {
+        Startup::Ok
+    }
+}
+
+/// `accel_sapi_is_cli`: the command line, or phpdbg.
+pub(crate) fn cli(req: &Request) -> bool {
+    matches!(req.sapi_name(), "cli" | "phpdbg")
 }
 
 /// What the unit cache does with the file at the full path `path`, as
@@ -258,6 +274,13 @@ fn admission(req: &mut Request, path: &[u8]) -> Admission {
     }
 }
 
+/// `cache_script_in_shared_memory` and `preload_script_in_shared_memory`
+/// once a file is persisted: `Cached script` at `ACCEL_LOG_INFO`.
+fn cached(req: &mut Request, path: &[u8]) {
+    let message = format!("Cached script '{}'", String::from_utf8_lossy(path));
+    accel_log(req, Log::Info, &message);
+}
+
 /// The startup verdict and `accelerator_enabled`.
 fn state(req: &mut Request) -> (Startup, bool) {
     let state = req.state::<State>();
@@ -323,7 +346,11 @@ fn opcache_reset(req: &mut Request) -> bool {
     if !flag(req, "opcache.enable") || startup != Startup::Ok {
         return false;
     }
-    req.unit_cache().reset() == Restart::Scheduled
+    let scheduled = req.unit_cache().reset() == Restart::Scheduled;
+    if scheduled {
+        accel_log(req, Log::Debug, "Restart Scheduled! Reason: user");
+    }
+    scheduled
 }
 
 /// `add_assoc_*`: `value` under `name`.
@@ -474,6 +501,10 @@ fn opcache_get_status(
         "opcache_statistics",
         Value::array(statistics),
     )?;
+    if let Some(preload) = &status.preload {
+        let preloaded = preload_statistics(req, preload)?;
+        put(req, &mut out, "preload_statistics", Value::array(preloaded))?;
+    }
     if include_scripts && enabled {
         let listed = scripts(req, &status)?;
         put(req, &mut out, "scripts", Value::array(listed))?;
@@ -587,6 +618,34 @@ fn statistics(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Throw
             ),
         ],
     )
+}
+
+/// `preload_statistics`: what the preload weighs, then its functions and
+/// its classes where it has any, and its scripts.
+fn preload_statistics(req: &mut Request, preload: &PreloadStatistics) -> Result<PhpArray, Thrown> {
+    let mut out = PhpArray::new(req)?;
+    put(
+        req,
+        &mut out,
+        "memory_consumption",
+        int(preload.memory_consumption),
+    )?;
+    for (name, names) in [
+        ("functions", &preload.functions),
+        ("classes", &preload.classes),
+        ("scripts", &preload.scripts),
+    ] {
+        if names.is_empty() && name != "scripts" {
+            continue;
+        }
+        let mut listed = PhpArray::new(req)?;
+        for each in names {
+            let each = text(req, each)?;
+            listed.append(req, each)?;
+        }
+        put(req, &mut out, name, Value::array(listed))?;
+    }
+    Ok(out)
 }
 
 /// `accelerator_get_scripts`: each file held under its full path.

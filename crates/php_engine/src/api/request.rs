@@ -46,10 +46,14 @@ use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
 pub(crate) use callable::{Deprecations, Refusal, compound_split};
 pub use execution::Execution;
-pub use unit_cache::{CacheStatus, CachedFile, Invalidation, Restart, UnitCache};
+pub use unit_cache::{
+    CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
+};
 
 mod callable;
 mod class_data;
+mod crypto;
+pub use crypto::{Crypto, CryptoSocket, Handshake, Readiness, XportFactory};
 mod execution;
 mod hold;
 pub(crate) use hold::Hold;
@@ -57,6 +61,8 @@ mod hooks;
 mod lazy;
 mod linking;
 mod load_file;
+mod preload;
+mod recording;
 mod site_override;
 mod table;
 mod unit_cache;
@@ -64,6 +70,7 @@ mod variables;
 
 pub(crate) use hooks::parent_hook_trampolines;
 pub(crate) use lazy::Strategy;
+pub(crate) use preload::{Preloaded, Preloading, Stacked};
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
@@ -445,16 +452,20 @@ impl UrlStat {
 /// What `php_stream_xport_create` is asked to make of a `transport`'s
 /// name: a client connected within `timeout`, `None` to wait for ever,
 /// or a server bound to the name, listening where `listen` says; each
-/// with the `socket` options of the `context` the native resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// with the `context` the native resolved, which the stream keeps as
+/// `PHP_STREAM_CONTEXT(stream)` before it connects, and the `socket`
+/// options read off it.
+#[derive(Clone)]
 pub enum Xport {
     Client {
         timeout: Option<std::time::Duration>,
         socket: SocketOptions,
+        context: Option<Resource>,
     },
     Server {
         listen: bool,
         socket: SocketOptions,
+        context: Option<Resource>,
     },
 }
 
@@ -703,6 +714,49 @@ impl Stream {
     /// php's order.
     pub fn meta_data(self, req: &mut Request) -> Result<PhpArray, Thrown> {
         req.stream_meta_data(self)
+    }
+
+    /// `PHP_STREAM_CONTEXT(stream)`: the `context` the stream keeps, which
+    /// a socket's `transport` is given as it is made
+    /// ([`Request::xport_create`]) and a native sets
+    /// ([`Stream::set_ctx`]); `None` for a stream that keeps none, a
+    /// closed one, and one inside a call.
+    #[must_use]
+    pub fn ctx(self, req: &Request) -> Option<Resource> {
+        req.stream_context(self)
+    }
+
+    /// `php_stream_context_set` (`Z/main/streams/streams.c:2385`): the
+    /// stream keeps `context`, one owner more, and gives up the one it
+    /// kept; `None` keeps none.
+    ///
+    /// ```php
+    /// $s = stream_socket_server('tcp://127.0.0.1:0', $no, $str, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, stream_context_create(['x' => ['y' => 1]]));
+    /// var_dump(stream_context_get_options($s));
+    /// $f = fopen(__FILE__, 'r');
+    /// stream_context_set_option($f, 'a', 'b', 2);
+    /// var_dump(stream_context_get_options($f), stream_context_get_options(stream_context_get_default()));
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   ["x"]=>
+    ///   array(1) {
+    ///     ["y"]=>
+    ///     int(1)
+    ///   }
+    /// }
+    /// array(1) {
+    ///   ["a"]=>
+    ///   array(1) {
+    ///     ["b"]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// array(0) {
+    /// }
+    /// ```
+    pub fn set_ctx(self, req: &mut Request, ctx: Option<Resource>) {
+        req.set_stream_context(self, ctx);
     }
 
     /// `stream->orig_path`: the path the stream was opened by, the one
@@ -1647,7 +1701,7 @@ pub struct Request {
     /// declares, one function number each past
     /// [`crate::enums::ENUM_FUNCTIONS`], as php allocates a
     /// `zend_internal_function` per method per enum.
-    enum_functions: Vec<(ClassId, crate::enums::EnumMethod)>,
+    enum_functions: Stacked<(ClassId, crate::enums::EnumMethod)>,
     /// The functions `zend_get_call_trampoline_func` makes of a call to
     /// a name only `__call` or `__callStatic` answers, one per magic
     /// method and name, two function numbers each
@@ -1890,7 +1944,7 @@ pub struct Request {
     /// immutable linked class shared across requests is not built yet,
     /// so every class a unit declares is this request's, the
     /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
-    declared: Vec<Declared>,
+    declared: Stacked<Declared>,
     /// The classes a unit's load bound early at their
     /// `DECLARE_CLASS_DELAYED` ([`Request::declare_classes`]), each the
     /// unit and the class's index, until that opline runs and passes
@@ -1902,6 +1956,9 @@ pub struct Request {
     /// The classes whose link is under way and what their links left
     /// for later ([`linking::Links`]).
     links: linking::Links,
+    /// `EG(record_errors)` and `EG(errors)`: the diagnostics held back
+    /// for a compile or a link to emit ([`recording::Record`]).
+    record: recording::Record,
     /// `CG(rtd_key_counter)` over the units this request compiled for
     /// itself: the runtime definition keys and anonymous class names
     /// they made, which the next one counts on from
@@ -1912,7 +1969,7 @@ pub struct Request {
     /// classes the table held when it was added, which is where php's
     /// table has it among them: `ZVAL_ALIAS_PTR` rows, request state as
     /// the classes the request declared are.
-    aliases: Vec<(usize, Vec<u8>, ClassId)>,
+    aliases: Stacked<preload::Alias>,
     /// `PHP_SAPI`, `sapi_module.name` as `php_module_startup` registers
     /// it: the host's, so the request's, the engine's interned string
     /// for the name the description carries.
@@ -1922,13 +1979,16 @@ pub struct Request {
     /// body: php's `EG(function_table)` past the natives and each user
     /// class's `function_table`. A `Function` past the natives and the
     /// native methods counts into this list (design §5.6).
-    user_functions: Vec<UserFunction>,
+    user_functions: Stacked<UserFunction>,
     /// `ZEND_MAP_PTR(op_array->static_variables_ptr)` for every function
     /// and main op array whose `static` variables the request has
     /// touched: the values, one per entry of the op array's
     /// [`php_unit::OpArray::bound_vars`], which the published unit never
     /// holds (design §5.14). A closure's are its object's.
     static_vars: HashMap<Statics, Vec<Value>>,
+    /// Where the request is the preload's (design §6.3), the files it
+    /// compiled into the preload.
+    preloading: Option<Preloading>,
 }
 
 /// One row of an object's property table as [`Request::property_rows`]
@@ -2029,6 +2089,10 @@ fn links_of<'a>(
             take_below(served, taken, mark.calls.min(end), links);
             links.extend(expand(mark.generator).into_iter().rev());
         }
+        for site in vm.sites().iter().filter(|site| site.frame == at) {
+            take_below(served, taken, site.calls.min(end), links);
+            links.push(Link::Site(site));
+        }
     };
     for at in frames.clone() {
         placed(at, &mut taken, &mut links);
@@ -2089,6 +2153,10 @@ enum Traced {
 enum Link<'a> {
     Frame(Slots<'a>, &'a exec::FrameState),
     Call(&'a exec::CallState),
+    /// `zend_get_attribute_object`'s dummy frame ([`exec::Site`]): user
+    /// code that serves no function, has no `$this` and no scope, and
+    /// makes no trace row of its own.
+    Site(&'a exec::Site),
 }
 
 /// Where the slots of a frame on the chain are: on a VM stack at its
@@ -2271,6 +2339,7 @@ impl Request {
         let mut heap = Heap::new();
         let mut stack = VmStack::new();
         let _laid = stack.open(&mut heap);
+        let tables = preload::Tables::of(shared.units.preloaded());
         let mut req = Request {
             // Read before `shared` moves in, as fields are in the order written.
             realpath_cache: RealpathCache::startup(&shared),
@@ -2301,7 +2370,7 @@ impl Request {
             constants: Vec::new(),
             enum_cases: Vec::new(),
             enums_updated: Vec::new(),
-            enum_functions: Vec::new(),
+            enum_functions: tables.enum_functions,
             trampolines: Vec::new(),
             fake_scope: None,
             deprecating: Vec::new(),
@@ -2367,14 +2436,16 @@ impl Request {
             interrupt: Interrupt::default(),
             timer: None,
             stack_limit: StackLimit::UNCHECKED,
-            declared: Vec::new(),
+            declared: tables.classes,
             bound_at_load: Vec::new(),
             links: linking::Links::default(),
+            record: recording::Record::default(),
             keys_made: 0,
-            aliases: Vec::new(),
+            aliases: tables.aliases,
             sapi_constant: Value::null(),
-            user_functions: Vec::new(),
+            user_functions: tables.functions,
             static_vars: HashMap::new(),
+            preloading: None,
             #[cfg(debug_assertions)]
             dirty: None,
             walk: None,
@@ -3113,6 +3184,9 @@ impl Request {
     /// function (`ZEND_ACC_FAKE_CLOSURE`).
     pub(crate) fn calling_closure(&self) -> Option<PhpObject> {
         for link in self.chain() {
+            if let Link::Site(_) = link {
+                return None;
+            }
             if let Link::Frame(_, state) = link {
                 let closure = state.closure?;
                 return closure
@@ -3243,6 +3317,7 @@ impl Request {
             return_value: exec::ReturnValue::Used,
             dynamic: false,
             coerced: Vec::new(),
+            beneath: 0,
             send_arg_by_ref: false,
         };
         self.vm.push_call(call);
@@ -3557,12 +3632,22 @@ impl Request {
         }
     }
 
-    /// The entry an interception replaced for the native being served,
-    /// none where the native serving is not intercepted.
-    pub(crate) fn replaced_entry(&self) -> Option<crate::api::abi::Entry> {
-        let function = self.vm.serving_call()?.function;
-        let at = usize::try_from(function.0).ok()?;
-        self.shared.replaced.get(at).copied().flatten()
+    /// The entry the one serving the call replaced, the next down its
+    /// native's chain of interceptions, and how far down that one
+    /// stands; none where the entry serving is the native's own.
+    pub(crate) fn replaced_entry(&self) -> Option<(crate::api::abi::Entry, usize)> {
+        let call = self.vm.serving_call()?;
+        let at = usize::try_from(call.function.0).ok()?;
+        let entry = self.shared.replaced.get(at)?.get(call.beneath)?;
+        Some((*entry, call.beneath.saturating_add(1)))
+    }
+
+    /// The call being served, served from `beneath` down its native's
+    /// chain of interceptions.
+    pub(crate) fn serve_beneath(&mut self, beneath: usize) {
+        if let Some(call) = self.vm.serving_call_mut() {
+            call.beneath = beneath;
+        }
     }
 
     /// The first argument of the call being served replaced by `value`,
@@ -4090,6 +4175,7 @@ impl Request {
                         .then_some(call.called_scope)
                         .flatten(),
                 ),
+                Link::Site(_) => return None,
             };
             let scope = self
                 .closure_scope(closure)
@@ -4394,6 +4480,29 @@ impl Request {
                 self.raised = Some(Raised::Throwable(object));
             }
             _ => self.release(object.as_value()),
+        }
+    }
+
+    /// `zend_error` with `EG(exception)` set: what `raise` raises meets
+    /// the throwable `pending` carries standing in php's slot, and the
+    /// slot is given back after, so the `Thrown` stays the one owner. A
+    /// user error handler is handed nothing then, since
+    /// `zend_call_function` returns at once while a throwable is pending
+    /// (`Z/Zend/zend_execute_API.c:822`), and the built-in handler
+    /// renders the diagnostic where no handler stands. A fatal or an
+    /// exit raises nothing: php's `zend_bailout` left before the raise.
+    pub(crate) fn while_pending(&mut self, pending: &Thrown, raise: impl FnOnce(&mut Request)) {
+        let Some(object) = pending.exception().copied() else {
+            return;
+        };
+        if self.raised.is_some() || self.bailout {
+            raise(self);
+            return;
+        }
+        self.raised = Some(Raised::Throwable(object));
+        raise(self);
+        if self.raised == Some(Raised::Throwable(object)) {
+            self.raised = None;
         }
     }
 
@@ -5038,10 +5147,14 @@ impl Request {
         let Some((file, line)) = self.overridden_site() else {
             return Ok(());
         };
-        let Some((executing, at)) = self.innermost_frame().and_then(|state| {
-            exec::body_of(&state.unit, state.body)
-                .map(|code| (code.filename.0.clone(), exec::line_of(state)))
-        }) else {
+        let executing = match self.vm.innermost_site() {
+            Some(site) => Some((site.file.clone(), site.line)),
+            None => self.innermost_frame().and_then(|state| {
+                exec::body_of(&state.unit, state.body)
+                    .map(|code| (code.filename.0.clone(), exec::line_of(state)))
+            }),
+        };
+        let Some((executing, at)) = executing else {
             return Ok(());
         };
         if *executing == *file && at == line {
@@ -5219,7 +5332,7 @@ impl Request {
                 .get(at.saturating_add(1))
                 .and_then(|below| match below {
                     Link::Frame(_, below) => Some(below),
-                    Link::Call(_) => None,
+                    Link::Call(_) | Link::Site(_) => None,
                 })
                 .and_then(|below| {
                     let code = exec::body_of(&below.unit, below.body)?;
@@ -5233,6 +5346,7 @@ impl Request {
             let site = match chain.get(at.saturating_add(1)) {
                 Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
                     .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
+                Some(Link::Site(below)) => Some((below.file.to_vec(), i64::from(below.line))),
                 Some(Link::Call(_)) | None => None,
             };
             match &chain[at] {
@@ -5305,6 +5419,8 @@ impl Request {
                         ));
                     }
                 }
+                // `ZEND_ACC_CALL_VIA_TRAMPOLINE`: no row of its own.
+                Link::Site(_) => {}
                 Link::Call(call) => {
                     rows.push((
                         Traced::Function(call.function),
@@ -6140,6 +6256,9 @@ impl Request {
     ) -> bool {
         if let Some(held) = self.startup.as_mut() {
             held.push((level, message.to_owned()));
+            return false;
+        }
+        if self.recorded(level, message, file, line) {
             return false;
         }
         // `php_error_cb` under `EH_THROW` (`Z/main/main.c:1368`), which
@@ -13644,6 +13763,17 @@ impl Request {
         let serving = calls
             .iter()
             .rposition(|call| call.stage == exec::CallStage::Serving);
+        // A native called from a site standing above the innermost
+        // frame, with no native between, is called from the site.
+        if let (Some(site), Some(at)) = (self.vm.innermost_site(), serving)
+            && calls.get(site.calls..at).is_some_and(|between| {
+                !between
+                    .iter()
+                    .any(|call| call.stage == exec::CallStage::Serving)
+            })
+        {
+            return site.strict;
+        }
         if let Some(at) = serving
             && calls.get(floor..at).is_some_and(|below| {
                 below
@@ -13703,10 +13833,26 @@ impl Request {
     /// loop on: php's there is the native's own frame, and no native
     /// this engine declares carries the bit.
     pub(crate) fn caller_strict_types(&self, frame: FrameRef) -> bool {
-        self.vm
-            .at(frame)
-            .and_then(|state| state.caller.frame())
-            .is_some_and(|caller| self.frame_strict_types(caller))
+        let Some(state) = self.vm.at(frame) else {
+            return false;
+        };
+        match state.caller.frame() {
+            Some(caller) => self.frame_strict_types(caller),
+            None => self.site_below(frame).is_some_and(|site| site.strict),
+        }
+    }
+
+    /// The site `frame` was called from: one standing where the frame
+    /// was pushed, with no native served between the two.
+    pub(crate) fn site_below(&self, frame: FrameRef) -> Option<&exec::Site> {
+        let at = usize::try_from(frame.0).ok()?;
+        let below = usize::try_from(self.vm.at(frame)?.calls_below).ok()?;
+        let site = self.vm.sites().iter().rev().find(|site| site.frame == at)?;
+        let between = self.vm.calls().get(site.calls..below)?;
+        (!between
+            .iter()
+            .any(|call| call.stage == exec::CallStage::Serving))
+        .then_some(site)
     }
 
     /// `zend_std_get_method`'s lookup (`Z/Zend/zend_object_handlers.c:1945`):
@@ -13921,6 +14067,11 @@ impl Request {
             })
             .collect();
         for (at, decl) in unit.classes.iter().enumerate() {
+            // A saved script of the preload, whose classes the preload
+            // holds, declares none of them again (`preload_remove_declares`).
+            if self.preloaded_class(unit, at) {
+                continue;
+            }
             let key = unit
                 .runtime_keys
                 .iter()
@@ -14072,6 +14223,13 @@ impl Request {
             at,
             composed: composed.map(Box::new),
         });
+        self.bind_members(class);
+    }
+
+    /// The members of `class`, bound, into the function table beside it:
+    /// an enum's own `cases`, `from` and `tryFrom`, each method, and
+    /// each hook of the class's own properties.
+    fn bind_members(&mut self, class: ClassId) {
         let Some(decl) = self.class_decl(class) else {
             return;
         };
@@ -14540,6 +14698,11 @@ impl Request {
                 "InternalError: a DECLARE_CLASS carries a key the unit files no class under",
             ));
         };
+        // `preload_remove_declares` made the opline of a class the
+        // preload holds a `NOP`.
+        if self.preloaded_class(unit, at) {
+            return Ok(());
+        }
         let Some(decl) = unit.classes.get(at).cloned() else {
             return Err(crate::api::raising::fatal(
                 self,
@@ -14799,6 +14962,11 @@ impl Request {
                 "InternalError: a DECLARE_FUNCTION naming a definition the unit has not",
             ));
         };
+        // `preload_remove_declares` made the opline of a function the
+        // preload holds a `NOP`.
+        if self.preloaded_function(unit, exec::Body::Dynamic(at)) {
+            return Ok(());
+        }
         let name = String::from_utf8_lossy(&decl.name.0).into_owned();
         if let Some(earlier) = self.function_named(lowered) {
             let site = self
@@ -14897,6 +15065,10 @@ impl Request {
     /// `false` says so.
     pub(crate) fn declare_functions(&mut self, unit: &Arc<Unit>) -> bool {
         for (at, (decl, _)) in unit.functions.iter().enumerate() {
+            let body = exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
+            if self.preloaded_function(unit, body) {
+                continue;
+            }
             if let Some(earlier) = self.function_named(&decl.name.0) {
                 let site = self
                     .user_function(earlier)
@@ -14919,7 +15091,7 @@ impl Request {
             }
             self.user_functions.push(UserFunction {
                 unit: Arc::clone(unit),
-                body: exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX)),
+                body,
                 member: None,
                 flags: crate::attributes::Flags::of(&decl.attributes),
             });
@@ -15277,7 +15449,9 @@ impl Request {
             let shared = Arc::clone(&self.shared);
             let unit = match shared.compile_for(self, &source, &path, SourceKind::File) {
                 Ok(unit) => unit,
-                Err(refused) => return Err(self.refused_include(&refused, &path)),
+                Err(refused) => {
+                    return Err(self.refused_include(&refused, &path, SourceKind::File));
+                }
             };
             if !self.included_files.contains(&path) {
                 self.included_files.push(path);
@@ -15295,7 +15469,7 @@ impl Request {
                 }
                 Ok(Opened::Unit(unit))
             }
-            Some(Err(refused)) => Err(self.refused_include(&refused, &path)),
+            Some(Err(refused)) => Err(self.refused_include(&refused, &path, SourceKind::File)),
             // The file went between the stat that resolved it and the
             // read that would have compiled it.
             None => {
@@ -15418,7 +15592,7 @@ impl Request {
         let shared = Arc::clone(&self.shared);
         let unit = match shared.compile_for(self, &source, path, SourceKind::File) {
             Ok(unit) => unit,
-            Err(refused) => return Err(self.refused_include(&refused, path)),
+            Err(refused) => return Err(self.refused_include(&refused, path, SourceKind::File)),
         };
         if !self.included_files.iter().any(|p| p == path) {
             self.included_files.push(path.to_vec());
@@ -15495,7 +15669,7 @@ impl Request {
         let shared = Arc::clone(&self.shared);
         match shared.compile_for(self, code, &name, SourceKind::Eval) {
             Ok(unit) => Ok(Opened::Unit(unit)),
-            Err(refused) => Err(self.refused_include(&refused, &name)),
+            Err(refused) => Err(self.refused_include(&refused, &name, SourceKind::Eval)),
         }
     }
 
@@ -15655,25 +15829,66 @@ impl Request {
         }
     }
 
-    /// What the compiler refused an included file with, raised as php
-    /// raises it: the diagnostics before the refusal at the file's own
-    /// name, then a parse error as the `ParseError` `zendparse` throws,
-    /// at the file and the line the parser stopped on, and a refusal
-    /// after the parse as the `E_COMPILE_ERROR` that ends the request.
-    fn refused_include(&mut self, refused: &CompileError, path: &[u8]) -> Thrown {
-        for raised in &refused.raised {
-            self.note_error_in(raised.level, &raised.message, path, raised.line);
+    /// What the compiler refused an included file or an `eval` with,
+    /// raised as php raises it: the diagnostics before the refusal at the
+    /// unit's own name, then a parse error as the `ParseError`
+    /// `zendparse` throws, at the file and the line the parser stopped
+    /// on, and a refusal after the parse as the `E_COMPILE_ERROR` that
+    /// ends the request. A file's are what `compile_file` recorded, so
+    /// they are emitted with the `ParseError` pending, which no user
+    /// error handler is handed, or ahead of the fatal with the handler
+    /// masked off; an `eval`'s were raised as it compiled, before either.
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $str) { echo "handler: $str\n"; });
+    /// $f = tempnam(sys_get_temp_dir(), 'w');
+    /// file_put_contents($f, '<?php $a = (integer) 1; echo 1 +;');
+    /// try { include $f; } catch (ParseError $e) { echo get_class($e), "\n"; }
+    /// try { eval('$a = (integer) 1; echo 1 +;'); } catch (ParseError $e) { echo get_class($e), "\n"; }
+    /// restore_error_handler();
+    /// try { include $f; } catch (ParseError $e) { echo get_class($e), "\n"; }
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// ParseError
+    /// handler: Non-canonical cast (integer) is deprecated, use the (int) cast instead
+    /// ParseError
+    ///
+    /// Deprecated: Non-canonical cast (integer) is deprecated, use the (int) cast instead in %s on line 1
+    /// ParseError
+    /// ```
+    fn refused_include(&mut self, refused: &CompileError, path: &[u8], kind: SourceKind) -> Thrown {
+        let raised = refused.raised.iter();
+        if kind == SourceKind::Eval {
+            for raised in raised.clone() {
+                self.note_error_in(raised.level, &raised.message, path, raised.line);
+            }
         }
         if refused.level == Level::Parse {
-            return crate::api::raising::throw_at(
+            let thrown = crate::api::raising::throw_at(
                 self,
                 "ParseError",
                 &refused.message,
                 path,
                 refused.line,
             );
+            if kind == SourceKind::File {
+                self.while_pending(&thrown, |req| {
+                    for raised in raised {
+                        req.note_error_in(raised.level, &raised.message, path, raised.line);
+                    }
+                });
+            }
+            return thrown;
+        }
+        let recording = self.begin_recording();
+        if kind == SourceKind::File {
+            for raised in raised {
+                self.note_error_in(raised.level, &raised.message, path, raised.line);
+            }
         }
         self.end_in_compile_time(refused.level, &refused.message, path, refused.line);
+        self.emit_recorded(recording);
         Thrown::of(None)
     }
 
@@ -15913,7 +16128,9 @@ impl Request {
         })();
         let served = match arguments {
             Ok(arguments) => {
+                let record = self.record_set_aside();
                 let answer = crate::api::call::call(self, &handler, &arguments);
+                self.record_restored(record);
                 for argument in arguments {
                     self.release(argument);
                 }
@@ -15998,11 +16215,16 @@ impl Request {
 
     /// The file of the frame that called the native,
     /// `zend_get_executed_filename`: the scope's file while a constant
-    /// expression is evaluated ([`site_override`]).
+    /// expression is evaluated ([`site_override`]), and an attribute's
+    /// while its object is made and nothing stands above its site
+    /// ([`exec::Site`]).
     #[must_use]
     pub fn current_file(&self) -> Option<&[u8]> {
         if let Some((file, _)) = self.overridden_site() {
             return Some(file);
+        }
+        if let Some(site) = self.vm.innermost_site() {
+            return Some(&site.file);
         }
         self.innermost_frame()
             .and_then(|state| exec::body_of(&state.unit, state.body))
@@ -16021,6 +16243,9 @@ impl Request {
     pub fn current_line(&self) -> u32 {
         if let Some((_, line)) = self.overridden_site() {
             return line;
+        }
+        if let Some(site) = self.vm.innermost_site() {
+            return site.line;
         }
         self.innermost_frame().map_or(0, exec::line_of)
     }
@@ -16323,20 +16548,35 @@ impl Request {
                 if std::ptr::eq(stack, &raw const self.stack) && state.function.is_some() =>
             {
                 let frame = FrameRef(u32::try_from(place).unwrap_or(u32::MAX));
-                let passed = usize::try_from(state.num_args).unwrap_or(0);
-                let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
-                    .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
-                    .collect();
-                arguments.extend(state.extra_args.iter().copied());
-                NativeCaller::Function(frame, arguments)
+                NativeCaller::Function(frame, self.arguments_of(frame, state))
             }
             Some(Link::Frame(Slots::Stack(stack, place), _))
                 if std::ptr::eq(stack, &raw const self.stack) =>
             {
                 NativeCaller::Code(FrameRef(u32::try_from(place).unwrap_or(u32::MAX)))
             }
-            Some(Link::Frame(..) | Link::Call(_)) | None => NativeCaller::Native,
+            Some(Link::Frame(..) | Link::Call(_) | Link::Site(_)) | None => NativeCaller::Native,
         }
+    }
+
+    /// The arguments the user function on `frame` was passed, as its
+    /// slots hold them now, the extra ones after, `ZEND_CALL_NUM_ARGS`
+    /// of them in all: what `ZEND_FUNC_GET_ARGS` copies, views with no
+    /// owner taken.
+    pub(crate) fn frame_arguments(&self, frame: FrameRef) -> Vec<Value> {
+        self.vm
+            .at(frame)
+            .map(|state| self.arguments_of(frame, state))
+            .unwrap_or_default()
+    }
+
+    fn arguments_of(&self, frame: FrameRef, state: &exec::FrameState) -> Vec<Value> {
+        let passed = usize::try_from(state.num_args).unwrap_or(0);
+        let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
+            .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
+            .collect();
+        arguments.extend(state.extra_args.iter().copied());
+        arguments
     }
 
     /// `zend_forbid_dynamic_call()` (`Z/Zend/zend_API.h:901`): php's
@@ -16472,6 +16712,7 @@ impl Request {
             let (function, this, called) = match link {
                 Link::Frame(_, state) => (state.function, state.this, state.called_scope),
                 Link::Call(call) => (Some(call.function), call.this, call.called_scope),
+                Link::Site(_) => return None,
             };
             if let Some(this) = this {
                 return Some(this.class());
@@ -16522,6 +16763,7 @@ impl Request {
             let (function, this) = match link {
                 Link::Frame(_, state) => (state.function, state.this),
                 Link::Call(call) => (Some(call.function), call.this),
+                Link::Site(_) => return None,
             };
             if this.is_some() {
                 return this;

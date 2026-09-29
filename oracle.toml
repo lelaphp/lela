@@ -42,7 +42,7 @@ ini = [
     "open_basedir=",
     "disable_functions=",
     "output_buffering=Off",
-    "error_reporting=32767",
+    "error_reporting=30719",
     "fatal_error_backtraces=Off",
     "display_errors=1",
     "display_startup_errors=1",
@@ -87,11 +87,16 @@ TEST_PHP_EXECUTABLE = "/opt/homebrew/Cellar/php/8.5.9/bin/php"
 TZ = "UTC"
 LANG = "C"
 LC_ALL = "C"
+# A child the test spawns without -n or -c searches for a php.ini as php_init_config
+# does (main/php_ini.c:409-560 at the tag): PHPRC names a file, so the machine's
+# own php.ini (the Homebrew keg's, for the oracle) is never read and both binaries
+# answer as upstream's CI, which has none; -n and -c are unaffected (#1176).
+PHPRC = "/dev/null"
 
 [recipe.limits]
 # `run-tests.php:1187`: 60 s per test, 300 under valgrind. A witness's `wall=`
 # is disclosure, not a limit.
-timeout_s = 40
+timeout_s = 60
 
 [recipe.normalise]
 # `run-tests.php:2528`: `preg_replace("/\r\n/", "\n", trim($out))`. The trim set
@@ -176,3 +181,14 @@ ini = ["session.use_only_cookies=0", "session.use_trans_sid=1"]
 # recipe it differs, and a divergence row covers that (#770, interim until
 # the design question is settled).
 ini = ["opcache.enable_cli=1"]
+
+[sapi]
+# The oracle's other hosts, from the keg and build `[oracle]` pins: parity is
+# every test the oracle runs (design §1), and upstream's run-tests.php runs
+# sapi/cgi, sapi/fpm and sapi/phpdbg with the binaries it finds beside `php`
+# (get_binary, run-tests.php:1003-1019; php-fpm by FPM\Tester::findExecutable,
+# sapi/fpm/tests/tester.inc:226-257, at the tag). Each is asserted by its digest
+# as `php` is, before the first program that runs it.
+cgi = { path = "/opt/homebrew/Cellar/php/8.5.9/bin/php-cgi", md5 = "66f6a8919f22d92b7978ae66305f873c" }
+fpm = { path = "/opt/homebrew/Cellar/php/8.5.9/sbin/php-fpm", md5 = "58aa917bf815cde59ed9e550e1f10f39" }
+phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.9/bin/phpdbg", md5 = "6bb7d99d6dc623367ea110ae49bd054b" }
