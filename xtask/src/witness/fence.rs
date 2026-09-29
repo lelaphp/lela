@@ -35,7 +35,7 @@
 //!
 //! A `request` fence between the two describes a request of the web, in
 //! the sections a CGI-shaped `.phpt` carries (`--GET--`, `--POST--`,
-//! `--POST_RAW--`, `--COOKIE--`): the snippet is served by php-cgi beside
+//! `--POST_RAW--`, `--COOKIE--`, `--ENV--`): the snippet is served by php-cgi beside
 //! the pinned php for the oracle and by the `php` binary run as php-cgi
 //! for the engine, each in a process of its own, and the `expect` fence
 //! pins what php-cgi writes, its head and its body (#1197).

@@ -594,7 +594,7 @@ fn addslashes(value: &str) -> String {
 }
 
 /// A test's `--ENV--`, one `NAME=value` a line, the value its bytes.
-fn env_of(phpt: &Phpt, test: &Path) -> Vec<(String, OsString)> {
+pub(crate) fn env_of(phpt: &Phpt, test: &Path) -> Vec<(String, OsString)> {
     let beside = test
         .parent()
         .map(|dir| dir.as_os_str().as_encoded_bytes().to_vec())

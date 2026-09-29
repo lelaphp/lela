@@ -101,6 +101,7 @@
 //! item 17.
 
 mod adapter;
+pub(crate) use adapter::env_of;
 pub(crate) mod against;
 pub(crate) mod cgi;
 /// The suffix of a control run's scope: the subset under the oracle.

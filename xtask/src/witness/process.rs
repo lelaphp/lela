@@ -122,8 +122,9 @@ impl Binary {
 /// program written as the recipe's `script_name` in a tree of its own,
 /// with the recipe's preamble; the request `request`'s sections describe
 /// translated as the phpt lane translates a CGI-shaped test's
-/// ([`cgi::request`]), over `env`; and the program run under the recipe
-/// by its path with `-C -f` before it, the body on stdin. What the oracle
+/// ([`cgi::request`]), over `env` with the request's `--ENV--` after it;
+/// and the program run under the recipe by its path with `-C -f` before
+/// it, the body on stdin. What the oracle
 /// and the engine are each held to for a fence with a `request`.
 pub(crate) fn served_as_cgi(
     oracle: &Oracle<'_>,
@@ -138,10 +139,13 @@ pub(crate) fn served_as_cgi(
     fs::write(&program, format!("{}{snippet}", recipe.preamble))
         .with_context(|| format!("writing {}", program.display()))?;
     let test = format!("--TEST--\nwitness\n{request}\n--FILE--\n\n--EXPECT--\n\n");
-    let phpt = Phpt::parse(&own.join("witness.phpt"), test.as_bytes())
+    let path = own.join("witness.phpt");
+    let phpt = Phpt::parse(&path, test.as_bytes())
         .map_err(|borked| anyhow!("the request fence is not a test's sections: {borked}"))?;
     let program = crate::oracle::run_by(&program)?;
-    let described = cgi::request(&phpt, &program, env)
+    let mut env = env.to_vec();
+    env.extend(crate::phpt::env_of(&phpt, &path));
+    let described = cgi::request(&phpt, &program, &env)
         .map_err(|(_, why)| anyhow!("the request fence describes no request: {why}"))?;
     let flags = [String::from("-C"), String::from("-f")];
     oracle.run_under(&Invocation {
