@@ -219,6 +219,9 @@ pub(crate) type CompileFileHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u
 /// The one question the unit cache asks an extension about a file
 /// (design §6.3): [`ExtensionBuilder::admission`].
 pub(crate) type AdmissionHook = fn(&mut Request, &[u8]) -> Admission;
+/// The path resolver, php's `zend_resolve_path` as an extension overrides
+/// it: [`ExtensionBuilder::resolve_path`].
+pub(crate) type ResolvePathHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
 /// The upload hook, php's `php_rfc1867_callback`:
 /// [`ExtensionBuilder::upload`].
 pub(crate) type UploadHook =
@@ -371,6 +374,8 @@ pub struct Extension {
     pub(crate) input_filter: Option<InputFilterHook>,
     /// What [`ExtensionBuilder::upload`] was handed.
     pub(crate) upload: Option<UploadHook>,
+    /// What [`ExtensionBuilder::resolve_path`] was handed.
+    pub(crate) resolve_path: Option<ResolvePathHook>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
     /// What [`ExtensionBuilder::intercept`] was handed: each native of
@@ -419,6 +424,7 @@ pub struct ExtensionBuilder {
     admission: Option<AdmissionHook>,
     input_filter: Option<InputFilterHook>,
     upload: Option<UploadHook>,
+    resolve_path: Option<ResolvePathHook>,
     zend: Option<ZendExtension>,
     intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
@@ -677,6 +683,18 @@ impl ExtensionBuilder {
         self
     }
 
+    /// `zend_resolve_path` overridden, as phar's `MINIT` overrides it with
+    /// `phar_resolve_path`: a path an include or an open along the
+    /// `include_path` names is handed to `hook` first, which may answer
+    /// where it stands, a `phar://` URL inside the archive being served;
+    /// `None` leaves it to the engine's own resolution. Hooks are asked in
+    /// bundle order and the first answer is taken.
+    #[must_use]
+    pub fn resolve_path(mut self, hook: ResolvePathHook) -> ExtensionBuilder {
+        self.resolve_path = Some(hook);
+        self
+    }
+
     /// The upload hook, php's `php_rfc1867_callback` as `ext/session`'s
     /// `MINIT` sets it for `session.upload_progress`: each step of a
     /// multipart body's reading is handed to `hook` as it is taken
@@ -813,6 +831,7 @@ impl ExtensionBuilder {
             admission: self.admission,
             input_filter: self.input_filter,
             upload: self.upload,
+            resolve_path: self.resolve_path,
             zend: self.zend,
             intercepts: self.intercepts,
             info: self.info,

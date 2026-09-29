@@ -15722,6 +15722,16 @@ impl Request {
     /// stat failed
     /// ```
     pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, Unresolved> {
+        let shared = Arc::clone(&self.shared);
+        for hook in shared
+            .extensions
+            .iter()
+            .filter_map(|extension| extension.resolve_path)
+        {
+            if let Some(path) = hook(self, written).map_err(Unresolved::Threw)? {
+                return Ok(path);
+            }
+        }
         let not_found = || Unresolved::Missing(std::io::Error::from(std::io::ErrorKind::NotFound));
         let for_include = crate::streams::OpenOptions {
             for_include: true,

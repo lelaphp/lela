@@ -169,6 +169,20 @@ fn relative_name(
     Ok(present.then(|| url(&arch, &entry)))
 }
 
+/// `phar_resolve_path`, phar's `zend_resolve_path`: what
+/// `phar_find_in_include_path` finds for a path named from inside the
+/// archive being served, where it knows the directory it is served from;
+/// `None` leaves the path to the engine.
+pub(crate) fn resolve_path(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+    if req.state::<crate::State>().cwd.is_none() {
+        return Ok(None);
+    }
+    let Some(arch) = serving_archive(req)? else {
+        return Ok(None);
+    };
+    find_in_include_path(req, &arch, filename)
+}
+
 /// `phar_find_in_include_path`: a `./` or `../` path looked for in the
 /// archive, and any other along `phar://<arch>/<cwd>` then the
 /// `include_path`; `None` where there is no directory of the file being
