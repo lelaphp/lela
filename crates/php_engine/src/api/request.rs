@@ -15563,7 +15563,7 @@ impl Request {
     /// include(): Failed opening 'data:,x' for inclusion (include_path='.')
     /// bool(false)
     /// ```
-    fn include_stream(
+    pub(crate) fn include_stream(
         &mut self,
         kind: IncludeKind,
         written: &[u8],
@@ -19416,7 +19416,7 @@ fn scheme_length(path: &[u8]) -> Option<usize> {
 
 /// Whether a path names a stream wrapper other than the plain files one,
 /// which an include opens through that wrapper.
-fn is_wrapper_url(path: &[u8]) -> bool {
+pub(crate) fn is_wrapper_url(path: &[u8]) -> bool {
     scheme_length(path).is_some_and(|n| !path[..n].eq_ignore_ascii_case(b"file"))
 }
 
