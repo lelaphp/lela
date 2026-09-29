@@ -181,3 +181,14 @@ ini = ["session.use_only_cookies=0", "session.use_trans_sid=1"]
 # recipe it differs, and a divergence row covers that (#770, interim until
 # the design question is settled).
 ini = ["opcache.enable_cli=1"]
+
+[sapi]
+# The oracle's other hosts, from the keg and build `[oracle]` pins: parity is
+# every test the oracle runs (design §1), and upstream's run-tests.php runs
+# sapi/cgi, sapi/fpm and sapi/phpdbg with the binaries it finds beside `php`
+# (get_binary, run-tests.php:1003-1019; php-fpm by FPM\Tester::findExecutable,
+# sapi/fpm/tests/tester.inc:226-257, at the tag). Each is asserted by its digest
+# as `php` is, before the first program that runs it.
+cgi = { path = "/opt/homebrew/Cellar/php/8.5.9/bin/php-cgi", md5 = "66f6a8919f22d92b7978ae66305f873c" }
+fpm = { path = "/opt/homebrew/Cellar/php/8.5.9/sbin/php-fpm", md5 = "58aa917bf815cde59ed9e550e1f10f39" }
+phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.9/bin/phpdbg", md5 = "6bb7d99d6dc623367ea110ae49bd054b" }
