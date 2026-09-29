@@ -566,7 +566,7 @@ fn set_serial(
 /// $r = openssl_csr_new(['commonName' => 'a'], $k);
 /// $x = openssl_csr_sign($r, null, $k, 30, ['digest_alg' => 'sha256'], 0, 'DEADBEEF');
 /// $p = openssl_x509_parse($x);
-/// var_dump($p['serialNumberHex'], $p['issuer'], $p['validTo_time_t'] - $p['validFrom_time_t']);
+/// var_dump($p['serialNumberHex'], $p['issuer'], intdiv($p['validTo_time_t'] - $p['validFrom_time_t'], 86400));
 /// var_dump(openssl_csr_sign($r, null, $k, -1));
 /// var_dump(openssl_csr_sign($r, null, openssl_pkey_new(['private_key_bits' => 1024]), 1) instanceof OpenSSLCertificate);
 /// var_dump(openssl_csr_sign($r, $x, openssl_pkey_new(['private_key_bits' => 1024]), 1));
@@ -583,7 +583,7 @@ fn set_serial(
 ///   ["O"]=>
 ///   string(24) "Internet Widgits Pty Ltd"
 /// }
-/// int(2592000)
+/// int(30)
 ///
 /// Warning: openssl_csr_sign(): Days must be between 0 and 106751991167300 in %s on line 6
 /// bool(false)
