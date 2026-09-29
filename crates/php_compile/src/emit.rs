@@ -8968,7 +8968,9 @@ impl Emit<'_> {
                     "\"continue {depth}\" targeting switch is equivalent to \"break {depth}\"{hint}"
                 )
             };
-            self.raise(Level::CompileWarning, &message);
+            // `E_WARNING`, which a user error handler is handed, where
+            // the compiler's other warnings are `E_COMPILE_WARNING`.
+            self.raise(Level::Warning, &message);
         }
         let opline = self.push(Opline {
             opcode: Opcode::Jmp,

@@ -3840,8 +3840,10 @@ mod tests {
     }
 
     /// A `continue` that targets a `switch` is the `break` it is, with
-    /// php's compile-time warning on the unit, the hint about the loop
-    /// outside where there is one.
+    /// php's warning on the unit, the hint about the loop outside where
+    /// there is one. php raises it as `E_WARNING`, not
+    /// `E_COMPILE_WARNING` (`Z/Zend/zend_compile.c:5860`), so it is one a
+    /// user error handler is handed.
     #[test]
     fn a_continue_targeting_a_switch_is_a_break_with_php_s_warning() {
         let (unit, _strings) = unit_and_strings(
@@ -3856,17 +3858,17 @@ mod tests {
             raised,
             vec![
                 (
-                    Level::CompileWarning,
+                    Level::Warning,
                     2,
                     "\"continue\" targeting switch is equivalent to \"break\". Did you mean to use \"continue 2\"?"
                 ),
                 (
-                    Level::CompileWarning,
+                    Level::Warning,
                     3,
                     "\"continue\" targeting switch is equivalent to \"break\""
                 ),
                 (
-                    Level::CompileWarning,
+                    Level::Warning,
                     5,
                     "\"continue 2\" targeting switch is equivalent to \"break 2\". Did you mean to use \"continue 3\"?"
                 ),
