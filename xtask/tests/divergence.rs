@@ -295,6 +295,10 @@ fn the_instrument_writes_a_reading_and_exits_one_on_the_fixture() {
     assert_eq!(reading.status, xtask::reading::Status::Fail);
 }
 
+/// `--uncut` renders every row with its reason whole, which is where an
+/// accepted row's reason is read; without it the section is what the
+/// local facts carry, the counts and the `open` rows, and names that
+/// command for the rest (#821).
 #[test]
 fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     let root = scratch("status");
@@ -303,8 +307,11 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     assert!(ok, "{err}");
     let (cut_ok, cut, cut_err) = xtask(&root, &["status", "--section", "divergence"]);
     assert!(cut_ok, "{cut_err}");
+    assert!(
+        registry.rows().iter().any(|r| r.status == Status::Accepted),
+        "the workspace's registry has an accepted row to read"
+    );
     for row in registry.rows() {
-        assert!(cut.contains(row.id.as_str()), "{cut}");
         assert!(md.contains(row.id.as_str()), "{md}");
         // A multi-line reason renders on one line of the table, so the
         // newline TOML leaves at its end is a space here.
@@ -312,13 +319,25 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
             md.contains(&row.reason.replace('\n', " ")),
             "the reason is rendered: {md}"
         );
+        assert_eq!(
+            cut.contains(&format!("| {} ", row.id.as_str())),
+            row.status == Status::Open,
+            "the facts list the open rows alone: {cut}"
+        );
     }
     assert!(md.contains("trace:nested-entry-return"), "{md}");
+    for text in [&md, &cut] {
+        assert!(
+            text.contains(&counts_line(&registry, Some(Kind::Trace))),
+            "counts by kind and status:\n{text}"
+        );
+        assert!(text.contains(&counts_line(&registry, None)), "{text}");
+    }
     assert!(
-        md.contains(&counts_line(&registry, Some(Kind::Trace))),
-        "counts by kind and status:\n{md}"
+        cut.contains("`cargo xtask status --section divergence --uncut`"),
+        "the facts name the command that reads every reason: {cut}"
     );
-    assert!(md.contains(&counts_line(&registry, None)), "{md}");
+    assert!(!md.contains("--uncut"), "{md}");
 
     let (ok, json, _) = xtask(
         &root,
@@ -336,6 +355,42 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
         registry.counts().cell(Kind::Trace, Status::Accepted)
     );
     assert_eq!(value["counts"]["total"]["open"], 0);
+
+    // One more accepted row changes the counts and nothing else of what
+    // the facts carry: its id and reason are read under `--uncut`.
+    let path = root.join(divergence::FILE);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{text}
+[[divergence]]
+id = \"trace:fixture-one-more\"
+kind = \"trace\"
+reason = \"The fixture's one more reason (fixture).\"
+status = \"accepted\"
+since = \"2026-09-29\"
+"
+        ),
+    )
+    .unwrap();
+    let (ok, grown, err) = xtask(&root, &["status", "--section", "divergence"]);
+    assert!(ok, "{err}");
+    let beside_counts = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| !l.starts_with("| trace |") && !l.starts_with("| total |"))
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(beside_counts(&grown), beside_counts(&cut), "{grown}");
+    let (ok, whole, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
+    assert!(ok, "{err}");
+    assert!(
+        whole.contains(
+            "| trace:fixture-one-more | trace | accepted | 2026-09-29 | The fixture's one more reason (fixture). |"
+        ),
+        "{whole}"
+    );
 }
 
 /// The `crosscheck` kind (#318): `parse` accepts a row keyed by an
@@ -386,7 +441,7 @@ since = "2026-09-18"
     )
     .unwrap();
     let registry = Registry::load(&root).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence"]);
+    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
     assert!(ok, "{err}");
     assert!(
         md.contains("| crosscheck:ctype | crosscheck | accepted |"),
@@ -423,6 +478,10 @@ fn status_divergence_counts_a_proposed_row_as_open() {
         .unwrap();
     let (ok, md, _) = xtask(&root, &["status", "--section", "divergence"]);
     assert!(ok);
+    assert!(
+        md.contains("| phpt:Zend/tests/x.phpt | runner | open | "),
+        "the facts list an open row: {md}"
+    );
     assert!(md.contains("| runner | 1 | 0 | 0 | 1 |"), "{md}");
     assert!(md.contains(&counts_line(&registry, None)), "{md}");
     assert!(md.contains("| total | 1 | "), "{md}");
@@ -618,7 +677,7 @@ fn status_and_the_reason_instrument_count_a_covering_row_once() {
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, format!("{text}\n{COVERING}")).unwrap();
     let registry = Registry::load(&root).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence"]);
+    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
     assert!(ok, "{err}");
     assert!(
         md.contains("| phpt:fixture-optimizer (covers 2) | phpt | accepted | 2026-09-28 |"),
