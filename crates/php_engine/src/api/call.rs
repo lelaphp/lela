@@ -327,11 +327,26 @@ pub fn call_named(
     let Some(function) = callee(req, target).filter(|_| !named.is_empty()) else {
         return serve(req, target, arguments, &[]);
     };
+    let placement = placed(req, function, arguments, named)?;
+    serve(req, target, &placement.arguments, &placement.extra_named)
+}
+
+/// `zend_call_function`'s walk of `fci->named_params` over `function`:
+/// the positional arguments with each named one placed at the offset
+/// the function declares its name at, and the extra named ones a
+/// variadic collects. What [`call_named`] serves and `Closure::call`
+/// hands its own serving.
+pub(crate) fn placed(
+    req: &mut Request,
+    function: Function,
+    arguments: &[Value],
+    named: &[(PhpString, Value)],
+) -> Result<Placement, Thrown> {
     let mut placement = Placement::new(function, arguments);
     for (name, value) in named {
         placement.named(req, *name, *value)?;
     }
-    serve(req, target, &placement.arguments, &placement.extra_named)
+    Ok(placement)
 }
 
 /// `zend_call_function` with `fci->named_params` the whole argument
@@ -397,10 +412,10 @@ pub fn call_array(
 /// positional arguments as placed so far, with the slots a named one
 /// skipped `UNDEF`, and the extra named arguments a variadic callee
 /// collects, against the parameter names the callee declares.
-struct Placement {
+pub(crate) struct Placement {
     function: Function,
-    arguments: Vec<Value>,
-    extra_named: Vec<(PhpString, Value)>,
+    pub(crate) arguments: Vec<Value>,
+    pub(crate) extra_named: Vec<(PhpString, Value)>,
 }
 
 impl Placement {

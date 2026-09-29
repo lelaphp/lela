@@ -779,6 +779,17 @@ impl Closure {
     /// NULL
     /// ```
     ///
+    /// Named arguments are placed at the closure's parameters:
+    ///
+    /// ```php
+    /// class Foo {}
+    /// $f = function ($a = 'a', $b = 'b', $c = 'c') { echo "$a $b $c\n"; };
+    /// $f->call(new Foo, 'A', c: 'C');
+    /// ```
+    /// ```expect
+    /// A b C
+    /// ```
+    ///
     /// A `static` closure takes no receiver:
     ///
     /// ```php
@@ -803,8 +814,16 @@ impl Closure {
         if !valid_closure_binding(req, &info, Some(newThis), Some(class)) {
             return Ok(Value::null());
         }
-        let named = args.named().to_vec();
-        let returned = req.serve_closure_as(closure, newThis, class, &args.positional, &named)?;
+        // `fci.named_params`, placed by `zend_call_function` over the
+        // closure's function.
+        let placed = crate::api::call::placed(req, info.function, &args.positional, args.named())?;
+        let returned = req.serve_closure_as(
+            closure,
+            newThis,
+            class,
+            &placed.arguments,
+            &placed.extra_named,
+        )?;
         Ok(returned.deref())
     }
 
