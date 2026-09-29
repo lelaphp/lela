@@ -602,8 +602,13 @@ fn wrap_http_ex(
         Some(d) => timeval(d),
         None => timeval(default_timeout(req).trunc()),
     };
-    let socket = socket_options(req, chain.ctx)?;
-    let stream = match req.xport_create(&transport, Xport::Client { timeout, socket })? {
+    let (socket, context) = socket_options(req, chain.ctx)?;
+    let xport = Xport::Client {
+        timeout,
+        socket,
+        context,
+    };
+    let stream = match req.xport_create(&transport, xport)? {
         Ok(stream) => {
             if let Some(timeout) = timeout {
                 stream.set_option(req, StreamOption::ReadTimeout(timeout));

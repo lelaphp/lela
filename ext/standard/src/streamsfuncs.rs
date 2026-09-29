@@ -261,15 +261,23 @@ pub fn stream_ctx_option(
 
 /// `Z_PARAM_RESOURCE` then `decode_context_param`
 /// (`Z/ext/standard/streamsfuncs.c:937`): a `context`, or a stream's,
-/// which here is the default one; anything else is php's
-/// `must be a valid stream/context`.
+/// `PHP_STREAM_CONTEXT(stream)`, a new one made and kept by a stream that
+/// keeps none; anything else is php's `must be a valid stream/context`.
 fn context_resource(req: &mut Request, res: Resource, position: u32) -> Result<Resource, Thrown> {
     let kind = context_type(req);
     if !res.is_closed() && res.kind() == Some(kind) {
         return Ok(res);
     }
-    if Stream::from_value(req, &res.as_value()).is_some() {
-        return default_context(req);
+    if let Some(stream) = Stream::from_value(req, &res.as_value()) {
+        if let Some(context) = stream.ctx(req) {
+            return Ok(context);
+        }
+        let context = context_alloc(req)?;
+        stream.set_ctx(req, Some(context));
+        // The stream holds the owner `php_stream_context_alloc` made;
+        // `stream->ctx = context->res` takes it without one more.
+        req.release(context.as_value());
+        return Ok(context);
     }
     Err(arg_type_error(req, position, "be a valid stream/context"))
 }

@@ -48,6 +48,8 @@ pub use execution::Execution;
 pub use unit_cache::{CacheStatus, CachedFile, Invalidation, Restart, UnitCache};
 
 mod class_data;
+mod crypto;
+pub use crypto::{Crypto, CryptoSocket, Handshake, Readiness, XportFactory};
 mod execution;
 mod hold;
 pub(crate) use hold::Hold;
@@ -443,16 +445,20 @@ impl UrlStat {
 /// What `php_stream_xport_create` is asked to make of a `transport`'s
 /// name: a client connected within `timeout`, `None` to wait for ever,
 /// or a server bound to the name, listening where `listen` says; each
-/// with the `socket` options of the `context` the native resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// with the `context` the native resolved, which the stream keeps as
+/// `PHP_STREAM_CONTEXT(stream)` before it connects, and the `socket`
+/// options read off it.
+#[derive(Clone)]
 pub enum Xport {
     Client {
         timeout: Option<std::time::Duration>,
         socket: SocketOptions,
+        context: Option<Resource>,
     },
     Server {
         listen: bool,
         socket: SocketOptions,
+        context: Option<Resource>,
     },
 }
 
@@ -701,6 +707,49 @@ impl Stream {
     /// php's order.
     pub fn meta_data(self, req: &mut Request) -> Result<PhpArray, Thrown> {
         req.stream_meta_data(self)
+    }
+
+    /// `PHP_STREAM_CONTEXT(stream)`: the `context` the stream keeps, which
+    /// a socket's `transport` is given as it is made
+    /// ([`Request::xport_create`]) and a native sets
+    /// ([`Stream::set_ctx`]); `None` for a stream that keeps none, a
+    /// closed one, and one inside a call.
+    #[must_use]
+    pub fn ctx(self, req: &Request) -> Option<Resource> {
+        req.stream_context(self)
+    }
+
+    /// `php_stream_context_set` (`Z/main/streams/streams.c:2385`): the
+    /// stream keeps `context`, one owner more, and gives up the one it
+    /// kept; `None` keeps none.
+    ///
+    /// ```php
+    /// $s = stream_socket_server('tcp://127.0.0.1:0', $no, $str, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, stream_context_create(['x' => ['y' => 1]]));
+    /// var_dump(stream_context_get_options($s));
+    /// $f = fopen(__FILE__, 'r');
+    /// stream_context_set_option($f, 'a', 'b', 2);
+    /// var_dump(stream_context_get_options($f), stream_context_get_options(stream_context_get_default()));
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   ["x"]=>
+    ///   array(1) {
+    ///     ["y"]=>
+    ///     int(1)
+    ///   }
+    /// }
+    /// array(1) {
+    ///   ["a"]=>
+    ///   array(1) {
+    ///     ["b"]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// array(0) {
+    /// }
+    /// ```
+    pub fn set_ctx(self, req: &mut Request, ctx: Option<Resource>) {
+        req.set_stream_context(self, ctx);
     }
 
     /// `stream->orig_path`: the path the stream was opened by, the one

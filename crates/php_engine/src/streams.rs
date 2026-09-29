@@ -67,6 +67,26 @@ pub(crate) trait Ops: Send {
     /// sets `stream->eof`, `None` for `-1`.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize>;
 
+    /// `ops->read` with the stream's `has_buffered_data` beside it, which
+    /// a socket reads (`php_sockop_read`) and no other kind does.
+    fn read_after_buffer(
+        &mut self,
+        req: &mut Request,
+        buf: &mut [u8],
+        eof: &mut bool,
+        has_buffered_data: bool,
+    ) -> Option<usize> {
+        let _ = has_buffered_data;
+        self.read(req, buf, eof)
+    }
+
+    /// The socket kind, where the stream is one: what the
+    /// `PHP_STREAM_OPTION_CRYPTO_API` options and
+    /// `PHP_STREAM_CONTEXT(stream)`'s lending reach.
+    fn as_socket(&mut self) -> Option<&mut sockets::Socket> {
+        None
+    }
+
     /// `ops->close`, with what the kind holds: php's answer, `0` but for
     /// a process pipe, whose close is `pclose(3)`'s exit status, which
     /// `pclose()` hands back.
@@ -360,6 +380,9 @@ pub(crate) struct PhpStream {
     /// `stream->writefilters`, the chain every write passes through
     /// before the kind.
     writefilters: Vec<filters::Attached>,
+    /// `stream->has_buffered_data`: within one `_php_stream_read`, bytes
+    /// were had already, so the kind's read that follows must not wait.
+    has_buffered_data: bool,
     /// What a wrapper set on the stream, boxed apart since a stream of
     /// the engine's own kinds has none of it.
     wrapped: Option<Box<Wrapped>>,
@@ -369,11 +392,14 @@ pub(crate) struct PhpStream {
 /// over another kind: `PHP_STREAM_CONTEXT(stream)`'s notifier,
 /// `stream->wrapperthis` with the wrapper's `stream_closer`,
 /// `stream->wrapperdata` (one owner the stream's, which
-/// `stream_get_meta_data` prints ahead of what the kind keeps), and
+/// `stream_get_meta_data` prints ahead of what the kind keeps),
 /// `stream->wrapper->wops->stream_stat`, which `fstat()` asks in place of
-/// the kind's.
+/// the kind's, and `stream->ctx`, `PHP_STREAM_CONTEXT(stream)`, one owner
+/// the stream's, which a socket's `transport` and the wrappers that
+/// connect one set.
 #[derive(Default)]
 struct Wrapped {
+    context: Option<Resource>,
     notifier: Option<Box<dyn Notifier>>,
     closer: Option<Box<dyn Closer>>,
     wrapperdata: Option<Value>,
@@ -435,6 +461,7 @@ impl PhpStream {
             res: None,
             readfilters: Vec::new(),
             writefilters: Vec::new(),
+            has_buffered_data: false,
             wrapped: None,
         }
     }
@@ -588,9 +615,10 @@ impl PhpStream {
             eof,
             readbuf,
             writepos,
+            has_buffered_data,
             ..
         } = self;
-        match ops.read(req, &mut readbuf[*writepos..], eof) {
+        match ops.read_after_buffer(req, &mut readbuf[*writepos..], eof, *has_buffered_data) {
             Some(justread) => {
                 *writepos += justread;
                 self.count_progress(req, justread);
@@ -618,14 +646,20 @@ impl PhpStream {
                 self.readpos += toread;
                 size -= toread;
                 didread += toread;
+                self.has_buffered_data = true;
             }
             if size == 0 {
                 break;
             }
             let direct = self.flags.no_buffer || self.chunk_size == 1;
             let toread = if self.readfilters.is_empty() && direct {
-                let Self { ops, eof, .. } = self;
-                match ops.read(req, &mut buf[didread..], eof) {
+                let Self {
+                    ops,
+                    eof,
+                    has_buffered_data,
+                    ..
+                } = self;
+                match ops.read_after_buffer(req, &mut buf[didread..], eof, *has_buffered_data) {
                     Some(n) => {
                         self.count_progress(req, n);
                         n
@@ -651,6 +685,7 @@ impl PhpStream {
             if toread > 0 {
                 didread += toread;
                 size -= toread;
+                self.has_buffered_data = true;
             } else {
                 break;
             }
@@ -660,6 +695,7 @@ impl PhpStream {
         }
         if didread > 0 {
             self.position += i64::try_from(didread).unwrap_or(i64::MAX);
+            self.has_buffered_data = false;
         }
         Some(didread)
     }
@@ -1161,6 +1197,19 @@ impl PhpStream {
                 self.writepos = 0;
             }
         }
+        // `php_openssl_sockop_cast`'s `PHP_STREAM_AS_FD_FOR_SELECT`: what
+        // the crypto layer holds decrypted moved into the empty read
+        // buffer, so `select(2)` is not asked to wait for bytes already had.
+        if cast == Cast::Select && self.writepos == self.readpos {
+            let pending = self
+                .ops
+                .as_socket()
+                .map_or(0, |socket| socket.crypto_pending());
+            if pending > 0 {
+                let chunk = self.chunk_size;
+                self.fill_read_buffer(req, pending.min(chunk));
+            }
+        }
         if !self.readfilters.is_empty() || !self.writefilters.is_empty() {
             if warn {
                 let text = format!(
@@ -1236,11 +1285,15 @@ impl PhpStream {
         self.free_filters(req);
         if let Some(wrapped) = self.wrapped.take() {
             let Wrapped {
+                context,
                 notifier,
                 closer,
                 wrapperdata,
                 ..
             } = *wrapped;
+            if let Some(context) = context {
+                req.release(context.as_value());
+            }
             if let Some(closer) = closer
                 && let Err(thrown) = closer.close(req)
             {
@@ -3626,7 +3679,11 @@ impl Request {
     /// `seekable` and, where it was opened by path, `uri`.
     pub(crate) fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown> {
         let mut out = PhpArray::new(self)?;
-        let head = if let Some(head) = self.kind_meta_data(stream) {
+        let crypto = self.crypto_meta(stream)?;
+        let head = if let Some(mut head) = self.kind_meta_data(stream) {
+            if let Some(crypto) = crypto {
+                head.insert(0, (b"crypto".to_vec(), MetaValue::Value(crypto)));
+            }
             head
         } else {
             let Some(eof) = self.stream_op(stream, |req, s| s.eof(req)) else {
@@ -3681,7 +3738,56 @@ impl Request {
             let key = Key::Str(PhpString::new(self, &key)?);
             out.set(self, key, value)?;
         }
+        if let Some(crypto) = crypto {
+            self.release(crypto);
+        }
         Ok(out)
+    }
+
+    /// `php_stream_context_set` (`Z/main/streams/streams.c:2385`): the
+    /// stream keeps `context`, one owner more, in place of the one it
+    /// kept, which gives its owner up; a socket's crypto layer reads it
+    /// from then.
+    pub(crate) fn set_stream_context(&mut self, stream: Stream, context: Option<Resource>) {
+        if let Some(context) = context {
+            self.addref(&context.as_value());
+        }
+        let old = self
+            .stream_op(stream, |_, s| {
+                if let Some(socket) = s.ops.as_socket() {
+                    socket.set_ctx(context);
+                }
+                match context {
+                    Some(context) => s.wrapped_mut().context.replace(context),
+                    None => s.wrapped.as_mut().and_then(|w| w.context.take()),
+                }
+            })
+            .flatten();
+        if let Some(old) = old {
+            self.release(old.as_value());
+        }
+    }
+
+    /// `PHP_STREAM_CONTEXT(stream)`.
+    pub(crate) fn stream_context(&self, stream: Stream) -> Option<Resource> {
+        self.stream_ref(stream)?.wrapped.as_ref()?.context
+    }
+
+    /// What a socket's active crypto layer shows under `crypto`, ahead of
+    /// the three the socket shows.
+    fn crypto_meta(&mut self, stream: Stream) -> Result<Option<Value>, Thrown> {
+        let meta = self
+            .stream_op(stream, |req, s| {
+                let socket = s.ops.as_socket()?;
+                let layer = socket.crypto_layer()?;
+                Some(layer.meta(req))
+            })
+            .flatten();
+        match meta {
+            Some(Ok(Some(array))) => Ok(Some(Value::array(array))),
+            Some(Err(thrown)) => Err(thrown),
+            Some(Ok(None)) | None => Ok(None),
+        }
     }
 
     /// `php_stream_populate_meta_data`, `PHP_STREAM_OPTION_META_DATA_API`

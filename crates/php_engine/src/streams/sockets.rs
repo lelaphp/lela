@@ -5,8 +5,11 @@
 //! stream was handed), and `main/streams/transports.c`'s
 //! `php_stream_xport_create`, which reads a `transport` off the front of a
 //! name and connects or binds a socket of that kind. The four `transports`
-//! are the four `PHP_MINIT(standard)` registers; the `ssl` family is
-//! `ext/openssl`'s, which this engine does not have.
+//! are the four `PHP_MINIT(standard)` registers; an extension registers
+//! more ([`XportFactory`]), each a `tcp` socket with the extension's crypto
+//! layer beside it, which reads and writes in the socket's place once
+//! active and is set up and enabled through `PHP_STREAM_OPTION_CRYPTO_API`
+//! ([`Stream::crypto_setup`], [`Stream::crypto_enable`]).
 //!
 //! A read of a blocking socket with a timeout waits for the socket as
 //! `php_sock_stream_wait_for_data` does, through `poll(2)`, which is
@@ -26,9 +29,10 @@ use php_heap::{Readiness, SockOpt};
 use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
-    BindTo, Cast, OptionAnswer, Request, SocketOptions, Stream, StreamOption, Xport, XportFailure,
+    BindTo, Cast, Crypto, CryptoSocket, Handshake, OptionAnswer, Request, SocketOptions, Stream,
+    StreamOption, Xport, XportFactory, XportFailure,
 };
-use crate::api::values::PhpString;
+use crate::api::values::{PhpString, Resource};
 
 /// `STREAM_OOB` and `STREAM_PEEK`, the bits of `stream_socket_sendto`'s
 /// and `stream_socket_recvfrom`'s `$flags`.
@@ -157,8 +161,14 @@ impl Sock {
 /// `php_netstream_data_t` under one of `xp_socket.c`'s ops: the socket,
 /// `None` once closed; the ops' label; `is_blocked`; the read timeout,
 /// `None` for php's `tv_sec == -1`; `timeout_event`; and whether the
-/// stream is a server's ([`Role`]), which only this kind reads.
+/// stream is a server's ([`Role`]), which only this kind reads. A
+/// registered `transport`'s socket carries its crypto layer, dropped before
+/// the socket closes, and `PHP_STREAM_CONTEXT(stream)`, whose owner is the
+/// stream's, to lend the layer.
 pub(crate) struct Socket {
+    crypto: Option<Box<dyn Crypto>>,
+    context: Option<Resource>,
+    own: Option<Stream>,
     sock: Option<Sock>,
     label: &'static str,
     is_blocked: bool,
@@ -182,6 +192,9 @@ enum Role {
 impl Socket {
     fn new(sock: Sock, label: &'static str, timeout: Option<Duration>) -> Socket {
         Socket {
+            crypto: None,
+            context: None,
+            own: None,
             sock: Some(sock),
             label,
             is_blocked: true,
@@ -189,6 +202,114 @@ impl Socket {
             timeout_event: false,
             role: Role::Peer,
         }
+    }
+
+    /// Whether the crypto layer reads and writes in the socket's place,
+    /// `ssl_active`.
+    fn crypto_active(&self) -> bool {
+        self.crypto.as_ref().is_some_and(|layer| layer.active())
+    }
+
+    /// The crypto layer and the socket it runs over, lent for one call,
+    /// with `supplemental` the stream's `has_buffered_data`; the socket's
+    /// `is_blocked` and `timeout_event` taken back after. `None` for a
+    /// socket with no layer or one closed.
+    fn with_layer<R>(
+        &mut self,
+        supplemental: bool,
+        f: impl FnOnce(&mut dyn Crypto, &mut CryptoSocket<'_>) -> R,
+    ) -> Option<R> {
+        let Socket {
+            crypto,
+            context,
+            own,
+            sock,
+            is_blocked,
+            timeout,
+            timeout_event,
+            ..
+        } = self;
+        let layer = crypto.as_deref_mut()?;
+        let sock = sock.as_ref()?;
+        let mut lent = CryptoSocket {
+            fd: sock.fd(),
+            blocked: *is_blocked,
+            timeout: *timeout,
+            timed_out: *timeout_event,
+            supplemental,
+            ctx: *context,
+            stream: *own,
+        };
+        let out = f(layer, &mut lent);
+        *is_blocked = lent.blocked;
+        *timeout_event = lent.timed_out;
+        Some(out)
+    }
+
+    /// `STREAM_XPORT_CRYPTO_OP_SETUP`: `None` for a socket with no crypto
+    /// layer, php's `PHP_STREAM_OPTION_RETURN_NOTIMPL`.
+    pub(crate) fn crypto_setup(
+        &mut self,
+        req: &mut Request,
+        method: i64,
+        session: Option<Stream>,
+    ) -> Option<bool> {
+        self.crypto.as_ref()?;
+        let setup = self.with_layer(false, |layer, lent| layer.setup(req, lent, method, session));
+        Some(match setup {
+            Some(Ok(done)) => done,
+            Some(Err(thrown)) => {
+                super::filters::defer(req, thrown);
+                false
+            }
+            None => false,
+        })
+    }
+
+    /// `STREAM_XPORT_CRYPTO_OP_ENABLE`: `None` for a socket with no crypto
+    /// layer.
+    pub(crate) fn crypto_enable(&mut self, req: &mut Request, activate: bool) -> Option<Handshake> {
+        self.crypto.as_ref()?;
+        let enabled = self.with_layer(false, |layer, lent| layer.enable(req, lent, activate));
+        Some(match enabled {
+            Some(Ok(handshake)) => handshake,
+            Some(Err(thrown)) => {
+                super::filters::defer(req, thrown);
+                Handshake::Failed
+            }
+            None => Handshake::Failed,
+        })
+    }
+
+    /// The layer's [`Crypto::connected`], after the connect or the accept
+    /// that made the socket; nothing to do for a socket with no layer.
+    fn crypto_connected(&mut self, req: &mut Request) -> Result<(), String> {
+        match self.with_layer(false, |layer, lent| layer.connected(req, lent)) {
+            Some(Ok(connected)) => connected,
+            Some(Err(thrown)) => {
+                super::filters::defer(req, thrown);
+                Err(String::new())
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The crypto layer, where the socket has one.
+    pub(crate) fn crypto_layer(&mut self) -> Option<&mut dyn Crypto> {
+        self.crypto.as_deref_mut()
+    }
+
+    /// `SSL_pending` of an active layer, `0` for every other socket.
+    pub(crate) fn crypto_pending(&self) -> usize {
+        self.crypto
+            .as_ref()
+            .filter(|layer| layer.active())
+            .map_or(0, |layer| layer.pending())
+    }
+
+    /// `PHP_STREAM_CONTEXT(stream)`, as the stream set it, for the layer.
+    pub(crate) fn set_ctx(&mut self, context: Option<Resource>) {
+        self.context = context;
     }
 
     /// `recv(2)` with `MSG_DONTWAIT` on a socket that blocks: the socket
@@ -256,6 +377,11 @@ impl Ops for Socket {
     /// `send(2)`, a socket that does not block answering `0` where it
     /// would, and php's notice with `errno` where it failed.
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
+        if self.crypto_active() {
+            return self
+                .with_layer(false, |layer, lent| layer.write(req, lent, buf))
+                .flatten();
+        }
         let Some(sock) = self.sock.as_mut() else {
             return Some(0);
         };
@@ -275,16 +401,41 @@ impl Ops for Socket {
         }
     }
 
-    /// `php_sockop_read` (`Z/main/streams/xp_socket.c:170`): a socket that
-    /// blocks waits for data up to its timeout, the wait that runs out
-    /// setting `timeout_event` and answering `-1`, and one with a zero
-    /// timeout does not wait; then `recv(2)`, `0` bytes where the socket
+    fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
+        self.read_after_buffer(req, buf, eof, false)
+    }
+
+    /// `php_sockop_read` (`Z/main/streams/xp_socket.c:161`), or the crypto
+    /// layer's read where it is active: a socket that blocks waits for data
+    /// up to its timeout, the wait that runs out setting `timeout_event`
+    /// and answering `-1`, and one with a zero timeout does not wait, nor
+    /// does a read after the stream's buffer already gave bytes
+    /// (`has_buffered_data`); then `recv(2)`, `0` bytes where the socket
     /// would block, eof at the peer's close and at an error.
-    fn read(&mut self, _req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
+    fn read_after_buffer(
+        &mut self,
+        req: &mut Request,
+        buf: &mut [u8],
+        eof: &mut bool,
+        has_buffered_data: bool,
+    ) -> Option<usize> {
+        if self.crypto_active() {
+            let read = self.with_layer(has_buffered_data, |layer, lent| {
+                layer.read(req, lent, buf, eof)
+            });
+            return match read {
+                Some(Ok(read)) => read,
+                Some(Err(thrown)) => {
+                    super::filters::defer(req, thrown);
+                    None
+                }
+                None => None,
+            };
+        }
         let sock = self.sock.as_mut()?;
         let mut dont_wait = false;
         if self.is_blocked {
-            dont_wait = self.timeout == Some(Duration::ZERO);
+            dont_wait = has_buffered_data || self.timeout == Some(Duration::ZERO);
             if !dont_wait {
                 self.timeout_event = false;
                 loop {
@@ -318,10 +469,21 @@ impl Ops for Socket {
         }
     }
 
-    /// `php_sockop_close`: `closesocket`, which the drop is.
+    /// `php_sockop_close`: `closesocket`, which the drop is, after the
+    /// crypto layer's own close, `SSL_shutdown` and free, which its drop
+    /// is.
     fn close(&mut self, _req: &mut Request) -> i32 {
+        self.crypto = None;
         self.sock = None;
         0
+    }
+
+    fn as_socket(&mut self) -> Option<&mut Socket> {
+        Some(self)
+    }
+
+    fn adopt(&mut self, own: Stream) {
+        self.own = Some(own);
     }
 
     /// `php_sockop_stat`: `fstat(2)` of the socket.
@@ -338,23 +500,32 @@ impl Ops for Socket {
         }
     }
 
-    /// `php_sockop_cast`: the socket, for any cast to a fd.
+    /// `php_sockop_cast`: the socket, for any cast to a fd; with an active
+    /// crypto layer, `php_openssl_sockop_cast` refuses every cast but the
+    /// one `select(2)` asks for, since the bytes on the socket are not the
+    /// stream's.
     fn cast_target(
         &mut self,
         _req: &mut Request,
-        _cast: Cast,
+        cast: Cast,
         _own: Option<Stream>,
     ) -> CastTarget<'_> {
+        if cast != Cast::Select && self.crypto_active() {
+            return CastTarget::Refused;
+        }
         self.sock
             .as_ref()
             .map_or(CastTarget::Refused, |sock| CastTarget::Fd(sock.fd()))
     }
 
     /// `php_sockop_set_option` (`Z/main/streams/xp_socket.c:333`):
-    /// `PHP_STREAM_OPTION_CHECK_LIVENESS` is [`Socket::alive`],
+    /// `PHP_STREAM_OPTION_CHECK_LIVENESS` is [`Socket::alive`], or, with an
+    /// active crypto layer, the layer's answer once the socket polls
+    /// readable without waiting and alive where it does not
+    /// (`php_openssl_sockop_set_option`),
     /// `PHP_STREAM_OPTION_BLOCKING` is `php_set_sock_blocking`, and
     /// `PHP_STREAM_OPTION_READ_TIMEOUT` the timeout a read waits for.
-    fn set_option(&mut self, _req: &mut Request, option: StreamOption) -> OptionAnswer {
+    fn set_option(&mut self, req: &mut Request, option: StreamOption) -> OptionAnswer {
         match option {
             StreamOption::Blocking(blocking) => {
                 let Some(sock) = self.sock.as_ref() else {
@@ -370,6 +541,23 @@ impl Ops for Socket {
                 self.timeout = Some(timeout);
                 self.timeout_event = false;
                 OptionAnswer::Ok
+            }
+            StreamOption::Liveness if self.crypto_active() => {
+                let readable = self.sock.as_ref().is_some_and(|sock| {
+                    matches!(
+                        php_heap::poll_fd(sock.fd(), Readiness::Readable, Some(Duration::ZERO)),
+                        Ok(true)
+                    )
+                });
+                let alive = !readable
+                    || self
+                        .with_layer(false, |layer, lent| layer.alive(req, lent))
+                        .unwrap_or(false);
+                if alive {
+                    OptionAnswer::Ok
+                } else {
+                    OptionAnswer::Err
+                }
             }
             StreamOption::Liveness => {
                 if self.alive() {
@@ -541,6 +729,7 @@ impl Socket {
         };
         let mut accepted = Socket::new(client, self.label, self.timeout);
         accepted.is_blocked = self.is_blocked;
+        accepted.crypto = self.crypto.as_ref().map(|layer| layer.accepted());
         Ok((accepted, want_peer.then_some(peer)))
     }
 }
@@ -864,24 +1053,68 @@ const TRANSPORTS: [(&str, &str); 4] = [
     ("udg", "udg_socket"),
 ];
 
+/// What a `transport`'s name finds in `xport_hash`: one of the engine's
+/// four, by the label of its kind, or one an extension registered, which
+/// is a `tcp` socket with the extension's crypto layer.
+#[derive(Clone, Copy)]
+enum Found {
+    Engine(&'static str),
+    Registered(XportFactory),
+}
+
 impl Request {
     /// `stream_get_transports()`: the registered `transports` in the order
-    /// they were registered, `tcp`, `udp`, `unix` and `udg`.
+    /// they were registered, `tcp`, `udp`, `unix` and `udg`, then what the
+    /// bundle's extensions registered, in bundle order, a name already
+    /// there taken over in its place as `zend_hash_update` keeps it.
+    ///
+    /// ```php
+    /// echo implode(',', array_slice(stream_get_transports(), 0, 4)), "\n";
+    /// ```
+    /// ```expect
+    /// tcp,udp,unix,udg
+    /// ```
     #[must_use]
     pub fn transports(&self) -> Vec<&'static str> {
-        TRANSPORTS.iter().map(|(name, _)| *name).collect()
+        let mut names: Vec<&'static str> = TRANSPORTS.iter().map(|(name, _)| *name).collect();
+        for transport in self.registered::<XportFactory>() {
+            if !names.contains(&transport.name) {
+                names.push(transport.name);
+            }
+        }
+        names
+    }
+
+    /// `zend_hash_str_find_ptr(&xport_hash, protocol)`: the last
+    /// registration of the name, an extension's over the engine's.
+    fn transport_named(&self, protocol: &[u8]) -> Option<Found> {
+        if let Some(transport) = self
+            .registered::<XportFactory>()
+            .filter(|t| t.name.as_bytes() == protocol)
+            .last()
+        {
+            return Some(Found::Registered(*transport));
+        }
+        TRANSPORTS
+            .iter()
+            .find(|(registered, _)| registered.as_bytes() == protocol)
+            .map(|&(_, label)| Found::Engine(label))
     }
 
     /// `_php_stream_xport_create` (`Z/main/streams/transports.c:52`) under
     /// `REPORT_ERRORS` with an error string asked for: the `transport` read
     /// off the front of `name`, `tcp` where it names none, one nobody
-    /// registered being php's `Unable to find the socket transport`; then
-    /// a client connected to the rest of the name, within `timeout`, or a
-    /// server bound to it, and listening where `listen` says. The stream
-    /// is `r+`, of the `transport`'s kind, with the name as written as its
-    /// `uri` and `default_socket_timeout` as its read timeout. A failure
-    /// is its error code and text, which the natives print; the `Err` is
-    /// the memory limit.
+    /// registered being php's `Unable to find the socket transport`; for
+    /// one an extension registered, its crypto layer made first, as the
+    /// factory makes the stream; then a client connected to the rest of
+    /// the name, within `timeout`, or a server bound to it, and listening
+    /// where `listen` says. The stream is `r+`, of the `transport`'s kind,
+    /// with the name as written as its `uri`, the `context` as its own and
+    /// `default_socket_timeout` as its read timeout; a client's layer is
+    /// then asked [`Crypto::connected`], and one that refuses fails the
+    /// connect with no text. A failure is its error code and text, which
+    /// the natives print; the `Err` is the memory limit or what the
+    /// layer's factory threw.
     pub fn xport_create(
         &mut self,
         name: &[u8],
@@ -897,10 +1130,7 @@ impl Request {
             } else {
                 (&b"tcp"[..], name)
             };
-        let Some(&(_, label)) = TRANSPORTS
-            .iter()
-            .find(|(registered, _)| registered.as_bytes() == protocol)
-        else {
+        let Some(found) = self.transport_named(protocol) else {
             let shown = String::from_utf8_lossy(&protocol[..protocol.len().min(31)]);
             return Ok(Err(XportFailure {
                 code: 0,
@@ -909,23 +1139,86 @@ impl Request {
                 ),
             }));
         };
-        let role = match &xport {
-            Xport::Client { .. } => Role::Peer,
-            Xport::Server { socket, .. } => Role::Server {
-                accept_nodelay: socket.tcp_nodelay,
-            },
+        let (context, role) = match &xport {
+            Xport::Client { context, .. } => (*context, Role::Peer),
+            Xport::Server {
+                socket, context, ..
+            } => (
+                *context,
+                Role::Server {
+                    accept_nodelay: socket.tcp_nodelay,
+                },
+            ),
         };
-        let made = match (label, xport) {
-            ("tcp_socket", Xport::Client { timeout, socket }) => {
-                connect_inet(self, rest, false, timeout, &socket)
+        let (label, crypto) = match found {
+            Found::Engine(label) => (label, None),
+            Found::Registered(transport) => {
+                let timeout = match &xport {
+                    Xport::Client { timeout, .. } => *timeout,
+                    Xport::Server { .. } => default_timeout(self),
+                };
+                let protocol = String::from_utf8_lossy(protocol);
+                let layer = (transport.layer)(self, &protocol, rest, timeout, context)?;
+                ("tcp_socket", Some((transport.label, layer)))
             }
-            ("udp_socket", Xport::Client { timeout, socket }) => {
-                connect_inet(self, rest, true, timeout, &socket)
+        };
+        let made = self.make_sock(label, rest, xport);
+        let sock = match made {
+            Ok(sock) => sock,
+            Err(failed) => return Ok(Err(failed)),
+        };
+        let (label, crypto) = match crypto {
+            Some((label, layer)) => (label, Some(layer)),
+            None => (label, None),
+        };
+        let mut kind = Socket::new(sock, label, default_timeout(self));
+        kind.role = role;
+        kind.crypto = crypto;
+        let mut stream = PhpStream::new(Box::new(kind), b"r+");
+        stream.orig_path = Some(name.to_vec());
+        stream.flags.no_seek = true;
+        let stream = self.stream_alloc(stream)?;
+        stream.set_ctx(self, context);
+        if role == Role::Peer {
+            let connected = self
+                .stream_op(stream, |req, s| {
+                    s.ops
+                        .as_socket()
+                        .map_or(Ok(()), |socket| socket.crypto_connected(req))
+                })
+                .unwrap_or(Ok(()));
+            if connected.is_err() {
+                stream.free(self);
+                return Ok(Err(XportFailure {
+                    code: 0,
+                    text: String::new(),
+                }));
             }
-            ("tcp_socket", Xport::Server { listen, socket }) => {
+        }
+        Ok(Ok(stream))
+    }
+
+    /// The socket of a `transport`'s kind, by its label: a client
+    /// connected or a server bound, `php_stream_xport_connect` and
+    /// `php_stream_xport_bind` under the kind's ops.
+    fn make_sock(&mut self, label: &str, rest: &[u8], xport: Xport) -> Result<Sock, XportFailure> {
+        match (label, xport) {
+            (
+                "tcp_socket",
+                Xport::Client {
+                    timeout, socket, ..
+                },
+            ) => connect_inet(self, rest, false, timeout, &socket),
+            (
+                "udp_socket",
+                Xport::Client {
+                    timeout, socket, ..
+                },
+            ) => connect_inet(self, rest, true, timeout, &socket),
+            ("tcp_socket", Xport::Server { listen, socket, .. }) => {
                 bind_inet(self, rest, false, listen, &socket)
             }
-            ("udp_socket", Xport::Server { listen, socket }) => {
+            ("udp_socket", Xport::Server { listen, socket, .. }) => {
                 bind_inet(self, rest, true, listen, &socket)
             }
             ("unix_socket", Xport::Client { .. }) => {
@@ -958,17 +1251,7 @@ impl Request {
                         text: String::new(),
                     })
             }
-        };
-        let sock = match made {
-            Ok(sock) => sock,
-            Err(failed) => return Ok(Err(failed)),
-        };
-        let mut kind = Socket::new(sock, label, default_timeout(self));
-        kind.role = role;
-        let mut stream = PhpStream::new(Box::new(kind), b"r+");
-        stream.orig_path = Some(name.to_vec());
-        stream.flags.no_seek = true;
-        Ok(Ok(self.stream_alloc(stream)?))
+        }
     }
 
     /// `php_stream_sock_open_from_socket` (`Z/main/network.c:1020`): a
@@ -991,16 +1274,31 @@ impl Request {
         name: Option<&str>,
         blocking: bool,
     ) -> Result<Stream, Thrown> {
-        let found = name.and_then(|name| TRANSPORTS.iter().find(|(r, _)| *r == name));
+        let found = name.and_then(|name| Some((name, self.transport_named(name.as_bytes())?)));
+        let mut crypto = None;
         let (sock, label) = match found {
-            Some(("tcp", label)) => (Sock::Tcp(TcpStream::from(fd)), *label),
-            Some(("udp", label)) => (Sock::Udp(UdpSocket::from(fd)), *label),
-            Some(("unix", label)) => (Sock::Unix(UnixStream::from(fd)), *label),
-            Some(("udg", label)) => (Sock::Udg(UnixDatagram::from(fd)), *label),
+            Some((_, Found::Registered(transport))) => {
+                let layer = (transport.layer)(self, transport.name, b"", None, None)?;
+                crypto = Some(layer);
+                (Sock::Tcp(TcpStream::from(fd)), transport.label)
+            }
+            Some((_, Found::Engine("tcp_socket"))) => {
+                (Sock::Tcp(TcpStream::from(fd)), "tcp_socket")
+            }
+            Some((_, Found::Engine("udp_socket"))) => {
+                (Sock::Udp(UdpSocket::from(fd)), "udp_socket")
+            }
+            Some((_, Found::Engine("unix_socket"))) => {
+                (Sock::Unix(UnixStream::from(fd)), "unix_socket")
+            }
+            Some((_, Found::Engine("udg_socket"))) => {
+                (Sock::Udg(UnixDatagram::from(fd)), "udg_socket")
+            }
             _ => (Sock::Generic(UnixStream::from(fd)), "generic_socket"),
         };
         let mut kind = Socket::new(sock, label, default_timeout(self));
         kind.is_blocked = blocking;
+        kind.crypto = crypto;
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
         if let Some((name, _)) = found {
             stream.orig_path = Some(format!("{name}://").into_bytes());
@@ -1057,6 +1355,21 @@ impl Stream {
         let mut stream = PhpStream::new(Box::new(client), b"r+");
         stream.flags.no_seek = true;
         let client = req.stream_alloc(stream)?;
+        // `xparam->outputs.client->ctx = stream->ctx`, one owner more, and
+        // the client's crypto enabled where the listener's transport says.
+        let context = self.ctx(req);
+        client.set_ctx(req, context);
+        let connected = req
+            .stream_op(client, |req, s| {
+                s.ops
+                    .as_socket()
+                    .map_or(Ok(()), |socket| socket.crypto_connected(req))
+            })
+            .unwrap_or(Ok(()));
+        if let Err(text) = connected {
+            client.free(req);
+            return Ok(Err(Some(text)));
+        }
         let peer = match peer {
             Some(peer) => Some(PhpString::new(req, &peer)?),
             None => None,
@@ -1181,4 +1494,73 @@ impl Stream {
             Some(Xported::Shut(true))
         )
     }
+}
+
+impl Stream {
+    /// `php_stream_xport_crypto_setup` (`Z/main/streams/transports.c:357`):
+    /// `STREAM_XPORT_CRYPTO_OP_SETUP` of the stream's crypto layer with
+    /// php's `method` bits and the `session_stream`; `true` for php's `0`.
+    /// A stream with no layer is php's warning `This stream does not
+    /// support SSL/crypto` and `false`.
+    ///
+    /// ```php
+    /// [$a, $b] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+    /// var_dump(stream_socket_enable_crypto($a, true, STREAM_CRYPTO_METHOD_TLS_CLIENT));
+    /// ```
+    /// ```expect
+    /// Warning: stream_socket_enable_crypto(): This stream does not support SSL/crypto in %s on line 3
+    /// bool(false)
+    /// ```
+    pub fn crypto_setup(self, req: &mut Request, method: i64, session: Option<Stream>) -> bool {
+        let answered = req
+            .stream_op(self, |req, s| {
+                s.ops
+                    .as_socket()
+                    .and_then(|socket| socket.crypto_setup(req, method, session))
+            })
+            .flatten();
+        answered.unwrap_or_else(|| {
+            no_crypto(req);
+            false
+        })
+    }
+
+    /// `php_stream_xport_crypto_enable` (`Z/main/streams/transports.c:378`):
+    /// `STREAM_XPORT_CRYPTO_OP_ENABLE` of the stream's crypto layer, the
+    /// handshake where `activate` and the layer shut where not; a stream
+    /// with no layer is php's warning and [`Handshake::Unsupported`].
+    pub fn crypto_enable(self, req: &mut Request, activate: bool) -> Handshake {
+        let answered = req
+            .stream_op(self, |req, s| {
+                s.ops
+                    .as_socket()
+                    .and_then(|socket| socket.crypto_enable(req, activate))
+            })
+            .flatten();
+        answered.unwrap_or_else(|| {
+            no_crypto(req);
+            Handshake::Unsupported
+        })
+    }
+
+    /// The stream's crypto layer handed to `f`, as `xp_ssl.c` reads a
+    /// `session_stream`'s `abstract` once its `ops` are
+    /// `php_openssl_socket_ops`: `None` for a stream with no layer, one
+    /// closed, and one inside a call already.
+    pub fn crypto<R>(self, req: &mut Request, f: impl FnOnce(&mut dyn Crypto) -> R) -> Option<R> {
+        req.stream_op(self, |_, s| {
+            s.ops.as_socket().and_then(Socket::crypto_layer).map(f)
+        })
+        .flatten()
+    }
+}
+
+/// `php_error_docref("streams.crypto", E_WARNING, ...)` for a stream whose
+/// kind answers `PHP_STREAM_OPTION_CRYPTO_API` with `NOTIMPL`.
+fn no_crypto(req: &mut Request) {
+    let text = format!(
+        "{}(): This stream does not support SSL/crypto",
+        req.active_native()
+    );
+    warning(req, &text);
 }

@@ -194,9 +194,14 @@ fn connect(
     let mut transport = b"tcp://".to_vec();
     transport.extend_from_slice(resource.host.as_deref().map(cstr).unwrap_or_default());
     transport.extend_from_slice(format!(":{}", resource.port.unwrap_or(21)).as_bytes());
-    let socket = socket_options(req, ctx)?;
+    let (socket, context) = socket_options(req, ctx)?;
     let timeout = timeval(default_timeout(req).trunc());
-    let control = match req.xport_create(&transport, Xport::Client { timeout, socket })? {
+    let xport = Xport::Client {
+        timeout,
+        socket,
+        context,
+    };
+    let control = match req.xport_create(&transport, xport)? {
         Ok(stream) => stream,
         Err(XportFailure { text, .. }) => {
             let text = if text.is_empty() {
@@ -580,9 +585,14 @@ fn open(
     let mut transport = b"tcp://".to_vec();
     transport.extend_from_slice(&host);
     transport.extend_from_slice(format!(":{}", passive.port).as_bytes());
-    let socket = socket_options(req, ctx)?;
+    let (socket, context) = socket_options(req, ctx)?;
     let timeout = timeval(default_timeout(req).trunc());
-    let data = match req.xport_create(&transport, Xport::Client { timeout, socket })? {
+    let xport = Xport::Client {
+        timeout,
+        socket,
+        context,
+    };
+    let data = match req.xport_create(&transport, xport)? {
         Ok(data) => data,
         Err(XportFailure { text, .. }) => return refused(req, Reply::default(), Some(text)),
     };
@@ -646,7 +656,12 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
     transport.extend_from_slice(format!(":{}", passive.port).as_bytes());
     let timeout = timeval(default_timeout(req).trunc());
     let socket = SocketOptions::default();
-    let data = match req.xport_create(&transport, Xport::Client { timeout, socket })? {
+    let xport = Xport::Client {
+        timeout,
+        socket,
+        context: None,
+    };
+    let data = match req.xport_create(&transport, xport)? {
         Ok(data) => data,
         Err(XportFailure { text, .. }) => {
             let text = if text.is_empty() {
