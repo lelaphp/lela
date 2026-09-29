@@ -44,7 +44,7 @@ pub use crate::open_basedir::{HostPath, Refused};
 use crate::output::Output;
 use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
-pub(crate) use callable::{Deprecations, Refusal};
+pub(crate) use callable::{Deprecations, Refusal, compound_split};
 pub use execution::Execution;
 pub use unit_cache::{CacheStatus, CachedFile, Invalidation, Restart, UnitCache};
 

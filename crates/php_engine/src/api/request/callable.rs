@@ -119,6 +119,31 @@ enum Resolved {
     },
 }
 
+/// Where a compound `Class::method` name splits, as
+/// `zend_is_callable_check_func` and `zend_init_dynamic_call_string`
+/// both find it: the last `:` of the name, where it is past the first
+/// byte and a second `:` stands before it, and the split is at that
+/// second one, so `::m` has an empty class half and `C:` none at all.
+///
+/// ```php
+/// class C { static function __callStatic($m, $a) { var_dump($m); } }
+/// foreach (['C::', '::m', 'C:', ':m'] as $f) {
+///     try { $f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// string(0) ""
+/// Class "" not found
+/// Call to undefined function C:()
+/// Call to undefined function :m()
+/// ```
+pub(crate) fn compound_split(name: &[u8]) -> Option<usize> {
+    name.iter()
+        .rposition(|byte| *byte == b':')
+        .filter(|at| *at > 0 && name[*at - 1] == b':')
+        .map(|at| at - 1)
+}
+
 impl Request {
     /// Whether `zend_is_callable_ex` accepts a value, no trampoline
     /// made: `is_callable()` and a `callable` type check, which raise
@@ -602,12 +627,7 @@ impl Request {
                 return Ok(());
             }
         }
-        // `zend_memrchr(callable, ':')` preceded by a second `:`.
-        let split = callable
-            .iter()
-            .rposition(|byte| *byte == b':')
-            .filter(|at| *at > 0 && callable[*at - 1] == b':')
-            .map(|at| at - 1);
+        let split = compound_split(callable);
         let method: Vec<u8> = match split {
             Some(0) => return Err("invalid function name".into()),
             Some(at) => {

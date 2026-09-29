@@ -1401,11 +1401,7 @@ fn dynamic_call_string(
     name: &[u8],
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
-    let split = name
-        .windows(2)
-        .rposition(|pair| pair == b"::")
-        .filter(|at| *at > 0);
-    if let Some(at) = split {
+    if let Some(at) = crate::api::request::compound_split(name) {
         let class = dynamic_call_class(req, &name[..at])?;
         return dynamic_call_static(req, class, &name[at + 2..], this);
     }
