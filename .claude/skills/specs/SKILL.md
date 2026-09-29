@@ -82,16 +82,20 @@ After the last merge of a batch, before any push:
 
 1. `cargo xtask port-map` when `crates/php_ext` changed.
 2. `cargo xtask witness` over every crate. The hook runs only staged crates' witnesses, which is how #681 broke ext/reflection unseen until #733.
-3. On a fresh release build, the lane and `Zend/tests`, each held test by test against the merge base, the tip before the batch, whose runs the cut's first step kept (#664):
+3. On a fresh release build, the lane and `Zend/tests`, each held test by test against the merge base, the tip before the batch, whose runs the cut's first step kept (#664). The witness and the four runs read the tree and not each other, and each run works in its own copy of the pinned tree (#1183), so they run at once; the lane is the longest:
    ```
-   cargo build --release -p php
-   cargo xtask phpt --census --against <base> > $S/lane-<head>.out
-   cargo xtask phpt --subset Zend/tests --against <base> > $S/zend-<head>.out
-   cargo xtask phpt --subset tests --against <base> > $S/tests-<head>.out
-   cargo xtask phpt --subset sapi/cli --against <base> > $S/cli-<head>.out
+   cargo build --release -p php -p xtask
+   cargo xtask witness > $S/witness-<head>.out 2>&1 &
+   cargo xtask phpt --census --against <base> > $S/lane-<head>.out &
+   cargo xtask phpt --subset Zend/tests --against <base> > $S/zend-<head>.out &
+   cargo xtask phpt --subset tests --against <base> > $S/tests-<head>.out &
+   cargo xtask phpt --subset sapi/cli --against <base> > $S/cli-<head>.out &
+   wait
+   grep -E '^(fail|skip) witness' $S/witness-<head>.out
    grep -E '^regressed |@against' $S/lane-<head>.out $S/zend-<head>.out $S/tests-<head>.out $S/cli-<head>.out
+   git fetch origin && cargo xtask done --base origin/main
    ```
-   No regression means every `@against` reading passes. A skip is no verdict (a stale binary, no run kept at the base, different subsets) and never reads as no regression. With no run kept at the base, take one in a checkout of the base with its engine built.
+   No regression means every `@against` reading passes. A skip is no verdict (a stale binary, no run kept at the base, different subsets) and never reads as no regression. With no run kept at the base, take one in a checkout of the base with its engine built. `done` at the end names what pre-push would refuse (a stale `port-map`, a new subset with no reading), so it is taken before the push rather than after a refusal.
 4. Push only on no regressions and a fast-forward: `git fetch origin`, `git merge-base --is-ancestor origin/main HEAD`, `git push origin main`. A `main` another session moved is merged in first, and the check runs again against the moved tip.
 
 A regression sends its branch back as a blocker (step 1), and the rest of the batch goes on without it: return the checkout to the base with `git reset --keep <base>` (the merges are unpushed, each branch keeps its own commits, and `--keep` leaves a person's uncommitted edit standing where `--hard` would discard it), merge the others again and run the check again.
