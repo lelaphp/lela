@@ -5822,6 +5822,8 @@ impl Emit<'_> {
         Ok(Attribute {
             name: Name(name.into_boxed_slice()),
             arguments,
+            line: attribute.line,
+            strict: self.typing == Typing::Strict,
         })
     }
 

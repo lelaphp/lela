@@ -4233,9 +4233,16 @@ fn arg_type_error(
 /// `frame`, and nothing where a native pushed it or where `frame` is
 /// the one `serve` pushed. Both `zend_missing_arg_error` and
 /// `zend_verify_arg_error` drop the clause that names the call site
-/// where this is nothing.
+/// where this is nothing. A frame a native pushed from an attribute's
+/// site ([`exec::Site`]) names the site.
 fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
-    let caller = req.vm().at(frame)?.caller.frame()?;
+    let Some(caller) = req.vm().at(frame)?.caller.frame() else {
+        // A call a native served from an attribute's site, which is
+        // user code (`zend_get_attribute_object`'s dummy frame).
+        return req
+            .site_below(frame)
+            .map(|site| (String::from_utf8_lossy(&site.file).into_owned(), site.line));
+    };
     let caller = req.vm().at(caller)?;
     Some((
         exec::body_of(&caller.unit, caller.body)

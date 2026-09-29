@@ -833,6 +833,8 @@ fn sid_attributes() -> Vec<Attribute> {
             argument(b"since", b"8.4"),
             argument(b"message", b"as GET/POST sessions were deprecated"),
         ],
+        line: 0,
+        strict: false,
     }]
 }
 

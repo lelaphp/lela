@@ -18,12 +18,12 @@ use std::fmt::Write as _;
 
 use php_ext::abi::This;
 use php_ext::attr::php_class;
-use php_ext::call::{eval_const_expr, instantiate_named, lookup_class};
+use php_ext::call::{attribute_object, eval_const_expr, lookup_class};
 use php_ext::coerce::value_name;
 use php_ext::decl::{Attribute, class_attribute_refusal};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString};
 
 use super::{
     class_is, class_name_of, class_named, default_value_string, is_internal, keep_attribute,
@@ -72,6 +72,9 @@ pub(super) struct AttributeRef {
     pub(super) scope: Option<ClassId>,
     pub(super) target: i64,
     pub(super) repeated: bool,
+    /// The file the subject was declared in, php's `attr->filename`:
+    /// none for a native's.
+    pub(super) file: Option<Vec<u8>>,
 }
 
 /// `zend_get_attribute_target_names`: the bits set, in bit order,
@@ -88,6 +91,12 @@ fn target_names(flags: i64) -> String {
         out.push_str(name);
     }
     out
+}
+
+/// php's `attr->filename` for a subject declared in `file`: the file,
+/// and none for a native's, whose declaration names none.
+pub(super) fn declared_in(file: &[u8]) -> Option<Vec<u8>> {
+    (!file.is_empty()).then(|| file.to_vec())
 }
 
 /// `reflect_attributes` (`php_reflection.c`) with `read_attributes`
@@ -115,6 +124,7 @@ pub(super) fn reflect_attributes(
     attributes: &[Attribute],
     scope: Option<ClassId>,
     target: i64,
+    file: Option<&[u8]>,
     name: Option<PhpString>,
     flags: i64,
 ) -> Result<PhpArray, Thrown> {
@@ -155,6 +165,7 @@ pub(super) fn reflect_attributes(
             scope,
             target,
             repeated: repeated.get(at).copied().unwrap_or(false),
+            file: file.map(<[u8]>::to_vec),
         };
         let object = attribute_factory(req, &kept)?;
         out.append(req, object.as_value())?;
@@ -246,27 +257,6 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
 /// with the attribute's arguments, the named ones by their names, as
 /// `object_init_with_constructor` serves them
 /// ([`instantiate_named`]).
-fn construct(req: &mut Request, class: ClassId, kept: &AttributeRef) -> Result<PhpObject, Thrown> {
-    let mut positional = Vec::new();
-    let mut named: Vec<(PhpString, Value)> = Vec::new();
-    for argument in &kept.attribute.arguments {
-        let value = eval_const_expr(req, &argument.value, kept.scope)?;
-        match &argument.name {
-            Some(name) => named.push((PhpString::new(req, &name.0)?, value)),
-            None => positional.push(value),
-        }
-    }
-    let made = instantiate_named(req, class, &positional, &named);
-    for value in positional {
-        req.release(value);
-    }
-    for (name, value) in named {
-        req.release(Value::string(name));
-        req.release(value);
-    }
-    made
-}
-
 /// `ReflectionAttribute` as the stub declares it.
 #[php_class(implements(crate::Reflector), not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionAttribute;
@@ -451,6 +441,32 @@ impl ReflectionAttribute {
     /// Cannot apply #[\Attribute] to trait T
     /// Cannot apply #[\AllowDynamicProperties] to readonly class R
     /// ```
+    ///
+    /// The arguments are evaluated and the constructor called under a
+    /// site at the attribute's own file and line, which no trace row
+    /// shows (`zend_get_attribute_object`'s dummy frame,
+    /// [`attribute_object`]): the constructor's row names the
+    /// attribute as its caller, and a throwable an argument raises has no
+    /// `[constant expression]` row over it.
+    ///
+    /// ```php
+    /// #[Attribute]
+    /// class A { public function __construct($x = null) { throw new Exception("ctor"); } }
+    /// #[A]
+    /// class C {}
+    /// #[A(1 % 0)]
+    /// class D {}
+    /// try { (new ReflectionClass('C'))->getAttributes()[0]->newInstance(); } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
+    /// try { (new ReflectionClass('D'))->getAttributes()[0]->newInstance(); } catch (Error $e) { echo $e->getLine(), "\n", $e->getTraceAsString(), "\n"; }
+    /// ```
+    /// ```expect
+    /// #0 %s(4): A->__construct()
+    /// #1 %s(8): ReflectionAttribute->newInstance()
+    /// #2 {main}
+    /// 6
+    /// #0 %s(9): ReflectionAttribute->newInstance()
+    /// #1 {main}
+    /// ```
     fn newInstance(req: &mut Request, this: This<Self>) -> Result<PhpObject, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let written = String::from_utf8_lossy(&kept.attribute.name.0).into_owned();
@@ -496,8 +512,13 @@ impl ReflectionAttribute {
                 &format!("Attribute \"{written}\" must not be repeated"),
             ));
         }
-        let object = construct(req, class, &kept)?;
-        Ok(object)
+        attribute_object(
+            req,
+            class,
+            &kept.attribute,
+            kept.scope,
+            kept.file.as_deref(),
+        )
     }
 
     /// `ReflectionAttribute::__toString()`: `Attribute [ name ]` alone for

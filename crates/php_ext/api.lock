@@ -183,6 +183,7 @@ call::Iter::next
 call::Iter::rewind
 call::Iter::valid
 call::Iter::value
+call::attribute_object
 call::autoload
 call::bound_variables
 call::call
