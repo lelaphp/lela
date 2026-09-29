@@ -2889,6 +2889,18 @@ impl<'a> Linker<'a> {
     /// refused where it is not one or is named twice, then each of them
     /// and each one's parents, `do_interface_implementation` over its
     /// constants and methods and then `interface_gets_implemented`.
+    ///
+    /// A method another interface or a parent put in the table is
+    /// held to the interface's as the class's own is:
+    ///
+    /// ```php
+    /// interface d { static function B(); }
+    /// interface c { function b(); }
+    /// interface a extends d, c {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot make non static method c::B() static in class d in %s on line 2
+    /// ```
     fn implement(
         &mut self,
         child: &'a ClassDecl,
@@ -2951,6 +2963,24 @@ impl<'a> Linker<'a> {
                             Check::Interface,
                         ) {
                             return Some(linked);
+                        }
+                    }
+                    // `do_inherit_method` over a method another class of
+                    // the chain or another interface put there: held to
+                    // the interface's as php holds it, unless it is that
+                    // very method.
+                    Some((Some(held_by), held)) if !same(held_by, interface) => {
+                        let (held_by, held) = (*held_by, *held);
+                        let fe_side = Side {
+                            scope: Self::scope_of(child, Cls::Linked(held_by)),
+                            shown: &held_by.name.0,
+                        };
+                        let (_, proto_side) = Self::own_over(child, interface);
+                        let check = Check::Interface;
+                        let refused =
+                            self.method_refused(child, held, fe_side, method, proto_side, check);
+                        if refused.is_some() {
+                            return refused;
                         }
                     }
                     Some(_) => {}
