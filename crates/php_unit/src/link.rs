@@ -1380,7 +1380,11 @@ struct Linker<'a> {
 /// among them: the traits bound first ([`traits`]), then every refusal
 /// `zend_do_inheritance_ex` and `do_interface_implementation` make,
 /// the first in php's order.
-pub fn link<'a>(child: &'a ClassDecl, lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>) -> Linking {
+pub fn link<'a>(
+    child: &'a ClassDecl,
+    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
+    values: &'a dyn Fn(&ConstExpr) -> Option<ConstExpr>,
+) -> Linking {
     if child.traits.is_empty() {
         let mut linker = Linker::over(lookup, Vec::new());
         let settled = linker.link_refused(child, &[]);
@@ -1393,7 +1397,7 @@ pub fn link<'a>(child: &'a ClassDecl, lookup: &'a dyn Fn(&[u8]) -> Option<Held<'
             autoloads: deferred.autoloads,
         };
     }
-    let composition = match traits::compose(child, lookup) {
+    let composition = match traits::compose(child, lookup, values) {
         Ok(composition) => composition,
         Err(failed) => {
             let (refused, raised) = *failed;

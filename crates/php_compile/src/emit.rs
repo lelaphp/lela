@@ -6681,7 +6681,9 @@ impl Emit<'_> {
                 linked: true,
             })
         };
-        let linking = php_unit::link::link(child, &lookup);
+        // A class that uses traits is never bound early, so nothing
+        // here composes one, and no value is evaluated.
+        let linking = php_unit::link::link(child, &lookup, &|_| None);
         // `zend_can_early_bind`'s `INHERITANCE_UNRESOLVED`, silent: the
         // class is left to its opline.
         if !linking.obligations.is_empty() {
