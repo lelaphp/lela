@@ -1542,7 +1542,18 @@ impl<'a> Linker<'a> {
             .any(|up| self.instance_of_at(up, of, depth + 1))
     }
 
-    /// The members `class` has with what it inherited, its own first.
+    /// The members `class` has with what it inherited, its own first,
+    /// and the methods of the interfaces the chain implements, which
+    /// php's table holds after its own and its parents':
+    ///
+    /// ```php
+    /// interface I { function __construct(); }
+    /// abstract class P implements I {}
+    /// class C extends P { function __construct($a) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Declaration of C::__construct($a) must be compatible with I::__construct() in %s on line 4
+    /// ```
     fn tables(&self, class: &'a ClassDecl) -> Tables<'a> {
         let mut tables = Tables {
             methods: Vec::new(),
@@ -1586,6 +1597,16 @@ impl<'a> Linker<'a> {
                 break;
             }
             at = self.class_parent(here);
+        }
+        // `do_interface_implementation` put each interface's methods the
+        // chain did not declare in the class's table too, so the table a
+        // child inherits holds them.
+        for interface in self.all_interfaces(class) {
+            for method in &interface.methods {
+                if !tables.methods.iter().any(|(_, m)| same_method(m, method)) {
+                    tables.methods.push((interface, method));
+                }
+            }
         }
         tables
     }
