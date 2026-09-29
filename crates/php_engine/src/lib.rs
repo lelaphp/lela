@@ -39,6 +39,7 @@ mod natives;
 mod open_basedir;
 mod ops;
 mod output;
+mod preload;
 #[cfg(test)]
 mod probe;
 mod scanner;

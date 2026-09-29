@@ -11,15 +11,15 @@
 //! answer from.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use php_compile::CompileError;
 use php_unit::Unit;
 
 use crate::api::abi::{Cache, Validation};
-use crate::api::request::{CacheStatus, CachedFile, Restart};
+use crate::api::request::{CacheStatus, CachedFile, Preloaded, Restart};
 
 /// What the unit cache answers for one file: the published unit, the
 /// refusal the compiler gave for it, or nothing at all for a file that
@@ -142,6 +142,22 @@ enum Due {
 }
 
 impl Held {
+    /// One of the preload's saved scripts, `preload_script_in_shared_memory`'s:
+    /// held with no stamp, which nothing validates, and never served
+    /// before, `last_used` zero.
+    pub(crate) fn preloaded(unit: Arc<Unit>, path: Vec<u8>, size: u64, order: u64) -> Held {
+        Held {
+            unit: Ok(unit),
+            path,
+            stamp: None,
+            size,
+            order,
+            hits: AtomicU64::new(0),
+            last_used: AtomicI64::new(0),
+            revalidate: AtomicI64::new(0),
+        }
+    }
+
     /// What a hit under `validation` at the request time `now` is due.
     fn due(&self, validation: Validation, now: i64) -> Due {
         match (validation, self.stamp) {
@@ -197,7 +213,26 @@ pub(crate) struct UnitCache {
     last_restart_time: AtomicI64,
     manual_restarts: AtomicU64,
     restart_pending: AtomicBool,
+    /// What `opcache.preload` preloaded, `ZCSG(preload_script)` and its
+    /// saved scripts, published once before the first request.
+    preloaded: OnceLock<Preloaded>,
 }
+
+/// What [`UnitCache::file`] did with the file it was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Filed {
+    /// Served as held.
+    Hit,
+    /// Compiled and held, `cache_script_in_shared_memory`.
+    Held,
+    /// Compiled and held nowhere.
+    Unheld,
+}
+
+/// `ZCSG(preload_script)`'s name in the cache, the one pseudo-file the
+/// preload's classes and functions are persisted as (`$PRELOAD$`,
+/// `CG(compiled_filename)` in `accel_preload`).
+pub(crate) const PRELOAD_SCRIPT: &[u8] = b"$PRELOAD$";
 
 /// Now, in whole seconds since the epoch, php's `time_t`.
 pub(crate) fn now() -> i64 {
@@ -221,11 +256,30 @@ impl UnitCache {
             last_restart_time: AtomicI64::new(0),
             manual_restarts: AtomicU64::new(0),
             restart_pending: AtomicBool::new(false),
+            preloaded: OnceLock::new(),
         }
     }
 
-    /// The file held under `key`, a full path or a path as written.
+    /// What the preload left, once it has been served.
+    pub(crate) fn preloaded(&self) -> Option<&Preloaded> {
+        self.preloaded.get()
+    }
+
+    /// The preload's tables and saved scripts published, once: the
+    /// first publication stands.
+    pub(crate) fn publish_preload(&self, preloaded: Preloaded) {
+        let _ = self.preloaded.set(preloaded);
+    }
+
+    /// The file held under `key`, a full path or a path as written: a
+    /// saved file of the preload first, as php's hash holds them.
     pub(crate) fn find(&self, key: &UnitKey) -> Option<Arc<Held>> {
+        if let Some(held) = self
+            .preloaded()
+            .and_then(|preloaded| preloaded.script(&key.0))
+        {
+            return Some(Arc::clone(held));
+        }
         self.held.get(key)
     }
 
@@ -260,7 +314,21 @@ impl UnitCache {
         protection: u32,
         now: i64,
         compile: impl FnOnce(&[u8]) -> Result<Arc<Unit>, CompileError>,
-    ) -> Cached {
+    ) -> (Cached, Filed) {
+        // A saved script of the preload, whose timestamp php keeps at
+        // zero, is served as held without the file looked at, whatever
+        // the window; the cache bypassed, `EveryHit`, compiles afresh.
+        if validation != Validation::EveryHit
+            && let Some(held) = self
+                .preloaded()
+                .and_then(|preloaded| preloaded.script(path))
+        {
+            self.hit(held, validation, now);
+            if let Some(written) = written {
+                self.held.alias(written, held);
+            }
+            return (Some(held.unit.clone()), Filed::Hit);
+        }
         let stale = self.held.get(&UnitKey::full(path));
         if let Some(held) = &stale
             && held.validated(validation, now)
@@ -269,7 +337,7 @@ impl UnitCache {
             if let Some(written) = written {
                 self.held.alias(written, held);
             }
-            return Some(held.unit.clone());
+            return (Some(held.unit.clone()), Filed::Hit);
         }
         if let Some(stale) = &stale {
             self.held.remove_all(stale);
@@ -279,14 +347,16 @@ impl UnitCache {
         }
         let stamped = validation != Validation::Never || protection > 0;
         let observed = if stamped { Stamp::of(path) } else { None };
-        let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
+        let Ok(source) = std::fs::read(String::from_utf8_lossy(path).as_ref()) else {
+            return (None, Filed::Unheld);
+        };
         let unit = compile(&source);
         let unheld = stamped
             && observed.is_none_or(|stamp| {
                 protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
             });
         if unheld || self.restart_pending.load(Ordering::Relaxed) {
-            return Some(unit);
+            return (Some(unit), Filed::Unheld);
         }
         let stamp = match validation {
             Validation::Never => None,
@@ -312,7 +382,7 @@ impl UnitCache {
         if let Some(written) = written {
             self.held.alias(written, &held);
         }
-        Some(held.unit.clone())
+        (Some(held.unit.clone()), Filed::Held)
     }
 
     /// `ZCSG(blacklist_misses)++`: a file the blacklist kept out of the
@@ -381,20 +451,38 @@ impl UnitCache {
     pub(crate) fn status(&self, interned_strings: usize) -> CacheStatus {
         let mut held = self.held.snapshot();
         held.retain(|(_, held)| held.unit.is_ok());
-        let keys = u64::try_from(held.len()).unwrap_or(u64::MAX);
+        held.retain(|(_, held)| {
+            self.preloaded()
+                .is_none_or(|preloaded| preloaded.script(&held.path).is_none())
+        });
+        let mut keys = u64::try_from(held.len()).unwrap_or(u64::MAX);
         held.retain(|(key, held)| key.0 == held.path);
         held.sort_by_key(|(_, held)| held.order);
-        let files = held
-            .into_iter()
-            .map(|(_, held)| CachedFile {
-                path: held.path.clone(),
-                hits: held.hits.load(Ordering::Relaxed),
-                size: held.size,
-                last_used: held.last_used.load(Ordering::Relaxed),
-                timestamp: held.stamp.map_or(0, Stamp::seconds),
-                revalidate: held.revalidate.load(Ordering::Relaxed),
-            })
-            .collect();
+        let listed = |held: &Held| CachedFile {
+            path: held.path.clone(),
+            hits: held.hits.load(Ordering::Relaxed),
+            size: held.size,
+            last_used: held.last_used.load(Ordering::Relaxed),
+            timestamp: held.stamp.map_or(0, Stamp::seconds),
+            revalidate: held.revalidate.load(Ordering::Relaxed),
+        };
+        // The preload's pseudo-file and its saved scripts stand in the
+        // hash beside what the requests cached, never validated.
+        let mut files = Vec::new();
+        if let Some(preloaded) = self.preloaded() {
+            files.push(CachedFile {
+                path: PRELOAD_SCRIPT.to_vec(),
+                hits: 0,
+                size: preloaded.statistics.memory_consumption,
+                last_used: 0,
+                timestamp: 0,
+                revalidate: 0,
+            });
+            files.extend(preloaded.scripts.iter().map(|held| listed(held)));
+            let preloaded = u64::try_from(files.len()).unwrap_or(u64::MAX);
+            keys = keys.saturating_add(preloaded);
+        }
+        files.extend(held.into_iter().map(|(_, held)| listed(&held)));
         CacheStatus {
             restart_pending: self.restart_pending.load(Ordering::Relaxed),
             hits: self.hits.load(Ordering::Relaxed),
@@ -406,6 +494,9 @@ impl UnitCache {
             interned_strings: u64::try_from(interned_strings).unwrap_or(u64::MAX),
             keys,
             files,
+            preload: self
+                .preloaded()
+                .map(|preloaded| preloaded.statistics.clone()),
         }
     }
 }
