@@ -507,6 +507,7 @@ fn describe(
     };
     let web = WebRequest {
         method: info.method.as_deref().map(Method::of),
+        request_uri: info.request_uri.clone(),
         query,
         cookies: env.get(b"HTTP_COOKIE").map(<[u8]>::to_vec),
         content_type: info.content_type.clone(),

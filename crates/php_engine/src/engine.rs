@@ -75,6 +75,8 @@ pub struct WebRequest {
     /// `request_method`; `None` where the host was given none, as php-cgi
     /// started from a shell is.
     pub method: Option<Method>,
+    /// `request_uri`, the path the request asked for.
+    pub request_uri: Option<Vec<u8>>,
     /// `query_string`, what `$_GET` is parsed from.
     pub query: Option<Vec<u8>>,
     /// `cookie_data`, the `Cookie` header, what `$_COOKIE` is parsed from.

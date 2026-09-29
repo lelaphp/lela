@@ -448,6 +448,7 @@ request::Request::is_unwind_exit
 request::Request::is_uploaded_file
 request::Request::last_error
 request::Request::loaded_extensions
+request::Request::made_superglobal
 request::Request::memory_peak
 request::Request::memory_usage
 request::Request::named_arguments
@@ -476,7 +477,9 @@ request::Request::registered
 request::Request::release
 request::Request::remove_filter
 request::Request::request_headers
+request::Request::request_method
 request::Request::request_time
+request::Request::request_uri
 request::Request::reset_memory_peak
 request::Request::resource
 request::Request::resources
@@ -521,6 +524,7 @@ request::Request::transports
 request::Request::umask
 request::Request::unit_cache
 request::Request::unregister_tick_function
+request::Request::update_server
 request::Request::url_stat
 request::Request::url_stat_quiet
 request::Request::variadic_arguments

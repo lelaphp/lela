@@ -241,6 +241,46 @@ impl Request {
         self.http_globals.track(global).and_then(|track| *track)
     }
 
+    /// `PG(http_globals)` for an auto-global as it stands, made or not,
+    /// and never made by the asking: what `Phar::webPhar` reads `$_SERVER`
+    /// through, whose `Z_TYPE(...) != IS_UNDEF` asks whether the program
+    /// has named it. A view: no owner taken.
+    #[must_use]
+    pub fn made_superglobal(&mut self, name: &[u8]) -> Option<PhpArray> {
+        let global = AutoGlobal::of(name)?;
+        self.http_globals.track(global).and_then(|track| *track)
+    }
+
+    /// `zend_hash_str_update` on `PG(http_globals)[TRACK_VARS_SERVER]` in
+    /// place, which php allows `$_SERVER` alone (`HT_ALLOW_COW_VIOLATION`,
+    /// `Z/main/php_variables.c:902`): the program's `$_SERVER`, the same
+    /// array while it has not written to its own, sees the row, as
+    /// `phar_mung_server_vars` has it. `value` is the array's from here;
+    /// nothing is written where `$_SERVER` was never made.
+    pub fn update_server(&mut self, name: &[u8], value: Value) -> Result<(), Thrown> {
+        let Some(server) = self.http_globals.server else {
+            self.release(value);
+            return Ok(());
+        };
+        let name = PhpString::new(self, name)?;
+        self.array_update(server.heap(), Key::Str(name).heap(), value)?;
+        self.release(Value::string(name));
+        Ok(())
+    }
+
+    /// `SG(request_info).request_method`, where the host was given one.
+    #[must_use]
+    pub fn request_method(&self) -> Option<&[u8]> {
+        self.web()?.method.as_ref().map(crate::engine::Method::name)
+    }
+
+    /// `SG(request_info).request_uri`, where the host was given one: php's
+    /// CGI takes it from `SCRIPT_NAME` (`init_request_info`).
+    #[must_use]
+    pub fn request_uri(&self) -> Option<&[u8]> {
+        self.web()?.request_uri.as_deref()
+    }
+
     /// Step 8 of `php_request_shutdown` (`Z/main/main.c:2011`): each
     /// track of `PG(http_globals)` given up, `TRACK_VARS_POST` first,
     /// after the shutdown functions are freed and before
