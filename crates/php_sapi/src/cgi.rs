@@ -712,6 +712,9 @@ pub fn serve(
     if invocation.interactive {
         Process.write(b"Interactive mode enabled\n\n");
     }
+    if invocation.behavior == Behavior::Lint {
+        return lint(engine, invocation, &env, ini);
+    }
     let (description, failed) = match describe(invocation, ini, env) {
         Ok(described) => described,
         Err(Refusal::Redirect) => {
@@ -721,24 +724,55 @@ pub fn serve(
     };
     let mut sink = Process;
     let served: Observables = match invocation.behavior {
-        Behavior::Lint if !failed => {
-            let name = description.script_name.clone().unwrap_or_default();
-            let served = engine.lint(description, &mut sink);
-            let mut line = if served.exit_code == 0 {
-                b"No syntax errors detected in ".to_vec()
-            } else {
-                b"Errors parsing ".to_vec()
-            };
-            line.extend_from_slice(&name);
-            line.push(b'\n');
-            sink.write(&line);
-            return if served.exit_code == 0 { 0 } else { 255 };
-        }
         Behavior::Highlight if !failed => engine.highlight(description, &mut sink),
         Behavior::Strip if !failed => engine.strip(description, &mut sink),
         _ => engine.serve(description, &mut sink),
     };
     if failed { 255 } else { served.exit_code }
+}
+
+/// `-l`: each file compiled as its own request and its verdict written,
+/// and while words remain after the one checked, the next checked
+/// (`goto do_repeat`, `Z/sapi/cgi/cgi_main.c:2606`); a file that does not
+/// open ends the process with 255 where it stands, and one that does not
+/// compile leaves the exit 255 once the rest are checked.
+fn lint(
+    engine: &Engine,
+    invocation: &Invocation,
+    env: &Environment,
+    ini: &[(String, String)],
+) -> i32 {
+    let mut this = invocation.clone();
+    let mut exit_code = 0;
+    loop {
+        let (description, failed) = match describe(&this, ini, env.clone()) {
+            Ok(described) => described,
+            Err(Refusal::Redirect) => {
+                Process.write(SECURITY_ALERT.as_bytes());
+                return 255;
+            }
+        };
+        if failed {
+            engine.serve(description, &mut Process);
+            return 255;
+        }
+        let name = description.script_name.clone().unwrap_or_default();
+        let served = engine.lint(description, &mut Process);
+        let mut line = if served.exit_code == 0 {
+            b"No syntax errors detected in ".to_vec()
+        } else {
+            exit_code = 255;
+            b"Errors parsing ".to_vec()
+        };
+        line.extend_from_slice(&name);
+        line.push(b'\n');
+        Process.write(&line);
+        if this.words.len() < 2 {
+            return exit_code;
+        }
+        this.words.remove(0);
+        this.file = None;
+    }
 }
 
 #[cfg(test)]
