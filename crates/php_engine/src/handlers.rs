@@ -18694,6 +18694,86 @@ pub(crate) fn get_type<T: Tier>(
     })
 }
 
+/// `ZEND_ARRAY_KEY_EXISTS` (`Z/Zend/zend_vm_def.h:9747`), what php's
+/// compiler makes of `array_key_exists($k, $a)`
+/// (`zend_compile_func_array_key_exists`): over an array, a reference
+/// followed, [`crate::ops::array_key_exists`], with the key's
+/// `Undefined variable` raised where it asks; over anything else
+/// (`zend_array_key_exists_error`) the key and then the array warned of
+/// where nothing wrote them, and php's `TypeError` naming what the array
+/// is where neither warning threw. The answer into the temporary, the
+/// array freed and then the key. php branches on it where a `JMPZ` or a
+/// `JMPNZ` follows (`ZEND_VM_SMART_BRANCH`); the jump reads the
+/// temporary here, as after [`type_check`].
+///
+/// ```php
+/// $a = ['k' => null]; $r = &$a;
+/// var_dump(array_key_exists('k', $r), array_key_exists('j', $a), array_key_exists($u, ['' => 1]));
+/// if (array_key_exists('k', $a)) echo "branch\n";
+/// try { array_key_exists('k', 'x'); } catch (TypeError $e) { echo $e->getMessage(), " at ", count($e->getTrace()), "\n"; }
+/// try { array_key_exists($u, $v); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { array_key_exists('k', new ArrayObject(['k' => 1])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $u in %s on line 3
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// branch
+/// array_key_exists(): Argument #2 ($array) must be of type array, string given at 0
+///
+/// Warning: Undefined variable $u in %s on line 6
+///
+/// Warning: Undefined variable $v in %s on line 6
+/// array_key_exists(): Argument #2 ($array) must be of type array, null given
+/// array_key_exists(): Argument #2 ($array) must be of type array, ArrayObject given
+/// ```
+pub(crate) fn array_key_exists<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let key = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+    let subject = exec::operand_undef(req, frame, code, op.op2_type, op.op2).deref();
+    let answered = if let Some(array) = subject.as_array().copied() {
+        crate::ops::array_key_exists(req, array, &key, |req| {
+            exec::operand(req, frame, code, op.op1_type, op.op1);
+        })
+    } else {
+        if key.tag() == TypeTag::Undef {
+            exec::operand(req, frame, code, op.op1_type, op.op1);
+        }
+        if subject.tag() == TypeTag::Undef {
+            exec::operand(req, frame, code, op.op2_type, op.op2);
+        }
+        if !req.is_pending() {
+            let shown = crate::ops::value_name(req, &subject);
+            let thrown = crate::api::raising::throw(
+                req,
+                "TypeError",
+                &format!(
+                    "array_key_exists(): Argument #2 ($array) must be of type array, {shown} given"
+                ),
+            );
+            req.leave_pending(&thrown);
+        }
+        Ok(false)
+    };
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    match answered {
+        Ok(found) => {
+            let slot = exec::temporary_slot(code, op.out);
+            let previous = req.set_slot(frame, slot, Value::bool(found));
+            req.release(previous);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
 /// `ZEND_COUNT`: [`crate::ops::count`] over the operand, `sizeof`'s
 /// bit in `extended_value`, into the temporary; the operand freed after
 /// it.

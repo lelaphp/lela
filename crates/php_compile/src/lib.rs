@@ -2249,6 +2249,7 @@ mod tests {
                 b"<?php echo array_slice(func_get_args(), 1);",
                 b"array_slice",
             ),
+            (b"<?php echo array_key_exists($k);", b"array_key_exists"),
         ] {
             assert!(
                 ordinary_call(source, name),
@@ -2844,6 +2845,44 @@ mod tests {
              0018 RETURN null\n\
              LIVE RANGES:\n\
              \x20    3: 0007 - 0017 (tmp/var)\n"
+        );
+    }
+
+    /// `zend_compile_func_array_key_exists` as the oracle at 8.5.9 dumps
+    /// it (#1251): `ARRAY_KEY_EXISTS` over the key and then the array,
+    /// each compiled first, read by a `JMPZ` and freed where nothing
+    /// reads it; one argument is the call.
+    #[test]
+    fn array_key_exists_of_two_arguments_is_its_opcode() {
+        assert_eq!(
+            dump_of(
+                b"<?php echo array_key_exists($k, $a), array_key_exists(1, [1]), array_key_exists($k), array_key_exists($k . \"\", $a[\"x\"]); if (array_key_exists($k, $a)) echo 1; array_key_exists($k, $a);"
+            ),
+            main_dump(
+                18,
+                2,
+                8,
+                "0000 T2 = ARRAY_KEY_EXISTS CV0($k) CV1($a)\n\
+                 0001 ECHO T2\n\
+                 0002 T3 = ARRAY_KEY_EXISTS int(1) array(...)\n\
+                 0003 ECHO T3\n\
+                 0004 INIT_FCALL 1 96 string(\"array_key_exists\")\n\
+                 0005 SEND_VAR CV0($k) 1\n\
+                 0006 V4 = DO_ICALL\n\
+                 0007 ECHO V4\n\
+                 0008 T5 = CONCAT CV0($k) string(\"\")\n\
+                 0009 T6 = FETCH_DIM_R CV1($a) string(\"x\")\n\
+                 0010 T7 = ARRAY_KEY_EXISTS T5 T6\n\
+                 0011 ECHO T7\n\
+                 0012 T8 = ARRAY_KEY_EXISTS CV0($k) CV1($a)\n\
+                 0013 JMPZ T8 0015\n\
+                 0014 ECHO int(1)\n\
+                 0015 T9 = ARRAY_KEY_EXISTS CV0($k) CV1($a)\n\
+                 0016 FREE T9\n\
+                 0017 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    5: 0009 - 0010 (tmp/var)\n"
+            )
         );
     }
 
