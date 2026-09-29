@@ -40,6 +40,7 @@ use crate::api::request::{
     OptionAnswer, Request, Stream, StreamOption, Whence,
 };
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
+use crate::wrapper::TemporaryCheck;
 
 mod filters;
 mod rfc2397;
@@ -1848,7 +1849,7 @@ pub(crate) fn temporary_file(
     dir: Option<&[u8]>,
     prefix: &[u8],
 ) -> Result<Option<Stream>, Thrown> {
-    let Some((file, path)) = req.open_temporary_fd(dir, prefix, false) else {
+    let Some((file, path)) = req.open_temporary_fd(dir, prefix, TemporaryCheck::Never) else {
         return Ok(None);
     };
     let orig_path = path.as_os_str().as_encoded_bytes().to_vec();
@@ -2656,7 +2657,7 @@ fn php_open(
             }
             PhpStream::new(
                 Box::new(Memory {
-                    data: req.body_bytes().to_vec(),
+                    data: req.input_bytes(),
                     fpos: 0,
                     mode: TempMode::ReadOnly,
                     label: "Input",
@@ -2671,7 +2672,7 @@ fn php_open(
         b"stdin" | b"stdout" | b"stderr" => {
             let kind = match lower.as_slice() {
                 b"stdin" => HostFd::Stdin(Memory {
-                    data: req.body_bytes().to_vec(),
+                    data: Vec::new(),
                     fpos: 0,
                     mode: TempMode::ReadOnly,
                     label: "STDIO",

@@ -255,6 +255,23 @@ pub(super) fn decode(req: &mut Request, data: &[u8]) -> Result<bool, Thrown> {
 
 // ------------------------------------------------------------ lifecycle
 
+/// `php_rinit_session(false)`: the request state reset and the save handler and
+/// the serializer the ini names found, the session disabled where either
+/// is unknown; `false` then.
+pub(super) fn rinit_without_start(req: &mut Request) -> bool {
+    rinit_globals(req);
+    let module = Module::find(&ini(req, b"session.save_handler"));
+    let format = Format::find(&ini(req, b"session.serialize_handler"));
+    let state = req.state::<State>();
+    state.module = module;
+    state.format = format;
+    if module.is_none() || format.is_none() {
+        state.status = Status::Disabled;
+        return false;
+    }
+    true
+}
+
 /// `php_rinit_session_globals`.
 fn rinit_globals(req: &mut Request) {
     let state = req.state::<State>();
@@ -271,7 +288,7 @@ fn rinit_globals(req: &mut Request) {
 
 /// `php_rshutdown_session_globals`: the handler closed, the id, the
 /// read data and the start site forgotten.
-fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
+pub(super) fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
     crate::unbind(req);
     let closed = close(req);
     absorb(req, closed)?;
@@ -292,14 +309,7 @@ fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
 /// startup rules are the engine's to serve, over the host's values, as
 /// the engine starts (`ZEND_INI_STAGE_STARTUP`), before this runs.
 pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    rinit_globals(req);
-    let module = Module::find(&ini(req, b"session.save_handler"));
-    let format = Format::find(&ini(req, b"session.serialize_handler"));
-    let state = req.state::<State>();
-    state.module = module;
-    state.format = format;
-    if module.is_none() || format.is_none() {
-        state.status = Status::Disabled;
+    if !rinit_without_start(req) {
         return Ok(());
     }
     if ini_bool(req, b"session.auto_start") {
@@ -885,7 +895,32 @@ fn now() -> i64 {
 }
 
 /// `php_session_send_cookie`: `Set-Cookie` for the session's name and
-/// id with the `session.cookie_*` attributes, added beside any other.
+/// id with the `session.cookie_*` attributes, added beside any other
+/// after `php_session_remove_cookie` dropped the one an earlier id sent,
+/// so a regenerated id leaves one session cookie in the head:
+///
+/// ```php
+/// ob_start();
+/// session_start();
+/// session_regenerate_id();
+/// $cookies = array_filter(headers_list(), fn($h) => str_starts_with($h, "Set-Cookie: PHPSESSID="));
+/// var_dump(count($cookies));
+/// session_destroy();
+/// header_remove("Set-Cookie");
+/// ```
+/// ```request
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Expires: Thu, 19 Nov 1981 08:52:00 GMT
+/// Cache-Control: no-store, no-cache, must-revalidate
+/// Pragma: no-cache
+/// Content-type: text/html; charset=UTF-8
+///
+/// int(1)
+/// ```
 fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
     if headers_sent(req) {
         sent_error(
@@ -940,6 +975,11 @@ fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
         cookie.extend_from_slice(b"; SameSite=");
         cookie.extend_from_slice(&samesite);
     }
+    let name = ini(req, b"session.name");
+    let mut prefix = b"Set-Cookie: ".to_vec();
+    prefix.extend_from_slice(&name);
+    prefix.push(b'=');
+    req.header_remove_prefix(&prefix, b"Set-Cookie".len());
     req.header_add(&cookie, false, 0);
     true
 }

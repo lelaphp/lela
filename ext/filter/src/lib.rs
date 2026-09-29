@@ -14,12 +14,13 @@
 //! validators are `logical`'s, the sanitizers and the callback
 //! `sanitizing`'s.
 //!
-//! The input arrays are what the CLI host fills, `php_sapi_filter` passed
-//! over the variables php registers: `INPUT_SERVER` the five entries
-//! `cli_register_variables` names off the served file, `INPUT_ENV` the
-//! environment, and `INPUT_GET`, `INPUT_POST` and `INPUT_COOKIE` never
-//! initialised, so `filter_input` over them answers the missing
-//! variable's `null`.
+//! The input arrays are `IF_G`'s, what `php_sapi_filter`, the engine's
+//! input filter this extension registers ([`sapi_filter`]), kept raw of
+//! each variable php registered from what the host described: the query
+//! string's, the cookie header's, the form body's and the host's
+//! `$_SERVER` rows; `INPUT_ENV` is the environment as `$_ENV` has it. An
+//! array no variable reached was never initialised, and `filter_input`
+//! over it answers the missing variable's `null`.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -37,14 +38,15 @@ mod logical;
 mod sanitizing;
 
 use constants::{
-    FILTER_CALLBACK, FILTER_DEFAULT, FILTER_FORCE_ARRAY, FILTER_NULL_ON_FAILURE,
-    FILTER_REQUIRE_ARRAY, FILTER_REQUIRE_SCALAR, FILTER_SANITIZE_ADD_SLASHES,
-    FILTER_SANITIZE_EMAIL, FILTER_SANITIZE_ENCODED, FILTER_SANITIZE_FULL_SPECIAL_CHARS,
-    FILTER_SANITIZE_NUMBER_FLOAT, FILTER_SANITIZE_NUMBER_INT, FILTER_SANITIZE_SPECIAL_CHARS,
-    FILTER_SANITIZE_STRING, FILTER_SANITIZE_URL, FILTER_THROW_ON_FAILURE, FILTER_VALIDATE_BOOL,
-    FILTER_VALIDATE_DOMAIN, FILTER_VALIDATE_EMAIL, FILTER_VALIDATE_FLOAT, FILTER_VALIDATE_INT,
-    FILTER_VALIDATE_IP, FILTER_VALIDATE_MAC, FILTER_VALIDATE_REGEXP, FILTER_VALIDATE_URL,
-    INPUT_COOKIE, INPUT_ENV, INPUT_GET, INPUT_POST, INPUT_SERVER,
+    FILTER_CALLBACK, FILTER_DEFAULT, FILTER_FLAG_NO_ENCODE_QUOTES, FILTER_FORCE_ARRAY,
+    FILTER_NULL_ON_FAILURE, FILTER_REQUIRE_ARRAY, FILTER_REQUIRE_SCALAR,
+    FILTER_SANITIZE_ADD_SLASHES, FILTER_SANITIZE_EMAIL, FILTER_SANITIZE_ENCODED,
+    FILTER_SANITIZE_FULL_SPECIAL_CHARS, FILTER_SANITIZE_NUMBER_FLOAT, FILTER_SANITIZE_NUMBER_INT,
+    FILTER_SANITIZE_SPECIAL_CHARS, FILTER_SANITIZE_STRING, FILTER_SANITIZE_URL,
+    FILTER_THROW_ON_FAILURE, FILTER_UNSAFE_RAW, FILTER_VALIDATE_BOOL, FILTER_VALIDATE_DOMAIN,
+    FILTER_VALIDATE_EMAIL, FILTER_VALIDATE_FLOAT, FILTER_VALIDATE_INT, FILTER_VALIDATE_IP,
+    FILTER_VALIDATE_MAC, FILTER_VALIDATE_REGEXP, FILTER_VALIDATE_URL, INPUT_COOKIE, INPUT_ENV,
+    INPUT_GET, INPUT_POST, INPUT_SERVER,
 };
 use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Union};
 use php_ext::attr::{php_class, php_const, php_function};
@@ -54,13 +56,114 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, call_stack_end, docref, new_throwable, throw,
     throw_value,
 };
-use php_ext::request::Request;
+use php_ext::request::{Input, Request};
 use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
 
-/// Nothing is held across a call: `IF_G`'s input arrays are the host's,
-/// read where they are asked for.
+/// `IF_G`'s input arrays: each variable [`sapi_filter`] was handed, raw,
+/// by where it came from; `None` where none came.
 #[derive(Default)]
-struct State {}
+struct State {
+    post: Option<PhpArray>,
+    get: Option<PhpArray>,
+    cookie: Option<PhpArray>,
+    server: Option<PhpArray>,
+}
+
+impl State {
+    /// The array a variable from `input` is kept in, `None` for
+    /// `parse_str()`'s, which php keeps nowhere, and for the
+    /// environment's, which `$_ENV` has.
+    fn slot(&mut self, input: Input) -> Option<&mut Option<PhpArray>> {
+        match input {
+            Input::Post => Some(&mut self.post),
+            Input::Get => Some(&mut self.get),
+            Input::Cookie => Some(&mut self.cookie),
+            Input::Server => Some(&mut self.server),
+            Input::Env | Input::String => None,
+        }
+    }
+}
+
+/// `php_sapi_filter` (`Z/ext/filter/filter.c:504`), the input filter:
+/// the variable kept raw in `IF_G`'s array for where it came from, and
+/// the value handed back through `filter.default` under
+/// `filter.default_flags`, as it came under `unsafe_raw`, the default.
+///
+/// ```php
+/// parse_str("a=<b>", $o); var_dump($o, filter_input(INPUT_GET, "a"));
+/// ```
+/// ```expect
+/// array(1) {
+///   ["a"]=>
+///   string(3) "<b>"
+/// }
+/// NULL
+/// ```
+fn sapi_filter(
+    req: &mut Request,
+    input: Input,
+    name: &[u8],
+    value: &[u8],
+) -> Result<Option<Value>, Thrown> {
+    if req.state::<State>().slot(input).is_some() {
+        let kept = req.state::<State>().slot(input).and_then(|slot| *slot);
+        let array = if let Some(array) = kept {
+            array
+        } else {
+            let array = PhpArray::new(req)?;
+            if let Some(slot) = req.state::<State>().slot(input) {
+                *slot = Some(array);
+            }
+            array
+        };
+        let raw = string_value(req, value)?;
+        req.register_variable(array, name, raw)?;
+    }
+    let raw = string_value(req, value)?;
+    let default = req
+        .ini_get(b"filter.default")
+        .and_then(|named| {
+            FILTERS
+                .iter()
+                .find(|(name, _, _)| name.as_bytes().eq_ignore_ascii_case(named))
+        })
+        .map_or(FILTER_DEFAULT, |(_, id, _)| *id);
+    if value.is_empty() || default == FILTER_UNSAFE_RAW {
+        return Ok(Some(raw));
+    }
+    let flags = match req.ini_get(b"filter.default_flags") {
+        Some(flags) if !flags.is_empty() => atoi(flags),
+        _ => FILTER_FLAG_NO_ENCODE_QUOTES,
+    };
+    let run = Run {
+        flags,
+        options: None,
+        native: "filter",
+    };
+    zval_filter(req, raw, default, &run).map(Some)
+}
+
+/// C's `atoi`.
+fn atoi(bytes: &[u8]) -> i64 {
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.trim_start();
+    let end = text
+        .char_indices()
+        .find(|(at, c)| !(c.is_ascii_digit() || (*at == 0 && (*c == '-' || *c == '+'))))
+        .map_or(text.len(), |(at, _)| at);
+    text[..end].parse().unwrap_or(0)
+}
+
+/// `PHP_RSHUTDOWN_FUNCTION(filter)`: `IF_G`'s arrays given up.
+fn rshutdown(req: &mut Request) {
+    let state = std::mem::take(req.state::<State>());
+    for array in [state.post, state.get, state.cookie, state.server]
+        .into_iter()
+        .flatten()
+    {
+        req.release(array.to_value());
+    }
+}
 
 /// `register_filter_symbols`' constants, in its order: the `INPUT_*`
 /// types, `filter_private.h`'s flags and the filter ids,
@@ -286,6 +389,8 @@ pub fn extension() -> Extension {
         ])
         .on_modify(b"filter.default", update_default_filter)
         .request_state::<State>()
+        .rshutdown(rshutdown)
+        .input_filter(sapi_filter)
         .info(filter_info)
         .build("filter")
 }
@@ -840,17 +945,11 @@ fn array_handler(
     Ok(out)
 }
 
-/// `php_filter_get_storage`: the input array a type names, `None` where
-/// the host never initialised it, and php's `ValueError` for a type that
-/// is not one. The array is the caller's, one owner.
-///
-/// `INPUT_GET`, `INPUT_POST`, `INPUT_COOKIE` and `INPUT_SERVER` are
-/// `IF_G`'s raw arrays, what the host registered through
-/// `php_sapi_filter` and not an auto-global's array: no host describes a query
-/// string, a form body or a cookie header, so the first three were never
-/// initialised. `INPUT_ENV` is `$_ENV` as the host made it, armed first,
-/// since php imports the environment past the filter
-/// (`PG(http_globals)[TRACK_VARS_ENV]`), so `variables_order` decides it:
+/// `php_filter_get_storage` (`Z/ext/filter/filter.c:425`): the input
+/// array a type names, `None` where no variable reached it, and php's
+/// `ValueError` for a type that is not one; `$_SERVER` and `$_ENV` made
+/// first where they are made when named, so their variables have
+/// reached the filter. The array has one more owner, the caller's.
 ///
 /// ```php
 /// var_dump(filter_input_array(INPUT_GET), is_array(filter_input_array(INPUT_ENV)));
@@ -860,39 +959,21 @@ fn array_handler(
 /// bool(true)
 /// ```
 fn storage(req: &mut Request, input: i64) -> Result<Option<PhpArray>, Thrown> {
-    let pairs: Vec<(Vec<u8>, Vec<u8>)> = match input {
-        INPUT_GET | INPUT_POST | INPUT_COOKIE => return Ok(None),
-        INPUT_ENV => {
-            return match req.superglobal(b"_ENV") {
-                Some(array) => Ok(Some(array.copy(req)?)),
-                None => Ok(None),
-            };
-        }
+    let kept = match input {
+        INPUT_POST => req.state::<State>().post,
+        INPUT_GET => req.state::<State>().get,
+        INPUT_COOKIE => req.state::<State>().cookie,
         INPUT_SERVER => {
-            // `cli_register_variables`: what php registers off the
-            // script, each through `php_sapi_filter` into the raw array.
-            let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();
-            let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = [
-                b"PHP_SELF".as_slice(),
-                b"SCRIPT_NAME",
-                b"SCRIPT_FILENAME",
-                b"PATH_TRANSLATED",
-            ]
-            .iter()
-            .map(|name| (name.to_vec(), script.clone()))
-            .collect();
-            pairs.push((b"DOCUMENT_ROOT".to_vec(), Vec::new()));
-            pairs
+            let _ = req.superglobal(b"_SERVER");
+            req.state::<State>().server
         }
+        INPUT_ENV => req.superglobal(b"_ENV"),
         _ => return Err(arg_value_error(req, 1, "be an INPUT_* constant")),
     };
-    let mut array = PhpArray::new(req)?;
-    for (name, value) in pairs {
-        let name = PhpString::new(req, &name)?;
-        let value = string_value(req, &value)?;
-        array.set(req, Key::from_string(name), value)?;
+    if let Some(array) = kept {
+        req.addref(&array.to_value());
     }
-    Ok(Some(array))
+    Ok(kept)
 }
 
 /// `zend_hash_find` by a variable name, a view: a string key alone, or

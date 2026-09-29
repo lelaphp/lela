@@ -37,7 +37,8 @@ use crate::api::values::{
     ValueRef,
 };
 use crate::engine::{
-    Configured, ConfiguredKey, MethodAt, NativeMethod, OutputSink, RequestDescription, Shared,
+    Configured, ConfiguredKey, MethodAt, NativeMethod, OutputSink, RequestDescription,
+    ResponseHead, Shared,
 };
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 pub use crate::open_basedir::{HostPath, Refused};
@@ -59,12 +60,16 @@ mod hooks;
 mod lazy;
 mod linking;
 mod load_file;
+mod post;
 mod preload;
 mod recording;
 mod site_override;
 mod table;
 mod unit_cache;
 mod variables;
+pub use post::Upload;
+pub use variables::{BodyLimits, Input};
+pub(crate) use variables::{atol, url_decode};
 
 pub(crate) use hooks::parent_hook_trampolines;
 pub(crate) use lazy::Strategy;
@@ -1524,7 +1529,7 @@ impl Sink {
 #[derive(Default)]
 pub(crate) struct Kept {
     aside: Vec<Aside>,
-    headers: Option<Vec<u8>>,
+    headers: Option<ResponseHead>,
     body: Vec<u8>,
 }
 
@@ -1553,8 +1558,8 @@ impl OutputSink for Kept {
 
     fn flush(&mut self) {}
 
-    fn send_headers(&mut self, block: &[u8]) {
-        self.headers = Some(block.to_vec());
+    fn send_headers(&mut self, head: &ResponseHead) {
+        self.headers = Some(head.clone());
     }
 
     fn log(&mut self, entry: &[u8]) {
@@ -1649,6 +1654,9 @@ pub struct Request {
     /// php's `PG(http_globals)`: a second owner of each auto-global's
     /// array that has a track of its own ([`variables::HttpGlobals`]).
     http_globals: variables::HttpGlobals,
+    /// php's post state: the body's reader, what the host has handed
+    /// out of it, and the files an upload wrote ([`post::Post`]).
+    post: post::Post,
     /// Each auto-global made just in time and not made yet, php's
     /// `armed` on each of `CG(auto_globals)`: the first
     /// `zend_is_auto_global` of one lays it into `EG(symbol_table)`
@@ -2367,7 +2375,7 @@ impl Request {
     #[allow(clippy::too_many_lines)] // one line per field of the request
     pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
         let cwd = description.cwd.clone();
-        let web = description.is_web;
+        let output = Output::activate(description.web.as_ref());
         let mut resources = Resources::default();
         let stream_type = crate::streams::register(&mut resources);
         let filter_type = resources.register_type(b"stream filter", None);
@@ -2394,7 +2402,7 @@ impl Request {
             ini: Vec::new(),
             error_reporting: 0,
             sink: Sink::Kept(Kept::default()),
-            output: Output::activate(web),
+            output,
             header_callback: None,
             last_error: None,
             startup: None,
@@ -2403,6 +2411,7 @@ impl Request {
             exit_status: 0,
             resources,
             http_globals: variables::HttpGlobals::default(),
+            post: post::Post::default(),
             armed: Vec::new(),
             tables: vec![SymbolTable::default()],
             included_files: Vec::new(),
@@ -6038,18 +6047,32 @@ impl Request {
         self.sink.get().log(entry);
     }
 
-    /// `sapi_module.send_headers`: the header block handed to the sink,
-    /// once, at the commit `sapi_send_headers` makes, or when the request
-    /// ends where nothing committed it.
+    /// `sapi_module.send_headers`: the response's head handed to the
+    /// sink, once, at the commit `sapi_send_headers` makes, or when the
+    /// request ends where nothing committed it; nothing where the host
+    /// asked for none (`no_headers`).
     pub(crate) fn send_header_block(&mut self) {
-        let block = self.header_block();
-        self.sink.get().send_headers(&block);
+        if self
+            .description
+            .web
+            .as_ref()
+            .is_some_and(|web| web.no_headers)
+        {
+            return;
+        }
+        let head = ResponseHead {
+            code: self.output.response_code(),
+            status_line: self.output.status_line().map(<[u8]>::to_vec),
+            lines: self.output.headers().to_vec(),
+        };
+        self.sink.get().send_headers(&head);
     }
 
     /// The header block as the sink is handed it: `SG(sapi_headers).headers`
     /// rendered one line each, and nothing else, since the status line
     /// and its shape are the host's (`sapi_cgi_send_headers` writes
     /// `Status:`, the dev server the HTTP status line).
+    #[cfg(test)]
     pub(crate) fn header_block(&self) -> Vec<u8> {
         let mut block = Vec::new();
         for header in self.output.headers() {
@@ -6187,16 +6210,11 @@ impl Request {
     /// is the CLI's, the CGI's and phpdbg's, `sapi_module.name` read at
     /// `Z/main/main.c:1484`; under another host `display_errors=stderr`
     /// falls to the plain form on the body, which [`Request::display_errors`]
-    /// answers off the host's name. `display_startup_errors` and
-    /// `during_request_startup` are not read: php's display and log
-    /// branches both ask `module_initialized && !during_request_startup`
-    /// before them, and a diagnostic of php's startup window is one
-    /// `php_request_startup` raises between `sapi_activate` and the
-    /// file's compile, in the GPC seeding or a per-directory ini. This
-    /// engine raises nothing before the file's first opline, so the two
-    /// entries decide nothing a request can see, and the recipe's
-    /// `display_startup_errors=1` shows no difference from php's default
-    /// of the same.
+    /// answers off the host's name. What is raised while modules start
+    /// and while the request starts, before the program is compiled, a
+    /// body's reader's warning among it, is displayed only under
+    /// `display_startup_errors`, as php's display branch asks
+    /// `module_initialized && !during_request_startup` before it.
     ///
     /// A fatal's own trace is php 8.5's `fatal_error_backtraces`
     /// (`Z/Zend/zend.c:263`, `On` by default), the half of
@@ -6501,6 +6519,17 @@ impl Request {
     /// php's and observable, `256` is off and `258` the error stream,
     /// so it is copied.
     fn display_errors(&self) -> Display {
+        // `php_error_cb`'s display branch (`Z/main/main.c:1469`): while
+        // modules start and while the request starts, what is raised is
+        // displayed only under `display_startup_errors`, php's default on.
+        let starting = self.display_direct || self.phase == Phase::Startup;
+        if starting
+            && self
+                .ini_get(b"display_startup_errors")
+                .is_some_and(|value| !ini_truth(Some(value)))
+        {
+            return Display::Off;
+        }
         let mode = match self.ini_get(b"display_errors") {
             None => DISPLAY_ERRORS_STDOUT,
             Some(value) => match value.to_ascii_lowercase().as_slice() {
@@ -13230,10 +13259,18 @@ impl Request {
 
     /// `zend_active_function()`: the native being served, which is the
     /// call frame on top of [`Vm`] while an entry runs, and none while
-    /// the loop is between calls. The raisers render its declared name
-    /// and its parameters' names off the declaration, never off the
-    /// caller's spelling.
+    /// the loop is between calls or a frame stands above it, a file the
+    /// native serves on the loop (`zend_execute`) or a function it calls
+    /// back, as `EG(current_execute_data)` is then that frame. The
+    /// raisers render its declared name and its parameters' names off
+    /// the declaration, never off the caller's spelling.
     fn active_native_function(&self) -> Option<Function> {
+        let floor = self.vm.innermost().map_or(0, |state| {
+            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
+        });
+        if self.vm.call_depth() <= floor {
+            return None;
+        }
         self.vm.serving_call().map(|call| call.function)
     }
 
@@ -15734,6 +15771,14 @@ impl Request {
         crate::output::header_remove(self, name)
     }
 
+    /// `sapi_header_op` under `SAPI_HEADER_DELETE_PREFIX`: the lines that
+    /// open with `prefix`, a header's name of `name_len` bytes and more,
+    /// dropped, as `php_session_remove_cookie` drops the session's
+    /// earlier `Set-Cookie`.
+    pub fn header_remove_prefix(&mut self, prefix: &[u8], name_len: usize) -> bool {
+        crate::output::header_remove_prefix(self, prefix, name_len)
+    }
+
     /// `headers_list()`: `SG(sapi_headers).headers`, in order.
     #[must_use]
     pub fn headers_list(&self) -> Vec<Vec<u8>> {
@@ -15787,7 +15832,12 @@ impl Request {
     /// strings of the request's.
     pub fn request_headers(&mut self) -> Result<PhpArray, Thrown> {
         let mut array = PhpArray::new(self)?;
-        let headers = self.description.headers.clone();
+        let headers = self
+            .description
+            .web
+            .as_ref()
+            .map(|web| web.headers.clone())
+            .unwrap_or_default();
         for (name, value) in &headers {
             let key = Key::Str(PhpString::new(self, name)?);
             let value = Value::string(PhpString::new(self, value)?);
@@ -15830,8 +15880,10 @@ impl Request {
         self.started
     }
 
-    /// `ZCG(request_time)`: when the request started, in whole seconds.
-    pub(crate) fn request_time(&self) -> i64 {
+    /// `ZCG(request_time)` and `sapi_get_request_time()` as a `zend_long`:
+    /// when the request started, in whole seconds.
+    #[must_use]
+    pub fn request_time(&self) -> i64 {
         i64::try_from(self.started.as_secs()).unwrap_or(i64::MAX)
     }
 
@@ -16027,7 +16079,7 @@ impl Request {
     /// include(): Failed opening 'data:,x' for inclusion (include_path='.')
     /// bool(false)
     /// ```
-    fn include_stream(
+    pub(crate) fn include_stream(
         &mut self,
         kind: IncludeKind,
         written: &[u8],
@@ -16186,6 +16238,16 @@ impl Request {
     /// stat failed
     /// ```
     pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, Unresolved> {
+        let shared = Arc::clone(&self.shared);
+        for hook in shared
+            .extensions
+            .iter()
+            .filter_map(|extension| extension.resolve_path)
+        {
+            if let Some(path) = hook(self, written).map_err(Unresolved::Threw)? {
+                return Ok(path);
+            }
+        }
         let not_found = || Unresolved::Missing(std::io::Error::from(std::io::ErrorKind::NotFound));
         let for_include = crate::streams::OpenOptions {
             for_include: true,
@@ -18497,10 +18559,29 @@ impl Request {
     /// string(3) "abc"
     /// bool(false)
     /// ```
+    ///
+    /// `default_charset` and `default_mimetype` refuse a value holding a
+    /// NUL, a carriage return or a line feed (`OnUpdateDefaultCharset`,
+    /// `OnUpdateDefaultMimeTye`, `Z/main/main.c:605-631`), which the
+    /// default `Content-type` would carry into the head.
+    ///
+    /// ```php
+    /// var_dump(ini_set("default_charset", "UTF-8\r\nX-Injected: 1"), ini_set("default_mimetype", "text/plain\n"), ini_get("default_mimetype"));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// string(9) "text/html"
+    /// ```
     fn ini_verdict(name: &[u8], value: &[u8]) -> IniVerdict {
         match name {
             b"zend.exception_string_param_max_len"
                 if !(0..=1_000_000).contains(&ini_atol(value)) =>
+            {
+                IniVerdict::Rejected
+            }
+            b"default_charset" | b"default_mimetype"
+                if value.iter().any(|b| matches!(b, 0 | b'\r' | b'\n')) =>
             {
                 IniVerdict::Rejected
             }
@@ -18724,15 +18805,9 @@ impl Request {
     }
 
     /// `php://stdin`, which is what the CLI's `STDIN` constant holds: the
-    /// host's fd 0 where it handed one, else the body as the description
-    /// carries it, read whole until #544 reads it lazily.
+    /// host's fd 0 where it handed one, else nothing.
     pub fn stdin(&mut self) -> Result<Option<Stream>, Thrown> {
         self.open_stream(b"php://stdin", b"r", false)
-    }
-
-    /// The request body's bytes, `SG(request_info).request_body`.
-    pub(crate) fn body_bytes(&self) -> &[u8] {
-        &self.description.body
     }
 
     /// `le_stream`.
@@ -18801,21 +18876,6 @@ impl Request {
             Some(sentence) => sentence.to_owned(),
             None => text,
         }
-    }
-
-    /// `parse_str()`: a query string as an array, its strings the
-    /// request's.
-    pub fn parse_query(&mut self, query: &[u8]) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new(self)?;
-        for pair in query.split(|b| *b == b'&').filter(|p| !p.is_empty()) {
-            let mut halves = pair.splitn(2, |b| *b == b'=');
-            let name = halves.next().unwrap_or_default();
-            let value = halves.next().unwrap_or_default();
-            let key = Key::from_string(PhpString::new(self, name)?);
-            let value = Value::string(PhpString::new(self, value)?);
-            array.set(self, key, value)?;
-        }
-        Ok(array)
     }
 
     /// `set_time_limit()`, which is `zend_alter_ini_entry_ex` over
@@ -19628,20 +19688,6 @@ impl Request {
         }
     }
 
-    /// `is_uploaded_file()`.
-    #[must_use]
-    pub fn is_uploaded_file(&self, path: &[u8]) -> bool {
-        let _ = path;
-        false
-    }
-
-    /// `move_uploaded_file()`'s first half: take the upload's temporary
-    /// path out of the request, once.
-    pub fn take_uploaded_file(&mut self, path: &[u8]) -> Option<PathBuf> {
-        let _ = path;
-        None
-    }
-
     /// `php_stream_open_wrapper_ex(path, mode, REPORT_ERRORS | USE_PATH?)`,
     /// what `fopen()` is: the stream, or `None` after php's warning for
     /// the open that failed (`fopen` answers `false`); the `Err` is a
@@ -19814,7 +19860,7 @@ impl Request {
         dir: &[u8],
         prefix: &[u8],
     ) -> Result<Option<PhpString>, Thrown> {
-        match self.open_temporary_fd(Some(dir), prefix, true) {
+        match self.open_temporary_fd(Some(dir), prefix, crate::wrapper::TemporaryCheck::Always) {
             Some((_, path)) => Ok(Some(PhpString::new(
                 self,
                 path.as_os_str().as_encoded_bytes(),
@@ -20038,7 +20084,7 @@ fn scheme_length(path: &[u8]) -> Option<usize> {
 
 /// Whether a path names a stream wrapper other than the plain files one,
 /// which an include opens through that wrapper.
-fn is_wrapper_url(path: &[u8]) -> bool {
+pub(crate) fn is_wrapper_url(path: &[u8]) -> bool {
     scheme_length(path).is_some_and(|n| !path[..n].eq_ignore_ascii_case(b"file"))
 }
 
