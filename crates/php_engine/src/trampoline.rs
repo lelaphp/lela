@@ -96,10 +96,15 @@ impl CallTrampoline {
 
     /// The trampoline `zend_get_call_trampoline_func` makes: public,
     /// variadic over `mixed ...$arguments` as `trampoline_arg_info` is,
-    /// named as the call was written up to a NUL, returning by
-    /// reference where the magic method does, and on the class where
-    /// `__callStatic` serves it.
-    pub(crate) fn new(magic: Function, name: &[u8], is_static: bool, by_ref: bool) -> Self {
+    /// named as the call was written up to a NUL, and on the class where
+    /// `__callStatic` serves it. What `fbc->common.fn_flags` carries of
+    /// the magic method `of` is kept, as php keeps
+    /// `ZEND_ACC_RETURN_REFERENCE`, `ZEND_ACC_ABSTRACT`,
+    /// `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`: its by-reference
+    /// return, its abstractness, and its attributes, which the last two
+    /// are read from and which php shares (`func->attributes =
+    /// fbc->common.attributes`).
+    pub(crate) fn new(magic: Function, name: &[u8], is_static: bool, of: &MethodDecl) -> Self {
         // `strlen(ZSTR_VAL(method_name))`: "keep compatibility for "\0"
         // characters".
         let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
@@ -120,9 +125,9 @@ impl CallTrampoline {
                     name: Name(name.into()),
                     parameters: vec![arguments],
                     return_type: None,
-                    returns_by_ref: by_ref,
+                    returns_by_ref: of.function.returns_by_ref,
                     is_generator: false,
-                    attributes: Vec::new(),
+                    attributes: of.function.attributes.clone(),
                     doc_comment: None,
                     file: Name(Box::new([])),
                     line: 0,
@@ -131,7 +136,7 @@ impl CallTrampoline {
                 },
                 visibility: Visibility::Public,
                 is_instance: !is_static,
-                is_abstract: false,
+                is_abstract: of.is_abstract,
                 is_final: false,
                 tentative_return: false,
             },

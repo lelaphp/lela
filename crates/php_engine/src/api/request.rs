@@ -3705,6 +3705,13 @@ impl Request {
         if let Some(method) = self.native_method(function) {
             return method.flags;
         }
+        // `fbc->common.fn_flags & (ZEND_ACC_DEPRECATED|ZEND_ACC_NODISCARD)`,
+        // which `zend_get_call_trampoline_func` copies from the magic method.
+        if let Some((trampoline, _)) = self.trampoline_of(function)
+            && let crate::trampoline::Via::Magic(magic) = trampoline.via
+        {
+            return self.function_flags(magic);
+        }
         usize::try_from(function.0)
             .ok()
             .and_then(|at| self.shared.function_flags.get(at))
@@ -3764,7 +3771,20 @@ impl Request {
     /// `__call`, or its `__callStatic` where `is_static`, serves under
     /// `name`, the one the request already made for that method and
     /// name where it made one; none where the class has no such
-    /// method.
+    /// method. It is abstract, deprecated or `#[\NoDiscard]` where the
+    /// magic method is, as php copies those flags onto it:
+    ///
+    /// ```php
+    /// class C { #[\Deprecated("why")] function __call($n, $a) { return $n; } }
+    /// interface I { public static function __callStatic($n, $a); }
+    /// var_dump((new C)->anything());
+    /// try { I::bar(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Deprecated: Method C::anything() is deprecated, why in %s on line 4
+    /// string(8) "anything"
+    /// Cannot call abstract method I::bar()
+    /// ```
     pub(crate) fn call_trampoline(
         &mut self,
         class: ClassId,
@@ -3786,12 +3806,10 @@ impl Request {
         let at = if let Some(at) = held {
             at
         } else {
-            let by_ref = self
-                .function_decl(magic)
-                .is_some_and(|decl| decl.returns_by_ref);
+            let of = self.method_decl(magic)?.clone();
             self.trampolines
                 .push(crate::trampoline::CallTrampoline::new(
-                    magic, name, is_static, by_ref,
+                    magic, name, is_static, &of,
                 ));
             self.trampolines.len().checked_sub(1)?
         };
