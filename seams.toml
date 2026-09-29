@@ -129,6 +129,8 @@ porting = true
 name = "ext/mbstring"
 budget = 17000
 feature = "mbstring"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664). libmbfl is vendored byte for byte from php-src ext/mbstring/libmbfl at the pinned tag under its LGPL-2.1, compiled by build.rs, and bound in src/ffi/, the bindings pool's (#1173).
+porting = true
 [[crate]]
 name = "ext/session"
 budget = 5500
