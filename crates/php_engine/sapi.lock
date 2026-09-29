@@ -2,6 +2,7 @@
 Engine
 EngineBuilder
 FileHandles
+HostExtension
 Method
 Observables
 OutputSink

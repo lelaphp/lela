@@ -23,8 +23,8 @@ pub mod cli;
 mod getopt;
 
 pub use php_engine::{
-    Engine, EngineBuilder, FileHandles, Method, Observables, OutputSink, RequestDescription,
-    ResponseHead, WebRequest,
+    Engine, EngineBuilder, FileHandles, HostExtension, Method, Observables, OutputSink,
+    RequestDescription, ResponseHead, WebRequest,
 };
 
 /// Which host a binary is, chosen once, by the name it was started under, as

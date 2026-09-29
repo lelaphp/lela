@@ -31,6 +31,7 @@ mod fiber;
 mod generator;
 mod handlers;
 mod highlight;
+mod host_extension;
 mod ini_quantity;
 mod ini_syntax;
 mod interfaces;
@@ -60,3 +61,4 @@ pub use engine::{
     Engine, EngineBuilder, FileHandles, Method, Observables, OutputSink, RequestDescription,
     ResponseHead, WebRequest,
 };
+pub use host_extension::HostExtension;

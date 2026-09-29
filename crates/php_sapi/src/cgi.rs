@@ -27,8 +27,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use php_engine::{
-    Engine, Method, Observables, OutputSink, PHP_VERSION, RequestDescription, ResponseHead,
-    WebRequest,
+    Engine, HostExtension, Method, Observables, OutputSink, PHP_VERSION, RequestDescription,
+    ResponseHead, WebRequest,
 };
 use php_proto::cgi::{Environment, Files, RequestInfo, Settings};
 
@@ -36,6 +36,10 @@ use crate::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 
 /// `sapi_module.name` for php's CGI: what `php_sapi_name()` answers.
 pub const NAME: &str = "cgi-fcgi";
+
+/// `cgi_module_entry`, which php-cgi hands `php_module_startup` to load
+/// after the bundle: the engine a CGI host serves on is built with it.
+pub const EXTENSION: HostExtension = HostExtension::CgiFcgi;
 
 /// The entries whose default php's CGI keeps where the engine's are the
 /// CLI's (`php_cli.c`'s `HARDCODED_INI`): laid over the engine's

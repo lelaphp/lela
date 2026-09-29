@@ -1367,6 +1367,7 @@ pub struct EngineBuilder {
     reenter: Loop,
     resume: Loop,
     tier_extension: Option<Extension>,
+    host_extension: Option<crate::host_extension::HostExtension>,
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
 }
@@ -1420,6 +1421,15 @@ impl EngineBuilder {
         self
     }
 
+    /// The extension the host registers after the bundle, as php-cgi hands
+    /// `cgi_module_entry` to `php_module_startup`: its natives and ini
+    /// entries, and its name last in `get_loaded_extensions()`.
+    #[must_use]
+    pub fn host_extension(mut self, host: crate::host_extension::HostExtension) -> EngineBuilder {
+        self.host_extension = Some(host);
+        self
+    }
+
     /// Bind the tier: `execute::<T>` becomes the loop, and the tier's
     /// state is declared under seam 3 (design §4.3 seam 8).
     #[must_use]
@@ -1442,6 +1452,9 @@ impl EngineBuilder {
         let mut extensions = self.extensions;
         if let Some(tier) = self.tier_extension {
             extensions.push(tier);
+        }
+        if let Some(host) = self.host_extension {
+            extensions.push(crate::host_extension::extension(host));
         }
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
@@ -1593,6 +1606,7 @@ impl Engine {
             reenter: reenter::<Nop>,
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
+            host_extension: None,
             #[cfg(feature = "witness-trace")]
             trace_to: None,
         }
