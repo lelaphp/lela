@@ -50,3 +50,76 @@ var_dump(file_exists($f), is_file($f), is_readable($f), file_exists($f . 'x'));
     assert_eq!(on, "bool(true)\nbool(true)\nbool(true)\nbool(false)\n");
     assert_eq!(off, "bool(false)\nbool(false)\nbool(false)\nbool(false)\n");
 }
+
+/// An engine of ext/standard and this crate under `ini`.
+fn engine(ini: &[(&str, &str)]) -> Engine {
+    let mut builder = Engine::builder()
+        .extensions(&[php_ext_standard::extension(), php_ext_opcache::extension()]);
+    for (name, value) in ini {
+        builder = builder.ini(name, value);
+    }
+    builder.build()
+}
+
+/// `zend_accel_error` at `ACCEL_LOG_FATAL` ends the process before
+/// anything is served whatever `opcache.log_verbosity_level` says, and
+/// writes its line where the level admits it; at `ACCEL_LOG_INFO` the
+/// cache logs each file it holds.
+#[test]
+fn a_fatal_startup_serves_nothing_and_the_cache_logs_its_own_events() {
+    let silent = engine(&[
+        ("opcache.enable_cli", "1"),
+        ("opcache.file_cache_only", "1"),
+        ("opcache.log_verbosity_level", "-1"),
+    ])
+    .serve_capture("<?php echo 'served';", Capture::default());
+    assert_eq!(
+        (
+            silent.stdout.as_slice(),
+            silent.stderr.as_slice(),
+            silent.exit_code
+        ),
+        (&b""[..], &b""[..], -2)
+    );
+    let logged = engine(&[
+        ("opcache.enable_cli", "1"),
+        ("opcache.interned_strings_buffer", "500"),
+    ])
+    .serve_capture("<?php echo 'served';", Capture::default());
+    let stderr = String::from_utf8_lossy(&logged.stderr);
+    assert!(logged.stdout.is_empty(), "{stderr}");
+    assert!(
+        stderr.ends_with(
+            "Fatal Error Insufficient shared memory for interned strings buffer! (tried to allocate 524288216 bytes)\n"
+        ),
+        "{stderr}"
+    );
+    let dir = std::env::temp_dir().join(format!("opcache-logging-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("held.inc"), "<?php return 1;");
+    let events = engine(&[
+        ("opcache.enable_cli", "1"),
+        ("opcache.file_update_protection", "0"),
+        ("opcache.log_verbosity_level", "4"),
+    ])
+    .serve_capture_in(
+        &dir,
+        b"events.php",
+        "<?php include __DIR__ . '/held.inc'; opcache_reset();",
+        Capture::default(),
+    );
+    let held = dir.join("held.inc").canonicalize().unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    let stderr = String::from_utf8_lossy(&events.stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter_map(|line| line.split_once("): ").map(|(_, logged)| logged))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            format!("Message Cached script '{}'", held.display()).as_str(),
+            "Debug Restart Scheduled! Reason: user",
+        ]
+    );
+}

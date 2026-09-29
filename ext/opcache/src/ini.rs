@@ -581,13 +581,23 @@ pub(crate) use handlers;
 /// `opcache.log_verbosity_level` admits up to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Log {
+    /// `ACCEL_LOG_FATAL`, which ends the process whether it is written
+    /// or not; the caller refuses to serve.
+    Fatal = 0,
     Warning = 2,
+    /// `ACCEL_LOG_INFO`, the cache's own events.
+    Info = 3,
+    Debug = 4,
 }
 
 impl Log {
+    /// The word `zend_accel_error_va_args` writes before the message.
     fn word(self) -> &'static str {
         match self {
+            Log::Fatal => "Fatal Error",
             Log::Warning => "Warning",
+            Log::Info => "Message",
+            Log::Debug => "Debug",
         }
     }
 }

@@ -31,6 +31,7 @@
 mod blacklist;
 mod file_override;
 mod ini;
+mod startup;
 
 use php_ext::abi::{
     Admission, Extension, ExtensionBuilder, Instance, Lookup, OrFalse, StartupIni, Validation,
@@ -43,7 +44,7 @@ use php_ext::request::{CacheStatus, Invalidation, PHP_VERSION, Request, Restart}
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 use crate::blacklist::Blacklist;
-use crate::ini::{Stored, flag, long, value};
+use crate::ini::{Log, Stored, accel_log, flag, long, value};
 
 /// `ACCELERATOR_PRODUCT_NAME`, the extension's name and the Zend
 /// extension's.
@@ -132,6 +133,8 @@ pub fn extension() -> Extension {
         .request_state::<State>()
         .rinit(rinit)
         .admission(admission)
+        .post_startup(startup::post_startup)
+        .cached(cached)
         .info(info)
         .zend_extension(ZendExtension {
             name: PRODUCT.to_owned(),
@@ -152,19 +155,28 @@ pub fn extension() -> Extension {
     reason = "the engine's `RINIT` shape, which a hook that can throw needs"
 )]
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    let cli = matches!(req.sapi_name(), "cli" | "phpdbg");
-    let startup = if cli && !flag(req, "opcache.enable_cli") {
-        Startup::DisabledForCli
-    } else if !flag(req, "opcache.enable") {
-        Startup::Off
-    } else {
-        Startup::Ok
-    };
+    let startup = verdict(req);
     let enabled = startup == Startup::Ok && !flag(req, "opcache.file_cache_only");
     let state = req.state::<State>();
     state.startup = startup;
     state.accelerator_enabled = enabled;
     Ok(())
+}
+
+/// `accel_startup`'s verdict, from the host's name and the startup ini.
+pub(crate) fn verdict(req: &Request) -> Startup {
+    if cli(req) && !flag(req, "opcache.enable_cli") {
+        Startup::DisabledForCli
+    } else if !flag(req, "opcache.enable") {
+        Startup::Off
+    } else {
+        Startup::Ok
+    }
+}
+
+/// `accel_sapi_is_cli`: the command line, or phpdbg.
+pub(crate) fn cli(req: &Request) -> bool {
+    matches!(req.sapi_name(), "cli" | "phpdbg")
 }
 
 /// What the unit cache does with the file at the full path `path`, as
@@ -260,6 +272,13 @@ fn admission(req: &mut Request, path: &[u8]) -> Admission {
     }
 }
 
+/// `cache_script_in_shared_memory` and `preload_script_in_shared_memory`
+/// once a file is persisted: `Cached script` at `ACCEL_LOG_INFO`.
+fn cached(req: &mut Request, path: &[u8]) {
+    let message = format!("Cached script '{}'", String::from_utf8_lossy(path));
+    accel_log(req, Log::Info, &message);
+}
+
 /// The startup verdict and `accelerator_enabled`.
 fn state(req: &mut Request) -> (Startup, bool) {
     let state = req.state::<State>();
@@ -325,7 +344,11 @@ fn opcache_reset(req: &mut Request) -> bool {
     if !flag(req, "opcache.enable") || startup != Startup::Ok {
         return false;
     }
-    req.unit_cache().reset() == Restart::Scheduled
+    let scheduled = req.unit_cache().reset() == Restart::Scheduled;
+    if scheduled {
+        accel_log(req, Log::Debug, "Restart Scheduled! Reason: user");
+    }
+    scheduled
 }
 
 /// `add_assoc_*`: `value` under `name`.
