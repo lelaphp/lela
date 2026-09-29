@@ -45,7 +45,9 @@ use crate::output::Output;
 use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
 pub use execution::Execution;
-pub use unit_cache::{CacheStatus, CachedFile, Invalidation, Restart, UnitCache};
+pub use unit_cache::{
+    CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
+};
 
 mod class_data;
 mod crypto;
@@ -57,6 +59,7 @@ mod hooks;
 mod lazy;
 mod linking;
 mod load_file;
+mod preload;
 mod site_override;
 mod table;
 mod unit_cache;
@@ -64,6 +67,7 @@ mod variables;
 
 pub(crate) use hooks::parent_hook_trampolines;
 pub(crate) use lazy::Strategy;
+pub(crate) use preload::{Preloaded, Preloading, Stacked};
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
@@ -1694,7 +1698,7 @@ pub struct Request {
     /// declares, one function number each past
     /// [`crate::enums::ENUM_FUNCTIONS`], as php allocates a
     /// `zend_internal_function` per method per enum.
-    enum_functions: Vec<(ClassId, crate::enums::EnumMethod)>,
+    enum_functions: Stacked<(ClassId, crate::enums::EnumMethod)>,
     /// The functions `zend_get_call_trampoline_func` makes of a call to
     /// a name only `__call` or `__callStatic` answers, one per magic
     /// method and name, two function numbers each
@@ -1937,7 +1941,7 @@ pub struct Request {
     /// immutable linked class shared across requests is not built yet,
     /// so every class a unit declares is this request's, the
     /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
-    declared: Vec<Declared>,
+    declared: Stacked<Declared>,
     /// The classes a unit's load bound early at their
     /// `DECLARE_CLASS_DELAYED` ([`Request::declare_classes`]), each the
     /// unit and the class's index, until that opline runs and passes
@@ -1959,7 +1963,7 @@ pub struct Request {
     /// classes the table held when it was added, which is where php's
     /// table has it among them: `ZVAL_ALIAS_PTR` rows, request state as
     /// the classes the request declared are.
-    aliases: Vec<(usize, Vec<u8>, ClassId)>,
+    aliases: Stacked<preload::Alias>,
     /// `PHP_SAPI`, `sapi_module.name` as `php_module_startup` registers
     /// it: the host's, so the request's, the engine's interned string
     /// for the name the description carries.
@@ -1969,13 +1973,16 @@ pub struct Request {
     /// body: php's `EG(function_table)` past the natives and each user
     /// class's `function_table`. A `Function` past the natives and the
     /// native methods counts into this list (design §5.6).
-    user_functions: Vec<UserFunction>,
+    user_functions: Stacked<UserFunction>,
     /// `ZEND_MAP_PTR(op_array->static_variables_ptr)` for every function
     /// and main op array whose `static` variables the request has
     /// touched: the values, one per entry of the op array's
     /// [`php_unit::OpArray::bound_vars`], which the published unit never
     /// holds (design §5.14). A closure's are its object's.
     static_vars: HashMap<Statics, Vec<Value>>,
+    /// Where the request is the preload's (design §6.3), the files it
+    /// compiled into the preload.
+    preloading: Option<Preloading>,
 }
 
 /// One row of an object's property table as [`Request::property_rows`]
@@ -2359,6 +2366,7 @@ impl Request {
         let mut heap = Heap::new();
         let mut stack = VmStack::new();
         let _laid = stack.open(&mut heap);
+        let tables = preload::Tables::of(shared.units.preloaded());
         let mut req = Request {
             // Read before `shared` moves in, as fields are in the order written.
             realpath_cache: RealpathCache::startup(&shared),
@@ -2389,7 +2397,7 @@ impl Request {
             constants: Vec::new(),
             enum_cases: Vec::new(),
             enums_updated: Vec::new(),
-            enum_functions: Vec::new(),
+            enum_functions: tables.enum_functions,
             trampolines: Vec::new(),
             fake_scope: None,
             deprecating: Vec::new(),
@@ -2455,14 +2463,15 @@ impl Request {
             interrupt: Interrupt::default(),
             timer: None,
             stack_limit: StackLimit::UNCHECKED,
-            declared: Vec::new(),
+            declared: tables.classes,
             bound_at_load: Vec::new(),
             links: linking::Links::default(),
             keys_made: 0,
-            aliases: Vec::new(),
+            aliases: tables.aliases,
             sapi_constant: Value::null(),
-            user_functions: Vec::new(),
+            user_functions: tables.functions,
             static_vars: HashMap::new(),
+            preloading: None,
             #[cfg(debug_assertions)]
             dirty: None,
             walk: None,
@@ -14456,6 +14465,11 @@ impl Request {
             })
             .collect();
         for (at, decl) in unit.classes.iter().enumerate() {
+            // A saved script of the preload, whose classes the preload
+            // holds, declares none of them again (`preload_remove_declares`).
+            if self.preloaded_class(unit, at) {
+                continue;
+            }
             let key = unit
                 .runtime_keys
                 .iter()
@@ -14607,6 +14621,13 @@ impl Request {
             at,
             composed: composed.map(Box::new),
         });
+        self.bind_members(class);
+    }
+
+    /// The members of `class`, bound, into the function table beside it:
+    /// an enum's own `cases`, `from` and `tryFrom`, each method, and
+    /// each hook of the class's own properties.
+    fn bind_members(&mut self, class: ClassId) {
         let Some(decl) = self.class_decl(class) else {
             return;
         };
@@ -15075,6 +15096,11 @@ impl Request {
                 "InternalError: a DECLARE_CLASS carries a key the unit files no class under",
             ));
         };
+        // `preload_remove_declares` made the opline of a class the
+        // preload holds a `NOP`.
+        if self.preloaded_class(unit, at) {
+            return Ok(());
+        }
         let Some(decl) = unit.classes.get(at).cloned() else {
             return Err(crate::api::raising::fatal(
                 self,
@@ -15334,6 +15360,11 @@ impl Request {
                 "InternalError: a DECLARE_FUNCTION naming a definition the unit has not",
             ));
         };
+        // `preload_remove_declares` made the opline of a function the
+        // preload holds a `NOP`.
+        if self.preloaded_function(unit, exec::Body::Dynamic(at)) {
+            return Ok(());
+        }
         let name = String::from_utf8_lossy(&decl.name.0).into_owned();
         if let Some(earlier) = self.function_named(lowered) {
             let site = self
@@ -15431,6 +15462,10 @@ impl Request {
     /// `false` says so.
     pub(crate) fn declare_functions(&mut self, unit: &Arc<Unit>) -> bool {
         for (at, (decl, _)) in unit.functions.iter().enumerate() {
+            let body = exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
+            if self.preloaded_function(unit, body) {
+                continue;
+            }
             if let Some(earlier) = self.function_named(&decl.name.0) {
                 let site = self
                     .user_function(earlier)
@@ -15453,7 +15488,7 @@ impl Request {
             }
             self.user_functions.push(UserFunction {
                 unit: Arc::clone(unit),
-                body: exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX)),
+                body,
                 member: None,
                 flags: crate::attributes::Flags::of(&decl.attributes),
             });

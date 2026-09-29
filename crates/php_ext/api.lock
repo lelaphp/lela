@@ -45,6 +45,7 @@ abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::admission
 abi::ExtensionBuilder::build
+abi::ExtensionBuilder::cached
 abi::ExtensionBuilder::class
 abi::ExtensionBuilder::class_constants
 abi::ExtensionBuilder::class_payload
@@ -61,6 +62,7 @@ abi::ExtensionBuilder::ini
 abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::on_modify
+abi::ExtensionBuilder::post_startup
 abi::ExtensionBuilder::register
 abi::ExtensionBuilder::request_state
 abi::ExtensionBuilder::rinit
@@ -140,6 +142,7 @@ abi::OnModify
 abi::OrFalse
 abi::Passed
 abi::Path
+abi::PostStartup
 abi::PropertyPlace
 abi::PropertyPurpose
 abi::PropertyRead
@@ -377,6 +380,7 @@ request::Opening
 request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
+request::PreloadStatistics
 request::Readiness
 request::RealpathEntry
 request::Receiving

@@ -219,6 +219,33 @@ pub(crate) type CompileFileHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u
 /// The one question the unit cache asks an extension about a file
 /// (design §6.3): [`ExtensionBuilder::admission`].
 pub(crate) type AdmissionHook = fn(&mut Request, &[u8]) -> Admission;
+/// What the engine asks each extension as it finishes starting up:
+/// [`ExtensionBuilder::post_startup`].
+pub(crate) type PostStartupHook = fn(&mut Request) -> PostStartup;
+/// What the unit cache tells each extension of a file it holds:
+/// [`ExtensionBuilder::cached`].
+pub(crate) type CachedHook = fn(&mut Request, &[u8]);
+
+/// An extension's answer as the engine finishes starting up, before it
+/// serves its first request (design §6.3): php's `zend_post_startup_cb`,
+/// which opcache's `accel_post_startup` is. The engine is built before
+/// any host names itself, so it asks once, on the first request's
+/// host, and the first extension in bundle order that does not answer
+/// [`PostStartup::Serve`] decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostStartup {
+    /// Serve as built.
+    Serve,
+    /// `accel_preload`: the file at the path compiled and served once, in a
+    /// request of its own, before the first request, and every class and
+    /// function it declared that links declared in every request after,
+    /// as they stand in the unit cache. A file that ends in a fatal or
+    /// an `exit` fails php's startup, and the process ends with status 1.
+    Preload(Vec<u8>),
+    /// Serve nothing: the process ends with `status`, as
+    /// `zend_accel_error` at `ACCEL_LOG_FATAL` ends it with `exit(-2)`.
+    Refuse { status: i32 },
+}
 
 /// What the unit cache does with a file for the request asking, the
 /// answer to [`ExtensionBuilder::admission`] (design §6.3, revision 45):
@@ -355,6 +382,10 @@ pub struct Extension {
     pub(crate) compile_file: Option<CompileFileHook>,
     /// What [`ExtensionBuilder::admission`] was handed.
     pub(crate) admission: Option<AdmissionHook>,
+    /// What [`ExtensionBuilder::post_startup`] was handed.
+    pub(crate) post_startup: Option<PostStartupHook>,
+    /// What [`ExtensionBuilder::cached`] was handed.
+    pub(crate) cached: Option<CachedHook>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
     /// What [`ExtensionBuilder::intercept`] was handed: each native of
@@ -401,6 +432,8 @@ pub struct ExtensionBuilder {
     ticks: Option<TicksHook>,
     compile_file: Option<CompileFileHook>,
     admission: Option<AdmissionHook>,
+    post_startup: Option<PostStartupHook>,
+    cached: Option<CachedHook>,
     zend: Option<ZendExtension>,
     intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
@@ -644,6 +677,29 @@ impl ExtensionBuilder {
         self
     }
 
+    /// Asked once as the engine finishes starting up, on a request of
+    /// the first host's that serves no program (design §6.3): php's
+    /// `zend_post_startup_cb`, where opcache refuses a configuration it
+    /// cannot start under and names the file `opcache.preload` serves.
+    /// What the hook writes to the error stream is written before
+    /// anything the engine serves.
+    #[must_use]
+    pub fn post_startup(mut self, hook: fn(&mut Request) -> PostStartup) -> ExtensionBuilder {
+        self.post_startup = Some(hook);
+        self
+    }
+
+    /// Told of each file the unit cache compiles and holds, by its full
+    /// path, on the request that compiled it (design §6.3): where php's
+    /// `cache_script_in_shared_memory` has persisted a file, and opcache
+    /// logs `Cached script` at `ACCEL_LOG_INFO`. Every extension with a
+    /// hook is told, in bundle order.
+    #[must_use]
+    pub fn cached(mut self, hook: fn(&mut Request, &[u8])) -> ExtensionBuilder {
+        self.cached = Some(hook);
+        self
+    }
+
     /// The extension is a Zend extension too, php's `zend_extension`
     /// beside its `zend_module_entry` (`Z/Zend/zend_extensions.c`), as
     /// opcache is: `row` is what `php -m` lists under `[Zend Modules]`,
@@ -766,6 +822,8 @@ impl ExtensionBuilder {
             ticks: self.ticks,
             compile_file: self.compile_file,
             admission: self.admission,
+            post_startup: self.post_startup,
+            cached: self.cached,
             zend: self.zend,
             intercepts: self.intercepts,
             info: self.info,
