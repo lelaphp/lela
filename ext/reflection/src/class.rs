@@ -2778,14 +2778,16 @@ impl ReflectionClass {
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
         let class = this_class(req, this.object())?;
-        let attributes = req
-            .class_decl(class)
-            .map_or_else(Vec::new, |decl| decl.attributes.clone());
+        let (attributes, file) = req.class_decl(class).map_or_else(
+            || (Vec::new(), None),
+            |decl| (decl.attributes.clone(), attr::declared_in(&decl.file.0)),
+        );
         attr::reflect_attributes(
             req,
             &attributes,
             Some(class),
             attr::TARGET_CLASS,
+            file.as_deref(),
             name,
             flags,
         )

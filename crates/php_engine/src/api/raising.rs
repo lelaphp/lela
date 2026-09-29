@@ -55,6 +55,20 @@ pub fn raise_at(req: &mut Request, level: Level, message: &str, file: &[u8], lin
     req.note_error_in(level, message, file, line);
 }
 
+/// `zend_error` with `EG(exception)` set: the diagnostic raised while
+/// the throwable `pending` carries is pending, as php raises one after a
+/// call that threw, where the engine's slot would otherwise stand empty
+/// because the throwable is in the native's hands. No user error handler
+/// is handed it, since php's `zend_call_function` returns at once while
+/// a throwable is pending, and the built-in handler renders it where
+/// none is set; a `pending` that carries a fatal or an exit raises
+/// nothing. `pending` is the native's still, to hand on. The overloaded
+/// element's notice after a throwing `offsetGet` is the witness, in
+/// `ext/spl`.
+pub fn raise_while_pending(req: &mut Request, pending: &Thrown, level: Level, message: &str) {
+    req.while_pending(pending, |req| raise(req, level, message));
+}
+
 /// `zend_error` while php starts, before any request (`zend_startup`,
 /// `php_module_startup`, the `ZEND_INI_STAGE_STARTUP` rules of the ini
 /// entries): the message as given, at `Unknown` on line 0, and displayed

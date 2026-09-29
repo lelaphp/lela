@@ -3249,8 +3249,11 @@ pub(crate) fn include_or_eval<T: Tier>(
         Ok(Opened::Failed) => return answered(req, frame, returns_to, Value::bool(false)),
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    crate::engine::note_compiled(req, &unit);
-    if !req.declare_classes(&unit) || !req.declare_functions(&unit) {
+    let source = match kind {
+        exec::IncludeKind::Eval => php_compile::SourceKind::Eval,
+        _ => php_compile::SourceKind::File,
+    };
+    if !crate::engine::note_compiled(req, &unit, source) {
         return Ok(Stepped::Threw(frame));
     }
     let main = exec::code_of(&unit);
@@ -4230,9 +4233,16 @@ fn arg_type_error(
 /// `frame`, and nothing where a native pushed it or where `frame` is
 /// the one `serve` pushed. Both `zend_missing_arg_error` and
 /// `zend_verify_arg_error` drop the clause that names the call site
-/// where this is nothing.
+/// where this is nothing. A frame a native pushed from an attribute's
+/// site ([`exec::Site`]) names the site.
 fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
-    let caller = req.vm().at(frame)?.caller.frame()?;
+    let Some(caller) = req.vm().at(frame)?.caller.frame() else {
+        // A call a native served from an attribute's site, which is
+        // user code (`zend_get_attribute_object`'s dummy frame).
+        return req
+            .site_below(frame)
+            .map(|site| (String::from_utf8_lossy(&site.file).into_owned(), site.line));
+    };
     let caller = req.vm().at(caller)?;
     Some((
         exec::body_of(&caller.unit, caller.body)
@@ -18407,6 +18417,83 @@ pub(crate) fn defined<T: Tier>(
         let name = value.as_str_bytes().unwrap_or_default();
         Ok(Value::bool(crate::ops::defined(req, name)))
     })
+}
+
+/// `ZEND_FUNC_GET_ARGS` (`Z/Zend/zend_vm_def.h:9639`), what php's
+/// compiler makes of `func_get_args()` inside a function
+/// (`zend_compile_func_get_args`): the arguments the frame was passed,
+/// as its slots hold them now, each reference followed and a slot
+/// nothing holds `null`, into the temporary; with a constant `op1`, the
+/// ones after the first that many, the form php's compiler makes of
+/// `array_slice(func_get_args(), n)` and this one does not make yet.
+///
+/// ```php
+/// function f($a, &$b, $c = 3, ...$rest) { $a = 9; $b = 'b'; return func_get_args(); }
+/// $x = 1;
+/// var_dump(f(1, $x), f(1, $x, 2, 4, 5));
+/// $g = function () { return func_get_args(); };
+/// var_dump($g());
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(9)
+///   [1]=>
+///   string(1) "b"
+/// }
+/// array(5) {
+///   [0]=>
+///   int(9)
+///   [1]=>
+///   string(1) "b"
+///   [2]=>
+///   int(2)
+///   [3]=>
+///   int(4)
+///   [4]=>
+///   int(5)
+/// }
+/// array(0) {
+/// }
+/// ```
+pub(crate) fn func_get_args<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let skip = if op.op1_type == OperandKind::Const {
+        exec::constant(code, ConstIdx(op.op1))
+            .as_int()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let arguments = req.frame_arguments(frame);
+    let copied = (|| -> Result<PhpArray, Thrown> {
+        let mut array = PhpArray::new(req)?;
+        for argument in arguments.into_iter().skip(skip) {
+            let value = argument.deref();
+            let value = if value.tag() == TypeTag::Undef {
+                Value::null()
+            } else {
+                req.addref(&value);
+                value
+            };
+            array.append(req, value)?;
+        }
+        Ok(array)
+    })();
+    match copied {
+        Ok(array) => {
+            let slot = exec::temporary_slot(code, op.out);
+            let previous = req.set_slot(frame, slot, Value::array(array));
+            req.release(previous);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
 }
 
 /// `ZEND_COUNT`: [`crate::ops::count`] over the operand, `sizeof`'s

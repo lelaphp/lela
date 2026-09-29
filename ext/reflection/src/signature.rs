@@ -1426,7 +1426,8 @@ impl ReflectionParameter {
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
-        let (reference, _, parameter) = this_parameter(req, this.object())?;
+        let (reference, decl, parameter) = this_parameter(req, this.object())?;
+        let file = super::attr::declared_in(&decl.file.0);
         let scope = match reference.function {
             FunctionRef::Method(scope, _) => Some(scope),
             FunctionRef::Invoke(_) => lookup_class(req, b"Closure").ok().flatten(),
@@ -1439,6 +1440,7 @@ impl ReflectionParameter {
             &attributes,
             scope,
             super::attr::TARGET_PARAMETER,
+            file.as_deref(),
             name,
             flags,
         )

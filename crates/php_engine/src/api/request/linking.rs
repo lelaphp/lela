@@ -25,18 +25,16 @@ use std::sync::Arc;
 use php_unit::Level;
 use php_unit::Unit;
 use php_unit::decl::ClassDecl;
-use php_unit::link::{Composed, Held, Linked, Linking, Obligation, Raised, Refused};
+use php_unit::link::{Composed, Held, Linked, Linking, Obligation, Refused};
 
 use super::Request;
 use crate::api::raising::Thrown;
 
-/// The classes whose link is under way, `CG(delayed_autoloads)`, and
-/// the diagnostics the links recorded, `EG(errors)`.
+/// The classes whose link is under way, and `CG(delayed_autoloads)`.
 #[derive(Default)]
 pub(crate) struct Links {
     unlinked: Vec<Unlinked>,
     autoloads: Vec<Vec<u8>>,
-    recorded: Vec<Raised>,
 }
 
 /// One class the table holds under its name that is not
@@ -173,7 +171,6 @@ impl Request {
             }
         };
         self.release(exception.as_value());
-        self.emit_recorded();
         crate::api::raising::fatal(self, &format!("{prefix}: Uncaught {rendered}"))
     }
 
@@ -253,10 +250,21 @@ impl Request {
             obligations,
             autoloads,
         } = linking;
-        self.links.recorded.extend(raised);
+        // What the link raised, held until its end, or until the end
+        // of the record that stood when it began: a file's compile.
+        let recording = self.begin_recording();
+        for raised in raised {
+            self.note_error_in(
+                raised.level(),
+                &raised.to_string(),
+                &raised.site().file.0,
+                raised.site().line,
+            );
+        }
         if let Linked::Refused(refused) = outcome {
             return Err(self.link_refused(&refused));
         }
+        self.pause_recording(recording);
         let name = unit
             .classes
             .get(usize::try_from(at).unwrap_or(usize::MAX))
@@ -267,8 +275,8 @@ impl Request {
             if let Some(standing) = standing {
                 self.links.unlinked.remove(standing);
             }
-            self.emit_recorded();
             self.bind_declared(unit, at, composed);
+            self.emit_recorded(recording);
             return Ok(());
         }
         if let Some(unlinked) = standing.and_then(|at| self.links.unlinked.get_mut(at)) {
@@ -285,7 +293,7 @@ impl Request {
         if self.nearly_linked(&name) {
             self.resolve_obligations(&name)?;
         }
-        self.emit_recorded();
+        self.emit_recorded(recording);
         Ok(())
     }
 
@@ -373,9 +381,8 @@ impl Request {
     }
 
     /// What a link refused, at its level and site, the request ended in
-    /// it after what the links recorded.
+    /// it after what the links recorded, which the fatal emits first.
     pub(super) fn link_refused(&mut self, refused: &Refused) -> Thrown {
-        self.emit_recorded();
         let message = refused.refusal.to_string();
         match refused.refusal.level() {
             Level::CoreError => self.end_in_core_error(&message),
@@ -384,18 +391,5 @@ impl Request {
             }
         }
         Thrown::of(None)
-    }
-
-    /// `zend_emit_recorded_errors`: what the links raised, in order.
-    pub(super) fn emit_recorded(&mut self) {
-        for raised in std::mem::take(&mut self.links.recorded) {
-            crate::api::raising::raise_at(
-                self,
-                raised.level(),
-                &raised.to_string(),
-                &raised.site().file.0,
-                raised.site().line,
-            );
-        }
     }
 }

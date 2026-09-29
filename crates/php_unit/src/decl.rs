@@ -572,11 +572,18 @@ pub struct AttributeArgument {
     pub value: ConstExpr,
 }
 
-/// An attribute as written, its arguments unevaluated.
+/// An attribute as written, its arguments unevaluated, with php's
+/// `zend_attribute.lineno`, the line its name stands on, and
+/// `ZEND_ATTRIBUTE_STRICT_TYPES`, whether the file it was written in
+/// declares `strict_types`: the site and the regime
+/// `zend_get_attribute_object` makes its object under. A native's has
+/// line zero and no regime.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
     pub name: Name,
     pub arguments: Vec<AttributeArgument>,
+    pub line: u32,
+    pub strict: bool,
 }
 
 /// What stands after a parameter's name, decoded once where the

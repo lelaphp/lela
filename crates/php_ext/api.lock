@@ -183,6 +183,7 @@ call::Iter::next
 call::Iter::rewind
 call::Iter::valid
 call::Iter::value
+call::attribute_object
 call::autoload
 call::bound_variables
 call::call
@@ -318,6 +319,7 @@ raising::notice
 raising::pending
 raising::raise
 raising::raise_at
+raising::raise_while_pending
 raising::startup
 raising::throw
 raising::throw_at
