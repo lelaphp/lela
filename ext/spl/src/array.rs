@@ -1450,8 +1450,10 @@ fn place(
         // `&EG(uninitialized_zval)`, which the fetch notices as no place.
         let thrown = illegal(req, object, offset, "unset");
         let class = String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
-        php_ext::raising::notice(
+        php_ext::raising::raise_while_pending(
             req,
+            &thrown,
+            Level::Notice,
             &format!("Indirect modification of overloaded element of {class} has no effect"),
         );
         return Err(thrown);
@@ -1735,6 +1737,20 @@ impl ObjectHandlers for Handlers {
     /// Notice: Indirect modification of overloaded element of C has no effect in %s on line 11
     /// ```
     ///
+    /// The notice is raised with what `offsetGet` threw pending, as
+    /// `zend_fetch_dimension_address` raises it with `EG(exception)`
+    /// set, so a user error handler is handed nothing of it:
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $m) { echo "handler: $m\n"; return true; });
+    /// class B extends ArrayObject { function offsetGet($o): mixed { throw new Exception("get"); } }
+    /// $b = new B;
+    /// try { $b[0][1] = 1; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// get
+    /// ```
+    ///
     /// An offset no key is made of is `zend_illegal_container_offset`'s
     /// under the fetch's own type: `??` names `isset` and `empty`, and a
     /// nested `unset` names `unset` and is noticed as no place; a
@@ -1790,7 +1806,7 @@ impl ObjectHandlers for Handlers {
                 // A method that threw leaves `rv` undefined and the answer
                 // `&EG(uninitialized_zval)`, which a write fetch takes for
                 // no place: `zend_fetch_dimension_address`'s notice.
-                if got.is_err()
+                if let Err(thrown) = &got
                     && matches!(
                         read,
                         DimensionRead::Write | DimensionRead::ReadWrite | DimensionRead::Unset
@@ -1798,8 +1814,10 @@ impl ObjectHandlers for Handlers {
                 {
                     let class = String::from_utf8_lossy(&crate::class_name(req, object.class()))
                         .into_owned();
-                    php_ext::raising::notice(
+                    php_ext::raising::raise_while_pending(
                         req,
+                        thrown,
+                        Level::Notice,
                         &format!(
                             "Indirect modification of overloaded element of {class} has no effect"
                         ),

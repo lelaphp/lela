@@ -4418,6 +4418,29 @@ impl Request {
         }
     }
 
+    /// `zend_error` with `EG(exception)` set: what `raise` raises meets
+    /// the throwable `pending` carries standing in php's slot, and the
+    /// slot is given back after, so the `Thrown` stays the one owner. A
+    /// user error handler is handed nothing then, since
+    /// `zend_call_function` returns at once while a throwable is pending
+    /// (`Z/Zend/zend_execute_API.c:822`), and the built-in handler
+    /// renders the diagnostic where no handler stands. A fatal or an
+    /// exit raises nothing: php's `zend_bailout` left before the raise.
+    pub(crate) fn while_pending(&mut self, pending: &Thrown, raise: impl FnOnce(&mut Request)) {
+        let Some(object) = pending.exception().copied() else {
+            return;
+        };
+        if self.raised.is_some() || self.bailout {
+            raise(self);
+            return;
+        }
+        self.raised = Some(Raised::Throwable(object));
+        raise(self);
+        if self.raised == Some(Raised::Throwable(object)) {
+            self.raised = None;
+        }
+    }
+
     /// `zend_throw_exception_internal`'s chain
     /// (`Z/Zend/zend_exceptions.c:193-206`) for a handler php carries on
     /// past a diagnostic whose handler threw, as the dimension writes carry

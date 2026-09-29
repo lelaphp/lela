@@ -318,6 +318,7 @@ raising::notice
 raising::pending
 raising::raise
 raising::raise_at
+raising::raise_while_pending
 raising::startup
 raising::throw
 raising::throw_at
