@@ -193,6 +193,12 @@ impl Engine {
             file_handles: Some(piped()),
             ..RequestDescription::default()
         };
+        // The CLI host's dump of the op arrays where
+        // `opcache.opt_debug_level` asks for them, on the second stream
+        // before the program runs (`php_sapi::cli`'s `dump`).
+        if let Some(arrays) = self.dump_before_optimizer(&description) {
+            sink.write_stderr(arrays.as_bytes());
+        }
         #[cfg(feature = "witness-trace")]
         let (observables, entered) = if traced {
             self.serve_traced(description, &mut sink)
