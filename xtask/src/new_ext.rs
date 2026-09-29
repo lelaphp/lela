@@ -216,17 +216,7 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str) -> String {
          //! `php-src/ext/{name}/tests`, through `xtask phpt --subset`.\n\
          #![forbid(unsafe_code)]\n"
     );
-    for rule in denied_lints(manifest, name) {
-        let _ = writeln!(out, "// seams.toml rule {}: {}", rule.id, rule.text);
-        let lints: Vec<String> = rule
-            .predicate
-            .deny_lints
-            .iter()
-            .flatten()
-            .cloned()
-            .collect();
-        out.push_str(&deny(&lints));
-    }
+    out.push_str(&lint_attributes(manifest, &format!("ext/{name}")));
     out.push_str(
         "// The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).\n\
          #![allow(rustdoc::invalid_codeblock_attributes)]\n\
@@ -255,6 +245,26 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str) -> String {
     );
     let _ = writeln!(out, "        .build(\"{name}\")");
     out.push_str("}\n");
+    out
+}
+
+/// The crate root's `#![deny(..)]` for each of the manifest's
+/// `deny_lints` rules whose scope reaches the crate named `row`, each under
+/// the comment naming its rule: what a crate laid down by `new-ext` or
+/// `new-sapi` carries, as the moved crates carry it by hand.
+pub(crate) fn lint_attributes(manifest: &Manifest, row: &str) -> String {
+    let mut out = String::new();
+    for rule in denied_lints(manifest, row) {
+        let _ = writeln!(out, "// seams.toml rule {}: {}", rule.id, rule.text);
+        let lints: Vec<String> = rule
+            .predicate
+            .deny_lints
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        out.push_str(&deny(&lints));
+    }
     out
 }
 
@@ -300,16 +310,20 @@ fn capture_rs(name: &str) -> String {
     )
 }
 
-/// The manifest's `deny_lints` rules whose scope reaches `ext/<name>`.
-fn denied_lints<'a>(manifest: &'a Manifest, name: &str) -> Vec<&'a Rule> {
-    let own = format!("ext/{name}");
+/// The manifest's `deny_lints` rules whose scope reaches the crate named
+/// `row` (`ext/<name>`, `sapi/<name>`): the row itself, its directory's
+/// glob (`ext/*`), or everything under it.
+fn denied_lints<'a>(manifest: &'a Manifest, row: &str) -> Vec<&'a Rule> {
+    let glob = row.split_once('/').map(|(dir, _)| format!("{dir}/*"));
     manifest
         .rules
         .iter()
         .filter(|r| r.predicate.deny_lints.is_some())
         .filter(|r| {
             r.scope.iter().any(|scope| {
-                scope == own || scope == "ext/*" || scope.strip_suffix("/**") == Some(&own)
+                scope == row
+                    || glob.as_deref() == Some(scope)
+                    || scope.strip_suffix("/**") == Some(row)
             })
         })
         .collect()
@@ -318,7 +332,7 @@ fn denied_lints<'a>(manifest: &'a Manifest, name: &str) -> Vec<&'a Rule> {
 /// Add `ext/<name>` to the root manifest's `[workspace] members` unless a
 /// member or a glob already covers it; whether the file changed. The edit
 /// is textual, so the comments stay.
-fn add_member(root: &Path, row: &str) -> Result<bool> {
+pub(crate) fn add_member(root: &Path, row: &str) -> Result<bool> {
     let path = root.join("Cargo.toml");
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let table: toml::Table =
@@ -604,7 +618,7 @@ fn render_guidance(root: &Path, laid: &mut Laid) -> Result<()> {
     Ok(())
 }
 
-fn relative(root: &Path, path: &Path) -> String {
+pub(crate) fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()

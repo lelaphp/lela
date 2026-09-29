@@ -172,6 +172,7 @@ Commands:
   steer              Apply a proposal to one of the harness's own files, and only where it adds: one changed value writes nothing
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
   new-ext            Lay one extension crate down at ext/<name> in the template topology, its line in `php_bundle`, ext/clippy.toml and its row in ext/AGENTS.md; refuses an existing one
+  new-sapi           Lay one host crate down at sapi/<name> in the topology the CLI and CGI have, its binary and its test; refuses one without its `[[crate]]` row or an existing one (ADR-0008)
   witness            Extract every `php` fence and its `expect` fence from a crate's rustdoc, run each under the oracle's recipe and hold it to what the fence pins. One reading per crate
   vocab              The glossary as a sensor: `_Avoid_` words in public item names and rustdoc prose, never in a lock; one reading per crate
 
@@ -179,7 +180,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=957bb526be2c2370c76effc59ca9eadb9cd083ae945aaab4bd9866642e0f7bf9 out=536119cf1f418fb0dd368e364531eb97b343f4037861bb43100437c333c6e0f7 -->
+<!-- /computed in=c26467f5046d12684d1e7978265a4aa7c14bcd2b667c8aa3fc2c25de9a8fa477 out=8ef0a111fb238864f5420531d74eac5864e23d33b644d32cab4c549a9f737b81 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
