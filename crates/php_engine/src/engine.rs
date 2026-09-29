@@ -1940,6 +1940,9 @@ impl Engine {
             }
         }
         deprecated_directives(&mut req);
+        if req.web().is_some_and(|web| web.no_headers) {
+            req.output_mut().quiet();
+        }
         // What `do_cli` does once `php_request_startup` has run, before
         // the program is compiled: `$_SERVER` named, which makes it
         // (`Z/sapi/cli/php_cli.c:941`), and the standard handles

@@ -200,6 +200,9 @@ pub(crate) struct Output {
     started: Option<(Vec<u8>, u32)>,
     /// `SG(headers_sent)`.
     headers_sent: bool,
+    /// `SG(request_info).no_headers`: the host writes no head, and a
+    /// header op after the head counts sent is taken without a warning.
+    no_headers: bool,
     /// `SG(sapi_headers).mimetype`, the thirty-two bytes this file's doc
     /// names, out from the first byte to the host until the request ends.
     mimetype: Option<Block>,
@@ -233,8 +236,9 @@ impl Output {
     /// the stack initialised, which `zend_stack_init` does without an
     /// allocation, and the layer marked active; and `sapi_activate`
     /// (`Z/main/SAPI.c:429`) for the header state, with the response
-    /// code the host leaves, zero under the CLI, and the headers counted
-    /// sent where the host writes none (php-cgi's `-q`).
+    /// code the host leaves, zero under the CLI, and `headers_sent` and
+    /// `no_headers` off whatever the host set before, as `sapi_activate`
+    /// leaves them; [`Output::quiet`] sets them once the request started.
     pub(crate) fn activate(web: Option<&crate::engine::WebRequest>) -> Output {
         Output {
             handlers: Vec::new(),
@@ -243,7 +247,8 @@ impl Output {
             running: None,
             flags: ACTIVATED,
             started: None,
-            headers_sent: web.is_some_and(|web| web.no_headers),
+            headers_sent: false,
+            no_headers: false,
             mimetype: None,
             headers: Vec::new(),
             send_default_content_type: true,
@@ -294,6 +299,15 @@ impl Output {
 
     pub(crate) fn headers_sent(&self) -> bool {
         self.headers_sent
+    }
+
+    /// What php-cgi does once `php_request_startup` returned, where the
+    /// line asked for no head (`Z/sapi/cgi/cgi_main.c:2468`): the head
+    /// counted sent and `no_headers` set, so `X-Powered-By` and what the
+    /// startup took are in the list and no later op warns.
+    pub(crate) fn quiet(&mut self) {
+        self.headers_sent = true;
+        self.no_headers = true;
     }
 
     /// `php_output_get_level`.
@@ -995,10 +1009,10 @@ fn send_headers_free(req: &mut Request) {
 /// `sapi_header_op`'s refusal once the block is sent
 /// (`Z/main/SAPI.c:685-694`): php's warning naming where the body
 /// started, through `sapi_module.sapi_error`, which is `php_error`
-/// under the CLI, so the text carries no native's name. `no_headers`
-/// is not read, since no host sets it.
+/// under the CLI, so the text carries no native's name; none where
+/// the host writes no head (`no_headers`).
 fn header_modifiable(req: &mut Request) -> bool {
-    if !req.output().headers_sent {
+    if !req.output().headers_sent || req.output().no_headers {
         return true;
     }
     let message = match req.output().started_at() {
@@ -1787,6 +1801,21 @@ mod tests {
         );
         assert!(req.headers_sent().is_some());
         assert!(!req.header_add(b"X-B: 2", true, 0));
+    }
+
+    /// php-cgi's `-q` once the request started: the head counts sent,
+    /// and a line `header()` takes after it is listed without a warning,
+    /// since `no_headers` is set; the first byte sends nothing more.
+    #[test]
+    fn a_quiet_head_counts_sent_and_takes_a_line_without_a_warning() {
+        let mut req = web_request();
+        req.output_mut().quiet();
+        assert!(req.headers_sent().is_some());
+        assert!(req.header_add(b"X-A: 1", true, 0));
+        req.write(b"x");
+        assert_eq!(req.headers_list(), [b"X-A: 1".to_vec()]);
+        assert!(req.header_add(b"X-B: 2", true, 0));
+        assert_eq!(req.headers_list().len(), 2);
     }
 
     /// `sapi_header_op` on a `Content-Type`: the default charset applied
