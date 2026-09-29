@@ -29,6 +29,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod blacklist;
+mod file_override;
 mod ini;
 
 use php_ext::abi::{
@@ -122,23 +123,24 @@ pub fn extension() -> Extension {
             opcache_is_script_cached_in_file_cache::declared(),
         ])
         .ini(ini::declared());
-    ini::handlers!(builder;
+    let builder = ini::handlers!(builder;
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
         24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
-        46, 47, 48, 49, 50, 51, 52, 53)
-    .engine_state(Accelerator::start)
-    .request_state::<State>()
-    .rinit(rinit)
-    .admission(admission)
-    .info(info)
-    .zend_extension(ZendExtension {
-        name: PRODUCT.to_owned(),
-        version: PHP_VERSION.to_owned(),
-        author: String::from("Zend Technologies"),
-        url: String::from("http://www.zend.com/"),
-        copyright: String::from("Copyright (c)"),
-    })
-    .build(PRODUCT)
+        46, 47, 48, 49, 50, 51, 52, 53);
+    file_override::install(builder)
+        .engine_state(Accelerator::start)
+        .request_state::<State>()
+        .rinit(rinit)
+        .admission(admission)
+        .info(info)
+        .zend_extension(ZendExtension {
+            name: PRODUCT.to_owned(),
+            version: PHP_VERSION.to_owned(),
+            author: String::from("Zend Technologies"),
+            url: String::from("http://www.zend.com/"),
+            copyright: String::from("Copyright (c)"),
+        })
+        .build(PRODUCT)
 }
 
 /// `accel_startup`'s verdict and `ZEND_RINIT_FUNCTION(zend_accelerator)`:

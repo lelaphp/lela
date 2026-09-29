@@ -18,3 +18,7 @@ php_ext = { path = "../../crates/php_ext" }
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
+# ext/standard for the natives the cache's own tests call and
+# `zend_accel_override_file_functions` replaces: `file_exists`, `is_file`
+# and `is_readable`, `file_put_contents` and `unlink`.
+php_ext_standard = { path = "../standard" }
