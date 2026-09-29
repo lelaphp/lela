@@ -2408,8 +2408,14 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
 /// NANz
 /// ```
 pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
-    let a = to_string(req, left)?;
-    let b = to_string(req, right)?;
+    let a = concat_operand(req, left)?;
+    let b = match concat_operand(req, right) {
+        Ok(b) => b,
+        Err(thrown) => {
+            req.release(Value::string(a));
+            return Err(thrown);
+        }
+    };
     // An empty side hands the other side on as it is, with the owner
     // `to_string` took, which is php's `ZVAL_COPY` of the other operand.
     if a.is_empty() {
@@ -2435,6 +2441,34 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
     req.release(Value::string(a));
     req.release(Value::string(b));
     Ok(Value::string(joined?))
+}
+
+/// One side of `concat_function` as a string, `zval_get_string_func`,
+/// and php's `if (UNEXPECTED(EG(exception))) return FAILURE` after it: a
+/// handler the conversion's warning reached that threw leaves the place
+/// `.=` writes as it stood, where php's `Array` would have been joined.
+///
+/// ```php
+/// set_error_handler(function ($type, $msg) { throw new Exception($msg); });
+/// $a = [];
+/// try { $a .= "foo"; } catch (Exception $e) { var_dump($a); }
+/// $a = "foo";
+/// try { $a .= []; } catch (Exception $e) { var_dump($a); }
+/// try { $b = [] . "x"; } catch (Exception $e) { var_dump(isset($b)); }
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// string(3) "foo"
+/// bool(false)
+/// ```
+fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
+    let text = to_string(req, value)?;
+    if req.is_pending() && value.deref().as_php_string().is_none() {
+        req.release(Value::string(text));
+        return Err(Thrown::of(None));
+    }
+    Ok(text)
 }
 
 /// `concat_function` where `result` is `op1` (`Z/Zend/zend_operators.c:2125`),
@@ -2541,11 +2575,11 @@ pub(crate) fn concat_assign(
     // anything, so the right side is read unowned only then: what a
     // destructor `vacate` served could free is held.
     let quiet = left.deref().as_php_string().is_some();
-    let a = to_string(req, left)?;
+    let a = concat_operand(req, left)?;
     let right = right.deref();
     let (b, owned) = match right.as_php_string() {
         Some(b) if quiet => (*b, false),
-        _ => match to_string(req, &right) {
+        _ => match concat_operand(req, &right) {
             Ok(b) => (b, true),
             Err(thrown) => {
                 req.release(Value::string(a));
@@ -3264,6 +3298,9 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Increment on type bool has no effect, this will change in the next major version of PHP",
             );
+            if req.is_pending() {
+                return Err(Thrown::of(None));
+            }
             // php steps nothing here, so the variable keeps what it
             // holds; the value handed back is a second owner of it,
             // which the caller's write-back gives the variable again.
@@ -3366,6 +3403,9 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Decrement on empty string is deprecated as non-numeric",
             );
+            if req.is_pending() {
+                return Err(Thrown::of(None));
+            }
             Ok(Value::int(-1))
         }
         ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
@@ -3377,6 +3417,9 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                     req,
                     "Decrement on non-numeric string has no effect and is deprecated",
                 );
+                if req.is_pending() {
+                    return Err(Thrown::of(None));
+                }
                 // As [`increment`]'s bool arm: nothing is stepped, and
                 // the value handed back is a second owner of the string
                 // the variable holds.
@@ -3390,6 +3433,9 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Decrement on type null has no effect, this will change in the next major version of PHP",
             );
+            if req.is_pending() {
+                return Err(Thrown::of(None));
+            }
             Ok(Value::null())
         }
         ValueRef::Bool(_) => {
@@ -3397,6 +3443,9 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Decrement on type bool has no effect, this will change in the next major version of PHP",
             );
+            if req.is_pending() {
+                return Err(Thrown::of(None));
+            }
             req.addref(value);
             Ok(*value)
         }
@@ -3430,11 +3479,44 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
 /// a byte that is none of the three stops the carry where it stands; and
 /// a carry off the front prepends the first of the last kind stepped. The
 /// empty string is `"1"`.
+///
+/// A handler the deprecation reached that threw leaves the variable as
+/// it stood, `if (EG(exception)) return false`, as each diagnostic of
+/// `increment_function` and `decrement_function` does.
+///
+/// ```php
+/// set_error_handler(function ($severity, $m) { throw new Exception($m); });
+/// foreach (['', 'A1', true, null] as $value) {
+///     try { $value++; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+///     var_dump($value);
+///     try { $value--; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+///     var_dump($value);
+/// }
+/// ```
+/// ```expect
+/// Increment on non-numeric string is deprecated, use str_increment() instead
+/// string(0) ""
+/// Decrement on empty string is deprecated as non-numeric
+/// string(0) ""
+/// Increment on non-numeric string is deprecated, use str_increment() instead
+/// string(2) "A1"
+/// Decrement on non-numeric string has no effect and is deprecated
+/// string(2) "A1"
+/// Increment on type bool has no effect, this will change in the next major version of PHP
+/// bool(true)
+/// Decrement on type bool has no effect, this will change in the next major version of PHP
+/// bool(true)
+/// int(1)
+/// int(0)
+/// ```
 fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
     deprecated(
         req,
         "Increment on non-numeric string is deprecated, use str_increment() instead",
     );
+    if req.is_pending() {
+        return Err(Thrown::of(None));
+    }
     if bytes.is_empty() {
         return PhpString::new(req, b"1");
     }
@@ -3951,7 +4033,8 @@ pub(crate) fn array_entry(
 /// float and an unwritten variable warn `String offset cast occurred` and
 /// then convert, the float silently since the warning has been raised
 /// ([`dval_to_lval_silent`]). An array, an object and a resource are the
-/// `TypeError`.
+/// `TypeError`, the offset named as `zend_zval_type_name` names it, an
+/// object by its class, under a `??` as under a plain read.
 ///
 /// ```php
 /// $s = "abc";
@@ -3966,6 +4049,18 @@ pub(crate) fn array_entry(
 /// string(1) "b"
 /// bool(false)
 /// ```
+///
+/// ```php
+/// $s = "string";
+/// try { var_dump($s[new stdClass()] ?? 'default'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { var_dump($s[new ArrayObject]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { var_dump($s[[]] ?? 'default'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot access offset of type stdClass on string
+/// Cannot access offset of type ArrayObject on string
+/// Cannot access offset of type array on string
+/// ```
 pub(crate) fn string_dim_offset(
     req: &mut Request,
     dim: &Value,
@@ -3976,7 +4071,10 @@ pub(crate) fn string_dim_offset(
         throw(
             req,
             "TypeError",
-            &format!("Cannot access offset of type {} on string", dim.type_name()),
+            &format!(
+                "Cannot access offset of type {} on string",
+                zval_type_name(req, dim)
+            ),
         )
     };
     match dim.as_ref() {
@@ -4760,6 +4858,44 @@ pub(crate) fn arg_long_weak(req: &mut Request, value: &Value) -> Option<i64> {
 pub(crate) fn double_to_long(req: &mut Request, d: f64) -> i64 {
     let l = dval_to_lval(req, d);
     if !long_compatible(d, l) && fits_long(d) {
+        let text = rendered(d);
+        deprecated(
+            req,
+            &format!("Implicit conversion from float {text} to int loses precision"),
+        );
+    }
+    l
+}
+
+/// `zval_get_long_func` with `is_strict` on over a double
+/// (`Z/Zend/zend_operators.c:971`), what `zval_get_long_ex(offset, true)`
+/// reads a float offset over a string as under `isset` and `empty`:
+/// `zend_dval_to_lval` with its warning, and then the deprecation
+/// wherever the long is not the double, a double past the long's range
+/// among them, where [`double_to_long`] deprecates only one in range.
+///
+/// ```php
+/// $s = "abc";
+/// var_dump(isset($s[1.5]), isset($s[1.8446744073709552E+19]), empty($s[NAN]));
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 3
+///
+/// Warning: The float 1.8446744073709552E+19 is not representable as an int, cast occurred in %s on line 3
+///
+/// Deprecated: Implicit conversion from float 1.8446744073709552E+19 to int loses precision in %s on line 3
+///
+/// Warning: The float NAN is not representable as an int, cast occurred in %s on line 3
+///
+/// Deprecated: Implicit conversion from float NAN to int loses precision in %s on line 3
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+pub(crate) fn double_to_long_strict(req: &mut Request, d: f64) -> i64 {
+    let l = dval_to_lval(req, d);
+    if !long_compatible(d, l) {
         let text = rendered(d);
         deprecated(
             req,

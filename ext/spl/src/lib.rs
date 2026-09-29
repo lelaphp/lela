@@ -491,21 +491,18 @@ fn zval_key(req: &mut Request, key: &Value) -> Result<Key, Thrown> {
 // ---- what several classes share
 
 /// `zend_dval_to_lval_safe`: the integer a float offset makes, with
-/// php's deprecation where the float has a fraction the cast drops.
+/// php's warning where no long represents it and its deprecation where
+/// the float has a fraction the cast drops.
 fn float_key(req: &mut Request, f: f64) -> Result<i64, Thrown> {
-    let n = php_ext::coerce::float_to_long(f);
-    // `zend_is_long_compatible` is `(double)l == d`, an exact test.
-    #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
-    let compatible = (n as f64) == f;
-    if !compatible && f.is_finite() && f.abs() < 9.2e18 {
-        let shown = php_ext::coerce::to_string(req, &Value::float(f))?;
-        let shown = String::from_utf8_lossy(shown.as_bytes()).into_owned();
-        php_ext::raising::deprecated(
-            req,
-            &format!("Implicit conversion from float {shown} to int loses precision"),
-        );
+    // An array's own offset reading of a float is this one, 8.5's
+    // warning for a float no long represents included.
+    match php_ext::coerce::key_of(req, &Value::float(f))? {
+        Key::Int(n) => Ok(n),
+        Key::Str(s) => {
+            req.release(Value::string(s));
+            Ok(0)
+        }
     }
-    Ok(n)
 }
 
 /// Whether the class of `object` overrides `lowered` with a method of

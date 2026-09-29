@@ -553,6 +553,34 @@ impl PhpArray {
     /// `EG(exception)` is set, so the sort runs to its end over the
     /// positions alone and the array is left as php leaves it before what
     /// was thrown is raised from here.
+    ///
+    /// The table is held one owner more while it is sorted,
+    /// `zend_array_sort_ex`'s `GC_ADDREF(ht)`, so a comparison whose code
+    /// writes the array separates it: the variable takes the copy with the
+    /// write, and the table sorted is given up after, destroyed where
+    /// nothing else holds it.
+    ///
+    /// ```php
+    /// function resize_arr() { global $arr; for ($i = 0; $i < 4; $i++) { $arr[$i] = $i; } }
+    /// class C { function __toString() { resize_arr(); return '3'; } }
+    /// $arr = ['a' => '1', '3' => new C, '2' => '2'];
+    /// asort($arr);
+    /// var_dump($arr);
+    /// ```
+    /// ```expect
+    /// array(5) {
+    ///   ["a"]=>
+    ///   string(1) "1"
+    ///   [3]=>
+    ///   int(3)
+    ///   [2]=>
+    ///   int(2)
+    ///   [0]=>
+    ///   int(0)
+    ///   [1]=>
+    ///   int(1)
+    /// }
+    /// ```
     pub fn sort_by(
         &mut self,
         req: &mut Request,
@@ -564,8 +592,9 @@ impl PhpArray {
         ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
         self.separate(req)?;
+        let held = req.take_hold(self.to_value());
         let mut pending: Option<Thrown> = None;
-        req.array_sort(self.0, renumber, &mut |req, x, y| {
+        let sorted = req.array_sort(self.0, renumber, &mut |req, x, y| {
             let ordering = if pending.is_some() {
                 Ordering::Equal
             } else {
@@ -580,7 +609,9 @@ impl PhpArray {
                 }
             };
             ordering.then(x.position.cmp(&y.position))
-        })?;
+        });
+        req.release_hold(held);
+        sorted?;
         pending.map_or(Ok(()), Err)
     }
 
@@ -779,6 +810,36 @@ impl HashIterator {
     /// `zend_hash_iterator_del`: the slot given back.
     pub fn release(self, req: &mut Request) {
         req.heap_mut().iterator_del(self.0);
+    }
+}
+
+impl PhpArray {
+    /// `zend_hash_iterators_lower_pos`: the lowest bucket at or after
+    /// `start` a hash iterator on the array stands at, the count of
+    /// buckets used where none does. What a native that rebuilds the
+    /// array walks its buckets ([`PhpArray::live_from`]) against.
+    pub fn iterators_lower_pos(&self, req: &mut Request, start: u32) -> u32 {
+        req.heap_mut().iterators_lower_pos(self.0, start)
+    }
+
+    /// `zend_hash_iterators_update`: every hash iterator on the array at
+    /// bucket `from` moved to `to`.
+    pub fn iterators_update(&self, req: &mut Request, from: u32, to: u32) {
+        req.heap_mut().iterators_update(self.0, from, to);
+    }
+
+    /// `zend_hash_iterators_advance`: every hash iterator on the array
+    /// `step` buckets on.
+    pub fn iterators_advance(&self, req: &mut Request, step: u32) {
+        req.heap_mut().iterators_advance(self.0, step);
+    }
+
+    /// The hash iterators on the array moved onto `rebuilt`, at the
+    /// positions they have: what php's swap of a rebuilt table's data
+    /// into the old header keeps (`HT_SET_ITERATORS_COUNT`), so a
+    /// `foreach` by reference over the array goes on in `rebuilt`.
+    pub fn iterators_carry(&self, req: &mut Request, rebuilt: &PhpArray) {
+        req.heap_mut().iterators_carry(self.0, rebuilt.0);
     }
 }
 
@@ -1492,10 +1553,12 @@ impl PhpRef {
     /// (`Z/Zend/zend_API.h`): a cell a typed property's slot holds is held
     /// to every type its sources declare, under the calling code's
     /// `strict_types`, as `zend_try_assign_typed_ref` holds it, and
-    /// coerced to what they agree on; any other cell takes the value as it
-    /// is. `value` is the cell's from here and what the cell held is
-    /// released last, where a destructor is served; on the `TypeError`
-    /// the value is given up and the cell keeps what it held.
+    /// coerced to what they agree on, `value` the cell's from here and
+    /// what it held released last (`zend_safe_assign_to_variable_noref`);
+    /// any other cell takes the value as it is, after `zval_ptr_safe_dtor`
+    /// has left it `null` and released what it held, so a destructor that
+    /// release serves reads `null` there and not the value. On the
+    /// `TypeError` the value is given up and the cell keeps what it held.
     ///
     /// ```php
     /// class T { public int $i = 0; public ?string $s = null; }
@@ -1516,7 +1579,26 @@ impl PhpRef {
     ///   &NULL
     /// }
     /// ```
+    ///
+    /// ```php
+    /// class Test { function __destruct() { global $box; var_dump($box); } }
+    /// $box = [new Test];
+    /// getimagesize("dummy", $box);
+    /// var_dump($box);
+    /// ```
+    /// ```expect
+    /// NULL
+    ///
+    /// Warning: getimagesize(dummy): Failed to open stream: No such file or directory in %s on line 4
+    /// array(0) {
+    /// }
+    /// ```
     pub fn set(&self, req: &mut Request, value: Value) -> Result<(), Thrown> {
+        if self.0.sources() == 0 {
+            req.reference_set(self.0, Value::null());
+            req.reference_set(self.0, value);
+            return Ok(());
+        }
         let strict = req.strict_types();
         req.assign_to_reference(self.0, value, strict)
     }
@@ -1768,6 +1850,17 @@ impl Value {
     /// alone; a native is never handed one.
     #[must_use]
     pub(crate) const fn undef() -> Value {
+        Value::of(Inner::Undef)
+    }
+
+    /// An argument left unpassed, the `IS_UNDEF` slot `zend_call_function`
+    /// forwards (`ZEND_CALL_MAY_HAVE_UNDEF`): a call served with one fills
+    /// it from the parameter's default or raises php's `ArgumentCountError`
+    /// that it was not passed, so the callee never reads one. What
+    /// `spl_array_read_dimension_ex` hands an overriding `offsetGet` for
+    /// `$o[]`.
+    #[must_use]
+    pub const fn unpassed() -> Value {
         Value::of(Inner::Undef)
     }
 

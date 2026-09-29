@@ -3717,8 +3717,22 @@ impl Request {
 
     /// `php_stream_display_wrapper_errors` (`Z/main/streams/streams.c:175`)
     /// as `php_error_docref1` renders it: the native, the path in
-    /// parentheses, the caption and the message.
+    /// parentheses, the caption and the message; nothing where a
+    /// throwable is pending, php testing for one ahead of it, so no
+    /// warning added over what was already thrown.
+    ///
+    /// ```php
+    /// class Test { function __destruct() { global $box; $box->value = null; } }
+    /// $box = [new Test];
+    /// try { getimagesize("dummy", $box); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Attempt to assign property "value" on null
+    /// ```
     pub(crate) fn display_wrapper_errors(&mut self, path: &[u8], caption: &str, message: &str) {
+        if self.is_pending() {
+            return;
+        }
         let text = format!(
             "{}({}): {caption}: {message}",
             self.active_native(),
