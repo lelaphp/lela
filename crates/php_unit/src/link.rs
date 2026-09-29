@@ -1213,19 +1213,25 @@ fn is_variadic(function: &FunctionDecl) -> bool {
 }
 
 /// A default as `zend_get_function_declaration` prints it.
+///
+/// A float is written at php's `precision` of 14 in the `E` form:
+///
+/// ```php
+/// class B { function t($x = 3.141592653589793, $y = 1.0, $z = 1e100) {} }
+/// class S extends B { function t() {} }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Declaration of S::t() must be compatible with B::t($x = 3.1415926535898, $y = 1, $z = 1.0E+100) in %s on line 3
+/// ```
 fn default_text(default: &ConstExpr) -> String {
     match default {
         ConstExpr::Null => String::from("null"),
         ConstExpr::Bool(false) => String::from("false"),
         ConstExpr::Bool(true) => String::from("true"),
         ConstExpr::Long { value, radix } => radix.written(*value),
-        ConstExpr::Double(d) => {
-            if d.fract() == 0.0 && d.is_finite() && d.abs() < 1e15 {
-                format!("{d:.0}")
-            } else {
-                d.to_string()
-            }
-        }
+        // `smart_str_append_double(&str, d, EG(precision), false)`, at
+        // php's default `precision` of 14.
+        ConstExpr::Double(d) => php_heap::double_to_string(*d, 14, php_heap::Exponent::Upper),
         ConstExpr::Str(bytes) => {
             let shown = &bytes[..bytes.len().min(10)];
             let more = if bytes.len() > 10 { "..." } else { "" };
