@@ -50,6 +50,40 @@ impl PostEntry {
     }
 }
 
+/// One step of a multipart body's reading, as `rfc1867_post_handler` hands
+/// it to `php_rfc1867_callback` (`MULTIPART_EVENT_*`, `Z/main/rfc1867.h`),
+/// each with how much of the body the host has handed out by then,
+/// `SG(read_post_bytes)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upload<'a> {
+    /// `MULTIPART_EVENT_START`: the body's reading begins.
+    Start { content_length: i64 },
+    /// `MULTIPART_EVENT_FORMDATA`: a form field, its name and the value the
+    /// input filter kept.
+    FormData {
+        read: i64,
+        name: &'a [u8],
+        value: &'a [u8],
+    },
+    /// `MULTIPART_EVENT_FILE_START`: a file's field and its name.
+    FileStart {
+        read: i64,
+        name: &'a [u8],
+        filename: &'a [u8],
+    },
+    /// `MULTIPART_EVENT_FILE_DATA`: a block of the file, at `offset`.
+    FileData { read: i64, offset: i64, length: i64 },
+    /// `MULTIPART_EVENT_FILE_END`: the file written, where it was, and its
+    /// `UPLOAD_ERR_*`.
+    FileEnd {
+        read: i64,
+        temp: Option<&'a [u8]>,
+        error: i64,
+    },
+    /// `MULTIPART_EVENT_END`: the body's reading ends.
+    End { read: i64 },
+}
+
 /// php's post state of one request (`SG(request_info)`, `SG(read_post_bytes)`,
 /// `SG(post_read)`, `SG(rfc1867_uploaded_files)`).
 #[derive(Debug, Default)]
@@ -325,5 +359,39 @@ impl Request {
     /// One file an upload wrote, kept for `is_uploaded_file()`.
     pub(crate) fn note_uploaded(&mut self, path: PathBuf) {
         self.post.uploaded.push(path);
+    }
+
+    /// `php_rfc1867_callback` over one step: every extension's upload hook,
+    /// in bundle order; `false` where one answered php's `FAILURE`.
+    pub(crate) fn upload_event(&mut self, event: &Upload<'_>) -> Result<bool, Thrown> {
+        let shared = std::sync::Arc::clone(&self.shared);
+        let mut went_on = true;
+        for hook in shared
+            .extensions
+            .iter()
+            .filter_map(|extension| extension.upload)
+        {
+            went_on &= hook(self, event)?;
+        }
+        Ok(went_on)
+    }
+
+    /// How much of the body the host has handed out,
+    /// `SG(read_post_bytes)`.
+    pub(crate) fn post_bytes_read(&self) -> i64 {
+        i64::try_from(self.post.read).unwrap_or(i64::MAX)
+    }
+
+    /// The variables of the query string or the cookie header, parsed
+    /// afresh by `php_default_treat_data` into an array of their own, as
+    /// `session.upload_progress` asks `sapi_module.treat_data` for them
+    /// before `$_GET` and `$_COOKIE` are made; empty for any other input.
+    pub fn input_variables(&mut self, input: super::Input) -> Result<PhpArray, Thrown> {
+        let source = match input {
+            super::Input::Get => self.web().and_then(|web| web.query.clone()),
+            super::Input::Cookie => self.web().and_then(|web| web.cookies.clone()),
+            _ => None,
+        };
+        self.treat_data(input, source.as_deref())
     }
 }

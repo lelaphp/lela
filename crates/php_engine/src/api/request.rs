@@ -60,6 +60,7 @@ mod site_override;
 mod table;
 mod unit_cache;
 mod variables;
+pub use post::Upload;
 pub use variables::{BodyLimits, Input};
 pub(crate) use variables::{atol, url_decode};
 
@@ -15392,8 +15393,10 @@ impl Request {
         self.started
     }
 
-    /// `ZCG(request_time)`: when the request started, in whole seconds.
-    pub(crate) fn request_time(&self) -> i64 {
+    /// `ZCG(request_time)` and `sapi_get_request_time()` as a `zend_long`:
+    /// when the request started, in whole seconds.
+    #[must_use]
+    pub fn request_time(&self) -> i64 {
         i64::try_from(self.started.as_secs()).unwrap_or(i64::MAX)
     }
 

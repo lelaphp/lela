@@ -68,6 +68,7 @@ abi::ExtensionBuilder::rinit
 abi::ExtensionBuilder::rshutdown
 abi::ExtensionBuilder::ticks
 abi::ExtensionBuilder::trampolines
+abi::ExtensionBuilder::upload
 abi::ExtensionBuilder::zend_extension
 abi::False
 abi::FromArgument
@@ -440,6 +441,7 @@ request::Request::ini_parse_bool
 request::Request::ini_parse_bytes
 request::Request::ini_parse_quantity
 request::Request::ini_set
+request::Request::input_variables
 request::Request::interrupt
 request::Request::is_unwind_exit
 request::Request::is_uploaded_file
@@ -473,6 +475,7 @@ request::Request::registered
 request::Request::release
 request::Request::remove_filter
 request::Request::request_headers
+request::Request::request_time
 request::Request::reset_memory_peak
 request::Request::resource
 request::Request::resources
@@ -603,6 +606,7 @@ request::UnitCache::holds
 request::UnitCache::invalidate
 request::UnitCache::reset
 request::UnitCache::status
+request::Upload
 request::UrlStat
 request::Whence
 request::Whence::from_int

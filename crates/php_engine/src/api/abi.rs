@@ -219,6 +219,10 @@ pub(crate) type CompileFileHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u
 /// The one question the unit cache asks an extension about a file
 /// (design §6.3): [`ExtensionBuilder::admission`].
 pub(crate) type AdmissionHook = fn(&mut Request, &[u8]) -> Admission;
+/// The upload hook, php's `php_rfc1867_callback`:
+/// [`ExtensionBuilder::upload`].
+pub(crate) type UploadHook =
+    fn(&mut Request, &crate::api::request::Upload<'_>) -> Result<bool, Thrown>;
 /// The input filter, php's `sapi_module.input_filter`:
 /// [`ExtensionBuilder::input_filter`].
 pub(crate) type InputFilterHook = fn(
@@ -365,6 +369,8 @@ pub struct Extension {
     pub(crate) admission: Option<AdmissionHook>,
     /// What [`ExtensionBuilder::input_filter`] was handed.
     pub(crate) input_filter: Option<InputFilterHook>,
+    /// What [`ExtensionBuilder::upload`] was handed.
+    pub(crate) upload: Option<UploadHook>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
     /// What [`ExtensionBuilder::intercept`] was handed: each native of
@@ -412,6 +418,7 @@ pub struct ExtensionBuilder {
     compile_file: Option<CompileFileHook>,
     admission: Option<AdmissionHook>,
     input_filter: Option<InputFilterHook>,
+    upload: Option<UploadHook>,
     zend: Option<ZendExtension>,
     intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
@@ -670,6 +677,20 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The upload hook, php's `php_rfc1867_callback` as `ext/session`'s
+    /// `MINIT` sets it for `session.upload_progress`: each step of a
+    /// multipart body's reading is handed to `hook` as it is taken
+    /// ([`crate::api::request::Upload`]), and `false` answers php's
+    /// `FAILURE`: the body's reading stops at its start, a field is not
+    /// registered, a file is passed over at its start and cancelled with
+    /// `UPLOAD_ERR_EXTENSION` after it. Every extension's hook is asked,
+    /// in bundle order.
+    #[must_use]
+    pub fn upload(mut self, hook: UploadHook) -> ExtensionBuilder {
+        self.upload = Some(hook);
+        self
+    }
+
     /// The extension is a Zend extension too, php's `zend_extension`
     /// beside its `zend_module_entry` (`Z/Zend/zend_extensions.c`), as
     /// opcache is: `row` is what `php -m` lists under `[Zend Modules]`,
@@ -791,6 +812,7 @@ impl ExtensionBuilder {
             compile_file: self.compile_file,
             admission: self.admission,
             input_filter: self.input_filter,
+            upload: self.upload,
             zend: self.zend,
             intercepts: self.intercepts,
             info: self.info,

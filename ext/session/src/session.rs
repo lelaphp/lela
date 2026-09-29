@@ -255,6 +255,23 @@ pub(super) fn decode(req: &mut Request, data: &[u8]) -> Result<bool, Thrown> {
 
 // ------------------------------------------------------------ lifecycle
 
+/// `php_rinit_session(false)`: the request state reset and the save handler and
+/// the serializer the ini names found, the session disabled where either
+/// is unknown; `false` then.
+pub(super) fn rinit_without_start(req: &mut Request) -> bool {
+    rinit_globals(req);
+    let module = Module::find(&ini(req, b"session.save_handler"));
+    let format = Format::find(&ini(req, b"session.serialize_handler"));
+    let state = req.state::<State>();
+    state.module = module;
+    state.format = format;
+    if module.is_none() || format.is_none() {
+        state.status = Status::Disabled;
+        return false;
+    }
+    true
+}
+
 /// `php_rinit_session_globals`.
 fn rinit_globals(req: &mut Request) {
     let state = req.state::<State>();
@@ -271,7 +288,7 @@ fn rinit_globals(req: &mut Request) {
 
 /// `php_rshutdown_session_globals`: the handler closed, the id, the
 /// read data and the start site forgotten.
-fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
+pub(super) fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
     crate::unbind(req);
     let closed = close(req);
     absorb(req, closed)?;
@@ -292,14 +309,7 @@ fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
 /// startup rules are the engine's to serve, over the host's values, as
 /// the engine starts (`ZEND_INI_STAGE_STARTUP`), before this runs.
 pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    rinit_globals(req);
-    let module = Module::find(&ini(req, b"session.save_handler"));
-    let format = Format::find(&ini(req, b"session.serialize_handler"));
-    let state = req.state::<State>();
-    state.module = module;
-    state.format = format;
-    if module.is_none() || format.is_none() {
-        state.status = Status::Disabled;
+    if !rinit_without_start(req) {
         return Ok(());
     }
     if ini_bool(req, b"session.auto_start") {

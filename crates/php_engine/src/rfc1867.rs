@@ -9,7 +9,7 @@
 //! extension of this engine registers it.
 
 use crate::api::raising::{Level, Thrown, docref, throw};
-use crate::api::request::{BodyLimits, Input, Request};
+use crate::api::request::{BodyLimits, Input, Request, Upload};
 use crate::api::values::{PhpArray, PhpString, Value};
 
 /// `FILLUNIT` (`Z/main/rfc1867.c:188`).
@@ -22,6 +22,7 @@ const UPLOAD_ERROR_C: i64 = 3;
 const UPLOAD_ERROR_D: i64 = 4;
 const UPLOAD_ERROR_E: i64 = 6;
 const UPLOAD_ERROR_F: i64 = 7;
+const UPLOAD_ERROR_X: i64 = 8;
 
 /// `multipart_buffer` (`Z/main/rfc1867.c:190`): the bytes read from the
 /// host and not yet handed out, `buf_begin..buf_begin+bytes_in_buffer` of
@@ -365,14 +366,14 @@ fn normalize_protected(name: &[u8]) -> Vec<u8> {
 /// What one pass of the handler holds beside the request: the names a file
 /// upload protects (`PG(rfc1867_protected_variables)`), the arrays it
 /// writes, and whether a refusal is thrown (`request_parse_body()`).
-struct Upload {
+struct Handler {
     protected: Vec<Vec<u8>>,
     post: PhpArray,
     files: PhpArray,
     throwing: bool,
 }
 
-impl Upload {
+impl Handler {
     /// `EMIT_WARNING_OR_ERROR`: php's `RequestParseBodyException` under
     /// `request_parse_body()`, the warning otherwise.
     fn refuse(&self, req: &mut Request, message: &str) -> Result<(), Thrown> {
@@ -414,15 +415,15 @@ impl Upload {
 }
 
 /// `rfc1867_post_handler` (`Z/main/rfc1867.c:640`) over the body, into
-/// `post`, `$_POST`'s array, and the request's `$_FILES`.
-#[allow(clippy::too_many_lines)] // php's one function, kept as one
+/// `post`, `$_POST`'s array, and the request's `$_FILES`: the limits and
+/// the boundary, then the parts between the upload hook's start and end.
 pub(crate) fn post_handler(
     req: &mut Request,
     content_type: &[u8],
     post: PhpArray,
     limits: &BodyLimits,
 ) -> Result<(), Thrown> {
-    let mut upload_cnt = limits
+    let upload_cnt = limits
         .max_file_uploads
         .unwrap_or_else(|| req.ini_long(b"max_file_uploads"));
     let mut body_parts_cnt = limits
@@ -444,7 +445,7 @@ pub(crate) fn post_handler(
         req.set_files_track(files);
         files
     };
-    let mut upload = Upload {
+    let mut upload = Handler {
         protected: Vec::new(),
         post,
         files,
@@ -493,6 +494,47 @@ pub(crate) fn post_handler(
         return Ok(());
     }
     let mut mbuff = Buffer::new(boundary);
+    let limits = Limits {
+        upload_cnt,
+        body_parts_cnt,
+        body_parts_limit,
+        max_input_vars,
+        upload_max_filesize,
+    };
+    if req.upload_event(&Upload::Start { content_length })? {
+        parts(req, &mut upload, &mut mbuff, limits)?;
+    }
+    let read = req.post_bytes_read();
+    req.upload_event(&Upload::End { read })?;
+    Ok(())
+}
+
+/// The limits one body is read under, as `rfc1867_post_handler` reads
+/// them.
+#[derive(Clone, Copy)]
+struct Limits {
+    upload_cnt: i64,
+    body_parts_cnt: i64,
+    body_parts_limit: i64,
+    max_input_vars: i64,
+    upload_max_filesize: i64,
+}
+
+/// `rfc1867_post_handler`'s loop over the parts, to `fileupload_done`.
+#[allow(clippy::too_many_lines)] // php's one loop, kept as one
+fn parts(
+    req: &mut Request,
+    upload: &mut Handler,
+    mbuff: &mut Buffer,
+    limits: Limits,
+) -> Result<(), Thrown> {
+    let Limits {
+        mut upload_cnt,
+        mut body_parts_cnt,
+        body_parts_limit,
+        max_input_vars,
+        upload_max_filesize,
+    } = limits;
     let mut anonymous_index = 0u32;
     let mut count = 0i64;
     let mut max_file_size: i64 = 0;
@@ -543,17 +585,39 @@ pub(crate) fn post_handler(
         {
             let value = mbuff.read_body(req).unwrap_or_default();
             count += 1;
-            if count <= max_input_vars {
-                if let Some(value) = req.filter_input(Input::Post, &param, &value)? {
-                    upload.register(req, upload.post, &param, value, false)?;
+            let read = req.post_bytes_read();
+            let kept = if count <= max_input_vars {
+                req.filter_input(Input::Post, &param, &value)?
+            } else {
+                None
+            };
+            if let Some(kept) = kept {
+                let shown = kept.as_str_bytes().map(<[u8]>::to_vec).unwrap_or_default();
+                let event = Upload::FormData {
+                    read,
+                    name: c_str(&param),
+                    value: &shown,
+                };
+                if req.upload_event(&event)? {
+                    upload.register(req, upload.post, &param, kept, false)?;
+                } else {
+                    req.release(kept);
                 }
-            } else if count == max_input_vars + 1 {
-                upload.refuse(
-                    req,
-                    &format!(
-                        "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
-                    ),
-                )?;
+            } else {
+                if count == max_input_vars + 1 {
+                    upload.refuse(
+                        req,
+                        &format!(
+                            "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
+                        ),
+                    )?;
+                }
+                let event = Upload::FormData {
+                    read,
+                    name: c_str(&param),
+                    value: &value,
+                };
+                req.upload_event(&event)?;
             }
             if c_str(&param).eq_ignore_ascii_case(b"MAX_FILE_SIZE") {
                 max_file_size = crate::api::request::atol(&value);
@@ -607,10 +671,18 @@ pub(crate) fn post_handler(
                 skip_upload = true;
             }
         }
+        let filename = c_str(&filename.unwrap_or_default()).to_vec();
+        if !skip_upload {
+            let event = Upload::FileStart {
+                read: req.post_bytes_read(),
+                name: &param,
+                filename: &filename,
+            };
+            skip_upload = !req.upload_event(&event)?;
+        }
         if skip_upload {
             continue;
         }
-        let filename = c_str(&filename.unwrap_or_default()).to_vec();
         let mut cancel_upload = 0;
         if filename.is_empty() {
             cancel_upload = UPLOAD_ERROR_D;
@@ -629,8 +701,18 @@ pub(crate) fn post_handler(
                 cancel_upload = UPLOAD_ERROR_E;
             }
         }
+        let mut offset = 0i64;
         while cancel_upload == 0 && !blen.is_empty() {
             let size = i64::try_from(blen.len()).unwrap_or(i64::MAX);
+            let event = Upload::FileData {
+                read: req.post_bytes_read(),
+                offset,
+                length: size,
+            };
+            if !req.upload_event(&event)? {
+                cancel_upload = UPLOAD_ERROR_X;
+                continue;
+            }
             if upload_max_filesize > 0 && total_bytes + size > upload_max_filesize {
                 cancel_upload = UPLOAD_ERROR_A;
             } else if max_file_size != 0 && total_bytes + size > max_file_size {
@@ -642,12 +724,24 @@ pub(crate) fn post_handler(
                     Some(Ok(())) => total_bytes += size,
                     _ => cancel_upload = UPLOAD_ERROR_F,
                 }
+                offset += size;
             }
             blen = mbuff.read(req, FILLUNIT, &mut end);
         }
         let temp_path = temp.map(|(_, path)| path);
         if cancel_upload == 0 && !end {
             cancel_upload = UPLOAD_ERROR_C;
+        }
+        let shown = temp_path
+            .as_ref()
+            .map(|path| path.as_os_str().as_encoded_bytes().to_vec());
+        let event = Upload::FileEnd {
+            read: req.post_bytes_read(),
+            temp: shown.as_deref(),
+            error: cancel_upload,
+        };
+        if !req.upload_event(&event)? {
+            cancel_upload = UPLOAD_ERROR_X;
         }
         let temp_name = if cancel_upload != 0 {
             if let Some(path) = &temp_path
