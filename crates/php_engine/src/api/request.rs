@@ -7009,6 +7009,65 @@ impl Request {
         })
     }
 
+    /// `zend_check_property_access` (`Z/Zend/zend_object_handlers.c`)
+    /// over one row of an object's property table, as
+    /// `get_object_vars()` asks it under the executed scope: `declared`
+    /// is the row's declaration, the class and visibility its mangled
+    /// name carries, or none for a dynamic row. The row is seen where
+    /// the scope's `zend_get_property_info` for its name finds that same
+    /// declaration: a private row where it finds that class's private
+    /// property, a protected one where it finds no private one, and a
+    /// public or dynamic one where it finds nothing declared, or a
+    /// public property. So a parent's private property is seen from the
+    /// parent over a child's redeclaration, and a dynamic property that
+    /// shadows it is not.
+    ///
+    /// ```php
+    /// class A { private $prop = "A"; function vars() { return get_object_vars($this); } }
+    /// #[AllowDynamicProperties]
+    /// class B extends A { protected $prop = "B"; }
+    /// #[AllowDynamicProperties]
+    /// class C extends A {}
+    /// $c = new C; $c->prop = "dynamic";
+    /// var_dump((new B)->vars(), $c->vars(), get_object_vars($c));
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   ["prop"]=>
+    ///   string(1) "A"
+    /// }
+    /// array(1) {
+    ///   ["prop"]=>
+    ///   string(1) "A"
+    /// }
+    /// array(1) {
+    ///   ["prop"]=>
+    ///   string(7) "dynamic"
+    /// }
+    /// ```
+    pub(crate) fn property_row_seen(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        declared: Option<(ClassId, Visibility)>,
+    ) -> bool {
+        let found = self
+            .declared_slot(class, name)
+            .map(|placed| self.reaches(&placed).then_some(placed));
+        match declared {
+            Some((declaring, Visibility::Private)) => matches!(found, Some(Some(p))
+                if p.visibility == Visibility::Private && p.declaring == declaring),
+            Some((_, Visibility::Protected)) => {
+                matches!(found, Some(Some(p)) if p.visibility != Visibility::Private)
+            }
+            _ => match found {
+                None => true,
+                Some(None) => false,
+                Some(Some(p)) => p.visibility == Visibility::Public,
+            },
+        }
+    }
+
     /// `property_info->prototype->ce` for the instance property `name`
     /// that `declaring` declares: `do_inherit_property` hands a child
     /// the parent's prototype where the parent's declaration is not
