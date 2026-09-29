@@ -258,11 +258,14 @@ impl Scratch {
 
 // ---------------------------------------------------------------- pre-commit
 
-/// The instruments in the order §6 lists them, `permit --diff`, then
-/// `xtask regions` over the four region files and the local one by name,
-/// which reaches `computed run`; the region file `computed` rewrote is
-/// re-staged, so the commit carries it and the tree is clean after, and
-/// `computed check` over the four holds the commit to a rendering.
+/// The instruments that only read the tree first, `fmt` and then at once
+/// `api-check`, `budget`, `unsafe-audit`, `vocab` and `permit --diff`;
+/// then `clippy` and `test`, then `witness` and `crosscheck` at once
+/// (#1252); then `xtask regions` over the four region files and the local
+/// one by name, which reaches `computed run`; the region file `computed`
+/// rewrote is re-staged, so the commit carries it and the tree is clean
+/// after, and `computed check` over the four holds the commit to a
+/// rendering.
 #[test]
 fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     let scratch = scratch("rendered", &Computed::Rendered);
@@ -272,34 +275,34 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
 
     let regions = format!("{} {LOCAL}", REGIONS.join(" "));
-    // The read-only steps run at once, so they start in any order (#1144);
-    // what they print comes out whole and in the hook's order, though
+    // A group runs at once, so its steps start in any order (#1144); what
+    // they print comes out whole and in the hook's order, though
     // `api-check`, the first, ends last.
-    let at_once = [
+    let reading = [
         "xtask api-check --staged",
         "xtask budget --staged",
         "xtask unsafe-audit --staged",
         "xtask vocab --staged",
-        "xtask witness --staged",
-        "xtask crosscheck",
         "xtask permit --diff",
     ];
+    let building = ["xtask witness --staged", "xtask crosscheck"];
     let mut calls = scratch.calls("cargo");
-    calls[3..10].sort_unstable();
-    let mut expected: Vec<String> = [
-        "fmt --check",
-        "xtask clippy --staged",
-        "xtask test --staged",
-    ]
-    .into_iter()
-    .chain(at_once)
-    .map(str::to_owned)
-    .collect();
-    expected[3..10].sort_unstable();
+    calls[1..6].sort_unstable();
+    calls[8..10].sort_unstable();
+    let mut expected: Vec<String> = ["fmt --check"]
+        .into_iter()
+        .chain(reading)
+        .chain(["xtask clippy --staged", "xtask test --staged"])
+        .chain(building)
+        .map(str::to_owned)
+        .collect();
+    expected[1..6].sort_unstable();
+    expected[8..10].sort_unstable();
     expected.push(format!("xtask regions {regions}"));
     assert_eq!(calls, expected);
     let printed: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("ran ")).collect();
-    assert_eq!(printed[3..], at_once, "{out}");
+    assert_eq!(printed[1..6], reading, "{out}");
+    assert_eq!(printed[8..], building, "{out}");
     assert_eq!(
         scratch.calls("computed"),
         [
@@ -450,29 +453,66 @@ fn an_untrusted_root_refuses_the_commit_naming_computed_trust() {
     assert_eq!(staged.trim(), "crates/php_heap/src/lib.rs");
 }
 
-/// An instrument that fails refuses the commit by name, and the ones
-/// after it still run: every command's exit is read, none short-circuits.
+/// An instrument that fails past the first group refuses the commit by
+/// name, and the ones after it still run: every command's exit is read,
+/// none short-circuits.
 #[test]
 fn a_failing_instrument_refuses_the_commit_and_the_rest_still_run() {
     let scratch = scratch("failing", &Computed::Rendered);
-    scratch.refuse("xtask budget");
+    scratch.refuse("xtask clippy");
     let before = scratch.head();
     let (code, out) = scratch.stage_and_commit();
     assert_eq!(code, 1, "{out}");
     assert_eq!(scratch.head(), before, "the commit was refused: {out}");
     assert!(
-        out.contains("pre-commit: cargo xtask budget --staged failed"),
+        out.contains("pre-commit: cargo xtask clippy --staged failed"),
         "{out}"
     );
     let calls = scratch.calls("cargo");
-    assert!(
-        calls.iter().any(|c| c == "xtask vocab --staged"),
-        "{calls:?}"
-    );
+    for after in ["xtask test --staged", "xtask witness --staged"] {
+        assert!(calls.iter().any(|c| c == after), "{after}: {calls:?}");
+    }
     assert!(
         calls.iter().any(|c| c.starts_with("xtask regions")),
         "{calls:?}"
     );
+}
+
+/// A refusal among the instruments that only read the tree ends the hook
+/// there (#1252): `vocab` refuses, the rest of its group still runs, and
+/// neither `clippy`, `test`, `witness` nor anything after them is started,
+/// so the commit is refused in the seconds the group takes and not after a
+/// build.
+#[test]
+fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
+    let scratch = scratch("vocab", &Computed::Rendered);
+    scratch.refuse("xtask vocab");
+    let before = scratch.head();
+    let (code, out) = scratch.stage_and_commit();
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(scratch.head(), before, "the commit was refused: {out}");
+    assert!(
+        out.contains("pre-commit: cargo xtask vocab --staged failed"),
+        "{out}"
+    );
+    assert!(
+        out.contains("refused before clippy, test and witness ran"),
+        "{out}"
+    );
+    let mut calls = scratch.calls("cargo");
+    calls[1..].sort_unstable();
+    assert_eq!(
+        calls,
+        [
+            "fmt --check",
+            "xtask api-check --staged",
+            "xtask budget --staged",
+            "xtask permit --diff",
+            "xtask unsafe-audit --staged",
+            "xtask vocab --staged",
+        ]
+    );
+    assert_eq!(scratch.calls("computed"), Vec::<String>::new());
 }
 
 // ---------------------------------------------------------------- pre-push
