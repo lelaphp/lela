@@ -6041,9 +6041,9 @@ fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName
 /// ```
 /// ```expect
 /// int(4437)
-/// string(5) "32767"
+/// string(5) "30719"
 /// aa
-/// int(32767)
+/// int(30719)
 /// int(4437)
 /// int(1)
 /// string(1) "1"
@@ -6060,7 +6060,7 @@ fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName
 /// ```
 /// ```expect
 /// aa
-/// int(32767)
+/// int(30719)
 /// NULL
 /// ```
 pub(crate) fn begin_silence<T: Tier>(
@@ -6112,10 +6112,10 @@ pub(crate) fn begin_silence<T: Tier>(
 /// try { @u(); } catch (Exception $e) { var_dump(error_reporting()); }
 /// ```
 /// ```expect
-/// int(32767)
-/// int(32767)
+/// int(30719)
+/// int(30719)
 /// int(4437)
-/// int(32767)
+/// int(30719)
 /// ```
 pub(crate) fn end_silence<T: Tier>(
     req: &mut Request,
