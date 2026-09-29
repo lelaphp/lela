@@ -87,6 +87,11 @@ TEST_PHP_EXECUTABLE = "/opt/homebrew/Cellar/php/8.5.9/bin/php"
 TZ = "UTC"
 LANG = "C"
 LC_ALL = "C"
+# A child the test spawns without -n or -c searches for a php.ini as php_init_config
+# does (main/php_ini.c:409-560 at the tag): PHPRC names a file, so the machine's
+# own php.ini (the Homebrew keg's, for the oracle) is never read and both binaries
+# answer as upstream's CI, which has none; -n and -c are unaffected (#1176).
+PHPRC = "/dev/null"
 
 [recipe.limits]
 # `run-tests.php:1187`: 60 s per test, 300 under valgrind. A witness's `wall=`
