@@ -6,14 +6,17 @@
 //! one, read whole; `stat()`, `unlink()`, `rename()`, `mkdir()` and
 //! `rmdir()` are one exchange each. Each reply of the control connection
 //! is a [`Reply`], its code's class matched as RFC 959 sorts it where php
-//! compares ranges. `ftps://` waits on the `ssl` socket `transport`.
+//! compares ranges. `ftps://` is the same wrapper with its connections
+//! secured through `ext/openssl`'s crypto layer, which registers it again
+//! under `ftps`.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::coerce::truthy;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::{
-    Closer, DirListing, Opening, Request, SocketOptions, Stream, StreamWrapper, Xport, XportFailure,
+    Closer, DirListing, Handshake, Opening, Request, SocketOptions, Stream, StreamWrapper, Xport,
+    XportFailure,
 };
 use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
 use php_ext_uri::UriStruct;
@@ -27,7 +30,7 @@ use crate::url::{UriParser, php_raw_url_decode};
 /// `php_stream_ftp_wrapper`: `ftp`, a URL wrapper that opens streams and
 /// directories, stats, unlinks, renames and makes and removes
 /// directories, and whose streams no `fstat()` answers.
-pub(crate) fn wrapper() -> StreamWrapper {
+pub fn wrapper() -> StreamWrapper {
     StreamWrapper {
         scheme: "ftp".into(),
         label: "ftp",
@@ -155,20 +158,47 @@ fn log(req: &mut Request, report: Report, message: &[u8]) {
     }
 }
 
-/// A connection logged in: the control stream and the URL it was made
-/// for.
+/// A connection logged in: the control stream, the URL it was made for,
+/// and, for an `ftps://` URL, whether its data connections are secured
+/// too (`use_ssl_on_data`).
 struct Session {
     control: Stream,
     resource: UriStruct,
+    ssl_on_data: bool,
+}
+
+/// `STREAM_CRYPTO_METHOD_SSLv23_CLIENT`, what `ftps://` secures its
+/// connections with.
+const SSLV23_CLIENT: i64 = (1 << 3) | (1 << 4) | (1 << 5) | 1;
+
+/// `php_stream_xport_crypto_setup(stream, STREAM_CRYPTO_METHOD_SSLv23_CLIENT,
+/// NULL) < 0 || php_stream_xport_crypto_enable(stream, 1) < 0` answered
+/// no: whether the stream's crypto is on.
+fn secured(req: &mut Request, stream: Stream) -> bool {
+    stream.crypto_setup(req, SSLV23_CLIENT, None)
+        && !matches!(
+            stream.crypto_enable(req, true),
+            Handshake::Failed | Handshake::Unsupported
+        )
 }
 
 /// `php_ftp_fopen_connect` (`Z/ext/standard/ftp_fopen_wrapper.c:127`):
 /// the URL parsed with the `context`'s parser, the control connection
 /// made to its host and `port`, 21 where it names none, the greeting
-/// read, and the user logged in, `anonymous` where none is named, with
-/// the password or `from` or `anonymous` where the server asks for one.
+/// read; for `ftps://`, `AUTH TLS`, or `AUTH SSL` where the server
+/// refuses it, the control connection secured, `PBSZ 0` and `PROT P`;
+/// then the user logged in, `anonymous` where none is named, with the
+/// password or `from` or `anonymous` where the server asks for one.
 /// `Ok(None)` is a connection that failed, after php's warning for a
 /// socket that did not connect and the log of a login it refuses.
+///
+/// ```php
+/// var_dump(@file_get_contents('ftps://127.0.0.1:1/x'), error_get_last()['message']);
+/// ```
+/// ```expect
+/// bool(false)
+/// string(80) "file_get_contents(ftps://127.0.0.1:1/x): Failed to open stream: operation failed"
+/// ```
 fn connect(
     req: &mut Request,
     path: &[u8],
@@ -221,9 +251,41 @@ fn connect(
         control.free(req);
         return Ok(None);
     }
-    // The `AUTH TLS` of an `ftps://` URL is the `ssl` socket
-    // `transport`'s, which this engine has not, and no `ftps` wrapper is
-    // registered to reach here with one.
+    let use_ssl = resource
+        .scheme
+        .as_deref()
+        .is_some_and(|scheme| scheme.len() > 3 && scheme[3] == b's');
+    let ssl_on_data = if use_ssl {
+        let Some(on_data) = secure_control(req, control, report)? else {
+            control.free(req);
+            return Ok(None);
+        };
+        on_data
+    } else {
+        false
+    };
+    if !login(req, control, ctx, &resource, report)? {
+        control.free(req);
+        return Ok(None);
+    }
+    Ok(Some(Session {
+        control,
+        resource,
+        ssl_on_data,
+    }))
+}
+
+/// The login of `php_ftp_fopen_connect`: `USER`, the user the URL names
+/// or `anonymous`, and `PASS` where the server asks for one, the URL's
+/// password or `from` or `anonymous`; whether the server took it, a name
+/// or password with a control character refused first with php's log.
+fn login(
+    req: &mut Request,
+    control: Stream,
+    ctx: Option<Resource>,
+    resource: &UriStruct,
+    report: Report,
+) -> Result<bool, Thrown> {
     let user = resource.user.as_deref().map(php_raw_url_decode);
     if let Some(user) = &user
         && user.iter().any(u8::is_ascii_control)
@@ -231,8 +293,7 @@ fn connect(
         let mut message = b"Invalid login ".to_vec();
         message.extend_from_slice(cstr(user));
         log(req, report, &message);
-        control.free(req);
-        return Ok(None);
+        return Ok(false);
     }
     command(
         req,
@@ -250,8 +311,7 @@ fn connect(
                     let mut message = b"Invalid password ".to_vec();
                     message.extend_from_slice(cstr(&password));
                     log(req, report, &message);
-                    control.free(req);
-                    return Ok(None);
+                    return Ok(false);
                 }
                 password
             }
@@ -265,11 +325,55 @@ fn connect(
             notifier::error(req, ctx, Code::AuthResult, Some(&reply.line), reply.code)?;
         }
     }
-    if reply.class() != Class::Completion {
-        control.free(req);
+    Ok(reply.class() == Class::Completion)
+}
+
+/// The `ftps://` half of `php_ftp_fopen_connect`: `AUTH TLS`, or `AUTH SSL`
+/// where the server refuses it, the control connection secured, `PBSZ 0`
+/// and `PROT P`; whether the data connections are secured too, a `PROT P`
+/// the server took or an `AUTH SSL` server's, and `None` where the server
+/// takes neither `AUTH` or the handshake failed, after php's log.
+fn secure_control(
+    req: &mut Request,
+    control: Stream,
+    report: Report,
+) -> Result<Option<bool>, Thrown> {
+    command(req, control, b"AUTH TLS", None);
+    // An old ftpd-ssl answers `AUTH SSL` and wants its session reused,
+    // which php marks and never hands on.
+    let mut reuse = false;
+    if get_result(req, control)?.code != 234 {
+        command(req, control, b"AUTH SSL", None);
+        if get_result(req, control)?.code != 334 {
+            log(req, report, b"Server doesn't support FTPS.");
+            return Ok(None);
+        }
+        reuse = true;
+    }
+    if !secured(req, control) {
+        log(req, report, b"Unable to activate SSL mode");
         return Ok(None);
     }
-    Ok(Some(Session { control, resource }))
+    command(req, control, b"PBSZ 0", None);
+    get_result(req, control)?;
+    command(req, control, b"PROT P", None);
+    Ok(Some(
+        get_result(req, control)?.class() == Class::Completion || reuse,
+    ))
+}
+
+/// A data connection the server opened: `php_stream_context_set` of the
+/// `context`, and, where `ssl_on_data`, its crypto set up and enabled; a
+/// connection that could not be secured is closed after php's log, and
+/// `false`.
+fn data_secured(req: &mut Request, data: Stream, ctx: Option<Resource>, ssl_on_data: bool) -> bool {
+    data.set_ctx(req, ctx);
+    if ssl_on_data && !secured(req, data) {
+        req.wrapper_log_error("Unable to activate SSL mode");
+        data.free(req);
+        return false;
+    }
+    true
 }
 
 /// Where the server listens for the data connection:
@@ -538,7 +642,12 @@ fn open(
         req.wrapper_log_error("FTP proxy may only be used in read mode");
         return Ok(None);
     }
-    let Some(Session { control, resource }) = connect(req, path, ctx, Report::Log)? else {
+    let Some(Session {
+        control,
+        resource,
+        ssl_on_data,
+    }) = connect(req, path, ctx, Report::Log)?
+    else {
         return Ok(None);
     };
     let file = resource.path.clone().unwrap_or_default();
@@ -603,6 +712,9 @@ fn open(
     }
     notifier::attach(req, data, ctx);
     notifier::progress_init(req, ctx, 0, file_size)?;
+    if !data_secured(req, data, ctx, ssl_on_data) {
+        return refused(req, Reply::default(), None);
+    }
     data.set_closer(
         req,
         Box::new(Control {
@@ -628,7 +740,12 @@ fn open(
 /// ```
 fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown> {
     let ctx = req.stream_ctx();
-    let Some(Session { control, resource }) = connect(req, path, ctx, Report::Log)? else {
+    let Some(Session {
+        control,
+        resource,
+        ssl_on_data,
+    }) = connect(req, path, ctx, Report::Log)?
+    else {
         return Ok(None);
     };
     let refused = |req: &mut Request, reply: Reply| -> Result<Option<DirListing>, Thrown> {
@@ -679,6 +796,9 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
     if reply.code != 150 && reply.code != 125 {
         data.free(req);
         return refused(req, reply);
+    }
+    if !data_secured(req, data, ctx, ssl_on_data) {
+        return refused(req, Reply::default());
     }
     notifier::attach(req, data, ctx);
     let mut names = Vec::new();
@@ -735,7 +855,10 @@ const S_IXALL: i64 = 0o111;
 /// ```
 fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<PhpArray>, Thrown> {
     let ctx = req.stream_ctx();
-    let Some(Session { control, resource }) = connect(req, url, ctx, Report::Quiet)? else {
+    let Some(Session {
+        control, resource, ..
+    }) = connect(req, url, ctx, Report::Quiet)?
+    else {
         return Ok(None);
     };
     let file = resource.path.clone().unwrap_or_else(|| b"/".to_vec());
@@ -837,7 +960,10 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 /// ```
 fn unlink(req: &mut Request, url: &[u8]) -> Result<bool, Thrown> {
     let ctx = req.stream_ctx();
-    let Some(Session { control, resource }) = connect(req, url, ctx, Report::Quiet)? else {
+    let Some(Session {
+        control, resource, ..
+    }) = connect(req, url, ctx, Report::Quiet)?
+    else {
         let text = format!(
             "Unable to connect to {}",
             String::from_utf8_lossy(cstr(url))
@@ -946,7 +1072,10 @@ fn rename(req: &mut Request, from: &[u8], to: &[u8]) -> Result<bool, Thrown> {
 /// ```
 fn mkdir(req: &mut Request, url: &[u8], _mode: i64, recursive: bool) -> Result<bool, Thrown> {
     let ctx = req.stream_ctx();
-    let Some(Session { control, resource }) = connect(req, url, ctx, Report::Quiet)? else {
+    let Some(Session {
+        control, resource, ..
+    }) = connect(req, url, ctx, Report::Quiet)?
+    else {
         let text = format!(
             "Unable to connect to {}",
             String::from_utf8_lossy(cstr(url))
@@ -1027,7 +1156,10 @@ fn make_parents(req: &mut Request, control: Stream, path: &[u8]) -> Result<Reply
 /// ```
 fn rmdir(req: &mut Request, url: &[u8]) -> Result<bool, Thrown> {
     let ctx = req.stream_ctx();
-    let Some(Session { control, resource }) = connect(req, url, ctx, Report::Quiet)? else {
+    let Some(Session {
+        control, resource, ..
+    }) = connect(req, url, ctx, Report::Quiet)?
+    else {
         let text = format!(
             "Unable to connect to {}",
             String::from_utf8_lossy(cstr(url))

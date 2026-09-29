@@ -122,12 +122,17 @@ pub use url_scanner::{php_url_scanner_add_session_var, php_url_scanner_reset_ses
 pub use file::{fclose, feof, fgetc, fgets, fpassthru, fread, fseek, ftell, fwrite, rewind};
 pub use streamsfuncs::{default_stream_ctx, stream_ctx_option};
 
-/// What `xp_ssl.c` takes of `standard` (ADR-0004; design §4.10):
-/// `php_stream_context.h`'s `php_stream_context_set_option`, which keeps
-/// a captured peer certificate, and `php_stream_context_get_uri_parser`
-/// with the parse it hands `php_uri.h`, which name the host a client
-/// verifies, both of which php keeps in `main/` and this engine ports in
-/// `standard` beside the wrappers.
+/// What `openssl.c` and `xp_ssl.c` take of `standard` (ADR-0004; design
+/// §4.10): `php_fopen_wrappers.h`'s `php_stream_http_wrapper` and
+/// `php_stream_ftp_wrapper`, which openssl's `MINIT` registers again as
+/// `https` and `ftps`; `php_stream_context.h`'s
+/// `php_stream_context_set_option`, which keeps a captured peer
+/// certificate; and `php_stream_context_get_uri_parser` with the parse it
+/// hands `php_uri.h`, which name the host a client verifies, all of which
+/// php keeps in `main/` and this engine ports in `standard` beside the
+/// wrappers.
+pub use ftp_fopen_wrapper::wrapper as ftp_wrapper;
+pub use http_fopen_wrapper::wrapper as http_wrapper;
 pub use streamsfuncs::stream_ctx_set_option;
 pub use url::UriParser;
 

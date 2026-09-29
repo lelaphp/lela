@@ -483,11 +483,29 @@ fn started(ini: &StartupIni) -> Started {
 
 /// The library's error queue emptied as a request starts: it is the
 /// thread's, and a thread may have served a request before, where php's
-/// CLI starts each program in a fresh process with an empty queue.
+/// CLI starts each program in a fresh process with an empty queue. Then
+/// the two wrappers `PHP_MINIT(openssl)` registers,
+/// `php_stream_http_wrapper` again as `https` and `php_stream_ftp_wrapper`
+/// as `ftps`, which this engine keeps in the request's table, after
+/// `standard`'s and ahead of `zlib`'s.
+///
+/// ```php
+/// $w = stream_get_wrappers();
+/// var_dump(array_search('https', $w) < array_search('compress.zlib', $w), array_search('ftps', $w) === array_search('https', $w) + 1);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
 #[allow(clippy::unnecessary_wraps)] // the ABI's `rinit` hook
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    let _ = req;
     ffi::clear_errors();
+    let mut https = php_ext_standard::http_wrapper();
+    https.scheme = String::from("https");
+    req.register_wrapper(https);
+    let mut ftps = php_ext_standard::ftp_wrapper();
+    ftps.scheme = String::from("ftps");
+    req.register_wrapper(ftps);
     Ok(())
 }
 

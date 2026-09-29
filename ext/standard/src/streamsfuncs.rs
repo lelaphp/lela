@@ -320,6 +320,55 @@ pub fn stream_ctx_set_option(
     set_option(req, context, wrapper, option, value)
 }
 
+/// `php_stream_context_unset_option` (`Z/main/streams/streams.c:2477`):
+/// the value under `option` of the `wrapper`'s options taken out, both
+/// levels separated first; nothing where the `wrapper` has none.
+pub(crate) fn stream_ctx_unset_option(
+    req: &mut Request,
+    context: Resource,
+    wrapper: &[u8],
+    option: &[u8],
+) -> Result<(), Thrown> {
+    let Some(mut options) = context
+        .native_mut::<Context>(req)
+        .and_then(|context| context.options.take())
+    else {
+        return Ok(());
+    };
+    let unset = unset_in(req, &mut options, wrapper, option);
+    if let Some(context) = context.native_mut::<Context>(req) {
+        context.options = Some(options);
+    }
+    unset
+}
+
+/// The body of [`stream_ctx_unset_option`] over the options array taken
+/// out of the `context` for the call.
+fn unset_in(
+    req: &mut Request,
+    options: &mut PhpArray,
+    wrapper: &[u8],
+    option: &[u8],
+) -> Result<(), Thrown> {
+    let name = PhpString::new(req, wrapper)?;
+    let found = options
+        .get(&Key::Str(name))
+        .map(|v| v.deref())
+        .and_then(|v| v.as_array().copied());
+    let Some(mut category) = found else {
+        req.release(Value::string(name));
+        return Ok(());
+    };
+    options.separate(req)?;
+    req.addref(&Value::array(category));
+    category.separate(req)?;
+    let option = PhpString::new(req, option)?;
+    let unset = category.unset(req, &Key::Str(option));
+    req.release(Value::string(option));
+    unset?;
+    options.set(req, Key::Str(name), Value::array(category))
+}
+
 /// The body of [`set_option`] over the options array taken out of the
 /// `context` for the call.
 fn put_option(
