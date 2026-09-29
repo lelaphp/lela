@@ -205,9 +205,7 @@ impl Emit<'_> {
     /// into a `VAR`, which `SEPARATE` makes the write's own and the fetch
     /// over it refuses as the program serves, where the special's
     /// temporary would be `zend_separate_if_call_and_write`'s compile
-    /// error, since a temporary cannot be written. The op arrays are the
-    /// oracle's dump, `chr_is_the_ordinary_call_under_a_write` in the
-    /// crate's tests.
+    /// error, since a temporary cannot be written.
     ///
     /// ```php
     /// try { chr(0)[0][] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
@@ -220,6 +218,56 @@ impl Emit<'_> {
     /// Cannot use string offset as an array
     /// Cannot increment/decrement string offsets
     /// A
+    /// ```
+    ///
+    /// The op array is the oracle's dump:
+    ///
+    /// ```php
+    /// try { chr(0)[0][] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { ++chr(0)[0]; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=dump
+    /// Cannot use string offset as an array
+    /// Cannot increment/decrement string offsets
+    /// ```
+    /// ```stderr
+    /// $_main:
+    ///      ; (lines=26, args=0, vars=1, tmps=8)
+    ///      ; (before optimizer)
+    ///      ; %s:1-3
+    ///      ; return  [] RANGE[0..0]
+    /// 0000 INIT_FCALL 1 96 string("chr")
+    /// 0001 SEND_VAL int(0) 1
+    /// 0002 V1 = DO_ICALL
+    /// 0003 V1 = SEPARATE V1
+    /// 0004 V2 = FETCH_DIM_W V1 int(0)
+    /// 0005 ASSIGN_DIM V2 NEXT
+    /// 0006 OP_DATA int(1)
+    /// 0007 JMP 0013
+    /// 0008 CV0($e) = CATCH string("Error")
+    /// 0009 INIT_METHOD_CALL 0 CV0($e) string("getMessage")
+    /// 0010 V4 = DO_FCALL
+    /// 0011 ECHO V4
+    /// 0012 ECHO string("\n")
+    /// 0013 INIT_FCALL 1 96 string("chr")
+    /// 0014 SEND_VAL int(0) 1
+    /// 0015 V5 = DO_ICALL
+    /// 0016 V5 = SEPARATE V5
+    /// 0017 V6 = FETCH_DIM_RW V5 int(0)
+    /// 0018 PRE_INC V6
+    /// 0019 JMP 0025
+    /// 0020 CV0($e) = CATCH string("Error")
+    /// 0021 INIT_METHOD_CALL 0 CV0($e) string("getMessage")
+    /// 0022 V8 = DO_FCALL
+    /// 0023 ECHO V8
+    /// 0024 ECHO string("\n")
+    /// 0025 RETURN int(1)
+    /// LIVE RANGES:
+    ///      1: 0003 - 0004 (tmp/var)
+    ///      5: 0016 - 0017 (tmp/var)
+    /// EXCEPTION TABLE:
+    ///      0000, 0008, -, -
+    ///      0013, 0020, -, -
     /// ```
     pub(crate) fn special(
         &mut self,
@@ -409,9 +457,7 @@ impl Emit<'_> {
     /// and the call passes nothing. php looks at no fetch type here, so
     /// the arguments' array is a temporary under a by-name argument too,
     /// and a callee that takes the element by reference is refused as
-    /// the program serves. The op array is the oracle's dump,
-    /// `func_get_args_is_a_temporary_under_every_fetch` in the crate's
-    /// tests.
+    /// the program serves.
     ///
     /// ```php
     /// function t() {
@@ -432,6 +478,57 @@ impl Emit<'_> {
     ///   [1]=>
     ///   int(2)
     /// }
+    /// ```
+    ///
+    /// The op arrays under a by-name argument are the oracle's dump:
+    ///
+    /// ```php
+    /// function t() { try { byRef(func_get_args()[0]); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+    /// function byRef(&$a) {}
+    /// t(1);
+    /// ```
+    /// ```expect regime=dump
+    /// Cannot use temporary expression in write context
+    /// ```
+    /// ```stderr
+    /// $_main:
+    ///      ; (lines=4, args=0, vars=0, tmps=1)
+    ///      ; (before optimizer)
+    ///      ; %s:1-4
+    ///      ; return  [] RANGE[0..0]
+    /// 0000 INIT_FCALL 1 176 string("t")
+    /// 0001 SEND_VAL int(1) 1
+    /// 0002 DO_UCALL
+    /// 0003 RETURN int(1)
+    ///
+    /// t:
+    ///      ; (lines=13, args=0, vars=1, tmps=4)
+    ///      ; (before optimizer)
+    ///      ; %s:2-2
+    ///      ; return  [] RANGE[0..0]
+    /// 0000 INIT_FCALL_BY_NAME 1 string("byRef")
+    /// 0001 CHECK_FUNC_ARG 1
+    /// 0002 T1 = FUNC_GET_ARGS
+    /// 0003 V2 = FETCH_DIM_FUNC_ARG T1 int(0)
+    /// 0004 SEND_FUNC_ARG V2 1
+    /// 0005 DO_FCALL_BY_NAME
+    /// 0006 JMP 0012
+    /// 0007 CV0($e) = CATCH string("Error")
+    /// 0008 INIT_METHOD_CALL 0 CV0($e) string("getMessage")
+    /// 0009 V4 = DO_FCALL
+    /// 0010 ECHO V4
+    /// 0011 ECHO string("\n")
+    /// 0012 RETURN null
+    /// EXCEPTION TABLE:
+    ///      0000, 0007, -, -
+    ///
+    /// byRef:
+    ///      ; (lines=2, args=1, vars=1, tmps=0)
+    ///      ; (before optimizer)
+    ///      ; %s:3-3
+    ///      ; return  [] RANGE[0..0]
+    /// 0000 CV0($a) = RECV 1
+    /// 0001 RETURN null
     /// ```
     fn func_get_args(&mut self, arguments: &[tree::Expr]) -> Option<Where> {
         if !self.in_function() || !arguments.is_empty() {
