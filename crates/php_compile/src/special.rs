@@ -103,9 +103,16 @@ pub(crate) enum Special {
     /// `zend_compile_func_gettype`: `ZEND_GET_TYPE` over the one
     /// argument.
     GetType,
-    /// A shape that is an opcode of its own (`ZEND_FUNC_NUM_ARGS`,
-    /// `ZEND_ARRAY_KEY_EXISTS`) and has no kernel here yet: the ordinary
-    /// call.
+    /// `zend_compile_func_num_args`: `ZEND_FUNC_NUM_ARGS` where the call
+    /// has no argument and stands in a function; the call otherwise.
+    FuncNumArgs,
+    /// `zend_compile_func_array_slice`: `ZEND_FUNC_GET_ARGS` with the
+    /// offset in a constant `op1` for `array_slice(func_get_args(), n)`
+    /// in a function, `n` a long written as such and not below zero;
+    /// the call for anything else.
+    ArraySlice,
+    /// A shape that is an opcode of its own (`ZEND_ARRAY_KEY_EXISTS`) and
+    /// has no kernel here yet: the ordinary call.
     Opcode,
 }
 
@@ -161,9 +168,9 @@ pub(crate) const TABLE: &[(&[u8], Special)] = &[
     (b"get_class", Special::GetClass),
     (b"get_called_class", Special::GetCalledClass),
     (b"gettype", Special::GetType),
-    (b"func_num_args", Special::Opcode),
+    (b"func_num_args", Special::FuncNumArgs),
     (b"func_get_args", Special::FuncGetArgs),
-    (b"array_slice", Special::Opcode),
+    (b"array_slice", Special::ArraySlice),
     (b"array_key_exists", Special::Opcode),
     (b"sprintf", Special::Sprintf),
     (b"clone", Special::Clone),
@@ -316,6 +323,9 @@ impl Emit<'_> {
                 .is_empty()
                 .then(|| self.emit_nullary(Opcode::GetCalledClass))),
             Some(Special::GetType) => self.over_one(Opcode::GetType, arguments, 0),
+            Some(Special::FuncNumArgs) => Ok((self.in_function() && arguments.is_empty())
+                .then(|| self.emit_nullary(Opcode::FuncNumArgs))),
+            Some(Special::ArraySlice) => self.array_slice(arguments),
             Some(Special::Opcode) | None => Ok(None),
         }
     }
@@ -351,6 +361,8 @@ impl Emit<'_> {
                 | Special::GetClass
                 | Special::GetCalledClass
                 | Special::GetType
+                | Special::FuncNumArgs
+                | Special::ArraySlice
                 | Special::Opcode,
             )
             | None => Ok(None),
@@ -591,6 +603,48 @@ impl Emit<'_> {
         };
         let value = self.expr(*argument)?;
         Ok(Some(self.emit_cast(value, to)))
+    }
+
+    /// `zend_compile_func_array_slice` (`Z/Zend/zend_compile.c:4602`):
+    /// in a function, a call of two arguments whose first is a call of a
+    /// name that resolves to `func_get_args` passing nothing, not even
+    /// `...`, and whose second is a long written as such and not below
+    /// zero, is `ZEND_FUNC_GET_ARGS` with that long as its constant
+    /// `op1`, the arguments after the first that many; neither call is
+    /// compiled. Anything else is the call of `array_slice`.
+    ///
+    /// ```php
+    /// function f() { return [array_slice(func_get_args(), 1), array_slice(func_get_args(), 5), array_slice(func_get_args(), -1), array_slice(func_get_args(), '1')]; }
+    /// echo json_encode(f(1, 2, 3)), "\n";
+    /// ```
+    /// ```expect
+    /// [[2,3],[],[3],[2,3]]
+    /// ```
+    fn array_slice(&mut self, arguments: &[tree::Expr]) -> Result<Option<Where>, CompileError> {
+        let [source, offset] = arguments else {
+            return Ok(None);
+        };
+        if !self.in_function() {
+            return Ok(None);
+        }
+        if !self
+            .named_call(*source)
+            .is_some_and(|(name, args)| name == b"func_get_args" && args.is_empty())
+        {
+            return Ok(None);
+        }
+        let Some(skip) = self
+            .written(*offset)?
+            .and_then(Zval::as_long)
+            .filter(|n| *n >= 0)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.emit_unary(
+            Opcode::FuncGetArgs,
+            Where::Constant(Zval::long(skip)),
+            0,
+        )))
     }
 
     /// `zend_compile_func_typecheck`, `zend_compile_func_is_scalar`,

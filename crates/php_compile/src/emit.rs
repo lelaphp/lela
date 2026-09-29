@@ -16279,6 +16279,29 @@ impl Emit<'_> {
         (resolved, !fully_qualified && self.namespace.is_some())
     }
 
+    /// A call of a name written as such, `ZEND_AST_CALL` whose name is a
+    /// `ZEND_AST_ZVAL` string: that name lowered as
+    /// `zend_resolve_function_name` resolves it through the file's
+    /// imports, and the arguments as written; nothing for a call of
+    /// anything else, a parenthesised name among them, which php's
+    /// grammar makes a constant, and nothing for anything but a call.
+    /// What `zend_compile_func_array_slice` and `zend_compile_func_cufa`
+    /// read of the call written as their argument.
+    pub(crate) fn named_call(&self, expr: tree::Expr) -> Option<(Vec<u8>, &[tree::Arg])> {
+        let tree::Expr::CallExpr(call) = self.peel(expr) else {
+            return None;
+        };
+        let node = &self.parsed.tree[call];
+        let tree::Expr::NameRef(name) = node.callee else {
+            return None;
+        };
+        let (resolved, _) = self.function_name(self.text(name));
+        Some((
+            resolved.to_ascii_lowercase(),
+            &self.parsed.tree[node.args].args,
+        ))
+    }
+
     /// [`Self::function_name`] for a constant, `zend_resolve_const_name`,
     /// which reads the constant imports, whose aliases keep their case.
     fn constant_resolved(&self, name: &[u8]) -> (Vec<u8>, bool) {

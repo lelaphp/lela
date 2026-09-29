@@ -18425,7 +18425,7 @@ pub(crate) fn defined<T: Tier>(
 /// as its slots hold them now, each reference followed and a slot
 /// nothing holds `null`, into the temporary; with a constant `op1`, the
 /// ones after the first that many, the form php's compiler makes of
-/// `array_slice(func_get_args(), n)` and this one does not make yet.
+/// `array_slice(func_get_args(), n)` (`zend_compile_func_array_slice`).
 ///
 /// ```php
 /// function f($a, &$b, $c = 3, ...$rest) { $a = 9; $b = 'b'; return func_get_args(); }
@@ -18494,6 +18494,35 @@ pub(crate) fn func_get_args<T: Tier>(
         }
         Err(thrown) => threw(req, frame, &thrown),
     }
+}
+
+/// `ZEND_FUNC_NUM_ARGS` (`Z/Zend/zend_vm_def.h:9628`), what php's
+/// compiler makes of `func_num_args()` inside a function
+/// (`zend_compile_func_num_args`): `EX_NUM_ARGS()`, every argument the
+/// frame was passed, the extra ones among them, into the temporary.
+///
+/// ```php
+/// function f($a, $b = 2) { return func_num_args(); }
+/// $g = function (...$r) { return func_num_args(); };
+/// var_dump(f(1), f(1, 2, 3), $g(), $g(1, 2));
+/// ```
+/// ```expect
+/// int(1)
+/// int(3)
+/// int(0)
+/// int(2)
+/// ```
+pub(crate) fn func_num_args<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let passed = req.vm().at(frame).map_or(0, |state| state.num_args);
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, Value::int(i64::from(passed)));
+    req.release(previous);
+    Ok(advance(req, frame))
 }
 
 /// `ZEND_GET_CLASS` (`Z/Zend/zend_vm_def.h:9557`), what php's compiler

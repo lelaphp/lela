@@ -2214,8 +2214,9 @@ mod tests {
     /// and never a constant or an opcode it is not: a `chr` whose long
     /// is not written as such or is outside the byte, an `ord` over any
     /// other string, a `defined` over a namespaced or a class name or
-    /// over no written value, a wrong count of arguments, and a name
-    /// whose row has no kernel yet.
+    /// over no written value, a wrong count of arguments, an unpacked or
+    /// a named argument, and `func_num_args` and `array_slice` over
+    /// `func_get_args` outside a function.
     #[test]
     fn a_special_name_php_leaves_to_the_call_is_the_ordinary_call() {
         for (source, name) in [
@@ -2243,6 +2244,11 @@ mod tests {
             (b"<?php echo gettype();", b"gettype"),
             (b"<?php echo get_class($a, $b);", b"get_class"),
             (b"<?php echo get_called_class(1);", b"get_called_class"),
+            (b"<?php echo func_num_args();", b"func_num_args"),
+            (
+                b"<?php echo array_slice(func_get_args(), 1);",
+                b"array_slice",
+            ),
         ] {
             assert!(
                 ordinary_call(source, name),
@@ -2706,6 +2712,138 @@ mod tests {
              0022 RETURN null\n\
              LIVE RANGES:\n\
              \x20    4: 0002 - 0021 (tmp/var)\n"
+        );
+    }
+
+    /// `zend_compile_func_num_args` and `zend_compile_func_array_slice`
+    /// as the oracle at 8.5.9 dumps them (#1251): in a function,
+    /// `FUNC_NUM_ARGS`, and `FUNC_GET_ARGS` with the offset as a constant
+    /// for `array_slice(func_get_args(), n)`, `n` a long written as such
+    /// and not below zero, the inner name in any case and fully
+    /// qualified; an offset written as a string or negated, an argument
+    /// to `func_get_args`, a third argument, and the main op array are
+    /// the calls, `func_get_args` served inside `array_slice`'s as its
+    /// own row serves it.
+    #[test]
+    fn func_num_args_and_array_slice_of_func_get_args_are_their_opcodes() {
+        assert_eq!(
+            dump_of(
+                b"<?php function f() { return [func_num_args(), func_num_args(1), array_slice(func_get_args(), 1), array_slice(FUNC_GET_ARGS(), 0), array_slice(func_get_args(), \"1\"), array_slice(func_get_args(), -1), array_slice(func_get_args(1), 1), array_slice(\\func_get_args(), 2), array_slice(func_get_args(), 1, 2)]; } echo func_num_args(), array_slice(func_get_args(), 1);"
+            ),
+            "\n\
+             $_main:\n\
+             \x20    ; (lines=11, args=0, vars=0, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 INIT_FCALL 0 80 string(\"func_num_args\")\n\
+             0001 V0 = DO_ICALL\n\
+             0002 ECHO V0\n\
+             0003 INIT_FCALL 2 112 string(\"array_slice\")\n\
+             0004 INIT_FCALL 0 80 string(\"func_get_args\")\n\
+             0005 V1 = DO_ICALL\n\
+             0006 SEND_VAR V1 1\n\
+             0007 SEND_VAL int(1) 2\n\
+             0008 V2 = DO_ICALL\n\
+             0009 ECHO V2\n\
+             0010 RETURN int(1)\n\
+             \n\
+             f:\n\
+             \x20    ; (lines=41, args=0, vars=0, tmps=14)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 T0 = FUNC_NUM_ARGS\n\
+             0001 T1 = INIT_ARRAY 9 (packed) T0 NEXT\n\
+             0002 INIT_FCALL 1 96 string(\"func_num_args\")\n\
+             0003 SEND_VAL int(1) 1\n\
+             0004 V2 = DO_ICALL\n\
+             0005 T1 = ADD_ARRAY_ELEMENT V2 NEXT\n\
+             0006 T3 = FUNC_GET_ARGS int(1)\n\
+             0007 T1 = ADD_ARRAY_ELEMENT T3 NEXT\n\
+             0008 T4 = FUNC_GET_ARGS int(0)\n\
+             0009 T1 = ADD_ARRAY_ELEMENT T4 NEXT\n\
+             0010 INIT_FCALL 2 112 string(\"array_slice\")\n\
+             0011 T5 = FUNC_GET_ARGS\n\
+             0012 SEND_VAL T5 1\n\
+             0013 SEND_VAL string(\"1\") 2\n\
+             0014 V6 = DO_ICALL\n\
+             0015 T1 = ADD_ARRAY_ELEMENT V6 NEXT\n\
+             0016 INIT_FCALL 2 112 string(\"array_slice\")\n\
+             0017 T7 = FUNC_GET_ARGS\n\
+             0018 SEND_VAL T7 1\n\
+             0019 SEND_VAL int(-1) 2\n\
+             0020 V8 = DO_ICALL\n\
+             0021 T1 = ADD_ARRAY_ELEMENT V8 NEXT\n\
+             0022 INIT_FCALL 2 112 string(\"array_slice\")\n\
+             0023 INIT_FCALL 1 96 string(\"func_get_args\")\n\
+             0024 SEND_VAL int(1) 1\n\
+             0025 V9 = DO_ICALL\n\
+             0026 SEND_VAR V9 1\n\
+             0027 SEND_VAL int(1) 2\n\
+             0028 V10 = DO_ICALL\n\
+             0029 T1 = ADD_ARRAY_ELEMENT V10 NEXT\n\
+             0030 T11 = FUNC_GET_ARGS int(2)\n\
+             0031 T1 = ADD_ARRAY_ELEMENT T11 NEXT\n\
+             0032 INIT_FCALL 3 128 string(\"array_slice\")\n\
+             0033 T12 = FUNC_GET_ARGS\n\
+             0034 SEND_VAL T12 1\n\
+             0035 SEND_VAL int(1) 2\n\
+             0036 SEND_VAL int(2) 3\n\
+             0037 V13 = DO_ICALL\n\
+             0038 T1 = ADD_ARRAY_ELEMENT V13 NEXT\n\
+             0039 RETURN T1\n\
+             0040 RETURN null\n\
+             LIVE RANGES:\n\
+             \x20    1: 0002 - 0039 (tmp/var)\n"
+        );
+    }
+
+    /// Inside a namespace the unqualified names wait for the program
+    /// (`zend_compile_ns_call`) and reach no row, and the `func_get_args`
+    /// inside a fully qualified `array_slice` resolves into the
+    /// namespace, which `zend_compile_func_array_slice` refuses; a fully
+    /// qualified name is served, as the oracle at 8.5.9 dumps it (#1251).
+    #[test]
+    fn a_special_name_waiting_for_its_namespace_is_no_row() {
+        assert_eq!(
+            dump_of(
+                b"<?php namespace N; function f() { return [\\array_slice(func_get_args(), 1), \\array_slice(\\func_get_args(), 1), intval($a), \\intval($a), \\get_class()]; }"
+            ),
+            "\n\
+             $_main:\n\
+             \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             \n\
+             N\\f:\n\
+             \x20    ; (lines=19, args=0, vars=1, tmps=7)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 INIT_FCALL 2 112 string(\"array_slice\")\n\
+             0001 INIT_NS_FCALL_BY_NAME 0 string(\"N\\\\func_get_args\")\n\
+             0002 V1 = DO_FCALL_BY_NAME\n\
+             0003 SEND_VAR V1 1\n\
+             0004 SEND_VAL int(1) 2\n\
+             0005 V2 = DO_ICALL\n\
+             0006 T3 = INIT_ARRAY 5 (packed) V2 NEXT\n\
+             0007 T4 = FUNC_GET_ARGS int(1)\n\
+             0008 T3 = ADD_ARRAY_ELEMENT T4 NEXT\n\
+             0009 INIT_NS_FCALL_BY_NAME 1 string(\"N\\\\intval\")\n\
+             0010 SEND_VAR_EX CV0($a) 1\n\
+             0011 V5 = DO_FCALL_BY_NAME\n\
+             0012 T3 = ADD_ARRAY_ELEMENT V5 NEXT\n\
+             0013 T6 = CAST (long) CV0($a)\n\
+             0014 T3 = ADD_ARRAY_ELEMENT T6 NEXT\n\
+             0015 T7 = GET_CLASS\n\
+             0016 T3 = ADD_ARRAY_ELEMENT T7 NEXT\n\
+             0017 RETURN T3\n\
+             0018 RETURN null\n\
+             LIVE RANGES:\n\
+             \x20    3: 0007 - 0017 (tmp/var)\n"
         );
     }
 
