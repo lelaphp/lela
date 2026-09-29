@@ -14150,11 +14150,16 @@ impl Emit<'_> {
                     _ => Err(self.unread("a unary operator")),
                 }
             }
+            // `zend_compile_cast` folds nothing, which [`Self::cast`]
+            // copies: under a compile the cast is its opline, a `TMP`,
+            // and no fold over it happens, so `-(float)"0"` is the `CAST`
+            // and the `MUL` over it.
+            tree::Expr::CastExpr(_) if self.fold == Fold::Compile => {
+                Err(self.fatal("a cast compiled is its opline"))
+            }
             // `zend_eval_const_expr`'s `ZEND_AST_CAST` arm: the operand
-            // folded, then `zend_try_ct_eval_cast` over it;
-            // `zend_compile_cast` itself folds nothing, which
-            // [`Self::cast`] copies. `(unset)` is refused where it
-            // stands, as php's grammar puts it.
+            // folded, then `zend_try_ct_eval_cast` over it. `(unset)` is
+            // refused where it stands, as php's grammar puts it.
             tree::Expr::CastExpr(id) => {
                 let node = &tree[id];
                 let to = self.cast_to(node.op, line)?;

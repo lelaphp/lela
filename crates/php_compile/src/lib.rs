@@ -2657,6 +2657,47 @@ mod tests {
         );
     }
 
+    /// `zend_compile_cast` folds nothing, so the unary operators over a
+    /// cast fold nothing either and `-(float)"0"` is the `CAST` and the
+    /// `MUL` over it (#1251, `Zend/tests/bug52355.phpt`), while an array
+    /// of constants, which `zend_eval_const_expr` folds, folds the cast
+    /// inside it; as the oracle at 8.5.9 dumps it.
+    #[test]
+    fn a_cast_under_a_unary_operator_is_its_opline() {
+        assert_eq!(
+            dump_of(
+                b"<?php var_dump(-(float)\"0\", +(float)\"-0\", !(bool)\"1\", ~(int)\"1\", -(int)1.5, (int)\"1\" + 1, [(int)\"2\"]);"
+            ),
+            main_dump(
+                22,
+                0,
+                13,
+                "0000 INIT_FCALL 7 192 string(\"var_dump\")\n\
+                 0001 T0 = CAST (double) string(\"0\")\n\
+                 0002 T1 = MUL T0 int(-1)\n\
+                 0003 SEND_VAL T1 1\n\
+                 0004 T2 = CAST (double) string(\"-0\")\n\
+                 0005 T3 = MUL T2 int(1)\n\
+                 0006 SEND_VAL T3 2\n\
+                 0007 T4 = BOOL string(\"1\")\n\
+                 0008 T5 = BOOL_NOT T4\n\
+                 0009 SEND_VAL T5 3\n\
+                 0010 T6 = CAST (long) string(\"1\")\n\
+                 0011 T7 = BW_NOT T6\n\
+                 0012 SEND_VAL T7 4\n\
+                 0013 T8 = CAST (long) float(1.5)\n\
+                 0014 T9 = MUL T8 int(-1)\n\
+                 0015 SEND_VAL T9 5\n\
+                 0016 T10 = CAST (long) string(\"1\")\n\
+                 0017 T11 = ADD T10 int(1)\n\
+                 0018 SEND_VAL T11 6\n\
+                 0019 SEND_VAL array(...) 7\n\
+                 0020 DO_ICALL\n\
+                 0021 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// `zend_compile_func_get_class`, `_get_called_class` and `_gettype`
     /// as the oracle at 8.5.9 dumps them (#1251): `GET_CLASS` with no
     /// operand or over the one argument, `GET_CALLED_CLASS` and
