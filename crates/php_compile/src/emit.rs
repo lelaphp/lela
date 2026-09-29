@@ -5338,37 +5338,13 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_verify_enum_magic_methods` (`Z/Zend/zend_enum.c:79`) and
     /// `zend_enum_register_funcs` over the enum at `at` of the unit's
-    /// classes: a magic method php keeps off an enum is its compile
-    /// error, in php's order of the checks, and the enum takes `cases`,
-    /// and for a backed one `from` and `tryFrom`, after its own methods,
-    /// a method of its own under one of those names being php's
-    /// `Cannot redeclare`.
-    ///
-    /// ```php
-    /// enum E { case A; public function __toString(): string { return ''; } }
-    /// ```
-    /// ```expect exit=255
-    /// Fatal error: Enum E cannot include magic method __toString in %s on line 2
-    /// ```
+    /// classes: the enum takes `cases`, and for a backed one `from` and
+    /// `tryFrom`, after its own methods, a method of its own under one
+    /// of those names being php's `Cannot redeclare`. The magic methods
+    /// php keeps off an enum are the linker's to refuse, as
+    /// `zend_verify_enum` refuses them when the class links.
     fn verify_enum(&mut self, at: usize, name: &[u8]) -> Result<(), CompileError> {
-        const FORBIDDEN: [&str; 14] = [
-            "__construct",
-            "__destruct",
-            "__clone",
-            "__get",
-            "__set",
-            "__unset",
-            "__isset",
-            "__toString",
-            "__debugInfo",
-            "__serialize",
-            "__unserialize",
-            "__sleep",
-            "__wakeup",
-            "__set_state",
-        ];
         let Some(decl) = self.classes.get(at) else {
             return Err(self.fatal("InternalError: an enum the unit has not"));
         };
@@ -5377,12 +5353,6 @@ impl Emit<'_> {
                 .iter()
                 .any(|m| m.function.name.0.eq_ignore_ascii_case(wanted.as_bytes()))
         };
-        if let Some(magic) = FORBIDDEN.iter().find(|magic| has(magic)) {
-            return Err(self.compile_error(format!(
-                "Enum {} cannot include magic method {magic}",
-                String::from_utf8_lossy(name)
-            )));
-        }
         let builtins = php_unit::enum_methods(decl.backing);
         if let Some(clash) = builtins
             .iter()

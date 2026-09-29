@@ -250,6 +250,12 @@ pub enum Refusal {
     /// `Class %s cannot implement both Iterator and IteratorAggregate at
     /// the same time` (`zend_implement_aggregate`, `zend_implement_iterator`).
     IteratorAndAggregate { class: String },
+    /// `Enum %s cannot include magic method %s`
+    /// (`zend_verify_enum_magic_methods`).
+    EnumMagic { class: String, method: &'static str },
+    /// `Enum %s cannot implement the Serializable interface`
+    /// (`zend_verify_enum_interfaces`).
+    EnumSerializable { class: String },
     /// `Class %s contains %d abstract method%s and must therefore be
     /// declared abstract or implement the remaining method%s (%s)`, with
     /// every method left, of which php names three; an enum, which
@@ -720,6 +726,15 @@ impl fmt::Display for Refusal {
                 f,
                 "Class {class} cannot implement both Iterator and IteratorAggregate at the same time"
             ),
+            Refusal::EnumMagic { class, method } => {
+                write!(f, "Enum {class} cannot include magic method {method}")
+            }
+            Refusal::EnumSerializable { class } => {
+                write!(
+                    f,
+                    "Enum {class} cannot implement the Serializable interface"
+                )
+            }
             Refusal::EnumInterface { class, interface } => {
                 write!(
                     f,
@@ -2414,7 +2429,7 @@ impl<'a> Linker<'a> {
         if let Some(refusal) = abstract_left(child, &methods, hooks) {
             return Settled::of(Linked::Refused(at_class(child, refusal)));
         }
-        if let Some(refusal) = enum_properties(child) {
+        if let Some(refusal) = enum_properties(child).or_else(|| self.enum_refused(child)) {
             return Settled::of(Linked::Refused(at_class(child, refusal)));
         }
         if let Some(linked) = self.set_hooks_refused(child) {
@@ -3172,7 +3187,8 @@ impl<'a> Linker<'a> {
     /// linked
     /// ```
     fn serializable_deprecated(&mut self, child: &'a ClassDecl, methods: &Table<'a, MethodDecl>) {
-        if child.kind != ClassKind::Class || child.flags.is_abstract {
+        if matches!(child.kind, ClassKind::Interface | ClassKind::Trait) || child.flags.is_abstract
+        {
             return;
         }
         let serializable = self
@@ -3192,6 +3208,73 @@ impl<'a> Linker<'a> {
                 },
             });
         }
+    }
+}
+
+impl<'a> Linker<'a> {
+    /// `zend_verify_enum_magic_methods` and `zend_verify_enum_interfaces`,
+    /// after `zend_verify_enum_properties`: an enum holding a magic
+    /// method php keeps off one, its own or a trait's, and an enum that
+    /// is `Serializable`, whose deprecation
+    /// `zend_implement_serializable` raised first.
+    ///
+    /// ```php
+    /// trait T { public function __construct() {} }
+    /// enum E { use T; case A; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum E cannot include magic method __construct in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// enum E { case A; public function __toString(): string { return ''; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum E cannot include magic method __toString in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// enum E implements Serializable { case A;
+    ///     public function serialize() {} public function unserialize($s) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: E implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 2
+    ///
+    /// Fatal error: Enum E cannot implement the Serializable interface in %s on line 2
+    /// ```
+    fn enum_refused(&self, child: &'a ClassDecl) -> Option<Refusal> {
+        const FORBIDDEN: [&str; 14] = [
+            "__construct",
+            "__destruct",
+            "__clone",
+            "__get",
+            "__set",
+            "__unset",
+            "__isset",
+            "__toString",
+            "__debugInfo",
+            "__serialize",
+            "__unserialize",
+            "__sleep",
+            "__wakeup",
+            "__set_state",
+        ];
+        if child.kind != ClassKind::Enum {
+            return None;
+        }
+        let class = text(&child.name.0);
+        let has = |wanted: &str| {
+            child
+                .methods
+                .iter()
+                .any(|m| m.function.name.0.eq_ignore_ascii_case(wanted.as_bytes()))
+        };
+        if let Some(method) = FORBIDDEN.into_iter().find(|magic| has(magic)) {
+            return Some(Refusal::EnumMagic { class, method });
+        }
+        self.class_named(b"serializable")
+            .is_some_and(|interface| self.instance_of(child, interface))
+            .then_some(Refusal::EnumSerializable { class })
     }
 }
 
