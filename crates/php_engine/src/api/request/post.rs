@@ -182,8 +182,32 @@ impl Request {
             return;
         }
         let mut body = Vec::new();
+        let mut spilled = false;
         loop {
             let block = self.read_post_block(POST_BLOCK_SIZE);
+            // `php_stream_temp_write`: the body's memory stream holds fewer
+            // than `SAPI_POST_BLOCK_SIZE` bytes, and the write that would
+            // reach it moves it to a temporary file in `upload_tmp_dir`;
+            // one that cannot be made loses the whole body.
+            if !spilled && !block.is_empty() && body.len() + block.len() >= POST_BLOCK_SIZE {
+                let dir = self.ini_get(b"upload_tmp_dir").map(<[u8]>::to_vec);
+                let Some((_, path)) = self.open_temporary_fd(dir.as_deref(), b"php") else {
+                    docref(
+                        self,
+                        Level::Warning,
+                        "Unable to create temporary file, Check permissions in temporary files directory.",
+                    );
+                    docref(
+                        self,
+                        Level::Warning,
+                        "POST data can't be buffered; all data discarded",
+                    );
+                    body.clear();
+                    break;
+                };
+                spilled = true;
+                let _ = std::fs::remove_file(path);
+            }
             body.extend_from_slice(&block);
             if post_max_size > 0
                 && i64::try_from(self.post.read).unwrap_or(i64::MAX) > post_max_size
@@ -257,14 +281,29 @@ impl Request {
     /// handed out read after it, which becomes the request's body; empty
     /// where a reader took the body and kept none of it, as multipart
     /// does.
+    ///
+    /// Read as `php_stream_input_read` reads, a chunk at a time: the host
+    /// is asked for more only while what it has handed out falls short of
+    /// the chunk wanted, so a body the form reader stopped reading part way
+    /// is read no further.
     pub(crate) fn input_bytes(&mut self) -> Vec<u8> {
+        const CHUNK: usize = 8192;
         let mut body = self.post.request_body.take().unwrap_or_default();
-        if !self.post.done {
-            let rest = self.read_post_block(usize::MAX);
-            body.extend_from_slice(&rest);
+        let mut out = Vec::new();
+        loop {
+            let position = out.len();
+            if !self.post.done && self.post.read < position + CHUNK {
+                let block = self.read_post_block(CHUNK);
+                body.extend_from_slice(&block);
+            }
+            let end = (position + CHUNK).min(body.len());
+            if end <= position {
+                break;
+            }
+            out.extend_from_slice(&body[position..end]);
         }
-        self.post.request_body = Some(body.clone());
-        body
+        self.post.request_body = Some(body);
+        out
     }
 
     /// `request_parse_body()`'s body (`Z/ext/standard/http.c:345`): the
