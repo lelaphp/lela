@@ -1524,7 +1524,7 @@ fn destroy(req: &mut Request, object: PhpObject) {
                 req.raise_under(before);
             }
             if !req.executing()
-                && let Err(fatal) = req.exception_error()
+                && let Err(fatal) = req.exception_error(crate::api::raising::Level::Error)
             {
                 req.end_in(&fatal);
             }

@@ -55,6 +55,46 @@ pub fn raise_at(req: &mut Request, level: Level, message: &str, file: &[u8], lin
     req.note_error_in(level, message, file, line);
 }
 
+/// `zend_exception_error(ex, severity)` over the throwable `thrown`
+/// carries: rendered "Uncaught ..." at `severity` with its own site, as
+/// `assert()` under `assert.bail` renders what its callback threw at
+/// `E_WARNING`, the throwable given up. At `E_ERROR` it is the uncaught
+/// fatal and the request ends, which is the `Err`; a `thrown` that
+/// carries a fatal or an exit is handed on as it is.
+///
+/// ```php
+/// ini_set("assert.bail", 1);
+/// ini_set("assert.exception", 0);
+/// function cb() { throw new Exception("from the callback"); }
+/// ini_set("assert.callback", "cb");
+/// assert(false);
+/// echo "not reached\n";
+/// ```
+/// ```expect
+/// Deprecated: ini_set(): assert.bail INI setting is deprecated in %s on line 2
+///
+/// Deprecated: ini_set(): assert.exception INI setting is deprecated in %s on line 3
+///
+/// Deprecated: ini_set(): assert.callback INI setting is deprecated in %s on line 5
+///
+/// Warning: assert(): assert(false) failed in %s on line 6
+///
+/// Warning: Uncaught Exception: from the callback in %s:4
+/// Stack trace:
+/// #0 [internal function]: cb('%s', 6, NULL, 'assert(false)')
+/// #1 %s(6): assert(false, 'assert(false)')
+/// #2 {main}
+///   thrown in %s on line 4
+/// ```
+pub fn uncaught_at(req: &mut Request, thrown: Thrown, severity: Level) -> Result<(), Thrown> {
+    if thrown.exception().is_none() {
+        return Err(thrown);
+    }
+    req.leave_pending(&thrown);
+    req.exception_error(severity)
+        .or_else(|fatal| req.fatal_of(Err(fatal)))
+}
+
 /// `zend_error` with `EG(exception)` set: the diagnostic raised while
 /// the throwable `pending` carries is pending, as php raises one after a
 /// call that threw, where the engine's slot would otherwise stand empty

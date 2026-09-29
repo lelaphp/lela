@@ -26,6 +26,7 @@ use php_ext::coerce::{to_callable, to_string, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, arity, docref, new_throwable, throw_chained, throw_value,
+    uncaught_at,
 };
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
@@ -361,11 +362,16 @@ fn assert(
         let what = message.as_deref().unwrap_or("Assertion");
         docref(req, Level::Warning, &format!("{what} failed"));
     }
+    if flag(req, b"assert.bail") {
+        // "The callback might have thrown. Use E_WARNING to print the
+        // exception so we can avoid bailout and use unwind_exit."
+        if let Some(thrown) = pending {
+            uncaught_at(req, thrown, Level::Warning)?;
+        }
+        return Err(php_ext::raising::exit(req, &Value::int(0)));
+    }
     if let Some(thrown) = pending {
         return Err(thrown);
-    }
-    if flag(req, b"assert.bail") {
-        return Err(php_ext::raising::exit(req, &Value::int(0)));
     }
     Ok(false)
 }

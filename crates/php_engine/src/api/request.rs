@@ -4625,13 +4625,16 @@ impl Request {
         // no frame standing: a user exception handler takes the
         // throwable first, and what it leaves is rendered.
         self.user_exception_handler();
-        self.exception_error()
+        self.exception_error(Level::Error)
     }
 
     /// `zend_exception_error` (`Z/Zend/zend_exceptions.c:936`): what is
-    /// pending rendered as the uncaught fatal, with no handler asked,
-    /// and nothing rendered for either exit.
-    pub(crate) fn exception_error(&mut self) -> Result<(), Fatal> {
+    /// pending rendered "Uncaught" at `severity`, with no handler asked,
+    /// and nothing rendered for either exit. At `E_ERROR` it is the
+    /// uncaught fatal and the request ends; below it, php's
+    /// `severity | E_DONT_BAIL` as `assert.bail` asks, it is a diagnostic
+    /// like any other, and the throwable is given up.
+    pub(crate) fn exception_error(&mut self, severity: Level) -> Result<(), Fatal> {
         let Some(throwable) = self.take_pending() else {
             // `zend_exception_error` on either exit: "We successfully
             // unwound, nothing more to do", and the object is released
@@ -4692,6 +4695,11 @@ impl Request {
         } else {
             file
         };
+        if compile_time.is_none() && severity != Level::Error {
+            crate::api::raising::raise_at(self, severity, &message, &file, line);
+            self.release(throwable.as_value());
+            return Ok(());
+        }
         self.end_in_uncaught(compile_time.unwrap_or(Level::Error), &message, &file, line);
         let fatal = Fatal::Error(message);
         // `zend_exception_error` ends with `OBJ_RELEASE(ex)`: the pending
