@@ -1305,15 +1305,18 @@ pub fn bound_variables(
 /// ```
 pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
     let bare = name.strip_prefix(b"\\").unwrap_or(name);
+    // The table first, which holds an anonymous class under its name
+    // with the NUL, and `zend_is_valid_class_name` only before the
+    // autoloaders.
+    if let Some(class) = req.class_named(bare) {
+        return Ok(Some(class));
+    }
     let valid = !bare.is_empty()
         && bare
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'\\' || *b >= 0x80);
     if !valid {
         return Ok(None);
-    }
-    if let Some(class) = req.class_named(bare) {
-        return Ok(Some(class));
     }
     if req.link_under_way(bare) {
         return Ok(None);
