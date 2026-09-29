@@ -117,7 +117,7 @@ use crate::sources;
 use crate::tally::{self, Outcome};
 use anchor::Entry;
 use fence::Extracted;
-use process::Binary;
+pub(crate) use process::Binary;
 use watch::{Journal, Watch};
 
 /// The instrument's name, the reading's `instrument` field.

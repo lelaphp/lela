@@ -49,7 +49,7 @@ pub(crate) struct Binary {
 
 impl Binary {
     /// The binary of the workspace at `root`, not yet built.
-    pub(super) fn of(root: &Path) -> Binary {
+    pub(crate) fn of(root: &Path) -> Binary {
         Binary {
             root: root.to_path_buf(),
             built: OnceLock::new(),
@@ -69,7 +69,7 @@ impl Binary {
     /// after it where the fence names one, as the oracle serves it; with
     /// the natives every request it served entered, in the order they
     /// were appended.
-    pub(super) fn serve(
+    pub(crate) fn serve(
         &self,
         oracle: &Oracle<'_>,
         snippet: &str,

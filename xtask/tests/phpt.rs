@@ -393,8 +393,9 @@ fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
     // No engine is built here, so every subset of the lane is a skip that
     // says so; what is under test is which subsets the lane is. §7's
     // per-commit row: Zend/tests and tests/ with php_engine, sapi/cli with
-    // php_sapi, and the default extensions' own. A crate behind a feature
-    // is not in the default build, and one with no subset owns none.
+    // php_sapi, and the default extensions' own. The scratch workspace
+    // has no binary crate, so it carries no feature and a crate behind
+    // one is outside its lane (revision 63); one with no subset owns none.
     let root = Tree::new("phpt-lane").unwrap();
     scratch_workspace(workspace(), &root).unwrap();
     let readings = phpt::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();

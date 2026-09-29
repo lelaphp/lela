@@ -338,20 +338,28 @@ fn an_absent_rendering_fails_saying_the_engine_rendered_nothing() {
     assert_eq!(note, "the engine rendered nothing: not built");
 }
 
+/// The set a bare run renders is every `ext/*` row the binary under test
+/// carries: the default set and the rows behind a feature it turns on,
+/// never one behind a feature it does not (harness §7, revision 63).
 #[test]
-fn the_default_set_is_every_ext_row_outside_a_feature_and_ext_names_one() {
+fn the_default_set_is_every_ext_row_the_binary_carries_and_ext_names_one() {
     let manifest = Manifest::of([
         Crate::named("php_heap"),
         Crate::named("ext/ctype"),
         Crate::named("ext/mbstring").with_feature("mbstring"),
         Crate::named("ext/hash"),
+        Crate::named("ext/bcmath").with_feature("bcmath"),
     ]);
-    assert_eq!(extensions(&manifest, &Ask::default()), ["ctype", "hash"]);
+    let carried = Carried::turning_on(&["bcmath"]);
+    assert_eq!(
+        extensions(&manifest, &carried, &Ask::default()),
+        ["ctype", "hash", "bcmath"]
+    );
     let one = Ask {
         ext: vec!["mbstring".to_owned()],
         ..Ask::default()
     };
-    assert_eq!(extensions(&manifest, &one), ["mbstring"]);
+    assert_eq!(extensions(&manifest, &carried, &one), ["mbstring"]);
 }
 
 #[test]

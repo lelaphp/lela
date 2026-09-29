@@ -716,18 +716,65 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
             Crate::named("php_heap"),
             Crate::named("php_sapi").with_phpt(&["sapi/cli/tests"]),
             Crate::named("ext/pcre"),
+            Crate::named("ext/openssl").with_feature("openssl"),
             Crate::named("ext/curl").with_feature("curl"),
         ],
         &tree,
     );
-    let lane: Vec<String> = Subset::lane(&manifest, &tree)
+    let lane: Vec<String> = Subset::lane(&manifest, &Carried::turning_on(&["openssl"]), &tree)
         .into_iter()
         .map(|subset| subset.scope)
         .collect();
     // §7's per-commit row: Zend/tests and tests/ with php_engine, sapi/cli
-    // with php_sapi, and the default extensions' own. A crate behind a
-    // feature is not in the default build, and one with no subset owns none.
-    assert_eq!(lane, ["php_engine", "php_sapi", "ext/pcre"]);
+    // with php_sapi, and the extensions the binary carries: the default
+    // set's and the one behind a feature it turns on (revision 63). One
+    // behind a feature it does not turn on is the nightly lane's, and a
+    // crate with no subset owns none.
+    assert_eq!(lane, ["php_engine", "php_sapi", "ext/pcre", "ext/openssl"]);
+}
+
+/// The lane over the tracked manifest and the binary's own declaration:
+/// every row whose `feature` the binary turns on and which owns a subset
+/// is in it, so a lane that drops one, by a filter that reads the
+/// manifest's `feature` alone or by a second list of the binary's
+/// features gone stale, is this test red (revision 63, #1252).
+#[test]
+fn the_lane_runs_every_feature_row_the_binary_turns_on() {
+    let tree = Tree::new("phpt-lane-carried").unwrap();
+    let manifest = tracked_over_fixture(&tree);
+    let carried = Carried::binary(&workspace()).unwrap();
+    let carried_rows: Vec<&Crate> = manifest
+        .crates
+        .iter()
+        .filter(|krate| krate.feature.is_some() && carried.carries(krate))
+        .filter(|krate| !krate.subsets().is_empty())
+        .collect();
+    assert!(
+        !carried_rows.is_empty(),
+        "the binary turns on no feature row"
+    );
+    for krate in &carried_rows {
+        for under in krate.subsets() {
+            fs::create_dir_all(tree.join(under)).unwrap();
+        }
+    }
+    let lane: Vec<String> = Subset::lane(&manifest, &carried, &tree)
+        .into_iter()
+        .map(|subset| subset.scope)
+        .collect();
+    for krate in carried_rows {
+        assert!(
+            lane.contains(&krate.name),
+            "the lane drops {}, whose feature the binary turns on: {lane:?}",
+            krate.name
+        );
+    }
+    let left_out = manifest
+        .crates
+        .iter()
+        .filter(|krate| !carried.carries(krate))
+        .find(|krate| lane.contains(&krate.name));
+    assert_eq!(left_out, None, "{lane:?}");
 }
 
 #[test]
