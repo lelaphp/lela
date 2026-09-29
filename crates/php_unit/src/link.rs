@@ -244,9 +244,12 @@ pub enum Refusal {
     /// `Non-backed enum %s cannot implement interface %s`, a pure enum
     /// naming `BackedEnum` (`zend_implement_backed_enum`).
     NonBackedEnumInterface { class: String, interface: String },
-    /// `Class %s must implement interface Traversable as part of either
-    /// Iterator or IteratorAggregate`.
-    Traversable { class: String },
+    /// `%s %s must implement interface Traversable as part of either
+    /// Iterator or IteratorAggregate`, the object's kind first.
+    Traversable { kind: ClassKind, class: String },
+    /// `Class %s cannot implement both Iterator and IteratorAggregate at
+    /// the same time` (`zend_implement_aggregate`, `zend_implement_iterator`).
+    IteratorAndAggregate { class: String },
     /// `Class %s contains %d abstract method%s and must therefore be
     /// declared abstract or implement the remaining method%s (%s)`, with
     /// every method left, of which php names three; an enum, which
@@ -413,7 +416,8 @@ impl Refusal {
             | Refusal::NotAnInterface { .. }
             | Refusal::Throwable { .. }
             | Refusal::EnumInterface { .. }
-            | Refusal::NonBackedEnumInterface { .. } => Level::Error,
+            | Refusal::NonBackedEnumInterface { .. }
+            | Refusal::IteratorAndAggregate { .. } => Level::Error,
             Refusal::Traversable { .. } => Level::CoreError,
             _ => Level::CompileError,
         }
@@ -707,9 +711,14 @@ impl fmt::Display for Refusal {
                     "{class} cannot implement {interface} - it is not an interface"
                 )
             }
-            Refusal::Traversable { class } => write!(
+            Refusal::Traversable { kind, class } => write!(
                 f,
-                "Class {class} must implement interface Traversable as part of either Iterator or IteratorAggregate"
+                "{} {class} must implement interface Traversable as part of either Iterator or IteratorAggregate",
+                object_type_uc(*kind)
+            ),
+            Refusal::IteratorAndAggregate { class } => write!(
+                f,
+                "Class {class} cannot implement both Iterator and IteratorAggregate at the same time"
             ),
             Refusal::EnumInterface { class, interface } => {
                 write!(
@@ -2934,6 +2943,10 @@ impl<'a> Linker<'a> {
             }
             named.push(interface);
         }
+        let all = self.all_interfaces(child);
+        if let Some(refusal) = self.inherited_interfaces_refused(child, &all) {
+            return Some(Linked::Refused(at_class(child, refusal)));
+        }
         let mut interfaces = Vec::new();
         self.interfaces_of(&child.interfaces, &mut interfaces, 0);
         for interface in interfaces {
@@ -3001,7 +3014,7 @@ impl<'a> Linker<'a> {
                 }
             }
             if child.kind != ClassKind::Interface
-                && let Some(refusal) = self.interface_refused(child, interface)
+                && let Some(refusal) = self.interface_refused(child, interface, &all)
             {
                 return Some(Linked::Refused(at_class(child, refusal)));
             }
@@ -3009,12 +3022,81 @@ impl<'a> Linker<'a> {
         None
     }
 
+    /// `zend_do_inheritance`'s `do_implement_interface` over what the
+    /// parent implements, whose guards hold the child too, before its
+    /// own interfaces'.
+    fn inherited_interfaces_refused(
+        &self,
+        child: &'a ClassDecl,
+        all: &[&'a ClassDecl],
+    ) -> Option<Refusal> {
+        if child.kind == ClassKind::Interface {
+            return None;
+        }
+        let mut own = Vec::new();
+        self.interfaces_of(&child.interfaces, &mut own, 0);
+        all.iter()
+            .filter(|interface| !own.iter().any(|o| same(o, interface)))
+            .find_map(|interface| self.interface_refused(child, interface, all))
+    }
+
+    /// `ce->interfaces` once `zend_do_link_class` has resolved them: the
+    /// interfaces each parent up the chain holds, then the class's own
+    /// and those each one extends, each once.
+    fn all_interfaces(&self, child: &'a ClassDecl) -> Vec<&'a ClassDecl> {
+        let mut chain: Vec<&'a ClassDecl> = Vec::new();
+        let mut at = self.class_parent(child);
+        while let Some(parent) = at {
+            if chain.len() > 64 || chain.iter().any(|seen| same(seen, parent)) {
+                break;
+            }
+            chain.push(parent);
+            at = self.class_parent(parent);
+        }
+        let mut all = Vec::new();
+        for class in chain.into_iter().rev() {
+            self.interfaces_of(&class.interfaces, &mut all, 0);
+        }
+        self.interfaces_of(&child.interfaces, &mut all, 0);
+        all
+    }
+
     /// `interface_gets_implemented` of the interfaces php's engine
     /// guards: `Throwable` only through `Exception` or `Error`,
     /// `Traversable` only through `Iterator` or `IteratorAggregate`, the
     /// enum interfaces only on an enum and `BackedEnum` only on a backed
     /// one.
-    fn interface_refused(&self, child: &'a ClassDecl, interface: &ClassDecl) -> Option<Refusal> {
+    ///
+    /// Each guard runs over what the class holds once linked, its
+    /// parents' interfaces included, as `ce->interfaces` is by then:
+    ///
+    /// ```php
+    /// abstract class A implements IteratorAggregate, Iterator {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class A cannot implement both Iterator and IteratorAggregate at the same time in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// abstract class A implements Traversable {}
+    /// class B extends A {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class B must implement interface Traversable as part of either Iterator or IteratorAggregate in Unknown on line 0
+    /// ```
+    ///
+    /// ```php
+    /// enum Foo implements Traversable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum Foo must implement interface Traversable as part of either Iterator or IteratorAggregate in Unknown on line 0
+    /// ```
+    fn interface_refused(
+        &self,
+        child: &'a ClassDecl,
+        interface: &ClassDecl,
+        all: &[&'a ClassDecl],
+    ) -> Option<Refusal> {
         let name = &interface.name.0;
         let class = text(&child.name.0);
         if name.eq_ignore_ascii_case(b"Throwable") {
@@ -3030,20 +3112,27 @@ impl<'a> Linker<'a> {
                 });
             }
         }
-        if name.eq_ignore_ascii_case(b"Traversable") && !child.flags.is_abstract {
-            let mut all = Vec::new();
-            self.interfaces_of(&child.interfaces, &mut all, 0);
-            let through_iterator = all.iter().any(|interface| {
-                interface.name.0.eq_ignore_ascii_case(b"Iterator")
-                    || interface.name.0.eq_ignore_ascii_case(b"IteratorAggregate")
-            }) || child
-                .parent
-                .as_ref()
-                .and_then(|p| self.class_named(&p.0))
-                .is_some_and(|parent| self.instance_of(parent, interface));
-            if !through_iterator {
-                return Some(Refusal::Traversable { class });
-            }
+        let holds = |wanted: &[u8]| all.iter().any(|i| i.name.0.eq_ignore_ascii_case(wanted));
+        if name.eq_ignore_ascii_case(b"Traversable")
+            && !child.flags.is_abstract
+            && !holds(b"Iterator")
+            && !holds(b"IteratorAggregate")
+        {
+            return Some(Refusal::Traversable {
+                kind: child.kind,
+                class,
+            });
+        }
+        let other: &[u8] = if name.eq_ignore_ascii_case(b"Iterator") {
+            b"IteratorAggregate"
+        } else {
+            b"Iterator"
+        };
+        if (name.eq_ignore_ascii_case(b"Iterator")
+            || name.eq_ignore_ascii_case(b"IteratorAggregate"))
+            && holds(other)
+        {
+            return Some(Refusal::IteratorAndAggregate { class });
         }
         let backed = name.eq_ignore_ascii_case(b"BackedEnum");
         if !backed && !name.eq_ignore_ascii_case(b"UnitEnum") {
