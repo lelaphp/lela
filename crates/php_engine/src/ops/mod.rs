@@ -4262,6 +4262,27 @@ pub(crate) fn array_offset(
     }
 }
 
+/// `zend_zval_get_legacy_type` (`Z/Zend/zend_API.c:191`), the name
+/// `ZEND_GET_TYPE` answers for a value: `NULL`, `boolean`, `integer`,
+/// `double`, `string`, `array`, `object`, and `resource` or `resource
+/// (closed)`; a reference is the value it holds, and a variable nothing
+/// wrote is `null`, which the handler warned of as it read it.
+pub(crate) fn legacy_type(value: &Value) -> &'static [u8] {
+    match value.deref().as_ref() {
+        ValueRef::Undef | ValueRef::Null => b"NULL",
+        ValueRef::Bool(_) => b"boolean",
+        ValueRef::Int(_) => b"integer",
+        ValueRef::Float(_) => b"double",
+        ValueRef::Str(_) => b"string",
+        ValueRef::Array(_) => b"array",
+        ValueRef::Object(_) => b"object",
+        ValueRef::Resource(resource) if resource.is_closed() => b"resource (closed)",
+        ValueRef::Resource(_) => b"resource",
+        // `deref` followed it; php's `default` arm names none.
+        ValueRef::Reference(_) => b"unknown type",
+    }
+}
+
 /// `ZEND_ISSET_ISEMPTY_DIM_OBJ`'s array arm (`Z/Zend/zend_vm_def.h:7546`,
 /// the `isset_dim_obj_array` label): the entry at the key the offset
 /// makes, asked for rather than fetched, so no `Undefined array key`

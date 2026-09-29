@@ -94,8 +94,16 @@ pub(crate) enum Special {
     /// `boolval` and `ZEND_CAST` to the type for `intval`, `floatval`,
     /// `doubleval` and `strval`, as the cast written would be.
     Cast(CastTo),
-    /// A shape that is an opcode of its own (`ZEND_GET_CLASS`,
-    /// `ZEND_GET_CALLED_CLASS`, `ZEND_GET_TYPE`, `ZEND_FUNC_NUM_ARGS`,
+    /// `zend_compile_func_get_class`: `ZEND_GET_CLASS` with no operand
+    /// for no argument, over the argument for one; the call for more.
+    GetClass,
+    /// `zend_compile_func_get_called_class`: `ZEND_GET_CALLED_CLASS`
+    /// where the call has no argument.
+    GetCalledClass,
+    /// `zend_compile_func_gettype`: `ZEND_GET_TYPE` over the one
+    /// argument.
+    GetType,
+    /// A shape that is an opcode of its own (`ZEND_FUNC_NUM_ARGS`,
     /// `ZEND_ARRAY_KEY_EXISTS`) and has no kernel here yet: the ordinary
     /// call.
     Opcode,
@@ -150,9 +158,9 @@ pub(crate) const TABLE: &[(&[u8], Special)] = &[
     (b"in_array", Special::InArray),
     (b"count", Special::Count { sizeof: false }),
     (b"sizeof", Special::Count { sizeof: true }),
-    (b"get_class", Special::Opcode),
-    (b"get_called_class", Special::Opcode),
-    (b"gettype", Special::Opcode),
+    (b"get_class", Special::GetClass),
+    (b"get_called_class", Special::GetCalledClass),
+    (b"gettype", Special::GetType),
     (b"func_num_args", Special::Opcode),
     (b"func_get_args", Special::FuncGetArgs),
     (b"array_slice", Special::Opcode),
@@ -300,6 +308,14 @@ impl Emit<'_> {
             Some(Special::CallUserFunc) => self.call_user_func(arguments),
             Some(Special::Sprintf) => self.sprintf(arguments),
             Some(Special::Cast(to)) => self.cast_call(arguments, to),
+            Some(Special::GetClass) => match arguments {
+                [] => Ok(Some(self.emit_nullary(Opcode::GetClass))),
+                _ => self.over_one(Opcode::GetClass, arguments, 0),
+            },
+            Some(Special::GetCalledClass) => Ok(arguments
+                .is_empty()
+                .then(|| self.emit_nullary(Opcode::GetCalledClass))),
+            Some(Special::GetType) => self.over_one(Opcode::GetType, arguments, 0),
             Some(Special::Opcode) | None => Ok(None),
         }
     }
@@ -332,6 +348,9 @@ impl Emit<'_> {
                 | Special::CallUserFunc
                 | Special::Sprintf
                 | Special::Cast(_)
+                | Special::GetClass
+                | Special::GetCalledClass
+                | Special::GetType
                 | Special::Opcode,
             )
             | None => Ok(None),
@@ -575,10 +594,11 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_func_typecheck`, `zend_compile_func_is_scalar`,
-    /// `zend_compile_func_count` and `zend_compile_func_clone`: one
-    /// argument, compiled, and the opcode over it into a temporary with
-    /// `extended_value` as given; two arguments or none is the call,
-    /// whatever the arguments are.
+    /// `zend_compile_func_count`, `zend_compile_func_gettype`,
+    /// `zend_compile_func_clone` and `zend_compile_func_get_class`'s one
+    /// argument: that argument, compiled, and the opcode over it into a
+    /// temporary with `extended_value` as given; two arguments or none
+    /// is the call, whatever the arguments are.
     fn over_one(
         &mut self,
         opcode: Opcode,

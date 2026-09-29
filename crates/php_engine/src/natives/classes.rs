@@ -62,22 +62,23 @@ fn class_name(req: &mut Request, class: ClassId) -> Result<PhpString, Thrown> {
 /// `get_called_class(): string`, php's `ZEND_FUNCTION(get_called_class)`
 /// (`Z/Zend/zend_builtin_functions.c:654`): the class `static` names
 /// where the native was called, `zend_get_called_scope`, and php's
-/// `Error` outside a class. php's compiler serves a call of it with
-/// `ZEND_GET_CALLED_CLASS`, whose frame a trace does not show; this
-/// engine's serves it as a call, so the witness reads the `Error`'s
-/// message and not the trace.
+/// `Error` outside a class. php's compiler serves a call of no argument
+/// with `ZEND_GET_CALLED_CLASS` (`zend_compile_func_get_called_class`);
+/// what reaches the native is a call by a name the program holds and a
+/// callback, whose frame the `Error`'s trace shows.
 ///
 /// ```php
-/// class A { static function f() { return get_called_class(); } function g() { return get_called_class(); } }
+/// class A { static function f() { $g = 'get_called_class'; return $g(); } function g() { return call_user_func('get_called_class'); } }
 /// class B extends A {}
 /// var_dump(A::f(), B::f(), (new B)->g());
-/// try { get_called_class(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $g = 'get_called_class';
+/// try { $g(); } catch (Error $e) { echo $e->getMessage(), " at ", count($e->getTrace()), "\n"; }
 /// ```
 /// ```expect
 /// string(1) "A"
 /// string(1) "B"
 /// string(1) "B"
-/// get_called_class() must be called from within a class
+/// get_called_class() must be called from within a class at 1
 /// ```
 #[php_function]
 fn get_called_class(req: &mut Request) -> Result<PhpString, Thrown> {

@@ -18,11 +18,14 @@ use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 /// `gettype(mixed $value): string`, php's `PHP_FUNCTION(gettype)` over
 /// `zend_zval_get_legacy_type`: the names php has kept since PHP 4,
 /// `integer`, `double`, `boolean`, `NULL`, and `resource (closed)` for a
-/// closed resource.
+/// closed resource. php's compiler serves a call of one argument with
+/// `ZEND_GET_TYPE` (`zend_compile_func_gettype`); what reaches the
+/// native is a call by a name the program holds, a named or an unpacked
+/// argument, and a callback.
 ///
 /// ```php
-/// $f = fopen('php://memory', 'r'); fclose($f);
-/// var_dump(gettype(1), gettype(1.0), gettype("s"), gettype(null), gettype([]), gettype(new stdClass), gettype(true), gettype($f), gettype(fopen('php://memory', 'r')));
+/// $f = fopen('php://memory', 'r'); fclose($f); $g = 'gettype';
+/// var_dump($g(1), $g(1.0), $g("s"), $g(null), $g([]), $g(new stdClass), $g(true), $g($f), $g(fopen('php://memory', 'r')));
 /// ```
 /// ```expect
 /// string(7) "integer"
