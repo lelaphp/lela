@@ -42,8 +42,8 @@ use php_ext::abi::{Raw, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::{ClassKind, EnumBacking};
-use php_ext::raising::{Thrown, arg_type_error, fatal, throw, warning};
-use php_ext::request::Request;
+use php_ext::raising::{Thrown, arg_type_error, throw, warning};
+use php_ext::request::{BodyLimits, Request};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::url::{PHP_QUERY_RFC3986, url_encode};
@@ -72,30 +72,6 @@ impl Limit {
         .into_iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(key))
         .map(|(_, limit)| limit)
-    }
-}
-
-/// The content types `SG(known_post_content_types)` holds a handler for,
-/// `php_startup_sapi_content_types`: `sapi_read_post_data` lowers the
-/// request's type and cuts it at the first `;`, `,` or space before it
-/// looks one up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PostType {
-    UrlEncoded,
-    Multipart,
-}
-
-impl PostType {
-    fn of(content_type: &[u8]) -> Option<PostType> {
-        let end = content_type
-            .iter()
-            .position(|c| matches!(c, b';' | b',' | b' '))
-            .unwrap_or(content_type.len());
-        match content_type[..end].to_ascii_lowercase().as_slice() {
-            b"application/x-www-form-urlencoded" => Some(PostType::UrlEncoded),
-            b"multipart/form-data" => Some(PostType::Multipart),
-            _ => None,
-        }
     }
 }
 
@@ -128,41 +104,24 @@ fn request_parse_body(
     req: &mut Request,
     #[php(default = null)] options: Option<PhpArray>,
 ) -> Result<PhpArray, Thrown> {
+    let mut limits = BodyLimits::default();
     if let Some(options) = options {
-        body_limits(req, options)?;
+        for (limit, quantity) in body_limits(req, options)? {
+            let slot = match limit {
+                Limit::MaxFileUploads => &mut limits.max_file_uploads,
+                Limit::MaxInputVars => &mut limits.max_input_vars,
+                Limit::MaxMultipartBodyParts => &mut limits.max_multipart_body_parts,
+                Limit::PostMaxSize => &mut limits.post_max_size,
+                Limit::UploadMaxFilesize => &mut limits.upload_max_filesize,
+            };
+            *slot = Some(quantity);
+        }
     }
-    let headers = req.request_headers()?;
-    let content_type = headers
-        .snapshot()
-        .into_iter()
-        .find_map(|(key, value)| match key {
-            Key::Str(name) if name.as_bytes().eq_ignore_ascii_case(b"content-type") => {
-                value.as_php_string().map(|s| s.as_bytes().to_vec())
-            }
-            _ => None,
-        });
-    let Some(content_type) = content_type else {
-        return Err(throw(
-            req,
-            "RequestParseBodyException",
-            "Request does not provide a content type",
-        ));
-    };
-    if PostType::of(&content_type).is_none() {
-        let text = format!(
-            "Content-Type \"{}\" is not supported",
-            String::from_utf8_lossy(&content_type)
-        );
-        return Err(throw(req, "RequestParseBodyException", &text));
-    }
-    // `sapi_handle_post` over `php_std_post_handler` and
-    // `rfc1867_post_handler`, the engine's POST readers, which it has
-    // not got; no host of this engine hands a request a content type
-    // yet, so no request reaches here.
-    Err(fatal(
-        req,
-        "InternalError: request_parse_body() has no POST reader for this content type yet (#877)",
-    ))
+    let (post, files) = req.parse_body(&limits)?;
+    let mut pair = PhpArray::new(req)?;
+    pair.append(req, Value::array(post))?;
+    pair.append(req, Value::array(files))?;
+    Ok(pair)
 }
 
 /// `cache_request_parse_body_options` (`Z/ext/standard/http.c:279`):

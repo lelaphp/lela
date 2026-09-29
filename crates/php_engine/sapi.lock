@@ -2,7 +2,10 @@
 Engine
 EngineBuilder
 FileHandles
+Method
 Observables
 OutputSink
 PHP_VERSION
 RequestDescription
+ResponseHead
+WebRequest

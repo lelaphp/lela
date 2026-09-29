@@ -182,6 +182,7 @@ impl Context {
 /// `zend_output_globals` (`Z/main/php_output.h:139-146`), and the
 /// `sapi_globals` the header ops and the first write move:
 /// `SG(sapi_headers)` and `SG(headers_sent)`.
+#[allow(clippy::struct_excessive_bools)] // php's `OG` and `SG` flags, each its own global, read alone
 pub(crate) struct Output {
     /// `OG(handlers)`, bottom first; the top is `OG(active)`.
     handlers: Vec<Handler>,
@@ -219,9 +220,12 @@ pub(crate) struct Output {
     /// Whether the host's `header_handler` takes a line: every host but
     /// the CLI, whose handler answers zero
     /// (`Z/sapi/cli/php_cli.c:376`), so `sapi_header_add_op` frees the
-    /// line and the list stays empty. Read off the description's
-    /// `is_web`.
+    /// line and the list stays empty. Whether the description carries a
+    /// request of the web.
     takes_headers: bool,
+    /// `SG(request_info).headers_only`: a `HEAD` request, whose body
+    /// `php_header` refuses once the head is sent.
+    headers_only: bool,
 }
 
 impl Output {
@@ -229,8 +233,9 @@ impl Output {
     /// the stack initialised, which `zend_stack_init` does without an
     /// allocation, and the layer marked active; and `sapi_activate`
     /// (`Z/main/SAPI.c:429`) for the header state, with the response
-    /// code the host leaves. `web` is the description's `is_web`.
-    pub(crate) fn activate(web: bool) -> Output {
+    /// code the host leaves, zero under the CLI, and the headers counted
+    /// sent where the host writes none (php-cgi's `-q`).
+    pub(crate) fn activate(web: Option<&crate::engine::WebRequest>) -> Output {
         Output {
             handlers: Vec::new(),
             elements: None,
@@ -238,13 +243,14 @@ impl Output {
             running: None,
             flags: ACTIVATED,
             started: None,
-            headers_sent: false,
+            headers_sent: web.is_some_and(|web| web.no_headers),
             mimetype: None,
             headers: Vec::new(),
             send_default_content_type: true,
-            response_code: if web { 200 } else { 0 },
+            response_code: web.map_or(0, |web| web.response_code),
             status_line: None,
-            takes_headers: web,
+            takes_headers: web.is_some(),
+            headers_only: web.is_some_and(|web| web.method == Some(crate::engine::Method::Head)),
         }
     }
 
@@ -917,7 +923,9 @@ fn header(req: &mut Request) {
         let line = req.current_line();
         req.output_mut().started = Some((file, line));
     }
-    if !send_headers(req) {
+    // `php_header`: a `HEAD` request's body goes nowhere once its head
+    // is sent.
+    if !send_headers(req) || req.output().headers_only {
         req.output_mut().flags |= DISABLED;
     }
 }
@@ -1748,7 +1756,10 @@ mod tests {
         Request::new(
             Arc::clone(&engine.shared),
             RequestDescription {
-                is_web: true,
+                web: Some(crate::engine::WebRequest {
+                    response_code: 200,
+                    ..crate::engine::WebRequest::default()
+                }),
                 ..RequestDescription::default()
             },
         )

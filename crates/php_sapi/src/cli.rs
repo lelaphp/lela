@@ -43,7 +43,9 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use php_engine::{Engine, FileHandles, OutputSink, PHP_VERSION, RequestDescription};
+use php_engine::{Engine, FileHandles, OutputSink, PHP_VERSION, RequestDescription, ResponseHead};
+
+use crate::getopt::{Getopt, Opt, Taken, getopt_line, opt, os};
 
 /// `sapi_module.name` for the CLI: what `php_sapi_name()` answers and
 /// what the version line carries.
@@ -134,21 +136,8 @@ enum Mode {
     Strip,
 }
 
-/// One row of `php_cli.c`'s `OPTIONS`: the code `php_getopt` returns, a
-/// letter or php's number for a long switch, whether it takes a value
-/// (`1`), may (`2`) or does not (`0`), and its long name.
-struct Opt {
-    code: u8,
-    need: u8,
-    name: &'static str,
-}
-
-const fn opt(code: u8, need: u8, name: &'static str) -> Opt {
-    Opt { code, need, name }
-}
-
 /// `OPTIONS`, `php_cli.c:124-165`, row for row.
-const OPTIONS: [Opt; 38] = [
+const OPTIONS: &[Opt] = &[
     opt(b'a', 0, "interactive"),
     opt(b'B', 1, "process-begin"),
     opt(b'C', 0, "no-chdir"),
@@ -188,168 +177,6 @@ const OPTIONS: [Opt; 38] = [
     opt(16, 1, "repeat"),
     opt(b'-', 0, ""),
 ];
-
-/// `php_opt_error`'s three reasons, `main/getopt.c:20-24`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OptError {
-    Colon,
-    NotFound,
-    NoArgument,
-}
-
-/// Where `php_getopt` stopped and why: the argument and the character
-/// its line names, and the reason.
-type Stopped = (usize, usize, OptError);
-
-/// `php_getopt` (`Z/main/getopt.c:55-198`) over `argv[1..]`, with the
-/// state it keeps in statics, `optchr` and `dash`, kept here: `optchr`
-/// is where in a clustered word the next letter is and outlives the
-/// word, which is why the line php prints for a switch it does not know
-/// counts from the previous cluster's end. Copied as written, since that
-/// line is observable.
-struct Getopt {
-    optind: usize,
-    optchr: usize,
-    dash: bool,
-}
-
-/// One thing `php_getopt` returned: a switch with its value, or the end
-/// of the switches.
-enum Taken {
-    Switch(u8, Option<Vec<u8>>),
-    End,
-}
-
-impl Getopt {
-    fn new() -> Getopt {
-        Getopt {
-            optind: 0,
-            optchr: 0,
-            dash: false,
-        }
-    }
-
-    /// The next switch, `php_getopt` with `arg_start` 2.
-    fn next(&mut self, argv: &[Vec<u8>]) -> Result<Taken, Stopped> {
-        let Some(word) = argv.get(self.optind) else {
-            return Ok(Taken::End);
-        };
-        if !self.dash && (word.first() != Some(&b'-') || word.len() == 1) {
-            return Ok(Taken::End);
-        }
-        let (index, arg_start) = if word.starts_with(b"--") {
-            if word.len() == 2 {
-                self.optind += 1;
-                return Ok(Taken::End);
-            }
-            self.long(word)?
-        } else {
-            if !self.dash {
-                self.dash = true;
-                self.optchr = 1;
-            }
-            if word.get(self.optchr) == Some(&b':') {
-                self.dash = false;
-                self.optind += 1;
-                return Err((self.optind - 1, self.optchr, OptError::Colon));
-            }
-            (self.short(word)?, 1 + self.optchr)
-        };
-        let row = &OPTIONS[index];
-        if row.need != 0 {
-            return self.value(argv, word, row, arg_start);
-        }
-        if arg_start >= 2 && !word.starts_with(b"--") {
-            if word.get(self.optchr + 1).is_none() {
-                self.dash = false;
-                self.optind += 1;
-            } else {
-                self.optchr += 1;
-            }
-        } else {
-            self.optind += 1;
-        }
-        Ok(Taken::Switch(row.code, None))
-    }
-
-    /// A `--name` or `--name=value` word: its row and where its value
-    /// starts; a name no row has is `OPTERRARG` at the `optchr` left
-    /// over from the previous word.
-    fn long(&mut self, word: &[u8]) -> Result<(usize, usize), Stopped> {
-        let mut arg_start = 2;
-        let mut arg_end = word.len() - 1;
-        if let Some(at) = word[arg_start..arg_end].iter().position(|&b| b == b'=') {
-            arg_end = at;
-            arg_start += 1;
-        } else {
-            arg_end -= 1;
-        }
-        let found = OPTIONS.iter().position(|row| {
-            row.code == b'-'
-                || (row.name.len() == arg_end && word[2..].starts_with(row.name.as_bytes()))
-        });
-        let index = match found {
-            Some(index) if OPTIONS[index].code != b'-' => index,
-            _ => {
-                self.optind += 1;
-                return Err((self.optind - 1, self.optchr, OptError::NoArgument));
-            }
-        };
-        self.optchr = 0;
-        self.dash = false;
-        Ok((index, arg_start + OPTIONS[index].name.len()))
-    }
-
-    /// The letter at `optchr` of a `-xyz` word: its row, or `OPTERRNF`
-    /// with the cluster advanced past it.
-    fn short(&mut self, word: &[u8]) -> Result<usize, Stopped> {
-        let letter = word.get(self.optchr).copied();
-        if let Some(index) = OPTIONS
-            .iter()
-            .position(|row| row.code != b'-' && Some(row.code) == letter)
-        {
-            return Ok(index);
-        }
-        let at = (self.optind, self.optchr);
-        if word.get(self.optchr + 1).is_none() {
-            self.dash = false;
-            self.optind += 1;
-        } else {
-            self.optchr += 1;
-        }
-        Err((at.0, at.1, OptError::NotFound))
-    }
-
-    /// The value of a switch that takes one: attached, after `=`, or the
-    /// next word; a switch that may take one (`--ini`) takes only an
-    /// attached one.
-    fn value(
-        &mut self,
-        argv: &[Vec<u8>],
-        word: &[u8],
-        row: &Opt,
-        arg_start: usize,
-    ) -> Result<Taken, Stopped> {
-        self.dash = false;
-        self.optind += 1;
-        let value = match word.get(arg_start) {
-            None if self.optind == argv.len() => {
-                if row.need == 1 {
-                    return Err((self.optind - 1, self.optchr, OptError::NoArgument));
-                }
-                None
-            }
-            None if row.need == 1 => {
-                self.optind += 1;
-                argv.get(self.optind - 1).cloned()
-            }
-            None => None,
-            Some(b'=') => Some(word[arg_start + 1..].to_vec()),
-            Some(_) => Some(word[arg_start..].to_vec()),
-        };
-        Ok(Taken::Switch(row.code, value))
-    }
-}
 
 /// What `do_cli`'s second loop settled: what is being done with the
 /// line, the program `-f` or
@@ -442,12 +269,15 @@ impl Options {
     /// `main`'s loop over the line (`php_cli.c:1290-1325`), `show_err`
     /// set: the ini switches onto `self`, and what ends it early.
     fn main_pass(&mut self, argv: &[Vec<u8>]) -> Result<Option<Ask>, Refused> {
-        let mut getopt = Getopt::new();
+        let mut getopt = Getopt::new(OPTIONS);
         loop {
             let ask = match getopt.next(argv) {
                 Ok(Taken::End) => return Ok(None),
                 Err((argument, at, error)) => {
-                    return Err(getopt_error(argv, argument, at, error));
+                    return Err(Refused {
+                        stderr: getopt_line(argv, argument, at, error),
+                        ..usage(1)
+                    });
                 }
                 Ok(Taken::Switch(code, value)) => match code {
                     b'n' => {
@@ -480,7 +310,7 @@ impl Options {
             param_error: None,
             optind: 0,
         };
-        let mut getopt = Getopt::new();
+        let mut getopt = Getopt::new(OPTIONS);
         while let Ok(Taken::Switch(code, value)) = getopt.next(argv) {
             let value = value.unwrap_or_default();
             match code {
@@ -546,10 +376,6 @@ fn bare_words(rest: &mut std::slice::Iter<'_, Vec<u8>>) -> Vec<Program> {
         .collect()
 }
 
-fn os(bytes: &[u8]) -> OsString {
-    OsString::from(String::from_utf8_lossy(bytes).into_owned())
-}
-
 /// `php_ini_builder_define`'s split: `name=value` at the first `=`, or
 /// `name=1` for a bare name. Its line, quoted or not, and what the INI
 /// grammar reads from it are the engine's builder's.
@@ -557,31 +383,6 @@ fn define(given: &str) -> (String, String) {
     match given.split_once('=') {
         Some((name, value)) => (name.to_owned(), value.to_owned()),
         None => (given.to_owned(), String::from("1")),
-    }
-}
-
-/// `php_opt_error`'s line on stderr (`Z/main/getopt.c:28-50`), the
-/// argument counted from the program's name and the character from
-/// one, and then `main`'s `php_cli_usage` on stdout and exit 1.
-fn getopt_error(argv: &[Vec<u8>], argument: usize, at: usize, error: OptError) -> Refused {
-    let letter = argv
-        .get(argument)
-        .and_then(|word| word.get(at))
-        .map_or(String::new(), |&b| {
-            String::from_utf8_lossy(&[b]).into_owned()
-        });
-    let reason = match error {
-        OptError::Colon => String::from(": in flags"),
-        OptError::NotFound => format!("option not found {letter}"),
-        OptError::NoArgument => format!("no argument for option {letter}"),
-    };
-    Refused {
-        stderr: format!(
-            "Error in argument {}, char {}: {reason}\n",
-            argument + 1,
-            at + 1
-        ),
-        ..usage(1)
     }
 }
 
@@ -716,7 +517,7 @@ impl OutputSink for Process {
         let _ = std::io::stdout().lock().flush();
     }
 
-    fn send_headers(&mut self, _block: &[u8]) {}
+    fn send_headers(&mut self, _head: &ResponseHead) {}
 
     fn log(&mut self, entry: &[u8]) {
         let mut stderr = std::io::stderr().lock();
@@ -1252,7 +1053,7 @@ mod tests {
             self.0.extend_from_slice(bytes);
         }
         fn flush(&mut self) {}
-        fn send_headers(&mut self, _block: &[u8]) {}
+        fn send_headers(&mut self, _head: &ResponseHead) {}
         fn log(&mut self, entry: &[u8]) {
             self.0.extend_from_slice(entry);
             self.0.push(b'\n');

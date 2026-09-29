@@ -606,11 +606,6 @@ fn decode(s: &[u8], plus: bool) -> Vec<u8> {
     out
 }
 
-/// `php_url_decode(str, len)`.
-pub(super) fn php_url_decode(s: &[u8]) -> Vec<u8> {
-    decode(s, true)
-}
-
 /// `urlencode(string $string): string`, the form encoding.
 ///
 /// ```php

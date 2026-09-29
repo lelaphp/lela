@@ -2436,7 +2436,7 @@ fn php_open(
             }
             PhpStream::new(
                 Box::new(Memory {
-                    data: req.body_bytes().to_vec(),
+                    data: req.input_bytes(),
                     fpos: 0,
                     mode: TempMode::ReadOnly,
                     label: "Input",
@@ -2451,7 +2451,7 @@ fn php_open(
         b"stdin" | b"stdout" | b"stderr" => {
             let kind = match lower.as_slice() {
                 b"stdin" => HostFd::Stdin(Memory {
-                    data: req.body_bytes().to_vec(),
+                    data: Vec::new(),
                     fpos: 0,
                     mode: TempMode::ReadOnly,
                     label: "STDIO",

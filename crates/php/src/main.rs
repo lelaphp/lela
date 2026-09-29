@@ -1,7 +1,7 @@
 //! `php`, the binary (design §4.1, §4.10): one engine of the bundle's
 //! enabled set with the bundle's tier bound, the command line read by
-//! the CLI host, and the process ending with the code the request ended
-//! with. The ini the line carries is laid over the engine's defaults
+//! the host the binary's name chose, the CLI or, started as `php-cgi`, CGI,
+//! and the process ending with the code the request ended with. The ini the line carries is laid over the engine's defaults
 //! before it is built, as php's `-d` reaches `php_ini_builder` before
 //! `php_module_startup`; the version needs no engine and the listing
 //! needs one served nothing.
@@ -16,16 +16,60 @@
     clippy::unimplemented
 )]
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::process::ExitCode;
 
-use php_sapi::Engine;
+use php_sapi::cgi::Ask as CgiAsk;
 use php_sapi::cli::{Ask, Options};
+use php_sapi::{Engine, Host};
 
 pub(crate) fn main() -> ExitCode {
-    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let options = match Options::parse(&argv) {
+    let mut words = std::env::args_os();
+    let argv0 = words.next().unwrap_or_default();
+    let argv: Vec<OsString> = words.collect();
+    match Host::of(&argv0) {
+        Host::Cli => cli(&argv),
+        Host::Cgi => cgi(&argv0, &argv),
+    }
+}
+
+/// php-cgi's `main`: the line read in the process's environment, and the
+/// request served, or what the line asked for instead.
+fn cgi(argv0: &OsStr, argv: &[OsString]) -> ExitCode {
+    let env = php_sapi::cgi::environment();
+    let options = php_sapi::cgi::Options::parse(argv, &env);
+    match &options.ask {
+        CgiAsk::Usage { stderr, exit_code } => {
+            let _ = std::io::stderr().lock().write_all(stderr.as_bytes());
+            let _ = std::io::stdout()
+                .lock()
+                .write_all(php_sapi::cgi::usage_text(argv0).as_bytes());
+            code(*exit_code)
+        }
+        CgiAsk::Version => {
+            let _ = std::io::stdout()
+                .lock()
+                .write_all(php_sapi::cgi::version().as_bytes());
+            code(0)
+        }
+        CgiAsk::Extensions => {
+            let engine = engine(&options.ini);
+            let _ = std::io::stdout()
+                .lock()
+                .write_all(php_sapi::cli::extensions(&engine).as_bytes());
+            code(0)
+        }
+        CgiAsk::Serve(invocation) => {
+            let engine = engine(&options.ini);
+            code(php_sapi::cgi::serve(&engine, invocation, env, &options.ini))
+        }
+    }
+}
+
+/// php's CLI `main`.
+fn cli(argv: &[OsString]) -> ExitCode {
+    let options = match Options::parse(argv) {
         Ok(options) => options,
         Err(refused) => {
             let _ = std::io::stderr()
@@ -57,22 +101,22 @@ pub(crate) fn main() -> ExitCode {
             code(0)
         }
         Ask::Extensions => {
-            let engine = engine(&options);
+            let engine = engine(&options.ini);
             let _ = std::io::stdout()
                 .lock()
                 .write_all(php_sapi::cli::extensions(&engine).as_bytes());
             code(0)
         }
         Ask::Serve(program, arguments) => {
-            let engine = engine(&options);
+            let engine = engine(&options.ini);
             code(php_sapi::cli::serve(&engine, program, arguments))
         }
         Ask::Highlight(program, arguments) => {
-            let engine = engine(&options);
+            let engine = engine(&options.ini);
             code(php_sapi::cli::highlight(&engine, program, arguments))
         }
         Ask::Strip(program, arguments) => {
-            let engine = engine(&options);
+            let engine = engine(&options.ini);
             code(php_sapi::cli::strip(&engine, program, arguments))
         }
         // `do_cli`'s lint loop: the status starts at 0, a lint that fails
@@ -84,7 +128,7 @@ pub(crate) fn main() -> ExitCode {
                 let _ = std::io::stdout().lock().write_all(sentence.as_bytes());
                 status = 1;
             }
-            let engine = engine(&options);
+            let engine = engine(&options.ini);
             let mut sink = php_sapi::cli::Process;
             for program in programs {
                 match php_sapi::cli::lint(&engine, program, &mut sink) {
@@ -102,7 +146,7 @@ pub(crate) fn main() -> ExitCode {
 /// by the engine's INI grammar over its own defaults in the order given,
 /// and what that reading wrote for `stderr` written there, as php's
 /// `ini_error` writes it during `php_module_startup`.
-fn engine(options: &Options) -> Engine {
+fn engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let mut builder = Engine::builder()
         .extensions(&extensions)
@@ -111,7 +155,7 @@ fn engine(options: &Options) -> Engine {
     if let Some(path) = std::env::var_os(TRACE) {
         builder = builder.trace_natives_to(path.into());
     }
-    for (name, value) in &options.ini {
+    for (name, value) in ini {
         builder = builder.ini(name, value);
     }
     let engine = builder.build();

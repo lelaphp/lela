@@ -58,6 +58,7 @@ abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::info
 abi::ExtensionBuilder::ini
+abi::ExtensionBuilder::input_filter
 abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::on_modify
@@ -327,6 +328,7 @@ raising::throwing_warnings
 raising::too_few_arguments
 raising::warning
 request::BindTo
+request::BodyLimits
 request::Brigade
 request::BufferHandler
 request::CacheStatus
@@ -346,6 +348,7 @@ request::HandlerOp
 request::HandlerStatus
 request::HostPath
 request::IniEntry
+request::Input
 request::Interrupt
 request::Interrupt::raise
 request::Interrupt::raised
@@ -453,6 +456,7 @@ request::Request::open_url
 request::Request::os_error_text
 request::Request::output_buffer_op
 request::Request::output_started_at
+request::Request::parse_body
 request::Request::parse_query
 request::Request::plain_path
 request::Request::realpath
@@ -463,6 +467,7 @@ request::Request::register_engine_wrapper
 request::Request::register_filter
 request::Request::register_shutdown_function
 request::Request::register_tick_function
+request::Request::register_variable
 request::Request::register_wrapper
 request::Request::registered
 request::Request::release

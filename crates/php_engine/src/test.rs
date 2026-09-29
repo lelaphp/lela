@@ -7,7 +7,7 @@
 use std::path::Path;
 
 pub use crate::engine::Engine;
-use crate::engine::{FileHandles, OutputSink, RequestDescription};
+use crate::engine::{FileHandles, OutputSink, RequestDescription, ResponseHead};
 
 /// An in-process sink: everything the request wrote, kept, the way
 /// php's CLI has it. `stderr` is the CLI's second stream whole: each
@@ -30,8 +30,12 @@ impl OutputSink for Capture {
 
     fn flush(&mut self) {}
 
-    fn send_headers(&mut self, block: &[u8]) {
-        self.headers.extend_from_slice(block);
+    /// The head's lines, each with `\r\n` after it.
+    fn send_headers(&mut self, head: &ResponseHead) {
+        for line in &head.lines {
+            self.headers.extend_from_slice(line);
+            self.headers.extend_from_slice(b"\r\n");
+        }
     }
 
     fn log(&mut self, entry: &[u8]) {
