@@ -2160,6 +2160,17 @@ impl<'a> Slots<'a> {
     }
 }
 
+/// Why `zend_get_property_offset` answered its wrong offset for a name
+/// no declared instance property holds.
+#[derive(Clone, Copy)]
+enum Unplaced {
+    /// A name led by a NUL byte (`zend_bad_property_name`).
+    BadName,
+    /// A `static` property the scope may not reach
+    /// (`zend_bad_property_access`).
+    Denied(Visibility),
+}
+
 /// What `zend_get_property_offset` places a declared instance property
 /// by: the slot it sits in, the visibility a read is held to, the set
 /// visibility a write is held to where it has one of its own, and
@@ -7082,6 +7093,125 @@ impl Request {
         }
     }
 
+    /// `zend_get_property_offset` where the row `ce->properties_info`
+    /// holds for `name` is a `static` property, which the placed
+    /// instance rows never are: `None` where the row is not one, and
+    /// otherwise the rule over it, `Err` with its visibility where the
+    /// scope may not reach it (`zend_bad_property_access`, the caller's
+    /// to raise unless it places silently), and `Ok` where it may, the
+    /// notice raised unless `silent` and the name then a dynamic
+    /// property. The row is the class's own declaration, else the
+    /// nearest parent's, a private one included, and under
+    /// `ZEND_ACC_CHANGED` the scope's own private `static` where the
+    /// scope is a parent of `class` that declares one.
+    ///
+    /// ```php
+    /// class A { private static $a = "a"; protected static $b = "b"; public static $c = "c";
+    ///     function f() { var_dump($this->a, $this->b, $this->c); } }
+    /// class B extends A {}
+    /// (new B)->f();
+    /// try { var_dump((new B)->b); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    ///
+    /// Notice: Accessing static property B::$a as non static in %s on line 3
+    ///
+    /// Warning: Undefined property: B::$a in %s on line 3
+    ///
+    /// Notice: Accessing static property B::$b as non static in %s on line 3
+    ///
+    /// Warning: Undefined property: B::$b in %s on line 3
+    ///
+    /// Notice: Accessing static property B::$c as non static in %s on line 3
+    ///
+    /// Warning: Undefined property: B::$c in %s on line 3
+    /// NULL
+    /// NULL
+    /// NULL
+    /// Cannot access protected property B::$b
+    /// ```
+    pub(crate) fn static_as_instance(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        silent: bool,
+    ) -> Option<Result<(), Visibility>> {
+        let mut at = Some(class);
+        let mut row = None;
+        for _ in 0..64 {
+            let Some(here) = at else { break };
+            if let Some(p) = self
+                .class_decl(here)
+                .and_then(|decl| decl.properties.iter().find(|p| &*p.name.0 == name))
+            {
+                row = Some((here, p.is_instance, p.visibility));
+                break;
+            }
+            at = self.class_parent(here);
+        }
+        let (declaring, is_instance, visibility) = row?;
+        let scope = self.property_scope();
+        if scope != Some(declaring) {
+            // `ZEND_ACC_CHANGED`: the scope's own private `static` wins
+            // where the row is a `static` too.
+            let own = scope.is_some_and(|scope| {
+                scope != class
+                    && self.instance_of(class, scope)
+                    && self.class_decl(scope).is_some_and(|decl| {
+                        decl.properties.iter().any(|p| {
+                            !p.is_instance
+                                && p.visibility == Visibility::Private
+                                && &*p.name.0 == name
+                        })
+                    })
+            });
+            match visibility {
+                _ if is_instance => return None,
+                _ if own => {}
+                Visibility::Public => {}
+                Visibility::Private if declaring != class => return None,
+                Visibility::Protected if self.check_protected(declaring, scope) => {}
+                Visibility::Private | Visibility::Protected => return Some(Err(visibility)),
+            }
+        } else if is_instance {
+            return None;
+        }
+        if !silent {
+            let shown = self.class_name(class);
+            crate::api::raising::notice(
+                self,
+                &format!(
+                    "Accessing static property {shown}::${} as non static",
+                    String::from_utf8_lossy(name)
+                ),
+            );
+        }
+        Some(Ok(()))
+    }
+
+    /// `ZEND_WRONG_PROPERTY_OFFSET` for a name no instance row placed:
+    /// a name led by a NUL byte, or a `static` property the scope may
+    /// not reach ([`Request::static_as_instance`], whose notice for one
+    /// it may reach is raised here unless `silent`). `None` is a
+    /// dynamic property.
+    fn unplaced(&mut self, class: ClassId, name: &[u8], silent: bool) -> Option<Unplaced> {
+        if Self::bad_property_name(name) {
+            return Some(Unplaced::BadName);
+        }
+        match self.static_as_instance(class, name, silent) {
+            Some(Err(visibility)) => Some(Unplaced::Denied(visibility)),
+            _ => None,
+        }
+    }
+
+    /// The `Error` for what [`Request::unplaced`] refused.
+    fn unplaced_error(&mut self, class: ClassId, name: &[u8], miss: Unplaced) -> Thrown {
+        match miss {
+            Unplaced::BadName => self.bad_property_name_error(),
+            Unplaced::Denied(visibility) => self.inaccessible_property(class, visibility, name),
+        }
+    }
+
     /// `zend_get_property_offset`'s choice of `property_info` for `name`
     /// on an object of `class` under the executed scope, as the placed
     /// row it names: the row `ce->properties_info` holds, the class's
@@ -8838,7 +8968,8 @@ impl Request {
             return (!self.reaches(&placed))
                 .then(|| self.inaccessible_property(class, placed.visibility, name));
         }
-        Self::bad_property_name(name).then(|| self.bad_property_name_error())
+        let miss = self.unplaced(class, name, true)?;
+        Some(self.unplaced_error(class, name, miss))
     }
 
     /// `zend_bad_property_access`: php's `Error` for a property the
@@ -9193,9 +9324,11 @@ impl Request {
                 }
                 wrong = true;
             }
-        } else if Self::bad_property_name(name) {
+        } else if let Some(miss) =
+            self.unplaced(class, name, silent || self.serves_accessor(class, b"__get"))
+        {
             if !silent && !self.serves_accessor(class, b"__get") {
-                return Err(self.bad_property_name_error());
+                return Err(self.unplaced_error(class, name, miss));
             }
             wrong = true;
         } else {
@@ -9378,8 +9511,10 @@ impl Request {
     ) -> Result<Option<(u32, bool)>, Thrown> {
         let class = object.class();
         let Some(placed) = self.declared_slot(class, name) else {
-            if !silent && Self::bad_property_name(name) {
-                return Err(self.bad_property_name_error());
+            if let Some(miss) = self.unplaced(class, name, silent)
+                && !silent
+            {
+                return Err(self.unplaced_error(class, name, miss));
             }
             return Ok(None);
         };
@@ -12526,9 +12661,9 @@ impl Request {
                 }
                 wrong = true;
             }
-        } else if Self::bad_property_name(name) {
+        } else if let Some(miss) = self.unplaced(class, name, unsetter.is_some()) {
             if unsetter.is_none() {
-                return Err(self.bad_property_name_error());
+                return Err(self.unplaced_error(class, name, miss));
             }
             wrong = true;
         } else if let Some(table) = o.properties() {
