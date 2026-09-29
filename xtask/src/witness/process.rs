@@ -108,8 +108,7 @@ impl Binary {
     ) -> Result<(Observation, Vec<Entry>)> {
         let binary = self.path()?;
         let hosts = Tree::new("witness-cgi")?;
-        let host = cgi::host(oracle.pin(), binary, false, hosts.path())?
-            .ok_or_else(|| anyhow!("no php-cgi stands beside {}", binary.display()))?;
+        let host = cgi::linked(binary, hosts.path())?;
         let traces = Tree::new("witness-trace")?;
         let trace = traces.join("entered");
         let env = [(TRACE.to_owned(), trace.clone().into_os_string())];

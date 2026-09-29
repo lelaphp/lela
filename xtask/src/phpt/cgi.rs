@@ -6,10 +6,9 @@
 //! and the body after it, the headers held to `--EXPECTHEADERS--`.
 //!
 //! The host is php-cgi beside the pinned php for the runner's control, and
-//! the binary under test by the name `php-cgi` for the engine, which answers
-//! as php-cgi under that name (#1197): a link of that name to it stands at
-//! `sapi/cgi/php-cgi` in the tree the subset runs in, where upstream's build
-//! puts php-cgi and `get_binary` finds it (run-tests.php:1003-1019).
+//! the engine's own `php-cgi` beside the binary under test, the same
+//! program under the name it answers as php-cgi by (#1197), which is where
+//! a test that looks for php-cgi beside `TEST_PHP_EXECUTABLE` finds it.
 //! [`request`] is the one translation of a test's sections into what its
 //! host is handed, whichever host it is (#1198).
 
@@ -30,10 +29,11 @@ const BESIDE: &str = "sapi/cgi/php-cgi";
 
 /// The CGI host a run hands a CGI-shaped test to: php-cgi beside the
 /// pinned php where `binary` is the pinned php, which is the runner's
-/// control, and `binary` itself under the name php-cgi otherwise, linked
-/// at [`BESIDE`] under `root`. `None` where the pinned php has no php-cgi
-/// beside it, which upstream's runner answers with a skip
-/// (run-tests.php:1894-1896).
+/// control, and otherwise the engine's own `php-cgi` beside `binary`,
+/// which cargo builds with it, or, where only `binary` was built, `binary`
+/// under the name php-cgi, linked at [`BESIDE`] under `root`. `None` where
+/// the pinned php has no php-cgi beside it, which upstream's runner
+/// answers with a skip (run-tests.php:1894-1896).
 pub(crate) fn host(
     pin: &Pin,
     binary: &Path,
@@ -44,6 +44,17 @@ pub(crate) fn host(
         let beside = pin.oracle.path.with_file_name("php-cgi");
         return Ok(beside.is_file().then_some(beside));
     }
+    let beside = binary.with_file_name("php-cgi");
+    if beside.is_file() {
+        return Ok(Some(beside));
+    }
+    linked(binary, root).map(Some)
+}
+
+/// `binary` under the name php-cgi: a link of that name to it at
+/// [`BESIDE`] under `root`, the witness lane's `php-witness` run as
+/// php-cgi.
+pub(crate) fn linked(binary: &Path, root: &Path) -> Result<PathBuf> {
     let link = root.join(BESIDE);
     if let Some(dir) = link.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -55,7 +66,7 @@ pub(crate) fn host(
     }
     std::os::unix::fs::symlink(binary, &link)
         .with_context(|| format!("linking {} to {}", link.display(), binary.display()))?;
-    Ok(Some(link))
+    Ok(link)
 }
 
 /// What one CGI-shaped test hands its host past the recipe: the
