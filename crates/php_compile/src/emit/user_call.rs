@@ -208,19 +208,13 @@ impl Emit<'_> {
         &mut self,
         array: tree::Expr,
     ) -> Result<Option<(tree::Expr, u32, tree::Expr)>, CompileError> {
-        let tree::Expr::CallExpr(call) = self.peel(array) else {
+        let Some((resolved, args)) = self.named_call(array) else {
             return Ok(None);
         };
-        let node = &self.parsed.tree[call];
-        let (tree::Expr::NameRef(name), args) = (self.peel(node.callee), node.args) else {
-            return Ok(None);
-        };
-        let (resolved, _) = self.function_name(self.text(name));
-        if !resolved.eq_ignore_ascii_case(b"array_slice") {
+        if resolved != b"array_slice" {
             return Ok(None);
         }
-        let list: Option<Vec<tree::Expr>> = self.parsed.tree[args]
-            .args
+        let list: Option<Vec<tree::Expr>> = args
             .iter()
             .map(|arg| match arg {
                 tree::Arg::Expr(expr) => Some(*expr),
