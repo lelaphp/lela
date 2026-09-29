@@ -17917,10 +17917,29 @@ impl Request {
     /// string(3) "abc"
     /// bool(false)
     /// ```
+    ///
+    /// `default_charset` and `default_mimetype` refuse a value holding a
+    /// NUL, a carriage return or a line feed (`OnUpdateDefaultCharset`,
+    /// `OnUpdateDefaultMimeTye`, `Z/main/main.c:605-631`), which the
+    /// default `Content-type` would carry into the head.
+    ///
+    /// ```php
+    /// var_dump(ini_set("default_charset", "UTF-8\r\nX-Injected: 1"), ini_set("default_mimetype", "text/plain\n"), ini_get("default_mimetype"));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// string(9) "text/html"
+    /// ```
     fn ini_verdict(name: &[u8], value: &[u8]) -> IniVerdict {
         match name {
             b"zend.exception_string_param_max_len"
                 if !(0..=1_000_000).contains(&ini_atol(value)) =>
+            {
+                IniVerdict::Rejected
+            }
+            b"default_charset" | b"default_mimetype"
+                if value.iter().any(|b| matches!(b, 0 | b'\r' | b'\n')) =>
             {
                 IniVerdict::Rejected
             }
