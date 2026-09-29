@@ -10721,6 +10721,36 @@ impl Request {
         }
     }
 
+    /// The key `FE_FETCH` hands a loop over an object's table for the row
+    /// [`Request::object_walk`] found: a name as it is, and a mangled
+    /// one, which a cast of an array can leave in the dynamic table,
+    /// with its class part dropped (`zend_unmangle_property_name_ex`).
+    ///
+    /// ```php
+    /// $obj = (object)["\0A\0b" => 42, "\0*\0c" => 24, "d" => 1];
+    /// foreach ($obj as $k => $v) { var_dump($k, $v); }
+    /// ```
+    /// ```expect
+    /// string(1) "b"
+    /// int(42)
+    /// string(1) "c"
+    /// int(24)
+    /// string(1) "d"
+    /// int(1)
+    /// ```
+    pub(crate) fn walked_key(&mut self, key: php_heap::Key) -> Result<php_heap::Key, Thrown> {
+        let php_heap::Key::Str(name) = key else {
+            return Ok(key);
+        };
+        let crate::natives::Unmangled::Mangled { prop, .. } =
+            crate::natives::unmangle_property_name(name.bytes())
+        else {
+            return Ok(key);
+        };
+        let interned = self.heap.intern(prop);
+        self.fatal_of(interned).map(php_heap::Key::Str)
+    }
+
     /// What [`Request::object_walk`] found at a place: the value, a view
     /// with no owner taken and a reference followed where `deref`.
     pub(crate) fn walked_value(object: PhpObject, walked: Walked) -> Value {

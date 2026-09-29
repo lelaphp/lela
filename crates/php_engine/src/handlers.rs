@@ -16436,6 +16436,10 @@ pub(crate) fn fe_fetch_r<T: Tier>(
         }
         ForeachVar::Properties { object, walk } => match req.object_walk(object, walk.0, false) {
             Ok(Some((key, walked))) => {
+                let key = match req.walked_key(key) {
+                    Ok(key) => key,
+                    Err(thrown) => return threw(req, frame, &thrown),
+                };
                 let value = Request::walked_value(object, walked);
                 if matches!(walked, crate::api::request::Walked::Hooked(..)) {
                     owned = Some(value);
@@ -17058,6 +17062,10 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
     let owned = matches!(walked, crate::api::request::Walked::Hooked(..));
     let cell = match req.walked_reference(object, walked) {
         Ok(cell) => cell,
+        Err(thrown) => return Ok(Err(thrown)),
+    };
+    let key = match req.walked_key(key) {
+        Ok(key) => key,
         Err(thrown) => return Ok(Err(thrown)),
     };
     Ok(fe_key_kept(req, op, key).map(|key| Some(BoundRw { key, cell, owned })))
