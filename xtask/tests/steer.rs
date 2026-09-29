@@ -273,3 +273,43 @@ fn a_new_row_with_covers_is_one_addition_to_the_registry() {
         );
     }
 }
+
+/// A proposal is held to the reader the harness reads its file with, where
+/// the tracked file loads through it: a table the pin's reader does not
+/// know is refused and written nowhere, since written it would stop every
+/// instrument that reads the pin (#1161's `[sapi]`, which the reader
+/// learned in the same change), and a table it knows is an addition.
+#[test]
+fn a_table_the_pins_reader_does_not_know_is_refused_and_one_it_knows_is_written() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let pin = fs::read_to_string(workspace.join("oracle.toml")).expect("the workspace's pin");
+    let root = scratch("reader", &pin);
+    let proposal = root.join("proposed.toml");
+
+    fs::write(
+        &proposal,
+        format!("{pin}\n[hosts_nobody_reads]\ncgi = \"x\"\n"),
+    )
+    .expect("the proposal");
+    let refused = steer::run(&root, "oracle.toml", &proposal, false).expect("the instrument runs");
+    assert_eq!(refused.status, Status::Fail, "{}", refused.message);
+    assert!(
+        refused.message.contains("would not load"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("oracle.toml")).expect("the pin"),
+        pin
+    );
+
+    let sapi = "\n[sapi]\ncgi = { path = \"/bin/php-cgi\", md5 = \"00\" }\n";
+    fs::write(&proposal, format!("{pin}{sapi}")).expect("the proposal");
+    let written = steer::run(&root, "oracle.toml", &proposal, false).expect("the instrument runs");
+    assert_eq!(written.status, Status::Pass, "{}", written.message);
+    assert!(
+        fs::read_to_string(root.join("oracle.toml"))
+            .expect("the pin")
+            .ends_with(sapi)
+    );
+}

@@ -115,6 +115,8 @@ new_ext::run
 oracle::Binary
 oracle::Binary::file
 oracle::ENGINE
+oracle::Host
+oracle::Hosts
 oracle::Invocation
 oracle::Invocation::new
 oracle::Limits
