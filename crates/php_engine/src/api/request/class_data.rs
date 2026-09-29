@@ -96,6 +96,21 @@ impl Request {
     /// Deprecated: Constant E_STRICT is deprecated since 8.4, the error level was removed in %s on line 2
     /// int(2048)
     /// ```
+    ///
+    /// A class whose table holds no expression php declares updated
+    /// already, so its parent's constants are not evaluated for it, one
+    /// the class redeclares among them:
+    ///
+    /// ```php
+    /// class B { const X = UNRESOLVED; }
+    /// class C extends B { const X = 42; public $p = 1; }
+    /// var_dump((new C)->p);
+    /// try { new B; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// Undefined constant "UNRESOLVED"
+    /// ```
     pub(crate) fn update_class_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
         if self.class_data.get(&class).is_some_and(|data| data.updated) {
             return Ok(());
@@ -107,10 +122,11 @@ impl Request {
             return Ok(());
         }
         let native = self.native_class(class);
-        if let Some(parent) = self.class_parent(class) {
+        let updated_as_declared = !native && self.holds_no_expression(class);
+        if !updated_as_declared && let Some(parent) = self.class_parent(class) {
             self.update_class_constants(parent)?;
         }
-        if !native {
+        if !native && !updated_as_declared {
             for name in self.constant_names(class) {
                 let Some((declaring, constant)) = self.class_constant_of(class, &name, 0) else {
                     continue;
@@ -132,6 +148,47 @@ impl Request {
         self.evaluate_defaults(class)?;
         self.class_data.entry(class).or_default().updated = true;
         Ok(())
+    }
+
+    /// Whether php sets `ZEND_ACC_CONSTANTS_UPDATED` on the class as it
+    /// declares it and links it: no constant of its table, no default of
+    /// its instance properties and no `static` property of its own or
+    /// its parents' is an expression still to evaluate, a value written
+    /// out being none (`zend_compile_class_decl`, and
+    /// `zend_do_inheritance_ex` clearing the bit for what it inherits).
+    fn holds_no_expression(&self, class: ClassId) -> bool {
+        let written = |expr: &php_unit::decl::ConstExpr| {
+            use php_unit::decl::ConstExpr;
+            matches!(
+                expr,
+                ConstExpr::Null
+                    | ConstExpr::Bool(_)
+                    | ConstExpr::Long { .. }
+                    | ConstExpr::Double(_)
+                    | ConstExpr::Str(_)
+            )
+        };
+        let constants = self.constant_names(class).iter().all(|name| {
+            self.class_constant_of(class, name, 0)
+                .is_none_or(|(_, constant)| written(&constant.value))
+        });
+        let defaults = self
+            .placed_properties(class)
+            .iter()
+            .all(|(_, property)| property.default.as_ref().is_none_or(written));
+        let mut statics = true;
+        let mut at = Some(class);
+        for _ in 0..64 {
+            let Some(here) = at else { break };
+            statics &= self.class_decl(here).is_none_or(|decl| {
+                decl.properties
+                    .iter()
+                    .filter(|property| !property.is_instance)
+                    .all(|property| property.default.as_ref().is_none_or(written))
+            });
+            at = self.class_parent(here);
+        }
+        constants && defaults && statics
     }
 
     /// The names of the class's constants table in php's order: its

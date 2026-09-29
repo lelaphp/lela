@@ -206,7 +206,7 @@ pub(crate) fn host_names(strings: &mut Strings) -> Vec<(Box<[u8]>, Zval)> {
 /// int(30719)
 /// int(0)
 /// int(30717)
-/// int(32767)
+/// int(30719)
 /// int(22527)
 /// ```
 #[php_const]

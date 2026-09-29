@@ -42,7 +42,7 @@ ini = [
     "open_basedir=",
     "disable_functions=",
     "output_buffering=Off",
-    "error_reporting=32767",
+    "error_reporting=30719",
     "fatal_error_backtraces=Off",
     "display_errors=1",
     "display_startup_errors=1",
@@ -96,7 +96,7 @@ PHPRC = "/dev/null"
 [recipe.limits]
 # `run-tests.php:1187`: 60 s per test, 300 under valgrind. A witness's `wall=`
 # is disclosure, not a limit.
-timeout_s = 40
+timeout_s = 60
 
 [recipe.normalise]
 # `run-tests.php:2528`: `preg_replace("/\r\n/", "\n", trim($out))`. The trim set

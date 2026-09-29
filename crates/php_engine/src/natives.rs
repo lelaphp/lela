@@ -2125,8 +2125,8 @@ fn set_time_limit(req: &mut Request, seconds: i64) -> bool {
 /// echo $u;
 /// ```
 /// ```expect
-/// int(32767)
-/// int(32767)
+/// int(30719)
+/// int(30719)
 /// int(30717)
 /// string(5) "30717"
 /// int(30717)
@@ -2143,7 +2143,7 @@ fn set_time_limit(req: &mut Request, seconds: i64) -> bool {
 /// var_dump(ini_set("error_reporting", "2x"), error_reporting(), ini_set("error_reporting", "E_ALL"), error_reporting());
 /// ```
 /// ```expect
-/// string(5) "32767"
+/// string(5) "30719"
 /// int(2)
 /// string(2) "2x"
 /// int(0)

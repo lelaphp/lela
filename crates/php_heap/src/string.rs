@@ -705,7 +705,7 @@ const REQUEST_TABLE_SIZE: u32 = 1024;
 /// var_dump(memory_get_usage());
 /// ```
 /// ```expect exit=0
-/// int(463336)
+/// int(463408)
 /// ```
 pub(crate) struct Table {
     /// The `HashTable`, laid down by the first add; `None` is a request

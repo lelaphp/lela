@@ -15,7 +15,7 @@ use super::{Request, Unresolved};
 use crate::api::abi::{Admission, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::exec::IncludeKind;
-use crate::unit_cache::{Cached, Held, UnitKey, full_path};
+use crate::unit_cache::{Cached, Filed, Held, UnitKey, full_path};
 
 /// The unit cache for one request: [`Request::unit_cache`].
 pub struct UnitCache<'r> {
@@ -47,8 +47,28 @@ pub struct CacheStatus {
     /// The names the files are held under, each file's full path and
     /// the paths as written beside it, `ZCSG(hash).num_entries`.
     pub keys: u64,
-    /// The files held, in the order the cache took them.
+    /// The files held, in the order the cache took them, the preload's
+    /// pseudo-file and its saved scripts first.
     pub files: Vec<CachedFile>,
+    /// What `opcache.preload` preloaded, `ZCSG(preload_script)`; none
+    /// where nothing was.
+    pub preload: Option<PreloadStatistics>,
+}
+
+/// `opcache_get_status()['preload_statistics']`: what the preload
+/// published for every request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreloadStatistics {
+    /// What the preload weighs, the bytes of the files it compiled.
+    pub memory_consumption: u64,
+    /// Each function it declared, by its name, in the order the
+    /// function table holds them.
+    pub functions: Vec<Vec<u8>>,
+    /// Each row of its table of classes in order: a class by its name, an
+    /// alias by its key, and a class that never linked by its name too.
+    pub classes: Vec<Vec<u8>>,
+    /// Each file it compiled, by its full path, in the order compiled.
+    pub scripts: Vec<Vec<u8>>,
 }
 
 /// One file the cache holds, a row of `opcache_get_status()['scripts']`.
@@ -186,6 +206,9 @@ impl Request {
     /// says and filed under `written` too where the answer looks by the
     /// path as written.
     pub(crate) fn cached_file(&mut self, path: &[u8], written: Option<&[u8]>) -> Cached {
+        if self.preloading.is_some() {
+            return self.preload_file(path);
+        }
         let shared = Arc::clone(&self.shared);
         let full = full_path(path, &self.cwd);
         let (validation, lookup, protection) = match self.admission(&full) {
@@ -207,11 +230,25 @@ impl Request {
         let now = self.request_time();
         let cwd = self.cwd.clone();
         let stack = self.stack_limit();
-        shared
-            .units
-            .file(&full, written, validation, protection, now, |source| {
-                shared.publish_file(source, path, &cwd, stack)
-            })
+        let (cached, filed) =
+            shared
+                .units
+                .file(&full, written, validation, protection, now, |source| {
+                    shared.publish_file(source, path, &cwd, stack)
+                });
+        if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
+            self.tell_cached(&full);
+        }
+        cached
+    }
+
+    /// Every extension told of a file the unit cache holds by its full
+    /// path, in bundle order ([`crate::api::abi::ExtensionBuilder::cached`]).
+    pub(crate) fn tell_cached(&mut self, full: &[u8]) {
+        let shared = Arc::clone(&self.shared);
+        for hook in shared.extensions.iter().filter_map(|e| e.cached) {
+            hook(self, full);
+        }
     }
 }
 
