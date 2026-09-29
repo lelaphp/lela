@@ -307,6 +307,74 @@ pub enum NameKind {
     Relative,
 }
 
+/// The name a constant expression fetches a constant by, php's
+/// `ZEND_AST_CONSTANT` and its `attr`: the name as
+/// `zend_compile_const_expr_const` resolved it against the constant
+/// imports and the namespace, which Reflection prints and an undefined
+/// constant's `Error` names, and whether a miss falls back to the
+/// global constant. A bare name no `use const` names, written inside a
+/// namespace, is php's `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE`: the
+/// namespace's constant where it is defined, else the global one of the
+/// same name (`zend_get_constant_ex`).
+///
+/// ```php
+/// namespace N;
+/// const FOO = "ns";
+/// define("BAR", "global");
+/// function f($a = FOO, $b = BAR, $c = \N\FOO, $d = [FOO, BAR]) { return [$a, $b, $c, $d]; }
+/// foreach ((new \ReflectionFunction('N\f'))->getParameters() as $p) {
+///     echo $p, " ", $p->isDefaultValueConstant() ? $p->getDefaultValueConstantName() : "-", "\n";
+/// }
+/// echo json_encode(f()), "\n";
+/// class A { public $foo = FOO; }
+/// class B { const Q = NOPE; }
+/// var_dump((new A)->foo);
+/// try { B::Q; } catch (\Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = N\FOO ] N\FOO
+/// Parameter #1 [ <optional> $b = N\BAR ] N\BAR
+/// Parameter #2 [ <optional> $c = N\FOO ] N\FOO
+/// Parameter #3 [ <optional> $d = [N\FOO, N\BAR] ] -
+/// ["ns","global","ns",["ns","global"]]
+/// string(2) "ns"
+/// Undefined constant "N\NOPE"
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConstantName {
+    /// A name fetched as resolved: written with a `\` in it, named by a
+    /// `use const`, or written outside any namespace.
+    Resolved(Name),
+    /// A bare name written inside a namespace, resolved against it
+    /// (`N\FOO`), whose global constant (`FOO`) stands in where the
+    /// namespace defines none.
+    UnqualifiedInNamespace(Name),
+}
+
+impl ConstantName {
+    /// The name resolved at compile time, `zend_ast_get_constant_name`.
+    #[must_use]
+    pub const fn resolved(&self) -> &Name {
+        match self {
+            ConstantName::Resolved(name) | ConstantName::UnqualifiedInNamespace(name) => name,
+        }
+    }
+
+    /// The global name fetched where the resolved one names no
+    /// constant: the last segment of a bare name written inside a
+    /// namespace, and none for any other.
+    #[must_use]
+    pub fn fallback(&self) -> Option<&[u8]> {
+        match self {
+            ConstantName::Resolved(_) => None,
+            ConstantName::UnqualifiedInNamespace(name) => {
+                let at = name.0.iter().rposition(|byte| *byte == b'\\')?;
+                name.0.get(at.saturating_add(1)..)
+            }
+        }
+    }
+}
+
 /// An unevaluated constant expression: Zend's `zend_ast` for constant
 /// expressions, evaluated by the engine on first use and kept as written
 /// for Reflection. A closure is an index into the owning unit's function
@@ -336,8 +404,9 @@ pub enum ConstExpr {
     },
     Double(f64),
     Str(Box<[u8]>),
+    /// A constant by its name, php's `ZEND_AST_CONSTANT`.
     Constant {
-        name: Name,
+        name: ConstantName,
         line: u32,
     },
     /// `class::name`, php's `ZEND_AST_CLASS_CONST`: the class resolved,

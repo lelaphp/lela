@@ -102,9 +102,9 @@ use php_heap::{
 };
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
-    ConstDecl, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, HookKind, MethodDecl, Name,
-    NameKind, Parameter, ParameterDefault, PropertyDecl, TraitAdaptation, TraitMethodRef, Type,
-    Visibility,
+    ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind,
+    MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, TraitAdaptation,
+    TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody,
@@ -6902,20 +6902,19 @@ impl Emit<'_> {
                 None => Err(self.unread("an expression inside parentheses")),
             },
             // `zend_compile_const_expr_const`: the name resolved through
-            // the constant imports, and an unqualified one no import
-            // names, in a namespace, left as written for the fallback
-            // the engine's fetch makes. It moves `CG(zend_lineno)` to the
-            // name's line, which the opline after the walk is emitted at.
+            // the constant imports and the namespace, an unqualified one
+            // no import names, in a namespace, marked for the global
+            // fallback the engine's fetch makes. It moves
+            // `CG(zend_lineno)` to the name's line, which the opline
+            // after the walk is emitted at.
             tree::Expr::NameRef(token) => {
                 if let Some(value) = self.constant_name(token) {
                     return self.folded(value, line);
                 }
                 self.line = line;
                 let written = self.text(token).to_vec();
-                let (resolved, runtime) = self.constant_resolved(&written);
-                let name = if runtime { written } else { resolved };
                 Ok(ConstExpr::Constant {
-                    name: Name(name.into_boxed_slice()),
+                    name: self.constant_resolved(&written),
                     line,
                 })
             }
@@ -16298,10 +16297,18 @@ impl Emit<'_> {
     }
 
     /// [`Self::function_name`] for a constant, `zend_resolve_const_name`,
-    /// which reads the constant imports, whose aliases keep their case.
-    fn constant_resolved(&self, name: &[u8]) -> (Vec<u8>, bool) {
+    /// which reads the constant imports, whose aliases keep their case;
+    /// a name that is not fully qualified, inside a namespace, is php's
+    /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE`, fetched with the global
+    /// fallback.
+    fn constant_resolved(&self, name: &[u8]) -> ConstantName {
         let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Const);
-        (resolved, !fully_qualified && self.namespace.is_some())
+        let resolved = Name(resolved.into_boxed_slice());
+        if !fully_qualified && self.namespace.is_some() {
+            ConstantName::UnqualifiedInNamespace(resolved)
+        } else {
+            ConstantName::Resolved(resolved)
+        }
     }
 
     /// `zend_resolve_class_name`: `self`, `parent` and `static` written
@@ -16538,11 +16545,10 @@ impl Emit<'_> {
     }
 
     fn const_name(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
-        let (resolved, runtime) = self.constant_resolved(name);
-        if runtime {
-            return Ok(None);
+        match self.constant_resolved(name) {
+            ConstantName::Resolved(resolved) => self.persistent(&resolved.0),
+            ConstantName::UnqualifiedInNamespace(_) => Ok(None),
         }
-        self.persistent(&resolved)
     }
 
     /// `zend_compile_const`'s second half (`Z/Zend/zend_compile.c:11048`),
@@ -16570,16 +16576,15 @@ impl Emit<'_> {
         if let Some(value) = self.const_name(name)? {
             return Ok(Where::Constant(value));
         }
-        let (resolved, unqualified) = self.constant_resolved(name);
-        let op2 = self.const_name_literal(&resolved, unqualified)?;
+        let resolved = self.constant_resolved(name);
+        let op2 = self.const_name_literal(&resolved)?;
         let extended_value = self.cache_slot();
         let out = self.temporary();
         self.push(Opline {
             opcode: Opcode::FetchConstant,
-            op1: if unqualified {
-                UNQUALIFIED_IN_NAMESPACE
-            } else {
-                0
+            op1: match resolved {
+                ConstantName::UnqualifiedInNamespace(_) => UNQUALIFIED_IN_NAMESPACE,
+                ConstantName::Resolved(_) => 0,
             },
             op2_type: OperandKind::Const,
             op2,
@@ -16596,8 +16601,8 @@ impl Emit<'_> {
     /// with no `namespace\` before it.
     fn names_halt_offset(&self, name: &[u8]) -> bool {
         const HALT: &[u8] = b"__COMPILER_HALT_OFFSET__";
-        let (resolved, _) = self.constant_resolved(name);
-        resolved == HALT || (!name.starts_with(b"namespace\\") && name == HALT)
+        self.constant_resolved(name).resolved().0.as_ref() == HALT
+            || (!name.starts_with(b"namespace\\") && name == HALT)
     }
 
     /// `zend_compile_halt_compiler` (`Z/Zend/zend_compile.c:9804`): no
@@ -16640,7 +16645,8 @@ impl Emit<'_> {
     /// after `op2` is the key whatever the name was. The answer is the
     /// slot of the name as resolved, which is the one the opline names
     /// and the one php's error text reads.
-    fn const_name_literal(&mut self, name: &[u8], unqualified: bool) -> Result<u32, CompileError> {
+    fn const_name_literal(&mut self, resolved: &ConstantName) -> Result<u32, CompileError> {
+        let name = resolved.resolved().0.as_ref();
         let written = self.string(name)?;
         let at = self.literal(written);
         let Some(slash) = name.iter().rposition(|byte| *byte == b'\\') else {
@@ -16654,8 +16660,8 @@ impl Emit<'_> {
         }
         let lowered = self.string(&lowered)?;
         self.literal(lowered);
-        if unqualified {
-            let bare = self.string(name.get(slash.saturating_add(1)..).unwrap_or_default())?;
+        if let Some(global) = resolved.fallback() {
+            let bare = self.string(global)?;
             self.literal(bare);
         }
         Ok(at)

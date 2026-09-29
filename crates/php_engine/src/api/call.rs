@@ -1507,15 +1507,35 @@ pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
         let shown = String::from_utf8_lossy(class_name).into_owned();
         return req.class_constant_shown(class, constant_name, &shown);
     }
-    let found = if let Some(separator) = name.iter().rposition(|b| *b == b'\\') {
-        let (namespace, constant_name) = name.split_at(separator);
-        let mut lowered = namespace.to_ascii_lowercase();
-        lowered.extend_from_slice(constant_name);
-        req.constant_named(&lowered).map(|value| (lowered, value))
-    } else {
-        req.constant_str(name)
-            .map(|value| (name.to_vec(), value))
-            .or_else(|| special_constant(name).map(|value| (name.to_vec(), value)))
+    global_constant(req, name, None)
+}
+
+/// `zend_get_constant_ex`'s arm for a constant that is no class's
+/// (`Z/Zend/zend_constants.c:448`), `name` without its leading `\`: a
+/// `\` in the name is a namespaced constant, looked up with the
+/// namespace lowered and the rest as written, and where it misses,
+/// `fallback`, the global name of php's
+/// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE`; a name with no `\` is the
+/// table, the halt offset and then `true`, `false` and `null` in any
+/// case (`zend_get_constant_str_impl`). A miss is php's `Error` naming
+/// `name`; a constant `#[\Deprecated]` marks raises its deprecation,
+/// worded from the key it was found by, before the value is handed
+/// over, one more owner, the caller's.
+fn global_constant(
+    req: &mut Request,
+    name: &[u8],
+    fallback: Option<&[u8]>,
+) -> Result<Value, Thrown> {
+    let found = match name.iter().rposition(|b| *b == b'\\') {
+        Some(separator) => {
+            let (namespace, constant_name) = name.split_at(separator);
+            let mut lowered = namespace.to_ascii_lowercase();
+            lowered.extend_from_slice(constant_name);
+            req.constant_named(&lowered)
+                .map(|value| (lowered, value))
+                .or_else(|| fallback.and_then(|global| unqualified_constant(req, global)))
+        }
+        None => unqualified_constant(req, name),
     };
     let Some((key, value)) = found else {
         return Err(throw(
@@ -1527,6 +1547,15 @@ pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
     crate::api::raising::deprecated_constant(req, &key)?;
     req.addref(&value);
     Ok(value)
+}
+
+/// `zend_get_constant_str_impl`: a name with no namespace, by the key
+/// the table holds it under, the halt offset, and then
+/// `zend_get_special_const`.
+fn unqualified_constant(req: &Request, name: &[u8]) -> Option<(Vec<u8>, Value)> {
+    req.constant_str(name)
+        .or_else(|| special_constant(name))
+        .map(|value| (name.to_vec(), value))
 }
 
 /// `zend_get_special_const`: `true`, `false` and `null` in any case,
@@ -1745,23 +1774,11 @@ fn evaluate_node(
         ConstExpr::Long { value: n, .. } => Ok(Value::int(*n)),
         ConstExpr::Double(f) => Ok(Value::float(*f)),
         ConstExpr::Str(s) => Ok(Value::string(PhpString::new(req, s)?)),
-        // `zend_get_constant_ex`, which words a `CONST_DEPRECATED`
-        // constant's deprecation after it found it.
-        ConstExpr::Constant { name, .. } => match req.constant_str(&name.0) {
-            Some(value) => {
-                crate::api::raising::deprecated_constant(req, &name.0)?;
-                req.addref(&value);
-                Ok(value)
-            }
-            None => Err(throw(
-                req,
-                "Error",
-                &format!(
-                    "Undefined constant \"{}\"",
-                    String::from_utf8_lossy(&name.0)
-                ),
-            )),
-        },
+        // `zend_get_constant_ex` under the node's `attr`, which words a
+        // `CONST_DEPRECATED` constant's deprecation after it found it.
+        ConstExpr::Constant { name, .. } => {
+            global_constant(req, &name.resolved().0, name.fallback())
+        }
         ConstExpr::ClassConstant { class, name, .. } => {
             class_constant_expr(req, class, name, scope)
         }

@@ -274,6 +274,9 @@ decl::ConstDecl
 decl::ConstExpr
 decl::ConstExpr::line
 decl::ConstExpr::long
+decl::ConstantName
+decl::ConstantName::fallback
+decl::ConstantName::resolved
 decl::DynamicProperties
 decl::EnumBacking
 decl::FunctionDecl
