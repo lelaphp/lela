@@ -12865,10 +12865,18 @@ impl Request {
 
     /// `zend_active_function()`: the native being served, which is the
     /// call frame on top of [`Vm`] while an entry runs, and none while
-    /// the loop is between calls. The raisers render its declared name
-    /// and its parameters' names off the declaration, never off the
-    /// caller's spelling.
+    /// the loop is between calls or a frame stands above it, a file the
+    /// native serves on the loop (`zend_execute`) or a function it calls
+    /// back, as `EG(current_execute_data)` is then that frame. The
+    /// raisers render its declared name and its parameters' names off
+    /// the declaration, never off the caller's spelling.
     fn active_native_function(&self) -> Option<Function> {
+        let floor = self.vm.innermost().map_or(0, |state| {
+            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
+        });
+        if self.vm.call_depth() <= floor {
+            return None;
+        }
         self.vm.serving_call().map(|call| call.function)
     }
 
