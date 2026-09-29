@@ -13,11 +13,11 @@
 //!    them and asked of every crate, since every crate has tests and one
 //!    whose tests do not run is not done (#191), less `witness`
 //!    for the harness, less `phpt` for a crate the per-commit lane writes
-//!    no reading for, one that owns no subset or that the manifest marks
-//!    `feature =` and so stands outside the default build (#133), and less
+//!    no reading for, one that owns no subset or whose row's `feature =`
+//!    the binary under test does not turn on (#133, revision 63), and less
 //!    `port-map` for every crate but the one `api.lock` lives with, which
 //!    is the only scope that instrument writes a reading at (#148), and
-//!    with `crosscheck` for an `ext/*` crate of the default set, the
+//!    with `crosscheck` for an `ext/*` crate the binary carries, the
 //!    rendering diff the per-commit lane writes per extension (#269). Fresh
 //!    means the reading's `tree` is the content hash over the crate's
 //!    sources now (§13 D.18), the hash every instrument stamps; an
@@ -103,6 +103,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::api_check;
+use crate::carried::Carried;
 use crate::crosscheck;
 use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
@@ -124,7 +125,7 @@ pub(crate) const WORKSPACE: &str = "workspace";
 /// subsets the crate's `[[crate]]` row owns, written under the crate's
 /// name, `witness` is no crate's without a kernel or a native, and
 /// `port-map` is the one crate `api.lock` lives with alone, and
-/// `crosscheck` is an extension's of the default set, the ones the
+/// `crosscheck` is an extension's the binary carries, the ones the
 /// per-commit lane renders (#269). `test` is narrowed for nobody: the
 /// harness has tests as every crate has, and it is asked the way `clippy`
 /// is (#191).
@@ -150,34 +151,37 @@ pub(crate) const HARNESS: &str = "xtask";
 /// `home_of_the_lock` in the manifest's terms and passed in here. Which
 /// crate owns which of the corpus is the `[[crate]]` row's sentence, so a
 /// crate that owns none is not asked here rather than asked and answered
-/// by the runner's error. A crate the row marks `feature =` is outside the
-/// default build, whose subsets are the ones the lane runs, so its corpus
-/// is the nightly lane's, and `done`, which runs per commit, does not ask
-/// for a reading only a run by name could write (design §8's `ext/<name>` row,
-/// per commit for the default extensions and nightly for the rest; harness
-/// §4.1, §4.5 condition 1, §7). `port-map` writes exactly one reading, at
+/// by the runner's error. The lane runs the subsets of every crate the
+/// binary under test carries, `carried`, read from the binary's own
+/// declaration: a crate the row marks `feature =` is asked where the
+/// binary turns the feature on, and one it does not turn on is the nightly
+/// lane's, which `done`, running per commit, does not ask for a reading
+/// only a run by name could write (harness §4.1, §4.5 condition 1, §7,
+/// revision 63). `port-map` writes exactly one reading, at
 /// the crate the lock lives with, so every other crate would be held to a
 /// reading nothing ever writes; that crate is the one asked because the
 /// lock is in its tree, and a change to the lock is what makes a row of
 /// the join matched or unmatched (harness §4.5 condition 1, #148).
-/// `crosscheck` is asked of an `ext/*` crate outside every feature: the
-/// lane renders the default set per commit and every feature nightly
-/// (harness §7), the same line `phpt` stands on, and the reading is the
-/// port's progress meter, so an extension whose rendering is not the
-/// oracle's is not done (design §7.1, #269).
+/// `crosscheck` is asked of an `ext/*` crate the binary carries: the lane
+/// renders those per commit and every other feature nightly (harness §7),
+/// the same line `phpt` stands on, and the reading is the port's progress
+/// meter, so an extension whose rendering is not the oracle's is not done
+/// (design §7.1, #269).
 pub(crate) fn instruments_of(
     krate: &Crate,
     lock_home: Option<&str>,
+    carried: &Carried,
 ) -> impl Iterator<Item = &'static str> {
     let harness = krate.name == HARNESS;
-    let measured_by_the_lane = !krate.subsets().is_empty() && !krate.optional();
+    let carried = carried.carries(krate);
+    let measured_by_the_lane = !krate.subsets().is_empty() && carried;
     let home_of_the_lock = lock_home == Some(krate.name.as_str());
-    let default_extension = krate.name.starts_with("ext/") && !krate.optional();
+    let carried_extension = krate.name.starts_with("ext/") && carried;
     FRESH.into_iter().filter(move |i| match *i {
         "witness" => !harness,
         "phpt" => measured_by_the_lane,
         "port-map" => home_of_the_lock,
-        "crosscheck" => default_extension,
+        "crosscheck" => carried_extension,
         _ => true,
     })
 }
@@ -310,8 +314,16 @@ pub fn judge(
     let mut notes = Vec::new();
 
     let lock_home = lock_home(manifest);
+    let carried = Carried::binary(root)?;
     for krate in &crates {
-        fresh_readings(root, store, krate, lock_home.as_deref(), &mut unmet)?;
+        fresh_readings(
+            root,
+            store,
+            krate,
+            lock_home.as_deref(),
+            &carried,
+            &mut unmet,
+        )?;
     }
     locks(root, manifest, store, &changed, &mut unmet)?;
     open_rows(root, &base.commit, registry, &crates, &changed, &mut unmet)?;
@@ -498,11 +510,12 @@ fn fresh_readings(
     store: &Store,
     krate: &Crate,
     lock_home: Option<&str>,
+    carried: &Carried,
     unmet: &mut Vec<String>,
 ) -> Result<()> {
     let tree = git::tree_hash(root, &krate.path())?;
     let name = &krate.name;
-    for instrument in instruments_of(krate, lock_home) {
+    for instrument in instruments_of(krate, lock_home, carried) {
         for scope in scopes_of(instrument, name) {
             let Some(reading) = store.read(instrument, &scope)? else {
                 unmet.push(format!("{instrument}: no reading for {scope}"));
@@ -794,6 +807,7 @@ mod tests {
     use super::{
         FRESH, compiler_unread, instruments_of, met_without_passing, no_binary_yet, porting_meter,
     };
+    use crate::carried::Carried;
     use crate::manifest::Crate;
     use crate::reading::{Reading, Status};
 
@@ -801,6 +815,12 @@ mod tests {
     /// what narrows `port-map`; every crate here but that one is asked
     /// for `ASKED_OF_EVERY_OTHER_CRATE` at most.
     const HOME: Option<&str> = Some("php_ext");
+
+    /// What the crate asks as the binary under test that turns on the
+    /// `openssl` feature and no other carries it.
+    fn asked_of(krate: &Crate, lock_home: Option<&str>) -> Vec<&'static str> {
+        instruments_of(krate, lock_home, &Carried::turning_on(&["openssl"])).collect()
+    }
 
     /// [`FRESH`] less `port-map` and `crosscheck`: what an engine crate
     /// that is not the lock's home is asked, before the two narrowings of
@@ -830,27 +850,31 @@ mod tests {
 
     #[test]
     fn the_harness_crate_is_asked_for_clippy_test_api_check_budget_and_unsafe_audit_only() {
-        let asked: Vec<&str> = instruments_of(&Crate::named("xtask"), HOME).collect();
+        let asked = asked_of(&Crate::named("xtask"), HOME);
         assert_eq!(
             asked,
             ["clippy", "test", "api-check", "budget", "unsafe-audit"]
         );
-        let asked: Vec<&str> = instruments_of(&Crate::named("ext/pcre"), HOME).collect();
+        let asked = asked_of(&Crate::named("ext/pcre"), HOME);
         assert_eq!(asked, ASKED_OF_A_DEFAULT_EXTENSION);
     }
 
-    /// `crosscheck` renders the default set per commit (harness §7), so an
-    /// `ext/*` crate outside every feature is asked for its reading, a
-    /// `feature =` one is not, and no engine crate is (#269).
+    /// `crosscheck` renders every extension the binary carries per commit
+    /// (harness §7, revision 63), so an `ext/*` crate outside every
+    /// feature or behind one the binary turns on is asked for its reading,
+    /// one behind a feature the binary does not turn on is not, and no
+    /// engine crate is (#269).
     #[test]
     fn a_default_extension_is_asked_for_a_crosscheck_reading_and_nobody_else_is() {
-        let asked: Vec<&str> = instruments_of(&Crate::named("ext/ctype"), HOME).collect();
+        let asked = asked_of(&Crate::named("ext/ctype"), HOME);
         assert!(asked.contains(&"crosscheck"), "{asked:?}");
         let row = Crate::named("ext/mbstring").with_feature("mbstring");
-        let asked: Vec<&str> = instruments_of(&row, HOME).collect();
+        let asked = asked_of(&row, HOME);
         assert!(!asked.contains(&"crosscheck"), "{asked:?}");
+        let row = Crate::named("ext/openssl").with_feature("openssl");
+        assert!(asked_of(&row, HOME).contains(&"crosscheck"));
         for other in ["php_engine", "php_ext", "xtask"] {
-            let asked: Vec<&str> = instruments_of(&Crate::named(other), HOME).collect();
+            let asked = asked_of(&Crate::named(other), HOME);
             assert!(!asked.contains(&"crosscheck"), "{other}: {asked:?}");
         }
     }
@@ -861,7 +885,7 @@ mod tests {
     /// one is asked.
     #[test]
     fn a_crate_is_asked_for_a_phpt_reading_only_where_the_manifest_gives_it_one() {
-        let asked: Vec<&str> = instruments_of(&Crate::named("php_heap"), HOME).collect();
+        let asked = asked_of(&Crate::named("php_heap"), HOME);
         assert_eq!(
             asked,
             [
@@ -874,19 +898,20 @@ mod tests {
             ]
         );
         let row = Crate::named("php_heap").with_phpt(&["Zend/tests"]);
-        let asked: Vec<&str> = instruments_of(&row, HOME).collect();
+        let asked = asked_of(&row, HOME);
         assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
     }
 
-    /// A crate the manifest marks `feature =` is outside the default
-    /// build, and the per-commit lane runs the default build's subsets
-    /// alone, so `done` does not ask it for a reading no lane run writes
-    /// (#133); its corpus is the nightly lane's. The same row without the
-    /// feature is asked.
+    /// A crate behind a feature the binary under test does not turn on is
+    /// outside the per-commit lane, so `done` does not ask it for a
+    /// reading no lane run writes (#133); its corpus is the nightly
+    /// lane's. The same row without the feature is asked, and so is one
+    /// behind a feature the binary turns on, since the lane runs every
+    /// extension the binary carries (revision 63, #1252).
     #[test]
     fn an_optional_crate_is_not_asked_for_a_phpt_reading_the_lane_never_writes() {
         let row = Crate::named("ext/mbstring").with_feature("mbstring");
-        let asked: Vec<&str> = instruments_of(&row, HOME).collect();
+        let asked = asked_of(&row, HOME);
         assert_eq!(
             asked,
             [
@@ -898,8 +923,10 @@ mod tests {
                 "unsafe-audit"
             ]
         );
-        let asked: Vec<&str> = instruments_of(&Crate::named("ext/mbstring"), HOME).collect();
+        let asked = asked_of(&Crate::named("ext/mbstring"), HOME);
         assert_eq!(asked, ASKED_OF_A_DEFAULT_EXTENSION);
+        let row = Crate::named("ext/openssl").with_feature("openssl");
+        assert_eq!(asked_of(&row, HOME), ASKED_OF_A_DEFAULT_EXTENSION);
     }
 
     /// `port-map` writes exactly one reading, at the crate `api.lock`
@@ -914,7 +941,7 @@ mod tests {
             .filter(|i| *i != "port-map" && *i != "crosscheck")
             .collect();
         assert_eq!(rest, ASKED_OF_EVERY_OTHER_CRATE);
-        let asked: Vec<&str> = instruments_of(&Crate::named("php_ext"), HOME).collect();
+        let asked = asked_of(&Crate::named("php_ext"), HOME);
         assert_eq!(
             asked,
             [
@@ -928,10 +955,10 @@ mod tests {
             ]
         );
         for other in ["php_engine", "ext/pcre", "xtask"] {
-            let asked: Vec<&str> = instruments_of(&Crate::named(other), HOME).collect();
+            let asked = asked_of(&Crate::named(other), HOME);
             assert!(!asked.contains(&"port-map"), "{other}: {asked:?}");
         }
-        let asked: Vec<&str> = instruments_of(&Crate::named("php_ext"), None).collect();
+        let asked = asked_of(&Crate::named("php_ext"), None);
         assert!(!asked.contains(&"port-map"), "{asked:?}");
     }
 

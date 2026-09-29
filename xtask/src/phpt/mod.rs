@@ -82,15 +82,18 @@
 //! a crate owns the directories of the corpus its row names, an extension
 //! owns `ext/<name>/tests` by the design, and a crate that owns none is
 //! asked for no phpt reading. A bare call is the per-commit lane, which is
-//! every subset of every crate the default build has, in manifest order
-//! (harness §7); `--subset` is one crate's subsets or one directory of the
-//! pinned tree.
+//! every subset of every crate the binary under test carries, in manifest
+//! order (harness §7, revision 63; [`Carried`]); `--subset` is one crate's
+//! subsets or one directory of the pinned tree.
 //!
 //! **What is not run here.** The full corpus, the nightly verdict control
 //! and the tier's lanes are CI's, under the manifest's `lanes.nightly`
-//! rule; the per-commit lane and one subset are an agent's to run. A CGI-shaped test, a
-//! `--PHPDBG--` one and a `--REDIRECTTEST--` are skipped with their reason:
-//! this runner hosts the command line. Beyond those, the process adapter
+//! rule; the per-commit lane and one subset are an agent's to run. A
+//! `--PHPDBG--` test and a `--REDIRECTTEST--` are skipped with their
+//! reason; a CGI-shaped one runs through the CGI host beside the binary,
+//! the php-cgi `[sapi]` pins for the control and the engine's own
+//! binary under that name for the engine, as the `cgi` module has it
+//! (#1198). Beyond those, the process adapter
 //! gives a test one stdin and two streams captured as one, so a test that
 //! wants a terminal on a stream it did not capture, an interactive shell
 //! or a listening server is where the runner and upstream still part; the
@@ -98,7 +101,9 @@
 //! item 17.
 
 mod adapter;
+pub(crate) use adapter::env_of;
 pub(crate) mod against;
+pub(crate) mod cgi;
 /// The suffix of a control run's scope: the subset under the oracle.
 pub(crate) const CONTROL: &str = "@control";
 mod census;
@@ -115,6 +120,7 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
+use crate::carried::{BINARY, Carried};
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Oracle, Runner, Source};
@@ -279,16 +285,18 @@ impl Subset {
             .collect()
     }
 
-    /// The per-commit lane (harness §7): every subset of every crate the
-    /// default build has, in manifest order, under the pinned tree at
-    /// `source`. The row is the statement and this is its only reader, so
-    /// the lane is never a second copy of the design's table; a crate
-    /// behind a feature is outside the default build and outside the lane.
-    pub(crate) fn lane(manifest: &Manifest, source: &Path) -> Vec<Subset> {
+    /// The per-commit lane (harness §7, revision 63): every subset of
+    /// every crate the binary under test carries, in manifest order, under
+    /// the pinned tree at `source`. The row is the statement of which
+    /// subsets a crate owns and `carried` of which crates the binary has,
+    /// each read in one place, so the lane is never a second copy of the
+    /// design's table; a crate behind a feature the binary does not turn
+    /// on is outside the lane and in the nightly one.
+    pub(crate) fn lane(manifest: &Manifest, carried: &Carried, source: &Path) -> Vec<Subset> {
         manifest
             .crates
             .iter()
-            .filter(|krate| !krate.optional())
+            .filter(|krate| carried.carries(krate))
             .filter_map(|krate| Subset::of(source, krate))
             .collect()
     }
@@ -681,14 +689,15 @@ pub fn run(
         Some(name) => vec![Subset::resolve(manifest, &source, name)?],
         None if ask.full => Subset::corpus(&source),
         // The per-commit lane, composed from the `[[crate]]` rows that own
-        // a subset (harness §7). The row is where the lane lives, so
-        // neither this function nor the design's table is a second copy of
-        // the other.
+        // a subset and that the binary under test carries (harness §7,
+        // revision 63). The row and the binary's declaration are where the
+        // lane lives, so neither this function nor the design's table is a
+        // second copy of either.
         None => {
-            let lane = Subset::lane(manifest, &source);
+            let lane = Subset::lane(manifest, &Carried::binary(root)?, &source);
             let scopes: Vec<&str> = lane.iter().map(|s| s.scope.as_str()).collect();
             println!(
-                "phpt: the per-commit lane, {} subset{} the manifest names: {}",
+                "phpt: the per-commit lane, {} subset{} the manifest names of what {BINARY} carries: {}",
                 lane.len(),
                 if lane.len() == 1 { "" } else { "s" },
                 listed(&scopes)
@@ -862,7 +871,9 @@ pub(crate) fn run_subset(
     // A digest mismatch refuses the whole run (§4.3), before the first
     // test rather than at its first SKIPIF.
     oracle.asserted()?;
-    let adapter = Adapter::new(oracle, registry, binary, lane);
+    let control = matches!(runner, Runner::Control(_));
+    let host = cgi::host(oracle.pin(), binary, control, &subset.root)?;
+    let adapter = Adapter::new(oracle, registry, binary, host, lane);
     let mut dirs = BTreeMap::new();
     let apart: Vec<_> = tests
         .iter()

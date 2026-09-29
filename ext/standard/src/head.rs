@@ -33,15 +33,20 @@ use php_ext::values::{Key, PhpArray, PhpString, Value};
 /// ```
 ///
 /// A line with a second line in it, or a NUL, is the warning and
-/// nothing taken; the response code the third argument carries is
-/// taken with the line.
+/// nothing taken, the first of the two it holds named; the response code
+/// the third argument carries is taken with the line.
 ///
 /// ```php
-/// header("X-A: 1", true, 404); $code = http_response_code(); header("X-A: a\nb"); var_dump($code);
+/// ob_start(); header("X-A: 1", true, 404); $code = http_response_code(); header("X-A: a\nb");
+/// header("X-B: e\0f\ng"); header("X-B: e\rf\0g"); ob_end_flush(); var_dump($code);
 /// ```
 /// ```expect
 ///
 /// Warning: Header may not contain more than a single header, new line detected in %s on line 2
+///
+/// Warning: Header may not contain NUL bytes in %s on line 3
+///
+/// Warning: Header may not contain more than a single header, new line detected in %s on line 3
 /// int(404)
 /// ```
 ///

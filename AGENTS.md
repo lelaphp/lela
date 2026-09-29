@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=fff9860bb3ae2ad9e3a3a62cbff84ac2b6e5c3561f469d21a1981f3125f76c23 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=40c16c32ca32a6574837231de6daafd58326917ecd013cdb8851a51e2d5a9752 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -107,12 +107,12 @@ third-engine-design.md
 | heap | heap.lock | 325 |  | pass |
 | unit | unit.lock | 102 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 841 | 900 | pass |
+| api | api.lock | 845 | 900 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
-| harness | xtask.lock | 344 |  | pass |
+| harness | xtask.lock | 348 |  | pass |
 
-<!-- /computed in=95710ff973e094bb58338a91e1e598f62898ecdc558aeb942a26eaa67f1d3b1e out=e5ec699e989989e5babadeb934b4e529034e3bd87b10982ba91150e0d9b13477 -->
+<!-- /computed in=96dbab8ac9fabaa3b6218840432c4c41e33e0f0447ef9cc2dbcda38d0452dc03 out=521f479146451e5d958466dc0ef22c3b416aeacb8b858ee13148bcff4681d29a -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -179,7 +179,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=2e68cab66af5101c6d11fb6eac68726b420f97291ed5f0ee5241a5e0f5a31b0c out=536119cf1f418fb0dd368e364531eb97b343f4037861bb43100437c333c6e0f7 -->
+<!-- /computed in=957bb526be2c2370c76effc59ca9eadb9cd083ae945aaab4bd9866642e0f7bf9 out=536119cf1f418fb0dd368e364531eb97b343f4037861bb43100437c333c6e0f7 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

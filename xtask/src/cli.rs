@@ -50,9 +50,10 @@ pub(crate) enum Command {
         /// stdin head instead.
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
-        /// A divergence's reason whole, as `docs/divergence.md` shows the
-        /// registry. Without it the reason is cut to the message width,
-        /// which is what the local facts render.
+        /// Every divergence row with its reason whole, as `docs/divergence.md`
+        /// shows the registry. Without it the section is the counts and the
+        /// `open` rows alone, their reasons cut to the message width, which
+        /// is what the local facts render.
         #[arg(long)]
         uncut: bool,
         /// Print AGENTS.md and .claude/harness.local.md for the function
@@ -274,8 +275,8 @@ pub(crate) enum Command {
     /// oracle's fails naming the first differing line, and one the engine
     /// cannot render fails in the engine's own words.
     Crosscheck {
-        /// One extension by its php name, repeatable; default the
-        /// bundle's default set.
+        /// One extension by its php name, repeatable; default every
+        /// extension the binary under test carries.
         #[arg(long = "ext", value_name = "NAME")]
         ext: Vec<String>,
     },

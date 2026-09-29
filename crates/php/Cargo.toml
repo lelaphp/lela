@@ -17,6 +17,13 @@ workspace = true
 name = "php"
 path = "src/main.rs"
 
+# The same binary under php-cgi's name, which `php_sapi::Host::of` reads
+# off `argv[0]`: php builds its CGI as `php-cgi` beside `php`, and a test
+# that looks for it looks there (sapi/cgi/tests/include.inc).
+[[bin]]
+name = "php-cgi"
+path = "src/cgi.rs"
+
 # The same binary with `php_engine`'s `witness-trace` on, which the witness
 # lane builds and serves a fence marked `process` through, and nothing else
 # does: under a name of its own, so `target/*/php` stays the default build

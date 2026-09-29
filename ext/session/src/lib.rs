@@ -14,9 +14,9 @@
 //! the `$_SESSION` superglobal's array, which the natives read and write;
 //! a program reads it once the compiler fetches a superglobal (#633, #745).
 //! The process's uids, which the files handler reads, are the one
-//! binding, in `ffi`. The mm handler and upload progress are not ported: the first is not
-//! in php's default build, the second needs a request body the CLI
-//! host does not have.
+//! binding, in `ffi`. Upload progress is the engine's upload hook
+//! (`progress`). The mm handler is not ported: it is not in php's
+//! default build.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -34,6 +34,7 @@ mod ffi;
 mod files;
 mod ini;
 mod natives;
+mod progress;
 mod serializers;
 mod session;
 mod user;
@@ -162,6 +163,8 @@ struct State {
     /// `EG(exception)` as a user handler left it: php goes on after a
     /// handler throws, and the native raises it when it returns.
     thrown: Option<Thrown>,
+    /// `PS(rfc1867_progress)`: an upload's progress while its body is read.
+    progress: Option<progress::Progress>,
 }
 
 /// The extension value (design §7.1): the natives `session.stub.php`
@@ -242,6 +245,7 @@ pub fn extension() -> Extension {
         .request_state::<State>()
         .rinit(session::rinit)
         .rshutdown(session::rshutdown)
+        .upload(progress::hook)
         .info(session_info)
         .build("session")
 }

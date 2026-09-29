@@ -138,6 +138,7 @@ pub fn extension() -> Extension {
         .rinit(rinit)
         .rshutdown(rshutdown)
         .compile_file(open::compile_file)
+        .resolve_path(intercept::resolve_path)
         .info(info);
     intercept::install(builder).build("Phar")
 }

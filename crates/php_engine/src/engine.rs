@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -44,11 +45,15 @@ pub struct RequestDescription {
     pub argv: Vec<Vec<u8>>,
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
     pub cwd: PathBuf,
+    /// The host's rows of `$_SERVER` past the environment, which the
+    /// engine imports first for every host
+    /// (`sapi_module.register_server_variables`).
     pub server: Vec<(Vec<u8>, Vec<u8>)>,
-    pub headers: Vec<(Vec<u8>, Vec<u8>)>,
-    pub body: Vec<u8>,
     pub sapi_name: String,
-    pub is_web: bool,
+    /// The request of the web the host serves, what php's
+    /// `SG(request_info)` carries past the command line; `None` for the
+    /// CLI, which serves none and whose `header_handler` takes no line.
+    pub web: Option<WebRequest>,
     /// The served file's name, for `$_SERVER['SCRIPT_NAME']` and error text.
     pub script_name: Option<Vec<u8>>,
     /// The source to serve, when the host has it in hand (`php -r`, the
@@ -58,6 +63,96 @@ pub struct RequestDescription {
     /// `php_request_startup` and php's other hosts have none of; `None`
     /// registers nothing.
     pub file_handles: Option<FileHandles>,
+}
+
+/// One request of the web as its host received it, php's
+/// `SG(request_info)` and the response state a host sets before
+/// `php_request_startup` (`Z/main/SAPI.h:73-120`): what php's variable
+/// registration reads for `$_GET`, `$_POST`, `$_COOKIE` and `$_FILES`
+/// (`Z/main/php_variables.c`) and `sapi_activate` for the body
+/// (`Z/main/SAPI.c:430`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebRequest {
+    /// `request_method`; `None` where the host was given none, as php-cgi
+    /// started from a shell is.
+    pub method: Option<Method>,
+    /// `request_uri`, the path the request asked for.
+    pub request_uri: Option<Vec<u8>>,
+    /// `query_string`, what `$_GET` is parsed from.
+    pub query: Option<Vec<u8>>,
+    /// `cookie_data`, the `Cookie` header, what `$_COOKIE` is parsed from.
+    pub cookies: Option<Vec<u8>>,
+    /// `content_type`, which picks the body's reader.
+    pub content_type: Option<Vec<u8>>,
+    /// `content_length`, as the host was told it.
+    pub content_length: i64,
+    /// The body, what `sapi_module.read_post` hands out: the bytes the
+    /// host read, no more than `content_length`.
+    pub body: Vec<u8>,
+    /// The request headers, what `getallheaders()` answers.
+    pub headers: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `no_headers`: the host writes no header block, and the request
+    /// starts with its headers counted sent (php-cgi's `-q`).
+    pub no_headers: bool,
+    /// `SG(sapi_headers).http_response_code` as the host leaves it
+    /// before the request starts: 200, or php-cgi's 404 for a file it
+    /// could not open.
+    pub response_code: i64,
+}
+
+/// A request's method, `request_method`, read as `sapi_activate` and
+/// `php_auto_globals_create_post` compare it: `POST` and `HEAD` are the
+/// two php acts on, spelled exactly; any other stands as the host was
+/// given it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Head,
+    Post,
+    Put,
+    Other(Vec<u8>),
+}
+
+impl Method {
+    /// The method a host was handed.
+    #[must_use]
+    pub fn of(name: &[u8]) -> Method {
+        match name {
+            b"GET" => Method::Get,
+            b"HEAD" => Method::Head,
+            b"POST" => Method::Post,
+            b"PUT" => Method::Put,
+            other => Method::Other(other.to_vec()),
+        }
+    }
+
+    /// The method as the host was handed it.
+    #[must_use]
+    pub fn name(&self) -> &[u8] {
+        match self {
+            Method::Get => b"GET",
+            Method::Head => b"HEAD",
+            Method::Post => b"POST",
+            Method::Put => b"PUT",
+            Method::Other(name) => name,
+        }
+    }
+}
+
+/// What a request answers its host with before the body, at the commit
+/// `sapi_send_headers` makes (`Z/main/SAPI.c:861`): the response code,
+/// the `HTTP/` status line `header()` was given where it was, and the
+/// header lines in the order `sapi_header_add_op` took them. How it goes
+/// on the wire is the host's: php's CGI writes a `Status:` line from the
+/// code, the dev server an HTTP status line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResponseHead {
+    /// `SG(sapi_headers).http_response_code`.
+    pub code: i64,
+    /// `SG(sapi_headers).http_status_line`.
+    pub status_line: Option<Vec<u8>>,
+    /// `SG(sapi_headers).headers`, each line without its line end.
+    pub lines: Vec<Vec<u8>>,
 }
 
 /// What `do_cli` registers for a request it serves a program in
@@ -117,8 +212,8 @@ pub trait OutputSink {
     fn write(&mut self, bytes: &[u8]);
     /// The host may push what it has.
     fn flush(&mut self);
-    /// The rendered header block, once, before the first body byte.
-    fn send_headers(&mut self, block: &[u8]);
+    /// The response's head, once, before the first body byte.
+    fn send_headers(&mut self, head: &ResponseHead);
     /// One entry for the host's log, whole: what `php_log_err` was
     /// given, a diagnostic in its log form with its stack trace under
     /// it where it has one, or `error_log()`'s message as given, so it
@@ -789,7 +884,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 59] = [
+const CORE_INI: [(&str, &str); 72] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -883,6 +978,23 @@ const CORE_INI: [(&str, &str); 59] = [
     ("arg_separator.input", "&"),
     ("arg_separator.output", "&"),
     ("realpath_cache_ttl", "120"),
+    // `main.c`'s entries for what a request of the web carries
+    // (`Z/main/main.c:802-878`): the `X-Powered-By` header, the auto
+    // globals made when named, `$_SERVER['argv']`, the body and its
+    // limits, and the uploads.
+    ("expose_php", "1"),
+    ("auto_globals_jit", "1"),
+    ("register_argc_argv", "0"),
+    ("enable_post_data_reading", "1"),
+    ("post_max_size", "8M"),
+    ("max_input_time", "-1"),
+    ("max_input_nesting_level", "64"),
+    ("max_input_vars", "1000"),
+    ("file_uploads", "1"),
+    ("upload_max_filesize", "2M"),
+    ("upload_tmp_dir", ""),
+    ("max_file_uploads", "20"),
+    ("max_multipart_body_parts", "-1"),
     ("enable_dl", "1"),
     ("extension_dir", crate::constants::PHP_EXTENSION_DIR),
 ];
@@ -1271,6 +1383,7 @@ pub struct EngineBuilder {
     reenter: Loop,
     resume: Loop,
     tier_extension: Option<Extension>,
+    host_extension: Option<crate::host_extension::HostExtension>,
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
 }
@@ -1324,6 +1437,15 @@ impl EngineBuilder {
         self
     }
 
+    /// The extension the host registers after the bundle, as php-cgi hands
+    /// `cgi_module_entry` to `php_module_startup`: its natives and ini
+    /// entries, and its name last in `get_loaded_extensions()`.
+    #[must_use]
+    pub fn host_extension(mut self, host: crate::host_extension::HostExtension) -> EngineBuilder {
+        self.host_extension = Some(host);
+        self
+    }
+
     /// Bind the tier: `execute::<T>` becomes the loop, and the tier's
     /// state is declared under seam 3 (design §4.3 seam 8).
     #[must_use]
@@ -1346,6 +1468,9 @@ impl EngineBuilder {
         let mut extensions = self.extensions;
         if let Some(tier) = self.tier_extension {
             extensions.push(tier);
+        }
+        if let Some(host) = self.host_extension {
+            extensions.push(crate::host_extension::extension(host));
         }
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
@@ -1498,6 +1623,7 @@ impl Engine {
             reenter: reenter::<Nop>,
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
+            host_extension: None,
             #[cfg(feature = "witness-trace")]
             trace_to: None,
         }
@@ -1624,6 +1750,31 @@ impl Engine {
             .filter_map(|e| e.zend.as_ref())
             .map(|row| row.name.clone())
             .collect()
+    }
+
+    /// `get_zend_version`: `ZEND_CORE_VERSION_INFO` and a line for each
+    /// Zend extension loaded, in startup order, as
+    /// `zend_append_version_info` appends it (`Z/Zend/zend.c:1289`), the
+    /// tail of what a host's `-v` prints.
+    #[must_use]
+    pub fn zend_version_info(&self) -> String {
+        let mut text = format!(
+            "Zend Engine v{}, Copyright (c) Zend Technologies\n",
+            crate::natives::ZEND_VERSION
+        );
+        for row in self
+            .shared
+            .extensions
+            .iter()
+            .filter_map(|e| e.zend.as_ref())
+        {
+            let _ = writeln!(
+                text,
+                "    with {} v{}, {}, by {}",
+                row.name, row.version, row.copyright, row.author
+            );
+        }
+        text
     }
 
     /// The compiled unit for `source`, as the cache holds it: its
@@ -1792,6 +1943,16 @@ impl Engine {
         self.transaction(description, sink, Work::Strip, false).0
     }
 
+    /// `preload_activate`: the auto-registered arrays the preloaded code
+    /// names (`$_SERVER` and its kin), armed for every request.
+    fn arm_preloaded(&self, req: &mut Request) {
+        if let Some(preloaded) = self.shared.units.preloaded() {
+            for global in &preloaded.arms {
+                let _ = req.arm(*global);
+            }
+        }
+    }
+
     /// The one transaction behind [`Engine::serve`], [`Engine::lint`],
     /// [`Engine::highlight`] and [`Engine::strip`]: `work` says what the
     /// program is for once the request has started.
@@ -1816,7 +1977,7 @@ impl Engine {
             .script_name
             .clone()
             .unwrap_or_else(|| b"Standard input code".to_vec());
-        let web = description.is_web;
+        let web = description.web.is_some();
         let mut req = Request::new(Arc::clone(&self.shared), description);
         #[cfg(feature = "witness-trace")]
         if traced || self.shared.trace_to.is_some() {
@@ -1827,9 +1988,16 @@ impl Engine {
         if let Some(held) = sink.held() {
             req.hold(held);
         }
-        // `php_request_startup` hashes the environment before the
-        // extensions' `RINIT` (`Z/main/main.c:1942`); what can fail is the
-        // memory limit, which the first allocation after it meets again.
+        // `php_request_startup` (`Z/main/main.c:1890`): `sapi_activate`
+        // reads the body, the `X-Powered-By` header goes on while
+        // `expose_php` is on, and the environment is hashed before the
+        // extensions' `RINIT`; what can fail is the memory limit, which the
+        // first allocation after it meets again.
+        req.read_post_at_startup();
+        if web && req.ini_flag(b"expose_php") && req.headers_sent().is_none() {
+            let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
+            let _ = req.header_add(line.as_bytes(), true, 0);
+        }
         let _ = req.hash_environment();
         // Displayed past the `php_output` layer, as php displays what
         // `MINIT` raised before `php_output_activate`, so no header is
@@ -1846,12 +2014,9 @@ impl Engine {
             }
         }
         deprecated_directives(&mut req);
-        // `preload_activate`: what the preloaded code names of the auto
-        // globals, armed for every request.
-        if let Some(preloaded) = self.shared.units.preloaded() {
-            for global in &preloaded.arms {
-                let _ = req.arm(*global);
-            }
+        self.arm_preloaded(&mut req);
+        if req.web().is_some_and(|web| web.no_headers) {
+            req.output_mut().quiet();
         }
         // What `do_cli` does once `php_request_startup` has run, before
         // the program is compiled: `$_SERVER` named, which makes it
@@ -1984,6 +2149,7 @@ impl Engine {
         req.catch_bailout();
         req.free_shutdown_functions();
         req.destroy_http_globals();
+        req.destroy_uploaded_files();
         req.close_resources();
         req.free_user_handlers();
         req.destroy_symbol_table();
@@ -2366,7 +2532,7 @@ mod tests {
             self.body.extend_from_slice(bytes);
         }
         fn flush(&mut self) {}
-        fn send_headers(&mut self, _: &[u8]) {}
+        fn send_headers(&mut self, _: &ResponseHead) {}
         fn log(&mut self, entry: &[u8]) {
             self.seen.push(Saw::Log(entry.to_vec()));
         }
@@ -2385,8 +2551,9 @@ mod tests {
     }
 
     /// `sapi_send_headers` under a host whose `header_handler` takes the
-    /// line: the default `Content-type` stands in the block once the
-    /// first body byte reaches it; under the CLI's description the block
+    /// line: `expose_php`'s `X-Powered-By` laid at request start, and the
+    /// default `Content-type` after it once the first body byte reaches
+    /// the block; under the CLI's description the block
     /// carries nothing, since `sapi_cli_header_handler` answers zero and
     /// the line is freed (#289).
     #[test]
@@ -2395,14 +2562,20 @@ mod tests {
         let mut web = crate::test::Capture::default();
         engine.serve(
             RequestDescription {
-                is_web: true,
+                web: Some(WebRequest {
+                    response_code: 200,
+                    ..WebRequest::default()
+                }),
                 sapi_name: String::from("cgi-fcgi"),
                 ..description("<?php echo 'x';")
             },
             &mut web,
         );
         assert_eq!(web.stdout, b"x");
-        assert_eq!(web.headers, b"Content-type: text/html; charset=UTF-8\r\n");
+        assert_eq!(
+            web.headers,
+            b"X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n"
+        );
         let mut cli = crate::test::Capture::default();
         engine.serve(description("<?php echo 'x';"), &mut cli);
         assert_eq!(cli.stdout, b"x");

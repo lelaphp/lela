@@ -5,10 +5,10 @@
 use php_ext::abi::Callable;
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString};
+use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use crate::archive::{archives, lossy};
-use crate::entry;
+use crate::archive::{ArchiveId, archives, lossy};
+use crate::entry::{self, Dir, Found};
 use crate::open;
 use crate::path::{self, Create, Exec};
 
@@ -158,11 +158,314 @@ pub(crate) fn mung_server(req: &mut Request, names: PhpArray) -> Result<(), Thro
     Ok(())
 }
 
-/// `Phar::webPhar()`: the file being served read as an archive, as
-/// `mapPhar()` reads it; then, for a request that came with a method and
-/// a URI, the entry the URI names served. The hosts here give a request
-/// neither (`SG(request_info)` as the CLI leaves it), so the call ends
-/// where php's ends under the CLI.
+/// `PHAR_MIME_*`: what an entry's extension makes of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mime {
+    /// `PHAR_MIME_PHP`: included and served.
+    Php,
+    /// `PHAR_MIME_PHPS`: its source highlighted.
+    Phps,
+    /// `PHAR_MIME_OTHER`: sent as it is, under its type.
+    Other,
+}
+
+/// `PHAR_G(mime_types)` as `PHP_GINIT_FUNCTION(phar)` fills it
+/// (`Z/ext/phar/phar.c:3349-3388`).
+const MIME_TYPES: [(&str, &str, Mime); 40] = [
+    ("phps", "text/html", Mime::Phps),
+    ("c", "text/plain", Mime::Other),
+    ("cc", "text/plain", Mime::Other),
+    ("cpp", "text/plain", Mime::Other),
+    ("c++", "text/plain", Mime::Other),
+    ("dtd", "text/plain", Mime::Other),
+    ("h", "text/plain", Mime::Other),
+    ("log", "text/plain", Mime::Other),
+    ("rng", "text/plain", Mime::Other),
+    ("txt", "text/plain", Mime::Other),
+    ("xsd", "text/plain", Mime::Other),
+    ("php", "", Mime::Php),
+    ("inc", "", Mime::Php),
+    ("avi", "video/avi", Mime::Other),
+    ("bmp", "image/bmp", Mime::Other),
+    ("css", "text/css", Mime::Other),
+    ("gif", "image/gif", Mime::Other),
+    ("htm", "text/html", Mime::Other),
+    ("html", "text/html", Mime::Other),
+    ("htmls", "text/html", Mime::Other),
+    ("ico", "image/x-ico", Mime::Other),
+    ("jpe", "image/jpeg", Mime::Other),
+    ("jpg", "image/jpeg", Mime::Other),
+    ("jpeg", "image/jpeg", Mime::Other),
+    ("js", "application/x-javascript", Mime::Other),
+    ("midi", "audio/midi", Mime::Other),
+    ("mid", "audio/midi", Mime::Other),
+    ("mod", "audio/mod", Mime::Other),
+    ("mov", "movie/quicktime", Mime::Other),
+    ("mp3", "audio/mp3", Mime::Other),
+    ("mpg", "video/mpeg", Mime::Other),
+    ("mpeg", "video/mpeg", Mime::Other),
+    ("pdf", "application/pdf", Mime::Other),
+    ("png", "image/png", Mime::Other),
+    ("swf", "application/shockwave-flash", Mime::Other),
+    ("tif", "image/tiff", Mime::Other),
+    ("tiff", "image/tiff", Mime::Other),
+    ("wav", "audio/wav", Mime::Other),
+    ("xbm", "image/xbm", Mime::Other),
+    ("xml", "text/xml", Mime::Other),
+];
+
+/// `phar_file_type`: the type and the action the entry's extension
+/// names, `text/plain` where it has none and `application/octet-stream`
+/// where the table has none.
+fn file_type(entry: &[u8]) -> (Vec<u8>, Mime) {
+    let Some(dot) = entry.iter().rposition(|b| *b == b'.') else {
+        return (b"text/plain".to_vec(), Mime::Other);
+    };
+    let ext = &entry[dot + 1..];
+    MIME_TYPES
+        .iter()
+        .find(|(name, _, _)| name.as_bytes() == ext)
+        .map_or(
+            (b"application/octet-stream".to_vec(), Mime::Other),
+            |(_, mime, kind)| (mime.as_bytes().to_vec(), *kind),
+        )
+}
+
+/// What ends the request once the front controller has answered it:
+/// php's `zend_bailout()`, which leaves the status as it stands, as an
+/// `exit("")` does.
+fn bailout(req: &mut Request) -> Thrown {
+    match PhpString::new(req, b"") {
+        Ok(empty) => {
+            let status = Value::string(empty);
+            let thrown = php_ext::raising::exit(req, &status);
+            req.release(status);
+            thrown
+        }
+        Err(thrown) => thrown,
+    }
+}
+
+/// A string row of `$_SERVER` as it stands, made or not.
+fn server_row(req: &mut Request, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+    let Some(server) = req.made_superglobal(b"_SERVER") else {
+        return Ok(None);
+    };
+    let key = PhpString::new(req, name)?;
+    let found = server
+        .get(&Key::Str(key))
+        .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec));
+    req.release(Value::string(key));
+    Ok(found)
+}
+
+/// A row of `$_SERVER` replaced, what it held kept under `kept`.
+fn swap_server(
+    req: &mut Request,
+    name: &[u8],
+    kept: &[u8],
+    old: &[u8],
+    new: &[u8],
+) -> Result<(), Thrown> {
+    let value = Value::string(PhpString::new(req, new)?);
+    req.update_server(name, value)?;
+    let value = Value::string(PhpString::new(req, old)?);
+    req.update_server(kept, value)
+}
+
+/// `phar_mung_server_vars` (`Z/ext/phar/phar_object.c:57`): `PATH_INFO`
+/// past the entry and `PATH_TRANSLATED` into the archive, always, and the
+/// rows `mungServer()` named, each old value kept under `PHAR_` and its
+/// name; nothing where the program never made `$_SERVER`.
+fn mung_server_vars(
+    req: &mut Request,
+    fname: &[u8],
+    entry: &[u8],
+    basename: &[u8],
+    ru_len: usize,
+) -> Result<(), Thrown> {
+    if req.made_superglobal(b"_SERVER").is_none() {
+        return Ok(());
+    }
+    let mut url = b"phar://".to_vec();
+    url.extend_from_slice(fname);
+    url.extend_from_slice(entry);
+    if let Some(info) = server_row(req, b"PATH_INFO")?
+        && info.len() > entry.len()
+        && info.starts_with(entry)
+    {
+        let end = (entry.len() + ru_len).min(info.len());
+        swap_server(
+            req,
+            b"PATH_INFO",
+            b"PHAR_PATH_INFO",
+            &info,
+            &info[entry.len()..end],
+        )?;
+    }
+    if let Some(translated) = server_row(req, b"PATH_TRANSLATED")? {
+        swap_server(
+            req,
+            b"PATH_TRANSLATED",
+            b"PHAR_PATH_TRANSLATED",
+            &translated,
+            &url,
+        )?;
+    }
+    let mung = req.state::<crate::State>().mung;
+    for (bit, name, kept) in [
+        (
+            MUNG_REQUEST_URI,
+            &b"REQUEST_URI"[..],
+            &b"PHAR_REQUEST_URI"[..],
+        ),
+        (MUNG_PHP_SELF, b"PHP_SELF", b"PHAR_PHP_SELF"),
+    ] {
+        if mung & bit != 0
+            && let Some(old) = server_row(req, name)?
+            && old.len() > basename.len()
+            && old.starts_with(basename)
+        {
+            swap_server(req, name, kept, &old, &old[basename.len()..])?;
+        }
+    }
+    if mung & MUNG_SCRIPT_NAME != 0
+        && let Some(old) = server_row(req, b"SCRIPT_NAME")?
+    {
+        swap_server(req, b"SCRIPT_NAME", b"PHAR_SCRIPT_NAME", &old, entry)?;
+    }
+    if mung & MUNG_SCRIPT_FILENAME != 0
+        && let Some(old) = server_row(req, b"SCRIPT_FILENAME")?
+    {
+        swap_server(req, b"SCRIPT_FILENAME", b"PHAR_SCRIPT_FILENAME", &old, &url)?;
+    }
+    Ok(())
+}
+
+/// `phar_file_action` (`Z/ext/phar/phar_object.c:143`): the entry
+/// answered as its type says, and the request ended; `Ok` where an
+/// included entry could not be compiled or was already included, which
+/// `webPhar()` then returns from.
+fn file_action(
+    req: &mut Request,
+    id: ArchiveId,
+    slot: usize,
+    (mime, kind): (&[u8], Mime),
+    entry: &[u8],
+    fname: &[u8],
+    basename: Option<(&[u8], usize)>,
+) -> Result<(), Thrown> {
+    let mut name = b"phar://".to_vec();
+    name.extend_from_slice(fname);
+    if entry.first() != Some(&b'/') {
+        name.push(b'/');
+    }
+    name.extend_from_slice(entry);
+    match kind {
+        Mime::Phps => {
+            let function = Value::string(PhpString::new(req, b"highlight_file")?);
+            let callable = php_ext::coerce::callable_checked(req, &function);
+            req.release(function);
+            if let Ok(callable) = callable {
+                let name = Value::string(PhpString::new(req, &name)?);
+                let highlighted = php_ext::call::call(req, &callable, &[name]);
+                req.release(name);
+                req.release(highlighted?);
+            }
+            Err(bailout(req))
+        }
+        Mime::Other => {
+            let mut line = b"Content-type: ".to_vec();
+            line.extend_from_slice(mime);
+            req.header_add(&line, true, 0);
+            let size = archives(req)
+                .get(id)
+                .and_then(|a| a.manifest.at(slot))
+                .map_or(0, |e| e.uncompressed_filesize);
+            req.header_add(format!("Content-length: {size}").as_bytes(), true, 0);
+            let bytes = entry::contents(req, id, slot)?;
+            req.write(&bytes);
+            Err(bailout(req))
+        }
+        Mime::Php => {
+            if let Some((basename, ru_len)) = basename {
+                mung_server_vars(req, fname, entry, basename, ru_len)?;
+            }
+            let dir = entry.iter().rposition(|b| *b == b'/');
+            let state = req.state::<crate::State>();
+            state.cwd = None;
+            if let Some(cut) = dir {
+                state.cwd_init = true;
+                let start = usize::from(entry.first() == Some(&b'/'));
+                state.cwd = (cut > 0).then(|| entry[start..cut].to_vec());
+            }
+            let served = php_ext::call::load_file(req, &name);
+            let state = req.state::<crate::State>();
+            state.cwd = None;
+            state.cwd_init = false;
+            if served? {
+                return Err(bailout(req));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// `phar_do_403`: the status line and php's page.
+fn do_403(req: &mut Request) -> Thrown {
+    req.header_add(b"HTTP/1.0 403 Access Denied", true, 403);
+    req.write(b"<html>\n <head>\n  <title>Access Denied</title>\n </head>\n <body>\n  <h1>403 - File Access Denied</h1>\n </body>\n</html>");
+    bailout(req)
+}
+
+/// `phar_do_404`: the not-found file where one is named and the
+/// archive has it, else the status line and php's page.
+fn do_404(
+    req: &mut Request,
+    id: Option<ArchiveId>,
+    fname: &[u8],
+    f404: Option<&[u8]>,
+) -> Result<(), Thrown> {
+    if let (Some(id), Some(f404)) = (id, f404.filter(|f| !f.is_empty()))
+        && let Ok(Found::Slot(slot)) = entry::find(req, id, f404, Dir::No, true)?
+    {
+        file_action(req, id, slot, (b"text/html", Mime::Php), f404, fname, None)?;
+        return Err(bailout(req));
+    }
+    req.header_add(b"HTTP/1.0 404 Not Found", true, 404);
+    req.write(b"<html>\n <head>\n  <title>File Not Found</title>\n </head>\n <body>\n  <h1>404 - File Not Found</h1>\n </body>\n</html>");
+    Err(bailout(req))
+}
+
+/// `phar_postprocess_ru_web`: the longest leading part of the entry the
+/// archive holds, and what follows it, `/` first, as the request URI's
+/// rest; the entry as it stands where no part is held.
+fn postprocess_ru_web(req: &mut Request, id: ArchiveId, entry: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let e = entry.get(1..)?.to_vec();
+    let mut cut = e.len();
+    loop {
+        let held = archives(req)
+            .get(id)
+            .is_some_and(|a| a.manifest.slot(&e[..cut]).is_some());
+        if held {
+            entry.truncate(cut + 1);
+            return (cut < e.len()).then(|| e[cut..].to_vec());
+        }
+        cut = e[..cut].iter().rposition(|b| *b == b'/')?;
+    }
+}
+
+/// `Phar::webPhar()` (`Z/ext/phar/phar_object.c:548`): the file being
+/// served read as an archive, as `mapPhar()` reads it; then, for a
+/// request of the web with a method php serves and a URI, the entry the
+/// path names: under CGI the `PATH_INFO` after the `SCRIPT_NAME` that
+/// names the archive, `$_SERVER`'s where the program made it and the
+/// environment's where it did not; passed through the rewrite callback;
+/// the archive's index answered with a 301 to it, an entry the archive
+/// has not with the 404 file or page, and any other included and
+/// served, highlighted or sent as its extension says. Answering ends the
+/// request. The CLI has no such request, so there the call ends after
+/// the read, as php's does.
 pub(crate) fn web_phar(
     req: &mut Request,
     alias: Option<PhpString>,
@@ -171,10 +474,250 @@ pub(crate) fn web_phar(
     mimes: PhpArray,
     rewrite: Option<Callable>,
 ) -> Result<(), Thrown> {
-    let _ = (index, missing, mimes, rewrite);
     let alias = alias.map(|a| a.as_bytes().to_vec());
     match open::open_executed(req, alias.as_deref())? {
-        Ok(()) | Err(None) => Ok(()),
-        Err(Some(error)) => Err(throw(req, "PharException", &error)),
+        Ok(()) => {}
+        Err(None) => return Ok(()),
+        Err(Some(error)) => return Err(throw(req, "PharException", &error)),
     }
+    let served = req.request_method().is_some_and(|m| METHODS.contains(&m));
+    if !served || req.request_uri().is_none() {
+        return Ok(());
+    }
+    let Some(fname) = req.current_file().map(<[u8]>::to_vec) else {
+        return Ok(());
+    };
+    let basename = fname
+        .iter()
+        .rposition(|b| *b == b'/')
+        .map_or(fname.as_slice(), |at| &fname[at + 1..])
+        .to_vec();
+    let Some(located) = locate(req, &basename)? else {
+        return Ok(());
+    };
+    let Located {
+        mut entry,
+        path_info,
+        pt,
+        not_cgi,
+    } = located;
+    if let Some(rewrite) = rewrite {
+        entry = rewritten(req, &rewrite, &entry)?;
+    }
+    let id = crate::archive::get_archive(req, &fname, None).ok();
+    let mut ru = None;
+    if !entry.is_empty()
+        && let Some(id) = id
+    {
+        ru = postprocess_ru_web(req, id, &mut entry);
+    }
+    let f404 = missing.map(|m| m.as_bytes().to_vec());
+    if entry.is_empty() || entry == b"/" {
+        let mut index = index
+            .map(|i| i.as_bytes().to_vec())
+            .filter(|i| !i.is_empty())
+            .unwrap_or_else(|| b"/index.php".to_vec());
+        if index.first() != Some(&b'/') {
+            index.insert(0, b'/');
+        }
+        let found = match id {
+            Some(id) => entry::find(req, id, &index, Dir::No, false)?,
+            None => Err(None),
+        };
+        if !matches!(found, Ok(Found::Slot(_))) {
+            return do_404(req, id, &fname, f404.as_deref());
+        }
+        return Err(moved(
+            req,
+            &index,
+            &path_info,
+            not_cgi.then_some(basename.as_slice()),
+        ));
+    }
+    let slot = match id {
+        Some(id) => match entry::find(req, id, &entry, Dir::No, false)? {
+            Ok(Found::Slot(slot)) => slot,
+            _ => return do_404(req, Some(id), &fname, f404.as_deref()),
+        },
+        None => return do_404(req, None, &fname, f404.as_deref()),
+    };
+    let Some(id) = id else {
+        return Ok(());
+    };
+    let (mime, kind) = mime_of(req, &entry, mimes)?;
+    let ru_len = ru.as_ref().map_or(0, Vec::len);
+    file_action(
+        req,
+        id,
+        slot,
+        (&mime, kind),
+        &entry,
+        &fname,
+        Some((&pt, ru_len)),
+    )
+}
+
+/// The methods `webPhar()` answers a request of.
+const METHODS: [&[u8]; 7] = [
+    b"GET", b"POST", b"DELETE", b"HEAD", b"OPTIONS", b"PATCH", b"PUT",
+];
+
+/// The entry the rewrite callback answers for `entry`: a string is the
+/// entry, `true` or `false` the 403, anything else php's
+/// `PharException`.
+fn rewritten(req: &mut Request, rewrite: &Callable, entry: &[u8]) -> Result<Vec<u8>, Thrown> {
+    let param = Value::string(PhpString::new(req, entry)?);
+    let answered = php_ext::call::call(req, rewrite, &[param]);
+    req.release(param);
+    // A callback that threw left no return value: php's own exception
+    // then, the thrown one its previous (`zend_throw_exception_ex` over a
+    // pending one).
+    let answered = answered.map_err(|thrown| {
+        php_ext::raising::throw_chained(
+            req,
+            thrown,
+            "PharException",
+            "phar error: rewrite callback must return a string or false",
+        )
+    })?;
+    if let Some(rewritten) = answered.as_str_bytes().map(<[u8]>::to_vec) {
+        req.release(answered);
+        return Ok(rewritten);
+    }
+    if answered.as_bool().is_some() {
+        return Err(do_403(req));
+    }
+    req.release(answered);
+    Err(throw(
+        req,
+        "PharException",
+        "phar error: rewrite callback must return a string or false",
+    ))
+}
+
+/// A request for the archive itself moved to its index, a 301 to the
+/// path with the index after it, the path cut after the archive's name
+/// outside CGI, and the request ended.
+fn moved(req: &mut Request, index: &[u8], path_info: &[u8], cut_after: Option<&[u8]>) -> Thrown {
+    req.header_add(b"HTTP/1.1 301 Moved Permanently", true, 301);
+    let mut base = path_info.to_vec();
+    if let Some(basename) = cut_after
+        && let Some(at) = crate::path::find(&base, basename)
+    {
+        base.truncate(at + basename.len());
+    }
+    let mut location = b"Location: ".to_vec();
+    location.extend_from_slice(&base);
+    if base.last() == Some(&b'/') {
+        location.extend_from_slice(&index[1..]);
+    } else {
+        location.extend_from_slice(index);
+    }
+    req.header_add(&location, true, 0);
+    bailout(req)
+}
+
+/// Where the request's path puts the entry, and what the 301 and the
+/// server rows are built from.
+struct Located {
+    entry: Vec<u8>,
+    path_info: Vec<u8>,
+    pt: Vec<u8>,
+    not_cgi: bool,
+}
+
+/// The entry the request's path names past the archive's own name: from
+/// `SCRIPT_NAME` and `PATH_INFO` under CGI's hosts, from the request URI
+/// under any other; `None` where the path does not name the archive.
+fn locate(req: &mut Request, basename: &[u8]) -> Result<Option<Located>, Thrown> {
+    let cgi = matches!(
+        req.sapi_name(),
+        "cgi-fcgi" | "fpm-fcgi" | "cgi" | "litespeed"
+    );
+    if !cgi {
+        let path_info = req.request_uri().unwrap_or_default().to_vec();
+        let Some(at) = crate::path::find(&path_info, basename) else {
+            return Ok(None);
+        };
+        let end = at + basename.len();
+        return Ok(Some(Located {
+            entry: path_info[end..].to_vec(),
+            pt: path_info[..end].to_vec(),
+            path_info,
+            not_cgi: true,
+        }));
+    }
+    if req.made_superglobal(b"_SERVER").is_some() {
+        let Some(script_name) = server_row(req, b"SCRIPT_NAME")? else {
+            return Ok(None);
+        };
+        if crate::path::find(&script_name, basename).is_none() {
+            return Ok(None);
+        }
+        let entry = server_row(req, b"PATH_INFO")?.unwrap_or_default();
+        let mut path_info = script_name.clone();
+        path_info.extend_from_slice(&entry);
+        return Ok(Some(Located {
+            entry,
+            path_info,
+            pt: script_name,
+            not_cgi: false,
+        }));
+    }
+    let env = |req: &Request, name: &[u8]| {
+        req.env_pairs()
+            .iter()
+            .find(|(had, _)| had == name)
+            .map(|(_, value)| value.clone())
+    };
+    let Some(testit) = env(req, b"SCRIPT_NAME") else {
+        return Ok(None);
+    };
+    let Some(at) = crate::path::find(&testit, basename) else {
+        return Ok(None);
+    };
+    let entry = env(req, b"PATH_INFO").unwrap_or_default();
+    let mut path_info = testit.clone();
+    path_info.extend_from_slice(&entry);
+    Ok(Some(Located {
+        entry,
+        path_info,
+        pt: testit[..(at + basename.len()).min(testit.len())].to_vec(),
+        not_cgi: false,
+    }))
+}
+
+/// The type an entry is answered as: the `$mimeTypes` override for its
+/// extension, `Phar::PHP` or `Phar::PHPS` or a type's name, and the
+/// table's otherwise.
+fn mime_of(req: &mut Request, entry: &[u8], mimes: PhpArray) -> Result<(Vec<u8>, Mime), Thrown> {
+    if !mimes.is_empty()
+        && let Some(dot) = entry.iter().rposition(|b| *b == b'.')
+    {
+        let ext = PhpString::new(req, &entry[dot + 1..])?;
+        let found = mimes.get(&Key::Str(ext));
+        req.release(Value::string(ext));
+        if let Some(value) = found {
+            if let Some(code) = value.as_int() {
+                return match code {
+                    0 => Ok((Vec::new(), Mime::Php)),
+                    1 => Ok((Vec::new(), Mime::Phps)),
+                    _ => Err(throw(
+                        req,
+                        "PharException",
+                        "Unknown mime type specifier used, only Phar::PHP, Phar::PHPS and a mime type string are allowed",
+                    )),
+                };
+            }
+            if let Some(mime) = value.as_str_bytes() {
+                return Ok((mime.to_vec(), Mime::Other));
+            }
+            return Err(throw(
+                req,
+                "PharException",
+                "Unknown mime type specifier used (not a string or int), only Phar::PHP, Phar::PHPS and a mime type string are allowed",
+            ));
+        }
+    }
+    Ok(file_type(entry))
 }

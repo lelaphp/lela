@@ -222,6 +222,11 @@ pub(crate) fn local_template() -> String {
     out
 }
 
+/// What the divergence section says under its counts when it shows the
+/// `open` rows alone: where the rest is read, reasons whole.
+const EVERY_ROW: &str = "Every row with its reason whole: \
+`cargo xtask status --section divergence --uncut`, which `docs/divergence.md` renders.";
+
 /// The widest a reading's message renders in a Markdown cell, in
 /// characters. A Markdown table is what a session scans, and the local
 /// facts it is handed at start are eight sections under the engine's cap
@@ -229,11 +234,11 @@ pub(crate) fn local_template() -> String {
 /// most this many, and a number the reading holds at zero, which says
 /// nothing happened, is left out of its `numbers` cell. `--format json`
 /// is the reading whole, every number and the message uncut (#820). A
-/// rule's text is rendered as written. A divergence's reason is cut to
-/// the same width, since the registry only grows and the facts block
-/// has a cap. The reason stays whole in `docs/divergence.toml`, under
-/// `--uncut` (which `docs/divergence.md` renders) and under
-/// `--format json` (Mitchell, 2026-09-26).
+/// rule's text is rendered as written. An `open` divergence's reason is
+/// cut to the same width, the only rows the facts block lists (#821);
+/// every reason stays whole in `docs/divergence.toml`, under `--uncut`
+/// (which `docs/divergence.md` renders) and under `--format json`
+/// (Mitchell, 2026-09-26).
 const MESSAGE_WIDTH: usize = 120;
 
 /// `text` as a cell of at most [`MESSAGE_WIDTH`] characters, the last an
@@ -461,6 +466,12 @@ fn fold_uncreated(rows: Vec<Row>, key: &str) -> Result<Vec<Row>> {
 /// how many ids it covers beside its own, then counts by kind (rows) and status (columns)
 /// with a total, a covering row counted once. It reads no reading; the
 /// registry is the truth and this is its view (harness-design.md §4.3).
+///
+/// Under `uncut` the rows are every row with its reason whole, which is
+/// what `docs/divergence.md` renders. Without it they are the `open` rows
+/// alone, since `done` fails while one touches the scope, followed by the
+/// command that reads the rest: the local facts carry this, and it grows
+/// with the kinds and not with each accepted row (#821).
 fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String> {
     let counts = registry.counts();
     let kinds = Kind::ALL
@@ -503,9 +514,16 @@ fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String
         }
         Format::Md => {
             let mut out = String::new();
-            let _ = writeln!(out, "| id | kind | status | since | reason |");
-            let _ = writeln!(out, "|---|---|---|---|---|");
-            for row in registry.rows() {
+            let shown: Vec<_> = registry
+                .rows()
+                .iter()
+                .filter(|r| uncut || r.status == Status::Open)
+                .collect();
+            if !shown.is_empty() {
+                let _ = writeln!(out, "| id | kind | status | since | reason |");
+                let _ = writeln!(out, "|---|---|---|---|---|");
+            }
+            for row in &shown {
                 let id = match row.covers.len() {
                     0 => cell(row.id.as_str()),
                     n => format!("{} (covers {n})", cell(row.id.as_str())),
@@ -523,7 +541,9 @@ fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String
                     }
                 );
             }
-            let _ = writeln!(out);
+            if !shown.is_empty() {
+                let _ = writeln!(out);
+            }
             let _ = writeln!(out, "| kind | open | accepted | fixed | rows |");
             let _ = writeln!(out, "|---|---|---|---|---|");
             for kind in kinds {
@@ -545,6 +565,9 @@ fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String
                 of(Status::Fixed),
                 registry.rows().len()
             );
+            if !uncut {
+                let _ = writeln!(out, "\n{EVERY_ROW}");
+            }
             Ok(out)
         }
     }

@@ -14,6 +14,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use xtask::carried::Carried;
 use xtask::cli::{Format, Section};
 use xtask::crosscheck::{self, Ask, Column};
 use xtask::divergence::Registry;
@@ -189,11 +190,12 @@ fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_h
     }
     let scratch = Scratch::new("default");
     let readings = scratch.run(&Ask::default());
+    let carried = Carried::binary(&scratch.root).unwrap();
     let default: Vec<&str> = scratch
         .manifest
         .crates
         .iter()
-        .filter(|c| c.name.starts_with("ext/") && !c.optional())
+        .filter(|c| c.name.starts_with("ext/") && carried.carries(c))
         .map(|c| c.name.as_str())
         .collect();
     assert!(default.contains(&"ext/ctype"), "{default:?}");

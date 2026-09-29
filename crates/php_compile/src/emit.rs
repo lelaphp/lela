@@ -13874,16 +13874,19 @@ impl Emit<'_> {
     /// (`zend_eval_const_expr`), so `(float)1` stands as an opline.
     fn cast(&mut self, to: CastTo, operand: tree::Expr) -> Result<Where, CompileError> {
         let operand = self.expr(operand)?;
-        Ok(match to {
-            CastTo::Bool => self.emit_unary(Opcode::Bool, operand, 0),
-            _ => self.emit_unary(Opcode::Cast, operand, to.type_code()),
-        })
+        Ok(self.emit_cast(operand, to))
     }
 
-    /// `ZEND_CAST` of `operand` to `to` into a temporary, what
+    /// `operand` converted to `to` into a temporary: `ZEND_BOOL` for a
+    /// bool and `ZEND_CAST` with the type in `extended_value` for the
+    /// rest. What `zend_compile_cast` emits, what `zend_compile_func_cast`
+    /// emits for `boolval`, `intval`, `floatval` and `strval`, and what
     /// `zend_compile_func_sprintf` emits before a `%d` and an array's `%s`.
     pub(crate) fn emit_cast(&mut self, operand: Where, to: CastTo) -> Where {
-        self.emit_unary(Opcode::Cast, operand, to.type_code())
+        match to {
+            CastTo::Bool => self.emit_unary(Opcode::Bool, operand, 0),
+            _ => self.emit_unary(Opcode::Cast, operand, to.type_code()),
+        }
     }
 
     /// `zend_emit_op_tmp(result, opcode, NULL, NULL)`: the opline with
@@ -14121,11 +14124,16 @@ impl Emit<'_> {
                     _ => Err(self.unread("a unary operator")),
                 }
             }
+            // `zend_compile_cast` folds nothing, which [`Self::cast`]
+            // copies: under a compile the cast is its opline, a `TMP`,
+            // and no fold over it happens, so `-(float)"0"` is the `CAST`
+            // and the `MUL` over it.
+            tree::Expr::CastExpr(_) if self.fold == Fold::Compile => {
+                Err(self.fatal("a cast compiled is its opline"))
+            }
             // `zend_eval_const_expr`'s `ZEND_AST_CAST` arm: the operand
-            // folded, then `zend_try_ct_eval_cast` over it;
-            // `zend_compile_cast` itself folds nothing, which
-            // [`Self::cast`] copies. `(unset)` is refused where it
-            // stands, as php's grammar puts it.
+            // folded, then `zend_try_ct_eval_cast` over it. `(unset)` is
+            // refused where it stands, as php's grammar puts it.
             tree::Expr::CastExpr(id) => {
                 let node = &tree[id];
                 let to = self.cast_to(node.op, line)?;
@@ -16248,6 +16256,29 @@ impl Emit<'_> {
     fn function_name(&self, name: &[u8]) -> (Vec<u8>, bool) {
         let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Function);
         (resolved, !fully_qualified && self.namespace.is_some())
+    }
+
+    /// A call of a name written as such, `ZEND_AST_CALL` whose name is a
+    /// `ZEND_AST_ZVAL` string: that name lowered as
+    /// `zend_resolve_function_name` resolves it through the file's
+    /// imports, and the arguments as written; nothing for a call of
+    /// anything else, a parenthesised name among them, which php's
+    /// grammar makes a constant, and nothing for anything but a call.
+    /// What `zend_compile_func_array_slice` and `zend_compile_func_cufa`
+    /// read of the call written as their argument.
+    pub(crate) fn named_call(&self, expr: tree::Expr) -> Option<(Vec<u8>, &[tree::Arg])> {
+        let tree::Expr::CallExpr(call) = self.peel(expr) else {
+            return None;
+        };
+        let node = &self.parsed.tree[call];
+        let tree::Expr::NameRef(name) = node.callee else {
+            return None;
+        };
+        let (resolved, _) = self.function_name(self.text(name));
+        Some((
+            resolved.to_ascii_lowercase(),
+            &self.parsed.tree[node.args].args,
+        ))
     }
 
     /// [`Self::function_name`] for a constant, `zend_resolve_const_name`,

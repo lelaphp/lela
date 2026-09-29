@@ -20,6 +20,10 @@
 //! for a fence served here as for one served by the linked engine (harness
 //! §4.5 condition 2, revision 58), what a fence entered and nothing it
 //! only spells.
+//!
+//! A fence with a `request` is served by the same binary run as php-cgi,
+//! through a link of that name, beside php-cgi for the oracle
+//! ([`served_as_cgi`], #1197).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +34,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::anchor::Entry;
 use crate::oracle::{Invocation, Observation, Oracle, Program};
+use crate::phpt::{cgi, file::Phpt};
 use crate::scratch::Tree;
 
 /// The binary's name, `crates/php`'s second `[[bin]]`.
@@ -49,7 +54,7 @@ pub(crate) struct Binary {
 
 impl Binary {
     /// The binary of the workspace at `root`, not yet built.
-    pub(super) fn of(root: &Path) -> Binary {
+    pub(crate) fn of(root: &Path) -> Binary {
         Binary {
             root: root.to_path_buf(),
             built: OnceLock::new(),
@@ -69,7 +74,7 @@ impl Binary {
     /// after it where the fence names one, as the oracle serves it; with
     /// the natives every request it served entered, in the order they
     /// were appended.
-    pub(super) fn serve(
+    pub(crate) fn serve(
         &self,
         oracle: &Oracle<'_>,
         snippet: &str,
@@ -78,7 +83,7 @@ impl Binary {
         let binary = self.path()?;
         let traces = Tree::new("witness-trace")?;
         let trace = traces.join("entered");
-        let env = [(TRACE.to_owned(), trace.display().to_string())];
+        let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
         let observed = oracle.run_under(&Invocation {
             regime,
             env: &env,
@@ -89,6 +94,67 @@ impl Binary {
         let text = fs::read_to_string(&trace).unwrap_or_default();
         Ok((observed, text.lines().filter_map(Entry::parse).collect()))
     }
+}
+
+impl Binary {
+    /// `snippet` served as the request `request` describes by the binary
+    /// run as php-cgi, as [`Binary::serve`] serves a `process` fence; with
+    /// the natives it entered.
+    pub(super) fn serve_cgi(
+        &self,
+        oracle: &Oracle<'_>,
+        snippet: &str,
+        request: &str,
+    ) -> Result<(Observation, Vec<Entry>)> {
+        let binary = self.path()?;
+        let hosts = Tree::new("witness-cgi")?;
+        let host = cgi::linked(binary, hosts.path())?;
+        let traces = Tree::new("witness-trace")?;
+        let trace = traces.join("entered");
+        let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
+        let observed = served_as_cgi(oracle, &host, snippet, request, &env)?;
+        let text = fs::read_to_string(&trace).unwrap_or_default();
+        Ok((observed, text.lines().filter_map(Entry::parse).collect()))
+    }
+}
+
+/// `snippet` served as a request of the web by the CGI host `host`: the
+/// program written as the recipe's `script_name` in a tree of its own,
+/// with the recipe's preamble; the request `request`'s sections describe
+/// translated as the phpt lane translates a CGI-shaped test's
+/// ([`cgi::request`]), over `env` with the request's `--ENV--` after it;
+/// and the program run under the recipe by its path with `-C -f` before
+/// it, the body on stdin. What the oracle
+/// and the engine are each held to for a fence with a `request`.
+pub(crate) fn served_as_cgi(
+    oracle: &Oracle<'_>,
+    host: &Path,
+    snippet: &str,
+    request: &str,
+    env: &[(String, std::ffi::OsString)],
+) -> Result<Observation> {
+    let recipe = &oracle.pin().recipe;
+    let own = Tree::new("witness-request")?;
+    let program = own.join(&recipe.script_name);
+    fs::write(&program, format!("{}{snippet}", recipe.preamble))
+        .with_context(|| format!("writing {}", program.display()))?;
+    let test = format!("--TEST--\nwitness\n{request}\n--FILE--\n\n--EXPECT--\n\n");
+    let path = own.join("witness.phpt");
+    let phpt = Phpt::parse(&path, test.as_bytes())
+        .map_err(|borked| anyhow!("the request fence is not a test's sections: {borked}"))?;
+    let program = crate::oracle::run_by(&program)?;
+    let mut env = env.to_vec();
+    env.extend(crate::phpt::env_of(&phpt, &path));
+    let described = cgi::request(&phpt, &program, &env)
+        .map_err(|(_, why)| anyhow!("the request fence describes no request: {why}"))?;
+    let flags = [String::from("-C"), String::from("-f")];
+    oracle.run_under(&Invocation {
+        flags: &flags,
+        args: &described.args,
+        env: &described.env,
+        stdin: described.stdin.as_deref(),
+        ..Invocation::new(host, Program::File(&program))
+    })
 }
 
 /// `cargo build -p php --bin php-witness --features witness-trace` in
