@@ -4,6 +4,10 @@ bench::Label
 bench::REPS
 bench::run
 budget::run
+carried::BINARY
+carried::Carried
+carried::Carried::binary
+carried::Carried::carries
 cli::Format
 cli::Section
 clippy::run
