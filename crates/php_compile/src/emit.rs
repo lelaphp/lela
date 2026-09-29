@@ -5383,6 +5383,13 @@ impl Emit<'_> {
     /// ```
     ///
     /// ```php
+    /// interface A { protected const FOO = 10; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access type for interface constant A::FOO must be public in %s on line 2
+    /// ```
+    ///
+    /// ```php
     /// class A { const CLASS = 1; }
     /// ```
     /// ```expect exit=255
@@ -5419,6 +5426,12 @@ impl Emit<'_> {
                     "Cannot use {} as value for class constant {member} of type {}",
                     zval_type_name(kind),
                     php_unit::type_to_string(ty)
+                )));
+            }
+            // `zend_declare_typed_class_constant`'s first test.
+            if decl.kind == ClassKind::Interface && constant.visibility != Visibility::Public {
+                return Err(self.compile_error(format!(
+                    "Access type for interface constant {member} must be public"
                 )));
             }
             if constant.name.eq_ignore_ascii_case(b"class") {
