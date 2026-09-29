@@ -24,7 +24,9 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
 use php_ext::coerce::{to_callable, to_string, truthy};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Level, Thrown, arg_value_error, arity, docref, new_throwable, throw_value};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, arity, docref, new_throwable, throw_chained, throw_value,
+};
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
 
@@ -249,6 +251,20 @@ fn flag(req: &Request, name: &[u8]) -> bool {
 /// witness.php:13 NULL bail
 /// ```
 ///
+/// What the callback throws, or its resolution does, stands pending
+/// while the assertion goes on, as `call_user_function` leaves it, and
+/// the `AssertionError` chains it as its `previous`:
+///
+/// ```php
+/// function cb() { throw new Exception("from the callback"); }
+/// ini_set("assert.callback", "cb");
+/// try { assert(false); } catch (AssertionError $e) { echo $e->getMessage(), " / ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Deprecated: ini_set(): assert.callback INI setting is deprecated in %s on line 3
+/// assert(false) / from the callback
+/// ```
+///
 /// Under `assert.bail` without `assert.exception` the request ends there,
 /// through `zend_throw_unwind_exit`, with status zero.
 ///
@@ -299,8 +315,11 @@ fn assert(
             .map(<[u8]>::to_vec)
             .and_then(|cb| PhpString::new(req, &cb).ok().map(Value::string))
     });
+    // `call_user_function`: what the callback, or its resolution,
+    // throws stands pending while the assertion goes on, and an
+    // `AssertionError` chains it as its `previous`.
+    let mut pending = None;
     if let Some(callback) = callback {
-        let callable = to_callable(req, &callback)?;
         let file = req.current_file().unwrap_or(b"Unknown").to_vec();
         let line = i64::from(req.current_line());
         let mut arguments = vec![
@@ -311,26 +330,39 @@ fn assert(
         if let Some(text) = &text {
             arguments.push(Value::string(PhpString::new(req, text)?));
         }
-        let returned = call(req, &callable, &arguments);
+        let returned =
+            to_callable(req, &callback).and_then(|callable| call(req, &callable, &arguments));
         for argument in arguments {
             req.release(argument);
         }
-        req.release(returned?);
+        match returned {
+            Ok(returned) => req.release(returned),
+            Err(thrown) => pending = Some(thrown),
+        }
     }
     let message = text.as_deref().map(String::from_utf8_lossy);
     if flag(req, b"assert.exception") {
-        let error = new_throwable(req, "AssertionError", message.as_deref().unwrap_or(""))?;
-        if let Some(object) = error.as_object() {
+        let message = message.as_deref().unwrap_or("");
+        let thrown = if let Some(previous) = pending {
+            throw_chained(req, previous, "AssertionError", message)
+        } else {
+            let error = new_throwable(req, "AssertionError", message)?;
+            let thrown = throw_value(req, &error);
+            req.release(error);
+            thrown
+        };
+        if let Some(object) = thrown.exception() {
             let code = PhpString::new(req, b"code")?;
             object.set_prop(req, code, Value::int(E_ERROR))?;
         }
-        let thrown = throw_value(req, &error);
-        req.release(error);
         return Err(thrown);
     }
     if flag(req, b"assert.warning") {
         let what = message.as_deref().unwrap_or("Assertion");
         docref(req, Level::Warning, &format!("{what} failed"));
+    }
+    if let Some(thrown) = pending {
+        return Err(thrown);
     }
     if flag(req, b"assert.bail") {
         return Err(php_ext::raising::exit(req, &Value::int(0)));
