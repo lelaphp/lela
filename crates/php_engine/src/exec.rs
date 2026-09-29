@@ -489,6 +489,11 @@ pub(crate) struct CallState {
     /// php's `str_tmp`: what a coercion made for a frameless call, freed
     /// with the call as `Z_FLF_PARAM_FREE_STR` frees it at the body's end.
     pub(crate) coerced: Vec<Value>,
+    /// How far down its native's chain of interceptions the call is
+    /// served: zero for the entry the function table holds, the last
+    /// interception's, and one more for each
+    /// [`crate::api::call::passthrough`] to the entry that one replaced.
+    pub(crate) beneath: usize,
 }
 
 /// `USED_RET()`: whether a call's caller reads what it returns. It is

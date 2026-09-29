@@ -1196,15 +1196,28 @@ pub fn internal_iterator(req: &mut Request, object: &PhpObject) -> Result<PhpObj
     crate::interfaces::internal_iterator(req, *object)
 }
 
-/// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry an
-/// interception replaced for the native being served
+/// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry the
+/// interception serving the call replaced
 /// ([`crate::api::abi::ExtensionBuilder::intercept`]), served on the same
 /// call, its arguments and its return the caller's, the first argument
 /// replaced by `first` where one is given, as phar's interceptors open
 /// the `phar://` name they made of a relative path; `null` where the
-/// native is not intercepted.
+/// entry serving is the native's own. Interceptions stack in bundle
+/// order, as php saves each handler over the one before it, so the
+/// last passes through to the one it replaced and that one on down to
+/// the native: `file_exists` is opcache's over phar's over
+/// `ext/standard`'s, each handing on what it does not answer itself.
+///
+/// ```php
+/// var_dump(file_exists(__FILE__), is_file(__DIR__), is_readable(__DIR__ . '/nowhere'));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ```
 pub fn passthrough(req: &mut Request, first: Option<Value>) -> Result<Value, Thrown> {
-    let Some(entry) = req.replaced_entry() else {
+    let Some((entry, beneath)) = req.replaced_entry() else {
         if let Some(first) = first {
             req.release(first);
         }
@@ -1213,7 +1226,11 @@ pub fn passthrough(req: &mut Request, first: Option<Value>) -> Result<Value, Thr
     if let Some(first) = first {
         req.replace_first_argument(first);
     }
-    entry(req)
+    let above = beneath.saturating_sub(1);
+    req.serve_beneath(beneath);
+    let served = entry(req);
+    req.serve_beneath(above);
+    served
 }
 
 /// The linked class named, `zend_lookup_class_ex` with

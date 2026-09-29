@@ -178,10 +178,11 @@ pub(crate) struct Shared {
     /// Each native's entry, one row per row of `functions`, the
     /// interception's where an extension intercepts it.
     pub(crate) entries: Vec<Entry>,
-    /// The entry an extension's interception replaced, one row per row
-    /// of `functions`, none where nothing intercepts the native
+    /// The entries the extensions' interceptions replaced, one row per
+    /// row of `functions`, the nearest first and the native's own last,
+    /// empty where nothing intercepts the native
     /// ([`crate::api::abi::ExtensionBuilder::intercept`]).
-    pub(crate) replaced: Vec<Option<Entry>>,
+    pub(crate) replaced: Vec<Vec<Entry>>,
     /// Each native's `internal_function.module`, one row per row of
     /// `functions`: the extension that declared it, or none for one the
     /// engine declares itself.
@@ -1231,23 +1232,27 @@ fn function_table(
         .unzip()
 }
 
-/// `phar_intercept_functions_init` for every extension, in bundle order:
-/// each native an extension intercepts has its entry replaced, the one
-/// it replaced kept in its row of what this answers.
+/// `phar_intercept_functions_init` and opcache's
+/// `zend_accel_override_file_functions` for every extension, in bundle
+/// order: each native an extension intercepts has its entry replaced,
+/// and the entry it replaced goes in front of its row of what this
+/// answers, so a later interception stands over an earlier one, as
+/// opcache's handler is saved over phar's.
 fn intercept(
     functions: &[FunctionDecl],
     entries: &mut [Entry],
     extensions: &[Extension],
-) -> Vec<Option<Entry>> {
-    let mut replaced = vec![None; functions.len()];
+) -> Vec<Vec<Entry>> {
+    let mut replaced = vec![Vec::new(); functions.len()];
     for (name, entry) in extensions.iter().flat_map(|e| e.intercepts.iter()) {
         let found = functions
             .iter()
             .position(|decl| decl.name.0.eq_ignore_ascii_case(&name.0));
         if let Some(at) = found
             && let Some(row) = entries.get_mut(at)
+            && let Some(chain) = replaced.get_mut(at)
         {
-            replaced[at] = Some(std::mem::replace(row, *entry));
+            chain.insert(0, std::mem::replace(row, *entry));
         }
     }
     replaced
@@ -2394,6 +2399,41 @@ mod tests {
             .ini("t.first", "1")
             .build();
         assert!(engine.startup_errors().ends_with("1 then 2\n"));
+    }
+
+    /// Two extensions that intercept one native stack in bundle order,
+    /// as opcache's `file_exists` is saved over phar's: the later serves
+    /// first and passes through to the earlier, the earlier to the
+    /// native, and each hands on the call's own arguments.
+    #[test]
+    fn interceptions_of_one_native_stack_in_bundle_order() {
+        let earlier: Entry = |req| {
+            req.write(b"earlier ");
+            crate::api::call::passthrough(req, None)
+        };
+        let later: Entry = |req| {
+            req.write(b"later ");
+            crate::api::call::passthrough(req, None)
+        };
+        let extensions = [
+            crate::api::abi::ExtensionBuilder::default()
+                .intercept(b"strlen", earlier)
+                .build("earlier"),
+            crate::api::abi::ExtensionBuilder::default()
+                .intercept(b"strlen", later)
+                .build("later"),
+        ];
+        let served = Engine::builder()
+            .extensions(&extensions)
+            .build()
+            .serve_capture(
+                "<?php $f = 'strlen'; echo $f('abcd'), ' ', $f('ab');",
+                crate::test::Capture::default(),
+            );
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            "later earlier 4 later earlier 2"
+        );
     }
 
     /// What the pinned oracle answers for `ini_get` under `-n` and one

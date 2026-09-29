@@ -1326,6 +1326,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
         return_value: ReturnValue::Used,
         dynamic: true,
         coerced: Vec::new(),
+        beneath: 0,
     });
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     Ok(advance(req, frame))
@@ -1715,6 +1716,7 @@ fn init_call(
         return_value: ReturnValue::Used,
         dynamic: false,
         coerced: Vec::new(),
+        beneath: 0,
     });
     Ok(advance(req, frame))
 }
@@ -2448,6 +2450,7 @@ pub(crate) fn init_user_call<T: Tier>(
         return_value: ReturnValue::Used,
         dynamic: true,
         coerced: Vec::new(),
+        beneath: 0,
     });
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     Ok(advance(req, frame))
@@ -4545,6 +4548,7 @@ pub(crate) fn new<T: Tier>(
         return_value: ReturnValue::Used,
         dynamic: false,
         coerced: Vec::new(),
+        beneath: 0,
     });
     Ok(advance(req, frame))
 }
@@ -4903,6 +4907,7 @@ fn static_call_frame(
         return_value: ReturnValue::Used,
         dynamic: false,
         coerced: Vec::new(),
+        beneath: 0,
     });
     Ok(advance(req, frame))
 }
@@ -5014,6 +5019,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         frameless: false,
         return_value: ReturnValue::Used,
         coerced: Vec::new(),
+        beneath: 0,
         dynamic: false,
     });
     Ok(advance(req, frame))
@@ -5198,6 +5204,7 @@ pub(crate) fn init_method_call<T: Tier>(
         return_value: ReturnValue::Used,
         dynamic: false,
         coerced: Vec::new(),
+        beneath: 0,
     });
     Ok(advance(req, frame))
 }
@@ -10454,6 +10461,7 @@ fn frameless_call(
         return_value: ReturnValue::Used,
         dynamic: false,
         coerced: Vec::new(),
+        beneath: 0,
     });
     let served = req.serve_native(Function(entry.function));
     req.pop_call();
@@ -20913,6 +20921,7 @@ mod tests {
                 return_value: ReturnValue::Used,
                 dynamic: false,
                 coerced: Vec::new(),
+                beneath: 0,
             };
             let frame = req
                 .push_user_frame(f, state, None, crate::exec::Caller::Opline(main))

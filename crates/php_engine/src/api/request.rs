@@ -3331,6 +3331,7 @@ impl Request {
             return_value: exec::ReturnValue::Used,
             dynamic: false,
             coerced: Vec::new(),
+            beneath: 0,
             send_arg_by_ref: false,
         };
         self.vm.push_call(call);
@@ -3645,12 +3646,22 @@ impl Request {
         }
     }
 
-    /// The entry an interception replaced for the native being served,
-    /// none where the native serving is not intercepted.
-    pub(crate) fn replaced_entry(&self) -> Option<crate::api::abi::Entry> {
-        let function = self.vm.serving_call()?.function;
-        let at = usize::try_from(function.0).ok()?;
-        self.shared.replaced.get(at).copied().flatten()
+    /// The entry the one serving the call replaced, the next down its
+    /// native's chain of interceptions, and how far down that one
+    /// stands; none where the entry serving is the native's own.
+    pub(crate) fn replaced_entry(&self) -> Option<(crate::api::abi::Entry, usize)> {
+        let call = self.vm.serving_call()?;
+        let at = usize::try_from(call.function.0).ok()?;
+        let entry = self.shared.replaced.get(at)?.get(call.beneath)?;
+        Some((*entry, call.beneath.saturating_add(1)))
+    }
+
+    /// The call being served, served from `beneath` down its native's
+    /// chain of interceptions.
+    pub(crate) fn serve_beneath(&mut self, beneath: usize) {
+        if let Some(call) = self.vm.serving_call_mut() {
+            call.beneath = beneath;
+        }
     }
 
     /// The first argument of the call being served replaced by `value`,

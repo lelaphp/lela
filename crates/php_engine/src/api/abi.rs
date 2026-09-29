@@ -660,9 +660,11 @@ impl ExtensionBuilder {
     /// `file_get_contents`, `stat` and their kin in the function table
     /// (`phar_intercept_functions_init`): the declaration stays the
     /// native's, what a call serves is `entry`, and the entry it
-    /// replaced is kept for [`crate::api::call::passthrough`]. A name no
-    /// extension declares, or one `disable_functions` took out, is
-    /// intercepted by nothing.
+    /// replaced is kept for [`crate::api::call::passthrough`]. Two
+    /// extensions that intercept one native stack in bundle order, the
+    /// later over the earlier, as opcache's handler is saved over
+    /// phar's. A name no extension declares, or one `disable_functions`
+    /// took out, is intercepted by nothing.
     #[must_use]
     pub fn intercept(
         mut self,
