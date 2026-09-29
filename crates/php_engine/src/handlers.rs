@@ -1402,11 +1402,7 @@ fn dynamic_call_string(
     name: &[u8],
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
-    let split = name
-        .windows(2)
-        .rposition(|pair| pair == b"::")
-        .filter(|at| *at > 0);
-    if let Some(at) = split {
+    if let Some(at) = crate::api::request::compound_split(name) {
         let class = dynamic_call_class(req, &name[..at])?;
         return dynamic_call_static(req, class, &name[at + 2..], this);
     }
@@ -2412,19 +2408,23 @@ pub(crate) fn init_user_call<T: Tier>(
 ) -> Edge {
     let callback = exec::operand(req, frame, code, op.op2_type, op.op2);
     let resolved = req.callable_checked(&callback);
-    if req.is_pending() {
-        exec::free_operand(req, frame, code, op.op2_type, op.op2);
-        return Ok(Stepped::Threw(frame));
-    }
     let target = match resolved {
+        // A deprecation's handler may have thrown with the callable found.
+        Ok(_) if req.is_pending() => {
+            exec::free_operand(req, frame, code, op.op2_type, op.op2);
+            return Ok(Stepped::Threw(frame));
+        }
         Ok(callable) => user_call_target(req, callable.target()),
-        Err(error) => {
+        // `zend_type_error`, chained onto what a deprecation's handler
+        // or an autoloader left pending, `(null)` where it left the
+        // resolution no sentence.
+        Err(refusal) => {
             let native = exec::constant(code, ConstIdx(op.op1));
             let native = String::from_utf8_lossy(native.as_str_bytes().unwrap_or_default());
-            Err(crate::api::raising::throw(
+            Err(crate::api::raising::throw_over_pending(
                 req,
                 "TypeError",
-                &format!("{native}(): Argument #1 ($callback) must be a valid callback, {error}"),
+                &format!("{native}(): Argument #1 ($callback) must be a valid callback, {refusal}"),
             ))
         }
     };
@@ -16436,6 +16436,10 @@ pub(crate) fn fe_fetch_r<T: Tier>(
         }
         ForeachVar::Properties { object, walk } => match req.object_walk(object, walk.0, false) {
             Ok(Some((key, walked))) => {
+                let key = match req.walked_key(key) {
+                    Ok(key) => key,
+                    Err(thrown) => return threw(req, frame, &thrown),
+                };
                 let value = Request::walked_value(object, walked);
                 if matches!(walked, crate::api::request::Walked::Hooked(..)) {
                     owned = Some(value);
@@ -17058,6 +17062,10 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
     let owned = matches!(walked, crate::api::request::Walked::Hooked(..));
     let cell = match req.walked_reference(object, walked) {
         Ok(cell) => cell,
+        Err(thrown) => return Ok(Err(thrown)),
+    };
+    let key = match req.walked_key(key) {
+        Ok(key) => key,
         Err(thrown) => return Ok(Err(thrown)),
     };
     Ok(fe_key_kept(req, op, key).map(|key| Some(BoundRw { key, cell, owned })))

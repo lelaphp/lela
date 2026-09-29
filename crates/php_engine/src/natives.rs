@@ -1705,7 +1705,7 @@ fn dump_property_name(req: &mut Request, out: &mut Vec<u8>, level: usize, name: 
 
 /// What `zend_unmangle_property_name_ex` answers for one name.
 #[derive(Clone, Copy)]
-enum Unmangled<'a> {
+pub(crate) enum Unmangled<'a> {
     /// A name with no `\0` at its head: `SUCCESS` with no class.
     Plain,
     /// The class part and the property: `SUCCESS` with a class.
@@ -1721,7 +1721,7 @@ enum Unmangled<'a> {
 /// it. The notice is `Illegal member variable name` for a name shorter
 /// than three bytes or with `\0` at its second byte, and `Corrupt
 /// member variable name` for one with no second `\0`.
-fn unmangle_property_name(name: &[u8]) -> Unmangled<'_> {
+pub(crate) fn unmangle_property_name(name: &[u8]) -> Unmangled<'_> {
     let Some(rest) = name.strip_prefix(b"\0") else {
         return Unmangled::Plain;
     };

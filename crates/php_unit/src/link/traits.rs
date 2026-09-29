@@ -69,6 +69,11 @@ type Used<'a> = Option<Held<'a>>;
 struct Composer<'a, 'l> {
     child: &'a ClassDecl,
     lookup: &'l dyn Fn(&[u8]) -> Option<Held<'a>>,
+    /// `zval_update_constant_ex` at the link: the value an expression
+    /// that is no plain value evaluates to, written as a plain value,
+    /// where the linking caller can evaluate it; none at the compiler's early
+    /// bind, which never composes a class that uses traits.
+    values: &'l dyn Fn(&ConstExpr) -> Option<ConstExpr>,
     traits: Vec<Used<'a>>,
     excluded: Vec<Vec<Vec<u8>>>,
     aliases: Vec<Name>,
@@ -106,6 +111,7 @@ struct Composer<'a, 'l> {
 pub(super) fn compose<'a>(
     child: &'a ClassDecl,
     lookup: &dyn Fn(&[u8]) -> Option<Held<'a>>,
+    values: &dyn Fn(&ConstExpr) -> Option<ConstExpr>,
 ) -> Result<Composition, Box<(Refused, Vec<Raised>)>> {
     let mut traits: Vec<Used<'a>> = Vec::with_capacity(child.traits.len());
     for name in &child.traits {
@@ -121,6 +127,7 @@ pub(super) fn compose<'a>(
     let mut composer = Composer {
         child,
         lookup,
+        values,
         traits,
         excluded: vec![Vec::new(); child.traits.len()],
         aliases: Vec::new(),
@@ -637,7 +644,7 @@ impl<'a> Composer<'a, '_> {
                 let compatible = existing.visibility == constant.visibility
                     && existing.is_final == constant.is_final
                     && existing.ty == constant.ty
-                    && identical(Some(&existing.value), Some(&constant.value));
+                    && self.identical(Some(&existing.value), Some(&constant.value));
                 if !compatible {
                     let first = self.first_definition(at, |held| {
                         held.decl.constants.iter().any(|c| c.name == constant.name)
@@ -705,7 +712,10 @@ impl<'a> Composer<'a, '_> {
                         && existing.is_instance == property.is_instance
                         && existing.is_readonly == property.is_readonly
                         && existing.ty == property.ty
-                        && identical(default_of(existing).as_ref(), default_of(property).as_ref());
+                        && self.identical(
+                            default_of(existing).as_ref(),
+                            default_of(property).as_ref(),
+                        );
                     if compatible {
                         continue;
                     }
@@ -775,16 +785,33 @@ fn default_of(property: &PropertyDecl) -> Option<ConstExpr> {
     }
 }
 
-/// `check_trait_property_or_constant_value_compatibility` over two
-/// values as written: `fast_is_identical_function` on literals, element
-/// by element on arrays, and two expressions that are not literals the
-/// same only where they are written the same, since the link evaluates
-/// no constant; no value at all is the same as none.
-fn identical(a: Option<&ConstExpr>, b: Option<&ConstExpr>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(a), Some(b)) => same_value(a, b),
-        _ => false,
+impl Composer<'_, '_> {
+    /// `check_trait_property_or_constant_value_compatibility` over two
+    /// values after `zval_update_constant_ex` evaluated a side that is
+    /// an expression: `fast_is_identical_function` on literals, element
+    /// by element on arrays, and a side the caller cannot evaluate
+    /// compared as written; no value at all is the same as none.
+    ///
+    /// ```php
+    /// const VALUE = true;
+    /// trait Foo { public $var = VALUE; const K = 40 + 2; }
+    /// trait Bar { public $var = true; const K = 42; }
+    /// class Baz { use Foo, Bar; }
+    /// var_dump((new Baz)->var, Baz::K);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(42)
+    /// ```
+    fn identical(&self, a: Option<&ConstExpr>, b: Option<&ConstExpr>) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                let (x, y) = ((self.values)(a), (self.values)(b));
+                same_value(x.as_ref().unwrap_or(a), y.as_ref().unwrap_or(b))
+            }
+            _ => false,
+        }
     }
 }
 

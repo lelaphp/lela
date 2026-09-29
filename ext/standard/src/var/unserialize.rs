@@ -1437,7 +1437,18 @@ impl State<'_> {
         Ok(true)
     }
 
-    /// `object ":" uiv ":" ["]`, `O:` and `C:`.
+    /// `object ":" uiv ":" ["]`, `O:` and `C:`. A name that is no valid
+    /// class name is refused before the table is asked, so an anonymous
+    /// class, whose name holds a NUL, is never unserialized:
+    ///
+    /// ```php
+    /// $name = get_class(new class {});
+    /// var_dump(unserialize("O:" . strlen($name) . ":\"" . $name . "\":0:{}"));
+    /// ```
+    /// ```expect
+    /// Warning: unserialize(): Error at offset 0 of %d bytes in %s on line 3
+    /// bool(false)
+    /// ```
     // php's rule is one block; its checks stay in its order.
     #[allow(clippy::too_many_lines)]
     fn object(
@@ -1477,15 +1488,18 @@ impl State<'_> {
         let allowed = self.hash.allowed.admits(&lower);
         let mut incomplete = false;
         let class = if allowed {
+            // `zend_is_valid_class_name` before the table is asked, since
+            // the one class php finds there without the test, a linked
+            // one, is never anonymous, whose name holds a NUL.
+            if !valid_class_name(&name) {
+                return Ok(false);
+            }
             // The class loader and the callback run with
             // `BG(serialize_lock)` held, so what they unserialize is read
             // through a var hash of its own.
             if let Some(class) = locked(req, |req| autoload(req, &name))? {
                 Some(class)
             } else {
-                if !valid_class_name(&name) {
-                    return Ok(false);
-                }
                 incomplete = true;
                 if locked(req, |req| Self::callback(req, &name))? {
                     incomplete = false;
