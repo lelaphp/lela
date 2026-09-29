@@ -343,13 +343,16 @@ pub fn usage_text(argv0: &OsStr) -> String {
     )
 }
 
-/// `php_print_version` for this host, its first line, as the CLI host
-/// prints its own.
+/// `php_print_version` for this host (`php_get_version`, `M/main.c:126`): the head line,
+/// php's copyright line and `get_zend_version`, the engine's line and one
+/// for each Zend extension loaded. php-cgi starts its extensions before it
+/// answers `-v`, so the engine is built first.
 #[must_use]
-pub fn version() -> String {
+pub fn version(engine: &Engine) -> String {
     format!(
-        "PHP {PHP_VERSION} ({NAME}) (built: {}) (NTS)\n",
-        env!("PHP_BUILD_DATE")
+        "PHP {PHP_VERSION} ({NAME}) (built: {}) (NTS)\nCopyright (c) The PHP Group\n{}",
+        env!("PHP_BUILD_DATE"),
+        engine.zend_version_info()
     )
 }
 

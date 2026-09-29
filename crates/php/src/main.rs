@@ -3,8 +3,8 @@
 //! the host the binary's name chose, the CLI or, started as `php-cgi`, CGI,
 //! and the process ending with the code the request ended with. The ini the line carries is laid over the engine's defaults
 //! before it is built, as php's `-d` reaches `php_ini_builder` before
-//! `php_module_startup`; the version needs no engine and the listing
-//! needs one served nothing.
+//! `php_module_startup`; the CLI's version needs no engine, and the
+//! listing and php-cgi's version need one served nothing.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -49,9 +49,10 @@ fn cgi(argv0: &OsStr, argv: &[OsString]) -> ExitCode {
             code(*exit_code)
         }
         CgiAsk::Version => {
+            let engine = engine(&options.ini, Some(php_sapi::cgi::EXTENSION));
             let _ = std::io::stdout()
                 .lock()
-                .write_all(php_sapi::cgi::version().as_bytes());
+                .write_all(php_sapi::cgi::version(&engine).as_bytes());
             code(0)
         }
         CgiAsk::Extensions => {
