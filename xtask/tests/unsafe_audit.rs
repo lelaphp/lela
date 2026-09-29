@@ -32,8 +32,9 @@ fn the_tracked_workspace_has_no_unsafe_outside_the_homes() {
 }
 
 /// A host's `unsafe` lives under `sapi/*/src/ffi/` and nowhere else
-/// (ADR-0008), under the row and the home #1249 proposes on a manifest
-/// that does not carry them yet: `sapi/fpm` with its block in `src/ffi/`
+/// (ADR-0008), under the home #1249 proposes on a manifest that does not
+/// carry it yet, which this adds and adds nothing once it does: `sapi/fpm`
+/// with its block in `src/ffi/`
 /// and `#![deny(unsafe_code)]` at its root passes, and `sapi/phpdbg` with
 /// one in `src/lib.rs` fails naming the line.
 #[test]
