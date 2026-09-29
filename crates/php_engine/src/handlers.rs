@@ -2410,19 +2410,23 @@ pub(crate) fn init_user_call<T: Tier>(
 ) -> Edge {
     let callback = exec::operand(req, frame, code, op.op2_type, op.op2);
     let resolved = req.callable_checked(&callback);
-    if req.is_pending() {
-        exec::free_operand(req, frame, code, op.op2_type, op.op2);
-        return Ok(Stepped::Threw(frame));
-    }
     let target = match resolved {
+        // A deprecation's handler may have thrown with the callable found.
+        Ok(_) if req.is_pending() => {
+            exec::free_operand(req, frame, code, op.op2_type, op.op2);
+            return Ok(Stepped::Threw(frame));
+        }
         Ok(callable) => user_call_target(req, callable.target()),
-        Err(error) => {
+        // `zend_type_error`, chained onto what a deprecation's handler
+        // or an autoloader left pending, `(null)` where it left the
+        // resolution no sentence.
+        Err(refusal) => {
             let native = exec::constant(code, ConstIdx(op.op1));
             let native = String::from_utf8_lossy(native.as_str_bytes().unwrap_or_default());
-            Err(crate::api::raising::throw(
+            Err(crate::api::raising::throw_over_pending(
                 req,
                 "TypeError",
-                &format!("{native}(): Argument #1 ($callback) must be a valid callback, {error}"),
+                &format!("{native}(): Argument #1 ($callback) must be a valid callback, {refusal}"),
             ))
         }
     };

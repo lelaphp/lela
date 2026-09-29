@@ -16,8 +16,8 @@ use php_heap::ZvalType;
 use php_unit::decl::Type;
 
 use crate::api::abi::Callable;
-use crate::api::raising::{Thrown, arg_type_error, throw};
-use crate::api::request::Request;
+use crate::api::raising::{Thrown, arg_type_error};
+use crate::api::request::{Deprecations, Request};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 /// php's binary operators as `zend_binary_op` names them.
@@ -201,8 +201,8 @@ pub fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> 
 
 /// `zend_is_callable` with the request's scope.
 #[must_use]
-pub fn is_callable(req: &Request, value: &Value) -> bool {
-    req.is_callable_value(value)
+pub fn is_callable(req: &mut Request, value: &Value) -> bool {
+    req.is_callable_value(value, Deprecations::Raised)
 }
 
 /// `zend_is_callable_ex` with its `*error` (`Z/Zend/zend_API.c:4250`):
@@ -214,6 +214,7 @@ pub fn is_callable(req: &Request, value: &Value) -> bool {
 /// deprecations for `self`, `parent` and `static` as the class half.
 pub fn callable_checked(req: &mut Request, value: &Value) -> Result<Callable, String> {
     req.callable_checked(value)
+        .map_err(|refusal| refusal.to_string())
 }
 
 /// `zend_get_callable_name` (`Z/Zend/zend_API.c:4075`): the name php
@@ -233,11 +234,32 @@ pub fn callable_name(req: &mut Request, value: &Value) -> Result<PhpString, Thro
     }
 }
 
-/// The callable a value names, or php's `TypeError` for one that is not.
+/// The callable a value names as `zend_call_function` resolves one it
+/// was handed uncached, `call_user_function`'s way: the deprecations
+/// raised, and a value that names none php's `Error` "Invalid callback
+/// %s, %s" with the name `zend_get_callable_name_ex` gives it and the
+/// resolver's sentence (`Z/Zend/zend_execute_API.c:838-846`).
+///
+/// ```php
+/// ini_set("assert.callback", "nope");
+/// try { assert(false); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), " / ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Deprecated: ini_set(): assert.callback INI setting is deprecated in %s on line 2
+/// AssertionError: assert(false) / Invalid callback nope, function "nope" not found or invalid function name
+/// ```
 pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown> {
-    match req.callable_of(value) {
-        Some(callable) => Ok(callable),
-        None => Err(throw(req, "TypeError", "Argument must be a valid callback")),
+    match req.callable_checked(value) {
+        Ok(_) if req.is_pending() => Err(Thrown::of(req.take_pending())),
+        Ok(callable) => Ok(callable),
+        Err(refusal) => {
+            let name = req.callable_name(value);
+            Err(crate::api::raising::throw_over_pending(
+                req,
+                "Error",
+                &format!("Invalid callback {name}, {refusal}"),
+            ))
+        }
     }
 }
 
@@ -791,6 +813,11 @@ fn callable_type(ty: &Type) -> Option<bool> {
 pub(crate) struct Scopes {
     pub(crate) own: Option<ClassId>,
     pub(crate) called: Option<ClassId>,
+    /// Whether a `callable` is resolved with its deprecations, as
+    /// `zend_check_type` resolves one for a user function's parameter
+    /// or return, or without, `IS_CALLABLE_SUPPRESS_DEPRECATIONS`, for a
+    /// native's.
+    pub(crate) callables: Deprecations,
 }
 
 /// `zend_check_type` (`Z/Zend/zend_execute.c:1160`) and
@@ -838,7 +865,7 @@ pub(crate) struct Scopes {
 /// i(): Argument #1 ($x) must be of type Traversable|array, int given
 /// k(): Argument #1 ($c) must be of type ?callable, string given
 /// ```
-pub(crate) fn holds(req: &Request, value: &Value, ty: &Type, scopes: Scopes) -> bool {
+pub(crate) fn holds(req: &mut Request, value: &Value, ty: &Type, scopes: Scopes) -> bool {
     let value = value.deref();
     let object = value.as_object().map(PhpObject::class);
     let is = |class: Option<ClassId>| {
@@ -860,7 +887,7 @@ pub(crate) fn holds(req: &Request, value: &Value, ty: &Type, scopes: Scopes) -> 
             .all(|member| holds(req, &value, member, scopes)),
         Type::Named(name) => is(req.class_named(&name.0)),
         Type::Iterable => value.as_array().is_some() || is(req.class_named(b"Traversable")),
-        Type::Callable => req.is_callable_value(&value),
+        Type::Callable => req.is_callable_value(&value, scopes.callables),
         Type::SelfClass => is(scopes.own),
         Type::CalledClass => is(scopes.called),
         Type::ParentClass => is(scopes

@@ -374,6 +374,19 @@ pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: 
     }
 }
 
+/// `zend_throw_error` where `EG(exception)` may already be set, as after
+/// a resolution a deprecation's handler threw through: the new
+/// throwable with the pending one taken off the request and chained as
+/// its `previous` (`zend_throw_exception_internal`), or alone where
+/// none is pending. An `exit` or a fatal standing is handed on as it is.
+pub(crate) fn throw_over_pending(req: &mut Request, class: &str, message: &str) -> Thrown {
+    match req.take_pending() {
+        Some(earlier) => throw_chained(req, Thrown::of(Some(earlier)), class, message),
+        None if req.is_pending() => Thrown::of(None),
+        None => throw(req, class, message),
+    }
+}
+
 /// Make a throwable pending, `zend_throw_exception_object`: one more
 /// owner of the object, the pending slot's, as `ZEND_THROW` takes one
 /// before it frees its operand; the caller keeps its own. A value that

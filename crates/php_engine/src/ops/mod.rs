@@ -1042,6 +1042,7 @@ fn type_assignable(
         crate::api::coerce::Scopes {
             own: Some(declaring),
             called: Some(declaring),
+            callables: crate::api::request::Deprecations::Suppressed,
         },
     ) {
         return Assignable::Yes;
