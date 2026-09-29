@@ -1147,16 +1147,21 @@ pub(crate) fn header_add(
         return false;
     }
     let line = trimmed_end(line);
-    if line.iter().any(|b| matches!(b, b'\n' | b'\r')) {
-        req.note_error(
-            Level::Warning,
-            "Header may not contain more than a single header, new line detected",
-        );
-        return false;
-    }
-    if line.contains(&0) {
-        req.note_error(Level::Warning, "Header may not contain NUL bytes");
-        return false;
+    // The safety check walks the line once, and the first byte it trips
+    // on names the refusal (`Z/main/SAPI.c:740-755`).
+    match line.iter().find(|b| matches!(b, b'\n' | b'\r' | 0)) {
+        Some(0) => {
+            req.note_error(Level::Warning, "Header may not contain NUL bytes");
+            return false;
+        }
+        Some(_) => {
+            req.note_error(
+                Level::Warning,
+                "Header may not contain more than a single header, new line detected",
+            );
+            return false;
+        }
+        None => {}
     }
     if line.len() >= 5 && line[..5].eq_ignore_ascii_case(b"HTTP/") {
         update_response_code(req, extract_response_code(line));
