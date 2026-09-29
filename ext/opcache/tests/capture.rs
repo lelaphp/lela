@@ -61,6 +61,48 @@ fn engine(ini: &[(&str, &str)]) -> Engine {
     builder.build()
 }
 
+/// `opcache.preload`: the file is served once, before the first request,
+/// what it declared stands in every request, a class a file it only
+/// compiled could not link is php's warning, and
+/// `opcache_get_status()` reports the preload.
+#[test]
+fn the_preload_s_declarations_stand_in_every_request() {
+    let dir = std::env::temp_dir().join(format!("opcache-preload-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(
+        dir.join("compiled.inc"),
+        "<?php\nclass Kept {}\nclass Unlinked extends Missing {}\nfunction compiled() { return 'compiled'; }\n",
+    );
+    let script = dir.join("preload.inc");
+    let _ = std::fs::write(
+        &script,
+        "<?php\necho \"preloading\\n\";\nopcache_compile_file(__DIR__ . '/compiled.inc');\nfunction preloaded() { return 'preloaded'; }\n",
+    );
+    let script = script.to_string_lossy().into_owned();
+    let engine = engine(&[("opcache.enable_cli", "1"), ("opcache.preload", &script)]);
+    let program = r"<?php
+echo preloaded(), ' ', compiled(), ' ', class_exists('Kept') ? 'kept' : '-', ' ', class_exists('Unlinked', false) ? '-' : 'unlinked', PHP_EOL;
+$s = opcache_get_status()['preload_statistics'];
+echo implode(' ', $s['functions']), ' | ', implode(' ', $s['classes']), ' | ', count($s['scripts']), PHP_EOL;
+";
+    let first = engine.serve_capture_in(&dir, b"first.php", program, Capture::default());
+    let second = engine.serve_capture_in(&dir, b"second.php", program, Capture::default());
+    let compiled = dir.join("compiled.inc").canonicalize().unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    let listed = "compiled preloaded | Kept Unlinked | 2\n";
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout),
+        format!(
+            "preloading\n\nWarning: Can't preload unlinked class Unlinked: Unknown parent Missing in {} on line 3\npreloaded compiled kept unlinked\n{listed}",
+            compiled.display()
+        )
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout),
+        format!("preloaded compiled kept unlinked\n{listed}")
+    );
+}
+
 /// `zend_accel_error` at `ACCEL_LOG_FATAL` ends the process before
 /// anything is served whatever `opcache.log_verbosity_level` says, and
 /// writes its line where the level admits it; at `ACCEL_LOG_INFO` the

@@ -1,13 +1,16 @@
-//! `accel_post_startup` (`ZendAccelerator.c` at the tag), which the
-//! engine asks as it finishes starting up: a configuration the cache
-//! cannot start under is `ACCEL_LOG_FATAL`, which ends the process
-//! before anything is served whatever the log's verbosity.
+//! `accel_post_startup` and `accel_finish_startup` (`ZendAccelerator.c`
+//! at the tag), which the engine asks as it finishes starting up: a
+//! configuration the cache cannot start under is `ACCEL_LOG_FATAL`,
+//! which ends the process before anything is served whatever the log's
+//! verbosity, and a started cache with `opcache.preload` set names the
+//! file the unit cache preloads.
 
 use php_ext::abi::PostStartup;
+use php_ext::process;
 use php_ext::request::Request;
 
 use crate::ini::{Log, accel_log, atoi, flag, long, value};
-use crate::{Startup, verdict};
+use crate::{Startup, cli, verdict};
 
 /// `sizeof(zend_accel_shared_globals)` on the oracle's build, what
 /// `zend_accel_init_shm` asks the segment for beside the interned
@@ -31,7 +34,7 @@ pub(crate) fn post_startup(req: &mut Request) -> PostStartup {
             "file_override_enabled has no effect when file_cache_only is set",
         );
     }
-    PostStartup::Serve
+    preload(req, file_cache_only)
 }
 
 /// `accel_post_startup`'s refusals, in the order it meets them: the
@@ -75,4 +78,45 @@ fn refused(req: &mut Request) -> Option<String> {
         ));
     }
     None
+}
+
+/// `accel_finish_startup`: the file `opcache.preload` names, where the
+/// cache is not the file cache alone, checked against
+/// `opcache.preload_user` as `accel_finish_startup_preload_subprocess`
+/// checks it. php asks `geteuid()`; this asks the real user id, the same
+/// id for a binary that is not set-user-id. Under uid 0 with a
+/// `preload_user`, php forks and preloads in a child that took that
+/// user's ids; this engine's process serves requests on threads, which
+/// share its ids, so it preloads as the process runs.
+fn preload(req: &mut Request, file_cache_only: bool) -> PostStartup {
+    let script = value(req, "opcache.preload").to_vec();
+    if script.is_empty() {
+        return PostStartup::Serve;
+    }
+    if file_cache_only {
+        accel_log(
+            req,
+            Log::Warning,
+            "Preloading doesn't work in \"file_cache_only\" mode",
+        );
+        return PostStartup::Serve;
+    }
+    let user = value(req, "opcache.preload_user").to_vec();
+    if process::uid() != 0 {
+        if !user.is_empty() {
+            accel_log(
+                req,
+                Log::Warning,
+                "\"opcache.preload_user\" is ignored because the current user is not \"root\"",
+            );
+        }
+    } else if user.is_empty() && !cli(req) {
+        accel_log(
+            req,
+            Log::Fatal,
+            "\"opcache.preload\" requires \"opcache.preload_user\" when running under uid 0",
+        );
+        return PostStartup::Refuse { status: -2 };
+    }
+    PostStartup::Preload(script)
 }

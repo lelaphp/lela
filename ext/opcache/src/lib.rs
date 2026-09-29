@@ -40,7 +40,9 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::to_callable;
 use php_ext::raising::{Thrown, notice, warning};
-use php_ext::request::{CacheStatus, Invalidation, PHP_VERSION, Request, Restart};
+use php_ext::request::{
+    CacheStatus, Invalidation, PHP_VERSION, PreloadStatistics, Request, Restart,
+};
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 use crate::blacklist::Blacklist;
@@ -499,6 +501,10 @@ fn opcache_get_status(
         "opcache_statistics",
         Value::array(statistics),
     )?;
+    if let Some(preload) = &status.preload {
+        let preloaded = preload_statistics(req, preload)?;
+        put(req, &mut out, "preload_statistics", Value::array(preloaded))?;
+    }
     if include_scripts && enabled {
         let listed = scripts(req, &status)?;
         put(req, &mut out, "scripts", Value::array(listed))?;
@@ -612,6 +618,34 @@ fn statistics(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Throw
             ),
         ],
     )
+}
+
+/// `preload_statistics`: what the preload weighs, then its functions and
+/// its classes where it has any, and its scripts.
+fn preload_statistics(req: &mut Request, preload: &PreloadStatistics) -> Result<PhpArray, Thrown> {
+    let mut out = PhpArray::new(req)?;
+    put(
+        req,
+        &mut out,
+        "memory_consumption",
+        int(preload.memory_consumption),
+    )?;
+    for (name, names) in [
+        ("functions", &preload.functions),
+        ("classes", &preload.classes),
+        ("scripts", &preload.scripts),
+    ] {
+        if names.is_empty() && name != "scripts" {
+            continue;
+        }
+        let mut listed = PhpArray::new(req)?;
+        for each in names {
+            let each = text(req, each)?;
+            listed.append(req, each)?;
+        }
+        put(req, &mut out, name, Value::array(listed))?;
+    }
+    Ok(out)
 }
 
 /// `accelerator_get_scripts`: each file held under its full path.
