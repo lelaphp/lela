@@ -380,7 +380,10 @@ impl Emit<'_> {
     ) -> Result<Option<Base>, CompileError> {
         Ok(match self.named(expr)? {
             None => None,
-            Some(Named::Cv(name)) => Some(Base::Settled((OperandKind::Cv, self.lookup_cv(&name)))),
+            Some(Named::Cv(name)) => {
+                self.cv_fetched(&name, fetch);
+                Some(Base::Settled((OperandKind::Cv, self.lookup_cv(&name))))
+            }
             Some(Named::This) => {
                 let kind = match fetch {
                     Fetch::Read | Fetch::Is => OperandKind::Tmp,

@@ -47,6 +47,7 @@ pub(crate) fn wrapper() -> StreamWrapper {
     StreamWrapper {
         scheme: String::from("glob"),
         label: "glob",
+        is_url: false,
         open: None,
         open_dir: Some(open_dir),
         stat: None,
@@ -55,6 +56,7 @@ pub(crate) fn wrapper() -> StreamWrapper {
         mkdir: None,
         rmdir: None,
         set_stat: None,
+        stream_stat: None,
     }
 }
 

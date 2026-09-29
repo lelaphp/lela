@@ -180,7 +180,7 @@ fn timeout_or_default(req: &Request, timeout: Option<f64>) -> f64 {
 
 /// `FG(default_socket_timeout)` as a double of seconds, what a timeout
 /// of `null` is.
-fn default_timeout(req: &Request) -> f64 {
+pub(crate) fn default_timeout(req: &Request) -> f64 {
     req.ini_get(b"default_socket_timeout")
         .and_then(|text| String::from_utf8_lossy(text).trim().parse::<i64>().ok())
         .map_or(60.0, |secs| {
@@ -196,7 +196,7 @@ const TIMEOUT_MAX: f64 = 18_446_744_073_709.55;
 /// A timeout of seconds as the natives turn it into a `timeval`: `None`,
 /// no limit, below zero and at or past the most a timeout holds, and the
 /// microseconds `(php_timeout_ull)(timeout * 1000000.0)` keeps otherwise.
-fn timeval(timeout: f64) -> Option<Duration> {
+pub(crate) fn timeval(timeout: f64) -> Option<Duration> {
     if !(0.0..TIMEOUT_MAX).contains(&timeout) {
         return None;
     }
@@ -492,7 +492,10 @@ fn stream_socket_client(
 /// `transports.c` reads it: `bindto` a string or refused, `backlog` by
 /// `zval_get_long`, `ipv6_v6only` where it is not `null`, and the rest by
 /// `zend_is_true`.
-fn socket_options(req: &mut Request, given: Option<Resource>) -> Result<SocketOptions, Thrown> {
+pub(crate) fn socket_options(
+    req: &mut Request,
+    given: Option<Resource>,
+) -> Result<SocketOptions, Thrown> {
     let mut options = SocketOptions::default();
     let Some(context) = context_of(req, given, NullContext::Default)? else {
         return Ok(options);

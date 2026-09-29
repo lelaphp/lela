@@ -593,6 +593,7 @@ impl Emit<'_> {
             // stands on the argument's own line.
             (Some(SendMode::Ref | SendMode::PreferRef), Variable::Cv(cv)) => {
                 self.line = self.line_of(value);
+                self.cv_numbered(cv, Fetch::Write);
                 self.send(Opcode::SendRef, (OperandKind::Cv, cv), at)
             }
             (Some(SendMode::Ref | SendMode::PreferRef), Variable::This) => {
@@ -618,6 +619,7 @@ impl Emit<'_> {
             }
             (None, Variable::Cv(cv)) => {
                 self.line = list_line;
+                self.cv_numbered(cv, Fetch::Read);
                 self.send(Opcode::SendVarEx, (OperandKind::Cv, cv), at)
             }
             (None, Variable::This) => {

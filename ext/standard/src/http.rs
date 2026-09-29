@@ -1,8 +1,7 @@
 //! `Z/ext/standard/http.c`: `http_build_query` over
 //! `php_url_encode_hash_ex`, and the two natives over the headers the
-//! http wrapper's last response left. This engine's streams have no
-//! http wrapper yet, so no request ever leaves headers and the first
-//! answers `null` as php does before one. `request_parse_body` reads its
+//! http wrapper's last request read, `BG(last_http_headers)`, which
+//! `crate::http_fopen_wrapper` keeps. `request_parse_body` reads its
 //! `$options` as `cache_request_parse_body_options` does and the
 //! request's content type as `sapi_read_post_data` does.
 //!
@@ -528,8 +527,10 @@ fn http_build_query(
     PhpString::new(req, &query.out)
 }
 
-/// `http_get_last_response_headers(): ?array`: the headers the http
-/// wrapper's last response left, none here.
+/// `http_get_last_response_headers(): ?array`
+/// (`Z/ext/standard/http.c:375`): the headers the http wrapper's last
+/// request read, `BG(last_http_headers)`, and `null` before one read
+/// any; the headers themselves are witnessed beside the wrapper.
 ///
 /// ```php
 /// var_dump(http_get_last_response_headers());
@@ -538,8 +539,8 @@ fn http_build_query(
 /// NULL
 /// ```
 #[php_function]
-fn http_get_last_response_headers() -> Option<PhpArray> {
-    None
+fn http_get_last_response_headers(req: &mut Request) -> Option<PhpArray> {
+    crate::http_fopen_wrapper::last_headers(req)
 }
 
 /// `http_clear_last_response_headers(): void`: the headers forgotten.
@@ -552,4 +553,6 @@ fn http_get_last_response_headers() -> Option<PhpArray> {
 /// NULL
 /// ```
 #[php_function]
-fn http_clear_last_response_headers() {}
+fn http_clear_last_response_headers(req: &mut Request) {
+    crate::http_fopen_wrapper::clear_last_headers(req);
+}

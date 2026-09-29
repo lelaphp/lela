@@ -661,6 +661,7 @@ pub(crate) fn wrapper() -> StreamWrapper {
     StreamWrapper {
         scheme: "phar".into(),
         label: "phar",
+        is_url: false,
         open: Some(open_url),
         open_dir: Some(open_dir),
         stat: Some(url_stat),
@@ -669,5 +670,6 @@ pub(crate) fn wrapper() -> StreamWrapper {
         mkdir: Some(write::mkdir),
         rmdir: Some(write::rmdir),
         set_stat: None,
+        stream_stat: None,
     }
 }

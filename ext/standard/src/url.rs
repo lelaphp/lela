@@ -11,6 +11,9 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext_uri::{Parser, ReadAs, UriStruct};
+
+use crate::streamsfuncs::{NullContext, context_of, stream_ctx_option};
 
 pub(super) use constants::PHP_QUERY_RFC3986;
 use constants::{
@@ -53,14 +56,15 @@ pub(crate) mod constants {
 
 /// `get_headers(string $url, bool $associative = false, $context = null):
 /// array|false`, php's `PHP_FUNCTION(get_headers)`: the URL opened `r`
-/// under `STREAM_USE_URL` ([`Request::open_url`]), and the header lines
-/// its wrapper left in the stream's `wrapper_data`, each as a string, or
-/// with `$associative` keyed by the name before its first `:` with the
-/// blanks after it skipped, a repeated name a list, and a line with no
-/// `:` under the next integer key; `false` where nothing opened or the
-/// wrapper left no array. A path whose wrapper is no URL wrapper is
-/// php's warning. This engine's streams have no http wrapper yet, and a
-/// registered one's `wrapper_data` is its object.
+/// under `STREAM_USE_URL | STREAM_ONLY_GET_HEADERS` ([`Request::open_url`])
+/// within the `context` given or the default one, and the header lines its
+/// wrapper left in the stream's `wrapper_data`, each as a string, or with
+/// `$associative` keyed by the name before its first `:` with the blanks
+/// after it skipped, a repeated name a list, and a line with no `:` under
+/// the next integer key; `false` where nothing opened or the wrapper left
+/// no array, as a user-space wrapper's object is. A path whose wrapper is
+/// no URL wrapper is php's warning. The http wrapper keeps the stream of a
+/// response that is no success, since only the head is asked.
 ///
 /// ```php
 /// class W { public $context; function stream_open($p, $m, $o, &$op) { return true; } function stream_read($n) { return ""; } function stream_eof() { return true; } }
@@ -75,6 +79,36 @@ pub(crate) mod constants {
 /// get_headers(): Argument #3 ($context) must be of type resource or null, int given
 /// get_headers(): Argument #1 ($url) must not contain any null bytes
 /// ```
+///
+/// ```php
+/// $srv = stream_socket_server('tcp://127.0.0.1:0');
+/// $addr = stream_socket_get_name($srv, false);
+/// if (pcntl_fork() === 0) {
+///     $c = stream_socket_accept($srv);
+///     $asked = str_contains(fread($c, 1024), "X-Asked: yes") ? 'yes' : 'no';
+///     fwrite($c, "HTTP/1.0 404 Not Found\r\nX-A: 1\r\nX-A: 2\r\nX-Got: $asked\r\n\r\nbody");
+///     fclose($c);
+///     exit(0);
+/// }
+/// $ctx = stream_context_create(['http' => ['header' => 'X-Asked: yes']]);
+/// var_dump(get_headers("http://$addr/", true, $ctx));
+/// pcntl_wait($status);
+/// ```
+/// ```expect process
+/// array(3) {
+///   [0]=>
+///   string(22) "HTTP/1.0 404 Not Found"
+///   ["X-A"]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "1"
+///     [1]=>
+///     string(1) "2"
+///   }
+///   ["X-Got"]=>
+///   string(3) "yes"
+/// }
+/// ```
 #[php_function]
 fn get_headers(
     req: &mut Request,
@@ -82,9 +116,9 @@ fn get_headers(
     #[php(default = false)] associative: bool,
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<OrFalse<PhpArray>, Thrown> {
-    // No wrapper here reads a `$context`: it is taken and not read.
-    let _ = context;
-    let Some(stream) = req.open_url(url.0.as_bytes(), b"r")? else {
+    let context = context_of(req, context, NullContext::Default)?;
+    let Some(stream) = req.with_stream_ctx(context, |req| req.open_url(url.0.as_bytes(), b"r"))?
+    else {
         return Ok(OrFalse::False);
     };
     let meta = stream.meta_data(req)?;
@@ -609,6 +643,66 @@ fn decode(s: &[u8], plus: bool) -> Vec<u8> {
 /// `php_url_decode(str, len)`.
 pub(super) fn php_url_decode(s: &[u8]) -> Vec<u8> {
     decode(s, true)
+}
+
+/// `php_raw_url_decode(str, len)`.
+pub(super) fn php_raw_url_decode(s: &[u8]) -> Vec<u8> {
+    decode(s, false)
+}
+
+/// The parser `php_stream_context_get_uri_parser` names for a wrapper,
+/// decoded once: `parse_url`, the default, which this crate keeps, or a
+/// class of ext/uri's (design §4.10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UriParser {
+    ParseUrl,
+    Uri(Parser),
+}
+
+impl UriParser {
+    /// `php_stream_context_get_uri_parser(wrapper, context)`
+    /// (`Z/main/streams/streams.c:2490`): `parse_url` for no `context`
+    /// and for a `uri_parser_class` option that is absent or `null`, the
+    /// parser registered under the class a string names, and `None`,
+    /// which the wrappers turn into php's `ValueError`, for a string that
+    /// names none and for any other value.
+    pub(crate) fn of_ctx(
+        req: &mut Request,
+        ctx: Option<Resource>,
+        wrapper: &[u8],
+    ) -> Result<Option<UriParser>, Thrown> {
+        let Some(ctx) = ctx else {
+            return Ok(Some(UriParser::ParseUrl));
+        };
+        let named = stream_ctx_option(req, ctx, wrapper, b"uri_parser_class")?;
+        Ok(match named.as_ref().map(Value::as_ref) {
+            None | Some(ValueRef::Null) => Some(UriParser::ParseUrl),
+            Some(ValueRef::Str(name)) => match name.as_bytes() {
+                b"parse_url" => Some(UriParser::ParseUrl),
+                name => Parser::named(name).map(UriParser::Uri),
+            },
+            Some(_) => None,
+        })
+    }
+
+    /// `php_uri_parse_to_struct(parser, text, PHP_URI_COMPONENT_READ_MODE_RAW,
+    /// true)`: `None` where the parser refuses the text; `parse_url`'s
+    /// `port` of zero is no `port`, as `uri_parser_php_parse_url.c` reads it.
+    pub(crate) fn parse(self, req: &mut Request, text: &[u8]) -> Result<Option<UriStruct>, Thrown> {
+        match self {
+            UriParser::Uri(parser) => parser.parse_to_struct(req, text, ReadAs::Raw, true),
+            UriParser::ParseUrl => Ok(parse(text).map(|url| UriStruct {
+                scheme: url.scheme,
+                user: url.user,
+                password: url.pass,
+                host: url.host,
+                port: url.port.filter(|port| *port != 0).map(i64::from),
+                path: url.path,
+                query: url.query,
+                fragment: url.fragment,
+            })),
+        }
+    }
 }
 
 /// `urlencode(string $string): string`, the form encoding.

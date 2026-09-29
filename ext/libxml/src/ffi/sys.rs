@@ -811,6 +811,7 @@ unsafe extern "C" {
         enc: c_int,
     ) -> *mut xmlParserInputBuffer;
     pub(crate) fn xmlFreeParserInputBuffer(input: *mut xmlParserInputBuffer);
+    pub(crate) fn xmlParseCharEncoding(name: *const c_char) -> c_int;
     pub(crate) fn __xmlParserInputBufferCreateFilename(
         uri: *const c_char,
         enc: c_int,

@@ -108,10 +108,12 @@ pub(crate) struct Contexts {
     default: Option<Resource>,
 }
 
-/// `php_stream_context`: its options array and its notifier's callback.
+pub(crate) mod notifier;
+
+/// `php_stream_context`: its options array and its notifier.
 struct Context {
     options: Option<PhpArray>,
-    notification: Option<Value>,
+    notifier: Option<notifier::Notification>,
 }
 
 /// `PHP_STREAM_COPY_ALL` as `stream_get_contents` spells it, `-1`.
@@ -122,13 +124,13 @@ const COPY_ALL: i64 = -1;
 fn context_dtor(req: &mut Request, res: Resource) {
     let taken = res
         .native_mut::<Context>(req)
-        .map(|context| (context.options.take(), context.notification.take()));
-    if let Some((options, notification)) = taken {
+        .map(|context| (context.options.take(), context.notifier.take()));
+    if let Some((options, notifier)) = taken {
         if let Some(options) = options {
             req.release(Value::array(options));
         }
-        if let Some(notification) = notification {
-            req.release(notification);
+        if let Some(notifier) = notifier {
+            req.release(notifier.callback);
         }
     }
 }
@@ -155,7 +157,7 @@ fn context_alloc(req: &mut Request) -> Result<Resource, Thrown> {
         kind,
         Context {
             options: Some(options),
-            notification: None,
+            notifier: None,
         },
     )
 }
@@ -367,11 +369,13 @@ fn parse_params(req: &mut Request, res: Resource, params: PhpArray) -> Result<()
             ));
         }
         req.addref(&callback);
-        let old = res
-            .native_mut::<Context>(req)
-            .and_then(|context| context.notification.replace(callback));
+        let old = res.native_mut::<Context>(req).and_then(|context| {
+            context
+                .notifier
+                .replace(notifier::Notification::new(callback))
+        });
         if let Some(old) = old {
-            req.release(old);
+            req.release(old.callback);
         }
     }
     let options = Key::Str(PhpString::new(req, b"options")?);
@@ -522,7 +526,10 @@ fn stream_context_set_params(
 fn stream_context_get_params(req: &mut Request, context: Resource) -> Result<PhpArray, Thrown> {
     let res = context_resource(req, context, 1)?;
     let (options, notification) = res.native::<Context>(req).map_or((None, None), |context| {
-        (context.options, context.notification)
+        (
+            context.options,
+            context.notifier.as_ref().map(|n| n.callback),
+        )
     });
     let mut array = PhpArray::new(req)?;
     if let Some(notification) = notification {

@@ -149,7 +149,7 @@ impl FilterCall {
 
 /// A throwable a filter raised, kept for the native that asked, unless
 /// one is kept already.
-fn defer(req: &mut Request, thrown: Thrown) {
+pub(super) fn defer(req: &mut Request, thrown: Thrown) {
     if req.stream_thrown.is_none() {
         req.stream_thrown = Some(thrown);
     } else if let Some(object) = thrown.exception() {
@@ -232,6 +232,7 @@ impl PhpStream {
         while !self.eof && self.writepos - self.readpos < to_read_now {
             let Self { ops, eof, .. } = self;
             let justread = ops.read(req, &mut chunk, eof);
+            self.count_progress(req, justread.unwrap_or(0));
             if justread.is_none() && self.writepos == self.readpos {
                 return false;
             }
@@ -453,6 +454,7 @@ impl PhpStream {
                         && count > 0
                     {
                         *position += i64::try_from(count).unwrap_or(i64::MAX);
+                        self.count_progress(req, count);
                     }
                 }
             }
