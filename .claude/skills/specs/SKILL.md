@@ -31,7 +31,7 @@ Until [each run works in its own copy of the pinned tree](https://github.com/mit
 
 1. On a fresh release build at `main`'s tip, take the per-commit lane with its census and `Zend/tests`, each into `$S`. The merge check's head runs are these runs; reuse them while the tip is unchanged.
    ```
-   cargo build --release -p php
+   cargo build --release -p php_sapi_cli -p php_sapi_cgi
    cargo xtask phpt --census > $S/lane-<tip>.out
    cargo xtask phpt --subset Zend/tests > $S/zend-<tip>.out
    cargo xtask phpt --subset tests > $S/tests-<tip>.out
@@ -71,7 +71,7 @@ Recording the ticket on the branch also keeps `xtask track next` from naming the
 
 In main's checkout, one branch at a time. A blocker's branch (a crash or a regression fix) merges on its own as soon as its builder finishes, ahead of the specs waiting: #723's fix waited on its branch while the same bug was found again as #771 and fixed a second time.
 
-1. `git merge --no-ff --no-commit <branch>`. Resolve every conflict, then `cargo build -p php` until it builds, since the build is where the conflicts git can't see surface. [merging.md](merging.md) holds the ones that recur.
+1. `git merge --no-ff --no-commit <branch>`. Resolve every conflict, then `cargo build -p php_sapi_cli -p php_sapi_cgi` until it builds, since the build is where the conflicts git can't see surface. [merging.md](merging.md) holds the ones that recur.
 2. Commit through the hook with `git commit -F $S/msg-<branch>.txt` and no pathspec: a merge commit takes the whole index, which is why the checkout is the coordinator's alone. The subject is `Merge <branch>: <the spec's change in one sentence>`. A hook refusal is a conflict not yet resolved.
 
 The merge is in when its commit exists and `git status` is clean. Every branch a builder finishes is merged or sent back: a ticket closes on its branch before the merge, so a branch left standing is work its closed ticket says `main` has (twelve were found so at a681389; #811 lists them). Branches over separate areas merge one after another and share one merge check, since a regression's test names point at its branch.
@@ -84,7 +84,7 @@ After the last merge of a batch, before any push:
 2. `cargo xtask witness` over every crate. The hook runs only staged crates' witnesses, which is how #681 broke ext/reflection unseen until #733.
 3. On a fresh release build, the lane and `Zend/tests`, each held test by test against the merge base, the tip before the batch, whose runs the cut's first step kept (#664). The witness and the four runs read the tree and not each other, and each run works in its own copy of the pinned tree (#1183), so they run at once; the lane is the longest:
    ```
-   cargo build --release -p php -p xtask
+   cargo build --release -p php_sapi_cli -p php_sapi_cgi -p xtask
    cargo xtask witness > $S/witness-<head>.out 2>&1 &
    cargo xtask phpt --census --against <base> > $S/lane-<head>.out &
    cargo xtask phpt --subset Zend/tests --against <base> > $S/zend-<head>.out &

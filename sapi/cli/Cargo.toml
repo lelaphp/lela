@@ -1,14 +1,15 @@
-# php: the binary (design §4.1). The bundle's enabled set on one engine, the
-# tier the bundle names, served by php_sapi's CLI host. Two edges, php_bundle
-# and php_sapi; the engine is named through the host face alone.
+# sapi/cli: php's CLI, `php-src/sapi/cli`, one crate under `sapi/` (ADR-0008),
+# the binary `php`: the bundle's enabled set on one engine, the tier the
+# bundle names, the command line read as php's CLI reads it. Two edges,
+# php_bundle and php_sapi; the engine is named through the facade alone.
 [package]
-name = "php"
+name = "php_sapi_cli"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "The binary: the bundle's enabled set on one engine, behind the CLI host"
+description = "php's CLI host, the binary php"
 
 [lints]
 workspace = true
@@ -16,13 +17,6 @@ workspace = true
 [[bin]]
 name = "php"
 path = "src/main.rs"
-
-# The same binary under php-cgi's name, which `php_sapi::Host::of` reads
-# off `argv[0]`: php builds its CGI as `php-cgi` beside `php`, and a test
-# that looks for it looks there (sapi/cgi/tests/include.inc).
-[[bin]]
-name = "php-cgi"
-path = "src/cgi.rs"
 
 # The same binary with `php_engine`'s `witness-trace` on, which the witness
 # lane builds and serves a fence marked `process` through, and nothing else
@@ -36,7 +30,7 @@ required-features = ["witness-trace"]
 [features]
 # Every request the binary serves appends the natives it entered to the file
 # `PHP_WITNESS_TRACE` names (harness §4.5 condition 2, revision 61).
-witness-trace = ["php_bundle/witness-trace"]
+witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 
 [dependencies]
 # The bundle's default set and seven it turns on: `pcntl` and `posix`,
@@ -48,5 +42,5 @@ witness-trace = ["php_bundle/witness-trace"]
 # `--enable-bcmath`, which the oracle is built with (#1163, #1166), and
 # `calendar`, php's `--enable-calendar`, which the oracle is built with
 # (#1163, #1206).
-php_bundle = { path = "../php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar"] }
-php_sapi = { path = "../php_sapi" }
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar"] }
+php_sapi = { path = "../../crates/php_sapi" }

@@ -276,6 +276,51 @@ budget = 3500     # php_uri.c, php_uri_common.c and the three parser adapters; u
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 
+# ---------------------------------------------------------------- sapi/
+# One crate per SAPI, package `php_sapi_<name>` at `sapi/<name>`, each its
+# binary, reaching the engine through php_sapi alone (ADR-0008). Budgets by
+# #727's rule, 1.25 × php-src's non-blank, non-comment C lines at php-8.5.9,
+# rounded up to 500 (#1248). php-src's sapi/ suites are the hosts' own tests,
+# in the lane beside the extensions' (#1161: every test the oracle runs). The
+# ports are partial: `phpt` is the meter, not a condition of done, until the
+# no-regression rule replaces the key (#652, #664).
+[[crate]]
+name = "sapi/cli"
+budget = 8500     # php_cli.c with the -S server, 6,641 lines of C
+phpt = ["sapi/cli/tests"]
+porting = true
+[[crate]]
+name = "sapi/cgi"
+budget = 3000     # cgi_main.c, 2,118
+phpt = ["sapi/cgi/tests"]
+porting = true
+[[crate]]
+name = "sapi/fpm"
+budget = 14500    # fpm/, 11,284
+phpt = ["sapi/fpm/tests"]
+porting = true
+[[crate]]
+name = "sapi/phpdbg"
+budget = 13500    # phpdbg*.c, 10,795
+phpt = ["sapi/phpdbg/tests"]
+porting = true
+[[crate]]
+name = "sapi/embed"
+budget = 500      # php_embed.c, 210; php-src carries no sapi/embed/tests
+porting = true
+[[crate]]
+name = "sapi/apache2handler"
+budget = 2000     # 1,313; no tests directory
+porting = true
+[[crate]]
+name = "sapi/litespeed"
+budget = 8000     # 6,088; no tests directory
+porting = true
+[[crate]]
+name = "sapi/fuzzer"
+budget = 1500     # 921; no tests directory
+porting = true
+
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
 # `ops.lock`'s effects column. A lock with `sections` is diffed per section.
@@ -378,6 +423,10 @@ to = ["php_bundle", "php_sapi"]
 from = "php_engine::{executor,kernels}"
 to = "php_engine::{serve,headers,gpc,output}"
 deny = true # design §4.2: keeps a later main/-style split possible
+[[edge]]
+from = "sapi/*"
+to = ["php_sapi", "php_proto", "php_bundle"]
+adr = "0008" # a host reaches the engine through php_sapi alone; never php_engine, api or ext/*
 
 # ---------------------------------------------------------------- rules
 # Each rule: an `id`, a `scope` or a `tool`, one predicate, an optional `adr`,

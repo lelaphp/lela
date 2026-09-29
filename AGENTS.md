@@ -1,6 +1,6 @@
 # dax-php
 
-dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's execution model once, with one executor, held to the real `php` binary as its second opinion. Twelve crates in `crates/`, one crate per extension in `ext/`, and `xtask`, the harness that measures all of it. Think of it as opcache's memory model applied to threads instead of processes: immutable compiled units shared by every request in one process, with no fork and no recompiling.
+dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's execution model once, with one executor, held to the real `php` binary as its second opinion. Twelve crates in `crates/`, one crate per extension in `ext/`, one per host in `sapi/`, and `xtask`, the harness that measures all of it. Think of it as opcache's memory model applied to threads instead of processes: immutable compiled units shared by every request in one process, with no fork and no recompiling.
 
 ## What makes the third engine special?
 
@@ -69,8 +69,8 @@ Where those paragraphs say *suggestion* or *follow-up*, this repository says tic
 
 - `third-engine-design.md` is the design of record, `jit-design.md` the compiled tier, `harness-design.md` the harness: living documents with a ledger on top, cited by section. What a revision says is a person's; typing it is not. Where a ticket carries the sentence a person has settled, landing it with its ledger row is yours, and the commit names the ticket that settled it. A revision nobody has settled stays a question you file. `research/` holds the earlier revisions and the research behind them, read for history only. `docs/adr/` is the list of reversals; read the ADR before touching what it names.
 - Design documents carry no numbers of their own; budgets and interfaces live in `seams.toml`, the oracle in `oracle.toml`. A fact that changes is a region, rendered by `computed run` and held by `computed check`. No tickets, plans or agent scratch files in the repository; keep working material in your scratchpad.
-- `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and the only `unsafe`; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto`, `php_sapi` and `php` are the codecs, the hosts and the binary.
-- `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `xtask` is the harness and `xtask/fixtures/` its negative controls. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
+- `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and the only `unsafe`; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto` is the codecs and `php_sapi` the facade every host depends on.
+- `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `sapi/<name>` is one crate per host, each its binary (`sapi/cli` builds `php`, `sapi/cgi` `php-cgi`; ADR-0008). `xtask` is the harness and `xtask/fixtures/` its negative controls. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
 
 ## Taste
 
@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=40c16c32ca32a6574837231de6daafd58326917ecd013cdb8851a51e2d5a9752 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=ce167399c809e9026fa85ce5811196b2874ca881f17aa7a1fd894085c7205f5d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -107,12 +107,12 @@ third-engine-design.md
 | heap | heap.lock | 325 |  | pass |
 | unit | unit.lock | 102 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 845 | 900 | pass |
-| sapi | sapi.lock | 7 |  | pass |
+| api | api.lock | 861 | 900 | pass |
+| sapi | sapi.lock | 11 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 348 |  | pass |
 
-<!-- /computed in=96dbab8ac9fabaa3b6218840432c4c41e33e0f0447ef9cc2dbcda38d0452dc03 out=521f479146451e5d958466dc0ef22c3b416aeacb8b858ee13148bcff4681d29a -->
+<!-- /computed in=72f6dcf3b1dd4227c1054f93988cf82f6c681b5896c46cc0990527b553d281ad out=4959f50a15265cb796786bb3badccf6c1cb32e04cb3d594d0b85dee3621787ac -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -123,26 +123,26 @@ third-engine-design.md
 | lints.no-panic |  | deny_lints | no reading | Internal invariant failures are InternalError fatals with a message, not panics (design §10). |
 | engine.reentry-signature |  | check | no reading | A function in php_engine that calls execute or release takes &mut Request. |
 | api.no-hot |  | deny_pattern | no reading | php_heap::hot is for the handlers; api never re-exports it (design §4.4, §10). |
-| ext.no-private |  | deny_pattern | fail | Only a macro expansion names php_ext::__private; an extension's source never does (design §4.4, revision 34). |
+| ext.no-private |  | deny_pattern | no reading | Only a macro expansion names php_ext::__private; an extension's source never does (design §4.4, revision 34). |
 | api.lock-line |  | on | pass | A new pub item in api needs its api.lock line in the same commit; api holds to [budget] api_items (design §4.4). |
 | xtask.lock-line |  | on | pass | A new pub item in xtask needs its xtask.lock line in the same commit. |
 | ext.pub-beyond-extension |  | on | pass | api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12). |
-| witness.exit-authored |  | deny_pattern | fail | exit= in a witness is captured by `xtask witness --accept`, never authored. |
-| witness.coverage |  | check | pass | A kernel or a native without a witness fails CI (design §8). |
+| witness.exit-authored |  | deny_pattern | no reading | exit= in a witness is captured by `xtask witness --accept`, never authored. |
+| witness.coverage |  | check | no reading | A kernel or a native without a witness fails CI (design §8). |
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | vocab.harness |  | avoid_from | pass | The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read. |
 | generated.committed |  | generated | pass | ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget. |
-| git.no-verify |  | deny_argv | fail | Commits run the pre-commit hook; --no-verify is not available to agents. |
-| ticket.close |  | deny_argv | fail | A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents. |
+| git.no-verify |  | deny_argv | no reading | Commits run the pre-commit hook; --no-verify is not available to agents. |
+| ticket.close |  | deny_argv | no reading | A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents. |
 | ticket.close-api |  | deny_pattern | no reading | The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. |
-| ticket.reply-unfiled |  | deny_pattern | fail | A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes. |
-| lanes.nightly |  | deny_pattern | fail | Nightly lanes run in CI only; run the per-crate subset. |
-| lanes.builder-subset |  | deny_pattern | fail | A builder runs its crates' subsets, and Zend/tests when it touches php_engine, php_compile, php_syntax or php_heap; the whole lane is the merge check's (specs §6). |
-| computed.force |  | deny_pattern | fail | `computed run --force` discards a hand edit; a person decides that. |
+| ticket.reply-unfiled |  | deny_pattern | no reading | A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes. |
+| lanes.nightly |  | deny_pattern | no reading | Nightly lanes run in CI only; run the per-crate subset. |
+| lanes.builder-subset |  | deny_pattern | no reading | A builder runs its crates' subsets, and Zend/tests when it touches php_engine, php_compile, php_syntax or php_heap; the whole lane is the merge check's (specs §6). |
+| computed.force |  | deny_pattern | no reading | `computed run --force` discards a hand edit; a person decides that. |
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
-| divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
+| divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=e2240bfb6fefb6f880bafdaf6d7e3ab9e1ebb2f30e2ea0043348b615cfb4f7ad out=d3089b4601e9cae5433e5a339801b794aeef12dbcb5ff0dec8ff142070872bdd -->
+<!-- /computed in=4ce3272e271a7f497ed6959fa4a1d78e21b873c9ed470f9d5b0e36204b5970c9 out=d8f833ef0725db204c13e90a3bc463486013221b5d42dca048e5b29a2032b337 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -183,7 +183,6 @@ Options:
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
-├── php
 ├── php_bundle
 ├── php_compile
 ├── php_engine
@@ -195,7 +194,7 @@ Options:
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=58289efa27f4c9a56d26d66985bd384159d2ed91593e6571b94bceaaec15fa88 out=574d41589036448a1d587bafd8fa4f6f4280feb6b64b201ae8301bd98465112e -->
+<!-- /computed in=05dc4b683adea2b1120d270298d33fe48777aab9e12d3445f17df73ab7b701dd out=6ec60b32a5cbec77b584126a718b74bc14d8ba4d5e87c9c43ecaab34f8efe9ba -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .
@@ -237,3 +236,10 @@ Options:
 └── zlib
 ```
 <!-- /computed in=ad0e73f07ddfa419db2579e8315eae227926a331cd98a3863b419c2bd220c36c out=06fd5b22292e333053445277b1f5010686c24594ee58fcb9bc7407ea46ea8833 -->
+<!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
+```
+.
+├── cgi
+└── cli
+```
+<!-- /computed in=6579601b54f477e5cf1c1143832f3db115cb0108eb41b5c3ac83d78cf7008132 out=f33245cb110b42347d328159c514f71ad9e18464f7bb086239fd5de7a0888968 -->

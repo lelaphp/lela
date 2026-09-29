@@ -6,9 +6,9 @@
 //! and the body after it, the headers held to `--EXPECTHEADERS--`.
 //!
 //! The host is the php-cgi `[sapi]` pins for the runner's control, and
-//! the engine's own `php-cgi` beside the binary under test, the same
-//! program under the name it answers as php-cgi by (#1197), which is where
-//! a test that looks for php-cgi beside `TEST_PHP_EXECUTABLE` finds it.
+//! the engine's own `php-cgi` beside the binary under test, `sapi/cgi`'s
+//! binary (#1197, ADR-0008), which is where a test that looks for php-cgi
+//! beside `TEST_PHP_EXECUTABLE` finds it.
 //! [`request`] is the one translation of a test's sections into what its
 //! host is handed, whichever host it is (#1198).
 
@@ -29,31 +29,23 @@ const BESIDE: &str = "sapi/cgi/php-cgi";
 
 /// The CGI host a run hands a CGI-shaped test to: the php-cgi `[sapi]`
 /// pins where `binary` is the pinned php, which is the runner's control,
-/// and otherwise the engine's own `php-cgi` beside `binary`, which cargo
-/// builds with it, or, where only `binary` was built, `binary` under the
-/// name php-cgi, linked at [`BESIDE`] under `root`. `None` where the pin
-/// names no php-cgi or none is at its path, which upstream's runner
-/// answers with a skip (run-tests.php:1894-1896).
-pub(crate) fn host(
-    pin: &Pin,
-    binary: &Path,
-    control: bool,
-    root: &Path,
-) -> Result<Option<PathBuf>> {
-    if control || binary == pin.oracle.path {
-        let pinned = pin.sapi.cgi.as_ref().map(|cgi| cgi.path.clone());
-        return Ok(pinned.filter(|path| path.is_file()));
-    }
-    let beside = binary.with_file_name("php-cgi");
-    if beside.is_file() {
-        return Ok(Some(beside));
-    }
-    linked(binary, root).map(Some)
+/// and otherwise the engine's own `php-cgi` beside `binary`, which the
+/// lane's runner held to the tree with it (`oracle::Runner::resolve`).
+/// `None` where the pin names no php-cgi or none is at its path, or none
+/// was built beside `binary`, which upstream's runner answers with a skip
+/// (run-tests.php:1894-1896).
+pub(crate) fn host(pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
+    let host = if control || binary == pin.oracle.path {
+        pin.sapi.cgi.as_ref().map(|cgi| cgi.path.clone())
+    } else {
+        Some(binary.with_file_name(oracle::ENGINE_CGI))
+    };
+    host.filter(|path| path.is_file())
 }
 
 /// `binary` under the name php-cgi: a link of that name to it at
-/// [`BESIDE`] under `root`, the witness lane's `php-witness` run as
-/// php-cgi.
+/// [`BESIDE`] under `root`, the witness lane's `php-cgi-witness` run
+/// under the name php-cgi builds it by.
 pub(crate) fn linked(binary: &Path, root: &Path) -> Result<PathBuf> {
     let link = root.join(BESIDE);
     if let Some(dir) = link.parent() {

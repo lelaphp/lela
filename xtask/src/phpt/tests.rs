@@ -729,7 +729,7 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
         [
             Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"]),
             Crate::named("php_heap"),
-            Crate::named("php_sapi").with_phpt(&["sapi/cli/tests"]),
+            Crate::named("sapi/cli").with_phpt(&["sapi/cli/tests"]),
             Crate::named("ext/pcre"),
             Crate::named("ext/openssl").with_feature("openssl"),
             Crate::named("ext/curl").with_feature("curl"),
@@ -741,11 +741,11 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
         .map(|subset| subset.scope)
         .collect();
     // §7's per-commit row: Zend/tests and tests/ with php_engine, sapi/cli
-    // with php_sapi, and the extensions the binary carries: the default
+    // with its host, and the extensions the binary carries: the default
     // set's and the one behind a feature it turns on (revision 63). One
     // behind a feature it does not turn on is the nightly lane's, and a
     // crate with no subset owns none.
-    assert_eq!(lane, ["php_engine", "php_sapi", "ext/pcre", "ext/openssl"]);
+    assert_eq!(lane, ["php_engine", "sapi/cli", "ext/pcre", "ext/openssl"]);
 }
 
 /// The lane over the tracked manifest and the binary's own declaration:

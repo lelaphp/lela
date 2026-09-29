@@ -30,9 +30,9 @@ use toml::Value;
 use crate::manifest::Crate;
 
 /// The crate that builds the binary under test, relative to the
-/// workspace root: `crates/php` until ADR-0008's `sapi/cli` takes the
-/// binary, and then that crate. The one place the harness names it.
-pub const BINARY: &str = "crates/php";
+/// workspace root: `sapi/cli`, php's CLI host, whose binary is `php`
+/// (ADR-0008). The one place the harness names it.
+pub const BINARY: &str = "sapi/cli";
 
 /// The package every build turns its extension features on through.
 const BUNDLE: &str = "php_bundle";

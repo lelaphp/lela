@@ -13,8 +13,8 @@
 //! A fence marked `process` is run of record by the `php` binary in a
 //! process of its own instead ([`super::process`]; harness §8, revision
 //! 61), held by the same rule; one with a `request` fence is served as a
-//! request of the web, by the php-cgi `[sapi]` pins and by the `php`
-//! binary run as php-cgi (#1197).
+//! request of the web, by the php-cgi `[sapi]` pins and by the engine's
+//! `php-cgi` (#1197).
 //!
 //! Both runs stand under the recipe, and under the `[regime.<name>]` the
 //! fence names where it names one, its ini after the recipe's in each
@@ -167,7 +167,7 @@ pub(super) fn serve(
                 &witness.snippet,
                 witness.request.as_deref().unwrap_or_default(),
             )
-            .map_err(|trouble| format!("the php binary did not serve it as php-cgi: {trouble:#}")),
+            .map_err(|trouble| format!("the php-cgi binary did not serve it: {trouble:#}")),
     }
 }
 

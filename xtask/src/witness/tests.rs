@@ -50,8 +50,9 @@ fn source(name: &str, text: &str) -> (Tree, PathBuf) {
     (dir, file)
 }
 
-/// The workspace's `php-witness`, for a fence marked `process`; built by
-/// the first test that serves one.
+/// The workspace's `php-witness`, for a fence marked `process`, and its
+/// `php-cgi-witness`, for one with a `request`; each built by the first
+/// test that serves one.
 fn binary() -> Binary {
     Binary::of(&workspace())
 }
