@@ -33,6 +33,13 @@
 //! own is an attribute this grammar has no meaning for and the block is
 //! refused.
 //!
+//! A `request` fence between the two describes a request of the web, in
+//! the sections a CGI-shaped `.phpt` carries (`--GET--`, `--POST--`,
+//! `--POST_RAW--`, `--COOKIE--`): the snippet is served by php-cgi beside
+//! the pinned php for the oracle and by the `php` binary run as php-cgi
+//! for the engine, each in a process of its own, and the `expect` fence
+//! pins what php-cgi writes, its head and its body (#1197).
+//!
 //! A `process` says the snippet changes the process it runs in: it forks,
 //! sends or takes a signal, or sets the process's ids, session or limits.
 //! Such a fence is served by the `php` binary in a process of its own, a
@@ -58,6 +65,9 @@ const PHP: &str = "php";
 const EXPECT: &str = "expect";
 /// The info string of the optional fence that pins the second stream.
 const STDERR: &str = "stderr";
+/// The info string of the optional fence between the two that describes
+/// the request a CGI host serves the program as.
+const REQUEST: &str = "request";
 
 /// What the `exit` attribute of an `expect` fence says.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -94,6 +104,9 @@ pub enum Served {
     /// The `php` binary built with `witness-trace`, in a process of its
     /// own: the fence carries `process` (harness §8, revision 61).
     Binary,
+    /// The same binary run as php-cgi, beside php-cgi for the oracle: a
+    /// `request` fence describes what the CGI host is handed (#1197).
+    Cgi,
 }
 
 /// One witness: the program, what it prints, and where it stands.
@@ -129,6 +142,10 @@ pub struct Witness {
     pub wall: Option<Duration>,
     /// What serves the snippet beside the oracle.
     pub served: Served,
+    /// The `request` fence's body: the `.phpt` sections of a CGI-shaped
+    /// test (`--GET--`, `--POST--`, `--POST_RAW--`, `--COOKIE--`) the CGI
+    /// host is handed, read by the phpt lane's one translation of them.
+    pub request: Option<String>,
 }
 
 impl Witness {
@@ -139,10 +156,13 @@ impl Witness {
     /// since the same snippet under two regimes is two runs and a person's
     /// row on one of them is not a row on the other.
     pub fn id(&self) -> String {
-        let program = match &self.regime {
+        let mut program = match &self.regime {
             None => self.snippet.clone(),
             Some(regime) => format!("{regime}\n{}", self.snippet),
         };
+        if let Some(request) = &self.request {
+            program = format!("{request}\n{program}");
+        }
         format!("witness:{}", git::blob_id(program.as_bytes()))
     }
 
@@ -279,8 +299,19 @@ pub fn extract(file: &Path, text: &str) -> Extracted {
 /// The block whose `php` fence opens at `start`, and the index after its
 /// last line.
 fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize), Problem> {
-    let (snippet, after) = body_of(lines, start)
+    let (snippet, mut after) = body_of(lines, start)
         .ok_or_else(|| Problem::at(file, start, "a php fence no line of the block closes"))?;
+    // The request a CGI host serves the snippet as, where a `request`
+    // fence stands between the two.
+    let mut request = None;
+    if let Some(at) = next_fence(lines, after)
+        && first_word(info_at(lines, at).unwrap_or_default()) == REQUEST
+    {
+        let (body, next) = body_of(lines, at)
+            .ok_or_else(|| Problem::at(file, at, "a request fence no line of the block closes"))?;
+        request = Some(body);
+        after = next;
+    }
     let opened = next_fence(lines, after).ok_or_else(|| {
         Problem::at(
             file,
@@ -334,7 +365,12 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             exit: attributes.exit,
             wall: attributes.wall,
             regime: attributes.regime,
-            served: attributes.served,
+            served: if request.is_some() {
+                Served::Cgi
+            } else {
+                attributes.served
+            },
+            request,
         },
         after,
     ))
@@ -711,6 +747,23 @@ mod tests {
             pinned("/// ```expect exit process", 255),
             "/// ```expect exit=255 process"
         );
+    }
+
+    /// A `request` fence between the two is the request a CGI host serves
+    /// the snippet as, and part of what the key names (#1197).
+    #[test]
+    fn a_request_fence_serves_the_snippet_as_a_request_of_the_web() {
+        let request = php(
+            "/// ```php\n/// echo $_GET['q'];\n/// ```\n/// ```request\n/// --GET--\n/// q=1\n/// ```\n/// ```expect\n/// 1\n/// ```\n",
+        );
+        let plain =
+            php("/// ```php\n/// echo $_GET['q'];\n/// ```\n/// ```expect\n/// 1\n/// ```\n");
+        assert!(request.problems.is_empty(), "{request:#?}");
+        let witness = &request.witnesses[0];
+        assert_eq!(witness.served, Served::Cgi);
+        assert_eq!(witness.request.as_deref(), Some("--GET--\nq=1"));
+        assert_eq!(witness.stdout, "1");
+        assert_ne!(witness.id(), plain.witnesses[0].id());
     }
 
     #[test]

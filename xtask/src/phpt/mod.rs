@@ -88,9 +88,12 @@
 //!
 //! **What is not run here.** The full corpus, the nightly verdict control
 //! and the tier's lanes are CI's, under the manifest's `lanes.nightly`
-//! rule; the per-commit lane and one subset are an agent's to run. A CGI-shaped test, a
-//! `--PHPDBG--` one and a `--REDIRECTTEST--` are skipped with their reason:
-//! this runner hosts the command line. Beyond those, the process adapter
+//! rule; the per-commit lane and one subset are an agent's to run. A
+//! `--PHPDBG--` test and a `--REDIRECTTEST--` are skipped with their
+//! reason; a CGI-shaped one runs through the CGI host beside the binary,
+//! php-cgi beside the pinned php for the control and the engine's own
+//! binary under that name for the engine, as the `cgi` module has it
+//! (#1198). Beyond those, the process adapter
 //! gives a test one stdin and two streams captured as one, so a test that
 //! wants a terminal on a stream it did not capture, an interactive shell
 //! or a listening server is where the runner and upstream still part; the
@@ -99,6 +102,7 @@
 
 mod adapter;
 pub(crate) mod against;
+pub(crate) mod cgi;
 /// The suffix of a control run's scope: the subset under the oracle.
 pub(crate) const CONTROL: &str = "@control";
 mod census;
@@ -862,7 +866,9 @@ pub(crate) fn run_subset(
     // A digest mismatch refuses the whole run (§4.3), before the first
     // test rather than at its first SKIPIF.
     oracle.asserted()?;
-    let adapter = Adapter::new(oracle, registry, binary, lane);
+    let control = matches!(runner, Runner::Control(_));
+    let host = cgi::host(oracle.pin(), binary, control, &subset.root)?;
+    let adapter = Adapter::new(oracle, registry, binary, host, lane);
     let mut dirs = BTreeMap::new();
     let apart: Vec<_> = tests
         .iter()

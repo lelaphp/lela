@@ -26,6 +26,7 @@ pub(crate) mod expect;
 pub(crate) mod linked;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
 use std::os::unix::process::CommandExt;
@@ -536,8 +537,10 @@ pub struct Invocation<'a> {
     pub flags: &'a [String],
     /// Arguments after the program's path: a test's `--ARGS--`.
     pub args: &'a [String],
-    /// Environment entries added to the recipe's: a test's `--ENV--`.
-    pub env: &'a [(String, String)],
+    /// Environment entries added to the recipe's: a test's `--ENV--`, and
+    /// the request a CGI-shaped test describes, whose values are the bytes
+    /// the test wrote and no encoding of them.
+    pub env: &'a [(String, OsString)],
     /// What the program reads on stdin: a test's `--STDIN--`, and nothing
     /// otherwise, which is what the recipe's own runs read.
     pub stdin: Option<&'a [u8]>,
@@ -549,6 +552,10 @@ pub struct Invocation<'a> {
     /// a witness's; php-src's root for a phpt test and the sections run
     /// beside it, as run-tests.php runs them (#952).
     pub cwd: Option<&'a Path>,
+    /// Whether what the program wrote is handed back as it wrote it and
+    /// not normalised: a CGI run's, whose headers run-tests.php parts
+    /// from the body before it trims (run-tests.php:2530-2533).
+    pub raw: bool,
 }
 
 impl<'a> Invocation<'a> {
@@ -565,6 +572,7 @@ impl<'a> Invocation<'a> {
             stdin: None,
             merge_streams: false,
             cwd: None,
+            raw: false,
         }
     }
 }
@@ -706,9 +714,17 @@ impl<'a> Oracle<'a> {
         } else {
             fs::read(&err_path).context("reading php's stderr")?
         };
+        let (stdout, stderr) = if call.raw {
+            (stdout, stderr)
+        } else {
+            (
+                scratch.normalise(&recipe.normalise, stdout),
+                scratch.normalise(&recipe.normalise, stderr),
+            )
+        };
         Ok(Observation {
-            stdout: scratch.normalise(&recipe.normalise, stdout),
-            stderr: scratch.normalise(&recipe.normalise, stderr),
+            stdout,
+            stderr,
             exit: status.code(),
             wall,
         })
