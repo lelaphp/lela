@@ -141,7 +141,7 @@ pub(crate) fn find(
         };
         let mut test = tmp;
         test.extend_from_slice(&path[mounted.len()..]);
-        let Some(sb) = req.url_stat(&test, false, false)? else {
+        let Some(sb) = req.url_stat(&test, false, false)?.found() else {
             return Ok(Err(None));
         };
         let is_directory = sb[2] & 0o040_000 != 0;
@@ -198,7 +198,11 @@ pub(crate) fn mount(
     } else {
         archive::expand_filepath(req, filename).unwrap_or_else(|| filename.to_vec())
     };
-    let Some(sb) = req.url_stat(&tmp, false, false)? else {
+    // "only check openbasedir for files, not for phar streams"
+    if !is_phar && req.check_open_basedir(&tmp, true).is_err() {
+        return Ok(false);
+    }
+    let Some(sb) = req.url_stat(&tmp, false, false)?.found() else {
         return Ok(false);
     };
     let mut entry = Entry::new(&path);
@@ -284,6 +288,9 @@ pub(crate) fn open_archive_fp(req: &mut Request, id: ArchiveId) -> Result<bool, 
         return Ok(true);
     }
     let fname = archive.fname.clone();
+    if req.check_open_basedir(&fname, true).is_err() {
+        return Ok(false);
+    }
     let bytes = archive::read_file(req, &fname, false)?;
     let Some(archive) = archives(req).get_mut(id) else {
         return Ok(false);

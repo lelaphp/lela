@@ -292,7 +292,7 @@ fn load(req: &mut Request, options: &Options) -> Result<Option<(CString, CString
     let Some(mut conf) = Conf::new() else {
         return Ok(None);
     };
-    if !conf.load(&file) || !load_oids(req, &conf)? {
+    if !conf.load(&file) || !load_oids(req, &conf) {
         return Ok(None);
     }
     Ok(Some((file, section, conf)))
@@ -341,10 +341,10 @@ fn sha1(req: &mut Request) -> Option<Digest> {
 /// `php_openssl_add_oid_section`: each line of its `oid_section` made an
 /// object where no object has its name; false after php's warning where
 /// the section or an object cannot be.
-fn load_oids(req: &mut Request, conf: &Conf) -> Result<bool, Thrown> {
+fn load_oids(req: &mut Request, conf: &Conf) -> bool {
     if let Some(file) = conf.string(None, c"oid_file") {
         let origin = Origin::Setting("oid_file");
-        let path = check_path(req, c_string(&file).as_bytes(), origin, false)?;
+        let path = check_path(req, c_string(&file).as_bytes(), origin, false);
         if let Some(bio) = path.and_then(|path| Bio::file(&path, c"r")) {
             ffi::create_objects(&bio);
             drop(bio);
@@ -352,7 +352,7 @@ fn load_oids(req: &mut Request, conf: &Conf) -> Result<bool, Thrown> {
         }
     }
     let Some(section) = conf.string(None, c"oid_section") else {
-        return Ok(true);
+        return true;
     };
     let Some(lines) = conf.section(&c_string(&section)) else {
         store_errors(req);
@@ -361,7 +361,7 @@ fn load_oids(req: &mut Request, conf: &Conf) -> Result<bool, Thrown> {
             String::from_utf8_lossy(&section)
         );
         docref(req, Level::Warning, &text);
-        return Ok(false);
+        return false;
     };
     for (name, value) in lines {
         let (name_c, value_c) = (c_string(&name), c_string(&value));
@@ -376,10 +376,10 @@ fn load_oids(req: &mut Request, conf: &Conf) -> Result<bool, Thrown> {
                 String::from_utf8_lossy(&value)
             );
             docref(req, Level::Warning, &text);
-            return Ok(false);
+            return false;
         }
     }
-    Ok(true)
+    true
 }
 
 /// `PHP_SSL_CONFIG_SYNTAX_CHECK`: a section of extensions added under

@@ -153,6 +153,9 @@ fn iptcembed(
     #[php(default = 0)] spool: i64,
 ) -> Result<Union<PhpString, bool>, Thrown> {
     let (data, Path(file)) = (iptc_data.as_bytes().to_vec(), filename);
+    let Ok(jpeg) = req.check_open_basedir(file.as_bytes(), true) else {
+        return Ok(Union::B(false));
+    };
     if data.len() >= usize::MAX - PSHEADER.len() - 1026 {
         return Err(throw(
             req,
@@ -160,7 +163,7 @@ fn iptcembed(
             "iptcembed(): Argument #1 ($iptc_data) is too large",
         ));
     }
-    let Ok(bytes) = std::fs::read(req.absolutize(file.as_bytes()).0) else {
+    let Ok(bytes) = std::fs::read(&jpeg) else {
         let text = format!(
             "Unable to open {}",
             String::from_utf8_lossy(file.as_bytes())

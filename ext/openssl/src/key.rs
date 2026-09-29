@@ -233,7 +233,7 @@ pub(crate) fn key_from(
         let text = text.as_bytes();
         let mut file: Option<CString> = None;
         if text.len() > 7 && text.starts_with(b"file://") {
-            let Some(path) = check_path(req, text, Origin::Arg(arg), true)? else {
+            let Some(path) = check_path(req, text, Origin::Arg(arg), true) else {
                 return Ok(None);
             };
             file = Some(path);
@@ -245,7 +245,7 @@ pub(crate) fn key_from(
         match half {
             Half::Public => {
                 errors_set_mark(req);
-                cert = cert_from_str(req, text, Origin::Arg(arg))?;
+                cert = cert_from_str(req, text, Origin::Arg(arg));
                 if cert.is_none() {
                     errors_restore_mark(req);
                     let Some(bio) = bio(&file) else {
@@ -432,7 +432,7 @@ fn openssl_pkey_export_to_file(
             return Ok(false);
         };
         let origin = Origin::Arg(Arg::new(2, "output_filename"));
-        let Some(path) = check_path(req, output_filename.0.as_bytes(), origin, false)? else {
+        let Some(path) = check_path(req, output_filename.0.as_bytes(), origin, false) else {
             return Ok(false);
         };
         let Some(settings) = config::parse(req, options)? else {

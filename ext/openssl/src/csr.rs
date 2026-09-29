@@ -428,7 +428,7 @@ fn openssl_csr_export_to_file(
             return Ok(false);
         };
         let origin = Origin::Arg(Arg::new(2, "output_filename"));
-        let Some(path) = check_path(req, output_filename.0.as_bytes(), origin, false)? else {
+        let Some(path) = check_path(req, output_filename.0.as_bytes(), origin, false) else {
             return Ok(false);
         };
         let shown = String::from_utf8_lossy(path.as_bytes()).into_owned();

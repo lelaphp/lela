@@ -82,7 +82,7 @@ fn update_timestamp(
 
 pub(super) fn destroy_id(req: &mut Request, module: Module, id: &[u8]) -> Result<bool, Thrown> {
     match module {
-        Module::Files => files::destroy(req, id),
+        Module::Files => Ok(files::destroy(req, id)),
         Module::User => user::destroy(req, id),
     }
 }
@@ -93,21 +93,21 @@ pub(super) fn module_gc(
     maxlifetime: i64,
 ) -> Result<i64, Thrown> {
     match module {
-        Module::Files => files::gc(req, maxlifetime),
+        Module::Files => Ok(files::gc(req, maxlifetime)),
         Module::User => user::gc(req, maxlifetime),
     }
 }
 
 pub(super) fn create_sid(req: &mut Request, module: Module) -> Result<Option<Vec<u8>>, Thrown> {
     match module {
-        Module::Files => files::create_sid(req),
+        Module::Files => Ok(files::create_sid(req)),
         Module::User => user::create_sid(req),
     }
 }
 
 pub(super) fn validate_sid(req: &mut Request, module: Module, id: &[u8]) -> Result<bool, Thrown> {
     match module {
-        Module::Files => files::validate_sid(req, id),
+        Module::Files => Ok(files::validate_sid(req, id)),
         Module::User => user::validate_sid(req, id),
     }
 }
@@ -985,10 +985,13 @@ fn cache_limiter(req: &mut Request) -> Result<i32, Thrown> {
     }
     if limiter != b"nocache"
         && let Some(script) = req.script_name().map(<[u8]>::to_vec)
-        && let Some(stat) = req.url_stat(&script, false, false)?
+        // `VCWD_STAT(path_translated)`, the host's own stat, which no
+        // wrapper and no `open_basedir` guard stands before.
+        && let Ok(stat) = std::fs::metadata(req.absolutize(&script))
     {
+        use std::os::unix::fs::MetadataExt;
         req.header_add(
-            format!("Last-Modified: {} GMT", gmt(stat[9])).as_bytes(),
+            format!("Last-Modified: {} GMT", gmt(stat.mtime())).as_bytes(),
             true,
             0,
         );

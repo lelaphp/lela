@@ -181,7 +181,7 @@ fn openssl_x509_export_to_file(
             return Ok(false);
         };
         let origin = Origin::Arg(Arg::new(2, "output_filename"));
-        let Some(path) = check_path(req, output_filename.0.as_bytes(), origin, false)? else {
+        let Some(path) = check_path(req, output_filename.0.as_bytes(), origin, false) else {
             return Ok(false);
         };
         let Some(out) = Bio::file(&path, c"w") else {
@@ -677,7 +677,7 @@ pub(crate) fn setup_verify(
     let (mut files, mut dirs) = (0, 0);
     for (_, item) in calist.map(|a| a.snapshot()).unwrap_or_default() {
         let text = to_string(req, &item)?;
-        let Some(path) = check_path(req, text.as_bytes(), Origin::Item(arg, None), false)? else {
+        let Some(path) = check_path(req, text.as_bytes(), Origin::Item(arg, None), false) else {
             continue;
         };
         let shown = String::from_utf8_lossy(path.as_bytes()).into_owned();
@@ -781,7 +781,7 @@ fn openssl_x509_checkpurpose(
         let untrusted = match untrusted_certificates_file {
             Some(file) => {
                 let arg = Arg::new(4, "untrusted_certificates_file");
-                match certs_from_file(req, file.as_bytes(), arg)? {
+                match certs_from_file(req, file.as_bytes(), arg) {
                     Some(stack) => Some(stack),
                     None => return Ok(Union::B(-1)),
                 }

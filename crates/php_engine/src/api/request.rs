@@ -40,6 +40,7 @@ use crate::engine::{
     Configured, ConfiguredKey, MethodAt, NativeMethod, OutputSink, RequestDescription, Shared,
 };
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
+pub use crate::open_basedir::{HostPath, Refused};
 use crate::output::Output;
 use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
@@ -76,11 +77,6 @@ const IN_GET: u32 = 1 << 0;
 const IN_SET: u32 = 1 << 1;
 const IN_UNSET: u32 = 1 << 2;
 const IN_ISSET: u32 = 1 << 3;
-
-/// A path on the host's filesystem, absolute, after the request's `cwd`
-/// and `open_basedir` have been applied.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct HostPath(pub PathBuf);
 
 /// A linked extension, by identity: its position in the bundle's startup
 /// order, which is where its `zend_module_entry` stands in
@@ -197,17 +193,6 @@ pub(crate) enum Phase {
     Startup,
     Running,
     Shutdown,
-}
-
-/// What a native intends to do at a path, for the `open_basedir` guard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PathIntent {
-    Read,
-    Write,
-    Create,
-    Remove,
-    Stat,
-    Exec,
 }
 
 /// One `ob_*` operation on the request's buffer stack.
@@ -430,15 +415,29 @@ pub enum FdStream<'a> {
 }
 
 /// What a path's wrapper answers to its own `url_stat`, asked as
-/// [`Request::wrapper_url_stat`] asks it: the stat, laid out as
-/// `php_fstat` lays it out; `Failed` for the wrapper's `-1`; and
-/// `Unsupported` where no wrapper was located or the one located has no
-/// `url_stat`, as `php://` has none.
+/// [`Request::url_stat`] and [`Request::wrapper_url_stat`] ask it: the
+/// stat, laid out as `php_fstat` lays it out; `Failed` for the wrapper's
+/// `-1`; `Unsupported` where no wrapper was located or the one located
+/// has no `url_stat`, as `php://` has none; and `Refused` where the
+/// `open_basedir` guard refused a plain file before it was stated, which
+/// `php_stat` answers `false` to without its `stat failed` warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UrlStat {
     Found([i64; 13]),
     Failed,
     Unsupported,
+    Refused,
+}
+
+impl UrlStat {
+    /// The stat where there is one, `None` for every way there is not.
+    #[must_use]
+    pub fn found(self) -> Option<[i64; 13]> {
+        match self {
+            UrlStat::Found(sb) => Some(sb),
+            UrlStat::Failed | UrlStat::Unsupported | UrlStat::Refused => None,
+        }
+    }
 }
 
 /// What `php_stream_xport_create` is asked to make of a `transport`'s
@@ -1053,7 +1052,9 @@ pub enum DirListing {
 /// open an `include` makes; `STREAM_MUST_SEEK`, a stream whose kind
 /// cannot seek copied into one that can, `php_stream_make_seekable`; and
 /// `STREAM_WILL_CAST`, the caller about to cast the stream to a fd, which
-/// makes that copy a temporary file rather than a `php://temp`. The
+/// makes that copy a temporary file rather than a `php://temp`;
+/// `STREAM_DISABLE_OPEN_BASEDIR`, the plain files wrapper opening without
+/// the guard, as `mail.log` is opened. The
 /// engine clears `warn` before it asks an opener, as php does, so what
 /// fails inside one is what the opener logged
 /// ([`Request::wrapper_log_error`]), or the generic `operation failed`.
@@ -1065,6 +1066,7 @@ pub struct Opening {
     pub for_include: bool,
     pub must_seek: bool,
     pub will_cast: bool,
+    pub disable_open_basedir: bool,
 }
 
 /// A wrapper whose kinds the engine keeps, which the extension that
@@ -12894,9 +12896,17 @@ impl Request {
         self.active_native_function().is_some()
     }
 
+    /// Whether the code being served is an include's open, which
+    /// `php_verror` names by the construct (`include()`) as it names a
+    /// native by the native.
+    pub(crate) fn serving_include(&self) -> bool {
+        self.including
+            .is_some_and(|(_, depth)| depth == self.vm.call_depth())
+    }
+
     pub(crate) fn active_native(&self) -> String {
-        if let Some((kind, depth)) = self.including
-            && depth == self.vm.call_depth()
+        if let Some((kind, _)) = self.including
+            && self.serving_include()
         {
             return String::from(kind.name());
         }
@@ -15370,7 +15380,7 @@ impl Request {
     /// the host handed over, `php -r` and stdin, has no path and is
     /// nowhere in the table, as php's `Standard input code` is not.
     pub(crate) fn note_primary_file(&mut self, script: &[u8]) {
-        if let Some(HostPath(real)) = self.realpath(script) {
+        if let Some(real) = self.realpath(script) {
             self.included_files
                 .push(real.as_os_str().as_encoded_bytes().to_vec());
         }
@@ -15435,10 +15445,21 @@ impl Request {
                 return self.include_stream(kind, written, written);
             }
             Err(Unresolved::Missing(reason)) => {
+                // The plain files wrapper is handed the path as written,
+                // and asks the guard of it before it opens.
+                let reason = match self.include_guard(kind, written) {
+                    Ok(_) => reason,
+                    Err(refused) => refused.into(),
+                };
                 self.open_stream_failed(kind, written, &reason);
                 return self.failed_opening(kind, written);
             }
         };
+        if let Err(refused) = self.include_guard(kind, &path) {
+            // The stream opens the resolved path, which its warning names.
+            self.open_stream_failed(kind, &path, &refused.into());
+            return self.failed_opening(kind, written);
+        }
         if kind.once() {
             self.included_files.push(path.clone());
         }
@@ -15476,6 +15497,30 @@ impl Request {
                 self.failed_opening(kind, written)
             }
         }
+    }
+
+    /// `php_plain_files_stream_opener`'s guard over the path an include
+    /// opens (`Z/main/streams/plain_wrapper.c:1265`), its warning named by
+    /// the construct: the resolved path, or the path as written where
+    /// none resolved, and the stream's warning naming the same.
+    ///
+    /// ```php
+    /// ini_set('open_basedir', __DIR__);
+    /// var_dump(include '/etc/hosts');
+    /// ```
+    /// ```expect
+    /// Warning: include(): open_basedir restriction in effect. File(%s) is not within the allowed path(s): (%s) in %s on line 3
+    ///
+    /// Warning: include(%s): Failed to open stream: Operation not permitted in %s on line 3
+    ///
+    /// Warning: include(): Failed opening '/etc/hosts' for inclusion (include_path='%s') in %s on line 3
+    /// bool(false)
+    /// ```
+    fn include_guard(&mut self, kind: IncludeKind, path: &[u8]) -> Result<HostPath, Refused> {
+        let outer = self.including.replace((kind, self.vm.call_depth()));
+        let guarded = self.check_open_basedir(path, true);
+        self.including = outer;
+        guarded
     }
 
     /// An include of a path a stream wrapper serves, `zend_stream_open`'s
@@ -15716,7 +15761,7 @@ impl Request {
                         Ok(path) => return Ok(path),
                         Err(reason) => last = Unresolved::Missing(reason),
                     },
-                    _ => match self.url_stat_quiet(&candidate, false) {
+                    _ => match self.url_stat_quiet(&candidate, false).map(UrlStat::found) {
                         Ok(Some(_)) => return Ok(candidate),
                         Err(thrown) if thrown.exception().is_some() => {
                             return Err(Unresolved::Threw(thrown));
@@ -15743,8 +15788,7 @@ impl Request {
         const ENOENT: i32 = 2;
         let real = self
             .realpath(path)
-            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?
-            .0;
+            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
         if !real.is_file() {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
         }
@@ -17760,6 +17804,28 @@ impl Request {
         if name == b"zend.assertions" && !self.assertions_updated(value) {
             return Ok(None);
         }
+        // `OnUpdateErrorLog` (`Z/main/main.c:697`): at runtime a file
+        // outside `open_basedir` is refused, `syslog` and the empty value
+        // never are.
+        if name == b"error_log"
+            && !value.is_empty()
+            && value != b"syslog"
+            && self.check_open_basedir(value, true).is_err()
+        {
+            return Ok(None);
+        }
+        let tightened;
+        let value = if name == b"open_basedir" {
+            match self.tighter_open_basedir(value) {
+                Some(list) => {
+                    tightened = list;
+                    tightened.as_slice()
+                }
+                None => return Ok(None),
+            }
+        } else {
+            value
+        };
         let handler = self.shared.extensions.iter().find_map(|e| {
             e.on_modify
                 .iter()
@@ -18114,13 +18180,17 @@ impl Request {
 
     /// `getcwd()`.
     #[must_use]
-    pub fn cwd(&self) -> HostPath {
-        HostPath(self.cwd.clone())
+    pub fn cwd(&self) -> PathBuf {
+        self.cwd.clone()
     }
 
-    /// `chdir()`.
-    pub fn set_cwd(&mut self, path: HostPath) -> Result<(), Thrown> {
-        self.cwd = path.0;
+    /// `chdir()`'s `VCWD_CHDIR` past the checks the native makes: the
+    /// working directory moved to what the guarded path resolves to,
+    /// every link on the way replaced, as `getcwd(3)` answers after
+    /// `chdir(2)`, and the stat cache's relative entries dropped.
+    pub fn set_cwd(&mut self, dir: &HostPath) -> Result<(), Thrown> {
+        let real = self.realpath(dir.as_os_str().as_bytes());
+        self.cwd = real.unwrap_or_else(|| dir.to_path_buf());
         self.forget_relative_stats();
         Ok(())
     }
@@ -18132,13 +18202,13 @@ impl Request {
     /// set to more than a lone `/`, else `TMPDIR` from the environment,
     /// one trailing slash taken off either; else `/tmp`.
     #[must_use]
-    pub fn temp_dir(&self) -> HostPath {
+    pub fn temp_dir(&self) -> PathBuf {
         let chosen = self
             .ini_get(b"sys_temp_dir")
             .filter(|dir| !dir.is_empty() && *dir != b"/")
             .or_else(|| self.env(b"TMPDIR").filter(|dir| !dir.is_empty()));
         let dir = chosen.map_or(&b"/tmp"[..], |dir| dir.strip_suffix(b"/").unwrap_or(dir));
-        HostPath(PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
+        PathBuf::from(std::ffi::OsStr::from_bytes(dir))
     }
 
     /// `umask()` as it stands.
@@ -18915,22 +18985,22 @@ impl Request {
 
     /// A path made absolute against the request's `cwd`.
     #[must_use]
-    pub fn absolutize(&self, path: &[u8]) -> HostPath {
-        let given = PathBuf::from(String::from_utf8_lossy(path).into_owned());
+    pub fn absolutize(&self, path: &[u8]) -> PathBuf {
+        let given = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
         if given.is_absolute() {
-            HostPath(given)
+            given.to_path_buf()
         } else {
-            HostPath(self.cwd.join(given))
+            self.cwd.join(given)
         }
     }
 
     /// `VCWD_REALPATH`, `tsrm_realpath`: the path against the request's
     /// working directory with every link resolved, through the realpath
     /// cache; `None` where the path does not exist.
-    pub fn realpath(&mut self, path: &[u8]) -> Option<HostPath> {
+    pub fn realpath(&mut self, path: &[u8]) -> Option<PathBuf> {
         let cwd = self.cwd.as_os_str().as_encoded_bytes().to_vec();
         let real = self.virtual_file_ex(&cwd, path, Resolve::RealPath)?;
-        Some(HostPath(PathBuf::from(std::ffi::OsStr::from_bytes(&real))))
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(&real)))
     }
 
     /// `virtual_file_ex(state, path, NULL, how)` (`Z/Zend/zend_virtual_cwd.c:1007`)
@@ -18990,13 +19060,6 @@ impl Request {
         }
     }
 
-    /// The `open_basedir` guard Mahout's `check_fs_access` performed at
-    /// 27 sites: php's warning and a `Thrown` when the path is outside.
-    pub fn fs_guard(&mut self, path: &HostPath, intent: PathIntent) -> Result<(), Thrown> {
-        let _ = (path, intent);
-        Ok(())
-    }
-
     /// `is_uploaded_file()`.
     #[must_use]
     pub fn is_uploaded_file(&self, path: &[u8]) -> bool {
@@ -19006,7 +19069,7 @@ impl Request {
 
     /// `move_uploaded_file()`'s first half: take the upload's temporary
     /// path out of the request, once.
-    pub fn take_uploaded_file(&mut self, path: &[u8]) -> Option<HostPath> {
+    pub fn take_uploaded_file(&mut self, path: &[u8]) -> Option<PathBuf> {
         let _ = path;
         None
     }
@@ -19116,19 +19179,15 @@ impl Request {
     /// `php_stream_stat_path_ex`, and with `cached` the stat `php_stat`
     /// makes: the path's wrapper located and its `url_stat` asked,
     /// `lstat(2)` where `link` and `stat(2)` otherwise for a plain file,
-    /// laid out as `php_fstat` lays it out; `None` is the stat that
-    /// failed or a wrapper with none. With `cached` the answer comes
+    /// laid out as `php_fstat` lays it out, a plain file's through the
+    /// `open_basedir` guard first, which warns unless the stat is quiet
+    /// and always for `php_stat`'s own. With `cached` the answer comes
     /// from, and goes into, `BG(CurrentStatFile)` or
     /// `BG(CurrentLStatFile)` by the path as written, which
     /// [`Request::clear_stat_cache`], a plain file's read, write or open,
     /// and every operation of [`Request::wrapper_op`] that changed a
     /// file clear.
-    pub fn url_stat(
-        &mut self,
-        path: &[u8],
-        link: bool,
-        cached: bool,
-    ) -> Result<Option<[i64; 13]>, Thrown> {
+    pub fn url_stat(&mut self, path: &[u8], link: bool, cached: bool) -> Result<UrlStat, Thrown> {
         self.stat_url(path, link, cached, false)
     }
 
@@ -19136,7 +19195,7 @@ impl Request {
     /// existence check, `file_exists` and the `is_*` natives: a
     /// user-space wrapper's `url_stat` is handed
     /// `STREAM_URL_STAT_QUIET` beside the link bit.
-    pub fn url_stat_quiet(&mut self, path: &[u8], link: bool) -> Result<Option<[i64; 13]>, Thrown> {
+    pub fn url_stat_quiet(&mut self, path: &[u8], link: bool) -> Result<UrlStat, Thrown> {
         self.stat_url(path, link, true, true)
     }
 
@@ -19147,7 +19206,10 @@ impl Request {
     /// cache neither read nor written, and a wrapper with no `url_stat`
     /// told apart from a stat that failed.
     pub fn wrapper_url_stat(&mut self, path: &[u8]) -> Result<UrlStat, Thrown> {
-        self.stat_url_quiet(path)
+        Ok(match self.stat_url_quiet(path)? {
+            UrlStat::Refused => UrlStat::Failed,
+            answer => answer,
+        })
     }
 
     /// `php_clear_stat_cache`: the stat cache emptied, both entries.
@@ -19184,7 +19246,7 @@ impl Request {
         dir: &[u8],
         prefix: &[u8],
     ) -> Result<Option<PhpString>, Thrown> {
-        match self.open_temporary_fd(Some(dir), prefix) {
+        match self.open_temporary_fd(Some(dir), prefix, true) {
             Some((_, path)) => Ok(Some(PhpString::new(
                 self,
                 path.as_os_str().as_encoded_bytes(),

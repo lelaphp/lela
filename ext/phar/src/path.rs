@@ -203,7 +203,7 @@ fn analyze_path(
     {
         return Ok(true);
     }
-    if let Some(sb) = req.url_stat(filename, false, false)? {
+    if let Some(sb) = req.url_stat(filename, false, false)?.found() {
         return Ok(sb[2] & S_IFDIR == 0 && create != Create::Yes);
     }
     if create == Create::No {
@@ -211,7 +211,7 @@ fn analyze_path(
     }
     let slash = filename.iter().rposition(|b| *b == b'/');
     let dir = &filename[..slash.unwrap_or(filename.len())];
-    if let Some(sb) = req.url_stat(dir, false, false)? {
+    if let Some(sb) = req.url_stat(dir, false, false)?.found() {
         return Ok(sb[2] & S_IFDIR != 0);
     }
     if slash.is_some() {
@@ -229,6 +229,7 @@ fn analyze_path(
     };
     Ok(req
         .url_stat(&real[..slash], false, false)?
+        .found()
         .is_some_and(|sb| sb[2] & S_IFDIR != 0))
 }
 

@@ -62,7 +62,8 @@ pub(crate) fn wrapper() -> StreamWrapper {
 /// pattern after `glob://`, a relative one under the working directory as
 /// php's thread-safe build prefixes it and strips the prefix again, the
 /// matches `php_glob` makes of it with no flags, none for a pattern
-/// nothing matches and a refusal for one it cannot read; the matches and
+/// nothing matches and a refusal for one it cannot read; those the
+/// `open_basedir` guard refuses left out, silently; the matches and
 /// the pattern handed to the engine's glob stream, which splits each as
 /// it reads it (`php_glob_stream_path_split`).
 #[allow(clippy::unnecessary_wraps)] // `StreamWrapper::open_dir`'s signature
@@ -71,7 +72,7 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
     let mut pattern = path.to_vec();
     let mut cwd_skip = 0;
     if pattern.first() != Some(&b'/') {
-        let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
+        let cwd = req.cwd().as_os_str().as_bytes().to_vec();
         cwd_skip = cwd.len() + 1;
         let mut prefixed = cwd;
         prefixed.push(b'/');
@@ -85,9 +86,12 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
         Err(php_glob::PHP_GLOB_NOMATCH) => Vec::new(),
         Err(_) => return Ok(None),
     };
+    // "if open_basedir in use, check and filter restricted paths": a
+    // match the guard refuses is left out without a word.
     let matches = matches
         .into_iter()
         .map(|m| m.get(cwd_skip..).unwrap_or(&m[..]).to_vec())
+        .filter(|m| req.check_open_basedir(m, false).is_ok())
         .collect();
     Ok(Some(DirListing::Glob {
         pattern: path.to_vec(),

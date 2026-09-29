@@ -881,7 +881,7 @@ fn posix_getcwd(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
     let cwd = req.cwd();
     Ok(OrFalse::Value(PhpString::new(
         req,
-        cwd.0.as_os_str().as_bytes(),
+        cwd.as_os_str().as_bytes(),
     )?))
 }
 
@@ -895,13 +895,14 @@ fn expanded(req: &mut Request, path: &[u8]) -> Option<Vec<u8>> {
     let relative_to: &[u8] = if path.first() == Some(&b'/') {
         b""
     } else {
-        cwd.0.as_os_str().as_bytes()
+        cwd.as_os_str().as_bytes()
     };
     req.virtual_file_ex(relative_to, path, Resolve::FilePath)
 }
 
 /// `posix_mkfifo(string $filename, int $permissions): bool`:
-/// `mkfifo(2)`.
+/// `mkfifo(2)`, after the `open_basedir` guard, which refuses without a
+/// word and leaves the last error as it stood, as `posix_mknod`'s does.
 ///
 /// ```php
 /// @unlink('fifo');
@@ -916,6 +917,10 @@ fn expanded(req: &mut Request, path: &[u8]) -> Option<Vec<u8>> {
 /// ```
 #[php_function]
 fn posix_mkfifo(req: &mut Request, filename: PhpString, permissions: i64) -> bool {
+    // The guard refuses without a word, and leaves the last error as it was.
+    if req.check_open_basedir(filename.as_bytes(), false).is_err() {
+        return false;
+    }
     let Some(path) = expanded(req, filename.as_bytes()) else {
         return failed(req, Errno::ENOENT);
     };
@@ -951,6 +956,9 @@ fn posix_mknod(
     #[php(default = 0)] major: i64,
     #[php(default = 0)] minor: i64,
 ) -> Result<bool, Thrown> {
+    if req.check_open_basedir(filename.as_bytes(), false).is_err() {
+        return Ok(false);
+    }
     let Some(path) = expanded(req, filename.as_bytes()) else {
         return Ok(failed(req, Errno::ENOENT));
     };
@@ -977,7 +985,8 @@ fn posix_mknod(
 }
 
 /// `posix_access(string $filename, int $flags = 0): bool`: `access(2)`,
-/// the path expanded first; one that does not expand is `EIO`.
+/// the path expanded first; one that does not expand is `EIO`, and one
+/// the `open_basedir` guard refuses, silently, `EPERM`.
 ///
 /// ```php
 /// var_dump(posix_access(__FILE__, POSIX_R_OK | POSIX_W_OK), posix_access('nope', POSIX_F_OK), posix_get_last_error() === 2, posix_access(''), posix_get_last_error() === 5);
@@ -994,6 +1003,9 @@ fn posix_access(req: &mut Request, filename: PhpString, #[php(default = 0)] flag
     let Some(path) = expanded(req, filename.as_bytes()) else {
         return failed(req, Errno::EIO);
     };
+    if req.check_open_basedir(&path, false).is_err() {
+        return failed(req, Errno::EPERM);
+    }
     let mode = AccessFlags::from_bits_retain(as_c_int(flags));
     match access(OsStr::from_bytes(&path), mode) {
         Ok(()) => true,
@@ -1035,6 +1047,9 @@ fn posix_eaccess(
     let Some(path) = expanded(req, filename.as_bytes()) else {
         return Err(arg_value_error(req, 1, "not be empty"));
     };
+    if req.check_open_basedir(&path, false).is_err() {
+        return Ok(failed(req, Errno::EPERM));
+    }
     let Ok(path) = CString::new(path) else {
         return Ok(failed(req, Errno::ENOENT));
     };
@@ -1409,7 +1424,8 @@ fn posix_sysconf(conf_id: i64) -> i64 {
 }
 
 /// `posix_pathconf(string $path, int $name): int|false`: `pathconf(2)`;
-/// the empty path is the `ValueError`.
+/// the empty path is the `ValueError`, and one the `open_basedir` guard
+/// refuses its warning and php's `Invalid path supplied`.
 ///
 /// ```php
 /// var_dump(posix_pathconf('.', POSIX_PC_NAME_MAX) > 0, posix_pathconf('nope', POSIX_PC_PATH_MAX), posix_get_last_error() === 2);
@@ -1425,6 +1441,14 @@ fn posix_sysconf(conf_id: i64) -> i64 {
 fn posix_pathconf(req: &mut Request, path: PhpString, name: i64) -> Result<OrFalse<i64>, Thrown> {
     if path.as_bytes().is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
+    }
+    if req.check_open_basedir(path.as_bytes(), true).is_err() {
+        let text = format!(
+            "Invalid path supplied: {}",
+            String::from_utf8_lossy(path.as_bytes())
+        );
+        docref(req, Level::Warning, &text);
+        return Ok(OrFalse::False);
     }
     let resolved = expanded(req, path.as_bytes()).unwrap_or_else(|| path.as_bytes().to_vec());
     let Ok(resolved) = CString::new(resolved) else {

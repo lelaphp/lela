@@ -80,14 +80,14 @@ impl Output {
 }
 
 /// The file a verification's parameter names, opened for writing.
-pub(crate) fn output(req: &mut Request, file: Option<Path>, arg: Arg) -> Result<Output, Thrown> {
+pub(crate) fn output(req: &mut Request, file: Option<Path>, arg: Arg) -> Output {
     let Some(file) = file else {
-        return Ok(Output::Unnamed);
+        return Output::Unnamed;
     };
-    Ok(match open_file(req, file.0.as_bytes(), arg, c"w")? {
+    match open_file(req, file.0.as_bytes(), arg, c"w") {
         Some(bio) => Output::File(bio),
         None => Output::Unopened,
-    })
+    }
 }
 
 /// The signers of a verified message written to the file php's
@@ -99,20 +99,20 @@ pub(crate) fn signers_file(
     file: Path,
     arg: Arg,
     signers: impl FnOnce() -> Option<Pems>,
-) -> Result<bool, Thrown> {
-    let Some(out) = open_file(req, file.0.as_bytes(), arg, c"w")? else {
+) -> bool {
+    let Some(out) = open_file(req, file.0.as_bytes(), arg, c"w") else {
         let text = format!(
             "Signature OK, but cannot open {} for writing",
             String::from_utf8_lossy(file.0.as_bytes())
         );
         docref(req, Level::Warning, &text);
-        return Ok(false);
+        return false;
     };
     let Some(pems) = signers() else {
         store_errors(req);
-        return Ok(false);
+        return false;
     };
-    Ok(write_signers(req, &out, pems))
+    write_signers(req, &out, pems)
 }
 
 /// Each PEM of a list written to `certout` in turn, `Failed to write`
@@ -184,7 +184,7 @@ fn openssl_pkcs7_verify(
         let others = match &untrusted_certificates_filename {
             Some(file) => {
                 let arg = Arg::new(5, "untrusted_certificates_filename");
-                match certs_from_file(req, file.0.as_bytes(), arg)? {
+                match certs_from_file(req, file.0.as_bytes(), arg) {
                     Some(stack) => Some(stack),
                     None => return Ok(Union::B(-1)),
                 }
@@ -200,19 +200,18 @@ fn openssl_pkcs7_verify(
             input_filename.0.as_bytes(),
             Arg::new(1, "input_filename"),
             c"r",
-        )?
-        else {
+        ) else {
             return Ok(Union::B(-1));
         };
         let Some((p7, data)) = Pkcs7::read_smime(&input) else {
             store_errors(req);
             return Ok(Union::B(-1));
         };
-        let data_out = output(req, content, Arg::new(6, "content"))?;
+        let data_out = output(req, content, Arg::new(6, "content"));
         if matches!(data_out, Output::Unopened) {
             return Ok(Union::B(-1));
         }
-        let p7b_out = output(req, output_filename, Arg::new(7, "output_filename"))?;
+        let p7b_out = output(req, output_filename, Arg::new(7, "output_filename"));
         if matches!(p7b_out, Output::Unopened) {
             return Ok(Union::B(-1));
         }
@@ -229,7 +228,7 @@ fn openssl_pkcs7_verify(
         let mut verdict = Union::A(true);
         if let Some(file) = signers_certificates_filename {
             let arg = Arg::new(3, "signers_certificates_filename");
-            if !signers_file(req, file, arg, || p7.signers(others.as_ref(), flags))? {
+            if !signers_file(req, file, arg, || p7.signers(others.as_ref(), flags)) {
                 verdict = Union::B(-1);
             }
             if let Some(out) = p7b_out.bio()
@@ -285,8 +284,7 @@ fn openssl_pkcs7_encrypt(
             input_filename.0.as_bytes(),
             Arg::new(1, "input_filename"),
             c"r",
-        )?
-        else {
+        ) else {
             return Ok(false);
         };
         let Some(out) = open_file(
@@ -294,8 +292,7 @@ fn openssl_pkcs7_encrypt(
             output_filename.0.as_bytes(),
             Arg::new(2, "output_filename"),
             c"w",
-        )?
-        else {
+        ) else {
             return Ok(false);
         };
         let Some(certs) = recipients(req, &certificate.0, Arg::new(3, "certificate"))? else {
@@ -403,7 +400,7 @@ fn openssl_pkcs7_sign(
         else {
             return Ok(false);
         };
-        let Some((input, out)) = signing_files(req, input_filename, output_filename)? else {
+        let Some((input, out)) = signing_files(req, input_filename, output_filename) else {
             return Ok(false);
         };
         let flags = as_int(flags);
@@ -437,7 +434,7 @@ pub(crate) fn signing(
     let others = match untrusted {
         Some(file) => {
             let arg = Arg::new(untrusted_position, "untrusted_certificates_filename");
-            match certs_from_file(req, file.0.as_bytes(), arg)? {
+            match certs_from_file(req, file.0.as_bytes(), arg) {
                 Some(stack) => Some(stack),
                 None => return Ok(None),
             }
@@ -464,25 +461,25 @@ pub(crate) fn signing_files(
     req: &mut Request,
     input: Path,
     output: Path,
-) -> Result<Option<(Bio<'static>, Bio<'static>)>, Thrown> {
+) -> Option<(Bio<'static>, Bio<'static>)> {
     let files = [
         (input, Arg::new(1, "input_filename"), c"r", "input"),
         (output, Arg::new(2, "output_filename"), c"w", "output"),
     ];
     let mut opened = Vec::new();
     for (path, arg, mode, what) in files {
-        let Some(bio) = open_file(req, path.0.as_bytes(), arg, mode)? else {
+        let Some(bio) = open_file(req, path.0.as_bytes(), arg, mode) else {
             let text = format!(
                 "Error opening {what} file {}!",
                 String::from_utf8_lossy(path.0.as_bytes())
             );
             docref(req, Level::Warning, &text);
-            return Ok(None);
+            return None;
         };
         opened.push(bio);
     }
     let out = opened.pop();
-    Ok(opened.pop().zip(out))
+    opened.pop().zip(out)
 }
 
 /// The certificate and private key a decryption uses: the certificate
@@ -550,8 +547,7 @@ fn openssl_pkcs7_decrypt(
             input_filename.0.as_bytes(),
             Arg::new(1, "input_filename"),
             c"r",
-        )?
-        else {
+        ) else {
             return Ok(false);
         };
         let Some(out) = open_file(
@@ -559,8 +555,7 @@ fn openssl_pkcs7_decrypt(
             output_filename.0.as_bytes(),
             Arg::new(2, "output_filename"),
             c"w",
-        )?
-        else {
+        ) else {
             return Ok(false);
         };
         let Some((p7, _data)) = Pkcs7::read_smime(&input) else {

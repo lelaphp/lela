@@ -120,39 +120,6 @@ fn low_bits(value: i64, mask: i64) -> u32 {
     u32::try_from(value & mask).unwrap_or(u32::MAX)
 }
 
-/// `expand_filepath_with_mode(path, buf, NULL, 0, CWD_EXPAND)`
-/// (`Z/main/fopen_wrappers.c:787`): the path made absolute against the
-/// working directory and normalised as `virtual_file_ex` normalises it,
-/// runs of slashes as one, `.` dropped and `..` taking the component
-/// before it, with no trailing slash and no symbolic link read.
-fn expand_filepath(cwd: &Path, path: &[u8]) -> Vec<u8> {
-    let mut whole = Vec::new();
-    if path.first() != Some(&b'/') {
-        whole.extend_from_slice(cwd.as_os_str().as_bytes());
-        whole.push(b'/');
-    }
-    whole.extend_from_slice(path);
-    let mut parts: Vec<&[u8]> = Vec::new();
-    for part in whole.split(|b| *b == b'/') {
-        match part {
-            b"" | b"." => {}
-            b".." => {
-                parts.pop();
-            }
-            _ => parts.push(part),
-        }
-    }
-    let mut out = Vec::new();
-    for part in &parts {
-        out.push(b'/');
-        out.extend_from_slice(part);
-    }
-    if out.is_empty() {
-        out.push(b'/');
-    }
-    out
-}
-
 /// The bytes before the first NUL, a C string's.
 fn c_string(buf: &[u8]) -> &[u8] {
     let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
@@ -197,17 +164,6 @@ impl Request {
         }
     }
 
-    /// A path as the plain files wrapper's calls reach it: against the
-    /// working directory, and the empty path left empty, which every
-    /// call answers `ENOENT` to.
-    fn plain_host(&self, url: &[u8]) -> PathBuf {
-        if url.is_empty() {
-            PathBuf::new()
-        } else {
-            self.absolutize(url).0
-        }
-    }
-
     /// `php_error_docref1(NULL, param, E_WARNING, ...)`: the native, the
     /// path in parentheses, and the message.
     fn docref1(&mut self, param: &[u8], message: &str) {
@@ -232,7 +188,7 @@ impl Request {
         link: bool,
         cached: bool,
         quiet: bool,
-    ) -> Result<Option<StatBuf>, Thrown> {
+    ) -> Result<UrlStat, Thrown> {
         if cached {
             let entry = if link {
                 &self.stat_cache.lstat
@@ -242,15 +198,12 @@ impl Request {
             if let Some((name, sb)) = entry
                 && name == path
             {
-                return Ok(Some(*sb));
+                return Ok(UrlStat::Found(*sb));
             }
         }
         let (wrapper, local) = self.locate_wrapper(path);
-        let sb = match self.wrapper_stat(wrapper, &local, link, cached, quiet)? {
-            UrlStat::Found(sb) => Some(sb),
-            UrlStat::Failed | UrlStat::Unsupported => None,
-        };
-        if cached && let Some(sb) = sb {
+        let answer = self.wrapper_stat(wrapper, &local, link, cached, quiet)?;
+        if cached && let UrlStat::Found(sb) = answer {
             if link {
                 self.stat_cache.lstat = Some((path.to_vec(), sb));
             }
@@ -258,7 +211,7 @@ impl Request {
                 self.stat_cache.stat = Some((path.to_vec(), sb));
             }
         }
-        Ok(sb)
+        Ok(answer)
     }
 
     /// `php_stream_locate_url_wrapper(path, &local, 0)` and the located
@@ -291,25 +244,27 @@ impl Request {
         let found = |sb: Option<StatBuf>| sb.map_or(UrlStat::Failed, UrlStat::Found);
         Ok(match wrapper {
             Located::Plain => {
-                // `php_plain_files_url_stater` strips `file://` again
-                // unless `PHP_STREAM_URL_STAT_IGNORE_OPEN_BASEDIR` is
-                // set, which `php_stat` sets and `_php_stream_stat_path`
-                // does not.
-                let url = if cached {
-                    local
+                // `php_plain_files_url_stater` strips `file://` again and
+                // asks the guard, which warns unless the stat is quiet,
+                // unless `PHP_STREAM_URL_STAT_IGNORE_OPEN_BASEDIR` is set,
+                // which `php_stat` sets after asking the guard itself,
+                // with a warning, and `_php_stream_stat_path` does not.
+                let guarded = if cached {
+                    self.check_open_basedir(local, true)
                 } else {
-                    strip_file_scheme(local)
+                    self.check_open_basedir(strip_file_scheme(local), !quiet)
                 };
-                if url.is_empty() {
-                    UrlStat::Failed
-                } else {
-                    let target = self.absolutize(url).0;
-                    let meta = if link {
-                        std::fs::symlink_metadata(target)
-                    } else {
-                        std::fs::metadata(target)
-                    };
-                    found(meta.ok().map(|meta| stat_buf(&meta)))
+                match guarded {
+                    Err(_) => UrlStat::Refused,
+                    Ok(target) if target.as_os_str().is_empty() => UrlStat::Failed,
+                    Ok(target) => {
+                        let meta = if link {
+                            std::fs::symlink_metadata(&target)
+                        } else {
+                            std::fs::metadata(&target)
+                        };
+                        found(meta.ok().map(|meta| stat_buf(&meta)))
+                    }
                 }
             }
             Located::Space(user) => {
@@ -431,11 +386,15 @@ impl Request {
     }
 
     /// `php_plain_files_unlink` (`Z/main/streams/plain_wrapper.c:1298`):
-    /// `unlink(2)`, php's warning with the path and `strerror(errno)`
-    /// where it failed, and the stat cache cleared where it did not.
+    /// the guard, which warns, then `unlink(2)`, php's warning with the
+    /// path and `strerror(errno)` where it failed, and the stat cache
+    /// cleared where it did not.
     fn plain_unlink(&mut self, url: &[u8]) -> bool {
         let url = strip_file_scheme(url);
-        match std::fs::remove_file(self.plain_host(url)) {
+        let Ok(target) = self.check_open_basedir(url, true) else {
+            return false;
+        };
+        match std::fs::remove_file(&target) {
             Ok(()) => {
                 self.forget_stats_and_realpaths();
                 true
@@ -502,6 +461,7 @@ impl Request {
     }
 
     /// `php_plain_files_rename` (`Z/main/streams/plain_wrapper.c:1326`):
+    /// the guard over the source and then the target, each warning, then
     /// `rename(2)`; across devices, `EXDEV`, the file copied, given the
     /// source's owner and permission bits where it may be, and the
     /// source unlinked;
@@ -510,7 +470,12 @@ impl Request {
     fn plain_rename(&mut self, from: &[u8], to: &[u8]) -> bool {
         let from = strip_file_scheme(from);
         let to = strip_file_scheme(to);
-        let (source, target) = (self.plain_host(from), self.plain_host(to));
+        let Ok(source) = self.check_open_basedir(from, true) else {
+            return false;
+        };
+        let Ok(target) = self.check_open_basedir(to, true) else {
+            return false;
+        };
         let docref2 = |req: &mut Request, error: &std::io::Error| {
             let text = format!(
                 "{}({},{}): {}",
@@ -592,8 +557,9 @@ impl Request {
     }
 
     /// `php_plain_files_mkdir` (`Z/main/streams/plain_wrapper.c:1433`):
-    /// one `mkdir(2)` and php's warning, `strerror(errno)`, where it
-    /// failed; with `$recursive` the path expanded, the deepest
+    /// the guard, which warns, then one `mkdir(2)` and php's warning,
+    /// `strerror(errno)`, where it failed; with `$recursive` the path
+    /// expanded and the guard asked of that, the deepest
     /// directory of it that exists found by stating each parent from the
     /// end, and each component after it made in turn, one that exists
     /// already passed over and the last one's failure the warning.
@@ -601,7 +567,10 @@ impl Request {
         let dir = strip_file_scheme(dir);
         let mode = low_bits(mode, 0o7777);
         if !recursive {
-            return match self.make_dir(&self.plain_host(dir), mode) {
+            let Ok(target) = self.check_open_basedir(dir, true) else {
+                return false;
+            };
+            return match self.make_dir(&target, mode) {
                 Ok(()) => true,
                 Err(error) => {
                     docref(self, Level::Warning, &strerror(&error));
@@ -609,7 +578,16 @@ impl Request {
                 }
             };
         }
-        let mut buf = expand_filepath(&self.cwd().0, dir);
+        // `expand_filepath_with_mode(dir, buf, NULL, 0, CWD_EXPAND)`.
+        let cwd = self.cwd().into_os_string().into_encoded_bytes();
+        let Some(mut buf) = self.virtual_file_ex(&cwd, dir, crate::virtual_cwd::Resolve::Expand)
+        else {
+            docref(self, Level::Warning, "Invalid path");
+            return false;
+        };
+        if self.check_open_basedir(&buf, true).is_err() {
+            return false;
+        }
         let e = buf.len();
         let dir_len = dir.len();
         let mut p = buf[..dir_len.min(e)].iter().position(|b| *b == b'/');
@@ -685,11 +663,14 @@ impl Request {
     }
 
     /// `php_plain_files_rmdir` (`Z/main/streams/plain_wrapper.c:1536`):
-    /// `rmdir(2)`, php's warning with the path and `strerror(errno)`
+    /// the guard, which warns, then `rmdir(2)`, php's warning with the path and `strerror(errno)`
     /// where it failed, and the stat cache cleared where it did not.
     fn plain_rmdir(&mut self, url: &[u8]) -> bool {
         let url = strip_file_scheme(url);
-        match std::fs::remove_dir(self.plain_host(url)) {
+        let Ok(target) = self.check_open_basedir(url, true) else {
+            return false;
+        };
+        match std::fs::remove_dir(&target) {
             Ok(()) => {
                 self.forget_stats_and_realpaths();
                 true
@@ -741,14 +722,16 @@ impl Request {
     }
 
     /// `php_plain_files_metadata` (`Z/main/streams/plain_wrapper.c:1565`):
-    /// for `touch` the file made first where `access(F_OK)` finds none,
+    /// the guard, which warns; for `touch` the file made first where `access(F_OK)` finds none,
     /// php's `Unable to create file %s because %s` where it cannot be,
     /// then `utime(2)`; `chown(2)` of the owner or the group; `chmod(2)`;
     /// a call that failed is php's `Operation failed: %s`, and one done
     /// clears the stat cache.
     fn plain_metadata(&mut self, url: &[u8], op: WrapperOp<'_>) -> bool {
         let url = strip_file_scheme(url);
-        let host = self.plain_host(url);
+        let Ok(host) = self.check_open_basedir(url, true) else {
+            return false;
+        };
         let done = match op {
             WrapperOp::Touch(times) => {
                 if std::fs::metadata(&host).is_err() {
@@ -803,20 +786,27 @@ impl Request {
         }
     }
 
-    /// `php_open_temporary_fd_ex` (`Z/main/php_open_temporary_file.c:318`)
-    /// under `PHP_TMP_FILE_DEFAULT`: the file made in `dir`, or where
-    /// that fails php's notice `file created in the system's temporary
-    /// directory` and the file made there; no `dir`, or an empty one,
-    /// goes to the temporary directory with nothing said. The file is
-    /// open for reading and writing, and `None` is the one that could
-    /// not be made anywhere.
+    /// `php_open_temporary_fd_ex` (`Z/main/php_open_temporary_file.c:318`):
+    /// the file made in `dir`, or where that fails php's notice `file
+    /// created in the system's temporary directory` and the file made
+    /// there; no `dir`, or an empty one, goes to the temporary directory
+    /// with nothing said. Under `guarded`,
+    /// `PHP_TMP_FILE_OPEN_BASEDIR_CHECK_ALWAYS`, the guard is asked of
+    /// `dir` before it is tried and of the temporary directory before
+    /// that is, each warning; `PHP_TMP_FILE_DEFAULT` asks it of neither.
+    /// The file is open for reading and writing, and `None` is the one
+    /// that could not be made anywhere or was refused.
     pub(crate) fn open_temporary_fd(
         &mut self,
         dir: Option<&[u8]>,
         prefix: &[u8],
+        guarded: bool,
     ) -> Option<(File, PathBuf)> {
         if let Some(dir) = dir.filter(|dir| !dir.is_empty()) {
-            let dir = self.absolutize(dir).0;
+            if guarded && self.check_open_basedir(dir, true).is_err() {
+                return None;
+            }
+            let dir = self.absolutize(dir);
             if let Some(made) = open_temporary_in(&dir, prefix) {
                 return Some(made);
             }
@@ -826,7 +816,15 @@ impl Request {
                 "file created in the system's temporary directory",
             );
         }
-        open_temporary_in(&self.temp_dir().0, prefix)
+        let temp_dir = self.temp_dir();
+        if guarded
+            && self
+                .check_open_basedir(temp_dir.as_os_str().as_bytes(), true)
+                .is_err()
+        {
+            return None;
+        }
+        open_temporary_in(&temp_dir, prefix)
     }
 }
 

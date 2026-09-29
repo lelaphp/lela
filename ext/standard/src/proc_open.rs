@@ -249,7 +249,7 @@ fn shell(req: &Request, command: &[u8]) -> Command {
 /// The request's working directory and environment, where a child of
 /// the process would have the process's.
 fn in_request(req: &Request, command: &mut Command) {
-    command.current_dir(req.cwd().0);
+    command.current_dir(req.cwd());
     command.env_clear();
     for (name, value) in req.env_pairs() {
         command.env(OsStr::from_bytes(name), OsStr::from_bytes(value));

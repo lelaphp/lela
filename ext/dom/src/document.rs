@@ -392,7 +392,7 @@ fn finish_loading(req: &mut Request, this: PhpObject, doc: Option<Node>) -> bool
 /// bool(true)
 /// ```
 pub(crate) fn base_directory(req: &Request) -> Vec<u8> {
-    let mut dir = req.cwd().0.to_string_lossy().into_owned().into_bytes();
+    let mut dir = req.cwd().to_string_lossy().into_owned().into_bytes();
     if !dir.ends_with(b"/") {
         dir.push(b'/');
     }

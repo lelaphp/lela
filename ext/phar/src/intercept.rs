@@ -195,7 +195,7 @@ fn find_in_include_path(
         }
     }
     let candidate = [b"phar://".as_slice(), arch, b"/", &cwd, b"/", filename].concat();
-    if req.url_stat_quiet(&candidate, false)?.is_some() {
+    if req.url_stat_quiet(&candidate, false)?.found().is_some() {
         return Ok(Some(candidate));
     }
     let function = archive::string(req, b"stream_resolve_include_path")?;

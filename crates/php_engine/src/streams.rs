@@ -36,8 +36,8 @@ use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
 use crate::api::request::{
-    Cast, DirListing, EngineWrapper, FdStream, FilterFlags, OptionAnswer, Request, Stream,
-    StreamOption, Whence,
+    Cast, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, OptionAnswer, Request,
+    Stream, StreamOption, Whence,
 };
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 
@@ -1639,7 +1639,7 @@ pub(crate) fn temporary_file(
     dir: Option<&[u8]>,
     prefix: &[u8],
 ) -> Result<Option<Stream>, Thrown> {
-    let Some((file, path)) = req.open_temporary_fd(dir, prefix) else {
+    let Some((file, path)) = req.open_temporary_fd(dir, prefix, false) else {
         return Ok(None);
     };
     let orig_path = path.as_os_str().as_encoded_bytes().to_vec();
@@ -2007,7 +2007,7 @@ fn open_options(mode: &[u8]) -> Option<std::fs::OpenOptions> {
 /// for a fresh open and `-1` with `NO_SEEK` for one that cannot. The
 /// `Err` is what `php_stream_display_wrapper_errors` prints after
 /// `Failed to open stream: `.
-fn plain_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, String> {
+fn plain_open(req: &mut Request, path: &HostPath, mode: &[u8]) -> Result<PhpStream, String> {
     let Some(options) = open_options(mode) else {
         return Err(format!(
             "`{}' is not a valid mode for fopen",
@@ -2017,12 +2017,13 @@ fn plain_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, 
     // `_php_stream_fopen`'s `expand_filepath`, under `CWD_FILEPATH`, which
     // enters the path in the realpath cache; where it refuses, the host
     // is handed the path as written and answers for it.
-    let cwd = req.cwd().0.into_os_string().into_encoded_bytes();
-    let host = match req.virtual_file_ex(&cwd, path, crate::api::request::Resolve::FilePath) {
+    let cwd = req.cwd().into_os_string().into_encoded_bytes();
+    let written = path.as_os_str().as_encoded_bytes();
+    let host = match req.virtual_file_ex(&cwd, written, crate::api::request::Resolve::FilePath) {
         Some(expanded) => std::path::PathBuf::from(
             <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&expanded),
         ),
-        None => req.absolutize(path).0,
+        None => path.to_path_buf(),
     };
     let creates = matches!(mode.first(), Some(b'w' | b'a' | b'x' | b'c'))
         && std::fs::symlink_metadata(&host).is_err();
@@ -2338,6 +2339,9 @@ pub(crate) struct OpenOptions {
     /// `STREAM_MUST_SEEK` makes is a temporary file,
     /// `PHP_STREAM_PREFER_STDIO`.
     pub(crate) will_cast: bool,
+    /// `STREAM_DISABLE_OPEN_BASEDIR`: the plain files wrapper opens
+    /// without asking the `open_basedir` guard.
+    pub(crate) disable_open_basedir: bool,
 }
 
 impl OpenOptions {
@@ -2349,6 +2353,7 @@ impl OpenOptions {
         for_include: false,
         must_seek: false,
         will_cast: false,
+        disable_open_basedir: false,
     };
 
     /// `options & ~REPORT_ERRORS`, what a wrapper's opener is handed.
@@ -3072,6 +3077,7 @@ impl Request {
             report: opening.warn,
             must_seek: opening.must_seek,
             will_cast: opening.will_cast,
+            disable_open_basedir: opening.disable_open_basedir,
             ..OpenOptions::REPORT
         };
         self.open_wrapper_ex(path, mode, options)
@@ -3131,7 +3137,7 @@ impl Request {
         let (label, opened) = match wrapper {
             Located::Plain => (
                 PLAIN_FILES,
-                match plain_open(self, &path_to_open, mode) {
+                match self.plain_opener(&path_to_open, mode, options) {
                     Ok(stream) => {
                         // `_php_stream_fopen`'s `php_clear_stat_cache`
                         // (`Z/main/streams/plain_wrapper.c:1209`).
@@ -3157,6 +3163,7 @@ impl Request {
                             for_include: options.for_include,
                             must_seek: options.must_seek,
                             will_cast: options.will_cast,
+                            disable_open_basedir: options.disable_open_basedir,
                         };
                         let outer = std::mem::take(&mut self.wrapper_errors);
                         let opened = open(self, &path_to_open, mode, opening);
@@ -3204,6 +3211,27 @@ impl Request {
                 }
                 Ok(None)
             }
+        }
+    }
+
+    /// `php_plain_files_stream_opener` (`Z/main/streams/plain_wrapper.c:1262`):
+    /// the `open_basedir` guard, which warns, unless
+    /// `STREAM_DISABLE_OPEN_BASEDIR`, then `_php_stream_fopen` of the path
+    /// it let through; a refusal is `strerror(errno)` as any failed open.
+    fn plain_opener(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        options: OpenOptions,
+    ) -> Result<PhpStream, String> {
+        let guarded = if options.disable_open_basedir {
+            Ok(self.unguarded_host_path(path))
+        } else {
+            self.check_open_basedir(path, true)
+        };
+        match guarded {
+            Ok(host) => plain_open(self, &host, mode),
+            Err(refused) => Err(strerror(&refused.into())),
         }
     }
 
@@ -3331,21 +3359,26 @@ impl Request {
         }
         let (wrapper, path_to_open) = self.locate_wrapper(path);
         let (label, opened) = match wrapper {
+            // `php_plain_files_dir_opener` (`Z/main/streams/plain_wrapper.c:1114`):
+            // the guard, which warns, then `opendir(3)`.
             Located::Plain => (
                 PLAIN_FILES,
-                match std::fs::read_dir(self.absolutize(&path_to_open).0) {
-                    Ok(entries) => {
-                        let dir = PhpStream::new(
-                            Box::new(Dir {
-                                path: self.absolutize(&path_to_open).0,
-                                entries: Some(entries),
-                                dots: 0,
-                            }),
-                            b"r",
-                        );
-                        Ok(self.stream_alloc(dir)?)
-                    }
-                    Err(error) => Err(strerror(&error)),
+                match self.check_open_basedir(&path_to_open, true) {
+                    Err(refused) => Err(strerror(&refused.into())),
+                    Ok(dir) => match std::fs::read_dir(&dir) {
+                        Ok(entries) => {
+                            let dir = PhpStream::new(
+                                Box::new(Dir {
+                                    path: dir.into(),
+                                    entries: Some(entries),
+                                    dots: 0,
+                                }),
+                                b"r",
+                            );
+                            Ok(self.stream_alloc(dir)?)
+                        }
+                        Err(error) => Err(strerror(&error)),
+                    },
                 },
             ),
             Located::Php => (PHP_WRAPPER, Err(String::from("not implemented"))),
