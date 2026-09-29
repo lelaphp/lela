@@ -654,7 +654,7 @@ pub(super) fn php_raw_url_decode(s: &[u8]) -> Vec<u8> {
 /// decoded once: `parse_url`, the default, which this crate keeps, or a
 /// class of ext/uri's (design §4.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UriParser {
+pub enum UriParser {
     ParseUrl,
     Uri(Parser),
 }
@@ -666,7 +666,7 @@ impl UriParser {
     /// parser registered under the class a string names, and `None`,
     /// which the wrappers turn into php's `ValueError`, for a string that
     /// names none and for any other value.
-    pub(crate) fn of_ctx(
+    pub fn of_ctx(
         req: &mut Request,
         ctx: Option<Resource>,
         wrapper: &[u8],
@@ -688,7 +688,7 @@ impl UriParser {
     /// `php_uri_parse_to_struct(parser, text, PHP_URI_COMPONENT_READ_MODE_RAW,
     /// true)`: `None` where the parser refuses the text; `parse_url`'s
     /// `port` of zero is no `port`, as `uri_parser_php_parse_url.c` reads it.
-    pub(crate) fn parse(self, req: &mut Request, text: &[u8]) -> Result<Option<UriStruct>, Thrown> {
+    pub fn parse(self, req: &mut Request, text: &[u8]) -> Result<Option<UriStruct>, Thrown> {
         match self {
             UriParser::Uri(parser) => parser.parse_to_struct(req, text, ReadAs::Raw, true),
             UriParser::ParseUrl => Ok(parse(text).map(|url| UriStruct {

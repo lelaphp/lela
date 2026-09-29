@@ -5,8 +5,11 @@
 //! [`wrap_http_ex`], as php recurses, and each response head is read
 //! into the one headers array `$http_response_header`,
 //! `http_get_last_response_headers()` and the stream's `wrapper_data`
-//! share. `https://` waits on the `ssl` socket `transport`: a redirect to
-//! one asks for it and is refused as php without `openssl` refuses it.
+//! share. `https://` is the same wrapper over the `ssl` socket
+//! `transport`, or a `CONNECT` through a `proxy` whose tunnel is then
+//! secured, both `ext/openssl`'s, which registers the wrapper again under
+//! `https`; without it, a redirect to one is refused as php without
+//! `openssl` refuses it.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -14,7 +17,8 @@ use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::{
-    Opening, OptionAnswer, Request, Stream, StreamOption, StreamWrapper, Xport, XportFailure,
+    Handshake, Opening, OptionAnswer, Request, Stream, StreamOption, StreamWrapper, Xport,
+    XportFailure,
 };
 use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
 use php_ext_uri::UriStruct;
@@ -22,7 +26,7 @@ use php_ext_uri::UriStruct;
 use crate::State;
 use crate::sockets::{default_timeout, socket_options, timeval};
 use crate::streamsfuncs::notifier::{self, Code};
-use crate::streamsfuncs::stream_ctx_option;
+use crate::streamsfuncs::{stream_ctx_option, stream_ctx_set_option, stream_ctx_unset_option};
 use crate::url::{UriParser, php_url_decode};
 
 /// `HTTP_HEADER_MAX_LOCATION_SIZE`: 8192 less the ten bytes of
@@ -75,7 +79,7 @@ pub(crate) fn file_ini(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
 
 /// `php_stream_http_wrapper`: `http`, a URL wrapper that opens streams
 /// and nothing else, whose streams no `fstat()` answers.
-pub(crate) fn wrapper() -> StreamWrapper {
+pub fn wrapper() -> StreamWrapper {
     StreamWrapper {
         scheme: "http".into(),
         label: "http",
@@ -497,6 +501,190 @@ fn get_line(
     Ok(Some(bytes))
 }
 
+/// How a request's socket is secured: not at all, by the `ssl`
+/// `transport`, or by a `CONNECT` through a `proxy` whose tunnel then
+/// carries TLS, whose `Proxy-Authorization` the request to the host
+/// leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ssl {
+    Off,
+    Direct,
+    Tunnel,
+}
+
+impl Ssl {
+    fn of(use_ssl: bool, use_proxy: bool) -> Ssl {
+        match (use_ssl, use_proxy) {
+            (false, _) => Ssl::Off,
+            (true, false) => Ssl::Direct,
+            (true, true) => Ssl::Tunnel,
+        }
+    }
+}
+
+/// `php_stream_handle_proxy_authorization_header`
+/// (`Z/ext/standard/http_fopen_wrapper.c:121`): the first line of `lines`
+/// whose name is `Proxy-Authorization:`, ignoring case, added to `header`
+/// with `\r\n`; whether there was one.
+fn proxy_authorization(lines: &[u8], header: &mut Vec<u8>) -> bool {
+    let lines = cstr(lines);
+    let mut s = 0;
+    while s < lines.len() {
+        while matches!(lines.get(s), Some(b' ' | b'\t')) {
+            s += 1;
+        }
+        let mut p = s;
+        while p < lines.len() && !matches!(lines[p], b':' | b'\r' | b'\n') {
+            p += 1;
+        }
+        if lines.get(p) == Some(&b':') {
+            p += 1;
+            let name = &lines[s..p];
+            while p < lines.len() && !matches!(lines[p], b'\r' | b'\n') {
+                p += 1;
+            }
+            if name.eq_ignore_ascii_case(b"Proxy-Authorization:") {
+                header.extend_from_slice(&lines[s..p]);
+                header.extend_from_slice(b"\r\n");
+                return true;
+            }
+        }
+        s = p;
+        while matches!(lines.get(s), Some(b'\r' | b'\n')) {
+            s += 1;
+        }
+    }
+    false
+}
+
+/// The `proxy-authorization:` line php takes out of the user's headers
+/// for a request through a `CONNECT` tunnel, found in `lower` and cut
+/// from `bag`, where it begins the headers or a line.
+fn remove_proxy_authorization(bag: &mut Vec<u8>, lower: &[u8]) {
+    const NAME: &[u8] = b"proxy-authorization:";
+    let Some(found) = lower.windows(NAME.len()).position(|w| w == NAME) else {
+        return;
+    };
+    if found != 0 && lower[found - 1] != b'\n' {
+        return;
+    }
+    let mut s = found;
+    let mut p = found + NAME.len();
+    while s > 0 && matches!(lower[s - 1], b' ' | b'\t') {
+        s -= 1;
+    }
+    while p < lower.len() && !matches!(lower[p], b'\r' | b'\n') {
+        p += 1;
+    }
+    while matches!(lower.get(p), Some(b'\r' | b'\n')) {
+        p += 1;
+    }
+    if p >= lower.len() {
+        while s > 0 && matches!(lower[s - 1], b'\r' | b'\n') {
+            s -= 1;
+        }
+        bag.truncate(s);
+    } else {
+        bag.drain(s..p);
+    }
+}
+
+/// `HTTP_HEADER_BLOCK_SIZE`, the buffer the proxy's answer is read in.
+const HTTP_HEADER_BLOCK_SIZE: usize = 1024;
+
+/// `STREAM_CRYPTO_METHOD_SSLv23_CLIENT`, what the tunnel is set up with.
+const SSLV23_CLIENT: i64 = (1 << 3) | (1 << 4) | (1 << 5) | 1;
+
+/// The `CONNECT` of `php_stream_url_wrap_http_ex` through a `proxy` to an
+/// `https` host (`Z/ext/standard/http_fopen_wrapper.c:506`): the host
+/// kept as the `ssl` `peer_name` of the socket's `context` for the
+/// handshake where none is given, the `CONNECT` written with the
+/// `Proxy-Authorization` the `http` `header` holds, the proxy's answer
+/// read to its blank line, then the tunnel's crypto set up and enabled,
+/// and the `peer_name` taken back. `None` is a tunnel that failed, after
+/// php's `Cannot connect to HTTPS server through proxy`.
+fn tunnel(
+    req: &mut Request,
+    chain: &Chain,
+    stream: Stream,
+    resource: &UriStruct,
+) -> Result<Option<Stream>, Thrown> {
+    let host = resource
+        .host
+        .as_deref()
+        .map(cstr)
+        .unwrap_or_default()
+        .to_vec();
+    let given = match chain.ctx {
+        Some(ctx) => stream_ctx_option(req, ctx, b"ssl", b"peer_name")?.is_some(),
+        None => false,
+    };
+    let context = stream.ctx(req);
+    let reset = match context {
+        Some(context) if !given => {
+            let value = Value::string(PhpString::new(req, &host)?);
+            stream_ctx_set_option(req, context, b"ssl", b"peer_name", &value)?;
+            req.release(value);
+            true
+        }
+        _ => false,
+    };
+    let mut header = b"CONNECT ".to_vec();
+    header.extend_from_slice(&host);
+    header.extend_from_slice(format!(":{} HTTP/1.0\r\n", resource.port.unwrap_or(0)).as_bytes());
+    if let Some(ctx) = chain.ctx
+        && let Some(value) = stream_ctx_option(req, ctx, b"http", b"header")?
+    {
+        match value.as_ref() {
+            ValueRef::Array(lines) => {
+                for (_, line) in lines.snapshot() {
+                    if let Some(line) = line.as_str_bytes()
+                        && proxy_authorization(line, &mut header)
+                    {
+                        break;
+                    }
+                }
+            }
+            ValueRef::Str(text) if !text.as_bytes().is_empty() => {
+                proxy_authorization(text.as_bytes(), &mut header);
+            }
+            _ => {}
+        }
+    }
+    header.extend_from_slice(b"\r\n");
+    let unset = |req: &mut Request| -> Result<(), Thrown> {
+        match context {
+            Some(context) if reset => stream_ctx_unset_option(req, context, b"ssl", b"peer_name"),
+            _ => Ok(()),
+        }
+    };
+    if stream.write(req, &header) != Some(header.len()) {
+        unset(req)?;
+        log(req, "Cannot connect to HTTPS server through proxy");
+        stream.free(req);
+        return Ok(None);
+    }
+    while let Some(line) = get_line(req, stream, Some(HTTP_HEADER_BLOCK_SIZE - 1))? {
+        if matches!(line.first(), None | Some(b'\n' | b'\r' | 0)) {
+            break;
+        }
+    }
+    let enabled = stream.crypto_setup(req, SSLV23_CLIENT, None)
+        && !matches!(
+            stream.crypto_enable(req, true),
+            Handshake::Failed | Handshake::Unsupported
+        );
+    let stream = if enabled {
+        Some(stream)
+    } else {
+        log(req, "Cannot connect to HTTPS server through proxy");
+        stream.free(req);
+        None
+    };
+    unset(req)?;
+    Ok(stream)
+}
+
 /// `php_stream_wrapper_log_error` from the opener, which the open shows
 /// where it fails.
 fn log(req: &mut Request, message: &str) {
@@ -602,8 +790,13 @@ fn wrap_http_ex(
         Some(d) => timeval(d),
         None => timeval(default_timeout(req).trunc()),
     };
-    let socket = socket_options(req, chain.ctx)?;
-    let stream = match req.xport_create(&transport, Xport::Client { timeout, socket })? {
+    let (socket, context) = socket_options(req, chain.ctx)?;
+    let xport = Xport::Client {
+        timeout,
+        socket,
+        context,
+    };
+    let stream = match req.xport_create(&transport, xport)? {
         Ok(stream) => {
             if let Some(timeout) = timeout {
                 stream.set_option(req, StreamOption::ReadTimeout(timeout));
@@ -617,10 +810,10 @@ fn wrap_http_ex(
             None
         }
     };
-    // The `CONNECT` through a proxy to an `https` host is the `ssl`
-    // socket `transport`'s, which this engine has not: `use_ssl` never
-    // reaches here with a stream, since connecting `ssl://` fails first.
-    let _ = use_ssl && use_proxy;
+    let stream = match stream {
+        Some(stream) if use_ssl && use_proxy => tunnel(req, chain, stream, &resource)?,
+        stream => stream,
+    };
     let mut info = HeaderInfo::new();
     let Some(stream) = stream else {
         return Ok(None);
@@ -645,7 +838,7 @@ fn wrap_http_ex(
         chain,
         path,
         &mut resource,
-        use_ssl,
+        Ssl::of(use_ssl, use_proxy),
         request_fulluri,
         hop,
     );
@@ -764,10 +957,11 @@ fn request_bytes(
     chain: &mut Chain,
     path: &[u8],
     resource: &mut UriStruct,
-    use_ssl: bool,
+    ssl: Ssl,
     request_fulluri: bool,
     hop: Hop,
 ) -> Vec<u8> {
+    let use_ssl = ssl != Ssl::Off;
     let options = &chain.options;
     let mut buf = Vec::new();
     let custom = options.method.as_ref().filter(|method| {
@@ -819,7 +1013,10 @@ fn request_bytes(
         have.content_length = check_has_header(&lower, b"content-length:");
         have.content_type = check_has_header(&lower, b"content-type:");
         have.connection = check_has_header(&lower, b"connection:");
-        user_headers = Some(bag);
+        if ssl == Ssl::Tunnel {
+            remove_proxy_authorization(&mut bag, &lower);
+        }
+        user_headers = (!bag.is_empty()).then_some(bag);
     }
     if !have.auth
         && let Some(user) = &resource.user

@@ -230,8 +230,13 @@ impl PhpStream {
         let mut inp = Brigade::new();
         let mut outp = Brigade::new();
         while !self.eof && self.writepos - self.readpos < to_read_now {
-            let Self { ops, eof, .. } = self;
-            let justread = ops.read(req, &mut chunk, eof);
+            let Self {
+                ops,
+                eof,
+                has_buffered_data,
+                ..
+            } = self;
+            let justread = ops.read_after_buffer(req, &mut chunk, eof, *has_buffered_data);
             self.count_progress(req, justread.unwrap_or(0));
             if justread.is_none() && self.writepos == self.readpos {
                 return false;

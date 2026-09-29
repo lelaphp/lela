@@ -14,6 +14,10 @@ workspace = true
 # The facade. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+# `php_fopen_wrappers.h`'s http and ftp wrappers, which openssl registers
+# again as `https` and `ftps`, and the stream context's options and URI
+# parser `xp_ssl.c` reads (design §4.10).
+php_ext_standard = { path = "../standard" }
 # libcrypto is the platform's OpenSSL 3, the major version the oracle
 # links, found by openssl-sys through pkg-config and bound in `src/ffi/`
 # alone (`unsafe.homes`; design §7.2).

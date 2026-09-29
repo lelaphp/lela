@@ -617,6 +617,7 @@ version = "0.0.0"
 dependencies = [
  "openssl-sys",
  "php_ext",
+ "php_ext_standard",
 ]
 
 [[package]]
