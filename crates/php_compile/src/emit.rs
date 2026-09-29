@@ -1038,6 +1038,7 @@ fn class_flags(
         is_final: is_enum || class.modifiers.is_final,
         is_readonly: class.modifiers.is_readonly,
         is_anonymous,
+        is_top_level: false,
         not_serializable: is_anonymous,
         dynamic_properties: if is_enum || class.modifiers.is_readonly {
             DynamicProperties::Forbidden
@@ -4821,6 +4822,9 @@ impl Emit<'_> {
         let name = self.declare_symbol(Symbol::Class, &class.name)?;
         let line = self.line;
         let (at, parent) = self.class_entry(class, &name, false)?;
+        if let Some(decl) = self.classes.get_mut(at) {
+            decl.flags.is_top_level = toplevel;
+        }
         // `zend_compile_class_decl` decides once the body has compiled,
         // so an interface `add_stringable_interface` gave the class
         // counts, and an enum, which `zend_enum_add_interfaces` gave

@@ -126,6 +126,11 @@ pub struct ClassFlags {
     /// `ZEND_ACC_ANON_CLASS`: declared by `new class`, under the name
     /// `zend_generate_anon_class_name` made, which holds a NUL.
     pub is_anonymous: bool,
+    /// `ZEND_ACC_TOP_LEVEL`: declared by a statement of the file's own
+    /// list, or a bracketed namespace's, and not in a block or a body,
+    /// which is what `preload_link` links of a class the preload left
+    /// unbound.
+    pub is_top_level: bool,
     /// `ZEND_ACC_NOT_SERIALIZABLE`: the stub's `@not-serializable`, and
     /// what `zend_compile_class_decl` sets on an anonymous class.
     /// `serialize` and `unserialize` refuse an object of the class and
