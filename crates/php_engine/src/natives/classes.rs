@@ -466,7 +466,11 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
     let rows = req.property_rows(object)?;
     let mut array = PhpArray::new(req)?;
     for (name, value, declared) in rows {
-        let seen = req.property_row_seen(class, name.as_bytes(), declared);
+        let seen = req.property_row_visible(
+            class,
+            name.as_bytes(),
+            declared.map(|(declaring, _)| declaring),
+        );
         if !seen {
             continue;
         }
@@ -527,7 +531,7 @@ fn answered_vars(
         let key = if name.as_bytes().first() == Some(&0) {
             Key::Str(name)
         } else {
-            if !req.property_row_seen(class, name.as_bytes(), None) {
+            if !req.property_row_visible(class, name.as_bytes(), None) {
                 continue;
             }
             Key::from_string(name)
