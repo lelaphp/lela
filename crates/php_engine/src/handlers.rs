@@ -18412,6 +18412,83 @@ pub(crate) fn defined<T: Tier>(
     })
 }
 
+/// `ZEND_FUNC_GET_ARGS` (`Z/Zend/zend_vm_def.h:9639`), what php's
+/// compiler makes of `func_get_args()` inside a function
+/// (`zend_compile_func_get_args`): the arguments the frame was passed,
+/// as its slots hold them now, each reference followed and a slot
+/// nothing holds `null`, into the temporary; with a constant `op1`, the
+/// ones after the first that many, the form php's compiler makes of
+/// `array_slice(func_get_args(), n)` and this one does not make yet.
+///
+/// ```php
+/// function f($a, &$b, $c = 3, ...$rest) { $a = 9; $b = 'b'; return func_get_args(); }
+/// $x = 1;
+/// var_dump(f(1, $x), f(1, $x, 2, 4, 5));
+/// $g = function () { return func_get_args(); };
+/// var_dump($g());
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(9)
+///   [1]=>
+///   string(1) "b"
+/// }
+/// array(5) {
+///   [0]=>
+///   int(9)
+///   [1]=>
+///   string(1) "b"
+///   [2]=>
+///   int(2)
+///   [3]=>
+///   int(4)
+///   [4]=>
+///   int(5)
+/// }
+/// array(0) {
+/// }
+/// ```
+pub(crate) fn func_get_args<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let skip = if op.op1_type == OperandKind::Const {
+        exec::constant(code, ConstIdx(op.op1))
+            .as_int()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let arguments = req.frame_arguments(frame);
+    let copied = (|| -> Result<PhpArray, Thrown> {
+        let mut array = PhpArray::new(req)?;
+        for argument in arguments.into_iter().skip(skip) {
+            let value = argument.deref();
+            let value = if value.tag() == TypeTag::Undef {
+                Value::null()
+            } else {
+                req.addref(&value);
+                value
+            };
+            array.append(req, value)?;
+        }
+        Ok(array)
+    })();
+    match copied {
+        Ok(array) => {
+            let slot = exec::temporary_slot(code, op.out);
+            let previous = req.set_slot(frame, slot, Value::array(array));
+            req.release(previous);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
 /// `ZEND_COUNT`: [`crate::ops::count`] over the operand, `sizeof`'s
 /// bit in `extended_value`, into the temporary; the operand freed after
 /// it.

@@ -16873,12 +16873,7 @@ impl Request {
                 if std::ptr::eq(stack, &raw const self.stack) && state.function.is_some() =>
             {
                 let frame = FrameRef(u32::try_from(place).unwrap_or(u32::MAX));
-                let passed = usize::try_from(state.num_args).unwrap_or(0);
-                let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
-                    .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
-                    .collect();
-                arguments.extend(state.extra_args.iter().copied());
-                NativeCaller::Function(frame, arguments)
+                NativeCaller::Function(frame, self.arguments_of(frame, state))
             }
             Some(Link::Frame(Slots::Stack(stack, place), _))
                 if std::ptr::eq(stack, &raw const self.stack) =>
@@ -16887,6 +16882,26 @@ impl Request {
             }
             Some(Link::Frame(..) | Link::Call(_)) | None => NativeCaller::Native,
         }
+    }
+
+    /// The arguments the user function on `frame` was passed, as its
+    /// slots hold them now, the extra ones after, `ZEND_CALL_NUM_ARGS`
+    /// of them in all: what `ZEND_FUNC_GET_ARGS` copies, views with no
+    /// owner taken.
+    pub(crate) fn frame_arguments(&self, frame: FrameRef) -> Vec<Value> {
+        self.vm
+            .at(frame)
+            .map(|state| self.arguments_of(frame, state))
+            .unwrap_or_default()
+    }
+
+    fn arguments_of(&self, frame: FrameRef, state: &exec::FrameState) -> Vec<Value> {
+        let passed = usize::try_from(state.num_args).unwrap_or(0);
+        let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
+            .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
+            .collect();
+        arguments.extend(state.extra_args.iter().copied());
+        arguments
     }
 
     /// `zend_forbid_dynamic_call()` (`Z/Zend/zend_API.h:901`): php's

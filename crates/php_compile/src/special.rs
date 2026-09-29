@@ -35,7 +35,7 @@ use php_heap::{Key, Zval, ZvalType, numeric_prefix};
 use php_unit::Opcode;
 
 use crate::CompileError;
-use crate::emit::{CastTo, Emit, Where, truth};
+use crate::emit::{CastTo, Emit, Fetch, Where, truth};
 use php_syntax::tree;
 
 /// What php's compiler makes of one name in the table.
@@ -85,11 +85,16 @@ pub(crate) enum Special {
     /// is a rope of its pieces, a `%d` cast to `int` first; anything else
     /// is the call.
     Sprintf,
+    /// `zend_compile_func_get_args`: `ZEND_FUNC_GET_ARGS` into a
+    /// temporary where the call has no argument and stands in a
+    /// function, whatever the fetch it stands under; the call otherwise,
+    /// whose native refuses the global scope.
+    FuncGetArgs,
     /// A shape that is an opcode of its own (`ZEND_BOOL`, `ZEND_CAST`,
     /// `ZEND_GET_CLASS`,
     /// `ZEND_GET_CALLED_CLASS`, `ZEND_GET_TYPE`, `ZEND_FUNC_NUM_ARGS`,
-    /// `ZEND_FUNC_GET_ARGS`, `ZEND_ARRAY_KEY_EXISTS`) and has no kernel
-    /// here yet: the ordinary call.
+    /// `ZEND_ARRAY_KEY_EXISTS`) and has no kernel here yet: the ordinary
+    /// call.
     Opcode,
 }
 
@@ -146,7 +151,7 @@ pub(crate) const TABLE: &[(&[u8], Special)] = &[
     (b"get_called_class", Special::Opcode),
     (b"gettype", Special::Opcode),
     (b"func_num_args", Special::Opcode),
-    (b"func_get_args", Special::Opcode),
+    (b"func_get_args", Special::FuncGetArgs),
     (b"array_slice", Special::Opcode),
     (b"array_key_exists", Special::Opcode),
     (b"sprintf", Special::Sprintf),
@@ -193,10 +198,34 @@ impl Emit<'_> {
     /// bool(true)
     /// bool(true)
     /// ```
+    ///
+    /// `chr` and `ord` are specials under a read alone (`type ==
+    /// BP_VAR_R`), as the frameless calls are: under a write, an `unset`,
+    /// an increment or a by-name argument the call is the ordinary one
+    /// into a `VAR`, which `SEPARATE` makes the write's own and the fetch
+    /// over it refuses as the program serves, where the special's
+    /// temporary would be `zend_separate_if_call_and_write`'s compile
+    /// error, since a temporary cannot be written. The op arrays are the
+    /// oracle's dump, `chr_is_the_ordinary_call_under_a_write` in the
+    /// crate's tests.
+    ///
+    /// ```php
+    /// try { chr(0)[0][] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { unset(chr(0)[0][0]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { ++chr(0)[0]; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// echo chr(65), "\n";
+    /// ```
+    /// ```expect
+    /// Cannot use string offset as an array
+    /// Cannot use string offset as an array
+    /// Cannot increment/decrement string offsets
+    /// A
+    /// ```
     pub(crate) fn special(
         &mut self,
         lowered: &[u8],
         arguments: &[tree::Expr],
+        fetch: Fetch,
     ) -> Result<Option<Where>, CompileError> {
         if !self.native(lowered) {
             return Ok(None);
@@ -204,8 +233,12 @@ impl Emit<'_> {
         match row(lowered) {
             Some(Special::Strlen) => self.strlen(arguments),
             Some(Special::TypeCheck(mask)) => self.over_one(Opcode::TypeCheck, arguments, mask),
+            // `&& type == BP_VAR_R`: under any other fetch the call is
+            // the ordinary one, into a `VAR` a write can separate.
+            Some(Special::Chr | Special::Ord) if fetch != Fetch::Read => Ok(None),
             Some(Special::Chr) => Ok(self.chr(arguments)?.map(Where::Constant)),
             Some(Special::Ord) => Ok(self.ord(arguments)?.map(Where::Constant)),
+            Some(Special::FuncGetArgs) => Ok(self.func_get_args(arguments)),
             Some(Special::Defined) => self.defined(arguments),
             Some(Special::Count { sizeof }) => {
                 self.over_one(Opcode::Count, arguments, u32::from(sizeof))
@@ -239,6 +272,7 @@ impl Emit<'_> {
             Some(Special::Defined) => self.defined_constant(arguments),
             Some(
                 Special::TypeCheck(_)
+                | Special::FuncGetArgs
                 | Special::Count { .. }
                 | Special::Clone
                 | Special::InArray
@@ -369,6 +403,43 @@ impl Emit<'_> {
     /// argument, compiled, and the opcode
     /// over it into a temporary with `extended_value` as given; two
     /// arguments or none is the call, whatever the arguments are.
+    /// `zend_compile_func_get_args` (`Z/Zend/zend_compile.c:4575`):
+    /// `ZEND_FUNC_GET_ARGS` into a temporary, with no operand, where the
+    /// op array is a function's (`CG(active_op_array)->function_name`)
+    /// and the call passes nothing. php looks at no fetch type here, so
+    /// the arguments' array is a temporary under a by-name argument too,
+    /// and a callee that takes the element by reference is refused as
+    /// the program serves. The op array is the oracle's dump,
+    /// `func_get_args_is_a_temporary_under_every_fetch` in the crate's
+    /// tests.
+    ///
+    /// ```php
+    /// function t() {
+    ///     byVal(func_get_args()[0]);
+    ///     try { byRef(func_get_args()[0]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///     return func_get_args();
+    /// }
+    /// function byVal($a) { var_dump($a); }
+    /// function byRef(&$a) { var_dump($a); }
+    /// var_dump(t('y', 2));
+    /// ```
+    /// ```expect
+    /// string(1) "y"
+    /// Cannot use temporary expression in write context
+    /// array(2) {
+    ///   [0]=>
+    ///   string(1) "y"
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// ```
+    fn func_get_args(&mut self, arguments: &[tree::Expr]) -> Option<Where> {
+        if !self.in_function() || !arguments.is_empty() {
+            return None;
+        }
+        Some(self.emit_nullary(Opcode::FuncGetArgs))
+    }
+
     fn over_one(
         &mut self,
         opcode: Opcode,

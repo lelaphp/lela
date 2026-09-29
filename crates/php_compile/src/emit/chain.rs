@@ -39,8 +39,19 @@ impl Emit<'_> {
     /// `zend_short_circuiting_mark_inner` and the compile after it: the
     /// object under a link of a chain, whose own end the link's commits.
     pub(super) fn chain_link(&mut self, object: tree::Expr) -> Result<Where, crate::CompileError> {
+        self.chain_link_under(object, super::Fetch::Read)
+    }
+
+    /// [`Self::chain_link`] under the fetch the chain is compiled
+    /// under, which a call standing as the link is compiled under too
+    /// (`zend_compile_var_inner`'s `ZEND_AST_CALL` arm).
+    pub(super) fn chain_link_under(
+        &mut self,
+        object: tree::Expr,
+        fetch: super::Fetch,
+    ) -> Result<Where, crate::CompileError> {
         self.chain_inner = Some(self.peel(object));
-        self.expr(object)
+        self.expr_under(object, fetch)
     }
 
     /// `zend_emit_jmp_null` (`Z/Zend/zend_compile.c:2574`): `JMP_NULL` over

@@ -834,7 +834,7 @@ struct DimLink {
 /// write is `FETCH_DIM_W` into a `VAR` carrying `ZEND_FETCH_DIM_DIM`,
 /// where `[]` is the append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fetch {
+pub(crate) enum Fetch {
     Read,
     Write,
     /// `BP_VAR_RW`, the fetch a compound assignment's links take: the
@@ -2220,14 +2220,19 @@ impl Emit<'_> {
     /// method 5 | method 6 | static 7
     /// static 8static 9
     /// ```
-    fn call_of(&mut self, id: NodeId<tree::CallExpr>, line: u32) -> Result<Where, CompileError> {
+    fn call_of(
+        &mut self,
+        id: NodeId<tree::CallExpr>,
+        line: u32,
+        fetch: Fetch,
+    ) -> Result<Where, CompileError> {
         let node = &self.parsed.tree[id];
         let (callee, args) = (node.callee, node.args);
         match callee {
             tree::Expr::NameRef(name) => {
                 let name = self.text(name).to_vec();
                 let arguments = self.arguments(args, line)?;
-                self.call(&name, &arguments)
+                self.call(&name, &arguments, fetch)
             }
             tree::Expr::ScopedAccessExpr(scoped) => {
                 if let Some(called) = self.parent_hook_call(scoped, args, line)? {
@@ -2259,7 +2264,7 @@ impl Emit<'_> {
                         qualified.push(b'\\');
                     }
                     qualified.extend_from_slice(name);
-                    return self.call(&qualified, &arguments);
+                    return self.call(&qualified, &arguments, fetch);
                 }
                 self.call_var(callee, &arguments)
             }
@@ -10175,6 +10180,16 @@ impl Emit<'_> {
     /// node laid down is aimed past it here ([`chain`]), php's
     /// `zend_compile_expr` and its `zend_short_circuiting_commit`.
     pub(crate) fn expr(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
+        self.expr_under(expr, Fetch::Read)
+    }
+
+    /// [`Self::expr`] where the node stands under a fetch of its own,
+    /// php's `zend_compile_var(result, ast, type, …)`: a call among what
+    /// a write, an `unset`, a `??` or a by-name argument fetches is
+    /// compiled under that `type`, which keeps it out of the specials
+    /// php compiles only for a read, `chr`, `ord` and the frameless
+    /// calls ([`Self::call`]); every other node is compiled as a read's.
+    fn expr_under(&mut self, expr: tree::Expr, fetch: Fetch) -> Result<Where, CompileError> {
         let node = self.peel(expr);
         // `ZEND_AST_ZNODE`: the value [`Self::pipe`] holds for the node.
         if let Some(value) = self.znode(node) {
@@ -10188,7 +10203,7 @@ impl Emit<'_> {
         }
         let inner = self.chain_inner.take() == Some(node);
         let checkpoint = self.short_circuits.len();
-        let value = self.expr_node(node)?;
+        let value = self.expr_node(node, fetch)?;
         if !inner && let Some(end) = self.chain_end(node) {
             self.short_circuit_commit(checkpoint, value, end);
         }
@@ -10197,7 +10212,7 @@ impl Emit<'_> {
 
     /// [`Self::expr`]'s body over one node, php's `zend_compile_expr_inner`.
     #[allow(clippy::too_many_lines)]
-    fn expr_node(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
+    fn expr_node(&mut self, expr: tree::Expr, fetch: Fetch) -> Result<Where, CompileError> {
         let line = expr.line(self.parsed);
         self.line = line;
         self.check_stack()?;
@@ -10303,14 +10318,14 @@ impl Emit<'_> {
                     (None, Some(args)) => self.arguments(args, line)?,
                     (None, None) => return Err(self.unread("a `clone`")),
                 };
-                self.call(b"\\clone", &arguments)
+                self.call(b"\\clone", &arguments, Fetch::Read)
             }
             tree::Expr::ExitExpr(id) => {
                 let arguments = match tree[id].args {
                     Some(args) => self.arguments(args, line)?,
                     None => Args::of(&[], line),
                 };
-                self.call(b"\\exit", &arguments)
+                self.call(b"\\exit", &arguments, Fetch::Read)
             }
             tree::Expr::PrintExpr(id) => {
                 let operand = self.required(tree[id].operand, "a `print`")?;
@@ -10414,7 +10429,7 @@ impl Emit<'_> {
                 let code = self.required(tree[id].code, "an `eval`")?;
                 self.include_or_eval(IncludeKind::Eval, code)
             }
-            tree::Expr::CallExpr(id) => self.call_of(id, line),
+            tree::Expr::CallExpr(id) => self.call_of(id, line, fetch),
             tree::Expr::MemberAccessExpr(_) => self.prop(expr),
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => self.class_const(class, &name),
@@ -10799,6 +10814,13 @@ impl Emit<'_> {
     /// ```expect
     /// 123
     /// ```
+    /// Whether the op array being compiled is a function's, a method's
+    /// or a closure's, `CG(active_op_array)->function_name`, and not a
+    /// file's or an `eval`'s main one.
+    pub(crate) fn in_function(&self) -> bool {
+        self.active_function.is_some()
+    }
+
     fn mark_function_as_generator(&mut self) -> Result<(), CompileError> {
         if self.active_function.is_none() {
             return Err(
@@ -11673,7 +11695,7 @@ impl Emit<'_> {
                 self.var_for_reference(node)?
             }
             node @ tree::Expr::CallExpr(_) => {
-                let returned = self.expr(node)?;
+                let returned = self.expr_under(node, Fetch::Write)?;
                 self.operand(returned)
             }
             _ => {
@@ -12107,7 +12129,7 @@ impl Emit<'_> {
                 Base::Settled(self.operand(this))
             }
             (_, Fetch::Read | Fetch::Is | Fetch::FuncArg) => {
-                let value = self.chain_link(base)?;
+                let value = self.chain_link_under(base, fetch)?;
                 Base::Settled(self.operand(value))
             }
             // `zend_separate_if_call_and_write`: a call under a write
@@ -12117,7 +12139,7 @@ impl Emit<'_> {
             (_, Fetch::Write | Fetch::Rw | Fetch::Unset)
                 if matches!(base, tree::Expr::CallExpr(_)) =>
             {
-                let returned = self.expr(base)?;
+                let returned = self.expr_under(base, fetch)?;
                 let Where::Returned(at) = returned else {
                     return Err(self
                         .compile_error("Cannot use result of built-in function in write context"));
@@ -13888,6 +13910,19 @@ impl Emit<'_> {
         self.emit_unary(Opcode::Cast, operand, to.type_code())
     }
 
+    /// `zend_emit_op_tmp(result, opcode, NULL, NULL)`: the opline with
+    /// no operand and a temporary for what it leaves.
+    pub(crate) fn emit_nullary(&mut self, opcode: Opcode) -> Where {
+        let out = self.temporary();
+        self.push(Opline {
+            opcode,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        Where::Temporary(out)
+    }
+
     /// `zend_emit_op_tmp` over one operand: the opline with `op1`,
     /// `extended_value` as the caller sets it after the emission, and a
     /// temporary for what it leaves, which is where the value is.
@@ -14993,7 +15028,7 @@ impl Emit<'_> {
     /// anything reads it; [`Self::do_free`] marks it `UNUSED` when
     /// nothing does, which is what the engine's `DO_ICALL` reads as
     /// `RETURN_VALUE_USED`.
-    fn call(&mut self, name: &[u8], arguments: &Args) -> Result<Where, CompileError> {
+    fn call(&mut self, name: &[u8], arguments: &Args, fetch: Fetch) -> Result<Where, CompileError> {
         let line = self.line;
         let is_callable_convert = matches!(arguments, Args::CallableConvert);
         let (resolved, runtime) = self.function_name(name);
@@ -15003,7 +15038,7 @@ impl Emit<'_> {
             if name.eq_ignore_ascii_case(b"assert") && !is_callable_convert {
                 return self.assert(&resolved, arguments, None);
             }
-            return self.ns_call(&resolved, arguments);
+            return self.ns_call(&resolved, arguments, fetch);
         }
         let lowered = resolved.to_ascii_lowercase();
         // "Special assert() handling should apply independently of
@@ -15019,10 +15054,14 @@ impl Emit<'_> {
                 // `zend_try_compile_special_func`, which a named argument
                 // keeps a call out of.
                 if let Some(positional) = arguments.positional() {
-                    if let Some(served) = self.special(&lowered, &positional)? {
+                    if let Some(served) = self.special(&lowered, &positional, fetch)? {
                         return Ok(served);
                     }
-                    if let Some(served) = self.frameless_icall(index, &positional, None)? {
+                    // `find_frameless_function_info`: `type != BP_VAR_R`
+                    // is the ordinary call.
+                    if fetch == Fetch::Read
+                        && let Some(served) = self.frameless_icall(index, &positional, None)?
+                    {
                         return Ok(served);
                     }
                 }
@@ -16745,7 +16784,12 @@ impl Emit<'_> {
     /// a second time. The `JMP_FRAMELESS` takes its cache slot after
     /// the `INIT_NS_FCALL_BY_NAME` took its own, which is the number
     /// the dump prints.
-    fn ns_call(&mut self, name: &[u8], arguments: &Args) -> Result<Where, CompileError> {
+    fn ns_call(
+        &mut self,
+        name: &[u8],
+        arguments: &Args,
+        fetch: Fetch,
+    ) -> Result<Where, CompileError> {
         let line = self.line;
         let name_constants = self.ns_func_name_literal(name)?;
         let lowered = name.to_ascii_lowercase();
@@ -16759,6 +16803,7 @@ impl Emit<'_> {
         // (`!zend_args_contain_unpack_or_named`).
         let positional = arguments.positional();
         if !self.in_jmp_frameless_branch
+            && fetch == Fetch::Read
             && let Some(positional) = &positional
             && let Some(index) = self.native_index(&unqualified)
             && self.frameless_arity(index, positional.len()).is_some()
