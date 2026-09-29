@@ -696,6 +696,10 @@ values::PhpArray::is_packed
 values::PhpArray::is_recursive
 values::PhpArray::is_same
 values::PhpArray::iter
+values::PhpArray::iterators_advance
+values::PhpArray::iterators_carry
+values::PhpArray::iterators_lower_pos
+values::PhpArray::iterators_update
 values::PhpArray::len
 values::PhpArray::live_from
 values::PhpArray::new
@@ -810,5 +814,6 @@ values::Value::resource
 values::Value::string
 values::Value::tag
 values::Value::type_name
+values::Value::unpassed
 values::ValueRef
 values::zend_sort

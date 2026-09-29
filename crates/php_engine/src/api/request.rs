@@ -2519,7 +2519,7 @@ impl Request {
             called_scope,
             0,
             returns_to,
-            Some(caller),
+            exec::Caller::Opline(caller),
         );
         if let Some(state) = self.vm.at_mut(frame) {
             state.scope = scope;
@@ -2583,7 +2583,7 @@ impl Request {
         function: Function,
         call: exec::CallState,
         returns_to: Option<(FrameRef, u32)>,
-        caller: Option<FrameRef>,
+        caller: exec::Caller,
     ) -> Result<FrameRef, Fatal> {
         let no_body = || {
             Fatal::Error(String::from(
@@ -3447,7 +3447,10 @@ impl Request {
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
-        let pushed = self.push_user_frame(function, call, None, None);
+        let caller = self
+            .current_user_frame()
+            .map_or(exec::Caller::Outside, exec::Caller::Loop);
+        let pushed = self.push_user_frame(function, call, None, caller);
         let frame = self.fatal_of(pushed)?;
         // `enter`'s own prologue, so a body reached from here stands
         // where a body reached from `DO_UCALL` stands: every `RECV*`
@@ -4324,6 +4327,44 @@ impl Request {
         }
     }
 
+    /// `zend_throw_exception_internal`'s chain
+    /// (`Z/Zend/zend_exceptions.c:193-206`) for a handler php carries on
+    /// past a diagnostic whose handler threw, as the dimension writes carry
+    /// on past `ZVAL_UNDEFINED_OP1` and `zend_false_to_array_deprecated`:
+    /// a throwable the handler raised after it takes the slot, and the
+    /// one the diagnostic left pending, `ran_on`, is chained under it as
+    /// its `previous`. Where anything else stands pending by then, a
+    /// destructor's throwable the handler's own releases served, nothing
+    /// is chained here. Everywhere else the loop stops at the first,
+    /// which is where php tests `EG(exception)`, and
+    /// [`Request::leave_pending`] gives a second up.
+    ///
+    /// ```php
+    /// set_error_handler(function (y $y) {});
+    /// $k = [];
+    /// try { $y[$k]++; } catch (TypeError $e) {
+    ///     echo $e->getMessage(), "\n", $e->getPrevious()::class, "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// Cannot access offset of type array on array
+    /// TypeError
+    /// ```
+    pub(crate) fn raised_over(&mut self, thrown: Thrown, ran_on: Option<PhpObject>) -> Thrown {
+        let (Some(new), Some(ran_on)) = (thrown.exception().copied(), ran_on) else {
+            return thrown;
+        };
+        if let Some(Raised::Throwable(old)) = self.raised
+            && !self.bailout
+            && old.index() == ran_on.index()
+            && old.index() != new.index()
+        {
+            self.raised = None;
+            self.set_previous(new, old);
+        }
+        thrown
+    }
+
     /// A release php makes with `EG(exception)` set, `OBJ_RELEASE` or
     /// `FREE_OP1` on a handler's way out: `free` served while `thrown`
     /// stands pending, so a destructor it serves sees the throwable
@@ -5175,7 +5216,7 @@ impl Request {
                     // include's own row, whose argument is php's
                     // `include_filename`, the site of the row before the
                     // function's, and none where it is the first.
-                    if state.caller.is_none()
+                    if !matches!(state.caller, exec::Caller::Opline(_))
                         && let Some(kind) = including(at)
                     {
                         let file = (kind != IncludeKind::Eval)
@@ -9450,6 +9491,58 @@ impl Request {
         }
     }
 
+    /// `zend_std_write_property`'s `typed_property` arm around
+    /// [`Request::hold_to_property_type`]: the object held one owner more
+    /// while the value is verified (`GC_ADDREF(zobj)`), since a
+    /// `__toString` the weak rule serves may give its last owner up, and
+    /// where that hold was the last one, php's `Error` and the object
+    /// destroyed after it, the value given up (`GC_DELREF(zobj) == 0`,
+    /// `Z/Zend/zend_object_handlers.c:1113`).
+    ///
+    /// ```php
+    /// class A { public string $prop; }
+    /// class B { public function __toString() { global $a; $a = null; return "a"; } }
+    /// $a = new A();
+    /// try { $a->prop = new B(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $a = new A(); $a->prop = '';
+    /// try { $a->prop = new B(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($a);
+    /// ```
+    /// ```expect
+    /// Object was released while assigning to property A::$prop
+    /// Object was released while assigning to property A::$prop
+    /// NULL
+    /// ```
+    pub(crate) fn hold_to_property_type_of(
+        &mut self,
+        object: PhpObject,
+        typed: &TypedProperty,
+        name: &[u8],
+        value: Value,
+        strict: bool,
+    ) -> Result<Value, Thrown> {
+        let held = self.take_hold(object.as_value());
+        let verified = self.hold_to_property_type(typed, name, value, strict);
+        let Ok(landing) = verified else {
+            self.let_go(held);
+            return verified;
+        };
+        if object.as_value().refcount() > 1 {
+            self.let_go(held);
+            return Ok(landing);
+        }
+        let class = self.class_name(typed.declaring);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        let error = crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Object was released while assigning to property {class}::${shown}"),
+        );
+        self.let_go(held);
+        self.release(landing);
+        Err(error)
+    }
+
     /// `zend_assign_to_variable` over a declared slot, `ASSIGN_OBJ`'s
     /// fast path over a slot that holds a value (`fast_assign_obj`):
     /// `value` is the slot's from here and what it held is released
@@ -9783,6 +9876,29 @@ impl Request {
     /// int(7)
     /// int(7)
     /// ```
+    ///
+    /// A dynamic property that holds a reference a typed property holds
+    /// too is written through `zend_assign_to_typed_ref`, an undefined
+    /// value as the `null` its warning left.
+    ///
+    /// ```php
+    /// class T { public string $x = ""; public int $n = 1; }
+    /// $t = new T; $o = new stdClass;
+    /// $o->p =& $t->x;
+    /// try { $o->p = $v; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// $o->q =& $t->n;
+    /// try { $o->q = "abc"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// $o->q = "5";
+    /// var_dump($t->x, $t->n);
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: Undefined variable $v in %s on line 5
+    /// Cannot assign null to reference held by property T::$x of type string
+    /// Cannot assign string to reference held by property T::$n of type int
+    /// string(0) ""
+    /// int(5)
+    /// ```
     fn write_std_property(
         &mut self,
         object: PhpObject,
@@ -9801,7 +9917,8 @@ impl Request {
                     ))));
                 };
                 let strict = self.property_strict_types();
-                match self.hold_to_property_type(&typed, name.as_bytes(), value, strict) {
+                match self.hold_to_property_type_of(object, &typed, name.as_bytes(), value, strict)
+                {
                     Ok(value) => value,
                     Err(thrown) => {
                         self.release(Value::string(name));
@@ -9837,19 +9954,19 @@ impl Request {
             let held = o.properties().is_some_and(|table| table.contains(key));
             // `zend_assign_to_variable` over the entry found: one that
             // holds a reference, what `$o->p = &$x` bound, is written
-            // through, so every name of the cell reads the value.
+            // through, so every name of the cell reads the value, and
+            // held to the types of the properties that hold the cell
+            // (`zend_assign_to_typed_ref`) under the writing file's rule.
             let bound = o
                 .properties()
                 .and_then(|table| table.get(key))
                 .and_then(|found| Value::of_zval(found).as_php_ref().copied());
             if let Some(cell) = bound {
-                self.reference_set(cell.heap(), value);
                 self.release(Value::string(name));
-                return Ok(());
+                let strict = self.property_strict_types();
+                return self.assign_to_reference(cell.heap(), value.undef_as_null(), strict);
             }
-            if !held
-                && let Err(thrown) = self.dynamic_property_creation(object.class(), name.as_bytes())
-            {
+            if !held && let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
                 self.release(value);
                 self.release(Value::string(name));
                 return Err(thrown);
@@ -9930,7 +10047,7 @@ impl Request {
         let held = o
             .properties()
             .is_some_and(|table| table.contains(table_key));
-        if !held && let Err(thrown) = self.dynamic_property_creation(class, &name) {
+        if !held && let Err(thrown) = self.dynamic_property_creation(object, &name) {
             self.release(value);
             self.release(Value::string(key));
             return Err(thrown);
@@ -10082,15 +10199,29 @@ impl Request {
     /// with neither.
     ///
     /// php's raiser holds one more owner of the object across the
-    /// deprecation and turns the last release into the same `Error`;
-    /// nothing here can drop the object under a diagnostic, since the
-    /// handler that reached this holds it.
+    /// deprecation (`GC_ADDREF(obj)`), and where the handler the
+    /// deprecation reached gave up every other one, the object is
+    /// destroyed and the creation refused with the same `Error`, unless
+    /// the handler threw.
+    ///
+    /// ```php
+    /// set_error_handler(function ($code, $msg) { echo "Err: $msg\n"; $GLOBALS['a'] = null; });
+    /// $a = new class {};
+    /// try { [&$a->y]; } catch (Throwable $ex) { echo "Exception: ", $ex->getMessage(), "\n"; }
+    /// var_dump($a);
+    /// ```
+    /// ```expect
+    /// Err: Creation of dynamic property class@anonymous::$y is deprecated
+    /// Exception: Cannot create dynamic property class@anonymous::$y
+    /// NULL
+    /// ```
     pub(crate) fn dynamic_property_creation(
         &mut self,
-        class: ClassId,
+        object: PhpObject,
         name: &[u8],
     ) -> Result<(), Thrown> {
         use php_unit::decl::DynamicProperties;
+        let class = object.class();
         let Some(flags) = self.class_flags(class) else {
             return Ok(());
         };
@@ -10107,11 +10238,24 @@ impl Request {
                 &format!("Cannot create dynamic property {class_name}::${shown}"),
             ));
         }
+        let held = self.take_hold(object.as_value());
         crate::api::raising::deprecated(
             self,
             &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
         );
-        Ok(())
+        if object.as_value().refcount() > 1 {
+            self.let_go(held);
+            return Ok(());
+        }
+        self.let_go(held);
+        if self.is_pending() {
+            return Err(Thrown::of(None));
+        }
+        Err(crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Cannot create dynamic property {class_name}::${shown}"),
+        ))
     }
 
     /// `ZEND_FE_RESET_R`'s separation of a shared property table
@@ -10343,7 +10487,25 @@ impl Request {
     /// raises the two in and the reverse of the order the pair
     /// [`Request::read_property`] and [`Request::write_property`]
     /// raises them in over the same name. A name the table already
-    /// holds raises neither, php returning before both.
+    /// holds raises neither, php returning before both. The entry is
+    /// added after the warning, to the table the handler it reached left,
+    /// so a value that handler wrote under the name is what the compound
+    /// assignment reads.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class C {
+    ///     function error($_, $msg) { echo $msg, "\n"; $this->a = 12345; }
+    /// }
+    /// $c = new C;
+    /// set_error_handler([$c, 'error']);
+    /// $c->a %= 10;
+    /// var_dump($c->a);
+    /// ```
+    /// ```expect
+    /// Undefined property: C::$a
+    /// int(5)
+    /// ```
     pub(crate) fn dynamic_property_ref(
         &mut self,
         object: PhpObject,
@@ -10353,25 +10515,23 @@ impl Request {
         let o = object.heap();
         let key = php_heap::Key::Str(name.heap());
         let held = o.properties().is_some_and(|table| table.contains(key));
-        if !held
-            && let Err(thrown) = self.dynamic_property_creation(object.class(), name.as_bytes())
-        {
+        if !held && let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
             self.release(Value::string(name));
             return Err(thrown);
         }
+        if !held && read == PropertyRead::Warning {
+            let class = self.class_name(object.class());
+            let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
+            crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        }
+        // `zend_hash_add(zobj->properties, name, &EG(uninitialized_zval))`
+        // after the warning: the table as the handler the warning reached
+        // left it, and a name it wrote kept as it wrote it.
         let table = self.heap.object_properties(o);
         let table = self.fatal_of(table)?;
         let table = self.array_separate(table)?;
         self.heap.object_set_properties(o, table);
-        if !held {
-            if read == PropertyRead::Warning {
-                let class = self.class_name(object.class());
-                let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
-                crate::api::raising::warning(
-                    self,
-                    &format!("Undefined property: {class}::${shown}"),
-                );
-            }
+        if !table.contains(key) {
             self.array_update(table, key, Value::null())?;
         }
         self.release(Value::string(name));
@@ -11830,6 +11990,28 @@ impl Request {
         Heap::free_object_storage(&mut Hooks(self));
     }
 
+    /// Whether no extension registered a handler table for `class` or a
+    /// class it extends, so its dimensions are `zend_std_read_dimension`'s,
+    /// whose failure answers `NULL`, where a table of an extension's
+    /// answers what its own C handler does (`spl_array_read_dimension_ex`
+    /// answers `&EG(uninitialized_zval)`).
+    pub(crate) fn std_dimensions(&self, class: ClassId) -> bool {
+        let mut at = Some(class);
+        for _ in 0..64 {
+            let Some(class) = at else {
+                return true;
+            };
+            if let Some(Some(_)) = usize::try_from(class.0)
+                .ok()
+                .and_then(|i| self.shared.handlers.get(i))
+            {
+                return false;
+            }
+            at = self.class_parent(class);
+        }
+        true
+    }
+
     /// The handler table an object of `class` is reached through
     /// (design §5.4): the class's own where it declared one, else the
     /// nearest ancestor's, as php inherits `create_object` and the table
@@ -13239,16 +13421,24 @@ impl Request {
     /// innermost frame's own file, where the write a handler table makes
     /// on an opcode's behalf stands.
     pub(crate) fn property_strict_types(&self) -> bool {
-        let Some(innermost) = self.vm.innermost() else {
-            return false;
-        };
+        self.current_user_frame()
+            .and_then(|frame| self.vm.at(frame))
+            .is_some_and(crate::exec::strict_types_of)
+    }
+
+    /// `EG(current_execute_data)` where it is user code: the innermost
+    /// frame, and nothing while a native is being served above it or
+    /// no frame stands.
+    pub(crate) fn current_user_frame(&self) -> Option<FrameRef> {
+        let innermost = self.vm.innermost()?;
         let floor = usize::try_from(innermost.calls_below).unwrap_or(usize::MAX);
         let serving = self.vm.calls().get(floor..).is_some_and(|above| {
             above
                 .iter()
                 .any(|call| call.stage == exec::CallStage::Serving)
         });
-        !serving && crate::exec::strict_types_of(innermost)
+        let at = self.vm.frames().len().checked_sub(1)?;
+        (!serving).then(|| FrameRef(u32::try_from(at).unwrap_or(u32::MAX)))
     }
 
     /// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`):
@@ -13261,7 +13451,7 @@ impl Request {
     pub(crate) fn caller_strict_types(&self, frame: FrameRef) -> bool {
         self.vm
             .at(frame)
-            .and_then(|state| state.caller)
+            .and_then(|state| state.caller.frame())
             .is_some_and(|caller| self.frame_strict_types(caller))
     }
 

@@ -71,8 +71,16 @@ impl Request {
         let table = caller.map(|caller| self.rebuild_symbol_table(caller));
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
-        self.vm
-            .push_body(unit, exec::Body::Main, None, None, None, 0, None, caller);
+        self.vm.push_body(
+            unit,
+            exec::Body::Main,
+            None,
+            None,
+            None,
+            0,
+            None,
+            caller.map_or(exec::Caller::Outside, exec::Caller::Opline),
+        );
         if let Some(state) = self.vm.at_mut(frame) {
             state.scope = None;
             state.symbol_table = table;
