@@ -213,7 +213,7 @@ fn a_test_and_its_skipif_spawn_the_binary_under_test_with_its_extra_args() {
     // carries the test's own --INI-- (#906).
     let (_root, subset) = rooted(
         "spawn",
-        "--TEST--\nspawn\n--INI--\nprecision=3\n--SKIPIF--\n<?php if (getenv('TEST_PHP_EXTRA_ARGS') === false || getenv('TEST_PHP_CGI_EXECUTABLE') !== '') echo 'skip no environment';\n--FILE--\n<?php\n$php = getenv('TEST_PHP_EXECUTABLE_ESCAPED');\n$extra = getenv('TEST_PHP_EXTRA_ARGS');\necho shell_exec(\"$php $extra -r 'echo 1/3, ini_get(\\\"error_reporting\\\");'\"), \"\\n\";\nvar_dump(getenv('TEST_PHP_EXECUTABLE') === realpath(getenv('TEST_PHP_EXECUTABLE')));\n--EXPECT--\n0.33332767\nbool(true)\n",
+        "--TEST--\nspawn\n--INI--\nprecision=3\n--SKIPIF--\n<?php if (getenv('TEST_PHP_EXTRA_ARGS') === false || getenv('TEST_PHP_CGI_EXECUTABLE') === '') echo 'skip no environment';\n--FILE--\n<?php\n$php = getenv('TEST_PHP_EXECUTABLE_ESCAPED');\n$extra = getenv('TEST_PHP_EXTRA_ARGS');\necho shell_exec(\"$php $extra -r 'echo 1/3, ini_get(\\\"error_reporting\\\");'\"), \"\\n\";\nvar_dump(getenv('TEST_PHP_EXECUTABLE') === realpath(getenv('TEST_PHP_EXECUTABLE')));\n--EXPECT--\n0.33332767\nbool(true)\n",
     );
     let tally = run(&subset, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
@@ -557,22 +557,37 @@ fn a_file_that_is_not_a_test_borks_and_the_subset_fails_on_it() {
     );
 }
 
+/// The fixture at `xtask/fixtures/phpt/cgi` (#1198): a `--POST--` test
+/// with a query string, a cookie and a header it wants, which passes only
+/// where the runner hands it to a CGI host with its request described, so
+/// a runner that skips it, or serves it the command line, fails here; and
+/// its negative control, whose body is met and whose headers are not. The
+/// oracle stands in for the engine, so the host is the php-cgi `[sapi]` pins.
 #[test]
-fn a_cgi_test_is_skipped_because_this_runner_hosts_the_command_line() {
+fn a_post_test_runs_through_the_cgi_host() {
     if oracle().is_none() {
         return;
     }
-    let (_tree, subset) = subset(
-        "cgi",
-        &[(
-            "cgi.phpt",
-            "--TEST--\nA CGI test\n--CGI--\n--FILE--\n<?php echo \"never\";\n--EXPECT--\nnever\n",
-        )],
-    );
+    let (_tree, subset) = fixture_subset("cgi");
     let tally = run(&subset, &registry(""));
-    let (judgement, note) = only(&tally);
-    assert_eq!(judgement, Judgement::Skip);
-    assert!(note.contains("CGI"), "{note}");
+    let went: Vec<(&str, Judgement)> = tally
+        .judged
+        .iter()
+        .map(|j| (j.name.as_str(), j.judgement))
+        .collect();
+    assert_eq!(
+        went,
+        [
+            ("headers.phpt", Judgement::Fail),
+            ("post.phpt", Judgement::Pass)
+        ],
+        "{tally:#?}"
+    );
+    let note = &tally.judged[0].note;
+    assert!(
+        note.contains("-X-Never: 1") && note.contains("--HEADERS--"),
+        "{note}"
+    );
 }
 
 #[test]

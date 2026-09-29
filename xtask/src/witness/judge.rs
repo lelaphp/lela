@@ -12,7 +12,9 @@
 //!
 //! A fence marked `process` is run of record by the `php` binary in a
 //! process of its own instead ([`super::process`]; harness §8, revision
-//! 61), held by the same rule.
+//! 61), held by the same rule; one with a `request` fence is served as a
+//! request of the web, by the php-cgi `[sapi]` pins and by the `php`
+//! binary run as php-cgi (#1197).
 //!
 //! Both runs stand under the recipe, and under the `[regime.<name>]` the
 //! fence names where it names one, its ini after the recipe's in each
@@ -23,7 +25,7 @@ use std::fmt;
 
 use super::anchor::Entry;
 use super::fence::{Exit, Served, Witness};
-use super::process::Binary;
+use super::process::{self, Binary};
 use super::{Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
@@ -70,10 +72,19 @@ pub(super) fn one(
     binary: &Binary,
     kept: &mut Kept,
 ) -> Judged {
-    let oracle_out = match oracle.run(
-        Program::Snippet(&witness.snippet),
-        witness.regime.as_deref(),
-    ) {
+    let oracle_run = match &witness.request {
+        Some(request) => oracle.asserted().and_then(|()| {
+            let Some(cgi) = &oracle.pin().sapi.cgi else {
+                anyhow::bail!("oracle.toml's [sapi] names no php-cgi to serve the request");
+            };
+            process::served_as_cgi(oracle, &cgi.path, &witness.snippet, request, &[])
+        }),
+        None => oracle.run(
+            Program::Snippet(&witness.snippet),
+            witness.regime.as_deref(),
+        ),
+    };
+    let oracle_out = match oracle_run {
         Ok(out) => out,
         Err(trouble) => {
             return judged(
@@ -150,6 +161,13 @@ pub(super) fn serve(
         Served::Binary => binary
             .serve(oracle, &witness.snippet, witness.regime.as_deref())
             .map_err(|trouble| format!("the php binary did not serve it: {trouble:#}")),
+        Served::Cgi => binary
+            .serve_cgi(
+                oracle,
+                &witness.snippet,
+                witness.request.as_deref().unwrap_or_default(),
+            )
+            .map_err(|trouble| format!("the php binary did not serve it as php-cgi: {trouble:#}")),
     }
 }
 

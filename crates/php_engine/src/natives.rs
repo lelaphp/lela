@@ -42,6 +42,8 @@ mod classes;
 mod errors;
 mod functions;
 
+pub(crate) use functions::ZEND_VERSION;
+
 /// The natives php keeps in `ext/standard` and this engine here, in
 /// the order they were declared, which follow Core's
 /// ([`crate::core::extension`]) in the function table.

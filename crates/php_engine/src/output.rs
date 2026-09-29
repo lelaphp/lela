@@ -182,6 +182,7 @@ impl Context {
 /// `zend_output_globals` (`Z/main/php_output.h:139-146`), and the
 /// `sapi_globals` the header ops and the first write move:
 /// `SG(sapi_headers)` and `SG(headers_sent)`.
+#[allow(clippy::struct_excessive_bools)] // php's `OG` and `SG` flags, each its own global, read alone
 pub(crate) struct Output {
     /// `OG(handlers)`, bottom first; the top is `OG(active)`.
     handlers: Vec<Handler>,
@@ -199,6 +200,9 @@ pub(crate) struct Output {
     started: Option<(Vec<u8>, u32)>,
     /// `SG(headers_sent)`.
     headers_sent: bool,
+    /// `SG(request_info).no_headers`: the host writes no head, and a
+    /// header op after the head counts sent is taken without a warning.
+    no_headers: bool,
     /// `SG(sapi_headers).mimetype`, the thirty-two bytes this file's doc
     /// names, out from the first byte to the host until the request ends.
     mimetype: Option<Block>,
@@ -219,9 +223,12 @@ pub(crate) struct Output {
     /// Whether the host's `header_handler` takes a line: every host but
     /// the CLI, whose handler answers zero
     /// (`Z/sapi/cli/php_cli.c:376`), so `sapi_header_add_op` frees the
-    /// line and the list stays empty. Read off the description's
-    /// `is_web`.
+    /// line and the list stays empty. Whether the description carries a
+    /// request of the web.
     takes_headers: bool,
+    /// `SG(request_info).headers_only`: a `HEAD` request, whose body
+    /// `php_header` refuses once the head is sent.
+    headers_only: bool,
 }
 
 impl Output {
@@ -229,8 +236,10 @@ impl Output {
     /// the stack initialised, which `zend_stack_init` does without an
     /// allocation, and the layer marked active; and `sapi_activate`
     /// (`Z/main/SAPI.c:429`) for the header state, with the response
-    /// code the host leaves. `web` is the description's `is_web`.
-    pub(crate) fn activate(web: bool) -> Output {
+    /// code the host leaves, zero under the CLI, and `headers_sent` and
+    /// `no_headers` off whatever the host set before, as `sapi_activate`
+    /// leaves them; [`Output::quiet`] sets them once the request started.
+    pub(crate) fn activate(web: Option<&crate::engine::WebRequest>) -> Output {
         Output {
             handlers: Vec::new(),
             elements: None,
@@ -239,12 +248,14 @@ impl Output {
             flags: ACTIVATED,
             started: None,
             headers_sent: false,
+            no_headers: false,
             mimetype: None,
             headers: Vec::new(),
             send_default_content_type: true,
-            response_code: if web { 200 } else { 0 },
+            response_code: web.map_or(0, |web| web.response_code),
             status_line: None,
-            takes_headers: web,
+            takes_headers: web.is_some(),
+            headers_only: web.is_some_and(|web| web.method == Some(crate::engine::Method::Head)),
         }
     }
 
@@ -288,6 +299,15 @@ impl Output {
 
     pub(crate) fn headers_sent(&self) -> bool {
         self.headers_sent
+    }
+
+    /// What php-cgi does once `php_request_startup` returned, where the
+    /// line asked for no head (`Z/sapi/cgi/cgi_main.c:2468`): the head
+    /// counted sent and `no_headers` set, so `X-Powered-By` and what the
+    /// startup took are in the list and no later op warns.
+    pub(crate) fn quiet(&mut self) {
+        self.headers_sent = true;
+        self.no_headers = true;
     }
 
     /// `php_output_get_level`.
@@ -917,7 +937,9 @@ fn header(req: &mut Request) {
         let line = req.current_line();
         req.output_mut().started = Some((file, line));
     }
-    if !send_headers(req) {
+    // `php_header`: a `HEAD` request's body goes nowhere once its head
+    // is sent.
+    if !send_headers(req) || req.output().headers_only {
         req.output_mut().flags |= DISABLED;
     }
 }
@@ -987,10 +1009,10 @@ fn send_headers_free(req: &mut Request) {
 /// `sapi_header_op`'s refusal once the block is sent
 /// (`Z/main/SAPI.c:685-694`): php's warning naming where the body
 /// started, through `sapi_module.sapi_error`, which is `php_error`
-/// under the CLI, so the text carries no native's name. `no_headers`
-/// is not read, since no host sets it.
+/// under the CLI, so the text carries no native's name; none where
+/// the host writes no head (`no_headers`).
 fn header_modifiable(req: &mut Request) -> bool {
-    if !req.output().headers_sent {
+    if !req.output().headers_sent || req.output().no_headers {
         return true;
     }
     let message = match req.output().started_at() {
@@ -1139,16 +1161,21 @@ pub(crate) fn header_add(
         return false;
     }
     let line = trimmed_end(line);
-    if line.iter().any(|b| matches!(b, b'\n' | b'\r')) {
-        req.note_error(
-            Level::Warning,
-            "Header may not contain more than a single header, new line detected",
-        );
-        return false;
-    }
-    if line.contains(&0) {
-        req.note_error(Level::Warning, "Header may not contain NUL bytes");
-        return false;
+    // The safety check walks the line once, and the first byte it trips
+    // on names the refusal (`Z/main/SAPI.c:740-755`).
+    match line.iter().find(|b| matches!(b, b'\n' | b'\r' | 0)) {
+        Some(0) => {
+            req.note_error(Level::Warning, "Header may not contain NUL bytes");
+            return false;
+        }
+        Some(_) => {
+            req.note_error(
+                Level::Warning,
+                "Header may not contain more than a single header, new line detected",
+            );
+            return false;
+        }
+        None => {}
     }
     if line.len() >= 5 && line[..5].eq_ignore_ascii_case(b"HTTP/") {
         update_response_code(req, extract_response_code(line));
@@ -1226,6 +1253,21 @@ pub(crate) fn header_remove(req: &mut Request, name: Option<&[u8]>) -> bool {
         return false;
     }
     remove_header(&mut req.output_mut().headers, name, 0);
+    true
+}
+
+/// `sapi_header_op` for `SAPI_HEADER_DELETE_PREFIX` (`Z/main/SAPI.c:705`):
+/// refused with the warning once the block is sent, nothing for an empty
+/// prefix, and otherwise, the trailing whitespace cut, every line that
+/// opens with the prefix, whatever its case, dropped, where the prefix
+/// runs past the header's name of `name_len` bytes; a colon in it is no
+/// refusal, since the prefix names a value too (`Set-Cookie: PHPSESSID=`).
+pub(crate) fn header_remove_prefix(req: &mut Request, prefix: &[u8], name_len: usize) -> bool {
+    if !header_modifiable(req) || prefix.is_empty() {
+        return false;
+    }
+    let prefix = trimmed_end(prefix);
+    remove_header(&mut req.output_mut().headers, prefix, name_len);
     true
 }
 
@@ -1748,7 +1790,10 @@ mod tests {
         Request::new(
             Arc::clone(&engine.shared),
             RequestDescription {
-                is_web: true,
+                web: Some(crate::engine::WebRequest {
+                    response_code: 200,
+                    ..crate::engine::WebRequest::default()
+                }),
                 ..RequestDescription::default()
             },
         )
@@ -1771,6 +1816,21 @@ mod tests {
         );
         assert!(req.headers_sent().is_some());
         assert!(!req.header_add(b"X-B: 2", true, 0));
+    }
+
+    /// php-cgi's `-q` once the request started: the head counts sent,
+    /// and a line `header()` takes after it is listed without a warning,
+    /// since `no_headers` is set; the first byte sends nothing more.
+    #[test]
+    fn a_quiet_head_counts_sent_and_takes_a_line_without_a_warning() {
+        let mut req = web_request();
+        req.output_mut().quiet();
+        assert!(req.headers_sent().is_some());
+        assert!(req.header_add(b"X-A: 1", true, 0));
+        req.write(b"x");
+        assert_eq!(req.headers_list(), [b"X-A: 1".to_vec()]);
+        assert!(req.header_add(b"X-B: 2", true, 0));
+        assert_eq!(req.headers_list().len(), 2);
     }
 
     /// `sapi_header_op` on a `Content-Type`: the default charset applied

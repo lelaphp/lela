@@ -219,6 +219,21 @@ pub(crate) type CompileFileHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u
 /// The one question the unit cache asks an extension about a file
 /// (design §6.3): [`ExtensionBuilder::admission`].
 pub(crate) type AdmissionHook = fn(&mut Request, &[u8]) -> Admission;
+/// The path resolver, php's `zend_resolve_path` as an extension overrides
+/// it: [`ExtensionBuilder::resolve_path`].
+pub(crate) type ResolvePathHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
+/// The upload hook, php's `php_rfc1867_callback`:
+/// [`ExtensionBuilder::upload`].
+pub(crate) type UploadHook =
+    fn(&mut Request, &crate::api::request::Upload<'_>) -> Result<bool, Thrown>;
+/// The input filter, php's `sapi_module.input_filter`:
+/// [`ExtensionBuilder::input_filter`].
+pub(crate) type InputFilterHook = fn(
+    &mut Request,
+    crate::api::request::Input,
+    &[u8],
+    &[u8],
+) -> Result<Option<crate::api::values::Value>, Thrown>;
 
 /// What the unit cache does with a file for the request asking, the
 /// answer to [`ExtensionBuilder::admission`] (design §6.3, revision 45):
@@ -355,6 +370,12 @@ pub struct Extension {
     pub(crate) compile_file: Option<CompileFileHook>,
     /// What [`ExtensionBuilder::admission`] was handed.
     pub(crate) admission: Option<AdmissionHook>,
+    /// What [`ExtensionBuilder::input_filter`] was handed.
+    pub(crate) input_filter: Option<InputFilterHook>,
+    /// What [`ExtensionBuilder::upload`] was handed.
+    pub(crate) upload: Option<UploadHook>,
+    /// What [`ExtensionBuilder::resolve_path`] was handed.
+    pub(crate) resolve_path: Option<ResolvePathHook>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
     /// What [`ExtensionBuilder::intercept`] was handed: each native of
@@ -401,6 +422,9 @@ pub struct ExtensionBuilder {
     ticks: Option<TicksHook>,
     compile_file: Option<CompileFileHook>,
     admission: Option<AdmissionHook>,
+    input_filter: Option<InputFilterHook>,
+    upload: Option<UploadHook>,
+    resolve_path: Option<ResolvePathHook>,
     zend: Option<ZendExtension>,
     intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
@@ -644,6 +668,47 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The input filter, php's `sapi_module.input_filter` as `ext/filter`'s
+    /// `MINIT` registers `php_sapi_filter` (`sapi_register_input_filter`):
+    /// each variable php registers from what a host described, a query
+    /// string's, a cookie's, a form body's, a `$_SERVER` row the host
+    /// registers, and `parse_str()`'s, is handed to `hook` with where it
+    /// came from, its name and its value, before it is registered; the
+    /// value `hook` answers is registered in its place, and `None` drops
+    /// the variable. The last extension in bundle order with a hook is the
+    /// filter; with none, every value is registered as it came.
+    #[must_use]
+    pub fn input_filter(mut self, hook: InputFilterHook) -> ExtensionBuilder {
+        self.input_filter = Some(hook);
+        self
+    }
+
+    /// `zend_resolve_path` overridden, as phar's `MINIT` overrides it with
+    /// `phar_resolve_path`: a path an include or an open along the
+    /// `include_path` names is handed to `hook` first, which may answer
+    /// where it stands, a `phar://` URL inside the archive being served;
+    /// `None` leaves it to the engine's own resolution. Hooks are asked in
+    /// bundle order and the first answer is taken.
+    #[must_use]
+    pub fn resolve_path(mut self, hook: ResolvePathHook) -> ExtensionBuilder {
+        self.resolve_path = Some(hook);
+        self
+    }
+
+    /// The upload hook, php's `php_rfc1867_callback` as `ext/session`'s
+    /// `MINIT` sets it for `session.upload_progress`: each step of a
+    /// multipart body's reading is handed to `hook` as it is taken
+    /// ([`crate::api::request::Upload`]), and `false` answers php's
+    /// `FAILURE`: the body's reading stops at its start, a field is not
+    /// registered, a file is passed over at its start and cancelled with
+    /// `UPLOAD_ERR_EXTENSION` after it. Every extension's hook is asked,
+    /// in bundle order.
+    #[must_use]
+    pub fn upload(mut self, hook: UploadHook) -> ExtensionBuilder {
+        self.upload = Some(hook);
+        self
+    }
+
     /// The extension is a Zend extension too, php's `zend_extension`
     /// beside its `zend_module_entry` (`Z/Zend/zend_extensions.c`), as
     /// opcache is: `row` is what `php -m` lists under `[Zend Modules]`,
@@ -764,6 +829,9 @@ impl ExtensionBuilder {
             ticks: self.ticks,
             compile_file: self.compile_file,
             admission: self.admission,
+            input_filter: self.input_filter,
+            upload: self.upload,
+            resolve_path: self.resolve_path,
             zend: self.zend,
             intercepts: self.intercepts,
             info: self.info,

@@ -282,7 +282,13 @@ fn a_new_row_with_covers_is_one_addition_to_the_registry() {
 #[test]
 fn a_table_the_pins_reader_does_not_know_is_refused_and_one_it_knows_is_written() {
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let pin = fs::read_to_string(workspace.join("oracle.toml")).expect("the workspace's pin");
+    let tracked = fs::read_to_string(workspace.join("oracle.toml")).expect("the workspace's pin");
+    // The workspace's pin as it stood before a person wrote its `[sapi]`
+    // (#1161), so the table the reader knows has a pin to be added to.
+    let pin = match tracked.split_once("\n[sapi]\n") {
+        Some((before, _)) => format!("{before}\n"),
+        None => tracked,
+    };
     let root = scratch("reader", &pin);
     let proposal = root.join("proposed.toml");
 

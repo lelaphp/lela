@@ -6,20 +6,24 @@
 //! (`--INI--`, `--ARGS--`, `--ENV--`, `--STDIN--`, `--CAPTURE_STDIO--`),
 //! its `SKIPIF` and `CLEAN` sections run beside it under the oracle by the
 //! same shape of path, and what it wrote held to its `--EXPECT*--` section
-//! with php's normalisation. The verdict goes through [`oracle::verdict`], so
+//! with php's normalisation. A CGI-shaped test runs through the CGI host
+//! beside the binary, as the `cgi` module has it. The verdict goes through [`oracle::verdict`], so
 //! the registry decides what a difference means (harness §4.3). The tally,
 //! the subsets and the reading are `phpt`'s; this is the per-item judge it
 //! contributes.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::num::NonZeroUsize;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use regex_lite::Regex;
 
+use super::cgi;
 use super::file::{self, Phpt};
 use super::miss::Miss;
 use super::{Judged, Judgement, Lane, Subset};
@@ -31,13 +35,14 @@ use crate::oracle::{
 use crate::tally::{Apart, Within};
 
 /// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
-/// one run: the oracle and the registry, the binary it runs, the tier lane
-/// it runs under, and the extensions that binary loads, which
-/// `--EXTENSIONS--` is answered from.
+/// one run: the oracle and the registry, the binary it runs, the CGI host
+/// beside it where there is one, the tier lane it runs under, and the
+/// extensions that binary loads, which `--EXTENSIONS--` is answered from.
 pub(super) struct Adapter<'a> {
     oracle: &'a Oracle<'a>,
     registry: &'a Registry,
     binary: &'a Path,
+    cgi: Option<PathBuf>,
     lane: Option<Lane>,
     loaded: Vec<String>,
 }
@@ -47,6 +52,7 @@ impl<'a> Adapter<'a> {
         oracle: &'a Oracle<'a>,
         registry: &'a Registry,
         binary: &'a Path,
+        cgi: Option<PathBuf>,
         lane: Option<Lane>,
     ) -> Adapter<'a> {
         let loaded = loaded_extensions(oracle, binary).unwrap_or_else(|e| {
@@ -57,6 +63,7 @@ impl<'a> Adapter<'a> {
             oracle,
             registry,
             binary,
+            cgi,
             lane,
             loaded,
         }
@@ -73,7 +80,7 @@ impl<'a> Adapter<'a> {
                 return Ok(Judged::new(&id, &name, Judgement::Bork, borked.0).keeping(miss));
             }
         };
-        if let Some(why) = unhosted(&phpt) {
+        if let Some(why) = unhosted(&phpt, self.cgi.is_some()) {
             return Ok(Judged::new(&id, &name, Judgement::Skip, why));
         }
         if let Some(why) = self.missing(&phpt) {
@@ -96,8 +103,11 @@ impl<'a> Adapter<'a> {
                 expected_to_fail = Some(reason);
             }
         }
-
-        let actual = match self.run_program(subset, &phpt, test, &ini, &env)? {
+        let request = match cgi::request_of(&phpt, &beside(test, None), &env) {
+            Ok(request) => request,
+            Err((refused, why)) => return Ok(refused.judged(&id, &name, why)),
+        };
+        let actual = match self.run_program(subset, &phpt, test, &ini, (&env, request.as_ref()))? {
             Ok(actual) => actual,
             Err(Stopped::PastLimit(why)) => {
                 return Ok(
@@ -108,6 +118,12 @@ impl<'a> Adapter<'a> {
                 let miss = Miss::bork(&why);
                 return Ok(Judged::new(&id, &name, Judgement::Bork, why).keeping(miss));
             }
+        };
+        // A CGI run's headers stand before its body, parted before the
+        // body is normalised (run-tests.php:2530-2543).
+        let (headers, actual) = match &request {
+            Some(_) => cgi::parted(&actual, &self.oracle.pin().recipe.normalise),
+            None => (Vec::new(), actual),
         };
         if let Some(construct) = unread(&actual) {
             let miss = Miss::unread(&construct);
@@ -121,7 +137,13 @@ impl<'a> Adapter<'a> {
             Ok(met) => (met, String::new()),
             Err(e) => (false, format!("{e:#}\n")),
         };
-        let compared = oracle::verdict(self.registry, &id, met, expectation.text(), &actual);
+        let (met, wanted, actual) = cgi::with_headers(
+            phpt.text("EXPECTHEADERS").as_deref(),
+            &headers,
+            (met, expectation.text()),
+            actual,
+        );
+        let compared = oracle::verdict(self.registry, &id, met, &wanted, &actual);
         Ok(match (compared, expected_to_fail) {
             (Compared::Same, Some(why)) => Judged::new(
                 &id,
@@ -164,13 +186,17 @@ impl<'a> Adapter<'a> {
     /// The working directory is the root of the tree the subset stands in,
     /// as upstream runs every program from `TEST_PHP_SRCDIR`
     /// (run-tests.php:1173).
+    ///
+    /// A CGI-shaped test runs through the CGI host, `-C -f` before its
+    /// program as run-tests.php hands it (run-tests.php:1897, 2342), in
+    /// the environment of the request it describes, its body on stdin.
     fn run_program(
         &self,
         subset: &Subset,
         phpt: &Phpt,
         test: &Path,
         ini: &[String],
-        env: &[(String, String)],
+        (env, request): (&[(String, OsString)], Option<&cgi::Request>),
     ) -> Result<Result<Vec<u8>, Stopped>> {
         let program = beside(test, None);
         if program.exists() {
@@ -182,7 +208,8 @@ impl<'a> Adapter<'a> {
         let body = phpt.section("FILE").unwrap_or_default().to_vec();
         let written = Written::new(&program, &body)?;
         let args = words(&phpt.text("ARGS").unwrap_or_default());
-        let ran = self.oracle.run_under(&Invocation {
+        let cgi_flags = [String::from("-C"), String::from("-f")];
+        let invocation = Invocation {
             ini,
             args: &args,
             env,
@@ -190,7 +217,19 @@ impl<'a> Adapter<'a> {
             merge_streams: merges_streams(phpt),
             cwd: Some(&subset.root),
             ..Invocation::new(self.binary, Program::Beside(&program))
-        });
+        };
+        let ran = match (request, &self.cgi) {
+            (Some(request), Some(host)) => self.oracle.run_under(&Invocation {
+                binary: host,
+                flags: &cgi_flags,
+                args: &request.args,
+                env: &request.env,
+                stdin: request.stdin.as_deref().or(invocation.stdin),
+                raw: true,
+                ..invocation
+            }),
+            _ => self.oracle.run_under(&invocation),
+        };
         drop(written);
         let output = match ran {
             Ok(output) => Ok(output.stdout),
@@ -221,7 +260,7 @@ impl<'a> Adapter<'a> {
         &self,
         subset: &Subset,
         test: &Path,
-        env: &[(String, String)],
+        env: &[(String, OsString)],
         kind: &str,
         body: &[u8],
     ) -> Result<Observation> {
@@ -270,35 +309,48 @@ impl<'a> Adapter<'a> {
     /// (run-tests.php:179-183), and never the pinned tree, which a test
     /// does not write in (#1183). The recipe's `TEST_PHP_EXECUTABLE`
     /// names the pinned php, which is right for a witness and wrong here:
-    /// what a test spawns is the binary being measured. No CGI or debugger
-    /// host stands beside that binary, so their two names are empty, as
-    /// upstream's `get_binary` leaves them when it finds none
-    /// (run-tests.php:1003-1019).
+    /// what a test spawns is the binary being measured, and
+    /// `TEST_PHP_CGI_EXECUTABLE` the CGI host beside it (the `cgi`
+    /// module). No debugger host stands beside it, so that name is empty,
+    /// as upstream's `get_binary` leaves one it finds none of
+    /// (run-tests.php:1003-1019), and the CGI host's is empty where the
+    /// control has none (`[sapi]` names no php-cgi, or none is at its path).
     fn environment(
         &self,
         phpt: &Phpt,
         test: &Path,
         ini: &[String],
         root: &Path,
-    ) -> Vec<(String, String)> {
+    ) -> Vec<(String, OsString)> {
         let binary = self.binary.to_string_lossy().into_owned();
         let recipe = &self.oracle.pin().recipe;
         let mut env = vec![
-            ("TEST_PHP_EXECUTABLE_ESCAPED".to_owned(), escaped(&binary)),
-            ("TEST_PHP_EXECUTABLE".to_owned(), binary),
+            (
+                "TEST_PHP_EXECUTABLE_ESCAPED".to_owned(),
+                escaped(&binary).into(),
+            ),
+            ("TEST_PHP_EXECUTABLE".to_owned(), binary.into()),
             (
                 oracle::TREE_VARIABLE.to_owned(),
-                root.to_string_lossy().into_owned(),
+                root.as_os_str().to_owned(),
             ),
         ];
-        for host in ["TEST_PHP_CGI_EXECUTABLE", "TEST_PHPDBG_EXECUTABLE"] {
-            env.push((host.to_owned(), String::new()));
-            env.push((format!("{host}_ESCAPED"), escaped("")));
+        let cgi = self
+            .cgi
+            .as_ref()
+            .map(|host| host.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for (host, path) in [
+            ("TEST_PHP_CGI_EXECUTABLE", cgi),
+            ("TEST_PHPDBG_EXECUTABLE", String::new()),
+        ] {
+            env.push((format!("{host}_ESCAPED"), escaped(&path).into()));
+            env.push((host.to_owned(), path.into()));
         }
         env.extend(env_of(phpt, test));
         env.push((
             "TEST_PHP_EXTRA_ARGS".to_owned(),
-            extra_args(&recipe.args, recipe.ini.iter().chain(ini)),
+            extra_args(&recipe.args, recipe.ini.iter().chain(ini)).into(),
         ));
         env
     }
@@ -383,14 +435,15 @@ fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> 
         .collect())
 }
 
-/// Why this runner cannot host a test: it serves the command line, and the
-/// three shapes below are another host's or another program's.
-fn unhosted(phpt: &Phpt) -> Option<String> {
+/// Why this runner cannot host a test: a CGI-shaped one where no CGI host
+/// stands beside the binary, as upstream's runner skips it
+/// (run-tests.php:1894-1896), and the two shapes below, another program's.
+fn unhosted(phpt: &Phpt, cgi: bool) -> Option<String> {
+    if phpt.is_cgi() && !cgi {
+        return Some("CGI not available".into());
+    }
     if phpt.has("REDIRECTTEST") {
         return Some("a --REDIRECTTEST--; this runner runs a subset, not a redirected set".into());
-    }
-    if phpt.is_cgi() {
-        return Some("a CGI test; this runner hosts the command line".into());
     }
     if phpt.has("PHPDBG") {
         return Some("a --PHPDBG-- test; this engine has no debugger host".into());
@@ -540,14 +593,42 @@ fn addslashes(value: &str) -> String {
     out
 }
 
-/// A test's `--ENV--`, one `NAME=value` a line.
-fn env_of(phpt: &Phpt, test: &Path) -> Vec<(String, String)> {
-    substituted(&phpt.text("ENV").unwrap_or_default(), test)
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
-        .filter(|(name, _)| !name.is_empty())
+/// A test's `--ENV--`, one `NAME=value` a line, the value its bytes.
+pub(crate) fn env_of(phpt: &Phpt, test: &Path) -> Vec<(String, OsString)> {
+    let beside = test
+        .parent()
+        .map(|dir| dir.as_os_str().as_encoded_bytes().to_vec())
+        .unwrap_or_default();
+    let body = phpt.section("ENV").unwrap_or_default();
+    body.split(|b| *b == b'\n')
+        .filter_map(|line| {
+            let eq = line.iter().position(|b| *b == b'=')?;
+            let name = String::from_utf8_lossy(&line[..eq]).trim().to_owned();
+            let value = replaced(line[eq + 1..].trim_ascii(), b"{PWD}", &beside);
+            let value = replaced(
+                &value,
+                b"{TMP}",
+                std::env::temp_dir().as_os_str().as_encoded_bytes(),
+            );
+            (!name.is_empty()).then(|| (name, OsString::from_vec(value)))
+        })
         .collect()
+}
+
+/// `bytes` with every `from` replaced by `to`.
+fn replaced(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at..].starts_with(from) {
+            out.extend_from_slice(to);
+            at += from.len();
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    out
 }
 
 /// `{PWD}` and `{TMP}`, which stand for the test's own directory and the
