@@ -13186,6 +13186,18 @@ impl Request {
     /// }
     /// ```
     ///
+    /// A `null` is an empty table, with php's deprecation since 8.5:
+    ///
+    /// ```php
+    /// class N { public $a = 1; public function __debugInfo() { return null; } }
+    /// var_dump(new N);
+    /// ```
+    /// ```expect
+    /// Deprecated: Returning null from N::__debugInfo() is deprecated, return an empty array instead in %s on line 3
+    /// object(N)#1 (0) {
+    /// }
+    /// ```
+    ///
     /// ```php
     /// class E { public function __debugInfo() { return 1; } }
     /// var_dump(new E);
@@ -13208,6 +13220,13 @@ impl Request {
             Some(array) => Ok(Some(*array)),
             None if value.tag() == TypeTag::Null => {
                 self.release(value);
+                let class = self.class_name(object.class());
+                crate::api::raising::deprecated(
+                    self,
+                    &format!(
+                        "Returning null from {class}::__debugInfo() is deprecated, return an empty array instead"
+                    ),
+                );
                 PhpArray::new(self).map(Some)
             }
             None => {
