@@ -675,6 +675,11 @@ request::WrapperOp
 request::Xport
 request::XportFactory
 request::XportFailure
+request::Zone
+request::Zone::date
+request::Zone::midnight
+request::Zone::of
+request::Zone::offset
 request::take_signals
 syntax::Diagnostic
 syntax::Diagnostic::new

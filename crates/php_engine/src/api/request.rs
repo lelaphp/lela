@@ -70,9 +70,11 @@ mod site_override;
 mod table;
 mod unit_cache;
 mod variables;
+mod zone;
 pub use post::Upload;
 pub use variables::{BodyLimits, Input};
 pub(crate) use variables::{atol, url_decode};
+pub use zone::Zone;
 
 pub(crate) use hooks::parent_hook_trampolines;
 pub(crate) use lazy::Strategy;

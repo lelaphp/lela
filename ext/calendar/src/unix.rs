@@ -6,8 +6,8 @@ use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
 
-use crate::zone::Zone;
 use crate::{count, int, sdn};
+use php_ext::request::Zone;
 
 /// `SECS_PER_DAY`.
 const SECS_PER_DAY: i64 = 24 * 3600;

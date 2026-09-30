@@ -333,10 +333,23 @@ pub(super) fn local_month_day() -> Option<(i32, i32)> {
     Some((tm.tm_mon, tm.tm_mday))
 }
 
-/// `strptime(s, format, &tm)` over a zeroed `tm`: the eight fields
-/// `strptime()` answers, `tm_sec` to `tm_yday`, and what was left of the
-/// string, or `None` where the call answered null.
-pub(super) fn strptime(s: &[u8], format: &[u8]) -> Option<([i32; 8], Vec<u8>)> {
+/// What `strptime(s, format, &tm)` over a zeroed `tm` came to: the eight
+/// fields `strptime()` answers, `tm_sec` to `tm_yday`, and what was left
+/// of the string.
+pub(super) struct Parsed {
+    pub(super) fields: [i32; 8],
+    pub(super) rest: Vec<u8>,
+    /// Where the C library turned the fields into its local time, as it
+    /// does after a `%Z` of GMT or UTC and a `%z` (`timegm`, then
+    /// `localtime_r`), the moment that was: the fields back through
+    /// `timegm`, less the offset `localtime_r` wrote beside them. The
+    /// local time is the process's, and php's is the request's.
+    pub(super) moment: Option<i64>,
+}
+
+/// `strptime(s, format, &tm)` over a zeroed `tm`, `None` where the call
+/// answered null.
+pub(super) fn strptime(s: &[u8], format: &[u8]) -> Option<Parsed> {
     let (text, format) = (CString::new(s).ok()?, CString::new(format).ok()?);
     let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
     // SAFETY: both strings are NUL-terminated and outlive the call, and
@@ -347,15 +360,42 @@ pub(super) fn strptime(s: &[u8], format: &[u8]) -> Option<([i32; 8], Vec<u8>)> {
         return None;
     }
     // SAFETY: a zeroed `tm` is a valid one, and the call wrote only fields.
-    let tm = unsafe { tm.assume_init() };
+    let mut tm = unsafe { tm.assume_init() };
     let rest = owned(rest)?;
-    Some((
-        [
-            tm.tm_sec, tm.tm_min, tm.tm_hour, tm.tm_mday, tm.tm_mon, tm.tm_year, tm.tm_wday,
-            tm.tm_yday,
-        ],
+    let fields = [
+        tm.tm_sec, tm.tm_min, tm.tm_hour, tm.tm_mday, tm.tm_mon, tm.tm_year, tm.tm_wday, tm.tm_yday,
+    ];
+    // Only `localtime_r` names a zone in the `tm`, which was zeroed.
+    let moment = (!tm.tm_zone.is_null()).then(|| {
+        let offset: i64 = tm.tm_gmtoff;
+        // SAFETY: `tm` is a live, initialised `tm`; `timegm` reads its
+        // fields and normalises them in place.
+        let at = unsafe { libc::timegm(&raw mut tm) };
+        at - offset
+    });
+    Some(Parsed {
+        fields,
         rest,
-    ))
+        moment,
+    })
+}
+
+/// `gmtime_r(t)`'s eight fields, `tm_sec` to `tm_yday`: the civil time of
+/// `t` read as UTC, which a local time is once its offset is added.
+pub(super) fn civil(t: i64) -> Option<[i32; 8]> {
+    let t = libc::time_t::try_from(t).ok()?;
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
+    // SAFETY: `t` is a live `time_t` and `tm` live, zeroed storage the
+    // call writes; it answers null or a pointer to `tm`.
+    let filled = unsafe { libc::gmtime_r(&raw const t, tm.as_mut_ptr()) };
+    if filled.is_null() {
+        return None;
+    }
+    // SAFETY: a zeroed `tm` is a valid one, and the call wrote only fields.
+    let tm = unsafe { tm.assume_init() };
+    Some([
+        tm.tm_sec, tm.tm_min, tm.tm_hour, tm.tm_mday, tm.tm_mon, tm.tm_year, tm.tm_wday, tm.tm_yday,
+    ])
 }
 
 /// One `ifaddrs` entry as `net_get_interfaces` reads it: the name, the

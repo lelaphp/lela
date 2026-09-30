@@ -6,7 +6,7 @@
 use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, Zone};
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 /// `strptime(string $timestamp, string $format): array|false`,
@@ -45,6 +45,21 @@ use php_ext::values::{Key, PhpArray, PhpString, Value};
 /// bool(false)
 /// ```
 ///
+/// A `%Z` of GMT, and a `%z`, give a GMT time, which the C library
+/// answers in its local time: the zone of the request's `TZ`, which
+/// `putenv` moves as php's `tzset` does, and never the process's.
+///
+/// ```php
+/// putenv("TZ=Asia/Tokyo");
+/// $a = @strptime("1963-07-02 10:01:20 GMT", "%Y-%m-%d %H:%M:%S %Z");
+/// $b = @strptime("1963-07-02 10:01:20 +0200", "%Y-%m-%d %H:%M:%S %z");
+/// $c = @strptime("1963-07-02 10:01:20", "%Y-%m-%d %H:%M:%S");
+/// echo $a["tm_hour"], " ", $a["tm_mday"], " ", $b["tm_hour"], " ", $c["tm_hour"], "\n";
+/// ```
+/// ```expect
+/// 19 2 17 10
+/// ```
+///
 /// The declaration, under the stub's `#[\Deprecated(since: '8.2', ...)]`.
 ///
 /// ```php
@@ -70,12 +85,20 @@ fn strptime(
     format: PhpString,
 ) -> Result<OrFalse<PhpArray>, Thrown> {
     let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
-    let Some((fields, unparsed)) = crate::ffi::strptime(
+    let Some(parsed) = crate::ffi::strptime(
         &c_string(timestamp.as_bytes()),
         &c_string(format.as_bytes()),
     ) else {
         return Ok(OrFalse::False);
     };
+    // Where the C library turned a GMT time into its local time, the
+    // local time is the request's, as php's is after `putenv('TZ=…')`,
+    // which calls `tzset`; the process's `TZ` is not the request's.
+    let fields = parsed
+        .moment
+        .and_then(|at| crate::ffi::civil(at.saturating_add(Zone::of(req).offset(at))))
+        .unwrap_or(parsed.fields);
+    let unparsed = parsed.rest;
     let mut array = PhpArray::new(req)?;
     let names = [
         "tm_sec", "tm_min", "tm_hour", "tm_mday", "tm_mon", "tm_year", "tm_wday", "tm_yday",
