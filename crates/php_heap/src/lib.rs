@@ -169,6 +169,24 @@ impl Heap {
         }
     }
 
+    /// The request's table of interned strings laid down, the 40960 bytes
+    /// php's compiler lays down with the first string it interns while it
+    /// compiles the primary file (`zend_add_interned_string`), so what
+    /// `memory_get_usage()` counts from the file's first line on is php's
+    /// whether or not anything is interned after it:
+    ///
+    /// ```php
+    /// $m = memory_get_usage();
+    /// $c = get_class(new ArrayObject);
+    /// echo memory_get_usage() - $m < 4096 ? "no table laid down here\n" : "a table laid down here\n";
+    /// ```
+    /// ```expect
+    /// no table laid down here
+    /// ```
+    pub fn lay_interned_table(&mut self) -> Result<(), Fatal> {
+        self.interned.lay_down(&mut self.mm)
+    }
+
     /// Bytes in use: the bin accounting for `real == false`, the bytes
     /// the chunks hold for `real == true`, which is their count times
     /// 2 MiB (design §5.13).

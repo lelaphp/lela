@@ -726,6 +726,19 @@ impl Table {
         self.arr?.find_bytes(hash, bytes)
     }
 
+    /// The table's data laid down before anything is interned: what the
+    /// first `zend_new_interned_string` of php's compiler lays down while
+    /// it compiles the primary file, which a request here, whose units
+    /// intern into the engine's table, lays down as that file is
+    /// compiled.
+    pub(crate) fn lay_down(&mut self, mm: &mut Mm) -> Result<(), Fatal> {
+        let arr = match self.arr {
+            Some(arr) => arr,
+            None => *self.arr.insert(table_header(REQUEST_TABLE_SIZE)?),
+        };
+        crate::array::lay_interned(mm, arr)
+    }
+
     /// Publish `s`, php's `zend_add_interned_string`
     /// (`Z/Zend/zend_string.c:173-185`), with the room the add takes out
     /// of `mm`: the whole array on the first add, the doubled one on the

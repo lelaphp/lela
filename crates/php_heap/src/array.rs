@@ -258,6 +258,15 @@ pub(crate) fn add_interned(mm: &mut Mm, a: Arr, s: Str) -> Result<(), Fatal> {
     Ok(())
 }
 
+/// The data [`add_interned`]'s first add lays down, laid down ahead of
+/// it (`zend_hash_real_init_mixed`); nothing where it stands already.
+pub(crate) fn lay_interned(mm: &mut Mm, a: Arr) -> Result<(), Fatal> {
+    if a.is_uninitialized() {
+        a.real_init_mixed(mm)?;
+    }
+    Ok(())
+}
+
 /// `zend_hash_index_add_new(ht, index, &zv)` over a request's `mm` for a
 /// key the caller knows is not there, which is what `zend_list_insert`
 /// (`Z/Zend/zend_list.c:32-44`) knows of the id `nNextFreeElement` gave
