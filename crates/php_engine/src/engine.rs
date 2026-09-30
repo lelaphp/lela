@@ -1948,6 +1948,7 @@ pub struct EngineBuilder {
     resume: Loop,
     tier_extension: Option<Extension>,
     host_extension: Option<crate::host_extension::HostExtension>,
+    additional_extension: Option<Extension>,
     host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     shebang: php_compile::Shebang,
     #[cfg(feature = "witness-trace")]
@@ -2014,6 +2015,18 @@ impl EngineBuilder {
         self
     }
 
+    /// The extension a host built itself and hands `php_module_startup`
+    /// as its `additional_module`, as phpdbg hands
+    /// `sapi_phpdbg_module_entry` (`Z/sapi/phpdbg/phpdbg.c:682-697`): its
+    /// natives, constants and ini entries, started after the bundle's as
+    /// `zend_sort_modules` leaves them, for a host that declares natives of
+    /// its own (ADR-0008, #1348).
+    #[must_use]
+    pub fn additional_extension(mut self, extension: Extension) -> EngineBuilder {
+        self.additional_extension = Some(extension);
+        self
+    }
+
     /// One entry as a host sets it after startup, php-fpm's pool
     /// `php_value` and `php_admin_value` (`fpm_php_apply_defines_ex`):
     /// the value as given, not read again by the INI grammar, through the
@@ -2074,6 +2087,7 @@ impl EngineBuilder {
             extensions.extend(hosted.extension);
             hosted.additional
         });
+        extensions.extend(self.additional_extension);
         sort_modules(&mut extensions);
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
@@ -2323,6 +2337,7 @@ impl Engine {
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
             host_extension: None,
+            additional_extension: None,
             host_ini: Vec::new(),
             shebang: php_compile::Shebang::Read,
             #[cfg(feature = "witness-trace")]
@@ -4893,6 +4908,28 @@ mod tests {
     /// for the host, its class, site and `__toString`, and nothing is
     /// rendered; the handler `set_exception_handler` set has it first,
     /// and what it takes is not kept; the file is no included file.
+    /// The native a host's own extension declares, for the test below.
+    #[php_macros::php_function]
+    fn host_module_answer() -> i64 {
+        42
+    }
+
+    /// An extension a host built itself starts with the bundle: its natives
+    /// are callable and its name is a loaded extension's, the last one
+    /// `get_loaded_extensions()` lists, as php lists phpdbg's.
+    #[test]
+    fn an_extension_the_host_built_starts_after_the_bundle() {
+        let built = crate::api::abi::ExtensionBuilder::default()
+            .functions(vec![host_module_answer::declared()])
+            .build("phpdbg");
+        let engine = Engine::builder().additional_extension(built).build();
+        let (body, _) = served(
+            &engine,
+            "<?php echo host_module_answer(), ' ', extension_loaded('phpdbg') ? 'loaded' : 'absent', ' '; foreach (get_loaded_extensions() as $last) {} echo $last;",
+        );
+        assert_eq!(body, "42 loaded phpdbg");
+    }
+
     #[test]
     fn a_program_served_for_a_host_that_renders_the_uncaught_keeps_it() {
         let files = Files::new(

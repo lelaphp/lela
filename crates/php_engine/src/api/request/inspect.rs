@@ -194,7 +194,8 @@ impl Request {
                 user: false,
                 file: Vec::new(),
                 lines: (0, 0),
-                oplines: 0,
+                ops: Vec::new(),
+                params: u32::try_from(decl.parameters.len()).unwrap_or(u32::MAX),
                 dump: Vec::new(),
             });
         };
@@ -215,7 +216,8 @@ impl Request {
             user: true,
             file: body.filename.0.to_vec(),
             lines: (body.line_start, body.line_end),
-            oplines: u32::try_from(body.oplines.len()).unwrap_or(u32::MAX),
+            ops: ops_of(body),
+            params: u32::try_from(decl.parameters.len()).unwrap_or(u32::MAX),
         })
     }
 
@@ -337,7 +339,8 @@ impl Request {
             user: true,
             file: body.filename.0.to_vec(),
             lines: (body.line_start, body.line_end),
-            oplines: u32::try_from(body.oplines.len()).unwrap_or(u32::MAX),
+            ops: ops_of(body),
+            params: 0,
         })
     }
 
@@ -555,4 +558,13 @@ impl Request {
             .as_ref()
             .map(|(_, message, file, line)| (message.clone().into_bytes(), file.clone(), *line))
     }
+}
+
+/// An op array's oplines as the tier face shows them, each opcode with
+/// its line.
+fn ops_of(body: &php_unit::OpArray) -> Vec<(php_unit::Opcode, u32)> {
+    body.oplines
+        .iter()
+        .map(|op| (op.opcode, op.lineno))
+        .collect()
 }

@@ -4,6 +4,7 @@
 //! is a copy taken when asked.
 
 use php_heap::FrameRef;
+use php_unit::Opcode;
 
 use crate::api::request::Request;
 
@@ -19,8 +20,12 @@ pub struct Code {
     /// Where it was declared, and the lines its op array spans.
     pub file: Vec<u8>,
     pub lines: (u32, u32),
-    /// `op_array->last`.
-    pub oplines: u32,
+    /// `op_array->opcodes`, each opcode with its line; `op_array->last`
+    /// is its length. Empty for a native.
+    pub ops: Vec<(Opcode, u32)>,
+    /// `num_args`, and one more for a variadic: how many `RECV*` oplines
+    /// open the op array.
+    pub params: u32,
     /// The op array as phpdbg's `print` writes it, and each function
     /// its body declares after it (`dynamic_func_defs`), as
     /// `phpdbg_print_function_helper` writes them; empty for a native.

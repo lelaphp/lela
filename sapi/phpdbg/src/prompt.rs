@@ -821,7 +821,7 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let entry = tier::entry(req);
     let main = main_frame(req, entry);
     if let Some(code) = tier::frame_code(req, main) {
-        out::notice(format!("Context {} ({} ops)", lossy(&exec), code.oplines).as_bytes());
+        out::notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
         out::out(&code.dump);
     }
     Ret::Success
@@ -920,7 +920,7 @@ fn print_method(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
                     "{} Method {} ({} ops)",
                     if code.user { "User" } else { "Internal" },
                     lossy(&code.name),
-                    code.oplines
+                    code.ops.len()
                 )
                 .as_bytes(),
             );
@@ -961,7 +961,7 @@ fn print_func(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
                         "Function"
                     },
                     lossy(&code.name),
-                    code.oplines
+                    code.ops.len()
                 )
                 .as_bytes(),
             );
@@ -985,14 +985,14 @@ fn print_stack(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         return Ret::Success;
     };
     let title = match (&code.class, code.name.is_empty()) {
-        (_, true) => format!("Stack in {} ({} ops)", lossy(&code.file), code.oplines),
+        (_, true) => format!("Stack in {} ({} ops)", lossy(&code.file), code.ops.len()),
         (Some(class), false) => format!(
             "Stack in {}::{}() ({} ops)",
             lossy(class),
             lossy(&code.name),
-            code.oplines
+            code.ops.len()
         ),
-        (None, false) => format!("Stack in {}() ({} ops)", lossy(&code.name), code.oplines),
+        (None, false) => format!("Stack in {}() ({} ops)", lossy(&code.name), code.ops.len()),
     };
     out::notice(title.as_bytes());
     print_function(&code);
@@ -1081,17 +1081,17 @@ fn opline_break(
             out::error(message.as_bytes());
             return;
         }
-        tier::Named::Code(code) if code.oplines <= opline => {
+        tier::Named::Code(code) if code.ops.len() <= opline as usize => {
             let message = match class {
                 Some(class) => format!(
                     "There are only {} oplines in method {}::{} (breaking at opline {num} impossible)",
-                    code.oplines,
+                    code.ops.len(),
                     lossy(class),
                     lossy(name)
                 ),
                 None => format!(
                     "There are only {} oplines in function {} (breaking at opline {num} impossible)",
-                    code.oplines,
+                    code.ops.len(),
                     lossy(name)
                 ),
             };
