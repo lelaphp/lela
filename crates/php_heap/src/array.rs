@@ -327,6 +327,31 @@ const STATIC_KEYS: u32 = 1 << 4;
 /// `HASH_FLAG_HAS_EMPTY_IND`: an object's property table, one of whose
 /// declared slots may be empty, so `zend_array_count` counts again.
 const HAS_EMPTY_IND: u32 = 1 << 5;
+/// [`DeclaredRows::Copied`], in the byte php leaves unused beside
+/// `u.v.flags` (`_unused`), which `set_flag_byte` leaves standing: php
+/// has no bit for it, since its table says it by holding plain values
+/// where it held an `IS_INDIRECT` per slot, and this table holds no row
+/// for a slot at all.
+const COPIED_DECLARED: u32 = 1 << 8;
+
+/// What an object's property table holds of the object's declared
+/// properties, the one fact php's table says by the type of the rows it
+/// holds under their names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredRows {
+    /// The slots stand for them, as php's table does with one
+    /// `IS_INDIRECT` per slot (`rebuild_object_properties`): the table
+    /// holds the dynamic properties alone, and a reader reads the
+    /// declared ones off the object.
+    Slots,
+    /// Copies of them, as they stood when a table shared while it stood
+    /// for the slots was separated, since `zend_array_dup` copies what
+    /// each `IS_INDIRECT` points at and drops the indirection
+    /// (`Z/Zend/zend_hash.c:2504-2505`): the table holds every row
+    /// itself, the declared ones first under their mangled names, and a
+    /// reader reads the table alone while the slots go on apart from it.
+    Copied,
+}
 
 /// `zend_array`: fifty-six bytes, php's own order, out of the heap.
 #[repr(C)]
@@ -551,6 +576,30 @@ impl Arr {
             flags | HAS_EMPTY_IND
         } else {
             flags & !HAS_EMPTY_IND
+        });
+    }
+
+    /// What an object's property table holds of the declared
+    /// properties: [`DeclaredRows::Slots`] for every table but the copy
+    /// [`crate::Heap::object_properties_copy`] makes and the copies made
+    /// of that.
+    #[must_use]
+    pub fn declared_rows(&self) -> DeclaredRows {
+        if self.header().flags.get() & COPIED_DECLARED == 0 {
+            DeclaredRows::Slots
+        } else {
+            DeclaredRows::Copied
+        }
+    }
+
+    /// The table marked as holding `rows`, what the separation of an
+    /// object's table carries onto the copy it makes of one that holds
+    /// its declared rows already.
+    pub fn set_declared_rows(&self, rows: DeclaredRows) {
+        let flags = self.header().flags.get();
+        self.header().flags.set(match rows {
+            DeclaredRows::Slots => flags & !COPIED_DECLARED,
+            DeclaredRows::Copied => flags | COPIED_DECLARED,
         });
     }
 
@@ -1734,6 +1783,55 @@ impl crate::Heap {
         header.num_used.set(idx);
         header.num_elements.set(idx);
         Ok(target)
+    }
+
+    /// `zend_hash_add_new` of `z` under `key` into `a`, which has one
+    /// owner and holds no such key: the key one more owner unless it is
+    /// interned, `z` the array's from here.
+    pub(crate) fn array_add_copy(&mut self, a: Arr, key: Key, z: Zval) -> Result<(), Fatal> {
+        match key {
+            Key::Str(name) => self.array_write_str(a, name, z)?,
+            Key::Long(n) => self.array_write_long(a, n, z, Write::Update)?,
+        };
+        Ok(())
+    }
+
+    /// `zend_array_dup` over an object's property table that stands for
+    /// its declared slots and is shared, what `SEPARATE_ARRAY` over it
+    /// does before a write (`Z/Zend/zend_hash.c:2503-2505`): a copy that
+    /// holds each slot's value, a reference only this slot owns copied
+    /// as the value it holds, under `names[i]`, the slot's mangled name,
+    /// a slot nothing holds left out as php's copy skips an
+    /// `IS_INDIRECT` to an `UNDEF`, and then the dynamic rows, and that
+    /// holds them from then on ([`DeclaredRows::Copied`]). The object
+    /// takes the copy and the table it had, which another holder shares,
+    /// is one owner fewer. `names`
+    /// has one name per slot; a slot past its end is left out.
+    pub fn object_properties_copy(&mut self, o: crate::Obj, names: &[Str]) -> Result<Arr, Fatal> {
+        let source = o.properties();
+        let held = (0..o.slots()).filter(|i| !o.slot(*i).is_undef()).count();
+        let dynamic = source.map_or(0, |table| table.len());
+        let size = u32::try_from(held + dynamic).unwrap_or(u32::MAX);
+        let copy = self.array_mixed(size)?;
+        for (i, name) in (0..o.slots()).zip(names) {
+            let z = o.slot(i);
+            if z.is_undef() {
+                continue;
+            }
+            let z = self.dup_value(z, source);
+            self.array_write_str(copy, *name, z)?;
+        }
+        if let Some(table) = source {
+            copy.set_next_free(table.next_free());
+            for (key, z) in &table {
+                let z = self.dup_value(z, Some(table));
+                self.array_add_copy(copy, key, z)?;
+            }
+            let _ = table.delref();
+        }
+        copy.set_declared_rows(DeclaredRows::Copied);
+        self.object_set_properties(o, copy);
+        Ok(copy)
     }
 
     /// `zend_array_dup_value`'s copy of one element, and `zval_add_ref`

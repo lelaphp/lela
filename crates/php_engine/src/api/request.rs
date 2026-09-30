@@ -2768,6 +2768,9 @@ impl Request {
     /// the current frame and the entry slot with it, so neither is
     /// saved on its own.
     pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
+        // The execution left off the running chain keeps what it was
+        // lent ([`exec::Receiver`]).
+        self.own_lent_receivers(None);
         std::mem::swap(&mut self.stack, &mut other.stack);
         std::mem::swap(&mut self.vm, &mut other.vm);
         std::mem::swap(&mut self.error_reporting, &mut other.error_reporting);
@@ -2844,11 +2847,11 @@ impl Request {
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         let (this, called_scope, scope) = self.vm.at(caller).map_or((None, None, None), |state| {
-            (state.this, state.called_scope, self.frame_scope(caller))
+            (state.this(), state.called_scope, self.frame_scope(caller))
         });
-        if let Some(this) = this {
-            self.addref(&this.as_value());
-        }
+        // `ZEND_CALL_HAS_THIS` carried from the including frame, whose
+        // `$this` that frame keeps: no `ZEND_CALL_RELEASE_THIS`.
+        let receiver = this.map(|this| self.lent_receiver(this));
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
@@ -2856,7 +2859,7 @@ impl Request {
             unit,
             exec::Body::Main,
             None,
-            this,
+            receiver,
             called_scope,
             0,
             returns_to,
@@ -2953,7 +2956,7 @@ impl Request {
             unit,
             body,
             Some(function),
-            call.this,
+            call.receiver,
             call.called_scope,
             num_args,
             returns_to,
@@ -3035,7 +3038,7 @@ impl Request {
             (
                 std::mem::take(&mut state.extra_named),
                 std::mem::take(&mut state.extra_args),
-                state.this.take(),
+                state.receiver.take().and_then(exec::Receiver::owned),
                 state.closure.take().filter(|_| state.generator.is_none()),
             )
         });
@@ -3190,6 +3193,61 @@ impl Request {
     /// int(0)
     /// int(1)
     /// ```
+    /// Whether a call php makes without `ZEND_CALL_RELEASE_THIS` may
+    /// name `object` with no owner ([`exec::Receiver::Lent`]): where the
+    /// heap cannot free it but through its destructor, which is served
+    /// once and hands every such call an owner
+    /// ([`Request::own_lent_receivers`]). An object whose class serves no
+    /// destructor, or whose destructor has been served, the collector
+    /// may free with no call up, so a call names it with an owner of its
+    /// own, whose release nothing but a destructor could observe.
+    pub(crate) fn lendable(&mut self, object: PhpObject) -> bool {
+        let o = object.heap();
+        !o.destructor_called() && Hooks(self).has_destructor(o)
+    }
+
+    /// The receiver of a call php makes without `ZEND_CALL_RELEASE_THIS`
+    /// (`zend_call_function`, `$this->m()`, a forwarding `parent::m()`):
+    /// lent where [`Request::lendable`], and one more owner otherwise.
+    /// An autoloader that unregisters itself gives up the object's last
+    /// owner outside the call, and its destructor is served there, inside
+    /// the method, which goes on over the object it still names:
+    ///
+    /// ```php
+    /// class A { function __invoke($c) { spl_autoload_unregister($this); echo "unregistered\n"; $this->after(); }
+    ///     function after() { echo "after\n"; }
+    ///     function __destruct() { echo "A gone\n"; } }
+    /// spl_autoload_register(new A);
+    /// var_dump(class_exists('X'));
+    /// ```
+    /// ```expect
+    /// A gone
+    /// unregistered
+    /// after
+    /// bool(false)
+    /// ```
+    pub(crate) fn lent_receiver(&mut self, object: PhpObject) -> exec::Receiver {
+        if self.lendable(object) {
+            exec::Receiver::Lent(object)
+        } else {
+            self.addref(&object.as_value());
+            exec::Receiver::Owned(object)
+        }
+    }
+
+    /// What follows a destructor served while calls on the running chain
+    /// name the object with no owner, the release that served it being
+    /// php's last: each such call and frame takes an owner of its own,
+    /// so the object php frees here stands until the last of them is
+    /// popped. `None` hands an owner to every lent receiver of the
+    /// running execution, what a fiber switch does to the execution it
+    /// leaves, which no destructor served meanwhile could find.
+    pub(crate) fn own_lent_receivers(&mut self, object: Option<PhpObject>) {
+        for held in self.vm.own_lent(object) {
+            self.addref(&held.as_value());
+        }
+    }
+
     pub(crate) fn pop_call(&mut self) {
         if let Some(call) = self.vm.pop_call() {
             // `zend_vm_stack_free_args`, whose `zval_ptr_dtor_nogc` makes
@@ -3204,7 +3262,7 @@ impl Request {
             if let Some(name) = call.name {
                 self.release(Value::string(name));
             }
-            if let Some(this) = call.this {
+            if let Some(this) = call.receiver.and_then(exec::Receiver::owned) {
                 self.release(this.as_value());
             }
             if let Some(closure) = call.closure {
@@ -3510,9 +3568,9 @@ impl Request {
             self.addref(&Value::string(*extra));
             self.addref(value);
         }
-        if let Some(this) = this {
-            self.addref(&this.as_value());
-        }
+        // `zend_call_function`: `ZEND_CALL_HAS_THIS` and no
+        // `ZEND_CALL_RELEASE_THIS`, the caller keeping the object.
+        let receiver = this.map(|this| self.lent_receiver(this));
         // `ZEND_CALL_MAY_HAVE_UNDEF`: a named argument skipped a slot.
         let may_have_undef = sent
             .iter()
@@ -3526,7 +3584,7 @@ impl Request {
             name: None,
             count: sent.len(),
             arguments: sent,
-            this,
+            receiver,
             called_scope,
             closure,
             extra_named: extra_named.to_vec(),
@@ -5661,7 +5719,7 @@ impl Request {
                     let arguments = self.traced_arguments(slots, state, function);
                     rows.push((
                         Traced::Function(function),
-                        state.this,
+                        state.this(),
                         self.closure_scope(state.closure),
                         arguments,
                         state.extra_named.clone(),
@@ -5697,7 +5755,7 @@ impl Request {
                 Link::Call(call) => {
                     rows.push((
                         Traced::Function(call.function),
-                        call.this,
+                        call.this(),
                         self.closure_scope(call.closure),
                         call.arguments.clone(),
                         call.extra_named.clone(),
@@ -10721,9 +10779,9 @@ impl Request {
             // before the entry is looked for, so a reference the other
             // holder's copy owns alone is its value here and not a cell
             // both write through.
-            if let Some(table) = o.properties().filter(|table| table.refcount() > 1) {
-                match self.array_separate(table) {
-                    Ok(table) => self.heap.object_set_properties(o, table),
+            if o.properties().is_some_and(|table| table.refcount() > 1) {
+                match self.separated_properties(o) {
+                    Ok(_) => {}
                     Err(thrown) => {
                         self.release(value);
                         self.release(Value::string(name));
@@ -10751,10 +10809,7 @@ impl Request {
                 self.release(Value::string(name));
                 return Err(thrown);
             }
-            let table = self.heap.object_properties(o);
-            let table = self.fatal_of(table)?;
-            let table = self.array_separate(table)?;
-            self.heap.object_set_properties(o, table);
+            let table = self.separated_properties(o)?;
             self.array_update(table, key, value)?;
         }
         self.release(Value::string(name));
@@ -10832,10 +10887,7 @@ impl Request {
             self.release(Value::string(key));
             return Err(thrown);
         }
-        let table = self.heap.object_properties(o);
-        let table = self.fatal_of(table)?;
-        let table = self.array_separate(table)?;
-        self.heap.object_set_properties(o, table);
+        let table = self.separated_properties(o)?;
         self.array_update(table, table_key, value)?;
         self.release(Value::string(key));
         Ok(true)
@@ -10957,10 +11009,7 @@ impl Request {
             let name = key.to_prop_name(self)?;
             self.addref(&entry);
             let o = object.heap();
-            let table = self.heap.object_properties(o);
-            let table = self.fatal_of(table)?;
-            let table = self.array_separate(table)?;
-            self.heap.object_set_properties(o, table);
+            let table = self.separated_properties(o)?;
             self.array_update(table, php_heap::Key::Str(name.heap()), entry)?;
             self.release(Value::string(name));
         }
@@ -11047,11 +11096,9 @@ impl Request {
     /// `Z_OBJ_P(array_ptr)->properties` being there at all.
     pub(crate) fn separate_object_properties(&mut self, object: PhpObject) -> Result<(), Thrown> {
         let o = object.heap();
-        let Some(table) = o.properties() else {
-            return Ok(());
-        };
-        let table = self.array_separate(table)?;
-        self.heap.object_set_properties(o, table);
+        if o.properties().is_some() {
+            self.separated_properties(o)?;
+        }
         Ok(())
     }
 
@@ -11073,7 +11120,21 @@ impl Request {
         let o = object.heap();
         let table = self.heap.object_properties(o);
         let table = self.fatal_of(table)?;
-        if self.class_slots(object.class()) == 0 && table.is_empty() {
+        // `Z_OBJPROP_P` of a class whose `get_properties` answers its
+        // own rows: the walk stands on the object's table as any does,
+        // and goes over what the class answers.
+        let handlers = self.object_handlers(o);
+        if handlers.properties_overloaded() {
+            if handlers.get_properties(self, object)?.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(self.heap.iterator_add(table, 0)));
+        }
+        let slots = match table.declared_rows() {
+            php_heap::DeclaredRows::Slots => self.class_slots(object.class()),
+            php_heap::DeclaredRows::Copied => 0,
+        };
+        if slots == 0 && table.is_empty() {
             return Ok(None);
         }
         Ok(Some(self.heap.iterator_add(table, 0)))
@@ -11104,6 +11165,9 @@ impl Request {
     ) -> Result<Option<(php_heap::Key, Walked)>, Thrown> {
         let o = object.heap();
         let class = object.class();
+        if self.object_handlers(o).properties_overloaded() {
+            return self.answered_walk(object, idx);
+        }
         // `zend_hooked_object_get_iterator`: a class with a hooked
         // property walks its declared rows in the table's order, each
         // hooked one read through its hook.
@@ -11116,11 +11180,16 @@ impl Request {
                 return Ok(Some((php_heap::Key::Str(key.heap()), walked)));
             }
         } else {
-            let declared: Vec<(Box<[u8]>, ClassId)> = self
-                .placed_properties(class)
-                .into_iter()
-                .map(|(declaring, p)| (p.name.0, declaring))
-                .collect();
+            // A table that holds copies of the declared rows is walked
+            // alone, each of them a row of its own.
+            let declared: Vec<(Box<[u8]>, ClassId)> = match o.declared_rows() {
+                php_heap::DeclaredRows::Slots => self
+                    .placed_properties(class)
+                    .into_iter()
+                    .map(|(declaring, p)| (p.name.0, declaring))
+                    .collect(),
+                php_heap::DeclaredRows::Copied => Vec::new(),
+            };
             let mut at = self.heap.iterator_lead(idx) as usize;
             while let Some((name, declaring)) = declared.get(at) {
                 let slot = u32::try_from(at).unwrap_or(u32::MAX);
@@ -11157,6 +11226,98 @@ impl Request {
                 return Ok(Some((key, Walked::Dynamic(key))));
             }
         }
+    }
+
+    /// [`Request::object_walk`] over an object whose class answers its
+    /// own rows, `zend_fe_fetch_object_helper` over `Z_OBJPROP_P`, which
+    /// is the class's `get_properties` asked again at every fetch: the
+    /// next row from the iterator's lead, the rows' index, that the
+    /// executing scope may see, a row the class answered for a property
+    /// the object holds walked as that slot or that dynamic entry, so a
+    /// walk by reference binds it where the std walk does, and any other
+    /// row, a `DateInterval`'s field, as the value the class answered.
+    ///
+    /// ```php
+    /// foreach (new DateInterval('P1D') as $k => $v) { echo $k, '=', var_export($v, true), "\n"; }
+    /// class D extends DateTime { public $own = 1; protected $hidden = 2; }
+    /// $d = new D('2020-01-01');
+    /// foreach ($d as $k => &$v) { $v = 5; }
+    /// unset($v);
+    /// var_dump(get_object_vars($d), $k);
+    /// $i = new DateInterval('P2D');
+    /// foreach ($i as $k => &$v) { if ($k === 'd') { $v = 9; } }
+    /// unset($v);
+    /// var_dump($i->d);
+    /// ```
+    /// ```expect
+    /// y=0
+    /// m=0
+    /// d=1
+    /// h=0
+    /// i=0
+    /// s=0
+    /// f=0.0
+    /// invert=0
+    /// days=false
+    /// from_string=false
+    /// array(1) {
+    ///   ["own"]=>
+    ///   int(5)
+    /// }
+    /// string(3) "own"
+    /// int(2)
+    /// ```
+    fn answered_walk(
+        &mut self,
+        object: PhpObject,
+        idx: u32,
+    ) -> Result<Option<(php_heap::Key, Walked)>, Thrown> {
+        let class = object.class();
+        let o = object.heap();
+        let handlers = self.object_handlers(o);
+        let rows = handlers.get_properties(self, object)?;
+        let placed = self.placed_properties(class);
+        let mut cursor = 0;
+        let mut at = self.heap.iterator_lead(idx) as usize;
+        let mut found = None;
+        for (i, (name, value)) in rows.into_iter().enumerate() {
+            // The declared slot a row is, by the cursor over the
+            // placed properties `object_entries` answers them in.
+            let slot = placed
+                .iter()
+                .skip(cursor)
+                .position(|(_, p)| &*p.name.0 == name.as_bytes())
+                .map(|found| found + cursor);
+            if let Some(slot) = slot {
+                cursor = slot + 1;
+            }
+            if i < at {
+                continue;
+            }
+            at = i + 1;
+            let declaring = slot
+                .and_then(|slot| placed.get(slot))
+                .map(|(declaring, _)| *declaring);
+            if !self.property_row_visible(class, name.as_bytes(), declaring) {
+                continue;
+            }
+            let key = php_heap::Key::Str(name.heap());
+            let walked = match slot.and_then(|slot| u32::try_from(slot).ok()) {
+                Some(slot) if !o.slot(slot).is_undef() => Walked::Slot(slot),
+                _ if o.properties().is_some_and(|table| table.contains(key)) => {
+                    Walked::Dynamic(key)
+                }
+                _ => {
+                    self.addref(&value);
+                    Walked::Answered(value)
+                }
+            };
+            found = Some((key, walked));
+            break;
+        }
+        self.heap
+            .iterator_set_lead(idx, u32::try_from(at).unwrap_or(u32::MAX));
+        Ok(found)
     }
 
     /// The key `FE_FETCH` hands a loop over an object's table for the row
@@ -11199,7 +11360,7 @@ impl Request {
                 .properties()
                 .and_then(|table| table.get(key))
                 .unwrap_or(php_heap::Zval::UNDEF),
-            Walked::Hooked(value) => return value,
+            Walked::Hooked(value) | Walked::Answered(value) => return value,
         };
         Value::of_zval(z)
     }
@@ -11265,6 +11426,11 @@ impl Request {
             // A hook that answered no reference has no place to bind; the
             // walk refused one whose `get` hook returns none before it
             // ran it ([`Request::hooked_object_walk`]).
+            // A row the class answered and the object holds nowhere, a
+            // `DateInterval`'s field: php binds it in the table
+            // `get_properties` filled, which the next fetch fills again,
+            // so the cell stands on its own.
+            Walked::Answered(value) => self.reference(value),
             Walked::Hooked(value) => {
                 self.release(value);
                 self.fatal_of(Err(Fatal::Error(String::from(
@@ -11337,10 +11503,7 @@ impl Request {
         // `zend_hash_add(zobj->properties, name, &EG(uninitialized_zval))`
         // after the warning: the table as the handler the warning reached
         // left it, and a name it wrote kept as it wrote it.
-        let table = self.heap.object_properties(o);
-        let table = self.fatal_of(table)?;
-        let table = self.array_separate(table)?;
-        self.heap.object_set_properties(o, table);
+        let table = self.separated_properties(o)?;
         if !table.contains(key) {
             self.array_update(table, key, Value::null())?;
         }
@@ -11376,7 +11539,12 @@ impl Request {
     pub(crate) fn property_rows(&mut self, object: PhpObject) -> Result<Vec<PropertyRow>, Thrown> {
         let table = self.object_handlers(object.heap());
         let rows = table.get_properties(self, object)?;
-        let placed = self.placed_properties(object.class());
+        // Rows a table holds as copies are plain values to php's
+        // `zend_check_property_access`, `is_dynamic` for each.
+        let placed = match object.heap().declared_rows() {
+            php_heap::DeclaredRows::Slots => self.placed_properties(object.class()),
+            php_heap::DeclaredRows::Copied => Vec::new(),
+        };
         let mut at = 0;
         Ok(rows
             .into_iter()
@@ -11397,11 +11565,16 @@ impl Request {
 
     pub(crate) fn object_entries(&mut self, o: Obj) -> Result<Vec<(PhpString, Value)>, Thrown> {
         let mut entries = Vec::new();
-        let declared: Vec<Box<[u8]>> = self
-            .placed_properties(ClassId(o.class()))
-            .into_iter()
-            .map(|(_, p)| p.name.0)
-            .collect();
+        // A table that holds copies of the declared rows is read alone,
+        // as php reads the plain values its `zend_array_dup` left.
+        let declared: Vec<Box<[u8]>> = match o.declared_rows() {
+            php_heap::DeclaredRows::Slots => self
+                .placed_properties(ClassId(o.class()))
+                .into_iter()
+                .map(|(_, p)| p.name.0)
+                .collect(),
+            php_heap::DeclaredRows::Copied => Vec::new(),
+        };
         for (i, name) in declared.iter().enumerate() {
             let z = o.slot(u32::try_from(i).unwrap_or(u32::MAX));
             if z.is_undef() {
@@ -11466,6 +11639,10 @@ impl Request {
         let o = object.heap();
         let built = self.heap.object_properties(o);
         let table = self.fatal_of(built)?;
+        // A copy holds no `IS_INDIRECT`, so it counts its rows.
+        if table.declared_rows() == php_heap::DeclaredRows::Copied {
+            return Ok(table.len());
+        }
         let declared = self.placed_properties(object.class()).len();
         let total = declared + table.len();
         if !table.has_empty_ind() {
@@ -11578,7 +11755,7 @@ impl Request {
             self.release(Value::of_zval(Zval::array(table)));
         }
         let displaced = self.heap.object_clone_members_into(new.heap(), old.heap());
-        for held in displaced {
+        for held in self.fatal_of(displaced)? {
             self.release(Value::of_zval(held));
         }
         self.clone_slot_sources(new);
@@ -13422,8 +13599,7 @@ impl Request {
             let key = self.interned(name)?;
             let key = php_heap::Key::Str(key.heap());
             if table.contains(key) {
-                let table = self.array_separate(table)?;
-                self.heap.object_set_properties(o, table);
+                let table = self.separated_properties(o)?;
                 self.array_del(table, key);
                 return Ok(());
             }
@@ -17392,7 +17568,7 @@ impl Request {
     pub(crate) fn serving_callee(&self) -> Option<(Function, Option<PhpObject>, Option<ClassId>)> {
         self.vm
             .serving_call()
-            .map(|call| (call.function, call.this, call.called_scope))
+            .map(|call| (call.function, call.this(), call.called_scope))
     }
 
     /// The arguments of the call being served and its extra named ones,
@@ -17656,8 +17832,8 @@ impl Request {
     pub fn called_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, this, called) = match link {
-                Link::Frame(_, state) => (state.function, state.this, state.called_scope),
-                Link::Call(call) => (Some(call.function), call.this, call.called_scope),
+                Link::Frame(_, state) => (state.function, state.this(), state.called_scope),
+                Link::Call(call) => (Some(call.function), call.this(), call.called_scope),
                 Link::Site(_) => return None,
             };
             if let Some(this) = this {
@@ -17681,9 +17857,9 @@ impl Request {
     #[must_use]
     pub fn this(&self) -> Option<PhpObject> {
         if let Some(call) = self.vm.serving_call() {
-            return call.this;
+            return call.this();
         }
-        self.vm.innermost()?.this
+        self.vm.innermost()?.this()
     }
 
     /// `zend_get_this_object(EG(current_execute_data))`
@@ -17707,8 +17883,8 @@ impl Request {
     pub fn this_object(&self) -> Option<PhpObject> {
         for link in self.chain() {
             let (function, this) = match link {
-                Link::Frame(_, state) => (state.function, state.this),
-                Link::Call(call) => (Some(call.function), call.this),
+                Link::Frame(_, state) => (state.function, state.this()),
+                Link::Call(call) => (Some(call.function), call.this()),
                 Link::Site(_) => return None,
             };
             if this.is_some() {
@@ -20946,14 +21122,23 @@ fn include_path_entries(include_path: &[u8]) -> Vec<Vec<u8>> {
 struct Hooks<'a>(&'a mut Request);
 
 /// Where a walk over an object stands at a property: a declared slot,
-/// the key of a bucket of the dynamic table, or a hooked property's
-/// value as its `get` hook answered it, one owner the walker's to give
-/// up.
+/// the key of a bucket of the dynamic table, a hooked property's value
+/// as its `get` hook answered it, or a row the class's `get_properties`
+/// answered that the object holds nowhere of its own; each of the last
+/// two one owner the walker's to give up.
 #[derive(Clone, Copy)]
 pub(crate) enum Walked {
     Slot(u32),
     Dynamic(php_heap::Key),
     Hooked(Value),
+    Answered(Value),
+}
+
+impl Walked {
+    /// Whether the walk holds an owner of the value it found.
+    pub(crate) fn owned(self) -> bool {
+        matches!(self, Walked::Hooked(_) | Walked::Answered(_))
+    }
 }
 
 /// One `zend_property_info *` of a reference's source list
@@ -20982,6 +21167,7 @@ impl HeapHooks for Hooks<'_> {
     fn destruct(&mut self, obj: Obj) {
         let table = self.0.object_handlers(obj);
         table.dtor_obj(self.0, PhpObject::of(obj));
+        self.0.own_lent_receivers(Some(PhpObject::of(obj)));
     }
 
     /// `free_obj`, through the table: the payload's release is the

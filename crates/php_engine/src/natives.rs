@@ -1626,15 +1626,28 @@ fn dump_members(
     level: usize,
 ) {
     let class = object.class();
+    // `zend_std_get_debug_info`'s `get_properties`, or for a lazy object
+    // `zend_get_properties_no_lazy_init`: the table laid down as php's
+    // walk reads it, what a ghost's initializer later shares.
+    if let Err(thrown) = req.lay_properties_no_lazy_init(object) {
+        req.leave_pending(&thrown);
+        return;
+    }
     // `ce->properties_info_table` in slot order, which is what
     // `rebuild_object_properties_internal` walks: an inherited property
     // before the class's own, and a private one named by the class that
     // declared it (`zend_mangle_property_name`).
-    let declared: Vec<(Vec<u8>, ClassId, Visibility, Option<Type>)> = req
-        .placed_properties(class)
-        .into_iter()
-        .map(|(declaring, p)| (p.name.0.to_vec(), declaring, p.visibility, p.ty))
-        .collect();
+    // A table that holds copies of the declared rows is dumped as it
+    // stands, its plain values in place of the slots.
+    let declared: Vec<(Vec<u8>, ClassId, Visibility, Option<Type>)> =
+        match object.heap().declared_rows() {
+            php_heap::DeclaredRows::Slots => req
+                .placed_properties(class)
+                .into_iter()
+                .map(|(declaring, p)| (p.name.0.to_vec(), declaring, p.visibility, p.ty))
+                .collect(),
+            php_heap::DeclaredRows::Copied => Vec::new(),
+        };
     // Each row's key as php's property table holds it, mangled by
     // `zend_mangle_property_name` for a declared one, so every name is
     // printed through the one unmangling below.

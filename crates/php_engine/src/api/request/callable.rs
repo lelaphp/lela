@@ -450,9 +450,9 @@ impl Request {
             let state = match link {
                 super::Link::Call(call) => {
                     if walking
-                        && (call.this.is_some() || self.method_class(call.function).is_some())
+                        && (call.this().is_some() || self.method_class(call.function).is_some())
                     {
-                        current_this = call.this;
+                        current_this = call.this();
                         walking = false;
                     }
                     continue;
@@ -468,17 +468,17 @@ impl Request {
                 }
             };
             if walking {
-                current_this = state.this;
+                current_this = state.this();
             }
             let scope = self
                 .closure_scope(state.closure)
                 .or_else(|| state.function.and_then(|f| self.method_class(f)))
                 .or(state.scope);
-            let called = state.this.map(|this| this.class()).or(state.called_scope);
+            let called = state.this().map(|this| this.class()).or(state.called_scope);
             return CallFrame {
                 scope,
                 called,
-                this: state.this,
+                this: state.this(),
                 current_this,
             };
         }

@@ -3,6 +3,7 @@ Arr
 Arr::addref
 Arr::backward
 Arr::contains
+Arr::declared_rows
 Arr::end
 Arr::entry_at
 Arr::forward
@@ -22,6 +23,7 @@ Arr::position
 Arr::protect
 Arr::refcount
 Arr::reset
+Arr::set_declared_rows
 Arr::set_has_empty_ind
 Arr::set_next_free
 Arr::table_size
@@ -36,6 +38,7 @@ Block::bytes_mut
 Block::is_empty
 Block::len
 CallStack
+DeclaredRows
 EntryGuard
 Exponent
 Exponent::as_char
@@ -108,6 +111,7 @@ Heap::object_clone
 Heap::object_clone_members_into
 Heap::object_clone_with
 Heap::object_properties
+Heap::object_properties_copy
 Heap::object_set_properties
 Heap::object_set_slot
 Heap::object_take_properties
@@ -173,6 +177,7 @@ Number::double
 Obj
 Obj::addref
 Obj::class
+Obj::declared_rows
 Obj::destructor_called
 Obj::has_native
 Obj::id
