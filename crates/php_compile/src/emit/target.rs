@@ -143,6 +143,11 @@ impl Emit<'_> {
         if let tree::Expr::CallExpr(id) = expr {
             return Err(self.call_written(id));
         }
+        // `ZEND_AST_PIPE`, a call as `zend_ensure_writable_variable` reads
+        // it.
+        if self.is_call(expr) {
+            return Err(self.compile_error("Can't use function return value in write context"));
+        }
         if self.is_short_circuited(expr) {
             return Err(self.compile_error("Can't use nullsafe operator in write context"));
         }
@@ -209,7 +214,17 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_is_variable` or `zend_is_call` (`Z/Zend/zend_compile.c:2718`):
+    /// `zend_is_variable` or `zend_is_call` (`Z/Zend/zend_compile.c:2718`),
+    /// a pipe among the calls, so a list may name one and the assignment
+    /// refuses it as a call's value:
+    ///
+    /// ```php
+    /// list(y|>y)=y;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Can't use function return value in write context in %s on line 2
+    /// ```
+    ///
     /// a variable, an element, a property, a `static` property or a call.
     pub(super) fn is_variable_or_call(&self, expr: tree::Expr) -> bool {
         match self.peel(expr) {
@@ -220,6 +235,8 @@ impl Emit<'_> {
             | tree::Expr::MemberAccessExpr(_)
             | tree::Expr::CallExpr(_) => true,
             tree::Expr::ScopedAccessExpr(id) => self.names_property(id),
+            // `zend_is_call`'s `ZEND_AST_PIPE`.
+            tree::Expr::BinaryExpr(_) => self.is_call(expr),
             _ => false,
         }
     }
