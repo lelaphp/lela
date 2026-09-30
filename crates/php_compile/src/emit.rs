@@ -7837,7 +7837,12 @@ impl Emit<'_> {
             let (name, value, line) = self.const_declarator(*declarator)?;
             self.line = line;
             // The fold, or the tree `DECLARE_CONST` evaluates as it runs.
-            let value = self.const_expr_to_zval(value)?;
+            let (value, unevaluated) = if let Some(folded) = self.eval_const(value)? {
+                (folded, None)
+            } else {
+                let tree = self.dynamic_const_expr(value)?;
+                (self.unevaluated(tree.clone()), Some(tree))
+            };
             if [&b"true"[..], b"false", b"null"]
                 .iter()
                 .any(|special| name.eq_ignore_ascii_case(special))
@@ -7848,7 +7853,7 @@ impl Emit<'_> {
                 )));
             }
             let full = self.declare_symbol(Symbol::Const, &name)?;
-            declared = Some((full.clone(), value));
+            declared = Some((full.clone(), value, unevaluated));
             let name = self.string(&full)?;
             let op1 = self.literal(name);
             let op2 = self.literal(value);
@@ -7864,7 +7869,7 @@ impl Emit<'_> {
         if node.attrs.is_empty() {
             return Ok(());
         }
-        let Some((name, value)) = declared else {
+        let Some((name, value, unevaluated)) = declared else {
             return Err(self.fatal("InternalError: an attributed `const` that declared nothing"));
         };
         let first = node
@@ -7877,7 +7882,9 @@ impl Emit<'_> {
         }
         let written = self.walk_attributes(&node.attrs)?;
         let attributes = self.member_attributes(&written, attributes::TARGET_CONST, 0, first)?;
-        let Some(value) = folded_const_expr(value, first) else {
+        // The value `ZEND_DECLARE_ATTRIBUTED_CONST` evaluates, which a
+        // value the compiler could not fold is the tree of.
+        let Some(value) = unevaluated.or_else(|| folded_const_expr(value, first)) else {
             return Err(
                 self.fatal("InternalError: an attributed `const` whose value folded to no scalar")
             );

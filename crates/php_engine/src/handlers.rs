@@ -584,6 +584,20 @@ pub(crate) fn declare_const<T: Tier>(
 /// Deprecated: Constant OLD is deprecated in %s on line 5
 /// 1
 /// ```
+///
+/// A value the compiler could not fold is evaluated as the constant is
+/// declared:
+///
+/// ```php
+/// define('A', 1);
+/// #[MyAttribute]
+/// const B = A + 1;
+/// var_dump(B, (new ReflectionConstant('B'))->getValue());
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+/// ```
 pub(crate) fn declare_attributed_const<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -619,12 +633,16 @@ pub(crate) fn declare_attributed_const<T: Tier>(
         )));
     };
     let attributes = decl.attributes.clone();
-    let value = exec::constant(code, ConstIdx(op.op2));
+    // A value the compiler could not fold is its constant expression,
+    // evaluated here as `zval_update_constant` evaluates it.
+    let value = match exec::default_value(req, code, ConstIdx(op.op2)) {
+        Ok((value, _)) => value,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
     let mut key = written;
     if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
         key[..slash].make_ascii_lowercase();
     }
-    req.addref(&value);
     if !req.define_attributed_constant(&key, value, attributes) {
         req.release(value);
         crate::api::raising::warning(
