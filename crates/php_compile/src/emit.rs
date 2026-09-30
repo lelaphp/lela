@@ -1809,6 +1809,36 @@ impl Emit<'_> {
         self.peel(expr).line(self.parsed)
     }
 
+    /// The line a token stands on, what php's node for it carries.
+    pub(super) fn token_line(&self, id: TokenId) -> Option<u32> {
+        self.parsed
+            .tokens
+            .get(id.0 as usize)
+            .map(|token| self.parsed.lines.line_number(token.offset))
+    }
+
+    /// The line of a method's name as written, which
+    /// `zend_compile_call_common` gives the call's `DO_FCALL`
+    /// (`zend_ast_get_lineno(method_ast)`), so a call spread over lines
+    /// is reported where its name stands:
+    ///
+    /// ```php
+    /// class A { public function b() { throw new Exception(); } }
+    /// try { (new A())
+    ///     ->
+    ///     b
+    ///     (); } catch (Exception $e) { echo $e->getTrace()[0]['line'], "\n"; }
+    /// ```
+    /// ```expect
+    /// 5
+    /// ```
+    fn member_line(&self, member: Member) -> u32 {
+        match member {
+            Member::Written(token) => self.token_line(token).unwrap_or(self.line),
+            Member::Computed(expr) => self.line_of(expr),
+        }
+    }
+
     /// A token's text in the source.
     fn text(&self, id: TokenId) -> &[u8] {
         let Some(token) = self.parsed.tokens.get(id.0 as usize) else {
@@ -15567,7 +15597,7 @@ impl Emit<'_> {
         method: Member,
         arguments: &Args,
     ) -> Result<Where, CompileError> {
-        let line = self.line;
+        let line = self.member_line(method);
         let class = self.class_link(class)?;
         let method = match self.method_name(method)? {
             MethodName::Constant(method) => method,
@@ -15682,7 +15712,7 @@ impl Emit<'_> {
         arguments: &Args,
         nullsafe: bool,
     ) -> Result<Where, CompileError> {
-        let line = self.line;
+        let line = self.member_line(method);
         let (op1_type, op1) = self.receiver(object)?;
         // `zend_emit_jmp_null` over the receiver of a `?->`, but for
         // `$this`, which throws where it does not exist.

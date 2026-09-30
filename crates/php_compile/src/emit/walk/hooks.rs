@@ -130,14 +130,6 @@ impl Emit<'_> {
         Ok(out)
     }
 
-    /// The line a token stands on.
-    fn token_line(&self, token: tree::TokenId) -> Option<u32> {
-        self.parsed
-            .tokens
-            .get(token.0 as usize)
-            .map(|token| self.parsed.lines.line_number(token.offset))
-    }
-
     /// `zend_property_hook_find_property_usage` over the hook's body:
     /// whether `$this->property` or `$this?->property` stands in it,
     /// the name written as an identifier, a string interpolation's
