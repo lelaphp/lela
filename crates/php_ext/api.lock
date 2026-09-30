@@ -73,6 +73,7 @@ abi::ExtensionBuilder::ticks
 abi::ExtensionBuilder::trampolines
 abi::ExtensionBuilder::treat_data
 abi::ExtensionBuilder::upload
+abi::ExtensionBuilder::version
 abi::ExtensionBuilder::zend_extension
 abi::False
 abi::FromArgument
@@ -452,6 +453,7 @@ request::Request::extension_ini
 request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number
+request::Request::extension_version
 request::Request::flush
 request::Request::forbid_dynamic_call
 request::Request::frame_args

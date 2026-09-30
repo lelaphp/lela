@@ -211,6 +211,7 @@ pub fn extension() -> Extension {
         .request_state::<object::State>()
         .rinit(register_alias)
         .info(dom_info)
+        .version("20031129")
         .build("dom")
 }
 

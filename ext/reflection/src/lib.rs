@@ -80,7 +80,7 @@ use php_ext::decl::{
     MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, throw};
-use php_ext::request::{ExtensionId, PHP_VERSION, Request};
+use php_ext::request::{ExtensionId, Request};
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -5298,9 +5298,9 @@ fn this_class_constant(
 /// `Functions`, one `_function_string` per native; `Classes`, one
 /// `_class_string` per class, each preceded by a blank line as
 /// `_extension_class_string` writes it. Every bundled extension is
-/// `<persistent>`, as one compiled in is, and its version is
-/// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin are. The `INI`
-/// block is not rendered yet (#375); `json` has no ini entry.
+/// `<persistent>`, as one compiled in is, and its version is the
+/// extension's own. The `INI` block is not rendered yet (#375); `json` has
+/// no ini entry.
 fn extension_string(
     req: &mut Request,
     extension: ExtensionId,
@@ -5311,9 +5311,10 @@ fn extension_string(
         .extension_name(extension)
         .map(str::to_owned)
         .unwrap_or_default();
+    let version = req.extension_version(extension).unwrap_or_default();
     let _ = writeln!(
         out,
-        "{indent}Extension [ <persistent> extension #{} {name} version {PHP_VERSION} ] {{",
+        "{indent}Extension [ <persistent> extension #{} {name} version {version} ] {{",
         req.extension_number(extension)
     );
     let dependencies = req.extension_dependencies(extension);
@@ -7731,20 +7732,28 @@ impl ReflectionExtension {
     }
 
     /// `ReflectionExtension::getVersion()`: `module->version`, and `null`
-    /// for `NO_VERSION_YET`. Every extension compiled in here carries
-    /// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin do, which is what
-    /// `_extension_string`'s header prints.
+    /// for `NO_VERSION_YET`, which no extension compiled in here is: the
+    /// version the extension declared, `PHP_VERSION` where it declared
+    /// none, which is what `_extension_string`'s header prints.
     ///
     /// ```php
     /// var_dump((new ReflectionExtension('json'))->getVersion());
+    /// var_dump((new ReflectionExtension('dom'))->getVersion());
+    /// echo preg_replace('/#\d+/', '#N', strstr(new ReflectionExtension('dom'), "\n", true)), "\n";
     /// ```
     /// ```expect
     /// string(5) "8.5.9"
+    /// string(8) "20031129"
+    /// Extension [ <persistent> extension #N dom version 20031129 ] {
     /// ```
     #[php(tentative)]
     fn getVersion(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        this_extension(req, this.object())?;
-        PhpString::new(req, PHP_VERSION.as_bytes()).map(Some)
+        let extension = this_extension(req, this.object())?;
+        let version = req
+            .extension_version(extension)
+            .unwrap_or_default()
+            .to_owned();
+        PhpString::new(req, version.as_bytes()).map(Some)
     }
 
     /// `ReflectionExtension::getFunctions()`: one `ReflectionFunction` per

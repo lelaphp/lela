@@ -17464,6 +17464,13 @@ impl Request {
         self.extension_of(extension).map(|e| e.name.as_str())
     }
 
+    /// `module->version`: what the extension declared with
+    /// `ExtensionBuilder::version`, else `PHP_VERSION`, as `Core`'s is.
+    #[must_use]
+    pub fn extension_version(&self, extension: ExtensionId) -> Option<&str> {
+        self.extension_of(extension).map(|e| e.version.as_str())
+    }
+
     /// `module->module_number`, `zend_next_free_module` at registration:
     /// `Core` takes zero at `zend_startup` and each extension the next
     /// number in startup order.
@@ -17639,7 +17646,7 @@ impl Request {
     /// under `Directive => Local Value => Master Value`
     /// (`Z/main/php_ini.c:115`), the master being the engine's default
     /// and an empty value `no value`. Every bundled extension has a
-    /// version, `PHP_VERSION`, so php's other branch, the bare name, is
+    /// version, so php's other branch, the bare name, is
     /// never taken. What `ReflectionExtension::info` and `php --ri` print.
     pub fn extension_info(&mut self, extension: ExtensionId) {
         let Some(module) = self.extension_of(extension).cloned() else {
@@ -17650,7 +17657,7 @@ impl Request {
             info(self);
             return;
         }
-        self.info_table(&[&["Version", PHP_VERSION]]);
+        self.info_table(&[&["Version", module.version.as_str()]]);
         let names: Vec<&[u8]> = module.ini.iter().map(|entry| &*entry.name.0).collect();
         self.info_ini_entries(&names);
     }
