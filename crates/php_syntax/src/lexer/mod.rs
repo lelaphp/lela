@@ -69,6 +69,11 @@ pub enum Position {
     AtOpenTag,
     /// `ZEND_COMPILE_POSITION_AFTER_OPEN_TAG`: code first.
     AfterOpenTag,
+    /// `ZEND_COMPILE_POSITION_AT_SHEBANG`, where `open_file_for_scanning`
+    /// begins a file under `CG(skip_shebang)`: a first line that opens
+    /// with `#!` is passed over through its line end, and inline HTML
+    /// follows (`Z/Zend/zend_language_scanner.l:2288-2297`).
+    AtShebang,
 }
 
 /// What one lex produced: the token stream and the scanner's diagnostics.
@@ -105,7 +110,7 @@ pub(crate) fn lex_with_lines(
     options: &LexOptions,
     lines: &LineIndex,
 ) -> Lexed {
-    Lexer::new(file, text, options, lines).lex()
+    Lexer::new(file, text, options, lines).lex(options.position)
 }
 
 /// A scanner state. The stack's factoring and the names are Zend's, so a
@@ -240,7 +245,7 @@ impl<'a> Lexer<'a> {
             pos: 0,
             frames: vec![StateFrame {
                 state: match options.position {
-                    Position::AtOpenTag => State::InlineHtml,
+                    Position::AtOpenTag | Position::AtShebang => State::InlineHtml,
                     Position::AfterOpenTag => State::Scripting,
                 },
                 aux: StateAux {
@@ -255,7 +260,10 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub(crate) fn lex(mut self) -> Lexed {
+    pub(crate) fn lex(mut self, position: Position) -> Lexed {
+        if position == Position::AtShebang {
+            self.lex_shebang();
+        }
         while self.pos < self.text.len() {
             #[cfg(debug_assertions)]
             let before = (self.pos, self.frames.len(), self.state_kind());
@@ -392,6 +400,24 @@ impl<'a> Lexer<'a> {
     /// May `}` pop? Zend pops only when its state stack is non-empty.
     pub(crate) fn can_pop_brace(&self) -> bool {
         self.frames.len() > 1
+    }
+
+    /// `<SHEBANG>"#!" .* {NEWLINE}`: the line and its end, `.*` running
+    /// to the last byte before a `\n` and backing off to a `\r` where the
+    /// file has none; any other first byte is `yyless(0)` into `INITIAL`.
+    fn lex_shebang(&mut self) {
+        if !self.text.starts_with(b"#!") {
+            return;
+        }
+        let end = match self.text.iter().position(|&b| b == b'\n') {
+            Some(newline) => newline + 1,
+            None => match self.text.iter().rposition(|&b| b == b'\r') {
+                Some(carriage) => carriage + 1,
+                None => return,
+            },
+        };
+        self.pos = end;
+        self.emit(SyntaxKind::SHEBANG, 0);
     }
 
     // ----- byte helpers ------------------------------------------------------

@@ -1239,17 +1239,23 @@ pub fn normalise(rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
 const LOAD_NUMBER: &[u8] = b"extension #";
 
 /// Every `extension #<digits>` in `haystack` with the digits replaced by
-/// `token`, the rest byte for byte.
+/// `token`, the rest byte for byte; an `--EXPECTF--` section's `%d` in
+/// that place is replaced too, since what it is matched against carries
+/// the token where the digits were (`sapi/cli/tests/006.phpt`).
 fn renumber(haystack: &[u8], token: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(haystack.len());
     let mut i = 0;
     while i < haystack.len() {
         if haystack[i..].starts_with(LOAD_NUMBER) {
             let after = i + LOAD_NUMBER.len();
-            let digits = haystack[after..]
-                .iter()
-                .take_while(|b| b.is_ascii_digit())
-                .count();
+            let digits = if haystack[after..].starts_with(b"%d") {
+                2
+            } else {
+                haystack[after..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_digit())
+                    .count()
+            };
             if digits > 0 {
                 out.extend_from_slice(LOAD_NUMBER);
                 out.extend_from_slice(token);
@@ -1508,4 +1514,20 @@ pub(crate) fn align(
     }
     steps.extend((0..tail).map(|n| Step::Both(expected - tail + n, actual - tail + n)));
     steps
+}
+
+#[cfg(test)]
+mod renumber_tests {
+    use super::renumber;
+
+    #[test]
+    fn a_load_number_and_an_expectf_digit_run_in_its_place_are_the_token() {
+        assert_eq!(
+            renumber(
+                b"extension #6 pcre, extension #%d pcre, extension #x",
+                b"%N%"
+            ),
+            b"extension #%N% pcre, extension #%N% pcre, extension #x"
+        );
+    }
 }

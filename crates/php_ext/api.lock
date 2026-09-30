@@ -710,6 +710,8 @@ syntax::strip
 test::Capture
 test::Engine
 test::Engine::builder
+test::Engine::command_line
+test::Engine::dispatch
 test::Engine::dump_before_optimizer
 test::Engine::frameless
 test::Engine::highlight
