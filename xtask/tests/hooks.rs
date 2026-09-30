@@ -23,11 +23,12 @@ fn workspace() -> &'static Path {
 
 /// The region files pre-commit renders, in the order it names them; the
 /// gitignored local file is not one of them (#1312).
-const REGIONS: [&str; 4] = [
+const REGIONS: [&str; 5] = [
     "AGENTS.md",
     "ext/AGENTS.md",
     "data/INDEX.md",
     "docs/divergence.md",
+    "harness-design.md",
 ];
 
 /// A scratch repository with the stand-ins beside it: `root` is the
@@ -84,7 +85,7 @@ fn executable(path: &Path, body: &str) {
     }
 }
 
-/// The scratch repository: the workspace's manifest and pin, the four
+/// The scratch repository: the workspace's manifest and pin, the five
 /// region files, one crate file, one commit, and the real hooks under
 /// `scripts/hooks` as its `core.hooksPath`.
 fn scratch(name: &str, computed: &Computed) -> Scratch {
@@ -261,10 +262,10 @@ impl Scratch {
 /// `api-check`, `budget`, `unsafe-audit`, `vocab` and `permit --diff`;
 /// then `clippy` and `test`, then `witness` and `crosscheck` at once
 /// (#1252), crosscheck on the staged extensions alone (#1312); then
-/// `xtask regions` over the four region files and not the gitignored
+/// `xtask regions` over the five region files and not the gitignored
 /// local one, which reaches `computed run`; the region file `computed`
 /// rewrote is re-staged, so the commit carries it and the tree is clean
-/// after, and `computed check` over the four holds the commit to a
+/// after, and `computed check` over the five holds the commit to a
 /// rendering.
 #[test]
 fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
