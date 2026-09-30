@@ -10928,6 +10928,20 @@ pub(crate) fn assign_op<T: Tier>(
 /// int(32)
 /// int(-216)
 /// ```
+///
+/// A call that returned by value is php's notice and a plain assignment,
+/// through a reference the target already is:
+///
+/// ```php
+/// function g() { return 5; }
+/// function s() { static $v; if (!isset($v)) { $v = &g(); } return $v; }
+/// var_dump(s(), s());
+/// ```
+/// ```expect
+/// Notice: Only variables should be assigned by reference in %s on line 3
+/// int(5)
+/// int(5)
+/// ```
 pub(crate) fn assign_ref<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -10963,14 +10977,27 @@ pub(crate) fn assign_ref<T: Tier>(
     };
     let held = exec::value_of(source.read());
     // `ZEND_RETURNS_FUNCTION`: the source is a call, and a call that
-    // returned by value has no cell to bind, which is php's notice and a
-    // cell of its own over the value
-    // (`zend_wrong_assign_to_variable_reference`).
+    // returned by value has no cell to bind, which is php's notice and
+    // then the plain assignment (`zend_wrong_assign_to_variable_reference`
+    // over `zend_assign_to_variable`), so a target that is a reference,
+    // a `static` among them, keeps it and takes the value through it.
     if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
         crate::api::raising::notice(req, "Only variables should be assigned by reference");
         if req.is_pending() {
             return Ok(Stepped::Threw(frame));
         }
+        let value = held.undef_as_null();
+        req.addref(&value);
+        let strict = req.frame_strict_types(frame);
+        let (landed, garbage) = match assign_to_place(req, target, value, strict) {
+            Ok(pair) => pair,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        write_out(req, frame, code, op, &landed);
+        req.release(garbage);
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return Ok(advance(req, frame));
     }
     let cell = match held.as_php_ref() {
         Some(cell) if target == source => {
