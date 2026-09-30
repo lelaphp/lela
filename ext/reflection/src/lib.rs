@@ -5730,7 +5730,10 @@ fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> V
             }
         }
     }
-    let Ok(entries) = object.props(req) else {
+    // `classname_obj->handlers->get_properties(classname_obj)`: the
+    // table the class answers, a `DateInterval`'s fields among it.
+    let handlers = object.handlers(req);
+    let Ok(entries) = handlers.get_properties(req, object) else {
         return Vec::new();
     };
     let mut seen: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
@@ -5770,7 +5773,10 @@ fn undeclared_properties(req: &mut Request, class: ClassId, object: PhpObject) -
         .filter_map(|at| req.class_decl(at))
         .flat_map(|decl| decl.properties.iter().map(|p| p.name.0.to_vec()))
         .collect();
-    let Ok(entries) = object.props(req) else {
+    // `classname_obj->handlers->get_properties(classname_obj)`: the
+    // table the class answers, a `DateInterval`'s fields among it.
+    let handlers = object.handlers(req);
+    let Ok(entries) = handlers.get_properties(req, object) else {
         return Vec::new();
     };
     entries
