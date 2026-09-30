@@ -769,6 +769,14 @@ values::ArrayIter::key
 values::ArrayIter::value
 values::ClassId
 values::ClosureInfo
+values::Emalloc
+values::Emalloc::bytes
+values::Emalloc::bytes_mut
+values::Emalloc::free
+values::Emalloc::is_empty
+values::Emalloc::len
+values::Emalloc::new
+values::Emalloc::resize
 values::HashIterator
 values::HashIterator::new
 values::HashIterator::position

@@ -34,7 +34,9 @@ use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 
+mod emalloc;
 mod smart_str;
+pub use emalloc::Emalloc;
 pub use smart_str::SmartStr;
 
 /// The type of a value, php's `zend_zval_type_name` set, and the one
