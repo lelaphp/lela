@@ -9,15 +9,15 @@ use php_ext::abi::{Callable, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, to_string};
-use php_ext::raising::{Level, Thrown, arg_type_error, docref};
+use php_ext::raising::{Level, Thrown, arg_type_error, docref, raise_while_pending};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::Either;
 use crate::constants::{PREG_INTERNAL_ERROR, PREG_NO_ERROR};
 use crate::ffi::{self, Subject};
 use crate::matching::{Scratch, populate, unit_length};
-use crate::pattern::{Pattern, compiled};
+use crate::pattern::{Pattern, compiled, compiled_under};
 use crate::{exec_error, set_error};
 
 /// What a replacing native answers, `string|array|null`.
@@ -102,13 +102,16 @@ fn expand(replacement: &[u8], subject: &[u8], scratch: &Scratch, count: usize, o
 /// The loop both replacement bodies share: each match up to `limit`
 /// replaced by what `each` writes, the pieces between copied, an empty
 /// match stepped past as `/g` does, and `count` raised once per match.
+/// An `each` that answers `false` has no replacement, php's `NULL`
+/// `eval_result`: the subject fails at that match with
+/// `PREG_INTERNAL_ERROR`, as a throw from it does.
 fn replace_loop(
     req: &mut Request,
     pattern: &Pattern,
     subject: &[u8],
     mut limit: usize,
     count: &mut usize,
-    mut each: impl FnMut(&mut Request, &Scratch, usize, &mut Vec<u8>) -> Result<(), Thrown>,
+    mut each: impl FnMut(&mut Request, &Scratch, usize, &mut Vec<u8>) -> Result<bool, Thrown>,
 ) -> Result<Replaced, Thrown> {
     set_error(req, PREG_NO_ERROR);
     let Some(mut scratch) = Scratch::take(req, pattern) else {
@@ -136,10 +139,17 @@ fn replace_loop(
                 let buffer = out.get_or_insert_with(Vec::new);
                 buffer.extend_from_slice(subject.get(last_end..match_start).unwrap_or_default());
                 let n = usize::try_from(rc).unwrap_or(0);
-                if let Err(thrown) = each(req, &scratch, n, buffer) {
-                    set_error(req, PREG_INTERNAL_ERROR);
-                    scratch.give_back(req);
-                    return Err(thrown);
+                match each(req, &scratch, n, buffer) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        set_error(req, PREG_INTERNAL_ERROR);
+                        break 'search Replaced::Failed;
+                    }
+                    Err(thrown) => {
+                        set_error(req, PREG_INTERNAL_ERROR);
+                        scratch.give_back(req);
+                        return Err(thrown);
+                    }
                 }
                 limit -= 1;
                 start = match_end;
@@ -229,23 +239,42 @@ pub(super) fn replace_impl(
     let bytes = subject.as_bytes();
     let replaced = replace_loop(req, pattern, bytes, limit, count, |_, scratch, n, out| {
         expand(replacement, bytes, scratch, n, out);
-        Ok(())
+        Ok(true)
     })?;
     owned(req, subject, replaced)
 }
 
+/// What a callback replacement runs under, php's `fci` and `fcc` with
+/// the arguments every subject shares: the callback, the limit per
+/// subject and pattern, `$flags`, and what an earlier subject threw,
+/// pending, which the callback is never entered under.
+#[derive(Clone, Copy)]
+struct Calling<'a> {
+    callback: &'a Callable,
+    limit: usize,
+    flags: i64,
+    pending: Option<&'a Thrown>,
+}
+
 /// `php_pcre_replace_func`: one pattern string over one subject, each
-/// match replaced by what `callback` returns for its array.
+/// match replaced by what `callback` returns for its array. While what
+/// an earlier subject threw is `pending`, the pattern is compiled and
+/// matched as ever, but `zend_call_function` will not enter the callback,
+/// so the first match has no replacement and the subject fails there.
 fn replace_one_func(
     req: &mut Request,
     regex: &[u8],
     subject: PhpString,
-    callback: &Callable,
-    limit: usize,
+    calling: Calling<'_>,
     count: &mut usize,
-    flags: i64,
 ) -> Result<Option<PhpString>, Thrown> {
-    let Some(pattern) = compiled(req, regex) else {
+    let Calling {
+        callback,
+        limit,
+        flags,
+        pending,
+    } = calling;
+    let Some(pattern) = compiled_under(req, regex, pending) else {
         return Ok(None);
     };
     let bytes = subject.as_bytes();
@@ -256,6 +285,9 @@ fn replace_one_func(
         limit,
         count,
         |req, scratch, n, out| {
+            if pending.is_some() {
+                return Ok(false);
+            }
             let mut groups = PhpArray::new(req)?;
             populate(req, &mut groups, &pattern, scratch, bytes, n, flags)?;
             let argument = groups.to_value();
@@ -267,7 +299,7 @@ fn replace_one_func(
             let text = text?;
             out.extend_from_slice(text.as_bytes());
             req.release(Value::string(text));
-            Ok(())
+            Ok(true)
         },
     )?;
     owned(req, subject, replaced)
@@ -339,49 +371,39 @@ fn in_subject(
     Ok(Some(current))
 }
 
-/// `php_replace_in_subject_func`: [`in_subject`] with a callback.
+/// `php_replace_in_subject_func`: [`in_subject`] with a callback. While
+/// what an earlier subject threw is `pending`, a pattern of an array is
+/// converted as php converts it then ([`string_while_pending`]), one that
+/// will not convert ending the patterns with the subject as it stands.
 fn in_subject_func(
     req: &mut Request,
     regex: Either,
-    callback: &Callable,
     subject: PhpString,
-    limit: usize,
+    calling: Calling<'_>,
     count: &mut usize,
-    flags: i64,
 ) -> Result<Option<PhpString>, Thrown> {
     let patterns = match regex {
         Union::B(regex) => {
-            return replace_one_func(
-                req,
-                regex.as_bytes(),
-                subject,
-                callback,
-                limit,
-                count,
-                flags,
-            );
+            return replace_one_func(req, regex.as_bytes(), subject, calling, count);
         }
         Union::A(patterns) => patterns,
     };
     req.addref(&Value::string(subject));
     let mut current = subject;
     for (_, entry) in patterns.snapshot() {
-        let regex = match to_string(req, &entry) {
-            Ok(regex) => regex,
+        let converted = match calling.pending {
+            None => to_string(req, &entry).map(Some),
+            Some(pending) => string_while_pending(req, pending, &entry),
+        };
+        let regex = match converted {
+            Ok(Some(regex)) => regex,
+            Ok(None) => break,
             Err(thrown) => {
                 req.release(Value::string(current));
                 return Err(thrown);
             }
         };
-        let result = replace_one_func(
-            req,
-            regex.as_bytes(),
-            current,
-            callback,
-            limit,
-            count,
-            flags,
-        );
+        let result = replace_one_func(req, regex.as_bytes(), current, calling, count);
         req.release(Value::string(regex));
         req.release(Value::string(current));
         match result? {
@@ -390,6 +412,98 @@ fn in_subject_func(
         }
     }
     Ok(Some(current))
+}
+
+/// `zval_try_get_string` while a throwable is pending: an array raises
+/// php's warning while the throwable carries and will not convert
+/// then, and neither will an object, since `__toString` is a call
+/// `zend_call_function` will not enter and no second throwable is
+/// raised over the first; `None` for either.
+fn string_while_pending(
+    req: &mut Request,
+    pending: &Thrown,
+    value: &Value,
+) -> Result<Option<PhpString>, Thrown> {
+    match value.deref().as_ref() {
+        ValueRef::Array(_) => {
+            raise_while_pending(req, pending, Level::Warning, "Array to string conversion");
+            Ok(None)
+        }
+        ValueRef::Object(_) => Ok(None),
+        _ => to_string(req, value).map(Some),
+    }
+}
+
+/// `php_preg_replace_func_impl` over an array subject: each entry
+/// converted and replaced under its key. What one entry's patterns or
+/// callback throw does not end php's loop, which stops only at an entry
+/// that will not convert: the entries after it are converted and their
+/// patterns compiled and matched while the throwable is pending, which is
+/// what reaches the caller at the end.
+///
+/// ```php
+/// $t = function ($m) { throw new Exception('x'); };
+/// try { preg_replace_callback(['/a/', '/(/'], $t, ['a', 'Array', 'b']); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// try { preg_replace_callback(['/a/', '/(/'], $t, ['a', [1], 'b']); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// try { preg_replace_callback([new stdClass, '/b/'], fn($m) => 1, ['a', ['x'], 'b']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Warning: preg_replace_callback(): Compilation failed: missing closing parenthesis at offset 1 in %s on line 3
+/// x
+///
+/// Warning: Array to string conversion in %s on line 4
+/// x
+///
+/// Warning: Array to string conversion in %s on line 5
+/// Object of class stdClass could not be converted to string
+/// ```
+fn over_array_func(
+    req: &mut Request,
+    regex: Either,
+    subjects: PhpArray,
+    calling: Calling<'_>,
+    count: &mut usize,
+) -> Result<PhpArray, Thrown> {
+    let mut out = PhpArray::new(req)?;
+    let mut pending: Option<Thrown> = None;
+    for (key, entry) in subjects.snapshot() {
+        let converted = match &pending {
+            None => to_string(req, &entry).map(Some),
+            Some(thrown) => string_while_pending(req, thrown, &entry),
+        };
+        let subject = match converted {
+            Ok(Some(subject)) => subject,
+            Ok(None) => break,
+            Err(thrown) => {
+                pending = Some(thrown);
+                break;
+            }
+        };
+        let calling = Calling {
+            pending: pending.as_ref(),
+            ..calling
+        };
+        let result = in_subject_func(req, regex, subject, calling, count);
+        req.release(Value::string(subject));
+        match result {
+            Ok(Some(result)) => {
+                if let Key::Str(s) = &key {
+                    req.addref(&Value::string(*s));
+                }
+                out.set(req, key, Value::string(result))?;
+            }
+            Ok(None) => {}
+            Err(thrown) => pending = Some(thrown),
+        }
+    }
+    match pending {
+        Some(thrown) => {
+            req.release(out.to_value());
+            Err(thrown)
+        }
+        None => Ok(out),
+    }
 }
 
 /// Each string of an array subject through `each`, under its key, the
@@ -576,18 +690,18 @@ fn func_impl(
     flags: i64,
 ) -> Result<(Replacement, usize), Thrown> {
     let mut count = 0;
+    let calling = Calling {
+        callback,
+        limit,
+        flags,
+        pending: None,
+    };
     let value = match subject {
         Union::B(subject) => {
-            in_subject_func(req, regex, callback, subject, limit, &mut count, flags)?.map(Union::A)
+            in_subject_func(req, regex, subject, calling, &mut count)?.map(Union::A)
         }
-        Union::A(subjects) => Some(Union::B(over_array(
-            req,
-            subjects,
-            &mut count,
-            |req, subject, count| {
-                in_subject_func(req, regex, callback, subject, limit, count, flags)
-            },
-            |_, _| true,
+        Union::A(subjects) => Some(Union::B(over_array_func(
+            req, regex, subjects, calling, &mut count,
         )?)),
     };
     Ok((value, count))

@@ -82,6 +82,52 @@ pub(crate) enum Content {
     Tmp(Option<Stream>),
 }
 
+/// `phar->fp`: the archive's bytes, shared with each entry stream opened
+/// on them, which reads them on after a write replaces them, as a php
+/// stream keeps its own `fp`; and which stream php holds them through.
+#[derive(Clone)]
+pub(crate) struct Fp {
+    pub(crate) bytes: Arc<Vec<u8>>,
+    pub(crate) through: Through,
+}
+
+/// The stream `phar->fp` is in php.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Through {
+    /// The file opened `rb`: what is read through it is the file as it
+    /// stands, rewritten since or not, and a write through it fails.
+    File,
+    /// A stream php wrote the bytes into, the file the flush opened
+    /// `w+b` or a temporary one (a whole-file compressed archive's
+    /// decompressed copy, a deferred flush's): a write through it lands.
+    Written,
+}
+
+impl Fp {
+    /// The bytes an open read: the file itself, or where the whole file
+    /// is compressed (`flags`), the temporary stream it was decompressed
+    /// into.
+    pub(crate) fn opened(bytes: Vec<u8>, flags: u32) -> Fp {
+        let through = if flags & FILE_COMPRESSION_MASK == 0 {
+            Through::File
+        } else {
+            Through::Written
+        };
+        Fp {
+            bytes: Arc::new(bytes),
+            through,
+        }
+    }
+
+    /// Bytes php wrote into a stream it holds.
+    pub(crate) fn written(bytes: Arc<Vec<u8>>) -> Fp {
+        Fp {
+            bytes,
+            through: Through::Written,
+        }
+    }
+}
+
 /// `phar_metadata_tracker`: the value `setMetadata()` was given, the
 /// serialised string, or both.
 #[derive(Default)]
@@ -263,10 +309,9 @@ pub(crate) struct Archive {
     pub(crate) flags: u32,
     pub(crate) min_timestamp: u32,
     pub(crate) max_timestamp: u32,
-    /// The archive's bytes, decompressed where the whole file is: shared
-    /// with each entry stream opened on them, which reads them on after a
-    /// write replaces them, as a php stream keeps its own `fp`.
-    pub(crate) fp: Option<Arc<Vec<u8>>>,
+    /// The archive's bytes, decompressed where the whole file is, and the
+    /// stream php holds them through.
+    pub(crate) fp: Option<Fp>,
     /// Where compressed entries are decompressed to, shared the same way.
     pub(crate) ufp: Option<Arc<Vec<u8>>>,
     pub(crate) refcount: i32,
