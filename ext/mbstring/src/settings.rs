@@ -648,31 +648,32 @@ pub(crate) fn text_encodings(list: &mut Vec<Encoding>) {
     list.retain(|e| e.no() > ENCODING_CHARSET_MIN);
 }
 
-/// The ini entries, `PHP_INI_BEGIN()`'s order.
+/// The ini entries, `PHP_INI_BEGIN()`'s order, a default `None` where
+/// php registers the entry with no value.
 pub(crate) fn entries() -> Vec<IniDecl> {
-    let entry = |name: &str, default: &str, user: bool| IniDecl {
+    let entry = |name: &str, default: Option<&str>, user: bool| IniDecl {
         name: Name(name.as_bytes().into()),
-        default: default.as_bytes().into(),
+        default: default.map(|default| default.as_bytes().into()),
         user,
         per_dir: true,
         system: true,
     };
     vec![
-        entry("mbstring.language", "neutral", true),
-        entry("mbstring.detect_order", "", true),
-        entry("mbstring.http_input", "", true),
-        entry("mbstring.http_output", "", true),
-        entry("mbstring.internal_encoding", "", true),
-        entry("mbstring.substitute_character", "", true),
-        entry("mbstring.encoding_translation", "0", false),
+        entry("mbstring.language", Some("neutral"), true),
+        entry("mbstring.detect_order", None, true),
+        entry("mbstring.http_input", None, true),
+        entry("mbstring.http_output", None, true),
+        entry("mbstring.internal_encoding", None, true),
+        entry("mbstring.substitute_character", None, true),
+        entry("mbstring.encoding_translation", Some("0"), false),
         entry(
             "mbstring.http_output_conv_mimetypes",
-            "^(text/|application/xhtml\\+xml)",
+            Some("^(text/|application/xhtml\\+xml)"),
             true,
         ),
-        entry("mbstring.strict_detection", "0", true),
-        entry("mbstring.regex_stack_limit", "100000", true),
-        entry("mbstring.regex_retry_limit", "1000000", true),
+        entry("mbstring.strict_detection", Some("0"), true),
+        entry("mbstring.regex_stack_limit", Some("100000"), true),
+        entry("mbstring.regex_retry_limit", Some("1000000"), true),
     ]
 }
 
@@ -710,7 +711,8 @@ pub(crate) fn handlers() -> [(&'static [u8], php_ext::abi::OnModify); 12] {
 
 /// `OnUpdate_mbstring_language`.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
-fn on_language(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_language(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     let settings = settings(req);
     let Some(language) = Language::named(value) else {
         settings.language = Language::neutral();
@@ -723,18 +725,46 @@ fn on_language(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
 
 /// `OnUpdate_mbstring_detect_order`: the list the next request starts
 /// from, so this one's is left as it is.
-fn on_detect_order(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_detect_order(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    // No value, php's `NULL`, is no list, and taken.
+    let Some(value) = value else {
+        return Ok(true);
+    };
     Ok(encoding_list(req, value, None)?.is_some_and(|list| !list.is_empty()))
 }
 
 /// `if (new_value) php_error_docref(...)`, the deprecation of
 /// `mbstring.http_input`, `http_output` and `internal_encoding`, which
 /// php registers with no value (`NULL`): raised for every value handed
-/// in, but as the request ends an entry the host did not set is handed
-/// back that `NULL`, which this engine holds as the empty value, and
-/// raises nothing there.
-fn deprecated_entry(req: &mut Request, name: &str, value: &[u8]) {
-    if req.ini_stage() == IniStage::Deactivate && value.is_empty() {
+/// in, the empty string among them, and for none where the entry is
+/// handed back that `NULL`, as it is at the request's end where the
+/// host did not set it. Where the host set it empty, the end hands that
+/// back and deprecates it:
+///
+/// ```php
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'mbstring.http_input=', '-r', 'ini_set("mbstring.http_input", "UTF-8"); echo "end\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]); proc_close($p);
+/// ```
+/// ```expect process
+/// Deprecated: PHP Startup: Use of mbstring.http_input is deprecated in Unknown on line 0
+///
+/// Deprecated: ini_set(): Use of mbstring.http_input is deprecated in Command line code on line 1
+/// end
+///
+/// Deprecated: PHP Request Shutdown: Use of mbstring.http_input is deprecated in Unknown on line 0
+/// ```
+///
+/// Where it did not, the end hands back `NULL` and raises nothing:
+///
+/// ```php
+/// ini_set('mbstring.http_output', 'UTF-8'); echo "end\n";
+/// ```
+/// ```expect
+/// Deprecated: ini_set(): Use of mbstring.http_output is deprecated in %s on line 2
+/// end
+/// ```
+fn deprecated_entry(req: &mut Request, name: &str, value: Option<&[u8]>) {
+    if value.is_none() {
         return;
     }
     docref(
@@ -745,9 +775,10 @@ fn deprecated_entry(req: &mut Request, name: &str, value: &[u8]) {
 }
 
 /// `OnUpdate_mbstring_http_input`.
-fn on_http_input(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_http_input(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     deprecated_entry(req, "http_input", value);
-    let (origin, value) = own_or_php(req, value.to_vec(), "input_encoding");
+    let own = value.unwrap_or_default().to_vec();
+    let (origin, value) = own_or_php(req, own, "input_encoding");
     settings(req).http_input_origin = origin;
     set_http_input(req, &value).map(|done| done || origin == Origin::Php)
 }
@@ -770,9 +801,10 @@ fn set_http_input(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
 
 /// `OnUpdate_mbstring_http_output`.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
-fn on_http_output(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_http_output(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     deprecated_entry(req, "http_output", value);
-    let (origin, value) = own_or_php(req, value.to_vec(), "output_encoding");
+    let own = value.unwrap_or_default().to_vec();
+    let (origin, value) = own_or_php(req, own, "output_encoding");
     let settings = settings(req);
     settings.http_output_origin = origin;
     match named_or_pass(&value) {
@@ -786,9 +818,10 @@ fn on_http_output(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
 
 /// `OnUpdate_mbstring_internal_encoding`.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
-fn on_internal_encoding(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_internal_encoding(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     deprecated_entry(req, "internal_encoding", value);
-    let (origin, value) = own_or_php(req, value.to_vec(), "internal_encoding");
+    let own = value.unwrap_or_default().to_vec();
+    let (origin, value) = own_or_php(req, own, "internal_encoding");
     settings(req).internal_origin = origin;
     set_internal(req, &value);
     Ok(true)
@@ -813,24 +846,45 @@ fn set_internal(req: &mut Request, value: &[u8]) {
     crate::regex::internal_encoding_changed(req, value);
 }
 
-/// `OnUpdate_mbstring_substitute_character`.
+/// `OnUpdate_mbstring_substitute_character`: no value, php's `NULL`,
+/// which `ini_restore()` hands back, is the character `?`, and the
+/// detect order's `NULL` is no list, taken:
+///
+/// ```php
+/// ini_set('mbstring.substitute_character', '65'); ini_restore('mbstring.substitute_character');
+/// ini_set('mbstring.detect_order', 'ASCII'); ini_restore('mbstring.detect_order');
+/// var_dump(mb_substitute_character(), ini_get('mbstring.detect_order'));
+/// ```
+/// ```expect
+/// int(63)
+/// string(0) ""
+/// ```
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
-fn on_substitute_character(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_substitute_character(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     let settings = settings(req);
-    settings.substitute = settings.substitute.updated(value);
+    settings.substitute = match value {
+        Some(value) => settings.substitute.updated(value),
+        // No value, php's `NULL`: the character `?`.
+        None => Substitute {
+            mode: Mode::Char,
+            char: 0x3f,
+        },
+    };
     Ok(true)
 }
 
 /// `OnUpdate_mbstring_http_output_conv_mimetypes`: the pattern compiled
 /// by pcre, a pattern that does not compile refused.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
-fn on_conv_mimetypes(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_conv_mimetypes(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     Ok(crate::http::conv_mimetypes(req, value).is_ok())
 }
 
 /// `OnUpdateBool` over `strict_detection`.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
-fn on_strict_detection(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_strict_detection(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     settings(req).strict_detection = Request::ini_parse_bool(value);
     Ok(true)
 }
@@ -841,7 +895,8 @@ fn on_strict_detection(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> 
 /// `MINIT` ends, after `REGISTER_INI_ENTRIES` handed each entry the host
 /// left unset its default, so what an unknown encoding raises there is
 /// raised twice; this raises the registration's before the hook's.
-fn changed(req: &mut Request, name: &str, value: &[u8]) -> Result<bool, Thrown> {
+fn changed(req: &mut Request, name: &str, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     let (internal, http_output, http_input) = {
         let s = settings(req);
         (s.internal_origin, s.http_output_origin, s.http_input_origin)

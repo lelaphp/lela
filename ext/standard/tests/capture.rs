@@ -187,3 +187,19 @@ fn a_persistent_socket_is_lent_to_one_request_at_a_time() {
     both.sort();
     assert_eq!(both, vec![b"c".to_vec(), b"d".to_vec()]);
 }
+
+/// `Zend Multibyte Support` is `disabled` where no extension set the
+/// encoding functions, as php's is without mbstring
+/// (`Z/ext/standard/info.c:872-881`); the witness beside `general`
+/// holds `provided by mbstring` in the bundle.
+#[test]
+fn zend_multibyte_support_is_disabled_without_a_provider() {
+    let (stdout, fatal) = served("<?php phpinfo(INFO_GENERAL);");
+    assert_eq!(fatal, None);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "Zend Multibyte Support => disabled"),
+        "{stdout}"
+    );
+}

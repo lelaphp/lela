@@ -85,16 +85,16 @@ pub(crate) mod constants {
 /// ```
 pub(crate) fn ini() -> Vec<IniDecl> {
     [
-        ("assert.active", "1"),
-        ("assert.bail", "0"),
-        ("assert.warning", "1"),
-        ("assert.callback", ""),
-        ("assert.exception", "1"),
+        ("assert.active", Some("1")),
+        ("assert.bail", Some("0")),
+        ("assert.warning", Some("1")),
+        ("assert.callback", None),
+        ("assert.exception", Some("1")),
     ]
     .into_iter()
     .map(|(name, default)| IniDecl {
         name: Name(name.as_bytes().into()),
-        default: default.as_bytes().into(),
+        default: default.map(|default| default.as_bytes().into()),
         user: true,
         per_dir: true,
         system: true,
@@ -173,7 +173,8 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) {
 macro_rules! handler {
     ($name:ident, $entry:literal) => {
         #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
-        pub(crate) fn $name(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+        pub(crate) fn $name(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+            let value = value.unwrap_or_default();
             on_modify(req, $entry, value);
             Ok(true)
         }

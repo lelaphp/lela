@@ -48,7 +48,7 @@ use crate::State;
 pub(crate) fn ini() -> Vec<IniDecl> {
     let entry = |name: &[u8], default: &[u8]| IniDecl {
         name: Name(name.into()),
-        default: default.into(),
+        default: Some(default.into()),
         user: true,
         per_dir: true,
         system: true,
@@ -68,7 +68,8 @@ const SESSION_TAGS: &[u8] = b"a=href,area=href,frame=src,form=";
 /// `OnUpdateSessionTags`: a value that does not begin with the default
 /// is deprecated, and taken.
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
-pub(super) fn on_session_tags(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+pub(super) fn on_session_tags(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     if !value.starts_with(SESSION_TAGS) {
         docref(
             req,
@@ -82,7 +83,8 @@ pub(super) fn on_session_tags(req: &mut Request, value: &[u8]) -> Result<bool, T
 /// `OnUpdateSessionHosts`: any value but the empty one is deprecated,
 /// and taken.
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
-pub(super) fn on_session_hosts(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+pub(super) fn on_session_hosts(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     if !value.is_empty() {
         docref(
             req,

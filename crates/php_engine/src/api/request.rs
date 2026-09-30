@@ -126,15 +126,18 @@ pub(crate) fn halt_offset_key(file: &[u8]) -> Vec<u8> {
 /// by `_extension_ini_string`, `ReflectionExtension::getINIEntries` and
 /// `ini_get_all`: the declaration with its `modifiable` bits, the
 /// extension that registered it (`module_number`), `Core` for the
-/// engine's own table, the value in force, and the value the entry had
-/// before the request changed it, php's `orig_value`, which is `Some`
-/// exactly where php's `modified` is set.
+/// engine's own table, the value in force, the value every request
+/// starts with, which is php's `orig_value` where the request changed
+/// the entry and its `value` where it did not (the master value), and
+/// whether the request changed it, php's `modified`. A value is `None`
+/// where the entry has none, php's `NULL`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IniEntry {
     pub decl: IniDecl,
     pub extension: ExtensionId,
-    pub value: Box<[u8]>,
-    pub original: Option<Box<[u8]>>,
+    pub value: Option<Box<[u8]>>,
+    pub master: Option<Box<[u8]>>,
+    pub modified: bool,
 }
 
 /// One bucket of the realpath cache, `realpath_cache_bucket` as
@@ -1721,9 +1724,10 @@ pub struct Request {
     map: MapTable,
     states: Vec<(TypeId, Box<dyn Any + Send>)>,
     /// `EG(modified_ini_directives)`: each entry the request changed,
-    /// in the order it first changed, with the value it holds now; the
-    /// value it started with is the engine's ([`Request::ini_deactivate`]).
-    ini: Vec<(Vec<u8>, Vec<u8>)>,
+    /// in the order it first changed, with the value it holds now, `None`
+    /// where it has none (php's `NULL`); the value it started with is the
+    /// engine's ([`Request::ini_deactivate`]).
+    ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     /// The entries this request's host locked past the engine's
     /// ([`crate::engine::IniOrigin::Admin`]).
     locked: Vec<Vec<u8>>,
@@ -14293,7 +14297,7 @@ impl Request {
     /// value before it walks to the next: `opcache.log_verbosity_level`
     /// decides what opcache's handlers after it log.
     pub(crate) fn take_startup_value(&mut self, name: &[u8], value: &[u8]) {
-        self.ini_hold(name, value);
+        self.ini_hold(name, Some(value));
     }
 
     /// What the startup's handlers wrote to the error stream, php's
@@ -17113,7 +17117,7 @@ impl Request {
     /// replaced by the number's decimal text, `zend_long_to_str`, past
     /// its `on_modify`, and the word set to the number.
     pub(crate) fn alter_error_reporting(&mut self, level: i64) {
-        self.ini_hold(b"error_reporting", level.to_string().as_bytes());
+        self.ini_hold(b"error_reporting", Some(level.to_string().as_bytes()));
         self.error_reporting = level;
     }
 
@@ -17125,16 +17129,14 @@ impl Request {
         self.error_reporting = self.ini_error_reporting();
     }
 
-    /// `INI_INT("error_reporting")`, `E_ALL` where the entry is unset
-    /// (`OnUpdateErrorReporting`), its empty value being php's `NULL`, the
-    /// default: the level the entry says, which is what a fiber starts
+    /// `INI_INT("error_reporting")`, `E_ALL` where the entry has no value
+    /// (`OnUpdateErrorReporting`), php's `NULL`, the default, and the
+    /// empty string's `atoi`, 0, where it was set empty: the level the
+    /// entry says, which is what a fiber starts
     /// its body at (`zend_fiber_execute`), whatever an `@` around the
     /// `start` masked.
     pub(crate) fn ini_error_reporting(&self) -> i64 {
-        match self.ini_get(b"error_reporting") {
-            None | Some([]) => E_ALL,
-            Some(value) => ini_atol(value),
-        }
+        self.ini_value(b"error_reporting").map_or(E_ALL, ini_atol)
     }
 
     /// `ZEND_FUNCTION(set_error_handler)`
@@ -18653,6 +18655,22 @@ impl Request {
         self.extension_of(extension).map(|e| e.name.as_str())
     }
 
+    /// `zend_multibyte_get_functions()`: the extension that handed the
+    /// engine its encoding functions
+    /// ([`crate::api::abi::ExtensionBuilder::encodings`]), the last in
+    /// bundle order as a later `zend_multibyte_set_functions` replaces
+    /// an earlier one; none where no extension did, and Zend's dummies
+    /// answer. Its name is php's `provider_name`.
+    #[must_use]
+    pub fn multibyte_provider(&self) -> Option<ExtensionId> {
+        self.shared
+            .extensions
+            .iter()
+            .rposition(|e| e.encodings.is_some())
+            .and_then(|at| u32::try_from(at).ok())
+            .map(ExtensionId)
+    }
+
     /// `module->version`: what the extension declared with
     /// `ExtensionBuilder::version`, else `PHP_VERSION`, as `Core`'s is.
     #[must_use]
@@ -18802,7 +18820,7 @@ impl Request {
                 let (user, per_dir, system) = Request::ini_modifiable(name);
                 let decl = IniDecl {
                     name: Name(name.as_slice().into()),
-                    default: default.as_slice().into(),
+                    default: default.as_deref().map(Into::into),
                     user,
                     per_dir,
                     system,
@@ -18813,19 +18831,26 @@ impl Request {
     }
 
     /// One entry as the request sees it: the value in force, the
-    /// request's `ini_set` over the engine's startup value, and the
-    /// startup value again as `original` where the request changed it.
+    /// request's `ini_set` over the engine's startup value, the startup
+    /// value, and whether the request changed it.
     fn ini_entry(&self, decl: IniDecl, extension: ExtensionId) -> IniEntry {
         let name = decl.name.0.as_ref();
-        let startup = self.shared.ini_default(name).unwrap_or(&decl.default);
+        let master = self
+            .shared
+            .ini_defaults()
+            .iter()
+            .find(|(n, _)| n.as_slice() == name)
+            .map_or_else(
+                || decl.default.clone(),
+                |(_, v)| v.as_deref().map(Into::into),
+            );
         let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
-        let value = changed.map_or(startup, |(_, v)| v.as_slice()).into();
-        let original = changed.map(|_| startup.into());
         IniEntry {
+            value: changed.map_or_else(|| master.clone(), |(_, v)| v.as_deref().map(Into::into)),
+            master,
+            modified: changed.is_some(),
             decl,
             extension,
-            value,
-            original,
         }
     }
 
@@ -19527,14 +19552,39 @@ impl Request {
 
     // -------------------------------------------------- ini
 
-    /// `ini_get()`: the request's override, else the engine's default.
+    /// `ini_get()`, `zend_ini_get_value`: the request's override, else
+    /// the engine's default, the empty string where the entry has no
+    /// value (php's `NULL`); `None` where php has no such entry.
     #[must_use]
     pub fn ini_get(&self, name: &[u8]) -> Option<&[u8]> {
-        self.ini
-            .iter()
-            .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, v)| v.as_slice())
-            .or_else(|| self.shared.ini_default(name))
+        match self.ini.iter().find(|(n, _)| n.as_slice() == name) {
+            Some((_, value)) => Some(value.as_deref().unwrap_or_default()),
+            None => self.shared.ini_default(name),
+        }
+    }
+
+    /// `INI_STR`, `zend_ini_string_ex`: the entry's value in force as php
+    /// holds it, `None` where it has none (`NULL`), as for a name php has
+    /// no entry for. What a rule that tells `NULL` from the empty string
+    /// reads, as `-d error_reporting=` sets the level to 0 where the
+    /// entry's `NULL` is `E_ALL`:
+    ///
+    /// ```php
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'error_reporting=', '-r', 'var_dump(error_reporting(), ini_get("error_reporting")); echo $undefined;'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// ini_set('error_reporting', ''); var_dump(error_reporting());
+    /// ```
+    /// ```expect process
+    /// int(0)
+    /// string(0) ""
+    /// int(0)
+    /// ```
+    #[must_use]
+    pub fn ini_value(&self, name: &[u8]) -> Option<&[u8]> {
+        match self.ini.iter().find(|(n, _)| n.as_slice() == name) {
+            Some((_, value)) => value.as_deref(),
+            None => self.shared.ini_default_value(name),
+        }
     }
 
     /// `ini_set()`: the previous value, or `None` for an entry that does
@@ -19574,7 +19624,7 @@ impl Request {
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         let allowed =
             Request::ini_modifiable(name).0 && self.ini_user(name) && !self.ini_locked(name);
-        self.ini_alter(name, value, allowed)
+        self.ini_alter(name, Some(value), allowed)
     }
 
     /// The host's entries for this request, each as its
@@ -19584,7 +19634,7 @@ impl Request {
         for (name, value, mode) in std::mem::take(&mut self.description.ini) {
             let allowed =
                 mode != IniOrigin::PerDir || (self.ini_per_dir(&name) && !self.ini_locked(&name));
-            let taken = matches!(self.ini_alter(&name, &value, allowed), Ok(Some(_)));
+            let taken = matches!(self.ini_alter(&name, Some(&value), allowed), Ok(Some(_)));
             if taken && mode == IniOrigin::Admin {
                 self.locked.push(name);
             }
@@ -19612,12 +19662,13 @@ impl Request {
     }
 
     /// `zend_alter_ini_entry_ex` once `allowed` has answered the entry's
-    /// `modifiable` for the stage: the previous value, or `None` where the
-    /// entry does not exist, is not allowed, or refuses the value.
+    /// `modifiable` for the stage, over `new_value`, `None` for php's
+    /// `NULL`: the previous value as `ini_get()` reads it, or `None` where
+    /// the entry does not exist, is not allowed, or refuses the value.
     fn ini_alter(
         &mut self,
         name: &[u8],
-        value: &[u8],
+        new_value: Option<&[u8]>,
         allowed: bool,
     ) -> Result<Option<Vec<u8>>, Thrown> {
         let Some(previous) = self.ini_get(name).map(<[u8]>::to_vec) else {
@@ -19629,11 +19680,15 @@ impl Request {
         // Changed from here, whether the rules below take the value or
         // not, as `zend_alter_ini_entry_ex` marks the entry `modified`
         // before it serves `on_modify`.
-        self.ini_hold(name, &previous);
-        if Request::ini_verdict(name, value) == IniVerdict::Rejected {
+        let held = self.ini_value(name).map(<[u8]>::to_vec);
+        self.ini_hold(name, held.as_deref());
+        if name == b"fiber.stack_size" && !crate::fiber::stack_size_updated(self, new_value) {
             return Ok(None);
         }
-        if name == b"fiber.stack_size" && !crate::fiber::stack_size_updated(self, value) {
+        // The core table's other rules read `NULL` as the empty string,
+        // as php's do.
+        let value = new_value.unwrap_or_default();
+        if Request::ini_verdict(name, value) == IniVerdict::Rejected {
             return Ok(None);
         }
         if name == b"zend.assertions" && !self.assertions_updated(value) {
@@ -19683,6 +19738,7 @@ impl Request {
             let message = "Directive 'report_memleaks' is deprecated";
             crate::api::raising::docref(self, Level::Deprecated, message);
         }
+        let value = new_value.map(|_| value);
         if let Some(handler) = self.ini_handler(name)
             && !handler(self, value)?
         {
@@ -19693,7 +19749,7 @@ impl Request {
             b"max_execution_time" => self.arm_timer(),
             b"error_reporting" => self.update_error_reporting(),
             b"zend.enable_gc" => {
-                self.heap.gc_enable(ini_truth(Some(value)));
+                self.heap.gc_enable(ini_truth(value));
             }
             _ => {}
         }
@@ -19703,10 +19759,11 @@ impl Request {
     /// The entry `name` holding `value` in the request: in its place
     /// among the entries the request changed, or last where it had not
     /// changed it yet.
-    fn ini_hold(&mut self, name: &[u8], value: &[u8]) {
+    fn ini_hold(&mut self, name: &[u8], value: Option<&[u8]>) {
+        let value = value.map(<[u8]>::to_vec);
         match self.ini.iter_mut().find(|(n, _)| n.as_slice() == name) {
-            Some((_, held)) => *held = value.to_vec(),
-            None => self.ini.push((name.to_vec(), value.to_vec())),
+            Some((_, held)) => *held = value,
+            None => self.ini.push((name.to_vec(), value)),
         }
     }
 
@@ -19746,10 +19803,8 @@ impl Request {
         if !user || self.ini_locked(name) || !self.ini.iter().any(|(n, _)| n == name) {
             return Ok(());
         }
-        let Some(original) = self.shared.ini_default(name).map(<[u8]>::to_vec) else {
-            return Ok(());
-        };
-        if self.ini_alter(name, &original, true)?.is_some() {
+        let original = self.shared.ini_default_value(name).map(<[u8]>::to_vec);
+        if self.ini_alter(name, original.as_deref(), true)?.is_some() {
             self.ini.retain(|(n, _)| n.as_slice() != name);
         }
         Ok(())
@@ -19796,10 +19851,10 @@ impl Request {
         let changed: Vec<Vec<u8>> = self.ini.iter().map(|(n, _)| n.clone()).collect();
         for name in changed {
             if let Some(handler) = self.ini_handler(&name) {
-                let original = self.shared.ini_default(&name).unwrap_or_default().to_vec();
+                let original = self.shared.ini_default_value(&name).map(<[u8]>::to_vec);
                 // Each rule under its own `zend_try`: what it bails out
                 // with leaves it, and the next entry is restored.
-                let _ = handler(self, &original);
+                let _ = handler(self, original.as_deref());
                 self.catch_bailout();
             }
             self.ini.retain(|(n, _)| *n != name);
@@ -21043,7 +21098,7 @@ impl Request {
     /// call left.
     pub fn gc_enable(&mut self, enabled: bool) {
         let value: &[u8] = if enabled { b"1" } else { b"0" };
-        self.ini_hold(b"zend.enable_gc", value);
+        self.ini_hold(b"zend.enable_gc", Some(value));
         self.heap.gc_enable(enabled);
     }
 
@@ -22354,20 +22409,23 @@ mod tests {
     #[test]
     fn an_extension_entrys_on_modify_is_served_by_ini_set() {
         #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
-        fn guarded(req: &mut Request, value: &[u8]) -> Result<bool, crate::api::raising::Thrown> {
-            if value == b"0" {
+        fn guarded(
+            req: &mut Request,
+            value: Option<&[u8]>,
+        ) -> Result<bool, crate::api::raising::Thrown> {
+            if value == Some(b"0") {
                 crate::api::raising::docref(
                     req,
                     Level::Deprecated,
                     "t.flag INI setting is deprecated",
                 );
             }
-            Ok(value != b"bad")
+            Ok(value != Some(b"bad"))
         }
         let extension = crate::api::abi::ExtensionBuilder::default()
             .ini(vec![php_unit::decl::IniDecl {
                 name: php_unit::decl::Name(b"t.flag".as_slice().into()),
-                default: b"1".as_slice().into(),
+                default: Some(b"1".as_slice().into()),
                 user: true,
                 per_dir: true,
                 system: true,
@@ -22424,8 +22482,11 @@ mod tests {
     #[test]
     fn a_startup_value_the_on_modify_refuses_keeps_the_default() {
         #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
-        fn guarded(req: &mut Request, value: &[u8]) -> Result<bool, crate::api::raising::Thrown> {
-            if value == b"bad" {
+        fn guarded(
+            req: &mut Request,
+            value: Option<&[u8]>,
+        ) -> Result<bool, crate::api::raising::Thrown> {
+            if value == Some(b"bad") {
                 crate::api::raising::docref(req, Level::Warning, "t.flag refused");
                 return Ok(false);
             }
@@ -22435,7 +22496,7 @@ mod tests {
             crate::api::abi::ExtensionBuilder::default()
                 .ini(vec![php_unit::decl::IniDecl {
                     name: php_unit::decl::Name(b"t.flag".as_slice().into()),
-                    default: b"1".as_slice().into(),
+                    default: Some(b"1".as_slice().into()),
                     user: true,
                     per_dir: true,
                     system: true,

@@ -16,6 +16,7 @@ use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, warning};
 use php_ext::request::Request;
+use php_ext::syntax::Scanning;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use constants::{CONNECTION_ABORTED, INI_PERDIR, INI_SYSTEM, INI_USER};
@@ -257,11 +258,10 @@ pub(crate) fn minfo(req: &mut Request) {
                 true => String::from("Off"),
                 false => String::from_utf8_lossy(value).into_owned(),
             };
-            let master = entry.original.as_deref().unwrap_or(&entry.value);
             [
                 String::from_utf8_lossy(name).into_owned(),
-                shown(&entry.value),
-                shown(master),
+                shown(entry.value.as_deref().unwrap_or_default()),
+                shown(entry.master.as_deref().unwrap_or_default()),
             ]
         })
         .collect();
@@ -1151,7 +1151,34 @@ fn error_log(
 /// `global_value`, `local_value` and `access`; with an extension named
 /// as `module_registry` keys it, lower-case, its own entries alone,
 /// `core` being the one name every entry is walked for. A name no
-/// extension of the bundle has is the warning and `false`.
+/// extension of the bundle has is the warning and `false`. An entry with
+/// no value, php's `NULL`, is `null`, and its `global_value` once the
+/// request changed it is the value it was changed to, as php reads
+/// `orig_value` and then `value`:
+///
+/// ```php
+/// ini_set('from', 'me');
+/// var_dump(ini_get_all(null, false)['user_agent'], ini_get_all()['user_agent'], ini_get_all()['from']);
+/// ```
+/// ```expect
+/// NULL
+/// array(3) {
+///   ["global_value"]=>
+///   NULL
+///   ["local_value"]=>
+///   NULL
+///   ["access"]=>
+///   int(7)
+/// }
+/// array(3) {
+///   ["global_value"]=>
+///   string(2) "me"
+///   ["local_value"]=>
+///   string(2) "me"
+///   ["access"]=>
+///   int(7)
+/// }
+/// ```
 ///
 /// ```php
 /// var_dump(ini_get_all("reflection"), ini_get_all("pcre", false));
@@ -1212,17 +1239,13 @@ fn ini_get_all(
             let access = (i64::from(entry.decl.user) * INI_USER)
                 | (i64::from(entry.decl.per_dir) * INI_PERDIR)
                 | (i64::from(entry.decl.system) * INI_SYSTEM);
-            let global = entry.original.as_deref().unwrap_or(&entry.value).to_vec();
+            // `orig_value`, else `value`: an entry changed from no value
+            // shows the value it was changed to.
+            let global = entry.master.as_deref().or(entry.value.as_deref());
             let mut option = PhpArray::new(req)?;
             for (name, value) in [
-                (
-                    &b"global_value"[..],
-                    Value::string(PhpString::new(req, &global)?),
-                ),
-                (
-                    b"local_value",
-                    Value::string(PhpString::new(req, &entry.value)?),
-                ),
+                (&b"global_value"[..], ini_value(req, global)?),
+                (b"local_value", ini_value(req, entry.value.as_deref())?),
                 (b"access", Value::int(access)),
             ] {
                 let name = Key::Str(PhpString::new(req, name)?);
@@ -1230,11 +1253,20 @@ fn ini_get_all(
             }
             Value::array(option)
         } else {
-            Value::string(PhpString::new(req, &entry.value)?)
+            ini_value(req, entry.value.as_deref())?
         };
         all.set(req, key, value)?;
     }
     Ok(OrFalse::Value(all))
+}
+
+/// An entry's value as `ini_get_all()` answers it: the string, or `null`
+/// where the entry has none (php's `NULL`).
+fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Value, Thrown> {
+    Ok(match value {
+        Some(value) => Value::string(PhpString::new(req, value)?),
+        None => Value::null(),
+    })
 }
 
 /// `ini_restore(string $option): void`, `zend_restore_ini_entry` at
@@ -1654,6 +1686,22 @@ fn scanned_file(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>>, T
 /// bool(false)
 /// highlight_file(): Argument #1 ($filename) must not contain any null bytes
 /// ```
+///
+/// Under `zend.multibyte` the file is read as a compile reads it, its
+/// encoding found and the source filter passed over it
+/// ([`php_ext::syntax::Scanning::File`]), so a `Shift_JIS` file is
+/// highlighted as the text it holds, `ソ`'s trail byte no backslash:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/' . uniqid('m') . '.php'; file_put_contents($f, "<?php\necho \"\x83\x74\x83\x5c\"; // \x95\x5c\n");
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'zend.multibyte=1', '-d', 'zend.script_encoding=Shift_JIS', '-d', 'internal_encoding=UTF-8', '-r', 'highlight_file($argv[1]);', $f], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]); proc_close($p); unlink($f);
+/// ```
+/// ```expect process
+/// <pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php
+/// </span><span style="color: #007700">echo </span><span style="color: #DD0000">"フソ"</span><span style="color: #007700">; </span><span style="color: #FF8000">// 表
+/// </span></code></pre>
+/// ```
 #[php_function(aliases(show_source))]
 fn highlight_file(
     req: &mut Request,
@@ -1672,7 +1720,7 @@ fn highlight_file(
         docref(req, Level::Warning, &text);
         return Ok(Union::B(false));
     };
-    let html = php_ext::syntax::highlight(req, &source);
+    let html = php_ext::syntax::highlight(req, &source, Scanning::File)?;
     if returned {
         return captured(req, &html).map(Union::A);
     }
@@ -1699,13 +1747,25 @@ fn highlight_file(
 /// echo $a; "
 /// string(0) ""
 /// ```
+///
+/// Under `zend.multibyte` the file is read as a compile reads it:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/' . uniqid('m') . '.php'; file_put_contents($f, "<?php\necho \"\x83\x74\x83\x5c\"; // \x95\x5c\n");
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'zend.multibyte=1', '-d', 'zend.script_encoding=Shift_JIS', '-d', 'internal_encoding=UTF-8', '-r', 'echo php_strip_whitespace($argv[1]);', $f], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]); proc_close($p); unlink($f);
+/// ```
+/// ```expect process
+/// <?php
+/// echo "フソ";
+/// ```
 #[php_function]
 fn php_strip_whitespace(req: &mut Request, filename: Path) -> Result<PhpString, Thrown> {
     let Path(filename) = filename;
     let Some(source) = scanned_file(req, filename.as_bytes())? else {
         return PhpString::new(req, b"");
     };
-    let stripped = php_ext::syntax::strip(req, &source);
+    let stripped = php_ext::syntax::strip(req, &source)?;
     captured(req, &stripped)
 }
 
@@ -1732,6 +1792,22 @@ fn captured(req: &mut Request, printed: &[u8]) -> Result<PhpString, Thrown> {
 /// <pre><code style="color: #000000">x</code></pre>string(130) "<pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php 1</span><span style="color: #007700">;</span></code></pre>"
 /// bool(true)
 /// ```
+///
+/// Under `zend.multibyte` the string is read in the internal encoding,
+/// `zend_prepare_string_for_scanning`'s, through the filters it needs,
+/// and each token written through the token filter, back in the
+/// internal encoding:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/' . uniqid('m') . '.php'; file_put_contents($f, "<?php\necho \"\x83\x74\x83\x5c\"; // \x95\x5c\n");
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'zend.multibyte=1', '-d', 'zend.script_encoding=Shift_JIS', '-d', 'internal_encoding=Shift_JIS', '-r', 'echo mb_convert_encoding(highlight_string(file_get_contents($argv[1]), true), "UTF-8", "Shift_JIS");', $f], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]); proc_close($p); unlink($f);
+/// ```
+/// ```expect process
+/// <pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php
+/// </span><span style="color: #007700">echo </span><span style="color: #DD0000">"フソ"</span><span style="color: #007700">; </span><span style="color: #FF8000">// 表
+/// </span></code></pre>
+/// ```
 #[php_function]
 fn highlight_string(
     req: &mut Request,
@@ -1739,7 +1815,7 @@ fn highlight_string(
     #[php(default = false)] r#return: bool,
 ) -> Result<Union<PhpString, True>, Thrown> {
     let returned = r#return;
-    let html = php_ext::syntax::highlight(req, string.as_bytes());
+    let html = php_ext::syntax::highlight(req, string.as_bytes(), Scanning::String)?;
     if returned {
         return captured(req, &html).map(Union::A);
     }

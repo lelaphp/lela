@@ -108,7 +108,7 @@ pub fn extension() -> Extension {
             INI.iter()
                 .map(|(name, default)| IniDecl {
                     name: Name((*name).into()),
-                    default: (*default).into(),
+                    default: Some((*default).into()),
                     user: true,
                     per_dir: true,
                     system: true,
@@ -171,14 +171,14 @@ fn exif_info(req: &mut Request) {
 
 /// `OnUpdateEncode`: a non-empty value must parse as an encoding list.
 #[expect(clippy::unnecessary_wraps, reason = "the `on_modify` slot's shape")]
-fn on_update_encode(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
-    Ok(value.is_empty() || parses(req, value))
+fn on_update_encode(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    Ok(value.is_none_or(|value| value.is_empty() || parses(req, value)))
 }
 
 /// `OnUpdateDecode`: the value must parse as an encoding list.
 #[expect(clippy::unnecessary_wraps, reason = "the `on_modify` slot's shape")]
-fn on_update_decode(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
-    Ok(parses(req, value))
+fn on_update_decode(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    Ok(value.is_none_or(|value| parses(req, value)))
 }
 
 /// `zend_multibyte_parse_encoding_list`, with php's warning where it

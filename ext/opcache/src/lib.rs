@@ -94,7 +94,8 @@ impl Accelerator {
             .entries
             .iter()
             .find(|(name, _)| name.as_slice() == b"opcache.blacklist_filename")
-            .map_or(&[][..], |(_, value)| value.as_slice());
+            .and_then(|(_, value)| value.as_deref())
+            .unwrap_or_default();
         Accelerator {
             blacklist: Blacklist::load(filename),
         }
@@ -1253,8 +1254,9 @@ fn display_ini_entries(req: &mut Request) {
         .filter_map(|held| {
             let name = String::from_utf8_lossy(&held.decl.name.0).into_owned();
             let entry = ini::named(&name)?;
-            let master = held.original.as_deref().unwrap_or(&held.value);
-            Some([name.clone(), entry.shown(&held.value), entry.shown(master)])
+            let local = held.value.as_deref().unwrap_or_default();
+            let master = held.master.as_deref().unwrap_or_default();
+            Some([name.clone(), entry.shown(local), entry.shown(master)])
         })
         .collect();
     let rows: Vec<[&str; 3]> = rows

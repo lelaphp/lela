@@ -59,7 +59,8 @@ pub(super) fn guess_timezone(req: &mut Request) -> Vec<u8> {
 /// string(13) "Europe/London"
 /// ```
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature, which may throw
-pub(super) fn on_update_timezone(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+pub(super) fn on_update_timezone(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     if Tzdb::builtin().is_valid(value) {
         return Ok(true);
     }

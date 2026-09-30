@@ -249,7 +249,18 @@ fn zend_version(req: &Request) -> String {
 /// what this build is, and the box naming the engine. The build's own
 /// facts, its date, system, provider and configure line, are the pinned
 /// build's, as `PHP_BUILD_DATE` and `PHP_BUILD_PROVIDER` are; the rows
-/// after them say what this engine is.
+/// after them say what this engine is. `Zend Multibyte Support` names
+/// the extension that set the encoding functions, `provided by %s` of
+/// its `provider_name`, and is `disabled` where none did
+/// (`Z/ext/standard/info.c:872-881`):
+///
+/// ```php
+/// ob_start(); phpinfo(INFO_GENERAL); preg_match('/^Zend Multibyte Support => .*$/m', ob_get_clean(), $row);
+/// echo $row[0], "\n";
+/// ```
+/// ```expect
+/// Zend Multibyte Support => provided by mbstring
+/// ```
 fn general(req: &mut Request) {
     if html(req) {
         let logo = if crate::ffi::local_month_day() == Some((3, 1)) {
@@ -280,6 +291,13 @@ fn general(req: &mut Request) {
         .map(|t| t.as_bytes().to_vec())
         .collect();
     let filters = req.stream_filters();
+    let multibyte = req
+        .multibyte_provider()
+        .and_then(|provider| req.extension_name(provider))
+        .map_or_else(
+            || String::from("disabled"),
+            |name| format!("provided by {name}"),
+        );
     let streams = [
         stream_hash(req, "PHP Streams", &wrappers),
         stream_hash(req, "Stream Socket Transports", &transports),
@@ -311,7 +329,7 @@ fn general(req: &mut Request) {
         ["Thread Safety", "disabled"],
         ["Zend Signal Handling", "disabled"],
         ["Zend Memory Manager", "enabled"],
-        ["Zend Multibyte Support", "disabled"],
+        ["Zend Multibyte Support", &multibyte],
         ["Zend Max Execution Timers", "disabled"],
         ["IPv6 Support", "enabled"],
         ["DTrace Support", "disabled"],

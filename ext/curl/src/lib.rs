@@ -823,7 +823,7 @@ pub fn extension() -> Extension {
         .class::<file::CURLStringFile>()
         .ini(vec![IniDecl {
             name: Name(CAINFO.into()),
-            default: b"".as_slice().into(),
+            default: Some(b"".as_slice().into()),
             user: false,
             per_dir: false,
             system: true,

@@ -103,7 +103,7 @@ pub(super) fn declared() -> Vec<IniDecl> {
             let per_dir = matches!(kind, Kind::PerDir | Kind::PerDirBool);
             IniDecl {
                 name: Name(name.as_bytes().into()),
-                default: default.as_bytes().into(),
+                default: Some(default.as_bytes().into()),
                 user: !per_dir,
                 per_dir: true,
                 // `ZEND_INI_PERDIR` alone, which `php --re` shows as
@@ -435,7 +435,8 @@ fn per_dir(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> boo
 /// from `ini_set()` and [`alter`]; one function per entry, since an
 /// `on_modify` is told the value and not the name.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature, which may throw
-fn modify<const AT: usize>(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn modify<const AT: usize>(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     let Some((name, _, _)) = ENTRIES.get(AT) else {
         return Ok(true);
     };

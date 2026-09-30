@@ -57,10 +57,11 @@ pub trait Multibyte: Encodings {
 }
 
 /// The startup ini view an extension's engine state is built from: what
-/// the host set before the first request, immutable afterwards.
+/// the host set before the first request, immutable afterwards, each
+/// entry's value `None` where it has none (php's `NULL`).
 #[derive(Debug, Clone, Default)]
 pub struct StartupIni {
-    pub entries: Vec<(Vec<u8>, Vec<u8>)>,
+    pub entries: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
 /// What an ini entry's `on_modify` function says of a new value.
@@ -446,11 +447,14 @@ pub enum Lookup {
 /// own entry over php once it has started (`ZEND_INI_STAGE_ACTIVATE`),
 /// and as the request ends with the value an entry the request changed
 /// started with (`ZEND_INI_STAGE_DEACTIVATE`); [`Request::ini_stage`]
-/// says which. It raises what the entry's handler
+/// says which. The value is php's `new_value`, `None` where it has none
+/// (`NULL`), which an entry registered with no value is handed back as
+/// the request ends or `ini_restore()` restores it, and which a rule may
+/// read apart from the empty string. It raises what the entry's handler
 /// raises, and answers whether the value is taken, `false` being php's
 /// `FAILURE`, which leaves the entry as it was, its default at startup,
 /// and makes `ini_set()` answer `false`.
-pub type OnModify = fn(&mut Request, &[u8]) -> Result<bool, Thrown>;
+pub type OnModify = fn(&mut Request, Option<&[u8]>) -> Result<bool, Thrown>;
 
 /// The stage an [`OnModify`] is served at, php's `ZEND_INI_STAGE_*`
 /// (`Z/Zend/zend_ini.h`) as this engine reaches them.

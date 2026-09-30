@@ -348,9 +348,9 @@ fn openssl_error_string(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown>
 /// string(0) ""
 /// ```
 pub fn extension() -> Extension {
-    let ini = |name: &str, default: &str| IniDecl {
+    let ini = |name: &str, default: Option<&str>| IniDecl {
         name: Name(name.as_bytes().into()),
-        default: default.as_bytes().into(),
+        default: default.map(|default| default.as_bytes().into()),
         user: false,
         per_dir: true,
         system: false,
@@ -360,9 +360,9 @@ pub fn extension() -> Extension {
         .fold(ExtensionBuilder::default(), ExtensionBuilder::register);
     builder
         .ini(vec![
-            ini("openssl.cafile", ""),
-            ini("openssl.capath", ""),
-            ini("openssl.libctx", "custom"),
+            ini("openssl.cafile", None),
+            ini("openssl.capath", None),
+            ini("openssl.libctx", Some("custom")),
         ])
         .constants(constants::declared())
         .class::<x509::OpenSSLCertificate>()
@@ -456,7 +456,8 @@ pub fn extension() -> Extension {
 /// bool(false)
 /// ```
 #[allow(clippy::unnecessary_wraps)] // the ABI's `OnModify`
-fn on_update_libctx(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_update_libctx(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     if value == b"default" || value == b"custom" {
         return Ok(true);
     }

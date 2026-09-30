@@ -128,7 +128,7 @@ impl Kind {
 pub fn extension() -> Extension {
     let ini = |kind: Kind| IniDecl {
         name: Name(kind.entry().into_bytes().into()),
-        default: Box::new([]),
+        default: Some(Box::new([])),
         user: true,
         per_dir: true,
         system: true,
@@ -235,17 +235,20 @@ fn on_modify(req: &mut Request, kind: Kind, value: &[u8]) -> bool {
 }
 
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
-fn on_input_encoding(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_input_encoding(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     Ok(on_modify(req, Kind::Input, value))
 }
 
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
-fn on_output_encoding(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_output_encoding(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     Ok(on_modify(req, Kind::Output, value))
 }
 
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
-fn on_internal_encoding(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_internal_encoding(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     Ok(on_modify(req, Kind::Internal, value))
 }
 

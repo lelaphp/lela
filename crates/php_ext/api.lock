@@ -510,6 +510,7 @@ request::Request::ini_parse_quantity
 request::Request::ini_restore
 request::Request::ini_set
 request::Request::ini_stage
+request::Request::ini_value
 request::Request::input_variables
 request::Request::interrupt
 request::Request::is_uploaded_file
@@ -519,6 +520,7 @@ request::Request::loaded_extensions
 request::Request::made_superglobal
 request::Request::memory_peak
 request::Request::memory_usage
+request::Request::multibyte_provider
 request::Request::named_arguments
 request::Request::new_stream
 request::Request::open_dir
@@ -726,6 +728,7 @@ syntax::Options
 syntax::Parsed
 syntax::Parsed::dump
 syntax::ScannedToken
+syntax::Scanning
 syntax::SyntaxKind
 syntax::Token
 syntax::TokenId

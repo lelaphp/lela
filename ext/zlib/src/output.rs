@@ -340,7 +340,8 @@ pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
 /// Warning: ini_set(): Cannot change zlib.output_compression - headers already sent in %s on line 3
 /// bool(false)
 /// ```
-pub(crate) fn on_compression(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     let (compression, invalid) = parse(value);
     if let Some(error) = invalid {
         let text = format!("Invalid \"{COMPRESSION}\" setting. {error}");
@@ -376,7 +377,7 @@ pub(crate) fn on_compression(req: &mut Request, value: &[u8]) -> Result<bool, Th
 /// `OnUpdate_zlib_output_handler`: refused at runtime once the headers
 /// went out; the request's end hands it back its value past them.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
-pub(crate) fn on_handler(req: &mut Request, _value: &[u8]) -> Result<bool, Thrown> {
+pub(crate) fn on_handler(req: &mut Request, _value: Option<&[u8]>) -> Result<bool, Thrown> {
     if matches!(req.ini_stage(), IniStage::Activate | IniStage::Runtime)
         && req.headers_sent().is_some()
     {
@@ -478,8 +479,8 @@ pub(crate) fn info_ini(req: &mut Request) {
             let entry = entries
                 .iter()
                 .find(|e| e.decl.name.0.as_ref() == name.as_bytes());
-            let local = entry.map_or(&[][..], |e| &e.value[..]);
-            let master = entry.map_or(&[][..], |e| e.original.as_deref().unwrap_or(&e.value[..]));
+            let local = entry.and_then(|e| e.value.as_deref()).unwrap_or_default();
+            let master = entry.and_then(|e| e.master.as_deref()).unwrap_or_default();
             [(*name).to_string(), shown(name, local), shown(name, master)]
         })
         .collect();

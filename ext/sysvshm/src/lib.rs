@@ -66,7 +66,7 @@ impl Config {
             .entries
             .iter()
             .find(|(name, _)| name.as_slice() == b"sysvshm.init_mem")
-            .map_or(10000, |(_, value)| leading_long(value));
+            .map_or(10000, |(_, value)| value.as_deref().map_or(0, leading_long));
         Config { init_mem }
     }
 }

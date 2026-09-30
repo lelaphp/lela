@@ -55,11 +55,12 @@ pub(crate) enum Kind {
     TraceLength,
 }
 
-/// One entry: its name, its default, whether a program may change it
-/// (`PHP_INI_ALL`) or only the host (`PHP_INI_SYSTEM`), and its kind.
+/// One entry: its name, its default, `None` for php's `NULL`, whether a
+/// program may change it (`PHP_INI_ALL`) or only the host
+/// (`PHP_INI_SYSTEM`), and its kind.
 pub(crate) struct Entry {
     pub(crate) name: &'static str,
-    default: &'static str,
+    default: Option<&'static str>,
     all: bool,
     pub(crate) kind: Kind,
 }
@@ -67,7 +68,17 @@ pub(crate) struct Entry {
 const fn entry(name: &'static str, default: &'static str, all: bool, kind: Kind) -> Entry {
     Entry {
         name,
-        default,
+        default: Some(default),
+        all,
+        kind,
+    }
+}
+
+/// An entry php registers with no value, `NULL`.
+const fn unset(name: &'static str, all: bool, kind: Kind) -> Entry {
+    Entry {
+        name,
+        default: None,
         all,
         kind,
     }
@@ -134,7 +145,7 @@ pub(crate) const ENTRIES: [Entry; 54] = [
     entry("opcache.error_log", "", SYSTEM, Kind::Text),
     entry("opcache.restrict_api", "", SYSTEM, Kind::Text),
     entry("opcache.lockfile_path", "/tmp", SYSTEM, Kind::Text),
-    entry("opcache.file_cache", "", SYSTEM, Kind::FileCache),
+    unset("opcache.file_cache", SYSTEM, Kind::FileCache),
     entry("opcache.file_cache_read_only", "0", SYSTEM, Kind::Bool),
     entry("opcache.file_cache_only", "0", SYSTEM, Kind::Bool),
     entry(
@@ -188,7 +199,7 @@ pub(crate) fn declared() -> Vec<IniDecl> {
         .iter()
         .map(|entry| IniDecl {
             name: Name(entry.name.as_bytes().into()),
-            default: entry.default.as_bytes().into(),
+            default: entry.default.map(|default| default.as_bytes().into()),
             user: entry.all,
             per_dir: entry.all,
             system: true,
@@ -278,7 +289,9 @@ impl Entry {
 
 /// The entry's value in force for this request.
 pub(crate) fn value<'r>(req: &'r Request, name: &str) -> &'r [u8] {
-    let fallback = named(name).map_or("", |entry| entry.default);
+    let fallback = named(name)
+        .and_then(|entry| entry.default)
+        .unwrap_or_default();
     req.ini_get(name.as_bytes()).unwrap_or(fallback.as_bytes())
 }
 
@@ -312,7 +325,11 @@ fn quantity(req: &mut Request, name: &str, value: &[u8]) -> i64 {
     clippy::unnecessary_wraps,
     reason = "the engine's `OnModify` shape, which a handler that can throw needs"
 )]
-pub(crate) fn modify<const AT: usize>(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+pub(crate) fn modify<const AT: usize>(
+    req: &mut Request,
+    value: Option<&[u8]>,
+) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     let Some(entry) = ENTRIES.get(AT) else {
         return Ok(false);
     };
@@ -553,7 +570,8 @@ fn jit_configured(req: &mut Request) -> bool {
         req.extension_ini(me)
             .into_iter()
             .find(|held| held.decl.name.0.as_ref() == name.as_bytes())
-            .map(|held| held.original.unwrap_or(held.value).into_vec())
+            .and_then(|held| held.master)
+            .map(<[u8]>::into_vec)
             .unwrap_or_default()
     };
     if jit_setting(&master("opcache.jit")) != Jit::Enabled {

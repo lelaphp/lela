@@ -1039,11 +1039,14 @@ pub struct ConstDecl {
 }
 
 /// An ini entry an extension declares: its default and where it may be
-/// changed (`PHP_INI_USER`, `PHP_INI_PERDIR`, `PHP_INI_SYSTEM`).
+/// changed (`PHP_INI_USER`, `PHP_INI_PERDIR`, `PHP_INI_SYSTEM`). The
+/// default is `None` where php registers the entry with no value at all,
+/// `NULL`, which `ini_get()` reads as the empty string and an entry's
+/// `on_modify` is handed apart from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IniDecl {
     pub name: Name,
-    pub default: Box<[u8]>,
+    pub default: Option<Box<[u8]>>,
     pub user: bool,
     pub per_dir: bool,
     pub system: bool,
