@@ -34,6 +34,9 @@ use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 
+mod smart_str;
+pub use smart_str::SmartStr;
+
 /// The type of a value, php's `zend_zval_type_name` set, and the one
 /// pseudo type php's `cast_object` is asked for beside them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
