@@ -606,10 +606,11 @@ pub(crate) struct Shared {
     /// read by every request thread with nothing taken.
     strings: Mutex<Strings>,
     /// php's `interned_strings_permanent` as `zend_interned_strings_switch_storage`
-    /// leaves it after `MINIT`: the name of every class, method,
-    /// property, class constant and function the engine and the bundle
-    /// declare, interned at startup and frozen, so a request asking for
-    /// one finds it here and allocates nothing ([`Shared::permanent`]).
+    /// leaves it after `MINIT`: `zend_known_strings`, and the name of
+    /// every class, method, property, class constant and function the
+    /// engine and the bundle declare, interned at startup and frozen, so
+    /// a request asking for one finds it here and allocates nothing
+    /// ([`Shared::permanent`]).
     names: Strings,
     /// How the engine's startup finished, which the first request's
     /// host finishes ([`Engine::started`]): serving, with what the unit
@@ -2120,6 +2121,101 @@ impl EngineBuilder {
     }
 }
 
+/// `ZEND_KNOWN_STRINGS` (`Z/Zend/zend_string.h`): what
+/// `zend_interned_strings_init` interns before any extension starts, the
+/// keys of a backtrace's rows and of a `Throwable`'s properties, `->` and
+/// `::` among them, which `ZSTR_KNOWN` hands out with no allocation.
+const KNOWN_STRINGS: [&str; 88] = [
+    "file",
+    "line",
+    "function",
+    "class",
+    "object",
+    "type",
+    "->",
+    "::",
+    "args",
+    "unknown",
+    "Unknown",
+    "exit",
+    "clone",
+    "eval",
+    "include",
+    "require",
+    "include_once",
+    "require_once",
+    "scalar",
+    "error_reporting",
+    "static",
+    "this",
+    "value",
+    "key",
+    "__invoke",
+    "previous",
+    "code",
+    "message",
+    "severity",
+    "string",
+    "trace",
+    "scheme",
+    "host",
+    "port",
+    "user",
+    "username",
+    "pass",
+    "password",
+    "path",
+    "query",
+    "fragment",
+    "NULL",
+    "boolean",
+    "integer",
+    "double",
+    "array",
+    "resource",
+    "resource (closed)",
+    "name",
+    "argv",
+    "argc",
+    "Array",
+    "bool",
+    "int",
+    "float",
+    "callable",
+    "iterable",
+    "void",
+    "never",
+    "false",
+    "true",
+    "null",
+    "mixed",
+    "Traversable",
+    "self",
+    "parent",
+    "__sleep",
+    "__wakeup",
+    "cases",
+    "from",
+    "tryFrom",
+    "tryfrom",
+    "_SERVER",
+    "_ENV",
+    "_REQUEST",
+    "count",
+    "SensitiveParameter",
+    "[constant expression]",
+    "Deprecated",
+    "since",
+    "get",
+    "set",
+    "8.0",
+    "8.1",
+    "8.2",
+    "8.3",
+    "8.4",
+    "8.5",
+];
+
 /// The names `MINIT` interns permanently as the engine and the bundle
 /// register their declarations (`zend_register_functions`,
 /// `zend_register_internal_class_ex`, `zend_declare_typed_property`,
@@ -2128,6 +2224,9 @@ impl EngineBuilder {
 /// the table refuses is left to the request that asks for it.
 fn permanent_names(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings {
     let mut names = Strings::new();
+    for known in KNOWN_STRINGS {
+        let _ = names.intern(known.as_bytes());
+    }
     let declared = functions
         .iter()
         .map(|decl| &decl.name)
