@@ -365,7 +365,7 @@ const INTERNAL: [&[u8]; 11] = [
 /// ```expect
 /// string(11) "1-2-3 4 + %"
 /// ```
-#[php_class(payload = IntervalObj, handlers = INTERVAL)]
+#[php_class(size = 80, payload = IntervalObj, handlers = INTERVAL)]
 pub(crate) struct DateInterval;
 
 #[php_class]

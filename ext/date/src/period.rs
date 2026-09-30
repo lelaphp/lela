@@ -120,7 +120,7 @@ fn store(req: &mut Request, object: PhpObject, period: PeriodObj) {
 fn copied(req: &Request, object: PhpObject) -> PeriodObj {
     object
         .native::<PeriodObj>(req)
-        .map(PeriodObj::copied)
+        .map(|period| period.copied())
         .unwrap_or_default()
 }
 
@@ -390,7 +390,7 @@ fn invalid(req: &mut Request) -> Thrown {
 /// `class DatePeriod implements IteratorAggregate`, over [`PeriodObj`]:
 /// its seven properties are `@virtual`, answered by its table in place
 /// of a slot.
-#[php_class(implements(IteratorAggregate), payload = PeriodObj, handlers = PERIOD)]
+#[php_class(implements(IteratorAggregate), size = 104, payload = PeriodObj, handlers = PERIOD)]
 pub(crate) struct DatePeriod;
 
 #[php_class]
