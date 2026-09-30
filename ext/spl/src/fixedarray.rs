@@ -87,6 +87,11 @@ fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Throw
     if under_way {
         return with(req, object, |a| a.resizing = Some(size));
     }
+    // `safe_erealloc` before the row grows: the overflow's fatal and the
+    // memory limit's come before a slot is laid down.
+    if size > len {
+        fit(req, object, size)?;
+    }
     let cut = with(req, object, |a| {
         a.resizing = Some(size);
         if size < a.elements.len() {
@@ -96,7 +101,9 @@ fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Throw
             Vec::new()
         }
     })?;
-    fit(req, object, size)?;
+    if size < len {
+        fit(req, object, size)?;
+    }
     if size == 0 {
         for value in cut.into_iter().rev() {
             req.release(value);
