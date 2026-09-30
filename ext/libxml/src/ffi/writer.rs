@@ -1,7 +1,7 @@
 //! libxml2's `xmlTextWriter` (`xmlwriter.h`), which php's xmlwriter
 //! drives call for call (design §4.10, #1323): the emitter, where its bytes
 //! go, and each of its calls wrapped in php's error capture with the
-//! request lent, so a emitter whose buffer php's wrappers opened writes
+//! request lent, so an emitter whose buffer php's wrappers opened writes
 //! through them whenever libxml flushes.
 
 use std::ffi::{c_char, c_int, c_void};
@@ -58,13 +58,6 @@ unsafe extern "C" fn keep_close(_context: *mut c_void) -> c_int {
     0
 }
 
-/// The close of a borrowed stream's box, given back.
-unsafe extern "C" fn stream_release(context: *mut c_void) -> c_int {
-    // SAFETY: the box `Emitter::stream` handed libxml, released once, here.
-    drop(unsafe { Box::from_raw(context.cast::<Stream>()) });
-    0
-}
-
 impl Emitter {
     fn over(buffer: *mut sys::xmlOutputBuffer) -> Option<NonNull<sys::xmlTextWriter>> {
         if buffer.is_null() {
@@ -79,7 +72,7 @@ impl Emitter {
         raw
     }
 
-    /// `xml_writer_create_in_memory`: a emitter over a buffer that appends
+    /// `xml_writer_create_in_memory`: an emitter over a buffer that appends
     /// to memory this owns.
     #[must_use]
     pub fn memory() -> Option<Emitter> {
@@ -104,27 +97,31 @@ impl Emitter {
         })
     }
 
-    /// `XMLWriter::toStream`: a emitter over a buffer that writes through
-    /// `stream` and never closes it.
-    #[must_use]
-    pub fn stream(stream: Stream) -> Option<Emitter> {
-        let context = Box::into_raw(Box::new(stream)).cast::<c_void>();
-        // SAFETY: the callbacks read the box this hands over; the buffer
-        // owns it from here.
-        let buffer = unsafe {
-            sys::xmlOutputBufferCreateIO(
-                loader::stream_write,
-                Some(stream_release),
-                context,
-                ptr::null_mut(),
-            )
-        };
-        if buffer.is_null() {
-            // SAFETY: the box no buffer took.
-            unsafe { stream_release(context) };
-            return None;
-        }
-        Emitter::over(buffer).map(|raw| Emitter { raw, memory: None })
+    /// `XMLWriter::toStream`: an emitter over a buffer that writes through
+    /// `stream`, holding one owner of it and never closing it.
+    pub fn stream(
+        req: &mut Request,
+        stream: Stream,
+    ) -> (Option<Emitter>, Vec<Raised>, Option<Thrown>) {
+        let context = loader::lend(req, stream);
+        Raised::capture_io(req, None, || {
+            // SAFETY: the callbacks read the box `lend` made; the buffer
+            // owns it from here and closes it even where it fails.
+            let buffer = unsafe {
+                sys::xmlOutputBufferCreateIO(
+                    loader::stream_write,
+                    Some(loader::stream_release),
+                    context,
+                    ptr::null_mut(),
+                )
+            };
+            if buffer.is_null() {
+                // SAFETY: the box no buffer took.
+                unsafe { loader::stream_release(context) };
+                return None;
+            }
+            Emitter::over(buffer).map(|raw| Emitter { raw, memory: None })
+        })
     }
 
     /// `xmlNewTextWriterFilename(path, 0)`, the path opened for writing

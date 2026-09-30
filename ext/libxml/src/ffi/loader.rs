@@ -552,6 +552,29 @@ pub(super) unsafe extern "C" fn stream_write(
         .unwrap_or(-1)
 }
 
+/// A stream a reader or an emitter borrows (`XMLReader::fromStream`,
+/// `XMLWriter::toStream`) boxed for libxml's callbacks, one more owner of
+/// its resource taken, as `Z_ADDREF_P(stream_zv)` takes it, so the stream
+/// outlives the program's own name for it.
+pub(super) fn lend(req: &mut Request, stream: Stream) -> *mut c_void {
+    req.addref(&stream.as_value());
+    Box::into_raw(Box::new(stream)).cast::<c_void>()
+}
+
+/// The close of a stream [`lend`] boxed: the owner it took given back,
+/// `zend_list_delete`, and nothing closed. Outside a call that lends a
+/// request the owner stays for the request's end.
+pub(super) unsafe extern "C" fn stream_release(context: *mut c_void) -> c_int {
+    // SAFETY: the box `lend` handed libxml, released once, here.
+    let stream = *unsafe { Box::from_raw(context.cast::<Stream>()) };
+    if let Some((_, io)) = lent() {
+        // SAFETY: the running call's `Io`.
+        let req = unsafe { request(io) };
+        req.release(stream.as_value());
+    }
+    0
+}
+
 /// `php_libxml_streams_IO_close`: `php_stream_close`, and the box given
 /// back. Outside a call that lends a request the stream is left for the
 /// request's end to close.

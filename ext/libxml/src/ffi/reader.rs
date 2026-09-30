@@ -65,14 +65,6 @@ const ROUTING: Routing = Routing::Parser {
     sax: ptr::null_mut(),
 };
 
-/// The close of a borrowed stream's box, given back:
-/// `xml_reader_stream_close` deletes its own reference and closes nothing.
-unsafe extern "C" fn stream_release(context: *mut c_void) -> c_int {
-    // SAFETY: the box `TextReader::stream` handed libxml, released once.
-    drop(unsafe { Box::from_raw(context.cast::<Stream>()) });
-    0
-}
-
 fn held(s: Option<&[u8]>) -> Option<Vec<u8>> {
     s.map(cstr)
 }
@@ -163,14 +155,14 @@ impl TextReader {
         options: i32,
     ) -> (Option<TextReader>, Vec<Raised>, Option<Thrown>) {
         let (u, e) = (held(uri), held(encoding));
-        let context = Box::into_raw(Box::new(stream)).cast::<c_void>();
+        let context = loader::lend(req, stream);
         Raised::capture_io(req, Some(ROUTING), || {
             // SAFETY: the callbacks read the box this hands over, which the
             // reader owns from here and closes even where it fails.
             let raw = unsafe {
                 sys::xmlReaderForIO(
                     loader::stream_read,
-                    Some(stream_release),
+                    Some(loader::stream_release),
                     context,
                     at(u.as_ref()).cast(),
                     at(e.as_ref()).cast(),
