@@ -78,14 +78,14 @@ The merge is in when its commit exists and `git status` is clean. Every branch a
 
 ## 6. The merge check
 
-After the last merge of a batch, before any push:
+After the last merge of a batch, before any push, and never while a merge commit's hook is running: the check and the hook share the target directory and the cores, and a hook starved of either is what fails witnesses and tests under load (#1312).
 
 1. `cargo xtask port-map` when `crates/php_ext` changed.
-2. `cargo xtask witness` over every crate. The hook runs only staged crates' witnesses, which is how #681 broke ext/reflection unseen until #733.
+2. `cargo xtask witness --unmeasured`: every crate without a passing reading over its tree now. The hook runs only staged crates' witnesses, which is how #681 broke ext/reflection unseen until #733; the ones it measured over the tree that landed stand and are not run again (#1312).
 3. On a fresh release build, the lane and `Zend/tests`, each held test by test against the merge base, the tip before the batch, whose runs the cut's first step kept (#664). The witness and the four runs read the tree and not each other, and each run works in its own copy of the pinned tree (#1183), so they run at once; the lane is the longest:
    ```
    cargo build --release -p php_sapi_cli -p php_sapi_cgi -p xtask
-   cargo xtask witness > $S/witness-<head>.out 2>&1 &
+   cargo xtask witness --unmeasured > $S/witness-<head>.out 2>&1 &
    cargo xtask phpt --census --against <base> > $S/lane-<head>.out &
    cargo xtask phpt --subset Zend/tests --against <base> > $S/zend-<head>.out &
    cargo xtask phpt --subset tests --against <base> > $S/tests-<head>.out &
