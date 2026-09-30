@@ -3879,18 +3879,32 @@ pub(crate) fn recv_variadic<T: Tier>(
 /// float(1)
 /// float(1)
 /// ```
+///
+/// A by-reference parameter returned by reference is coerced where the
+/// reference holds it, so the caller's variable reads the coerced value;
+/// returned by value it is copied out of the reference first:
+///
+/// ```php
+/// function &r(int &$a): string { return $a; }
+/// function v(int &$a): string { return $a; }
+/// $x = 1; v($x); var_dump($x); r($x); var_dump($x);
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "1"
+/// ```
 pub(crate) fn verify_return_type<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(ty) = req
+    let Some((ty, by_ref)) = req
         .vm()
         .at(frame)
         .and_then(|state| state.function)
         .and_then(|function| req.function_decl(function))
-        .and_then(|decl| decl.return_type.clone())
+        .and_then(|decl| Some((decl.return_type.clone()?, decl.returns_by_ref)))
     else {
         return Ok(advance(req, frame));
     };
@@ -3938,6 +3952,20 @@ pub(crate) fn verify_return_type<T: Tier>(
     } else {
         exec::temporary_slot(code, op.op1)
     };
+    // `ZEND_ACC_RETURN_REFERENCE` over a reference: the check is handed
+    // the reference and coerces the value it holds, which every name
+    // bound to it reads after; a by-value return unwraps it first.
+    if by_ref
+        && let Some(cell) = req
+            .slot_ptr(frame, slot)
+            .and_then(|at| exec::value_of(at.read()).as_php_ref().copied())
+    {
+        let place = cell.heap().val_ref();
+        let previous = exec::value_of(place.read());
+        place.write(coerced.to_zval());
+        req.release(previous);
+        return Ok(advance(req, frame));
+    }
     let previous = req.set_slot(frame, slot, coerced);
     req.release(previous);
     Ok(advance(req, frame))
