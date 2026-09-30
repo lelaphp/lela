@@ -2398,6 +2398,52 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
     );
 }
 
+/// A merge commit displaces both its parents (#1312): a verdict the merged
+/// branch's `--accept` captured is the branch's, so `permit --diff` over
+/// the staged merge permits it with no witness reading over the merged
+/// tree, and a verdict the merge itself adds is still denied.
+#[test]
+fn a_verdict_the_merged_branch_carried_is_the_branchs_and_not_the_merges() {
+    let root = scratch("merge-verdict");
+    let git = |args: &[&str]| {
+        let unhooked = [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
+        ];
+        sh(&root, &[&unhooked[..], args].concat());
+    };
+    let tail = "pub fn other() {}\n";
+    lay_down(&root, &format!("{}{tail}", block("exit")));
+    git(&["add", "--", CRATE]);
+    git(&["commit", "-q", "-m", "the fence"]);
+    git(&["checkout", "-q", "-b", "branch"]);
+    write(&root, FILE, &format!("{}{tail}", block("exit=3")));
+    git(&["commit", "-q", "-am", "the branch's accept"]);
+    git(&["checkout", "-q", "-"]);
+    write(
+        &root,
+        FILE,
+        &format!("{}{tail}pub fn mains() {{}}\n", block("exit")),
+    );
+    git(&["commit", "-q", "-am", "main moves on"]);
+    git(&["merge", "-q", "--no-ff", "--no-commit", "branch"]);
+
+    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!out.contains("deny "), "{out}");
+
+    let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
+    let authored = block("exit=4").replace("native", "another");
+    write(&root, FILE, &format!("{merged}{authored}"));
+    git(&["add", "--", FILE]);
+    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains(EXIT_AUTHORED), "{out}");
+}
+
 /// The binary over the scratch root, with no stdin.
 fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
