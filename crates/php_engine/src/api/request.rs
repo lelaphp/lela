@@ -60,6 +60,7 @@ mod execution;
 mod hold;
 pub(crate) use hold::Hold;
 mod hooks;
+mod inspect;
 mod lazy;
 mod linking;
 mod load_file;
@@ -1683,6 +1684,8 @@ struct TickFunction {
 pub struct Request {
     shared: Arc<Shared>,
     description: RequestDescription,
+    /// What the program left uncaught, kept for a host that renders it.
+    kept_uncaught: Option<crate::engine::Uncaught>,
     /// The natives the request has entered, in order, where the witness
     /// runner asked for them (harness §4.5 condition 2, revision 58);
     /// `None` records nothing. The field exists in a build with the
@@ -2511,6 +2514,7 @@ impl Request {
             #[cfg(feature = "witness-trace")]
             trace: None,
             description,
+            kept_uncaught: None,
             heap,
             stack,
             vm: Vm::default(),
