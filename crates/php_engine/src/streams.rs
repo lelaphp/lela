@@ -2376,16 +2376,19 @@ pub(crate) enum Standard {
 enum HostFd {
     /// fd 0 under a host that handed none, over the body it reads.
     Stdin(Memory),
-    Stdout,
-    Stderr,
+    /// fd 1 and fd 2, each with the label php's kind over the host's fd
+    /// has: `tcp_socket` over a socket, as `php_stream_url_wrap_php`
+    /// swaps the ops, and `STDIO` otherwise.
+    Stdout(&'static str),
+    Stderr(&'static str),
 }
 
 impl HostFd {
     fn standard(&self) -> Standard {
         match self {
             HostFd::Stdin(_) => Standard::Stdin,
-            HostFd::Stdout => Standard::Stdout,
-            HostFd::Stderr => Standard::Stderr,
+            HostFd::Stdout(_) => Standard::Stdout,
+            HostFd::Stderr(_) => Standard::Stderr,
         }
     }
 
@@ -2399,17 +2402,20 @@ impl HostFd {
 
 impl Ops for HostFd {
     fn label(&self) -> &'static str {
-        "STDIO"
+        match self {
+            HostFd::Stdin(_) => "STDIO",
+            HostFd::Stdout(label) | HostFd::Stderr(label) => label,
+        }
     }
 
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         match self {
             HostFd::Stdin(body) => body.write(req, buf),
-            HostFd::Stdout => {
+            HostFd::Stdout(_) => {
                 req.write_stdout(buf);
                 Some(buf.len())
             }
-            HostFd::Stderr => {
+            HostFd::Stderr(_) => {
                 req.write_stderr(buf);
                 Some(buf.len())
             }
@@ -2432,7 +2438,7 @@ impl Ops for HostFd {
     fn close(&mut self, req: &mut Request) -> i32 {
         match self {
             HostFd::Stdin(body) => body.close(req),
-            HostFd::Stdout | HostFd::Stderr => 0,
+            HostFd::Stdout(_) | HostFd::Stderr(_) => 0,
         }
     }
 
@@ -2762,8 +2768,8 @@ fn php_open(
                     mode: TempMode::ReadOnly,
                     label: "STDIO",
                 }),
-                b"stdout" => HostFd::Stdout,
-                _ => HostFd::Stderr,
+                b"stdout" => HostFd::Stdout(host_label(req, Standard::Stdout)),
+                _ => HostFd::Stderr(host_label(req, Standard::Stderr)),
             };
             let mut stream = PhpStream::new(Box::new(kind), mode);
             stream.flags.no_seek = true;
@@ -2923,8 +2929,17 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
             )));
         }
     };
-    let kind = fd_kind(&fd, mode);
-    Ok(Ok(req.stream_from_fd(fd, kind)?))
+    Ok(Ok(fd_stream(req, fd, mode)?))
+}
+
+/// The stream a `php://` fd opens as: over a socket, the `tcp_socket` kind
+/// php swaps its ops to ([`Request::php_socket_stream`]); over anything
+/// else, the plain file's kind.
+fn fd_stream(req: &mut Request, fd: OwnedFd, mode: &[u8]) -> Result<Stream, Thrown> {
+    match fd_kind(&fd, mode) {
+        FdStream::Socket => req.php_socket_stream(fd),
+        kind => req.stream_from_fd(fd, kind),
+    }
 }
 
 /// What a `php://` fd opens as: a socket's kind where
@@ -2984,9 +2999,8 @@ fn standard_open(req: &mut Request, standard: Standard, mode: &[u8]) -> Result<O
         Ok(fd) => fd,
         Err(error) => return Ok(Err(strerror(&error))),
     };
-    let kind = fd_kind(&fd, mode);
-    let seeks = standard == Standard::Stdin || matches!(kind, FdStream::Socket);
-    let stream = req.stream_from_fd(fd, kind)?;
+    let seeks = standard == Standard::Stdin || matches!(fd_kind(&fd, mode), FdStream::Socket);
+    let stream = fd_stream(req, fd, mode)?;
     if !seeks {
         req.stream_op(stream, |_, opened| {
             opened.flags.no_seek = true;
@@ -2994,6 +3008,17 @@ fn standard_open(req: &mut Request, standard: Standard, mode: &[u8]) -> Result<O
         });
     }
     Ok(Ok(stream))
+}
+
+/// The label of php's kind over the host's fd `standard`: `tcp_socket`
+/// where it is a socket, `STDIO` where it is anything else or the host
+/// handed none.
+fn host_label(req: &Request, standard: Standard) -> &'static str {
+    let socket = req
+        .host_fd(standard)
+        .and_then(|fd| fd.try_clone_to_owned().ok())
+        .is_some_and(|fd| matches!(fd_kind(&fd, b""), FdStream::Socket));
+    if socket { "tcp_socket" } else { "STDIO" }
 }
 
 /// Which of the three a `php://` name is, `stdin` for any other.

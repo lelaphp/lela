@@ -723,6 +723,23 @@ impl Socket {
                 let (client, addr) = listener.accept().map_err(|e| socket_error(&e).1)?;
                 (Sock::Unix(client), unix_text(&addr))
             }
+            // A socket the stream was handed and given the `tcp` ops,
+            // `php://stdin` over a listening socket: `accept(2)` of
+            // whatever family it is, as `php_network_accept_incoming` takes
+            // any, through a copy of the fd shaped as that family's listener.
+            Sock::Generic(handed) if self.label != GENERIC => {
+                let copy = handed.as_fd().try_clone_to_owned();
+                let copy = copy.map_err(|e| socket_error(&e).1)?;
+                let inet = TcpListener::from(copy);
+                if inet.local_addr().is_ok() {
+                    let (client, addr) = inet.accept().map_err(|e| socket_error(&e).1)?;
+                    (Sock::Tcp(client), inet_text(&addr))
+                } else {
+                    let unix = UnixListener::from(OwnedFd::from(inet));
+                    let (client, addr) = unix.accept().map_err(|e| socket_error(&e).1)?;
+                    (Sock::Unix(client), unix_text(&addr))
+                }
+            }
             _ => {
                 let error = std::io::Error::from_raw_os_error(95);
                 return Err(socket_error(&error).1);
@@ -1044,6 +1061,11 @@ fn bind_inet(
     Err(last)
 }
 
+/// `php_stream_generic_socket_ops.label`, the kind of a socket the stream
+/// was handed, whose options take no `transport` operation but a name,
+/// a send, a receive and a shutdown.
+const GENERIC: &str = "generic_socket";
+
 /// The `transports` `PHP_MINIT(standard)` registers
 /// (`Z/ext/standard/basic_functions.c:315`), in its order, each with the
 /// label of the ops `php_stream_generic_socket_factory` picks for it.
@@ -1271,6 +1293,39 @@ impl Request {
         self.xport_stream(fd, None, true)
     }
 
+    /// What `php_stream_url_wrap_php` makes of a `php://` fd that is a
+    /// socket (`Z/ext/standard/php_fopen_wrapper.c:361-372`):
+    /// `php_stream_sock_open_from_socket`, then `stream->ops =
+    /// &php_stream_socket_ops`, so the stream is `tcp_socket` whatever the
+    /// socket's family and takes the `transport`'s operations, an accept
+    /// among them, which is how a CLI handed a listening socket as its
+    /// stdin accepts on it. Served by the binary (`process`), since the
+    /// child is `PHP_BINARY`.
+    ///
+    /// ```php
+    /// $path = sys_get_temp_dir() . '/' . uniqid('s') . '.sock';
+    /// $server = stream_socket_server("unix://$path");
+    /// $child = proc_open([PHP_BINARY, '-n', '-r', '$c = stream_socket_accept(fopen("php://stdin", "r")); echo stream_get_meta_data(STDIN)["stream_type"], " ", get_resource_type($c), "\n"; fwrite($c, "hi");'], [0 => $server, 1 => ['pipe', 'w']], $pipes);
+    /// $client = stream_socket_client("unix://$path");
+    /// var_dump(stream_get_contents($client), stream_get_contents($pipes[1]), proc_close($child));
+    /// unlink($path);
+    /// ```
+    /// ```expect process
+    /// string(2) "hi"
+    /// string(18) "tcp_socket stream
+    /// "
+    /// int(0)
+    /// ```
+    pub(crate) fn php_socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown> {
+        let stream = self.socket_stream(fd)?;
+        self.stream_op(stream, |_, s| {
+            if let Some(socket) = s.ops.as_socket() {
+                socket.label = "tcp_socket";
+            }
+        });
+        Ok(stream)
+    }
+
     /// `php_stream_xport_create(name, 0 flags)` handed a socket
     /// afterwards, as `socket_export_stream` makes one
     /// (`Z/ext/sockets/sockets.c:2698`): the kind the registered xport
@@ -1304,7 +1359,7 @@ impl Request {
             Some((_, Found::Engine("udg_socket"))) => {
                 (Sock::Udg(UnixDatagram::from(fd)), "udg_socket")
             }
-            _ => (Sock::Generic(UnixStream::from(fd)), "generic_socket"),
+            _ => (Sock::Generic(UnixStream::from(fd)), GENERIC),
         };
         let mut kind = Socket::new(Some(sock), label, default_timeout(self));
         kind.is_blocked = blocking;
