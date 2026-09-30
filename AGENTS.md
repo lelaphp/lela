@@ -211,6 +211,7 @@ Options:
 ├── dom
 ├── exif
 ├── filter
+├── ftp
 ├── hash
 ├── iconv
 ├── json
@@ -229,15 +230,19 @@ Options:
 ├── random
 ├── reflection
 ├── session
+├── shmop
 ├── simplexml
 ├── sockets
 ├── spl
 ├── standard
+├── sysvmsg
+├── sysvsem
+├── sysvshm
 ├── tokenizer
 ├── uri
 └── zlib
 ```
-<!-- /computed in=0f92d6106cbb1775eb0ac1051076a30c1971ceba23f0258fea3dcbc78140f1c2 out=c7e9484cb0d27f73bc9c21668c037055546d9a5786652c6162caac8d355b84fa -->
+<!-- /computed in=080849935dc6bfe2437f98d3e6ee1b2eaf268aa740aff9fe1dacb0d6354b7782 out=7b9405d134937ab61d6ac5dc5839e34d45a0bda5530609906911058d0c603fd5 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

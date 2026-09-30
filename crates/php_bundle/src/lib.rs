@@ -88,6 +88,16 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_calendar::extension,
         #[cfg(feature = "exif")]
         php_ext_exif::extension,
+        #[cfg(feature = "shmop")]
+        php_ext_shmop::extension,
+        #[cfg(feature = "sysvsem")]
+        php_ext_sysvsem::extension,
+        #[cfg(feature = "sysvmsg")]
+        php_ext_sysvmsg::extension,
+        #[cfg(feature = "sysvshm")]
+        php_ext_sysvshm::extension,
+        #[cfg(feature = "ftp")]
+        php_ext_ftp::extension,
     ]
 }
 
