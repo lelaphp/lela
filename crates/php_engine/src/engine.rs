@@ -1020,7 +1020,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 78] = [
+const CORE_INI: [(&str, &str); 80] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1029,6 +1029,10 @@ const CORE_INI: [(&str, &str); 78] = [
     ("display_errors", "1"),
     ("log_errors", "0"),
     ("html_errors", "0"),
+    // `docref_root` and `docref_ext`, `PHP_INI_ALL`: where a function's
+    // diagnostic under `html_errors` links to (`raising::origin`).
+    ("docref_root", ""),
+    ("docref_ext", ""),
     ("error_prepend_string", ""),
     ("error_append_string", ""),
     ("ignore_repeated_errors", "0"),

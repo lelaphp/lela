@@ -16170,11 +16170,9 @@ impl Request {
         let reason = reason
             .split_once(" (os error")
             .map_or(reason.as_str(), |(text, _)| text);
-        let message = format!(
-            "{}({}): Failed to open stream: {reason}",
-            self.opener(kind),
-            String::from_utf8_lossy(written)
-        );
+        let opener = self.opener(kind);
+        let origin = crate::api::raising::origin(self, &opener, &String::from_utf8_lossy(written));
+        let message = format!("{origin}: Failed to open stream: {reason}");
         crate::api::raising::warning(self, &message);
     }
 

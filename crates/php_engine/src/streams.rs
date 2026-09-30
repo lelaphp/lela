@@ -3910,11 +3910,9 @@ impl Request {
         if self.is_pending() {
             return;
         }
-        let text = format!(
-            "{}({}): {caption}: {message}",
-            self.active_native(),
-            String::from_utf8_lossy(path)
-        );
+        let function = self.active_native();
+        let origin = crate::api::raising::origin(self, &function, &String::from_utf8_lossy(path));
+        let text = format!("{origin}: {caption}: {message}");
         warning(self, &text);
     }
 

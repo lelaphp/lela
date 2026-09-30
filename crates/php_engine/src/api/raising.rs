@@ -305,7 +305,8 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
     let text = if req.at_startup() {
         format!("PHP Startup: {message}")
     } else if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
-        format!("{}(): {message}", req.active_native())
+        let function = req.active_native();
+        format!("{}: {message}", origin(req, &function, ""))
     } else {
         let origin = match req.phase() {
             crate::api::request::Phase::Startup => String::from("PHP Request Startup"),
@@ -320,6 +321,52 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         format!("{origin}: {message}")
     };
     raise(req, level, &text);
+}
+
+/// `php_verror`'s origin for a function's diagnostic, `function(params)`,
+/// and its link to the manual (`Z/main/main.c:1150-1212`) under
+/// `html_errors` with a `docref_root`:
+/// the function's page, `function.name` or `class.method` with its
+/// leading underscores dropped, `_` made `-` and lowered, `docref_ext`
+/// after it, and a `#target` kept past the extension; none otherwise.
+///
+/// ```php
+/// ini_set('html_errors', 1); ini_set('docref_root', '/'); ini_set('docref_ext', '.html');
+/// @fopen('nope.txt', 'r');
+/// echo strip_tags(error_get_last()['message']), "\n";
+/// ```
+/// ```expect
+/// fopen(nope.txt) [function.fopen.html]: Failed to open stream: No such file or directory
+/// ```
+pub(crate) fn origin(req: &Request, function: &str, params: &str) -> String {
+    match docref_link(req, function) {
+        Some(link) => format!("{function}({params}) {link}"),
+        None => format!("{function}({params})"),
+    }
+}
+
+/// [`origin`]'s link, where there is one.
+fn docref_link(req: &Request, function: &str) -> Option<String> {
+    if !req.ini_flag(b"html_errors") {
+        return None;
+    }
+    let root = String::from_utf8_lossy(req.ini_get(b"docref_root")?).into_owned();
+    if root.is_empty() {
+        return None;
+    }
+    let page = match function.split_once("::") {
+        Some((class, method)) => format!("{class}.{}", method.trim_start_matches('_')),
+        None => format!("function.{}", function.trim_start_matches('_')),
+    };
+    let mut page = page.replace('_', "-").to_ascii_lowercase();
+    let target = page
+        .rfind('#')
+        .map(|at| page.split_off(at))
+        .unwrap_or_default();
+    if let Some(ext) = req.ini_get(b"docref_ext").filter(|ext| !ext.is_empty()) {
+        page.push_str(&String::from_utf8_lossy(ext));
+    }
+    Some(format!("[<a href='{root}{page}{target}'>{page}</a>]"))
 }
 
 /// `zend_call_stack_overflowed(EG(stack_limit))` with
