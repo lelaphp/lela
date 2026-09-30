@@ -12,5 +12,10 @@ fn main() {
         println!("cargo:warning=pkg-config libxml-2.0: {error}");
         println!("cargo:rustc-link-lib=xml2");
     }
+    // The generic error channel's handler, variadic in C (`src/ffi/generic.c`).
+    cc::Build::new()
+        .file("src/ffi/generic.c")
+        .compile("dax_libxml_generic");
+    println!("cargo:rerun-if-changed=src/ffi/generic.c");
     println!("cargo:rerun-if-changed=build.rs");
 }

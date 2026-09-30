@@ -567,6 +567,14 @@ pub(crate) type xmlOutputBufferCreateFilenameFunc = unsafe extern "C" fn(
     compression: c_int,
 ) -> *mut xmlOutputBuffer;
 
+pub(crate) type xmlGenericErrorFunc =
+    unsafe extern "C" fn(ctx: *mut c_void, msg: *const c_char, ...);
+
+// `generic.c`: the variadic handler Rust cannot define.
+unsafe extern "C" {
+    pub(crate) fn dax_libxml_generic(ctx: *mut c_void, msg: *const c_char, ...);
+}
+
 #[link(name = "xml2")]
 unsafe extern "C" {
     pub(crate) safe static xmlParserVersion: *const c_char;
@@ -588,6 +596,9 @@ unsafe extern "C" {
     );
     pub(crate) fn __xmlStructuredError() -> *mut Option<xmlStructuredErrorFunc>;
     pub(crate) fn __xmlStructuredErrorContext() -> *mut *mut c_void;
+    pub(crate) fn xmlSetGenericErrorFunc(ctx: *mut c_void, handler: Option<xmlGenericErrorFunc>);
+    pub(crate) fn __xmlGenericError() -> *mut Option<xmlGenericErrorFunc>;
+    pub(crate) fn __xmlGenericErrorContext() -> *mut *mut c_void;
     pub(crate) fn xmlGetLastError() -> *mut xmlError;
     pub(crate) fn xmlResetLastError();
 
