@@ -16013,14 +16013,14 @@ impl Request {
                 self.note_error_in(raised.level, &raised.message, path, raised.line);
             }
         }
-        if refused.level == Level::Parse {
-            let thrown = crate::api::raising::throw_at(
-                self,
-                "ParseError",
-                &refused.message,
-                path,
-                refused.line,
-            );
+        if refused.level == Level::Parse || refused.thrown {
+            let class = if refused.level == Level::Parse {
+                "ParseError"
+            } else {
+                "CompileError"
+            };
+            let thrown =
+                crate::api::raising::throw_at(self, class, &refused.message, path, refused.line);
             if kind == SourceKind::File {
                 self.while_pending(&thrown, |req| {
                     for raised in raised {

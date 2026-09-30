@@ -1276,6 +1276,7 @@ pub(crate) fn unit(
                 ),
                 line,
                 raised: emit.diagnostics,
+                thrown: false,
             });
         };
         dynamic.push(def);
@@ -1394,6 +1395,7 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
             ),
             line: op.lineno,
             raised: Vec::new(),
+            thrown: false,
         };
         if !op.opcode.is_safepoint_site() {
             return Err(refused("with no safepoint column for its number"));
@@ -1548,6 +1550,7 @@ impl Emit<'_> {
             message: message.into(),
             line: self.line,
             raised: Vec::new(),
+            thrown: false,
         }
     }
 
@@ -1761,8 +1764,12 @@ impl Emit<'_> {
             // `CompileError`, a top statement being walked by
             // `top_statements`.
             Stmt::HaltCompilerStmt(_) => {
-                return Err(self
-                    .compile_error("__HALT_COMPILER() can only be used from the outermost scope"));
+                return Err(CompileError {
+                    thrown: true,
+                    ..self.compile_error(
+                        "__HALT_COMPILER() can only be used from the outermost scope",
+                    )
+                });
             }
         }
         Ok(())
@@ -5682,6 +5689,7 @@ impl Emit<'_> {
                     ),
                     line: self.line,
                     raised: Vec::new(),
+                    thrown: false,
                 });
             }
             if out
@@ -5694,6 +5702,7 @@ impl Emit<'_> {
                     message: format!("Attribute \"{shown}\" must not be repeated"),
                     line: self.line,
                     raised: Vec::new(),
+                    thrown: false,
                 });
             }
             if !on_target {
@@ -5986,6 +5995,7 @@ impl Emit<'_> {
                     ),
                     line: declared_at,
                     raised: Vec::new(),
+                    thrown: false,
                 });
             }
             if out
@@ -5998,6 +6008,7 @@ impl Emit<'_> {
                     message: format!("Attribute \"{shown}\" must not be repeated"),
                     line: declared_at,
                     raised: Vec::new(),
+                    thrown: false,
                 });
             }
         }
@@ -6726,6 +6737,7 @@ impl Emit<'_> {
                 message: refused.refusal.to_string(),
                 line: refused.site.line,
                 raised: Vec::new(),
+                thrown: false,
             }),
         }
     }
@@ -7678,6 +7690,14 @@ impl Emit<'_> {
             // token the scanner made a zval of, so `-1`, `true` and
             // `1 + 0` are each the fatal and not a fold.
             let Some(value) = self.literal_of(written_value) else {
+                // `zend_handle_encoding_declaration`, which the parser runs
+                // before any of this, throws its own.
+                if written.eq_ignore_ascii_case(b"encoding") {
+                    return Err(CompileError {
+                        thrown: true,
+                        ..self.compile_error("Encoding must be a literal")
+                    });
+                }
                 return Err(self.compile_error(format!("declare({name}) value must be a literal")));
             };
             if written.eq_ignore_ascii_case(b"strict_types") {
@@ -9174,6 +9194,7 @@ impl Emit<'_> {
             message,
             line,
             raised: Vec::new(),
+            thrown: false,
         };
         let name = self
             .constants
@@ -9281,6 +9302,7 @@ impl Emit<'_> {
                 message: String::from(refused),
                 line,
                 raised: Vec::new(),
+                thrown: false,
             });
         }
         Ok(())
@@ -9835,6 +9857,7 @@ impl Emit<'_> {
             message: message.into(),
             line: self.line,
             raised: Vec::new(),
+            thrown: false,
         }
     }
 

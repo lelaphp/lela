@@ -297,6 +297,7 @@ impl Emit<'_> {
             message: format!("InternalError: {}", what.as_ref()),
             line: self.line,
             raised: Vec::new(),
+            thrown: false,
         }
     }
 
@@ -766,7 +767,7 @@ impl Emit<'_> {
                 Modifier::ReadonlyKw(_) => Written::Flag(Flag::Readonly),
             };
             if !written.takes(target) {
-                return Err(refused(
+                return Err(thrown(
                     line,
                     format!(
                         "Cannot use the {} modifier on a {}",
@@ -777,8 +778,7 @@ impl Emit<'_> {
             }
             // `zend_add_member_modifier`, then the repeat
             // `zend_modifier_list_to_flags` holds back until it has run.
-            let multiple_access =
-                || refused(line, "Multiple access type modifiers are not allowed");
+            let multiple_access = || thrown(line, "Multiple access type modifiers are not allowed");
             let repeated = match written {
                 Written::Visibility(visibility) => {
                     if out.visibility.is_some() {
@@ -812,13 +812,13 @@ impl Emit<'_> {
             if out.has(Flag::Abstract) && out.has(Flag::Final) {
                 match target {
                     Target::Method => {
-                        return Err(refused(
+                        return Err(thrown(
                             line,
                             "Cannot use the final modifier on an abstract method",
                         ));
                     }
                     Target::Property => {
-                        return Err(refused(
+                        return Err(thrown(
                             line,
                             "Cannot use the final modifier on an abstract property",
                         ));
@@ -827,7 +827,7 @@ impl Emit<'_> {
                 }
             }
             if repeated {
-                return Err(refused(
+                return Err(thrown(
                     line,
                     format!("Multiple {} modifiers are not allowed", written.word()),
                 ));
@@ -929,20 +929,20 @@ impl Emit<'_> {
                     self.parsed.lines.line_number(token.offset)
                 });
             if anonymous && word != "readonly" {
-                return Err(refused(
+                return Err(thrown(
                     line,
                     format!("Cannot use the {word} modifier on an anonymous class"),
                 ));
             }
             if *flag {
-                return Err(refused(
+                return Err(thrown(
                     line,
                     format!("Multiple {word} modifiers are not allowed"),
                 ));
             }
             *flag = true;
             if out.is_abstract && out.is_final {
-                return Err(refused(
+                return Err(thrown(
                     line,
                     "Cannot use the final modifier on an abstract class",
                 ));
@@ -1250,6 +1250,7 @@ impl Emit<'_> {
                 ),
                 line: at,
                 raised: Vec::new(),
+                thrown: false,
             });
         }
         for declarator in &node.property_declarators {
@@ -1333,6 +1334,7 @@ pub(super) fn unread(line: u32, what: &str) -> CompileError {
         message: format!("{what} this compiler cannot read yet"),
         line,
         raised: Vec::new(),
+        thrown: false,
     }
 }
 
@@ -1354,6 +1356,35 @@ pub(super) fn refused(line: u32, message: impl Into<String>) -> CompileError {
         message: message.into(),
         line,
         raised: Vec::new(),
+        thrown: false,
+    }
+}
+
+/// The refusal php throws as a `CompileError`
+/// (`zend_throw_exception(zend_ce_compile_error)`), which a `try`
+/// around the `eval` or the `include` catches: every refusal of a
+/// modifier list, `zend_modifier_token_to_flag`'s,
+/// `zend_add_member_modifier`'s, `zend_add_class_modifier`'s and the
+/// repeat `zend_modifier_list_to_flags` holds back; and, built beside
+/// it, a nested `__HALT_COMPILER()` and `zend_handle_encoding_declaration`'s
+/// refusal of an encoding the parser cannot read as it stands.
+///
+/// ```php
+/// foreach (['class C { final final function f() {} }', 'class D { private protected $x; }', 'abstract final class E {}', 'if (1) { __HALT_COMPILER(); }', 'declare(encoding=1+1);'] as $code) {
+///     try { eval($code); } catch (CompileError $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// CompileError: Multiple final modifiers are not allowed
+/// CompileError: Multiple access type modifiers are not allowed
+/// CompileError: Cannot use the final modifier on an abstract class
+/// CompileError: __HALT_COMPILER() can only be used from the outermost scope
+/// CompileError: Encoding must be a literal
+/// ```
+pub(super) fn thrown(line: u32, message: impl Into<String>) -> CompileError {
+    CompileError {
+        thrown: true,
+        ..refused(line, message)
     }
 }
 
