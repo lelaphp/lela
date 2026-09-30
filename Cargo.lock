@@ -813,6 +813,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "php_sapi_fpm"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "nix",
+ "php_bundle",
+ "php_proto",
+ "php_sapi",
+]
+
+[[package]]
 name = "php_syntax"
 version = "0.0.0"
 dependencies = [

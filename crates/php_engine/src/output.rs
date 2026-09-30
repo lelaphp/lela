@@ -934,7 +934,7 @@ fn produced_output(req: &mut Request, at: usize) {
 /// `php_output_header` (`Z/main/output.c:102`): where the body started,
 /// taken once, and the header block committed through `php_header`;
 /// the layer is disabled when that refuses it.
-fn header(req: &mut Request) {
+pub(crate) fn header(req: &mut Request) {
     if req.output().headers_sent {
         return;
     }

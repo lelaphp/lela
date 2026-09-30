@@ -17,6 +17,12 @@ use php_proto::cgi::{Environment, Files, RequestInfo, Settings};
 use crate::ini::enabled;
 use crate::{Method, ResponseHead, WebRequest};
 
+/// The entries whose default php's CGI and `FastCGI` hosts keep where the
+/// engine keeps the CLI's (`php_cli.c`'s `HARDCODED_INI`): laid over the
+/// engine's defaults before the line's `-d`, as `main.c`'s own table has
+/// them.
+pub const HOST_INI: [(&str, &str); 2] = [("html_errors", "1"), ("max_execution_time", "30")];
+
 /// The file system as `init_request_info` asks it.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Disk;
@@ -45,6 +51,7 @@ pub fn settings(ini: &[(String, String)]) -> Settings {
     Settings {
         fix_pathinfo: enabled(ini, "cgi.fix_pathinfo", true),
         discard_path: enabled(ini, "cgi.discard_path", false),
+        ..Settings::default()
     }
 }
 

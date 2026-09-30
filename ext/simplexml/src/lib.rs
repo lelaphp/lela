@@ -1182,9 +1182,9 @@ fn as_xml(
         return Ok(Union::B(written != -1));
     }
     let text = if whole {
-        handlers.dump_doc_to_str(req, doc, 0, false, encoding)
+        handlers.dump_doc_to_str(req, doc, 0, false, encoding)?
     } else {
-        handlers.dump_node_to_str(req, doc, node, false, false, encoding)
+        handlers.dump_node_to_str(req, doc, node, false, false, encoding)?
     };
     match text {
         Some(t) => PhpString::new(req, &t).map(Union::A),

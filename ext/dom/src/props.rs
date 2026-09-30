@@ -16,7 +16,10 @@ use crate::{
     invalidate, is_connected, nullable_object, nullable_string, object_for, prop_node,
     qualified_name, remove_all_children, string, sync_entity_reference,
 };
-use php_ext_libxml::ffi::{Kind, Node, Ns, Save, Utf8, XML_EXTERNAL_GENERAL_UNPARSED_ENTITY};
+use php_ext_libxml::Errors;
+use php_ext_libxml::ffi::{
+    Kind, Node, Ns, Raised, Save, Utf8, XML_EXTERNAL_GENERAL_UNPARSED_ENTITY,
+};
 
 /// One handled property: `dom_prop_handler`.
 pub(crate) struct Prop {
@@ -400,8 +403,27 @@ fn set_substituted_node_value(
     let node = prop_node(req, object)?;
     invalidate(req, object);
     remove_all_children(node);
-    node.set_content_len(&written_bytes(value));
+    set_content_len(req, node, &written_bytes(value));
     Ok(())
+}
+
+/// `xmlNodeSetContentLen` with php's handlers set, as they are for the
+/// whole request: an entity reference the value leaves unterminated is
+/// libxml's error, raised as php raises it, a warning `@` silences.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $e = $d->appendChild($d->createElement('e'));
+/// $e->setAttribute('a', 'x');
+/// @$e->getAttributeNode('a')->nodeValue = '&';
+/// echo $d->saveXML($e), "\n";
+/// ```
+/// ```expect
+/// <e a=""/>
+/// ```
+fn set_content_len(req: &mut Request, node: Node, bytes: &[u8]) {
+    let ((), raised) = Raised::capture(|| node.set_content_len(bytes));
+    Errors::route(req, raised);
 }
 
 // ---- the helpers every reader shares
@@ -514,14 +536,14 @@ fn set_node_value(req: &mut Request, object: PhpObject, value: &Value) -> Result
                     node.add_child(text);
                 }
             } else {
-                node.set_content_len(&bytes);
+                set_content_len(req, node, &bytes);
             }
         }
         Kind::Element => {
             remove_all_children(node);
-            node.set_content_len(&bytes);
+            set_content_len(req, node, &bytes);
         }
-        Kind::Text | Kind::Comment | Kind::CData | Kind::Pi => node.set_content_len(&bytes),
+        Kind::Text | Kind::Comment | Kind::CData | Kind::Pi => set_content_len(req, node, &bytes),
         _ => {}
     }
     invalidate(req, object);
@@ -1133,7 +1155,7 @@ fn data(req: &mut Request, object: PhpObject) -> Read {
 /// `dom_characterdata_data_write`.
 fn set_data(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
     let node = prop_node(req, object)?;
-    node.set_content_len(&written_bytes(value));
+    set_content_len(req, node, &written_bytes(value));
     Ok(())
 }
 
@@ -1255,7 +1277,7 @@ fn set_attr_value(req: &mut Request, object: PhpObject, value: &Value) -> Result
             node.add_child(text);
         }
     } else {
-        node.set_content_len(&bytes);
+        set_content_len(req, node, &bytes);
     }
     Ok(())
 }

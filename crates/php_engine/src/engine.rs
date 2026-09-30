@@ -44,6 +44,11 @@ use crate::unit_cache::UnitCache;
 pub struct RequestDescription {
     pub argv: Vec<Vec<u8>>,
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The request's own variables, what `sapi_module.getenv` answers
+    /// (php-fpm's `FastCGI` parameters), in the order the host walks
+    /// them: `getenv()` reads them before the environment, and `$_SERVER`
+    /// and `$_ENV` register them after it.
+    pub params: Vec<(Vec<u8>, Vec<u8>)>,
     pub cwd: PathBuf,
     /// The host's rows of `$_SERVER` past the environment, which the
     /// engine imports first for every host
@@ -67,6 +72,38 @@ pub struct RequestDescription {
     /// (`save_ps_args`): what `cli_set_process_title` writes and
     /// `PHP_CLI_PROCESS_TITLE` says is there.
     pub process_title: Option<ProcessTitle>,
+    /// The entries the host sets before the request starts, each as its
+    /// [`IniOrigin`] says, in the order given: php-fpm's `PHP_VALUE` and
+    /// `PHP_ADMIN_VALUE` and the lines of the request's `.user.ini` files.
+    pub ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
+}
+
+/// How a host sets an entry for a request, php-fpm's three ways.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IniOrigin {
+    /// `php_value`: the value, whatever the entry's `modifiable`, as
+    /// `fpm_php_zend_ini_alter_master` sets it under `ZEND_INI_USER`.
+    Value,
+    /// `php_admin_value`: the value, and the entry `PHP_INI_SYSTEM` after
+    /// it, so neither `ini_set()` nor a `.user.ini` moves it.
+    Admin,
+    /// A `.user.ini` line, `php_ini_activate_config` at
+    /// `PHP_INI_STAGE_HTACCESS`: taken where the entry is
+    /// `PHP_INI_PERDIR` and no admin value holds it.
+    PerDir,
+}
+
+/// A value a host hands a request, made a PHP value there: what
+/// `fpm_get_status()` answers from the process manager's shared table.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostValue {
+    Int(i64),
+    Float(f64),
+    Str(Vec<u8>),
+    /// An array of string keys, in order.
+    Map(Vec<(Vec<u8>, HostValue)>),
+    /// An array keyed 0, 1, and on.
+    List(Vec<HostValue>),
 }
 
 /// The memory `ps` shows a process's command line from, which php's CLI
@@ -348,6 +385,33 @@ pub trait OutputSink {
     fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
         None
     }
+    /// Whether the host's `flush` sends the head first, as php-fpm's
+    /// `sapi_cgibin_flush` calls `sapi_send_headers`. No, by default.
+    fn flush_sends_head(&self) -> bool {
+        false
+    }
+    /// `fastcgi_finish_request()`'s `fcgi_end` and `fcgi_close`, once the
+    /// buffers are flushed and the head sent: the response ends here and
+    /// the program runs on unheard; whether the connection is closed
+    /// after it (`fcgi_is_closed`), which makes a later call `false`.
+    /// Nothing, and `false`, by default.
+    fn finish(&mut self) -> bool {
+        false
+    }
+    /// What the host says of itself, `fpm_get_status()`'s array; `None`,
+    /// the default, is its `false`.
+    fn status(&mut self) -> Option<HostValue> {
+        None
+    }
+    /// `php://stdout` written to the host's own fd 1, where that is not
+    /// the response: php-fpm's, the pipe its master logs, which
+    /// `php_stream_url_wrap_php` reaches through `dup(STDOUT_FILENO)`.
+    /// `false`, the default, has the bytes go to the body as the CLI's
+    /// and a CGI's fd 1 is.
+    fn write_stdout(&mut self, bytes: &[u8]) -> bool {
+        let _ = bytes;
+        false
+    }
 }
 
 /// What the built-in server reads off a request it dispatched
@@ -382,6 +446,8 @@ pub struct Observables {
     pub headers_sent: bool,
     /// The fatal's rendered text, when the request ended in one.
     pub fatal: Option<String>,
+    /// `zend_memory_peak_usage(1)`: the most memory the request held.
+    pub memory_peak: usize,
 }
 
 /// The loop bound to the engine's tier, `execute::<T>` for one `T`.
@@ -394,6 +460,8 @@ const MAX_ACCELERATED_FILES: usize = 10_000;
 /// What every request shares: the bundle, the linked declarations, the
 /// engine states, the ini defaults and the loop (design §5.14).
 pub(crate) struct Shared {
+    /// `module_registry`: `Core`, then the bundle in startup order, each
+    /// at its [`ExtensionId`].
     pub(crate) extensions: Vec<Extension>,
     /// `CG(function_table)`'s natives, the engine's own and then each
     /// extension's in bundle order, less what the startup ini's
@@ -410,8 +478,9 @@ pub(crate) struct Shared {
     /// ([`crate::api::abi::ExtensionBuilder::intercept`]).
     pub(crate) replaced: Vec<Vec<Entry>>,
     /// Each native's `internal_function.module`, one row per row of
-    /// `functions`: the extension that declared it, or none for one the
-    /// engine declares itself.
+    /// `functions`: the extension that declared it, `Core` for Zend's
+    /// own, and none for the natives of php's `standard` the engine
+    /// declares itself.
     pub(crate) function_modules: Vec<Option<ExtensionId>>,
     /// Each native's `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, one
     /// row per row of `functions`, decoded from its declaration's
@@ -495,6 +564,9 @@ pub(crate) struct Shared {
     /// host handed over is not in it, because php caches neither `-r`
     /// nor `eval`. It stands above the table its units' constants are
     /// interned into, so a dropped engine drops its units first.
+    /// The entries a host's `php_admin_value` made `PHP_INI_SYSTEM`,
+    /// which no request moves ([`IniOrigin::Admin`]).
+    pub(crate) locked: Vec<Vec<u8>>,
     pub(crate) units: UnitCache,
     /// The engine's interned strings (design §5.2, §5.14): what a unit's
     /// constant strings enter as it is published, grown here alone and
@@ -1020,7 +1092,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 74] = [
+const CORE_INI: [(&str, &str); 80] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1136,6 +1208,18 @@ const CORE_INI: [(&str, &str); 74] = [
     // Two `main.c` registers for ext/standard to read (`Z/main/main.c:822, 863`).
     ("unserialize_callback_func", ""),
     ("browscap", ""),
+    // `doc_root`, `user_dir` and `user_ini.*`, `PHP_INI_SYSTEM`
+    // (`Z/main/main.c:829-884`): what a host of the web reads to find a
+    // request's program and its `.user.ini` files.
+    // `output_buffering` and `output_handler`, `PHP_INI_PERDIR|
+    // PHP_INI_SYSTEM` (`Z/main/main.c:816-817`): the buffer a request
+    // starts with ([`crate::output::start_at_request`]).
+    ("output_buffering", "0"),
+    ("output_handler", ""),
+    ("doc_root", ""),
+    ("user_dir", ""),
+    ("user_ini.filename", ".user.ini"),
+    ("user_ini.cache_ttl", "300"),
 ];
 
 /// `php_ini_builder_define`'s line (`Z/main/php_ini_builder.c:63-81`)
@@ -1243,21 +1327,62 @@ struct Startup<'c> {
     diverted: bool,
 }
 
+/// `zend_get_constant` for the INI grammar: the declared value as a
+/// string, a double as `precision` digits write it.
+fn constant_text(constants: &[ConstDecl], name: &[u8], precision: i32) -> Option<Vec<u8>> {
+    let decl = constants.iter().find(|c| &*c.name.0 == name)?;
+    match &decl.value {
+        ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
+        ConstExpr::Bool(true) => Some(b"1".to_vec()),
+        ConstExpr::Long { value: n, .. } => Some(n.to_string().into_bytes()),
+        ConstExpr::Double(d) => {
+            Some(php_heap::double_to_string(*d, precision, php_heap::Exponent::Upper).into_bytes())
+        }
+        ConstExpr::Str(s) => Some(s.to_vec()),
+        _ => None,
+    }
+}
+
+/// The grammar's host for [`Engine::parse_ini`]: the engine's
+/// constants and configuration, the process's environment, and the
+/// events kept, a double written at php's default `precision`.
+struct Configure<'e> {
+    shared: &'e Shared,
+    events: Vec<IniEvent>,
+}
+
+impl crate::ini_syntax::Host for Configure<'_> {
+    type Error = std::convert::Infallible;
+
+    fn constant(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        Ok(constant_text(&self.shared.constants, name, 14))
+    }
+
+    fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        self.shared
+            .configured(name)
+            .and_then(|entry| entry.text().map(<[u8]>::to_vec))
+    }
+
+    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        std::env::var_os(&*String::from_utf8_lossy(name))
+            .map(std::ffi::OsString::into_encoded_bytes)
+    }
+
+    fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
+        Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper).into_bytes())
+    }
+
+    fn event(&mut self, event: IniEvent) {
+        self.events.push(event);
+    }
+}
+
 impl crate::ini_syntax::Host for Startup<'_> {
     type Error = std::convert::Infallible;
 
     fn constant(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
-        let Some(decl) = self.constants.iter().find(|c| &*c.name.0 == name) else {
-            return Ok(None);
-        };
-        Ok(match &decl.value {
-            ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
-            ConstExpr::Bool(true) => Some(b"1".to_vec()),
-            ConstExpr::Long { value: n, .. } => Some(n.to_string().into_bytes()),
-            ConstExpr::Double(d) => Some(self.double(*d)?),
-            ConstExpr::Str(s) => Some(s.to_vec()),
-            _ => None,
-        })
+        Ok(constant_text(self.constants, name, 1))
     }
 
     fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>> {
@@ -1485,9 +1610,13 @@ fn function_table(
     core.functions
         .iter()
         .cloned()
-        .chain(crate::natives::standard())
-        .map(|native| (None, native))
-        .chain(extensions.iter().zip(0u32..).flat_map(|(e, at)| {
+        .map(|native| (Some(ExtensionId::CORE), native))
+        .chain(
+            crate::natives::standard()
+                .into_iter()
+                .map(|native| (None, native)),
+        )
+        .chain(extensions.iter().zip(1u32..).flat_map(|(e, at)| {
             e.functions
                 .iter()
                 .cloned()
@@ -1533,6 +1662,7 @@ pub struct EngineBuilder {
     resume: Loop,
     tier_extension: Option<Extension>,
     host_extension: Option<crate::host_extension::HostExtension>,
+    host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     shebang: php_compile::Shebang,
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
@@ -1596,6 +1726,17 @@ impl EngineBuilder {
         self
     }
 
+    /// One entry as a host sets it after startup, php-fpm's pool
+    /// `php_value` and `php_admin_value` (`fpm_php_apply_defines_ex`):
+    /// the value as given, not read again by the INI grammar, through the
+    /// entry's `on_modify`, with [`IniOrigin`]'s reach; one php does not
+    /// know is left, so [`Engine::ini_get`] answers `None` for it.
+    #[must_use]
+    pub fn host_ini(mut self, name: &[u8], value: &[u8], mode: IniOrigin) -> EngineBuilder {
+        self.host_ini.push((name.to_vec(), value.to_vec(), mode));
+        self
+    }
+
     /// `CG(skip_shebang)` for every request: a file's `#!` first line is
     /// passed over, primary or included, as php's CLI, CGI and built-in
     /// server set it once a request has started
@@ -1626,15 +1767,12 @@ impl EngineBuilder {
             .map(|(n, v)| (n.as_bytes().to_vec(), v.as_bytes().to_vec()))
             .collect();
         let mut extensions = self.extensions;
-        if let Some(tier) = self.tier_extension {
-            extensions.push(tier);
-        }
-        let mut additional = Vec::new();
-        if let Some(host) = self.host_extension {
-            let hosted = crate::host_extension::hosted(host);
+        extensions.extend(self.tier_extension);
+        let hosted = self.host_extension.map(crate::host_extension::hosted);
+        let additional = hosted.map_or_else(Vec::new, |hosted| {
             extensions.extend(hosted.extension);
-            additional = hosted.additional;
-        }
+            hosted.additional
+        });
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
         // `standard`'s constants: each extension's constants rewritten
@@ -1655,19 +1793,19 @@ impl EngineBuilder {
             }
         }
         let core = crate::core::extension();
-        let zend_constants = core.constants.clone();
-        let configuration = Configuration::read(&self.ini_entries, &zend_constants);
+        let configuration = Configuration::read(&self.ini_entries, &core.constants);
         // An entry with an `on_modify` keeps its default until the
         // handler has taken the value the host set ([`Engine::register_ini`]).
         let mut held = Vec::new();
         for (name, value) in configuration.directives() {
             if on_modify(&extensions, &name).is_some() {
-                held.push((name, value));
+                held.push((name, value, false));
                 continue;
             }
             ini.retain(|(n, _)| *n != name);
             ini.push((name, value));
         }
+        let locked = host_ini(self.host_ini, &extensions, &mut ini, &mut held);
         let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) =
             function_table(&core, &extensions, additional, &ini);
         let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
@@ -1684,11 +1822,13 @@ impl EngineBuilder {
             methods,
             trampolines,
         } = link_classes(&core, &extensions);
-        // Zend's own constants stand before the bundle's, as
+        // `module_registry`: `Core` first, as `zend_startup` registers it,
+        // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
-        let constants: Vec<ConstDecl> = zend_constants
-            .into_iter()
-            .chain(extensions.iter().flat_map(|e| e.constants.iter().cloned()))
+        extensions.insert(0, core);
+        let constants: Vec<ConstDecl> = extensions
+            .iter()
+            .flat_map(|e| e.constants.iter().cloned())
             .collect();
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
@@ -1721,13 +1861,14 @@ impl EngineBuilder {
                 entry: self.entry,
                 reenter: self.reenter,
                 resume: self.resume,
+                locked,
                 units: UnitCache::new(MAX_ACCELERATED_FILES),
                 strings: Mutex::new(strings),
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
             }),
         };
-        engine.register_ini(held);
+        engine.register_ini(held, self.host_extension);
         engine
     }
 }
@@ -1759,6 +1900,45 @@ fn constant_values(
     values
 }
 
+/// `fpm_php_apply_defines_ex` for each of a host's entries
+/// ([`EngineBuilder::host_ini`]): one php knows, and whose value its
+/// check takes, laid into `ini`, or held for its `on_modify` where it has
+/// one; the names an admin value set, which the engine locks.
+fn host_ini(
+    entries: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
+    extensions: &[Extension],
+    ini: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    held: &mut Vec<(Vec<u8>, Vec<u8>, bool)>,
+) -> Vec<Vec<u8>> {
+    let mut admin = Vec::new();
+    for (name, value, mode) in entries {
+        let per_dir = || {
+            extensions
+                .iter()
+                .flat_map(|e| e.ini.iter())
+                .find(|d| *d.name.0 == *name)
+                .map_or(Request::ini_modifiable(&name).1, |d| d.per_dir)
+        };
+        let refused = Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected;
+        if !ini.iter().any(|(n, _)| *n == name)
+            || (mode == IniOrigin::PerDir && !per_dir())
+            || refused
+        {
+            continue;
+        }
+        if mode == IniOrigin::Admin {
+            admin.push(name.clone());
+        }
+        if on_modify(extensions, &name).is_some() {
+            held.push((name, value, true));
+        } else {
+            ini.retain(|(n, _)| *n != name);
+            ini.push((name, value));
+        }
+    }
+    admin
+}
+
 /// The `on_modify` an extension of `extensions` gave the entry `name`.
 fn on_modify(extensions: &[Extension], name: &[u8]) -> Option<OnModify> {
     extensions.iter().find_map(|e| {
@@ -1788,6 +1968,7 @@ impl Engine {
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
             host_extension: None,
+            host_ini: Vec::new(),
             shebang: php_compile::Shebang::Read,
             #[cfg(feature = "witness-trace")]
             trace_to: None,
@@ -1828,7 +2009,11 @@ impl Engine {
     /// pin's `session-startup` regime holds it, with the test below for
     /// a refused value, and `ext/date`'s `date.timezone` is the one the
     /// phpt corpus reads.
-    fn register_ini(&mut self, mut held: Vec<(Vec<u8>, Vec<u8>)>) {
+    fn register_ini(
+        &mut self,
+        mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
+        host: Option<crate::host_extension::HostExtension>,
+    ) {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
         // handler or engine state runs: the process's, so the first engine
         // a process builds sets it and every later one finds it set.
@@ -1845,14 +2030,23 @@ impl Engine {
                 .position(|entry| entry.name.0.as_ref() == name)
                 .unwrap_or(usize::MAX)
         };
-        held.sort_by_key(|(name, _)| declared_at(name));
+        // A host's own entries after, at `ZEND_INI_STAGE_ACTIVATE`, as
+        // php-fpm's child applies its pool's once php has started.
+        held.sort_by_key(|(name, _, activate)| (*activate, declared_at(name)));
         let mut taken = Vec::new();
         let mut raised = Vec::new();
         let mut written = Vec::new();
         if !held.is_empty() {
-            let mut req = Request::new(Arc::clone(&self.shared), RequestDescription::default());
+            let description = RequestDescription {
+                sapi_name: host
+                    .map_or("", crate::host_extension::HostExtension::sapi_name)
+                    .to_owned(),
+                ..RequestDescription::default()
+            };
+            let mut req = Request::new(Arc::clone(&self.shared), description);
             req.begin_startup();
-            for (name, value) in held {
+            for (name, value, activate) in held {
+                req.set_activating(activate);
                 let accepted = on_modify(&self.shared.extensions, &name)
                     .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
                 if accepted {
@@ -1866,6 +2060,12 @@ impl Engine {
         let Some(shared) = Arc::get_mut(&mut self.shared) else {
             return;
         };
+        // `php_admin_value` locks what it set, where its `on_modify` took
+        // it; one without a handler always takes.
+        let extensions = &shared.extensions;
+        shared.locked.retain(|name| {
+            on_modify(extensions, name).is_none() || taken.iter().any(|(n, _)| n == name)
+        });
         for (name, value) in taken {
             shared.ini.retain(|(n, _)| *n != name);
             shared.ini.push((name, value));
@@ -1894,13 +2094,41 @@ impl Engine {
         &self.shared.startup_errors
     }
 
+    /// `ini_get()` outside any request: the value each request starts
+    /// with, `None` for an entry php does not know.
+    #[must_use]
+    pub fn ini_get(&self, name: &[u8]) -> Option<Vec<u8>> {
+        self.shared.ini_default(name).map(<[u8]>::to_vec)
+    }
+
+    /// `zend_parse_ini_string` under the normal scanner, as a host reads
+    /// its own configuration once php has started (php-fpm's
+    /// `fpm_conf_load_ini_file`): each statement's event in order, a
+    /// constant read from this engine's table and `${…}` from the
+    /// process's environment; and where the text is not INI, bison's
+    /// message and the line after the events before it.
+    #[must_use]
+    pub fn parse_ini(&self, text: &[u8]) -> (Vec<IniEvent>, Option<(String, u32)>) {
+        let mut host = Configure {
+            shared: &self.shared,
+            events: Vec::new(),
+        };
+        let failed = match crate::ini_syntax::parse(text, IniScanner::Normal, &mut host) {
+            Ok(parsed) => parsed.err(),
+            Err(never) => match never {},
+        };
+        (host.events, failed)
+    }
+
     /// The extensions this engine loaded, `Core` first and then the
     /// bundle's in startup order, as `get_loaded_extensions()` and the
     /// CLI's `-m` list them: what a host prints without a request.
     #[must_use]
     pub fn loaded_extensions(&self) -> Vec<String> {
-        std::iter::once(String::from("Core"))
-            .chain(self.shared.extensions.iter().map(|e| e.name.clone()))
+        self.shared
+            .extensions
+            .iter()
+            .map(|e| e.name.clone())
             .collect()
     }
 
@@ -2159,6 +2387,7 @@ impl Engine {
         }
         if work == Work::Serve {
             self.execute_script(&mut req, source.as_deref());
+            crate::host_extension::after_script(&mut req);
             return self.shutdown(&mut req, sink);
         }
         // `php_lint_script` compiles and drops the op array, and what
@@ -2189,7 +2418,7 @@ impl Engine {
             return Err(Observables {
                 exit_code: status,
                 headers_sent: true,
-                fatal: None,
+                ..Observables::default()
             });
         }
         let web = description.web.is_some();
@@ -2208,6 +2437,7 @@ impl Engine {
         // `expose_php` is on, and the environment is hashed before the
         // extensions' `RINIT`; what can fail is the memory limit, which the
         // first allocation after it meets again.
+        req.apply_host_ini();
         req.read_post_at_startup();
         if web && req.ini_flag(b"expose_php") && req.headers_sent().is_none() {
             let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
@@ -2494,6 +2724,7 @@ impl Engine {
                 exit_code,
                 headers_sent: true,
                 fatal,
+                memory_peak: req.memory_peak(true),
             },
             trace,
         )

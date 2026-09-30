@@ -88,6 +88,7 @@ const HEADER_KEYS: &[(&str, Form)] = &[
     ("implements", Form::List),
     ("interface", Form::Flag),
     ("implemented_by", Form::List),
+    ("alias", Form::Eq),
     ("abstract", Form::Flag),
     ("final", Form::Flag),
     ("readonly", Form::Flag),
@@ -236,6 +237,12 @@ fn header(attribute: Tokens, item: &ItemStruct) -> syn::Result<Tokens> {
     };
     interfaces.extend(class_names(&paths(keys.list("implements"))?));
     let implementors = class_names(&paths(keys.list("implemented_by"))?);
+    let aliases = match keys.eq("alias") {
+        Some(tokens) => vec![crate::name(
+            &syn::parse2::<syn::LitStr>(tokens.clone())?.value(),
+        )],
+        None => Vec::new(),
+    };
     let flags = flags(&keys)?;
     let handlers = keys.eq("handlers").map(|handlers| quote!(&#handlers));
     let register = match (own, handlers) {
@@ -257,6 +264,7 @@ fn header(attribute: Tokens, item: &ItemStruct) -> syn::Result<Tokens> {
                 class.parent = #parent;
                 class.interfaces = vec![#(#interfaces),*];
                 class.implementors = vec![#(#implementors),*];
+                class.aliases = vec![#(#aliases),*];
                 class
             }
             fn register(

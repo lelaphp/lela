@@ -590,6 +590,46 @@ fn a_post_test_runs_through_the_cgi_host() {
     );
 }
 
+/// The fixture at `xtask/fixtures/phpt/fpm` (#1291): a test standing in
+/// `sapi/fpm/tests` finds a php-fpm where `FPM\Tester::findExecutable`
+/// looks last, which the runner put there, so a runner that puts none
+/// fails here; the same test standing anywhere else finds none and skips.
+/// The oracle stands in for the engine, so the php-fpm is the one `[sapi]`
+/// pins.
+#[test]
+fn a_test_of_sapi_fpm_finds_the_process_manager() {
+    if oracle().is_none() || manifest().pin.sapi.fpm.is_none() {
+        return;
+    }
+    let tree = Tree::new("phpt-judge-fpm").unwrap();
+    let tests = tree.join("sapi/fpm/tests");
+    copy(&fixture("fpm"), &tests);
+    let subset = Subset {
+        scope: "sapi/fpm".to_owned(),
+        dirs: vec![Dir {
+            under: PathBuf::from("sapi/fpm/tests"),
+            dir: tests.clone(),
+        }],
+        root: tree.path().to_path_buf(),
+    };
+    let tally = run(&subset, &registry(""));
+    let found: Vec<(&str, Judgement)> = tally
+        .judged
+        .iter()
+        .map(|j| (j.name.as_str(), j.judgement))
+        .collect();
+    assert_eq!(found, [("found.phpt", Judgement::Pass)], "{tally:#?}");
+    assert!(tree.join("sapi/fpm/php-fpm").is_file());
+    let (_elsewhere, subset) = fixture_subset("fpm");
+    let tally = run(&subset, &registry(""));
+    let skipped: Vec<(&str, Judgement)> = tally
+        .judged
+        .iter()
+        .map(|j| (j.name.as_str(), j.judgement))
+        .collect();
+    assert_eq!(skipped, [("found.phpt", Judgement::Skip)], "{tally:#?}");
+}
+
 #[test]
 fn the_test_s_own_ini_reaches_the_run() {
     if oracle().is_none() {

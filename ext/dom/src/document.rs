@@ -806,7 +806,7 @@ pub(crate) fn save_xml(
             dom_error(req, Code::WrongDocument, strict)?;
             return Ok(Value::bool(false));
         }
-        handlers.dump_node_to_str(req, doc, node, format, no_empty, encoding.as_deref())
+        handlers.dump_node_to_str(req, doc, node, format, no_empty, encoding.as_deref())?
     } else {
         let mut converted = f::XML_SAVE_AS_XML;
         if options & i64::from(f::XML_SAVE_NO_DECL) != 0 {
@@ -815,7 +815,7 @@ pub(crate) fn save_xml(
         if format {
             converted |= f::XML_SAVE_FORMAT;
         }
-        handlers.dump_doc_to_str(req, doc, converted, no_empty, encoding.as_deref())
+        handlers.dump_doc_to_str(req, doc, converted, no_empty, encoding.as_deref())?
     };
     if let Some(bytes) = saved {
         string(req, &bytes)

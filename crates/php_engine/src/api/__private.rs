@@ -86,6 +86,7 @@ pub fn class(name: &[u8], kind: ClassKind) -> ClassDecl {
         parent: None,
         interfaces: Vec::new(),
         implementors: Vec::new(),
+        aliases: Vec::new(),
         traits: Vec::new(),
         adaptations: Vec::new(),
         backing: php_unit::decl::EnumBacking::default(),

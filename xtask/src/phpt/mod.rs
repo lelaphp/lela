@@ -100,7 +100,9 @@
 //! #814); a CGI-shaped one runs through the CGI host beside the binary,
 //! the php-cgi `[sapi]` pins for the control and the engine's own
 //! `php-cgi`, `sapi/cgi`'s binary, for the engine, as the `cgi` module
-//! has it (#1198, ADR-0008). Beyond those, the process adapter
+//! has it (#1198, ADR-0008); and a test of `sapi/fpm/tests` finds the
+//! engine's own `php-fpm` where upstream's `FPM\Tester` looks, as the
+//! `fpm` module places it (#1291). Beyond those, the process adapter
 //! gives a test run-tests.php's environment and pipes for its streams, the
 //! `environment` module's and [`oracle::Streams::Pipes`] (#1186), and
 //! never a terminal, so it sets `SKIP_IO_CAPTURE_TESTS` as upstream does
@@ -115,6 +117,7 @@ pub(crate) mod environment;
 pub(crate) use environment::env_of;
 pub(crate) mod against;
 pub(crate) mod cgi;
+mod fpm;
 /// The suffix of a control run's scope: the subset under the oracle.
 pub(crate) const CONTROL: &str = "@control";
 mod census;
@@ -967,6 +970,7 @@ pub(crate) fn run_subset(
     // test rather than at its first SKIPIF.
     oracle.asserted()?;
     let control = matches!(runner, Runner::Control(_));
+    fpm::place(subset, fpm::host(oracle.pin(), binary, control).as_deref())?;
     let host = cgi::host(oracle.pin(), binary, control);
     let adapter = Adapter::new(oracle, registry, binary, host, lane);
     let items = adapter.listed(subset, tests)?;

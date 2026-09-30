@@ -816,7 +816,7 @@ pub(crate) fn mangled_array(
     object: PhpObject,
     rows: Vec<(Key, Value)>,
 ) -> Result<PhpArray, Thrown> {
-    let mangled = mangled_names(req, object.class());
+    let mangled = mangled_names(req, object);
     let mut array = PhpArray::new(req)?;
     let mut at = 0;
     for (key, entry) in rows {
@@ -852,12 +852,28 @@ struct MangledName {
 /// The prefix `zend_mangle_property_name` puts before each declared
 /// instance property of `class` that is not public: `\0*\0` for a
 /// protected one, `\0Class\0` for a private one, and none for a public
-/// one. Every declared slot is a row, in slot order, so a caller that
-/// walks the object's rows beside this one keeps its place.
-fn mangled_names(req: &Request, class: crate::api::values::ClassId) -> Vec<MangledName> {
-    req.placed_properties(class)
+/// one. Every declared slot that holds a value is a row, in slot order,
+/// so a caller that walks the object's rows beside this one keeps its
+/// place, and a dynamic row named as a slot nothing holds, a parent's
+/// private one, stays unmangled.
+///
+/// ```php
+/// class B { private $s = 0; function __construct() { unset($this->s); } }
+/// #[AllowDynamicProperties] class K extends B {}
+/// $o = new K; $o->s = 1;
+/// foreach ((array) $o as $k => $v) echo str_replace("\0", '\0', $k), "=$v\n";
+/// ```
+/// ```expect
+/// s=1
+/// ```
+fn mangled_names(req: &Request, object: PhpObject) -> Vec<MangledName> {
+    let o = object.heap();
+    let eager = o.laziness() == php_heap::Laziness::Eager;
+    req.placed_properties(object.class())
         .into_iter()
-        .map(|(declaring, p)| {
+        .zip(0u32..)
+        .filter(|(_, i)| !eager || *i >= o.slots() || !o.slot(*i).is_undef())
+        .map(|((declaring, p), _)| {
             let prefix = match p.visibility {
                 Visibility::Public => None,
                 Visibility::Protected => Some(b"\0*\0".to_vec()),
@@ -1546,7 +1562,7 @@ pub(crate) fn properties_answered(
             _ => table.get_properties(req, object)?,
         },
     };
-    let mangled = mangled_names(req, object.class());
+    let mangled = mangled_names(req, object);
     let mut at = 0;
     let mut out = Vec::with_capacity(rows.len());
     for (name, entry) in rows {
