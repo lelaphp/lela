@@ -1147,9 +1147,19 @@ fn header_add_op(req: &mut Request, replace: bool, line: Vec<u8>) {
 /// and stops the default one; a `Location` outside a redirect sets
 /// `response_code` or 302 (the 303 a non-`GET` request past HTTP/1.0
 /// takes reads `request_method` and `proto_num`, which no description
-/// carries yet); a `WWW-Authenticate` sets 401. `Content-Length`'s
-/// switch on `zlib.output_compression` is not read, since there is no
-/// zlib. Then `response_code`, when given, and `sapi_header_add_op`.
+/// carries yet); a `WWW-Authenticate` sets 401; a `Content-Length`
+/// switches `zlib.output_compression` off, as a user's `ini_set()` would
+/// (`Z/main/SAPI.c:819-828`). Then `response_code`, when given, and
+/// `sapi_header_add_op`.
+///
+/// ```php
+/// ini_set('zlib.output_compression', '1');
+/// header('Content-Length: 3');
+/// var_dump(ini_get('zlib.output_compression'));
+/// ```
+/// ```expect
+/// string(1) "0"
+/// ```
 /// Whether the line was taken is the answer.
 pub(crate) fn header_add(
     req: &mut Request,
@@ -1221,6 +1231,10 @@ pub(crate) fn header_add(
             }
         } else if name.eq_ignore_ascii_case(b"WWW-Authenticate") {
             update_response_code(req, 401);
+        } else if name.eq_ignore_ascii_case(b"Content-Length") {
+            // Req #44164: a script that sets the length cannot know the
+            // size after compression, so compression is switched off.
+            let _ = req.ini_set(b"zlib.output_compression", b"0");
         }
     }
     if response_code != 0 {
