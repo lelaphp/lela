@@ -12,6 +12,7 @@ use anyhow::Result;
 
 use crate::git;
 use crate::layout;
+use crate::lock;
 use crate::manifest::{AvoidFrom, Crate, Manifest};
 use crate::reading::{Reading, Status, Store, listed};
 
@@ -112,14 +113,67 @@ pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<Stri
 /// log, which is where a retired worktree's pass is when its branch is
 /// merged (#1252). A reading taken over a working tree that differs
 /// from the index there is over content the commit does not take, and
-/// stands for nothing. Nothing stands while a staged file outside every
-/// crate is one an instrument reads: the manifest, the workspace's
-/// `Cargo.toml` and lockfile and a rule's glossary are stamped into no
-/// reading, so a commit that changes one is measured whole, as before.
-/// A Markdown file outside the crates other than a glossary, such as a
-/// region file pre-commit renders, is read by none of them.
+/// stands for nothing. A staged file outside every crate is stamped into
+/// no reading, so each voids the readings it can change, as [`Reach`]
+/// sorts them (#1312).
 #[derive(Debug, Default)]
 pub(crate) struct Standing(BTreeMap<String, Reading>);
+
+/// What a staged file outside every crate can change of a reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Nothing an instrument reads: a Markdown file other than a
+    /// glossary, such as a region file pre-commit renders.
+    Nothing,
+    /// Every reading: a file every build or every instrument reads, the
+    /// workspace's `Cargo.toml`, `.cargo/`, the toolchain and lint
+    /// configuration, the opcode spec two build scripts read, the
+    /// manifest, the oracle pin and the divergence registry; and a
+    /// glossary, to `vocab`.
+    Every,
+    /// The readings of the crates whose dependency closure the lock
+    /// pins otherwise than it did where the reading was taken.
+    Lock,
+    /// xtask's reading alone, since its tests read the tree (a census
+    /// under `data/`, a hook under `scripts/`, a workflow).
+    Harness,
+}
+
+/// The files outside every crate that every reading depends on.
+const READ_BY_EVERY: [&str; 12] = [
+    "Cargo.toml",
+    "rust-toolchain.toml",
+    "rust-toolchain",
+    "clippy.toml",
+    ".clippy.toml",
+    "rustfmt.toml",
+    ".rustfmt.toml",
+    "ext/clippy.toml",
+    "ops.toml",
+    crate::manifest::FILE,
+    crate::divergence::FILE,
+    "oracle.toml",
+];
+
+impl Reach {
+    fn of(path: &str, instrument: &str, glossaries: &[&str]) -> Reach {
+        if READ_BY_EVERY.contains(&path) || path.starts_with(".cargo/") {
+            Reach::Every
+        } else if path == lock::FILE {
+            Reach::Lock
+        } else if glossaries.contains(&path) {
+            if instrument == crate::vocab::INSTRUMENT {
+                Reach::Every
+            } else {
+                Reach::Harness
+            }
+        } else if Path::new(path).extension().is_some_and(|e| e == "md") {
+            Reach::Nothing
+        } else {
+            Reach::Harness
+        }
+    }
+}
 
 impl Standing {
     /// Of `scopes`, the readings of `instrument` that stand for what is
@@ -136,18 +190,24 @@ impl Standing {
             .iter()
             .filter_map(|r| r.predicate.avoid_from.as_ref().map(AvoidFrom::file))
             .collect();
-        let instrument_reads = |path: &str| {
-            manifest.crates_of(&[path]).is_empty()
-                && (Path::new(path).extension().is_none_or(|e| e != "md")
-                    || glossaries.contains(&path))
-        };
-        let staged = git::staged(root)?;
-        if let Some(outside) = staged.iter().find(|c| instrument_reads(&c.path)) {
-            println!(
-                "{instrument}: {} is staged outside every crate, so no reading stands for the commit",
-                outside.path
-            );
-            return Ok(Standing::default());
+        let mut lock_staged = false;
+        let mut harness = None;
+        for change in git::staged(root)? {
+            if !manifest.crates_of(&[change.path.as_str()]).is_empty() {
+                continue;
+            }
+            match Reach::of(&change.path, instrument, &glossaries) {
+                Reach::Nothing => {}
+                Reach::Every => {
+                    println!(
+                        "{instrument}: {} is staged outside every crate, so no reading stands for the commit",
+                        change.path
+                    );
+                    return Ok(Standing::default());
+                }
+                Reach::Lock => lock_staged = true,
+                Reach::Harness => harness = harness.or(Some(change.path)),
+            }
         }
         let index = git::Index::read(root)?;
         let trees: BTreeMap<String, String> = scopes
@@ -156,6 +216,25 @@ impl Standing {
             .collect();
         let mut standing = store.latest_over(instrument, &trees)?;
         standing.retain(|_, reading| reading.status == Status::Pass);
+        if let Some(path) = harness
+            && standing.remove("xtask").is_some()
+        {
+            println!(
+                "{instrument}: {path} is staged outside every crate and xtask's tests read the tree, so xtask's reading does not stand"
+            );
+        }
+        if lock_staged {
+            let moved = lock_moved(root, manifest, &standing)?;
+            if !moved.is_empty() {
+                let names: Vec<&str> = moved.iter().map(String::as_str).collect();
+                println!(
+                    "{instrument}: {} is staged and pins a dependency otherwise than where the reading was taken, so no reading stands for {}",
+                    lock::FILE,
+                    listed(&names)
+                );
+            }
+            standing.retain(|scope, _| !moved.contains(scope));
+        }
         let standing = Standing(standing);
         if let Some(line) = standing.said(instrument) {
             println!("{line}");
@@ -218,6 +297,40 @@ impl Standing {
             .cloned()
             .collect()
     }
+}
+
+/// Of the standing readings, the scopes whose crate's dependency closure
+/// the staged lock pins otherwise than the lock at the commit the reading
+/// was taken at (#1312). A reading at no commit git can show, or over no
+/// crate the lock names, is counted moved. The reading's own staged lock,
+/// when the commit it was taken for staged one, is not kept; the lock at
+/// its commit stands for it.
+fn lock_moved(
+    root: &Path,
+    manifest: &Manifest,
+    standing: &BTreeMap<String, Reading>,
+) -> Result<Vec<String>> {
+    let Some(staged) = git::staged_content(root, lock::FILE)? else {
+        return Ok(standing.keys().cloned().collect());
+    };
+    let mut at: BTreeMap<&str, Option<String>> = BTreeMap::new();
+    let mut moved = Vec::new();
+    for (scope, reading) in standing {
+        let then = at.entry(&reading.commit).or_insert_with(|| {
+            (!reading.commit.is_empty())
+                .then(|| git::show(root, &reading.commit, lock::FILE).ok().flatten())
+                .flatten()
+        });
+        let same = manifest.crate_named(scope).is_some_and(|krate| {
+            let package = krate.package();
+            let now = lock::closure(&staged, &package);
+            now.is_some() && then.as_deref().and_then(|t| lock::closure(t, &package)) == now
+        });
+        if !same {
+            moved.push(scope.clone());
+        }
+    }
+    Ok(moved)
 }
 
 /// The crates `instrument` measures for a commit: the ones with a staged
@@ -331,6 +444,67 @@ mod tests {
         fs::write(tree.join("seams.toml"), "").unwrap();
         git(&tree, &["add", "--", "seams.toml"], None).unwrap();
         assert!(!stands(&tree, &manifest, &store));
+    }
+
+    /// A passing `clippy` reading over `php_heap` as it is on disk, the
+    /// crate laid beside `xtask` and committed first.
+    fn heap_passes(tree: &Tree, manifest: &Manifest, store: &Store) {
+        fs::create_dir_all(tree.join("crates/php_heap/src")).unwrap();
+        fs::write(tree.join("crates/php_heap/Cargo.toml"), "[package]\n").unwrap();
+        fs::write(tree.join("crates/php_heap/src/lib.rs"), "h\n").unwrap();
+        committing(tree, &["add", "--", "crates"]);
+        committing(tree, &["commit", "-q", "-m", "heap"]);
+        let krate = manifest.crate_named("php_heap").unwrap();
+        let mut reading = Reading::for_crate("clippy", krate, tree).unwrap();
+        reading.status = Status::Pass;
+        store.record(&[reading]).unwrap();
+    }
+
+    fn standing_over(tree: &Tree, manifest: &Manifest, store: &Store) -> Vec<String> {
+        let scopes = ["xtask".to_owned(), "php_heap".to_owned()];
+        let standing = Standing::for_commit(tree, manifest, store, "clippy", &scopes).unwrap();
+        scopes
+            .into_iter()
+            .filter(|s| standing.get(s).is_some())
+            .collect()
+    }
+
+    /// A staged census is read by xtask's tests and by no build: xtask is
+    /// measured again and every other crate's pass stands (#1312).
+    #[test]
+    fn a_staged_file_only_the_harness_reads_voids_xtasks_reading_alone() {
+        let (tree, manifest, store) = repository("census");
+        edit(&tree, "b\n", true);
+        pass(&tree, &manifest, &store);
+        heap_passes(&tree, &manifest, &store);
+        fs::create_dir_all(tree.join("data")).unwrap();
+        fs::write(tree.join("data/port-map.v0.toml"), "").unwrap();
+        git(&tree, &["add", "--", "data"], None).unwrap();
+        assert_eq!(standing_over(&tree, &manifest, &store), ["php_heap"]);
+    }
+
+    /// A staged lock voids the reading of a crate whose closure it moves,
+    /// and leaves one whose closure it pins as before standing (#1312).
+    #[test]
+    fn a_staged_lock_voids_only_the_crates_whose_closure_it_moves() {
+        let (tree, manifest, store) = repository("lock");
+        let lock = "version = 4\n\n\
+            [[package]]\nname = \"php_heap\"\nversion = \"0.0.0\"\n\n\
+            [[package]]\nname = \"serde\"\nversion = \"1.0.0\"\nsource = \"registry+x\"\nchecksum = \"aa\"\n\n\
+            [[package]]\nname = \"xtask\"\nversion = \"0.0.0\"\ndependencies = [\n \"serde\",\n]\n";
+        fs::write(tree.join("Cargo.lock"), lock).unwrap();
+        committing(&tree, &["add", "--", "Cargo.lock"]);
+        committing(&tree, &["commit", "-q", "-m", "lock"]);
+        pass(&tree, &manifest, &store);
+        heap_passes(&tree, &manifest, &store);
+        assert_eq!(
+            standing_over(&tree, &manifest, &store),
+            ["xtask", "php_heap"]
+        );
+        let bumped = lock.replace("checksum = \"aa\"", "checksum = \"bb\"");
+        fs::write(tree.join("Cargo.lock"), bumped).unwrap();
+        git(&tree, &["add", "--", "Cargo.lock"], None).unwrap();
+        assert_eq!(standing_over(&tree, &manifest, &store), ["php_heap"]);
     }
 
     /// `git` in `dir` as a person commits there: named, unsigned and

@@ -191,9 +191,87 @@ fn is_type_name(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
 }
 
+/// One `[[package]]` whole, as the lock pins it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct Pinned {
+    name: String,
+    version: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    checksum: Option<String>,
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct Pins {
+    #[serde(default)]
+    package: Vec<Pinned>,
+}
+
+/// The packages `package` reaches in the lock `text`, itself first and
+/// the rest in the lock's order, each whole as the lock pins it: two
+/// locks resolve a build of the crate alike when the two closures are
+/// equal (#1312). A dependency is written `name`, `name version` or
+/// `name version (source)`, and matches every package of that name and
+/// version. `None` when the text is no lock or names no such package.
+pub(crate) fn closure(text: &str, package: &str) -> Option<Vec<Pinned>> {
+    let pins: Pins = toml::from_str(text).ok()?;
+    let dashed = package.replace('_', "-");
+    let first = pins
+        .package
+        .iter()
+        .position(|p| p.source.is_none() && (p.name == package || p.name == dashed))?;
+    let mut reached = vec![false; pins.package.len()];
+    reached[first] = true;
+    let mut queue = vec![first];
+    while let Some(at) = queue.pop() {
+        for dep in &pins.package[at].dependencies {
+            let mut words = dep.split_whitespace();
+            let name = words.next().unwrap_or("");
+            let version = words.next();
+            for (i, p) in pins.package.iter().enumerate() {
+                if !reached[i] && p.name == name && version.is_none_or(|v| p.version == v) {
+                    reached[i] = true;
+                    queue.push(i);
+                }
+            }
+        }
+    }
+    let mut out = vec![pins.package[first].clone()];
+    out.extend(
+        pins.package
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| reached[*i] && *i != first)
+            .map(|(_, p)| p.clone()),
+    );
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CargoLock, reexports, root_types};
+    use super::{CargoLock, closure, reexports, root_types};
+
+    const LOCK: &str = "version = 4\n\n\
+        [[package]]\nname = \"app\"\nversion = \"0.0.0\"\ndependencies = [\n \"dep 1.0.0\",\n]\n\n\
+        [[package]]\nname = \"dep\"\nversion = \"1.0.0\"\nsource = \"registry+x\"\nchecksum = \"aa\"\n\n\
+        [[package]]\nname = \"dep\"\nversion = \"2.0.0\"\nsource = \"registry+x\"\nchecksum = \"bb\"\n\n\
+        [[package]]\nname = \"other\"\nversion = \"0.0.0\"\ndependencies = [\n \"dep 2.0.0\",\n]\n";
+
+    /// A package's closure moves with what it reaches and with nothing
+    /// else: a bump of the `dep` only `other` reaches leaves `app`'s
+    /// closure as it was (#1312).
+    #[test]
+    fn a_closure_moves_only_with_what_the_package_reaches() {
+        let bumped = LOCK.replace("checksum = \"bb\"", "checksum = \"cc\"");
+        assert_eq!(closure(LOCK, "app").map(|c| c.len()), Some(2));
+        assert_eq!(closure(LOCK, "app"), closure(&bumped, "app"));
+        assert_ne!(closure(LOCK, "other"), closure(&bumped, "other"));
+        assert_eq!(closure(LOCK, "missing"), None);
+        assert_eq!(closure("not a lock [", "app"), None);
+    }
 
     #[test]
     fn a_crate_root_yields_its_camel_case_public_types() {
