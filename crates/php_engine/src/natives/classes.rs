@@ -433,6 +433,41 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<PhpArray, Throw
 ///   int(2)
 /// }
 /// ```
+///
+/// Each row is laid down as `zend_symtable_add_new` lays it, without
+/// the lookup, so over a hooked class whose table holds copies of its
+/// declared rows (a lazy ghost's, separated by its initializer) a name
+/// the hooks answer and the table holds as a copy is two rows, and a
+/// lookup finds the later.
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class C { public int $b = 1; public $h = 5 { get => $this->h * 10; } function __construct() { $this->a = 1; $this->b = 3; } }
+/// $o = (new ReflectionClass(C::class))->newLazyGhost(function ($o) { $o->__construct(); });
+/// var_dump($o); $o->a += 1;
+/// $vars = get_object_vars($o);
+/// var_dump($vars, $vars['b'], count($vars));
+/// ```
+/// ```expect
+/// lazy ghost object(C)#3 (0) {
+///   ["b"]=>
+///   uninitialized(int)
+/// }
+/// array(5) {
+///   ["b"]=>
+///   int(3)
+///   ["h"]=>
+///   int(50)
+///   ["b"]=>
+///   int(1)
+///   ["h"]=>
+///   int(5)
+///   ["a"]=>
+///   int(2)
+/// }
+/// int(1)
+/// int(5)
+/// ```
 #[php_function]
 fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     let class = object.class();
@@ -460,7 +495,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
             } else {
                 Key::from_string(name)
             };
-            array.set(req, key, value)?;
+            array.add_new(req, key, value)?;
         }
         return Ok(array);
     }
@@ -487,7 +522,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
         } else {
             Key::from_string(name)
         };
-        array.set(req, key, value)?;
+        array.add_new(req, key, value)?;
     }
     Ok(array)
 }
@@ -539,7 +574,7 @@ fn answered_vars(
         };
         req.addref(&Value::string(name));
         req.addref(&value);
-        array.set(req, key, value)?;
+        array.add_new(req, key, value)?;
     }
     Ok(array)
 }

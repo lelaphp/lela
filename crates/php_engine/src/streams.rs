@@ -4335,9 +4335,9 @@ impl Ops for Dir {
 }
 
 /// A directory an extension's wrapper listed, php's own dir stream ops
-/// for such a wrapper, `php_glob_stream_ops` among them: the entries in
-/// order, `readdir` the next and `rewinddir` back to the first, under the
-/// wrapper's label.
+/// for such a wrapper: `phar_dir_ops` for a wrapper's own listing and
+/// `php_glob_stream_ops` for a glob, the entries in order, `readdir` the
+/// next and `rewinddir` back to the first, under the wrapper's label.
 struct Listing {
     label: &'static str,
     listed: DirListing,
@@ -4384,10 +4384,15 @@ impl Ops for Listing {
         self.label
     }
 
+    /// `phar_dir_write`, which a wrapper's own listing has and a glob's
+    /// has not, so `fwrite()` over the first answers `false` and raises
+    /// nothing, where over a glob it is php's notice that the stream is
+    /// not writable.
     fn writable(&self) -> bool {
-        false
+        matches!(self.listed, DirListing::Names(_))
     }
 
+    /// `phar_dir_write`'s `-1`.
     fn write(&mut self, _req: &mut Request, _buf: &[u8]) -> Option<usize> {
         None
     }
@@ -4400,17 +4405,58 @@ impl Ops for Listing {
         0
     }
 
-    /// `php_glob_stream_rewind`: back to the first entry, a glob's path
-    /// given up.
+    /// `php_glob_stream_rewind` for a glob: back to the first entry,
+    /// whatever was asked, its path given up. `phar_dir_seek`
+    /// (`Z/ext/phar/dirstream.c:56-83`) for a wrapper's own listing:
+    /// `SEEK_END` counted from the number of entries, the cursor back to
+    /// the first for it and for `SEEK_SET`, a negative offset refused
+    /// after that, and otherwise the cursor moved on as far as the offset
+    /// or the end, the position how far it moved.
+    ///
+    /// ```php
+    /// $p = sys_get_temp_dir() . '/listing' . getmypid() . '.phar';
+    /// $phar = new Phar($p); $phar['a.txt'] = 'a'; $phar['b.txt'] = 'b'; $phar['c/d.txt'] = 'd'; unset($phar);
+    /// $d = opendir("phar://$p");
+    /// var_dump(fseek($d, 0, SEEK_END), ftell($d), fseek($d, -1), ftell($d), fseek($d, 1), ftell($d), readdir($d), fwrite($d, 'hi'));
+    /// closedir($d); unlink($p);
+    /// ```
+    /// ```expect regime=phar-writable
+    /// int(0)
+    /// int(3)
+    /// int(-1)
+    /// int(3)
+    /// int(0)
+    /// int(1)
+    /// string(5) "b.txt"
+    /// bool(false)
+    /// ```
     fn seek(
         &mut self,
         _req: &mut Request,
-        _offset: i64,
-        _whence: Option<Whence>,
-        _position: &mut i64,
+        offset: i64,
+        whence: Option<Whence>,
+        position: &mut i64,
     ) -> Option<bool> {
-        self.at = 0;
-        self.path = None;
+        let DirListing::Names(entries) = &self.listed else {
+            self.at = 0;
+            self.path = None;
+            return Some(true);
+        };
+        let count = i64::try_from(entries.len()).unwrap_or(i64::MAX);
+        let offset = match whence {
+            Some(Whence::End) => count.saturating_add(offset),
+            _ => offset,
+        };
+        if matches!(whence, Some(Whence::Set | Whence::End)) {
+            self.at = 0;
+        }
+        if offset < 0 {
+            return Some(false);
+        }
+        let left = entries.len().saturating_sub(self.at);
+        let moved = usize::try_from(offset).unwrap_or(usize::MAX).min(left);
+        self.at += moved;
+        *position = i64::try_from(moved).unwrap_or(i64::MAX);
         Some(true)
     }
 

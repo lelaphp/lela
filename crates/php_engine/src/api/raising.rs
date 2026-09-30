@@ -302,7 +302,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
     // A fatal in flight is no native served: `_zend_bailout` empties
     // `EG(current_execute_data)` before it jumps (`Z/Zend/zend.c:1267`),
     // so what a `zend_catch` raises names no function.
-    let text = if req.at_startup() {
+    let text = if req.ini_stage() == crate::api::abi::IniStage::Startup {
         format!("PHP Startup: {message}")
     } else if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
         let function = req.active_native();

@@ -27,7 +27,8 @@ use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, Me
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
-    Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni, Validation,
+    DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
+    Validation,
 };
 use crate::api::raising::Level;
 use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
@@ -1147,6 +1148,13 @@ impl Shared {
             .map(|(_, entry)| entry)
     }
 
+    /// `zend_get_configuration_directive`, what an INI text's `${name}`
+    /// reads first: the string the host's ini text set under `name`,
+    /// whether or not an entry of that name exists.
+    pub(crate) fn directive(&self, name: &[u8]) -> Option<&[u8]> {
+        self.configured(name).and_then(Configured::text)
+    }
+
     /// The value of the constant `name` as the bundle declared it, or as
     /// the engine's own table has it: a value nothing owns, since the
     /// string ones are the engine's interned strings.
@@ -1217,8 +1225,14 @@ const CORE_INI: &[(&str, &str)] = &[
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
     ("serialize_precision", "-1"),
-    ("error_reporting", "32767"),
+    // `error_reporting`, `NULL` in php's table (`Z/Zend/zend.c:262`),
+    // which `ini_get` reads as the empty string, phpinfo as `no value`
+    // and `OnUpdateErrorReporting` as `E_ALL`.
+    ("error_reporting", ""),
     ("display_errors", "1"),
+    // `display_startup_errors`, `On` (`Z/main/main.c:800`): whether what
+    // is raised while php starts is displayed ([`Request::display_errors`]).
+    ("display_startup_errors", "1"),
     ("log_errors", "0"),
     // `error_log`, `NULL` in php's table, and `error_log_mode`, both
     // `PHP_INI_ALL` (`Z/main/main.c:835-836`): the file `php_log_err`
@@ -1234,6 +1248,7 @@ const CORE_INI: &[(&str, &str)] = &[
     ("error_append_string", ""),
     ("ignore_repeated_errors", "0"),
     ("ignore_repeated_source", "0"),
+    ("report_zend_debug", "0"),
     ("xmlrpc_errors", "0"),
     ("xmlrpc_error_number", "0"),
     // `max_memory_limit`, `PHP_INI_SYSTEM`, declared before
@@ -1284,6 +1299,10 @@ const CORE_INI: &[(&str, &str)] = &[
     ("zend.multibyte", "0"),
     ("zend.script_encoding", ""),
     ("zend.detect_unicode", "1"),
+    // `zend.signal_check`, `ZEND_INI_SYSTEM` and `SIGNAL_CHECK_DEFAULT`
+    // (`Z/Zend/zend.c:270`): whether shutdown checks the signal handlers
+    // `zend_signal` installed were left in place.
+    ("zend.signal_check", "0"),
     // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
     // as the empty string and `OnUpdateFiberStackSize` as php's default.
     ("fiber.stack_size", ""),
@@ -1307,6 +1326,7 @@ const CORE_INI: &[(&str, &str)] = &[
     ("mail.cr_lf_mode", "crlf"),
     ("mail.log", ""),
     ("sendmail_path", "/usr/sbin/sendmail -t -i"),
+    ("sendmail_from", ""),
     ("mail.force_extra_parameters", ""),
     ("syslog.facility", "LOG_USER"),
     ("syslog.ident", "php"),
@@ -1322,6 +1342,10 @@ const CORE_INI: &[(&str, &str)] = &[
     // `ignore_user_abort`, `PG(ignore_user_abort)`, and the two `dl()`
     // reads, `enable_dl` and `extension_dir`, `PHP_INI_SYSTEM`.
     ("ignore_user_abort", "0"),
+    // `implicit_flush`, `Off` in `main.c` and `On` among the CLI's
+    // hardcoded entries (`Z/sapi/cli/php_cli.c:118`), which the web's
+    // hosts lay back.
+    ("implicit_flush", "1"),
     // `realpath_cache_size` and `realpath_cache_ttl`, `PHP_INI_SYSTEM`,
     // the realpath cache's limit and time to live (`crate::virtual_cwd`).
     ("realpath_cache_size", "4096K"),
@@ -1509,9 +1533,7 @@ impl crate::ini_syntax::Host for Configure<'_> {
     }
 
     fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        self.shared
-            .configured(name)
-            .and_then(|entry| entry.text().map(<[u8]>::to_vec))
+        self.shared.directive(name).map(<[u8]>::to_vec)
     }
 
     fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
@@ -1926,7 +1948,9 @@ impl EngineBuilder {
         self
     }
 
-    /// The extensions in `MINIT` order, the bundle's `enabled()`.
+    /// The extensions in the bundle's order, `enabled()`, which the
+    /// engine starts in as `zend_sort_modules` leaves it
+    /// ([`sort_modules`]).
     #[must_use]
     pub fn extensions(mut self, extensions: &[Extension]) -> EngineBuilder {
         self.extensions.extend(extensions.iter().cloned());
@@ -2001,7 +2025,19 @@ impl EngineBuilder {
     }
 
     /// The engine: every engine state built from the startup ini, in
-    /// bundle order (ADR-0005), the declarations linked.
+    /// bundle order (ADR-0005), the declarations linked. A name the host
+    /// set that neither the core table nor an extension declares is no
+    /// entry, as the recipe's `track_errors`, gone since php 8, is not:
+    ///
+    /// ```php
+    /// var_dump(ini_get('track_errors'), get_cfg_var('track_errors'), ini_set('track_errors', '1'), isset(ini_get_all()['track_errors']));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(1) "0"
+    /// bool(false)
+    /// bool(false)
+    /// ```
     #[must_use]
     #[allow(clippy::too_many_lines)] // one line per field of the engine
     pub fn build(self) -> Engine {
@@ -2016,6 +2052,7 @@ impl EngineBuilder {
             extensions.extend(hosted.extension);
             hosted.additional
         });
+        sort_modules(&mut extensions);
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
         // `standard`'s constants: each extension's constants rewritten
@@ -2043,6 +2080,13 @@ impl EngineBuilder {
         for (name, value) in configuration.directives() {
             if on_modify(&extensions, &name).is_some() {
                 held.push((name, value, false));
+                continue;
+            }
+            // A name no table declares is no entry: it stays in the
+            // configuration table, where `get_cfg_var()` finds it, as
+            // `zend_register_ini_entries_ex` reads that table by the
+            // names it registers and by no other.
+            if !ini.iter().any(|(n, _)| *n == name) {
                 continue;
             }
             ini.retain(|(n, _)| *n != name);
@@ -2308,6 +2352,49 @@ fn host_ini(
     admin
 }
 
+/// `zend_sort_modules` (`Z/Zend/zend_API.c:2483-2515`), which
+/// `zend_startup_modules` runs over `module_registry` before the first
+/// `MINIT`: walking from the first, an extension that names a required
+/// or optional dependency standing after it trades places with that one,
+/// and the walk stays where it is until the extension there names none
+/// that stands later. The order the engine starts, registers and lists
+/// its extensions in is the bundle's as this leaves it, so `standard`,
+/// which names `session` optional (`standard_deps`), starts after it
+/// whatever the crates depend on:
+///
+/// ```php
+/// $loaded = get_loaded_extensions();
+/// var_dump(array_search('session', $loaded) < array_search('standard', $loaded), array_search('libxml', $loaded) < array_search('dom', $loaded));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
+///
+/// php loops for ever over a cycle of dependencies; the walk here stops
+/// after as many trades as a list of its length can need without one.
+fn sort_modules(modules: &mut [Extension]) {
+    let mut trades = modules.len() * modules.len();
+    let mut at = 0;
+    while at < modules.len() {
+        let later = modules[at]
+            .dependencies
+            .iter()
+            .filter(|dep| dep.kind != DependencyKind::Conflicts)
+            .find_map(|dep| {
+                (at + 1..modules.len())
+                    .find(|&other| modules[other].name.eq_ignore_ascii_case(&dep.name))
+            });
+        match later {
+            Some(other) if trades > 0 => {
+                modules.swap(at, other);
+                trades -= 1;
+            }
+            _ => at += 1,
+        }
+    }
+}
+
 /// The `on_modify` an extension of `extensions` gave the entry `name`.
 fn on_modify(extensions: &[Extension], name: &[u8]) -> Option<OnModify> {
     extensions.iter().find_map(|e| {
@@ -2412,7 +2499,11 @@ impl Engine {
         req.begin_startup();
         let mut taken = core_startup(&mut req);
         for (name, value, activate) in held {
-            req.set_activating(activate);
+            req.set_ini_stage(if activate {
+                IniStage::Activate
+            } else {
+                IniStage::Startup
+            });
             let accepted = on_modify(&self.shared.extensions, &name)
                 .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
             if accepted {
@@ -2420,6 +2511,7 @@ impl Engine {
                 taken.push((name, value));
             }
         }
+        req.set_ini_stage(IniStage::Startup);
         let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
         if taken_encoding == crate::multibyte::Startup::Refused {
             taken.push((b"zend.script_encoding".to_vec(), Vec::new()));
@@ -3075,6 +3167,9 @@ impl Engine {
         req.destroy_static_vars();
         req.free_default_arguments();
         req.free_object_storage();
+        // `zend_deactivate`'s `zend_ini_deactivate`, after
+        // `shutdown_executor` (`Z/Zend/zend.c:1320-1330`).
+        req.ini_deactivate();
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
         // for the host is the log form of it, whether or not `log_errors`
@@ -3466,10 +3561,11 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 /// starts them, what its `php -n` answers `get_loaded_extensions()` in
 /// past `Core`: the order php's `MINIT`s register their stream wrappers
 /// and filters in, which `stream_get_wrappers()`, `stream_get_filters()`
-/// and phpinfo's `Registered PHP Streams` list. The bundle is a
-/// topological order of the crates instead, `standard` ahead of the
-/// extensions that call into it, so the tables are put in this order
-/// after the extensions start ([`serve_rinits`]).
+/// and phpinfo's `Registered PHP Streams` list. The engine starts the
+/// bundle's order as [`sort_modules`] leaves it, which is not the pinned
+/// build's (`openssl` after `standard`, `random` near the front), so the
+/// tables are put in this order after the extensions start
+/// ([`serve_rinits`]).
 #[rustfmt::skip]
 const MODULE_STARTUP: [&str; 65] = [
     "date", "lexbor", "openssl", "pcre", "sqlite3", "zlib", "bcmath", "bz2", "calendar", "ctype",
@@ -3491,7 +3587,7 @@ fn startup_rank(name: &str) -> usize {
         .unwrap_or(MODULE_STARTUP.len())
 }
 
-/// Each extension's `rinit` in bundle order, with the stream wrappers
+/// Each extension's `rinit` in startup order, with the stream wrappers
 /// and filters each registers placed in php's startup order
 /// ([`MODULE_STARTUP`]): every extension registers into empty tables,
 /// its rows are gathered under its rank, and the tables are the rows
@@ -5360,21 +5456,43 @@ mod tests {
     /// what is held here is the switch.
     #[test]
     fn the_dump_before_the_optimizer_is_the_op_arrays_under_the_ini_bit_and_nothing_without_it() {
+        // The entry is opcache's, and php has none without it.
+        let opcache = || {
+            let entry = php_unit::decl::IniDecl {
+                name: Name(b"opcache.opt_debug_level"[..].into()),
+                default: b"0"[..].into(),
+                user: false,
+                per_dir: false,
+                system: true,
+            };
+            let extension = crate::api::abi::ExtensionBuilder::default()
+                .ini(vec![entry])
+                .build("t");
+            Engine::builder().extensions(&[extension])
+        };
         let described = description("<?php echo 1;");
         assert_eq!(
-            Engine::builder().build().dump_before_optimizer(&described),
+            Engine::builder()
+                .ini("opcache.opt_debug_level", "0x10000")
+                .build()
+                .dump_before_optimizer(&described),
+            None,
+            "no opcache, and so no entry"
+        );
+        assert_eq!(
+            opcache().build().dump_before_optimizer(&described),
             None,
             "no opt_debug_level at all"
         );
         assert_eq!(
-            Engine::builder()
+            opcache()
                 .ini("opcache.opt_debug_level", "0")
                 .build()
                 .dump_before_optimizer(&described),
             None,
             "the entry at its default"
         );
-        let dumped = Engine::builder()
+        let dumped = opcache()
             .ini("opcache.opt_debug_level", "0x10000")
             .build()
             .dump_before_optimizer(&described)
@@ -5385,7 +5503,7 @@ mod tests {
             "the one op array, in php's format"
         );
         assert_eq!(
-            Engine::builder()
+            opcache()
                 .ini("opcache.opt_debug_level", "0x10000")
                 .build()
                 .dump_before_optimizer(&description("<?php echo 1 +;")),

@@ -1198,6 +1198,44 @@ impl Request {
     ///    'd' => 'd',
     /// ))
     /// ```
+    ///
+    /// The declared rows are read off the slots whatever the object's
+    /// table holds, and the dynamic ones are every row the table holds
+    /// that is no `IS_INDIRECT` (`zho_build_properties_ex`), so a table
+    /// that holds copies of the declared rows
+    /// ([`php_heap::DeclaredRows::Copied`]) hands each copy on as a row
+    /// of its own, under the name the slot's row has, as php's
+    /// `zend_hash_add_new` lays both down; the `foreach` walk reads the
+    /// same rows.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class H { public int $b = 1; public $h = 5 { get => $this->h * 10; } function __construct() { $this->a = 1; $this->b = 3; } }
+    /// $o = (new ReflectionClass(H::class))->newLazyGhost(function ($o) { $o->__construct(); });
+    /// var_dump($o); $o->a += 1;
+    /// echo json_encode($o), "\n";
+    /// var_export($o); echo "\n";
+    /// foreach ($o as $k => $v) echo "$k => $v\n";
+    /// ```
+    /// ```expect
+    /// lazy ghost object(H)#3 (0) {
+    ///   ["b"]=>
+    ///   uninitialized(int)
+    /// }
+    /// {"b":3,"h":50,"b":1,"h":5,"a":2}
+    /// \H::__set_state(array(
+    ///    'b' => 3,
+    ///    'h' => 50,
+    ///    'b' => 1,
+    ///    'h' => 5,
+    ///    'a' => 2,
+    /// ))
+    /// b => 3
+    /// h => 50
+    /// b => 1
+    /// h => 5
+    /// a => 2
+    /// ```
     pub(crate) fn hooked_object_rows(
         &mut self,
         object: PhpObject,

@@ -90,7 +90,6 @@ pub(crate) struct IntervalState {
     pub civil_or_wall: i64,
     pub from_string: bool,
     pub date_string: Option<Vec<u8>>,
-    rows: Vec<Value>,
 }
 
 /// The payload: `php_interval_obj` keeps its state behind pointers, and so the
@@ -353,8 +352,9 @@ fn update(rows: &mut Vec<(PhpString, Value)>, name: PhpString, value: Value) {
     }
 }
 
-/// The rows as an array with its own owners, the table `__serialize`
-/// returns and `get_debug_info` hands a dumper: the fields first where
+/// The rows as an array with its own owners, each key and value one
+/// more owner of what `own` views, the table `__serialize` returns and
+/// `get_debug_info` hands a dumper: the fields first where
 /// `first`, and the object's own rows added behind them only where no
 /// field took their name, as `add_common_properties` adds them.
 pub(super) fn rows_array(
@@ -366,6 +366,7 @@ pub(super) fn rows_array(
     let mut array = PhpArray::new(req)?;
     if !first {
         for (name, value) in own {
+            req.addref(&Value::string(*name));
             req.addref(value);
             array.set(req, Key::Str(*name), *value)?;
         }
@@ -378,6 +379,7 @@ pub(super) fn rows_array(
         for (name, value) in own {
             let key = Key::Str(*name);
             if !array.contains(&key) {
+                req.addref(&Value::string(*name));
                 req.addref(value);
                 array.set(req, key, *value)?;
             }
@@ -802,13 +804,6 @@ impl IntervalHandlers {
 }
 
 impl ObjectHandlers for IntervalHandlers {
-    fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let rows = object
-            .native_mut::<IntervalObj>(req)
-            .map(|i| std::mem::take(&mut i.rows));
-        release_rows(req, rows);
-    }
-
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_interval)
     }
@@ -924,9 +919,8 @@ impl ObjectHandlers for IntervalHandlers {
         if has_debug_info(req, object) {
             return Std.get_debug_info(req, object);
         }
-        let own = std_rows(req, object)?;
-        let fields = interval_rows(req, object)?;
-        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
+        let rows = interval_table(req, object)?;
+        rows_array(req, &rows, Vec::new(), false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -942,12 +936,18 @@ impl ObjectHandlers for IntervalHandlers {
         if purpose == PropertyPurpose::Debug {
             return Ok(None);
         }
-        interval_table(req, object).map(Some)
+        Ok(Some(
+            interval_table(req, object)?
+                .into_iter()
+                .map(|(name, value)| (Key::Str(name), value))
+                .collect(),
+        ))
     }
 
     /// `date_object_get_properties_interval`, the class's
-    /// `get_properties`: the object's own rows with the interval's
-    /// fields over them, which `ReflectionProperty`'s dynamic arm reads.
+    /// `get_properties`: the interval's fields written into the object's
+    /// own table and the table answered, which `ReflectionProperty`'s
+    /// dynamic arm reads and the pointer natives move the pointer of.
     ///
     /// ```php
     /// $i = new DateInterval('P1Y2D');
@@ -961,28 +961,62 @@ impl ObjectHandlers for IntervalHandlers {
     /// bool(false)
     /// bool(true)
     /// ```
+    ///
+    /// The fields live in the object's own table, so the pointer natives
+    /// keep their pointer on it between calls, a field written through
+    /// the interval is updated where its row stands, and a dynamic
+    /// property added after the fields were written follows them.
+    ///
+    /// ```php
+    /// $i = new DateInterval('P1Y2D');
+    /// var_dump(@current($i), @next($i), @key($i));
+    /// $i->m = 7;
+    /// var_dump(@current($i), @key($i), @next($i), @end($i), @key($i), @prev($i));
+    /// $j = new DateInterval('P1D'); @$j->foo = 1; var_dump(count((array) $j)); @$j->bar = 2;
+    /// echo implode(' ', array_keys((array) $j)), "\n";
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(0)
+    /// string(1) "m"
+    /// int(7)
+    /// string(1) "m"
+    /// int(2)
+    /// bool(false)
+    /// string(11) "from_string"
+    /// bool(false)
+    /// int(11)
+    /// foo y m d h i s f invert days from_string bar
+    /// ```
     fn get_properties(
         &self,
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Vec<(PhpString, Value)>, Thrown> {
-        Ok(interval_table(req, object)?
-            .into_iter()
-            .filter_map(|(key, value)| match key {
-                Key::Str(name) => Some((name, value)),
-                Key::Int(_) => None,
-            })
-            .collect())
+        interval_table(req, object)
     }
 }
 
-/// `Z_OBJPROP_P` as `date_object_get_properties_interval` fills it: the
-/// object's own rows with the fields over them, kept on the payload.
-fn interval_table(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
-    let fields = interval_rows(req, object)?;
-    rows_view(req, object, fields, |req, o| {
-        o.native_mut::<IntervalObj>(req).map(|i| &mut i.rows)
-    })
+/// `date_object_get_properties_interval`: `date_interval_object_to_hash`
+/// writes each field into the object's own table with
+/// `zend_hash_str_update`, a row it holds replaced where it stands and a
+/// new one appended, so the table's internal pointer stays where it
+/// stood; then the table's rows, views, each declared name mangled as a
+/// reader keys it.
+fn interval_table(req: &mut Request, object: PhpObject) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    for (name, value) in interval_rows(req, object)? {
+        let name = match PhpString::new(req, name) {
+            Ok(name) => name,
+            Err(thrown) => {
+                req.release(value);
+                return Err(thrown);
+            }
+        };
+        let written = object.set_row(req, &Key::Str(name), value);
+        req.release(Value::string(name));
+        written?;
+    }
+    std_rows(req, object)
 }
 
 /// The interval's fields, none for one no constructor set.

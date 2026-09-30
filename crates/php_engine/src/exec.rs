@@ -170,15 +170,14 @@ impl Caller {
 /// lets it go while one of its methods runs from a native is served
 /// there, inside the method.
 ///
-/// A lent receiver is a name with no owner, so the engine keeps it
-/// where nothing frees the object behind it:
-/// [`Request::lent_receiver`] lends only an object whose freeing is
-/// sure to pass through its destructor, one whose class serves one
-/// that has not been served; the destructor hands every call lending it
-/// an owner of its own ([`Request::own_lent_receivers`]), so php's
-/// destructor runs at php's moment and the memory stands until the last
-/// such frame is popped; and a frame that leaves the running chain, a
-/// generator's or a suspended fiber's, owns what it was lent.
+/// A lent receiver is a name with no owner, so it pins the object
+/// ([`Receiver::lent`], [`php_heap::Obj::pin`]): php frees the
+/// object under the running frame when its last owner lets it go, and
+/// here its destructor and its members' release are served at that
+/// moment while its bytes and its id stand until the last pin is
+/// let go ([`Request::give_up_receiver`]); and a frame that leaves the
+/// running chain, a generator's or a suspended fiber's, owns what it was
+/// lent.
 #[derive(Clone, Copy)]
 pub(crate) enum Receiver {
     /// `ZEND_CALL_RELEASE_THIS`: one owner the call holds, which the
@@ -191,6 +190,35 @@ pub(crate) enum Receiver {
 }
 
 impl Receiver {
+    /// The receiver of a call php makes without `ZEND_CALL_RELEASE_THIS`
+    /// (`zend_call_function`, `$this->m()`, a forwarding `parent::m()`):
+    /// lent, the object named with no owner and pinned
+    /// ([`php_heap::Obj::pin`]) until the call or the frame it becomes
+    /// gives the name up ([`Request::give_up_receiver`]). An autoloader
+    /// that unregisters itself gives up the object's last owner outside
+    /// the call, and php frees the object there, inside the method: its
+    /// destructor is served and its members are released at that
+    /// moment, while the method goes on over the object it still names,
+    /// whose bytes stand until the pin is let go:
+    ///
+    /// ```php
+    /// class A { function __invoke($c) { spl_autoload_unregister($this); echo "unregistered\n"; $this->after(); }
+    ///     function after() { echo "after\n"; }
+    ///     function __destruct() { echo "A gone\n"; } }
+    /// spl_autoload_register(new A);
+    /// var_dump(class_exists('X'));
+    /// ```
+    /// ```expect
+    /// A gone
+    /// unregistered
+    /// after
+    /// bool(false)
+    /// ```
+    pub(crate) fn lent(object: PhpObject) -> Receiver {
+        object.heap().pin();
+        Receiver::Lent(object)
+    }
+
     /// The object, owned or not.
     pub(crate) fn object(self) -> PhpObject {
         match self {
@@ -783,10 +811,10 @@ impl Vm {
         Some((state, calls))
     }
 
-    /// Every frame and call of this execution lent `object` as its
-    /// receiver, or lent any where `object` is `None`, made its owner:
-    /// the objects the caller is to take one owner of for each.
-    pub(crate) fn own_lent(&mut self, object: Option<PhpObject>) -> Vec<PhpObject> {
+    /// Every frame and call of this execution lent its receiver made its
+    /// owner: the objects the caller is to take one owner of for each,
+    /// and let one pin of each go.
+    pub(crate) fn own_lent(&mut self) -> Vec<PhpObject> {
         let mut taken = Vec::new();
         let receivers = self
             .frames
@@ -794,9 +822,7 @@ impl Vm {
             .map(|state| &mut state.receiver)
             .chain(self.calls.iter_mut().map(|call| &mut call.receiver));
         for receiver in receivers {
-            if let Some(Receiver::Lent(held)) = *receiver
-                && object.is_none_or(|object| object.heap().id() == held.heap().id())
-            {
+            if let Some(Receiver::Lent(held)) = *receiver {
                 *receiver = Some(Receiver::Owned(held));
                 taken.push(held);
             }
