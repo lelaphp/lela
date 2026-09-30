@@ -247,13 +247,11 @@ fn shell(req: &Request, command: &[u8]) -> Command {
 }
 
 /// The request's working directory and environment, where a child of
-/// the process would have the process's.
+/// the process would have the process's: the environment handed over in
+/// its own order, as php hands `posix_spawn` its `envp`.
 fn in_request(req: &Request, command: &mut Command) {
     command.current_dir(req.cwd());
-    command.env_clear();
-    for (name, value) in req.env_pairs() {
-        command.env(OsStr::from_bytes(name), OsStr::from_bytes(value));
-    }
+    crate::ffi::environment(command, req.env_pairs());
 }
 
 /// `pclose($handle): int`, `PHP_FUNCTION(pclose)`
@@ -962,10 +960,7 @@ fn child_command(
         child.current_dir(OsStr::from_bytes(cwd));
     }
     if let Some(env) = env {
-        child.env_clear();
-        for (name, value) in env {
-            child.env(OsStr::from_bytes(name), OsStr::from_bytes(value));
-        }
+        crate::ffi::environment(&mut child, env);
     }
     child
 }
