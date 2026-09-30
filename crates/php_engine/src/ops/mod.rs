@@ -811,15 +811,39 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
 /// array(0) {
 /// }
 /// ```
+///
+/// php hands the object's own table back where it can
+/// (`zend_proptable_to_symtable`), and duplicates it where the class
+/// declares a property or has handlers of its own; a duplicate holds a
+/// reference nothing else holds as its value (`zend_array_dup_element`),
+/// so the cast of a property bound by reference once is no reference:
+///
+/// ```php
+/// class Foo { public $foo; }
+/// $o = new Foo;
+/// (function ($p, $o) { foreach ($p as $n => &$v) { $o->$n = &$v; } })(['foo' => 1], $o);
+/// $a = (array) $o;
+/// $o->foo = 2;
+/// var_dump(ReflectionReference::fromArrayElement($a, 'foo'), $a['foo']);
+/// ```
+/// ```expect
+/// NULL
+/// int(1)
+/// ```
 pub(crate) fn mangled_array(
     req: &mut Request,
     object: PhpObject,
     rows: Vec<(Key, Value)>,
 ) -> Result<PhpArray, Thrown> {
     let mangled = mangled_names(req, object.class());
+    let duplicate = !mangled.is_empty() || req.own_handlers(object.class()).is_some();
     let mut array = PhpArray::new(req)?;
     let mut at = 0;
     for (key, entry) in rows {
+        let entry = match entry.as_ref() {
+            ValueRef::Reference(cell) if duplicate && cell.heap().refcount() == 1 => entry.deref(),
+            _ => entry,
+        };
         let name = match key {
             Key::Int(n) => {
                 req.addref(&entry);

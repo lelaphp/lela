@@ -12423,6 +12423,13 @@ impl Request {
     /// it installs, and `Std`'s at a root and for every user class. The
     /// walk is cut at a depth no declaration can make.
     pub(crate) fn handlers_of(&self, class: ClassId) -> &'static dyn ObjectHandlers {
+        self.own_handlers(class).unwrap_or(&Std)
+    }
+
+    /// The handler table of `class` where it is not
+    /// `std_object_handlers`: its own or the nearest parent's, or an
+    /// enum's; `None` where its objects are served by [`Std`].
+    pub(crate) fn own_handlers(&self, class: ClassId) -> Option<&'static dyn ObjectHandlers> {
         let mut at = Some(class);
         for _ in 0..64 {
             let Some(class) = at else {
@@ -12432,17 +12439,13 @@ impl Request {
                 .ok()
                 .and_then(|i| self.shared.handlers.get(i))
             {
-                return *table;
+                return Some(*table);
             }
             at = self.class_parent(class);
         }
-        if self
-            .class_decl(class)
+        self.class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Enum)
-        {
-            return &crate::enums::ENUM;
-        }
-        &Std
+            .then_some(&crate::enums::ENUM as &'static dyn ObjectHandlers)
     }
 
     /// The `create_object` of the class or of the nearest parent that
@@ -13186,6 +13189,18 @@ impl Request {
     /// }
     /// ```
     ///
+    /// A `null` is an empty table, with php's deprecation since 8.5:
+    ///
+    /// ```php
+    /// class N { public $a = 1; public function __debugInfo() { return null; } }
+    /// var_dump(new N);
+    /// ```
+    /// ```expect
+    /// Deprecated: Returning null from N::__debugInfo() is deprecated, return an empty array instead in %s on line 3
+    /// object(N)#1 (0) {
+    /// }
+    /// ```
+    ///
     /// ```php
     /// class E { public function __debugInfo() { return 1; } }
     /// var_dump(new E);
@@ -13208,6 +13223,13 @@ impl Request {
             Some(array) => Ok(Some(*array)),
             None if value.tag() == TypeTag::Null => {
                 self.release(value);
+                let class = self.class_name(object.class());
+                crate::api::raising::deprecated(
+                    self,
+                    &format!(
+                        "Returning null from {class}::__debugInfo() is deprecated, return an empty array instead"
+                    ),
+                );
                 PhpArray::new(self).map(Some)
             }
             None => {
