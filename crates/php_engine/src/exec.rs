@@ -1814,6 +1814,44 @@ pub(crate) fn cleanup_unfinished_calls(req: &mut Request, frame: FrameRef) {
     }
 }
 
+/// `ZEND_LAST_CATCH` (`Z/Zend/zend_compile.h`): the bit beside the cache
+/// slot on the `extended_value` of the last `CATCH` of a `try`, the one
+/// that rethrows rather than jumping to a clause after it.
+pub(crate) const LAST_CATCH: u32 = 1 << 0;
+
+/// `CACHED_PTR(slot)`, else `zend_lookup_class_ex` under
+/// `ZEND_FETCH_CLASS_NO_AUTOLOAD` over the lowered half of the constant
+/// pair at `at` and `CACHE_PTR(slot, ce)` over what it found: the
+/// silent resolution `ZEND_CATCH` and `ZEND_INSTANCEOF` make, and the
+/// lookup half of the throwing one, `class_operand`. A name nothing
+/// declares primes nothing — php's `CATCH` writes the null it found and
+/// reads it back as unprimed, and the other three throw before
+/// `CACHE_PTR` — so a class declared after a pass is found by the next.
+///
+/// No slot is `init_static_method_call`'s: php primes that one with
+/// the class alone only where `op2` is no constant, and with the class
+/// and the callee together where it is (`CACHE_POLYMORPHIC_PTR`), so it
+/// reads and writes [`Cached::ClassAndCallee`] off the slot itself.
+pub(crate) fn cached_class(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    at: u32,
+    slot: Option<CacheSlot>,
+) -> Option<crate::api::values::ClassId> {
+    if let Some(Cached::Class(class)) = slot.map(|slot| req.cached(frame, slot)) {
+        return Some(class);
+    }
+    let lowered = constant(code, ConstIdx(at.saturating_add(1)));
+    let found = lowered
+        .as_str_bytes()
+        .and_then(|lowered| find_class(req, lowered));
+    if let (Some(slot), Some(class)) = (slot, found) {
+        req.prime(frame, slot, Cached::Class(class));
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

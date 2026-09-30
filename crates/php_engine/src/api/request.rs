@@ -2266,6 +2266,10 @@ enum Traced {
         kind: IncludeKind,
         file: Option<Vec<u8>>,
     },
+    /// A code frame no `INCLUDE_OR_EVAL` pushed that stands over user
+    /// code, which php names `unknown` (`ZEND_STR_UNKNOWN`): what a
+    /// host's evaluation in a frame is ([`crate::tier::evaluate`]).
+    Unknown,
 }
 
 /// One link of php's `prev_execute_data` chain as this engine holds it:
@@ -5325,6 +5329,10 @@ impl Request {
                     let name = Value::string(PhpString::new(self, kind.name().as_bytes())?);
                     self.set_string_key(&mut row, b"function", name)?;
                 }
+                Traced::Unknown => {
+                    let name = Value::string(PhpString::new(self, b"unknown")?);
+                    self.set_string_key(&mut row, b"function", name)?;
+                }
             }
             trace.append(self, Value::array(row))?;
         }
@@ -5607,6 +5615,20 @@ impl Request {
                         // makes no row (`zend_trace_to_string` closes
                         // every trace with `{main}`).
                         let Some(kind) = including(at) else {
+                            // `zend_fetch_debug_backtrace`'s default arm:
+                            // a dummy frame is skipped where it holds no
+                            // file and line, and named `unknown` where
+                            // it stands over user code.
+                            if site.is_some() {
+                                rows.push((
+                                    Traced::Unknown,
+                                    None,
+                                    None,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    site,
+                                ));
+                            }
                             continue;
                         };
                         // `build_filename_arg`: an `eval` names no file.

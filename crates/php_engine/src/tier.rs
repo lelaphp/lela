@@ -11,14 +11,39 @@
 //! given, after that frame's prologue; `RETURN` raises `Site::Return` for
 //! every other frame and for no entry frame, which the stack's entry slot
 //! says.
+//!
+//! The debugging host is a `Tier` too (`jit-design.md` §2.4, revision 8;
+//! design §5.8, revision 51): its `safepoint` is where it stops the serving and [`step`]
+//! is its loop, as the recorder's, with [`unwind`] beside it for the
+//! frame a step left a throwable pending in, and the frame reads
+//! between the steps. `php_sapi` re-exports this face, so a host that
+//! binds a tier names none of `php_engine`.
 
 use std::sync::atomic::AtomicU32;
 
-use php_heap::{Fatal, FrameRef};
-
 use crate::api::abi::Extension;
-use crate::api::request::Request;
 use crate::{exec, interrupt};
+
+pub use crate::api::request::Request;
+pub use php_heap::{Fatal, FrameRef};
+pub use php_unit::Opcode;
+
+mod code;
+mod frames;
+mod values;
+pub use code::{
+    Class, Code, Named, Shape, class_named, frame_code, function_named, method_named, table_sizes,
+    user_classes, user_functions,
+};
+pub use frames::{
+    Argument, Aside, Evaluated, Pending, Position, Serves, call, caller, catches, entry, evaluate,
+    exit, exiting, function_exists, oplines, pending, position, restore, serves, set_aside,
+};
+pub(crate) use values::values_shown;
+pub use values::{
+    Identity, Key, Shown, TraceRow, Variable, backtrace, included_files, last_error, literals,
+    superglobals, user_constants, variable, variables,
+};
 
 /// The number of a safepoint within its op array; zero is the entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -312,7 +337,7 @@ fn serve_from<T: Tier>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
                 continue;
             }
             Stepped::Threw(at) => {
-                let unwound = unwind::<T>(req, at)?;
+                let unwound = unwind_frame::<T>(req, at)?;
                 if unwound == Stepped::Threw(at) {
                     // The entry frame caught nothing: the throwable stays
                     // pending for the caller, the native that re-entered
@@ -344,7 +369,7 @@ fn serve_from<T: Tier>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
 /// the caller where it left the frame, and this frame again where the
 /// serving's entry frame caught nothing, which is where the serving
 /// ends.
-fn unwind<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
+fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = standing(req, frame)?;
     let code = code_of(&serving, frame)?;
     let op = *at_opline(req, frame, code)?;
@@ -364,6 +389,18 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
         return Err(sensed);
     }
     Ok(stepped)
+}
+
+/// `ZEND_HANDLE_EXCEPTION` over one frame, what the loop runs for a
+/// [`Stepped::Threw`]: the frame lands at a `catch` clause or a
+/// `finally` block and it answers `Same`, or it is left and it
+/// answers `Threw` of its caller with the throwable still pending.
+/// On the entry frame of the serving, which the unwinder does not
+/// leave, `Threw` of that frame says nothing took it; a tier hands that
+/// frame back with `Flow::Resume` and the loop ends the serving, so one
+/// asks [`catches`] first and unwinds only a frame that takes it.
+pub fn unwind(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
+    unwind_frame::<Nop>(req, frame)
 }
 
 /// What `frame` is serving, held by its own share of the unit so the
