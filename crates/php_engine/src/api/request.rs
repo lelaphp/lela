@@ -1478,6 +1478,12 @@ impl Interrupt {
         self.0.raised.store(true, Ordering::Release);
     }
 
+    /// Whether the timer's timeout is still unread, php's
+    /// `EG(timed_out)`: raised and not yet taken by a check.
+    pub(crate) fn timed_out(&self) -> bool {
+        self.0.timed_out.load(Ordering::Acquire)
+    }
+
     /// What unsetting the execution timer does beside stopping it
     /// (`zend_unset_timeout`, `Z/Zend/zend_execute_API.c:1657-1685`): the
     /// timer's word is cleared, so a deadline the old timer reached as
@@ -2683,7 +2689,18 @@ impl Request {
     /// so the seconds count from here.
     fn arm_timer(&mut self) {
         self.timer = None;
-        self.timer = crate::interrupt::Timer::arm(&self.interrupt, self.max_execution_time());
+        self.timer = crate::interrupt::Timer::arm(
+            &self.interrupt,
+            self.max_execution_time(),
+            self.hard_timeout(),
+        );
+    }
+
+    /// `zend_unset_timeout` at `php_request_shutdown`'s fourth step,
+    /// once the program's shutdown functions, destructors and buffer
+    /// handlers are done: nothing the request does after it is timed.
+    pub(crate) fn unset_timer(&mut self) {
+        self.timer = None;
     }
 
     // -------------------------------------------------- crate-internal
@@ -14219,6 +14236,12 @@ impl Request {
         i64::from(self.ini_number(b"max_execution_time", 0))
     }
 
+    /// `EG(hard_timeout)`, `OnUpdateLong` over the startup ini: the
+    /// seconds past a timeout the timer gives the loop to take it.
+    fn hard_timeout(&self) -> i64 {
+        crate::ini_quantity::parse(self.ini_get(b"hard_timeout").unwrap_or_default()).0
+    }
+
     /// Whether a handler left a throwable pending, php's `EG(exception)`:
     /// the test the loop performs after a `throw`-effect op and after a
     /// `Flow::Resume` (`jit-design.md` §2.2). The unwind exit is one
@@ -18998,6 +19021,7 @@ impl Request {
     pub(crate) fn ini_modifiable(name: &[u8]) -> (bool, bool, bool) {
         match name {
             b"xmlrpc_errors"
+            | b"hard_timeout"
             | b"sys_temp_dir"
             | b"sendmail_path"
             | b"syslog.facility"

@@ -1155,7 +1155,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 88] = [
+const CORE_INI: [(&str, &str); 89] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1186,6 +1186,10 @@ const CORE_INI: [(&str, &str); 88] = [
     ("memory_limit", "128M"),
     ("report_memleaks", "1"),
     ("max_execution_time", "0"),
+    // `hard_timeout`, `PHP_INI_SYSTEM` (`Z/main/main.c:885`): the seconds
+    // past a timeout the execution timer waits for the loop to take it
+    // before it ends the process ([`crate::interrupt::Timer`]).
+    ("hard_timeout", "2"),
     ("default_charset", "UTF-8"),
     ("default_mimetype", "text/html"),
     ("internal_encoding", ""),
@@ -2846,6 +2850,9 @@ impl Engine {
         req.catch_bailout();
         crate::output::end_all(req);
         req.catch_bailout();
+        // "4. Reset max_execution_time (no longer executing php code
+        // after response sent)" (`Z/main/main.c:1990-1994`).
+        req.unset_timer();
     }
 
     /// The rest of `php_request_shutdown` after
