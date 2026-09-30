@@ -1204,8 +1204,14 @@ const CORE_INI: &[(&str, &str)] = &[
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
     ("serialize_precision", "-1"),
-    ("error_reporting", "32767"),
+    // `error_reporting`, `NULL` in php's table (`Z/Zend/zend.c:262`),
+    // which `ini_get` reads as the empty string, phpinfo as `no value`
+    // and `OnUpdateErrorReporting` as `E_ALL`.
+    ("error_reporting", ""),
     ("display_errors", "1"),
+    // `display_startup_errors`, `On` (`Z/main/main.c:800`): whether what
+    // is raised while php starts is displayed ([`Request::display_errors`]).
+    ("display_startup_errors", "1"),
     ("log_errors", "0"),
     // `error_log`, `NULL` in php's table, and `error_log_mode`, both
     // `PHP_INI_ALL` (`Z/main/main.c:835-836`): the file `php_log_err`
@@ -1221,6 +1227,7 @@ const CORE_INI: &[(&str, &str)] = &[
     ("error_append_string", ""),
     ("ignore_repeated_errors", "0"),
     ("ignore_repeated_source", "0"),
+    ("report_zend_debug", "0"),
     ("xmlrpc_errors", "0"),
     ("xmlrpc_error_number", "0"),
     // `max_memory_limit`, `PHP_INI_SYSTEM`, declared before
@@ -1271,6 +1278,10 @@ const CORE_INI: &[(&str, &str)] = &[
     ("zend.multibyte", "0"),
     ("zend.script_encoding", ""),
     ("zend.detect_unicode", "1"),
+    // `zend.signal_check`, `ZEND_INI_SYSTEM` and `SIGNAL_CHECK_DEFAULT`
+    // (`Z/Zend/zend.c:270`): whether shutdown checks the signal handlers
+    // `zend_signal` installed were left in place.
+    ("zend.signal_check", "0"),
     // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
     // as the empty string and `OnUpdateFiberStackSize` as php's default.
     ("fiber.stack_size", ""),
@@ -1294,6 +1305,7 @@ const CORE_INI: &[(&str, &str)] = &[
     ("mail.cr_lf_mode", "crlf"),
     ("mail.log", ""),
     ("sendmail_path", "/usr/sbin/sendmail -t -i"),
+    ("sendmail_from", ""),
     ("mail.force_extra_parameters", ""),
     ("syslog.facility", "LOG_USER"),
     ("syslog.ident", "php"),
@@ -1309,6 +1321,10 @@ const CORE_INI: &[(&str, &str)] = &[
     // `ignore_user_abort`, `PG(ignore_user_abort)`, and the two `dl()`
     // reads, `enable_dl` and `extension_dir`, `PHP_INI_SYSTEM`.
     ("ignore_user_abort", "0"),
+    // `implicit_flush`, `Off` in `main.c` and `On` among the CLI's
+    // hardcoded entries (`Z/sapi/cli/php_cli.c:118`), which the web's
+    // hosts lay back.
+    ("implicit_flush", "1"),
     // `realpath_cache_size` and `realpath_cache_ttl`, `PHP_INI_SYSTEM`,
     // the realpath cache's limit and time to live (`crate::virtual_cwd`).
     ("realpath_cache_size", "4096K"),

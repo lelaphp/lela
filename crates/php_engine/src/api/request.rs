@@ -6896,15 +6896,7 @@ impl Request {
         {
             return Display::Off;
         }
-        let mode = match self.ini_get(b"display_errors") {
-            None => DISPLAY_ERRORS_STDOUT,
-            Some(value) => match value.to_ascii_lowercase().as_slice() {
-                b"on" | b"yes" | b"true" | b"stdout" => DISPLAY_ERRORS_STDOUT,
-                b"stderr" => DISPLAY_ERRORS_STDERR,
-                _ => display_errors_mode(ini_atol(value)),
-            },
-        };
-        match mode {
+        match display_errors_mode_of(self.ini_get(b"display_errors")) {
             0 => Display::Off,
             DISPLAY_ERRORS_STDERR if self.host_writes_stderr() => Display::Stderr,
             _ => Display::Body,
@@ -16900,12 +16892,16 @@ impl Request {
         self.error_reporting = self.ini_error_reporting();
     }
 
-    /// `INI_INT("error_reporting")`, `E_ALL` where the entry is unset:
-    /// the level the entry says, which is what a fiber starts its body
-    /// at (`zend_fiber_execute`), whatever an `@` around the `start`
-    /// masked.
+    /// `INI_INT("error_reporting")`, `E_ALL` where the entry is unset
+    /// (`OnUpdateErrorReporting`), its empty value being php's `NULL`, the
+    /// default: the level the entry says, which is what a fiber starts
+    /// its body at (`zend_fiber_execute`), whatever an `@` around the
+    /// `start` masked.
     pub(crate) fn ini_error_reporting(&self) -> i64 {
-        self.ini_get(b"error_reporting").map_or(E_ALL, ini_atol)
+        match self.ini_get(b"error_reporting") {
+            None | Some([]) => E_ALL,
+            Some(value) => ini_atol(value),
+        }
     }
 
     /// `ZEND_FUNCTION(set_error_handler)`
@@ -18659,8 +18655,234 @@ impl Request {
 
     /// `display_ini_entries(NULL)` (`Z/main/php_ini.c:131`) after
     /// `zend_ini_sort_entries`: the entries no extension declared, the
-    /// engine's own, sorted by name ([`Request::info_ini_table`]). What
-    /// `PHP_MINFO_FUNCTION(core)` and `phpinfo()`'s `PHP Core` print.
+    /// engine's own, sorted by name, each value through the entry's
+    /// displayer ([`IniDisplayer`]). What `PHP_MINFO_FUNCTION(core)` and
+    /// `phpinfo()`'s `PHP Core` print.
+    ///
+    /// ```php
+    /// ob_start(); phpinfo(INFO_CONFIGURATION); $page = ob_get_clean(); echo strstr($page, "PHP Core");
+    /// ```
+    /// ```expect
+    /// PHP Core
+    ///
+    /// Directive => Local Value => Master Value
+    /// allow_url_fopen => On => On
+    /// allow_url_include => Off => Off
+    /// arg_separator.input => & => &
+    /// arg_separator.output => & => &
+    /// auto_append_file => no value => no value
+    /// auto_globals_jit => On => On
+    /// auto_prepend_file => no value => no value
+    /// browscap => no value => no value
+    /// default_charset => UTF-8 => UTF-8
+    /// default_mimetype => text/html => text/html
+    /// disable_functions => no value => no value
+    /// display_errors => STDOUT => STDOUT
+    /// display_startup_errors => On => On
+    /// doc_root => no value => no value
+    /// docref_ext => .html => .html
+    /// docref_root => no value => no value
+    /// enable_dl => On => On
+    /// enable_post_data_reading => On => On
+    /// error_append_string => no value => no value
+    /// error_log => no value => no value
+    /// error_log_mode => 0644 => 0644
+    /// error_prepend_string => no value => no value
+    /// error_reporting => 30719 => 30719
+    /// expose_php => On => On
+    /// extension_dir => /opt/homebrew/Cellar/php/8.5.9/lib/php/20250925 => /opt/homebrew/Cellar/php/8.5.9/lib/php/20250925
+    /// fatal_error_backtraces => Off => Off
+    /// fiber.stack_size => no value => no value
+    /// file_uploads => On => On
+    /// hard_timeout => 2 => 2
+    /// highlight.comment => <span style="color: #FF8000">#FF8000</span> => <span style="color: #FF8000">#FF8000</span>
+    /// highlight.default => <span style="color: #0000BB">#0000BB</span> => <span style="color: #0000BB">#0000BB</span>
+    /// highlight.html => <span style="color: #000000">#000000</span> => <span style="color: #000000">#000000</span>
+    /// highlight.keyword => <span style="color: #007700">#007700</span> => <span style="color: #007700">#007700</span>
+    /// highlight.string => <span style="color: #DD0000">#DD0000</span> => <span style="color: #DD0000">#DD0000</span>
+    /// html_errors => Off => Off
+    /// ignore_repeated_errors => Off => Off
+    /// ignore_repeated_source => Off => Off
+    /// ignore_user_abort => Off => Off
+    /// implicit_flush => On => On
+    /// include_path => .:/opt/homebrew/Cellar/php/8.5.9/share/php/pear => .:/opt/homebrew/Cellar/php/8.5.9/share/php/pear
+    /// input_encoding => no value => no value
+    /// internal_encoding => no value => no value
+    /// log_errors => Off => Off
+    /// mail.add_x_header => Off => Off
+    /// mail.cr_lf_mode => crlf => crlf
+    /// mail.force_extra_parameters => no value => no value
+    /// mail.log => no value => no value
+    /// mail.mixed_lf_and_crlf => Off => Off
+    /// max_execution_time => 0 => 0
+    /// max_file_uploads => 20 => 20
+    /// max_input_nesting_level => 64 => 64
+    /// max_input_time => -1 => -1
+    /// max_input_vars => 1000 => 1000
+    /// max_memory_limit => -1 => -1
+    /// max_multipart_body_parts => -1 => -1
+    /// memory_limit => 128M => 128M
+    /// open_basedir => no value => no value
+    /// output_buffering => no value => no value
+    /// output_encoding => no value => no value
+    /// output_handler => no value => no value
+    /// post_max_size => 8M => 8M
+    /// precision => 14 => 14
+    /// realpath_cache_size => 4096K => 4096K
+    /// realpath_cache_ttl => 120 => 120
+    /// register_argc_argv => Off => Off
+    /// report_memleaks => On => On
+    /// report_zend_debug => Off => Off
+    /// request_order => no value => no value
+    /// sendmail_from => no value => no value
+    /// sendmail_path => /usr/sbin/sendmail -t -i => /usr/sbin/sendmail -t -i
+    /// serialize_precision => -1 => -1
+    /// short_open_tag => Off => Off
+    /// SMTP => localhost => localhost
+    /// smtp_port => 25 => 25
+    /// sys_temp_dir => no value => no value
+    /// syslog.facility => LOG_USER => LOG_USER
+    /// syslog.filter => no-ctrl => no-ctrl
+    /// syslog.ident => php => php
+    /// unserialize_callback_func => no value => no value
+    /// upload_max_filesize => 2M => 2M
+    /// upload_tmp_dir => no value => no value
+    /// user_dir => no value => no value
+    /// user_ini.cache_ttl => 300 => 300
+    /// user_ini.filename => .user.ini => .user.ini
+    /// variables_order => EGPCS => EGPCS
+    /// xmlrpc_error_number => 0 => 0
+    /// xmlrpc_errors => Off => Off
+    /// zend.assertions => 1 => 1
+    /// zend.detect_unicode => On => On
+    /// zend.enable_gc => On => On
+    /// zend.exception_ignore_args => Off => Off
+    /// zend.exception_string_param_max_len => 15 => 15
+    /// zend.max_allowed_stack_size => 0 => 0
+    /// zend.multibyte => Off => Off
+    /// zend.reserved_stack_size => 0 => 0
+    /// zend.script_encoding => no value => no value
+    /// zend.signal_check => Off => Off
+    /// ```
+    ///
+    /// Under php-cgi, whose `display_errors` displayer says `On`, in HTML,
+    /// where a displayer's markup is written as it is and a value is
+    /// escaped:
+    ///
+    /// ```php
+    /// ob_start(); phpinfo(INFO_CONFIGURATION); $page = ob_get_clean(); echo strstr($page, "PHP Core");
+    /// ```
+    /// ```request
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// X-Powered-By: PHP/8.5.9
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// PHP Core</h2>
+    /// <table>
+    /// <tr class="h"><th>Directive</th><th>Local Value</th><th>Master Value</th></tr>
+    /// <tr><td class="e">allow_url_fopen</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">allow_url_include</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">arg_separator.input</td><td class="v">&amp;</td><td class="v">&amp;</td></tr>
+    /// <tr><td class="e">arg_separator.output</td><td class="v">&amp;</td><td class="v">&amp;</td></tr>
+    /// <tr><td class="e">auto_append_file</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">auto_globals_jit</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">auto_prepend_file</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">browscap</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">default_charset</td><td class="v">UTF-8</td><td class="v">UTF-8</td></tr>
+    /// <tr><td class="e">default_mimetype</td><td class="v">text/html</td><td class="v">text/html</td></tr>
+    /// <tr><td class="e">disable_functions</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">display_errors</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">display_startup_errors</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">doc_root</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">docref_ext</td><td class="v">.html</td><td class="v">.html</td></tr>
+    /// <tr><td class="e">docref_root</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">enable_dl</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">enable_post_data_reading</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">error_append_string</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">error_log</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">error_log_mode</td><td class="v">0644</td><td class="v">0644</td></tr>
+    /// <tr><td class="e">error_prepend_string</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">error_reporting</td><td class="v">30719</td><td class="v">30719</td></tr>
+    /// <tr><td class="e">expose_php</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">extension_dir</td><td class="v">/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925</td><td class="v">/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925</td></tr>
+    /// <tr><td class="e">fatal_error_backtraces</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">fiber.stack_size</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">file_uploads</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">hard_timeout</td><td class="v">2</td><td class="v">2</td></tr>
+    /// <tr><td class="e">highlight.comment</td><td class="v"><span style="color: #FF8000">#FF8000</span></td><td class="v"><span style="color: #FF8000">#FF8000</span></td></tr>
+    /// <tr><td class="e">highlight.default</td><td class="v"><span style="color: #0000BB">#0000BB</span></td><td class="v"><span style="color: #0000BB">#0000BB</span></td></tr>
+    /// <tr><td class="e">highlight.html</td><td class="v"><span style="color: #000000">#000000</span></td><td class="v"><span style="color: #000000">#000000</span></td></tr>
+    /// <tr><td class="e">highlight.keyword</td><td class="v"><span style="color: #007700">#007700</span></td><td class="v"><span style="color: #007700">#007700</span></td></tr>
+    /// <tr><td class="e">highlight.string</td><td class="v"><span style="color: #DD0000">#DD0000</span></td><td class="v"><span style="color: #DD0000">#DD0000</span></td></tr>
+    /// <tr><td class="e">html_errors</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">ignore_repeated_errors</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">ignore_repeated_source</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">ignore_user_abort</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">implicit_flush</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">include_path</td><td class="v">.:/opt/homebrew/Cellar/php/8.5.9/share/php/pear</td><td class="v">.:/opt/homebrew/Cellar/php/8.5.9/share/php/pear</td></tr>
+    /// <tr><td class="e">input_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">internal_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">log_errors</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">mail.add_x_header</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">mail.cr_lf_mode</td><td class="v">crlf</td><td class="v">crlf</td></tr>
+    /// <tr><td class="e">mail.force_extra_parameters</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">mail.log</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">mail.mixed_lf_and_crlf</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">max_execution_time</td><td class="v">30</td><td class="v">30</td></tr>
+    /// <tr><td class="e">max_file_uploads</td><td class="v">20</td><td class="v">20</td></tr>
+    /// <tr><td class="e">max_input_nesting_level</td><td class="v">64</td><td class="v">64</td></tr>
+    /// <tr><td class="e">max_input_time</td><td class="v">-1</td><td class="v">-1</td></tr>
+    /// <tr><td class="e">max_input_vars</td><td class="v">1000</td><td class="v">1000</td></tr>
+    /// <tr><td class="e">max_memory_limit</td><td class="v">-1</td><td class="v">-1</td></tr>
+    /// <tr><td class="e">max_multipart_body_parts</td><td class="v">-1</td><td class="v">-1</td></tr>
+    /// <tr><td class="e">memory_limit</td><td class="v">128M</td><td class="v">128M</td></tr>
+    /// <tr><td class="e">open_basedir</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">output_buffering</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">output_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">output_handler</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">post_max_size</td><td class="v">8M</td><td class="v">8M</td></tr>
+    /// <tr><td class="e">precision</td><td class="v">14</td><td class="v">14</td></tr>
+    /// <tr><td class="e">realpath_cache_size</td><td class="v">4096K</td><td class="v">4096K</td></tr>
+    /// <tr><td class="e">realpath_cache_ttl</td><td class="v">120</td><td class="v">120</td></tr>
+    /// <tr><td class="e">register_argc_argv</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">report_memleaks</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">report_zend_debug</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">request_order</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">sendmail_from</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">sendmail_path</td><td class="v">/usr/sbin/sendmail -t -i</td><td class="v">/usr/sbin/sendmail -t -i</td></tr>
+    /// <tr><td class="e">serialize_precision</td><td class="v">-1</td><td class="v">-1</td></tr>
+    /// <tr><td class="e">short_open_tag</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">SMTP</td><td class="v">localhost</td><td class="v">localhost</td></tr>
+    /// <tr><td class="e">smtp_port</td><td class="v">25</td><td class="v">25</td></tr>
+    /// <tr><td class="e">sys_temp_dir</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">syslog.facility</td><td class="v">LOG_USER</td><td class="v">LOG_USER</td></tr>
+    /// <tr><td class="e">syslog.filter</td><td class="v">no-ctrl</td><td class="v">no-ctrl</td></tr>
+    /// <tr><td class="e">syslog.ident</td><td class="v">php</td><td class="v">php</td></tr>
+    /// <tr><td class="e">unserialize_callback_func</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">upload_max_filesize</td><td class="v">2M</td><td class="v">2M</td></tr>
+    /// <tr><td class="e">upload_tmp_dir</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">user_dir</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">user_ini.cache_ttl</td><td class="v">300</td><td class="v">300</td></tr>
+    /// <tr><td class="e">user_ini.filename</td><td class="v">.user.ini</td><td class="v">.user.ini</td></tr>
+    /// <tr><td class="e">variables_order</td><td class="v">EGPCS</td><td class="v">EGPCS</td></tr>
+    /// <tr><td class="e">xmlrpc_error_number</td><td class="v">0</td><td class="v">0</td></tr>
+    /// <tr><td class="e">xmlrpc_errors</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">zend.assertions</td><td class="v">1</td><td class="v">1</td></tr>
+    /// <tr><td class="e">zend.detect_unicode</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">zend.enable_gc</td><td class="v">On</td><td class="v">On</td></tr>
+    /// <tr><td class="e">zend.exception_ignore_args</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">zend.exception_string_param_max_len</td><td class="v">15</td><td class="v">15</td></tr>
+    /// <tr><td class="e">zend.max_allowed_stack_size</td><td class="v">0</td><td class="v">0</td></tr>
+    /// <tr><td class="e">zend.multibyte</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// <tr><td class="e">zend.reserved_stack_size</td><td class="v">0</td><td class="v">0</td></tr>
+    /// <tr><td class="e">zend.script_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">zend.signal_check</td><td class="v">Off</td><td class="v">Off</td></tr>
+    /// </table>
+    /// </div></body></html>
+    /// ```
     pub fn core_ini_info(&mut self) {
         let shared = Arc::clone(&self.shared);
         let owned = |name: &[u8]| {
@@ -18677,7 +18899,48 @@ impl Request {
             .collect();
         // `ini_key_compare`: `zend_binary_strcasecmp` of the names.
         names.sort_unstable_by_key(|name| name.to_ascii_lowercase());
-        self.info_ini_entries(&names);
+        let rows: Vec<(String, IniCell, IniCell)> = names
+            .iter()
+            .map(|name| {
+                let displayer = IniDisplayer::of(name);
+                let local = self.ini_get(name).unwrap_or_default();
+                let master = shared.ini_default(name).unwrap_or_default();
+                (
+                    String::from_utf8_lossy(name).into_owned(),
+                    self.ini_display(displayer, local),
+                    self.ini_display(displayer, master),
+                )
+            })
+            .collect();
+        self.ini_table(&rows);
+    }
+
+    /// One value of a core entry as `php_ini_displayer_cb` shows it
+    /// through the entry's displayer (`Z/main/php_ini.c:67-111`).
+    fn ini_display(&self, displayer: IniDisplayer, value: &[u8]) -> IniCell {
+        let on_off = |on: bool| IniCell::Displayed(String::from(if on { "On" } else { "Off" }));
+        match displayer {
+            IniDisplayer::Plain => IniCell::Value(String::from_utf8_lossy(value).into_owned()),
+            IniDisplayer::Boolean => on_off(Request::ini_parse_bool(value)),
+            IniDisplayer::GcEnabled => on_off(self.gc_enabled()),
+            // `zend_ini_color_displayer_cb` under `zend_uv.html_errors`,
+            // which `php_module_startup` sets to 1 whatever the host is
+            // (`Z/main/main.c:2326`), so a colour is marked up in text too.
+            IniDisplayer::Color => {
+                let value = String::from_utf8_lossy(value);
+                IniCell::Displayed(format!("<span style=\"color: {value}\">{value}</span>"))
+            }
+            // `display_errors_mode`: the stream named where the host is
+            // `cli`, `cgi` or `phpdbg`, `On` under any other.
+            IniDisplayer::DisplayErrors => {
+                IniCell::Displayed(String::from(match display_errors_mode_of(Some(value)) {
+                    0 => "Off",
+                    _ if !self.host_writes_stderr() => "On",
+                    DISPLAY_ERRORS_STDERR => "STDERR",
+                    _ => "STDOUT",
+                }))
+            }
+        }
     }
 
     /// `display_ini_entries`' table (`Z/main/php_ini.c:115-146`) over
@@ -18713,18 +18976,37 @@ impl Request {
     /// </table>
     /// ```
     pub fn info_ini_table(&mut self, rows: &[[&str; 3]]) {
+        let rows: Vec<(String, IniCell, IniCell)> = rows
+            .iter()
+            .map(|[name, local, master]| {
+                (
+                    (*name).to_owned(),
+                    IniCell::Value((*local).to_owned()),
+                    IniCell::Value((*master).to_owned()),
+                )
+            })
+            .collect();
+        self.ini_table(&rows);
+    }
+
+    /// [`Request::info_ini_table`] over cells a displayer may have
+    /// written ([`IniCell`]).
+    fn ini_table(&mut self, rows: &[(String, IniCell, IniCell)]) {
         if rows.is_empty() {
             return;
         }
         let text = self.phpinfo_as_text();
         let mut out = Vec::new();
-        let value = |out: &mut Vec<u8>, shown: &str| match (shown.is_empty(), text) {
-            (true, true) => out.extend_from_slice(b"no value"),
-            (true, false) => out.extend_from_slice(b"<i>no value</i>"),
-            (false, true) => out.extend_from_slice(shown.as_bytes()),
-            (false, false) => php_compile::syntax::html_puts(out, shown.as_bytes()),
+        let value = |out: &mut Vec<u8>, cell: &IniCell| match cell {
+            IniCell::Displayed(shown) => out.extend_from_slice(shown.as_bytes()),
+            IniCell::Value(shown) => match (shown.is_empty(), text) {
+                (true, true) => out.extend_from_slice(b"no value"),
+                (true, false) => out.extend_from_slice(b"<i>no value</i>"),
+                (false, true) => out.extend_from_slice(shown.as_bytes()),
+                (false, false) => php_compile::syntax::html_puts(out, shown.as_bytes()),
+            },
         };
-        for [name, local, master] in rows {
+        for (name, local, master) in rows {
             if text {
                 out.extend_from_slice(name.as_bytes());
                 out.extend_from_slice(b" => ");
@@ -19316,6 +19598,7 @@ impl Request {
             | b"max_memory_limit"
             | b"browscap"
             | b"doc_root"
+            | b"zend.signal_check"
             | b"user_dir"
             | b"user_ini.filename"
             | b"user_ini.cache_ttl" => (false, false, true),
@@ -21282,6 +21565,72 @@ enum Display {
     Stderr,
 }
 
+/// A core entry's `displayer`, what `php_ini_displayer_cb` shows its
+/// values through in phpinfo (`Z/main/php_ini.c:67-111`), as `main.c`'s
+/// and `zend.c`'s tables pair them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IniDisplayer {
+    /// None: the value as it is, escaped in HTML, `no value` for none.
+    Plain,
+    /// `zend_ini_boolean_displayer_cb`, every `STD_PHP_INI_BOOLEAN` and
+    /// `STD_ZEND_INI_BOOLEAN`: `On` or `Off`.
+    Boolean,
+    /// `php_ini_color_displayer_cb`, the five `highlight.*` colours.
+    Color,
+    /// `display_errors_mode`, `display_errors`'.
+    DisplayErrors,
+    /// `zend_gc_enabled_displayer_cb`, `zend.enable_gc`'s: whether the
+    /// collector runs, `On` or `Off`, in both columns.
+    GcEnabled,
+}
+
+impl IniDisplayer {
+    /// The displayer `Z/main/main.c:793-887` and `Z/Zend/zend.c:263-272`
+    /// register the core entry `name` with.
+    fn of(name: &[u8]) -> IniDisplayer {
+        match name {
+            b"display_startup_errors"
+            | b"enable_dl"
+            | b"expose_php"
+            | b"html_errors"
+            | b"xmlrpc_errors"
+            | b"ignore_user_abort"
+            | b"implicit_flush"
+            | b"log_errors"
+            | b"ignore_repeated_errors"
+            | b"ignore_repeated_source"
+            | b"report_memleaks"
+            | b"report_zend_debug"
+            | b"register_argc_argv"
+            | b"auto_globals_jit"
+            | b"short_open_tag"
+            | b"file_uploads"
+            | b"mail.add_x_header"
+            | b"mail.mixed_lf_and_crlf"
+            | b"allow_url_fopen"
+            | b"allow_url_include"
+            | b"enable_post_data_reading"
+            | b"fatal_error_backtraces"
+            | b"zend.multibyte"
+            | b"zend.detect_unicode"
+            | b"zend.signal_check"
+            | b"zend.exception_ignore_args" => IniDisplayer::Boolean,
+            b"highlight.comment" | b"highlight.default" | b"highlight.html"
+            | b"highlight.keyword" | b"highlight.string" => IniDisplayer::Color,
+            b"display_errors" => IniDisplayer::DisplayErrors,
+            b"zend.enable_gc" => IniDisplayer::GcEnabled,
+            _ => IniDisplayer::Plain,
+        }
+    }
+}
+
+/// One value cell of phpinfo's ini table: a value shown as it is, or
+/// what a displayer wrote, which php writes as written in HTML too.
+enum IniCell {
+    Value(String),
+    Displayed(String),
+}
+
 /// `PHP_DISPLAY_ERRORS_STDOUT` and `PHP_DISPLAY_ERRORS_STDERR`
 /// (`Z/main/php_globals.h:36-37`), the two modes of `PG(display_errors)`
 /// beside zero.
@@ -21362,6 +21711,19 @@ impl ShutdownFunctions {
 
 const DISPLAY_ERRORS_STDOUT: u8 = 1;
 const DISPLAY_ERRORS_STDERR: u8 = 2;
+
+/// `php_get_display_errors_mode` (`Z/main/main.c:492-517`), as
+/// [`Request::display_errors`] reads it.
+fn display_errors_mode_of(value: Option<&[u8]>) -> u8 {
+    match value {
+        None => DISPLAY_ERRORS_STDOUT,
+        Some(value) => match value.to_ascii_lowercase().as_slice() {
+            b"on" | b"yes" | b"true" | b"stdout" => DISPLAY_ERRORS_STDOUT,
+            b"stderr" => DISPLAY_ERRORS_STDERR,
+            _ => display_errors_mode(ini_atol(value)),
+        },
+    }
+}
 
 /// `uint8_t mode = ZEND_ATOL(...)` at `Z/main/main.c:513`: the number
 /// narrowed to php's byte.
