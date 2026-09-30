@@ -584,6 +584,20 @@ pub(crate) fn declare_const<T: Tier>(
 /// Deprecated: Constant OLD is deprecated in %s on line 5
 /// 1
 /// ```
+///
+/// A value the compiler could not fold is evaluated as the constant is
+/// declared:
+///
+/// ```php
+/// define('A', 1);
+/// #[MyAttribute]
+/// const B = A + 1;
+/// var_dump(B, (new ReflectionConstant('B'))->getValue());
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+/// ```
 pub(crate) fn declare_attributed_const<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -619,12 +633,16 @@ pub(crate) fn declare_attributed_const<T: Tier>(
         )));
     };
     let attributes = decl.attributes.clone();
-    let value = exec::constant(code, ConstIdx(op.op2));
+    // A value the compiler could not fold is its constant expression,
+    // evaluated here as `zval_update_constant` evaluates it.
+    let value = match exec::default_value(req, code, ConstIdx(op.op2)) {
+        Ok((value, _)) => value,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
     let mut key = written;
     if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
         key[..slash].make_ascii_lowercase();
     }
-    req.addref(&value);
     if !req.define_attributed_constant(&key, value, attributes) {
         req.release(value);
         crate::api::raising::warning(
@@ -728,7 +746,11 @@ pub(crate) fn declare_lambda_function<T: Tier>(
             "InternalError: a DECLARE_LAMBDA_FUNCTION naming a definition the unit has not",
         )));
     };
-    let (bound, no_receiver) = (exec::starting_statics(body), body.no_receiver);
+    let no_receiver = body.no_receiver;
+    let bound = match exec::starting_statics(req, body) {
+        Ok(bound) => bound,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
     let Some(function) = req.closure_function(&serving.unit, at) else {
         return Err(Fatal::Error(String::from(
             "InternalError: a DECLARE_LAMBDA_FUNCTION naming a definition the unit has not",
@@ -884,19 +906,18 @@ pub(crate) fn bind_lexical<T: Tier>(
         req.addref(&held);
         held
     };
-    let Some(payload) = object.native_mut::<ClosureInfo>(req) else {
-        req.release(bound);
-        return Err(Fatal::Error(String::from(
-            "InternalError: a BIND_LEXICAL over an object that is no Closure",
-        )));
-    };
-    let Some(cell) = payload.bound.get_mut(slot) else {
+    let place = object
+        .closure(req)
+        .and_then(|closure| closure.bound)
+        .zip(u32::try_from(slot).ok())
+        .and_then(|(table, slot)| table.at_position(slot));
+    let Some((previous, place)) = place else {
         req.release(bound);
         return Err(Fatal::Error(String::from(
             "InternalError: a BIND_LEXICAL naming a slot the closure has not",
         )));
     };
-    let previous = std::mem::replace(cell, bound);
+    place.heap().write(bound.to_zval());
     req.release(previous);
     Ok(advance(req, frame))
 }
@@ -1036,10 +1057,14 @@ pub(crate) fn bind_static<T: Tier>(
     let slot = (op.extended_value >> 3) as usize;
     let by_ref = op.extended_value & BIND_REF != 0;
     let at = req.statics_of(frame, code);
-    let Some(held) = req.static_at(at, code, slot) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a BIND_STATIC naming a slot the static table has not",
-        )));
+    let held = match req.static_at(at, code, slot) {
+        Ok(Some(held)) => held,
+        Ok(None) => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: a BIND_STATIC naming a slot the static table has not",
+            )));
+        }
+        Err(thrown) => return threw(req, frame, &thrown),
     };
     let bound = if by_ref {
         let cell = if let Some(cell) = held.as_php_ref() {
@@ -1114,10 +1139,11 @@ pub(crate) fn bind_init_static_or_jmp<T: Tier>(
 ) -> Edge {
     let slot = (op.extended_value >> 3) as usize;
     let at = req.statics_of(frame, code);
-    let Some(cell) = req
-        .static_at(at, code, slot)
-        .and_then(|held| held.as_php_ref().copied())
-    else {
+    let held = match req.static_at(at, code, slot) {
+        Ok(held) => held,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let Some(cell) = held.and_then(|held| held.as_php_ref().copied()) else {
         return Ok(advance(req, frame));
     };
     let bound = cell.as_value();
@@ -1507,14 +1533,22 @@ fn dynamic_call_array(
 }
 
 /// `zend_fetch_class_by_name` under `ZEND_FETCH_CLASS_EXCEPTION`: the
-/// class of that name, a leading `\` skipped, and php's `Error` where
-/// nothing declares it.
+/// class of that name, a leading `\` skipped, the autoloaders asked,
+/// what they throw handed on, and php's `Error` where nothing declares
+/// it.
+///
+/// ```php
+/// spl_autoload_register(function ($name) { throw new Exception("loading $name"); });
+/// try { $a = ["Nope", "f"]; $a(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// loading Nope
+/// ```
 fn dynamic_call_class(
     req: &mut Request,
     name: &[u8],
 ) -> Result<crate::api::values::ClassId, Thrown> {
-    let bare = name.strip_prefix(b"\\").unwrap_or(name);
-    match req.class_named(bare) {
+    match crate::api::call::autoload(req, name)? {
         Some(class) => Ok(class),
         None => Err(crate::api::raising::throw(
             req,
@@ -3879,18 +3913,32 @@ pub(crate) fn recv_variadic<T: Tier>(
 /// float(1)
 /// float(1)
 /// ```
+///
+/// A by-reference parameter returned by reference is coerced where the
+/// reference holds it, so the caller's variable reads the coerced value;
+/// returned by value it is copied out of the reference first:
+///
+/// ```php
+/// function &r(int &$a): string { return $a; }
+/// function v(int &$a): string { return $a; }
+/// $x = 1; v($x); var_dump($x); r($x); var_dump($x);
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "1"
+/// ```
 pub(crate) fn verify_return_type<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(ty) = req
+    let Some((ty, by_ref)) = req
         .vm()
         .at(frame)
         .and_then(|state| state.function)
         .and_then(|function| req.function_decl(function))
-        .and_then(|decl| decl.return_type.clone())
+        .and_then(|decl| Some((decl.return_type.clone()?, decl.returns_by_ref)))
     else {
         return Ok(advance(req, frame));
     };
@@ -3938,6 +3986,20 @@ pub(crate) fn verify_return_type<T: Tier>(
     } else {
         exec::temporary_slot(code, op.op1)
     };
+    // `ZEND_ACC_RETURN_REFERENCE` over a reference: the check is handed
+    // the reference and coerces the value it holds, which every name
+    // bound to it reads after; a by-value return unwraps it first.
+    if by_ref
+        && let Some(cell) = req
+            .slot_ptr(frame, slot)
+            .and_then(|at| exec::value_of(at.read()).as_php_ref().copied())
+    {
+        let place = cell.heap().val_ref();
+        let previous = exec::value_of(place.read());
+        place.write(coerced.to_zval());
+        req.release(previous);
+        return Ok(advance(req, frame));
+    }
     let previous = req.set_slot(frame, slot, coerced);
     req.release(previous);
     Ok(advance(req, frame))
@@ -3954,8 +4016,7 @@ fn return_type_error(
     ty: &php_unit::decl::Type,
     returned: Option<&Value>,
 ) -> Thrown {
-    let function = req.vm().at(frame).and_then(|state| state.function);
-    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
+    let name = req.frame_function_name(frame);
     let declared = resolved_type_name(req, frame, ty);
     let given = match returned {
         Some(returned) => crate::ops::value_name(req, &returned.undef_as_null()),
@@ -4001,9 +4062,10 @@ pub(crate) fn verify_never_type<T: Tier>(
     _: &OpArray,
     _: &Opline,
 ) -> Edge {
-    let function = req.vm().at(frame).and_then(|state| state.function);
-    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
-    let kind = if req.vm().at(frame).is_some_and(|state| state.this.is_some()) {
+    // `zf->common.scope ? "method" : "function"`: a static method is
+    // a method, and a closure written in a class is one.
+    let name = req.frame_function_name(frame);
+    let kind = if req.frame_scope(frame).is_some() {
         "method"
     } else {
         "function"
@@ -4203,7 +4265,7 @@ fn arg_type_error(
     // NUL an anonymous class's name holds: its class alone.
     let name = function.map_or_else(String::new, |function| match req.method_class(function) {
         Some(class) if req.class_name_bytes(class).contains(&0) => req.class_name(class),
-        _ => req.qualified_name_of(function),
+        _ => req.frame_function_name(frame),
     });
     // `get_function_arg_name`: php has a name for an argument up to the
     // declared count alone, which excludes the variadic, so the error
@@ -4268,7 +4330,7 @@ fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
 /// is a call site the program never wrote.
 fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
     let function = req.vm().at(frame).and_then(|state| state.function);
-    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
+    let name = req.frame_function_name(frame);
     let parameters: Vec<bool> = function
         .and_then(|function| req.function_decl(function))
         .map(|decl| {
@@ -9707,6 +9769,13 @@ pub(crate) fn instanceof<T: Tier>(
             cached_class(req, frame, code, op.op2, slot)
                 .is_some_and(|class| req.instance_of(object.class(), class))
         }
+        // `ce && instanceof_function(...)`: a silent `FETCH_CLASS` found
+        // nothing.
+        (Some(_), OperandKind::Var)
+            if req.slot(frame, exec::temporary_slot(code, op.op2)).tag() == TypeTag::Null =>
+        {
+            false
+        }
         (Some(object), _) => match class_operand(req, frame, code, op.op2_type, op.op2, None) {
             Ok(class) => req.instance_of(object.class(), class),
             Err(thrown) => {
@@ -9808,6 +9877,11 @@ fn class_operand(
 /// `ZEND_FETCH_CLASS_MASK` (`Z/Zend/zend_compile.h:1034`): the bits of a
 /// class operand's number that are its fetch type, the flags above them.
 const FETCH_CLASS_MASK: u32 = 0x0f;
+
+/// `ZEND_FETCH_CLASS_NO_AUTOLOAD` and `ZEND_FETCH_CLASS_SILENT`
+/// (`Z/Zend/zend_compile.h:1035-1036`).
+const FETCH_CLASS_NO_AUTOLOAD: u32 = 0x80;
+const FETCH_CLASS_SILENT: u32 = 0x100;
 
 /// `ZEND_FETCH_CLASS_SELF` and `ZEND_FETCH_CLASS_PARENT`
 /// (`Z/Zend/zend_compile.h:1028`), the two fetch types a call on the class
@@ -9984,6 +10058,22 @@ pub(crate) fn fetch_class_name<T: Tier>(
 /// Class name must be a valid object or a string
 /// Class "Nope" not found
 /// ```
+///
+/// Under `ZEND_FETCH_CLASS_SILENT`, which `instanceof` compiles with
+/// beside `ZEND_FETCH_CLASS_NO_AUTOLOAD`, a name nothing declares is no
+/// class and no error, and the operation after it reads the null:
+///
+/// ```php
+/// namespace Foo; class Bar {}
+/// $n = 'Bar'; $f = 'Foo\Bar';
+/// spl_autoload_register(function ($c) { echo "autoload $c\n"; });
+/// var_dump(new \stdClass instanceof $n, new Bar instanceof $n, new Bar instanceof $f);
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// ```
 pub(crate) fn fetch_class<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -9991,14 +10081,21 @@ pub(crate) fn fetch_class<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let class = if op.op2_type == OperandKind::Unused {
-        scope_class(req, op.op1)
+        scope_class(req, op.op1).map(Some)
     } else {
         let value = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
         let class = if let Some(object) = value.as_object() {
-            Ok(object.class())
+            Ok(Some(object.class()))
         } else if let Some(name) = value.as_str_bytes() {
             let name = name.to_vec();
-            crate::api::call::fetch_class(req, &name)
+            match (
+                op.op1 & FETCH_CLASS_SILENT,
+                op.op1 & FETCH_CLASS_NO_AUTOLOAD,
+            ) {
+                (0, _) => crate::api::call::fetch_class(req, &name).map(Some),
+                (_, 0) => crate::api::call::autoload(req, &name),
+                _ => crate::api::call::lookup_class(req, &name),
+            }
         } else {
             Err(crate::api::raising::throw(
                 req,
@@ -10010,8 +10107,14 @@ pub(crate) fn fetch_class<T: Tier>(
         class
     };
     match class {
-        Ok(class) => {
+        Ok(Some(class)) => {
             hold_class(req, frame, code, op.out, class);
+            Ok(advance(req, frame))
+        }
+        // `Z_CE_P(EX_VAR(opline->result.var)) = NULL`.
+        Ok(None) => {
+            let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), Value::null());
+            req.release(previous);
             Ok(advance(req, frame))
         }
         Err(thrown) => threw(req, frame, &thrown),
@@ -10825,6 +10928,20 @@ pub(crate) fn assign_op<T: Tier>(
 /// int(32)
 /// int(-216)
 /// ```
+///
+/// A call that returned by value is php's notice and a plain assignment,
+/// through a reference the target already is:
+///
+/// ```php
+/// function g() { return 5; }
+/// function s() { static $v; if (!isset($v)) { $v = &g(); } return $v; }
+/// var_dump(s(), s());
+/// ```
+/// ```expect
+/// Notice: Only variables should be assigned by reference in %s on line 3
+/// int(5)
+/// int(5)
+/// ```
 pub(crate) fn assign_ref<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -10860,14 +10977,27 @@ pub(crate) fn assign_ref<T: Tier>(
     };
     let held = exec::value_of(source.read());
     // `ZEND_RETURNS_FUNCTION`: the source is a call, and a call that
-    // returned by value has no cell to bind, which is php's notice and a
-    // cell of its own over the value
-    // (`zend_wrong_assign_to_variable_reference`).
+    // returned by value has no cell to bind, which is php's notice and
+    // then the plain assignment (`zend_wrong_assign_to_variable_reference`
+    // over `zend_assign_to_variable`), so a target that is a reference,
+    // a `static` among them, keeps it and takes the value through it.
     if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
         crate::api::raising::notice(req, "Only variables should be assigned by reference");
         if req.is_pending() {
             return Ok(Stepped::Threw(frame));
         }
+        let value = held.undef_as_null();
+        req.addref(&value);
+        let strict = req.frame_strict_types(frame);
+        let (landed, garbage) = match assign_to_place(req, target, value, strict) {
+            Ok(pair) => pair,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        write_out(req, frame, code, op, &landed);
+        req.release(garbage);
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return Ok(advance(req, frame));
     }
     let cell = match held.as_php_ref() {
         Some(cell) if target == source => {
@@ -11363,6 +11493,21 @@ pub(crate) fn assign_obj<T: Tier>(
 /// `write_property` for a name the class did not declare or serves
 /// itself ([`PropertyPlace::Handlers`]). `value` is given up on the
 /// `Error` path, as `FREE_OP_DATA` gives it up.
+///
+/// A table whose own `write_property` guards a declared name takes the
+/// assignment whatever the slot holds
+/// ([`ObjectHandlers::write_overloaded`](crate::api::abi::ObjectHandlers::write_overloaded)):
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $s = $db->query('SELECT 1');
+/// try { $s->queryString = 'x'; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($s->queryString);
+/// ```
+/// ```expect
+/// Property queryString is read only
+/// string(8) "SELECT 1"
+/// ```
 fn assign_property(
     req: &mut Request,
     frame: FrameRef,
@@ -11377,8 +11522,11 @@ fn assign_property(
     // A lazy object takes the write through `write_property`, which is
     // where php's slot nothing has written and name nothing holds reach
     // `forward_write_to_lazy_object`.
+    // A table whose own `write_property` answers for a declared name
+    // takes every assignment, as php's `ASSIGN_OBJ` reaches a slot in
+    // place only through `zend_std_write_property`'s cache.
     let lazy = object.heap().laziness() != php_heap::Laziness::Eager;
-    let place = if lazy {
+    let place = if lazy || object.handlers(req).write_overloaded() {
         PropertyPlace::Handlers
     } else {
         match place_of(req, object, bytes) {
@@ -14331,7 +14479,17 @@ fn incdec_obj(
 /// `BP_VAR_RW` and what php does with the place it answers: a declared
 /// slot stepped in place and held to its declared type, the dynamic
 /// entry laid down, or the overloaded pair where the class hands out no
-/// place.
+/// place. A readonly property holding an object gets none either, so
+/// the step throws and the write it goes on to throws again, chained:
+///
+/// ```php
+/// class T { public readonly object $p; function __construct() { $this->p = new stdClass; } }
+/// $t = new T;
+/// try { $t->p++; } catch (Error $e) { echo $e->getMessage(), ' / ', $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot modify readonly property T::$p / Cannot increment stdClass
+/// ```
 fn incdec_property(
     req: &mut Request,
     frame: FrameRef,
@@ -14371,9 +14529,15 @@ fn incdec_property(
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
             // `BP_VAR_RW` reads an unwritten slot before the placement.
-            let placed = req
-                .read_before_write(object, &bytes)
-                .and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
+            let read = req.read_before_write(object, &bytes);
+            // A readonly or set-restricted property gets no place, so the
+            // step is the overloaded one, and what the write refuses is
+            // chained onto what the step threw.
+            if read.is_ok() && req.place_withheld(object, &bytes) {
+                return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
+            }
+            let placed =
+                read.and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
             match placed {
                 Ok(placed) => placed,
                 Err(thrown) => {
@@ -15304,7 +15468,19 @@ pub(crate) fn add_array_element<T: Tier>(
 /// `ZEND_ARRAY_ELEMENT_REF`, `[&$x]`, `op1` is the place a CV or a write
 /// fetch names (`GET_OP1_ZVAL_PTR_PTR(BP_VAR_W)`, which warns of
 /// nothing), made a reference where it holds none, and the entry is
-/// that cell.
+/// that cell; a `VAR` is freed after it, so `[&$this]` holds a cell
+/// nothing else does, which `array_slice()` copies as its value:
+///
+/// ```php
+/// function r(&$r) {}
+/// class K { function __construct() { $a = [&$this]; var_dump(ReflectionReference::fromArrayElement($a, 0)); $b = array_slice($a, 0, 1); call_user_func_array('r', $b); } }
+/// new K;
+/// ```
+/// ```expect
+/// NULL
+///
+/// Warning: r(): Argument #1 ($r) must be passed by reference, value given in %s on line 3
+/// ```
 fn add_element(
     req: &mut Request,
     frame: FrameRef,
@@ -15318,7 +15494,14 @@ fn add_element(
                 "InternalError: ADD_ARRAY_ELEMENT by reference over an operand php compiles no write over",
             )));
         };
-        match bound_at(req, at) {
+        let bound = bound_at(req, at);
+        // `FREE_OP1_VAR_PTR()`: a `VAR` holding a value of its own, what
+        // `FETCH_THIS` left for `[&$this]`, gives its owner up, so the
+        // cell the entry holds is the entry's alone.
+        if op.op1_type == OperandKind::Var {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        }
+        match bound {
             Ok(bound) => bound,
             Err(thrown) => return threw(req, frame, &thrown),
         }

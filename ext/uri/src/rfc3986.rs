@@ -320,7 +320,7 @@ pub(crate) static HANDLERS: Handlers<Rfc3986> = Handlers(std::marker::PhantomDat
     readonly,
     namespace(Uri::Rfc3986),
     dynamic_properties = forbidden,
-    payload = Slot<Rfc3986>,
+    size = 72, payload = Slot<Rfc3986>,
     handlers = crate::rfc3986::HANDLERS
 )]
 pub(crate) struct Uri;

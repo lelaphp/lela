@@ -258,6 +258,15 @@ pub(crate) fn add_interned(mm: &mut Mm, a: Arr, s: Str) -> Result<(), Fatal> {
     Ok(())
 }
 
+/// The data [`add_interned`]'s first add lays down, laid down ahead of
+/// it (`zend_hash_real_init_mixed`); nothing where it stands already.
+pub(crate) fn lay_interned(mm: &mut Mm, a: Arr) -> Result<(), Fatal> {
+    if a.is_uninitialized() {
+        a.real_init_mixed(mm)?;
+    }
+    Ok(())
+}
+
 /// `zend_hash_index_add_new(ht, index, &zv)` over a request's `mm` for a
 /// key the caller knows is not there, which is what `zend_list_insert`
 /// (`Z/Zend/zend_list.c:32-44`) knows of the id `nNextFreeElement` gave
@@ -859,6 +868,26 @@ impl Arr {
             // `repr(C)`, so this is `&p->val`; the cast itself reads
             // nothing.
             self.bucket(idx).cast::<Zval>()
+        };
+        Some(ZvalRef::new(at))
+    }
+
+    /// Where the value at position `pos` stands, php's
+    /// `(zval *)((char *)ht->arData + offset)`, which is how
+    /// `ZEND_BIND_STATIC` reaches a slot of a `static` table by the
+    /// offset the compiler recorded. The bucket is answered whatever it
+    /// holds, `UNDEF` among it, which `zend_closure_bind_var_ex` writes
+    /// for an arrow function's capture of a variable nothing defined.
+    /// None past `nNumUsed`. The rule [`Arr::value_ref`] states holds.
+    #[must_use]
+    pub fn value_ref_at(&self, pos: u32) -> Option<ZvalRef> {
+        if pos >= self.num_used() {
+            return None;
+        }
+        let at = if self.is_packed() {
+            self.slot(pos)
+        } else {
+            self.bucket(pos).cast::<Zval>()
         };
         Some(ZvalRef::new(at))
     }

@@ -50,6 +50,10 @@ pub(crate) struct StatePcgOneseq128XslRr64 {
     pub(crate) state: Uint128,
 }
 
+/// The payload, `engine.state`: the pointer to the state php allocates
+/// beside the object (`php_random_status_alloc`).
+pub(crate) type EnginePcgOneseq128XslRr64 = Box<StatePcgOneseq128XslRr64>;
+
 impl StatePcgOneseq128XslRr64 {
     /// `step`: one turn of the LCG.
     fn step(&mut self) {
@@ -144,7 +148,7 @@ impl Serial for StatePcgOneseq128XslRr64 {
     namespace(Random::Engine),
     implements(crate::Engine),
     dynamic_properties = forbidden,
-    payload = StatePcgOneseq128XslRr64,
+    size = 72, beside(16), payload = EnginePcgOneseq128XslRr64,
     handlers = crate::PCG
 )]
 pub(crate) struct PcgOneseq128XslRr64;
@@ -196,8 +200,8 @@ impl PcgOneseq128XslRr64 {
                 }
             }
         }
-        if let Some(slot) = this.native_mut::<StatePcgOneseq128XslRr64>(req) {
-            *slot = state;
+        if let Some(slot) = this.native_mut::<EnginePcgOneseq128XslRr64>(req) {
+            **slot = state;
         }
         Ok(())
     }
@@ -223,7 +227,7 @@ impl PcgOneseq128XslRr64 {
         if advance < 0 {
             return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
         }
-        if let Some(state) = this.native_mut::<StatePcgOneseq128XslRr64>(req) {
+        if let Some(state) = this.native_mut::<EnginePcgOneseq128XslRr64>(req) {
             state.advance(advance.cast_unsigned());
         }
         Ok(())

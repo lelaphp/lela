@@ -3985,11 +3985,9 @@ impl Request {
         if self.is_pending() {
             return;
         }
-        let text = format!(
-            "{}({}): {caption}: {message}",
-            self.active_native(),
-            String::from_utf8_lossy(path)
-        );
+        let function = self.active_native();
+        let origin = crate::api::raising::origin(self, &function, &String::from_utf8_lossy(path));
+        let text = format!("{origin}: {caption}: {message}");
         warning(self, &text);
     }
 
@@ -4173,6 +4171,9 @@ impl Stream {
     /// served, its bad answers refused in silence, and a `php://temp` whose
     /// bytes are in memory answers no where a cast would move them to a
     /// file first. What `stream_isatty` and ext/posix ask before they cast.
+    /// A refusal names the kind that refused, `stream->ops->label`, read
+    /// without asking the kind anything, which `php_posix_stream_get_fd`
+    /// prints; a stream closed or inside a call refuses as no kind.
     ///
     /// ```php
     /// class W { public $context;
@@ -4191,18 +4192,19 @@ impl Stream {
     /// bool(false)
     /// int(0)
     /// ```
-    pub fn can_cast(self, req: &mut Request, cast: Cast) -> bool {
-        req.stream_op(self, |req, stream| stream.can_cast(req, cast))
-            .unwrap_or(false)
-    }
-
-    /// `stream->ops->label`, the kind's name, which `stream_get_meta_data`
-    /// prints as `stream_type`, read without asking the kind anything, as
-    /// `php_posix_stream_get_fd` names a stream it cannot use; `None` for
-    /// a stream that is closed or inside a call.
-    #[must_use]
-    pub fn label(self, req: &Request) -> Option<&'static str> {
-        req.stream_ref(self).map(|stream| stream.ops.label())
+    ///
+    /// # Errors
+    ///
+    /// The label of a kind that would not answer the cast.
+    pub fn can_cast(self, req: &mut Request, cast: Cast) -> Result<(), &'static str> {
+        req.stream_op(self, |req, stream| {
+            if stream.can_cast(req, cast) {
+                Ok(())
+            } else {
+                Err(stream.ops.label())
+            }
+        })
+        .unwrap_or(Err(""))
     }
 
     /// `stream->writepos - stream->readpos`: the bytes read from the

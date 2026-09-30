@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use php_compile::{CompileError, SourceKind, StackLimit};
+use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
@@ -839,13 +839,16 @@ fn link_trampolines(
 /// ([`Engine::unit`]), and whether the source is a file or the string an
 /// `eval` handed over ([`SourceKind`]), with the runtime definition keys
 /// the request made before it where it is an `eval`'s
-/// ([`php_compile::Options::keys_before`]).
+/// ([`php_compile::Options::keys_before`]), and the classes the request
+/// had declared by then, which a unit compiled for no request has none of
+/// ([`php_compile::RequestClasses`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
     cwd: &'a Path,
     kind: SourceKind,
     keys_before: u32,
+    request_classes: RequestClasses<'a>,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -936,22 +939,26 @@ impl Shared {
             shebang: self.shebang,
         };
         let cwd = req.cwd();
-        let origin = Origin {
-            filename,
-            cwd: &cwd,
-            kind,
-            keys_before: req.keys_made,
-        };
+        let keys_before = req.keys_made;
         let stack = req.stack_limit();
-        let unit = compile(
-            source,
-            origin,
-            ini,
-            self.declared(),
-            stack,
-            req.heap_mut(),
-            &self.map_ptr_last,
-        )?;
+        let unit = req.compiling(|heap, request_classes| {
+            let origin = Origin {
+                filename,
+                cwd: &cwd,
+                kind,
+                keys_before,
+                request_classes,
+            };
+            compile(
+                source,
+                origin,
+                ini,
+                self.declared(),
+                stack,
+                heap,
+                &self.map_ptr_last,
+            )
+        })?;
         let made = u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX);
         req.keys_made = req.keys_made.saturating_add(made);
         Ok(unit)
@@ -997,22 +1004,49 @@ impl Shared {
     /// all, which is the `None` `serve` serves nothing for.
     pub(crate) fn cached(&self, path: &[u8], cwd: &Path, stack: StackLimit) -> Cached {
         let full = crate::unit_cache::full_path(path, cwd);
-        let now = crate::unit_cache::now();
+        let asked = crate::unit_cache::Asked {
+            path: &full,
+            written: None,
+            validation: Validation::EveryHit,
+            protection: 0,
+            now: crate::unit_cache::now(),
+            levels: crate::unit_cache::Levels::Memory,
+        };
         self.units
-            .file(&full, None, Validation::EveryHit, 0, now, |source| {
-                self.publish_file(source, path, cwd, stack)
-            })
+            .file(
+                asked,
+                |source| self.publish_file(source, path, cwd, stack, RequestClasses::default()),
+                |_| None,
+            )
             .0
     }
 
+    /// A unit the file cache kept, read back from its bytes and published
+    /// as a compiled one is: its strings and constant arrays laid down in
+    /// the engine's table and its op arrays given their map-pointer
+    /// offsets (design §6.3); none where the bytes are no whole unit.
+    pub(crate) fn publish_kept(&self, body: &[u8]) -> Option<Arc<Unit>> {
+        let mut strings = match self.strings.lock() {
+            Ok(strings) => strings,
+            // As in `publish`: the table is append-only and consistent.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut unit = crate::unit_cache::decode(body, &mut *strings)?;
+        drop(strings);
+        assign_map_ptrs(&mut unit, &self.map_ptr_last);
+        Some(unit.published())
+    }
+
     /// `source`, read from the file `path` names, compiled and published
-    /// as a file of its own.
+    /// as a file of its own, for a request that has declared
+    /// `request_classes`.
     pub(crate) fn publish_file(
         &self,
         source: &[u8],
         path: &[u8],
         cwd: &Path,
         stack: StackLimit,
+        request_classes: RequestClasses<'_>,
     ) -> Result<Arc<Unit>, CompileError> {
         self.publish(
             source,
@@ -1021,6 +1055,7 @@ impl Shared {
                 cwd,
                 kind: SourceKind::File,
                 keys_before: 0,
+                request_classes,
             },
             stack,
         )
@@ -1119,7 +1154,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 80] = [
+const CORE_INI: [(&str, &str); 86] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1128,13 +1163,22 @@ const CORE_INI: [(&str, &str); 80] = [
     ("display_errors", "1"),
     ("log_errors", "0"),
     ("html_errors", "0"),
+    // `docref_root` and `docref_ext`, `PHP_INI_ALL`: where a function's
+    // diagnostic under `html_errors` links to (`raising::origin`).
+    ("docref_root", ""),
+    ("docref_ext", ""),
     ("error_prepend_string", ""),
     ("error_append_string", ""),
     ("ignore_repeated_errors", "0"),
     ("ignore_repeated_source", "0"),
     ("xmlrpc_errors", "0"),
     ("xmlrpc_error_number", "0"),
+    // `max_memory_limit`, `PHP_INI_SYSTEM`, declared before
+    // `memory_limit`, whose handler holds it under the maximum, and
+    // `report_memleaks`, deprecated when off (`Z/main/main.c:814-866`).
+    ("max_memory_limit", "-1"),
     ("memory_limit", "128M"),
+    ("report_memleaks", "1"),
     ("max_execution_time", "0"),
     ("default_charset", "UTF-8"),
     ("default_mimetype", "text/html"),
@@ -1212,6 +1256,11 @@ const CORE_INI: [(&str, &str); 80] = [
     // `http_build_query` join with.
     ("arg_separator.input", "&"),
     ("arg_separator.output", "&"),
+    // `auto_prepend_file` and `auto_append_file`,
+    // `PHP_INI_SYSTEM|PHP_INI_PERDIR`: required before and after the
+    // primary script (`php_execute_script`).
+    ("auto_prepend_file", ""),
+    ("auto_append_file", ""),
     ("realpath_cache_ttl", "120"),
     // `main.c`'s entries for what a request of the web carries
     // (`Z/main/main.c:802-878`): the `X-Powered-By` header, the auto
@@ -1588,6 +1637,49 @@ fn deprecated_directives(req: &mut Request) {
     }
 }
 
+/// The core entries' handlers over what the host set, in the order
+/// `main.c` declares them (`Z/main/main.c:814-866`): `report_memleaks`
+/// off is `OnUpdateReportMemleaks`'s deprecation, and `memory_limit`
+/// past `max_memory_limit` is `OnChangeMemoryLimit`'s warning with the
+/// maximum's text in its place. What an entry takes is the answer.
+fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Vec<u8>)> {
+    if req
+        .ini_get(b"report_memleaks")
+        .is_some_and(|v| !crate::api::request::ini_truth(Some(v)))
+    {
+        let message = "Directive 'report_memleaks' is deprecated";
+        crate::api::raising::docref(req, Level::Deprecated, message);
+    }
+    let limit = req
+        .ini_get(b"memory_limit")
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    match req.memory_limit_verdict(&limit) {
+        Some(taken) if taken != limit => {
+            req.take_startup_value(b"memory_limit", &taken);
+            vec![(b"memory_limit".to_vec(), taken)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `zend_disable_function`'s refusal of `exit`, `die` and `clone`: a
+/// startup warning for each the list names, which keeps it.
+fn disable_warnings(req: &mut Request) {
+    let list = req
+        .ini_get(b"disable_functions")
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    let names = list.split(|byte| matches!(byte, b' ' | b','));
+    for name in names.filter(|name| matches!(*name, b"exit" | b"die" | b"clone")) {
+        let message = format!(
+            "Cannot disable function {}()",
+            String::from_utf8_lossy(name)
+        );
+        crate::api::raising::warning(req, &message);
+    }
+}
+
 /// `zend_disable_functions` (`Z/Zend/zend_API.c:3668-3710`): the names
 /// the startup ini's `disable_functions` takes out of the function table
 /// before any request runs, so a call to one is a call to an undefined
@@ -1599,8 +1691,7 @@ fn deprecated_directives(req: &mut Request) {
 /// name no native has is passed over. `exit`, `die` and `clone` are the
 /// three `zend_disable_function` keeps in the table; php says so with a
 /// startup `E_WARNING`, `Cannot disable function %s()` in `Unknown` on
-/// line 0, which this engine does not raise, since it has no diagnostic
-/// before a request (#776).
+/// line 0 ([`disable_warnings`]).
 fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
     list.split(|byte| matches!(byte, b' ' | b','))
         .filter(|name| !name.is_empty())
@@ -1788,6 +1879,7 @@ impl EngineBuilder {
     /// The engine: every engine state built from the startup ini, in
     /// bundle order (ADR-0005), the declarations linked.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // one line per field of the engine
     pub fn build(self) -> Engine {
         let mut ini: Vec<(Vec<u8>, Vec<u8>)> = CORE_INI
             .iter()
@@ -1860,6 +1952,7 @@ impl EngineBuilder {
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
+        let units = UnitCache::new(MAX_ACCELERATED_FILES, &functions, &classes);
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -1889,7 +1982,7 @@ impl EngineBuilder {
                 reenter: self.reenter,
                 resume: self.resume,
                 locked,
-                units: UnitCache::new(MAX_ACCELERATED_FILES),
+                units,
                 persistent: crate::api::abi::Pool::new(PERSISTENT_ENTRIES),
                 strings: Mutex::new(strings),
                 map_ptr_last: AtomicU32::new(0),
@@ -2061,30 +2154,28 @@ impl Engine {
         // A host's own entries after, at `ZEND_INI_STAGE_ACTIVATE`, as
         // php-fpm's child applies its pool's once php has started.
         held.sort_by_key(|(name, _, activate)| (*activate, declared_at(name)));
-        let mut taken = Vec::new();
-        let mut raised = Vec::new();
-        let mut written = Vec::new();
-        if !held.is_empty() {
-            let description = RequestDescription {
-                sapi_name: host
-                    .map_or("", crate::host_extension::HostExtension::sapi_name)
-                    .to_owned(),
-                ..RequestDescription::default()
-            };
-            let mut req = Request::new(Arc::clone(&self.shared), description);
-            req.begin_startup();
-            for (name, value, activate) in held {
-                req.set_activating(activate);
-                let accepted = on_modify(&self.shared.extensions, &name)
-                    .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
-                if accepted {
-                    req.take_startup_value(&name, &value);
-                    taken.push((name, value));
-                }
+        let description = RequestDescription {
+            sapi_name: host
+                .map_or("", crate::host_extension::HostExtension::sapi_name)
+                .to_owned(),
+            ..RequestDescription::default()
+        };
+        let mut req = Request::new(Arc::clone(&self.shared), description);
+        req.begin_startup();
+        let mut taken = core_startup(&mut req);
+        for (name, value, activate) in held {
+            req.set_activating(activate);
+            let accepted = on_modify(&self.shared.extensions, &name)
+                .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
+            if accepted {
+                req.take_startup_value(&name, &value);
+                taken.push((name, value));
             }
-            raised = req.end_startup();
-            written = req.startup_stderr();
         }
+        disable_warnings(&mut req);
+        let raised = req.end_startup();
+        let written = req.startup_stderr();
+        drop(req);
         let Some(shared) = Arc::get_mut(&mut self.shared) else {
             return;
         };
@@ -2210,6 +2301,7 @@ impl Engine {
             cwd: &cwd,
             kind: SourceKind::File,
             keys_before: 0,
+            request_classes: RequestClasses::default(),
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -2256,6 +2348,7 @@ impl Engine {
                     cwd: &description.cwd,
                     kind: SourceKind::File,
                     keys_before: 0,
+                    request_classes: RequestClasses::default(),
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -2535,6 +2628,11 @@ impl Engine {
         source: Option<&[u8]>,
         expand: bool,
     ) -> Option<Result<Arc<Unit>, CompileError>> {
+        let laid = req.heap_mut().lay_interned_table();
+        if let Err(thrown) = req.fatal_of(laid) {
+            req.leave_pending(&thrown);
+            return None;
+        }
         if let Some(source) = source {
             let script = req
                 .script_name()
@@ -2845,6 +2943,7 @@ fn compile(
         persistent: declared.constants,
         functions: declared.functions,
         classes: declared.classes,
+        request_classes: origin.request_classes,
         stack,
         keys_before: origin.keys_before,
     };
@@ -3446,6 +3545,7 @@ mod tests {
                 validation: Validation::Never,
                 lookup: crate::api::abi::Lookup::Resolved,
                 protection: 0,
+                file_cache: None,
             })
             .post_startup(|req| {
                 let script = req.ini_get(b"t.preload").unwrap_or_default().to_vec();
@@ -3499,6 +3599,77 @@ mod tests {
             String::from_utf8_lossy(&second.stdout),
             "fmyn\npreloading\nagain\n"
         );
+    }
+
+    /// An extension that keeps every file in the cache, never validated,
+    /// and names a file cache from an ini entry of its own.
+    fn file_caching(dir: &Path) -> Extension {
+        let entry = php_unit::decl::IniDecl {
+            name: Name(b"t.file_cache"[..].into()),
+            default: b""[..].into(),
+            user: false,
+            per_dir: false,
+            system: true,
+        };
+        crate::api::abi::ExtensionBuilder::default()
+            .ini(vec![entry])
+            .admission(|req, _| {
+                let dir = req.ini_get(b"t.file_cache").unwrap_or_default();
+                crate::api::abi::Admission::Held {
+                    validation: Validation::Never,
+                    lookup: crate::api::abi::Lookup::Resolved,
+                    protection: 0,
+                    file_cache: Some(crate::api::abi::FileCache {
+                        directory: std::path::PathBuf::from(
+                            String::from_utf8_lossy(dir).into_owned(),
+                        ),
+                        read_only: false,
+                    }),
+                }
+            })
+            .build(&dir.to_string_lossy())
+    }
+
+    /// `opcache.file_cache` as the unit cache's second level (design
+    /// §6.3): a file one engine compiled is kept on disk, and another
+    /// engine of the same build reads it back instead of compiling the
+    /// file, so what it serves is what was kept though the file has
+    /// changed since; a kept file another build wrote is never read.
+    #[test]
+    fn a_kept_unit_is_read_back_by_the_next_engine_and_another_builds_is_not() {
+        let dir = std::env::temp_dir().join(format!("engine-file-cache-{}", std::process::id()));
+        let cache = dir.join("cache");
+        let _ = std::fs::create_dir_all(&cache);
+        let script = dir.join("kept.inc");
+        let _ = std::fs::write(&script, "<?php return 'kept';");
+        let script = script.canonicalize().unwrap_or_default();
+        let engine = || {
+            Engine::builder()
+                .extensions(&[file_caching(&dir)])
+                .ini("t.file_cache", &cache.to_string_lossy())
+                .build()
+        };
+        let program = format!("<?php echo include '{}';", script.display());
+        let first = engine().serve_capture(&program, crate::test::Capture::default());
+        let _ = std::fs::write(&script, "<?php return 'compiled';");
+        let second = engine().serve_capture(&program, crate::test::Capture::default());
+        let kept = engine();
+        let kept_at = crate::unit_cache::Disk {
+            directory: &cache,
+            read_only: false,
+            build: &kept.shared.units.build,
+        }
+        .path(script.as_os_str().as_encoded_bytes());
+        let mut stale = std::fs::read(&kept_at).unwrap_or_default();
+        if let Some(byte) = stale.get_mut(8) {
+            *byte ^= 1;
+        }
+        let _ = std::fs::write(&kept_at, &stale);
+        let third = kept.serve_capture(&program, crate::test::Capture::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(String::from_utf8_lossy(&first.stdout), "kept");
+        assert_eq!(String::from_utf8_lossy(&second.stdout), "kept");
+        assert_eq!(String::from_utf8_lossy(&third.stdout), "compiled");
     }
 
     /// A startup an extension refuses serves nothing, and every request
@@ -3572,7 +3743,8 @@ mod tests {
     /// function to a call, a dynamic call, `function_exists()`,
     /// `get_defined_functions()` or a callback's check; the list splits
     /// at spaces and commas alone; a name is matched as the table's
-    /// lowered key; an unknown one is passed over; `exit` and `die` stay;
+    /// lowered key; an unknown one is passed over; `exit` and `die` stay,
+    /// each with php's startup warning;
     /// and a user function may take a disabled native's name (Zend's
     /// `bug79382.phpt`).
     #[test]
@@ -3617,7 +3789,17 @@ mod tests {
             ("die,strlen", false, true),
             ("exit", true, true),
         ] {
-            assert_eq!(served_under(list), answers(strlen, defined), "{list:?}");
+            // `zend_disable_function`'s startup warning for a name it keeps.
+            let mut kept = String::new();
+            for name in list.split([' ', ',']) {
+                if matches!(name, "exit" | "die" | "clone") {
+                    kept.push_str("\nWarning: Cannot disable function ");
+                    kept.push_str(name);
+                    kept.push_str("() in Unknown on line 0\n");
+                }
+            }
+            let expected = kept + &answers(strlen, defined);
+            assert_eq!(served_under(list), expected, "{list:?}");
         }
         let engine = Engine::builder().ini("disable_functions", "strlen").build();
         let (out, _) = served(
@@ -4493,6 +4675,7 @@ mod tests {
                     cwd: Path::new(""),
                     kind: SourceKind::File,
                     keys_before: 0,
+                    request_classes: RequestClasses::default(),
                 },
                 CompileIni {
                     precision: 14,

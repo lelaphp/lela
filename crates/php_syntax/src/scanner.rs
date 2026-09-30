@@ -30,7 +30,7 @@
 //! What `token_get_all` decides on its own, the stop three tokens after
 //! `T_HALT_COMPILER` that `tokenize()` counts, stays with `ext/tokenizer`.
 
-use php_compile::syntax::{
+use crate::{
     SyntaxKind, Token, amp_name, cast_name, int_overflows, magic_const_name, operator_name,
 };
 

@@ -562,17 +562,19 @@ pub struct Invocation<'a> {
     pub flags: &'a [String],
     /// Arguments after the program's path: a test's `--ARGS--`.
     pub args: &'a [String],
-    /// Environment entries added to the recipe's: a test's `--ENV--`, and
-    /// the request a CGI-shaped test describes, whose values are the bytes
-    /// the test wrote and no encoding of them.
+    /// Environment entries over the recipe's, a later one of a name over
+    /// an earlier: a test's environment as run-tests.php builds it, and the
+    /// request a CGI-shaped test describes, whose values are the bytes the
+    /// test wrote and no encoding of them. An entry whose value is empty
+    /// takes the name out of the environment, the recipe's included, as
+    /// php's `proc_open` leaves an empty value out of the environment it
+    /// hands a program (`php_array_to_envp`, `ext/standard/proc_open.c:174`),
+    /// and run-tests.php hands every program through it (#1186).
     pub env: &'a [(String, OsString)],
-    /// What the program reads on stdin: a test's `--STDIN--`, and nothing
-    /// otherwise, which is what the recipe's own runs read.
-    pub stdin: Option<&'a [u8]>,
-    /// Whether the second stream is the first: upstream's `2>&1`, which is
-    /// how a phpt run is captured unless `--CAPTURE_STDIO--` says
-    /// otherwise (run-tests.php:1885-1889). A witness pins the two apart.
-    pub merge_streams: bool,
+    /// What the program reads on stdin.
+    pub stdin: Stdin<'a>,
+    /// How the program's two streams out are taken.
+    pub streams: Streams,
     /// The working directory: the program's own where `None`, which is
     /// a witness's; php-src's root for a phpt test and the sections run
     /// beside it, as run-tests.php runs them (#952).
@@ -594,11 +596,158 @@ impl<'a> Invocation<'a> {
             flags: &[],
             args: &[],
             env: &[],
-            stdin: None,
-            merge_streams: false,
+            stdin: Stdin::Null,
+            streams: Streams::Files,
             cwd: None,
             raw: false,
         }
+    }
+}
+
+/// What a program reads on stdin, each as upstream's runner hands it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Stdin<'a> {
+    /// `/dev/null`: what a witness, a compile and every run of the recipe's
+    /// own read, and a test whose `--CAPTURE_STDIO--` leaves stdin out,
+    /// which upstream hands its own stdin and this runner, which hands a
+    /// test no terminal, hands nothing.
+    #[default]
+    Null,
+    /// A pipe, these bytes written into it and then closed: what
+    /// run-tests.php hands every program of a test, its `--STDIN--` or
+    /// nothing, the `SKIPIF` and `CLEAN` beside it too
+    /// (`system_with_timeout`, run-tests.php:1163-1182), so `fseek(STDIN)`
+    /// and `fsync(STDIN)` fail as they fail on a pipe (#1186).
+    Pipe(&'a [u8]),
+    /// A file holding these bytes: a CGI-shaped test's body, which
+    /// run-tests.php saves and redirects in with `<`
+    /// (run-tests.php:2346-2418).
+    File(&'a [u8]),
+}
+
+/// How a program's two streams out are taken, each as its lane's runner
+/// takes them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Streams {
+    /// Each to a file of its own: a witness's, which pins the two apart, a
+    /// compile's and a rendering's.
+    #[default]
+    Files,
+    /// Through pipes, as run-tests.php takes every program of a test
+    /// (`system_with_timeout`, run-tests.php:1163-1233): stdout's, with
+    /// stderr in it where `merged`, upstream's `2>&1` for a test that
+    /// captures both (run-tests.php:1885-1889), and in a pipe of its own
+    /// otherwise, as a `SKIPIF`'s is. So `php://stdout` does not seek and a
+    /// descriptor sent over a socket is a pipe's, as under upstream (#1186).
+    Pipes { merged: bool },
+}
+
+/// Where a program's two streams go: set on its command before it starts,
+/// and read back once it has ended.
+enum Taken {
+    Files { out: PathBuf, err: PathBuf },
+    Pipes { out: Drained, err: Option<Drained> },
+}
+
+impl Taken {
+    /// The streams `how` names, set on `cmd`: files in `streams`, or pipes
+    /// whose draining starts now.
+    fn set(cmd: &mut Command, streams: &Tree, how: Streams) -> Result<Taken> {
+        match how {
+            Streams::Files => {
+                let (out, err) = (streams.join("stdout"), streams.join("stderr"));
+                cmd.stdout(File::create(&out).context("creating the stdout file")?)
+                    .stderr(File::create(&err).context("creating the stderr file")?);
+                Ok(Taken::Files { out, err })
+            }
+            Streams::Pipes { merged } => {
+                let (out, out_writer) = std::io::pipe().context("opening the stdout pipe")?;
+                let (err, err_writer) = if merged {
+                    let shared = out_writer.try_clone().context("sharing the stdout pipe")?;
+                    (None, shared)
+                } else {
+                    let (err, writer) = std::io::pipe().context("opening the stderr pipe")?;
+                    (Some(Drained::start(err)), writer)
+                };
+                cmd.stdout(out_writer).stderr(err_writer);
+                Ok(Taken::Pipes {
+                    out: Drained::start(out),
+                    err,
+                })
+            }
+        }
+    }
+
+    /// What the program wrote to stdout and to stderr, a pipe's by `until`
+    /// at the latest; stderr is empty where it went into stdout.
+    fn read(self, until: Instant) -> Result<(Vec<u8>, Vec<u8>)> {
+        match self {
+            Taken::Files { out, err } => Ok((
+                fs::read(&out).context("reading php's stdout")?,
+                fs::read(&err).context("reading php's stderr")?,
+            )),
+            Taken::Pipes { out, err } => Ok((
+                out.taken(until),
+                err.map(|err| err.taken(until)).unwrap_or_default(),
+            )),
+        }
+    }
+}
+
+/// A pipe's bytes written into the program's stdin beside the wait, as
+/// upstream writes them before it reads, and the pipe closed after them:
+/// a program that never reads them, or ends first, ends the write with a
+/// broken pipe, which is its business and not the run's.
+fn fed(stdin: Stdin<'_>, child: &mut std::process::Child) -> Option<thread::JoinHandle<()>> {
+    let (Stdin::Pipe(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) else {
+        return None;
+    };
+    let bytes = bytes.to_vec();
+    Some(thread::spawn(move || {
+        let _ = std::io::Write::write_all(&mut pipe, &bytes);
+    }))
+}
+
+/// One stream of a program's, taken through a pipe: drained on a thread
+/// of its own as it is written, so neither stream holds the program up
+/// while the other fills, and read to its end once the program and
+/// whatever it started are gone.
+struct Drained {
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+impl Drained {
+    fn start(mut pipe: std::io::PipeReader) -> Drained {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (tell, done) = std::sync::mpsc::channel();
+        let into = std::sync::Arc::clone(&bytes);
+        thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = std::io::Read::read(&mut pipe, &mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut held) = into.lock() {
+                    held.extend_from_slice(&chunk[..n]);
+                }
+            }
+            let _ = tell.send(());
+        });
+        Drained { bytes, done }
+    }
+
+    /// What came through the pipe: all of it once its last writer closed
+    /// it, or what had come by `until` where a process the group kill did
+    /// not reach still holds it open.
+    fn taken(self, until: Instant) -> Vec<u8> {
+        let _ = self
+            .done
+            .recv_timeout(until.saturating_duration_since(Instant::now()));
+        self.bytes
+            .lock()
+            .map(|mut held| std::mem::take(&mut *held))
+            .unwrap_or_default()
     }
 }
 
@@ -686,7 +835,13 @@ impl<'a> Oracle<'a> {
             cmd.env_clear();
         }
         cmd.envs(&recipe.env);
-        cmd.envs(call.env.iter().map(|(name, value)| (name, value)));
+        for (name, value) in call.env {
+            if value.is_empty() {
+                cmd.env_remove(name);
+            } else {
+                cmd.env(name, value);
+            }
+        }
         // The streams, and the program's stdin, stand in a tree apart from
         // the program's directory, so a snippet that lists or reads its
         // own directory finds its own file there and never these; a tree
@@ -694,23 +849,17 @@ impl<'a> Oracle<'a> {
         // `memory_get_usage()` counts the path in `$_SERVER` and a witness
         // pins that number.
         let streams = Tree::new("streams")?;
-        let out_path = streams.join("stdout");
-        let err_path = streams.join("stderr");
-        let out_file = File::create(&out_path).context("creating the stdout file")?;
-        let err_file = if call.merge_streams {
-            out_file.try_clone().context("sharing the stdout file")?
-        } else {
-            File::create(&err_path).context("creating the stderr file")?
-        };
-        cmd.stdin(stdin_of(&streams, call.stdin)?)
-            .stdout(out_file)
-            .stderr(err_file);
+        let taken = Taken::set(&mut cmd, &streams, call.streams)?;
+        cmd.stdin(stdin_of(&streams, call.stdin)?);
 
         let started = Instant::now();
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("running {}", call.binary.display()))?;
+        let spawned = cmd.spawn();
+        // The command holds the pipes' writing ends until it drops, and a
+        // pipe ends only when its last writer closes it.
+        drop(cmd);
+        let mut child = spawned.with_context(|| format!("running {}", call.binary.display()))?;
         let group = Group::of(&child)?;
+        let feeding = fed(call.stdin, &mut child);
         let limit = Duration::from_secs(recipe.limits.timeout_s);
         let status = loop {
             if let Some(status) = child.try_wait().context("waiting for php")? {
@@ -732,13 +881,14 @@ impl<'a> Oracle<'a> {
             thread::sleep(Duration::from_millis(5));
         };
         let wall = started.elapsed();
+        // What the program started goes with it, which closes whatever of
+        // its pipes those held, so the reads below reach their end.
+        drop(group);
+        if let Some(feeding) = feeding {
+            let _ = feeding.join();
+        }
 
-        let stdout = fs::read(&out_path).context("reading php's stdout")?;
-        let stderr = if call.merge_streams {
-            Vec::new()
-        } else {
-            fs::read(&err_path).context("reading php's stderr")?
-        };
+        let (stdout, stderr) = taken.read(started + limit)?;
         let (stdout, stderr) = if call.raw {
             (stdout, stderr)
         } else {
@@ -1049,17 +1199,21 @@ fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
     ))
 }
 
-/// The program's stdin: a file holding what a test's `--STDIN--` gives,
-/// and nothing at all otherwise.
-fn stdin_of(streams: &Tree, bytes: Option<&[u8]>) -> Result<Stdio> {
-    let Some(bytes) = bytes else {
-        return Ok(Stdio::null());
-    };
-    let path = streams.join("stdin");
-    fs::write(&path, bytes).context("writing the program's stdin")?;
-    Ok(Stdio::from(
-        File::open(&path).context("opening the program's stdin")?,
-    ))
+/// The program's stdin as [`Stdin`] says: nothing, a pipe the run writes
+/// once the program stands, or a file in the run's streams holding the
+/// bytes.
+fn stdin_of(streams: &Tree, stdin: Stdin<'_>) -> Result<Stdio> {
+    match stdin {
+        Stdin::Null => Ok(Stdio::null()),
+        Stdin::Pipe(_) => Ok(Stdio::piped()),
+        Stdin::File(bytes) => {
+            let path = streams.join("stdin");
+            fs::write(&path, bytes).context("writing the program's stdin")?;
+            Ok(Stdio::from(
+                File::open(&path).context("opening the program's stdin")?,
+            ))
+        }
+    }
 }
 
 /// The recipe's normalisation of bytes that are not a stream of one run:

@@ -197,9 +197,11 @@ pub struct Pool<K, V> {
 
 impl<K: Hash + Eq, V> Pool<K, V> {
     /// A pool keeping at most `capacity` idle entries; one given back past
-    /// the bound is dropped, which closes it.
+    /// the bound is dropped, which closes it. The engine's own for now,
+    /// its streams the one user; an extension's pool, persistent PDO's,
+    /// comes with the type a lent entry needs.
     #[must_use]
-    pub fn new(capacity: usize) -> Pool<K, V> {
+    pub(crate) fn new(capacity: usize) -> Pool<K, V> {
         Pool {
             capacity: capacity.max(1),
             idle: Mutex::new(HashMap::new()),
@@ -331,8 +333,9 @@ pub(crate) type InputFilterHook = fn(
 /// answer to [`ExtensionBuilder::admission`] (design §6.3, revision 45):
 /// what `persistent_compile_file` decides from `accelerator_enabled`,
 /// the blacklist and `opcache.validate_timestamps`,
-/// `opcache.revalidate_freq` and `opcache.revalidate_path`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `opcache.revalidate_freq`, `opcache.revalidate_path` and
+/// `opcache.file_cache`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Admission {
     /// Kept out: compiled as the request's own unit, published nowhere
     /// and counted among the cache's blacklist misses, as
@@ -342,12 +345,38 @@ pub enum Admission {
     /// `lookup` says; a file compiled at a request that starts within
     /// `protection` seconds of the file's last write is compiled and not
     /// held, `opcache.file_update_protection`, since the second a file
-    /// was written in cannot tell a later write in the same second.
+    /// was written in cannot tell a later write in the same second. With
+    /// a `file_cache`, a miss is looked for there before it is compiled,
+    /// and what is compiled is kept there too.
     Held {
         validation: Validation,
         lookup: Lookup,
         protection: u32,
+        file_cache: Option<FileCache>,
     },
+    /// Kept in the `file_cache` alone and held in no memory, which
+    /// `file_cache_compile_file` is: `opcache.file_cache_only`, or a
+    /// request whose accelerator is off beside a file cache. A file kept
+    /// there is read back as `validation` validates it, never looking
+    /// at the file except to compare its `mtime` in whole seconds, and
+    /// one compiled within `protection` seconds of its last write is not
+    /// kept.
+    OnDisk {
+        validation: Validation,
+        protection: u32,
+        file_cache: FileCache,
+    },
+}
+
+/// `opcache.file_cache`, the unit cache's second level (design §6.3):
+/// the directory the compiled files are kept under, each at the path
+/// `zend_file_cache_get_bin_file_path` makes of it, and whether the
+/// cache may only read there, `opcache.file_cache_read_only`. What is
+/// kept is this build's alone; another build's files are never read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileCache {
+    pub directory: std::path::PathBuf,
+    pub read_only: bool,
 }
 
 /// When a hit on a held file is held to the file as it stands.
@@ -422,7 +451,7 @@ pub(crate) type NativeClassDecl = (
 /// php's null slot, a class whose objects are `zend_objects_new` and
 /// carry nothing; the engine takes the nearest parent's, as php
 /// inherits `create_object`.
-pub(crate) type NativeNew = fn(&mut Heap, u32, u32) -> Result<Obj, Fatal>;
+pub(crate) type NativeNew = fn(&mut Heap, u32, u32, usize) -> Result<Obj, Fatal>;
 
 /// One [`NativeNew`], the payload's `Default` into a fresh object of
 /// `class` with `slots` declared property slots.
@@ -437,8 +466,9 @@ fn new_with_payload<T: Any + Send + Default>(
     heap: &mut Heap,
     class: u32,
     slots: u32,
+    custom: usize,
 ) -> Result<Obj, Fatal> {
-    heap.object_with(class, slots, T::default())
+    heap.object_with(class, slots, custom, T::default())
 }
 
 /// One extension (design §7.1): declarations paired with entries,
@@ -1213,6 +1243,30 @@ pub enum PropertyPurpose {
     GetObjectVars,
 }
 
+/// What the `get_debug_info` slot answers: php's `HashTable *` with its
+/// `*is_temp` owner, the caller's, and the throwable a handler raised
+/// while it built the table and left in `EG(exception)`, which
+/// `dom_get_debug_info_helper` does for a property whose reader fails
+/// (`Z/ext/dom/php_dom.c:526`). A dumper renders the table and then
+/// hands the throwable on, so the dump is printed and the throwable is
+/// thrown once the dumper returns, as `php_var_dump` leaves it
+/// (`Z/ext/standard/var.c:184`). A second throwable the handler raises
+/// is chained onto the first with [`Thrown::chain`].
+#[derive(Debug)]
+pub struct DebugInfo {
+    pub table: PhpArray,
+    pub thrown: Option<Thrown>,
+}
+
+impl From<PhpArray> for DebugInfo {
+    fn from(table: PhpArray) -> DebugInfo {
+        DebugInfo {
+            table,
+            thrown: None,
+        }
+    }
+}
+
 /// The `clone_obj` slot: a fresh object holding what this one holds,
 /// one owner, the caller's.
 pub type CloneObj = fn(&mut Request, PhpObject) -> Result<PhpObject, Thrown>;
@@ -1269,6 +1323,16 @@ pub trait ClassIterator: Send {
 /// `do_operation` and `get_properties_for` answer the value or `None`
 /// in one call, since their kernels fall back either way.
 pub trait ObjectHandlers: Send + Sync {
+    /// `ce->create_object` past `zend_object_alloc`: what the class lays
+    /// down with a new object on the request's heap that its payload's
+    /// `Default` cannot, `array_init(&intern->array)` among them, after
+    /// the properties' defaults and before any constructor. `Std` lays
+    /// nothing down.
+    fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        let _ = (req, object);
+        Ok(())
+    }
+
     /// `free_obj` for the native payload: what the payload names of the
     /// heap given back before the payload is dropped, with the members
     /// already freed and the object's bucket already invalid. `Std`
@@ -1614,13 +1678,16 @@ pub trait ObjectHandlers: Send + Sync {
     /// `__debugInfo` returns. `None` is the members themselves, which
     /// php's slot answers as the properties table it is handed
     /// (`get_properties(object)`) and a reader here walks for itself, so
-    /// a typed property nothing has written still shows as one.
+    /// a typed property nothing has written still shows as one. A table
+    /// built with a throwable left pending is [`DebugInfo::thrown`]; the
+    /// `Err` is a table that could not be made.
     fn get_debug_info(
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<DebugInfo>, Thrown> {
         req.debug_info(object)
+            .map(|table| table.map(DebugInfo::from))
     }
 
     /// `get_closure`: the function a call on the object serves, with
@@ -1781,6 +1848,17 @@ pub trait ObjectHandlers: Send + Sync {
     /// stdClass backs
     /// ```
     fn properties_overloaded(&self) -> bool {
+        false
+    }
+
+    /// Whether the table's `write_property` is not
+    /// `zend_std_write_property` and answers for a property the class
+    /// declares: `ZEND_ASSIGN_OBJ` writes a declared slot in place only
+    /// through the cache `zend_std_write_property` fills, so a class
+    /// whose own handler guards a declared name has every assignment to
+    /// it reach that handler. `false` at `Std`; `PDOStatement`'s
+    /// `dbstmt_prop_write` is the witness, in `ext/pdo`.
+    fn write_overloaded(&self) -> bool {
         false
     }
 }

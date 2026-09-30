@@ -37,6 +37,64 @@ impl Thrown {
     pub fn exception(&self) -> Option<&PhpObject> {
         self.pending.as_ref()
     }
+
+    /// Which of the three ways out this is: a throwable, the `exit` a
+    /// callback unwinds (`zend_is_unwind_exit`), which php's C code goes
+    /// on past with the unwind exit pending, or a fatal, which
+    /// `zend_bailout` leaves a native by and a `zend_catch` sees. A
+    /// native that cleans up after a fatal raised under it, as
+    /// `php_session_decode` does in its `zend_catch`
+    /// (`Z/ext/session/session.c:289-302`), matches on
+    /// [`Cause::Fatal`] and hands the `Thrown` on. The session's decode
+    /// is the witness, in `ext/session`.
+    #[must_use]
+    pub fn cause(&self, req: &Request) -> Cause<'_> {
+        match &self.pending {
+            Some(throwable) => Cause::Throwable(throwable),
+            None if req.unwind_exit() => Cause::Exit,
+            None => Cause::Fatal,
+        }
+    }
+
+    /// `zend_throw_exception_internal` with a throwable already in
+    /// `EG(exception)`: `later`, raised while this one was pending, is
+    /// what is pending from here, with this one chained onto the end of
+    /// its `previous` chain (`zend_exception_set_previous`,
+    /// `Z/Zend/zend_exceptions.c:103`). A fatal or an `exit` is not
+    /// chained: where `later` is one, this throwable is given up and
+    /// `later` is what leaves; where this is one, `later` could not have
+    /// been raised past it and is given up. A dump of a `DOMNode` no
+    /// constructor made is the witness, in `ext/dom`: each property's
+    /// reader fails in turn and the throwables leave as one chain.
+    #[must_use]
+    pub fn chain(self, req: &mut Request, later: Thrown) -> Thrown {
+        match (self.pending, later.pending) {
+            (Some(earlier), Some(now)) => {
+                req.set_previous(now, earlier);
+                later
+            }
+            (Some(earlier), None) => {
+                req.release(earlier.as_value());
+                later
+            }
+            (None, now) => {
+                if let Some(now) = now {
+                    req.release(now.as_value());
+                }
+                self
+            }
+        }
+    }
+}
+
+/// What a [`Thrown`] carries, [`Thrown::cause`]: the throwable pending,
+/// the unwind exit an `exit` throws, or a fatal leaving by
+/// `zend_bailout`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Cause<'a> {
+    Throwable(&'a PhpObject),
+    Exit,
+    Fatal,
 }
 
 /// Raise a diagnostic at `level` with php's message text.
@@ -241,15 +299,20 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 pub fn docref(req: &mut Request, level: Level, message: &str) {
     // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
     // `PHP Startup`, no function and so no `()`.
+    // A fatal in flight is no native served: `_zend_bailout` empties
+    // `EG(current_execute_data)` before it jumps (`Z/Zend/zend.c:1267`),
+    // so what a `zend_catch` raises names no function.
     let text = if req.at_startup() {
         format!("PHP Startup: {message}")
-    } else if req.vm_serving_native() || req.serving_include() {
-        format!("{}(): {message}", req.active_native())
+    } else if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
+        let function = req.active_native();
+        format!("{}: {message}", origin(req, &function, ""))
     } else {
         let origin = match req.phase() {
             crate::api::request::Phase::Startup => String::from("PHP Request Startup"),
             // The code being served names it, as
             // `get_active_function_name` does when a handler raises it.
+            crate::api::request::Phase::Running if req.bailing_out() => String::from("Unknown"),
             crate::api::request::Phase::Running => req
                 .active_user_function()
                 .map_or_else(|| String::from("Unknown"), |name| format!("{name}()")),
@@ -260,6 +323,52 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         format!("{origin}: {message}")
     };
     raise(req, level, &text);
+}
+
+/// `php_verror`'s origin for a function's diagnostic, `function(params)`,
+/// and its link to the manual (`Z/main/main.c:1150-1212`) under
+/// `html_errors` with a `docref_root`:
+/// the function's page, `function.name` or `class.method` with its
+/// leading underscores dropped, `_` made `-` and lowered, `docref_ext`
+/// after it, and a `#target` kept past the extension; none otherwise.
+///
+/// ```php
+/// ini_set('html_errors', 1); ini_set('docref_root', '/'); ini_set('docref_ext', '.html');
+/// @fopen('nope.txt', 'r');
+/// echo strip_tags(error_get_last()['message']), "\n";
+/// ```
+/// ```expect
+/// fopen(nope.txt) [function.fopen.html]: Failed to open stream: No such file or directory
+/// ```
+pub(crate) fn origin(req: &Request, function: &str, params: &str) -> String {
+    match docref_link(req, function) {
+        Some(link) => format!("{function}({params}) {link}"),
+        None => format!("{function}({params})"),
+    }
+}
+
+/// [`origin`]'s link, where there is one.
+fn docref_link(req: &Request, function: &str) -> Option<String> {
+    if !req.ini_flag(b"html_errors") {
+        return None;
+    }
+    let root = String::from_utf8_lossy(req.ini_get(b"docref_root")?).into_owned();
+    if root.is_empty() {
+        return None;
+    }
+    let page = match function.split_once("::") {
+        Some((class, method)) => format!("{class}.{}", method.trim_start_matches('_')),
+        None => format!("function.{}", function.trim_start_matches('_')),
+    };
+    let mut page = page.replace('_', "-").to_ascii_lowercase();
+    let target = page
+        .rfind('#')
+        .map(|at| page.split_off(at))
+        .unwrap_or_default();
+    if let Some(ext) = req.ini_get(b"docref_ext").filter(|ext| !ext.is_empty()) {
+        page.push_str(&String::from_utf8_lossy(ext));
+    }
+    Some(format!("[<a href='{root}{page}{target}'>{page}</a>]"))
 }
 
 /// `zend_call_stack_overflowed(EG(stack_limit))` with

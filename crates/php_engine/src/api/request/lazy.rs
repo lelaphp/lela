@@ -183,11 +183,14 @@ impl Request {
         match self.lazy_row(o).map(|row| &row.state) {
             Some(State::Instance(instance)) => visit(instance.as_value()),
             Some(State::Waiting { initializer, .. }) => {
-                if let Target::Method {
-                    this: Some(this), ..
-                } = initializer.target()
-                {
-                    visit(this.as_value());
+                match initializer.target() {
+                    Target::Method {
+                        this: Some(this), ..
+                    } => visit(this.as_value()),
+                    // `zend_get_gc_buffer_add_fcc`: the closure the
+                    // callable names, beside the value.
+                    Target::Closure(closure) => visit(closure.as_value()),
+                    _ => {}
                 }
                 visit(initializer.value());
             }
@@ -220,8 +223,45 @@ impl Request {
             return;
         };
         match row.state {
-            State::Waiting { initializer, .. } => initializer.release(self),
+            State::Waiting { initializer, .. } => self.release_initializer(initializer),
             State::Instance(instance) => self.release(instance.as_value()),
+        }
+    }
+
+    /// `zend_lazy_object_info_dtor_func`'s initializer arm: the value
+    /// given up, `zval_ptr_dtor(&info->u.initializer.zv)`, and then the
+    /// callable's own owners, `zend_fcc_dtor`, the closure last. A
+    /// closure the row alone held is a possible root at the first
+    /// release and freed at the second, which is when php's collector
+    /// may start: here it starts while the ghost the last property's write
+    /// realised is no longer lazy, so the destructor it serves may make
+    /// it lazy again.
+    ///
+    /// ```php
+    /// class C { public $a; }
+    /// class D { public $self; function __construct() { $this->self = $this; }
+    ///     function __destruct() { global $obj, $r; $r->resetAsLazyGhost($obj, function () {}); } }
+    /// new D();
+    /// $r = new ReflectionClass(C::class);
+    /// for ($i = 0; $i < 10000; $i++) {
+    ///     $obj = $r->newLazyGhost(function ($obj) {});
+    ///     $obj2 = $obj; unset($obj2);
+    ///     $r->getProperty('a')->setRawValueWithoutLazyInitialization($obj, $obj);
+    /// }
+    /// var_dump($r->isUninitializedLazyObject($obj), gc_status()['runs']);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// int(2)
+    /// ```
+    fn release_initializer(&mut self, initializer: Callable) {
+        let closure = match initializer.target() {
+            Target::Closure(closure) => Some(closure),
+            _ => None,
+        };
+        initializer.release(self);
+        if let Some(closure) = closure {
+            self.release(closure.as_value());
         }
     }
 
@@ -320,7 +360,13 @@ impl Request {
             Strategy::Ghost => Laziness::Ghost,
             Strategy::Proxy => Laziness::Proxy,
         });
+        // `ZVAL_COPY(&info->u.initializer.zv, ...)` and `zend_fcc_dup`:
+        // the row owns the value and, apart, the closure `fcc.closure`
+        // names, so a closure initializer has two owners here.
         initializer.addref(self);
+        if let Target::Closure(closure) = initializer.target() {
+            self.addref(&closure.as_value());
+        }
         self.lazy.rows.insert(
             o.id().0,
             Info {
@@ -690,7 +736,7 @@ impl Request {
         };
         let waiting = std::mem::replace(&mut row.state, State::Instance(instance));
         if let State::Waiting { initializer, .. } = waiting {
-            initializer.release(self);
+            self.release_initializer(initializer);
         }
         o.set_laziness(Laziness::Forwarding);
         if let Some(table) = self.heap.object_take_properties(o) {

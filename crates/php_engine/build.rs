@@ -11,6 +11,14 @@
 //!
 //! Written to `OUT_DIR/dispatch.rs` and included, never committed (design
 //! §10).
+//!
+//! Beside it, the build's identity, `PHP_ENGINE_BUILD`: a digest of every
+//! source that decides what a unit is and what running one does, the
+//! syntax, the compiler, the unit format, the heap and the engine, with
+//! `ops.toml`. The file cache writes it into every unit it keeps on disk
+//! and reads back only a unit that carries it, so a unit another build
+//! wrote is never read (design §6.3), as php's `zend_system_id` keeps one
+//! build's file cache from another's.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -24,6 +32,21 @@ fn main() {
     let bodies = root.join("src/handlers.rs");
     println!("cargo:rerun-if-changed={}", spec.display());
     println!("cargo:rerun-if-changed={}", bodies.display());
+    let sources = [
+        "../php_syntax/src",
+        "../php_compile/src",
+        "../php_unit/src",
+        "../php_heap/src",
+        "src",
+    ];
+    let mut files = vec![spec.clone()];
+    for dir in sources {
+        let dir = root.join(dir);
+        println!("cargo:rerun-if-changed={}", dir.display());
+        walk(&dir, &mut files);
+    }
+    files.sort();
+    println!("cargo:rustc-env=PHP_ENGINE_BUILD={:016x}", digest(&files));
     let out = PathBuf::from(env::var("OUT_DIR").unwrap_or_default()).join("dispatch.rs");
     match generate(&spec, &bodies) {
         Ok(text) => {
@@ -37,6 +60,32 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Every file under `dir`, into `files`.
+fn walk(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
+}
+
+/// FNV-1a over each file's bytes in order, the build's identity.
+fn digest(files: &[PathBuf]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for file in files {
+        for byte in fs::read(file).unwrap_or_default() {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {

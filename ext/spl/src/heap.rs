@@ -25,7 +25,7 @@ use crate::{Countable, Iterator};
 // each, as `spl_ptr_heap` and `spl_heap_object` keep them.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
-pub(crate) struct Heap {
+pub(crate) struct HeapState {
     elements: Vec<(Value, Value)>,
     queue: bool,
     min: bool,
@@ -34,6 +34,10 @@ pub(crate) struct Heap {
     locked: bool,
     ready: bool,
 }
+
+/// The payload: `spl_heap_object`'s fields, boxed, inside the `sizeof` php
+/// allocates (design §5.13).
+pub(crate) type Heap = Box<HeapState>;
 
 /// `spl_handler_SplHeap` and `spl_handler_SplPriorityQueue`.
 pub(crate) struct Handlers;
@@ -76,7 +80,27 @@ pub(crate) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// bool(false)
 /// int(2)
 /// ```
-#[php_class(abstract, implements(Iterator, Countable), payload = Heap, handlers = HANDLERS)]
+///
+/// The object is `zend_object_alloc(sizeof(spl_heap_object))`, with the
+/// `spl_ptr_heap` and its first 64 elements `spl_ptr_heap_init` allocates
+/// beside it, which `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['SplMinHeap', 'SplMaxHeap', 'SplPriorityQueue'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// SplMinHeap 1184
+/// SplMaxHeap 1184
+/// SplPriorityQueue 2208
+/// ```
+#[php_class(abstract, implements(Iterator, Countable), size = 88, beside(64, 1024), payload = Heap, handlers = HANDLERS)]
 pub(crate) struct SplHeap;
 
 #[php_class]
@@ -415,7 +439,7 @@ impl SplMaxHeap {
 /// string(1) "w"
 /// int(1)
 /// ```
-#[php_class(implements(Iterator, Countable), payload = Heap, handlers = HANDLERS)]
+#[php_class(implements(Iterator, Countable), size = 88, beside(64, 2048), payload = Heap, handlers = HANDLERS)]
 pub(crate) struct SplPriorityQueue;
 
 #[php_class]
@@ -849,7 +873,7 @@ impl ObjectHandlers for Handlers {
 /// `spl_heap_object_clone`: the elements with one more owner each.
 fn clone_heap(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     state_ready(req, object)?;
-    let copy = read(req, object, |h| Heap {
+    let copy = read(req, object, |h| HeapState {
         elements: h.elements.clone(),
         queue: h.queue,
         min: h.min,
@@ -862,7 +886,7 @@ fn clone_heap(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown>
         req.addref(a);
         req.addref(b);
     }
-    clone_with(req, &object, copy)
+    clone_with(req, &object, Box::new(copy))
 }
 
 /// `spl_heap_object_get_debug_info`: the properties, then `flags`,

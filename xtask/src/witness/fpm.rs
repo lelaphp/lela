@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::oracle::{Observation, Oracle, normalise_in};
+use crate::phpt::environment::Environment;
 use crate::phpt::{cgi, file::Phpt};
 use crate::scratch::Tree;
 
@@ -106,12 +107,17 @@ pub(crate) fn served_as_fpm(
     let phpt = Phpt::parse(&path, test.as_bytes())
         .map_err(|borked| anyhow!("the request fence is not a test's sections: {borked}"))?;
     let program = crate::oracle::run_by(&program)?;
-    let described = cgi::request(&phpt, &program, &crate::phpt::env_of(&phpt, &path))
+    // The CGI variables emptied and the fence's `--ENV--` over them, as
+    // the phpt lane builds a test's environment, then the request.
+    let mut own_env = Environment::default();
+    own_env.reset();
+    own_env.extend(crate::phpt::env_of(&phpt, &path));
+    let described = cgi::request(&phpt, &program, &own_env)
         .map_err(|(_, why)| anyhow!("the request fence describes no request: {why}"))?;
     // A later entry of a name stands over an earlier, as for php-cgi; the
     // names in the order they were first given.
     let mut given: Vec<(String, OsString)> = Vec::new();
-    for (name, value) in described.env {
+    for (name, value) in described.env.entries().iter().cloned() {
         match given.iter_mut().find(|(had, _)| *had == name) {
             Some(slot) => slot.1 = value,
             None => given.push((name, value)),

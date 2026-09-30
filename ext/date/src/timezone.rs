@@ -478,7 +478,7 @@ fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<TzKind>, Thrown
 /// int(4095)
 /// int(4096)
 /// ```
-#[php_class(payload = TzObj, handlers = TIMEZONE)]
+#[php_class(size = 88, payload = TzObj, handlers = TIMEZONE)]
 pub(crate) struct DateTimeZone;
 
 /// The methods the procedural natives alias, called as methods.

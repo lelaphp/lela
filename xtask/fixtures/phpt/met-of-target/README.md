@@ -1,0 +1,14 @@
+A subset's target and an engine's run of it, as `xtask phpt` keeps them
+(#1184): `control.json` is the pinned oracle's verdicts under the runner's
+control, kept at `target/phpt-runs/pin-<tag>-<md5>/<scope>.json`, and
+`engine.json` an engine's run of the same tests. Two oracle misses are
+planted: `oracle-miss.phpt`, which the oracle fails (as it runs past the
+recipe's limit on `ext/openssl/tests/stream_server_reneg_limit.phpt`), and
+`oracle-row.phpt`, which it misses under a registry row; with
+`oracle-skip.phpt`, which it skips and the engine passes, they are outside
+the target, and a reading that counts either miss in `target` fails. The
+target is `kept.phpt`, met; `missed.phpt`, missed; `xfail.phpt`, met as the
+oracle fails it; and `row.phpt`, met under a registry row though the engine
+skipped it (#1161). `--against` over the planted miss, `diverged` at the
+base and a fail past the limit at the head, is no regression once the target
+is kept. Held by the tests of `xtask/src/phpt/target.rs`.

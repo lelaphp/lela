@@ -21,13 +21,17 @@ use crate::{ArrayAccess, Countable, Iterator, IteratorAggregate, JsonSerializabl
 
 /// `spl_fixedarray_object`'s row of elements.
 #[derive(Default)]
-pub(crate) struct Row {
+pub(crate) struct RowState {
     elements: Vec<Value>,
     /// `cached_resize`: the size a resize under way was last asked for,
     /// by itself or by a destructor it served; `None` while none is
     /// under way.
     resizing: Option<usize>,
 }
+
+/// The payload: `spl_fixedarray_object`'s fields, boxed, inside the `sizeof` php
+/// allocates (design §5.13).
+pub(crate) type Row = Box<RowState>;
 
 /// `spl_fixedarray_resize`: the row cut or grown to `size`. The
 /// elements cut are given up after the row has its new size, from the
@@ -129,9 +133,26 @@ pub(crate) static HANDLERS: Handlers = Handlers;
 ///
 /// Deprecated: Method SplFixedArray::__wakeup() is deprecated since 8.4, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize() in %s on line 12
 /// ```
+///
+/// `zend_object_alloc(sizeof(spl_fixedarray_object))`, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['SplFixedArray'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// SplFixedArray 96
+/// ```
 #[php_class(
     implements(IteratorAggregate, ArrayAccess, Countable, JsonSerializable),
-    payload = Row,
+    size = 88, payload = Row,
     handlers = HANDLERS
 )]
 pub(crate) struct SplFixedArray;
@@ -812,7 +833,7 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         let rows = self.get_properties_for(req, object, PropertyPurpose::Debug)?;
         let Some(rows) = rows else {
             return Ok(None);
@@ -822,7 +843,7 @@ impl ObjectHandlers for Handlers {
             req.addref(&value);
             out.set(req, key, value)?;
         }
-        Ok(Some(out))
+        Ok(Some(out.into()))
     }
 
     fn iterator_element(
@@ -868,9 +889,9 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
     clone_with(
         req,
         &object,
-        Row {
+        Box::new(RowState {
             elements,
             resizing: None,
-        },
+        }),
     )
 }

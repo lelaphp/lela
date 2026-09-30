@@ -276,7 +276,28 @@ pub(crate) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// Serialization of 'SplTempFileObject' is not allowed
 /// Unserialization of 'SplFileInfo' is not allowed
 /// ```
-#[php_class(implements(Stringable), not_serializable, payload = Fs, handlers = HANDLERS)]
+///
+/// `zend_object_alloc(sizeof(spl_filesystem_object))`, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['SplFileInfo', 'DirectoryIterator', 'SplFileObject', 'SplTempFileObject', 'GlobIterator'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// SplFileInfo 1280
+/// DirectoryIterator 1280
+/// SplFileObject 1280
+/// SplTempFileObject 1280
+/// GlobIterator 1280
+/// ```
+#[php_class(implements(Stringable), not_serializable, size = 1208, payload = Fs, handlers = HANDLERS)]
 pub(crate) struct SplFileInfo;
 
 #[php_class]
@@ -1169,7 +1190,7 @@ impl RecursiveDirectoryIterator {
 #[php_class(
     extends(FilesystemIterator),
     implements(Countable),
-    payload = Fs,
+    size = 1208, payload = Fs,
     handlers = FILE_HANDLERS
 )]
 pub(crate) struct GlobIterator;
@@ -1250,7 +1271,7 @@ impl GlobIterator {
 #[php_class(
     extends(SplFileInfo),
     implements(RecursiveIterator, SeekableIterator),
-    payload = Fs,
+    size = 1208, payload = Fs,
     handlers = FILE_HANDLERS
 )]
 pub(crate) struct SplFileObject;

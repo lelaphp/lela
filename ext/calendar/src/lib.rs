@@ -9,7 +9,8 @@
 //! `dow.c`, [`jewish`] is `jewish.c`, and this file is `calendar.c`'s
 //! natives over them, with the calendar ID decoded once into
 //! [`Calendar`]. [`easter`] and [`unix`] are `easter.c` and
-//! `cal_unix.c`, which read the platform's local time through [`zone`].
+//! `cal_unix.c`, which read the platform's local time through the
+//! request's [`Zone`](php_ext::request::Zone).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -27,7 +28,6 @@ mod easter;
 mod jewish;
 mod sdn;
 mod unix;
-mod zone;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Union};
 use php_ext::attr::{php_const, php_function};

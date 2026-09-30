@@ -12,10 +12,10 @@ use std::sync::Arc;
 use php_compile::SourceKind;
 
 use super::{Request, Unresolved};
-use crate::api::abi::{Admission, Lookup, Validation};
+use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::exec::IncludeKind;
-use crate::unit_cache::{Cached, Filed, Held, UnitKey, full_path};
+use crate::unit_cache::{Asked, Cached, Disk, Filed, Held, Levels, UnitKey, full_path};
 
 /// The unit cache for one request: [`Request::unit_cache`].
 pub struct UnitCache<'r> {
@@ -131,6 +131,7 @@ impl Request {
                 validation: Validation::EveryHit,
                 lookup: Lookup::Resolved,
                 protection: 0,
+                file_cache: None,
             },
         }
     }
@@ -211,7 +212,7 @@ impl Request {
         }
         let shared = Arc::clone(&self.shared);
         let full = full_path(path, &self.cwd);
-        let (validation, lookup, protection) = match self.admission(&full) {
+        let (validation, lookup, protection, file_cache, memory) = match self.admission(&full) {
             Admission::KeptOut => {
                 shared.units.note_blacklisted();
                 let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
@@ -221,25 +222,89 @@ impl Request {
                 validation,
                 lookup,
                 protection,
-            } => (validation, lookup, protection),
+                file_cache,
+            } => (validation, lookup, protection, file_cache, true),
+            Admission::OnDisk {
+                validation,
+                protection,
+                file_cache,
+            } => (
+                validation,
+                Lookup::Resolved,
+                protection,
+                Some(file_cache),
+                false,
+            ),
         };
         let written = match lookup {
             Lookup::AsWritten => written.and_then(|written| self.written_key(written)),
             Lookup::Resolved => None,
         };
-        let now = self.request_time();
-        let cwd = self.cwd.clone();
+        let disk = file_cache
+            .as_ref()
+            .map(|file_cache| disk(file_cache, &shared.units.build));
+        let levels = match disk {
+            None => Levels::Memory,
+            Some(disk) if memory => Levels::Both(disk),
+            Some(disk) => Levels::Disk(disk),
+        };
+        let asked = Asked {
+            path: &full,
+            written,
+            validation,
+            protection,
+            now: self.request_time(),
+            levels,
+        };
         let stack = self.stack_limit();
-        let (cached, filed) =
-            shared
-                .units
-                .file(&full, written, validation, protection, now, |source| {
-                    shared.publish_file(source, path, &cwd, stack)
-                });
+        let holds = |name: &[u8]| self.class_named(name).is_some();
+        let request_classes = php_compile::RequestClasses::new(&holds);
+        let (cached, filed) = shared.units.file(
+            asked,
+            |source| shared.publish_file(source, path, &self.cwd, stack, request_classes),
+            |body| shared.publish_kept(body),
+        );
         if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
             self.tell_cached(&full);
         }
         cached
+    }
+
+    /// `filename_is_in_file_cache`: whether `file_cache` keeps a unit of
+    /// the file `written` resolves to, as `zend_file_cache_script_load_ex`
+    /// would read it back, the file's `mtime` held to the one it was
+    /// kept at where the answer for it validates timestamps; what a
+    /// wrapper's `url_stat` throws on the way is thrown.
+    fn kept_on_disk(&mut self, written: &[u8], file_cache: &FileCache) -> Result<bool, Thrown> {
+        let full = match self.resolve_path(written) {
+            Ok(full) => full,
+            Err(Unresolved::Missing(_)) => return Ok(false),
+            Err(Unresolved::Threw(thrown)) => return Err(thrown),
+        };
+        let validation = match self.admission(&full) {
+            Admission::KeptOut => Validation::Never,
+            Admission::Held { validation, .. } | Admission::OnDisk { validation, .. } => validation,
+        };
+        let stamp = match validation {
+            Validation::Never => None,
+            Validation::Window { .. } | Validation::EveryHit => {
+                let Some(stamp) = crate::unit_cache::stamp_seconds(&full) else {
+                    return Ok(false);
+                };
+                Some(stamp)
+            }
+        };
+        Ok(disk(file_cache, &self.shared.units.build).holds(&full, stamp))
+    }
+
+    /// The file cache the answer for the file at the full path `full`
+    /// names, where it names one.
+    fn file_cache_of(&mut self, full: &[u8]) -> Option<FileCache> {
+        match self.admission(full) {
+            Admission::KeptOut => None,
+            Admission::Held { file_cache, .. } => file_cache,
+            Admission::OnDisk { file_cache, .. } => Some(file_cache),
+        }
     }
 
     /// Every extension told of a file the unit cache holds by its full
@@ -265,9 +330,16 @@ impl UnitCache<'_> {
     /// the answer for it validates a hit, which stats nothing where no
     /// hit is due; one that is due is held to the file `written`
     /// resolves to as `do_validate_timestamps` holds it, which throws
-    /// what a wrapper's `url_stat` throws.
-    pub fn holds(&mut self, written: &[u8]) -> Result<bool, Thrown> {
+    /// what a wrapper's `url_stat` throws. With `on_disk`, the question is
+    /// the second level's, `filename_is_in_file_cache`: whether that file
+    /// cache keeps a unit of the file `written` resolves to that it would
+    /// read back, its `mtime` held to the one it was kept at where the
+    /// answer for the file validates timestamps.
+    pub fn holds(&mut self, written: &[u8], on_disk: Option<&FileCache>) -> Result<bool, Thrown> {
         let req = &mut *self.req;
+        if let Some(file_cache) = on_disk {
+            return req.kept_on_disk(written, file_cache);
+        }
         let Some(held) = req
             .written_key(written)
             .and_then(|key| req.shared.units.find(&key))
@@ -278,7 +350,7 @@ impl UnitCache<'_> {
             return Ok(false);
         }
         let validation = match req.admission(&held.path) {
-            Admission::KeptOut => return Ok(false),
+            Admission::KeptOut | Admission::OnDisk { .. } => return Ok(false),
             Admission::Held { validation, .. } => validation,
         };
         let now = req.request_time();
@@ -305,6 +377,9 @@ impl UnitCache<'_> {
             Err(Unresolved::Missing(_)) => (written.to_vec(), false),
             Err(Unresolved::Threw(thrown)) => return Err(thrown),
         };
+        if let Some(file_cache) = self.req.file_cache_of(&path) {
+            disk(&file_cache, &self.req.shared.units.build).invalidate(&path);
+        }
         let held = self
             .req
             .shared
@@ -391,5 +466,14 @@ impl UnitCache<'_> {
     /// start, and until then what is compiled is held nowhere.
     pub fn reset(&self) -> Restart {
         self.req.shared.units.schedule_restart()
+    }
+}
+
+/// The file cache `file_cache` names, for the build `build`.
+fn disk<'a>(file_cache: &'a FileCache, build: &'a [u8; crate::unit_cache::BUILD]) -> Disk<'a> {
+    Disk {
+        directory: &file_cache.directory,
+        read_only: file_cache.read_only,
+        build,
     }
 }

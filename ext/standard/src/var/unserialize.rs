@@ -445,6 +445,19 @@ impl<'a> State<'a> {
 /// bool(false)
 /// bool(false)
 /// ```
+///
+/// A constant the enum declares that is no case is refused:
+///
+/// ```php
+/// enum Foo { case Bar; const Baz = Foo::Bar; }
+/// var_dump(unserialize('E:7:"Foo:Baz";'));
+/// ```
+/// ```expect
+/// Warning: unserialize(): Foo::Baz is not an enum case in %s on line 3
+///
+/// Warning: unserialize(): Error at offset 14 of 14 bytes in %s on line 3
+/// bool(false)
+/// ```
 #[php_function]
 fn unserialize(
     req: &mut Request,
@@ -1890,16 +1903,32 @@ impl State<'_> {
             return Ok(false);
         }
         self.p = after + 2;
-        let known = req
-            .class_decl(class)
-            .is_some_and(|decl| decl.constants.iter().any(|c| *c.name.0 == *case));
-        if !known {
-            docref(
-                req,
-                Level::Warning,
-                &format!("Undefined constant {enum_shown}::{case_shown}"),
-            );
-            return Ok(false);
+        let found = req.class_decl(class).and_then(|decl| {
+            decl.constants
+                .iter()
+                .find(|c| *c.name.0 == *case)
+                .map(|c| c.is_case)
+        });
+        match found {
+            None => {
+                docref(
+                    req,
+                    Level::Warning,
+                    &format!("Undefined constant {enum_shown}::{case_shown}"),
+                );
+                return Ok(false);
+            }
+            // `ZEND_CLASS_CONST_IS_CASE`: a constant the enum declares
+            // that is no case is refused, whatever it holds.
+            Some(false) => {
+                docref(
+                    req,
+                    Level::Warning,
+                    &format!("{enum_shown}::{case_shown} is not an enum case"),
+                );
+                return Ok(false);
+            }
+            Some(true) => {}
         }
         let value = class_constant(req, class, case)?;
         self.write(req, slot, entry, value)?;

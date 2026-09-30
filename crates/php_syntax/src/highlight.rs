@@ -8,12 +8,12 @@
 use crate::scanner::ScannedToken;
 
 /// `zend_syntax_highlighter_ini`: the five colours, as the ini has them.
-pub(crate) struct Colours {
-    pub(crate) comment: Vec<u8>,
-    pub(crate) default: Vec<u8>,
-    pub(crate) html: Vec<u8>,
-    pub(crate) keyword: Vec<u8>,
-    pub(crate) string: Vec<u8>,
+pub struct Colours {
+    pub comment: Vec<u8>,
+    pub default: Vec<u8>,
+    pub html: Vec<u8>,
+    pub keyword: Vec<u8>,
+    pub string: Vec<u8>,
 }
 
 /// Which of the five a token is written in: `zend_highlight` compares
@@ -42,8 +42,9 @@ impl Colours {
 }
 
 /// `zend_html_putc` over each byte: `<`, `>` and `&` as entities and a
-/// tab as four spaces.
-pub(crate) fn html_puts(out: &mut Vec<u8>, text: &[u8]) {
+/// tab as four spaces, `zend_html_puts`, which `phpinfo()`'s tables
+/// write their values through as well.
+pub fn html_puts(out: &mut Vec<u8>, text: &[u8]) {
     for &c in text {
         match c {
             b'<' => out.extend_from_slice(b"&lt;"),
@@ -60,7 +61,7 @@ pub(crate) fn html_puts(out: &mut Vec<u8>, text: &[u8]) {
 /// colour, a span opened where the colour changes from the HTML one and
 /// closed where it changes again, whitespace written in whatever colour
 /// stands.
-pub(crate) fn highlight(source: &[u8], tokens: &[ScannedToken], colours: &Colours) -> Vec<u8> {
+pub fn highlight(source: &[u8], tokens: &[ScannedToken], colours: &Colours) -> Vec<u8> {
     let mut out = Vec::new();
     let mut last = Colour::Html;
     out.extend_from_slice(b"<pre><code style=\"color: ");
@@ -119,7 +120,7 @@ pub(crate) fn highlight(source: &[u8], tokens: &[ScannedToken], colours: &Colour
 /// comment nothing, a heredoc's close followed by the character after
 /// it where that is not whitespace and a newline, and every other token
 /// as it is.
-pub(crate) fn strip(source: &[u8], tokens: &[ScannedToken]) -> Vec<u8> {
+pub fn strip(source: &[u8], tokens: &[ScannedToken]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut prev_space = false;
     let mut at = 0;

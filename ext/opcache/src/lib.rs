@@ -34,8 +34,8 @@ mod ini;
 mod startup;
 
 use php_ext::abi::{
-    Admission, Extension, ExtensionBuilder, Instance, Lookup, OrFalse, StartupIni, Validation,
-    ZendExtension,
+    Admission, Extension, ExtensionBuilder, FileCache, Instance, Lookup, OrFalse, StartupIni,
+    Validation, ZendExtension,
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::to_callable;
@@ -235,12 +235,18 @@ pub(crate) fn cli(req: &Request) -> bool {
 /// bool(false)
 /// ```
 fn admission(req: &mut Request, path: &[u8]) -> Admission {
-    let (_, enabled) = state(req);
-    if !enabled {
+    let (startup, enabled) = state(req);
+    // `persistent_compile_file` without the accelerator: php without the
+    // cache, or `file_cache_compile_file` where a file cache is set, the
+    // cache started and `opcache.enable` stands.
+    let started = startup == Startup::Ok && flag(req, "opcache.enable");
+    let file_cache = file_cache(req).filter(|_| enabled || started);
+    if !enabled && file_cache.is_none() {
         return Admission::Held {
             validation: Validation::EveryHit,
             lookup: Lookup::Resolved,
             protection: 0,
+            file_cache: None,
         };
     }
     let listed = req
@@ -261,17 +267,41 @@ fn admission(req: &mut Request, path: &[u8]) -> Admission {
     } else {
         Validation::Never
     };
-    let lookup = if flag(req, "opcache.revalidate_path") {
-        Lookup::Resolved
-    } else {
-        Lookup::AsWritten
-    };
     let protection = long(req, "opcache.file_update_protection");
-    Admission::Held {
-        validation,
-        lookup,
-        protection: u32::try_from(protection.max(0)).unwrap_or(u32::MAX),
+    let protection = u32::try_from(protection.max(0)).unwrap_or(u32::MAX);
+    match file_cache {
+        Some(file_cache) if !enabled => Admission::OnDisk {
+            validation,
+            protection,
+            file_cache,
+        },
+        file_cache => {
+            let lookup = if flag(req, "opcache.revalidate_path") {
+                Lookup::Resolved
+            } else {
+                Lookup::AsWritten
+            };
+            Admission::Held {
+                validation,
+                lookup,
+                protection,
+                file_cache,
+            }
+        }
     }
+}
+
+/// `opcache.file_cache`, where it names a directory, with
+/// `opcache.file_cache_read_only`.
+fn file_cache(req: &Request) -> Option<FileCache> {
+    let directory = value(req, "opcache.file_cache");
+    if directory.is_empty() {
+        return None;
+    }
+    Some(FileCache {
+        directory: std::path::PathBuf::from(String::from_utf8_lossy(directory).into_owned()),
+        read_only: flag(req, "opcache.file_cache_read_only"),
+    })
 }
 
 /// `cache_script_in_shared_memory` and `preload_script_in_shared_memory`
@@ -972,13 +1002,13 @@ fn opcache_is_script_cached(req: &mut Request, filename: PhpString) -> Result<bo
         return Ok(false);
     }
     let written = filename.as_bytes().to_vec();
-    req.unit_cache().holds(&written)
+    req.unit_cache().holds(&written, None)
 }
 
 /// `opcache_is_script_cached_in_file_cache(string $filename): bool`:
-/// `false` where neither the cache nor the file cache runs or no
-/// `opcache.file_cache` is set, and `false` again where one is, since the
-/// engine keeps no second-level cache on disk (design §6.3, month two).
+/// whether `opcache.file_cache` keeps the file as it stands, as
+/// `filename_is_in_file_cache` asks it; `false` where neither the cache
+/// nor the file cache alone runs, or no file cache is set.
 ///
 /// ```php
 /// var_dump(opcache_is_script_cached_in_file_cache(__FILE__));
@@ -986,11 +1016,55 @@ fn opcache_is_script_cached(req: &mut Request, filename: PhpString) -> Result<bo
 /// ```expect regime=jit-off
 /// bool(false)
 /// ```
+///
+/// A file compiled into the cache is kept on disk too, and invalidating
+/// it removes both copies; with the file cache alone, it is kept on disk
+/// and nothing invalidates it, the accelerator being off. The file cache
+/// is set at startup, so a program of its own asks it.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/witness-fc-' . getmypid();
+/// @mkdir($dir);
+/// file_put_contents("$dir/kept.inc", '<?php return 1;');
+/// file_put_contents("$dir/ask.php", '<?php $f = __DIR__ . "/kept.inc";
+/// var_dump(opcache_is_script_cached_in_file_cache($f));
+/// opcache_compile_file($f);
+/// var_dump(opcache_is_script_cached_in_file_cache($f), opcache_is_script_cached($f));
+/// opcache_invalidate($f, true);
+/// var_dump(opcache_is_script_cached_in_file_cache($f), opcache_is_script_cached($f));');
+/// echo shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 -d opcache.file_update_protection=0 -d opcache.file_cache=$dir $dir/ask.php");
+/// echo shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 -d opcache.file_cache_only=1 -d opcache.file_update_protection=0 -d opcache.file_cache=$dir $dir/ask.php");
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// ```
+/// ```expect process
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
 #[php_function]
-fn opcache_is_script_cached_in_file_cache(req: &mut Request, filename: PhpString) -> bool {
-    let _ = filename;
-    let _ = api_allowed(req);
-    false
+fn opcache_is_script_cached_in_file_cache(
+    req: &mut Request,
+    filename: PhpString,
+) -> Result<bool, Thrown> {
+    if !api_allowed(req) {
+        return Ok(false);
+    }
+    let (_, enabled) = state(req);
+    if !enabled && !flag(req, "opcache.file_cache_only") {
+        return Ok(false);
+    }
+    let Some(file_cache) = file_cache(req) else {
+        return Ok(false);
+    };
+    let written = filename.as_bytes().to_vec();
+    req.unit_cache().holds(&written, Some(&file_cache))
 }
 
 /// `zend_accel_info`, opcache's `MINFO`: what runs and what does not,

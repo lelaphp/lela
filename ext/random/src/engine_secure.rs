@@ -17,7 +17,7 @@ use crate::{Algo, Failure, Generated, csprng};
     namespace(Random::Engine),
     implements(crate::CryptoSafeEngine),
     dynamic_properties = forbidden,
-    payload = StateSecure,
+    size = 72, payload = StateSecure,
     handlers = crate::UNCLONEABLE
 )]
 pub(crate) struct Secure;

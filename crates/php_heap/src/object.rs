@@ -159,12 +159,19 @@ impl Obj {
     }
 
     /// `zend_object_alloc`'s arithmetic: the header, a zval per slot and
-    /// the payload after them at its own alignment, which the allocator's
-    /// eight-byte alignment can honour up to eight.
-    fn allocation_size(slots: u32, payload: Option<&Payload>) -> Result<usize, Fatal> {
+    /// `custom`, the bytes php's struct lays beside the `zend_object`
+    /// (its own fields, and the guard slot of a class that uses guards),
+    /// which the payload sits in at its own alignment, the allocator's
+    /// eight-byte alignment honouring up to eight. A payload larger than
+    /// `custom` takes what it needs.
+    fn allocation_size(
+        slots: u32,
+        payload: Option<&Payload>,
+        custom: usize,
+    ) -> Result<usize, Fatal> {
         let members = HEADER + SLOT * slots as usize;
         let Some(payload) = payload else {
-            return Ok(members);
+            return Ok(members + custom);
         };
         if payload.layout.align() > 8 {
             return Err(Fatal::Error(format!(
@@ -172,7 +179,8 @@ impl Obj {
                 payload.layout.align()
             )));
         }
-        Ok(members.next_multiple_of(payload.layout.align()) + payload.layout.size())
+        let end = members.next_multiple_of(payload.layout.align()) + payload.layout.size();
+        Ok(end.max(members + custom))
     }
 
     /// `_zend_object_std_init` over a fresh allocation: one owner, the
@@ -649,11 +657,12 @@ impl std::fmt::Debug for Store {
 impl Heap {
     /// `zend_objects_new` (`Z/Zend/zend_objects.c:189`): an object of
     /// `class` with `slots` declared property slots, one owner, in the
-    /// store under the id [`Obj::id`] reads. The
-    /// engine computes `slots` as php's `zend_object_properties_size`
-    /// does, the declared count plus one for a class that uses guards.
-    pub fn object(&mut self, class: u32, slots: u32) -> Result<Obj, Fatal> {
-        self.object_alloc(class, slots, None)
+    /// store under the id [`Obj::id`] reads, `custom` bytes beside the
+    /// slots counted with it: the guard slot `zend_object_properties_size`
+    /// adds for a class that uses guards, and the fields of an internal
+    /// class's struct, which the engine reads off the class.
+    pub fn object(&mut self, class: u32, slots: u32, custom: usize) -> Result<Obj, Fatal> {
+        self.object_alloc(class, slots, None, custom)
     }
 
     /// The same object carrying `payload` as its native slot (design
@@ -665,10 +674,11 @@ impl Heap {
         &mut self,
         class: u32,
         slots: u32,
+        custom: usize,
         payload: T,
     ) -> Result<Obj, Fatal> {
         let table = payload_of::<T>();
-        let o = self.object_alloc(class, slots, Some(table))?;
+        let o = self.object_alloc(class, slots, Some(table), custom)?;
         // SAFETY: the allocation was sized for the payload at this
         // address, which nothing has written.
         unsafe { o.payload_addr(table).cast::<T>().as_ptr().write(payload) };
@@ -680,8 +690,9 @@ impl Heap {
         class: u32,
         slots: u32,
         payload: Option<&'static Payload>,
+        custom: usize,
     ) -> Result<Obj, Fatal> {
-        let size = Obj::allocation_size(slots, payload)?;
+        let size = Obj::allocation_size(slots, payload, custom)?;
         let at = self.mm.alloc(size)?;
         // SAFETY: the allocation is exactly the size `init` lays out and
         // nothing else holds it.
@@ -775,11 +786,11 @@ impl Heap {
     /// its class's `clone_obj` to copy through
     /// [`Heap::object_clone_with`] and is refused here, since the heap
     /// cannot copy a payload it only knows how to drop.
-    pub fn object_clone(&mut self, o: Obj) -> Result<Option<Obj>, Fatal> {
+    pub fn object_clone(&mut self, o: Obj, custom: usize) -> Result<Option<Obj>, Fatal> {
         if o.has_native() {
             return Ok(None);
         }
-        let new = self.object(o.class(), o.slots())?;
+        let new = self.object(o.class(), o.slots(), custom)?;
         self.clone_members(new, o);
         Ok(Some(new))
     }
@@ -804,8 +815,13 @@ impl Heap {
     /// the copy the class made of the old object's, in the new object's
     /// slot. What the copy names of the heap is the caller's to have
     /// taken an owner of, as `zend_create_closure` takes one of `$this`.
-    pub fn object_clone_with<T: Any + Send>(&mut self, o: Obj, payload: T) -> Result<Obj, Fatal> {
-        let new = self.object_with(o.class(), o.slots(), payload)?;
+    pub fn object_clone_with<T: Any + Send>(
+        &mut self,
+        o: Obj,
+        custom: usize,
+        payload: T,
+    ) -> Result<Obj, Fatal> {
+        let new = self.object_with(o.class(), o.slots(), custom, payload)?;
         self.clone_members(new, o);
         Ok(new)
     }
@@ -1012,13 +1028,13 @@ mod tests {
         let start = r.heap.memory_usage(false);
         assert_eq!(start, INIT_BYTES);
         assert_eq!(std::mem::size_of::<ObjHeader>(), 40);
-        let plain = r.heap.object(7, 0);
+        let plain = r.heap.object(7, 0, 0);
         assert!(plain.is_ok(), "the heap would not allocate an object");
         let Ok(plain) = plain else { return };
         assert_eq!(r.heap.memory_usage(false) - start, 40);
         assert_eq!(plain.class(), 7);
         assert_eq!(plain.refcount(), 1);
-        let three = r.heap.object(7, 3);
+        let three = r.heap.object(7, 3, 0);
         assert!(three.is_ok(), "the heap would not allocate an object");
         let Ok(three) = three else { return };
         // Forty and forty-eight, the 88 of php's `zend_object_alloc` in
@@ -1043,7 +1059,7 @@ mod tests {
     fn a_freed_handle_is_the_next_one_given() {
         let _alone = alone();
         let mut recorder = Recorder::new();
-        let ids: Vec<Option<Obj>> = (0..3).map(|_| recorder.heap.object(1, 0).ok()).collect();
+        let ids: Vec<Option<Obj>> = (0..3).map(|_| recorder.heap.object(1, 0, 0).ok()).collect();
         let [Some(first), Some(second), Some(third)] = ids[..] else {
             return;
         };
@@ -1061,7 +1077,7 @@ mod tests {
         // The list is last freed first: the first's id, then the
         // second's, then a fresh one past the third.
         let given: Vec<Option<ObjectId>> = (0..3)
-            .map(|_| recorder.heap.object(1, 0).ok().map(|o| o.id()))
+            .map(|_| recorder.heap.object(1, 0, 0).ok().map(|o| o.id()))
             .collect();
         assert_eq!(
             given,
@@ -1078,14 +1094,14 @@ mod tests {
         let mut r = Recorder::new();
         let mut held = Vec::new();
         for _ in 1..INIT_SIZE {
-            let o = r.heap.object(1, 0);
+            let o = r.heap.object(1, 0, 0);
             assert!(o.is_ok(), "the heap would not allocate an object");
             if let Ok(o) = o {
                 held.push(o);
             }
         }
         let start = r.heap.memory_usage(false);
-        let grown = r.heap.object(1, 0);
+        let grown = r.heap.object(1, 0, 0);
         assert!(grown.is_ok(), "the heap would not grow the store");
         let Ok(grown) = grown else { return };
         assert_eq!(grown.id(), ObjectId(INIT_SIZE));
@@ -1108,7 +1124,9 @@ mod tests {
     fn a_release_to_zero_serves_the_destructor_once_and_frees_after_it() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let Ok(o) = r.heap.object(1, 1) else { return };
+        let Ok(o) = r.heap.object(1, 1, 0) else {
+            return;
+        };
         let Ok(s) = r.heap.string(b"held by the slot") else {
             return;
         };
@@ -1164,7 +1182,9 @@ mod tests {
             heap: Heap::new(),
             served: 0,
         };
-        let Ok(o) = k.heap.object(1, 0) else { return };
+        let Ok(o) = k.heap.object(1, 0, 0) else {
+            return;
+        };
         Heap::release(&mut k, Zval::object(o));
         assert_eq!(k.served, 1);
         assert_eq!(k.heap.objects(), 1, "the destructor's owner keeps it");
@@ -1184,7 +1204,9 @@ mod tests {
         let mut r = Recorder::new();
         let Ok(a) = r.heap.array() else { return };
         for _ in 0..3 {
-            let Ok(o) = r.heap.object(1, 0) else { return };
+            let Ok(o) = r.heap.object(1, 0, 0) else {
+                return;
+            };
             assert_eq!(r.heap.array_append(a, Zval::object(o)), Ok(true));
         }
         assert_eq!(r.heap.objects(), 3);
@@ -1221,7 +1243,9 @@ mod tests {
         let dropped = Arc::new(AtomicU32::new(0));
         let mut r = Recorder::new();
         let start = r.heap.memory_usage(false);
-        let o = r.heap.object_with(3, 2, Counted(Arc::clone(&dropped), 42));
+        let o = r
+            .heap
+            .object_with(3, 2, 0, Counted(Arc::clone(&dropped), 42));
         assert!(o.is_ok(), "the heap would not allocate the payload");
         let Ok(o) = o else { return };
         // Forty, two slots and sixteen of payload: the 88 of a 96 bin.
@@ -1236,7 +1260,7 @@ mod tests {
         }
         assert_eq!(r.heap.native::<Counted>(o).map(|c| c.1), Some(7));
         assert!(
-            matches!(r.heap.object_clone(o), Ok(None)),
+            matches!(r.heap.object_clone(o, 0), Ok(None)),
             "a payload is its class's to clone"
         );
         Heap::release(&mut r, Zval::object(o));
@@ -1247,7 +1271,10 @@ mod tests {
         assert_eq!(dropped.load(Relaxed), 1);
         assert_eq!(r.heap.memory_usage(false), start);
         // What no release reached is dropped with the heap, once.
-        let Ok(kept) = r.heap.object_with(3, 0, Counted(Arc::clone(&dropped), 1)) else {
+        let Ok(kept) = r
+            .heap
+            .object_with(3, 0, 0, Counted(Arc::clone(&dropped), 1))
+        else {
             return;
         };
         assert_eq!(
@@ -1266,7 +1293,9 @@ mod tests {
     fn a_clone_shares_what_the_old_holds_with_one_more_owner() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let Ok(o) = r.heap.object(2, 1) else { return };
+        let Ok(o) = r.heap.object(2, 1, 0) else {
+            return;
+        };
         let Ok(s) = r.heap.string(b"in the slot") else {
             return;
         };
@@ -1280,7 +1309,7 @@ mod tests {
         assert!(Heap::array_update(&mut r, table, crate::Key::Str(name), Zval::long(1)).is_ok());
         // The bucket took its own owner of the key.
         r.heap.release_string(name);
-        let Ok(Some(new)) = r.heap.object_clone(o) else {
+        let Ok(Some(new)) = r.heap.object_clone(o, 0) else {
             return;
         };
         assert_eq!(new.id(), ObjectId(2));
@@ -1305,7 +1334,10 @@ mod tests {
         let _alone = alone();
         let dropped = Arc::new(AtomicU32::new(0));
         let mut r = Recorder::new();
-        let Ok(o) = r.heap.object_with(3, 1, Counted(Arc::clone(&dropped), 42)) else {
+        let Ok(o) = r
+            .heap
+            .object_with(3, 1, 0, Counted(Arc::clone(&dropped), 42))
+        else {
             return;
         };
         let Ok(s) = r.heap.string(b"in the slot") else {
@@ -1315,7 +1347,7 @@ mod tests {
         let copied = r.heap.native::<Counted>(o).map_or(0, |c| c.1);
         let Ok(new) = r
             .heap
-            .object_clone_with(o, Counted(Arc::clone(&dropped), copied))
+            .object_clone_with(o, 0, Counted(Arc::clone(&dropped), copied))
         else {
             return;
         };
@@ -1338,7 +1370,7 @@ mod tests {
     fn the_shutdown_walks_serve_each_once_in_php_s_orders() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let ids: Vec<Option<Obj>> = (0..3).map(|_| r.heap.object(1, 0).ok()).collect();
+        let ids: Vec<Option<Obj>> = (0..3).map(|_| r.heap.object(1, 0, 0).ok()).collect();
         let [Some(_a), Some(b), Some(_c)] = ids[..] else {
             return;
         };
@@ -1351,7 +1383,7 @@ mod tests {
         );
         // With reuse off, an object made now is above `top`, not in
         // `b`'s bucket.
-        let Ok(late) = r.heap.object(1, 0) else {
+        let Ok(late) = r.heap.object(1, 0, 0) else {
             return;
         };
         assert_eq!(late.id(), ObjectId(4));

@@ -16,7 +16,7 @@ use php_unit::decl::{ClassConstDecl, ClassKind};
 
 use super::Request;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Value};
+use crate::api::values::{ClassId, PhpObject, Value};
 
 /// One class's row of [`Request`]'s `class_data`.
 #[derive(Debug, Default)]
@@ -38,9 +38,139 @@ pub(super) struct ClassData {
     /// `IS_CONSTANT_VISITED` (`MARK_CONSTANT_VISITED`) while
     /// `zend_get_class_constant_ex` evaluates them, by name.
     visiting: Vec<Box<[u8]>>,
+    /// [`Request::object_custom`] once read: what the linked class, an
+    /// immutable one, makes every object of it count.
+    layout: Option<Layout>,
+}
+
+/// What `zend_object_alloc` and the `create_object` around it allocate
+/// for an object of one class: the struct's bytes past the header and
+/// the declared slots, and the class whose declaration names the struct
+/// and what is allocated beside it.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    custom: usize,
+    declared_by: Option<ClassId>,
 }
 
 impl Request {
+    /// What `zend_object_alloc(sizeof(custom), ce)` counts of an object
+    /// of `class` past the header and the declared slots (design §5.13):
+    /// the fields of the struct the nearest internal class above it
+    /// declares ([`php_unit::decl::ClassDecl::object_size`]), and the
+    /// guard slot `zend_object_properties_size` adds for a class that
+    /// uses guards.
+    ///
+    /// ```php
+    /// class G { public $a; function __get($n) {} }
+    /// class P { public $a; }
+    /// foreach (['G', 'P'] as $c) { $keep = []; $m = memory_get_usage(); for ($i = 0; $i < 100; $i++) $keep[] = new $c; echo $c, ' ', (memory_get_usage() - $m) / 100, "\n"; }
+    /// ```
+    /// ```expect
+    /// G 106.48
+    /// P 82.16
+    /// ```
+    pub(crate) fn object_custom(&mut self, class: ClassId) -> usize {
+        self.object_layout(class).custom
+    }
+
+    /// [`Request::object_custom`] and the class it was read from, walked
+    /// once per class.
+    fn object_layout(&mut self, class: ClassId) -> Layout {
+        const ZEND_OBJECT: usize = 56;
+        if let Some(layout) = self.class_data.get(&class).and_then(|data| data.layout) {
+            return layout;
+        }
+        let mut at = Some(class);
+        let mut size = 0;
+        let mut declared_by = None;
+        for _ in 0..64 {
+            let Some(decl) = at.and_then(|at| self.class_decl(at)) else {
+                break;
+            };
+            if decl.object_size != 0 {
+                size = decl.object_size as usize;
+                declared_by = at;
+                break;
+            }
+            at = at.and_then(|at| self.class_parent(at));
+        }
+        let guards = if self.uses_guards(class) { 16 } else { 0 };
+        let layout = Layout {
+            custom: size.saturating_sub(ZEND_OBJECT) + guards,
+            declared_by,
+        };
+        self.class_data.entry(class).or_default().layout = Some(layout);
+        layout
+    }
+
+    /// The `emalloc`s `create_object` makes beside a new `object`, each
+    /// at the size php asks for
+    /// ([`php_unit::decl::ClassDecl::object_beside`]), held until the
+    /// object is freed ([`Request::free_beside`]), so what
+    /// `memory_get_usage()` counts of it is php's (design §5.13); the
+    /// witnesses stand beside the classes that declare them, `SplHeap`'s
+    /// and the random engines' among them.
+    pub(crate) fn lay_beside(&mut self, object: PhpObject) -> Result<(), Thrown> {
+        let Some(declared_by) = self.object_layout(object.class()).declared_by else {
+            return Ok(());
+        };
+        let count = self
+            .class_decl(declared_by)
+            .map_or(0, |decl| decl.object_beside.len());
+        let mut blocks = Vec::with_capacity(count);
+        for at in 0..count {
+            let size = self
+                .class_decl(declared_by)
+                .and_then(|decl| decl.object_beside.get(at).copied())
+                .unwrap_or(0);
+            match self.heap.block(size as usize) {
+                Ok(block) => blocks.push(block),
+                Err(fatal) => {
+                    for block in blocks {
+                        self.heap.free_block(block);
+                    }
+                    self.release(object.as_value());
+                    return self.fatal_of(Err(fatal));
+                }
+            }
+        }
+        if !blocks.is_empty() {
+            self.beside.insert(object.heap().id().0, blocks);
+        }
+        Ok(())
+    }
+
+    /// The rest of `create_object` over a new `object`, its properties
+    /// laid down: what is allocated beside it ([`Request::lay_beside`]),
+    /// then what its class lays down with it
+    /// ([`crate::api::abi::ObjectHandlers::create_object`]); the object
+    /// released where either fails.
+    pub(crate) fn object_created(&mut self, object: PhpObject) -> Result<(), Thrown> {
+        self.lay_beside(object)?;
+        let handlers = self.handlers_of(object.class());
+        if let Err(thrown) = handlers.create_object(self, object) {
+            self.release(object.as_value());
+            return Err(thrown);
+        }
+        Ok(())
+    }
+
+    /// What [`Request::lay_beside`] allocated for `object`, given back as
+    /// its `free_obj` gives it back.
+    pub(crate) fn free_beside(&mut self, object: PhpObject) {
+        if self.beside.is_empty() {
+            return;
+        }
+        for block in self
+            .beside
+            .remove(&object.heap().id().0)
+            .unwrap_or_default()
+        {
+            self.heap.free_block(block);
+        }
+    }
+
     /// `zend_update_class_constants` (`Z/Zend/zend_API.c:1535`), which
     /// `object_init_ex` and `zend_std_get_static_property_with_info` call
     /// before anything of the class is read: the parent's first, then

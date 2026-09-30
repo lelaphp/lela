@@ -33,6 +33,10 @@ pub(crate) struct StateXoshiro256StarStar {
     pub(crate) state: [u64; 4],
 }
 
+/// The payload, `engine.state`: the pointer to the state php allocates
+/// beside the object (`php_random_status_alloc`).
+pub(crate) type EngineXoshiro256StarStar = Box<StateXoshiro256StarStar>;
+
 /// `splitmix64`: the next word of Vigna's seeding generator.
 fn splitmix64(seed: &mut u64) -> u64 {
     *seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -135,7 +139,7 @@ fn words(bytes: &[u8; 32]) -> [u64; 4] {
 
 /// The state `polynomial` on, what `jump` and `jumpLong` share.
 fn jump_by(req: &mut Request, this: PhpObject, polynomial: &[u64; 4]) {
-    if let Some(state) = this.native_mut::<StateXoshiro256StarStar>(req) {
+    if let Some(state) = this.native_mut::<EngineXoshiro256StarStar>(req) {
         state.jump(polynomial);
     }
 }
@@ -148,7 +152,7 @@ fn jump_by(req: &mut Request, this: PhpObject, polynomial: &[u64; 4]) {
     namespace(Random::Engine),
     implements(crate::Engine),
     dynamic_properties = forbidden,
-    payload = StateXoshiro256StarStar,
+    size = 72, beside(32), payload = EngineXoshiro256StarStar,
     handlers = crate::XOSHIRO
 )]
 pub(crate) struct Xoshiro256StarStar;
@@ -202,8 +206,8 @@ impl Xoshiro256StarStar {
                 StateXoshiro256StarStar { state }
             }
         };
-        if let Some(slot) = this.native_mut::<StateXoshiro256StarStar>(req) {
-            *slot = state;
+        if let Some(slot) = this.native_mut::<EngineXoshiro256StarStar>(req) {
+            **slot = state;
         }
         Ok(())
     }

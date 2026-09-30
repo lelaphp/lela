@@ -12,7 +12,7 @@ use php_ext::attr::php_class;
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::Node;
 
 use crate::object::{Code, Dom, Extra};
@@ -532,7 +532,7 @@ impl ObjectHandlers for TokenListHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         crate::debug_info(req, object)
     }
 
@@ -694,7 +694,7 @@ fn varargs(
     implements(crate::IteratorAggregate, crate::Countable),
     not_serializable,
     dynamic_properties = forbidden,
-    payload = Dom,
+    size = 152, payload = Dom,
     handlers = HANDLERS
 )]
 pub(crate) struct TokenList;

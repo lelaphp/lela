@@ -61,7 +61,7 @@ impl Weights {
     /// one subset and the frontier is one list over all of them.
     pub(crate) fn of_store(store: &Store) -> Result<Weights> {
         let mut weights = Weights::default();
-        for reading in store.readings()? {
+        for reading in store.readings()?.readings {
             if reading.instrument != "phpt" {
                 continue;
             }

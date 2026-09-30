@@ -178,6 +178,11 @@ impl Fibers {
     /// The request's own VM stack, below every fiber running, which is
     /// the one `EG(symbol_table)`'s attached CVs stand on; none while no
     /// fiber runs and the request runs on it.
+    pub(crate) fn request_stack(&self) -> Option<&php_heap::VmStack> {
+        self.running.first().map(|running| &running.below.stack)
+    }
+
+    /// [`Fibers::request_stack`], to write.
     pub(crate) fn request_stack_mut(&mut self) -> Option<&mut php_heap::VmStack> {
         self.running
             .first_mut()
@@ -225,7 +230,7 @@ pub(crate) struct ZendFiber {
     stack: Option<FiberStack<Request>>,
     /// The fiber's own execution state while it is suspended; the
     /// request holds it while it runs.
-    execution: Option<Execution>,
+    execution: Option<Box<Execution>>,
     /// `fiber->result`, one owner, `null` until the callable returns.
     result: Value,
     /// The `emalloc` php makes for a started fiber beside its VM stack's
@@ -373,7 +378,7 @@ pub(crate) fn view(
     let fiber = object.native::<ZendFiber>(req)?;
     let standing = match fiber.status {
         Status::Init | Status::Dead => None,
-        Status::Suspended => fiber.execution.as_ref().map(Standing::Held),
+        Status::Suspended => fiber.execution.as_deref().map(Standing::Held),
         Status::Running => {
             let running = &req.fibers().running;
             running
@@ -531,11 +536,25 @@ fn fiber_error(req: &mut Request, message: &str) -> Thrown {
 /// bool(false)
 /// bool(true)
 /// ```
+///
+/// `zend_fiber_object_create` allocates `sizeof(zend_fiber)` whole, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// new Fiber('strlen');
+/// $m = memory_get_usage();
+/// $f = new Fiber('strlen');
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 384
+/// ```
 #[php_class(
     final,
     not_serializable,
     dynamic_properties = forbidden,
-    payload = ZendFiber,
+    // `emalloc(sizeof(zend_fiber))`, 328 bytes whole.
+    size = 344, payload = ZendFiber,
     handlers = FIBER
 )]
 pub(crate) struct Fiber;
@@ -1133,8 +1152,7 @@ fn switch_into(
     transfer: Transfer,
 ) -> Result<Transfer, Thrown> {
     let fiber = payload(req, object)?;
-    let (Some(mut stack), Some(mut execution)) = (fiber.stack.take(), fiber.execution.take())
-    else {
+    let (Some(mut stack), Some(execution)) = (fiber.stack.take(), fiber.execution.take()) else {
         return Err(throw(
             req,
             "Error",
@@ -1146,6 +1164,7 @@ fn switch_into(
         Transfer::GracefulExit => Resumer::Destroy,
         Transfer::Value(_) | Transfer::Throw(_) | Transfer::Fatal => Resumer::Native,
     };
+    let mut execution = *execution;
     req.switch_execution(&mut execution);
     req.fibers_mut().running.push(Running {
         fiber: object,
@@ -1163,7 +1182,7 @@ fn switch_into(
         Ok(Switched::Suspended(back)) => {
             fiber.status = Status::Suspended;
             fiber.stack = Some(stack);
-            fiber.execution = Some(execution);
+            fiber.execution = Some(Box::new(execution));
             Ok(back)
         }
         Ok(Switched::Returned(back)) => {
@@ -1439,7 +1458,7 @@ fn start(
     let fiber = payload(req, this)?;
     fiber.blocks.push(record);
     fiber.stack = Some(stack);
-    fiber.execution = Some(execution);
+    fiber.execution = Some(Box::new(execution));
     switch_into(req, this, Transfer::Value(Value::null()))
 }
 

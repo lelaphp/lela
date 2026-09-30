@@ -77,7 +77,7 @@ fn a_second_run_overwrites_the_file_and_appends_to_the_log() {
     let log = std::fs::read_to_string(store.root().join("log.jsonl")).unwrap();
     assert_eq!(log.lines().count(), 2);
     assert_eq!(
-        store.readings().unwrap().len(),
+        store.readings().unwrap().readings.len(),
         1,
         "one file per instrument and scope"
     );
@@ -91,7 +91,8 @@ fn a_missing_reading_is_none_and_a_missing_store_has_no_readings() {
     // instrument has run in has.
     let store = Store::at(dir.join("store"));
     assert!(store.read("budget", "php_heap").unwrap().is_none());
-    assert!(store.readings().unwrap().is_empty());
+    let files = store.readings().unwrap();
+    assert!(files.readings.is_empty() && files.unreadable.is_empty());
 }
 
 /// The exit-code rule (harness-design.md §4.2, §4.5): an instrument whose
@@ -158,7 +159,7 @@ fn a_set_of_readings_is_recorded_together_and_the_outcome_is_the_exit() {
         }
     );
     assert_eq!(
-        store.readings().unwrap().len(),
+        store.readings().unwrap().readings.len(),
         2,
         "two keys, one overwritten"
     );
@@ -323,4 +324,61 @@ fn another_stores_log_is_appended_one_line_per_write() {
     assert_eq!(log.unreadable, vec![3, 4]);
     assert_eq!(log.readings.len(), 4);
     assert_eq!(log.readings[3].status, Status::Fail);
+}
+
+/// A reading's file is replaced, never rewritten in place (#1235): the
+/// new reading goes to a file beside it and is renamed over the path, so
+/// a reader holding the old file, here a hard link to it, still reads the
+/// old reading whole, where a truncate and a write would have cut it
+/// short under the reader; and nothing is left beside the file. A disk
+/// that fills mid-write leaves the old file as it stood for the same
+/// reason.
+#[test]
+fn a_reading_is_written_beside_its_file_and_renamed_over_it() {
+    let dir = scratch("replace");
+    let store = Store::at(dir.path());
+    store.record(&[reading(Status::Fail, 3)]).unwrap();
+    let file = store.root().join("witness/ext/pcre.toml");
+    let held = dir.join("held.toml");
+    std::fs::hard_link(&file, &held).unwrap();
+    let before = std::fs::read_to_string(&held).unwrap();
+
+    store.record(&[reading(Status::Pass, 0)]).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&held).unwrap(),
+        before,
+        "the old file was written in place"
+    );
+    let back = store.read("witness", "ext/pcre").unwrap().unwrap();
+    assert_eq!(back.status, Status::Pass);
+    let beside: Vec<String> = std::fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(beside, ["pcre.toml"], "nothing is left beside the file");
+}
+
+/// A file of the store that is no reading, one a crash left empty or cut
+/// short, is named by its path and skipped, and every other reading is
+/// read (#1235), as the log's torn line is.
+#[test]
+fn an_unreadable_file_is_named_and_the_rest_are_read() {
+    let dir = scratch("unreadable");
+    let store = Store::at(dir.path());
+    store.record(&[reading(Status::Pass, 0)]).unwrap();
+    let empty = store.root().join("unsafe-audit/ext/calendar.toml");
+    std::fs::create_dir_all(empty.parent().unwrap()).unwrap();
+    std::fs::write(&empty, "").unwrap();
+    let cut = store.root().join("budget/php_heap.toml");
+    std::fs::create_dir_all(cut.parent().unwrap()).unwrap();
+    std::fs::write(&cut, "instrument = \"bud").unwrap();
+
+    let files = store.readings().unwrap();
+    assert_eq!(files.readings.len(), 1, "{files:#?}");
+    assert_eq!(files.readings[0].scope, "ext/pcre");
+    assert_eq!(files.unreadable, [cut, empty]);
+    assert_eq!(
+        files.unreadable_note(store.root()).unwrap(),
+        "target/harness: 2 readings unreadable at budget/php_heap.toml, unsafe-audit/ext/calendar.toml; the next run of its instrument writes it again."
+    );
 }

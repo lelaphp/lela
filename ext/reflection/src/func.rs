@@ -379,7 +379,7 @@ fn abstract_refused(req: &mut Request, decl: &MethodDecl, scope: ClassId) -> Res
 }
 
 /// `ReflectionFunctionAbstract` as the stub declares it.
-#[php_class(abstract, implements(crate::Reflector), not_serializable)]
+#[php_class(abstract, implements(crate::Reflector), not_serializable, size = 96)]
 pub(crate) struct ReflectionFunctionAbstract;
 
 #[php_class]
@@ -415,7 +415,10 @@ impl ReflectionFunctionAbstract {
     }
 
     /// `ReflectionFunctionAbstract::inNamespace()`: whether the name has a
-    /// `\` in it.
+    /// `\` in it, and `false` for a closure, whose `{closure:..}` name is
+    /// in no namespace whatever the one it was written in; the same holds
+    /// `getNamespaceName()` to the empty string and `getShortName()` to
+    /// the whole name.
     ///
     /// ```php
     /// var_dump((new ReflectionFunction('json_encode'))->inNamespace());
@@ -423,9 +426,24 @@ impl ReflectionFunctionAbstract {
     /// ```expect
     /// bool(false)
     /// ```
+    ///
+    /// ```php
+    /// namespace Foo;
+    /// class Bar { function baz() { return function () {}; } }
+    /// $r = new \ReflectionFunction((new Bar)->baz());
+    /// var_dump($r->getShortName(), $r->getNamespaceName(), $r->inNamespace());
+    /// ```
+    /// ```expect
+    /// string(26) "{closure:Foo\Bar::baz():3}"
+    /// string(0) ""
+    /// bool(false)
+    /// ```
     #[php(tentative)]
     fn inNamespace(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
-        let (_, decl) = this_function(req, this.object())?;
+        let (function, decl) = this_function(req, this.object())?;
+        if is_anonymous(req, &function) {
+            return Ok(false);
+        }
         Ok(namespace_end(&decl.name.0).is_some())
     }
 
@@ -875,7 +893,10 @@ impl ReflectionFunctionAbstract {
     /// ```
     #[php(tentative)]
     fn getNamespaceName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, decl) = this_function(req, this.object())?;
+        let (function, decl) = this_function(req, this.object())?;
+        if is_anonymous(req, &function) {
+            return PhpString::new(req, b"");
+        }
         let name = decl.name.0.to_vec();
         let space = namespace_end(&name).map_or_else(Vec::new, |end| name[..end].to_vec());
         PhpString::new(req, &space)
@@ -959,9 +980,13 @@ impl ReflectionFunctionAbstract {
     /// ```
     #[php(tentative)]
     fn getShortName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, decl) = this_function(req, this.object())?;
+        let (function, decl) = this_function(req, this.object())?;
         let name = decl.name.0.to_vec();
-        let start = namespace_end(&name).map_or(0, |end| end + 1);
+        let start = if is_anonymous(req, &function) {
+            0
+        } else {
+            namespace_end(&name).map_or(0, |end| end + 1)
+        };
         let short = name[start..].to_vec();
         PhpString::new(req, &short)
     }
@@ -1287,7 +1312,7 @@ impl ReflectionFunctionAbstract {
 }
 
 /// `ReflectionFunction` as the stub declares it.
-#[php_class(extends(ReflectionFunctionAbstract), payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(extends(ReflectionFunctionAbstract), size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionFunction;
 
 #[php_class]
@@ -1466,10 +1491,7 @@ impl ReflectionFunction {
     /// ```
     fn isAnonymous(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (function, _) = this_function(req, this.object())?;
-        Ok(match function {
-            FunctionRef::Closure(closure) => closure.closure(req).is_some_and(|info| !info.fake),
-            _ => false,
-        })
+        Ok(is_anonymous(req, &function))
     }
 
     /// `ReflectionFunction::isDisabled()`: `false`, since a disabled
@@ -1654,7 +1676,7 @@ fn handed(req: &mut Request, object: PhpObject) -> PhpObject {
 }
 
 /// `ReflectionGenerator` as the stub declares it.
-#[php_class(final, not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(final, not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionGenerator;
 
 #[php_class]
@@ -1917,7 +1939,7 @@ impl ReflectionGenerator {
 }
 
 /// `ReflectionMethod` as the stub declares it.
-#[php_class(extends(ReflectionFunctionAbstract), payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(extends(ReflectionFunctionAbstract), size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionMethod;
 
 #[php_class]
@@ -2695,7 +2717,7 @@ impl ReflectionMethod {
 }
 
 /// `ReflectionFiber` as the stub declares it.
-#[php_class(final, not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(final, not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionFiber;
 
 #[php_class]
@@ -2888,5 +2910,15 @@ impl ReflectionFiber {
     ) -> Result<PhpArray, Thrown> {
         let (kept, _) = standing_fiber(req, this.object())?;
         trace_of(req, kept, options)
+    }
+}
+
+/// `(fn_flags & (ZEND_ACC_CLOSURE | ZEND_ACC_FAKE_CLOSURE)) ==
+/// ZEND_ACC_CLOSURE`: a closure the program wrote, and not one made of a
+/// named function.
+fn is_anonymous(req: &Request, function: &FunctionRef) -> bool {
+    match function {
+        FunctionRef::Closure(closure) => closure.closure(req).is_some_and(|info| !info.fake),
+        _ => false,
     }
 }

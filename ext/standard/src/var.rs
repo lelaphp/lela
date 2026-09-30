@@ -643,6 +643,25 @@ const INDENT: usize = 4;
 ///   - Return [ string|true ]
 /// }
 /// ```
+///
+/// A class's debug table that leaves a throwable pending is printed
+/// whole with the rows after it, and the throwable is thrown after:
+///
+/// ```php
+/// $n = (new ReflectionClass('DOMNode'))->newInstanceWithoutConstructor();
+/// try { print_r([$n, 1]); } catch (DOMException $e) { for ($i = 0; $e; $e = $e->getPrevious()) $i++; echo $i, "\n"; }
+/// ```
+/// ```expect
+/// Array
+/// (
+///     [0] => DOMNode Object
+///         (
+///         )
+///
+///     [1] => 1
+/// )
+/// 18
+/// ```
 #[php_function]
 fn print_r(
     req: &mut Request,
@@ -651,7 +670,15 @@ fn print_r(
 ) -> Result<Union<PhpString, True>, Thrown> {
     let returned = r#return;
     let mut out = Vec::new();
-    render(req, &mut out, &value, 0)?;
+    // A throwable a class's debug table left pending is thrown once the
+    // whole value is printed, as `php_print_zval_r` leaves it in
+    // `EG(exception)`; a fatal or an exit prints nothing.
+    if let Err(thrown) = render(req, &mut out, &value, 0) {
+        if thrown.exception().is_some() && !returned {
+            req.write(&out);
+        }
+        return Err(thrown);
+    }
     if returned {
         return PhpString::new(req, &out).map(Union::A);
     }
@@ -744,17 +771,24 @@ pub(super) fn render(
         // The table has one owner and is given up once its rows are
         // rendered, php's `zend_release_properties`.
         let own = object.debug_info(req)?;
-        let rows: Vec<(Key, Value)> = match own {
-            Some(own) => own.snapshot(),
+        let rows: Vec<(Key, Value)> = match &own {
+            Some(own) => own.table.snapshot(),
             None => object.props_for(req, PropertyPurpose::Debug)?,
         };
         object.protect_in(req, RecursionGuard::Debug);
         let rendered = hash(req, out, &rows, indent, true);
         object.unprotect_in(req, RecursionGuard::Debug);
-        if let Some(own) = own {
-            req.release(Value::array(own));
-        }
-        return rendered;
+        let Some(own) = own else {
+            return rendered;
+        };
+        req.release(Value::array(own.table));
+        // What the table left pending was raised before any row's, so a
+        // row's is chained onto it.
+        return match (own.thrown, rendered) {
+            (Some(earlier), Err(later)) => Err(earlier.chain(req, later)),
+            (Some(earlier), Ok(())) => Err(earlier),
+            (None, rendered) => rendered,
+        };
     }
     // `zval_get_string_func`, whose string is the caller's to release:
     // the decimal of an int, the bytes of a string, `1` for `true`, the
@@ -781,6 +815,10 @@ fn hash(
 ) -> Result<(), Thrown> {
     out.extend(std::iter::repeat_n(b' ', indent));
     out.extend_from_slice(b"(\n");
+    // php checks no `EG(exception)` between rows, so a throwable an
+    // element's debug table left pending waits while the rest print, a
+    // later one chained onto it.
+    let mut pending: Option<Thrown> = None;
     for (key, element) in rows {
         out.extend(std::iter::repeat_n(b' ', indent + INDENT));
         out.push(b'[');
@@ -790,12 +828,21 @@ fn hash(
             Key::Str(s) => out.extend_from_slice(s.as_bytes()),
         }
         out.extend_from_slice(b"] => ");
-        render(req, out, element, indent + INDENT + INDENT)?;
+        if let Err(thrown) = render(req, out, element, indent + INDENT + INDENT) {
+            let thrown = match pending.take() {
+                Some(earlier) => earlier.chain(req, thrown),
+                None => thrown,
+            };
+            if thrown.exception().is_none() {
+                return Err(thrown);
+            }
+            pending = Some(thrown);
+        }
         out.push(b'\n');
     }
     out.extend(std::iter::repeat_n(b' ', indent));
     out.extend_from_slice(b")\n");
-    Ok(())
+    pending.map_or(Ok(()), Err)
 }
 
 /// `zend_unmangle_property_name_ex`: the class a mangled name carries

@@ -745,18 +745,20 @@ fn fd_of(req: &mut Request, given: &Value, reader: FdReader) -> Result<Option<i3
         // `php_posix_stream_get_fd`: each cast asked first, and taken
         // only where the kind says it would answer; a cast that fails
         // after that leaves php's `-1`.
-        let fd = if stream.can_cast(req, Cast::Select) {
+        let fd = if stream.can_cast(req, Cast::Select).is_ok() {
             stream.cast(req, Cast::Select, false)
-        } else if stream.can_cast(req, Cast::Internal) {
-            stream.cast(req, Cast::Internal, false)
         } else {
-            let label = stream.label(req).unwrap_or_default();
-            docref(
-                req,
-                Level::Warning,
-                &format!("Could not use stream of type '{label}'"),
-            );
-            return Ok(None);
+            match stream.can_cast(req, Cast::Internal) {
+                Ok(()) => stream.cast(req, Cast::Internal, false),
+                Err(label) => {
+                    docref(
+                        req,
+                        Level::Warning,
+                        &format!("Could not use stream of type '{label}'"),
+                    );
+                    return Ok(None);
+                }
+            }
         };
         fd.map_or(-1, i64::from)
     } else {

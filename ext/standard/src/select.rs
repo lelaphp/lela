@@ -338,9 +338,9 @@ fn stream_select(
 fn stream_isatty(req: &mut Request, stream: Stream) -> bool {
     // Each cast asked first and taken only where the kind would answer
     // it, and a cast that fails after that is php's `-1`, no terminal.
-    let fd = if stream.can_cast(req, Cast::Select) {
+    let fd = if stream.can_cast(req, Cast::Select).is_ok() {
         stream.cast(req, Cast::Select, false)
-    } else if stream.can_cast(req, Cast::Internal) {
+    } else if stream.can_cast(req, Cast::Internal).is_ok() {
         stream.cast(req, Cast::Internal, false)
     } else {
         return false;

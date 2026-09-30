@@ -26,7 +26,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerStatus, OutputOp, Request, StartHandler,
 };
-use php_ext::values::{Key, PhpString};
+use php_ext::values::{Key, PhpString, SmartStr};
 
 use crate::State;
 
@@ -176,10 +176,11 @@ pub(crate) struct Rewriter {
     attr_val: Vec<u8>,
     tag_type: TagType,
     attr_type: AttrType,
-    /// `url_app`, `name=value` pairs joined by `arg_separator.output`.
-    url_app: Vec<u8>,
-    /// `form_app`, the hidden inputs.
-    form_app: Vec<u8>,
+    /// `url_app`, `name=value` pairs joined by `arg_separator.output`,
+    /// a `smart_str` on the request's heap as php's is.
+    url_app: SmartStr,
+    /// `form_app`, the hidden inputs, the same.
+    form_app: SmartStr,
 }
 
 /// What the scanner reads off the ini as a chunk is handled: the table
@@ -390,7 +391,12 @@ impl Chunk<'_> {
             self.out.push(quote);
         }
         if self.ctx.arg.eq_ignore_ascii_case(&self.ctx.lookup) {
-            append_modified_url(&val, &mut self.out, &self.ctx.url_app, self.settings);
+            append_modified_url(
+                &val,
+                &mut self.out,
+                self.ctx.url_app.as_bytes(),
+                self.settings,
+            );
         } else {
             self.out.extend_from_slice(&val);
         }
@@ -402,8 +408,9 @@ impl Chunk<'_> {
     /// `handle_form`: after a form tag's `>`, the hidden inputs, where
     /// its action passes `check_host_whitelist`.
     fn handle_form(&mut self) {
-        if !self.ctx.form_app.is_empty() && self.ctx.tag == b"form" && self.host_allowed() {
-            self.out.extend_from_slice(&self.ctx.form_app);
+        let form_app = self.ctx.form_app.as_bytes();
+        if !form_app.is_empty() && self.ctx.tag == b"form" && self.host_allowed() {
+            self.out.extend_from_slice(form_app);
         }
     }
 
@@ -635,7 +642,7 @@ impl Chunk<'_> {
 fn handle(req: &mut Request, call: &mut HandlerCall<'_>, context: Context) -> HandlerStatus {
     let settings = Settings::read(req, context);
     let ctx = context.rewriter(req);
-    if ctx.url_app.is_empty() {
+    if ctx.url_app.as_bytes().is_empty() {
         let mut out = std::mem::take(&mut ctx.buf);
         out.extend_from_slice(call.input);
         call.out = out;
@@ -721,24 +728,34 @@ fn add_var(
             ..Rewriter::default()
         };
     }
-    if !ctx.url_app.is_empty() {
-        ctx.url_app.extend_from_slice(&separator);
-    }
-    if encode {
-        crate::url::url_encode(name, true, &mut ctx.url_app);
-        ctx.url_app.push(b'=');
-        crate::url::url_encode(value, true, &mut ctx.url_app);
+    let (sname, svalue) = if encode {
+        let (mut sname, mut svalue) = (Vec::new(), Vec::new());
+        crate::url::url_encode(name, true, &mut sname);
+        crate::url::url_encode(value, true, &mut svalue);
+        (sname, svalue)
     } else {
-        ctx.url_app.extend_from_slice(name);
-        ctx.url_app.push(b'=');
-        ctx.url_app.extend_from_slice(value);
-    }
-    ctx.form_app
-        .extend_from_slice(b"<input type=\"hidden\" name=\"");
-    ctx.form_app.extend_from_slice(&hname);
-    ctx.form_app.extend_from_slice(b"\" value=\"");
-    ctx.form_app.extend_from_slice(&hvalue);
-    ctx.form_app.extend_from_slice(b"\" />");
+        (name.to_vec(), value.to_vec())
+    };
+    let mut url_app = std::mem::take(&mut ctx.url_app);
+    let mut form_app = std::mem::take(&mut ctx.form_app);
+    let separated = !url_app.as_bytes().is_empty();
+    let appended = (|| {
+        if separated {
+            url_app.append(req, &separator)?;
+        }
+        url_app.append(req, &sname)?;
+        url_app.append(req, b"=")?;
+        url_app.append(req, &svalue)?;
+        form_app.append(req, b"<input type=\"hidden\" name=\"")?;
+        form_app.append(req, &hname)?;
+        form_app.append(req, b"\" value=\"")?;
+        form_app.append(req, &hvalue)?;
+        form_app.append(req, b"\" />")
+    })();
+    let ctx = context.rewriter(req);
+    ctx.url_app = url_app;
+    ctx.form_app = form_app;
+    appended?;
     if start {
         req.output_buffer_op(&OutputOp::Start {
             handler: StartHandler::Registered(context.handler()),
@@ -755,7 +772,7 @@ fn add_var(
 /// `false` where no pair of that name was added. The name is found as
 /// php finds it, as the first `name=` anywhere in the pairs.
 fn reset_var(req: &mut Request, context: Context, name: &[u8], encode: bool) -> bool {
-    if context.rewriter(req).url_app.is_empty() {
+    if context.rewriter(req).url_app.as_bytes().is_empty() {
         return true;
     }
     let separator = separator(req);
@@ -781,14 +798,15 @@ fn reset_var(req: &mut Request, context: Context, name: &[u8], encode: bool) -> 
     form_var.extend_from_slice(&hname);
     form_var.extend_from_slice(b"\" value=\"");
     let ctx = context.rewriter(req);
-    let Some(mut start) = find(&ctx.url_app, &url_var) else {
+    let url_app = ctx.url_app.as_bytes();
+    let Some(mut start) = find(url_app, &url_var) else {
         return false;
     };
-    let limit = ctx.url_app.len();
+    let limit = url_app.len();
     let mut end = start + url_var.len();
     let mut separator_removed = false;
     while end < limit {
-        if ctx.url_app[end..].starts_with(&separator) {
+        if url_app[end..].starts_with(&separator) {
             end += separator.len();
             separator_removed = true;
             break;
@@ -803,21 +821,22 @@ fn reset_var(req: &mut Request, context: Context, name: &[u8], encode: bool) -> 
     }
     if !separator_removed
         && start >= separator.len()
-        && ctx.url_app[start - separator.len()..start] == separator[..]
+        && url_app[start - separator.len()..start] == separator[..]
     {
         start -= separator.len();
     }
-    ctx.url_app.drain(start..end);
-    let Some(start) = find(&ctx.form_app, &form_var) else {
+    ctx.url_app.remove(start..end);
+    let form_app = ctx.form_app.as_bytes();
+    let Some(start) = find(form_app, &form_var) else {
         ctx.url_app.clear();
         ctx.form_app.clear();
         return false;
     };
-    let end = ctx.form_app[start + form_var.len()..]
+    let end = form_app[start + form_var.len()..]
         .iter()
         .position(|c| *c == b'>')
-        .map_or(ctx.form_app.len(), |at| start + form_var.len() + at + 1);
-    ctx.form_app.drain(start..end);
+        .map_or(form_app.len(), |at| start + form_var.len() + at + 1);
+    ctx.form_app.remove(start..end);
     true
 }
 

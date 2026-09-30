@@ -608,7 +608,7 @@ impl ObjectHandlers for MapHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         crate::debug_info(req, object)
     }
 
@@ -876,7 +876,7 @@ impl ClassIterator for NodeIter {
 /// ```
 #[php_class(
     implements(crate::IteratorAggregate, crate::Countable),
-    payload = Dom,
+    size = 80, beside(88), payload = Dom,
     handlers = HANDLERS
 )]
 pub(crate) struct DOMNodeList;
@@ -928,7 +928,7 @@ impl DOMNodeList {
 /// ```
 #[php_class(
     implements(crate::IteratorAggregate, crate::Countable),
-    payload = Dom,
+    size = 80, beside(88), payload = Dom,
     handlers = HANDLERS
 )]
 pub(crate) struct DOMNamedNodeMap;
@@ -991,7 +991,7 @@ impl DOMNamedNodeMap {
 #[php_class(
     namespace(Dom),
     implements(crate::IteratorAggregate, crate::Countable),
-    payload = Dom,
+    size = 80, beside(88), payload = Dom,
     handlers = HANDLERS
 )]
 pub(crate) struct NodeList;
@@ -1012,7 +1012,7 @@ impl NodeList {
 #[php_class(
     namespace(Dom),
     implements(crate::IteratorAggregate, crate::Countable),
-    payload = Dom,
+    size = 80, beside(88), payload = Dom,
     handlers = HANDLERS
 )]
 pub(crate) struct NamedNodeMap;
@@ -1044,7 +1044,7 @@ impl NamedNodeMap {
 #[php_class(
     namespace(Dom),
     implements(crate::IteratorAggregate, crate::Countable),
-    payload = Dom,
+    size = 80, beside(88), payload = Dom,
     handlers = HANDLERS
 )]
 pub(crate) struct DtdNamedNodeMap;
@@ -1080,7 +1080,7 @@ impl DtdNamedNodeMap {
 #[php_class(
     namespace(Dom),
     implements(crate::IteratorAggregate, crate::Countable),
-    payload = Dom,
+    size = 80, beside(88), payload = Dom,
     handlers = HANDLERS
 )]
 pub(crate) struct HTMLCollection;

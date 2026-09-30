@@ -61,6 +61,10 @@ pub(crate) struct StateMt19937 {
     pub(crate) state: [u32; N],
 }
 
+/// The payload, `engine.state`: the pointer to the state php allocates
+/// beside the object (`php_random_status_alloc`).
+pub(crate) type EngineMt19937 = Box<StateMt19937>;
+
 impl Default for StateMt19937 {
     fn default() -> StateMt19937 {
         StateMt19937 {
@@ -228,12 +232,38 @@ impl Serial for StateMt19937 {
 /// `__serialize`, `__unserialize` and `__debugInfo` are the entries the
 /// other engines name (`@implementation-alias`), dispatching on the
 /// state the receiver's class carries.
+///
+/// `php_random_engine_common_init`: the engine by `zend_object_alloc`
+/// and its state beside it, which `memory_get_usage()` counts (design
+/// §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['Random\\Engine\\Mt19937', 'Random\\Engine\\PcgOneseq128XslRr64', 'Random\\Engine\\Xoshiro256StarStar', 'Random\\Engine\\Secure'] as $c) {
+///     $m = memory_get_usage();
+///     $e = new $c;
+///     $used = memory_get_usage() - $m;
+///     $e = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// $s = new Random\Engine\Secure;
+/// new Random\Randomizer($s);
+/// $m = memory_get_usage();
+/// $r = new Random\Randomizer($s);
+/// echo 'Random\Randomizer ', memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// Random\Engine\Mt19937 2640
+/// Random\Engine\PcgOneseq128XslRr64 96
+/// Random\Engine\Xoshiro256StarStar 112
+/// Random\Engine\Secure 56
+/// Random\Randomizer 80
+/// ```
 #[php_class(
     final,
     namespace(Random::Engine),
     implements(crate::Engine),
     dynamic_properties = forbidden,
-    payload = StateMt19937,
+    size = 72, beside(2504), payload = EngineMt19937,
     handlers = crate::MT19937
 )]
 pub(crate) struct Mt19937;
@@ -294,8 +324,8 @@ impl Mt19937 {
         };
         #[allow(clippy::cast_possible_truncation)]
         let seeded = StateMt19937::seeded(seed.cast_unsigned() as u32, mode);
-        if let Some(state) = this.native_mut::<StateMt19937>(req) {
-            *state = seeded;
+        if let Some(state) = this.native_mut::<EngineMt19937>(req) {
+            **state = seeded;
         }
         Ok(())
     }

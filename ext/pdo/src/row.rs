@@ -25,7 +25,7 @@ pub(crate) struct Row {
 /// `@not-serializable final class PDORow`, as `pdo_stmt.stub.php`
 /// declares it, over the statement it reads and
 /// `pdo_row_object_handlers`.
-#[php_class(final, not_serializable, payload = Row, handlers = HANDLERS)]
+#[php_class(final, not_serializable, size = 64, payload = Row, handlers = HANDLERS)]
 pub(crate) struct PDORow;
 
 /// `public string $queryString`, which the handlers answer from the
@@ -323,7 +323,7 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         let Some(rows) = self.get_properties_for(req, object, PropertyPurpose::Debug)? else {
             return Ok(None);
         };
@@ -332,7 +332,7 @@ impl ObjectHandlers for Handlers {
             req.addref(&value);
             out.set(req, key, value)?;
         }
-        Ok(Some(out))
+        Ok(Some(out.into()))
     }
 
     fn properties_overloaded(&self) -> bool {

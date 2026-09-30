@@ -45,18 +45,22 @@ mod kind {
     include!(concat!(env!("OUT_DIR"), "/display.rs"));
 }
 mod grammar;
+mod highlight;
 mod lexer;
 mod line_index;
 mod parser;
 mod php_names;
+mod scanner;
 mod source;
 pub mod tree;
 mod value;
 
+pub use highlight::{Colours, highlight, html_puts, strip};
 pub use kind::SyntaxKind;
 pub use lexer::{LexOptions, Lexed, Position, Token, lex};
 pub use line_index::{LineCol, LineIndex};
 pub use php_names::{amp_name, cast_name, int_overflows, magic_const_name, operator_name};
+pub use scanner::{ScannedToken, scanned};
 pub use source::{Diagnostic, FileId, Level, MAX_FILE_LEN, Span, TextRange, load_bytes};
 pub use tree::{Missing, Tree};
 pub use value::{Holder, TokenValue};

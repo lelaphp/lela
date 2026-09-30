@@ -284,9 +284,32 @@ impl Mm {
         self.limit
     }
 
-    /// Set the `memory_limit`.
-    pub(crate) fn set_limit(&mut self, limit: usize) {
+    /// `zend_set_memory_limit` (`Z/Zend/zend_alloc.c:2899`): a limit
+    /// under what the chunks hold is met by giving cached chunks back
+    /// where that is enough, the limit itself then left as it stood, as
+    /// php leaves it, and refused where it is not.
+    pub(crate) fn set_limit(&mut self, limit: usize) -> bool {
+        if limit < self.real_size {
+            if limit < self.real_size - self.cached.len() * CHUNK_SIZE {
+                return false;
+            }
+            while limit < self.real_size {
+                let Some(chunk) = self.cached.pop() else {
+                    break;
+                };
+                chunk_free(chunk, CHUNK_SIZE);
+                self.real_size -= CHUNK_SIZE;
+            }
+            return true;
+        }
         self.limit = limit;
+        true
+    }
+
+    /// `heap->overflow`, `zend_alloc_in_memory_limit_error_reporting`:
+    /// whether the fatal the limit raised is being reported.
+    pub(crate) fn overflowed(&self) -> bool {
+        self.overflow
     }
 
     /// `heap->overflow = 0` after `zend_error` returns in

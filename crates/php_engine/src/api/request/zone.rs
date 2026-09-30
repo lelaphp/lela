@@ -1,7 +1,9 @@
-//! The platform's local time, which `easter_date` reaches through
-//! `mktime` and `unixtojd` through `php_localtime_r`: not
-//! `date.timezone` but the process's `TZ`, which PHP code moves with
-//! `putenv('TZ=…')` (php calls `tzset` there). This engine serves
+//! The platform's local time, which php reaches through the C library
+//! wherever it does not ask `date.timezone`: `easter_date` through
+//! `mktime`, `unixtojd` through `php_localtime_r`, and `strptime`,
+//! whose `%Z` of GMT and whose `%z` answer in it. Not `date.timezone`
+//! but the process's `TZ`, which PHP code moves with `putenv('TZ=…')`
+//! (php calls `tzset` there, ext/standard/basic_functions.c:833-836). This engine serves
 //! requests on threads, so the zone is read from the request's own
 //! environment, and resolved as the C library resolves it: an unset
 //! `TZ` is `/etc/localtime`; a set one names a `TZif` file, absolute or
@@ -10,7 +12,7 @@
 //! or empty, is UTC. Leap-second (`right/`) files are read as if they
 //! carried none.
 
-use php_ext::request::Request;
+use super::Request;
 
 /// Seconds in a day.
 const DAY: i64 = 86_400;
@@ -18,7 +20,7 @@ const DAY: i64 = 86_400;
 /// The days from 1970-01-01 to `year`-`month`-`day` in the proleptic
 /// Gregorian calendar (`days_from_civil`), any year an `i64` holds a
 /// timestamp of.
-pub(crate) const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = year.div_euclid(400);
     let yoe = year - era * 400;
@@ -29,7 +31,7 @@ pub(crate) const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 }
 
 /// The civil date of the day `days` after 1970-01-01 (`civil_from_days`).
-pub(crate) const fn civil_from_days(days: i64) -> (i64, i64, i64) {
+const fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -252,7 +254,7 @@ impl Rule {
 }
 
 /// The zone the request's `TZ` names.
-pub(crate) struct Zone {
+pub struct Zone {
     /// Each moment the offset changes, and the offset from it on, in order.
     transitions: Vec<(i64, i64)>,
     /// The offset before the first change.
@@ -270,7 +272,8 @@ const UTC: Zone = Zone {
 
 impl Zone {
     /// The zone of `req`'s environment, as `tzset` reads `TZ`.
-    pub(crate) fn of(req: &Request) -> Zone {
+    #[must_use]
+    pub fn of(req: &Request) -> Zone {
         let Some(tz) = req.env(b"TZ") else {
             return Zone::file(b"/etc/localtime").unwrap_or(UTC);
         };
@@ -424,7 +427,8 @@ fn tzif(path: &[u8]) -> Option<Tzif> {
 
 impl Zone {
     /// The offset east of UTC at `t`.
-    pub(crate) fn offset(&self, t: i64) -> i64 {
+    #[must_use]
+    pub fn offset(&self, t: i64) -> i64 {
         let passed = self.transitions.partition_point(|(at, _)| *at <= t);
         match (
             passed.checked_sub(1).map(|i| self.transitions[i]),
@@ -437,14 +441,16 @@ impl Zone {
     }
 
     /// `localtime_r`'s date of `t`: the year, month and day.
-    pub(crate) fn date(&self, t: i64) -> (i64, i64, i64) {
+    #[must_use]
+    pub fn date(&self, t: i64) -> (i64, i64, i64) {
         civil_from_days(t.saturating_add(self.offset(t)).div_euclid(DAY))
     }
 
     /// `mktime` of midnight on `year`-`month`-`day`, `tm_isdst = -1`:
     /// the offset in force there, and where midnight falls in a
     /// spring-forward gap, the offset before it.
-    pub(crate) fn midnight(&self, year: i64, month: i64, day: i64) -> i64 {
+    #[must_use]
+    pub fn midnight(&self, year: i64, month: i64, day: i64) -> i64 {
         let local = days_from_civil(year, month, day) * DAY;
         let guess = self.offset(local);
         let first = self.offset(local - guess);

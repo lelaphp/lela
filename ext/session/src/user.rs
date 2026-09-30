@@ -9,7 +9,7 @@ use php_ext::abi::{OrFalse, This};
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, value_name};
-use php_ext::raising::{Level, Thrown, docref, fatal, throw};
+use php_ext::raising::{Cause, Level, Thrown, docref, fatal, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
@@ -133,7 +133,7 @@ fn call_handler(
         // `PS(in_save_handler)`, so the next call is refused as a
         // recursive one; an `exit` unwinds as a throwable does, and the
         // flag is cleared behind it.
-        let bailed = matches!(&answered, Err(thrown) if thrown.exception().is_none() && !req.is_unwind_exit());
+        let bailed = matches!(&answered, Err(thrown) if thrown.cause(req) == Cause::Fatal);
         if !bailed {
             req.state::<State>().in_save_handler = false;
         }

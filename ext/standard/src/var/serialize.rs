@@ -358,9 +358,7 @@ fn write(
         ValueRef::Int(n) => write_long(out, n),
         ValueRef::Float(f) => {
             out.extend_from_slice(b"d:");
-            out.extend_from_slice(
-                float_format(f, req.serialize_precision(), Exponent::Upper).as_bytes(),
-            );
+            out.extend_from_slice(gcvt(f, req.serialize_precision()).as_bytes());
             out.push(b';');
         }
         ValueRef::Str(s) => write_string(out, s.as_bytes()),
@@ -731,4 +729,27 @@ fn sleep_props(
         out.set(req, key, value)?;
     }
     Ok(out)
+}
+
+/// `zend_gcvt(value, serialize_precision, '.', 'E', buf)`, which
+/// `php_var_serialize_intern` calls with the entry as it stands: where
+/// the entry is `0`, `zend_dtoa`'s one digit is written exponentially
+/// whenever the point stands past it (`decpt > ndigit`), so `10/3` is
+/// `3.0E+0` where the precision every other rendering models, one, prints
+/// `3`.
+///
+/// ```php
+/// ini_set('serialize_precision', 0);
+/// echo serialize([10/3, 0.25, 123456789.0, 0.0]), "\n";
+/// ```
+/// ```expect
+/// a:4:{i:0;d:3.0E+0;i:1;d:0.2;i:2;d:1.0E+8;i:3;d:0.0E+0;}
+/// ```
+fn gcvt(value: f64, precision: i32) -> String {
+    let text = float_format(value, precision, Exponent::Upper);
+    let digit = text.strip_prefix('-').unwrap_or(&text);
+    if precision == 0 && digit.len() == 1 && digit.bytes().all(|b| b.is_ascii_digit()) {
+        return format!("{text}.0E+0");
+    }
+    text
 }
