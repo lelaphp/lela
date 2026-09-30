@@ -824,6 +824,20 @@ impl DOMXPath {
 
 /// `final class Dom\XPath`, `@not-serializable`: `DOMXPath`'s bodies
 /// over the modern document, its failures thrown.
+///
+/// `dom_xpath_objects_new` allocates a `dom_xpath_object`, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// $doc = Dom\HTMLDocument::createEmpty();
+/// new Dom\XPath($doc);
+/// $m = memory_get_usage();
+/// $x = new Dom\XPath($doc);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 96
+/// ```
 #[php_class(
     namespace(Dom),
     final,

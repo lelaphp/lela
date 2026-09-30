@@ -46,6 +46,22 @@ pub(crate) struct Cert {
 /// object(OpenSSLCertificate)#4 (0) {
 /// }
 /// ```
+///
+/// `php_openssl_certificate_create_object` allocates a
+/// `php_openssl_certificate_object`, which `memory_get_usage()` counts
+/// (design §5.13):
+///
+/// ```php
+/// $k = openssl_pkey_new(['private_key_bits' => 1024, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+/// openssl_x509_export(openssl_csr_sign(openssl_csr_new(['commonName' => 'x'], $k), null, $k, 1), $pem);
+/// openssl_x509_read($pem);
+/// $m = memory_get_usage();
+/// $c = openssl_x509_read($pem);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 48
+/// ```
 #[php_class(
     final,
     not_serializable,
