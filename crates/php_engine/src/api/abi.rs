@@ -36,6 +36,25 @@ pub use marshal::{
     False, FromArgument, Instance, IntoReturn, Iterable, NamedVariadic, Never, Null, NullDefault,
     OrFalse, Passed, Path, Raw, Ref, Static, This, True, Union, Untyped, Variadic,
 };
+/// The encoding functions' vocabulary (`zend_multibyte_functions`),
+/// which the compiler's scanner calls and an extension implements for
+/// [`ExtensionBuilder::encodings`].
+pub use php_compile::multibyte::{Encoding, Encodings, Unicode};
+
+/// What an extension hands the engine with [`ExtensionBuilder::encodings`]:
+/// php's `zend_multibyte_functions` ([`Encodings`]), which the scanner
+/// calls, with the two answers rfc1867 asks through
+/// `php_rfc1867_set_multibyte_callbacks` besides them (`Z/main/rfc1867.c`).
+pub trait Multibyte: Encodings {
+    /// `php_rfc1867_encoding_translation` with `php_rfc1867_get_detect_order`:
+    /// the encodings a multipart body's header lines are detected among
+    /// where the body is translated, empty for the detect order, and
+    /// `None` where it is not translated.
+    fn http_input(&self) -> Option<Vec<Encoding>>;
+    /// `php_mb_mbchar_bytes`: how many bytes the character that opens
+    /// with `lead` takes in `encoding`, which the form's words step by.
+    fn char_len(&self, encoding: Encoding, lead: u8) -> usize;
+}
 
 /// The startup ini view an extension's engine state is built from: what
 /// the host set before the first request, immutable afterwards.
@@ -309,6 +328,10 @@ pub enum PostStartup {
 /// The path resolver, php's `zend_resolve_path` as an extension overrides
 /// it: [`ExtensionBuilder::resolve_path`].
 pub(crate) type ResolvePathHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
+
+/// What [`ExtensionBuilder::encodings`] takes: the encoding functions
+/// bound to one request.
+pub(crate) type EncodingsHook = fn(&mut Request) -> Box<dyn Multibyte>;
 /// The upload hook, php's `php_rfc1867_callback`:
 /// [`ExtensionBuilder::upload`].
 pub(crate) type UploadHook =
@@ -507,6 +530,8 @@ pub struct Extension {
     pub(crate) upload: Option<UploadHook>,
     /// What [`ExtensionBuilder::resolve_path`] was handed.
     pub(crate) resolve_path: Option<ResolvePathHook>,
+    /// What [`ExtensionBuilder::encodings`] was handed.
+    pub(crate) encodings: Option<EncodingsHook>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
     /// What [`ExtensionBuilder::intercept`] was handed: each native of
@@ -560,6 +585,7 @@ pub struct ExtensionBuilder {
     treat_data: Option<TreatDataHook>,
     upload: Option<UploadHook>,
     resolve_path: Option<ResolvePathHook>,
+    encodings: Option<EncodingsHook>,
     zend: Option<ZendExtension>,
     intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
@@ -869,6 +895,22 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The encoding functions, php's `zend_multibyte_functions` as
+    /// mbstring's `MINIT` hands them to `zend_multibyte_set_functions`:
+    /// `bind` answers them for one request as its settings stand, the
+    /// internal encoding, the detect order and the substitute character,
+    /// and the engine asks it each time it opens a file under
+    /// `zend.multibyte`, each time `zend.script_encoding` is set, and as it
+    /// reads a multipart form body ([`Multibyte`]). The last extension in bundle order that hands
+    /// them is the provider, as a later `zend_multibyte_set_functions`
+    /// replaces an earlier one; with none, Zend's dummies answer, under
+    /// which nothing is fetched or converted.
+    #[must_use]
+    pub fn encodings(mut self, bind: EncodingsHook) -> ExtensionBuilder {
+        self.encodings = Some(bind);
+        self
+    }
+
     /// The upload hook, php's `php_rfc1867_callback` as `ext/session`'s
     /// `MINIT` sets it for `session.upload_progress`: each step of a
     /// multipart body's reading is handed to `hook` as it is taken
@@ -1023,6 +1065,7 @@ impl ExtensionBuilder {
             treat_data: self.treat_data,
             upload: self.upload,
             resolve_path: self.resolve_path,
+            encodings: self.encodings,
             zend: self.zend,
             intercepts: self.intercepts,
             info: self.info,

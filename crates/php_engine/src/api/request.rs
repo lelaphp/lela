@@ -1681,7 +1681,7 @@ struct TickFunction {
 /// a value it hands out.
 #[allow(clippy::struct_excessive_bools)] // php's EG and PG flags, each its own global, read alone
 pub struct Request {
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
     description: RequestDescription,
     /// The natives the request has entered, in order, where the witness
     /// runner asked for them (harness §4.5 condition 2, revision 58);
@@ -2078,6 +2078,10 @@ pub struct Request {
     /// they made, which the next one counts on from
     /// ([`crate::engine::Shared::compile_for`]).
     pub(crate) keys_made: u32,
+    /// `CG(script_encoding_list)` where an `ini_set()` of
+    /// `zend.script_encoding` moved it this request; the engine's where
+    /// none did.
+    pub(crate) script_encodings: Option<Vec<php_compile::multibyte::Encoding>>,
     /// The aliases `class_alias()` added to `EG(class_table)`, each the
     /// bucket it stands in, the lowered name it is keyed by and the
     /// class it names: `ZVAL_ALIAS_PTR` rows, request state as the
@@ -2614,6 +2618,7 @@ impl Request {
             links: linking::Links::default(),
             record: recording::Record::default(),
             keys_made: 0,
+            script_encodings: None,
             buckets,
             aliases: tables.aliases,
             sapi_constant: Value::null(),
@@ -16534,6 +16539,14 @@ impl Request {
     /// ParseError
     /// ```
     fn refused_include(&mut self, refused: &CompileError, path: &[u8], kind: SourceKind) -> Thrown {
+        if refused.stage == php_compile::Stage::Opening {
+            // `open_file_for_scanning` refused before anything compiled:
+            // `zend_error` places it where the request is executing.
+            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+            let line = self.current_line();
+            self.end_in_compile_time(refused.level, &refused.message, &file, line);
+            return Thrown::of(None);
+        }
         let raised = refused.raised.iter();
         if kind == SourceKind::Eval {
             for raised in raised.clone() {
@@ -18847,6 +18860,12 @@ impl Request {
         if name == b"zend.assertions" && !self.assertions_updated(value) {
             return Ok(None);
         }
+        if name == b"zend.script_encoding" {
+            let Some(listed) = crate::multibyte::script_encoding(self, value) else {
+                return Ok(None);
+            };
+            self.script_encodings = Some(listed);
+        }
         // `OnUpdateErrorLog` (`Z/main/main.c:697`): at runtime a file
         // outside `open_basedir` is refused, `syslog` and the empty value
         // never are.
@@ -18962,6 +18981,7 @@ impl Request {
             | b"user_ini.filename"
             | b"user_ini.cache_ttl" => (false, false, true),
             b"short_open_tag"
+            | b"zend.multibyte"
             | b"output_buffering"
             | b"output_handler"
             | b"mail.add_x_header"
@@ -21385,6 +21405,31 @@ mod tests {
             out.ends_with("string(1) \"1\"\nbool(false)\nstring(1) \"0\"\n"),
             "{out}"
         );
+    }
+
+    /// A refusal php's compiler throws, uncaught in the program, is
+    /// rendered by `zend_exception_error` with no fatal's trace after it
+    /// whatever `fatal_error_backtraces` says, where one it raises takes
+    /// the trace; the recipe turns the entry off, so the witness on
+    /// `refused_program` cannot tell the two apart and this does.
+    #[test]
+    fn a_thrown_refusal_takes_no_fatal_trace_and_a_raised_one_does() {
+        let served = |script: &str| {
+            let out = Engine::builder()
+                .ini("fatal_error_backtraces", "1")
+                .build()
+                .serve_capture(script, crate::test::Capture::default());
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let thrown = served("<?php\ndeclare(encoding = M_PI);");
+        assert!(
+            thrown.contains("Fatal error: Encoding must be a literal"),
+            "{thrown}"
+        );
+        assert!(!thrown.contains("Stack trace"), "{thrown}");
+        let raised = served("<?php\necho 1;\ndeclare(encoding = 'UTF-8');");
+        assert!(raised.contains("very first statement"), "{raised}");
+        assert!(raised.contains("Stack trace"), "{raised}");
     }
 
     /// The same `on_modify` at `ZEND_INI_STAGE_STARTUP`, over the value

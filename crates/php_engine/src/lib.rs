@@ -36,6 +36,7 @@ mod ini_quantity;
 mod ini_syntax;
 mod interfaces;
 mod interrupt;
+mod multibyte;
 mod natives;
 mod open_basedir;
 mod ops;

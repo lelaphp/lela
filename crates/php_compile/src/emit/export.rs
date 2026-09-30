@@ -168,15 +168,10 @@ enum Named<'t> {
     Node(tree::Expr),
 }
 
-/// The text of one token.
+/// The text of one token, as the scanner handed it over
+/// ([`php_syntax::token_text`]).
 fn text(parsed: &Parsed, id: TokenId) -> &[u8] {
-    let Some(token) = parsed.tokens.get(id.0 as usize) else {
-        return &[];
-    };
-    parsed
-        .source
-        .get(token.offset as usize..(token.offset + token.len) as usize)
-        .unwrap_or_default()
+    php_syntax::token_text(parsed, id)
 }
 
 /// The kind of one token.
