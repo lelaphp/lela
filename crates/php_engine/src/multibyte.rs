@@ -10,7 +10,6 @@
 use php_compile::multibyte::{Dummy, Encoding, Multibyte};
 
 use crate::api::abi::{EncodingsHook, Multibyte as Provided};
-use crate::api::raising::{Level, docref};
 use crate::api::request::{Request, ini_truth};
 use crate::engine::Shared;
 
@@ -106,18 +105,8 @@ pub(crate) fn script_encoding(req: &mut Request, value: &[u8]) -> Option<Vec<Enc
     if provider(&req.shared).is_none() || value.is_empty() {
         return Some(Vec::new());
     }
-    match bind(req).list(value) {
-        Ok(list) if list.is_empty() => None,
-        Ok(list) => Some(list),
-        Err(name) => {
-            let message = format!(
-                "INI setting contains invalid encoding \"{}\"",
-                String::from_utf8_lossy(&name)
-            );
-            docref(req, Level::Warning, &message);
-            None
-        }
-    }
+    req.parse_encoding_list(value)
+        .filter(|list| !list.is_empty())
 }
 
 /// `zend.script_encoding` as the engine starts: the entry registered

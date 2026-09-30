@@ -462,6 +462,7 @@ request::Request::cwd
 request::Request::declared_classes
 request::Request::define_constant
 request::Request::defined_functions
+request::Request::encodings
 request::Request::engine
 request::Request::env
 request::Request::env_pairs
@@ -528,6 +529,7 @@ request::Request::os_error_text
 request::Request::output_buffer_op
 request::Request::output_started_at
 request::Request::parse_body
+request::Request::parse_encoding_list
 request::Request::parse_query
 request::Request::phpinfo_as_text
 request::Request::plain_path

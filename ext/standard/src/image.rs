@@ -1620,10 +1620,7 @@ fn handle_avif(s: &mut Stream<'_>) -> Option<GfxInfo> {
 /// ```
 #[php_function]
 fn image_type_to_mime_type(req: &mut Request, image_type: i64) -> Result<php::PhpString, Thrown> {
-    // The C call truncates zend_long to int, on purpose here.
-    #[allow(clippy::cast_possible_truncation)]
-    let registered = handler_of(req, i64::from(image_type as i32));
-    let mime = registered.map_or_else(|| mime_type(image_type), |h| h.mime_type);
+    let mime = php_image_type_to_mime_type(req, image_type);
     php::PhpString::new(req, mime.as_bytes())
 }
 
@@ -1686,6 +1683,52 @@ fn clear_info(req: &mut Request, image_info: Ref<Untyped<php::Value>>) -> Result
     Ok(())
 }
 
+/// Each diagnostic behind the native's name, as `php_error_docref`
+/// raises them, `shown` the name `Error reading from %s!` gives.
+fn raise_all(req: &mut Request, warnings: &[Warning], shown: &[u8]) {
+    for warning in warnings {
+        let text = String::from_utf8_lossy(&warning.text(shown)).into_owned();
+        let level = match warning.level() {
+            Level::Warning => php_ext::raising::Level::Warning,
+            Level::Notice => php_ext::raising::Level::Notice,
+        };
+        php_ext::raising::docref(req, level, &text);
+    }
+}
+
+/// `php_getimagetype` (`Z/ext/standard/image.c:1370`), which
+/// `php_image.h` declares `PHPAPI` and `exif_imagetype` calls: the type
+/// of the image `bytes` hold, its diagnostics raised as the calling
+/// native's with `input` the name they give, and after the fixed types
+/// each registered handler asked in turn; `0`, `IMAGE_FILETYPE_UNKNOWN`,
+/// where none took the bytes. `exif_imagetype`'s witness is this one's.
+pub fn php_getimagetype(req: &mut Request, bytes: &[u8], input: &[u8]) -> i64 {
+    let mut s = Stream::new(bytes);
+    let mut warnings = Vec::new();
+    let (itype, unmatched) = get_image_type(&mut s, &mut warnings);
+    raise_all(req, &warnings, input);
+    if unmatched {
+        let handlers: Vec<ImageHandler> = req.registered::<ImageHandler>().copied().collect();
+        for (at, handler) in (TYPE_FIXED_COUNT..).zip(&handlers) {
+            if (handler.read)(bytes).is_some() {
+                return at;
+            }
+        }
+    }
+    itype
+}
+
+/// `php_image_type_to_mime_type` (`Z/ext/standard/image.c:1220`),
+/// which `php_image.h` declares `PHPAPI` and `exif_read_data` reports
+/// a file's and a thumbnail's type with: a registered handler's MIME
+/// type, else the fixed table's.
+pub fn php_image_type_to_mime_type(req: &Request, image_type: i64) -> &'static str {
+    // The C call truncates zend_long to int, on purpose here.
+    #[allow(clippy::cast_possible_truncation)]
+    let registered = handler_of(req, i64::from(image_type as i32));
+    registered.map_or_else(|| mime_type(image_type), |h| h.mime_type)
+}
+
 fn answer(
     req: &mut Request,
     bytes: &[u8],
@@ -1695,14 +1738,7 @@ fn answer(
     let want_info = image_info.is_given();
     let handlers: Vec<ImageHandler> = req.registered::<ImageHandler>().copied().collect();
     let found = image_size(bytes, want_info, &handlers);
-    for warning in &found.warnings {
-        let text = String::from_utf8_lossy(&warning.text(shown)).into_owned();
-        let level = match warning.level() {
-            Level::Warning => php_ext::raising::Level::Warning,
-            Level::Notice => php_ext::raising::Level::Notice,
-        };
-        php_ext::raising::docref(req, level, &text);
-    }
+    raise_all(req, &found.warnings, shown);
     if want_info {
         let mut info = php::PhpArray::new(req)?;
         for segment in &found.segments {
