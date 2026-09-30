@@ -2530,6 +2530,11 @@ impl Request {
         &mut self.stack
     }
 
+    /// [`VmStack::move_to_heap`] over the request's stack and heap.
+    pub(crate) fn move_frame_to_heap(&mut self) -> Result<Option<php_heap::Frame>, Fatal> {
+        self.stack.move_to_heap(&mut self.heap)
+    }
+
     /// The first page of the VM stack the request runs on, out of its
     /// heap, where none stands: what `zend_fiber_execute` takes for a
     /// fiber's stack before the fiber's function is called.

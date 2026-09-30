@@ -44,6 +44,7 @@ FiberStack::end
 FiberStack::new
 FiberStack::resume
 Frame
+Frame::free
 Frame::is_empty
 Frame::len
 Frame::set
