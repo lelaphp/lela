@@ -1203,8 +1203,10 @@ impl ReflectionFunctionAbstract {
     /// `ReflectionFunctionAbstract::getAttributes(?string $name = null,
     /// int $flags = 0)`: `reflect_attributes` over
     /// `fptr->common.attributes`, with `ZEND_ATTRIBUTE_TARGET_METHOD` where
-    /// the function has a scope and `ZEND_ATTRIBUTE_TARGET_FUNCTION` where
-    /// it has none. The arguments are evaluated in `fptr->common.scope`,
+    /// the function has a scope and is no closure the program wrote, a
+    /// fake closure of a method among them, and
+    /// `ZEND_ATTRIBUTE_TARGET_FUNCTION` otherwise. The arguments are
+    /// evaluated in `fptr->common.scope`,
     /// which for a closure is the scope it is bound to:
     ///
     /// ```php
@@ -1221,6 +1223,15 @@ impl ReflectionFunctionAbstract {
     /// ```expect
     /// C1,foo C1
     /// T1,bar
+    /// ```
+    ///
+    /// ```php
+    /// #[Attribute(Attribute::TARGET_METHOD)] class M {}
+    /// class C { #[M] function m() {} }
+    /// echo get_class((new ReflectionFunction((new C)->m(...)))->getAttributes()[0]->newInstance()), "\n";
+    /// ```
+    /// ```expect
+    /// M
     /// ```
     ///
     /// ```php
@@ -1246,10 +1257,17 @@ impl ReflectionFunctionAbstract {
         // `fptr->common.scope`: a method's class, a closure's bound scope.
         let (scope, target) = match function {
             FunctionRef::Method(scope, _) => (Some(scope), super::attr::TARGET_METHOD),
-            FunctionRef::Closure(closure) => (
-                closure.closure(req).and_then(|info| info.scope),
-                super::attr::TARGET_FUNCTION,
-            ),
+            FunctionRef::Closure(closure) => {
+                let info = closure.closure(req);
+                let scope = info.as_ref().and_then(|info| info.scope);
+                let fake = info.is_some_and(|info| info.fake);
+                let target = if fake && scope.is_some() {
+                    super::attr::TARGET_METHOD
+                } else {
+                    super::attr::TARGET_FUNCTION
+                };
+                (scope, target)
+            }
             _ => (None, super::attr::TARGET_FUNCTION),
         };
         let hook = super::kept_hook(req, this.object());
