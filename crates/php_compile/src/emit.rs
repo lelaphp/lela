@@ -4907,6 +4907,20 @@ impl Emit<'_> {
     /// method declared, which is `CG(class_table)`'s order, each class
     /// added as its declaration completes, and so the order php's dump
     /// walks.
+    ///
+    /// The class's own attributes compile with the class as the active
+    /// one, so `self` in them is the class, an anonymous one's too:
+    ///
+    /// ```php
+    /// class C3 { private const FOO = 'foo'; static function foo() { return new #[A1(self::class, self::FOO)] class() { private const FOO = 'bar'; }; } }
+    /// $r = new ReflectionObject(C3::foo());
+    /// $a = $r->getAttributes()[0]->getArguments();
+    /// var_dump($a[0] == $r->getName(), $a[1]);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(3) "bar"
+    /// ```
     fn class_entry(
         &mut self,
         class: &Class,
@@ -4939,7 +4953,21 @@ impl Emit<'_> {
         // ZEND_FETCH_CLASS_NO_AUTOLOAD)` stands before the class itself
         // goes into the table, so a class naming itself as its parent
         // finds nothing and binds as the program serves.
-        let (attributes, dynamic_properties) = self.class_attributes(class, &name, class.line)?;
+        // `CG(active_class_entry) = ce` before `zend_compile_attributes`,
+        // so `self` in an attribute of the class is the class, an
+        // anonymous one's inside a method among them.
+        let at = self.classes.len();
+        let enclosing = self.active_class.replace(ActiveClass {
+            name: name.clone(),
+            kind: class.kind,
+            at,
+            anonymous,
+        });
+        let enclosing_parent = std::mem::replace(&mut self.active_parent, parent.clone());
+        let attributes = self.class_attributes(class, &name, class.line);
+        self.active_class = enclosing;
+        self.active_parent = enclosing_parent;
+        let (attributes, dynamic_properties) = attributes?;
         let is_enum = class.kind == ClassKind::Enum;
         let mut decl = ClassDecl {
             name: Name(name.clone().into_boxed_slice()),
@@ -4966,7 +4994,6 @@ impl Emit<'_> {
             end_line: class.end_line,
             object_size: 0,
         };
-        let at = self.classes.len();
         self.active_class = Some(ActiveClass {
             name: name.clone(),
             kind: class.kind,
