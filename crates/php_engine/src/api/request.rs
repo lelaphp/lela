@@ -13474,10 +13474,35 @@ impl Request {
             .is_some_and(|(_, depth)| depth == self.vm.call_depth())
     }
 
+    /// The name `php_verror` puts before `(): `: the construct of an
+    /// include being opened, or the native being served. A warning an
+    /// include's open raises with a throwable pending names the frame's
+    /// function instead, as a filter that could not be made does:
+    ///
+    /// ```php
+    /// class F extends php_user_filter { private $d = \NOPE; }
+    /// stream_filter_register("f", F::class);
+    /// function g() { include "php://filter/read=f/resource=" . __FILE__; }
+    /// try { g(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Warning: g(): Unable to create or locate filter "f" in %s on line 4
+    ///
+    /// Warning: g(): Unable to create filter (f) in %s on line 4
+    /// Undefined constant "NOPE"
+    /// ```
     pub(crate) fn active_native(&self) -> String {
         if let Some((kind, _)) = self.including
             && self.serving_include()
         {
+            // php reads the construct off the frame's opline, which a
+            // throw has moved to the exception op, so a warning raised
+            // with a throwable pending names the frame's function.
+            if self.stream_thrown.is_some() || self.is_pending() {
+                return self
+                    .active_user_function()
+                    .unwrap_or_else(|| String::from("main"));
+            }
             return String::from(kind.name());
         }
         self.active_native_function().map_or_else(
