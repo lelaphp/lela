@@ -1594,6 +1594,19 @@ impl PhpObject {
         matches!(self.0.laziness(), Laziness::Ghost | Laziness::Proxy)
     }
 
+    /// What the object's property table holds of its declared
+    /// properties: rows that stand for the slots, php's `IS_INDIRECT`s,
+    /// or copies of them, plain values under their mangled names, once a
+    /// table shared while it stood for the slots was separated (an
+    /// `ArrayObject` sort, a lazy ghost's initializer). A reader that
+    /// tells php's `IS_INDIRECT` from a plain value, as
+    /// `spl_array_object_count_elements_helper` does, reads it after
+    /// [`PhpObject::entries`] has laid the table down.
+    #[must_use]
+    pub fn declared_rows(&self) -> DeclaredRows {
+        self.0.declared_rows()
+    }
+
     /// `OBJ_EXTRA_FLAGS(obj)`'s two lazy bits as the one state they
     /// encode, what `php_var_dump_object_prefix` reads.
     #[must_use]
@@ -1798,6 +1811,11 @@ pub use php_heap::zend_sort;
 /// instance, or neither, which a dumper reads to print `lazy ghost ` or
 /// `lazy proxy ` before `object(` ([`PhpObject::laziness`]).
 pub use php_heap::Laziness;
+
+/// What an object's property table holds of its declared properties
+/// (design §5.4): the slots standing for them, or copies of them the
+/// table holds as plain values ([`PhpObject::declared_rows`]).
+pub use php_heap::DeclaredRows;
 
 /// A resource (design §5.5): php's `zend_resource *`, thirty-two bytes
 /// of the request's heap in the list `EG(regular_list)` is, its id the

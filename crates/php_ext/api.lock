@@ -770,6 +770,7 @@ values::ArrayIter::key
 values::ArrayIter::value
 values::ClassId
 values::ClosureInfo
+values::DeclaredRows
 values::HashIterator
 values::HashIterator::new
 values::HashIterator::position
@@ -831,6 +832,7 @@ values::PhpObject::clone_with
 values::PhpObject::closure
 values::PhpObject::closure_bound
 values::PhpObject::debug_info
+values::PhpObject::declared_rows
 values::PhpObject::entries
 values::PhpObject::handlers
 values::PhpObject::index
