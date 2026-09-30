@@ -4202,13 +4202,8 @@ impl Request {
             };
             return self.member_function(member);
         }
-        self.native_method_id(|m| {
-            matches!(m.at, MethodAt::Declared { class: held, at: index }
-                    if held == class && decl
-                        .methods
-                        .get(usize::try_from(index).unwrap_or(usize::MAX))
-                        .is_some_and(|method| method.function.name.0.eq_ignore_ascii_case(lowered)))
-        })
+        let table = self.shared.function_tables.get(at)?;
+        lowered_key(lowered, |key| table.get(key).copied())
     }
 
     /// The function number `zend_enum_register_funcs` gave `method` of

@@ -31,6 +31,7 @@ use crate::api::abi::{
     DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
     Validation,
 };
+use crate::api::call::Function;
 use crate::api::raising::Level;
 use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
 use crate::api::values::{ClassId, Value};
@@ -546,6 +547,10 @@ pub(crate) struct Shared {
     /// classes in one hash lookup, as `zend_hash_find` does, before the
     /// request's own rows.
     pub(crate) class_keys: HashMap<Box<[u8]>, ClassId>,
+    /// Each class's `ce->function_table`, one row per row of `classes`
+    /// ([`function_tables`]): its own methods under their lowered
+    /// names, each the `Function` its row of `methods` is.
+    pub(crate) function_tables: Vec<HashMap<Box<[u8]>, Function>>,
     /// Each class's `ce->parent`, one row per row of `classes`, resolved
     /// once as `zend_register_internal_class_ex` links it: a native
     /// class's parent is a native class.
@@ -791,6 +796,40 @@ fn class_keys(classes: &[ClassDecl]) -> HashMap<Box<[u8]>, ClassId> {
         }
     }
     keys
+}
+
+/// Each native class's `ce->function_table` as `zend_register_functions`
+/// fills it: every row of `methods` a class declares, under the lowered
+/// name of its declaration, numbered past the `functions` natives. The
+/// first of a name stays, as `zend_hash_add_ptr` keeps it.
+fn function_tables(
+    classes: &[ClassDecl],
+    methods: &[NativeMethod],
+    functions: usize,
+) -> Vec<HashMap<Box<[u8]>, Function>> {
+    let mut tables: Vec<HashMap<Box<[u8]>, Function>> = vec![HashMap::new(); classes.len()];
+    for (row, method) in (functions..).zip(methods) {
+        let MethodAt::Declared { class, at } = method.at else {
+            continue;
+        };
+        let (Ok(class), Ok(at), Ok(row)) = (
+            usize::try_from(class.0),
+            usize::try_from(at),
+            u32::try_from(row),
+        ) else {
+            continue;
+        };
+        let (Some(table), Some(decl)) = (
+            tables.get_mut(class),
+            classes.get(class).and_then(|decl| decl.methods.get(at)),
+        ) else {
+            continue;
+        };
+        table
+            .entry(lowered(&decl.function.name.0))
+            .or_insert(Function(row));
+    }
+    tables
 }
 
 /// `zend_string_tolower`: the key a name is found under.
@@ -2130,6 +2169,7 @@ impl EngineBuilder {
             trampolines,
         } = link_classes(&core, &extensions);
         let class_keys = class_keys(&classes);
+        let function_tables = function_tables(&classes, &methods, functions.len());
         let parents = classes
             .iter()
             .map(|decl| {
@@ -2164,6 +2204,7 @@ impl EngineBuilder {
                 methods,
                 trampolines,
                 class_keys,
+                function_tables,
                 parents,
                 constants,
                 engine_states: Vec::new(),
