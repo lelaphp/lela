@@ -370,7 +370,7 @@ fn character(mblen: &mut Mblen, rest: &[u8]) -> Option<usize> {
 /// a later one of its kind left alone; an invalid multibyte sequence
 /// dropped; php's `ValueError`s for a command too long for
 /// `sysconf(_SC_ARG_MAX)` before or after.
-pub(super) fn escape_shell_cmd(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thrown> {
+pub fn escape_shell_cmd(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thrown> {
     let max = crate::ffi::arg_max();
     if input.len() > max.saturating_sub(3) {
         let text = format!("Command exceeds the allowed length of {max} bytes");

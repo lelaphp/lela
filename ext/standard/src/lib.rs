@@ -136,6 +136,12 @@ pub use http_fopen_wrapper::wrapper as http_wrapper;
 pub use streamsfuncs::stream_ctx_set_option;
 pub use url::UriParser;
 
+/// What `php_mail.h` and `exec.h` declare `PHPAPI` for `mbstring.c`,
+/// whose `mb_send_mail` writes its headers and body and hands them to
+/// `php_mail` (ADR-0004; design §4.10).
+pub use exec::escape_shell_cmd as php_escape_shell_cmd;
+pub use mail::{build_headers as php_mail_build_headers, php_mail};
+
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::{EngineWrapper, Request};

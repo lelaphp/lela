@@ -3,17 +3,35 @@
 name = "php_ext_mbstring"
 version = "0.0.0"
 edition.workspace = true
-license.workspace = true
+# The port of php's mbstring.c, php_unicode.c, mb_gpc.c and php_mbregex.c
+# is the workspace's; libmbfl/ is vendored under its own LICENSE, the
+# LGPL-2.1, and compiled in (design §7.2, §12, revision 47, #1173).
+license = "MIT AND LGPL-2.1-only"
 rust-version.workspace = true
 publish = false
 description = "The mbstring extension, php-src/ext/mbstring"
+# The one crate that links libmbfl and oniguruma.
+links = "mbfl"
 
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, and the two extensions php's mbstring includes. The engine
+# is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+# `php_pcre.h`, for `mbstring.http_output_conv_mimetypes`
+# (`ZEND_MOD_REQUIRED("pcre")`, design §4.10).
+php_ext_pcre = { path = "../pcre" }
+# `php_mail.h` and `exec.h`, for `mb_send_mail` (design §4.10).
+php_ext_standard = { path = "../standard" }
+
+# libmbfl is php-src's vendored copy, compiled by `build.rs` over the Zend
+# shim in `shim/`; oniguruma is the platform's, found through `pkg-config`
+# (design §7.2, #1173). Both are bound in `src/ffi/` alone (`unsafe.homes`).
+[build-dependencies]
+cc = { workspace = true }
+pkg-config = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

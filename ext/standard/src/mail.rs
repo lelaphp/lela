@@ -131,7 +131,7 @@ fn build_elems(
 /// by its name, `To` and `Subject` refused as additional ones, the ones
 /// RFC 2822 allows once refusing an array, and the last `\r\n` taken
 /// off.
-fn build_headers(req: &mut Request, headers: PhpArray) -> Result<Vec<u8>, Thrown> {
+pub fn build_headers(req: &mut Request, headers: PhpArray) -> Result<Vec<u8>, Thrown> {
     let mut out = Vec::new();
     for (key, value) in headers.snapshot() {
         let key = match key {
@@ -277,7 +277,7 @@ fn log_date() -> String {
 /// message on its standard input, and its exit status read as php reads
 /// it.
 #[allow(clippy::too_many_lines)] // one C function, kept whole
-pub(super) fn php_mail(
+pub fn php_mail(
     req: &mut Request,
     to: &[u8],
     subject: &[u8],
