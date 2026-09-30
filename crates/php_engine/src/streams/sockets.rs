@@ -190,12 +190,12 @@ enum Role {
 }
 
 impl Socket {
-    fn new(sock: Sock, label: &'static str, timeout: Option<Duration>) -> Socket {
+    fn new(sock: Option<Sock>, label: &'static str, timeout: Option<Duration>) -> Socket {
         Socket {
             crypto: None,
             context: None,
             own: None,
-            sock: Some(sock),
+            sock,
             label,
             is_blocked: true,
             timeout,
@@ -727,7 +727,7 @@ impl Socket {
                 return Err(socket_error(&error).1);
             }
         };
-        let mut accepted = Socket::new(client, self.label, self.timeout);
+        let mut accepted = Socket::new(Some(client), self.label, self.timeout);
         accepted.is_blocked = self.is_blocked;
         accepted.crypto = self.crypto.as_ref().map(|layer| layer.accepted());
         Ok((accepted, want_peer.then_some(peer)))
@@ -1107,12 +1107,15 @@ impl Request {
     /// registered being php's `Unable to find the socket transport`; for
     /// one an extension registered, its crypto layer made first, as the
     /// factory makes the stream; then a client connected to the rest of
-    /// the name, within `timeout`, or a server bound to it, and listening
-    /// where `listen` says. The stream is `r+`, of the `transport`'s kind,
-    /// with the name as written as its `uri`, the `context` as its own and
-    /// `default_socket_timeout` as its read timeout; a client's layer is
-    /// then asked [`Crypto::connected`], and one that refuses fails the
-    /// connect with no text. A failure is its error code and text, which
+    /// the name, within `timeout`, where it asked to connect, or a server
+    /// bound to it, and listening where `listen` says. A client that did
+    /// not ask holds no socket, php's `sock->socket == -1`, the rest of the
+    /// name not parsed: a write takes nothing, a read fails, and it is at
+    /// its end. The stream is `r+`, of the `transport`'s kind, with the
+    /// name as written as its `uri`, the `context` as its own and
+    /// `default_socket_timeout` as its read timeout; a connected client's
+    /// layer is then asked [`Crypto::connected`], and one that refuses
+    /// fails the connect with no text. A failure is its error code and text, which
     /// the natives print; the `Err` is the memory limit or what the
     /// layer's factory threw.
     pub fn xport_create(
@@ -1162,11 +1165,17 @@ impl Request {
                 ("tcp_socket", Some((transport.label, layer)))
             }
         };
-        let made = self.make_sock(label, rest, xport);
-        let sock = match made {
-            Ok(sock) => sock,
-            Err(failed) => return Ok(Err(failed)),
+        // `php_stream_generic_socket_factory` makes the stream with
+        // `sock->socket = -1`, and only a client asked to connect, or a
+        // server, is handed a socket.
+        let sock = match xport {
+            Xport::Client { connect: false, .. } => None,
+            xport => match self.make_sock(label, rest, xport) {
+                Ok(sock) => Some(sock),
+                Err(failed) => return Ok(Err(failed)),
+            },
         };
+        let connected = sock.is_some();
         let (label, crypto) = match crypto {
             Some((label, layer)) => (label, Some(layer)),
             None => (label, None),
@@ -1179,7 +1188,7 @@ impl Request {
         stream.flags.no_seek = true;
         let stream = self.stream_alloc(stream)?;
         stream.set_ctx(self, context);
-        if role == Role::Peer {
+        if role == Role::Peer && connected {
             let connected = self
                 .stream_op(stream, |req, s| {
                     s.ops
@@ -1296,7 +1305,7 @@ impl Request {
             }
             _ => (Sock::Generic(UnixStream::from(fd)), "generic_socket"),
         };
-        let mut kind = Socket::new(sock, label, default_timeout(self));
+        let mut kind = Socket::new(Some(sock), label, default_timeout(self));
         kind.is_blocked = blocking;
         kind.crypto = crypto;
         let mut stream = PhpStream::new(Box::new(kind), b"r+");

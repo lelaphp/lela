@@ -793,6 +793,7 @@ fn wrap_http_ex(
     let (socket, context) = socket_options(req, chain.ctx)?;
     let xport = Xport::Client {
         timeout,
+        connect: true,
         socket,
         context,
     };

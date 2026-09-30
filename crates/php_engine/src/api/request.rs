@@ -509,15 +509,19 @@ impl std::fmt::Write for Bytes<'_> {
 }
 
 /// What `php_stream_xport_create` is asked to make of a `transport`'s
-/// name: a client connected within `timeout`, `None` to wait for ever,
-/// or a server bound to the name, listening where `listen` says; each
-/// with the `context` the native resolved, which the stream keeps as
-/// `PHP_STREAM_CONTEXT(stream)` before it connects, and the `socket`
-/// options read off it.
+/// name: a client, connected within `timeout`, `None` to wait for ever,
+/// where `connect` says, which is `STREAM_XPORT_CONNECT` or
+/// `STREAM_XPORT_CONNECT_ASYNC` among php's flags, and otherwise a
+/// stream of the `transport`'s kind holding no socket, the name not
+/// even parsed; or a server bound to the name, listening where `listen`
+/// says; each with the `context` the native resolved, which the stream
+/// keeps as `PHP_STREAM_CONTEXT(stream)` before it connects, and the
+/// `socket` options read off it.
 #[derive(Clone)]
 pub enum Xport {
     Client {
         timeout: Option<std::time::Duration>,
+        connect: bool,
         socket: SocketOptions,
         context: Option<Resource>,
     },

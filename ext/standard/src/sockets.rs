@@ -142,7 +142,8 @@ use php_ext::request::{
 use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::file::constants::{
-    STREAM_SERVER_LISTEN, STREAM_SHUT_RD, STREAM_SHUT_RDWR, STREAM_SHUT_WR,
+    STREAM_CLIENT_ASYNC_CONNECT, STREAM_CLIENT_CONNECT, STREAM_SERVER_LISTEN, STREAM_SHUT_RD,
+    STREAM_SHUT_RDWR, STREAM_SHUT_WR,
 };
 use crate::streamsfuncs::{NullContext, context_of, stream_ctx_option};
 
@@ -346,6 +347,7 @@ fn fsockopen_stream(
     let timeout = if limited { timeval(timeout) } else { None };
     let xport = Xport::Client {
         timeout,
+        connect: true,
         socket: SocketOptions::default(),
         context: None,
     };
@@ -448,6 +450,24 @@ fn fsockopen_stream(
 /// bool(false)
 /// string(42) "local_addr context option is not a string."
 /// ```
+///
+/// A client whose `$flags` carry neither `STREAM_CLIENT_CONNECT` nor
+/// `STREAM_CLIENT_ASYNC_CONNECT` connects nowhere and parses nothing: the
+/// stream holds no socket, a write takes nothing, a read fails and it is
+/// at its end.
+///
+/// ```php
+/// $c = stream_socket_client('abc', $code, $message, 0, 0);
+/// var_dump(get_resource_type($c), $code, $message, fwrite($c, "x"), fread($c, 10), feof($c));
+/// ```
+/// ```expect
+/// string(6) "stream"
+/// int(0)
+/// string(0) ""
+/// int(0)
+/// bool(false)
+/// bool(true)
+/// ```
 #[php_function]
 fn stream_socket_client(
     req: &mut Request,
@@ -458,7 +478,6 @@ fn stream_socket_client(
     #[php(default = STREAM_CLIENT_CONNECT)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
-    let _ = flags;
     let (socket, context) = socket_options(req, context)?;
     let host = address.as_bytes().to_vec();
     let timeout = match timeout {
@@ -473,6 +492,7 @@ fn stream_socket_client(
         &host,
         Xport::Client {
             timeout: timeval(timeout),
+            connect: flags & (STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT) != 0,
             socket,
             context,
         },
