@@ -755,7 +755,7 @@ impl ReflectionClass {
     fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let class = this_class(req, this.object())?;
         let name = class_name_of(req, class);
-        PhpString::new(req, &name)
+        PhpString::interned(req, &name)
     }
 
     /// `ReflectionClass::isInternal()`: `ce->type == ZEND_INTERNAL_CLASS`,

@@ -882,6 +882,7 @@ values::PhpRef::set
 values::PhpString
 values::PhpString::as_bytes
 values::PhpString::filled
+values::PhpString::interned
 values::PhpString::is_empty
 values::PhpString::is_valid_utf8
 values::PhpString::len

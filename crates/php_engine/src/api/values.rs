@@ -89,6 +89,27 @@ impl PhpString {
         req.string(bytes)
     }
 
+    /// `zend_string_init_interned`: the one interned string for these
+    /// bytes, never refcounted, what php hands out for a name a
+    /// declaration made (`ce->name`, `fptr->common.function_name`,
+    /// `prop_info->name`): the engine's permanent string where the engine
+    /// or the bundle declared the name, which costs the request nothing,
+    /// else the request's own, allocated on its first ask and shared by
+    /// every later one. The `Err` is the memory limit.
+    ///
+    /// ```php
+    /// $r = new ReflectionClass('stdClass');
+    /// $m = memory_get_usage();
+    /// $s = new ReflectionClass('stdClass');
+    /// var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(96)
+    /// ```
+    pub fn interned(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        req.interned(bytes)
+    }
+
     /// A string of `len` bytes written in place by `fill`, php's
     /// `zend_string_alloc` and the `memcpy` a native does into
     /// `ZSTR_VAL` after it. The allocation is asked for, and the memory

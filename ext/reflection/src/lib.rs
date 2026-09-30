@@ -4840,15 +4840,32 @@ fn set_name(req: &mut Request, this: PhpObject, name: &[u8]) -> Result<(), Throw
 /// A reflector's own property written as php's constructors write
 /// `reflection_prop_name` and `reflection_prop_class`, into the slot
 /// past [`ReflectorHandlers::write_property`], which refuses a program
-/// the same write.
+/// the same write. The value is a name a declaration made, which php
+/// copies from `ce->name`, `fptr->common.function_name` or
+/// `prop_info->name`, so it is the interned string and no allocation of
+/// the reflector's, and `getName()` answers the same string:
+///
+/// ```php
+/// $r = new ReflectionClass('stdClass'); $f = new ReflectionFunction('strlen'); $x = new ReflectionMethod('ArrayObject', 'count');
+/// $m = memory_get_usage(); $s = new ReflectionClass('stdClass'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $g = new ReflectionFunction('strlen'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $y = new ReflectionMethod('ArrayObject', 'count'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $n = [$s->getName(), $g->getName(), $y->getName(), $y->class]; echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 96
+/// 96
+/// 112
+/// 216
+/// ```
 fn set_string_prop(
     req: &mut Request,
     this: PhpObject,
     prop: &[u8],
     value: &[u8],
 ) -> Result<(), Thrown> {
-    let key = PhpString::new(req, prop)?;
-    let value = PhpString::new(req, value)?;
+    let key = PhpString::interned(req, prop)?;
+    let value = PhpString::interned(req, value)?;
     Std.write_property(req, this, key, Value::string(value))
 }
 
