@@ -51,7 +51,9 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-use php_sapi::Engine;
+use std::sync::OnceLock;
+
+use php_sapi::{Engine, ProcessTitle};
 
 pub use options::{Ask, Each, Lines, Options, Program, Refused, Report, Server, usage_text};
 pub use request::Process;
@@ -59,6 +61,15 @@ pub use request::Process;
 /// `sapi_module.name` for the CLI: what `php_sapi_name()` answers and
 /// what the version line carries.
 pub const NAME: &str = "cli";
+
+/// The process's title, saved once first in [`main`] (`save_ps_args`) and
+/// handed to every request the process serves.
+static TITLE: OnceLock<Option<ProcessTitle>> = OnceLock::new();
+
+/// The title the requests are handed, where [`main`] saved one.
+pub(crate) fn process_title() -> Option<ProcessTitle> {
+    TITLE.get().cloned().flatten()
+}
 
 /// `php_print_version` for this host, [`php_sapi::version`] under its
 /// name and the date this crate's `build.rs` stamps as `__DATE__ " "
@@ -76,6 +87,9 @@ pub fn version(engine: &Engine) -> String {
 /// `php_module_startup`.
 pub fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // `save_ps_args`, which php's `main` calls before anything else reads
+    // `argv` (`php_cli.c:1224-1228`); the arguments were copied above.
+    let _ = TITLE.set(ffi::save_ps_args().map(ProcessTitle::new));
     let options = match Options::parse(&argv) {
         Ok(options) => options,
         Err(refused) => {
@@ -168,7 +182,7 @@ fn engine(ini: &[(String, String)]) -> Engine {
         .extensions(&extensions)
         .tier::<php_bundle::Tier>()
         .skip_shebang();
-    php_sapi::start(builder, ini, None)
+    php_sapi::start(builder, ini, Some(php_sapi::HostExtension::Cli))
 }
 
 /// The built-in server's engine: the bundle as [`engine`] builds it, with

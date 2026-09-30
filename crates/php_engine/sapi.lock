@@ -10,6 +10,7 @@ Method
 Observables
 OutputSink
 PHP_VERSION
+ProcessTitle
 RequestDescription
 ResponseHead
 Routed

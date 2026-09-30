@@ -419,6 +419,7 @@ fn describe(site: &Site, client: &Client, is_static: bool) -> RequestDescription
             no_headers: false,
             response_code: 200,
         }),
+        process_title: crate::process_title(),
         script_name: if is_static {
             None
         } else {

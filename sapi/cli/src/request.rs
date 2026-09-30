@@ -109,6 +109,7 @@ pub fn describe(
         script_name,
         source,
         file_handles: Some(process_handles()),
+        process_title: crate::process_title(),
         ..RequestDescription::default()
     })
 }

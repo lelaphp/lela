@@ -32,7 +32,8 @@ use std::process::ExitCode;
 
 pub use php_engine::{
     CommandLine, Dispatched, EachLine, Engine, EngineBuilder, FileHandles, HostExtension, Method,
-    Observables, OutputSink, PHP_VERSION, RequestDescription, ResponseHead, Routed, WebRequest,
+    Observables, OutputSink, PHP_VERSION, ProcessTitle, RequestDescription, ResponseHead, Routed,
+    WebRequest,
 };
 
 /// `php_module_startup` for a host: `builder`, which carries the host's

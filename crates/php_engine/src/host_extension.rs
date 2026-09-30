@@ -27,6 +27,9 @@ use crate::api::values::{Key, PhpArray, PhpString, Value};
 pub enum HostExtension {
     /// `cgi_module_entry`, named `cgi-fcgi`.
     CgiFcgi,
+    /// php's CLI, which loads no extension of its own and adds its
+    /// `additional_functions` under `standard`, the process title's two.
+    Cli,
     /// The built-in server's `cli_server_module_entry`, named
     /// `cli_server`, and its natives under `standard`.
     CliServer,
@@ -35,7 +38,7 @@ pub enum HostExtension {
 /// What a host adds: its extension, and the natives `php_module_startup`
 /// registers under `standard` after every extension has started.
 pub(crate) struct Hosted {
-    pub(crate) extension: Extension,
+    pub(crate) extension: Option<Extension>,
     pub(crate) additional: Vec<(FunctionDecl, Entry)>,
 }
 
@@ -53,31 +56,44 @@ pub(crate) fn hosted(host: HostExtension) -> Hosted {
     };
     match host {
         HostExtension::CgiFcgi => Hosted {
-            extension: ExtensionBuilder::default()
-                .functions(vec![
-                    apache_child_terminate::declared(),
-                    apache_request_headers::declared(),
-                    getallheaders::declared(),
-                    apache_response_headers::declared(),
-                ])
-                .ini(vec![
-                    row("cgi.rfc2616_headers", "0", true),
-                    row("cgi.nph", "0", true),
-                    row("cgi.check_shebang_line", "1", false),
-                    row("cgi.force_redirect", "1", false),
-                    row("cgi.redirect_status_env", "", false),
-                    row("cgi.fix_pathinfo", "1", false),
-                    row("cgi.discard_path", "0", false),
-                    row("fastcgi.logging", "1", false),
-                ])
-                .build("cgi-fcgi"),
+            extension: Some(
+                ExtensionBuilder::default()
+                    .functions(vec![
+                        apache_child_terminate::declared(),
+                        apache_request_headers::declared(),
+                        getallheaders::declared(),
+                        apache_response_headers::declared(),
+                    ])
+                    .ini(vec![
+                        row("cgi.rfc2616_headers", "0", true),
+                        row("cgi.nph", "0", true),
+                        row("cgi.check_shebang_line", "1", false),
+                        row("cgi.force_redirect", "1", false),
+                        row("cgi.redirect_status_env", "", false),
+                        row("cgi.fix_pathinfo", "1", false),
+                        row("cgi.discard_path", "0", false),
+                        row("fastcgi.logging", "1", false),
+                    ])
+                    .build("cgi-fcgi"),
+            ),
             additional: Vec::new(),
         },
-        HostExtension::CliServer => Hosted {
-            extension: ExtensionBuilder::default()
-                .ini(vec![row("cli_server.color", "0", true)])
-                .build("cli_server"),
+        HostExtension::Cli => Hosted {
+            extension: None,
             additional: vec![
+                cli_set_process_title::declared(),
+                cli_get_process_title::declared(),
+            ],
+        },
+        HostExtension::CliServer => Hosted {
+            extension: Some(
+                ExtensionBuilder::default()
+                    .ini(vec![row("cli_server.color", "0", true)])
+                    .build("cli_server"),
+            ),
+            additional: vec![
+                cli_set_process_title::declared(),
+                cli_get_process_title::declared(),
                 apache_request_headers::declared(),
                 apache_response_headers::declared(),
                 getallheaders::declared(),
@@ -204,4 +220,69 @@ fn apache_response_headers(req: &mut Request) -> Result<PhpArray, Thrown> {
         array.set(req, key, value)?;
     }
     Ok(array)
+}
+
+/// `cli_set_process_title(string $title): bool`
+/// (`Z/sapi/cli/php_cli_process_title.c:26`): the title `ps` shows set
+/// over the host's area, and `true`; a title as long as the area or
+/// longer, or no area saved, is `set_ps_title`'s error in php's warning,
+/// and `false`. Before any title is set the one read is empty.
+///
+/// ```php
+/// var_dump(PHP_CLI_PROCESS_TITLE, cli_get_process_title());
+/// var_dump(cli_set_process_title("witness title"), cli_get_process_title());
+/// var_dump(cli_set_process_title(str_repeat("x", 100000)), cli_get_process_title());
+/// ```
+/// ```expect process
+/// bool(true)
+/// string(0) ""
+/// bool(true)
+/// string(13) "witness title"
+///
+/// Warning: cli_set_process_title(): cli_set_process_title had an error: Too long in %s on line 4
+/// bool(false)
+/// string(13) "witness title"
+/// ```
+#[php_function]
+fn cli_set_process_title(req: &mut Request, title: PhpString) -> bool {
+    // With no area `ps_buffer_size` is zero, which every title meets.
+    let set = req
+        .process_title()
+        .map_or(Err("Too long"), |area| area.set(title.as_bytes()));
+    match set {
+        Ok(()) => true,
+        Err(why) => {
+            crate::api::raising::docref(
+                req,
+                crate::api::raising::Level::Warning,
+                &format!("cli_set_process_title had an error: {why}"),
+            );
+            false
+        }
+    }
+}
+
+/// `cli_get_process_title(): ?string`
+/// (`Z/sapi/cli/php_cli_process_title.c:47`): the title last set, or
+/// `null` with php's warning where no area was saved; see
+/// [`cli_set_process_title`].
+///
+/// ```php
+/// cli_set_process_title("again");
+/// var_dump(cli_get_process_title());
+/// ```
+/// ```expect process
+/// string(5) "again"
+/// ```
+#[php_function]
+fn cli_get_process_title(req: &mut Request) -> Result<Option<PhpString>, Thrown> {
+    let Some(title) = req.process_title().map(crate::engine::ProcessTitle::get) else {
+        crate::api::raising::docref(
+            req,
+            crate::api::raising::Level::Warning,
+            "cli_get_process_title had an error: Not initialized correctly",
+        );
+        return Ok(None);
+    };
+    PhpString::new(req, &title).map(Some)
 }

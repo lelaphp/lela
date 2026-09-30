@@ -1,8 +1,13 @@
 //! What the CLI host asks of the C library that Rust's standard library
 //! does not answer, the host's one `unsafe` home (ADR-0008): the
 //! process's own fds 0, 1 and 2, which `do_cli` registers its standard
-//! streams over, and the local time the built-in server's log writes.
+//! streams over, the area `ps` shows its title from ([`title`]), and the
+//! local time the built-in server's log writes.
 //! Each `unsafe` block is one operation with its `SAFETY` comment.
+
+mod title;
+
+pub(crate) use title::save_ps_args;
 
 use std::mem::MaybeUninit;
 use std::os::fd::{FromRawFd, OwnedFd};

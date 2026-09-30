@@ -63,6 +63,59 @@ pub struct RequestDescription {
     /// `php_request_startup` and php's other hosts have none of; `None`
     /// registers nothing.
     pub file_handles: Option<FileHandles>,
+    /// The process's title, where the host saved the area `ps` shows
+    /// (`save_ps_args`): what `cli_set_process_title` writes and
+    /// `PHP_CLI_PROCESS_TITLE` says is there.
+    pub process_title: Option<ProcessTitle>,
+}
+
+/// The memory `ps` shows a process's command line from, which php's CLI
+/// takes over in `save_ps_args` (`Z/sapi/cli/ps_title.c:147`) before it
+/// reads its arguments: the host's `argv` strings and the environment
+/// strings after them, each byte written atomically, so every request
+/// of a process may hold it at once without waiting on another; and the length
+/// of the title last set, `ps_buffer_cur_len`, which every copy shares.
+#[derive(Debug, Clone)]
+pub struct ProcessTitle {
+    area: &'static [std::sync::atomic::AtomicU8],
+    shown: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ProcessTitle {
+    /// The title over `area`, `ps_buffer` to `ps_buffer_size`, with no
+    /// title set yet.
+    #[must_use]
+    pub fn new(area: &'static [std::sync::atomic::AtomicU8]) -> ProcessTitle {
+        ProcessTitle {
+            area,
+            shown: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// `set_ps_title` (`Z/sapi/cli/ps_title.c:345`): a title as long as
+    /// the area or longer is `Too long`; else it is written with its NUL
+    /// and the rest of the area padded with NULs, as Linux and macOS pad
+    /// it.
+    pub(crate) fn set(&self, title: &[u8]) -> Result<(), &'static str> {
+        if title.len() >= self.area.len() {
+            return Err("Too long");
+        }
+        let padding = std::iter::repeat_n(0, self.area.len() - title.len());
+        for (cell, byte) in self.area.iter().zip(title.iter().copied().chain(padding)) {
+            cell.store(byte, Ordering::Relaxed);
+        }
+        self.shown.store(title.len(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// `get_ps_title`: the area up to the title last set.
+    pub(crate) fn get(&self) -> Vec<u8> {
+        let shown = self.shown.load(Ordering::Relaxed).min(self.area.len());
+        self.area[..shown]
+            .iter()
+            .map(|cell| cell.load(Ordering::Relaxed))
+            .collect()
+    }
 }
 
 /// One request of the web as its host received it, php's
@@ -1576,7 +1629,7 @@ impl EngineBuilder {
         let mut additional = Vec::new();
         if let Some(host) = self.host_extension {
             let hosted = crate::host_extension::hosted(host);
-            extensions.push(hosted.extension);
+            extensions.extend(hosted.extension);
             additional = hosted.additional;
         }
         // What a `MINIT` registers into another extension's tables, as

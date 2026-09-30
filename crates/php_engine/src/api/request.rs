@@ -17235,6 +17235,11 @@ impl Request {
         self.description.file_handles.as_ref()?.fd(standard)
     }
 
+    /// The process's title, where the host saved its area.
+    pub(crate) fn process_title(&self) -> Option<&crate::engine::ProcessTitle> {
+        self.description.process_title.as_ref()
+    }
+
     /// Whether the host asked for the CLI's standard handles.
     pub(crate) fn registers_file_handles(&self) -> bool {
         self.description.file_handles.is_some()
