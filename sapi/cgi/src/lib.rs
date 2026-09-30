@@ -44,7 +44,8 @@ use php_sapi::cgi::{Disk, HOST_INI, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 use php_sapi::ini::{define, enabled, entry};
 use php_sapi::{
-    Engine, HostExtension, Observables, OutputSink, RequestDescription, ResponseHead, WebRequest,
+    Aborted, Engine, HostExtension, Observables, OutputSink, RequestDescription, ResponseHead,
+    WebRequest,
 };
 
 /// `sapi_module.name` for php's CGI: what `php_sapi_name()` answers.
@@ -358,10 +359,14 @@ pub fn version(engine: &Engine) -> String {
 pub struct Process;
 
 impl OutputSink for Process {
-    fn write(&mut self, bytes: &[u8]) {
+    /// `sapi_cgi_ub_write`: a write stdout refuses is
+    /// `php_handle_aborted_connection`, with no status set.
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
         let mut stdout = std::io::stdout().lock();
-        let _ = stdout.write_all(bytes);
-        let _ = stdout.flush();
+        stdout
+            .write_all(bytes)
+            .and_then(|()| stdout.flush())
+            .map_err(|_| Aborted { exit_status: None })
     }
 
     fn flush(&mut self) {
@@ -369,7 +374,7 @@ impl OutputSink for Process {
     }
 
     fn send_headers(&mut self, head: &ResponseHead) {
-        self.write(&php_sapi::cgi::head(head));
+        let _ = self.write(&php_sapi::cgi::head(head));
     }
 
     fn log(&mut self, entry: &[u8]) {
@@ -632,7 +637,7 @@ pub fn serve(
     ini: &[(String, String)],
 ) -> i32 {
     if invocation.interactive {
-        Process.write(b"Interactive mode enabled\n\n");
+        let _ = Process.write(b"Interactive mode enabled\n\n");
     }
     if invocation.behavior == Behavior::Lint {
         return lint(engine, invocation, &env, ini);
@@ -640,7 +645,7 @@ pub fn serve(
     let (description, failed) = match describe(invocation, ini, env) {
         Ok(described) => described,
         Err(Refusal::Redirect) => {
-            Process.write(SECURITY_ALERT.as_bytes());
+            let _ = Process.write(SECURITY_ALERT.as_bytes());
             return 255;
         }
     };
@@ -670,7 +675,7 @@ fn lint(
         let (description, failed) = match describe(&this, ini, env.clone()) {
             Ok(described) => described,
             Err(Refusal::Redirect) => {
-                Process.write(SECURITY_ALERT.as_bytes());
+                let _ = Process.write(SECURITY_ALERT.as_bytes());
                 return 255;
             }
         };
@@ -688,7 +693,7 @@ fn lint(
         };
         line.extend_from_slice(&name);
         line.push(b'\n');
-        Process.write(&line);
+        let _ = Process.write(&line);
         if this.words.len() < 2 {
             return exit_code;
         }

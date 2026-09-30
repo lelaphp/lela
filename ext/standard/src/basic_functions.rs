@@ -18,7 +18,7 @@ use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
-use constants::{CONNECTION_ABORTED, CONNECTION_NORMAL, INI_PERDIR, INI_SYSTEM, INI_USER};
+use constants::{CONNECTION_ABORTED, INI_PERDIR, INI_SYSTEM, INI_USER};
 pub(crate) use constants::{INI_SCANNER_NORMAL, INI_SCANNER_RAW, INI_SCANNER_TYPED};
 
 /// `INI_SCANNER_NORMAL`, `INI_SCANNER_RAW` and `INI_SCANNER_TYPED`.
@@ -1278,9 +1278,9 @@ fn ini_parse_quantity(req: &mut Request, shorthand: PhpString) -> i64 {
     value
 }
 
-/// `connection_aborted(): int`: `PG(connection_status)`'s aborted bit.
-/// No host of this engine reports a client gone yet, so the status is
-/// `CONNECTION_NORMAL` throughout, as it is under php's CLI.
+/// `connection_aborted(): int`: `PG(connection_status)`'s aborted bit,
+/// which a host's sink sets by refusing a write
+/// (`php_handle_aborted_connection`); `CONNECTION_NORMAL` until then.
 ///
 /// ```php
 /// var_dump(connection_aborted(), connection_status(), CONNECTION_NORMAL, CONNECTION_ABORTED, CONNECTION_TIMEOUT, INI_USER, INI_PERDIR, INI_SYSTEM, INI_ALL);
@@ -1297,8 +1297,8 @@ fn ini_parse_quantity(req: &mut Request, shorthand: PhpString) -> i64 {
 /// int(7)
 /// ```
 #[php_function]
-fn connection_aborted() -> i64 {
-    CONNECTION_NORMAL & CONNECTION_ABORTED
+fn connection_aborted(req: &mut Request) -> i64 {
+    req.connection_status() & CONNECTION_ABORTED
 }
 
 /// `connection_status(): int`: `PG(connection_status)`, see
@@ -1311,8 +1311,8 @@ fn connection_aborted() -> i64 {
 /// bool(true)
 /// ```
 #[php_function]
-fn connection_status() -> i64 {
-    CONNECTION_NORMAL
+fn connection_status(req: &mut Request) -> i64 {
+    req.connection_status()
 }
 
 /// `ignore_user_abort(?bool $enable = null): int`: `PG(ignore_user_abort)`

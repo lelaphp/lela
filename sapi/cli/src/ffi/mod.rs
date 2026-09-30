@@ -30,6 +30,45 @@ pub(crate) fn standard_fds() -> [Option<OwnedFd>; 3] {
     })
 }
 
+/// `sapi_cli_single_write` over fd 1 until every byte went
+/// (`Z/sapi/cli/php_cli.c:239`): `write(2)`, again where it was
+/// interrupted, and after a wait for the fd where it would block; the
+/// error of one the fd refused. What the standard library's stdout
+/// hides, since it answers a closed fd 1 as though the bytes went.
+pub(crate) fn write_stdout(mut bytes: &[u8]) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        // SAFETY: `write(2)` reads `bytes.len()` bytes from the slice,
+        // which is live and that long for the call, and touches nothing
+        // else.
+        let wrote = unsafe { libc::write(1, bytes.as_ptr().cast(), bytes.len()) };
+        if let Ok(wrote) = usize::try_from(wrote) {
+            bytes = bytes.get(wrote..).unwrap_or_default();
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            std::io::ErrorKind::Interrupted => {}
+            std::io::ErrorKind::WouldBlock => wait_writable(),
+            _ => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// `sapi_cli_select(STDOUT_FILENO)`: fd 1 waited for until it takes a
+/// write, a minute at most, `default_socket_timeout` at its default, and
+/// the write tried again either way, as php's loop tries it.
+fn wait_writable() {
+    let mut fd = libc::pollfd {
+        fd: 1,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: `poll(2)` reads and writes the one `pollfd` it is handed,
+    // which is live for the call.
+    let _ = unsafe { libc::poll(&raw mut fd, 1, 60_000) };
+}
+
 /// `php_cli_server_get_system_time` (`Z/sapi/cli/php_cli_server.c:267`):
 /// the time now in the process's local zone, `php_localtime_r` and
 /// `php_asctime_r`, as `Wed Jun  1 21:49:08 2026` without the line end

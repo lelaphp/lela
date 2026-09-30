@@ -228,6 +228,8 @@ fn connect(
     let timeout = timeval(default_timeout(req).trunc());
     let xport = Xport::Client {
         timeout,
+        connect: true,
+        persistent: None,
         socket,
         context,
     };
@@ -698,6 +700,8 @@ fn open(
     let timeout = timeval(default_timeout(req).trunc());
     let xport = Xport::Client {
         timeout,
+        connect: true,
+        persistent: None,
         socket,
         context,
     };
@@ -775,6 +779,8 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
     let socket = SocketOptions::default();
     let xport = Xport::Client {
         timeout,
+        connect: true,
+        persistent: None,
         socket,
         context: None,
     };

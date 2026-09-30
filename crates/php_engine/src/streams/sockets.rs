@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use php_heap::{Readiness, SockOpt};
 
-use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf, stat_buf, strerror};
+use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
     BindTo, Cast, Crypto, CryptoSocket, Handshake, OptionAnswer, Request, SocketOptions, Stream,
@@ -190,12 +190,12 @@ enum Role {
 }
 
 impl Socket {
-    fn new(sock: Sock, label: &'static str, timeout: Option<Duration>) -> Socket {
+    fn new(sock: Option<Sock>, label: &'static str, timeout: Option<Duration>) -> Socket {
         Socket {
             crypto: None,
             context: None,
             own: None,
-            sock: Some(sock),
+            sock,
             label,
             is_blocked: true,
             timeout,
@@ -310,6 +310,22 @@ impl Socket {
     /// `PHP_STREAM_CONTEXT(stream)`, as the stream set it, for the layer.
     pub(crate) fn set_ctx(&mut self, context: Option<Resource>) {
         self.context = context;
+    }
+
+    /// The connection taken out of the stream it served, which is left
+    /// holding no socket: what a persistent stream's resource keeps in
+    /// the persistent list when its last owner lets go.
+    pub(crate) fn detach(&mut self) -> Socket {
+        let empty = Socket::new(None, self.label, self.timeout);
+        std::mem::replace(self, empty)
+    }
+
+    /// `forget_persistent_resource_id_numbers`: what of the request the
+    /// socket kept, its stream and its `stream->ctx`, forgotten before it
+    /// outlives the request.
+    pub(crate) fn forget_request(&mut self) {
+        self.own = None;
+        self.context = None;
     }
 
     /// `recv(2)` with `MSG_DONTWAIT` on a socket that blocks: the socket
@@ -509,6 +525,7 @@ impl Ops for Socket {
         _req: &mut Request,
         cast: Cast,
         _own: Option<Stream>,
+        _ret: Ret,
     ) -> CastTarget<'_> {
         if cast != Cast::Select && self.crypto_active() {
             return CastTarget::Refused;
@@ -722,12 +739,29 @@ impl Socket {
                 let (client, addr) = listener.accept().map_err(|e| socket_error(&e).1)?;
                 (Sock::Unix(client), unix_text(&addr))
             }
+            // A socket the stream was handed and given the `tcp` ops,
+            // `php://stdin` over a listening socket: `accept(2)` of
+            // whatever family it is, as `php_network_accept_incoming` takes
+            // any, through a copy of the fd shaped as that family's listener.
+            Sock::Generic(handed) if self.label != GENERIC => {
+                let copy = handed.as_fd().try_clone_to_owned();
+                let copy = copy.map_err(|e| socket_error(&e).1)?;
+                let inet = TcpListener::from(copy);
+                if inet.local_addr().is_ok() {
+                    let (client, addr) = inet.accept().map_err(|e| socket_error(&e).1)?;
+                    (Sock::Tcp(client), inet_text(&addr))
+                } else {
+                    let unix = UnixListener::from(OwnedFd::from(inet));
+                    let (client, addr) = unix.accept().map_err(|e| socket_error(&e).1)?;
+                    (Sock::Unix(client), unix_text(&addr))
+                }
+            }
             _ => {
                 let error = std::io::Error::from_raw_os_error(95);
                 return Err(socket_error(&error).1);
             }
         };
-        let mut accepted = Socket::new(client, self.label, self.timeout);
+        let mut accepted = Socket::new(Some(client), self.label, self.timeout);
         accepted.is_blocked = self.is_blocked;
         accepted.crypto = self.crypto.as_ref().map(|layer| layer.accepted());
         Ok((accepted, want_peer.then_some(peer)))
@@ -1043,6 +1077,11 @@ fn bind_inet(
     Err(last)
 }
 
+/// `php_stream_generic_socket_ops.label`, the kind of a socket the stream
+/// was handed, whose options take no `transport` operation but a name,
+/// a send, a receive and a shutdown.
+const GENERIC: &str = "generic_socket";
+
 /// The `transports` `PHP_MINIT(standard)` registers
 /// (`Z/ext/standard/basic_functions.c:315`), in its order, each with the
 /// label of the ops `php_stream_generic_socket_factory` picks for it.
@@ -1107,12 +1146,15 @@ impl Request {
     /// registered being php's `Unable to find the socket transport`; for
     /// one an extension registered, its crypto layer made first, as the
     /// factory makes the stream; then a client connected to the rest of
-    /// the name, within `timeout`, or a server bound to it, and listening
-    /// where `listen` says. The stream is `r+`, of the `transport`'s kind,
-    /// with the name as written as its `uri`, the `context` as its own and
-    /// `default_socket_timeout` as its read timeout; a client's layer is
-    /// then asked [`Crypto::connected`], and one that refuses fails the
-    /// connect with no text. A failure is its error code and text, which
+    /// the name, within `timeout`, where it asked to connect, or a server
+    /// bound to it, and listening where `listen` says. A client that did
+    /// not ask holds no socket, php's `sock->socket == -1`, the rest of the
+    /// name not parsed: a write takes nothing, a read fails, and it is at
+    /// its end. The stream is `r+`, of the `transport`'s kind, with the
+    /// name as written as its `uri`, the `context` as its own and
+    /// `default_socket_timeout` as its read timeout; a connected client's
+    /// layer is then asked [`Crypto::connected`], and one that refuses
+    /// fails the connect with no text. A failure is its error code and text, which
     /// the natives print; the `Err` is the memory limit or what the
     /// layer's factory threw.
     pub fn xport_create(
@@ -1130,6 +1172,17 @@ impl Request {
             } else {
                 (&b"tcp"[..], name)
             };
+        let persistent = match &xport {
+            Xport::Client { persistent, .. } => persistent.clone(),
+            Xport::Server { .. } => None,
+        };
+        // `php_stream_from_persistent_id` first, a live stream under the
+        // key answered as it stands.
+        if let Some(key) = &persistent
+            && let Some(stream) = self.persistent_stream(key)?
+        {
+            return Ok(Ok(stream));
+        }
         let Some(found) = self.transport_named(protocol) else {
             let shown = String::from_utf8_lossy(&protocol[..protocol.len().min(31)]);
             return Ok(Err(XportFailure {
@@ -1162,11 +1215,17 @@ impl Request {
                 ("tcp_socket", Some((transport.label, layer)))
             }
         };
-        let made = self.make_sock(label, rest, xport);
-        let sock = match made {
-            Ok(sock) => sock,
-            Err(failed) => return Ok(Err(failed)),
+        // `php_stream_generic_socket_factory` makes the stream with
+        // `sock->socket = -1`, and only a client asked to connect, or a
+        // server, is handed a socket.
+        let sock = match xport {
+            Xport::Client { connect: false, .. } => None,
+            xport => match self.make_sock(label, rest, xport) {
+                Ok(sock) => Some(sock),
+                Err(failed) => return Ok(Err(failed)),
+            },
         };
+        let connected = sock.is_some();
         let (label, crypto) = match crypto {
             Some((label, layer)) => (label, Some(layer)),
             None => (label, None),
@@ -1177,9 +1236,9 @@ impl Request {
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
         stream.orig_path = Some(name.to_vec());
         stream.flags.no_seek = true;
-        let stream = self.stream_alloc(stream)?;
+        let stream = self.stream_alloc_as(stream, persistent.is_some())?;
         stream.set_ctx(self, context);
-        if role == Role::Peer {
+        if role == Role::Peer && connected {
             let connected = self
                 .stream_op(stream, |req, s| {
                     s.ops
@@ -1194,6 +1253,9 @@ impl Request {
                     text: String::new(),
                 }));
             }
+        }
+        if let Some(key) = persistent {
+            self.hold_persistent(key, stream);
         }
         Ok(Ok(stream))
     }
@@ -1261,6 +1323,39 @@ impl Request {
         self.xport_stream(fd, None, true)
     }
 
+    /// What `php_stream_url_wrap_php` makes of a `php://` fd that is a
+    /// socket (`Z/ext/standard/php_fopen_wrapper.c:361-372`):
+    /// `php_stream_sock_open_from_socket`, then `stream->ops =
+    /// &php_stream_socket_ops`, so the stream is `tcp_socket` whatever the
+    /// socket's family and takes the `transport`'s operations, an accept
+    /// among them, which is how a CLI handed a listening socket as its
+    /// stdin accepts on it. Served by the binary (`process`), since the
+    /// child is `PHP_BINARY`.
+    ///
+    /// ```php
+    /// $path = sys_get_temp_dir() . '/' . uniqid('s') . '.sock';
+    /// $server = stream_socket_server("unix://$path");
+    /// $child = proc_open([PHP_BINARY, '-n', '-r', '$c = stream_socket_accept(fopen("php://stdin", "r")); echo stream_get_meta_data(STDIN)["stream_type"], " ", get_resource_type($c), "\n"; fwrite($c, "hi");'], [0 => $server, 1 => ['pipe', 'w']], $pipes);
+    /// $client = stream_socket_client("unix://$path");
+    /// var_dump(stream_get_contents($client), stream_get_contents($pipes[1]), proc_close($child));
+    /// unlink($path);
+    /// ```
+    /// ```expect process
+    /// string(2) "hi"
+    /// string(18) "tcp_socket stream
+    /// "
+    /// int(0)
+    /// ```
+    pub(crate) fn php_socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown> {
+        let stream = self.socket_stream(fd)?;
+        self.stream_op(stream, |_, s| {
+            if let Some(socket) = s.ops.as_socket() {
+                socket.label = "tcp_socket";
+            }
+        });
+        Ok(stream)
+    }
+
     /// `php_stream_xport_create(name, 0 flags)` handed a socket
     /// afterwards, as `socket_export_stream` makes one
     /// (`Z/ext/sockets/sockets.c:2698`): the kind the registered xport
@@ -1294,9 +1389,9 @@ impl Request {
             Some((_, Found::Engine("udg_socket"))) => {
                 (Sock::Udg(UnixDatagram::from(fd)), "udg_socket")
             }
-            _ => (Sock::Generic(UnixStream::from(fd)), "generic_socket"),
+            _ => (Sock::Generic(UnixStream::from(fd)), GENERIC),
         };
-        let mut kind = Socket::new(sock, label, default_timeout(self));
+        let mut kind = Socket::new(Some(sock), label, default_timeout(self));
         kind.is_blocked = blocking;
         kind.crypto = crypto;
         let mut stream = PhpStream::new(Box::new(kind), b"r+");

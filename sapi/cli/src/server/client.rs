@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use php_proto::http::{self, Credentials, Events, Parser};
 use php_sapi::{
-    Method, OutputSink, PHP_VERSION, RequestDescription, ResponseHead, Routed, WebRequest,
+    Aborted, Method, OutputSink, PHP_VERSION, RequestDescription, ResponseHead, Routed, WebRequest,
 };
 
 use super::Site;
@@ -544,13 +544,17 @@ impl Wire {
     }
 
     /// `php_cli_server_client_send_through`: every byte, or as many as
-    /// the peer took before it went away.
-    fn send(&mut self, bytes: &[u8]) {
-        if let Some(stream) = &mut self.stream
-            && stream.write_all(bytes).is_err()
-        {
+    /// the peer took before it went away; whether all of them went, which
+    /// a peer that is gone refuses.
+    fn send(&mut self, bytes: &[u8]) -> bool {
+        let Some(stream) = &mut self.stream else {
+            return false;
+        };
+        if stream.write_all(bytes).is_err() {
             self.stream = None;
+            return false;
         }
+        true
     }
 }
 
@@ -569,8 +573,35 @@ impl WireSink {
 }
 
 impl OutputSink for WireSink {
-    fn write(&mut self, bytes: &[u8]) {
-        self.wire().send(bytes);
+    /// `sapi_cli_server_ub_write`: a client that went away is
+    /// `php_handle_aborted_connection`, with no status set, so a script
+    /// that ignores the abort sees `connection_aborted()`.
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/' . uniqid('srv');
+    /// mkdir($dir);
+    /// file_put_contents("$dir/index.php", '<?php ignore_user_abort(true); for ($i = 0; $i < 50 && !connection_aborted(); $i++) { echo str_repeat("x", 65536); flush(); usleep(20000); } file_put_contents(__DIR__ . "/log", connection_aborted() . connection_status() . ($i < 50 ? " early" : " late"));');
+    /// $port = 18000 + random_int(0, 999);
+    /// $p = proc_open([PHP_BINARY, '-n', '-S', "127.0.0.1:$port", '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+    /// usleep(300000);
+    /// $c = stream_socket_client("tcp://127.0.0.1:$port");
+    /// fwrite($c, "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    /// fread($c, 1000);
+    /// fclose($c);
+    /// for ($i = 0; $i < 50 && !file_exists("$dir/log"); $i++) usleep(100000);
+    /// echo file_get_contents("$dir/log"), "\n";
+    /// proc_terminate($p); proc_close($p);
+    /// unlink("$dir/log"); unlink("$dir/index.php"); rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// 11 early
+    /// ```
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
+        if self.wire().send(bytes) {
+            Ok(())
+        } else {
+            Err(Aborted { exit_status: None })
+        }
     }
 
     fn flush(&mut self) {}
@@ -578,7 +609,7 @@ impl OutputSink for WireSink {
     fn send_headers(&mut self, head: &ResponseHead) {
         let mut wire = self.wire();
         let bytes = wire.render(head);
-        wire.send(&bytes);
+        let _ = wire.send(&bytes);
     }
 
     /// `sapi_cli_server_log_message`: the entry on the server's log.

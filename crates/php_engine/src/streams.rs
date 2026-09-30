@@ -43,6 +43,7 @@ use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 use crate::wrapper::TemporaryCheck;
 
 mod filters;
+pub(crate) mod persistent;
 mod rfc2397;
 mod sockets;
 pub(crate) use filters::FilterCall;
@@ -183,29 +184,18 @@ pub(crate) trait Ops: Send {
 
     /// `ops->cast` to a fd, `cast` naming which of php's casts, what the
     /// kind is to it, [`CastTarget`]; `own` is the stream the kind is
-    /// under, which a user-space stream's `stream_cast` must not answer.
-    /// [`CastTarget::Refused`] for a kind with no fd, or none of the
-    /// kind `cast` asks for, php's `FAILURE`.
+    /// under, which a user-space stream's `stream_cast` must not answer,
+    /// and `ret` whether php hands the op a `ret` to fill or asks only
+    /// whether it would. [`CastTarget::Refused`] for a kind with no fd, or
+    /// none of the kind `cast` asks for, php's `FAILURE`.
     fn cast_target(
         &mut self,
         _req: &mut Request,
         _cast: Cast,
         _own: Option<Stream>,
+        _ret: Ret,
     ) -> CastTarget<'_> {
         CastTarget::Refused
-    }
-
-    /// `ops->cast` with no return pointer, what `php_stream_can_cast`
-    /// asks: [`Ops::cast_target`] for every kind but the one whose
-    /// answer is a call, which asks it without the warnings a cast with
-    /// a place to write raises.
-    fn can_cast_target(
-        &mut self,
-        req: &mut Request,
-        cast: Cast,
-        own: Option<Stream>,
-    ) -> CastTarget<'_> {
-        self.cast_target(req, cast, own)
     }
 
     /// `ops->set_option` for the options [`StreamOption`] names: php's
@@ -324,6 +314,21 @@ pub(crate) enum CastTarget<'a> {
     Host(Standard),
     Stream(Stream),
     Refused,
+}
+
+/// What `_php_stream_cast` is handed as `ret`: a place for the fd, which
+/// a cast fills and which may make something to fill it with, or `NULL`,
+/// `php_stream_can_cast`, which asks only whether the kind would answer
+/// and neither flushes, seeks, converts nor warns of its own. A kind that
+/// answers the two alike ignores it; `php_stream_temp_cast` refuses the
+/// question with no `ret` while its bytes are in memory, where a cast
+/// moves them to a file (`Z/main/streams/memory.c:463-488`), and `php_userstreamop_cast` warns
+/// of a bad `stream_cast` only when a `ret` was handed
+/// (`Z/main/streams/userspace.c:1406`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ret {
+    Null,
+    Given,
 }
 
 /// `php_stream_statbuf`'s thirteen fields in the order `php_fstat` puts
@@ -1216,15 +1221,30 @@ impl PhpStream {
         self.flush_closing(req, false)
     }
 
-    /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd:
-    /// short of `PHP_STREAM_AS_FD_FOR_SELECT` the stream is flushed and a
-    /// kind that seeks is sought to the position, the read buffer
-    /// dropped; the kind is asked for its fd, and one with none
-    /// is php's `Cannot represent a stream of type %s as a %s` under
-    /// `report`; a cast without `PHP_STREAM_CAST_INTERNAL` that leaves
-    /// bytes in the read buffer is php's warning that they are lost.
+    /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd, with a
+    /// `ret` to fill.
     pub(crate) fn cast(&mut self, req: &mut Request, cast: Cast, warn: bool) -> Option<RawFd> {
-        if cast != Cast::Select {
+        self.cast_as(req, cast, Ret::Given, warn)
+    }
+
+    /// `php_stream_can_cast`, `_php_stream_cast` with no `ret` and no
+    /// `show_err`: whether the kind would answer the cast, asked of it
+    /// without flushing, seeking or converting the stream.
+    pub(crate) fn can_cast(&mut self, req: &mut Request, cast: Cast) -> bool {
+        self.cast_as(req, cast, Ret::Null, false).is_some()
+    }
+
+    /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd: with a
+    /// `ret` and short of `PHP_STREAM_AS_FD_FOR_SELECT`, the stream is
+    /// flushed and a kind that seeks is sought to the position, the read
+    /// buffer dropped; the kind is asked for its fd, and one with none is
+    /// php's `Cannot represent a stream of type %s as a %s` under `warn`;
+    /// a cast without `PHP_STREAM_CAST_INTERNAL` that leaves bytes in the
+    /// read buffer is php's warning that they are lost. Asked with no
+    /// `ret`, it answers the fd too where the kind has one, and `Some` is
+    /// php's `SUCCESS`.
+    fn cast_as(&mut self, req: &mut Request, cast: Cast, ret: Ret, warn: bool) -> Option<RawFd> {
+        if ret == Ret::Given && cast != Cast::Select {
             self.flush(req);
             if self.ops.seekable() && !self.flags.no_seek {
                 let Self { ops, position, .. } = self;
@@ -1237,7 +1257,7 @@ impl PhpStream {
         // `php_openssl_sockop_cast`'s `PHP_STREAM_AS_FD_FOR_SELECT`: what
         // the crypto layer holds decrypted moved into the empty read
         // buffer, so `select(2)` is not asked to wait for bytes already had.
-        if cast == Cast::Select && self.writepos == self.readpos {
+        if ret == Ret::Given && cast == Cast::Select && self.writepos == self.readpos {
             let pending = self
                 .ops
                 .as_socket()
@@ -1258,14 +1278,14 @@ impl PhpStream {
             return None;
         }
         let own = self.res.map(Stream::of);
-        let fd = match self.ops.cast_target(req, cast, own) {
+        let fd = match self.ops.cast_target(req, cast, own, ret) {
             CastTarget::Fd(fd) => Some(fd.as_raw_fd()),
             CastTarget::Host(standard) => req.host_fd(standard).map(|fd| fd.as_raw_fd()),
             // `php_stream_cast(intstream, castas, retptr, 1)`: the stream
             // in this one's place warns of itself, and this one of itself
             // after it where that failed.
             CastTarget::Stream(inner) => req
-                .stream_op(inner, |req, s| s.cast(req, cast, true))
+                .stream_op(inner, |req, s| s.cast_as(req, cast, ret, true))
                 .flatten(),
             CastTarget::Refused => None,
         };
@@ -1286,7 +1306,7 @@ impl PhpStream {
             return None;
         };
         let held = self.writepos - self.readpos;
-        if held > 0 && matches!(cast, Cast::Fd | Cast::Socket) {
+        if ret == Ret::Given && held > 0 && matches!(cast, Cast::Fd | Cast::Socket) {
             let text = format!(
                 "{}(): {held} bytes of buffered data lost during stream conversion!",
                 req.active_native()
@@ -1294,24 +1314,6 @@ impl PhpStream {
             warning(req, &text);
         }
         Some(fd)
-    }
-
-    /// `php_stream_can_cast` (`_php_stream_cast` with no `ret`): whether
-    /// the stream casts to a fd as `cast` asks, with nothing flushed or
-    /// sought and nothing warned of.
-    pub(crate) fn can_cast(&mut self, req: &mut Request, cast: Cast) -> bool {
-        if !self.readfilters.is_empty() || !self.writefilters.is_empty() {
-            return false;
-        }
-        let own = self.res.map(Stream::of);
-        match self.ops.can_cast_target(req, cast, own) {
-            CastTarget::Fd(_) => true,
-            CastTarget::Host(standard) => req.host_fd(standard).is_some(),
-            CastTarget::Stream(inner) => req
-                .stream_op(inner, |req, s| s.can_cast(req, cast))
-                .unwrap_or(false),
-            CastTarget::Refused => false,
-        }
     }
 
     /// `_php_stream_free` under `PHP_STREAM_FREE_CLOSE`
@@ -1405,6 +1407,9 @@ impl PhpStream {
         if let Some(taken) = taken {
             req.pclose_ret = taken.release(req);
         }
+        // `PHP_STREAM_FREE_CLOSE_PERSISTENT`: a persistent stream closed
+        // is gone from the list for every holder.
+        req.drop_persistent(res);
     }
 }
 
@@ -1866,16 +1871,28 @@ impl Ops for Temp {
 
     /// `php_stream_temp_cast` (`Z/main/streams/memory.c:463`): a file
     /// cast in this stream's place, the memory stream moved into a
-    /// temporary one first where it is still in memory.
+    /// temporary one first where it is still in memory; asked with no
+    /// `ret`, one still in memory is refused, nothing moved.
     fn cast_target(
         &mut self,
         req: &mut Request,
         _cast: Cast,
         _own: Option<Stream>,
+        ret: Ret,
     ) -> CastTarget<'_> {
         let Some(inner) = self.inner else {
             return CastTarget::Refused;
         };
+        if ret == Ret::Null {
+            let in_memory = req
+                .stream_ref(inner)
+                .is_some_and(|s| s.ops.memory_buffer().is_some());
+            return if in_memory {
+                CastTarget::Refused
+            } else {
+                CastTarget::Stream(inner)
+            };
+        }
         if !matches!(self.move_to_file(req, inner, None), Ok(true)) {
             return CastTarget::Refused;
         }
@@ -2216,6 +2233,7 @@ impl Ops for Stdio {
         _req: &mut Request,
         cast: Cast,
         _own: Option<Stream>,
+        _ret: Ret,
     ) -> CastTarget<'_> {
         if cast == Cast::Socket {
             return CastTarget::Refused;
@@ -2362,16 +2380,19 @@ pub(crate) enum Standard {
 enum HostFd {
     /// fd 0 under a host that handed none, over the body it reads.
     Stdin(Memory),
-    Stdout,
-    Stderr,
+    /// fd 1 and fd 2, each with the label php's kind over the host's fd
+    /// has: `tcp_socket` over a socket, as `php_stream_url_wrap_php`
+    /// swaps the ops, and `STDIO` otherwise.
+    Stdout(&'static str),
+    Stderr(&'static str),
 }
 
 impl HostFd {
     fn standard(&self) -> Standard {
         match self {
             HostFd::Stdin(_) => Standard::Stdin,
-            HostFd::Stdout => Standard::Stdout,
-            HostFd::Stderr => Standard::Stderr,
+            HostFd::Stdout(_) => Standard::Stdout,
+            HostFd::Stderr(_) => Standard::Stderr,
         }
     }
 
@@ -2385,17 +2406,20 @@ impl HostFd {
 
 impl Ops for HostFd {
     fn label(&self) -> &'static str {
-        "STDIO"
+        match self {
+            HostFd::Stdin(_) => "STDIO",
+            HostFd::Stdout(label) | HostFd::Stderr(label) => label,
+        }
     }
 
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         match self {
             HostFd::Stdin(body) => body.write(req, buf),
-            HostFd::Stdout => {
+            HostFd::Stdout(_) => {
                 req.write_stdout(buf);
                 Some(buf.len())
             }
-            HostFd::Stderr => {
+            HostFd::Stderr(_) => {
                 req.write_stderr(buf);
                 Some(buf.len())
             }
@@ -2418,7 +2442,7 @@ impl Ops for HostFd {
     fn close(&mut self, req: &mut Request) -> i32 {
         match self {
             HostFd::Stdin(body) => body.close(req),
-            HostFd::Stdout | HostFd::Stderr => 0,
+            HostFd::Stdout(_) | HostFd::Stderr(_) => 0,
         }
     }
 
@@ -2475,6 +2499,7 @@ impl Ops for HostFd {
         _req: &mut Request,
         cast: Cast,
         _own: Option<Stream>,
+        _ret: Ret,
     ) -> CastTarget<'_> {
         if cast == Cast::Socket {
             return CastTarget::Refused;
@@ -2747,8 +2772,8 @@ fn php_open(
                     mode: TempMode::ReadOnly,
                     label: "STDIO",
                 }),
-                b"stdout" => HostFd::Stdout,
-                _ => HostFd::Stderr,
+                b"stdout" => HostFd::Stdout(host_label(req, Standard::Stdout)),
+                _ => HostFd::Stderr(host_label(req, Standard::Stderr)),
             };
             let mut stream = PhpStream::new(Box::new(kind), mode);
             stream.flags.no_seek = true;
@@ -2908,8 +2933,17 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
             )));
         }
     };
-    let kind = fd_kind(&fd, mode);
-    Ok(Ok(req.stream_from_fd(fd, kind)?))
+    Ok(Ok(fd_stream(req, fd, mode)?))
+}
+
+/// The stream a `php://` fd opens as: over a socket, the `tcp_socket` kind
+/// php swaps its ops to ([`Request::php_socket_stream`]); over anything
+/// else, the plain file's kind.
+fn fd_stream(req: &mut Request, fd: OwnedFd, mode: &[u8]) -> Result<Stream, Thrown> {
+    match fd_kind(&fd, mode) {
+        FdStream::Socket => req.php_socket_stream(fd),
+        kind => req.stream_from_fd(fd, kind),
+    }
 }
 
 /// What a `php://` fd opens as: a socket's kind where
@@ -2969,9 +3003,8 @@ fn standard_open(req: &mut Request, standard: Standard, mode: &[u8]) -> Result<O
         Ok(fd) => fd,
         Err(error) => return Ok(Err(strerror(&error))),
     };
-    let kind = fd_kind(&fd, mode);
-    let seeks = standard == Standard::Stdin || matches!(kind, FdStream::Socket);
-    let stream = req.stream_from_fd(fd, kind)?;
+    let seeks = standard == Standard::Stdin || matches!(fd_kind(&fd, mode), FdStream::Socket);
+    let stream = fd_stream(req, fd, mode)?;
     if !seeks {
         req.stream_op(stream, |_, opened| {
             opened.flags.no_seek = true;
@@ -2979,6 +3012,17 @@ fn standard_open(req: &mut Request, standard: Standard, mode: &[u8]) -> Result<O
         });
     }
     Ok(Ok(stream))
+}
+
+/// The label of php's kind over the host's fd `standard`: `tcp_socket`
+/// where it is a socket, `STDIO` where it is anything else or the host
+/// handed none.
+fn host_label(req: &Request, standard: Standard) -> &'static str {
+    let socket = req
+        .host_fd(standard)
+        .and_then(|fd| fd.try_clone_to_owned().ok())
+        .is_some_and(|fd| matches!(fd_kind(&fd, b""), FdStream::Socket));
+    if socket { "tcp_socket" } else { "STDIO" }
 }
 
 /// Which of the three a `php://` name is, `stdin` for any other.
@@ -3950,7 +3994,19 @@ impl Request {
     /// `php_stream_alloc`'s `zend_register_resource(ret, le_stream)`: the
     /// stream as the payload of a resource of the `stream` type, one
     /// owner, under the next id.
-    pub(crate) fn stream_alloc(&mut self, mut stream: PhpStream) -> Result<Stream, Thrown> {
+    pub(crate) fn stream_alloc(&mut self, stream: PhpStream) -> Result<Stream, Thrown> {
+        self.stream_alloc_as(stream, false)
+    }
+
+    /// [`Request::stream_alloc`] under `le_pstream` where `persistent`
+    /// says, `_php_stream_alloc` handed a `persistent_id`: the resource's
+    /// type is `persistent stream`, whose regular-list destructor leaves
+    /// the socket open ([`persistent::dtor`]).
+    pub(crate) fn stream_alloc_as(
+        &mut self,
+        mut stream: PhpStream,
+        persistent: bool,
+    ) -> Result<Stream, Thrown> {
         // `_php_stream_alloc`'s `FG(auto_detect_line_endings)`
         // (`Z/main/streams/streams.c:326`).
         if self
@@ -3959,7 +4015,11 @@ impl Request {
         {
             stream.flags.eol = Eol::Detect;
         }
-        let kind = self.stream_type();
+        let kind = if persistent {
+            self.pstream_type()
+        } else {
+            self.stream_type()
+        };
         let res = self.new_resource(kind, Some(stream))?;
         if let Some(Some(stream)) = self.resource_native_mut::<Option<PhpStream>>(res.heap()) {
             stream.res = Some(res);
@@ -3999,10 +4059,12 @@ impl Request {
     }
 
     /// `php_stream_from_zval_no_verify_no_error`: the stream a value
-    /// names, which is an open resource of the `stream` type.
+    /// names, which is an open resource of the `stream` type or the
+    /// `persistent stream` type.
     pub(crate) fn stream_of(&self, value: &Value) -> Option<Stream> {
         let r = value.as_resource()?;
-        (r.kind() == Some(self.stream_type())).then(|| Stream::of(*r))
+        let kind = r.kind()?;
+        (kind == self.stream_type() || kind == self.pstream_type()).then(|| Stream::of(*r))
     }
 
     /// `php_stream_read_to_str` (`Z/main/streams/streams.c:822`): a
@@ -4102,22 +4164,47 @@ impl Stream {
             .flatten()
     }
 
-    /// `php_stream_can_cast`: whether [`Stream::cast`] would answer a fd,
-    /// asked with nothing flushed, sought or warned of, which a
-    /// user-space stream's `stream_cast` is asked without a place to
-    /// write its warnings to.
+    /// `php_stream_can_cast` (`Z/main/php_streams.h:567`), `_php_stream_cast`
+    /// handed no `ret`: whether the stream's kind would answer `cast`, asked
+    /// of the kind alone, the stream neither flushed, sought nor converted
+    /// and nothing warned of. A user-space stream's `stream_cast` is still
+    /// served, its bad answers refused in silence, and a `php://temp` whose
+    /// bytes are in memory answers no where a cast would move them to a
+    /// file first. What `stream_isatty` and ext/posix ask before they cast.
+    /// A refusal names the kind that refused, `stream->ops->label`, read
+    /// without asking the kind anything, which `php_posix_stream_get_fd`
+    /// prints; a stream closed or inside a call refuses as no kind.
     ///
     /// ```php
-    /// class W { public $context; function stream_open($p, $m, $o, &$op) { return true; } function stream_eof() { return false; } function stream_seek($o, $w) { echo "seek\n"; return true; } }
-    /// stream_wrapper_register('wr', 'W');
-    /// var_dump(stream_isatty(fopen('wr://x', 'r')));
+    /// class W { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_seek($o, $w) { echo "sought\n"; return true; }
+    ///     function stream_cast($as) { echo "cast $as\n"; return false; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// var_dump(stream_isatty(fopen('ww://x', 'r')));
+    /// $t = fopen('php://temp', 'w+'); fwrite($t, 'x');
+    /// var_dump(stream_isatty($t), fstat($t)['ino']);
     /// ```
     /// ```expect
+    /// cast 3
+    /// cast 0
     /// bool(false)
+    /// bool(false)
+    /// int(0)
     /// ```
-    pub fn can_cast(self, req: &mut Request, cast: Cast) -> bool {
-        req.stream_op(self, |req, stream| stream.can_cast(req, cast))
-            .unwrap_or(false)
+    ///
+    /// # Errors
+    ///
+    /// The label of a kind that would not answer the cast.
+    pub fn can_cast(self, req: &mut Request, cast: Cast) -> Result<(), &'static str> {
+        req.stream_op(self, |req, stream| {
+            if stream.can_cast(req, cast) {
+                Ok(())
+            } else {
+                Err(stream.ops.label())
+            }
+        })
+        .unwrap_or(Err(""))
     }
 
     /// `stream->writepos - stream->readpos`: the bytes read from the
@@ -4356,8 +4443,14 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) {
     req.pclose_ret = stream.free(req);
 }
 
-/// The `stream` resource type, `le_stream`, as `PHP_MINIT(streams)`
-/// registers it (`Z/main/streams/streams.c:1910`).
-pub(crate) fn register(resources: &mut crate::api::request::Resources) -> ResourceType {
-    resources.register_type(b"stream", Some(dtor))
+/// The `stream` resource type, `le_stream`, and the `persistent stream`
+/// type, `le_pstream`, as `PHP_MINIT(streams)` registers them in turn
+/// (`Z/main/streams/streams.c:1910-1911`).
+pub(crate) fn register(
+    resources: &mut crate::api::request::Resources,
+) -> (ResourceType, ResourceType) {
+    (
+        resources.register_type(b"stream", Some(dtor)),
+        resources.register_type(b"persistent stream", Some(persistent::dtor)),
+    )
 }

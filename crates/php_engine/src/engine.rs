@@ -348,11 +348,27 @@ impl FileHandles {
     }
 }
 
+/// A body write the host could not make, php's hosts'
+/// `php_handle_aborted_connection` (`Z/main/main.c:2722`): the client
+/// went away, or the process's fd 1 refused it; with what the host sets
+/// `EG(exit_status)` to first, php's CLI 255 (`sapi_cli_ub_write`), and
+/// nothing for a host that sets none, as the built-in server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Aborted {
+    pub exit_status: Option<i32>,
+}
+
 /// Where a request's bytes go (design §4.3 seam 4): the engine owns the
 /// header list, the status and the commit moment; a sink only writes.
 pub trait OutputSink {
-    /// Body bytes.
-    fn write(&mut self, bytes: &[u8]);
+    /// Body bytes, and whether the host could write them: [`Aborted`]
+    /// where the client went away or the fd refused them, which the
+    /// request meets as `php_handle_aborted_connection`.
+    ///
+    /// # Errors
+    ///
+    /// [`Aborted`], a write the host could not make.
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted>;
     /// The host may push what it has.
     fn flush(&mut self);
     /// The response's head, once, before the first body byte.
@@ -456,6 +472,13 @@ type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 /// php's `opcache.max_accelerated_files` default: the units one engine
 /// keeps before it drops half of them.
 const MAX_ACCELERATED_FILES: usize = 10_000;
+
+/// The idle entries the persistent pool keeps (design §4.10). php's list
+/// has no bound of its own, being one per worker process, whose count
+/// bounds it; one pool shared by every request thread keeps at most this
+/// many, and one given back past it is closed, so a burst of concurrent
+/// requests does not leave every connection it opened held open.
+const PERSISTENT_ENTRIES: usize = 1024;
 
 /// What every request shares: the bundle, the linked declarations, the
 /// engine states, the ini defaults and the loop (design §5.14).
@@ -568,6 +591,10 @@ pub(crate) struct Shared {
     /// which no request moves ([`IniOrigin::Admin`]).
     pub(crate) locked: Vec<Vec<u8>>,
     pub(crate) units: UnitCache,
+    /// The persistent pool (design §4.10, #1172): the sockets
+    /// `pfsockopen` and `STREAM_CLIENT_PERSISTENT` keep between requests,
+    /// php's `EG(persistent_list)`, each lent to one request at a time.
+    pub(crate) persistent: crate::api::abi::Pool<Vec<u8>, crate::streams::persistent::Entry>,
     /// The engine's interned strings (design §5.2, §5.14): what a unit's
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
@@ -1852,6 +1879,7 @@ impl EngineBuilder {
     /// The engine: every engine state built from the startup ini, in
     /// bundle order (ADR-0005), the declarations linked.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // one line per field of the engine
     pub fn build(self) -> Engine {
         let mut ini: Vec<(Vec<u8>, Vec<u8>)> = CORE_INI
             .iter()
@@ -1955,6 +1983,7 @@ impl EngineBuilder {
                 resume: self.resume,
                 locked,
                 units,
+                persistent: crate::api::abi::Pool::new(PERSISTENT_ENTRIES),
                 strings: Mutex::new(strings),
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
@@ -2782,6 +2811,7 @@ impl Engine {
         req.destroy_http_globals();
         req.destroy_uploaded_files();
         req.close_resources();
+        req.return_persistent();
         req.free_user_handlers();
         req.destroy_symbol_table();
         req.destroy_static_vars();
@@ -3263,8 +3293,9 @@ mod tests {
     }
 
     impl OutputSink for Kept {
-        fn write(&mut self, bytes: &[u8]) {
+        fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
             self.body.extend_from_slice(bytes);
+            Ok(())
         }
         fn flush(&mut self) {}
         fn send_headers(&mut self, _: &ResponseHead) {}

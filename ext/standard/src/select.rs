@@ -299,9 +299,10 @@ fn stream_select(
 }
 
 /// `stream_isatty($stream): bool`, `PHP_FUNCTION(stream_isatty)`
-/// (`Z/ext/standard/streamsfuncs.c:1601`): the stream's fd, cast
-/// for `select(2)` and then plainly, `false` for a kind with none, and
-/// then `isatty(3)` of it. What a witness's streams are here is a file,
+/// (`Z/ext/standard/streamsfuncs.c:1601`): the stream's fd, cast for
+/// `select(2)` and then plainly, each only where `php_stream_can_cast`
+/// says the kind would answer it, `false` for a kind with none, and then
+/// `isatty(3)` of it. What a witness's streams are here is a file,
 /// memory, and the standard streams as a pipe hands them over, none of
 /// them a terminal.
 ///
@@ -315,16 +316,34 @@ fn stream_select(
 /// bool(false)
 /// stream_isatty(): Argument #1 ($stream) must be of type resource, int given
 /// ```
+///
+/// The question is the kind's own answer: a user-space stream's
+/// `stream_cast` is served for each, and a stream it refuses is not
+/// sought.
+///
+/// ```php
+/// class W { public $context;
+///     function stream_open($p, $m, $o, &$op) { return true; }
+///     function stream_seek($o, $w) { echo "sought\n"; return true; }
+///     function stream_cast($as) { echo "cast $as\n"; return false; } }
+/// stream_wrapper_register('ww', 'W');
+/// var_dump(stream_isatty(fopen('ww://x', 'r')));
+/// ```
+/// ```expect
+/// cast 3
+/// cast 0
+/// bool(false)
+/// ```
 #[php_function]
 fn stream_isatty(req: &mut Request, stream: Stream) -> bool {
-    // `php_stream_can_cast` before each cast, so a stream that cannot
-    // is neither flushed nor sought, nor warned of.
-    let fd = if stream.can_cast(req, Cast::Select) {
+    // Each cast asked first and taken only where the kind would answer
+    // it, and a cast that fails after that is php's `-1`, no terminal.
+    let fd = if stream.can_cast(req, Cast::Select).is_ok() {
         stream.cast(req, Cast::Select, false)
-    } else if stream.can_cast(req, Cast::Internal) {
+    } else if stream.can_cast(req, Cast::Internal).is_ok() {
         stream.cast(req, Cast::Internal, false)
     } else {
-        None
+        return false;
     };
     fd.is_some_and(crate::ffi::isatty)
 }

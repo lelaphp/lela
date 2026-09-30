@@ -14,9 +14,10 @@
 //! `null`, and hand `php_stream_xport_create` its `socket` options, which
 //! `xp_socket.c` and `transports.c` read; `fsockopen` opens with none.
 //!
-//! What is not here: persistent sockets, which a request-scoped engine
-//! has no store for, so `pfsockopen` and `STREAM_CLIENT_PERSISTENT` open
-//! a socket of the request's own; and crypto, which is `ext/openssl`'s.
+//! `pfsockopen` and `STREAM_CLIENT_PERSISTENT` hand the engine php's
+//! persistent key, and the engine keeps the socket in its pool between
+//! requests (design §4.10). What is not here: crypto, which is
+//! `ext/openssl`'s.
 //!
 //! The natives, as `basic_functions.stub.php` declares them.
 //!
@@ -142,6 +143,7 @@ use php_ext::request::{
 use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::file::constants::{
+    STREAM_CLIENT_ASYNC_CONNECT, STREAM_CLIENT_CONNECT, STREAM_CLIENT_PERSISTENT,
     STREAM_SERVER_LISTEN, STREAM_SHUT_RD, STREAM_SHUT_RDWR, STREAM_SHUT_WR,
 };
 use crate::streamsfuncs::{NullContext, context_of, stream_ctx_option};
@@ -298,18 +300,25 @@ fn fsockopen(
     fsockopen_stream(req, "fsockopen", (hostname, port, timeout), error)
 }
 
-/// `pfsockopen(...)`, `fsockopen`'s persistent twin: a request here has
-/// no store a socket outlives it in, so the socket is the request's own,
-/// as `fsockopen`'s is.
+/// `pfsockopen(...)`, `fsockopen`'s persistent twin: the socket kept
+/// under `pfsockopen__<host>:<port>`, the host escaped as
+/// `php_stream_escape_persistent_key` escapes it, a resource of the
+/// `persistent stream` type; a second ask by the key answers the same
+/// resource, and `fclose` of one holder closes it for every holder.
 ///
 /// ```php
 /// $c = pfsockopen('udp://127.0.0.1', 9, $code, $message);
-/// var_dump(is_resource($c), $code, $message);
+/// $d = pfsockopen('udp://127.0.0.1', 9);
+/// var_dump($c, $code, $message, $c === $d);
+/// fclose($d);
+/// var_dump($c);
 /// ```
 /// ```expect
-/// bool(true)
+/// resource(%d) of type (persistent stream)
 /// int(0)
 /// string(0) ""
+/// bool(true)
+/// resource(%d) of type (Unknown)
 /// ```
 #[php_function]
 fn pfsockopen(
@@ -322,6 +331,21 @@ fn pfsockopen(
 ) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
     let error = (&error_code, &error_message);
     fsockopen_stream(req, "pfsockopen", (hostname, port, timeout), error)
+}
+
+/// `php_stream_escape_persistent_key` (`Z/main/streams/streams.c:144`):
+/// the host whole, a NUL written `\0` and a backslash `\\`, so two
+/// hosts that differ past a NUL key two persistent streams (GH-22617).
+fn persistent_key(host: &[u8]) -> Vec<u8> {
+    let mut escaped = Vec::with_capacity(host.len());
+    for &b in host {
+        match b {
+            0 => escaped.extend_from_slice(b"\\0"),
+            b'\\' => escaped.extend_from_slice(b"\\\\"),
+            b => escaped.push(b),
+        }
+    }
+    escaped
 }
 
 /// `php_fsockopen_stream` for `native`, the name its `ValueError` prints.
@@ -344,8 +368,17 @@ fn fsockopen_stream(
         hostname.extend_from_slice(format!(":{port}").as_bytes());
     }
     let timeout = if limited { timeval(timeout) } else { None };
+    // `pfsockopen__%s:%ld`, the host escaped and the port as given.
+    let persistent = (native == "pfsockopen").then(|| {
+        let mut key = b"pfsockopen__".to_vec();
+        key.extend_from_slice(&persistent_key(&host));
+        key.extend_from_slice(format!(":{port}").as_bytes());
+        key
+    });
     let xport = Xport::Client {
         timeout,
+        connect: true,
+        persistent,
         socket: SocketOptions::default(),
         context: None,
     };
@@ -448,6 +481,41 @@ fn fsockopen_stream(
 /// bool(false)
 /// string(42) "local_addr context option is not a string."
 /// ```
+///
+/// `STREAM_CLIENT_PERSISTENT` keeps the client under
+/// `stream_socket_client__<address>`, a `persistent stream`, which the
+/// next ask by the address answers while it is alive.
+///
+/// ```php
+/// $s = stream_socket_server('tcp://127.0.0.1:0');
+/// $at = 'tcp://' . stream_socket_get_name($s, false);
+/// $a = stream_socket_client($at, $code, $message, 1, STREAM_CLIENT_CONNECT | STREAM_CLIENT_PERSISTENT);
+/// $b = stream_socket_client($at, $code, $message, 1, STREAM_CLIENT_CONNECT | STREAM_CLIENT_PERSISTENT);
+/// var_dump(get_resource_type($a), $a === $b, $a === stream_socket_client($at));
+/// ```
+/// ```expect
+/// string(17) "persistent stream"
+/// bool(true)
+/// bool(false)
+/// ```
+///
+/// A client whose `$flags` carry neither `STREAM_CLIENT_CONNECT` nor
+/// `STREAM_CLIENT_ASYNC_CONNECT` connects nowhere and parses nothing: the
+/// stream holds no socket, a write takes nothing, a read fails and it is
+/// at its end.
+///
+/// ```php
+/// $c = stream_socket_client('abc', $code, $message, 0, 0);
+/// var_dump(get_resource_type($c), $code, $message, fwrite($c, "x"), fread($c, 10), feof($c));
+/// ```
+/// ```expect
+/// string(6) "stream"
+/// int(0)
+/// string(0) ""
+/// int(0)
+/// bool(false)
+/// bool(true)
+/// ```
 #[php_function]
 fn stream_socket_client(
     req: &mut Request,
@@ -458,7 +526,6 @@ fn stream_socket_client(
     #[php(default = STREAM_CLIENT_CONNECT)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
-    let _ = flags;
     let (socket, context) = socket_options(req, context)?;
     let host = address.as_bytes().to_vec();
     let timeout = match timeout {
@@ -473,6 +540,13 @@ fn stream_socket_client(
         &host,
         Xport::Client {
             timeout: timeval(timeout),
+            connect: flags & (STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT) != 0,
+            // `stream_socket_client__%s`, the address escaped.
+            persistent: (flags & STREAM_CLIENT_PERSISTENT != 0).then(|| {
+                let mut key = b"stream_socket_client__".to_vec();
+                key.extend_from_slice(&persistent_key(&host));
+                key
+            }),
             socket,
             context,
         },

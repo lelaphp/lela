@@ -931,6 +931,14 @@ fn produced_output(req: &mut Request, at: usize) {
     }
 }
 
+/// `php_output_set_status(PHP_OUTPUT_DISABLED)` (`Z/main/output.c:209`):
+/// the low bits of `OG(flags)` replaced by the one, so nothing reaches
+/// the host again.
+pub(crate) fn disable(req: &mut Request) {
+    let flags = &mut req.output_mut().flags;
+    *flags = (*flags & !0xf) | DISABLED;
+}
+
 /// `php_output_header` (`Z/main/output.c:102`): where the body started,
 /// taken once, and the header block committed through `php_header`;
 /// the layer is disabled when that refuses it.

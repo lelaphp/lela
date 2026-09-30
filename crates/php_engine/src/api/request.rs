@@ -38,7 +38,7 @@ use crate::api::values::{
     ValueRef,
 };
 use crate::engine::{
-    Configured, ConfiguredKey, MethodAt, NativeMethod, OutputSink, RequestDescription,
+    Aborted, Configured, ConfiguredKey, MethodAt, NativeMethod, OutputSink, RequestDescription,
     ResponseHead, Shared,
 };
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
@@ -208,13 +208,16 @@ impl ConstantRow {
 /// (`Z/main/main.c:1086-1129`): `PG(during_request_startup)`, set by
 /// `php_request_startup` and cleared by the CLI before it compiles the
 /// file (`Z/sapi/cli/php_cli.c:943`), so the extensions' `RINIT` are
-/// served inside it; the main op array; and `EG_FLAGS_IN_SHUTDOWN`, which
-/// `php_request_shutdown` sets first (`Z/main/main.c:1960`).
+/// served inside it; the main op array; `EG_FLAGS_IN_SHUTDOWN`, which
+/// `php_request_shutdown` sets first (`Z/main/main.c:1960`); and
+/// `EG_FLAGS_IN_RESOURCE_SHUTDOWN`, which `shutdown_executor` sets beside
+/// it as it closes the resources (`Z/Zend/zend_execute_API.c:276`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     Startup,
     Running,
     Shutdown,
+    ResourceShutdown,
 }
 
 /// One `ob_*` operation on the request's buffer stack.
@@ -515,15 +518,22 @@ impl std::fmt::Write for Bytes<'_> {
 }
 
 /// What `php_stream_xport_create` is asked to make of a `transport`'s
-/// name: a client connected within `timeout`, `None` to wait for ever,
-/// or a server bound to the name, listening where `listen` says; each
-/// with the `context` the native resolved, which the stream keeps as
-/// `PHP_STREAM_CONTEXT(stream)` before it connects, and the `socket`
-/// options read off it.
+/// name: a client, connected within `timeout`, `None` to wait for ever,
+/// where `connect` says, which is `STREAM_XPORT_CONNECT` or
+/// `STREAM_XPORT_CONNECT_ASYNC` among php's flags, and otherwise a
+/// stream of the `transport`'s kind holding no socket, the name not
+/// even parsed; or a server bound to the name, listening where `listen`
+/// says; each with the `context` the native resolved, which the stream
+/// keeps as `PHP_STREAM_CONTEXT(stream)` before it connects, and the
+/// `socket` options read off it. A client with a `persistent` key, php's
+/// `persistent_id`, is first looked for among the persistent streams
+/// under it, and one made is kept there.
 #[derive(Clone)]
 pub enum Xport {
     Client {
         timeout: Option<std::time::Duration>,
+        connect: bool,
+        persistent: Option<Vec<u8>>,
         socket: SocketOptions,
         context: Option<Resource>,
     },
@@ -1554,6 +1564,14 @@ pub(crate) enum Ending {
     Parse,
 }
 
+/// `PG(connection_status)`'s bits this engine sets: `PHP_CONNECTION_NORMAL`
+/// and `PHP_CONNECTION_ABORTED` (`Z/main/php.h`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Connection {
+    Normal = 0,
+    Aborted = 1,
+}
+
 /// What a request wrote beside the body, one call the sink will see:
 /// an entry for the log or bytes for the error stream. Kept in the
 /// order they were written, since under php's CLI the two land on one
@@ -1609,14 +1627,16 @@ impl Kept {
         if let Some(headers) = self.headers {
             sink.send_headers(&headers);
         }
-        sink.write(&self.body);
+        // The request has ended; a refusal now has no request to abort.
+        let _ = sink.write(&self.body);
         sink.flush();
     }
 }
 
 impl OutputSink for Kept {
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
         self.body.extend_from_slice(bytes);
+        Ok(())
     }
 
     fn flush(&mut self) {}
@@ -1723,6 +1743,10 @@ pub struct Request {
     /// by `php_error_cb` for a fatal and the code by `exit`, whichever
     /// wrote last.
     exit_status: i32,
+    /// php's `PG(connection_status)`: whether the host's sink refused a
+    /// write, `PHP_CONNECTION_ABORTED`, which `connection_aborted()`
+    /// answers ([`Request::handle_aborted_connection`]).
+    connection: Connection,
     resources: Resources,
     /// php's `PG(http_globals)`: a second owner of each auto-global's
     /// array that has a track of its own ([`variables::HttpGlobals`]).
@@ -1969,6 +1993,12 @@ pub struct Request {
     started: std::time::Duration,
     /// `le_stream`, the resource type every stream is registered under.
     stream_type: ResourceType,
+    /// `le_pstream`, the `persistent stream` type.
+    pstream_type: ResourceType,
+    /// The entries of php's `EG(persistent_list)` this request holds,
+    /// lent from the engine's pool or opened here, until it ends
+    /// (`crate::streams::persistent`).
+    pub(crate) persistent: Vec<crate::streams::persistent::Held>,
     /// The fibers running on this request, innermost last, each with the
     /// execution state of the stack that resumed it, and where each
     /// suspends to (design §5.11, `crate::fiber`).
@@ -2463,7 +2493,7 @@ impl Request {
         let cwd = description.cwd.clone();
         let output = Output::activate(description.web.as_ref());
         let mut resources = Resources::default();
-        let stream_type = crate::streams::register(&mut resources);
+        let (stream_type, pstream_type) = crate::streams::register(&mut resources);
         let filter_type = resources.register_type(b"stream filter", None);
         // `init_executor`'s `zend_vm_stack_init`: the first page of the
         // VM stack, out of the heap the object store's table stands in.
@@ -2499,6 +2529,7 @@ impl Request {
             last_fatal_error_backtrace: None,
             ending: None,
             exit_status: 0,
+            connection: Connection::Normal,
             resources,
             http_globals: variables::HttpGlobals::default(),
             post: post::Post::default(),
@@ -2566,6 +2597,8 @@ impl Request {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default(),
             stream_type,
+            pstream_type,
+            persistent: Vec::new(),
             fibers: crate::fiber::Fibers::default(),
             raised: None,
             bailout: false,
@@ -15659,9 +15692,56 @@ impl Request {
     }
 
     /// `sapi_module.ub_write`: bytes past the `php_output` layer, the
-    /// host's, handed to the sink as they come.
+    /// host's, handed to the sink as they come; one the host could not
+    /// write is [`Request::handle_aborted_connection`].
     pub(crate) fn ub_write(&mut self, bytes: &[u8]) {
-        self.sink.get().write(bytes);
+        if let Err(aborted) = self.sink.get().write(bytes) {
+            self.handle_aborted_connection(aborted);
+        }
+    }
+
+    /// `php_handle_aborted_connection` (`Z/main/main.c:2722`), after what
+    /// the host set `EG(exit_status)` to, where it set it, as php's CLI
+    /// sets 255 (`sapi_cli_ub_write`): the connection marked aborted, the
+    /// `php_output` layer disabled, and, unless `ignore_user_abort` is on,
+    /// `zend_bailout`, which leaves the program with no diagnostic for the
+    /// shutdown to go on from.
+    ///
+    /// ```php
+    /// $path = sys_get_temp_dir() . '/' . uniqid('a') . '.php';
+    /// file_put_contents($path, '<?php ignore_user_abort((bool) $argv[1]); register_shutdown_function(function () { file_put_contents("php://stderr", "shutdown " . connection_aborted() . connection_status() . "\n"); }); for ($i = 0; $i < 3; $i++) { echo str_repeat("x", 100000); file_put_contents("php://stderr", "wrote $i\n"); }');
+    /// foreach ([0, 1] as $ignore) {
+    ///     $p = proc_open([PHP_BINARY, '-n', $path, $ignore], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    ///     fclose($pipes[1]);
+    ///     echo stream_get_contents($pipes[2]), 'exit ', proc_close($p), "\n";
+    /// }
+    /// unlink($path);
+    /// ```
+    /// ```expect process
+    /// shutdown 11
+    /// exit 255
+    /// wrote 0
+    /// wrote 1
+    /// wrote 2
+    /// shutdown 11
+    /// exit 255
+    /// ```
+    pub(crate) fn handle_aborted_connection(&mut self, aborted: Aborted) {
+        if let Some(status) = aborted.exit_status {
+            self.exit_status = status;
+        }
+        self.connection = Connection::Aborted;
+        crate::output::disable(self);
+        if !self.ini_flag(b"ignore_user_abort") {
+            self.bailout = true;
+        }
+    }
+
+    /// `PG(connection_status)`: `CONNECTION_NORMAL`, 0, or
+    /// `CONNECTION_ABORTED`, 1, once the host's sink refused a write.
+    #[must_use]
+    pub fn connection_status(&self) -> i64 {
+        self.connection as i64
     }
 
     /// The `php_output` layer, and the heap it lays its handlers down in.
@@ -16107,6 +16187,26 @@ impl Request {
     /// include(): Failed opening 'data:,x' for inclusion (include_path='.')
     /// bool(false)
     /// ```
+    ///
+    /// A fatal while the file is read leaves its stream open, since
+    /// `zend_bailout` jumps past `zend_destroy_file_handle`: the stream is
+    /// closed with the request's resources, its `stream_close` served.
+    ///
+    /// ```php
+    /// class L { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_set_option($o, $a, $b) { return false; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_read($c) { function f() {} }
+    ///     function stream_close() { echo "closed\n"; } }
+    /// stream_wrapper_register('ll', 'L');
+    /// function f() {}
+    /// include 'll://x';
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot redeclare function f() (previously declared in %s:9) in %s on line 6
+    /// closed
+    /// ```
     pub(crate) fn include_stream(
         &mut self,
         kind: IncludeKind,
@@ -16137,7 +16237,13 @@ impl Request {
                 let source = self
                     .stream_op(*stream, |req, s| s.copy_to_mem(req, None))
                     .unwrap_or_default();
-                stream.free(self);
+                // A read that bailed out leaves the stream open, as
+                // `zend_bailout` leaves `zend_destroy_file_handle`
+                // unreached: it stands among the request's resources,
+                // which close it at shutdown.
+                if !self.bailing_out() {
+                    stream.free(self);
+                }
                 Some(source)
             }
             _ => None,
@@ -19180,6 +19286,19 @@ impl Request {
         self.stream_type
     }
 
+    /// `le_pstream`.
+    pub(crate) const fn pstream_type(&self) -> ResourceType {
+        self.pstream_type
+    }
+
+    /// The engine's persistent pool, which the request takes entries out
+    /// of and gives them back to.
+    pub(crate) fn persistent_pool(
+        &self,
+    ) -> &crate::api::abi::Pool<Vec<u8>, crate::streams::persistent::Entry> {
+        &self.shared.persistent
+    }
+
     /// The heap's memory limit in bytes, `PG(memory_limit)` as
     /// `zend_set_memory_limit` set it.
     pub(crate) fn heap_memory_limit(&self) -> usize {
@@ -19740,8 +19859,35 @@ impl Request {
     /// `zend_close_rsrc_list`, the first act of
     /// `zend_shutdown_executor_values` (design §5.10): every open
     /// resource closed from the top down, its destructor served, before
-    /// the object storage is freed.
+    /// the object storage is freed. Each destructor is a `zend_try` of its
+    /// own: a fatal a user-space stream's `stream_close` raises is caught
+    /// after it, and the walk goes on from the top, where a resource the
+    /// destructor opened now stands (`Z/Zend/zend_list.c:215-247`).
+    ///
+    /// ```php
+    /// class W { public $context; static $n = 0;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_close() { echo "close ", ++self::$n, "\n"; if (self::$n == 1) undefined(); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// $a = fopen('ww://a', 'r'); $b = fopen('ww://b', 'r');
+    /// undefined_too();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Call to undefined function undefined_too() in %s:7
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 7
+    /// close 1
+    ///
+    /// Fatal error: Uncaught Error: Call to undefined function undefined() in %s:4
+    /// Stack trace:
+    /// #0 [internal function]: W->stream_close()
+    /// #1 {main}
+    ///   thrown in %s on line 4
+    /// close 2
+    /// ```
     pub(crate) fn close_resources(&mut self) {
+        self.enter_phase(Phase::ResourceShutdown);
         Heap::close_resources(&mut Hooks(self));
     }
 
@@ -20702,6 +20848,11 @@ impl HeapHooks for Hooks<'_> {
     fn free_resource(&mut self, res: Res, kind: ResourceType) {
         if let Some(dtor) = self.0.resources.dtor(kind) {
             dtor(self.0, Resource::of(res));
+        }
+        // `zend_close_rsrc_list`'s `zend_catch`: what a destructor bailed
+        // out of is caught behind it, and the walk goes on.
+        if self.0.phase == Phase::ResourceShutdown {
+            self.0.catch_bailout();
         }
     }
 
