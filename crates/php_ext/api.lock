@@ -418,7 +418,6 @@ request::Request::caller_var
 request::Request::captured
 request::Request::cfg_entry
 request::Request::check_open_basedir
-request::Request::class_alias
 request::Request::class_decl
 request::Request::class_extension
 request::Request::class_extension_name

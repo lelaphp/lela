@@ -14012,11 +14012,21 @@ impl Request {
             .and_then(|i| u32::try_from(i).ok())
             .map(ClassId)
             .or_else(|| {
-                self.aliases
-                    .iter()
+                self.native_aliases()
+                    .chain(self.aliases.iter().cloned())
                     .find(|(_, alias, _)| *alias == wanted)
-                    .map(|(_, _, class)| *class)
+                    .map(|(_, _, class)| class)
             })
+    }
+
+    /// What `zend_register_class_alias` added for each native class's
+    /// stub `@alias` ([`ClassDecl::aliases`]), right after its class.
+    fn native_aliases(&self) -> impl Iterator<Item = preload::Alias> + '_ {
+        (0u32..).zip(&self.shared.classes).flat_map(|(at, decl)| {
+            let after = usize::try_from(at).map_or(usize::MAX, |at| at + 1);
+            let row = move |alias: &Name| (after, alias.0.to_ascii_lowercase(), ClassId(at));
+            decl.aliases.iter().map(row)
+        })
     }
 
     /// `EG(class_table)` in its order, each row the class and, for a row
@@ -14026,7 +14036,8 @@ impl Request {
     pub(crate) fn class_table(&self) -> Vec<(ClassId, Option<Vec<u8>>)> {
         let count = self.shared.classes.len() + self.declared.len();
         let mut rows = Vec::with_capacity(count + self.aliases.len());
-        let mut aliases = self.aliases.iter().peekable();
+        let native: Vec<preload::Alias> = self.native_aliases().collect();
+        let mut aliases = native.iter().chain(self.aliases.iter()).peekable();
         for at in 0..count {
             while let Some((_, alias, class)) = aliases.next_if(|(before, _, _)| *before <= at) {
                 rows.push((*class, Some(alias.clone())));
@@ -17026,7 +17037,7 @@ impl Request {
     /// `false` where the table has that name already, a class's or
     /// another alias's, and nothing is added. The name is the caller's
     /// to have lowered and held to php's reserved names.
-    pub fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> bool {
+    pub(crate) fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> bool {
         if self.class_named(alias).is_some() {
             return false;
         }
@@ -20188,6 +20199,7 @@ mod tests {
             parent: None,
             interfaces: Vec::new(),
             implementors: Vec::new(),
+            aliases: Vec::new(),
             traits: Vec::new(),
             adaptations: Vec::new(),
             backing: EnumBacking::Pure,

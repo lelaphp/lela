@@ -87,18 +87,28 @@ type Read = Result<Option<Value>, Thrown>;
 pub(crate) struct Exception;
 
 /// `final class DOMException extends Exception`, its `$code` left untyped
-/// for BC, as php's stub says; `Dom\DOMException` is its alias.
+/// for BC, as php's stub says; `Dom\DOMException` is its `@alias`, which
+/// `register_class_DOMException` registers right after the class, so it
+/// stands there among the classes every request starts with.
 ///
 /// ```php
 /// $e = new DOMException('m', 3);
 /// var_dump($e->code, $e->getCode(), (new ReflectionProperty('DOMException', 'code'))->hasType());
+/// var_dump(new Dom\DOMException('m') instanceof DOMException, class_exists('Dom\DOMException'));
+/// $c = get_declared_classes();
+/// $i = array_search("dom\\domexception", $c);
+/// var_dump($c[$i - 1], $c[$i + 1] ?? null);
 /// ```
 /// ```expect
 /// int(3)
 /// int(3)
 /// bool(false)
+/// bool(true)
+/// bool(true)
+/// string(12) "DOMException"
+/// string(17) "DOMImplementation"
 /// ```
-#[php_class(final, extends(Exception))]
+#[php_class(final, extends(Exception), alias = "Dom\\DOMException")]
 pub(crate) struct DOMException;
 
 #[php_class]
@@ -209,28 +219,9 @@ pub fn extension() -> Extension {
         .class::<xpath::XPath>()
         .class::<token_list::TokenList>()
         .request_state::<object::State>()
-        .rinit(register_alias)
         .info(dom_info)
         .version("20031129")
         .build("dom")
-}
-
-/// `zend_register_class_alias("Dom\\DOMException", ...)` of
-/// `register_class_DOMException`: `DOMException` under the modern
-/// namespace too.
-///
-/// ```php
-/// var_dump(new Dom\DOMException('m') instanceof DOMException, class_exists('Dom\DOMException'));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// ```
-fn register_alias(req: &mut Request) -> Result<(), Thrown> {
-    if let Some(class) = lookup_class(req, b"DOMException")? {
-        req.class_alias(class, b"dom\\domexception");
-    }
-    Ok(())
 }
 
 fn dependency(name: &str, kind: DependencyKind) -> Dependency {

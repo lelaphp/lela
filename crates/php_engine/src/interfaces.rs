@@ -21,7 +21,7 @@
 //! program sees is the same.
 
 use php_macros::php_class;
-use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, Name};
+use php_unit::decl::ClassKind;
 
 use crate::api::abi::{
     ClassIterator, CurrentPlace, ExtensionBuilder, Instance, ObjectHandlers, This, Untyped,
@@ -513,28 +513,8 @@ impl ObjectHandlers for WrapperHandlers {
 /// of `EG(class_table)` and no stub declares it, so it is the one class of
 /// Core's a header does not name.
 pub(crate) fn iterator_wrapper(builder: ExtensionBuilder) -> ExtensionBuilder {
-    let decl = ClassDecl {
-        name: Name(ITERATOR_WRAPPER.into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags {
-            is_final: true,
-            ..ClassFlags::default()
-        },
-        parent: None,
-        interfaces: Vec::new(),
-        implementors: Vec::new(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: Vec::new(),
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    };
+    let mut decl = crate::api::__private::class(ITERATOR_WRAPPER, ClassKind::Class);
+    decl.flags.is_final = true;
     builder.class_created(
         decl,
         Vec::new(),

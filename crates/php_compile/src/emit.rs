@@ -4946,6 +4946,7 @@ impl Emit<'_> {
                 .map(|i| Name(i.clone().into_boxed_slice()))
                 .collect(),
             implementors: Vec::new(),
+            aliases: Vec::new(),
             traits,
             adaptations,
             backing,
