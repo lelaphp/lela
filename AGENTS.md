@@ -99,7 +99,7 @@ third-engine-design.md
 - ADR-0007 (accepted, 2026-09-26): `php_macros` depends on no workspace crate, and `php_engine` depends on it, so Core declares its natives with the same attributes
 - ADR-0008 (accepted, 2026-09-29): Hosts are one crate each under `sapi/`, with `php_sapi` as the facade below them, as ADR-0004 laid extensions out
 
-<!-- /computed in=7f53878e7c368311f86af46ad65f459465c8cacb4af901d56302cfd291616e31 out=1decbce24eec1ffda97c6ed5a80344b357a1f522e076a6e51b3c2f6ddeff4868 -->
+<!-- /computed in=655a09f7bfbd3dbc7dc1544a56c3c031bba71ef703990c5444a5f4f29f4d55b9 out=1decbce24eec1ffda97c6ed5a80344b357a1f522e076a6e51b3c2f6ddeff4868 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
