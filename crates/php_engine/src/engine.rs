@@ -27,7 +27,7 @@ use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, Me
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
-    Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni, Validation,
+    DependencyKind, Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni, Validation,
 };
 use crate::api::raising::Level;
 use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
@@ -1912,7 +1912,9 @@ impl EngineBuilder {
         self
     }
 
-    /// The extensions in `MINIT` order, the bundle's `enabled()`.
+    /// The extensions in the bundle's order, `enabled()`, which the
+    /// engine starts in as `zend_sort_modules` leaves it
+    /// ([`sort_modules`]).
     #[must_use]
     pub fn extensions(mut self, extensions: &[Extension]) -> EngineBuilder {
         self.extensions.extend(extensions.iter().cloned());
@@ -2002,6 +2004,7 @@ impl EngineBuilder {
             extensions.extend(hosted.extension);
             hosted.additional
         });
+        sort_modules(&mut extensions);
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
         // `standard`'s constants: each extension's constants rewritten
@@ -2169,6 +2172,49 @@ fn host_ini(
         }
     }
     admin
+}
+
+/// `zend_sort_modules` (`Z/Zend/zend_API.c:2483-2515`), which
+/// `zend_startup_modules` runs over `module_registry` before the first
+/// `MINIT`: walking from the first, an extension that names a required
+/// or optional dependency standing after it trades places with that one,
+/// and the walk stays where it is until the extension there names none
+/// that stands later. The order the engine starts, registers and lists
+/// its extensions in is the bundle's as this leaves it, so `standard`,
+/// which names `session` optional (`standard_deps`), starts after it
+/// whatever the crates depend on:
+///
+/// ```php
+/// $loaded = get_loaded_extensions();
+/// var_dump(array_search('session', $loaded) < array_search('standard', $loaded), array_search('libxml', $loaded) < array_search('dom', $loaded));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
+///
+/// php loops for ever over a cycle of dependencies; the walk here stops
+/// after as many trades as a list of its length can need without one.
+fn sort_modules(modules: &mut [Extension]) {
+    let mut trades = modules.len() * modules.len();
+    let mut at = 0;
+    while at < modules.len() {
+        let later = modules[at]
+            .dependencies
+            .iter()
+            .filter(|dep| dep.kind != DependencyKind::Conflicts)
+            .find_map(|dep| {
+                (at + 1..modules.len())
+                    .find(|&other| modules[other].name.eq_ignore_ascii_case(&dep.name))
+            });
+        match later {
+            Some(other) if trades > 0 => {
+                modules.swap(at, other);
+                trades -= 1;
+            }
+            _ => at += 1,
+        }
+    }
 }
 
 /// The `on_modify` an extension of `extensions` gave the entry `name`.
@@ -3329,10 +3375,11 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 /// starts them, what its `php -n` answers `get_loaded_extensions()` in
 /// past `Core`: the order php's `MINIT`s register their stream wrappers
 /// and filters in, which `stream_get_wrappers()`, `stream_get_filters()`
-/// and phpinfo's `Registered PHP Streams` list. The bundle is a
-/// topological order of the crates instead, `standard` ahead of the
-/// extensions that call into it, so the tables are put in this order
-/// after the extensions start ([`serve_rinits`]).
+/// and phpinfo's `Registered PHP Streams` list. The engine starts the
+/// bundle's order as [`sort_modules`] leaves it, which is not the pinned
+/// build's (`openssl` after `standard`, `random` near the front), so the
+/// tables are put in this order after the extensions start
+/// ([`serve_rinits`]).
 #[rustfmt::skip]
 const MODULE_STARTUP: [&str; 65] = [
     "date", "lexbor", "openssl", "pcre", "sqlite3", "zlib", "bcmath", "bz2", "calendar", "ctype",
@@ -3354,7 +3401,7 @@ fn startup_rank(name: &str) -> usize {
         .unwrap_or(MODULE_STARTUP.len())
 }
 
-/// Each extension's `rinit` in bundle order, with the stream wrappers
+/// Each extension's `rinit` in startup order, with the stream wrappers
 /// and filters each registers placed in php's startup order
 /// ([`MODULE_STARTUP`]): every extension registers into empty tables,
 /// its rows are gathered under its rank, and the tables are the rows

@@ -74,8 +74,10 @@ pub enum IniVerdict {
 /// (`Z/Zend/zend_modules.h`): the other extension's name, how this one
 /// stands to it, and the `rel` and `version` a `ZEND_MOD_REQUIRED_EX`
 /// row carries, which php prints after the kind and
-/// `ReflectionExtension::getDependencies` reads. The startup-order
-/// check php makes over the table is `api-check`'s bundle order here.
+/// `ReflectionExtension::getDependencies` reads. The engine starts its
+/// extensions in the order `zend_sort_modules` leaves by the required
+/// and optional rows; the check php makes that a required one is
+/// loaded is `api-check`'s crate graph here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency {
     pub name: String,
