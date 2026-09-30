@@ -559,10 +559,11 @@ fn stream_of(req: &mut Request, value: &Value) -> Result<Option<(Stream, i32)>, 
 /// `what->mode[0] != 'r' || what->mode[1] == '+'`.
 fn writable(req: &mut Request, stream: Stream) -> Result<bool, Thrown> {
     let meta: PhpArray = stream.meta_data(req)?;
-    let key = Key::Str(php_ext::values::PhpString::new(req, b"mode")?);
     let mode = meta
-        .get(&key)
-        .and_then(|mode| mode.as_str_bytes().map(<[u8]>::to_vec))
+        .snapshot()
+        .into_iter()
+        .find(|(key, _)| matches!(key, Key::Str(name) if name.as_bytes() == b"mode"))
+        .and_then(|(_, mode)| mode.as_str_bytes().map(<[u8]>::to_vec))
         .unwrap_or_default();
     req.release(Value::array(meta));
     Ok(mode.first() != Some(&b'r') || mode.get(1) == Some(&b'+'))
