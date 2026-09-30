@@ -178,6 +178,11 @@ impl Fibers {
     /// The request's own VM stack, below every fiber running, which is
     /// the one `EG(symbol_table)`'s attached CVs stand on; none while no
     /// fiber runs and the request runs on it.
+    pub(crate) fn request_stack(&self) -> Option<&php_heap::VmStack> {
+        self.running.first().map(|running| &running.below.stack)
+    }
+
+    /// [`Fibers::request_stack`], to write.
     pub(crate) fn request_stack_mut(&mut self) -> Option<&mut php_heap::VmStack> {
         self.running
             .first_mut()

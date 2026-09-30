@@ -5437,6 +5437,24 @@ impl Request {
     /// #1 %s(3): include()
     /// #2 %s(4): f()
     /// ```
+    ///
+    /// A frame with a symbol table, one an `eval` or an include in it
+    /// attached, has its declared arguments read through the table, where
+    /// what the code wrote stands:
+    ///
+    /// ```php
+    /// class A { public function __call($name, $args) { eval('$args = array(); var_dump(debug_backtrace()[1]["args"]);'); } }
+    /// (new A)->test("test");
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   string(4) "test"
+    ///   [1]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// ```
     fn trace_rows(&self, chain: &[Link<'_>]) -> Vec<TraceRow> {
         // The include the link below `at` stands at, where it is a user
         // frame at an `INCLUDE_OR_EVAL`.
@@ -5488,17 +5506,7 @@ impl Request {
                         ));
                         continue;
                     };
-                    let passed = usize::try_from(state.num_args).unwrap_or(0);
-                    let mut arguments: Vec<Value> = (0..passed
-                        .saturating_sub(state.extra_args.len()))
-                        .map(|slot| {
-                            let slot = Slot(u32::try_from(slot).unwrap_or(u32::MAX));
-                            slots
-                                .frame()
-                                .map_or(Value::undef(), |f| Value::of_zval(f.slot(slot)))
-                        })
-                        .collect();
-                    arguments.extend(state.extra_args.iter().copied());
+                    let arguments = self.traced_arguments(slots, state, function);
                     rows.push((
                         Traced::Function(function),
                         state.this,
@@ -12272,6 +12280,69 @@ impl Request {
         let _ = self.globals();
         TableId::GLOBAL
     }
+    /// A user frame's arguments for its trace row
+    /// (`debug_backtrace_get_args`): its parameters' CVs up to the number
+    /// passed, read through its symbol table where it has one, whose
+    /// values the stack may hold stale (`ZEND_CALL_HAS_SYMBOL_TABLE`,
+    /// bug #73156), then its extra ones. Views, no owner taken.
+    fn traced_arguments(
+        &self,
+        slots: &Slots<'_>,
+        state: &exec::FrameState,
+        function: Function,
+    ) -> Vec<Value> {
+        let passed = usize::try_from(state.num_args).unwrap_or(0);
+        let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
+            .map(|slot| {
+                let slot = Slot(u32::try_from(slot).unwrap_or(u32::MAX));
+                slots
+                    .frame()
+                    .map_or(Value::undef(), |f| Value::of_zval(f.slot(slot)))
+            })
+            .collect();
+        if let Some(table) = state.symbol_table {
+            let names = exec::body_of(&state.unit, state.body)
+                .map(|code| code.vars.clone())
+                .unwrap_or_default();
+            let declared = self
+                .function_decl(function)
+                .map_or(0, |decl| decl.parameters.len());
+            for (at, argument) in arguments.iter_mut().enumerate().take(declared) {
+                if let Some(name) = names.get(at)
+                    && let Some(value) = self.symbol_view(table, &name.0)
+                {
+                    *argument = value;
+                }
+            }
+        }
+        arguments.extend(state.extra_args.iter().copied());
+        arguments
+    }
+
+    /// [`Request::symbol_value`] with nothing borrowed mutably: an
+    /// `IS_INDIRECT` bucket followed to the CV on the stack the table's
+    /// frames stand on, what `zend_hash_find_ex_ind` reads.
+    fn symbol_view(&self, table: TableId, name: &[u8]) -> Option<Value> {
+        let symbol = self
+            .tables
+            .get(table.0 as usize)?
+            .entries
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, symbol)| *symbol)?;
+        Some(match symbol {
+            Symbol::Value(value) => value,
+            Symbol::Held(cell) => cell.get(),
+            Symbol::Indirect(frame, at) => {
+                let stack = match self.fibers.request_stack() {
+                    Some(own) if table == TableId::GLOBAL => own,
+                    _ => &self.stack,
+                };
+                Value::of_zval(stack.frame(frame)?.slot(php_heap::Slot(at)))
+            }
+        })
+    }
+
     /// `zend_hash_find` in a symbol table for a fetch by name that
     /// reads: what the bucket `name` holds, an `IS_INDIRECT` bucket
     /// followed to the CV of the frame attached to it; `None` where the
