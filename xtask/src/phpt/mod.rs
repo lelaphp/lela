@@ -95,14 +95,18 @@
 //! the php-cgi `[sapi]` pins for the control and the engine's own
 //! `php-cgi`, `sapi/cgi`'s binary, for the engine, as the `cgi` module
 //! has it (#1198, ADR-0008). Beyond those, the process adapter
-//! gives a test one stdin and two streams captured as one, so a test that
-//! wants a terminal on a stream it did not capture, an interactive shell
-//! or a listening server is where the runner and upstream still part; the
-//! four of `sapi/cli/tests` that do are named in harness-design.md §12
-//! item 17.
+//! gives a test run-tests.php's environment and pipes for its streams, the
+//! `environment` module's and [`oracle::Streams::Pipes`] (#1186), and
+//! never a terminal, so it sets `SKIP_IO_CAPTURE_TESTS` as upstream does
+//! off one; a test that wants a terminal, an interactive shell or a
+//! listening server is where the runner and upstream still part; the four
+//! of `sapi/cli/tests` that do are named in harness-design.md §12 item 17.
+//!
+//! [`oracle::Streams::Pipes`]: crate::oracle::Streams::Pipes
 
 mod adapter;
-pub(crate) use adapter::env_of;
+pub(crate) mod environment;
+pub(crate) use environment::env_of;
 pub(crate) mod against;
 pub(crate) mod cgi;
 /// The suffix of a control run's scope: the subset under the oracle.

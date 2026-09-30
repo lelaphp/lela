@@ -160,6 +160,8 @@ oracle::Source
 oracle::Source::named
 oracle::Source::path
 oracle::Source::tree
+oracle::Stdin
+oracle::Streams
 oracle::TREE_VARIABLE
 oracle::Verdict
 oracle::compare

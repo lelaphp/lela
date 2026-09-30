@@ -1213,3 +1213,64 @@ fn a_run_writes_nothing_into_the_pinned_tree() {
     assert_eq!(count(&reading, "borked"), 0, "{reading:#?}");
     assert_eq!(listing(&corpus), before, "the pinned tree moved");
 }
+
+/// The tests of a fixture directory, by file name and text.
+fn fixture_tests(dir: &str) -> Vec<(String, String)> {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+    let mut tests: Vec<(String, String)> = fs::read_dir(&fixture)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "phpt"))
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, fs::read_to_string(&path).unwrap())
+        })
+        .collect();
+    tests.sort();
+    tests
+}
+
+/// The fixture at `xtask/fixtures/phpt/environment` (#1186): a test's
+/// programs get run-tests.php's environment and pipes for their streams,
+/// so under the pinned php every one of its tests passes, the `SKIPIF`
+/// that skips on anything but a pipe included. Run again through a binary
+/// that hands its program `/dev/null` on stdin and a file on stdout, what
+/// the runner handed before, the three tests of the streams fail and are
+/// named: the fixture's negative control.
+#[test]
+fn a_test_gets_run_tests_environment_and_pipes_for_its_streams() {
+    if oracle().is_none() {
+        return;
+    }
+    let tests = fixture_tests("fixtures/phpt/environment");
+    assert_eq!(tests.len(), 5, "{tests:?}");
+    let tests: Vec<(&str, &str)> = tests
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let scratch = Scratch::new("environment", &tests);
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "passed"), 5, "{reading:#?}");
+
+    let nulled = scratch.root.join("engine/nulled");
+    fs::write(
+        &nulled,
+        format!(
+            "#!/bin/sh\nout=$(mktemp)\n\"{}\" \"$@\" </dev/null >\"$out\" 2>&1\ncat \"$out\"\nrm -f \"$out\"\n",
+            oracle().unwrap().display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&nulled, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let reading = scratch.run(&registry(""), &nulled);
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(&reading, "failed"), 3, "{reading:#?}");
+    for name in ["stdin-pipe.phpt", "stdin-section.phpt", "stdout-pipe.phpt"] {
+        assert!(reading.message.contains(name), "{}", reading.message);
+    }
+}

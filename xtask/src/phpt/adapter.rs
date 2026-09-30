@@ -4,6 +4,8 @@
 //! of the pinned one (#1183), and run through the binary under test by its absolute path, as
 //! upstream hands it (#331), with the sections that shape one run
 //! (`--INI--`, `--ARGS--`, `--ENV--`, `--STDIN--`, `--CAPTURE_STDIO--`),
+//! in the environment the `environment` module builds as upstream builds
+//! it and with stdin a pipe as upstream's is,
 //! its `SKIPIF` and `CLEAN` sections run beside it under the oracle by the
 //! same shape of path, and what it wrote held to its `--EXPECT*--` section
 //! with php's normalisation. A CGI-shaped test runs through the CGI host
@@ -13,11 +15,9 @@
 //! contributes.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::num::NonZeroUsize;
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -25,6 +25,7 @@ use anyhow::{Context, Result};
 use regex_lite::Regex;
 
 use super::cgi;
+use super::environment::Environment;
 use super::file::{self, Phpt};
 use super::miss::Miss;
 use super::redirect::{Item, Redirect, Test};
@@ -32,7 +33,8 @@ use super::{Judged, Judgement, Lane, Subset};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
 use crate::oracle::{
-    self, Invocation, Observation, Oracle, PastLimit, Pin, Program, Verdict as Compared,
+    self, Invocation, Observation, Oracle, PastLimit, Pin, Program, Stdin, Streams,
+    Verdict as Compared,
 };
 use crate::tally::{Apart, Within};
 
@@ -294,7 +296,7 @@ impl<'a> Adapter<'a> {
         phpt: &Phpt,
         test: &Test,
         ini: &[String],
-        (env, request): (&[(String, OsString)], Option<&cgi::Request>),
+        (env, request): (&Environment, Option<&cgi::Request>),
     ) -> Result<Result<Vec<u8>, Stopped>> {
         let program = test.beside(None);
         if program.exists() {
@@ -307,12 +309,15 @@ impl<'a> Adapter<'a> {
         let written = Written::new(&program, &body)?;
         let args = words(&phpt.text("ARGS").unwrap_or_default());
         let cgi_flags = [String::from("-C"), String::from("-f")];
+        let capture = Capture::of(phpt);
         let invocation = Invocation {
             ini,
             args: &args,
-            env,
-            stdin: phpt.section("STDIN"),
-            merge_streams: merges_streams(phpt),
+            env: env.entries(),
+            stdin: capture.stdin(phpt),
+            streams: Streams::Pipes {
+                merged: capture.stdout && capture.stderr,
+            },
             cwd: Some(&subset.root),
             ..Invocation::new(self.binary, Program::Beside(&program))
         };
@@ -321,8 +326,11 @@ impl<'a> Adapter<'a> {
                 binary: host,
                 flags: &cgi_flags,
                 args: &request.args,
-                env: &request.env,
-                stdin: request.stdin.as_deref().or(invocation.stdin),
+                env: request.env.entries(),
+                stdin: request
+                    .stdin
+                    .as_deref()
+                    .map_or(invocation.stdin, Stdin::File),
                 raw: true,
                 ..invocation
             }),
@@ -353,12 +361,13 @@ impl<'a> Adapter<'a> {
     /// is the runner's one known difference from upstream's verdicts. Both
     /// run from the tree's root and in the test's environment, as the test's
     /// program does, so a `SKIPIF` that asks `TEST_PHP_EXECUTABLE` what it
-    /// can do asks the binary under test, as upstream's asks it.
+    /// can do asks the binary under test, as upstream's asks it. Each reads
+    /// an empty pipe on stdin, as upstream's does.
     fn run_section(
         &self,
         subset: &Subset,
         test: &Test,
-        env: &[(String, OsString)],
+        env: &Environment,
         kind: &str,
         body: &[u8],
     ) -> Result<Observation> {
@@ -369,7 +378,9 @@ impl<'a> Adapter<'a> {
         let out = self
             .oracle
             .run_under(&Invocation {
-                env,
+                env: env.entries(),
+                stdin: Stdin::Pipe(&[]),
+                streams: Streams::Pipes { merged: false },
                 cwd: Some(&subset.root),
                 ..Invocation::new(pinned, Program::Beside(&program))
             })
@@ -400,63 +411,22 @@ impl<'a> Adapter<'a> {
     }
 
     /// What a test's programs find in their environment over the
-    /// recipe's, as upstream hands it to the `SKIPIF`, the `FILE` and the
-    /// `CLEAN` alike: the binary under test by the names the corpus spawns
-    /// it by (run-tests.php:670-677), the test's own `--ENV--`
-    /// (run-tests.php:2009-2018), and last `TEST_PHP_EXTRA_ARGS`, which is
+    /// recipe's, the `SKIPIF`, the `FILE` and the `CLEAN` alike: the
+    /// runner's, with the binary under test and the CGI host beside it,
+    /// then the test's own over it, `TEST_PHP_EXTRA_ARGS` last, which is
     /// the recipe's flags and every ini entry the test runs under
-    /// (run-tests.php:2115). `TEST_PHP_SRCDIR` names `root`, the tree the
-    /// programs run in, as the variable names upstream's own
-    /// (run-tests.php:179-183), and never the pinned tree, which a test
-    /// does not write in (#1183). The recipe's `TEST_PHP_EXECUTABLE`
-    /// names the pinned php, which is right for a witness and wrong here:
-    /// what a test spawns is the binary being measured, and
-    /// `TEST_PHP_CGI_EXECUTABLE` the CGI host beside it (the `cgi`
-    /// module). No debugger host stands beside it, so that name is empty,
-    /// as upstream's `get_binary` leaves one it finds none of
-    /// (run-tests.php:1003-1019), and the CGI host's is empty where the
-    /// control has none (`[sapi]` names no php-cgi, or none is at its path).
-    fn environment(
-        &self,
-        phpt: &Phpt,
-        test: &Test,
-        ini: &[String],
-        root: &Path,
-    ) -> Vec<(String, OsString)> {
-        let binary = self.binary.to_string_lossy().into_owned();
+    /// (run-tests.php:2115). The recipe's `TEST_PHP_EXECUTABLE` names the
+    /// pinned php, which is right for a witness and wrong here: what a test
+    /// spawns is the binary being measured.
+    fn environment(&self, phpt: &Phpt, test: &Test, ini: &[String], root: &Path) -> Environment {
         let recipe = &self.oracle.pin().recipe;
-        let mut env = vec![
-            (
-                "TEST_PHP_EXECUTABLE_ESCAPED".to_owned(),
-                escaped(&binary).into(),
-            ),
-            ("TEST_PHP_EXECUTABLE".to_owned(), binary.into()),
-            (
-                oracle::TREE_VARIABLE.to_owned(),
-                root.as_os_str().to_owned(),
-            ),
-        ];
-        let cgi = self
-            .cgi
-            .as_ref()
-            .map(|host| host.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        for (host, path) in [
-            ("TEST_PHP_CGI_EXECUTABLE", cgi),
-            ("TEST_PHPDBG_EXECUTABLE", String::new()),
-        ] {
-            env.push((format!("{host}_ESCAPED"), escaped(&path).into()));
-            env.push((host.to_owned(), path.into()));
-        }
-        // A redirect's environment over the runner's, and the test's own
-        // over both (run-tests.php:2228, 2009-2018).
-        env.extend(test.via.iter().flat_map(|via| via.env.iter().cloned()));
-        env.extend(env_of(phpt, &test.file));
-        env.push((
-            "TEST_PHP_EXTRA_ARGS".to_owned(),
-            extra_args(&recipe.args, recipe.ini.iter().chain(ini)).into(),
-        ));
-        env
+        let redirected = test.via.as_ref().map_or(&[][..], |via| &via.env[..]);
+        Environment::of_runner(self.binary, self.cgi.as_deref(), root).of_test(
+            redirected,
+            phpt,
+            &test.file,
+            extra_args(&recipe.args, recipe.ini.iter().chain(ini)),
+        )
     }
 }
 
@@ -464,7 +434,7 @@ impl<'a> Adapter<'a> {
 /// environment, and why it is expected to fail where it is.
 struct Admitted {
     ini: Vec<String>,
-    env: Vec<(String, OsString)>,
+    env: Environment,
     expected_to_fail: Option<String>,
 }
 
@@ -585,15 +555,45 @@ pub(super) fn unread(actual: &[u8]) -> Option<String> {
     refusal.captures(text).map(|found| found[1].to_owned())
 }
 
-/// Whether the two streams are captured as one, which is upstream's
-/// default and what `--CAPTURE_STDIO--` can narrow.
-fn merges_streams(phpt: &Phpt) -> bool {
-    match phpt.text("CAPTURE_STDIO") {
-        Some(capture) => {
-            let capture = capture.to_uppercase();
-            capture.contains("STDOUT") && capture.contains("STDERR")
+/// Which of a test's three streams the runner captures: all three,
+/// upstream's default, or those its `--CAPTURE_STDIO--` names, as
+/// run-tests.php reads the section (run-tests.php:1875-1889). The two
+/// streams out are captured as one where both are, upstream's `2>&1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Capture {
+    stdin: bool,
+    stdout: bool,
+    stderr: bool,
+}
+
+impl Capture {
+    fn of(phpt: &Phpt) -> Capture {
+        match phpt.text("CAPTURE_STDIO") {
+            Some(named) => {
+                let named = named.to_uppercase();
+                Capture {
+                    stdin: named.contains("STDIN"),
+                    stdout: named.contains("STDOUT"),
+                    stderr: named.contains("STDERR"),
+                }
+            }
+            None => Capture {
+                stdin: true,
+                stdout: true,
+                stderr: true,
+            },
         }
-        None => true,
+    }
+
+    /// The program's stdin: a pipe holding its `--STDIN--`, or nothing,
+    /// where the runner captures stdin; `/dev/null` where the section
+    /// leaves it to a terminal this runner does not hand a test.
+    fn stdin(self, phpt: &Phpt) -> Stdin<'_> {
+        if self.stdin {
+            Stdin::Pipe(phpt.section("STDIN").unwrap_or_default())
+        } else {
+            Stdin::Null
+        }
     }
 }
 
@@ -651,12 +651,6 @@ fn ini_of(phpt: &Phpt, test: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// php's `escapeshellarg` on a POSIX host: the word in single quotes,
-/// each quote inside closed, escaped and reopened.
-fn escaped(word: &str) -> String {
-    format!("'{}'", word.replace('\'', r"'\''"))
-}
-
 /// `TEST_PHP_EXTRA_ARGS` as upstream renders it: the flags, each after a
 /// space, then a space, then every ini entry as ` -d "name=value"`
 /// (run-tests.php:2115). The entries are gathered as `settings2array`
@@ -698,44 +692,6 @@ fn addslashes(value: &str) -> String {
             }
             '\0' => out.push_str("\\0"),
             c => out.push(c),
-        }
-    }
-    out
-}
-
-/// A test's `--ENV--`, one `NAME=value` a line, the value its bytes.
-pub(crate) fn env_of(phpt: &Phpt, test: &Path) -> Vec<(String, OsString)> {
-    let beside = test
-        .parent()
-        .map(|dir| dir.as_os_str().as_encoded_bytes().to_vec())
-        .unwrap_or_default();
-    let body = phpt.section("ENV").unwrap_or_default();
-    body.split(|b| *b == b'\n')
-        .filter_map(|line| {
-            let eq = line.iter().position(|b| *b == b'=')?;
-            let name = String::from_utf8_lossy(&line[..eq]).trim().to_owned();
-            let value = replaced(line[eq + 1..].trim_ascii(), b"{PWD}", &beside);
-            let value = replaced(
-                &value,
-                b"{TMP}",
-                std::env::temp_dir().as_os_str().as_encoded_bytes(),
-            );
-            (!name.is_empty()).then(|| (name, OsString::from_vec(value)))
-        })
-        .collect()
-}
-
-/// `bytes` with every `from` replaced by `to`.
-fn replaced(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at..].starts_with(from) {
-            out.extend_from_slice(to);
-            at += from.len();
-        } else {
-            out.push(bytes[at]);
-            at += 1;
         }
     }
     out
@@ -852,16 +808,20 @@ mod tests {
             extra_args(&["-n".to_owned()], &ini),
             r#" -n  -d "precision=3" -d "error_log=" -d "x=a\"b\'c\\d""#
         );
-        assert_eq!(escaped("/a/it's/php"), r"'/a/it'\''s/php'");
     }
 
     #[test]
-    fn the_streams_are_one_unless_capture_stdio_says_otherwise() {
+    fn every_stream_is_captured_and_stdin_a_pipe_unless_capture_stdio_says_otherwise() {
         let phpt = |text: &str| Phpt::parse(Path::new("x.phpt"), text.as_bytes()).unwrap();
         let plain = phpt("--TEST--\nn\n--FILE--\nx\n--EXPECT--\n1\n");
-        assert!(merges_streams(&plain));
-        let one =
-            phpt("--TEST--\nn\n--CAPTURE_STDIO--\nSTDIN STDOUT\n--FILE--\nx\n--EXPECT--\n1\n");
-        assert!(!merges_streams(&one));
+        let all = Capture::of(&plain);
+        assert!(all.stdout && all.stderr);
+        assert_eq!(all.stdin(&plain), Stdin::Pipe(b""));
+        let fed = phpt("--TEST--\nn\n--STDIN--\nabc\n--FILE--\nx\n--EXPECT--\n1\n");
+        assert_eq!(Capture::of(&fed).stdin(&fed), Stdin::Pipe(b"abc\n"));
+        let out = phpt("--TEST--\nn\n--CAPTURE_STDIO--\nSTDOUT\n--FILE--\nx\n--EXPECT--\n1\n");
+        let only = Capture::of(&out);
+        assert!(only.stdout && !only.stderr);
+        assert_eq!(only.stdin(&out), Stdin::Null);
     }
 }

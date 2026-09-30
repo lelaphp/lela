@@ -33,7 +33,8 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::anchor::Entry;
-use crate::oracle::{Invocation, Observation, Oracle, Program};
+use crate::oracle::{Invocation, Observation, Oracle, Program, Stdin};
+use crate::phpt::environment::Environment;
 use crate::phpt::{cgi, file::Phpt};
 use crate::scratch::Tree;
 
@@ -164,7 +165,8 @@ pub(crate) fn served_as_cgi(
     let phpt = Phpt::parse(&path, test.as_bytes())
         .map_err(|borked| anyhow!("the request fence is not a test's sections: {borked}"))?;
     let program = crate::oracle::run_by(&program)?;
-    let mut env = env.to_vec();
+    let mut env = Environment::from(env.to_vec());
+    env.reset();
     env.extend(crate::phpt::env_of(&phpt, &path));
     let described = cgi::request(&phpt, &program, &env)
         .map_err(|(_, why)| anyhow!("the request fence describes no request: {why}"))?;
@@ -172,8 +174,8 @@ pub(crate) fn served_as_cgi(
     oracle.run_under(&Invocation {
         flags: &flags,
         args: &described.args,
-        env: &described.env,
-        stdin: described.stdin.as_deref(),
+        env: described.env.entries(),
+        stdin: described.stdin.as_deref().map_or(Stdin::Null, Stdin::File),
         ..Invocation::new(host, Program::File(&program))
     })
 }
