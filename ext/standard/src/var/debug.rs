@@ -9,7 +9,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format};
 use php_ext::raising::{Thrown, call_stack_end};
 use php_ext::request::Request;
-use php_ext::values::{Key, Laziness, RecursionGuard, Value, ValueRef};
+use php_ext::values::{HeldRow, Key, Laziness, RecursionGuard, Value, ValueRef};
 
 use super::class_name;
 
@@ -124,6 +124,51 @@ use super::class_name;
 ///   NULL
 /// }
 /// ```
+///
+/// A typed property nothing has written is a row of its own,
+/// `uninitialized(T)`, left out of the count, as
+/// `zval_object_property_dump` prints the slot
+/// `zend_get_typed_property_info_for_slot` finds a type for; and an
+/// initialised proxy shows its instance in a table of its own, which
+/// holds one more owner of it while it prints
+/// (`zend_lazy_object_debug_info`).
+///
+/// ```php
+/// class T { public int $a; protected ?float $b; private string $c = "x"; }
+/// $t = new T; debug_zval_dump($t);
+/// $r = new ReflectionClass(T::class);
+/// $p = $r->newLazyProxy(fn () => new T);
+/// debug_zval_dump($p); $r->initializeLazyObject($p); debug_zval_dump($p);
+/// ```
+/// ```expect
+/// object(T)#1 (1) refcount(2){
+///   ["a"]=>
+///   uninitialized(int)
+///   ["b":protected]=>
+///   uninitialized(?float)
+///   ["c":"T":private]=>
+///   string(1) "x" interned
+/// }
+/// lazy proxy object(T)#4 (0) refcount(2){
+///   ["a"]=>
+///   uninitialized(int)
+///   ["b":protected]=>
+///   uninitialized(?float)
+///   ["c":"T":private]=>
+///   uninitialized(string)
+/// }
+/// lazy proxy object(T)#4 (1) refcount(2){
+///   ["instance"]=>
+///   object(T)#5 (1) refcount(2){
+///     ["a"]=>
+///     uninitialized(int)
+///     ["b":protected]=>
+///     uninitialized(?float)
+///     ["c":"T":private]=>
+///     string(1) "x" interned
+///   }
+/// }
+/// ```
 #[php_function]
 fn debug_zval_dump(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<(), Thrown> {
     let values = std::iter::once(value).chain(values.0);
@@ -133,6 +178,25 @@ fn debug_zval_dump(req: &mut Request, value: Value, values: Variadic<Value>) -> 
     }
     req.write(&out);
     Ok(())
+}
+
+/// `zval_object_property_dump`'s value: the row's value dumped, or for
+/// a typed property nothing has written `uninitialized(T)` at the
+/// indent the value would take.
+fn dump_row(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    row: &HeldRow,
+    level: usize,
+) -> Result<(), Thrown> {
+    match row {
+        HeldRow::Value(value) => dump(req, out, value, level),
+        HeldRow::Uninitialized(ty) => {
+            pad(out, level);
+            out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
+            Ok(())
+        }
+    }
 }
 
 fn pad(out: &mut Vec<u8>, level: usize) {
@@ -237,20 +301,20 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                 format!(
                     "{prefix}object({name})#{} ({}) refcount({}){{\n",
                     object.index(),
-                    props.len(),
+                    held.count(),
                     value.refcount()
                 )
                 .as_bytes(),
             );
             let mut dumped = Ok(());
-            for (key, element) in props {
+            for (key, row) in props {
                 out.extend(std::iter::repeat_n(b' ', level + 1));
                 // An element a class shows among its properties is an
                 // integer key, `[%ld]=>`.
                 let prop = match key {
                     Key::Int(n) => {
                         out.extend_from_slice(format!("[{n}]=>\n").as_bytes());
-                        dumped = dump(req, out, &element, level + 2);
+                        dumped = dump_row(req, out, &row, level + 2);
                         if dumped.is_err() {
                             break;
                         }
@@ -280,7 +344,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                     }
                 }
                 out.extend_from_slice(b"]=>\n");
-                dumped = dump(req, out, &element, level + 2);
+                dumped = dump_row(req, out, &row, level + 2);
                 if dumped.is_err() {
                     break;
                 }

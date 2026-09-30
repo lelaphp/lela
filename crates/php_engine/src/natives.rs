@@ -1932,7 +1932,7 @@ fn dump_rows(
 /// `zend_type_to_string` over a declared type: the scalar names, a
 /// class name as written, `?T`, and `|` and `&` between the members of
 /// a union and an intersection.
-fn type_text(ty: &Type) -> String {
+pub(crate) fn type_text(ty: &Type) -> String {
     match ty {
         Type::Mixed => String::from("mixed"),
         Type::Void => String::from("void"),
