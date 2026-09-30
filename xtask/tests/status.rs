@@ -1298,3 +1298,54 @@ fn a_torn_log_line_is_named_and_the_rest_of_the_section_and_the_session_render()
         "{text}"
     );
 }
+
+/// A reading file a crash left empty, or cut short, costs its own row and
+/// no more (#1235): the section renders every other reading, the row of
+/// the file that is no reading says it has none, the file is named by its
+/// path on stderr, and a section that reads no reading file renders as
+/// it did. Before, the one file failed every section, `divergence`
+/// included.
+#[test]
+fn an_unreadable_reading_file_degrades_only_its_own_row_and_is_named() {
+    let root = scratch("unreadable-file");
+    let store = Store::of_workspace(&root);
+    let mut heap = Reading::new("budget", "php_heap");
+    heap.status = Status::Pass;
+    heap.numbers.insert("lines".into(), 7941.into());
+    store.record(std::slice::from_ref(&heap)).unwrap();
+    std::fs::write(store.root().join("budget/php_unit.toml"), "").unwrap();
+    let cut = store.root().join("unsafe-audit/ext/calendar.toml");
+    std::fs::create_dir_all(cut.parent().unwrap()).unwrap();
+    std::fs::write(&cut, "instrument = \"unsafe-au").unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "budget"]);
+    assert!(ok, "{err}");
+    let row = |name: &str| {
+        md.lines()
+            .find(|l| l.starts_with(&format!("| {name} |")))
+            .unwrap_or_else(|| panic!("no row for {name}: {md}"))
+            .to_owned()
+    };
+    assert!(row("php_heap").contains("7941"), "{md}");
+    assert!(row("php_unit").contains("no reading"), "{md}");
+    assert!(
+        err.contains(
+            "target/harness: 2 readings unreadable at budget/php_unit.toml, unsafe-audit/ext/calendar.toml"
+        ),
+        "{err}"
+    );
+
+    let (ok, json, err) = status(&root, &["--section", "budget", "--format", "json"]);
+    assert!(ok, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["crate"] == "php_heap")
+    );
+
+    let (ok, md, err) = status(&root, &["--section", "divergence"]);
+    assert!(ok, "{err}");
+    assert!(md.contains("total"), "{md}");
+}

@@ -175,11 +175,10 @@ impl Runs {
         let moved = git::tracked_hash(&self.root, &built_from(), None)? != self.tree;
         if let (Some(run), false) = (&run, moved) {
             let file = path(&self.root, &self.tree, scope);
-            if let Some(dir) = file.parent() {
-                fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-            }
             let text = serde_json::to_string_pretty(run).context("rendering the run")?;
-            fs::write(&file, text).with_context(|| format!("writing {}", file.display()))?;
+            // Replaced whole, as a reading's file is, so a comparison
+            // reading it from another worktree never finds it cut short.
+            crate::reading::replace(&file, text.as_bytes())?;
         }
         let Some(base) = &self.base else {
             return Ok(None);

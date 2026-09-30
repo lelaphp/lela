@@ -75,7 +75,15 @@ pub fn render(
     if session_id.is_some() && section != Section::Permits {
         bail!("--session-id names this session of the permits section; use --section permits");
     }
-    let readings = store.readings()?;
+    // A file of the store that is no reading costs its own row and is
+    // named on stderr, never the section (#1235): stdout is the rendering a
+    // region holds, and a tracked region never carries this machine's
+    // store.
+    let files = store.readings()?;
+    if let Some(note) = files.unreadable_note(store.root()) {
+        eprintln!("{note}");
+    }
+    let readings = files.readings;
     let (rows, columns): (Vec<Row>, Columns) = match section {
         Section::Rules => (rules(manifest, &readings), RULES),
         Section::Locks => (locks(manifest, &readings), LOCKS),
@@ -182,10 +190,15 @@ pub fn session(
     }
     if let Some(id) = session_id {
         let log = store.log()?;
-        let rows: Vec<Row> = permit_rows(manifest, &store.readings()?, &log.readings, Some(id))
-            .into_iter()
-            .filter(|r| r.facts.get("this_session").and_then(Value::as_u64) > Some(0))
-            .collect();
+        let rows: Vec<Row> = permit_rows(
+            manifest,
+            &store.readings()?.readings,
+            &log.readings,
+            Some(id),
+        )
+        .into_iter()
+        .filter(|r| r.facts.get("this_session").and_then(Value::as_u64) > Some(0))
+        .collect();
         if !rows.is_empty() {
             let _ = write!(
                 facts,

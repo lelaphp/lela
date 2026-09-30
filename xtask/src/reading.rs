@@ -342,15 +342,13 @@ impl Store {
         self.record(readings).map(|_| ())
     }
 
-    /// One reading: its file, overwritten, and its line of the log, which
-    /// goes through [`Store::append_line`], the one append.
+    /// One reading: its file, replaced whole through [`replace`], and its
+    /// line of the log, which goes through [`Store::append_line`], the one
+    /// append.
     fn write(&self, reading: &Reading) -> Result<()> {
         let path = self.path(&reading.instrument, &reading.scope)?;
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
         let text = toml::to_string(reading).context("rendering the reading")?;
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        replace(&path, text.as_bytes())?;
 
         let mut line = reading.to_json()?.to_string();
         line.push('\n');
@@ -442,7 +440,9 @@ impl Store {
         let mut found = BTreeMap::new();
         let mut sought: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for (scope, tree) in trees.iter().filter(|(_, tree)| !tree.is_empty()) {
-            match self.read(instrument, scope)? {
+            // A file that is no reading is no reading over the tree, and
+            // the log is asked instead, as for a stale one (#1235).
+            match self.read(instrument, scope).ok().flatten() {
                 Some(reading) if reading.fresh_for(tree) => {
                     found.insert(scope.clone(), reading);
                 }
@@ -510,18 +510,29 @@ impl Store {
         Ok(log)
     }
 
-    /// Every reading in the store, in path order. A missing store is empty.
-    pub fn readings(&self) -> Result<Vec<Reading>> {
-        let mut files = Vec::new();
+    /// Every reading in the store, in path order, and every file of the
+    /// store that is not one, by its path. A missing store is empty. A file
+    /// a crash left empty or cut short, which [`replace`] no longer can
+    /// (#1235), is named and skipped rather than failing every rendering
+    /// of the store, as the log's torn line is: it costs its own row, and
+    /// the next run of its instrument writes it again.
+    pub fn readings(&self) -> Result<Files> {
+        let mut paths = Vec::new();
         if self.root.is_dir() {
-            walk(&self.root, &mut files)?;
+            walk(&self.root, &mut paths)?;
         }
-        files.sort();
-        files
-            .iter()
+        paths.sort();
+        let mut files = Files::default();
+        for path in paths
+            .into_iter()
             .filter(|p| p.extension().is_some_and(|e| e == "toml"))
-            .map(|p| Self::read_file(p))
-            .collect()
+        {
+            match Self::read_file(&path) {
+                Ok(reading) => files.readings.push(reading),
+                Err(_) => files.unreadable.push(path),
+            }
+        }
+        Ok(files)
     }
 
     fn read_file(path: &Path) -> Result<Reading> {
@@ -529,6 +540,80 @@ impl Store {
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("{}", path.display()))
     }
+}
+
+/// The store's files as read: every one that is a reading, in path order,
+/// and the path of every one that is not.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Files {
+    pub readings: Vec<Reading>,
+    pub unreadable: Vec<PathBuf>,
+}
+
+impl Files {
+    /// What a rendering says about the files it could not read, each by
+    /// its path under the store's `root`, `target/harness: 1 reading
+    /// unreadable at budget/php_unit.toml.`, at most five named and the
+    /// rest counted; none when every file read. The files' counterpart of
+    /// [`Log::unreadable_note`].
+    pub fn unreadable_note(&self, root: &Path) -> Option<String> {
+        if self.unreadable.is_empty() {
+            return None;
+        }
+        let paths: Vec<String> = self
+            .unreadable
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        let names: Vec<&str> = paths.iter().map(String::as_str).collect();
+        Some(format!(
+            "{DIR}: {} reading{} unreadable at {}; the next run of its instrument writes it again.",
+            self.unreadable.len(),
+            plural(self.unreadable.len()),
+            listed(&names)
+        ))
+    }
+}
+
+/// `bytes` as the whole of the file at `path`, or the file as it stood:
+/// written to a file of its own beside `path` and renamed over it, so a
+/// reader at the same moment, another worktree's hook or an instrument
+/// beside it, sees the old file or the new one and never one cut short,
+/// and a disk that fills leaves the old one standing (#1235). The rename is
+/// within one directory, which POSIX makes atomic. The file beside is
+/// hidden and ends in `.tmp`, so no reader of `.toml` or `.json` files
+/// takes it for what it replaces, and it is removed when the write fails.
+pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = path
+        .parent()
+        .with_context(|| format!("{} names no directory", path.display()))?;
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} names no file", path.display()))?
+        .to_string_lossy();
+    let beside = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = fs::write(&beside, bytes)
+        .with_context(|| format!("writing {}", beside.display()))
+        .and_then(|()| {
+            fs::rename(&beside, path)
+                .with_context(|| format!("renaming {} to {}", beside.display(), path.display()))
+        });
+    if written.is_err() {
+        let _ = fs::remove_file(&beside);
+    }
+    written
 }
 
 /// The log as read: every line that is a reading, in the log's order, and

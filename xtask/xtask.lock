@@ -196,6 +196,8 @@ reading::Chain
 reading::Chain::of_head
 reading::Chain::standing
 reading::DIR
+reading::Files
+reading::Files::unreadable_note
 reading::LOG
 reading::Log
 reading::Log::unreadable_note
