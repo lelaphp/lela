@@ -884,7 +884,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 75] = [
+const CORE_INI: [(&str, &str); 76] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -900,10 +900,11 @@ const CORE_INI: [(&str, &str); 75] = [
     ("xmlrpc_errors", "0"),
     ("xmlrpc_error_number", "0"),
     // `max_memory_limit`, `PHP_INI_SYSTEM`, declared before
-    // `memory_limit`, whose handler holds it under the maximum
-    // (`Z/main/main.c:865-866`).
+    // `memory_limit`, whose handler holds it under the maximum, and
+    // `report_memleaks`, deprecated when off (`Z/main/main.c:814-866`).
     ("max_memory_limit", "-1"),
     ("memory_limit", "128M"),
+    ("report_memleaks", "1"),
     ("max_execution_time", "0"),
     ("default_charset", "UTF-8"),
     ("default_mimetype", "text/html"),
@@ -1307,10 +1308,18 @@ fn deprecated_directives(req: &mut Request) {
 }
 
 /// The core entries' handlers over what the host set, in the order
-/// `main.c` declares them (`Z/main/main.c:814-866`): `memory_limit`
+/// `main.c` declares them (`Z/main/main.c:814-866`): `report_memleaks`
+/// off is `OnUpdateReportMemleaks`'s deprecation, and `memory_limit`
 /// past `max_memory_limit` is `OnChangeMemoryLimit`'s warning with the
 /// maximum's text in its place. What an entry takes is the answer.
 fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Vec<u8>)> {
+    if req
+        .ini_get(b"report_memleaks")
+        .is_some_and(|v| !crate::api::request::ini_truth(Some(v)))
+    {
+        let message = "Directive 'report_memleaks' is deprecated";
+        crate::api::raising::docref(req, Level::Deprecated, message);
+    }
     let limit = req
         .ini_get(b"memory_limit")
         .map(<[u8]>::to_vec)
@@ -1321,6 +1330,23 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Vec<u8>)> {
             vec![(b"memory_limit".to_vec(), taken)]
         }
         _ => Vec::new(),
+    }
+}
+
+/// `zend_disable_function`'s refusal of `exit`, `die` and `clone`: a
+/// startup warning for each the list names, which keeps it.
+fn disable_warnings(req: &mut Request) {
+    let list = req
+        .ini_get(b"disable_functions")
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    let names = list.split(|byte| matches!(byte, b' ' | b','));
+    for name in names.filter(|name| matches!(*name, b"exit" | b"die" | b"clone")) {
+        let message = format!(
+            "Cannot disable function {}()",
+            String::from_utf8_lossy(name)
+        );
+        crate::api::raising::warning(req, &message);
     }
 }
 
@@ -1335,8 +1361,7 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Vec<u8>)> {
 /// name no native has is passed over. `exit`, `die` and `clone` are the
 /// three `zend_disable_function` keeps in the table; php says so with a
 /// startup `E_WARNING`, `Cannot disable function %s()` in `Unknown` on
-/// line 0, which this engine does not raise, since it has no diagnostic
-/// before a request (#776).
+/// line 0 ([`disable_warnings`]).
 fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
     list.split(|byte| matches!(byte, b' ' | b','))
         .filter(|name| !name.is_empty())
@@ -1719,6 +1744,7 @@ impl Engine {
                 taken.push((name, value));
             }
         }
+        disable_warnings(&mut req);
         let raised = req.end_startup();
         let written = req.startup_stderr();
         drop(req);
@@ -2928,7 +2954,8 @@ mod tests {
     /// function to a call, a dynamic call, `function_exists()`,
     /// `get_defined_functions()` or a callback's check; the list splits
     /// at spaces and commas alone; a name is matched as the table's
-    /// lowered key; an unknown one is passed over; `exit` and `die` stay;
+    /// lowered key; an unknown one is passed over; `exit` and `die` stay,
+    /// each with php's startup warning;
     /// and a user function may take a disabled native's name (Zend's
     /// `bug79382.phpt`).
     #[test]
@@ -2973,7 +3000,17 @@ mod tests {
             ("die,strlen", false, true),
             ("exit", true, true),
         ] {
-            assert_eq!(served_under(list), answers(strlen, defined), "{list:?}");
+            // `zend_disable_function`'s startup warning for a name it keeps.
+            let mut kept = String::new();
+            for name in list.split([' ', ',']) {
+                if matches!(name, "exit" | "die" | "clone") {
+                    kept.push_str("\nWarning: Cannot disable function ");
+                    kept.push_str(name);
+                    kept.push_str("() in Unknown on line 0\n");
+                }
+            }
+            let expected = kept + &answers(strlen, defined);
+            assert_eq!(served_under(list), expected, "{list:?}");
         }
         let engine = Engine::builder().ini("disable_functions", "strlen").build();
         let (out, _) = served(

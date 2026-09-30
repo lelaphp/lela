@@ -18057,6 +18057,10 @@ impl Request {
         } else {
             value
         };
+        if name == b"report_memleaks" && !ini_truth(Some(value)) {
+            let message = "Directive 'report_memleaks' is deprecated";
+            crate::api::raising::docref(self, Level::Deprecated, message);
+        }
         let handler = self.shared.extensions.iter().find_map(|e| {
             e.on_modify
                 .iter()
@@ -20126,7 +20130,7 @@ fn seconds(d: std::time::Duration) -> f64 {
 
 /// `zend_ini_parse_bool`: an ini entry read as on or off, where "off",
 /// "no", "false" and "" are off beside "0" and everything else is on.
-fn ini_truth(value: Option<&[u8]>) -> bool {
+pub(crate) fn ini_truth(value: Option<&[u8]>) -> bool {
     let Some(value) = value else { return false };
     let text = value.to_ascii_lowercase();
     !matches!(text.as_slice(), b"" | b"0" | b"off" | b"no" | b"false")
