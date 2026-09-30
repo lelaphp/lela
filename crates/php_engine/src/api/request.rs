@@ -7353,9 +7353,32 @@ impl Request {
         class: ClassId,
         payload: T,
     ) -> Result<PhpObject, Thrown> {
+        let custom = self.object_custom(class);
+        self.new_object_custom(class, payload, custom)
+    }
+
+    /// [`Request::new_object_with`] for an object php `emalloc`s whole at
+    /// `size` bytes rather than at its class's `zend_object_alloc`: an
+    /// iterator the engine's wrapper stands for, whose struct is the
+    /// `get_iterator` that made it's ([`crate::interfaces`]).
+    pub(crate) fn new_object_sized<T: std::any::Any + Send>(
+        &mut self,
+        class: ClassId,
+        payload: T,
+        size: usize,
+    ) -> Result<PhpObject, Thrown> {
+        const HEADER: usize = 40;
+        self.new_object_custom(class, payload, size.saturating_sub(HEADER))
+    }
+
+    fn new_object_custom<T: std::any::Any + Send>(
+        &mut self,
+        class: ClassId,
+        payload: T,
+        custom: usize,
+    ) -> Result<PhpObject, Thrown> {
         let slots = self.class_slots(class);
         let defaults = self.property_defaults(class)?;
-        let custom = self.object_custom(class);
         let allocated = self.heap.object_with(class.0, slots, custom, payload);
         let object = match self.fatal_of(allocated).map(PhpObject::of) {
             Ok(object) => object,

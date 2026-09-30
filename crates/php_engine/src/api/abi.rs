@@ -1854,6 +1854,40 @@ pub trait ObjectHandlers: Send + Sync {
         Ok(None)
     }
 
+    /// `sizeof` the iterator struct the class's `get_iterator` `emalloc`s,
+    /// what `memory_get_usage()` counts of the iterator a `foreach` or an
+    /// outer iterator holds over one of its objects (design §5.13): a
+    /// declaration, as a class's `size` is, `zend_object_iterator`'s 88
+    /// bytes unless the class's struct extends it (`spl_array_iterator`'s
+    /// 96, `spl_dllist_it`'s 104).
+    ///
+    /// ```php
+    /// function probe($label, $x) { foreach ($x as $v) { break; } $m = memory_get_usage(); foreach ($x as $v) { echo $label, ' ', memory_get_usage() - $m, "\n"; break; } }
+    /// probe('fixed', SplFixedArray::fromArray([1, 2]));
+    /// $l = new SplDoublyLinkedList; $l->push(1); probe('dllist', $l);
+    /// probe('period', new DatePeriod(new DateTime('2020-01-01'), new DateInterval('P1D'), 2));
+    /// $wm = new WeakMap; $k = new stdClass; $wm[$k] = 1; probe('weakmap', $wm);
+    /// $d = new DOMDocument; $d->loadXML('<a><b/><c/></a>'); probe('nodes', $d->documentElement->childNodes);
+    /// probe('sxe', simplexml_load_string('<a><b/><c/></a>'));
+    /// $p = new PDO('sqlite::memory:'); probe('stmt', $p->query('select 1 union select 2'));
+    /// probe('array', new ArrayIterator([1, 2]));
+    /// $h = Dom\HTMLDocument::createFromString('<p class="a b">x</p>', LIBXML_NOERROR); probe('tokens', $h->body->firstChild->classList);
+    /// ```
+    /// ```expect
+    /// fixed 128
+    /// dllist 112
+    /// period 128
+    /// weakmap 96
+    /// nodes 128
+    /// sxe 96
+    /// stmt 112
+    /// array 96
+    /// tokens 112
+    /// ```
+    fn iterator_size(&self) -> usize {
+        88
+    }
+
     /// `get_properties_for`: the rows one purpose reads, each under the
     /// key php's table holds it by, a property's name as a string key
     /// even where it reads as a number and an element a class shows

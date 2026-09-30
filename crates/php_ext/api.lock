@@ -152,6 +152,7 @@ abi::ObjectHandlers::get_property_ptr_ptr
 abi::ObjectHandlers::has_dimension
 abi::ObjectHandlers::has_property
 abi::ObjectHandlers::iterator_element
+abi::ObjectHandlers::iterator_size
 abi::ObjectHandlers::method_receiver
 abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension

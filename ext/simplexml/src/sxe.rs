@@ -1351,6 +1351,11 @@ pub(crate) struct Handlers;
 pub(crate) static HANDLERS: Handlers = Handlers;
 
 impl ObjectHandlers for Handlers {
+    /// `php_sxe_iterator`: the iterator and its `sxe`.
+    fn iterator_size(&self) -> usize {
+        96
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let (current, properties, made) = match sxe_mut(req, object) {
             Some(s) => (s.current.take(), s.properties.take(), s.made.take()),

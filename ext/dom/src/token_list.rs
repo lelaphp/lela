@@ -480,6 +480,11 @@ pub(crate) struct TokenListHandlers;
 pub(crate) static HANDLERS: TokenListHandlers = TokenListHandlers;
 
 impl ObjectHandlers for TokenListHandlers {
+    /// `dom_token_list_it`: the iterator, its position and the cache tag.
+    fn iterator_size(&self) -> usize {
+        104
+    }
+
     fn read_property(
         &self,
         req: &mut Request,

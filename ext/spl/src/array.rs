@@ -1702,6 +1702,11 @@ fn as_props(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<bool, T
 }
 
 impl ObjectHandlers for Handlers {
+    /// `spl_array_iterator`: the iterator and its `by_ref`.
+    fn iterator_size(&self) -> usize {
+        96
+    }
+
     /// `spl_array_object_new_ex` with no object to copy:
     /// `array_init(&intern->array)`, the table a constructor replaces.
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {

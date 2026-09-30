@@ -1071,6 +1071,11 @@ pub(crate) struct PeriodHandlers;
 pub(crate) static PERIOD: PeriodHandlers = PeriodHandlers;
 
 impl ObjectHandlers for PeriodHandlers {
+    /// `date_period_it`: the iterator, `current`, the period and `current_index`.
+    fn iterator_size(&self) -> usize {
+        120
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let rows = object
             .native_mut::<PeriodObj>(req)

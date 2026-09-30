@@ -646,6 +646,11 @@ fn unset(req: &mut Request, object: PhpObject, offset: &Value) -> Result<(), Thr
 }
 
 impl ObjectHandlers for Handlers {
+    /// `spl_fixedarray_it`: the iterator and its `current`.
+    fn iterator_size(&self) -> usize {
+        96
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let (elements, allocation) = object
             .native_mut::<Row>(req)
