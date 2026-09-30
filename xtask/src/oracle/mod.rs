@@ -955,17 +955,22 @@ pub(crate) const ENGINE_FPM: &str = "php-fpm";
 /// builds (ADR-0008), which a `--PHPDBG--` test is run through.
 pub(crate) const ENGINE_PHPDBG: &str = "phpdbg";
 
-/// The cargo line that builds [`ENGINE`], [`ENGINE_CGI`] and
-/// [`ENGINE_FPM`]: their crates by package, so the build turns on the
+/// The cargo line that builds [`ENGINE`], [`ENGINE_CGI`], [`ENGINE_FPM`]
+/// and [`ENGINE_PHPDBG`]: their crates by package, so the build turns on the
 /// features those crates declare and no others. A line naming the
 /// binaries alone builds them with every workspace member's features
 /// unified, the harness's extensions among them, which is not the binary
 /// the lane measures.
 pub(crate) fn engine_build() -> String {
-    let packages: Vec<String> = [crate::carried::BINARY, "sapi/cgi", "sapi/fpm"]
-        .iter()
-        .map(|krate| format!("-p {}", crate::layout::package(krate)))
-        .collect();
+    let packages: Vec<String> = [
+        crate::carried::BINARY,
+        "sapi/cgi",
+        "sapi/fpm",
+        "sapi/phpdbg",
+    ]
+    .iter()
+    .map(|krate| format!("-p {}", crate::layout::package(krate)))
+    .collect();
     format!("cargo build {}", packages.join(" "))
 }
 
@@ -1194,7 +1199,8 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
 ///
 /// The CGI host's binary beside it, [`ENGINE_CGI`], is what a CGI-shaped
 /// test of the lane runs, and the `FastCGI` process manager's,
-/// [`ENGINE_FPM`], what `sapi/fpm/tests` start; since ADR-0008 each is
+/// [`ENGINE_FPM`], what `sapi/fpm/tests` start, and the debugger host's,
+/// [`ENGINE_PHPDBG`], what a `--PHPDBG--` test runs; since ADR-0008 each is
 /// built by a crate of its own, so a build of `php` alone leaves them
 /// where they were: where one stands there it is held to the tree with
 /// the engine's, and the lot is behind the tree when any is. Each is held
@@ -1206,6 +1212,7 @@ fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
         (path.clone(), crate::carried::BINARY),
         (path.with_file_name(ENGINE_CGI), "sapi/cgi"),
         (path.with_file_name(ENGINE_FPM), "sapi/fpm"),
+        (path.with_file_name(ENGINE_PHPDBG), "sapi/phpdbg"),
     ];
     let behind = hosts.iter().find_map(|(binary, own)| {
         let built = binary.metadata().and_then(|at| at.modified()).ok()?;
