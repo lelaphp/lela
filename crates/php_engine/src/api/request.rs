@@ -261,6 +261,22 @@ pub enum StartHandler {
     Refused,
 }
 
+/// `php_format_date(format, len, ts, localtime)` (`Z/ext/date/php_date.c:882`),
+/// the one function of ext/date php's `main` and its other extensions
+/// call: `format` over the timestamp in the request's default zone
+/// where `localtime` says, in UTC where it does not. ext/date hands it
+/// to [`ExtensionBuilder::register`]; `php_log_err` stamps a file log
+/// with it, and `mail.log` its lines. An engine without ext/date stamps
+/// in UTC.
+///
+/// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
+#[derive(Debug, Clone, Copy)]
+pub struct FormatDate(pub FormatDateFn);
+
+/// [`FormatDate`]'s function: the request, the format, the timestamp
+/// and whether it is taken in the request's zone.
+type FormatDateFn = fn(&mut Request, &[u8], i64, bool) -> Result<Vec<u8>, Thrown>;
+
 /// A handler of the buffer stack an extension hands to
 /// [`ExtensionBuilder::register`] under a name `ob_start()` takes,
 /// `php_output_handler_alias_register` from its `MINIT`, with the
@@ -1478,6 +1494,12 @@ impl Interrupt {
         self.0.raised.store(true, Ordering::Release);
     }
 
+    /// Whether the timer's timeout is still unread, php's
+    /// `EG(timed_out)`: raised and not yet taken by a check.
+    pub(crate) fn timed_out(&self) -> bool {
+        self.0.timed_out.load(Ordering::Acquire)
+    }
+
     /// What unsetting the execution timer does beside stopping it
     /// (`zend_unset_timeout`, `Z/Zend/zend_execute_API.c:1657-1685`): the
     /// timer's word is cleared, so a deadline the old timer reached as
@@ -1681,7 +1703,7 @@ struct TickFunction {
 /// a value it hands out.
 #[allow(clippy::struct_excessive_bools)] // php's EG and PG flags, each its own global, read alone
 pub struct Request {
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
     description: RequestDescription,
     /// The natives the request has entered, in order, where the witness
     /// runner asked for them (harness §4.5 condition 2, revision 58);
@@ -2078,6 +2100,10 @@ pub struct Request {
     /// they made, which the next one counts on from
     /// ([`crate::engine::Shared::compile_for`]).
     pub(crate) keys_made: u32,
+    /// `CG(script_encoding_list)` where an `ini_set()` of
+    /// `zend.script_encoding` moved it this request; the engine's where
+    /// none did.
+    pub(crate) script_encodings: Option<Vec<php_compile::multibyte::Encoding>>,
     /// The aliases `class_alias()` added to `EG(class_table)`, each the
     /// bucket it stands in, the lowered name it is keyed by and the
     /// class it names: `ZVAL_ALIAS_PTR` rows, request state as the
@@ -2614,6 +2640,7 @@ impl Request {
             links: linking::Links::default(),
             record: recording::Record::default(),
             keys_made: 0,
+            script_encodings: None,
             buckets,
             aliases: tables.aliases,
             sapi_constant: Value::null(),
@@ -2683,7 +2710,18 @@ impl Request {
     /// so the seconds count from here.
     fn arm_timer(&mut self) {
         self.timer = None;
-        self.timer = crate::interrupt::Timer::arm(&self.interrupt, self.max_execution_time());
+        self.timer = crate::interrupt::Timer::arm(
+            &self.interrupt,
+            self.max_execution_time(),
+            self.hard_timeout(),
+        );
+    }
+
+    /// `zend_unset_timeout` at `php_request_shutdown`'s fourth step,
+    /// once the program's shutdown functions, destructors and buffer
+    /// handlers are done: nothing the request does after it is timed.
+    pub(crate) fn unset_timer(&mut self) {
+        self.timer = None;
     }
 
     // -------------------------------------------------- crate-internal
@@ -6273,9 +6311,86 @@ impl Request {
         self.sink.get().status()
     }
 
-    /// `php_log_err`: one entry for the host's log, whole.
+    /// `php_log_err_with_severity` (`Z/main/main.c:919-990`): one entry
+    /// appended to the file `error_log` names, as it stands when the
+    /// entry is written, opened `O_CREAT | O_APPEND` against the working
+    /// directory with the permissions `error_log_mode` names where they
+    /// lie within `0777`, `0644` where they do not, and written as `[<stamp>] <entry>\n`; the host's
+    /// log where no file is named, where it names `syslog`, or where the
+    /// file cannot be opened. The stamp is `d-M-Y H:i:s e` in the
+    /// request's default zone ([`Request::log_stamp`]).
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . "/witness-log-" . getmypid();
+    /// ini_set('log_errors', 1); ini_set('display_errors', 0);
+    /// ini_set('error_log', $f); ini_set('error_log_mode', '0600');
+    /// echo $undefined;
+    /// $old = umask(0); error_log("two\nlines"); umask($old);
+    /// printf("%o\n", fileperms($f) & 0777);
+    /// readfile($f); unlink($f);
+    /// ```
+    /// ```expect
+    /// 600
+    /// [%d-%s-%d %d:%d:%d UTC] PHP Warning:  Undefined variable $undefined in %s on line 5
+    /// [%d-%s-%d %d:%d:%d UTC] two
+    /// lines
+    /// ```
     fn log_err(&mut self, entry: &[u8]) {
-        self.sink.get().log(entry);
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let named = self.ini_get(b"error_log").unwrap_or_default();
+        if named.is_empty() || named == b"syslog" {
+            self.sink.get().log(entry);
+            return;
+        }
+        let path = self.cwd().join(std::ffi::OsStr::from_bytes(named));
+        let mode =
+            crate::ini_quantity::parse(self.ini_get(b"error_log_mode").unwrap_or_default()).0;
+        let mode = u32::try_from(mode)
+            .ok()
+            .filter(|mode| (1..=0o777).contains(mode))
+            .unwrap_or(0o644);
+        let opened = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(mode)
+            .open(path);
+        let Ok(mut file) = opened else {
+            self.sink.get().log(entry);
+            return;
+        };
+        let stamp = self.log_stamp(std::time::SystemTime::now());
+        let mut line = Vec::with_capacity(entry.len() + 32);
+        line.push(b'[');
+        line.extend_from_slice(&stamp);
+        line.extend_from_slice(b"] ");
+        line.extend_from_slice(entry);
+        line.push(b'\n');
+        let _ = file.write_all(&line);
+    }
+
+    /// `php_format_date("d-M-Y H:i:s e", now, 1)`: through the
+    /// [`FormatDate`] the bundle registered, so in the request's default
+    /// zone, and in UTC where none is registered or it threw, whose
+    /// throwable is left pending as php's `get_timezone_info` leaves
+    /// its `DateError`.
+    fn log_stamp(&mut self, now: std::time::SystemTime) -> Vec<u8> {
+        let utc = zone::utc_log_stamp(now);
+        let Some(FormatDate(format)) = self.registered::<FormatDate>().next().copied() else {
+            return utc.into_bytes();
+        };
+        let secs = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        match format(self, b"d-M-Y H:i:s e", secs, true) {
+            Ok(stamp) => stamp,
+            Err(thrown) => {
+                self.leave_pending(&thrown);
+                utc.into_bytes()
+            }
+        }
     }
 
     /// `sapi_module.send_headers`: the response's head handed to the
@@ -11306,6 +11421,66 @@ impl Request {
         Ok(entries)
     }
 
+    /// `zend_array_count` over the property table
+    /// `zend_std_get_properties` builds for `object` (`Z/Zend/zend_hash.c:519`):
+    /// one row per declared slot and one per dynamic property, the
+    /// declared slots counted again, the empty ones left out, only where
+    /// the table is marked `HASH_FLAG_HAS_EMPTY_IND`, and the mark
+    /// cleared where that finds none empty. So a slot `unset` empties
+    /// still counts inside the release that empties it, before the mark
+    /// is set.
+    ///
+    /// ```php
+    /// class N { public $p = null; public $c = [];
+    ///     function __destruct() { var_dump($this); unset($this->c); } }
+    /// $a = new N; $a->c[] = new N; $a->c[0]->p = $a;
+    /// ```
+    /// ```expect
+    /// object(N)#1 (2) {
+    ///   ["p"]=>
+    ///   NULL
+    ///   ["c"]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     object(N)#2 (2) {
+    ///       ["p"]=>
+    ///       *RECURSION*
+    ///       ["c"]=>
+    ///       array(0) {
+    ///       }
+    ///     }
+    ///   }
+    /// }
+    /// object(N)#2 (2) {
+    ///   ["p"]=>
+    ///   object(N)#1 (2) {
+    ///     ["p"]=>
+    ///     NULL
+    ///   }
+    ///   ["c"]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// ```
+    pub(crate) fn property_count(&mut self, object: PhpObject) -> Result<usize, Thrown> {
+        let o = object.heap();
+        let built = self.heap.object_properties(o);
+        let table = self.fatal_of(built)?;
+        let declared = self.placed_properties(object.class()).len();
+        let total = declared + table.len();
+        if !table.has_empty_ind() {
+            return Ok(total);
+        }
+        let held = (0..declared)
+            .filter(|at| !o.slot(u32::try_from(*at).unwrap_or(u32::MAX)).is_undef())
+            .count();
+        let counted = held + table.len();
+        if counted == total {
+            table.set_has_empty_ind(false);
+        }
+        Ok(counted)
+    }
+
     /// `zend_objects_clone_obj`, the `Std` `clone_obj` slot: a fresh
     /// entry of the same class holding what this one holds, one more
     /// owner each, and the class's `__clone` served on it, the copy held
@@ -12118,9 +12293,33 @@ impl Request {
     /// `EG(current_execute_data)`: whether a frame or a native's call
     /// stands, which is every release inside a serving and none of the
     /// releases `php_request_shutdown` makes after the main frame popped.
+    /// A frame being popped is not one: `zend_leave_helper` has made its
+    /// caller current before it frees the CVs (`Z/Zend/zend_vm_def.h:2970`),
+    /// so a destructor a top frame's last release serves at shutdown
+    /// finds nothing executing, and what it raises is the uncaught fatal
+    /// `zend_call_function`'s tail renders there, the throwable the
+    /// frame was left with never chained under it.
+    ///
+    /// ```php
+    /// class C {
+    ///     public function __destruct() {
+    ///         static $n = 0;
+    ///         if (++$n === 1) { $c = new C; }
+    ///         throw new Exception("from destructor $n");
+    ///     }
+    /// }
+    /// $c = new C;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Exception: from destructor 2 in %s:6
+    /// Stack trace:
+    /// #0 [internal function]: C->__destruct()
+    /// #1 {main}
+    ///   thrown in %s on line 6
+    /// ```
     pub(crate) fn executing(&self) -> bool {
         self.fibers.active().is_some()
-            || self.vm.innermost().is_some()
+            || self.vm.frames().iter().any(|frame| !frame.leaving)
             || self.vm.serving_call().is_some()
     }
 
@@ -13126,6 +13325,24 @@ impl Request {
     /// __get u
     /// int(7)
     /// ```
+    /// `zend_std_unset_property`'s declared arm over a slot that holds
+    /// a value: the value given up with the slot left `UNDEF`, no longer
+    /// `IS_PROP_UNINIT` whatever it was made with, and then
+    /// `HT_FLAGS(zobj->properties) |= HASH_FLAG_HAS_EMPTY_IND`, so a
+    /// destructor the release served counted the slot still
+    /// ([`Request::property_count`]).
+    fn empty_slot(&mut self, object: PhpObject, slot: u32) {
+        let o = object.heap();
+        if let Some(cell) = o.slot(slot).as_reference() {
+            self.slot_source_gone(object, slot, cell);
+        }
+        Heap::object_set_slot(&mut Hooks(self), o, slot, Zval::UNDEF);
+        o.set_slot_bit(slot, php_heap::PropBit::Uninit, false);
+        if let Some(table) = o.properties() {
+            table.set_has_empty_ind(true);
+        }
+    }
+
     pub(crate) fn unset_property(&mut self, object: PhpObject, name: &[u8]) -> Result<(), Thrown> {
         let class = object.class();
         let o = object.heap();
@@ -13177,13 +13394,7 @@ impl Request {
                         ));
                     }
                     if !empty {
-                        if let Some(cell) = o.slot(placed.slot).as_reference() {
-                            self.slot_source_gone(object, placed.slot, cell);
-                        }
-                        Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
-                        // An emptied slot is no longer `IS_PROP_UNINIT`,
-                        // whatever it was made with.
-                        o.set_slot_bit(placed.slot, php_heap::PropBit::Uninit, false);
+                        self.empty_slot(object, placed.slot);
                     } else if uninit && !waits {
                         // `Z_PROP_FLAG_P(slot) = 0`: the bit reset and
                         // `__unset` passed by.
@@ -14166,6 +14377,12 @@ impl Request {
     /// armed for; zero, php's CLI default, arms none.
     pub(crate) fn max_execution_time(&self) -> i64 {
         i64::from(self.ini_number(b"max_execution_time", 0))
+    }
+
+    /// `EG(hard_timeout)`, `OnUpdateLong` over the startup ini: the
+    /// seconds past a timeout the timer gives the loop to take it.
+    fn hard_timeout(&self) -> i64 {
+        crate::ini_quantity::parse(self.ini_get(b"hard_timeout").unwrap_or_default()).0
     }
 
     /// Whether a handler left a throwable pending, php's `EG(exception)`:
@@ -16207,6 +16424,22 @@ impl Request {
     /// Fatal error: Cannot redeclare function f() (previously declared in %s:9) in %s on line 6
     /// closed
     /// ```
+    ///
+    /// A read that fails, as one through a filter that answers
+    /// `PSFS_ERR_FATAL` fails, is the file php could not open
+    /// (`zend_stream_fixup`, [`crate::streams::PhpStream::read_for_compile`]).
+    ///
+    /// ```php
+    /// class F extends php_user_filter { }
+    /// stream_filter_register('f.fatal', F::class);
+    /// var_dump(include 'php://filter/read=f.fatal/resource=' . __FILE__);
+    /// ```
+    /// ```expect
+    /// Warning: include(): Unprocessed filter buckets remaining on input brigade in %s on line 4
+    ///
+    /// Warning: include(): Failed opening 'php://filter/read=f.fatal/resource=%s' for inclusion (include_path='%s') in %s on line 4
+    /// bool(false)
+    /// ```
     pub(crate) fn include_stream(
         &mut self,
         kind: IncludeKind,
@@ -16235,8 +16468,8 @@ impl Request {
                 };
                 stream.set_option(self, unbuffered);
                 let source = self
-                    .stream_op(*stream, |req, s| s.copy_to_mem(req, None))
-                    .unwrap_or_default();
+                    .stream_op(*stream, |req, s| s.read_for_compile(req))
+                    .flatten();
                 // A read that bailed out leaves the stream open, as
                 // `zend_bailout` leaves `zend_destroy_file_handle`
                 // unreached: it stands among the request's resources,
@@ -16244,18 +16477,25 @@ impl Request {
                 if !self.bailing_out() {
                     stream.free(self);
                 }
-                Some(source)
+                source
             }
             _ => None,
         };
         self.including = outer;
         opened?;
-        let Some(source) = source else {
-            return self.failed_opening(kind, written);
-        };
+        // `compile_file` reports the file it could not open or read only
+        // where nothing is pending (`if (!EG(exception))`).
         if let Some(thrown) = self.stream_thrown.take() {
             return Err(thrown);
         }
+        let Some(source) = source else {
+            // A read a fatal ended is no file php reports: the bailout
+            // jumps past `compile_file`'s message.
+            if self.bailing_out() {
+                return Ok(Opened::Failed);
+            }
+            return self.failed_opening(kind, written);
+        };
         let path = opened_path.as_deref().unwrap_or(path);
         let shared = Arc::clone(&self.shared);
         let unit = match shared.compile_for(self, &source, path, SourceKind::File) {
@@ -16534,6 +16774,14 @@ impl Request {
     /// ParseError
     /// ```
     fn refused_include(&mut self, refused: &CompileError, path: &[u8], kind: SourceKind) -> Thrown {
+        if refused.stage == php_compile::Stage::Opening {
+            // `open_file_for_scanning` refused before anything compiled:
+            // `zend_error` places it where the request is executing.
+            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+            let line = self.current_line();
+            self.end_in_compile_time(refused.level, &refused.message, &file, line);
+            return Thrown::of(None);
+        }
         let raised = refused.raised.iter();
         if kind == SourceKind::Eval {
             for raised in raised.clone() {
@@ -18184,9 +18432,10 @@ impl Request {
     }
 
     /// `internal_function.module`: the extension that declared a native
-    /// function, `Core` for Zend's own; none for a native of php's
-    /// `standard` the engine declares itself, for a method and for a
-    /// user function.
+    /// function, `Core` for Zend's own and `standard` for a native of
+    /// php's `standard` the engine declares itself where the bundle has
+    /// it; none for such a native in an engine without it, for a method
+    /// and for a user function.
     #[must_use]
     pub fn function_extension(&self, function: Function) -> Option<ExtensionId> {
         let at = usize::try_from(function.0).ok()?;
@@ -18847,6 +19096,12 @@ impl Request {
         if name == b"zend.assertions" && !self.assertions_updated(value) {
             return Ok(None);
         }
+        if name == b"zend.script_encoding" {
+            let Some(listed) = crate::multibyte::script_encoding(self, value) else {
+                return Ok(None);
+            };
+            self.script_encodings = Some(listed);
+        }
         // `OnUpdateErrorLog` (`Z/main/main.c:697`): at runtime a file
         // outside `open_basedir` is refused, `syslog` and the empty value
         // never are.
@@ -18946,6 +19201,7 @@ impl Request {
     pub(crate) fn ini_modifiable(name: &[u8]) -> (bool, bool, bool) {
         match name {
             b"xmlrpc_errors"
+            | b"hard_timeout"
             | b"sys_temp_dir"
             | b"sendmail_path"
             | b"syslog.facility"
@@ -18962,6 +19218,7 @@ impl Request {
             | b"user_ini.filename"
             | b"user_ini.cache_ttl" => (false, false, true),
             b"short_open_tag"
+            | b"zend.multibyte"
             | b"output_buffering"
             | b"output_handler"
             | b"mail.add_x_header"
@@ -21385,6 +21642,31 @@ mod tests {
             out.ends_with("string(1) \"1\"\nbool(false)\nstring(1) \"0\"\n"),
             "{out}"
         );
+    }
+
+    /// A refusal php's compiler throws, uncaught in the program, is
+    /// rendered by `zend_exception_error` with no fatal's trace after it
+    /// whatever `fatal_error_backtraces` says, where one it raises takes
+    /// the trace; the recipe turns the entry off, so the witness on
+    /// `refused_program` cannot tell the two apart and this does.
+    #[test]
+    fn a_thrown_refusal_takes_no_fatal_trace_and_a_raised_one_does() {
+        let served = |script: &str| {
+            let out = Engine::builder()
+                .ini("fatal_error_backtraces", "1")
+                .build()
+                .serve_capture(script, crate::test::Capture::default());
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let thrown = served("<?php\ndeclare(encoding = M_PI);");
+        assert!(
+            thrown.contains("Fatal error: Encoding must be a literal"),
+            "{thrown}"
+        );
+        assert!(!thrown.contains("Stack trace"), "{thrown}");
+        let raised = served("<?php\necho 1;\ndeclare(encoding = 'UTF-8');");
+        assert!(raised.contains("very first statement"), "{raised}");
+        assert!(raised.contains("Stack trace"), "{raised}");
     }
 
     /// The same `on_modify` at `ZEND_INI_STAGE_STARTUP`, over the value

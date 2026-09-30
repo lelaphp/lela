@@ -5730,7 +5730,10 @@ fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> V
             }
         }
     }
-    let Ok(entries) = object.props(req) else {
+    // `classname_obj->handlers->get_properties(classname_obj)`: the
+    // table the class answers, a `DateInterval`'s fields among it.
+    let handlers = object.handlers(req);
+    let Ok(entries) = handlers.get_properties(req, object) else {
         return Vec::new();
     };
     let mut seen: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
@@ -5763,14 +5766,38 @@ fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> V
 /// `_class_string`'s `Dynamic properties`: the bare names of
 /// `zend_get_properties_no_lazy_init` that `ce->properties_info` has not,
 /// which holds a parent's private property too, so a dynamic property
-/// named as one is not counted there.
+/// named as one is not counted there. A lazy object is read as it
+/// stands and not initialised; any other is the rows its class's
+/// `get_properties` answers.
+///
+/// ```php
+/// class C { public int $a; }
+/// $r = new ReflectionClass(C::class);
+/// $g = $r->newLazyGhost(function () { echo "init\n"; });
+/// $s = (string) new ReflectionObject($g);
+/// var_dump($r->isUninitializedLazyObject($g));
+/// preg_match("/Dynamic properties \\[(\\d+)\\]/", (string) new ReflectionObject(new DateInterval("P1D")), $m); echo $m[1], "\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// 10
+/// ```
 fn undeclared_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
     let declared: Vec<Vec<u8>> = class_chain(req, class)
         .into_iter()
         .filter_map(|at| req.class_decl(at))
         .flat_map(|decl| decl.properties.iter().map(|p| p.name.0.to_vec()))
         .collect();
-    let Ok(entries) = object.props(req) else {
+    // `zend_get_properties_no_lazy_init`: a lazy object's rows as they
+    // stand, nothing initialised, and any other's class table, a
+    // `DateInterval`'s fields among it.
+    let entries = if object.is_lazy() {
+        object.props(req)
+    } else {
+        let handlers = object.handlers(req);
+        handlers.get_properties(req, object)
+    };
+    let Ok(entries) = entries else {
         return Vec::new();
     };
     entries

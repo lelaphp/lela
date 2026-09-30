@@ -23,6 +23,7 @@
 
 mod emit;
 mod live;
+pub mod multibyte;
 mod special;
 mod stack;
 
@@ -134,6 +135,11 @@ pub struct Options<'a> {
     /// declare two anonymous classes, as php's one `CG(rtd_key_counter)`
     /// makes them.
     pub keys_before: u32,
+    /// `CG(multibyte)`, `zend.multibyte` as it stands while the file
+    /// compiles, with the encoding functions the engine bound and what
+    /// the scanner made of the file as it opened it
+    /// ([`multibyte::Multibyte`]); `None` where the entry is off.
+    pub multibyte: Option<multibyte::Multibyte<'a>>,
 }
 
 impl Default for Options<'_> {
@@ -153,6 +159,7 @@ impl Default for Options<'_> {
             request_classes: RequestClasses::default(),
             stack: StackLimit::UNCHECKED,
             keys_before: 0,
+            multibyte: None,
         }
     }
 }
@@ -253,6 +260,24 @@ pub struct CompileError {
     /// fatal: a `try` around the `include` or the `eval` catches it, and
     /// uncaught it renders as the fatal at [`CompileError::level`].
     pub thrown: bool,
+    /// Where php stood when it refused, which is where `zend_error`
+    /// places it.
+    pub stage: Stage,
+}
+
+/// Where php stood when it refused a source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Stage {
+    /// Compiling it, `zend_is_compiling()`: the refusal stands in the
+    /// file at [`CompileError::line`].
+    #[default]
+    Compiling,
+    /// Opening it for the scanner, before anything compiled
+    /// (`open_file_for_scanning`, `zend_prepare_string_for_scanning`):
+    /// the refusal stands where the request is executing, the `include`
+    /// or the `eval` that asked, and at `Unknown` on line 0 for the
+    /// program itself.
+    Opening,
 }
 
 /// Parse and compile one source file: what the engine calls for the
@@ -301,7 +326,41 @@ pub fn compile_source(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    let syntax = php_syntax::Options {
+    let Some(multibyte) = options.multibyte else {
+        return compile(
+            &php_syntax::parse(source, &syntax_options(options)),
+            options,
+            strings,
+        );
+    };
+    let from = match options.kind {
+        SourceKind::File => multibyte::Source::File {
+            detect_unicode: multibyte.detect_unicode,
+            listed: multibyte.listed,
+        },
+        SourceKind::Eval => multibyte::Source::Eval,
+    };
+    let opened =
+        multibyte::open(multibyte.encodings, source, from).map_err(|refused| CompileError {
+            level: Level::CompileError,
+            message: refused.message(),
+            line: 0,
+            raised: Vec::new(),
+            thrown: false,
+            stage: Stage::Opening,
+        })?;
+    let parsed = php_syntax::parse(&opened.text, &syntax_options(options));
+    let scanning = multibyte::Scanning {
+        original: source.get(opened.bom..).unwrap_or_default(),
+        filter: opened.filter,
+    };
+    compile_scanned(&parsed, options, strings, Some(scanning))
+}
+
+/// What the lexer is told of a source the compiler is handed: the
+/// entry `CG(short_tags)` reads and where the scanner begins.
+fn syntax_options(options: &Options<'_>) -> php_syntax::Options {
+    php_syntax::Options {
         lex: php_syntax::LexOptions {
             short_open_tag: options.short_open_tag,
             position: match options.kind {
@@ -313,8 +372,7 @@ pub fn compile_source(
             },
         },
         ..php_syntax::Options::default()
-    };
-    compile(&php_syntax::parse(source, &syntax), options, strings)
+    }
 }
 
 /// Compile one parsed file into a unit, interning its constant strings
@@ -324,6 +382,17 @@ pub fn compile(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
+    compile_scanned(parsed, options, strings, None)
+}
+
+/// [`compile`] over a parse of what the scanner read through
+/// `scanning`, the file as it was opened.
+fn compile_scanned<'p>(
+    parsed: &'p Parsed,
+    options: &Options<'p>,
+    strings: &mut dyn Intern,
+    scanning: Option<multibyte::Scanning<'p>>,
+) -> Result<Unit, CompileError> {
     // `Parsed::diagnostics` is in php's order (design §6.1): the
     // scanner's and the parser's by position, the compiler's one after
     // them all. php's scanner raises as it scans and its parser stops at
@@ -332,8 +401,17 @@ pub fn compile(
     // nothing of a file its parser refused, and the first fatal is the
     // compile error, in php's words at php's line, with what was raised
     // before it carried beside it.
+    //
+    // The parser's `declare` action runs as it parses
+    // ([`multibyte::scan`]): what it warned stands among the parse's
+    // diagnostics, and the fatal it threw stands where it threw it.
+    let scanned = multibyte::scan(parsed, options, scanning);
+    let parsed = &*scanned.parsed;
     let mut raised = Vec::new();
-    for diagnostic in &parsed.diagnostics {
+    for (at, diagnostic) in parsed.diagnostics.iter().enumerate() {
+        if let Some(refused) = scanned.refused.as_ref().filter(|r| r.before == at) {
+            return Err(refused.error(raised));
+        }
         let level = level_of(diagnostic.level);
         if diagnostic.level.is_fatal() {
             return Err(CompileError {
@@ -342,6 +420,7 @@ pub fn compile(
                 line: diagnostic.line,
                 raised,
                 thrown: false,
+                stage: crate::Stage::Compiling,
             });
         }
         raised.push(Diagnostic {
@@ -354,7 +433,11 @@ pub fn compile(
     // as php raised them: the whole file is scanned before
     // `zend_compile_top_stmt` runs, and opcache records both kinds on a
     // `persistent_script` to replay on a hit.
-    match emit::unit(parsed, options, strings) {
+    if let Some(refused) = &scanned.refused {
+        return Err(refused.error(raised));
+    }
+    let halt = emit::walk::halt_offset(parsed).map(|offset| scanned.original_offset(offset));
+    match emit::unit(parsed, options, strings, halt) {
         Ok(mut unit) => {
             raised.append(&mut unit.diagnostics);
             unit.diagnostics = raised;
@@ -1438,6 +1521,7 @@ mod tests {
                 line: 3,
                 raised: vec![overflow(2)],
                 thrown: false,
+                stage: crate::Stage::Compiling,
             })
         );
         assert_eq!(
@@ -1448,6 +1532,7 @@ mod tests {
                 line: 3,
                 raised: vec![overflow(2), overflow(4)],
                 thrown: false,
+                stage: crate::Stage::Compiling,
             })
         );
     }
@@ -3324,6 +3409,7 @@ mod tests {
                 line: 2,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             })
         );
     }
@@ -3361,6 +3447,7 @@ mod tests {
                 line: 2,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             })
         );
     }
@@ -3461,6 +3548,7 @@ mod tests {
                 line: 1,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             }),
             "`zend_is_allowed_in_const_expr` has no `ZEND_AST_SILENCE`"
         );
@@ -3563,6 +3651,7 @@ mod tests {
                 line: 1,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             }),
             "`zend_is_allowed_in_const_expr` has no `ZEND_AST_ENCAPS_LIST`"
         );
@@ -3879,6 +3968,7 @@ mod tests {
             line: 0,
             raised: Vec::new(),
             thrown: false,
+            stage: crate::Stage::Compiling,
         };
         let error = refused(b"<?php\n$a = (function () { declare(ticks=0): enddeclare; });\n")
             .unwrap_or_else(compiled);
@@ -4272,6 +4362,7 @@ mod tests {
                 line: 0,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             });
             assert_eq!(error.level, Level::CompileError, "{message}");
             assert_eq!(error.message, message);
@@ -4664,13 +4755,33 @@ mod tests {
             refused(b"<?php declare(ticks=-1);").as_deref(),
             Some("declare(ticks) value must be a literal")
         );
-        // What php compiles and this compiler does not: the encoding
-        // pragma the scanner answers, and the alternative syntax. A tick
-        // count was one of them until #1190.
+        // What php compiles and this compiler does not: the alternative
+        // syntax. A tick count was one of them until #1190, the encoding
+        // pragma until #1272, which is held to `zend_is_first_statement`
+        // without `allow_nop` (the parser's own reading of it is
+        // `multibyte`'s tests).
         assert_eq!(refused(b"<?php declare(ticks=1); echo 1;").as_deref(), None);
+        let first =
+            Some("Encoding declaration pragma must be the very first statement in the script");
         assert_eq!(
-            refused(b"<?php declare(encoding=\"UTF-8\");").as_deref(),
-            Some("a `declare(encoding)` this compiler cannot read yet")
+            refused(b"<?php declare(ticks=1); declare(encoding=\"x\");").as_deref(),
+            None
+        );
+        assert_eq!(
+            refused(b"<?php ; declare(encoding=\"x\");").as_deref(),
+            first
+        );
+        assert_eq!(
+            refused(b"<?php ?><?php declare(encoding=\"x\");").as_deref(),
+            first
+        );
+        assert_eq!(
+            refused(b"<?php echo 1; declare(encoding=\"x\");").as_deref(),
+            first
+        );
+        assert_eq!(
+            refused(b"<?php declare(encoding=\"x\") { declare(encoding=\"y\"); }").as_deref(),
+            first
         );
         assert_eq!(
             refused(b"<?php declare(ticks=0): echo 1; enddeclare;").as_deref(),
@@ -7277,6 +7388,7 @@ class C {
                 line: 0,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             });
             assert_eq!(error.level, Level::CompileError, "{message}");
             assert_eq!(error.message, message);

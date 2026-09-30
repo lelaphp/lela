@@ -42,6 +42,16 @@ abi::DebugInfo
 abi::Dependency
 abi::DependencyKind
 abi::DimensionRead
+abi::Encoding
+abi::Encodings
+abi::Encodings::convert
+abi::Encodings::detect
+abi::Encodings::fetch
+abi::Encodings::internal
+abi::Encodings::lexer_compatible
+abi::Encodings::list
+abi::Encodings::name
+abi::Encodings::unicode
 abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::admission
@@ -56,6 +66,7 @@ abi::ExtensionBuilder::compile_file
 abi::ExtensionBuilder::constants
 abi::ExtensionBuilder::constants_with
 abi::ExtensionBuilder::dependencies
+abi::ExtensionBuilder::encodings
 abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::info
@@ -108,6 +119,9 @@ abi::Iterable
 abi::Lookup
 abi::Members
 abi::Members::members
+abi::Multibyte
+abi::Multibyte::char_len
+abi::Multibyte::http_input
 abi::NamedVariadic
 abi::NamedVariadic::named
 abi::Never
@@ -179,6 +193,7 @@ abi::This::read
 abi::True
 abi::Typed
 abi::Typed::new
+abi::Unicode
 abi::Union
 abi::Untyped
 abi::Validation
@@ -382,6 +397,7 @@ request::FdStream
 request::FilterFactory
 request::FilterFlags
 request::FilterStatus
+request::FormatDate
 request::HandlerCall
 request::HandlerOp
 request::HandlerStatus
@@ -761,8 +777,10 @@ values::HashIterator::position
 values::HashIterator::release
 values::HashIterator::set_position
 values::HeldProperties
+values::HeldProperties::count
 values::HeldProperties::release
 values::HeldProperties::rows
+values::HeldRow
 values::Key
 values::Key::from_string
 values::Key::to_prop_name
