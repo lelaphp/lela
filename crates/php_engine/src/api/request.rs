@@ -13718,6 +13718,36 @@ impl Request {
         )
     }
 
+    /// `get_function_or_method_name(EX(func))` over the function `frame`
+    /// serves: its declared name after its scope's, a closure's scope
+    /// being the one it was made or bound in, which its frame reads
+    /// ([`Request::frame_scope`]); empty for a frame that serves none.
+    ///
+    /// ```php
+    /// class C { function m() { return function (int $a): array { return []; }; } }
+    /// $f = (new C)->m();
+    /// try { $f("x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// C::{closure:C::m():2}(): Argument #1 ($a) must be of type int, string given, called in %s on line 4
+    /// ```
+    pub(crate) fn frame_function_name(&self, frame: FrameRef) -> String {
+        let Some(state) = self.vm.at(frame) else {
+            return String::new();
+        };
+        let Some(function) = state.function else {
+            return String::new();
+        };
+        if state.closure.is_none() {
+            return self.qualified_name_of(function);
+        }
+        let name = self.declared_name(function);
+        match self.frame_scope(frame) {
+            Some(scope) => format!("{}::{name}", self.class_name(scope)),
+            None => name,
+        }
+    }
+
     /// The name a raise or a trace prints a callee under: a function's
     /// declared name, and `Class::method` for a method, as
     /// `zend_wrong_parameters_count_error` and `zend_trace_to_string`

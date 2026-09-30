@@ -4016,8 +4016,7 @@ fn return_type_error(
     ty: &php_unit::decl::Type,
     returned: Option<&Value>,
 ) -> Thrown {
-    let function = req.vm().at(frame).and_then(|state| state.function);
-    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
+    let name = req.frame_function_name(frame);
     let declared = resolved_type_name(req, frame, ty);
     let given = match returned {
         Some(returned) => crate::ops::value_name(req, &returned.undef_as_null()),
@@ -4063,9 +4062,10 @@ pub(crate) fn verify_never_type<T: Tier>(
     _: &OpArray,
     _: &Opline,
 ) -> Edge {
-    let function = req.vm().at(frame).and_then(|state| state.function);
-    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
-    let kind = if req.vm().at(frame).is_some_and(|state| state.this.is_some()) {
+    // `zf->common.scope ? "method" : "function"`: a static method is
+    // a method, and a closure written in a class is one.
+    let name = req.frame_function_name(frame);
+    let kind = if req.frame_scope(frame).is_some() {
         "method"
     } else {
         "function"
@@ -4265,7 +4265,7 @@ fn arg_type_error(
     // NUL an anonymous class's name holds: its class alone.
     let name = function.map_or_else(String::new, |function| match req.method_class(function) {
         Some(class) if req.class_name_bytes(class).contains(&0) => req.class_name(class),
-        _ => req.qualified_name_of(function),
+        _ => req.frame_function_name(frame),
     });
     // `get_function_arg_name`: php has a name for an argument up to the
     // declared count alone, which excludes the variadic, so the error
@@ -4330,7 +4330,7 @@ fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
 /// is a call site the program never wrote.
 fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
     let function = req.vm().at(frame).and_then(|state| state.function);
-    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
+    let name = req.frame_function_name(frame);
     let parameters: Vec<bool> = function
         .and_then(|function| req.function_decl(function))
         .map(|decl| {
