@@ -15,14 +15,38 @@ use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, arg_value_error, throw, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, Value, ValueRef};
 
 use crate::{ArrayAccess, Countable, Iterator, IteratorAggregate, JsonSerializable};
 
 /// `spl_fixedarray_object`'s row of elements.
+///
+/// ```php
+/// $w = new SplFixedArray(3);
+/// $m = memory_get_usage(); $a = new SplFixedArray(3); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = new SplFixedArray(0); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $a->setSize(10); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $a->setSize(0); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $c = SplFixedArray::fromArray([1, 2, 3, 4, 5]); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $d = SplFixedArray::fromArray([7 => 1], true); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $e = clone $c; echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 144
+/// 96
+/// 112
+/// -160
+/// 176
+/// 224
+/// 176
+/// ```
 #[derive(Default)]
 pub(crate) struct RowState {
     elements: Vec<Value>,
+    /// `array->elements` as php allocates it on the request's heap,
+    /// `sizeof(zval)` an element, and none for an empty row (design
+    /// §5.13).
+    allocation: Option<Emalloc>,
     /// `cached_resize`: the size a resize under way was last asked for,
     /// by itself or by a destructor it served; `None` while none is
     /// under way.
@@ -72,6 +96,7 @@ fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Throw
             Vec::new()
         }
     })?;
+    fit(req, object, size)?;
     if size == 0 {
         for value in cut.into_iter().rev() {
             req.release(value);
@@ -182,8 +207,8 @@ impl SplFixedArray {
             return Ok(());
         }
         let size = usize::try_from(size).unwrap_or(0);
-        reserve(req, size)?;
-        with(req, this, |a| a.elements = vec![Value::null(); size])
+        let allocation = laid(req, size)?;
+        lay(req, this, vec![Value::null(); size], allocation)
     }
 
     /// `__wakeup(): void`, deprecated: the properties an old serialization
@@ -204,7 +229,8 @@ impl SplFixedArray {
                 elements.push(crate::copied(req, value));
                 Std.unset_property(req, this, name.as_bytes())?;
             }
-            with(req, this, |a| a.elements = elements)?;
+            let allocation = laid(req, elements.len())?;
+            lay(req, this, elements, allocation)?;
         }
         Ok(())
     }
@@ -265,7 +291,8 @@ impl SplFixedArray {
                 }
             }
         }
-        with(req, this, |a| a.elements = elements)?;
+        let allocation = laid(req, elements.len())?;
+        lay(req, this, elements, allocation)?;
         let loaded = crate::load_members(req, this, &Value::array(members));
         req.release(Value::array(members));
         loaded
@@ -340,6 +367,7 @@ impl SplFixedArray {
     ) -> Result<Instance<Self>, Thrown> {
         let rows = array.snapshot();
         let mut elements: Vec<Value>;
+        let allocation;
         if preserveKeys && !rows.is_empty() {
             let mut max = 0usize;
             for (key, _) in &rows {
@@ -363,7 +391,7 @@ impl SplFixedArray {
                     "integer overflow detected",
                 ));
             };
-            reserve(req, size)?;
+            allocation = laid(req, size)?;
             elements = vec![Value::null(); size];
             for (key, value) in rows {
                 if let Key::Int(n) = key
@@ -373,6 +401,7 @@ impl SplFixedArray {
                 }
             }
         } else {
+            allocation = laid(req, rows.len())?;
             elements = rows.into_iter().map(|(_, v)| v).collect();
         }
         let elements: Vec<Value> = elements
@@ -386,7 +415,7 @@ impl SplFixedArray {
             ));
         };
         let object = new_object(req, class)?;
-        with(req, object, |a| a.elements = elements)?;
+        lay(req, object, elements, allocation)?;
         Ok(Instance::of(object))
     }
 
@@ -418,7 +447,6 @@ impl SplFixedArray {
             return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
         }
         let size = usize::try_from(size).unwrap_or(usize::MAX);
-        reserve(req, size)?;
         resize(req, this.object(), size)?;
         Ok(True)
     }
@@ -619,12 +647,15 @@ fn unset(req: &mut Request, object: PhpObject, offset: &Value) -> Result<(), Thr
 
 impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let elements = object
+        let (elements, allocation) = object
             .native_mut::<Row>(req)
-            .map(|a| std::mem::take(&mut a.elements))
+            .map(|a| (std::mem::take(&mut a.elements), a.allocation.take()))
             .unwrap_or_default();
         for value in elements {
             req.release(value);
+        }
+        if let Some(allocation) = allocation {
+            allocation.free(req);
         }
     }
 
@@ -862,22 +893,68 @@ impl ObjectHandlers for Handlers {
     }
 }
 
-/// `safe_emalloc(size, sizeof(zval), 0)`'s checks before a row of
-/// `size` elements is laid down: php's `Possible integer overflow in
-/// memory allocation` fatal where the bytes overflow, and the memory
-/// limit's where they do not fit, both before anything is built.
-fn reserve(req: &mut Request, size: usize) -> Result<(), Thrown> {
-    let Some(bytes) = size.checked_mul(16) else {
-        return Err(php_ext::raising::fatal(
+/// `sizeof(zval)`: what each element of a row takes.
+const ZVAL: usize = 16;
+
+/// The bytes of a row of `size` elements, or php's `Possible integer
+/// overflow in memory allocation` fatal where they overflow, as
+/// `safe_emalloc` and `safe_erealloc` refuse them.
+fn row_bytes(req: &mut Request, size: usize) -> Result<usize, Thrown> {
+    size.checked_mul(ZVAL).ok_or_else(|| {
+        php_ext::raising::fatal(
             req,
             &format!("Possible integer overflow in memory allocation ({size} * 16 + 0)"),
-        ));
-    };
-    if bytes > 65536 {
-        let probe = PhpString::filled(req, bytes, |_| {})?;
-        req.release(Value::string(probe));
+        )
+    })
+}
+
+/// `spl_fixedarray_init`'s `safe_emalloc(size, sizeof(zval), 0)`: the
+/// allocation of a row of `size` elements, made before the row is
+/// built, so the overflow's fatal and the memory limit's come first;
+/// none for an empty row.
+fn laid(req: &mut Request, size: usize) -> Result<Option<Emalloc>, Thrown> {
+    let bytes = row_bytes(req, size)?;
+    if bytes == 0 {
+        return Ok(None);
+    }
+    Emalloc::new(req, bytes).map(Some)
+}
+
+/// The row `elements` laid into the object with the allocation
+/// [`laid`] made for it, what the object held before given back.
+fn lay(
+    req: &mut Request,
+    object: PhpObject,
+    elements: Vec<Value>,
+    allocation: Option<Emalloc>,
+) -> Result<(), Thrown> {
+    let old = with(req, object, |a| {
+        a.elements = elements;
+        std::mem::replace(&mut a.allocation, allocation)
+    })?;
+    if let Some(old) = old {
+        old.free(req);
     }
     Ok(())
+}
+
+/// `spl_fixedarray_resize`'s allocation for a row now `size` long:
+/// given back where the row empties, `spl_fixedarray_init`'s where it
+/// had none, and `erealloc`'d otherwise.
+fn fit(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Thrown> {
+    let held = with(req, object, |a| a.allocation.take())?;
+    let fitted = match held {
+        Some(held) if size == 0 => {
+            held.free(req);
+            None
+        }
+        None => laid(req, size)?,
+        Some(held) => {
+            let bytes = row_bytes(req, size)?;
+            Some(held.resize(req, bytes)?)
+        }
+    };
+    with(req, object, |a| a.allocation = fitted)
 }
 
 /// `spl_fixedarray_object_clone`: the elements with one more owner each.
@@ -886,11 +963,13 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
     for value in &elements {
         req.addref(value);
     }
+    let allocation = laid(req, elements.len())?;
     clone_with(
         req,
         &object,
         Box::new(RowState {
             elements,
+            allocation,
             resizing: None,
         }),
     )
