@@ -3085,12 +3085,25 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKin
 /// A program in `file` the compiler refused: `php_error_cb` renders it
 /// where it renders every diagnostic, at the level the compiler refused
 /// at, what it raised before first, and the request ends before a frame
-/// is pushed.
+/// is pushed. A refusal php throws as a `CompileError` is uncaught here,
+/// so `zend_exception_error` renders it through `zend_error_cb` alone,
+/// with no fatal's trace after it:
+///
+/// ```php
+/// declare(encoding = M_PI);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Encoding must be a literal in %s on line 2
+/// ```
 pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &[u8]) {
     for raised in &refused.raised {
         req.note_error_in(raised.level, &raised.message, file, raised.line);
     }
-    req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+    if refused.thrown {
+        req.end_in_uncaught(refused.level, &refused.message, file, refused.line);
+    } else {
+        req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+    }
 }
 
 /// `zend_execute_script(ZEND_REQUIRE, NULL, file)` over the file the
