@@ -5080,23 +5080,27 @@ fn class_extension_name(req: &Request, class: ClassId) -> Option<String> {
     req.extension_name(extension).map(str::to_owned)
 }
 
-/// The constant `name` names in `ce->constants_table`: the class's own or
-/// a parent's non-private one, with the class that declares it.
+/// The constant `name` names in `ce->constants_table`: the class's own,
+/// a parent's non-private one or an interface's, with the class that
+/// declares it.
+///
+/// ```php
+/// $rc = new ReflectionClass('DateTime');
+/// var_dump($rc->hasConstant('ATOM'), $rc->getReflectionConstant('ATOM')->class);
+/// ```
+/// ```expect
+/// bool(true)
+/// string(17) "DateTimeInterface"
+/// ```
 fn class_constant_named(
     req: &mut Request,
     class: ClassId,
     name: &[u8],
 ) -> Option<(ClassId, ClassConstDecl)> {
-    for (depth, at) in class_chain(req, class).into_iter().enumerate() {
-        let found =
-            req.class_decl(at)?.constants.iter().find(|c| {
-                &*c.name.0 == name && (depth == 0 || c.visibility != Visibility::Private)
-            });
-        if let Some(constant) = found {
-            return Some((at, constant.clone()));
-        }
-    }
-    None
+    linked_constants(req, class)
+        .into_iter()
+        .find(|(constant, _)| &*constant.name.0 == name)
+        .map(|(constant, declaring)| (declaring, constant))
 }
 
 /// `ReflectionClass::getConstant(string $name)`: the constant's value,
