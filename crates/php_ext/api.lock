@@ -572,6 +572,7 @@ request::Request::url_stat
 request::Request::url_stat_quiet
 request::Request::variadic_arguments
 request::Request::virtual_file_ex
+request::Request::with_fake_scope
 request::Request::with_fiber_switch_blocked
 request::Request::with_stream_ctx
 request::Request::wrapper_log_error

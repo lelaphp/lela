@@ -6884,6 +6884,21 @@ impl Request {
         out
     }
 
+    /// `EG(fake_scope) = class` for the length of `f`, and the scope
+    /// that stood put back after it, so it cannot leak past the call:
+    /// the scope a native asks the engine to measure visibility from as
+    /// though `class` were executing, as `ReflectionClass::newInstance`
+    /// asks the object's `get_constructor` (`Z/ext/reflection/php_reflection.c:5086-5088`)
+    /// and `zend_update_property_ex` writes. `ReflectionClass::newInstance`
+    /// on a class with a private constructor is the witness, in
+    /// `ext/reflection`.
+    pub fn with_fake_scope<R>(&mut self, class: ClassId, f: impl FnOnce(&mut Request) -> R) -> R {
+        let saved = self.fake_scope.replace(class);
+        let out = f(self);
+        self.fake_scope = saved;
+        out
+    }
+
     /// `zend_is_unwind_exit(EG(exception))` for a native: whether a
     /// [`Thrown`] that carries no throwable is the `exit` a callback
     /// unwinds, which php's C code goes on past with the unwind exit
