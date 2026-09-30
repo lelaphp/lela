@@ -888,6 +888,12 @@ pub enum TraitAdaptation {
 /// `ce->trait_precedences` and `ce->trait_aliases` of their adaptation
 /// lists, in one list in the order written; the link reads each kind
 /// in its own order (`zend_traits_init_trait_structures`).
+///
+/// `implementors` is what an interface's `interface_gets_implemented`
+/// holds a class to where php gives an extension's interface one: the
+/// classes a class implementing it must descend from, as ext/date's
+/// `date_interface_gets_implemented` holds `DateTimeInterface` to
+/// `DateTime` and `DateTimeImmutable`; empty for any other.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: Name,
@@ -895,6 +901,7 @@ pub struct ClassDecl {
     pub flags: ClassFlags,
     pub parent: Option<Name>,
     pub interfaces: Vec<Name>,
+    pub implementors: Vec<Name>,
     pub traits: Vec<Name>,
     pub adaptations: Vec<TraitAdaptation>,
     pub backing: EnumBacking,

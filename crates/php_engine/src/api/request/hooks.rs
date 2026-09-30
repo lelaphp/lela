@@ -196,6 +196,34 @@ impl Request {
     /// changed => B
     /// shadowed => Global
     /// ```
+    ///
+    /// From a parent's scope, the parent's private row is seen over a
+    /// child's protected redeclaration, and a dynamic row shadowing a
+    /// parent's private property is not:
+    ///
+    /// ```php
+    /// class A { private $prop = "A"; function vars() { return get_object_vars($this); } }
+    /// #[AllowDynamicProperties]
+    /// class B extends A { protected $prop = "B"; }
+    /// #[AllowDynamicProperties]
+    /// class C extends A {}
+    /// $c = new C; $c->prop = "dynamic";
+    /// var_dump((new B)->vars(), $c->vars(), get_object_vars($c));
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   ["prop"]=>
+    ///   string(1) "A"
+    /// }
+    /// array(1) {
+    ///   ["prop"]=>
+    ///   string(1) "A"
+    /// }
+    /// array(1) {
+    ///   ["prop"]=>
+    ///   string(7) "dynamic"
+    /// }
+    /// ```
     pub(crate) fn property_row_visible(
         &self,
         class: ClassId,

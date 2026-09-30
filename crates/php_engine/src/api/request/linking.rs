@@ -24,11 +24,12 @@ use std::sync::Arc;
 
 use php_unit::Level;
 use php_unit::Unit;
-use php_unit::decl::ClassDecl;
+use php_unit::decl::{ClassDecl, ConstExpr};
 use php_unit::link::{Composed, Held, Linked, Linking, Obligation, Refused};
 
 use super::Request;
 use crate::api::raising::Thrown;
+use crate::api::values::{Key, Value, ValueRef};
 
 /// The classes whose link is under way, and `CG(delayed_autoloads)`.
 #[derive(Default)]
@@ -178,6 +179,7 @@ impl Request {
     /// check reads it: the linked classes and those whose link is under
     /// way, a class still fetching marked as read.
     pub(super) fn link_against_table(&mut self, decl: &ClassDecl) -> Linking {
+        let values = self.trait_values(decl);
         let read = RefCell::new(Vec::new());
         let linking = {
             let lookup = |name: &[u8]| {
@@ -199,7 +201,13 @@ impl Request {
                     linked: false,
                 })
             };
-            php_unit::link::link(decl, &lookup)
+            let evaluated = |expr: &ConstExpr| {
+                values
+                    .iter()
+                    .find(|(written, _)| written == expr)
+                    .map(|(_, value)| value.clone())
+            };
+            php_unit::link::link(decl, &lookup, &evaluated)
         };
         for at in read.into_inner() {
             if let Some(Unlinked {
@@ -211,6 +219,93 @@ impl Request {
             }
         }
         linking
+    }
+
+    /// `zval_update_constant_ex` over what the traits' composition
+    /// compares (`zend_do_traits_property_binding`,
+    /// `do_trait_constant_check`): each property default and each
+    /// constant value that is no plain value, of a name the class and
+    /// its traits declare more than once, evaluated to one with the
+    /// others of its name, which the linker compares in their place. A
+    /// value that is no plain value (an object) or that cannot be evaluated before the class is
+    /// declared is left out and compared as written.
+    fn trait_values(&mut self, decl: &ClassDecl) -> Vec<(ConstExpr, ConstExpr)> {
+        if decl.traits.is_empty() {
+            return Vec::new();
+        }
+        let mut properties: Vec<(Box<[u8]>, Option<ConstExpr>)> = decl
+            .properties
+            .iter()
+            .map(|p| (p.name.0.clone(), p.default.clone()))
+            .collect();
+        let mut constants: Vec<(Box<[u8]>, ConstExpr)> = decl
+            .constants
+            .iter()
+            .map(|c| (c.name.0.clone(), c.value.clone()))
+            .collect();
+        for name in &decl.traits {
+            let Some(used) = self.class_named(&name.0).and_then(|c| self.class_decl(c)) else {
+                continue;
+            };
+            properties.extend(
+                used.properties
+                    .iter()
+                    .map(|p| (p.name.0.clone(), p.default.clone())),
+            );
+            constants.extend(
+                used.constants
+                    .iter()
+                    .map(|c| (c.name.0.clone(), c.value.clone())),
+            );
+        }
+        // Each name declared more than once whose values are not all
+        // literals has all of them evaluated, so the two sides compared
+        // are both values.
+        let mut wanted: Vec<ConstExpr> = Vec::new();
+        let property_rows: Vec<(&[u8], &ConstExpr)> = properties
+            .iter()
+            .filter_map(|(name, default)| default.as_ref().map(|d| (&**name, d)))
+            .collect();
+        let constant_rows: Vec<(&[u8], &ConstExpr)> = constants
+            .iter()
+            .map(|(name, value)| (&**name, value))
+            .collect();
+        for rows in [&property_rows, &constant_rows] {
+            for (name, _) in rows {
+                let group: Vec<&ConstExpr> = rows
+                    .iter()
+                    .filter(|(other, _)| other == name)
+                    .map(|(_, expr)| *expr)
+                    .collect();
+                if group.len() > 1 && group.iter().any(|expr| !is_literal(expr)) {
+                    wanted.extend(group.into_iter().cloned());
+                }
+            }
+        }
+        let mut values: Vec<(ConstExpr, ConstExpr)> = Vec::new();
+        for expr in wanted {
+            if values.iter().any(|(written, _)| *written == expr) {
+                continue;
+            }
+            match crate::api::call::eval_const_expr(self, &expr, None) {
+                Ok(value) => {
+                    if let Some(literal) = literal_of(&value) {
+                        values.push((expr, literal));
+                    }
+                    self.release(value);
+                }
+                // A value the class's own scope would give, `self::X`,
+                // cannot be read before the class is: it is compared as
+                // written, which is what php's comparison of the two
+                // values finds where both name the one constant.
+                Err(thrown) => {
+                    if let Some(object) = thrown.exception() {
+                        self.release(object.as_value());
+                    }
+                }
+            }
+        }
+        values
     }
 
     /// The end of `zend_do_link_class` for the class at `at` of `unit`,
@@ -392,4 +487,44 @@ impl Request {
         }
         Thrown::of(None)
     }
+}
+
+/// A constant expression that is a value as written: `null`, a bool,
+/// a number, a string, or an array of them.
+fn is_literal(expr: &ConstExpr) -> bool {
+    match expr {
+        ConstExpr::Null
+        | ConstExpr::Bool(_)
+        | ConstExpr::Long { .. }
+        | ConstExpr::Double(_)
+        | ConstExpr::Str(_) => true,
+        ConstExpr::Array { elements, .. } => elements
+            .iter()
+            .all(|(key, value)| key.as_ref().is_none_or(is_literal) && is_literal(value)),
+        _ => false,
+    }
+}
+
+/// A value as the constant expression that writes it, arrays element by
+/// element with their keys; none for an object or a resource.
+fn literal_of(value: &Value) -> Option<ConstExpr> {
+    Some(match value.deref().as_ref() {
+        ValueRef::Null | ValueRef::Undef => ConstExpr::Null,
+        ValueRef::Bool(b) => ConstExpr::Bool(b),
+        ValueRef::Int(i) => ConstExpr::long(i),
+        ValueRef::Float(d) => ConstExpr::Double(d),
+        ValueRef::Str(s) => ConstExpr::Str(s.as_bytes().into()),
+        ValueRef::Array(array) => {
+            let mut elements = Vec::new();
+            for (key, element) in array.snapshot() {
+                let key = match key {
+                    Key::Int(i) => ConstExpr::long(i),
+                    Key::Str(s) => ConstExpr::Str(s.as_bytes().into()),
+                };
+                elements.push((Some(key), literal_of(&element)?));
+            }
+            ConstExpr::Array { elements, line: 0 }
+        }
+        _ => return None,
+    })
 }

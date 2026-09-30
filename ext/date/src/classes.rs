@@ -45,7 +45,7 @@ pub(crate) struct Iterator;
 /// Deprecated: Constant DateTimeInterface::RFC7231 is deprecated since 8.5, as this format ignores the associated timezone and always uses GMT in %s on line 3
 /// string(21) "D, d M Y H:i:s \G\M\T"
 /// ```
-#[php_class(interface)]
+#[php_class(interface, implemented_by(crate::DateTime, crate::DateTimeImmutable))]
 pub(crate) struct DateTimeInterface;
 
 #[php_class]
