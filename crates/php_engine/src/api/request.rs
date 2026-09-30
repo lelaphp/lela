@@ -18395,6 +18395,34 @@ impl Request {
             .map(ExtensionId)
     }
 
+    /// `zend_multibyte_get_functions`: the encoding functions the last
+    /// extension in bundle order handed the engine
+    /// ([`ExtensionBuilder::encodings`](crate::api::abi::ExtensionBuilder::encodings)),
+    /// bound to this request as its settings stand, or Zend's dummies,
+    /// which fetch and convert nothing, where none did. What an
+    /// extension's `zend_multibyte_fetch_encoding` and
+    /// `zend_multibyte_encoding_converter` reach, as `exif.c`'s comment
+    /// decoding does.
+    pub fn encodings(&mut self) -> Box<dyn crate::api::abi::Multibyte> {
+        crate::multibyte::bind(self)
+    }
+
+    /// `zend_multibyte_parse_encoding_list`: the encodings `names`
+    /// lists, as the functions parse an ini entry's list, `None` after
+    /// the provider's warning where a name names none. Zend's dummies
+    /// parse every list, to none.
+    pub fn parse_encoding_list(&mut self, names: &[u8]) -> Option<Vec<crate::api::abi::Encoding>> {
+        match self.encodings().list(names) {
+            Ok(list) => Some(list),
+            Err(name) => {
+                let name = String::from_utf8_lossy(&name);
+                let message = format!("INI setting contains invalid encoding \"{name}\"");
+                crate::api::raising::docref(self, Level::Warning, &message);
+                None
+            }
+        }
+    }
+
     /// `module->name`: the name an extension registered under, as its
     /// `zend_module_entry` spells it.
     #[must_use]
