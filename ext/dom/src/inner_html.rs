@@ -42,9 +42,7 @@ fn fragment_serialize(
     } else {
         crate::node_list(node.children())
     };
-    let (saved, raised) = crate::xml_serializer::well_formed(req, object, &nodes);
-    Errors::route(req, raised);
-    match saved {
+    match crate::xml_serializer::well_formed(req, object, &nodes)? {
         Some(bytes) => string(req, &bytes),
         None => Err(dom_throw_message(
             req,
