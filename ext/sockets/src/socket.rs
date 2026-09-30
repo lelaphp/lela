@@ -106,10 +106,23 @@ impl Sock {
 /// }
 /// bool(false)
 /// ```
+///
+/// `socket_create_object` allocates a `php_socket`, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+/// $m = memory_get_usage();
+/// $s = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 80
+/// ```
 #[php_class(
     final,
     not_serializable,
-    payload = Sock,
+    size = 88, payload = Sock,
     handlers = SOCKET,
     dynamic_properties = forbidden
 )]

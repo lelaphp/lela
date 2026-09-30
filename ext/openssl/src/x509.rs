@@ -49,7 +49,7 @@ pub(crate) struct Cert {
 #[php_class(
     final,
     not_serializable,
-    payload = Cert,
+    size = 64, payload = Cert,
     handlers = HANDLERS,
     dynamic_properties = forbidden
 )]

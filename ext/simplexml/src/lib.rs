@@ -359,10 +359,27 @@ type Element = Raw<Instance<SimpleXMLElement>>;
 /// `class SimpleXMLElement implements Stringable, Countable,
 /// RecursiveIterator`, php's `@not-serializable` one, reached through
 /// [`sxe::HANDLERS`].
+///
+/// `sxe_object_new` allocates a `php_sxe_object`, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['SimpleXMLElement'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// SimpleXMLElement 160
+/// ```
 #[php_class(
     not_serializable,
     implements(Stringable, Countable, RecursiveIterator),
-    payload = Sxe,
+    size = 152, payload = Sxe,
     handlers = sxe::HANDLERS
 )]
 pub(crate) struct SimpleXMLElement;

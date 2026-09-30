@@ -55,7 +55,7 @@ impl Ns {
 /// (`iter.data`), its `XPath` evaluator and the table its properties were
 /// last read into (`properties`).
 #[derive(Default)]
-pub(crate) struct Sxe {
+pub(crate) struct SxeState {
     pub(crate) obj: NodeObject,
     pub(crate) walk: Walk,
     pub(crate) ns: Option<Ns>,
@@ -69,6 +69,10 @@ pub(crate) struct Sxe {
     /// made, kept until the next such write or the object's free.
     pub(crate) made: Option<PhpObject>,
 }
+
+/// The payload: `php_sxe_object`'s fields, boxed, inside the `sizeof` php
+/// allocates (design §5.13).
+pub(crate) type Sxe = Box<SxeState>;
 
 /// The payload of `object`.
 pub(crate) fn sxe(req: &Request, object: PhpObject) -> Option<&Sxe> {

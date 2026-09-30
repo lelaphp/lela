@@ -50,7 +50,7 @@ pub(crate) struct Req {
 #[php_class(
     final,
     not_serializable,
-    payload = Req,
+    size = 64, payload = Req,
     handlers = HANDLERS,
     dynamic_properties = forbidden
 )]

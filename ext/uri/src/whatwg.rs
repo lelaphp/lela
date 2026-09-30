@@ -566,12 +566,25 @@ impl UrlValidationError {
 
 /// `final readonly class Uri\WhatWg\Url`, `@strict-properties`: one URL
 /// under the WHATWG standard, immutable, each `with*()` a changed copy.
+///
+/// `php_uri_object_create` allocates a `php_uri_object`, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// new Uri\WhatWg\Url('http://x/');
+/// $m = memory_get_usage();
+/// $u = new Uri\WhatWg\Url('http://x/');
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 80
+/// ```
 #[php_class(
     final,
     readonly,
     namespace(Uri::WhatWg),
     dynamic_properties = forbidden,
-    payload = Slot<WhatWg>,
+    size = 72, payload = Slot<WhatWg>,
     handlers = crate::whatwg::HANDLERS
 )]
 pub(crate) struct Url;
