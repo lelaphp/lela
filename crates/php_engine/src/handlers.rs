@@ -7693,14 +7693,34 @@ fn property_place(
         let thrown = non_object_place(req, (frame, code, op), read, &container, &name);
         return Ok(PropertyFound::Threw(thrown));
     };
-    let object = match req.lazy_place(object, &name) {
-        Ok(object) => object,
+    let (object, lent) = match req.lazy_place(object, &name) {
+        Ok(placed) => placed,
         Err(thrown) => {
             return Ok(PropertyFound::Threw(freeing_container(
                 req, frame, code, op, thrown,
             )));
         }
     };
+    // The guard a proxy's `__get` lent the instance is held while the
+    // place is resolved there, and given back before what the fetch
+    // does with it.
+    let found = property_place_on(req, (frame, code, op), read, object, &name, &name_value);
+    req.give_back_guard(lent);
+    found
+}
+
+/// [`property_place`] on the object the place is resolved on:
+/// `zend_std_get_property_ptr_ptr`'s arms and what the fetch falls back
+/// to where it answers none.
+fn property_place_on(
+    req: &mut Request,
+    (frame, code, op): (FrameRef, &OpArray, &Opline),
+    read: PropertyRead,
+    object: PhpObject,
+    name: &[u8],
+    name_value: &Value,
+) -> Result<PropertyFound, Fatal> {
+    let name = name.to_vec();
     let place = match place_of(req, object, &name) {
         Ok(place) => place,
         // The class refused the place with a throwable, php's
@@ -7764,7 +7784,7 @@ fn property_place(
                     "InternalError: ZEND_FETCH_OBJ_W over a property whose name is no string",
                 )));
             };
-            req.addref(&name_value);
+            req.addref(name_value);
             // `zend_std_get_property_ptr_ptr`: under `BP_VAR_W` the
             // entry is laid down with the creation's diagnostics and no
             // read's warning, and under `BP_VAR_RW` with the warning
@@ -13771,7 +13791,7 @@ fn step_property(
             "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
         )));
     };
-    let object = match req.lazy_place(object, &bytes) {
+    let object = match req.lazy_place_unlent(object, &bytes) {
         Ok(object) => object,
         Err(thrown) => {
             exec::free_operand(req, frame, code, data.op1_type, data.op1);
@@ -14505,7 +14525,7 @@ fn incdec_property(
             "InternalError: an increment of a property whose name is no string",
         )));
     };
-    let object = match req.lazy_place(object, &bytes) {
+    let object = match req.lazy_place_unlent(object, &bytes) {
         Ok(object) => object,
         Err(thrown) => {
             write_out(req, frame, code, op, &Value::null());

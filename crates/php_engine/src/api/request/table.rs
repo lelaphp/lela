@@ -137,6 +137,11 @@ impl Request {
             Row::Slot(i) => {
                 if !o.slot(i).is_undef() {
                     Heap::object_set_slot(&mut Hooks(self), o, i, php_heap::Zval::UNDEF);
+                    // `zend_hash_del_ind`: the table marked once what the
+                    // slot held is given up.
+                    if let Some(table) = o.properties() {
+                        table.set_has_empty_ind(true);
+                    }
                 }
             }
             Row::Dynamic(k) => {

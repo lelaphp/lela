@@ -748,22 +748,45 @@ impl ArrayIter {
 #[derive(Debug)]
 #[must_use = "the rows are held until they are released"]
 pub struct HeldProperties {
-    rows: Vec<(Key, Value)>,
+    rows: Vec<(Key, HeldRow)>,
     owned: bool,
+    count: usize,
+}
+
+/// One row of [`HeldProperties`] as `zend_hash` walks it: a value, or
+/// under [`PropertyPurpose::Debug`] a typed property nothing has
+/// written, php's `IS_INDIRECT` to an `IS_UNDEF` slot that
+/// `zend_get_typed_property_info_for_slot` finds a type for, which a
+/// dumper shows as `uninitialized(T)` with the type's text.
+#[derive(Debug, Clone)]
+pub enum HeldRow {
+    Value(Value),
+    Uninitialized(String),
 }
 
 impl HeldProperties {
     /// The rows in the table's order.
     #[must_use]
-    pub fn rows(&self) -> &[(Key, Value)] {
+    pub fn rows(&self) -> &[(Key, HeldRow)] {
         &self.rows
+    }
+
+    /// `zend_array_count` over the table (`Z/Zend/zend_hash.c:519`), the
+    /// number a dumper prints before the rows: an uninitialised row not
+    /// counted, and under [`PropertyPurpose::Debug`] a slot `unset`
+    /// empties counted still inside the release that empties it.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.count
     }
 
     /// `zend_release_properties`: the owners the rows held given back.
     pub fn release(self, req: &mut Request) {
         if self.owned {
-            for (_, value) in self.rows {
-                req.release(value);
+            for (_, row) in self.rows {
+                if let HeldRow::Value(value) = row {
+                    req.release(value);
+                }
             }
         }
     }
@@ -1093,7 +1116,16 @@ impl PhpObject {
                 req.addref(value);
             }
         }
-        Ok(HeldProperties { rows, owned })
+        if purpose == PropertyPurpose::Debug && !owned {
+            let (rows, count) = crate::ops::debug_rows(req, *self, rows)?;
+            return Ok(HeldProperties { rows, owned, count });
+        }
+        let count = rows.len();
+        let rows = rows
+            .into_iter()
+            .map(|(key, value)| (key, HeldRow::Value(value)))
+            .collect();
+        Ok(HeldProperties { rows, owned, count })
     }
 
     /// The object's property table as `get_properties` holds it,

@@ -397,6 +397,7 @@ request::FdStream
 request::FilterFactory
 request::FilterFlags
 request::FilterStatus
+request::FormatDate
 request::HandlerCall
 request::HandlerOp
 request::HandlerStatus
@@ -776,8 +777,10 @@ values::HashIterator::position
 values::HashIterator::release
 values::HashIterator::set_position
 values::HeldProperties
+values::HeldProperties::count
 values::HeldProperties::release
 values::HeldProperties::rows
+values::HeldRow
 values::Key
 values::Key::from_string
 values::Key::to_prop_name

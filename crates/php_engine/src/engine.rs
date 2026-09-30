@@ -34,6 +34,7 @@ use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
+use crate::natives::StubPlace;
 use crate::streams::Standard;
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 pub(crate) use crate::unit_cache::Cached;
@@ -375,18 +376,18 @@ pub trait OutputSink {
     /// The response's head, once, before the first body byte.
     fn send_headers(&mut self, head: &ResponseHead);
     /// One entry for the host's log, whole: what `php_log_err` was
-    /// given, a diagnostic in its log form with its stack trace under
-    /// it where it has one, or `error_log()`'s message as given, so it
-    /// may carry newlines inside it and ends in none. The host ends it:
-    /// php's CLI writes `"%s\n"` to stderr and a file log writes
-    /// `[date] ` before it and `PHP_EOL` after.
+    /// given where `error_log` names no file it could open
+    /// (`sapi_module.log_message`), a diagnostic in its log form with
+    /// its stack trace under it where it has one, or `error_log()`'s
+    /// message as given, so it may carry newlines inside it and ends in
+    /// none. The host ends it: php's CLI writes `"%s\n"` to stderr.
     fn log(&mut self, entry: &[u8]);
     /// Bytes for the host's error stream, as given: what php writes to
     /// the process's `stderr` past the host, the `display_errors=stderr`
     /// form of a diagnostic with its `\n` (`Z/main/main.c:1484`) and,
     /// when streams exist, what the `STDERR` stream constant is given.
-    /// Where the log goes is the host's: php's CLI puts it on this same
-    /// stream, and a host with an `error_log` file parts the two, so a
+    /// Where the host's log goes is the host's: php's CLI puts it on this
+    /// same stream, and an `error_log` file parts the two, so a
     /// diagnostic is logged and displayed in that order on one stream
     /// and in no order across two (#216).
     fn write_stderr(&mut self, bytes: &[u8]);
@@ -1197,7 +1198,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 89] = [
+const CORE_INI: &[(&str, &str)] = &[
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1205,6 +1206,11 @@ const CORE_INI: [(&str, &str); 89] = [
     ("error_reporting", "32767"),
     ("display_errors", "1"),
     ("log_errors", "0"),
+    // `error_log`, `NULL` in php's table, and `error_log_mode`, both
+    // `PHP_INI_ALL` (`Z/main/main.c:835-836`): the file `php_log_err`
+    // appends to and the permissions it creates one with.
+    ("error_log", ""),
+    ("error_log_mode", "0644"),
     ("html_errors", "0"),
     // `docref_root` and `docref_ext`, `PHP_INI_ALL`: where a function's
     // diagnostic under `html_errors` links to (`raising::origin`).
@@ -1223,6 +1229,10 @@ const CORE_INI: [(&str, &str); 89] = [
     ("memory_limit", "128M"),
     ("report_memleaks", "1"),
     ("max_execution_time", "0"),
+    // `hard_timeout`, `PHP_INI_SYSTEM` (`Z/main/main.c:885`): the seconds
+    // past a timeout the execution timer waits for the loop to take it
+    // before it ends the process ([`crate::interrupt::Timer`]).
+    ("hard_timeout", "2"),
     ("default_charset", "UTF-8"),
     ("default_mimetype", "text/html"),
     ("internal_encoding", ""),
@@ -1755,6 +1765,9 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 /// and then each extension's in bundle order, the host's `additional`
 /// after them under `standard`, less what the list names
 /// ([`disabled_functions`]), each beside the extension that declared it.
+/// The natives the engine declares for `standard` ([`crate::natives::standard`])
+/// are `standard`'s where the bundle has it, at their stub places among
+/// its own, and follow Core's under no extension where it does not.
 /// The one place the disabled set is decided: what it takes out is in no
 /// table the compiler or a request reads.
 fn function_table(
@@ -1768,31 +1781,78 @@ fn function_table(
         .find(|(name, _)| name.as_slice() == b"disable_functions")
         .map_or(&[][..], |(_, list)| list.as_slice());
     let disabled = disabled_functions(list);
-    // A host's natives go under `standard` once every module has
-    // started (`Z/main/main.c:2359-2366`).
+    // `module_registry` numbers Core 0 and the bundle from 1.
     let standard = extensions
         .iter()
-        .position(|e| e.name == "standard")
-        .and_then(|at| u32::try_from(at).ok())
-        .map(ExtensionId);
-    core.functions
+        .zip(1u32..)
+        .find(|(e, _)| e.name == "standard")
+        .map(|(_, at)| ExtensionId(at));
+    let mut engine_standard = Some(crate::natives::standard());
+    let mut table: Vec<(Option<ExtensionId>, (FunctionDecl, Entry))> = core
+        .functions
         .iter()
         .cloned()
         .map(|native| (Some(ExtensionId::CORE), native))
-        .chain(
-            crate::natives::standard()
+        .collect();
+    if standard.is_none() {
+        table.extend(
+            engine_standard
+                .take()
                 .into_iter()
-                .map(|native| (None, native)),
-        )
-        .chain(extensions.iter().zip(1u32..).flat_map(|(e, at)| {
-            e.functions
-                .iter()
-                .cloned()
-                .map(move |native| (Some(ExtensionId(at)), native))
-        }))
-        .chain(additional.into_iter().map(|native| (standard, native)))
+                .flatten()
+                .map(|(_, native)| (None, native)),
+        );
+    }
+    for (e, at) in extensions.iter().zip(1u32..) {
+        let id = Some(ExtensionId(at));
+        let own = e.functions.iter().cloned();
+        match engine_standard.take_if(|_| Some(ExtensionId(at)) == standard) {
+            Some(engine) => {
+                table.extend(
+                    at_stub_places(engine, own)
+                        .into_iter()
+                        .map(|native| (id, native)),
+                );
+            }
+            None => table.extend(own.map(|native| (id, native))),
+        }
+    }
+    // A host's natives go under `standard` once every module has
+    // started (`Z/main/main.c:2359-2366`).
+    table.extend(additional.into_iter().map(|native| (standard, native)));
+    table
+        .into_iter()
         .filter(|(_, (decl, _))| !disabled.contains(&decl.name.0.to_ascii_lowercase().as_slice()))
         .unzip()
+}
+
+/// `ext/standard`'s natives in its own order with the engine's
+/// declared for it spliced in at their [`StubPlace`]s: each after the
+/// function it names, whichever side declared that one, and at the end
+/// where the stub's neighbour is not in the list.
+fn at_stub_places(
+    engine: Vec<(StubPlace, (FunctionDecl, Entry))>,
+    own: impl Iterator<Item = (FunctionDecl, Entry)>,
+) -> Vec<(FunctionDecl, Entry)> {
+    let mut waiting = engine;
+    let mut placed: Vec<(FunctionDecl, Entry)> = Vec::new();
+    let settle = |waiting: &mut Vec<(StubPlace, (FunctionDecl, Entry))>,
+                  placed: &mut Vec<(FunctionDecl, Entry)>| {
+        while let Some(at) = waiting
+            .iter()
+            .position(|(place, _)| place.follows(placed.last().map(|(decl, _)| decl)))
+        {
+            let (_, native) = waiting.remove(at);
+            placed.push(native);
+        }
+    };
+    settle(&mut waiting, &mut placed);
+    for native in own {
+        placed.push(native);
+        settle(&mut waiting, &mut placed);
+    }
+    placed.extend(waiting.into_iter().map(|(_, native)| native));
+    placed
 }
 
 /// `phar_intercept_functions_init` and opcache's
@@ -2848,6 +2908,9 @@ impl Engine {
         req.catch_bailout();
         crate::output::end_all(req);
         req.catch_bailout();
+        // "4. Reset max_execution_time (no longer executing php code
+        // after response sent)" (`Z/main/main.c:1990-1994`).
+        req.unset_timer();
     }
 
     /// The rest of `php_request_shutdown` after
@@ -3211,6 +3274,23 @@ fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
 /// the shutdown functions and the extensions' `rshutdown`, until
 /// `shutdown_executor` destroys the table (design §5.10).
 ///
+/// A fatal the loop raised leaves every frame above the main one
+/// standing, as `zend_bailout` jumps past them; `_zend_bailout` sets
+/// `EG(current_execute_data)` to null (`Z/Zend/zend.c:1268`), so they are
+/// popped here, before the main one is left, and a shutdown function is
+/// called from nothing.
+///
+/// ```php
+/// set_time_limit(1);
+/// register_shutdown_function(function () { debug_print_backtrace(); });
+/// function spin() { while (true); }
+/// spin();
+/// ```
+/// ```expect exit=255 wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 4
+/// #0 [internal function]: {closure:%s:3}()
+/// ```
+///
 /// Whether the program ran to its end: not a fatal, a refused
 /// declaration or an `exit`, each of which php leaves by `zend_bailout`,
 /// and not a throwable no handler took.
@@ -3218,6 +3298,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if !note_compiled(req, unit, SourceKind::File) {
         return false;
     }
+    let standing = req.vm().frames().len();
     let frame = match req.push_frame(Arc::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
@@ -3227,6 +3308,9 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     };
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
+    }
+    while req.vm().frames().len() > standing + 1 {
+        req.pop_frame();
     }
     req.detach_symbol_table(frame);
     req.pop_frame();
