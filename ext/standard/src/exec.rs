@@ -71,11 +71,9 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
 use php_ext::abi::{False, OrFalse, Path, Ref, Untyped};
 use php_ext::attr::php_function;
@@ -89,18 +87,20 @@ use crate::ffi::locale::Mblen;
 type Out = Ref<Untyped<Value>>;
 
 /// `VCWD_POPEN(cmd, "r")`: the shell over the command, in the request's
-/// working directory and environment, its `output` a pipe.
+/// working directory and environment, its `output` a pipe. The shell is
+/// `sh` to itself, as `popen(3)` names it, so its own messages say so:
+///
+/// ```php
+/// var_dump(exec("nope_xyz_cmd 2>&1", $o, $c), $c, shell_exec("nope_xyz_cmd 2>&1"));
+/// ```
+/// ```expect
+/// string(35) "sh: nope_xyz_cmd: command not found"
+/// int(127)
+/// string(36) "sh: nope_xyz_cmd: command not found
+/// "
+/// ```
 fn popen(req: &Request, command: &[u8]) -> Option<Child> {
-    Command::new("/bin/sh")
-        .arg("-c")
-        .arg(OsStr::from_bytes(command))
-        .current_dir(req.cwd())
-        .env_clear()
-        .envs(
-            req.env_pairs()
-                .iter()
-                .map(|(name, value)| (OsStr::from_bytes(name), OsStr::from_bytes(value))),
-        )
+    crate::proc_open::shell(req, command)
         .stdout(Stdio::piped())
         .spawn()
         .ok()

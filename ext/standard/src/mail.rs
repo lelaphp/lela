@@ -10,11 +10,9 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use std::ffi::OsStr;
 use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use php_ext::abi::{Passed, Path, Union};
 use php_ext::attr::php_function;
@@ -371,16 +369,7 @@ pub(super) fn php_mail(
         command.push(b' ');
         command.extend_from_slice(extra);
     }
-    let child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(OsStr::from_bytes(&command))
-        .current_dir(req.cwd())
-        .env_clear()
-        .envs(
-            req.env_pairs()
-                .iter()
-                .map(|(name, value)| (OsStr::from_bytes(name), OsStr::from_bytes(value))),
-        )
+    let child = crate::proc_open::shell(req, &command)
         .stdin(Stdio::piped())
         .spawn();
     let Ok(mut child) = child else {
