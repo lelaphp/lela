@@ -15433,7 +15433,7 @@ impl Emit<'_> {
         method: Member,
         arguments: &Args,
     ) -> Result<Where, CompileError> {
-        let line = self.line;
+        let line = self.member_line(method);
         let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
         let method = match self.method_name(method)? {
             MethodName::Constant(method) => method,
@@ -15548,7 +15548,7 @@ impl Emit<'_> {
         arguments: &Args,
         nullsafe: bool,
     ) -> Result<Where, CompileError> {
-        let line = self.line;
+        let line = self.member_line(method);
         let (op1_type, op1) = self.receiver(object)?;
         // `zend_emit_jmp_null` over the receiver of a `?->`, but for
         // `$this`, which throws where it does not exist.
