@@ -6017,8 +6017,14 @@ fn property_string(
         let _ = write!(out, "{} ", type_to_string(ty));
     }
     let _ = write!(out, "${}", String::from_utf8_lossy(name));
+    let evaluated = (property.is_instance)
+        .then(|| req.evaluated_default(declaring, name))
+        .flatten();
     match (&property.default, &property.ty) {
         _ if is_virtual => {}
+        (Some(_), _) if let Some(value) = evaluated => {
+            let _ = write!(out, " = {}", value_default_string(req, &value));
+        }
         (Some(default), _) => {
             let _ = write!(out, " = {}", default_value_string(req, default));
         }
@@ -6069,6 +6075,57 @@ fn property_string(
 /// Parameter #0 [ <optional> $a = \App\Bar::BAZ ]
 /// Parameter #0 [ <optional> $a = N\Bar::BAZ ]
 /// ```
+/// `format_default_value` over a default already evaluated
+/// ([`Request::evaluated_default`]): a scalar as `smart_str_append_scalar`
+/// writes it, an enum case `Class::Case`, an array by its keys where it
+/// is no list, and any other object `object(Class)`, as GH-15902 has it.
+fn value_default_string(req: &mut Request, value: &Value) -> String {
+    match value.as_ref() {
+        ValueRef::Null => String::from("NULL"),
+        ValueRef::Bool(b) => String::from(if b { "true" } else { "false" }),
+        ValueRef::Int(n) => n.to_string(),
+        ValueRef::Float(f) => default_value_string(req, &ConstExpr::Double(f)),
+        ValueRef::Str(s) => format!("'{}'", escaped(s.as_bytes())),
+        ValueRef::Array(array) => {
+            let rows = array.snapshot_refs();
+            let is_list = (0..).zip(&rows).all(|(i, (key, _))| *key == Key::Int(i));
+            let mut out = String::from("[");
+            for (i, (key, value)) in rows.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                if !is_list {
+                    match key {
+                        Key::Str(s) => {
+                            let _ = write!(out, "'{}'", escaped(s.as_bytes()));
+                        }
+                        Key::Int(n) => out.push_str(&n.to_string()),
+                    }
+                    out.push_str(" => ");
+                }
+                out.push_str(&value_default_string(req, value));
+            }
+            out.push(']');
+            out
+        }
+        ValueRef::Object(object) => {
+            let class = class_name_of(req, object.class());
+            let class = String::from_utf8_lossy(&class).into_owned();
+            let is_enum = req
+                .class_decl(object.class())
+                .is_some_and(|decl| decl.kind == ClassKind::Enum);
+            match object.prop(req, b"name").filter(|_| is_enum) {
+                Some(case) => format!(
+                    "{class}::{}",
+                    String::from_utf8_lossy(case.as_str_bytes().unwrap_or_default())
+                ),
+                None => format!("object({class})"),
+            }
+        }
+        _ => String::from("<default>"),
+    }
+}
+
 fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
     match expr {
         ConstExpr::Null => String::from("NULL"),
