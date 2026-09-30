@@ -72,8 +72,8 @@ struct Held {
 pub(crate) type Slot = Box<SlotState>;
 
 /// What a `BcMath\Number` keeps for the readers of its properties: the
-/// rendering (`intern->value`) and the two property names, each with
-/// the one owner the object holds.
+/// rendering (`intern->value`), with the one owner the object holds, and
+/// the two property names, php's `ZSTR_KNOWN` strings, interned.
 #[derive(Clone, Copy)]
 struct Kept {
     value: PhpString,
@@ -671,15 +671,29 @@ fn made(req: &mut Request, decimal: Decimal) -> Result<Instance<Number>, Thrown>
 
 /// What the object keeps for its readers, made on the first read:
 /// `bcmath_number_value_to_str` and the two names.
+///
+/// ```php
+/// $w = new BcMath\Number('1'); serialize($w);
+/// $n = new BcMath\Number('1');
+/// $m = memory_get_usage(); $s = serialize($n); $v = $n->value; echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 112
+/// ```
 fn kept(req: &mut Request, object: PhpObject) -> Result<Kept, Thrown> {
     if let Some(kept) = object.native::<Slot>(req).and_then(|slot| slot.kept) {
         return Ok(kept);
     }
     let decimal = held(req, object)?;
+    // `bc_num2str_ex` is `zend_string_alloc`, a string of its own even
+    // of one digit.
+    let rendered = decimal.render();
     let kept = Kept {
-        value: PhpString::new(req, &decimal.render())?,
-        value_name: PhpString::new(req, b"value")?,
-        scale_name: PhpString::new(req, b"scale")?,
+        value: PhpString::filled(req, rendered.len(), |bytes| {
+            bytes.copy_from_slice(&rendered);
+        })?,
+        value_name: PhpString::interned(req, b"value")?,
+        scale_name: PhpString::interned(req, b"scale")?,
     };
     if let Some(slot) = object.native_mut::<Slot>(req) {
         slot.kept = Some(kept);
