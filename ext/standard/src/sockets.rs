@@ -266,6 +266,7 @@ fn assign_error(
 /// var_dump(is_resource($c), $code, $message, fwrite($c, "hi"), fread(stream_socket_accept($s), 2));
 /// var_dump(fsockopen('127.0.0.1', 1, $code, $message, 1), $code, $message);
 /// var_dump(is_resource(pfsockopen('udp://127.0.0.1', 9, $code)), $code);
+/// var_dump(fsockopen("127.0.0.1\0.example.com", $port));
 /// ```
 /// ```expect
 /// bool(true)
@@ -280,6 +281,9 @@ fn assign_error(
 /// string(18) "Connection refused"
 /// bool(true)
 /// int(0)
+///
+/// Warning: fsockopen(): Unable to connect to 127.0.0.1:%d (The hostname must not contain null bytes) in %s on line 8
+/// bool(false)
 /// ```
 #[php_function]
 fn fsockopen(
@@ -351,9 +355,10 @@ fn fsockopen_stream(
             Ok(Untyped(OrFalse::Value(stream.resource())))
         }
         Err(XportFailure { code, text }) => {
+            // php prints the host as the C string it holds.
             let shown = format!(
                 "Unable to connect to {}:{port} ({})",
-                String::from_utf8_lossy(&host),
+                String::from_utf8_lossy(crate::basic_functions::c_string(&host)),
                 if text.is_empty() {
                     "Unknown error"
                 } else {
@@ -616,7 +621,7 @@ fn stream_socket_server(
         Err(XportFailure { code, text }) => {
             let shown = format!(
                 "Unable to connect to {} ({})",
-                String::from_utf8_lossy(&host),
+                String::from_utf8_lossy(crate::basic_functions::c_string(&host)),
                 if text.is_empty() {
                     "Unknown error"
                 } else {

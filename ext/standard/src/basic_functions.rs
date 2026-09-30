@@ -196,7 +196,7 @@ fn getenv(
 }
 
 /// The bytes before the first NUL, what a C string holds.
-fn c_string(bytes: &[u8]) -> &[u8] {
+pub(crate) fn c_string(bytes: &[u8]) -> &[u8] {
     bytes.split(|c| *c == 0).next().unwrap_or_default()
 }
 
