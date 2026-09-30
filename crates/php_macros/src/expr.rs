@@ -188,7 +188,9 @@ fn primary(input: ParseStream<'_>) -> syn::Result<Tokens> {
         let inner;
         syn::parenthesized!(inner in input);
         let constant = name(&path(&inner)?.join("\\"));
-        return Ok(quote!(#root::decl::ConstExpr::Constant { name: #constant, line: 0 }));
+        return Ok(
+            quote!(#root::decl::ConstExpr::Constant { name: #root::decl::ConstantName::Resolved(#constant), line: 0 }),
+        );
     }
     let first = Ident::parse_any(input)?;
     if first == "null" {
@@ -217,7 +219,9 @@ fn primary(input: ParseStream<'_>) -> syn::Result<Tokens> {
     }
     let Some((member, class)) = segments.split_last().filter(|(_, class)| !class.is_empty()) else {
         let constant = name(&segments.join("\\"));
-        return Ok(quote!(#root::decl::ConstExpr::Constant { name: #constant, line: 0 }));
+        return Ok(
+            quote!(#root::decl::ConstExpr::Constant { name: #root::decl::ConstantName::Resolved(#constant), line: 0 }),
+        );
     };
     // The last `::` is member access and the segments before it are the
     // class, `\`-joined. An enum case is a class constant here: the engine

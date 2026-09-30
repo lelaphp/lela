@@ -102,9 +102,9 @@ use php_heap::{
 };
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
-    ConstDecl, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, HookKind, MethodDecl, Name,
-    NameKind, Parameter, ParameterDefault, PropertyDecl, TraitAdaptation, TraitMethodRef, Type,
-    Visibility,
+    ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind,
+    MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, TraitAdaptation,
+    TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody,
@@ -1701,15 +1701,7 @@ impl Emit<'_> {
                     self.tick();
                 }
             }
-            Stmt::ExprStmt(id) => {
-                let expr = tree[id].expr;
-                if let Some(operand) = self.void_cast_operand(expr) {
-                    self.void_cast(operand)?;
-                } else {
-                    let value = self.expr(expr)?;
-                    self.do_free(value);
-                }
-            }
+            Stmt::ExprStmt(id) => self.expr_stmt(tree[id].expr)?,
             Stmt::Block(id) => self.block(id)?,
             Stmt::ForStmt(id) => self.r#for(id)?,
             Stmt::WhileStmt(id) => {
@@ -3807,7 +3799,11 @@ impl Emit<'_> {
     /// Fatal error: A never returning function does not return a value, but #[\NoDiscard] requires a return value in %s on line 2
     /// ```
     ///
-    /// `validate_nodiscard` refuses it on a property's `get` or `set` first.
+    /// `validate_nodiscard` refuses it on a property's `get` or `set`
+    /// first ([`php_unit::decl::hook_attribute_refusal`]), and sets no
+    /// `ZEND_ACC_NODISCARD` there, so nothing after it is checked; under
+    /// `#[\DelayedTargetValidation]` the refusal waits for
+    /// `ReflectionAttribute::newInstance` and the hook compiles.
     ///
     /// ```php
     /// class A { public $p { #[\NoDiscard] get => 1; } }
@@ -3815,12 +3811,33 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: #[\NoDiscard] is not supported for property hooks in %s on line 2
     /// ```
+    ///
+    /// ```php
+    /// class A { public string $p { #[DelayedTargetValidation] #[NoDiscard] set => strtoupper($value); } }
+    /// $a = new A;
+    /// $a->p = "x";
+    /// var_dump($a->p);
+    /// ```
+    /// ```expect
+    /// string(1) "X"
+    /// ```
     fn no_discard_refused(&self, attributes: &[Attribute]) -> Result<(), CompileError> {
-        let marked = attributes
-            .iter()
-            .any(|a| InternalAttribute::named(&a.name.0) == Some(InternalAttribute::NoDiscard));
+        let named = |which: InternalAttribute| {
+            attributes
+                .iter()
+                .any(|a| InternalAttribute::named(&a.name.0) == Some(which))
+        };
+        let marked = named(InternalAttribute::NoDiscard);
         if marked && self.active_hook.is_some() {
-            return Err(self.compile_error("#[\\NoDiscard] is not supported for property hooks"));
+            let refused = attributes
+                .iter()
+                .find_map(|a| php_unit::decl::hook_attribute_refusal(&a.name.0));
+            return match refused {
+                Some(refused) if !named(InternalAttribute::DelayedTargetValidation) => {
+                    Err(self.compile_error(refused))
+                }
+                _ => Ok(()),
+            };
         }
         let Some(ty) = self.return_type.as_ref().filter(|_| marked) else {
             return Ok(());
@@ -4135,6 +4152,11 @@ impl Emit<'_> {
             self.line = value.line(self.parsed);
             self.statements_seen = self.statements_seen.saturating_add(1);
             match short {
+                // `zend_compile_func_decl` wraps an arrow function's
+                // body in `ZEND_AST_RETURN` only where the return type
+                // holds no `never`; under `never` the body is an
+                // expression statement, and `VERIFY_NEVER_TYPE` follows.
+                Short::Return(value) if self.returns_never() => self.expr_stmt(value)?,
                 Short::Return(value) => {
                     self.r#return(Some(value))?;
                 }
@@ -6902,20 +6924,19 @@ impl Emit<'_> {
                 None => Err(self.unread("an expression inside parentheses")),
             },
             // `zend_compile_const_expr_const`: the name resolved through
-            // the constant imports, and an unqualified one no import
-            // names, in a namespace, left as written for the fallback
-            // the engine's fetch makes. It moves `CG(zend_lineno)` to the
-            // name's line, which the opline after the walk is emitted at.
+            // the constant imports and the namespace, an unqualified one
+            // no import names, in a namespace, marked for the global
+            // fallback the engine's fetch makes. It moves
+            // `CG(zend_lineno)` to the name's line, which the opline
+            // after the walk is emitted at.
             tree::Expr::NameRef(token) => {
                 if let Some(value) = self.constant_name(token) {
                     return self.folded(value, line);
                 }
                 self.line = line;
                 let written = self.text(token).to_vec();
-                let (resolved, runtime) = self.constant_resolved(&written);
-                let name = if runtime { written } else { resolved };
                 Ok(ConstExpr::Constant {
-                    name: Name(name.into_boxed_slice()),
+                    name: self.constant_resolved(&written),
                     line,
                 })
             }
@@ -9833,6 +9854,30 @@ impl Emit<'_> {
             };
         }
         Ok(last)
+    }
+
+    /// `zend_compile_stmt`'s arm for an expression: a `(void)` cast
+    /// ([`Self::void_cast`]), or the expression compiled and its value
+    /// freed (`zend_do_free`). An arrow function returning `never` is
+    /// one, its body never wrapped in a `return`:
+    ///
+    /// ```php
+    /// $x = fn(): never => throw new Exception('Here');
+    /// try { $x(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// $y = fn(): never => 42;
+    /// try { $y(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Here
+    /// {closure:%s:4}(): never-returning function must not implicitly return
+    /// ```
+    fn expr_stmt(&mut self, expr: tree::Expr) -> Result<(), CompileError> {
+        if let Some(operand) = self.void_cast_operand(expr) {
+            return self.void_cast(operand);
+        }
+        let value = self.expr(expr)?;
+        self.do_free(value);
+        Ok(())
     }
 
     /// The operand of a `(void)` cast, php's `ZEND_AST_CAST_VOID`, which
@@ -16298,10 +16343,18 @@ impl Emit<'_> {
     }
 
     /// [`Self::function_name`] for a constant, `zend_resolve_const_name`,
-    /// which reads the constant imports, whose aliases keep their case.
-    fn constant_resolved(&self, name: &[u8]) -> (Vec<u8>, bool) {
+    /// which reads the constant imports, whose aliases keep their case;
+    /// a name that is not fully qualified, inside a namespace, is php's
+    /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE`, fetched with the global
+    /// fallback.
+    fn constant_resolved(&self, name: &[u8]) -> ConstantName {
         let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Const);
-        (resolved, !fully_qualified && self.namespace.is_some())
+        let resolved = Name(resolved.into_boxed_slice());
+        if !fully_qualified && self.namespace.is_some() {
+            ConstantName::UnqualifiedInNamespace(resolved)
+        } else {
+            ConstantName::Resolved(resolved)
+        }
     }
 
     /// `zend_resolve_class_name`: `self`, `parent` and `static` written
@@ -16538,11 +16591,10 @@ impl Emit<'_> {
     }
 
     fn const_name(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
-        let (resolved, runtime) = self.constant_resolved(name);
-        if runtime {
-            return Ok(None);
+        match self.constant_resolved(name) {
+            ConstantName::Resolved(resolved) => self.persistent(&resolved.0),
+            ConstantName::UnqualifiedInNamespace(_) => Ok(None),
         }
-        self.persistent(&resolved)
     }
 
     /// `zend_compile_const`'s second half (`Z/Zend/zend_compile.c:11048`),
@@ -16570,16 +16622,15 @@ impl Emit<'_> {
         if let Some(value) = self.const_name(name)? {
             return Ok(Where::Constant(value));
         }
-        let (resolved, unqualified) = self.constant_resolved(name);
-        let op2 = self.const_name_literal(&resolved, unqualified)?;
+        let resolved = self.constant_resolved(name);
+        let op2 = self.const_name_literal(&resolved)?;
         let extended_value = self.cache_slot();
         let out = self.temporary();
         self.push(Opline {
             opcode: Opcode::FetchConstant,
-            op1: if unqualified {
-                UNQUALIFIED_IN_NAMESPACE
-            } else {
-                0
+            op1: match resolved {
+                ConstantName::UnqualifiedInNamespace(_) => UNQUALIFIED_IN_NAMESPACE,
+                ConstantName::Resolved(_) => 0,
             },
             op2_type: OperandKind::Const,
             op2,
@@ -16596,8 +16647,8 @@ impl Emit<'_> {
     /// with no `namespace\` before it.
     fn names_halt_offset(&self, name: &[u8]) -> bool {
         const HALT: &[u8] = b"__COMPILER_HALT_OFFSET__";
-        let (resolved, _) = self.constant_resolved(name);
-        resolved == HALT || (!name.starts_with(b"namespace\\") && name == HALT)
+        self.constant_resolved(name).resolved().0.as_ref() == HALT
+            || (!name.starts_with(b"namespace\\") && name == HALT)
     }
 
     /// `zend_compile_halt_compiler` (`Z/Zend/zend_compile.c:9804`): no
@@ -16640,7 +16691,8 @@ impl Emit<'_> {
     /// after `op2` is the key whatever the name was. The answer is the
     /// slot of the name as resolved, which is the one the opline names
     /// and the one php's error text reads.
-    fn const_name_literal(&mut self, name: &[u8], unqualified: bool) -> Result<u32, CompileError> {
+    fn const_name_literal(&mut self, resolved: &ConstantName) -> Result<u32, CompileError> {
+        let name = resolved.resolved().0.as_ref();
         let written = self.string(name)?;
         let at = self.literal(written);
         let Some(slash) = name.iter().rposition(|byte| *byte == b'\\') else {
@@ -16654,8 +16706,8 @@ impl Emit<'_> {
         }
         let lowered = self.string(&lowered)?;
         self.literal(lowered);
-        if unqualified {
-            let bare = self.string(name.get(slash.saturating_add(1)..).unwrap_or_default())?;
+        if let Some(global) = resolved.fallback() {
+            let bare = self.string(global)?;
             self.literal(bare);
         }
         Ok(at)
@@ -16987,6 +17039,14 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Where::Returned(out)
+    }
+
+    /// Whether the return type declared holds `never`,
+    /// `ZEND_TYPE_CONTAINS_CODE(return_info->type, IS_NEVER)`.
+    fn returns_never(&self) -> bool {
+        self.return_type
+            .as_ref()
+            .is_some_and(|ty| ty.contains_code(NEVER_CODE))
     }
 
     /// `zend_emit_final_return` (`Z/Zend/zend_compile.c:2688`): a

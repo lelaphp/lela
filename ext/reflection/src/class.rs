@@ -2785,9 +2785,7 @@ impl ReflectionClass {
         attr::reflect_attributes(
             req,
             &attributes,
-            Some(class),
-            attr::TARGET_CLASS,
-            file.as_deref(),
+            attr::Subject::new(Some(class), attr::TARGET_CLASS, file.as_deref()),
             name,
             flags,
         )
