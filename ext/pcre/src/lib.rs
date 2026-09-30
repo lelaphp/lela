@@ -467,17 +467,16 @@ fn pcre_info(req: &mut Request) {
             ]
         })
         .collect();
-    let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
     let borrowed: Vec<[&str; 3]> = cells
         .iter()
         .map(|[a, b, c]| [a.as_str(), b.as_str(), c.as_str()])
         .collect();
-    table.extend(borrowed.iter().map(<[&str; 3]>::as_slice));
-    req.info_table(&table);
+    req.info_ini_table(&borrowed);
 }
 
-/// An ini value as `display_ini_entries` prints it: `no value` for
-/// none, and `On` or `Off` through `zend_ini_boolean_displayer_cb`.
+/// An ini value as its displayer shows it: `On` or `Off` through
+/// `zend_ini_boolean_displayer_cb`, and the value as it is otherwise,
+/// which `display_ini_entries` shows as `no value` where it is empty.
 fn shown(value: &[u8], boolean: bool) -> String {
     if boolean {
         return if Request::ini_parse_bool(value) {
@@ -487,9 +486,5 @@ fn shown(value: &[u8], boolean: bool) -> String {
         }
         .to_owned();
     }
-    if value.is_empty() {
-        "no value".to_owned()
-    } else {
-        String::from_utf8_lossy(value).into_owned()
-    }
+    String::from_utf8_lossy(value).into_owned()
 }

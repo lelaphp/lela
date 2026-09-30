@@ -131,6 +131,19 @@ impl Embedding {
 /// bool(false)
 /// ```
 ///
+/// The buffer is sized by what `fstat` says the file holds, so a FIFO,
+/// which says nothing, keeps the data, the header and 1025 bytes more:
+///
+/// ```php
+/// $p = __DIR__ . '/fifo.jpg'; posix_mkfifo($p, 0600);
+/// $w = proc_open(['/bin/sh', '-c', '{ printf "\377\330\377\340\000\020JFIF"; head -c 3000 /dev/zero; } > "$0"', $p], [], $pipes);
+/// var_dump(strlen(iptcembed('A', $p)), proc_close($w));
+/// ```
+/// ```expect
+/// int(1055)
+/// int(0)
+/// ```
+///
 /// ```php
 /// echo new ReflectionFunction('iptcembed');
 /// ```
@@ -163,7 +176,7 @@ fn iptcembed(
             "iptcembed(): Argument #1 ($iptc_data) is too large",
         ));
     }
-    let Ok(bytes) = std::fs::read(&jpeg) else {
+    let Ok(mut fp) = std::fs::File::open(&jpeg) else {
         let text = format!(
             "Unable to open {}",
             String::from_utf8_lossy(file.as_bytes())
@@ -171,7 +184,17 @@ fn iptcembed(
         docref(req, Level::Warning, &text);
         return Ok(Union::B(false));
     };
-    let room = data.len() + PSHEADER.len() + 1 + 1024 + 1 + bytes.len();
+    // php sizes its buffer by `fstat`'s `st_size`, which a FIFO answers
+    // zero, and reads the file to its end (GH-20582).
+    let Ok(st_size) = fp.metadata().map(|sb| sb.len()) else {
+        return Ok(Union::B(false));
+    };
+    let mut bytes = Vec::new();
+    if std::io::Read::read_to_end(&mut fp, &mut bytes).is_err() {
+        return Ok(Union::B(false));
+    }
+    let st_size = usize::try_from(st_size).unwrap_or(usize::MAX);
+    let room = (data.len() + PSHEADER.len() + 1 + 1024 + 1).saturating_add(st_size);
     let mut s = Embedding {
         data: bytes,
         at: 0,

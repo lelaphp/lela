@@ -965,11 +965,39 @@ fn stream_copy_to_stream(
         Some(0) => return Ok(OrFalse::Value(0)),
         Some(n) => usize::try_from(n).ok(),
     };
+    Ok(match copy_stream(req, src, dest, maxlen)? {
+        Some(haveread) => OrFalse::Value(i64::try_from(haveread).unwrap_or(i64::MAX)),
+        None => OrFalse::False,
+    })
+}
+
+/// `_php_stream_copy_to_stream_ex` (`Z/main/streams/streams.c:1661`)
+/// from where `src` stands: a chunk read, given back, and written until
+/// a read gives nothing or `maxlen` bytes are had, `None` for no limit.
+/// The count copied, or `None` for a read or a write that failed, which
+/// `stream_copy_to_stream` answers `false` and `copy` answers `false`
+/// for. Each chunk is given back before the next is read, so a copy
+/// needs a chunk's memory whatever the stream holds (GH-13071):
+///
+/// ```php
+/// $f = __DIR__ . "/big"; file_put_contents($f, str_repeat("a", 4 << 20));
+/// ini_set("memory_limit", memory_get_usage(true) + (2 << 20)); var_dump(copy($f, "$f.2"), filesize("$f.2"));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(4194304)
+/// ```
+pub(crate) fn copy_stream(
+    req: &mut Request,
+    src: Stream,
+    dest: Stream,
+    maxlen: Option<usize>,
+) -> Result<Option<usize>, Thrown> {
     let mut haveread: usize = 0;
     loop {
         let readchunk = maxlen.map_or(8192, |max| (max - haveread).min(8192));
         let Some(chunk) = src.read(req, readchunk)? else {
-            return Ok(OrFalse::False);
+            return Ok(None);
         };
         if chunk.is_empty() {
             break;
@@ -980,7 +1008,7 @@ fn stream_copy_to_stream(
         while written < bytes.len() {
             match dest.write(req, &bytes[written..]) {
                 Some(n) if n > 0 => written += n,
-                _ => return Ok(OrFalse::False),
+                _ => return Ok(None),
             }
         }
         haveread += bytes.len();
@@ -988,7 +1016,7 @@ fn stream_copy_to_stream(
             break;
         }
     }
-    Ok(OrFalse::Value(i64::try_from(haveread).unwrap_or(i64::MAX)))
+    Ok(Some(haveread))
 }
 
 /// `stream_supports_lock($stream): bool`,

@@ -466,11 +466,7 @@ pub(crate) fn info_ini(req: &mut Request) {
             }
             .into();
         }
-        if value.is_empty() {
-            "no value".into()
-        } else {
-            String::from_utf8_lossy(value).into_owned()
-        }
+        String::from_utf8_lossy(value).into_owned()
     };
     let rows: Vec<[String; 3]> = [COMPRESSION, LEVEL, HANDLER]
         .iter()
@@ -483,11 +479,9 @@ pub(crate) fn info_ini(req: &mut Request) {
             [(*name).to_string(), shown(name, local), shown(name, master)]
         })
         .collect();
-    let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
     let cells: Vec<[&str; 3]> = rows
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    table.extend(cells.iter().map(<[&str; 3]>::as_slice));
-    req.info_table(&table);
+    req.info_ini_table(&cells);
 }

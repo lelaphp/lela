@@ -237,8 +237,9 @@ const fn libc_einval() -> i32 {
 
 /// `/bin/sh -c command`, as `popen(3)` and `proc_open`'s string form hand
 /// a command, `sh` its `argv[0]`, in the request's working directory and
-/// environment.
-fn shell(req: &Request, command: &[u8]) -> Command {
+/// environment. What `exec`'s `VCWD_POPEN` and `mail`'s `popen` start
+/// too, so a shell's own message names itself `sh` as php's children do.
+pub(crate) fn shell(req: &Request, command: &[u8]) -> Command {
     use std::os::unix::process::CommandExt;
     let mut sh = Command::new("/bin/sh");
     sh.arg0("sh").arg("-c").arg(OsStr::from_bytes(command));

@@ -237,14 +237,8 @@ fn date_info(req: &mut Request) {
         &["Default timezone", &default],
     ]);
     // `DISPLAY_INI_ENTRIES()`: each entry's request value beside its
-    // master, `no value` for an empty one.
-    let shown = |value: &[u8]| {
-        if value.is_empty() {
-            "no value".to_owned()
-        } else {
-            String::from_utf8_lossy(value).into_owned()
-        }
-    };
+    // master.
+    let shown = |value: &[u8]| String::from_utf8_lossy(value).into_owned();
     let entries = req.ini_entries();
     let rows: Vec<[String; 3]> = INI
         .iter()
@@ -262,13 +256,11 @@ fn date_info(req: &mut Request) {
             ]
         })
         .collect();
-    let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
     let cells: Vec<[&str; 3]> = rows
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    table.extend(cells.iter().map(<[&str; 3]>::as_slice));
-    req.info_table(&table);
+    req.info_ini_table(&cells);
 }
 
 /// `register_php_date_symbols`: the formats, then the three deprecated
