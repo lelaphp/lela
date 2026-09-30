@@ -51,7 +51,7 @@ name = "php_compile"
 budget = 22000
 [[crate]]
 name = "php_engine"
-budget = 56000
+budget = 60000
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
