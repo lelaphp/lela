@@ -1160,7 +1160,39 @@ fn clone_node_of(req: &mut Request, this: PhpObject, recursive: bool) -> Result<
 /// its eighteen properties, every one `@virtual` and served by
 /// [`crate::object::NODE_HANDLERS`], and its methods; every node class
 /// of the legacy namespace extends it, over one payload, [`Dom`].
-#[php_class(payload = Dom, handlers = crate::object::NODE_HANDLERS)]
+///
+/// `dom_objects_new` allocates a `dom_object`, `dom_xpath_objects_new` a
+/// `dom_xpath_object`, and a list's or a map's `dom_nnodemap_objects_new`
+/// its `dom_nnodemap_object` beside it, which `memory_get_usage()` counts
+/// (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['DOMDocument', 'DOMElement', 'DOMText', 'DOMNameSpaceNode', 'DOMImplementation', 'DOMNodeList', 'DOMNamedNodeMap', 'DOMXPath', 'Dom\\Element', 'Dom\\Implementation', 'Dom\\NodeList', 'Dom\\NamedNodeMap', 'Dom\\DtdNamedNodeMap', 'Dom\\HTMLCollection'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// DOMDocument 64
+/// DOMElement 64
+/// DOMText 64
+/// DOMNameSpaceNode 80
+/// DOMImplementation 64
+/// DOMNodeList 160
+/// DOMNamedNodeMap 160
+/// DOMXPath 96
+/// Dom\Element 96
+/// Dom\Implementation 64
+/// Dom\NodeList 160
+/// Dom\NamedNodeMap 160
+/// Dom\DtdNamedNodeMap 160
+/// Dom\HTMLCollection 160
+/// ```
+#[php_class(size = 80, payload = Dom, handlers = crate::object::NODE_HANDLERS)]
 pub(crate) struct DOMNode;
 
 #[php_class]
@@ -1960,7 +1992,7 @@ impl DOMNode {
 /// `class DOMNameSpaceNode`: a namespace declaration answered as a node,
 /// its ten properties `@virtual`, and `DOMNode`'s `__sleep` and
 /// `__wakeup` as its own (`@implementation-alias`).
-#[php_class(payload = Dom, handlers = crate::object::NODE_HANDLERS)]
+#[php_class(size = 88, payload = Dom, handlers = crate::object::NODE_HANDLERS)]
 pub(crate) struct DOMNameSpaceNode;
 
 #[php_class]

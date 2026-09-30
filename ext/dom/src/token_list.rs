@@ -548,7 +548,7 @@ fn varargs(
     implements(crate::IteratorAggregate, crate::Countable),
     not_serializable,
     dynamic_properties = forbidden,
-    payload = Dom,
+    size = 152, payload = Dom,
     handlers = HANDLERS
 )]
 pub(crate) struct TokenList;

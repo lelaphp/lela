@@ -534,7 +534,7 @@ fn register_into(
 /// Warning: DOMXPath::query(): Invalid expression in %s on line %d
 /// bool(false)
 /// ```
-#[php_class(not_serializable, payload = Dom, handlers = HANDLERS)]
+#[php_class(not_serializable, size = 112, payload = Dom, handlers = HANDLERS)]
 pub(crate) struct DOMXPath;
 
 #[php_class]
@@ -828,7 +828,7 @@ impl DOMXPath {
     namespace(Dom),
     final,
     not_serializable,
-    payload = Dom,
+    size = 112, payload = Dom,
     handlers = HANDLERS
 )]
 pub(crate) struct XPath;

@@ -210,7 +210,7 @@ fn construct(req: &mut Request, this: PhpObject, node: Option<Node>) -> Result<(
 /// <x:r xmlns:x="urn:r"/>
 /// bool(true)
 /// ```
-#[php_class(payload = Dom, handlers = crate::object::NODE_HANDLERS)]
+#[php_class(size = 80, payload = Dom, handlers = crate::object::NODE_HANDLERS)]
 pub(crate) struct DOMImplementation;
 
 #[php_class]
@@ -852,7 +852,7 @@ impl DOMProcessingInstruction {
     namespace(Dom),
     not_serializable,
     dynamic_properties = forbidden,
-    payload = Dom,
+    size = 80, payload = Dom,
     handlers = crate::object::IMPLEMENTATION_HANDLERS
 )]
 pub(crate) struct Implementation;
