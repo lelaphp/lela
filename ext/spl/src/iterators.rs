@@ -2628,9 +2628,27 @@ impl ObjectHandlers for DualHandlers {
         }
     }
 
+    /// `spl_dual_it_get_gc`: what the iterator holds, the callback of a
+    /// `CallbackFilterIterator` among it (`zend_get_gc_buffer_add_fcc`),
+    /// so a closure over the object that holds the iterator is a cycle
+    /// the collector frees:
+    ///
+    /// ```php
+    /// class A { public $it; function __construct() { $this->it = new CallbackFilterIterator(new ArrayIterator([1]), fn() => true); } function __destruct() { echo "freed\n"; } }
+    /// $a = new A; $a = null;
+    /// gc_collect_cycles();
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// freed
+    /// done
+    /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(it) = object.native::<DualIt>(req) {
-            for value in [it.data, it.key, it.string].into_iter().flatten() {
+            for value in [it.data, it.key, it.string, it.callback_value]
+                .into_iter()
+                .flatten()
+            {
                 visit(value);
             }
             for object in [it.inner, it.children, it.appended].into_iter().flatten() {
