@@ -578,6 +578,17 @@ pub(crate) fn get_iterator(
     by_ref: bool,
 ) -> Result<PhpObject, Thrown> {
     let (funcs, data, class_iter) = iterated(req, object, by_ref)?;
+    wrap(req, funcs, data, class_iter)
+}
+
+/// `zend_iterator_init`: the iterator over `data`, one owner the
+/// iterator's, taken from the caller, in the object store as php keeps it.
+fn wrap(
+    req: &mut Request,
+    funcs: Funcs,
+    data: PhpObject,
+    class_iter: Option<Box<dyn ClassIterator>>,
+) -> Result<PhpObject, Thrown> {
     let wrapper = match req.class_named(ITERATOR_WRAPPER) {
         Some(class) => req.new_object_with(
             class,
@@ -643,6 +654,14 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
     let native = req
         .method_named(object.class(), b"getiterator")
         .is_some_and(|function| req.user_function(function).is_none());
+    if native
+        && let Some(class_iter) = req
+            .object_handlers(object.heap())
+            .get_iterator(req, object, by_ref)?
+    {
+        req.addref(&object.as_value());
+        return Ok((Funcs::Class, object, Some(class_iter)));
+    }
     let answered = crate::api::call::call_method(req, &object, b"getIterator", &[])?;
     match answered.deref().as_object().copied() {
         Some(inner) if native && internal_walked(req, inner) == Some(object) => {
@@ -846,13 +865,44 @@ pub(crate) fn rewind(req: &mut Request, wrapper: PhpObject) -> Result<(), Thrown
     }
 }
 
-/// `zend_internal_iterator`: the object walked, how many steps past its
-/// rewind the walk stands, and whether it was rewound, php's
-/// `rewind_called`.
+/// `zend_internal_iterator`: what an `InternalIterator` walks. A class
+/// with an iterator of its own (`ce->get_iterator`) walks with it, held in
+/// the object store as php holds it, rewound once, php's `rewind_called`;
+/// any other walks its elements by index.
 #[derive(Default)]
-pub(crate) struct Internal {
-    object: Option<PhpObject>,
-    index: usize,
+pub(crate) enum Internal {
+    #[default]
+    Unmade,
+    Elements {
+        object: PhpObject,
+        index: usize,
+    },
+    Own {
+        iter: PhpObject,
+        rewound: bool,
+    },
+}
+
+/// The class's own walk an `InternalIterator` holds, rewound first where
+/// `ensure` asks, as `zend_internal_iterator_ensure_rewound` rewinds it;
+/// `None` for a walk by index.
+fn internal_walk(
+    req: &mut Request,
+    this: PhpObject,
+    ensure: bool,
+) -> Option<Result<(Funcs, Walk), Thrown>> {
+    let Some(Internal::Own { iter, rewound }) = this.native_mut::<Internal>(req) else {
+        return None;
+    };
+    let (wrapper, first) = (*iter, ensure && !*rewound);
+    *rewound |= ensure;
+    let (funcs, data) = walked(req, wrapper)?;
+    let walk = Walk { wrapper, data };
+    Some(if first {
+        funcs.rewind(req, walk).map(|()| (funcs, walk))
+    } else {
+        Ok((funcs, walk))
+    })
 }
 
 /// `zend_internal_iterator_handlers`: `free_obj` gives back the object
@@ -863,16 +913,18 @@ static INTERNAL: InternalHandlers = InternalHandlers;
 
 impl ObjectHandlers for InternalHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        if let Some(held) = object
-            .native_mut::<Internal>(req)
-            .and_then(|it| it.object.take())
+        let held = object.native_mut::<Internal>(req).map(std::mem::take);
+        if let Some(Internal::Elements { object: held, .. } | Internal::Own { iter: held, .. }) =
+            held
         {
             req.release(held.as_value());
         }
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(held) = object.native::<Internal>(req).and_then(|it| it.object) {
+        if let Some(Internal::Elements { object: held, .. } | Internal::Own { iter: held, .. }) =
+            object.native::<Internal>(req)
+        {
             visit(held.as_value());
         }
     }
@@ -928,6 +980,10 @@ impl InternalIterator {
 
     /// `InternalIterator::current(): mixed`.
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        if let Some(walk) = internal_walk(req, this.object(), true) {
+            let (funcs, walk) = walk?;
+            return funcs.current(req, walk, false);
+        }
         Ok(match internal_element(req, this.object())? {
             Some((key, value)) => {
                 req.release(key);
@@ -939,6 +995,10 @@ impl InternalIterator {
 
     /// `InternalIterator::key(): mixed`.
     fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        if let Some(walk) = internal_walk(req, this.object(), true) {
+            let (funcs, walk) = walk?;
+            return funcs.key(req, walk);
+        }
         Ok(match internal_element(req, this.object())? {
             Some((key, value)) => {
                 req.release(value);
@@ -949,14 +1009,23 @@ impl InternalIterator {
     }
 
     /// `InternalIterator::next(): void`.
-    fn next(req: &mut Request, this: This<Self>) {
-        if let Some(it) = this.object().native_mut::<Internal>(req) {
-            it.index += 1;
+    fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        if let Some(walk) = internal_walk(req, this.object(), true) {
+            let (funcs, walk) = walk?;
+            return funcs.move_forward(req, walk);
         }
+        if let Some(Internal::Elements { index, .. }) = this.object().native_mut::<Internal>(req) {
+            *index += 1;
+        }
+        Ok(())
     }
 
     /// `InternalIterator::valid(): bool`.
     fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        if let Some(walk) = internal_walk(req, this.object(), true) {
+            let (funcs, walk) = walk?;
+            return funcs.valid(req, walk);
+        }
         Ok(match internal_element(req, this.object())? {
             Some((key, value)) => {
                 req.release(key);
@@ -967,20 +1036,36 @@ impl InternalIterator {
         })
     }
 
-    /// `InternalIterator::rewind(): void`.
-    fn rewind(req: &mut Request, this: This<Self>) {
-        if let Some(it) = this.object().native_mut::<Internal>(req) {
-            it.index = 0;
+    /// `InternalIterator::rewind(): void`: the class's own iterator
+    /// rewound, which one with no rewind of its own refuses past its
+    /// first step, php's `Iterator does not support rewinding`.
+    fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        if let Some(walk) = internal_walk(req, this.object(), false) {
+            let (funcs, walk) = walk?;
+            if let Some(Internal::Own { rewound, .. }) = this.object().native_mut::<Internal>(req) {
+                *rewound = true;
+            }
+            return funcs.rewind(req, walk);
         }
+        if let Some(Internal::Elements { index, .. }) = this.object().native_mut::<Internal>(req) {
+            *index = 0;
+        }
+        Ok(())
     }
 }
 
 /// The object an `InternalIterator` walks, none for any other object.
 fn internal_walked(req: &Request, iterator: PhpObject) -> Option<PhpObject> {
-    iterator.native::<Internal>(req).and_then(|it| it.object)
+    match iterator.native::<Internal>(req)? {
+        Internal::Elements { object, .. } => Some(*object),
+        Internal::Own { iter, .. } => walked(req, *iter).map(|(_, data)| data),
+        Internal::Unmade => None,
+    }
 }
 
-/// `zend_create_internal_iterator_zval`.
+/// `zend_create_internal_iterator_zval`: the class's own iterator over
+/// `object`, where it has one, made first, as php makes it, then the
+/// `InternalIterator` holding it; a class walked by index is held itself.
 pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let Some(class) = req.class_named(b"internaliterator") else {
         return Err(crate::api::raising::fatal(
@@ -988,27 +1073,43 @@ pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<
             "InternalError: InternalIterator is not declared",
         ));
     };
-    let iterator = req.new_object(class)?;
+    let own = req
+        .object_handlers(object.heap())
+        .get_iterator(req, object, false)?;
     req.addref(&object.as_value());
+    let (state, held) = match own {
+        Some(own) => {
+            let iter = wrap(req, Funcs::Class, object, Some(own))?;
+            (
+                Internal::Own {
+                    iter,
+                    rewound: false,
+                },
+                iter,
+            )
+        }
+        None => (Internal::Elements { object, index: 0 }, object),
+    };
+    let iterator = req
+        .new_object(class)
+        .inspect_err(|_| req.release(held.as_value()))?;
     if let Some(it) = iterator.native_mut::<Internal>(req) {
-        it.object = Some(object);
+        *it = state;
     }
     Ok(iterator)
 }
 
-/// The element the iterator stands at, through the walked object's
+/// The element a walk by index stands at, through the walked object's
 /// class's `iterator_element`.
 fn internal_element(req: &mut Request, this: PhpObject) -> Result<Option<(Value, Value)>, Thrown> {
-    let Some((object, index)) = this
-        .native::<Internal>(req)
-        .and_then(|it| it.object.map(|o| (o, it.index)))
-    else {
+    let Some(Internal::Elements { object, index }) = this.native::<Internal>(req) else {
         return Err(throw(
             req,
             "Error",
             "The InternalIterator object has not been properly initialized",
         ));
     };
+    let (object, index) = (*object, *index);
     let table = req.object_handlers(object.heap());
     table.iterator_element(req, object, index)
 }
