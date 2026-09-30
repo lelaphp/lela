@@ -342,7 +342,7 @@ fn abstract_refused(req: &mut Request, decl: &MethodDecl, scope: ClassId) -> Res
 }
 
 /// `ReflectionFunctionAbstract` as the stub declares it.
-#[php_class(abstract, implements(crate::Reflector), not_serializable)]
+#[php_class(abstract, implements(crate::Reflector), not_serializable, size = 96)]
 pub(crate) struct ReflectionFunctionAbstract;
 
 #[php_class]
@@ -1232,7 +1232,7 @@ impl ReflectionFunctionAbstract {
 }
 
 /// `ReflectionFunction` as the stub declares it.
-#[php_class(extends(ReflectionFunctionAbstract), payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(extends(ReflectionFunctionAbstract), size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionFunction;
 
 #[php_class]
@@ -1599,7 +1599,7 @@ fn handed(req: &mut Request, object: PhpObject) -> PhpObject {
 }
 
 /// `ReflectionGenerator` as the stub declares it.
-#[php_class(final, not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(final, not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionGenerator;
 
 #[php_class]
@@ -1862,7 +1862,7 @@ impl ReflectionGenerator {
 }
 
 /// `ReflectionMethod` as the stub declares it.
-#[php_class(extends(ReflectionFunctionAbstract), payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(extends(ReflectionFunctionAbstract), size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionMethod;
 
 #[php_class]
@@ -2638,7 +2638,7 @@ impl ReflectionMethod {
 }
 
 /// `ReflectionFiber` as the stub declares it.
-#[php_class(final, not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(final, not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionFiber;
 
 #[php_class]

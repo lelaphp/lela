@@ -361,7 +361,37 @@ impl Unpacked {
 }
 
 /// `ReflectionClass` as the stub declares it.
-#[php_class(implements(crate::Reflector), not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+///
+/// `reflection_objects_new`, every reflector's `create_object`, allocates
+/// a `reflection_object`, which `memory_get_usage()` counts (design
+/// §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['ReflectionClass', 'ReflectionObject', 'ReflectionEnum', 'ReflectionFunction', 'ReflectionMethod', 'ReflectionProperty', 'ReflectionParameter', 'ReflectionClassConstant', 'ReflectionConstant', 'ReflectionNamedType', 'ReflectionUnionType', 'ReflectionExtension', 'ReflectionZendExtension'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// ReflectionClass 96
+/// ReflectionObject 96
+/// ReflectionEnum 96
+/// ReflectionFunction 96
+/// ReflectionMethod 112
+/// ReflectionProperty 112
+/// ReflectionParameter 96
+/// ReflectionClassConstant 112
+/// ReflectionConstant 96
+/// ReflectionNamedType 80
+/// ReflectionUnionType 80
+/// ReflectionExtension 96
+/// ReflectionZendExtension 96
+/// ```
+#[php_class(implements(crate::Reflector), not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionClass;
 
 #[php_class]
@@ -2817,7 +2847,7 @@ impl ReflectionClass {
 }
 
 /// `ReflectionObject` as the stub declares it.
-#[php_class(extends(ReflectionClass), payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(extends(ReflectionClass), size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionObject;
 
 #[php_class]

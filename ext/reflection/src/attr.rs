@@ -285,7 +285,7 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
 /// `object_init_with_constructor` serves them
 /// ([`instantiate_named`]).
 /// `ReflectionAttribute` as the stub declares it.
-#[php_class(implements(crate::Reflector), not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(implements(crate::Reflector), not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionAttribute;
 
 #[php_class]

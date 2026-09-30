@@ -4474,7 +4474,7 @@ fn reflection_info(req: &mut Request) {
 /// The slot is laid down by `new` as the class's `create_object`
 /// (design §5.4) and written by the constructor.
 #[derive(Default)]
-pub(crate) struct Reflected {
+pub(crate) struct ReflectedState {
     ce: Option<ClassId>,
     object: Option<PhpObject>,
     /// php's `attribute_reference`, which `ReflectionAttribute` keeps
@@ -4489,6 +4489,10 @@ pub(crate) struct Reflected {
     /// `$prop::set`, names it among the hooks of `$class`'s property.
     hook: bool,
 }
+
+/// The payload: the reflector's fields, boxed, inside the `sizeof` of
+/// `reflection_object` php allocates (design §5.13).
+pub(crate) type Reflected = Box<ReflectedState>;
 
 /// `reflection_object_handlers`
 /// (`Z/ext/reflection/php_reflection.c:7976-7981`): `free_obj` gives
@@ -7295,7 +7299,7 @@ pub(crate) struct Reflector;
 impl Reflector {}
 
 /// `ReflectionExtension` as the stub declares it.
-#[php_class(implements(Reflector), not_serializable)]
+#[php_class(implements(Reflector), not_serializable, size = 96)]
 pub(crate) struct ReflectionExtension;
 
 #[php_class]
@@ -8008,7 +8012,7 @@ impl ReflectionExtension {
 }
 
 /// `ReflectionZendExtension` as the stub declares it.
-#[php_class(implements(Reflector), not_serializable)]
+#[php_class(implements(Reflector), not_serializable, size = 96)]
 pub(crate) struct ReflectionZendExtension;
 
 #[php_class]
@@ -8197,7 +8201,7 @@ fn this_zend_extension(req: &mut Request, this: PhpObject) -> Result<ZendExtensi
 }
 
 /// `ReflectionReference` as the stub declares it.
-#[php_class(final, not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(final, not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionReference;
 
 #[php_class]
