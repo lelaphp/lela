@@ -1990,7 +1990,19 @@ impl EngineBuilder {
     }
 
     /// The engine: every engine state built from the startup ini, in
-    /// bundle order (ADR-0005), the declarations linked.
+    /// bundle order (ADR-0005), the declarations linked. A name the host
+    /// set that neither the core table nor an extension declares is no
+    /// entry, as the recipe's `track_errors`, gone since php 8, is not:
+    ///
+    /// ```php
+    /// var_dump(ini_get('track_errors'), get_cfg_var('track_errors'), ini_set('track_errors', '1'), isset(ini_get_all()['track_errors']));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(1) "0"
+    /// bool(false)
+    /// bool(false)
+    /// ```
     #[must_use]
     #[allow(clippy::too_many_lines)] // one line per field of the engine
     pub fn build(self) -> Engine {
@@ -2033,6 +2045,13 @@ impl EngineBuilder {
         for (name, value) in configuration.directives() {
             if on_modify(&extensions, &name).is_some() {
                 held.push((name, value, false));
+                continue;
+            }
+            // A name no table declares is no entry: it stays in the
+            // configuration table, where `get_cfg_var()` finds it, as
+            // `zend_register_ini_entries_ex` reads that table by the
+            // names it registers and by no other.
+            if !ini.iter().any(|(n, _)| *n == name) {
                 continue;
             }
             ini.retain(|(n, _)| *n != name);
@@ -5279,21 +5298,43 @@ mod tests {
     /// what is held here is the switch.
     #[test]
     fn the_dump_before_the_optimizer_is_the_op_arrays_under_the_ini_bit_and_nothing_without_it() {
+        // The entry is opcache's, and php has none without it.
+        let opcache = || {
+            let entry = php_unit::decl::IniDecl {
+                name: Name(b"opcache.opt_debug_level"[..].into()),
+                default: b"0"[..].into(),
+                user: false,
+                per_dir: false,
+                system: true,
+            };
+            let extension = crate::api::abi::ExtensionBuilder::default()
+                .ini(vec![entry])
+                .build("t");
+            Engine::builder().extensions(&[extension])
+        };
         let described = description("<?php echo 1;");
         assert_eq!(
-            Engine::builder().build().dump_before_optimizer(&described),
+            Engine::builder()
+                .ini("opcache.opt_debug_level", "0x10000")
+                .build()
+                .dump_before_optimizer(&described),
+            None,
+            "no opcache, and so no entry"
+        );
+        assert_eq!(
+            opcache().build().dump_before_optimizer(&described),
             None,
             "no opt_debug_level at all"
         );
         assert_eq!(
-            Engine::builder()
+            opcache()
                 .ini("opcache.opt_debug_level", "0")
                 .build()
                 .dump_before_optimizer(&described),
             None,
             "the entry at its default"
         );
-        let dumped = Engine::builder()
+        let dumped = opcache()
             .ini("opcache.opt_debug_level", "0x10000")
             .build()
             .dump_before_optimizer(&described)
@@ -5304,7 +5345,7 @@ mod tests {
             "the one op array, in php's format"
         );
         assert_eq!(
-            Engine::builder()
+            opcache()
                 .ini("opcache.opt_debug_level", "0x10000")
                 .build()
                 .dump_before_optimizer(&description("<?php echo 1 +;")),
