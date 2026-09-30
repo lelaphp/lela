@@ -4114,18 +4114,25 @@ impl Emit<'_> {
         };
         let is_ctor = scope.is_some() && name.eq_ignore_ascii_case(b"__construct");
         // `get_function_or_method_name`, what a deprecation of the
-        // prologue names the function by.
-        let owner = scope
-            .map(<[u8]>::to_vec)
-            .or_else(|| self.fn_flags.closure.then(|| self.active_name()).flatten());
-        let shown = match owner {
+        // prologue names the function by: a method by its class, and a
+        // closure by its name alone, since its op array has no scope
+        // while it compiles.
+        let shown = match scope {
             Some(owner) => format!(
                 "{}::{}",
-                String::from_utf8_lossy(&owner),
+                String::from_utf8_lossy(owner),
                 String::from_utf8_lossy(name)
             ),
             None => String::from_utf8_lossy(name).into_owned(),
         };
+        // `zend_compile_params` over the return type, before any
+        // parameter: `&` over `void` is deprecated.
+        if function.by_ref && matches!(self.return_type, Some(Type::Void)) {
+            self.raise(
+                Level::Deprecated,
+                &format!("{shown}(): Returning by reference from a void function is deprecated"),
+            );
+        }
         let parameters = self.recv_prologue(function, is_ctor, &shown)?;
         self.no_discard_refused(&attributes)?;
         // The entry safepoint is the opline after the prologue (design
@@ -4243,6 +4250,30 @@ impl Emit<'_> {
     /// ```expect exit=0
     /// Deprecated: C::m(): Implicitly marking parameter $x as nullable is deprecated, the explicit nullable type must be used instead in %s on line 2
     /// NULL
+    /// ```
+    ///
+    /// A function that returns by reference and is declared `void` is
+    /// deprecated before its parameters are read:
+    ///
+    /// ```php
+    /// function &f(): void {}
+    /// $r = &f();
+    /// var_dump($r);
+    /// ```
+    /// ```expect
+    /// Deprecated: f(): Returning by reference from a void function is deprecated in %s on line 2
+    ///
+    /// Notice: Only variable references should be returned by reference in %s on line 2
+    /// NULL
+    /// ```
+    ///
+    /// A closure is named without a class, even written in a method:
+    ///
+    /// ```php
+    /// class C { function m() { return function ($a = 1, $b) {}; } }
+    /// ```
+    /// ```expect
+    /// Deprecated: {closure:C::m():2}(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter in %s on line 2
     /// ```
     fn recv_prologue(
         &mut self,
