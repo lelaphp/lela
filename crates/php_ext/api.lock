@@ -244,7 +244,6 @@ call::passthrough
 call::property_hook
 call::property_is_virtual
 call::read_class_prop_silent
-call::read_hooked_property
 call::read_prop
 call::read_raw_property
 call::read_static_prop
@@ -252,7 +251,6 @@ call::reset_as_lazy_ghost
 call::reset_as_lazy_proxy
 call::skip_lazy_initialization
 call::update_class_constants
-call::write_hooked_property
 call::write_prop
 call::write_raw_property
 call::write_static_prop

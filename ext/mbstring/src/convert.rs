@@ -205,7 +205,10 @@ fn start<'a>(candidates: &mut [Candidate<'a>], input: &'a [u8]) {
 
 /// `count_demerits`: each candidate's input decoded, 128 codepoints a
 /// turn, last candidate first; strictly, a candidate with bad input is
-/// dropped.
+/// dropped. The count is php's `uint64_t`: weighed by the multiplier
+/// once per string, it reaches `UINT64_MAX` over a few hundred strings,
+/// and the next string's demerits wrap it round as C's unsigned
+/// addition does (GH-17503).
 // php weighs the demerits in `double` and clamps them back into a
 // `uint64_t`, which these casts are.
 #[allow(
@@ -232,9 +235,9 @@ fn count_demerits(candidates: &mut Vec<Candidate<'_>>, strict: bool) {
                         dropped = true;
                         break;
                     }
-                    c.demerits += 1000;
+                    c.demerits = c.demerits.wrapping_add(1000);
                 } else {
-                    c.demerits += demerits(w);
+                    c.demerits = c.demerits.wrapping_add(demerits(w));
                 }
             }
             if dropped {
@@ -874,6 +877,21 @@ fn convert_array_in(
 /// }
 /// string(6) "EUC-JP"
 /// string(3) "あ"
+/// ```
+///
+/// Detection over many strings weighs each candidate's demerits once a
+/// string, past what a `uint64_t` holds, and counts on from where php's
+/// arithmetic leaves them (GH-17503):
+///
+/// ```php
+/// $a = array_fill(0, 500, "<blah>");
+/// var_dump(mb_convert_variables("ASCII", ["UTF-8", "UTF-16"], $a));
+/// $c = array_merge(array_fill(0, 300, "<a>"), ["\xff\xfe"]);
+/// var_dump(mb_convert_variables("UTF-8", ["UTF-16", "UTF-8", "ISO-8859-1"], $c));
+/// ```
+/// ```expect
+/// string(5) "UTF-8"
+/// string(6) "UTF-16"
 /// ```
 #[php_function]
 fn mb_convert_variables(
