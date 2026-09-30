@@ -854,12 +854,9 @@ impl Runner {
     /// the one the skip names.
     pub fn resolve(root: &Path, pin: &Pin, named: Option<&Path>) -> Result<Runner> {
         if let Some(path) = named {
-            if !path.is_file() {
-                bail!("no binary at {}", path.display());
-            }
-            let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            let path = named_binary(path)?;
+            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
             let digest = format!("{:x}", md5::compute(bytes));
-            let path = path.to_path_buf();
             return Ok(if digest == pin.oracle.md5 {
                 // The pinned oracle is a control and never this tree's
                 // engine, so when the tree was last written says nothing
@@ -980,6 +977,22 @@ fn is_engine_source(relative: &Path) -> bool {
                 Some("tests" | "tests.rs" | "benches" | "examples" | "fixtures")
             )
         })
+}
+
+/// A binary named on the command line, by the path every program is
+/// handed: one that names no file is refused before anything runs, and a
+/// relative one is made absolute against the directory `xtask` was invoked
+/// from, since a lane's programs run in a tree of their own where the
+/// relative path names nothing and every test of the subset skipped for
+/// it (#1259).
+fn named_binary(path: &Path) -> Result<PathBuf> {
+    if !path.is_file() {
+        bail!("no binary at {}", path.display());
+    }
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    fs::canonicalize(path).with_context(|| format!("making {} absolute", path.display()))
 }
 
 /// One binary held to the tree a lane's reading is stamped with: itself
