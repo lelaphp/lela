@@ -23,13 +23,13 @@ use php_heap::Obj;
 use php_macros::php_class;
 
 use crate::api::abi::{
-    CloneObj, DebugInfo, DimensionRead, Instance, ObjectHandlers, This, Untyped,
+    ClassIterator, CloneObj, DebugInfo, DimensionRead, Instance, ObjectHandlers, This, Untyped,
 };
 use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, PhpObject, PhpString, Place, Value};
+use crate::api::values::{HashIterator, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, Value};
 use crate::classes::ArrayAccess;
-use crate::interfaces::Countable;
+use crate::interfaces::{Countable, Iterator, IteratorAggregate};
 
 /// One holder `EG(weakrefs)` lists against an object: php's tagged
 /// pointer, `ZEND_WEAKREF_TAG_REF` or `ZEND_WEAKREF_TAG_MAP`.
@@ -469,6 +469,48 @@ impl ObjectHandlers for WeakMapHandlers {
         Ok(())
     }
 
+    /// `zend_weakmap_get_iterator` (`Z/Zend/zend_weakrefs.c:709`): a
+    /// hash iterator over the entries, which a removal during the walk
+    /// moves on as it moves `foreach` over an array.
+    fn get_iterator(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        by_ref: bool,
+    ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        let _ = (req, object);
+        Ok(Some(Box::new(MapIter { at: None, by_ref })))
+    }
+
+    /// The entry `index` steps into the walk, which is what an
+    /// `InternalIterator` over the map reads: the object keying it and
+    /// its value, one owner each the caller's.
+    fn iterator_element(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        index: usize,
+    ) -> Result<Option<(Value, Value)>, Thrown> {
+        let entry = entries_of(req, object).and_then(|entries| {
+            entries
+                .iter()
+                .filter_map(|(key, value)| match key {
+                    Key::Int(id) => u32::try_from(id)
+                        .ok()
+                        .and_then(|id| stored(req, id))
+                        .map(|o| (o, value)),
+                    Key::Str(_) => None,
+                })
+                .nth(index)
+        });
+        Ok(entry.map(|(owner, value)| {
+            let value = value.deref();
+            req.addref(&owner.as_value());
+            req.addref(&value);
+            (owner.as_value(), value)
+        }))
+    }
+
     /// `zend_weakmap_count_elements`: the entries.
     fn count_elements(&self, req: &mut Request, object: PhpObject) -> Result<Option<i64>, Thrown> {
         let count = entries_of(req, object).map_or(0, |entries| entries.len());
@@ -485,7 +527,7 @@ impl ObjectHandlers for WeakMapHandlers {
     ) -> Result<Option<DebugInfo>, Thrown> {
         let mut table = PhpArray::new(req)?;
         for (key, value) in entries_of(req, object)
-            .map(|e| e.snapshot())
+            .map(|e| e.snapshot_refs())
             .unwrap_or_default()
         {
             let Key::Int(id) = key else { continue };
@@ -527,7 +569,7 @@ impl ObjectHandlers for WeakMapHandlers {
     /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         for (_, value) in entries_of(req, object)
-            .map(|e| e.snapshot())
+            .map(|e| e.snapshot_refs())
             .unwrap_or_default()
         {
             visit(value);
@@ -536,6 +578,91 @@ impl ObjectHandlers for WeakMapHandlers {
 }
 
 static WEAK_MAP: WeakMapHandlers = WeakMapHandlers;
+
+/// `zend_weakmap_iterator`: the entries' hash iterator, laid on the
+/// table at the first step that finds one, and whether the walk hands
+/// the value out by reference.
+struct MapIter {
+    at: Option<HashIterator>,
+    by_ref: bool,
+}
+
+impl MapIter {
+    /// The entry the iterator stands at or past, with its bucket:
+    /// `zend_hash_get_current_data_ex` over `iter->ht_iter`.
+    fn here(&mut self, req: &mut Request, map: PhpObject) -> Option<(u32, Key, Value)> {
+        let entries = entries_of(req, map)?;
+        let at = *self
+            .at
+            .get_or_insert_with(|| HashIterator::new(req, &entries, 0));
+        let pos = at.position(req, &entries);
+        entries.live_from(pos)
+    }
+}
+
+impl ClassIterator for MapIter {
+    /// `zend_weakmap_iterator_rewind`.
+    fn rewind(&mut self, req: &mut Request, _map: PhpObject) -> Result<(), Thrown> {
+        if let Some(at) = self.at {
+            at.set_position(req, 0);
+        }
+        Ok(())
+    }
+
+    fn valid(&mut self, req: &mut Request, map: PhpObject) -> Result<bool, Thrown> {
+        Ok(self.here(req, map).is_some())
+    }
+
+    /// `zend_weakmap_iterator_get_current_data`, made a reference in
+    /// place under a walk by reference, as `FE_FETCH_RW` makes the zval
+    /// it points at one.
+    fn current(&mut self, req: &mut Request, map: PhpObject) -> Result<Value, Thrown> {
+        let Some((_, key, value)) = self.here(req, map) else {
+            return Ok(Value::null());
+        };
+        if !self.by_ref || value.as_php_ref().is_some() {
+            req.addref(&value);
+            return Ok(value);
+        }
+        let Some(mut entries) = entries_of(req, map) else {
+            return Ok(Value::null());
+        };
+        req.addref(&value);
+        let cell = PhpRef::new(req, value)?;
+        req.addref(&cell.as_value());
+        entries.set(req, key, cell.as_value())?;
+        Ok(cell.as_value())
+    }
+
+    /// `zend_weakmap_iterator_get_current_key`: the object the entry is
+    /// keyed by, `null` past the last.
+    fn key(&mut self, req: &mut Request, map: PhpObject) -> Result<Value, Thrown> {
+        let object = match self.here(req, map) {
+            Some((_, Key::Int(id), _)) => u32::try_from(id).ok().and_then(|id| stored(req, id)),
+            _ => None,
+        };
+        Ok(object.map_or_else(Value::null, |object| {
+            req.addref(&object.as_value());
+            object.as_value()
+        }))
+    }
+
+    /// `zend_weakmap_iterator_move_forward`: past the entry it stands at.
+    fn move_forward(&mut self, req: &mut Request, map: PhpObject) -> Result<(), Thrown> {
+        if let (Some((bucket, _, _)), Some(at)) = (self.here(req, map), self.at) {
+            at.set_position(req, bucket.saturating_add(1));
+        }
+        Ok(())
+    }
+
+    /// `zend_weakmap_iterator_dtor`: the hash iterator given back.
+    fn release(&mut self, req: &mut Request, map: PhpObject) {
+        let _ = map;
+        if let Some(at) = self.at.take() {
+            at.release(req);
+        }
+    }
+}
 
 fn weakmap_place(
     req: &mut Request,
@@ -724,12 +851,11 @@ impl WeakReference {
     }
 }
 
-/// `final class WeakMap implements ArrayAccess, Countable`,
+/// `final class WeakMap implements ArrayAccess, Countable, IteratorAggregate`,
 /// `@strict-properties` and `@not-serializable`, over the handler table
 /// and the [`ZendWeakMap`] payload `zend_register_weakref_ce` sets. The
-/// stub's `IteratorAggregate` and its `getIterator` are not declared
-/// yet. Its methods are its dimension handlers and `count_elements`,
-/// served by name:
+/// entries are walked by its own iterator. Its methods are its dimension
+/// handlers and `count_elements`, served by name:
 ///
 /// ```php
 /// $map = new WeakMap;
@@ -763,7 +889,7 @@ impl WeakReference {
     final,
     not_serializable,
     dynamic_properties = forbidden,
-    implements(ArrayAccess, Countable),
+    implements(ArrayAccess, Countable, IteratorAggregate),
     payload = ZendWeakMap,
     handlers = WEAK_MAP
 )]
@@ -871,5 +997,35 @@ impl WeakMap {
     /// `WeakMap::count(): int`: `count_elements`.
     fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
         Ok(WEAK_MAP.count_elements(req, this.object())?.unwrap_or(0))
+    }
+
+    /// `WeakMap::getIterator(): Iterator`, an `InternalIterator` over
+    /// the map's own iterator (`zend_create_internal_iterator_zval`).
+    ///
+    /// ```php
+    /// $map = new WeakMap;
+    /// $it = $map->getIterator();
+    /// var_dump($it->key(), $it->current(), $it->valid());
+    /// $o = new stdClass; $p = new stdClass;
+    /// $map[$o] = 1; $map[$p] = 2;
+    /// foreach ($map as $k => &$v) { $v *= 10; }
+    /// unset($v);
+    /// $it = $map->getIterator();
+    /// var_dump($it->key() === $o, $it->current());
+    /// $it->next(); $it->next();
+    /// var_dump($it->key(), $it->valid(), $map[$p]);
+    /// ```
+    /// ```expect
+    /// NULL
+    /// NULL
+    /// bool(false)
+    /// bool(true)
+    /// int(10)
+    /// NULL
+    /// bool(false)
+    /// int(20)
+    /// ```
+    fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
+        crate::api::call::internal_iterator(req, &this.object()).map(Instance::of)
     }
 }

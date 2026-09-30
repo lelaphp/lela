@@ -663,6 +663,17 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
     let native = req
         .method_named(object.class(), b"getiterator")
         .is_some_and(|function| req.user_function(function).is_none());
+    // `zend_implement_aggregate` keeps an internal class's own
+    // `get_iterator` where it assigned one, so the loop walks it with no
+    // call of `getIterator()` at all, by reference where it can
+    // (`zend_weakmap_get_iterator`).
+    if native {
+        let table = req.object_handlers(object.heap());
+        if let Some(class_iter) = table.get_iterator(req, object, by_ref)? {
+            req.addref(&object.as_value());
+            return Ok((Funcs::Class, object, Some(class_iter)));
+        }
+    }
     let answered = crate::api::call::call_method(req, &object, b"getIterator", &[])?;
     match answered.deref().as_object().copied() {
         Some(inner) if native && internal_walked(req, inner) == Some(object) => {
