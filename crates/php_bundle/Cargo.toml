@@ -55,6 +55,7 @@ linked = [
     "lexbor", "zlib", "posix", "sockets", "phar", "bz2", "uri", "opcache", "bcmath", "simplexml",
     "calendar",
     "shmop",
+    "sysvsem",
     "sysvmsg",
     "sysvshm",
 ]
@@ -92,6 +93,7 @@ bcmath = ["dep:php_ext_bcmath"] # the `php` binary and the phpt lane, as php bui
 simplexml = ["dep:php_ext_simplexml"]
 calendar = ["dep:php_ext_calendar"] # the `php` binary and the phpt lane, as php builds it with --enable-calendar (#1163)
 shmop = ["dep:php_ext_shmop"] # the `php` binary and the phpt lane, as php builds it with --enable-shmop (#1323)
+sysvsem = ["dep:php_ext_sysvsem"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvsem (#1323)
 sysvmsg = ["dep:php_ext_sysvmsg"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvmsg (#1323)
 sysvshm = ["dep:php_ext_sysvshm"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvshm (#1323)
 
@@ -132,6 +134,7 @@ php_ext_bcmath = { path = "../../ext/bcmath", optional = true }
 php_ext_simplexml = { path = "../../ext/simplexml", optional = true }
 php_ext_calendar = { path = "../../ext/calendar", optional = true }
 php_ext_shmop = { path = "../../ext/shmop", optional = true }
+php_ext_sysvsem = { path = "../../ext/sysvsem", optional = true }
 php_ext_sysvmsg = { path = "../../ext/sysvmsg", optional = true }
 php_ext_sysvshm = { path = "../../ext/sysvshm", optional = true }
 
