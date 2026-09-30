@@ -49,7 +49,7 @@ impl Execution {
     fn stand(&mut self, state: &FrameState) {
         self.site = exec::body_of(&state.unit, state.body)
             .map(|code| (code.filename.0.to_vec(), exec::line_of(state)));
-        self.this = state.this;
+        self.this = state.this();
     }
 }
 

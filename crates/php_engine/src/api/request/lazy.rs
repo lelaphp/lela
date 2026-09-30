@@ -180,8 +180,24 @@ impl Request {
             let table = self.object_handlers(object.heap());
             return table.get_properties(self, object);
         }
-        let reader = self.lazy_reader(object);
+        let reader = self.lay_properties_no_lazy_init(object)?;
         self.object_entries(reader.heap())
+    }
+
+    /// `zend_get_properties_no_lazy_init`'s `rebuild_object_properties_internal`
+    /// (`Z/Zend/zend_object_handlers.c:151-163`): the table of the object
+    /// a reader of `object` reads, the one the initialised proxies lead
+    /// to, laid down where it has none, nothing initialised. php's debug
+    /// walk leaves a ghost's table standing so, and the ghost's
+    /// initializer takes it as its snapshot.
+    pub(crate) fn lay_properties_no_lazy_init(
+        &mut self,
+        object: PhpObject,
+    ) -> Result<PhpObject, Thrown> {
+        let reader = self.lazy_reader(object);
+        let built = self.heap.object_properties(reader.heap());
+        self.fatal_of(built)?;
+        Ok(reader)
     }
 
     /// The values a lazy object's row owns, for the cycle collector,
@@ -593,19 +609,6 @@ impl Request {
             return Ok((instance, Some(lent)));
         }
         Ok((instance, None))
-    }
-
-    /// [`Request::lazy_place`] with the lent guard given back at once, for
-    /// the sites that resolve the place and make the operation in one
-    /// body, a compound assignment and an increment (#1336).
-    pub(crate) fn lazy_place_unlent(
-        &mut self,
-        object: PhpObject,
-        name: &[u8],
-    ) -> Result<PhpObject, Thrown> {
-        let (object, lent) = self.lazy_place(object, name)?;
-        self.give_back_guard(lent);
-        Ok(object)
     }
 
     /// The `IN_GET` a [`LentGuard`] took on the instance, given back once

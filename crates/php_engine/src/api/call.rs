@@ -905,37 +905,6 @@ pub fn property_is_virtual(req: &Request, class: ClassId, name: &[u8]) -> bool {
     req.property_virtual(class, name)
 }
 
-/// `zend_read_property_ex(prop_info->ce, ...)` over a hooked property,
-/// what `ReflectionProperty::getValue` reads: the `get` hook called, or
-/// the backing value where there is none, the property's own class
-/// being the scope, so a private one is read as from inside it; a
-/// virtual property with no `get` hook is php's `Error`. A property
-/// with no hooks is read through the object's `read_property`. One more
-/// owner of the value, the caller's.
-pub fn read_hooked_property(
-    req: &mut Request,
-    object: &PhpObject,
-    name: &[u8],
-) -> Result<Value, Thrown> {
-    req.read_in_class_scope(*object, name)
-}
-
-/// `zend_update_property_ex(prop_info->ce, ...)` over a hooked
-/// property, what `ReflectionProperty::setValue` writes: the `set` hook
-/// called, or the backing value written where there is none, the
-/// property's own class being the scope; a virtual property with no
-/// `set` hook is php's `Error`. A property with no hooks is written
-/// through the object's `write_property`. `value` and `name` are given
-/// up whatever arm runs.
-pub fn write_hooked_property(
-    req: &mut Request,
-    object: &PhpObject,
-    name: PhpString,
-    value: Value,
-) -> Result<(), Thrown> {
-    req.write_in_class_scope(*object, name, value)
-}
-
 /// A hooked property's backing value, read past its hooks as the
 /// `get` hook itself reads it, which is what
 /// `ReflectionProperty::getRawValue` reaches through

@@ -5,7 +5,7 @@
 //! `zlib_get_coding_type`. The coding comes from the request's
 //! `Accept-Encoding`, read once per request.
 
-use php_ext::abi::OrFalse;
+use php_ext::abi::{IniStage, OrFalse};
 use php_ext::attr::php_function;
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref, raise};
@@ -323,7 +323,9 @@ pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
 
 /// `OnUpdate_zlib_output_compression`: the value read, refused beside a
 /// `output_handler`, and once the headers went out; the chunk size reset
-/// to it, and at runtime the handler started when it is not.
+/// to it, and at runtime the handler started when it is not. At startup
+/// and as the request ends, when the headers are out, the value is
+/// taken and nothing started.
 ///
 /// ```php
 /// var_dump(ini_set('zlib.output_compression', 'Off'), ini_get('zlib.output_compression'));
@@ -353,7 +355,7 @@ pub(crate) fn on_compression(req: &mut Request, value: &[u8]) -> Result<bool, Th
         );
         return Ok(false);
     }
-    if req.at_startup() {
+    if matches!(req.ini_stage(), IniStage::Startup | IniStage::Deactivate) {
         return Ok(true);
     }
     if req.headers_sent().is_some() {
@@ -372,10 +374,12 @@ pub(crate) fn on_compression(req: &mut Request, value: &[u8]) -> Result<bool, Th
 }
 
 /// `OnUpdate_zlib_output_handler`: refused at runtime once the headers
-/// went out.
+/// went out; the request's end hands it back its value past them.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
 pub(crate) fn on_handler(req: &mut Request, _value: &[u8]) -> Result<bool, Thrown> {
-    if !req.at_startup() && req.headers_sent().is_some() {
+    if matches!(req.ini_stage(), IniStage::Activate | IniStage::Runtime)
+        && req.headers_sent().is_some()
+    {
         docref(
             req,
             Level::Warning,

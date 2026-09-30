@@ -37,7 +37,9 @@ mod observer;
 
 pub(crate) use iterators::{RecursiveIterator, SeekableIterator};
 
-use php_ext::abi::{Extension, ExtensionBuilder, FromArgument, ObjectHandlers, Raw, Std};
+use php_ext::abi::{
+    Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, ObjectHandlers, Raw, Std,
+};
 use php_ext::attr::php_class;
 use php_ext::call::{Iter, call_method, iterate, lookup_class};
 use php_ext::coerce::{key_of, truthy};
@@ -106,6 +108,21 @@ struct State {
 ///   string(17) "iterator_to_array"
 /// }
 /// ```
+///
+/// Its `deps` table is `spl_deps` (`Z/ext/spl/php_spl.c:760-763`), `json`
+/// required, so json starts before it:
+///
+/// ```php
+/// $loaded = get_loaded_extensions();
+/// var_dump((new ReflectionExtension('SPL'))->getDependencies(), array_search('json', $loaded) < array_search('SPL', $loaded));
+/// ```
+/// ```expect
+/// array(1) {
+///   ["json"]=>
+///   string(8) "Required"
+/// }
+/// bool(true)
+/// ```
 pub fn extension() -> Extension {
     let mut builder = exceptions::register(ExtensionBuilder::default().functions(vec![
         functions::class_implements::declared(),
@@ -131,6 +148,12 @@ pub fn extension() -> Extension {
     builder = heap::register(builder);
     builder = builder.class::<fixedarray::SplFixedArray>();
     observer::register(builder)
+        .dependencies(vec![Dependency {
+            name: String::from("json"),
+            kind: DependencyKind::Required,
+            rel: None,
+            version: None,
+        }])
         .request_state::<State>()
         .info(spl_info)
         .build("SPL")

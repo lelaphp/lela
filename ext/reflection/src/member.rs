@@ -8,7 +8,7 @@
 //! resolves ([`php_ext::call::property_hook`]); a hook is reflected as a
 //! `ReflectionMethod` named `$name::get` or `$name::set` (#427).
 
-use php_ext::abi::{Instance, OrFalse, Passed, PropertyRead, This, Union};
+use php_ext::abi::{Instance, OrFalse, Passed, PropertyRead, PropertyTest, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::{
     constant, eval_const_expr, property_hook, property_is_virtual, read_class_prop_silent,
@@ -25,10 +25,9 @@ use super::lazy::{lazy_compatible, object_of};
 use super::signature::type_factory;
 use super::{
     asked_class, attr, class_const_string, class_constant_named, class_name_of, class_named,
-    class_of, const_string, constant_key, dynamic_properties, effective_prop, held_to, hooked,
-    keep, kept_class, namespace_end, property_named, property_string, read_instance_property,
-    reflection_class_factory, set_name, set_string_prop, string_value, this_class_constant,
-    this_name, this_property,
+    class_of, const_string, constant_key, dynamic_properties, effective_prop, held_to, keep,
+    kept_class, namespace_end, property_named, property_string, reflection_class_factory, set_name,
+    set_string_prop, string_value, this_class_constant, this_name, this_property,
 };
 
 // ----------------------------------------------- ReflectionProperty
@@ -586,8 +585,12 @@ impl ReflectionProperty {
 
     /// `ReflectionProperty::getValue(?object $object = null)`: an instance
     /// property read off the object given, which must be of the declaring
-    /// class; the read is the slot or the dynamic table by name, php's
-    /// `read_property` under `fake_scope`, so visibility is no bar. A
+    /// class, through the object's own `read_property` under
+    /// `EG(fake_scope) = intern->ce`, the class the reflector was asked
+    /// about, so visibility is measured from there: the slot or the
+    /// dynamic table by name, a `get` hook served, a `__get` asked where
+    /// nothing holds the name, and whatever a class's handler serves in
+    /// place of a slot, a DOM node's `@virtual` properties among them. A
     /// slot holds the declared default, which `object_properties_init` put
     /// there when the object was made, an inherited property's included
     /// (#419); a typed property with no default holds nothing and is php's
@@ -666,6 +669,37 @@ impl ReflectionProperty {
     /// string(1) "p"
     /// NULL
     /// ```
+    ///
+    /// A private property is the slot the reflector's class sees, the
+    /// parent's where the object's class redeclares it, and one an
+    /// `unset` emptied asks `__get`:
+    ///
+    /// ```php
+    /// class A { private $p = "A"; } class B extends A { private $p = "B"; }
+    /// var_dump((new ReflectionProperty('A', 'p'))->getValue(new B), (new ReflectionClass('B'))->getProperty('A::p')->getValue(new B));
+    /// class G { private $g; function __construct() { unset($this->g); } function __get($n) { return "get $n"; } }
+    /// var_dump((new ReflectionProperty('G', 'g'))->getValue(new G));
+    /// ```
+    /// ```expect
+    /// string(1) "A"
+    /// string(1) "A"
+    /// string(5) "get g"
+    /// ```
+    ///
+    /// A property the class's handler serves has no slot, and is what
+    /// the handler answers:
+    ///
+    /// ```php
+    /// $d = new DOMDocument; $d->loadXML('<r>t</r>');
+    /// var_dump((new ReflectionProperty('DOMNode', 'nodeType'))->getValue($d->documentElement));
+    /// var_dump((new ReflectionProperty('DOMNode', 'textContent'))->getValue($d->documentElement));
+    /// var_dump((new ReflectionProperty('DOMDocument', 'documentElement'))->getValue($d)->nodeName);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// string(1) "t"
+    /// string(1) "r"
+    /// ```
     #[php(tentative)]
     fn getValue(
         req: &mut Request,
@@ -691,10 +725,10 @@ impl ReflectionProperty {
         // the class the reflector was asked about.
         let holder = if declared.is_some() { class } else { asked };
         held_to(req, object, holder)?;
-        if hooked(req, object.class(), &name) {
-            return php_ext::call::read_hooked_property(req, &object, &name);
-        }
-        read_instance_property(req, object, class, &name, declared.as_ref())
+        let handlers = object.handlers(req);
+        req.with_fake_scope(asked, |req| {
+            handlers.read_property(req, object, &name, PropertyRead::Warning)
+        })
     }
 
     /// `ReflectionProperty::setValue(mixed $objectOrValue, mixed $value)`:
@@ -793,6 +827,26 @@ impl ReflectionProperty {
     /// #1 {main}
     ///   thrown in %s on line 2
     /// ```
+    ///
+    /// The write is the object's own `write_property` under the fake
+    /// scope of the class the reflector was asked about, so a parent's
+    /// private property is the parent's slot where the object's class
+    /// redeclares it, and a DOM node's property is what its handler
+    /// writes:
+    ///
+    /// ```php
+    /// class A { private $p = "A"; } class B extends A { private $p = "B"; }
+    /// $b = new B; (new ReflectionProperty('A', 'p'))->setValue($b, 'a');
+    /// var_dump((new ReflectionProperty('A', 'p'))->getValue($b), (new ReflectionProperty('B', 'p'))->getValue($b));
+    /// $d = new DOMDocument; $d->loadXML('<r>t</r>');
+    /// (new ReflectionProperty('DOMNode', 'textContent'))->setValue($d->documentElement, 'x');
+    /// echo $d->saveXML($d->documentElement), "\n";
+    /// ```
+    /// ```expect
+    /// string(1) "a"
+    /// string(1) "B"
+    /// <r>x</r>
+    /// ```
     #[php(tentative)]
     fn setValue(
         req: &mut Request,
@@ -838,14 +892,13 @@ impl ReflectionProperty {
         let Some(object) = given.as_object() else {
             return Ok(());
         };
-        req.addref(&value);
         let key = PhpString::new(req, &name)?;
-        if hooked(req, object.class(), &name) {
-            php_ext::call::write_hooked_property(req, object, key, value)?;
-            return Ok(());
-        }
-        object.set_prop(req, key, value)?;
-        Ok(())
+        req.addref(&value);
+        let (object, handlers) = (*object, object.handlers(req));
+        let asked = asked_class(req, this.object(), class);
+        req.with_fake_scope(asked, |req| {
+            handlers.write_property(req, object, key, value)
+        })
     }
 
     /// `ReflectionProperty::getRawValue(object $object)`: the value as
@@ -1070,8 +1123,10 @@ impl ReflectionProperty {
     /// `ReflectionProperty::isInitialized(?object $object = null)`: for a
     /// `static` property, whether its slot holds a value, read silently
     /// through `intern->ce`; for an instance one, whether the object's slot
-    /// or dynamic table holds one, `has_property(ZEND_PROPERTY_EXISTS)`
-    /// under `fake_scope`, which asks no `__isset`. The object is held to
+    /// or dynamic table holds one, the object's own
+    /// `has_property(ZEND_PROPERTY_EXISTS)` under `EG(fake_scope) =
+    /// intern->ce`, which asks no `__isset` and finds a property the
+    /// class's handler serves in place of a slot. The object is held to
     /// the declaring class, php's `ref->prop->ce`, or to `intern->ce` for a
     /// dynamic property.
     ///
@@ -1093,6 +1148,16 @@ impl ReflectionProperty {
     /// bool(false)
     /// ReflectionProperty::isInitialized(): Argument #1 ($object) must be provided for instance properties
     /// Given object is not an instance of the class this property was declared in
+    /// ```
+    ///
+    /// A property the class's handler serves in place of a slot:
+    ///
+    /// ```php
+    /// $d = new DOMDocument; $d->loadXML('<r/>');
+    /// var_dump((new ReflectionProperty('DOMNode', 'nodeType'))->isInitialized($d->documentElement));
+    /// ```
+    /// ```expect
+    /// bool(true)
     /// ```
     #[php(tentative)]
     fn isInitialized(
@@ -1119,12 +1184,10 @@ impl ReflectionProperty {
         };
         let holder = if declared.is_some() { class } else { asked };
         held_to(req, object, holder)?;
-        // `has_property(ZEND_PROPERTY_EXISTS)` finds a virtual property
-        // whatever it holds, having no slot to hold nothing in.
-        if php_ext::call::property_is_virtual(req, object.class(), &name) {
-            return Ok(true);
-        }
-        Ok(object.prop(req, &name).is_some())
+        let handlers = object.handlers(req);
+        req.with_fake_scope(asked, |req| {
+            handlers.has_property(req, object, &name, PropertyTest::Exists)
+        })
     }
 
     /// `ReflectionProperty::isPublic()`: `ZEND_ACC_PUBLIC`, which a

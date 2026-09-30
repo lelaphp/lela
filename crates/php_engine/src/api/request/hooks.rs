@@ -292,8 +292,8 @@ impl Request {
     /// `EG(current_execute_data)`'s function and `$this`.
     fn current_call(&self) -> Option<(Option<Function>, Option<PhpObject>)> {
         Some(match self.chain().next()? {
-            Link::Frame(_, state) => (state.function, state.this),
-            Link::Call(call) => (Some(call.function), call.this),
+            Link::Frame(_, state) => (state.function, state.this()),
+            Link::Call(call) => (Some(call.function), call.this()),
             Link::Site(_) => (None, None),
         })
     }
@@ -1198,6 +1198,44 @@ impl Request {
     ///    'd' => 'd',
     /// ))
     /// ```
+    ///
+    /// The declared rows are read off the slots whatever the object's
+    /// table holds, and the dynamic ones are every row the table holds
+    /// that is no `IS_INDIRECT` (`zho_build_properties_ex`), so a table
+    /// that holds copies of the declared rows
+    /// ([`php_heap::DeclaredRows::Copied`]) hands each copy on as a row
+    /// of its own, under the name the slot's row has, as php's
+    /// `zend_hash_add_new` lays both down; the `foreach` walk reads the
+    /// same rows.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class H { public int $b = 1; public $h = 5 { get => $this->h * 10; } function __construct() { $this->a = 1; $this->b = 3; } }
+    /// $o = (new ReflectionClass(H::class))->newLazyGhost(function ($o) { $o->__construct(); });
+    /// var_dump($o); $o->a += 1;
+    /// echo json_encode($o), "\n";
+    /// var_export($o); echo "\n";
+    /// foreach ($o as $k => $v) echo "$k => $v\n";
+    /// ```
+    /// ```expect
+    /// lazy ghost object(H)#3 (0) {
+    ///   ["b"]=>
+    ///   uninitialized(int)
+    /// }
+    /// {"b":3,"h":50,"b":1,"h":5,"a":2}
+    /// \H::__set_state(array(
+    ///    'b' => 3,
+    ///    'h' => 50,
+    ///    'b' => 1,
+    ///    'h' => 5,
+    ///    'a' => 2,
+    /// ))
+    /// b => 3
+    /// h => 50
+    /// b => 1
+    /// h => 5
+    /// a => 2
+    /// ```
     pub(crate) fn hooked_object_rows(
         &mut self,
         object: PhpObject,
@@ -1385,54 +1423,5 @@ impl Request {
             return self.lazy_write(object, name, value, false);
         }
         self.write_std_property(object, name, value)
-    }
-}
-
-impl Request {
-    /// [`crate::api::call::read_hooked_property`].
-    pub(crate) fn read_in_class_scope(
-        &mut self,
-        object: PhpObject,
-        name: &[u8],
-    ) -> Result<Value, Thrown> {
-        if let Some(hooked) = self.row_hooked(object.class(), name) {
-            return self.read_hooked(object, name, hooked, PropertyRead::Warning);
-        }
-        let table = self.object_handlers(object.heap());
-        table.read_property(self, object, name, PropertyRead::Warning)
-    }
-
-    /// [`crate::api::call::write_hooked_property`].
-    pub(crate) fn write_in_class_scope(
-        &mut self,
-        object: PhpObject,
-        name: PhpString,
-        value: Value,
-    ) -> Result<(), Thrown> {
-        let Some(hooked) = self.row_hooked(object.class(), name.as_bytes()) else {
-            let table = self.object_handlers(object.heap());
-            return table.write_property(self, object, name, value);
-        };
-        if hooked.set.is_none() && hooked.is_virtual {
-            let bytes = name.as_bytes().to_vec();
-            self.release(value);
-            self.release(Value::string(name));
-            return Err(self.hooked_error(
-                object,
-                &bytes,
-                "Property {class}::${name} is read-only",
-            ));
-        }
-        match hooked.set {
-            Some(set) if self.should_call_hook(&hooked, name.as_bytes(), object) => {
-                let served = self.call_hook(object, set, &[value]);
-                self.release(value);
-                self.release(Value::string(name));
-                let answered = served?;
-                self.release(answered);
-                Ok(())
-            }
-            _ => self.write_std_property(object, name, value),
-        }
     }
 }

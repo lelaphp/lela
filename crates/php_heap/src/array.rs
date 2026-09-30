@@ -254,8 +254,7 @@ pub(crate) fn free_table_header(a: Arr) {
 /// down and for each doubling. The caller has looked the bytes up and
 /// found nothing, so the add is an add.
 pub(crate) fn add_interned(mm: &mut Mm, a: Arr, s: Str) -> Result<(), Fatal> {
-    write_str(mm, a, s, Zval::string(s))?;
-    Ok(())
+    append_str(mm, a, s, Zval::string(s))
 }
 
 /// The data [`add_interned`]'s first add lays down, laid down ahead of
@@ -327,6 +326,33 @@ const STATIC_KEYS: u32 = 1 << 4;
 /// `HASH_FLAG_HAS_EMPTY_IND`: an object's property table, one of whose
 /// declared slots may be empty, so `zend_array_count` counts again.
 const HAS_EMPTY_IND: u32 = 1 << 5;
+/// [`DeclaredRows::Copied`], in the byte php leaves unused beside
+/// `u.v.flags` (`_unused`), which `set_flag_byte` leaves standing: php
+/// has no bit for it, since its table says it by holding plain values
+/// where it held an `IS_INDIRECT` per slot, and this table holds no row
+/// for a slot at all.
+const COPIED_DECLARED: u32 = 1 << 8;
+
+/// What an object's property table holds of the object's declared
+/// properties, the one fact php's table says by the type of the rows it
+/// holds under their names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredRows {
+    /// The slots stand for them, as php's table does with one
+    /// `IS_INDIRECT` per slot (`rebuild_object_properties`): the table
+    /// holds the dynamic properties alone, and a reader reads the
+    /// declared ones off the object.
+    Slots,
+    /// Copies of them, as they stood when a table shared while it stood
+    /// for the slots was separated, since `zend_array_dup` copies what
+    /// each `IS_INDIRECT` points at and drops the indirection
+    /// (`Z/Zend/zend_hash.c:2504-2505`): the table holds every row
+    /// itself, the declared ones under their mangled names, first where
+    /// a separation made the copy and wherever a sort put them where
+    /// `spl_array_method` laid its sorted copy down, and a reader reads
+    /// the table alone while the slots go on apart from it.
+    Copied,
+}
 
 /// `zend_array`: fifty-six bytes, php's own order, out of the heap.
 #[repr(C)]
@@ -351,9 +377,18 @@ pub(crate) struct ArrHeader {
     internal_pointer: Cell<u32>,
     /// `nNextFreeElement`.
     next_free: Cell<i64>,
-    /// `pDestructor`: `ZVAL_PTR_DTOR` for every array here, kept for the
-    /// size.
-    _dtor: usize,
+    /// The declared rows the internal pointer of an object's property
+    /// table has passed ([`crate::PropertyTable`]), in the half of
+    /// php's `pDestructor` word this heap does not need, since its one
+    /// destructor is `ZVAL_PTR_DTOR` for every array: php's table holds
+    /// an `IS_INDIRECT` per declared slot before the dynamic rows and
+    /// points into either with `nInternalPointer`, and this one holds
+    /// the dynamic rows alone, so where php's pointer stands among the
+    /// slots is kept here, as `HtIter::lead` keeps a walk's. Zero for
+    /// every other table.
+    lead: Cell<u32>,
+    /// The rest of `pDestructor`, kept for the size.
+    _dtor: u32,
 }
 
 /// `Bucket`: a zval, the hash or the integer key, and the string key or
@@ -479,6 +514,7 @@ impl Arr {
                 table_size: Cell::new(size),
                 internal_pointer: Cell::new(0),
                 next_free: Cell::new(i64::MIN),
+                lead: Cell::new(0),
                 _dtor: 0,
             });
         }
@@ -551,6 +587,30 @@ impl Arr {
             flags | HAS_EMPTY_IND
         } else {
             flags & !HAS_EMPTY_IND
+        });
+    }
+
+    /// What an object's property table holds of the declared
+    /// properties: [`DeclaredRows::Slots`] for every table but the copy
+    /// [`crate::Heap::object_properties_copy`] makes and the copies made
+    /// of that.
+    #[must_use]
+    pub fn declared_rows(&self) -> DeclaredRows {
+        if self.header().flags.get() & COPIED_DECLARED == 0 {
+            DeclaredRows::Slots
+        } else {
+            DeclaredRows::Copied
+        }
+    }
+
+    /// The table marked as holding `rows`, what the separation of an
+    /// object's table carries onto the copy it makes of one that holds
+    /// its declared rows already.
+    pub fn set_declared_rows(&self, rows: DeclaredRows) {
+        let flags = self.header().flags.get();
+        self.header().flags.set(match rows {
+            DeclaredRows::Slots => flags & !COPIED_DECLARED,
+            DeclaredRows::Copied => flags | COPIED_DECLARED,
         });
     }
 
@@ -926,6 +986,33 @@ impl Arr {
             pos += 1;
         }
         pos
+    }
+
+    /// `nInternalPointer` as it was written, no tombstone stepped over.
+    pub(crate) fn raw_pointer(self) -> u32 {
+        self.header().internal_pointer.get()
+    }
+
+    /// `nInternalPointer = pos`.
+    pub(crate) fn set_raw_pointer(self, pos: u32) {
+        self.header().internal_pointer.set(pos);
+    }
+
+    /// The declared rows an object table's pointer has passed
+    /// (`ArrHeader::lead`).
+    pub(crate) fn lead(self) -> u32 {
+        self.header().lead.get()
+    }
+
+    /// The pointer of an object's table set among its declared rows.
+    pub(crate) fn set_lead(self, lead: u32) {
+        self.header().lead.set(lead);
+    }
+
+    /// Whether position `pos` holds a bucket, php's
+    /// `Z_TYPE(p->val) != IS_UNDEF`: below `nNumUsed` and no tombstone.
+    pub(crate) fn is_live(self, pos: u32) -> bool {
+        pos < self.num_used() && !self.value_at(pos).is_undef()
     }
 
     /// `zend_hash_get_current_pos`: where the internal pointer stands,
@@ -1587,24 +1674,34 @@ fn write_long(
 /// one more owner unless it is interned; the value replaced, if one was,
 /// handed back to release.
 fn write_str(mm: &mut dyn Allocate, a: Arr, key: Str, z: Zval) -> Result<Written, Fatal> {
+    if !a.is_uninitialized()
+        && !a.is_packed()
+        && let Some(idx) = a.find_str(key)
+    {
+        let mut b = a.read_bucket(idx);
+        let old = b.val;
+        b.val = z;
+        b.val.set_next(old.next());
+        a.write_bucket(idx, b);
+        return Ok(Written::Replaced(old));
+    }
+    append_str(mm, a, key, z)?;
+    Ok(Written::Added)
+}
+
+/// `_zend_hash_add_or_update_i` with `HASH_ADD_NEW`, past the lookup a
+/// release build leaves out: a bucket appended under `key` and linked at
+/// the head of its chain, so a table that held the key already holds it
+/// twice and a lookup finds this one, as php's does.
+fn append_str(mm: &mut dyn Allocate, a: Arr, key: Str, z: Zval) -> Result<(), Fatal> {
     let h = key.hash();
     let header = a.header();
     if a.is_uninitialized() {
         a.real_init_mixed(mm)?;
     } else if a.is_packed() {
         a.packed_to_hash(mm)?;
-    } else {
-        if let Some(idx) = a.find_str(key) {
-            let mut b = a.read_bucket(idx);
-            let old = b.val;
-            b.val = z;
-            b.val.set_next(old.next());
-            a.write_bucket(idx, b);
-            return Ok(Written::Replaced(old));
-        }
-        if a.num_used() >= a.table_size() {
-            a.do_resize(mm)?;
-        }
+    } else if a.num_used() >= a.table_size() {
+        a.do_resize(mm)?;
     }
     if !key.is_interned() {
         key.addref();
@@ -1622,7 +1719,7 @@ fn write_str(mm: &mut dyn Allocate, a: Arr, key: Str, z: Zval) -> Result<Written
         },
     );
     a.link(idx);
-    Ok(Written::Added)
+    Ok(())
 }
 
 impl crate::Heap {
@@ -1734,6 +1831,83 @@ impl crate::Heap {
         header.num_used.set(idx);
         header.num_elements.set(idx);
         Ok(target)
+    }
+
+    /// `zend_hash_add_new` and `zend_hash_index_add_new` of `z` under
+    /// `key` into `a`, which has one owner: the key one more owner unless
+    /// it is interned, `z` the array's from here. A string key is
+    /// appended without the lookup, as php's release build appends it, so
+    /// a key `a` holds already is held twice and a lookup finds the later
+    /// row; an integer key is written as `zend_hash_index_update` writes
+    /// it, the same bucket wherever the key is new, which is the one case
+    /// php's add admits.
+    pub fn array_add_new(&mut self, a: Arr, key: Key, z: Zval) -> Result<(), Fatal> {
+        match key {
+            Key::Str(name) => append_str(&mut self.tables(), a, name, z)?,
+            Key::Long(n) => {
+                self.array_write_long(a, n, z, Write::Update)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `zend_array_dup` over an object's property table that stands for
+    /// its declared slots and is shared, what `SEPARATE_ARRAY` over it
+    /// does before a write (`Z/Zend/zend_hash.c:2503-2505`): a copy that
+    /// holds each slot's value, a reference only this slot owns copied
+    /// as the value it holds, under `names[i]`, the slot's mangled name,
+    /// a slot nothing holds left out as php's copy skips an
+    /// `IS_INDIRECT` to an `UNDEF`, and then the dynamic rows, and that
+    /// holds them from then on ([`DeclaredRows::Copied`]). The object
+    /// takes the copy and the table it had, which another holder shares,
+    /// is one owner fewer. `names`
+    /// has one name per slot; a slot past its end is left out.
+    pub fn object_properties_copy(&mut self, o: crate::Obj, names: &[Str]) -> Result<Arr, Fatal> {
+        let source = o.properties();
+        let held = (0..o.slots()).filter(|i| !o.slot(*i).is_undef()).count();
+        let dynamic = source.map_or(0, |table| table.len());
+        let size = u32::try_from(held + dynamic).unwrap_or(u32::MAX);
+        let copy = self.array_mixed(size)?;
+        // `target->nInternalPointer`: the source's where it stands before
+        // the end and zero past it, then moved with the row it stands at
+        // as the holes close up; a pointer at a row the copy leaves out
+        // keeps the number it had.
+        let (from, used) = o
+            .property_table()
+            .map_or((0, 0), |table| (table.raw_pointer(), table.used()));
+        let mut pointer = if from < used { from } else { 0 };
+        let mut at = 0;
+        for (i, name) in (0..o.slots()).zip(names) {
+            let z = o.slot(i);
+            if z.is_undef() {
+                continue;
+            }
+            if i == from {
+                pointer = at;
+            }
+            at += 1;
+            let z = self.dup_value(z, source);
+            self.array_write_str(copy, *name, z)?;
+        }
+        if let Some(table) = source {
+            copy.set_next_free(table.next_free());
+            for pos in 0..table.num_used() {
+                let Some((key, z)) = table.entry_at(pos) else {
+                    continue;
+                };
+                if o.slots() + pos == from {
+                    pointer = at;
+                }
+                at += 1;
+                let z = self.dup_value(z, Some(table));
+                self.array_add_new(copy, key, z)?;
+            }
+            let _ = table.delref();
+        }
+        copy.set_raw_pointer(pointer);
+        copy.set_declared_rows(DeclaredRows::Copied);
+        self.object_set_properties(o, copy);
+        Ok(copy)
     }
 
     /// `zend_array_dup_value`'s copy of one element, and `zval_add_ref`
@@ -2282,6 +2456,45 @@ mod tests {
             );
             Heap::release(&mut nothing, Zval::array(copy));
         }
+    }
+
+    /// `zend_hash_add_new` appends without the lookup: a key the table
+    /// holds already is held twice, both rows walked in order and
+    /// counted, and a lookup finds the later one, across a resize too.
+    #[test]
+    fn an_add_new_of_a_held_key_is_a_second_row_the_lookup_finds() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let (Ok(a), Ok(b), Ok(c)) = (
+            nothing.heap.intern(b"a"),
+            nothing.heap.intern(b"b"),
+            nothing.heap.array(),
+        ) else {
+            return;
+        };
+        for (key, n) in [(a, 1), (b, 2), (a, 3)] {
+            assert!(
+                nothing
+                    .heap
+                    .array_add_new(c, Key::Str(key), Zval::long(n))
+                    .is_ok()
+            );
+        }
+        assert_eq!(c.len(), 3);
+        assert_eq!(c.get(Key::Str(a)).and_then(Zval::as_long), Some(3));
+        for n in 0..8 {
+            assert!(
+                nothing
+                    .heap
+                    .array_add_new(c, Key::Long(n), Zval::long(n))
+                    .is_ok()
+            );
+        }
+        assert_eq!(c.len(), 11);
+        assert_eq!(c.get(Key::Str(a)).and_then(Zval::as_long), Some(3));
+        let values: Vec<i64> = c.iter().take(3).filter_map(|(_, z)| z.as_long()).collect();
+        assert_eq!(values, [1, 2, 3]);
+        Heap::release(&mut nothing, Zval::array(c));
     }
 
     fn keys(a: Arr) -> Vec<i64> {

@@ -1560,6 +1560,11 @@ impl ObjectHandlers for Handlers {
         true
     }
 
+    /// `sxe_get_properties` builds the element's table afresh.
+    fn answers_properties(&self) -> bool {
+        true
+    }
+
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(p) = sxe(req, object).and_then(|s| s.properties) {
             visit(Value::array(p));

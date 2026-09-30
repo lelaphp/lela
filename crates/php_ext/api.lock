@@ -102,6 +102,7 @@ abi::FromArgument::hold
 abi::Header
 abi::Header::header
 abi::Header::register
+abi::IniStage
 abi::IniVerdict
 abi::Instance
 abi::Instance::object
@@ -128,6 +129,7 @@ abi::Never
 abi::Null
 abi::NullDefault
 abi::ObjectHandlers
+abi::ObjectHandlers::answers_properties
 abi::ObjectHandlers::cast_object
 abi::ObjectHandlers::clone_obj
 abi::ObjectHandlers::clone_obj_with
@@ -244,7 +246,6 @@ call::passthrough
 call::property_hook
 call::property_is_virtual
 call::read_class_prop_silent
-call::read_hooked_property
 call::read_prop
 call::read_raw_property
 call::read_static_prop
@@ -252,7 +253,6 @@ call::reset_as_lazy_ghost
 call::reset_as_lazy_proxy
 call::skip_lazy_initialization
 call::update_class_constants
-call::write_hooked_property
 call::write_prop
 call::write_raw_property
 call::write_static_prop
@@ -432,8 +432,6 @@ request::Request::argument
 request::Request::argument_count
 request::Request::argv
 request::Request::assert_callback
-request::Request::at_activate
-request::Request::at_startup
 request::Request::autoload_functions
 request::Request::autoload_register
 request::Request::autoload_unregister
@@ -509,7 +507,9 @@ request::Request::ini_get
 request::Request::ini_parse_bool
 request::Request::ini_parse_bytes
 request::Request::ini_parse_quantity
+request::Request::ini_restore
 request::Request::ini_set
+request::Request::ini_stage
 request::Request::input_variables
 request::Request::interrupt
 request::Request::is_uploaded_file
@@ -773,6 +773,7 @@ values::ArrayIter::key
 values::ArrayIter::value
 values::ClassId
 values::ClosureInfo
+values::DeclaredRows
 values::HashIterator
 values::HashIterator::new
 values::HashIterator::position
@@ -834,6 +835,7 @@ values::PhpObject::clone_with
 values::PhpObject::closure
 values::PhpObject::closure_bound
 values::PhpObject::debug_info
+values::PhpObject::declared_rows
 values::PhpObject::entries
 values::PhpObject::handlers
 values::PhpObject::index
@@ -849,12 +851,15 @@ values::PhpObject::mark_destructor_called
 values::PhpObject::native
 values::PhpObject::native_mut
 values::PhpObject::native_mut_or_fatal
+values::PhpObject::pointer_move
+values::PhpObject::pointer_row
 values::PhpObject::prop
 values::PhpObject::props
 values::PhpObject::props_for
 values::PhpObject::props_held
 values::PhpObject::protect
 values::PhpObject::protect_in
+values::PhpObject::replace_table
 values::PhpObject::row
 values::PhpObject::row_place
 values::PhpObject::row_ref
@@ -885,6 +890,7 @@ values::PhpString::mark_valid_utf8
 values::PhpString::new
 values::PhpString::product
 values::Place
+values::PointerMove
 values::RecursionGuard
 values::Resource
 values::Resource::as_value
