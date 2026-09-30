@@ -153,6 +153,8 @@ Check: the six are wrong if the manifest cannot express a rule the design has (�
 
 **63. Revision 63 (2026-09-29).** The per-commit phpt lane measures every extension the binary under test carries, settled by Mitchell on #1261, reversing revision 26's default-build filter for the lane. `xtask/src/phpt/mod.rs` dropped every `feature` row from the lane while the `php` binary the lane runs turns seven of them on, so openssl (226 of 228 met on its branch), bcmath and calendar were served and never measured per commit, and with the nightly `--full` stopped by #596 the dashboard read them at 0.0%. The lane and `done` now read the rows whose feature the binary turns on; a row the binary does not carry stays nightly. Rejected: keeping the default-build lane and relying on the nightly, which leaves every commit blind to seven extensions and the dashboard to whatever CI's billing allows. Nothing is reversed beyond revision 26's filter, so there is no ADR. Check: `cargo xtask phpt --census` prints a reading for ext/openssl, ext/bcmath and ext/calendar, and `done` asks a touched `feature` crate the binary carries for its phpt reading.
 
+**64. Revision 64 (2026-09-30).** §6's Wiring states the pre-commit hook's rules and renders its sequence from the hook, settled by Mitchell on #1274. The sentence listed the hook's instruments in the order they ran before #1252 put the tree readers first, left `vocab` out, and named `cargo clippy -p <touched>` and `witness --crate <touched>` where the hook runs `xtask clippy --staged` and `xtask witness --staged`; a list typed beside the script it describes drifts with every change to the script, and each fix is a person's revision. The prose keeps what changes only by ruling: fmt first, the tree readers at once and a refusal among them ending the hook before a build, the building instruments after with crosscheck's exit not read, the regions last and re-staged. The steps are a region over `scripts/hooks/pre-commit`, and `harness-design.md` joins the hook's region files and CI's `computed check`, so the hook's header, "wired as harness-design.md §6 lists them", holds by construction. Rejected: the corrected list in prose, which is the next drift; a pointer to the script alone, which leaves §6 saying nothing of the order's reasons. Nothing is reversed, so there is no ADR. Check: `computed check harness-design.md` fails when the hook's `step`, `spawn` or `gather` lines change without a re-render.
+
 ---
 
 ## 2. Vocabulary
@@ -466,7 +468,26 @@ The constraint table of revision 1 stands, with its column of where each rule no
 
 The strongest rows are still the ones with no path to take. Every row below them has a twin: a rule `permit` evaluates before the write has a lint or an `xtask` check after it, so no function hook is ever the only sensor for a constraint (revision 2 C.8 item 8), and the column says which.
 
-**Wiring.** Pre-commit: `cargo fmt --check`, `cargo clippy -p <touched> -- -D warnings`, `xtask test --staged`, `xtask api-check`, `xtask budget`, `xtask unsafe-audit`, `xtask witness --crate <touched>`, `xtask crosscheck` with its exit not read (revision 44), `xtask permit --diff`, and `xtask regions` over the four region files plus `.claude/harness.local.md` by name, which runs `computed run` and says which files it wrote so the hook re-stages them (revision 16); `computed check` then refuses a hand-edited region. Pre-push: `xtask done`. Both hooks are held by `cargo test -p xtask --test hooks`, which runs them in a scratch repository with a stand-in `cargo` (#52). The plugin:
+**Wiring.** Pre-commit runs `cargo fmt --check` first; then, at once, the instruments that only read the tree, a refusal among them ending the hook before anything is built (#1252); then the instruments that build, with `crosscheck`'s exit not read (revision 44); and last `xtask regions`, which renders the region files and `.claude/harness.local.md` by name and says which it wrote so the hook re-stages them (revision 16), `computed check` then refusing a hand-edited region. The sequence is the hook's own, rendered from it (revision 64):
+
+<!-- computed exec cmd="grep -E '^(step|spawn|gather)( |$)' scripts/hooks/pre-commit" inputs=scripts/hooks/pre-commit name=pre-commit as=fence | do not edit; run computed -->
+```
+step cargo fmt --check
+spawn $X api-check --staged
+spawn $X budget --staged
+spawn $X unsafe-audit --staged
+spawn $X vocab --staged
+spawn $X permit --diff
+gather
+step $X clippy --staged
+step $X test --staged
+spawn $X witness --staged
+spawn $X crosscheck
+gather
+```
+<!-- /computed in=066b7eccd22d322d3ab97fa604e96921bede65a2041740952ea43f0abfa5c49a out=7945ae966489578c35464523a226bebfc174455a7187e5f2696fa9c57665e9a9 -->
+
+Pre-push: `xtask done`. Both hooks are held by `cargo test -p xtask --test hooks`, which runs them in a scratch repository with a stand-in `cargo` (#52). The plugin:
 
 ```
 .claude/

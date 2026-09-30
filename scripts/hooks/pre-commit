@@ -140,7 +140,7 @@ spawn $X crosscheck
 gather
 rm -rf "$at_once"
 
-regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md'
+regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md harness-design.md'
 # shellcheck disable=SC2086
 if rendered=$($X regions $regions .claude/harness.local.md); then
     echo "$rendered" | grep -E ' written$' | cut -d: -f1 | sort -u | while read -r file; do
