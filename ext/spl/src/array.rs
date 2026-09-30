@@ -2226,9 +2226,28 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
 }
 
 /// `spl_array_set_array`: the storage replaced by `given`, an array held
-/// as it is (`ZVAL_COPY`), an `ArrayObject` or `ArrayIterator` read
+/// as it is where the argument is its one owner (`ZVAL_COPY`) and copied
+/// where it is shared (`zend_array_dup`), an `ArrayObject` or `ArrayIterator` read
 /// through, and any other object's properties, each object php's
 /// deprecation first.
+///
+/// ```php
+/// $w = new ArrayObject([1]);
+/// $m = memory_get_usage(); $a = new ArrayObject([1, 2]); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = new ArrayIterator([]); echo memory_get_usage() - $m, "\n";
+/// $x = [1, 2, 3]; $x[] = 4;
+/// $m = memory_get_usage(); $c = new ArrayObject($x); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $d = new IteratorIterator(new ArrayIterator([])); echo memory_get_usage() - $m, "\n";
+/// $c[] = 9; var_dump(count($x), count($c));
+/// ```
+/// ```expect
+/// 376
+/// 216
+/// 376
+/// 504
+/// int(4)
+/// int(5)
+/// ```
 fn set_array(
     req: &mut Request,
     object: PhpObject,
@@ -2239,8 +2258,15 @@ fn set_array(
     sorting_refused(req, object)?;
     let given = given.deref();
     let storage = if let Some(array) = given.as_array() {
-        req.addref(&given);
-        Storage::Array(*array)
+        // `Z_REFCOUNT_P(array) == 1`: the argument's own array held with
+        // one more owner (`ZVAL_COPY`); a shared one, and an immutable
+        // one, whose count php keeps at two, copied (`zend_array_dup`).
+        if given.is_refcounted() && given.refcount() == 1 {
+            req.addref(&given);
+            Storage::Array(*array)
+        } else {
+            Storage::Array(array.copy(req)?)
+        }
     } else if let Some(other) = given.as_object().copied() {
         let what = if crate::is_a(req, object.class(), b"ArrayIterator") {
             "ArrayIterator"
