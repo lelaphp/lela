@@ -5,7 +5,7 @@
 //! `zlib_get_coding_type`. The coding comes from the request's
 //! `Accept-Encoding`, read once per request.
 
-use php_ext::abi::OrFalse;
+use php_ext::abi::{IniStage, OrFalse};
 use php_ext::attr::php_function;
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref, raise};
@@ -353,7 +353,7 @@ pub(crate) fn on_compression(req: &mut Request, value: &[u8]) -> Result<bool, Th
         );
         return Ok(false);
     }
-    if req.at_startup() {
+    if req.ini_stage() == IniStage::Startup {
         return Ok(true);
     }
     if req.headers_sent().is_some() {
@@ -375,7 +375,7 @@ pub(crate) fn on_compression(req: &mut Request, value: &[u8]) -> Result<bool, Th
 /// went out.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
 pub(crate) fn on_handler(req: &mut Request, _value: &[u8]) -> Result<bool, Thrown> {
-    if !req.at_startup() && req.headers_sent().is_some() {
+    if req.ini_stage() != IniStage::Startup && req.headers_sent().is_some() {
         docref(
             req,
             Level::Warning,

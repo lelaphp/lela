@@ -5,6 +5,7 @@
 //! entry holds is its text; what php's handler stored, `accel_directives`
 //! and `jit_globals`, is [`Stored`], read off the text when asked.
 
+use php_ext::abi::IniStage;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, warning};
 use php_ext::request::Request;
@@ -427,8 +428,9 @@ const MAX_INTERNED_STRINGS_BUFFER: i64 = 32767;
 /// string(1) "0"
 /// ```
 fn on_enable(req: &mut Request, value: &[u8]) -> bool {
-    if req.at_startup() || !Request::ini_parse_bool(value) {
-        if !req.at_startup() && !req.at_activate() {
+    let stage = req.ini_stage();
+    if stage == IniStage::Startup || !Request::ini_parse_bool(value) {
+        if stage == IniStage::Runtime {
             req.state::<State>().accelerator_enabled = false;
         }
         return true;
@@ -436,7 +438,7 @@ fn on_enable(req: &mut Request, value: &[u8]) -> bool {
     if flag(req, "opcache.enable") {
         return true;
     }
-    if req.at_activate() {
+    if stage == IniStage::Activate {
         // `ZEND_INI_STAGE_ACTIVATE`: a host's own value, which php-fpm's
         // pools set, logged rather than raised.
         let message = if req.sapi_name() == "fpm-fcgi" {
@@ -479,7 +481,7 @@ fn on_enable(req: &mut Request, value: &[u8]) -> bool {
 /// string(7) "tracing"
 /// ```
 fn on_jit(req: &mut Request, value: &[u8]) -> bool {
-    if !req.at_startup() && !jit_configured(req) {
+    if req.ini_stage() != IniStage::Startup && !jit_configured(req) {
         warning(
             req,
             "Cannot change opcache.jit setting at run-time (JIT is disabled)",

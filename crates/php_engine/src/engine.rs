@@ -27,7 +27,8 @@ use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, Me
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
-    DependencyKind, Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni, Validation,
+    DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
+    Validation,
 };
 use crate::api::raising::Level;
 use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
@@ -2321,7 +2322,11 @@ impl Engine {
         req.begin_startup();
         let mut taken = core_startup(&mut req);
         for (name, value, activate) in held {
-            req.set_activating(activate);
+            req.set_ini_stage(if activate {
+                IniStage::Activate
+            } else {
+                IniStage::Startup
+            });
             let accepted = on_modify(&self.shared.extensions, &name)
                 .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
             if accepted {
@@ -2329,6 +2334,7 @@ impl Engine {
                 taken.push((name, value));
             }
         }
+        req.set_ini_stage(IniStage::Startup);
         let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
         if taken_encoding == crate::multibyte::Startup::Refused {
             taken.push((b"zend.script_encoding".to_vec(), Vec::new()));

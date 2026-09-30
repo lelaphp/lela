@@ -23,6 +23,7 @@ use crate::tables::{
     MBFL_OUTPUTFILTER_ILLEGAL_MODE_LONG, MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE,
 };
 use crate::text::value_error;
+use php_ext::abi::IniStage;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
@@ -837,7 +838,7 @@ fn changed(req: &mut Request, name: &str, value: &[u8]) -> Result<bool, Thrown> 
         (s.internal_origin, s.http_output_origin, s.http_input_origin)
     };
     let change = Some((name, value));
-    if req.at_startup() {
+    if req.ini_stage() == IniStage::Startup {
         if http_input == Origin::Php {
             let encoding = php_encoding(req, "input_encoding", change);
             set_http_input(req, &encoding)?;

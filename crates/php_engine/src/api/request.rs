@@ -28,8 +28,8 @@ use php_unit::decl::{
 use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
-    Callable, Dependency, DimensionRead, Extension, IniVerdict, NativeNew, ObjectHandlers,
-    PropertyRead, PropertyTest, Std, ZendExtension,
+    Callable, Dependency, DimensionRead, Extension, IniStage, IniVerdict, NativeNew,
+    ObjectHandlers, PropertyRead, PropertyTest, Std, ZendExtension,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Level, Thrown};
@@ -1727,8 +1727,8 @@ pub struct Request {
     /// `fcgi_is_closed`: the host closed the response when
     /// `fastcgi_finish_request()` ended it.
     closed: bool,
-    /// `ZEND_INI_STAGE_ACTIVATE`, while a host's entry is laid over.
-    activating: bool,
+    /// The stage an entry's `on_modify` is served at ([`IniStage`]).
+    ini_stage: IniStage,
     /// `EG(error_reporting)`, the mask a diagnostic is held to
     /// ([`Request::error_cb`]): what `OnUpdateErrorReporting`
     /// (`Z/Zend/zend.c:111`) reads out of the `error_reporting` entry at
@@ -2545,7 +2545,7 @@ impl Request {
             ini: Vec::new(),
             locked: Vec::new(),
             closed: false,
-            activating: false,
+            ini_stage: IniStage::Runtime,
             error_reporting: 0,
             sink: Sink::Kept(Kept::default()),
             output,
@@ -14051,10 +14051,12 @@ impl Request {
     /// held, not shown ([`Request::end_startup`]).
     pub(crate) fn begin_startup(&mut self) {
         self.startup = Some(Vec::new());
+        self.ini_stage = IniStage::Startup;
     }
 
     /// Leave the startup: what was raised during it, in order.
     pub(crate) fn end_startup(&mut self) -> Vec<(Level, String)> {
+        self.ini_stage = IniStage::Runtime;
         self.startup.take().unwrap_or_default()
     }
 
@@ -14082,26 +14084,18 @@ impl Request {
         written
     }
 
-    /// `php_during_module_startup()`, which `php_verror` names the
-    /// origin of a docref by, `PHP Startup` for a native's name, and
-    /// what an extension's on-modify rule reads as
-    /// `ZEND_INI_STAGE_STARTUP`: `true` while the engine serves the
-    /// rules over the host's values, before any request.
-    pub fn at_startup(&self) -> bool {
-        self.startup.is_some() && !self.activating
-    }
-
-    /// Whether an entry's `on_modify` runs at `ZEND_INI_STAGE_ACTIVATE`: a
-    /// host's own entry laid over php once it has started, as php-fpm's
-    /// child applies its pool's `php_value`s.
+    /// The stage an entry's `on_modify` is served at, php's `stage`
+    /// argument to a `PHP_INI_MH`. [`IniStage::Startup`] is also
+    /// `php_during_module_startup()`, which `php_verror` names the origin
+    /// of a docref by, `PHP Startup` for a native's name.
     #[must_use]
-    pub fn at_activate(&self) -> bool {
-        self.activating
+    pub fn ini_stage(&self) -> IniStage {
+        self.ini_stage
     }
 
-    /// The stage the next `on_modify` runs at: activate, or startup.
-    pub(crate) fn set_activating(&mut self, activating: bool) {
-        self.activating = activating;
+    /// The stage the next `on_modify` is served at.
+    pub(crate) fn set_ini_stage(&mut self, stage: IniStage) {
+        self.ini_stage = stage;
     }
 
     /// `get_active_function_name`: the declared name of the native being

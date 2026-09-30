@@ -29,7 +29,7 @@ mod filter;
 mod mime;
 
 use ffi::{Cd, Errno};
-use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Union};
+use php_ext::abi::{Extension, ExtensionBuilder, IniStage, OrFalse, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
@@ -226,7 +226,7 @@ fn on_modify(req: &mut Request, kind: Kind, value: &[u8]) -> bool {
     if value.len() >= MAX_NAME {
         return false;
     }
-    if !req.at_startup() {
+    if req.ini_stage() != IniStage::Startup {
         let text = format!("Use of {} is deprecated", kind.entry());
         docref(req, Level::Deprecated, &text);
     }

@@ -6,7 +6,7 @@
 //! `zend_alter_ini_entry`, meet the same rule; the engine runs them
 //! over the values the host started the engine with (#744).
 
-use php_ext::abi::{ExtensionBuilder, OnModify};
+use php_ext::abi::{ExtensionBuilder, IniStage, OnModify};
 use php_ext::coerce::numeric_string;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{self, Level, Thrown, docref};
@@ -401,7 +401,7 @@ fn modify<const AT: usize>(req: &mut Request, value: &[u8]) -> Result<bool, Thro
     let Some((name, _, _)) = ENTRIES.get(AT) else {
         return Ok(true);
     };
-    let stage = if req.at_startup() {
+    let stage = if req.ini_stage() == IniStage::Startup {
         Stage::Startup
     } else {
         Stage::Runtime
