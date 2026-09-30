@@ -168,8 +168,7 @@ fn ob_start(
             // `zend_is_callable_ex` words for the shape it refused.
             Err(error) => {
                 docref(req, Level::Warning, &error);
-                docref(req, Level::Notice, "Failed to create buffer");
-                return Ok(false);
+                StartHandler::Refused
             }
         },
     };

@@ -1545,6 +1545,12 @@ fn start_user(
     flags: u32,
 ) -> Result<bool, Thrown> {
     let handler = match start {
+        // `php_output_handler_start(NULL)`: the lock check, then the
+        // refusal.
+        StartHandler::Refused => {
+            lock_error(req, HANDLER_START);
+            return Ok(false);
+        }
         StartHandler::Default => {
             let name = req.string(DEFAULT_NAME)?.heap();
             let (_, heap) = req.output_and_heap();
@@ -1649,6 +1655,18 @@ fn refused(req: &mut Request, message: &str) -> Value {
 /// The `PHP_FUNCTION` bodies of `Z/main/output.c:1373-1591`, each over
 /// the operation it wraps, with php's notices: the ones that move the
 /// stack here, the ones that read it in [`read_op`].
+///
+/// `ob_start()` inside a running handler is `php_output_lock_error`'s
+/// fatal, which leaves by `zend_bailout` with no notice after it:
+///
+/// ```php
+/// function f($s) { ob_start(); return $s; }
+/// ob_start('f');
+/// echo "done";
+/// ```
+/// ```expect exit=255
+/// Fatal error: ob_start(): Cannot use output buffering in output buffering display handlers in %s on line 2
+/// ```
 pub(crate) fn buffer_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
     let level = req.output().level();
     Ok(match op {
@@ -1661,6 +1679,10 @@ pub(crate) fn buffer_op(req: &mut Request, op: &OutputOp) -> Result<Value, Throw
             let flags = u32::try_from(*flags).unwrap_or(HANDLER_STDFLAGS);
             if start_user(req, handler, chunk_size, flags)? {
                 Value::bool(true)
+            } else if req.bailing_out() {
+                // `php_output_lock_error`'s fatal leaves by
+                // `zend_bailout`, before `ob_start()` could say more.
+                return Err(Thrown::of(None));
             } else {
                 refused(req, "Failed to create buffer")
             }

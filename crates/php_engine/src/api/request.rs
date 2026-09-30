@@ -244,6 +244,10 @@ pub enum StartHandler {
     Registered(BufferHandler),
     /// Anything else, as the callable it resolved to.
     User(Callable),
+    /// A callable `zend_fcall_info_init` refused, its warning raised:
+    /// no handler, which `php_output_handler_start` refuses after its
+    /// check for a running handler, so inside one it is still the fatal.
+    Refused,
 }
 
 /// A handler of the buffer stack an extension hands to
