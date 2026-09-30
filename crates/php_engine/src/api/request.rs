@@ -4469,6 +4469,11 @@ impl Request {
         self.returned = value;
     }
 
+    /// What the entry frame last returned, taken, `null` left in its place.
+    pub(crate) fn take_returned(&mut self) -> Value {
+        std::mem::replace(&mut self.returned, Value::null())
+    }
+
     /// Leave what a raise made pending where the loop reads it, php's
     /// `EG(exception)`. A `Thrown` that carries none is a fatal or an
     /// `exit` the raiser already recorded on the request. The
@@ -6055,6 +6060,14 @@ impl Request {
         self.sink.get().send_headers(&head);
     }
 
+    /// `sapi_module.send_headers` made one that sends nothing, for the
+    /// rest of the request.
+    pub(crate) fn discard_headers(&mut self) {
+        if let Some(web) = &mut self.description.web {
+            web.no_headers = true;
+        }
+    }
+
     /// The header block as the sink is handed it: `SG(sapi_headers).headers`
     /// rendered one line each, and nothing else, since the status line
     /// and its shape are the host's (`sapi_cgi_send_headers` writes
@@ -6658,6 +6671,15 @@ impl Request {
     fn end_at_level(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
         self.heap.gc_protect(true);
         self.exit_status = 255;
+        // `php_error_cb`'s arm for what it cannot recover from
+        // (`Z/main/main.c:1517`): with nothing displayed, a response not
+        // yet committed at 200 answers `HTTP/1.0 500 Internal Server Error`.
+        if self.display_errors() == Display::Off
+            && !self.output.headers_sent()
+            && self.output.response_code() == 200
+        {
+            let _ = crate::output::header_add(self, b"HTTP/1.0 500 Internal Server Error", true, 0);
+        }
         self.bailout = true;
         if self.ending.is_some() {
             return;
@@ -15404,10 +15426,7 @@ impl Request {
     /// expands to nothing.
     pub(crate) fn expand_primary_file(&mut self) -> Vec<u8> {
         let script = self.description.script_name.clone().unwrap_or_default();
-        let cwd = self.cwd().into_os_string().into_encoded_bytes();
-        let expanded = self
-            .virtual_file_ex(&cwd, &script, crate::virtual_cwd::Resolve::FilePath)
-            .unwrap_or(script);
+        let expanded = self.expand_filepath(&script).unwrap_or(script);
         self.included_files.push(expanded.clone());
         self.description.script_name = Some(expanded.clone());
         expanded
@@ -15972,6 +15991,22 @@ impl Request {
             array.set(self, key, value)?;
         }
         Ok(Some(array))
+    }
+
+    /// The last error where its level is one of `E_FATAL_ERRORS`, its
+    /// message, file and line.
+    pub(crate) fn last_fatal(&self) -> Option<(String, Vec<u8>, u32)> {
+        let (level, message, file, line) = self.last_error.clone()?;
+        matches!(
+            level,
+            Level::Error
+                | Level::CoreError
+                | Level::CompileError
+                | Level::UserError
+                | Level::RecoverableError
+                | Level::Parse
+        )
+        .then_some((message, file, line))
     }
 
     /// `error_clear_last()`.

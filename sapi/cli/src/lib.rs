@@ -30,7 +30,7 @@
 //! lines under `-R` and `-F` are read through the request's `STDIN`, as
 //! php reads them.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -41,8 +41,11 @@
     clippy::unimplemented
 )]
 
+#[allow(unsafe_code)]
+mod ffi;
 pub mod options;
 pub mod request;
+pub mod server;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -90,10 +93,11 @@ pub fn main() -> ExitCode {
         Ask::Version => print(&version(&engine(&options.ini))),
         Ask::Info => request::info(&engine(&options.ini)),
         Ask::Extensions => print(&php_sapi::modules(&engine(&options.ini))),
-        Ask::Server(_) => {
-            let _ = std::io::stdout().lock().write_all(usage_text().as_bytes());
-            1
-        }
+        Ask::Server(server) => server::run(
+            server_engine(&options.ini),
+            server,
+            php_sapi::ini::enabled(&options.ini, "cli_server.color", false),
+        ),
         ask => repeated(&engine(&options.ini), ask, options.repeat),
     };
     php_sapi::exit_code(status)
@@ -165,4 +169,20 @@ fn engine(ini: &[(String, String)]) -> Engine {
         .tier::<php_bundle::Tier>()
         .skip_shebang();
     php_sapi::start(builder, ini, None)
+}
+
+/// The built-in server's engine: the bundle as [`engine`] builds it, with
+/// php's own defaults for the two entries the CLI's `HARDCODED_INI`
+/// moves, which `main` lays only under the CLI's module
+/// (`php_cli.c:1336`), and the `cli_server` module and its natives after
+/// the bundle.
+fn server_engine(ini: &[(String, String)]) -> Engine {
+    let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
+    let builder = Engine::builder()
+        .extensions(&extensions)
+        .tier::<php_bundle::Tier>()
+        .skip_shebang()
+        .ini("html_errors", "1")
+        .ini("max_execution_time", "30");
+    php_sapi::start(builder, ini, Some(php_sapi::HostExtension::CliServer))
 }

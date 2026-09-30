@@ -31,8 +31,8 @@ use std::io::Write;
 use std::process::ExitCode;
 
 pub use php_engine::{
-    CommandLine, EachLine, Engine, EngineBuilder, FileHandles, HostExtension, Method, Observables,
-    OutputSink, PHP_VERSION, RequestDescription, ResponseHead, WebRequest,
+    CommandLine, Dispatched, EachLine, Engine, EngineBuilder, FileHandles, HostExtension, Method,
+    Observables, OutputSink, PHP_VERSION, RequestDescription, ResponseHead, Routed, WebRequest,
 };
 
 /// `php_module_startup` for a host: `builder`, which carries the host's
@@ -98,38 +98,17 @@ pub fn modules(engine: &Engine) -> String {
 /// 28 2026 13:06:52`, the day padded with a space as `__DATE__` pads it:
 /// rendered in UTC from `epoch`, the Unix seconds each host's `build.rs`
 /// stamps when its sources change, which is when php's `__DATE__` moves.
-/// The civil date is Howard Hinnant's `civil_from_days`.
+/// The civil date is [`php_proto::http::civil`].
 #[must_use]
 pub fn build_date(epoch: &str) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let seconds: u64 = epoch.parse().unwrap_or(0);
-    let days = i64::try_from(seconds / 86_400).unwrap_or(0);
-    let clock = seconds % 86_400;
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    let name = MONTHS
-        .get(usize::try_from(month - 1).unwrap_or(0))
+    let at = php_proto::http::civil(epoch.parse().unwrap_or(0));
+    let name = php_proto::http::MONTHS
+        .get(usize::try_from(at.month).unwrap_or(1) - 1)
         .copied()
         .unwrap_or("Jan");
     format!(
-        "{name} {day:>2} {year} {:02}:{:02}:{:02}",
-        clock / 3_600,
-        clock % 3_600 / 60,
-        clock % 60
+        "{name} {:>2} {} {:02}:{:02}:{:02}",
+        at.day, at.year, at.hour, at.minute, at.second
     )
 }
 

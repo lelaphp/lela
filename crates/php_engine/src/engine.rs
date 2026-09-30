@@ -244,6 +244,31 @@ pub trait OutputSink {
     }
 }
 
+/// What the built-in server reads off a request it dispatched
+/// ([`Engine::dispatch`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dispatched {
+    /// What the router answered; `Taken` where there is none.
+    pub routed: Routed,
+    /// `SG(sapi_headers).http_response_code` just after the program ran,
+    /// where one was served.
+    pub code: Option<i64>,
+    /// `PG(last_error_message)`, `PG(last_error_file)` and
+    /// `PG(last_error_lineno)` then, where `PG(last_error_type)` is one of
+    /// `E_FATAL_ERRORS`.
+    pub fatal: Option<(String, Vec<u8>, u32)>,
+}
+
+/// What the built-in server's router answered, `decline` in
+/// `php_cli_server_dispatch_router`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Routed {
+    /// The router served the request.
+    Taken,
+    /// The router returned `false`: the request is the file's to serve.
+    Declined,
+}
+
 /// What `serve` reports of one request.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Observables {
@@ -1325,13 +1350,15 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 /// `CG(function_table)`'s natives once every `MINIT` has registered its
 /// own and `php_module_startup` has called `zend_disable_functions` over
 /// the startup ini's `disable_functions` (`Z/main/main.c:2370`): the engine's own
-/// and then each extension's in bundle order, less what the list names
+/// and then each extension's in bundle order, the host's `additional`
+/// after them under `standard`, less what the list names
 /// ([`disabled_functions`]), each beside the extension that declared it.
 /// The one place the disabled set is decided: what it takes out is in no
 /// table the compiler or a request reads.
 fn function_table(
     core: &Extension,
     extensions: &[Extension],
+    additional: Vec<(FunctionDecl, Entry)>,
     ini: &[(Vec<u8>, Vec<u8>)],
 ) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
     let list = ini
@@ -1339,6 +1366,13 @@ fn function_table(
         .find(|(name, _)| name.as_slice() == b"disable_functions")
         .map_or(&[][..], |(_, list)| list.as_slice());
     let disabled = disabled_functions(list);
+    // A host's natives go under `standard` once every module has
+    // started (`Z/main/main.c:2359-2366`).
+    let standard = extensions
+        .iter()
+        .position(|e| e.name == "standard")
+        .and_then(|at| u32::try_from(at).ok())
+        .map(ExtensionId);
     core.functions
         .iter()
         .cloned()
@@ -1350,6 +1384,7 @@ fn function_table(
                 .cloned()
                 .map(move |native| (Some(ExtensionId(at)), native))
         }))
+        .chain(additional.into_iter().map(|native| (standard, native)))
         .filter(|(_, (decl, _))| !disabled.contains(&decl.name.0.to_ascii_lowercase().as_slice()))
         .unzip()
 }
@@ -1485,8 +1520,11 @@ impl EngineBuilder {
         if let Some(tier) = self.tier_extension {
             extensions.push(tier);
         }
+        let mut additional = Vec::new();
         if let Some(host) = self.host_extension {
-            extensions.push(crate::host_extension::extension(host));
+            let hosted = crate::host_extension::hosted(host);
+            extensions.push(hosted.extension);
+            additional = hosted.additional;
         }
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
@@ -1522,7 +1560,7 @@ impl EngineBuilder {
             ini.push((name, value));
         }
         let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) =
-            function_table(&core, &extensions, &ini);
+            function_table(&core, &extensions, additional, &ini);
         let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
         let replaced = intercept(&functions, &mut entries, &extensions);
         let function_flags = functions
@@ -2147,18 +2185,101 @@ impl Engine {
         } else {
             req.script_name().map(<[u8]>::to_vec).unwrap_or_default()
         };
-        match req.compile_file_source(&script) {
-            Ok(Some(source)) => {
-                Some(
-                    self.shared
-                        .compile_for(req, &source, &script, SourceKind::File),
-                )
-            }
-            Ok(None) => req.cached_file(&script, Some(&script)),
+        self.compile_file(req, &script)
+    }
+
+    /// The file at `path` compiled for the request: what an extension's
+    /// `zend_compile_file` answers, or the unit cache's.
+    fn compile_file(
+        &self,
+        req: &mut Request,
+        path: &[u8],
+    ) -> Option<Result<Arc<Unit>, CompileError>> {
+        match req.compile_file_source(path) {
+            Ok(Some(source)) => Some(
+                self.shared
+                    .compile_for(req, &source, path, SourceKind::File),
+            ),
+            Ok(None) => req.cached_file(path, Some(path)),
             Err(thrown) => {
                 req.leave_pending(&thrown);
                 None
             }
+        }
+    }
+
+    /// `php_cli_server_dispatch` (`Z/sapi/cli/php_cli_server.c:2294`)
+    /// once the request has started: where the server has a router, it
+    /// is served first as `php_execute_script_ex` serves a program, never
+    /// moving the working directory, and declines where it returns
+    /// `false` (`php_cli_server_dispatch_router`); where there is none, or
+    /// it declined, the program the request names is served in the same
+    /// request, and the response code and the last error just after it
+    /// are what `php_cli_server_log_response` writes, a 304 then
+    /// committing no default `Content-type`. A request the router declined
+    /// that names no program is a static file, the host's to send, and
+    /// the request ends with its head not sent
+    /// (`sapi_cli_server_discard_headers`).
+    pub fn dispatch(
+        &self,
+        description: RequestDescription,
+        router: Option<&[u8]>,
+        sink: &mut dyn OutputSink,
+    ) -> (Observables, Dispatched) {
+        let program = description.script_name.is_some();
+        let mut dispatched = Dispatched {
+            routed: Routed::Taken,
+            code: None,
+            fatal: None,
+        };
+        let mut req = match self.begin(description, sink, false) {
+            Ok(req) => req,
+            Err(refused) => return (refused, dispatched),
+        };
+        if let Some(router) = router {
+            dispatched.routed = self.execute_router(&mut req, router);
+        }
+        if program && (router.is_none() || dispatched.routed == Routed::Declined) {
+            self.execute_script(&mut req, None);
+            dispatched.code = Some(req.response_code());
+            dispatched.fatal = req.last_fatal();
+            if req.response_code() == 304 {
+                req.output_mut().no_default_content_type();
+            }
+        } else if dispatched.routed == Routed::Declined {
+            req.discard_headers();
+        }
+        (self.shutdown(&mut req, sink).0, dispatched)
+    }
+
+    /// `php_cli_server_dispatch_router`: `router` served as
+    /// `php_execute_script_ex` serves a program, and whether it declined.
+    fn execute_router(&self, req: &mut Request, router: &[u8]) -> Routed {
+        let entry = self.shared.entry;
+        if !auto_file(req, b"auto_prepend_file", entry) {
+            return Routed::Taken;
+        }
+        let path = req
+            .expand_filepath(router)
+            .unwrap_or_else(|| router.to_vec());
+        let ran = match self.compile_file(req, &path) {
+            Some(Ok(unit)) => serve_unit(req, &unit, entry),
+            Some(Err(refused)) => {
+                refused_program(req, &refused, &path);
+                false
+            }
+            None => false,
+        };
+        let returned = req.take_returned();
+        let declined = ran && returned.as_bool() == Some(false);
+        req.release(returned);
+        if ran && !auto_file(req, b"auto_append_file", entry) {
+            return Routed::Taken;
+        }
+        if declined {
+            Routed::Declined
+        } else {
+            Routed::Taken
         }
     }
 
