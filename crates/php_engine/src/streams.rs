@@ -911,7 +911,9 @@ impl PhpStream {
         let mut buffered_len = self.writepos - self.readpos;
         while found.is_none() && buffered_len < maxlen {
             let to_read_now = (maxlen - buffered_len).min(self.chunk_size);
-            self.fill_read_buffer(req, buffered_len + to_read_now);
+            if !self.fill_read_buffer(req, buffered_len + to_read_now) && self.fatal_error {
+                return None;
+            }
             let just_read = (self.writepos - self.readpos).saturating_sub(buffered_len);
             if just_read == 0 {
                 break;
@@ -943,13 +945,6 @@ impl PhpStream {
         Some(out)
     }
 
-    /// `_php_stream_get_line` (`Z/main/streams/streams.c:958`) without
-    /// `DETECT_EOL`: bytes up to and including the first `\n`, taken
-    /// from the read buffer and the buffer filled a chunk at a time
-    /// while it holds none, for every kind, the unbuffered ones too;
-    /// `maxlen` is php's, so at most `maxlen - 1` bytes, and `None` is
-    /// php's `grow_mode`, a line of any length. `None` back is a line of no
-    /// bytes, at eof or after a read that failed.
     /// `php_stream_locate_eol` (`Z/main/streams/streams.c:909`) over the
     /// read buffer: where the line ends, `\n` or, for a stream found to
     /// end its lines with `\r` alone, `\r`; a stream still detecting
@@ -994,6 +989,32 @@ impl PhpStream {
         }
     }
 
+    /// `_php_stream_get_line` (`Z/main/streams/streams.c:958`) without
+    /// `DETECT_EOL`: bytes up to and including the first `\n`, taken
+    /// from the read buffer and the buffer filled a chunk at a time
+    /// while it holds none, for every kind, the unbuffered ones too;
+    /// `maxlen` is php's, so at most `maxlen - 1` bytes, and `None` is
+    /// php's `grow_mode`, a line of any length. `None` back is a line of no
+    /// bytes, at eof or after a read that failed.
+    ///
+    /// A fill a read filter broke (`PSFS_ERR_FATAL`, `fatal_error`) ends
+    /// the line with nothing, what was gathered dropped, and so does
+    /// [`PhpStream::get_record`]'s (GH-13264):
+    ///
+    /// ```php
+    /// $s = fopen('php://memory', 'r+'); $z = gzcompress(str_repeat("line\n", 3000)); fwrite($s, substr($z, 0, -1) . "1"); rewind($s);
+    /// stream_filter_append($s, 'zlib.inflate', STREAM_FILTER_READ, ['window' => 15]);
+    /// $n = 0; while (($l = fgets($s)) !== false) $n++; var_dump($n, feof($s));
+    /// rewind($s); var_dump(stream_get_line($s, 0, "\n"));
+    /// ```
+    /// ```expect
+    /// Notice: fgets(): zlib: data error in %s on line 4
+    /// int(0)
+    /// bool(true)
+    ///
+    /// Notice: stream_get_line(): zlib: data error in %s on line 5
+    /// bool(false)
+    /// ```
     pub(crate) fn get_line(&mut self, req: &mut Request, maxlen: Option<usize>) -> Option<Vec<u8>> {
         if maxlen == Some(0) {
             return None;
@@ -1028,8 +1049,10 @@ impl PhpStream {
                     Some(_) => (left - 1).min(self.chunk_size),
                 };
                 // php gives up on a failed fill only where a filter set
-                // `fatal_error`, which no stream here has.
-                let _ = self.fill_read_buffer(req, toread);
+                // `fatal_error`, dropping what the line held (GH-13264).
+                if !self.fill_read_buffer(req, toread) && self.fatal_error {
+                    return None;
+                }
                 if self.writepos == self.readpos {
                     break;
                 }

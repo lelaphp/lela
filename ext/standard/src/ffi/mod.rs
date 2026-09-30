@@ -312,6 +312,27 @@ pub(super) fn protocol_name(number: i32) -> Option<Vec<u8>> {
     owned(unsafe { (*entry).p_name })
 }
 
+/// `php_localtime_r(&now)`'s `tm_mon` and `tm_mday`, the month counted
+/// from zero, in the process's own zone: what phpinfo's page asks to
+/// show the first of April's logo.
+pub(super) fn local_month_day() -> Option<(i32, i32)> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let now = libc::time_t::try_from(now).ok()?;
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
+    // SAFETY: `now` is a live `time_t` and `tm` live, zeroed storage the
+    // call writes; it answers null or a pointer to `tm`.
+    let filled = unsafe { libc::localtime_r(&raw const now, tm.as_mut_ptr()) };
+    if filled.is_null() {
+        return None;
+    }
+    // SAFETY: a zeroed `tm` is a valid one, and the call wrote only fields.
+    let tm = unsafe { tm.assume_init() };
+    Some((tm.tm_mon, tm.tm_mday))
+}
+
 /// `strptime(s, format, &tm)` over a zeroed `tm`: the eight fields
 /// `strptime()` answers, `tm_sec` to `tm_yday`, and what was left of the
 /// string, or `None` where the call answered null.

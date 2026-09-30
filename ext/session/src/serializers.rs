@@ -6,10 +6,10 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
 
-use crate::{Format, bind_array, session_array, session_array_mut, shown};
+use crate::{Format, bind_vars, session_array, session_array_mut, shown};
 
 /// `PS_ENCODE_LOOP`: each variable under a string key, a numeric one
 /// skipped with php's warning, over a copy of the array so the loop
@@ -132,6 +132,24 @@ fn encode_through(
 /// int(1)
 /// bool(false)
 /// ```
+///
+/// `php_serialize` binds whatever the data holds as `$_SESSION`, and the
+/// empty array for `N;` or data it cannot read:
+///
+/// ```php
+/// ini_set("session.serialize_handler", "php_serialize"); ob_start(); session_start(["save_path" => __DIR__, "use_cookies" => 0, "cache_limiter" => ""]);
+/// var_dump(session_decode("O:8:\"stdClass\":0:{}"), $_SESSION, session_decode("i:1;"), $_SESSION, session_decode("N;"), $_SESSION); ob_end_flush();
+/// ```
+/// ```expect
+/// bool(true)
+/// object(stdClass)#1 (0) {
+/// }
+/// bool(true)
+/// int(1)
+/// bool(true)
+/// array(0) {
+/// }
+/// ```
 pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<bool, Thrown> {
     let data = data.to_vec();
     if format == Format::PhpSerialize {
@@ -151,19 +169,13 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
         }
         let read = read?;
         let ok = read.is_some();
-        let array = match read {
-            Some(value) if value.as_array().is_some() => value.as_array().copied(),
-            Some(value) => {
-                req.release(value);
-                None
-            }
-            None => None,
+        // A value read is bound whatever it is, and nothing read is the
+        // empty array.
+        let vars = match read {
+            Some(value) if !matches!(value.as_ref(), ValueRef::Null) => value,
+            _ => PhpArray::new(req)?.to_value(),
         };
-        let array = match array {
-            Some(array) => array,
-            None => PhpArray::new(req)?,
-        };
-        bind_array(req, array)?;
+        bind_vars(req, vars)?;
         return Ok(ok || data.is_empty());
     }
     let Some(array) = session_array_mut(req)? else {

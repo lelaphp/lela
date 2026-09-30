@@ -460,7 +460,16 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 /// A new instance of the throwable class `class` with `message`, not yet
 /// pending. `zend_default_exception_new` records where it was made, and
 /// that is the site an uncaught one names. Its strings are the
-/// request's, and the `Err` is the memory limit refusing them.
+/// request's, and the `Err` is the memory limit refusing them. The
+/// message is the C string `zend_throw_exception` is handed, so it ends
+/// at its first NUL, as a `%c` of zero ends `sscanf()`'s:
+///
+/// ```php
+/// try { sscanf("x", "%"); } catch (ValueError $e) { var_dump($e->getMessage()); }
+/// ```
+/// ```expect
+/// string(31) "Bad scan conversion character ""
+/// ```
 ///
 /// The site and its trace are recorded once, as the object is made
 /// ([`Request::new_object`]), so the `SensitiveParameterValue` a trace
@@ -482,6 +491,7 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Result<Value, Thrown> {
     let object = req.new_object_of(class)?;
     let name = PhpString::new(req, b"message")?;
+    let message = message.split('\0').next().unwrap_or_default();
     let message = PhpString::new(req, message.as_bytes())?;
     object.set_prop(req, name, Value::string(message))?;
     if !crate::classes::records_throw_site(req.handlers_of(object.class())) {

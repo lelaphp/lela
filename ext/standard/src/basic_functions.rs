@@ -195,8 +195,85 @@ fn getenv(
     }
 }
 
+/// `PHP_MINFO_FUNCTION(basic)` (`Z/ext/standard/basic_functions.c:490`):
+/// `dl`'s and `mail`'s rows, then `assert`'s `DISPLAY_INI_ENTRIES()`,
+/// every entry `basic` registers, the booleans through
+/// `zend_ini_boolean_displayer_cb`. `browscap` and
+/// `unserialize_callback_func` are main's in php, so they are not among
+/// them. `dl()` here is php's without `HAVE_LIBDL`, whose row
+/// says `unavailable`.
+///
+/// The witness starts after the `dl` row, where the pinned build, which
+/// has `HAVE_LIBDL`, says `enabled`:
+///
+/// ```php
+/// @ini_set('assert.warning', '0');
+/// $e = new ReflectionExtension('standard'); ob_start(); $e->info(); echo strstr(ob_get_clean(), 'Path to sendmail');
+/// ```
+/// ```expect
+/// Path to sendmail => /usr/sbin/sendmail -t -i
+///
+/// Directive => Local Value => Master Value
+/// unserialize_max_depth => 4096 => 4096
+/// user_agent => no value => no value
+/// from => no value => no value
+/// default_socket_timeout => 60 => 60
+/// auto_detect_line_endings => Off => Off
+/// assert.active => On => On
+/// assert.bail => Off => Off
+/// assert.warning => Off => On
+/// assert.callback => no value => no value
+/// assert.exception => On => On
+/// session.trans_sid_tags => a=href,area=href,frame=src,form= => a=href,area=href,frame=src,form=
+/// session.trans_sid_hosts => no value => no value
+/// url_rewriter.tags => form= => form=
+/// url_rewriter.hosts => no value => no value
+/// ```
+pub(crate) fn minfo(req: &mut Request) {
+    let sendmail =
+        String::from_utf8_lossy(req.ini_get(b"sendmail_path").unwrap_or_default()).into_owned();
+    req.info_table(&[
+        &["Dynamic Library Support", "unavailable"],
+        &["Path to sendmail", &sendmail],
+    ]);
+    let Some(me) = req.extension_named(b"standard") else {
+        return;
+    };
+    let booleans: [&[u8]; 5] = [
+        b"auto_detect_line_endings",
+        b"assert.active",
+        b"assert.bail",
+        b"assert.warning",
+        b"assert.exception",
+    ];
+    let rows: Vec<[String; 3]> = req
+        .extension_ini(me)
+        .into_iter()
+        .map(|entry| {
+            let name: &[u8] = &entry.decl.name.0;
+            let boolean = booleans.contains(&name);
+            let shown = |value: &[u8]| match boolean {
+                true if Request::ini_parse_bool(value) => String::from("On"),
+                true => String::from("Off"),
+                false => String::from_utf8_lossy(value).into_owned(),
+            };
+            let master = entry.original.as_deref().unwrap_or(&entry.value);
+            [
+                String::from_utf8_lossy(name).into_owned(),
+                shown(&entry.value),
+                shown(master),
+            ]
+        })
+        .collect();
+    let rows: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
+        .collect();
+    req.info_ini_table(&rows);
+}
+
 /// The bytes before the first NUL, what a C string holds.
-fn c_string(bytes: &[u8]) -> &[u8] {
+pub(crate) fn c_string(bytes: &[u8]) -> &[u8] {
     bytes.split(|c| *c == 0).next().unwrap_or_default()
 }
 
@@ -450,6 +527,30 @@ fn get_include_path(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
 ///
 /// Notice: z in %s on line 4
 /// string(1) "z"
+/// ```
+///
+/// A fatal raised under `fatal_error_backtraces` carries its backtrace
+/// as `trace`, `EG(last_fatal_error_backtrace)`:
+///
+/// ```php
+/// ini_set('fatal_error_backtraces', '1');
+/// register_shutdown_function(function () { $e = error_get_last(); var_dump($e["type"], array_column($e["trace"], "function")); });
+/// function f() { eval("class C {} class C {}"); }
+/// f();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Cannot redeclare class C (previously declared in %s(4) : eval()'d code:1) in %s(4) : eval()'d code on line 1
+/// Stack trace:
+/// #0 %s(4): eval()
+/// #1 %s(5): f()
+/// #2 {main}
+/// int(64)
+/// array(2) {
+///   [0]=>
+///   string(4) "eval"
+///   [1]=>
+///   string(1) "f"
+/// }
 /// ```
 #[php_function]
 fn error_get_last(req: &mut Request) -> Result<Option<PhpArray>, Thrown> {

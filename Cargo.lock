@@ -593,7 +593,11 @@ dependencies = [
 name = "php_ext_mbstring"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "php_ext",
+ "php_ext_pcre",
+ "php_ext_standard",
+ "pkg-config",
 ]
 
 [[package]]

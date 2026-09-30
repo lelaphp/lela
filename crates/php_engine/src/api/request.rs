@@ -10,6 +10,7 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -451,6 +452,54 @@ impl UrlStat {
             UrlStat::Found(sb) => Some(sb),
             UrlStat::Failed | UrlStat::Unsupported | UrlStat::Refused => None,
         }
+    }
+}
+
+/// One row of a table on phpinfo's page, as `info.c`'s printers write
+/// it ([`Request::info_rows`]).
+#[derive(Clone, Copy)]
+pub enum InfoRow<'a> {
+    /// `php_info_print_table_header`: the cells as they are.
+    Header(&'a [&'a str]),
+    /// `php_info_print_table_row`: the cells, escaped in HTML.
+    Row(&'a [&'a str]),
+    /// `php_info_print_table_colspan_header(columns, header)`.
+    Colspan(usize, &'a str),
+    /// Bytes the caller wrote for the form the host prints, as
+    /// `php_print_gpcse_array` and `display_ini_entries` write their rows
+    /// between a table's start and its end.
+    Written(&'a [u8]),
+}
+
+/// `php_info_print_html_esc` (`Z/ext/standard/info.c:52`):
+/// `php_escape_html_entities(str, len, 0, ENT_QUOTES, "utf-8")`, the five
+/// characters `htmlspecialchars` escapes, `'` as `&#039;`, and nothing at
+/// all for text that is not UTF-8, which the escaper refuses whole.
+fn info_html_esc(text: &[u8]) -> Vec<u8> {
+    if std::str::from_utf8(text).is_err() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(text.len());
+    for &b in text {
+        match b {
+            b'&' => out.extend_from_slice(b"&amp;"),
+            b'"' => out.extend_from_slice(b"&quot;"),
+            b'\'' => out.extend_from_slice(b"&#039;"),
+            b'<' => out.extend_from_slice(b"&lt;"),
+            b'>' => out.extend_from_slice(b"&gt;"),
+            _ => out.push(b),
+        }
+    }
+    out
+}
+
+/// `fmt::Write` into bytes, for the rows [`Request::info_rows`] formats.
+struct Bytes<'a>(&'a mut Vec<u8>);
+
+impl std::fmt::Write for Bytes<'_> {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        self.0.extend_from_slice(text.as_bytes());
+        Ok(())
     }
 }
 
@@ -1646,8 +1695,10 @@ pub struct Request {
     /// `zend_trace_to_string`: the trace `zend_error_impl` fetched for the
     /// fatal being raised under `fatal_error_backtraces`, cleared for
     /// every diagnostic and by `zend_exception_error`, read by
-    /// `php_error_cb` for the display and the log forms.
-    last_fatal_error_backtrace: Option<String>,
+    /// `php_error_cb` for the display and the log forms and handed out
+    /// by `error_get_last()` as its `trace`: the array, one owner held
+    /// here, beside its rendering.
+    last_fatal_error_backtrace: Option<(Option<PhpArray>, String)>,
     ending: Option<Ending>,
     /// php's `EG(exit_status)`: what the process ends with, 255 written
     /// by `php_error_cb` for a fatal and the code by `exit`, whichever
@@ -1789,9 +1840,9 @@ pub struct Request {
     /// [`crate::streams::Located::Ext`] row names by its place.
     pub(crate) wrappers: Vec<StreamWrapper>,
     /// `url_stream_wrappers_hash`: the table every request starts with,
-    /// the engine's wrappers and the extensions' in the order they were
-    /// registered, the engine's three standing first until the extension
-    /// that registers them places them.
+    /// the engine's wrappers and the extensions' in php's startup order
+    /// (`engine::serve_rinits`), the engine's three standing first
+    /// until the extension that registers them places them.
     pub(crate) url_stream_wrappers: Vec<crate::streams::Registered>,
     /// `FG(stream_wrappers)`: the request's own wrapper table once a
     /// program changed it, `None` while it has the built-in one.
@@ -1817,8 +1868,8 @@ pub struct Request {
     /// `FG(pclose_ret)`: what the last stream freed by its resource's
     /// destructor answered from its kind's close, which `pclose()` reads.
     pub(crate) pclose_ret: i32,
-    /// `FG(stream_filters)`: each filter name and its factory, in the
-    /// order they were registered.
+    /// `FG(stream_filters)`: each filter name and its factory, the
+    /// extensions' in php's startup order and a program's after.
     pub(crate) filters: Vec<(Vec<u8>, FilterFactory)>,
     /// A throwable PHP code served by a stream's kind or filter raised
     /// inside an operation whose answer has no room for it: php's
@@ -5744,16 +5795,15 @@ impl Request {
     }
 
     /// The backtrace a fatal carries, `zend_fetch_debug_backtrace`
-    /// rendered by `zend_trace_to_string` at the site, its rows given
-    /// back once rendered; the memory limit refusing the rows leaves the
-    /// fatal without one.
-    fn trace_as_string(&mut self) -> String {
+    /// beside its rendering by `zend_trace_to_string` at the site; the
+    /// memory limit refusing the rows leaves the fatal `{main}` alone
+    /// and no rows for `error_get_last()`.
+    fn trace_as_string(&mut self) -> (Option<PhpArray>, String) {
         let Ok(trace) = self.debug_backtrace() else {
-            return String::from("#0 {main}");
+            return (None, String::from("#0 {main}"));
         };
         let text = self.trace_to_string(trace, true);
-        self.release(Value::array(trace));
-        text
+        (Some(trace), text)
     }
 
     /// `_build_trace_args` (`Z/Zend/zend_exceptions.c:539`) over one
@@ -6325,7 +6375,7 @@ impl Request {
             return false;
         }
         // "Always clear the last backtrace."
-        self.last_fatal_error_backtrace = None;
+        self.clear_fatal_error_backtrace();
         if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
@@ -6432,8 +6482,15 @@ impl Request {
     /// nothing at all while none was fetched.
     fn stack_trace_after_the_site(&self) -> String {
         self.last_fatal_error_backtrace
-            .as_deref()
-            .map_or_else(String::new, |trace| format!("\nStack trace:\n{trace}"))
+            .as_ref()
+            .map_or_else(String::new, |(_, trace)| format!("\nStack trace:\n{trace}"))
+    }
+
+    /// `zval_ptr_dtor(&EG(last_fatal_error_backtrace))` and `ZVAL_UNDEF`.
+    fn clear_fatal_error_backtrace(&mut self) {
+        if let Some((Some(trace), _)) = self.last_fatal_error_backtrace.take() {
+            self.release(Value::array(trace));
+        }
     }
 
     /// `fatal_error_backtraces`, `EG(fatal_error_backtrace_on)` through
@@ -6632,7 +6689,7 @@ impl Request {
         if self.bailout {
             return;
         }
-        self.last_fatal_error_backtrace = None;
+        self.clear_fatal_error_backtrace();
         self.error_cb(level, message, file, line);
         self.end_at_level(level, message, file, line);
     }
@@ -13504,10 +13561,35 @@ impl Request {
             .is_some_and(|(_, depth)| depth == self.vm.call_depth())
     }
 
+    /// The name `php_verror` puts before `(): `: the construct of an
+    /// include being opened, or the native being served. A warning an
+    /// include's open raises with a throwable pending names the frame's
+    /// function instead, as a filter that could not be made does:
+    ///
+    /// ```php
+    /// class F extends php_user_filter { private $d = \NOPE; }
+    /// stream_filter_register("f", F::class);
+    /// function g() { include "php://filter/read=f/resource=" . __FILE__; }
+    /// try { g(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Warning: g(): Unable to create or locate filter "f" in %s on line 4
+    ///
+    /// Warning: g(): Unable to create filter (f) in %s on line 4
+    /// Undefined constant "NOPE"
+    /// ```
     pub(crate) fn active_native(&self) -> String {
         if let Some((kind, _)) = self.including
             && self.serving_include()
         {
+            // php reads the construct off the frame's opline, which a
+            // throw has moved to the exception op, so a warning raised
+            // with a throwable pending names the frame's function.
+            if self.stream_thrown.is_some() || self.is_pending() {
+                return self
+                    .active_user_function()
+                    .unwrap_or_else(|| String::from("main"));
+            }
             return String::from(kind.name());
         }
         self.active_native_function().map_or_else(
@@ -15998,6 +16080,12 @@ impl Request {
             let key = Key::Str(PhpString::new(self, name)?);
             array.set(self, key, value)?;
         }
+        if let Some((Some(trace), _)) = self.last_fatal_error_backtrace {
+            let trace = Value::array(trace);
+            self.addref(&trace);
+            let key = Key::Str(PhpString::new(self, b"trace")?);
+            array.set(self, key, trace)?;
+        }
         Ok(Some(array))
     }
 
@@ -17699,20 +17787,46 @@ impl Request {
         }
     }
 
-    /// `php_info_print_module` as the CLI prints it, `phpinfo_as_text`
-    /// (`Z/ext/standard/info.c:133`): the name as a one-column table,
-    /// then the extension's `MINFO`; for an extension that declared
-    /// none, a `Version` row and `DISPLAY_INI_ENTRIES`, its ini entries
-    /// under `Directive => Local Value => Master Value`
-    /// (`Z/main/php_ini.c:115`), the master being the engine's default
-    /// and an empty value `no value`. Every bundled extension has a
-    /// version, `PHP_VERSION`, so php's other branch, the bare name, is
-    /// never taken. What `ReflectionExtension::info` and `php --ri` print.
+    /// `sapi_module.phpinfo_as_text`: whether the host prints phpinfo's
+    /// page as text, which the CLI does and a host serving the web, whose
+    /// page is `info.c`'s HTML, does not.
+    #[must_use]
+    pub fn phpinfo_as_text(&self) -> bool {
+        self.web().is_none()
+    }
+
+    /// `php_info_print_module` (`Z/ext/standard/info.c:133`): the name,
+    /// as a one-column table in text and as the `module_<name>` anchor
+    /// `<h2>` in HTML, then the extension's `MINFO`; for an extension that
+    /// declared none, a `Version` row and `DISPLAY_INI_ENTRIES`. Every
+    /// bundled extension has a version, `PHP_VERSION`, so php's other
+    /// branch, the bare name, is never taken. What `phpinfo()`,
+    /// `ReflectionExtension::info` and `php --ri` print.
     pub fn extension_info(&mut self, extension: ExtensionId) {
         let Some(module) = self.extension_of(extension).cloned() else {
             return;
         };
-        self.info_table(&[&[module.name.as_str()]]);
+        if self.phpinfo_as_text() {
+            self.info_rows(&[InfoRow::Header(&[module.name.as_str()])]);
+        } else {
+            // `php_url_encode` of the name, lowered: the anchor's name.
+            let mut anchor = String::new();
+            for b in module.name.to_ascii_lowercase().bytes() {
+                match b {
+                    b' ' => anchor.push('+'),
+                    b'-' | b'.' | b'_' => anchor.push(char::from(b)),
+                    _ if b.is_ascii_alphanumeric() => anchor.push(char::from(b)),
+                    _ => {
+                        let _ = write!(anchor, "%{b:02X}");
+                    }
+                }
+            }
+            let heading = format!(
+                "<h2><a name=\"module_{anchor}\" href=\"#module_{anchor}\">{}</a></h2>\n",
+                module.name
+            );
+            self.write(heading.as_bytes());
+        }
         if let Some(info) = module.info {
             info(self);
             return;
@@ -17724,9 +17838,8 @@ impl Request {
 
     /// `DISPLAY_INI_ENTRIES()`, `display_ini_entries`
     /// (`Z/main/php_ini.c:115`), for the entries named, as an
-    /// extension's `MINFO` ends with it: nothing for none, else a table
-    /// under `Directive => Local Value => Master Value`, the master being
-    /// the engine's default and an empty value `no value`.
+    /// extension's `MINFO` ends with it: each with the request's value and
+    /// the engine's default ([`Request::info_ini_table`]).
     ///
     /// ```php
     /// @ini_set('iconv.output_encoding', 'ISO-8859-1');
@@ -17739,18 +17852,12 @@ impl Request {
     /// iconv.internal_encoding => no value => no value
     /// ```
     pub fn info_ini_entries(&mut self, names: &[&[u8]]) {
-        if names.is_empty() {
-            return;
-        }
-        let no_value = || String::from("no value");
-        let shown = |value: Option<&[u8]>| {
-            value
-                .filter(|v| !v.is_empty())
-                .map_or_else(no_value, |v| String::from_utf8_lossy(v).into_owned())
-        };
         let rows: Vec<[String; 3]> = names
             .iter()
             .map(|name| {
+                let shown = |value: Option<&[u8]>| {
+                    String::from_utf8_lossy(value.unwrap_or_default()).into_owned()
+                };
                 [
                     String::from_utf8_lossy(name).into_owned(),
                     shown(self.ini_get(name)),
@@ -17758,19 +17865,16 @@ impl Request {
                 ]
             })
             .collect();
-        let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
-        let cells: Vec<[&str; 3]> = rows
+        let rows: Vec<[&str; 3]> = rows
             .iter()
             .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
             .collect();
-        table.extend(cells.iter().map(<[&str; 3]>::as_slice));
-        self.info_table(&table);
+        self.info_ini_table(&rows);
     }
 
-    /// `display_ini_entries(NULL)` (`Z/main/php_ini.c:131`) as the CLI
-    /// prints it after `zend_ini_sort_entries`: the entries no extension
-    /// declared, the engine's own, sorted by name, under `Directive =>
-    /// Local Value => Master Value`, an empty value `no value`. What
+    /// `display_ini_entries(NULL)` (`Z/main/php_ini.c:131`) after
+    /// `zend_ini_sort_entries`: the entries no extension declared, the
+    /// engine's own, sorted by name ([`Request::info_ini_table`]). What
     /// `PHP_MINFO_FUNCTION(core)` and `phpinfo()`'s `PHP Core` print.
     pub fn core_ini_info(&mut self) {
         let shared = Arc::clone(&self.shared);
@@ -17788,57 +17892,182 @@ impl Request {
             .collect();
         // `ini_key_compare`: `zend_binary_strcasecmp` of the names.
         names.sort_unstable_by_key(|name| name.to_ascii_lowercase());
-        let shown = |value: Option<&[u8]>| {
-            value.filter(|v| !v.is_empty()).map_or_else(
-                || String::from("no value"),
-                |v| String::from_utf8_lossy(v).into_owned(),
-            )
-        };
-        let rows: Vec<[String; 3]> = names
-            .iter()
-            .map(|name| {
-                [
-                    String::from_utf8_lossy(name).into_owned(),
-                    shown(self.ini_get(name)),
-                    shown(shared.ini_default(name)),
-                ]
-            })
-            .collect();
-        let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
-        let cells: Vec<[&str; 3]> = rows
-            .iter()
-            .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
-            .collect();
-        table.extend(cells.iter().map(<[&str; 3]>::as_slice));
-        self.info_table(&table);
+        self.info_ini_entries(&names);
     }
 
-    /// `php_info_print_table_start` and one `php_info_print_table_row`
-    /// per row as the CLI prints them, `phpinfo_as_text`
-    /// (`Z/ext/standard/info.c:1062-1220`): a blank line, then each
-    /// row's cells with ` => ` between and a newline after, an empty
-    /// cell one space with no ` => ` after it, as php's loop has it.
-    /// A header row prints the same way in text, so an extension's
-    /// `MINFO` writes its whole table through this.
-    pub fn info_table(&mut self, rows: &[&[&str]]) {
-        let mut out = String::from("\n");
-        for row in rows {
-            let last = row.len().saturating_sub(1);
-            for (i, cell) in row.iter().enumerate() {
-                if cell.is_empty() {
-                    out.push(' ');
-                } else {
-                    out.push_str(cell);
-                    if i < last {
-                        out.push_str(" => ");
-                    }
-                }
-                if i == last {
-                    out.push('\n');
-                }
+    /// `display_ini_entries`' table (`Z/main/php_ini.c:115-146`) over
+    /// rows an extension's `MINFO` shows, each its name, its local value
+    /// and its master value as the entry's displayer would write them,
+    /// the empty value being php's `no value`: nothing for no rows, else
+    /// a table under the `Directive`, `Local Value` and `Master Value`
+    /// header; in HTML the name as it is and each value through
+    /// `php_html_puts`, `<i>no value</i>` for an empty one:
+    ///
+    /// ```php
+    /// (new ReflectionExtension('iconv'))->info();
+    /// ```
+    /// ```request
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// X-Powered-By: PHP/8.5.9
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// <h2><a name="module_iconv" href="#module_iconv">iconv</a></h2>
+    /// <table>
+    /// <tr><td class="e">iconv support </td><td class="v">enabled </td></tr>
+    /// <tr><td class="e">iconv implementation </td><td class="v">libiconv </td></tr>
+    /// <tr><td class="e">iconv library version </td><td class="v">1.11 </td></tr>
+    /// </table>
+    /// <table>
+    /// <tr class="h"><th>Directive</th><th>Local Value</th><th>Master Value</th></tr>
+    /// <tr><td class="e">iconv.input_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">iconv.output_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// <tr><td class="e">iconv.internal_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+    /// </table>
+    /// ```
+    pub fn info_ini_table(&mut self, rows: &[[&str; 3]]) {
+        if rows.is_empty() {
+            return;
+        }
+        let text = self.phpinfo_as_text();
+        let mut out = Vec::new();
+        let value = |out: &mut Vec<u8>, shown: &str| match (shown.is_empty(), text) {
+            (true, true) => out.extend_from_slice(b"no value"),
+            (true, false) => out.extend_from_slice(b"<i>no value</i>"),
+            (false, true) => out.extend_from_slice(shown.as_bytes()),
+            (false, false) => crate::highlight::html_puts(out, shown.as_bytes()),
+        };
+        for [name, local, master] in rows {
+            if text {
+                out.extend_from_slice(name.as_bytes());
+                out.extend_from_slice(b" => ");
+                value(&mut out, local);
+                out.extend_from_slice(b" => ");
+                value(&mut out, master);
+                out.push(b'\n');
+            } else {
+                out.extend_from_slice(b"<tr><td class=\"e\">");
+                out.extend_from_slice(name.as_bytes());
+                out.extend_from_slice(b"</td><td class=\"v\">");
+                value(&mut out, local);
+                out.extend_from_slice(b"</td><td class=\"v\">");
+                value(&mut out, master);
+                out.extend_from_slice(b"</td></tr>\n");
             }
         }
-        self.write(out.as_bytes());
+        self.info_rows(&[
+            InfoRow::Header(&["Directive", "Local Value", "Master Value"]),
+            InfoRow::Written(&out),
+        ]);
+    }
+
+    /// `php_info_print_table_start`, one `php_info_print_table_row` per
+    /// row and `php_info_print_table_end` ([`Request::info_rows`]):
+    /// what an extension's `MINFO` writes its table through.
+    pub fn info_table(&mut self, rows: &[&[&str]]) {
+        let rows: Vec<InfoRow<'_>> = rows.iter().map(|row| InfoRow::Row(row)).collect();
+        self.info_rows(&rows);
+    }
+
+    /// One table of phpinfo's page as `info.c` writes it in the form the
+    /// host prints (`Z/ext/standard/info.c:1062-1220`): in text a blank
+    /// line, a header's cells joined by ` => ` with an empty one a
+    /// space, a row's the same but an empty cell a space with nothing
+    /// after it, a colspan header centred in 74 columns; in HTML
+    /// `<table>`, a header `<tr class="h">` of `<th>` cells as they are, a
+    /// row `<tr>` of cells `class="e"` then `class="v"`, each escaped as
+    /// `php_info_print_html_esc` escapes it and closed by ` </td>`, an
+    /// empty one `<i>no value</i>`, and `</table>`.
+    ///
+    /// ```php
+    /// ob_start(); (new ReflectionExtension('json'))->info(); echo ob_get_clean();
+    /// ```
+    /// ```request
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// X-Powered-By: PHP/8.5.9
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// <h2><a name="module_json" href="#module_json">json</a></h2>
+    /// <table>
+    /// <tr><td class="e">json support </td><td class="v">enabled </td></tr>
+    /// </table>
+    /// ```
+    pub fn info_rows(&mut self, rows: &[InfoRow<'_>]) {
+        let text = self.phpinfo_as_text();
+        let mut out = Vec::new();
+        out.extend_from_slice(if text { b"\n" } else { b"<table>\n" });
+        for row in rows {
+            match (row, text) {
+                (InfoRow::Header(cells), true) => {
+                    let last = cells.len().saturating_sub(1);
+                    for (i, cell) in cells.iter().enumerate() {
+                        out.extend_from_slice(if cell.is_empty() { " " } else { cell }.as_bytes());
+                        out.extend_from_slice(if i < last { b" => " } else { b"\n" });
+                    }
+                }
+                (InfoRow::Header(cells), false) => {
+                    out.extend_from_slice(b"<tr class=\"h\">");
+                    for cell in *cells {
+                        out.extend_from_slice(b"<th>");
+                        out.extend_from_slice(if cell.is_empty() { " " } else { cell }.as_bytes());
+                        out.extend_from_slice(b"</th>");
+                    }
+                    out.extend_from_slice(b"</tr>\n");
+                }
+                (InfoRow::Row(cells), true) => {
+                    let last = cells.len().saturating_sub(1);
+                    for (i, cell) in cells.iter().enumerate() {
+                        if cell.is_empty() {
+                            out.push(b' ');
+                        } else {
+                            out.extend_from_slice(cell.as_bytes());
+                            if i < last {
+                                out.extend_from_slice(b" => ");
+                            }
+                        }
+                        if i == last {
+                            out.push(b'\n');
+                        }
+                    }
+                }
+                (InfoRow::Row(cells), false) => {
+                    out.extend_from_slice(b"<tr>");
+                    for (i, cell) in cells.iter().enumerate() {
+                        let class = if i == 0 { "e" } else { "v" };
+                        let _ = write!(Bytes(&mut out), "<td class=\"{class}\">");
+                        if cell.is_empty() {
+                            out.extend_from_slice(b"<i>no value</i>");
+                        } else {
+                            out.extend_from_slice(&info_html_esc(cell.as_bytes()));
+                        }
+                        out.extend_from_slice(b" </td>");
+                    }
+                    out.extend_from_slice(b"</tr>\n");
+                }
+                (InfoRow::Colspan(columns, header), true) => {
+                    let _ = columns;
+                    let spaces = 74_usize.saturating_sub(header.len()) / 2;
+                    let pad = " ".repeat(spaces.max(1));
+                    let _ = writeln!(Bytes(&mut out), "{pad}{header}{pad}");
+                }
+                (InfoRow::Colspan(columns, header), false) => {
+                    let _ = writeln!(
+                        Bytes(&mut out),
+                        "<tr class=\"h\"><th colspan=\"{columns}\">{header}</th></tr>"
+                    );
+                }
+                (InfoRow::Written(bytes), _) => out.extend_from_slice(bytes),
+            }
+        }
+        if !text {
+            out.extend_from_slice(b"</table>\n");
+        }
+        self.write(&out);
     }
 
     fn extension_of(&self, extension: ExtensionId) -> Option<&Extension> {
@@ -18092,7 +18321,7 @@ impl Request {
     /// is what `ini_set()` asks: every entry of the table is
     /// `PHP_INI_ALL` but `xmlrpc_errors`, `sys_temp_dir`,
     /// `sendmail_path`, `syslog.facility`, `syslog.ident`,
-    /// `disable_functions`, `enable_dl` and `extension_dir`,
+    /// `disable_functions`, `enable_dl`, `extension_dir` and `browscap`,
     /// `PHP_INI_SYSTEM` (`Z/main/main.c:806-890`), and
     /// `short_open_tag` and the four `mail.*` beside `sendmail_path`,
     /// `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820-871`).
@@ -18113,7 +18342,7 @@ impl Request {
         match name {
             b"xmlrpc_errors" | b"sys_temp_dir" | b"sendmail_path" | b"syslog.facility"
             | b"syslog.ident" | b"disable_functions" | b"enable_dl" | b"extension_dir"
-            | b"allow_url_fopen" | b"allow_url_include" => (false, false, true),
+            | b"allow_url_fopen" | b"allow_url_include" | b"browscap" => (false, false, true),
             b"short_open_tag"
             | b"mail.add_x_header"
             | b"mail.mixed_lf_and_crlf"

@@ -33,10 +33,10 @@ required-features = ["witness-trace"]
 witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 
 [dependencies]
-# The bundle's default set and the seven the CLI turns on (sapi/cli's
+# The bundle's default set and the eight the CLI turns on (sapi/cli's
 # manifest says why each): php builds its CGI with its CLI's extensions,
 # `pcntl` and `posix` among them, and the oracle's `php-cgi -m` lists all
-# seven (design §7.2, revision 35).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar"] }
+# eight (design §7.2, revision 35).
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }

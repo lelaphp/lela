@@ -33,16 +33,17 @@ required-features = ["witness-trace"]
 witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 
 [dependencies]
-# The bundle's default set and seven it turns on: `pcntl` and `posix`,
+# The bundle's default set and eight it turns on: `pcntl` and `posix`,
 # which php builds for the CLI and which no server host carries (design
 # §7.2, revision 35), `sockets`, php's `--enable-sockets` (revision 36),
 # `bz2`, php's `--with-bz2` (revision 39), `openssl`, php's
 # `--with-openssl`, which the oracle is built with and ext/phar's
 # OpenSSL signatures call into (#1108), `bcmath`, php's
-# `--enable-bcmath`, which the oracle is built with (#1163, #1166), and
+# `--enable-bcmath`, which the oracle is built with (#1163, #1166),
 # `calendar`, php's `--enable-calendar`, which the oracle is built with
-# (#1163, #1206).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar"] }
+# (#1163, #1206), and `mbstring`, php's `--enable-mbstring`, which the
+# oracle is built with (#1173, #1260).
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring"] }
 php_sapi = { path = "../../crates/php_sapi" }
 php_proto = { path = "../../crates/php_proto" }
 # The C library in `src/ffi/` alone, for what the standard library does

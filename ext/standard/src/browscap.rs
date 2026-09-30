@@ -11,7 +11,6 @@
 use php_ext::abi::{OrFalse, Union};
 use php_ext::attr::php_function;
 use php_ext::call::{lookup_class, new_object};
-use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
@@ -38,7 +37,20 @@ struct BrowscapEntry {
 }
 
 /// `browser_data`: php's `htab`, sections by their pattern in the order
-/// they were first seen, a repeated one replacing the first in place.
+/// they were first seen, a repeated one replacing the first in place,
+/// loaded from the file the `browscap` entry names. The entry is
+/// `main.c`'s, `PHP_INI_SYSTEM` with no value, and so Core's, not this
+/// extension's:
+///
+/// ```php
+/// var_dump(ini_get('browscap'), ini_set('browscap', 'x'), array_key_exists('browscap', ini_get_all('standard')), array_key_exists('unserialize_callback_func', ini_get_all('standard')));
+/// ```
+/// ```expect
+/// string(0) ""
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
 #[derive(Default)]
 pub(crate) struct Browscap {
     loaded: bool,
@@ -49,24 +61,6 @@ impl Browscap {
     fn find(&self, pattern: &[u8]) -> Option<&BrowscapEntry> {
         self.entries.iter().find(|entry| entry.pattern == pattern)
     }
-}
-
-/// The `browscap` ini entry, `PHP_INI_SYSTEM` with no value.
-///
-/// ```php
-/// var_dump(ini_get('browscap'));
-/// ```
-/// ```expect
-/// string(0) ""
-/// ```
-pub(crate) fn ini() -> Vec<IniDecl> {
-    vec![IniDecl {
-        name: Name(b"browscap".as_slice().into()),
-        default: Box::new([]),
-        user: false,
-        per_dir: false,
-        system: true,
-    }]
 }
 
 fn is_placeholder(c: u8) -> bool {

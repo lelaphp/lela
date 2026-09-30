@@ -119,7 +119,7 @@ pub(crate) mod constants {
 }
 
 /// `Directory` as `register_class_Directory` declares it: final, no
-/// dynamic properties, the two readonly properties `path` and `handle`
+/// dynamic properties, not serializable, the two readonly properties `path` and `handle`
 /// in that order, since the methods read the `handle` slot as
 /// `Z_DIRECTORY_HANDLE_P` does, and the three methods.
 ///
@@ -183,7 +183,19 @@ pub(crate) mod constants {
 /// Directory::read(): cannot use Directory resource after it has been closed
 /// Directory::rewind(): cannot use Directory resource after it has been closed
 /// ```
-#[php_class(final, handlers = DirectoryHandlers, dynamic_properties = forbidden)]
+///
+/// ```php
+/// try { serialize(dir(__DIR__)); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Serialization of 'Directory' is not allowed
+/// ```
+#[php_class(
+    final,
+    not_serializable,
+    handlers = DirectoryHandlers,
+    dynamic_properties = forbidden
+)]
 pub(crate) struct Directory;
 
 #[php_class]

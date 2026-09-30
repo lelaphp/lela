@@ -34,6 +34,8 @@ const SUBSTITUTE_DISALLOWED: i64 = 128;
 /// `php_escape_html_entities_ex` for a rewrite variable's name and value,
 /// and every native's default `$flags` beside `ENT_HTML401`, which is 0.
 pub(super) const QUOTES_SUBSTITUTE: i64 = QUOTE_SINGLE | QUOTE_DOUBLE | SUBSTITUTE_ERRORS;
+/// `ENT_QUOTES`, what `php_info_print_html_esc` hands the escaper.
+pub(super) const QUOTES: i64 = QUOTE_SINGLE | QUOTE_DOUBLE;
 /// `LONGEST_ENTITY_LENGTH`.
 const LONGEST_ENTITY_LENGTH: usize = 31;
 

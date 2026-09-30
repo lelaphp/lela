@@ -1020,7 +1020,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 72] = [
+const CORE_INI: [(&str, &str); 74] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1133,6 +1133,9 @@ const CORE_INI: [(&str, &str); 72] = [
     ("max_multipart_body_parts", "-1"),
     ("enable_dl", "1"),
     ("extension_dir", crate::constants::PHP_EXTENSION_DIR),
+    // Two `main.c` registers for ext/standard to read (`Z/main/main.c:822, 863`).
+    ("unserialize_callback_func", ""),
+    ("browscap", ""),
 ];
 
 /// `php_ini_builder_define`'s line (`Z/main/php_ini_builder.c:63-81`)
@@ -2210,6 +2213,7 @@ impl Engine {
             let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
             let _ = req.header_add(line.as_bytes(), true, 0);
         }
+        let _ = crate::output::start_at_request(&mut req);
         let _ = req.hash_environment();
         // Displayed past the `php_output` layer, as php displays what
         // `MINIT` raised before `php_output_activate`, so no header is
@@ -2220,11 +2224,7 @@ impl Engine {
         // `accel_activate`: a reset a request asked for empties the unit
         // cache at the next request's start.
         self.shared.units.restart_if_pending();
-        for extension in &self.shared.extensions {
-            if let Some(rinit) = extension.rinit {
-                let _ = rinit(&mut req);
-            }
-        }
+        serve_rinits(&mut req, &self.shared.extensions);
         deprecated_directives(&mut req);
         self.arm_preloaded(&mut req);
         if req.web().is_some_and(|web| web.no_headers) {
@@ -2800,6 +2800,82 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     !exited && !req.bailing_out() && req.ending().is_none()
 }
 
+/// The extensions of the pinned build in the order `internal_functions.c`
+/// starts them, what its `php -n` answers `get_loaded_extensions()` in
+/// past `Core`: the order php's `MINIT`s register their stream wrappers
+/// and filters in, which `stream_get_wrappers()`, `stream_get_filters()`
+/// and phpinfo's `Registered PHP Streams` list. The bundle is a
+/// topological order of the crates instead, `standard` ahead of the
+/// extensions that call into it, so the tables are put in this order
+/// after the extensions start ([`serve_rinits`]).
+#[rustfmt::skip]
+const MODULE_STARTUP: [&str; 65] = [
+    "date", "lexbor", "openssl", "pcre", "sqlite3", "zlib", "bcmath", "bz2", "calendar", "ctype",
+    "curl", "dba", "uri", "json", "mbstring", "SPL", "FFI", "fileinfo", "filter", "ftp", "gd",
+    "gettext", "gmp", "hash", "iconv", "intl", "session", "ldap", "standard", "libxml", "mysqlnd",
+    "mysqli", "odbc", "Zend OPcache", "pcntl", "PDO", "pdo_dblib", "pdo_mysql", "PDO_ODBC",
+    "pdo_pgsql", "pdo_sqlite", "pgsql", "Phar", "posix", "random", "readline", "Reflection",
+    "exif", "shmop", "SimpleXML", "snmp", "soap", "sockets", "sodium", "sysvmsg", "sysvsem",
+    "sysvshm", "tidy", "tokenizer", "dom", "xml", "xmlreader", "xmlwriter", "xsl", "zip",
+];
+
+/// Where php starts the extension `name`, [`MODULE_STARTUP`]'s place
+/// for it, the names compared without regard to case as php compares
+/// them; one php does not build starts after every one it does.
+fn startup_rank(name: &str) -> usize {
+    MODULE_STARTUP
+        .iter()
+        .position(|started| started.eq_ignore_ascii_case(name))
+        .unwrap_or(MODULE_STARTUP.len())
+}
+
+/// Each extension's `rinit` in bundle order, with the stream wrappers
+/// and filters each registers placed in php's startup order
+/// ([`MODULE_STARTUP`]): every extension registers into empty tables,
+/// its rows are gathered under its rank, and the tables are the rows
+/// stably sorted by rank, the engine's own wrappers ahead until the
+/// extension that registers them places them. A registration made once
+/// the program runs goes on at the end, as php's does. The pinned build
+/// has `zip`, which the bundle has not:
+///
+/// ```php
+/// echo implode(',', array_diff(stream_get_wrappers(), ['zip'])), "\n", implode(',', stream_get_filters()), "\n";
+/// ```
+/// ```expect
+/// https,ftps,compress.zlib,compress.bzip2,php,file,glob,data,http,ftp,phar
+/// zlib.*,bzip2.*,convert.iconv.*,string.rot13,string.toupper,string.tolower,convert.*,consumed,dechunk
+/// ```
+fn serve_rinits(req: &mut Request, extensions: &[Extension]) {
+    let mut wrappers: Vec<(usize, crate::streams::Registered)> =
+        std::mem::take(&mut req.url_stream_wrappers)
+            .into_iter()
+            .map(|row| (0, row))
+            .collect();
+    let mut filters = Vec::new();
+    for extension in extensions {
+        let Some(rinit) = extension.rinit else {
+            continue;
+        };
+        let rank = startup_rank(&extension.name) + 1;
+        let _ = rinit(req);
+        for row in std::mem::take(&mut req.url_stream_wrappers) {
+            // A wrapper the engine keeps is placed by the extension that
+            // registers it, as `register_engine_wrapper` moves its row.
+            wrappers.retain(|(_, held)| held.scheme != row.scheme);
+            wrappers.push((rank, row));
+        }
+        filters.extend(
+            std::mem::take(&mut req.filters)
+                .into_iter()
+                .map(|row| (rank, row)),
+        );
+    }
+    wrappers.sort_by_key(|(rank, _)| *rank);
+    filters.sort_by_key(|(rank, _)| *rank);
+    req.url_stream_wrappers = wrappers.into_iter().map(|(_, row)| row).collect();
+    req.filters = filters.into_iter().map(|(_, row)| row).collect();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2946,6 +3022,56 @@ mod tests {
 
     /// What the pinned oracle answers for
     /// `var_dump(ini_get('error_append_string'))` under
+    /// `php_request_startup` starts the buffer the ini asks for before
+    /// the program runs: the handler `output_handler` names, which must
+    /// be a function by then, php's warning where it is not, or else
+    /// `output_buffering`'s default handler.
+    #[test]
+    fn the_request_starts_the_buffer_output_handler_or_output_buffering_names() {
+        let program = "<?php function h($s) { return '[' . $s . ']'; } echo 'x'; echo 'y';";
+        let serve = |name: &str, value: &str| {
+            let engine = Engine::builder().ini(name, value).build();
+            let out = engine.serve_capture(program, crate::test::Capture::default());
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        assert_eq!(
+            serve("output_handler", "h"),
+            "\nWarning: PHP Request Startup: function \"h\" not found or invalid function name in Unknown on line 0\nxy"
+        );
+        assert_eq!(serve("output_buffering", "4096"), "xy");
+        assert_eq!(serve("output_handler", ""), "xy");
+    }
+
+    /// `sapi_module.treat_data` replaced, as mbstring replaces it: the
+    /// query string is handed to the extension's treater, whose variables
+    /// are registered; a source it leaves, the cookie header here, is
+    /// `php_default_treat_data`'s.
+    #[test]
+    fn a_treat_data_hook_reads_the_sources_it_takes_and_leaves_the_rest() {
+        use crate::api::request::Input;
+        let upper: crate::api::abi::TreatDataHook = |_, input, source| {
+            Ok((input == Input::Get).then(|| vec![(b"q".to_vec(), source.to_ascii_uppercase())]))
+        };
+        let extension = crate::api::abi::ExtensionBuilder::default()
+            .treat_data(upper)
+            .build("t");
+        let engine = Engine::builder().extensions(&[extension]).build();
+        let mut sink = crate::test::Capture::default();
+        engine.serve(
+            RequestDescription {
+                web: Some(WebRequest {
+                    query: Some(b"a=1&b=2".to_vec()),
+                    cookies: Some(b"c=3".to_vec()),
+                    ..WebRequest::default()
+                }),
+                sapi_name: String::from("cgi-fcgi"),
+                ..description("<?php echo $_GET['q'], ' ', isset($_GET['a']) ? 'a' : '-', ' ', $_COOKIE['c'];")
+            },
+            &mut sink,
+        );
+        assert_eq!(sink.stdout, b"A=1&B=2 - 3");
+    }
+
     /// `-d error_append_string=<value>`: `Off`, `OFF`, `oFf`, `FALSE`,
     /// `none`, `None`, `NULL` and `off ` are `string(0) ""`; `On`, `YES`
     /// and `true` are `string(1) "1"`; `0`, `2`, `abc`, `stderr`, `1M`,
