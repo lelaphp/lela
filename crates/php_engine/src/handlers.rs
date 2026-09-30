@@ -11391,6 +11391,21 @@ pub(crate) fn assign_obj<T: Tier>(
 /// `write_property` for a name the class did not declare or serves
 /// itself ([`PropertyPlace::Handlers`]). `value` is given up on the
 /// `Error` path, as `FREE_OP_DATA` gives it up.
+///
+/// A table whose own `write_property` guards a declared name takes the
+/// assignment whatever the slot holds
+/// ([`ObjectHandlers::write_overloaded`](crate::api::abi::ObjectHandlers::write_overloaded)):
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $s = $db->query('SELECT 1');
+/// try { $s->queryString = 'x'; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($s->queryString);
+/// ```
+/// ```expect
+/// Property queryString is read only
+/// string(8) "SELECT 1"
+/// ```
 fn assign_property(
     req: &mut Request,
     frame: FrameRef,
@@ -11405,8 +11420,11 @@ fn assign_property(
     // A lazy object takes the write through `write_property`, which is
     // where php's slot nothing has written and name nothing holds reach
     // `forward_write_to_lazy_object`.
+    // A table whose own `write_property` answers for a declared name
+    // takes every assignment, as php's `ASSIGN_OBJ` reaches a slot in
+    // place only through `zend_std_write_property`'s cache.
     let lazy = object.heap().laziness() != php_heap::Laziness::Eager;
-    let place = if lazy {
+    let place = if lazy || object.handlers(req).write_overloaded() {
         PropertyPlace::Handlers
     } else {
         match place_of(req, object, bytes) {

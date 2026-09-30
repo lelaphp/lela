@@ -1709,6 +1709,17 @@ pub trait ObjectHandlers: Send + Sync {
     fn properties_overloaded(&self) -> bool {
         false
     }
+
+    /// Whether the table's `write_property` is not
+    /// `zend_std_write_property` and answers for a property the class
+    /// declares: `ZEND_ASSIGN_OBJ` writes a declared slot in place only
+    /// through the cache `zend_std_write_property` fills, so a class
+    /// whose own handler guards a declared name has every assignment to
+    /// it reach that handler. `false` at `Std`; `PDOStatement`'s
+    /// `dbstmt_prop_write` is the witness, in `ext/pdo`.
+    fn write_overloaded(&self) -> bool {
+        false
+    }
 }
 
 /// `std_object_handlers`: every slot its default, the table a user

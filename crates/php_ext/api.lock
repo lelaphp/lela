@@ -141,6 +141,7 @@ abi::ObjectHandlers::read_property
 abi::ObjectHandlers::unset_dimension
 abi::ObjectHandlers::unset_property
 abi::ObjectHandlers::write_dimension
+abi::ObjectHandlers::write_overloaded
 abi::ObjectHandlers::write_property
 abi::OnModify
 abi::OrFalse

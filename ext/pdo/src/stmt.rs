@@ -217,6 +217,26 @@ impl ObjectHandlers for Handlers {
         Ok(None)
     }
 
+    /// `dbstmt_prop_write` answers for the declared `queryString`, so
+    /// every assignment reaches it.
+    ///
+    /// ```php
+    /// $s = new PDOStatement;
+    /// $s->queryString = 'SELECT 1';
+    /// $p = 'queryString';
+    /// try { $s->queryString = 'SELECT 2'; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $s->$p = 'SELECT 3'; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($s->queryString);
+    /// ```
+    /// ```expect
+    /// Property queryString is read only
+    /// Property queryString is read only
+    /// string(8) "SELECT 1"
+    /// ```
+    fn write_overloaded(&self) -> bool {
+        true
+    }
+
     /// `dbstmt_prop_write`: `queryString` once written is read only.
     fn write_property(
         &self,
