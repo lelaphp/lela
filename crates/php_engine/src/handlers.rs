@@ -728,7 +728,11 @@ pub(crate) fn declare_lambda_function<T: Tier>(
             "InternalError: a DECLARE_LAMBDA_FUNCTION naming a definition the unit has not",
         )));
     };
-    let (bound, no_receiver) = (exec::starting_statics(body), body.no_receiver);
+    let no_receiver = body.no_receiver;
+    let bound = match exec::starting_statics(req, body) {
+        Ok(bound) => bound,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
     let Some(function) = req.closure_function(&serving.unit, at) else {
         return Err(Fatal::Error(String::from(
             "InternalError: a DECLARE_LAMBDA_FUNCTION naming a definition the unit has not",
@@ -884,19 +888,18 @@ pub(crate) fn bind_lexical<T: Tier>(
         req.addref(&held);
         held
     };
-    let Some(payload) = object.native_mut::<ClosureInfo>(req) else {
-        req.release(bound);
-        return Err(Fatal::Error(String::from(
-            "InternalError: a BIND_LEXICAL over an object that is no Closure",
-        )));
-    };
-    let Some(cell) = payload.bound.get_mut(slot) else {
+    let place = object
+        .closure(req)
+        .and_then(|closure| closure.bound)
+        .zip(u32::try_from(slot).ok())
+        .and_then(|(table, slot)| table.at_position(slot));
+    let Some((previous, place)) = place else {
         req.release(bound);
         return Err(Fatal::Error(String::from(
             "InternalError: a BIND_LEXICAL naming a slot the closure has not",
         )));
     };
-    let previous = std::mem::replace(cell, bound);
+    place.heap().write(bound.to_zval());
     req.release(previous);
     Ok(advance(req, frame))
 }
@@ -1036,10 +1039,14 @@ pub(crate) fn bind_static<T: Tier>(
     let slot = (op.extended_value >> 3) as usize;
     let by_ref = op.extended_value & BIND_REF != 0;
     let at = req.statics_of(frame, code);
-    let Some(held) = req.static_at(at, code, slot) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a BIND_STATIC naming a slot the static table has not",
-        )));
+    let held = match req.static_at(at, code, slot) {
+        Ok(Some(held)) => held,
+        Ok(None) => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: a BIND_STATIC naming a slot the static table has not",
+            )));
+        }
+        Err(thrown) => return threw(req, frame, &thrown),
     };
     let bound = if by_ref {
         let cell = if let Some(cell) = held.as_php_ref() {
@@ -1114,10 +1121,11 @@ pub(crate) fn bind_init_static_or_jmp<T: Tier>(
 ) -> Edge {
     let slot = (op.extended_value >> 3) as usize;
     let at = req.statics_of(frame, code);
-    let Some(cell) = req
-        .static_at(at, code, slot)
-        .and_then(|held| held.as_php_ref().copied())
-    else {
+    let held = match req.static_at(at, code, slot) {
+        Ok(held) => held,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let Some(cell) = held.and_then(|held| held.as_php_ref().copied()) else {
         return Ok(advance(req, frame));
     };
     let bound = cell.as_value();

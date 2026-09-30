@@ -485,6 +485,14 @@ impl PhpArray {
         Ok(())
     }
 
+    /// The value at `position`, a view, and where it stands: php's
+    /// `(zval *)((char *)ht->arData + offset)`, how `ZEND_BIND_STATIC`
+    /// reaches a slot of a `static` table.
+    pub(crate) fn at_position(self, position: u32) -> Option<(Value, Place)> {
+        let at = self.0.value_ref_at(position)?;
+        Some((Value::of_zval(at.read()), Place(at)))
+    }
+
     /// A copy with one owner, `zend_array_dup`: the same elements, each
     /// one more owner, what `array_merge` and `+` build on.
     pub fn copy(&self, req: &mut Request) -> Result<PhpArray, Thrown> {
@@ -879,13 +887,14 @@ pub struct ClosureInfo {
     pub called_scope: Option<ClassId>,
     /// The closure's own copy of the op array's `static_variables`,
     /// which `zend_create_closure` makes with `zend_array_dup` and
-    /// `ZEND_MAP_PTR_INIT`: one slot per entry of
-    /// [`php_unit::OpArray::bound_vars`], a `use` variable's undefined
-    /// until a `BIND_LEXICAL` beside the declaration fills it and a
-    /// `static`'s at the value the table starts it at, and what the
-    /// `BIND_STATIC`s of the body read and bind. A clone of this value
-    /// is a view of them and takes no owner, as `this` is.
-    pub bound: Vec<Value>,
+    /// `ZEND_MAP_PTR_INIT`, on the request's heap (design §5.13): each
+    /// name of [`php_unit::OpArray::bound_vars`] at the position the
+    /// compiler recorded, a `use` variable's `null` until a
+    /// `BIND_LEXICAL` beside the declaration fills it and a `static`'s
+    /// at the value the table starts it at, and what the `BIND_STATIC`s
+    /// of the body read and bind. None where the op array binds nothing.
+    /// The closure's one owner; a clone of this value is a view of it.
+    pub bound: Option<PhpArray>,
     /// `ZEND_ACC_FAKE_CLOSURE`: whether the closure was made of a
     /// function that already had a name, `zend_create_fake_closure`,
     /// which `Closure::fromCallable` and `Closure::fromCallable`'s kin

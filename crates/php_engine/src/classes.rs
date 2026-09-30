@@ -102,12 +102,11 @@ impl ObjectHandlers for ClosureHandlers {
     /// `zend_closure_free_storage`: the bound `$this` given back; the
     /// payload's drop is the heap's.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let bound = object
+        if let Some(bound) = object
             .native_mut::<ClosureInfo>(req)
-            .map(|closure| std::mem::take(&mut closure.bound))
-            .unwrap_or_default();
-        for value in bound {
-            req.release(value);
+            .and_then(|closure| closure.bound.take())
+        {
+            req.release(Value::array(bound));
         }
         if let Some(this) = object
             .native_mut::<ClosureInfo>(req)
@@ -125,14 +124,31 @@ impl ObjectHandlers for ClosureHandlers {
 
     /// `zend_closure_get_gc`: the bound `$this` where there is one, and
     /// the variables the closure bound, which php reaches through
-    /// `ZEND_MAP_PTR_GET(closure->func.op_array.static_variables_ptr)`.
+    /// `ZEND_MAP_PTR_GET(closure->func.op_array.static_variables_ptr)`
+    /// and hands back as the object's table, so a cycle through a `use`
+    /// variable collects the object and the closure and no more:
+    ///
+    /// ```php
+    /// class Bar { public $x; function __construct() { $self = $this; $this->x = function () use ($self) {}; } }
+    /// gc_collect_cycles();
+    /// new Bar;
+    /// var_dump(gc_collect_cycles());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         let Some(closure) = object.closure(req) else {
             return;
         };
         let this = closure.this;
-        for bound in closure.bound.clone() {
-            visit(bound);
+        // The table's rows, as php hands the table itself back through
+        // `*table`, so the collector walks them as the closure's and
+        // counts no node of the table's.
+        if let Some(bound) = closure.bound {
+            for (_, value) in bound.snapshot_refs() {
+                visit(value);
+            }
         }
         if let Some(this) = this {
             visit(this.as_value());
@@ -464,18 +480,16 @@ static CLOSURE: ClosureHandlers = ClosureHandlers;
 /// the new object's slot, with one more owner of the receiver taken
 /// first, as `zend_create_closure` takes it.
 fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
-    let Some(closure) = object.closure(req).cloned() else {
+    let Some(mut closure) = object.closure(req).cloned() else {
         return req.clone_members(object);
     };
-    if let Some(this) = closure.this {
-        req.addref(&this.as_value());
-    }
     // `zend_array_dup` of the bound variables in
     // `zend_create_closure_ex`: the clone's table is its own and each
     // value in it one more owner, a reference shared with the original
     // as php shares one.
-    for bound in &closure.bound {
-        req.addref(bound);
+    closure.bound = closure.bound.map(|table| table.copy(req)).transpose()?;
+    if let Some(this) = closure.this {
+        req.addref(&this.as_value());
     }
     req.clone_with_payload(object, closure)
 }
@@ -638,7 +652,7 @@ impl stdClass {}
 /// ```expect
 /// Instantiation of class Closure is not allowed
 /// ```
-#[php_class(final, not_serializable, dynamic_properties = forbidden, handlers = CLOSURE)]
+#[php_class(final, not_serializable, dynamic_properties = forbidden, size = 344, handlers = CLOSURE)]
 pub(crate) struct Closure;
 
 #[php_class]
@@ -1124,7 +1138,7 @@ pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<
         this,
         scope,
         called_scope,
-        bound: Vec::new(),
+        bound: None,
         fake: true,
     };
     create_closure(req, &fake, scope, called_scope, this)
@@ -1167,8 +1181,11 @@ pub(crate) fn const_expr_closure(
             "InternalError: a constant expression's closure naming a function its unit has not",
         ));
     };
-    let bound = crate::exec::starting_statics(body);
+    let bound = crate::exec::starting_statics(req, body)?;
     let Some(function) = req.closure_function(unit, at) else {
+        if let Some(bound) = bound {
+            req.release(Value::array(bound));
+        }
         return Err(crate::api::raising::fatal(
             req,
             "InternalError: a constant expression's closure naming a function its unit has not",
@@ -1182,7 +1199,11 @@ pub(crate) fn const_expr_closure(
         bound,
         fake: false,
     };
-    create_closure(req, &info, scope, scope, None)
+    let made = create_closure(req, &info, scope, scope, None);
+    if let Some(bound) = info.bound {
+        req.release(Value::array(bound));
+    }
+    made
 }
 
 /// `Closure::__invoke(mixed ...$args): mixed`, `ZEND_METHOD(Closure,
@@ -2120,11 +2141,9 @@ fn create_closure(
     let Some(class) = req.class_named(b"Closure") else {
         return Err(throw(req, "Error", "Class \"Closure\" not found"));
     };
+    let bound = info.bound.map(|table| table.copy(req)).transpose()?;
     if let Some(this) = this {
         req.addref(&this.as_value());
-    }
-    for bound in &info.bound {
-        req.addref(bound);
     }
     req.new_object_with(
         class,
@@ -2133,7 +2152,7 @@ fn create_closure(
             this,
             scope,
             called_scope: this.map(|object| object.class()).or(called_scope),
-            bound: info.bound.clone(),
+            bound,
             fake: info.fake,
         },
     )

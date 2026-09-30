@@ -1997,7 +1997,7 @@ pub struct Request {
     /// touched: the values, one per entry of the op array's
     /// [`php_unit::OpArray::bound_vars`], which the published unit never
     /// holds (design §5.14). A closure's are its object's.
-    static_vars: HashMap<Statics, Vec<Value>>,
+    static_vars: HashMap<Statics, PhpArray>,
     /// Where the request is the preload's (design §6.3), the files it
     /// compiled into the preload.
     preloading: Option<Preloading>,
@@ -5495,17 +5495,14 @@ impl Request {
         let Some(code) = exec::body_of(&user.unit, user.body) else {
             return Vec::new();
         };
-        let starting: Vec<Value>;
-        let values = if closure.fake {
-            if let Some(held) = self.static_vars.get(&Statics::Function(closure.function)) {
-                held.as_slice()
-            } else {
-                starting = exec::starting_statics(code);
-                starting.as_slice()
-            }
+        let table = if closure.fake {
+            self.static_vars
+                .get(&Statics::Function(closure.function))
+                .copied()
         } else {
-            closure.bound.as_slice()
+            closure.bound
         };
+        let values = exec::statics_values(code, table);
         code.bound_vars
             .iter()
             .zip(values.iter())
@@ -5545,33 +5542,49 @@ impl Request {
         at: StaticsAt,
         code: &OpArray,
         slot: usize,
-    ) -> Option<Value> {
-        match at {
-            StaticsAt::Closure(object) => object.closure(self)?.bound.get(slot).copied(),
-            StaticsAt::Table(of) => self
-                .static_vars
-                .entry(of)
-                .or_insert_with(|| exec::starting_statics(code))
-                .get(slot)
-                .copied(),
-        }
+    ) -> Result<Option<Value>, Thrown> {
+        let table = self.static_table(at, code)?;
+        Ok(table
+            .zip(u32::try_from(slot).ok())
+            .and_then(|(table, slot)| table.at_position(slot))
+            .map(|(value, _)| value))
+    }
+
+    /// The `static` table `at` names, laid down from `code`'s starting
+    /// values where the request has not touched a function's yet.
+    fn static_table(&mut self, at: StaticsAt, code: &OpArray) -> Result<Option<PhpArray>, Thrown> {
+        Ok(match at {
+            StaticsAt::Closure(object) => object.closure(self).and_then(|closure| closure.bound),
+            StaticsAt::Table(of) => {
+                if let Some(table) = self.static_vars.get(&of) {
+                    Some(*table)
+                } else {
+                    let table = exec::starting_statics(self, code)?;
+                    if let Some(table) = table {
+                        self.static_vars.insert(of, table);
+                    }
+                    table
+                }
+            }
+        })
     }
 
     /// `value` into `slot` of a `static` table, which takes the owner
     /// the caller held; what stood there is handed back, since the table
     /// only ever trades a value for the reference made over it.
     pub(crate) fn set_static(&mut self, at: StaticsAt, slot: usize, value: Value) -> Value {
-        let cell = match at {
-            StaticsAt::Closure(object) => object
-                .native_mut::<ClosureInfo>(self)
-                .and_then(|payload| payload.bound.get_mut(slot)),
-            StaticsAt::Table(of) => self
-                .static_vars
-                .get_mut(&of)
-                .and_then(|table| table.get_mut(slot)),
+        let table = match at {
+            StaticsAt::Closure(object) => object.closure(self).and_then(|closure| closure.bound),
+            StaticsAt::Table(of) => self.static_vars.get(&of).copied(),
         };
-        match cell {
-            Some(cell) => std::mem::replace(cell, value),
+        let place = table
+            .zip(u32::try_from(slot).ok())
+            .and_then(|(table, slot)| table.at_position(slot));
+        match place {
+            Some((previous, place)) => {
+                place.heap().write(value.to_zval());
+                previous
+            }
             None => value,
         }
     }
@@ -5601,17 +5614,14 @@ impl Request {
         let Some(code) = exec::body_of(&unit, body) else {
             return Vec::new();
         };
-        if code.bound_vars.is_empty() {
+        let at = StaticsAt::Table(Statics::Function(function));
+        let Ok(table) = self.static_table(at, code) else {
             return Vec::new();
-        }
-        let values = self
-            .static_vars
-            .entry(Statics::Function(function))
-            .or_insert_with(|| exec::starting_statics(code));
+        };
         code.bound_vars
             .iter()
-            .zip(values.iter())
-            .map(|(var, value)| (var.name.0.to_vec(), *value))
+            .zip(exec::statics_values(code, table))
+            .map(|(var, value)| (var.name.0.to_vec(), value))
             .collect()
     }
 
@@ -5619,10 +5629,8 @@ impl Request {
     /// `offset` given up: php compiles a file afresh at each include, so
     /// its main op array's table starts over each time it is entered.
     fn forget_main_statics(&mut self, offset: u32) {
-        if let Some(values) = self.static_vars.remove(&Statics::Main(offset)) {
-            for value in values {
-                self.release(value);
-            }
+        if let Some(table) = self.static_vars.remove(&Statics::Main(offset)) {
+            self.release(Value::array(table));
         }
     }
 
@@ -5632,10 +5640,8 @@ impl Request {
     /// destructors are behind the request by then, so this frees and
     /// serves nothing.
     pub(crate) fn destroy_static_vars(&mut self) {
-        for (_, values) in std::mem::take(&mut self.static_vars) {
-            for value in values {
-                self.release(value);
-            }
+        for (_, table) in std::mem::take(&mut self.static_vars) {
+            self.release(Value::array(table));
         }
     }
 
@@ -13287,7 +13293,7 @@ impl Request {
             this: Some(object),
             scope: Some(object.class()),
             called_scope: Some(object.class()),
-            bound: Vec::new(),
+            bound: None,
             fake: true,
         })
     }
