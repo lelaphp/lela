@@ -1,7 +1,8 @@
-# php_sapi: the hosts (design §4.1, §4.3 seam 4, §5.14). Each builds a request
-# description and supplies a sink; the CLI is the first, CGI, the FastCGI
-# worker and the dev server follow. Two edges: php_engine through the host
-# face, `sapi.lock`, and php_proto for the codecs; never `api`.
+# php_sapi: the hosts' facade (ADR-0008; design §4.1, §4.3 seam 4, §5.14), as
+# php_ext is the extensions'. Every host under `sapi/` reaches the engine
+# through it: php_engine's host face, `sapi.lock`, re-exported, and what
+# php-src shares between its SAPIs. Two edges: php_engine through the host
+# face, and php_proto for the codecs; never `api`.
 [package]
 name = "php_sapi"
 version = "0.0.0"
@@ -9,10 +10,16 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "The hosts: the CLI, and as each lands, CGI, the FastCGI worker and the dev server"
+description = "The hosts' facade: the engine's host face and what php-src shares between its SAPIs"
 
 [lints]
 workspace = true
+
+[features]
+# A host's witness build: every request the engine serves appends the
+# natives it entered to the file `PHP_WITNESS_TRACE` names (harness §4.5
+# condition 2, revision 61).
+witness-trace = ["php_engine/witness-trace"]
 
 [dependencies]
 php_engine = { path = "../php_engine" }

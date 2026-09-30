@@ -1,10 +1,10 @@
-# The workspace (third-engine-design.md §4.2): members are `crates/*`, `ext/*`
-# and `xtask`. The globs are listed as each crate is created; cargo refuses a
-# glob that matches a directory without a manifest, and `crates/php_ext` holds
-# only `api.lock` today.
+# The workspace (third-engine-design.md §4.2): members are `crates/*`, `ext/*`,
+# `sapi/*` (ADR-0008) and `xtask`. The globs are listed as each crate is
+# created; cargo refuses a glob that matches a directory without a manifest,
+# and `crates/php_ext` holds only `api.lock` today.
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor", "ext/zlib", "ext/pcntl", "ext/posix", "ext/sockets", "ext/phar", "ext/bz2", "ext/uri", "ext/opcache", "ext/bcmath", "ext/simplexml", "ext/calendar"]
+members = ["crates/*", "sapi/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor", "ext/zlib", "ext/pcntl", "ext/posix", "ext/sockets", "ext/phar", "ext/bz2", "ext/uri", "ext/opcache", "ext/bcmath", "ext/simplexml", "ext/calendar"]
 
 # On macOS the dev profile's default, `split-debuginfo = "unpacked"`, keeps
 # every codegen unit's object in target/debug/deps for its debuginfo, under a

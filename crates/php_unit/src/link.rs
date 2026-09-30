@@ -1271,7 +1271,7 @@ fn default_text(default: &ConstExpr) -> String {
         }
         ConstExpr::Array { elements, .. } if elements.is_empty() => String::from("[]"),
         ConstExpr::Array { .. } => String::from("[...]"),
-        ConstExpr::Constant { name, .. } => text(&name.0),
+        ConstExpr::Constant { name, .. } => text(&name.resolved().0),
         ConstExpr::ClassConstant { class, name, .. } => {
             format!("{}::{}", text(&class.0), text(&name.0))
         }

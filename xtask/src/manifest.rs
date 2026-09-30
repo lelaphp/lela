@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::layout;
 use crate::oracle::Pin;
 
 /// The file name of the manifest at the workspace root.
@@ -227,14 +228,18 @@ impl Crate {
     }
 
     /// Where the crate's sources are, relative to the workspace root:
-    /// `ext/<name>` for an extension, `crates/<name>` otherwise, and
-    /// `xtask` for the harness.
+    /// `ext/<name>` for an extension, `sapi/<name>` for a host,
+    /// `crates/<name>` otherwise, and `xtask` for the harness
+    /// ([`crate::layout`]).
     pub fn path(&self) -> PathBuf {
-        if self.name == "xtask" || self.name.starts_with("ext/") {
-            PathBuf::from(&self.name)
-        } else {
-            Path::new("crates").join(&self.name)
-        }
+        layout::path(&self.name)
+    }
+
+    /// The crate's cargo package: `php_ext_<name>` for `ext/<name>`
+    /// (ADR-0004), `php_sapi_<name>` for `sapi/<name>` (ADR-0008), the
+    /// name itself otherwise ([`crate::layout`]).
+    pub(crate) fn package(&self) -> String {
+        layout::package(&self.name)
     }
 
     /// The subsets of the pinned corpus this crate owns, relative to the
@@ -251,6 +256,17 @@ impl Crate {
             Some(extension) => vec![Path::new("ext").join(extension).join("tests")],
             None => Vec::new(),
         }
+    }
+
+    /// Whether the crate's subset is the one the design derives for an
+    /// extension, `ext/<name>/tests`, and not one its row names. A derived
+    /// directory the pinned tree does not have is an extension with no
+    /// tests of its own, as `ext/lexbor`, php-src's vendored library whose
+    /// tests are `ext/dom`'s and `ext/uri`'s, is: its reading is a skip that
+    /// says so. A named one the tree does not have is the manifest and the
+    /// pin disagreeing, and its reading fails (#18, #1231).
+    pub(crate) fn derives_subset(&self) -> bool {
+        self.phpt.is_empty() && self.name.starts_with("ext/")
     }
 
     /// Whether the crate is behind a feature, and so outside the default

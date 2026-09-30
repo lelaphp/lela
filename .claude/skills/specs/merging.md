@@ -6,7 +6,7 @@ Read when a merge into `main` conflicts, or the build or the hook refuses a merg
 
 - **`AGENTS.md`** conflicts only in computed regions. Take `main`'s side and re-render: `git checkout --ours -- AGENTS.md && cargo xtask regions AGENTS.md && git add -- AGENTS.md`.
 - **A lock** (`heap.lock`, `api.lock`) where both sides added items. The resolution is the union in sorted order; `cargo xtask api-check` confirms it, and a count past `api_items` is a person's (SKILL.md, step 6).
-- **`Cargo.lock`**: take `main`'s side, `git checkout --ours -- Cargo.lock`, and let `cargo build -p php` add only what's missing. A fresh `cargo generate-lockfile` moves every dependency the branch never asked to move.
+- **`Cargo.lock`**: take `main`'s side, `git checkout --ours -- Cargo.lock`, and let `cargo build -p php_sapi_cli -p php_sapi_cgi` add only what's missing. A fresh `cargo generate-lockfile` moves every dependency the branch never asked to move.
 
 ## The ones the build or the hook shows
 

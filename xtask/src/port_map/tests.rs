@@ -434,27 +434,38 @@ fn under_a_tree_a_row_resolves_on_the_census_names_and_not_the_map_rows() {
     assert_eq!(seed.rows[0].ext, ["spl"]);
 }
 
+/// The committed census joined to the lock, held to what stays true as
+/// either grows (#1252): every row is one of the three statuses and its
+/// `api` item is one the lock carries, and the committed census names no
+/// extension on any row (design §4.4), so with none ported every row is
+/// unresolved. A row added, a status rewritten or a lock line added moves
+/// no assertion here; a row whose item the lock lost is this test red.
 #[test]
-fn the_committed_census_is_651_rows_whose_every_api_item_the_lock_carries() {
+fn the_committed_census_joins_every_row_to_an_item_the_lock_carries() {
     let map = PortMap::load(workspace()).unwrap();
     let lock = Lock::read(&workspace().join("crates/php_ext/api.lock"))
         .unwrap()
         .lines;
     let joined = join(&map, &lock, &Ported::default(), Source::Seed, &[]);
-    assert_eq!(joined.rows.len(), 651);
-    assert_eq!(joined.rows_with(Status::Same), 159);
-    assert_eq!(joined.rows_with(Status::Renamed), 340);
-    assert_eq!(joined.rows_with(Status::Gone), 152);
+    let rows = joined.rows.len();
+    assert_eq!(rows, map.rows.len(), "every row is joined");
+    assert!(rows > 0);
+    assert_eq!(
+        joined.rows_with(Status::Same)
+            + joined.rows_with(Status::Renamed)
+            + joined.rows_with(Status::Gone),
+        rows
+    );
     assert!(joined.unmatched().is_empty(), "{:?}", joined.unmatched());
     assert!(joined.uncovered.is_empty());
     assert_eq!(
         joined.unresolved(),
-        651,
+        rows,
         "no extension is ported, so no row has evidence"
     );
     assert_eq!(
         joined.unnamed(),
-        651,
+        rows,
         "the committed census carries the count alone (design §4.4)"
     );
 }

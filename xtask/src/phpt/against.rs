@@ -7,7 +7,7 @@
 //! judged every test a subset holds is kept as its verdicts, one per
 //! test, at `target/phpt-runs/<tree>/<scope>.json`, beside the reading
 //! store and not in it. The key is the tree the engine's binary is built
-//! from, [`BUILT_FROM`], and not the tree the subset's reading is stamped
+//! from, [`built_from`], and not the tree the subset's reading is stamped
 //! with: that one is the crate's own, which does not move when
 //! `php_engine` does, while the verdicts do. The same key is taken from a
 //! commit's objects, so the run a checkout of the merge base took is found
@@ -48,11 +48,16 @@ use crate::oracle::Runner;
 use crate::reading::{Reading, Status, listed};
 use crate::tally::Judgement as _;
 
-/// What the engine's binary is built from: the crates and extensions it
-/// links, the workspace's lock, and `ops.toml`, which two `build.rs` read.
-const BUILT_FROM: [&str; 5] = ["Cargo.toml", "Cargo.lock", "ops.toml", "crates", "ext"];
+/// What the engine's binary is built from: the crates, extensions and
+/// hosts it links ([`crate::layout::CRATE_DIRS`]), the workspace's lock,
+/// and `ops.toml`, which two `build.rs` read.
+fn built_from() -> Vec<&'static str> {
+    let files = ["Cargo.toml", "Cargo.lock", "ops.toml"];
+    let dirs = crate::layout::CRATE_DIRS.iter().map(|d| d.dir);
+    files.into_iter().chain(dirs).collect()
+}
 /// Where a workspace keeps its runs, relative to its root.
-const RUNS: &str = "target/phpt-runs";
+pub(crate) const RUNS: &str = "target/phpt-runs";
 /// What a comparison's scope adds to its subset's.
 pub(crate) const SCOPE: &str = "@against";
 
@@ -121,7 +126,7 @@ impl Runs {
                 roots.extend(crate::track::main_worktree(root).ok());
                 Some(Base {
                     commit: full.chars().take(7).collect(),
-                    tree: git::tracked_hash(root, &BUILT_FROM, Some(full))?,
+                    tree: git::tracked_hash(root, &built_from(), Some(full))?,
                     roots,
                 })
             }
@@ -129,7 +134,7 @@ impl Runs {
         let source = &manifest.pin.source;
         Ok(Runs {
             root: root.to_path_buf(),
-            tree: git::tracked_hash(root, &BUILT_FROM, None)?,
+            tree: git::tracked_hash(root, &built_from(), None)?,
             commit: git::head_commit(root)?,
             corpus: format!("{} {}", source.tag, source.commit),
             base,
@@ -167,7 +172,7 @@ impl Runs {
         subset: &Reading,
     ) -> Result<Option<Reading>> {
         let run = self.run_of(tally, runner);
-        let moved = git::tracked_hash(&self.root, &BUILT_FROM, None)? != self.tree;
+        let moved = git::tracked_hash(&self.root, &built_from(), None)? != self.tree;
         if let (Some(run), false) = (&run, moved) {
             let file = path(&self.root, &self.tree, scope);
             if let Some(dir) = file.parent() {
@@ -243,6 +248,49 @@ impl Base {
 
 fn path(root: &Path, tree: &str, scope: &str) -> PathBuf {
     root.join(RUNS).join(tree).join(format!("{scope}.json"))
+}
+
+/// What [`carry`] did with one worktree's kept runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Carried {
+    /// The runs copied in, which the workspace kept none of.
+    pub carried: usize,
+    /// The runs the workspace kept already, left as they stood.
+    pub kept: usize,
+}
+
+/// Every run the workspace at `from` keeps, copied into the one at `into`
+/// where that one keeps no run of the same scope under the same engine
+/// tree; one it keeps already is left standing. A run is keyed by the tree
+/// the engine's binary is built from, so a run taken anywhere at that tree
+/// is the same run, and the one standing is as good as the one carried. What
+/// `worktree retire` keeps of a worktree before removing it, so a run
+/// taken in a checkout of a base, as the skip of [`Base::run`] asks, is
+/// still there for the comparison once the checkout is gone (#1268).
+pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
+    let runs = from.join(RUNS);
+    let mut files = Vec::new();
+    crate::tally::files_under(&runs, &mut files)?;
+    files.retain(|file| file.extension().is_some_and(|e| e == "json"));
+    files.sort();
+    let mut carried = Carried::default();
+    for file in files {
+        let Ok(under) = file.strip_prefix(&runs) else {
+            continue;
+        };
+        let to = into.join(RUNS).join(under);
+        if to.exists() {
+            carried.kept += 1;
+            continue;
+        }
+        if let Some(dir) = to.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        fs::copy(&file, &to)
+            .with_context(|| format!("copying {} to {}", file.display(), to.display()))?;
+        carried.carried += 1;
+    }
+    Ok(carried)
 }
 
 /// The head's run against the stored one, or why the two do not compare.

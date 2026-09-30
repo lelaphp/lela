@@ -5995,7 +5995,9 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             out.push(']');
             out
         }
-        ConstExpr::Constant { name, .. } => String::from_utf8_lossy(&name.0).into_owned(),
+        ConstExpr::Constant { name, .. } => {
+            String::from_utf8_lossy(&name.resolved().0).into_owned()
+        }
         // `zend_ast_export_ns_name`: the mark compilation left on the
         // class's name before it.
         ConstExpr::ClassConstant {
@@ -7145,7 +7147,9 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         ConstExpr::Long { value, radix } => radix.written(*value),
         ConstExpr::Double(f) => f.to_string(),
         ConstExpr::Str(s) => format!("\"{}\"", stub_escaped(s)),
-        ConstExpr::Constant { name, .. } => String::from_utf8_lossy(&name.0).into_owned(),
+        ConstExpr::Constant { name, .. } => {
+            String::from_utf8_lossy(&name.resolved().0).into_owned()
+        }
         // `DateTimeZone::ALL`, as `timezone_identifiers_list`'s stub writes it.
         ConstExpr::ClassConstant { class, name, .. } => format!(
             "{}::{}",

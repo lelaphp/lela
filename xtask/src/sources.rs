@@ -11,11 +11,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::git;
+use crate::layout;
 use crate::manifest::{AvoidFrom, Crate, Manifest};
 use crate::reading::{Reading, Status, Store, listed};
-
-/// Where crates live under the root (design §4.2): `crates/*`, `ext/*`, `xtask`.
-pub const CRATE_DIRS: [&str; 3] = ["crates", "ext", "xtask"];
 
 /// Directories under a crate whose files are not its code.
 const NOT_CODE: [&str; 4] = ["tests", "benches", "examples", "fixtures"];
@@ -61,14 +59,14 @@ pub fn exists(root: &Path, krate: &Crate) -> bool {
     root.join(krate.path()).join("Cargo.toml").is_file()
 }
 
-/// Every crate directory on disk (`crates/*`, `ext/*`, `xtask`, by the
-/// presence of a `Cargo.toml`) that has no `[[crate]]` row, as its
-/// manifest name (`ext/<name>` or `<name>`).
+/// Every crate directory on disk (each of [`layout::CRATE_DIRS`]' crates
+/// and `xtask`, by the presence of a `Cargo.toml`) that has no
+/// `[[crate]]` row, as its manifest name (`ext/<name>`, `sapi/<name>` or
+/// `<name>`).
 pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
     let mut out = Vec::new();
-    for dir in CRATE_DIRS.iter().filter(|d| **d != "xtask") {
-        let prefix = if *dir == "ext" { "ext/" } else { "" };
-        let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+    for dir in layout::CRATE_DIRS {
+        let Ok(entries) = std::fs::read_dir(root.join(dir.dir)) else {
             continue;
         };
         let mut names: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
@@ -80,14 +78,15 @@ pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            let name = format!("{prefix}{name}");
+            let name = dir.name(name);
             if manifest.crate_named(&name).is_none() {
                 out.push(name);
             }
         }
     }
-    if root.join("xtask/Cargo.toml").is_file() && manifest.crate_named("xtask").is_none() {
-        out.push("xtask".to_owned());
+    let harness = layout::HARNESS;
+    if root.join(harness).join("Cargo.toml").is_file() && manifest.crate_named(harness).is_none() {
+        out.push(harness.to_owned());
     }
     out
 }
@@ -108,7 +107,10 @@ pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<Stri
 /// The readings that stand for a commit (#1143): of one instrument, each
 /// that passes and was taken over exactly what the index holds of its
 /// scope, by scope, so pre-commit measures what none covers and writes no
-/// reading for the rest. A reading taken over a working tree that differs
+/// reading for the rest. The one asked is the latest reading over that
+/// content, [`Store::latest_over`]'s: the scope's file, or a line of the
+/// log, which is where a retired worktree's pass is when its branch is
+/// merged (#1252). A reading taken over a working tree that differs
 /// from the index there is over content the commit does not take, and
 /// stands for nothing. Nothing stands while a staged file outside every
 /// crate is one an instrument reads: the manifest, the workspace's
@@ -148,18 +150,12 @@ impl Standing {
             return Ok(Standing::default());
         }
         let index = git::Index::read(root)?;
-        let mut standing = BTreeMap::new();
-        for scope in scopes {
-            let Some(path) = manifest.scope_path(scope) else {
-                continue;
-            };
-            let Some(reading) = store.read(instrument, scope)? else {
-                continue;
-            };
-            if reading.status == Status::Pass && reading.fresh_for(&index.hash(&path)) {
-                standing.insert(scope.clone(), reading);
-            }
-        }
+        let trees: BTreeMap<String, String> = scopes
+            .iter()
+            .filter_map(|scope| Some((scope.clone(), index.hash(&manifest.scope_path(scope)?))))
+            .collect();
+        let mut standing = store.latest_over(instrument, &trees)?;
+        standing.retain(|_, reading| reading.status == Status::Pass);
         let standing = Standing(standing);
         if let Some(line) = standing.said(instrument) {
             println!("{line}");
@@ -335,6 +331,71 @@ mod tests {
         fs::write(tree.join("seams.toml"), "").unwrap();
         git(&tree, &["add", "--", "seams.toml"], None).unwrap();
         assert!(!stands(&tree, &manifest, &store));
+    }
+
+    /// `git` in `dir` as a person commits there: named, unsigned and
+    /// unhooked, since the real pre-commit measuring a scratch is not the
+    /// test.
+    fn committing(dir: &std::path::Path, args: &[&str]) {
+        let unhooked = [
+            "-c",
+            "user.name=x",
+            "-c",
+            "user.email=x@x",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
+        ];
+        git(dir, &[&unhooked[..], args].concat(), None).unwrap();
+    }
+
+    /// A branch's worktree measures `xtask` and passes, is retired, and
+    /// main moves on without touching `xtask`: at the merge, what the
+    /// index holds of `xtask` is what the worktree measured, so its pass,
+    /// which the retire appended into main's log and nowhere else, stands
+    /// and `test` is not run again (#1252). Before the retire the pass is
+    /// in the worktree's store alone and nothing stands.
+    #[test]
+    fn a_retired_worktrees_pass_stands_at_the_merge_of_its_branch() {
+        let (tree, manifest, store) = repository("retired");
+        fs::write(tree.join(".gitignore"), "target/\n").unwrap();
+        committing(&tree, &["add", "--", ".gitignore"]);
+        committing(&tree, &["commit", "-q", "-m", "ignored"]);
+        let beside = tree.join("worktrees/t-x");
+        let at = beside.to_str().unwrap();
+        committing(&tree, &["worktree", "add", "-q", "-b", "t-x", at]);
+        fs::write(beside.join("xtask/src/lib.rs"), "b\n").unwrap();
+        committing(&beside, &["commit", "-q", "-am", "the branch's change"]);
+        let krate = manifest.crate_named("xtask").unwrap();
+        let mut reading = Reading::for_crate("test", krate, &beside).unwrap();
+        reading.status = Status::Pass;
+        Store::of_workspace(&beside).record(&[reading]).unwrap();
+
+        fs::write(tree.join("notes.md"), "main moves on\n").unwrap();
+        committing(&tree, &["add", "--", "notes.md"]);
+        committing(&tree, &["commit", "-q", "-m", "main's own change"]);
+        let merge = ["merge", "-q", "--no-ff", "--no-commit", "t-x"];
+        committing(&tree, &merge);
+        let scopes = ["xtask".to_owned()];
+        let unretired = Standing::for_commit(&tree, &manifest, &store, "test", &scopes).unwrap();
+        assert!(unretired.get("xtask").is_none());
+        committing(&tree, &["merge", "--abort"]);
+
+        crate::worktree::retire(&tree, "t-x").unwrap();
+        committing(&tree, &merge);
+        assert!(
+            store.read("test", "xtask").unwrap().is_none(),
+            "no file came"
+        );
+        let standing = Standing::for_commit(&tree, &manifest, &store, "test", &scopes).unwrap();
+        let said = standing.said("test").unwrap();
+        assert!(
+            said.starts_with("test: xtask stands on its pass of "),
+            "{said}"
+        );
+        let measured = super::for_commit(&tree, &manifest, &store, "test").unwrap();
+        assert!(measured.is_empty(), "cargo test runs over {measured:?}");
     }
 
     #[test]

@@ -807,22 +807,23 @@ fn with_no_binary_built_the_linked_engine_carries_each_feature_extension() {
     }
 }
 
-/// What makes the two above true, held where it is written: `xtask`'s
-/// `Cargo.toml` links `php_bundle` with every extension feature the bundle
-/// declares, so the linked engine is the twenty extensions the oracle has
-/// and not the default sixteen (harness §7, revision 43), save `pcntl`,
-/// whose fences the `php` binary serves so that nothing forks the harness
-/// (revision 61). A feature the bundle gains and xtask does not name is
-/// this test red, and so is `pcntl` named.
+/// What makes the two above true, held where it is written: the bundle's
+/// `linked` feature is every extension feature the bundle declares, so the
+/// linked engine is the extensions the oracle has and not the default set
+/// (harness §7, revision 43), save `pcntl`, whose fences the `php` binary
+/// serves so that nothing forks the harness (revision 61); and `xtask`'s
+/// `Cargo.toml` links the bundle with `linked`. The two lists are one file,
+/// which `new-ext` writes both of, so an extension a branch adds is linked
+/// at its merge (#1252). A feature the bundle gains and `linked` does not
+/// name is this test red, and so is `pcntl` named.
 #[test]
 fn xtask_links_the_bundle_with_every_extension_feature_but_pcntl() {
     let bundle: toml::Value = toml::from_str(
         &fs::read_to_string(workspace().join("crates/php_bundle/Cargo.toml")).unwrap(),
     )
     .unwrap();
-    let declared: Vec<&str> = bundle["features"]
-        .as_table()
-        .unwrap()
+    let features = bundle["features"].as_table().unwrap();
+    let declared: Vec<&str> = features
         .iter()
         .filter(|(_, on)| {
             on.as_array().is_some_and(|on| {
@@ -832,10 +833,8 @@ fn xtask_links_the_bundle_with_every_extension_feature_but_pcntl() {
         })
         .map(|(name, _)| name.as_str())
         .collect();
-    assert!(declared.len() >= 20, "{declared:?}");
-    let xtask: toml::Value =
-        toml::from_str(&fs::read_to_string(workspace().join("xtask/Cargo.toml")).unwrap()).unwrap();
-    let linked: Vec<&str> = xtask["dependencies"]["php_bundle"]["features"]
+    assert!(declared.contains(&"standard"), "{declared:?}");
+    let linked: Vec<&str> = features["linked"]
         .as_array()
         .unwrap()
         .iter()
@@ -844,14 +843,22 @@ fn xtask_links_the_bundle_with_every_extension_feature_but_pcntl() {
     for feature in declared.iter().filter(|f| **f != "pcntl") {
         assert!(
             linked.contains(feature),
-            "xtask/Cargo.toml does not name {feature}: {linked:?}"
+            "the bundle's `linked` does not name {feature}: {linked:?}"
         );
     }
     assert!(
         declared.contains(&"pcntl") && !linked.contains(&"pcntl"),
         "the harness links pcntl, so a fence could fork it: {linked:?}"
     );
-    assert!(linked.contains(&"test"), "{linked:?}");
+    let xtask: toml::Value =
+        toml::from_str(&fs::read_to_string(workspace().join("xtask/Cargo.toml")).unwrap()).unwrap();
+    let enabled: Vec<&str> = xtask["dependencies"]["php_bundle"]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    assert_eq!(enabled, ["test", "witness-trace", "linked"]);
 }
 
 /// Nothing to run is complete only with the pinned oracle here to have

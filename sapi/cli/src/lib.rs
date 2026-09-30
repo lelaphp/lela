@@ -1,8 +1,9 @@
-//! The CLI host, php's `sapi/cli/php_cli.c`: the command line read as
-//! `main` and `do_cli` read it through `php_getopt`, one request
-//! description built from it, the sink on the process's two streams, and
-//! the exit code as `serve` ends the request (design §4.1, §4.3 seam 4,
-//! §5.14).
+//! php's CLI, `php-src/sapi/cli`, as one crate under `sapi/` (ADR-0008):
+//! the binary `php`, reaching the engine through `php_sapi` alone. The
+//! host is `sapi/cli/php_cli.c`: the command line read as `main` and
+//! `do_cli` read it through `php_getopt`, one request description built
+//! from it, the sink on the process's two streams, and the exit code as
+//! `serve` ends the request (design §4.1, §4.3 seam 4, §5.14).
 //!
 //! What the command line asks for is one of eight things, as `do_cli`
 //! settles it: the usage, the version, `phpinfo()` as text, the
@@ -39,13 +40,27 @@
 //! nothing in the engine reads the request's body yet (design §4.3 seam
 //! 4, the body stream), so stdin is read whole where it is the program.
 
+#![forbid(unsafe_code)]
+// seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
+
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::process::ExitCode;
 
-use php_engine::{Engine, FileHandles, OutputSink, PHP_VERSION, RequestDescription, ResponseHead};
-
-use crate::getopt::{Getopt, Opt, Taken, getopt_line, opt, os};
+use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt, os};
+use php_sapi::ini::define;
+use php_sapi::{
+    Engine, FileHandles, Observables, OutputSink, PHP_VERSION, RequestDescription, ResponseHead,
+};
 
 /// `sapi_module.name` for the CLI: what `php_sapi_name()` answers and
 /// what the version line carries.
@@ -376,16 +391,6 @@ fn bare_words(rest: &mut std::slice::Iter<'_, Vec<u8>>) -> Vec<Program> {
         .collect()
 }
 
-/// `php_ini_builder_define`'s split: `name=value` at the first `=`, or
-/// `name=1` for a bare name. Its line, quoted or not, and what the INI
-/// grammar reads from it are the engine's builder's.
-fn define(given: &str) -> (String, String) {
-    match given.split_once('=') {
-        Some((name, value)) => (name.to_owned(), value.to_owned()),
-        None => (given.to_owned(), String::from("1")),
-    }
-}
-
 /// `php_cli_usage` (`Z/sapi/cli/php_cli.c:457-515`) with `php` for the
 /// program's name, on stdout.
 #[must_use]
@@ -459,7 +464,7 @@ fn usage(exit_code: i32) -> Refused {
 pub fn version() -> String {
     format!(
         "PHP {PHP_VERSION} ({NAME}) (built: {}) (NTS)\n",
-        env!("PHP_BUILD_DATE")
+        php_sapi::build_date(env!("PHP_BUILD_EPOCH"))
     )
 }
 
@@ -470,28 +475,6 @@ pub fn info() -> String {
     format!(
         "phpinfo()\nPHP Version => {PHP_VERSION}\n\nServer API => Command Line Interface\nLoaded Configuration File => (none)\n"
     )
-}
-
-/// `print_modules` and `print_extensions`: the loaded extensions sorted
-/// as `module_name_cmp` sorts them, without regard to case, under
-/// `[PHP Modules]`, and the Zend extensions in the order they were
-/// loaded under `[Zend Modules]`, opcache's `Zend OPcache` being both.
-#[must_use]
-pub fn extensions(engine: &Engine) -> String {
-    let mut names = engine.loaded_extensions();
-    names.sort_by_key(|name| name.to_ascii_lowercase());
-    let mut text = String::from("[PHP Modules]\n");
-    for name in names {
-        text.push_str(&name);
-        text.push('\n');
-    }
-    text.push_str("\n[Zend Modules]\n");
-    for name in engine.loaded_zend_extensions() {
-        text.push_str(&name);
-        text.push('\n');
-    }
-    text.push('\n');
-    text
 }
 
 /// The sink on the process's streams, php's CLI: body bytes on stdout,
@@ -688,7 +671,7 @@ pub fn strip(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 
 fn view(
     program: &Program,
     arguments: &[OsString],
-    write: impl FnOnce(RequestDescription, &mut dyn OutputSink) -> php_engine::Observables,
+    write: impl FnOnce(RequestDescription, &mut dyn OutputSink) -> Observables,
 ) -> i32 {
     match describe(program, arguments) {
         Ok(mut description) => {
@@ -727,6 +710,75 @@ pub fn lint(engine: &Engine, program: &Program, sink: &mut dyn OutputSink) -> i3
     sink.write(&line);
     sink.flush();
     if served.exit_code == 0 { 0 } else { 255 }
+}
+
+/// php's CLI `main`: the command line read, what it asks for served on
+/// one engine of the bundle's enabled set with the bundle's tier bound,
+/// and the process ending with the code the request ended with. The ini
+/// the line carries is laid over the engine's defaults before it is
+/// built, as php's `-d` reaches `php_ini_builder` before
+/// `php_module_startup`; the version needs no engine, and the listing
+/// one served nothing.
+pub fn main() -> ExitCode {
+    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let options = match Options::parse(&argv) {
+        Ok(options) => options,
+        Err(refused) => {
+            let _ = std::io::stderr()
+                .lock()
+                .write_all(refused.stderr.as_bytes());
+            let _ = std::io::stdout()
+                .lock()
+                .write_all(refused.stdout.as_bytes());
+            return php_sapi::exit_code(refused.exit_code);
+        }
+    };
+    let status = match &options.ask {
+        Ask::Usage => print(&usage_text()),
+        Ask::Version => print(&version()),
+        Ask::Info => print(&info()),
+        Ask::Extensions => print(&php_sapi::modules(&engine(&options.ini))),
+        Ask::Serve(program, arguments) => serve(&engine(&options.ini), program, arguments),
+        Ask::Highlight(program, arguments) => highlight(&engine(&options.ini), program, arguments),
+        Ask::Strip(program, arguments) => strip(&engine(&options.ini), program, arguments),
+        // `do_cli`'s lint loop: the status starts at 0, a lint that fails
+        // sets 255 and a file that cannot be opened sets 1, each as it
+        // comes, and one that passes changes nothing.
+        Ask::Lint { programs, refused } => {
+            let mut status = 0;
+            if let Some(sentence) = refused {
+                let _ = std::io::stdout().lock().write_all(sentence.as_bytes());
+                status = 1;
+            }
+            let engine = engine(&options.ini);
+            let mut sink = Process;
+            for program in programs {
+                match lint(&engine, program, &mut sink) {
+                    0 => {}
+                    ended => status = ended,
+                }
+            }
+            status
+        }
+    };
+    php_sapi::exit_code(status)
+}
+
+/// `text` on stdout, and the status 0.
+fn print(text: &str) -> i32 {
+    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+    0
+}
+
+/// A fresh engine of `php_bundle::enabled()`, every extension in startup
+/// order and `php_bundle::Tier` bound, started over the line's `ini`
+/// ([`php_sapi::start`]).
+fn engine(ini: &[(String, String)]) -> Engine {
+    let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
+    let builder = Engine::builder()
+        .extensions(&extensions)
+        .tier::<php_bundle::Tier>();
+    php_sapi::start(builder, ini, None)
 }
 
 #[cfg(test)]

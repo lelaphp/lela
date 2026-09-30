@@ -739,8 +739,9 @@ fn engine_sources(root: &Path) {
 /// A release binary built once and never again was the lane's engine for
 /// every run after, however far the tree moved, since `release` is
 /// preferred over `debug` (#475). It is preferred among the binaries the
-/// tree has not moved past, and not over them: `cargo build -p php`
-/// writes the debug one, and that is what displaces it.
+/// tree has not moved past, and not over them: `cargo build -p
+/// php_sapi_cli -p php_sapi_cgi` writes the debug one, and that is what
+/// displaces it.
 #[test]
 fn a_binary_the_tree_has_moved_past_is_passed_over_for_one_it_has_not() {
     let root = fixture_tree("stale-passed-over");
@@ -761,9 +762,50 @@ fn a_binary_the_tree_has_moved_past_is_passed_over_for_one_it_has_not() {
     };
     assert!(why.contains(&stale.display().to_string()), "{why}");
     assert!(why.contains("crates/php_engine/src/lib.rs"), "{why}");
-    assert!(why.contains("cargo build -p php"), "{why}");
+    assert!(
+        why.contains("cargo build -p php_sapi_cli -p php_sapi_cgi"),
+        "{why}"
+    );
     assert_eq!(behind.binary(), None, "nothing runs under it");
     assert_eq!(behind.stamp(), None, "and no reading is stamped with it");
+}
+
+/// Since ADR-0008 `php-cgi` is a crate's of its own, so building `php`
+/// alone leaves the `php-cgi` beside it where it was, and a CGI-shaped
+/// test of the lane would run an engine the tree no longer describes: the
+/// pair is held to the tree, and a `php-cgi` behind it makes the fresh
+/// `php` beside it a skip naming the `php-cgi`.
+#[test]
+fn a_php_cgi_the_tree_has_moved_past_holds_back_the_php_beside_it() {
+    let root = fixture_tree("stale-cgi-beside");
+    let cgi = root.path().join("target/debug/php-cgi");
+    std::fs::create_dir_all(cgi.parent().unwrap()).unwrap();
+    std::fs::write(&cgi, "the cgi").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&cgi)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_hours(1))
+        .unwrap();
+    engine_sources(root.path());
+    let fresh = built(root.path(), "debug", 0);
+    let pin = pin_with_path(root.path());
+    let behind = Runner::resolve(root.path(), &pin, None).unwrap();
+    let Runner::Stale(why) = &behind else {
+        panic!("{behind:?}")
+    };
+    assert!(why.contains(&cgi.display().to_string()), "{why}");
+    std::fs::File::options()
+        .write(true)
+        .open(&cgi)
+        .unwrap()
+        .set_modified(SystemTime::now())
+        .unwrap();
+    assert_eq!(
+        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::Engine(fresh),
+        "a php-cgi the tree has not moved past leaves the php beside it the engine"
+    );
 }
 
 /// The engine's binary names itself on the reading that ran it, and a
@@ -799,5 +841,35 @@ fn a_tree_with_no_engine_source_leaves_every_binary_the_engine() {
     assert_eq!(
         Runner::resolve(root.path(), &pin, None).unwrap(),
         Runner::Engine(old)
+    );
+}
+
+/// A binary named by a path relative to where `xtask` was invoked is the
+/// one its programs are handed by its absolute path: they run in the run's
+/// copy of the tree, where the relative path named nothing, and every test
+/// of the subset skipped for it (#1259). A path that names no file is
+/// refused before anything runs, naming the path.
+#[test]
+fn a_named_binary_is_handed_on_by_its_absolute_path_and_one_not_there_is_refused() {
+    let root = fixture_tree("named-relative");
+    let binary = built(root.path(), "release", 0);
+    let pin = pin_with_path(root.path());
+    let here = std::env::current_dir().unwrap();
+    let relative: PathBuf = here
+        .components()
+        .skip(1)
+        .map(|_| std::path::Component::ParentDir)
+        .chain(binary.components().skip(1))
+        .collect();
+    assert!(relative.is_relative(), "{}", relative.display());
+    let runner = Runner::resolve(root.path(), &pin, Some(&relative)).unwrap();
+    let absolute = std::fs::canonicalize(&binary).unwrap();
+    assert_eq!(runner, Runner::Engine(absolute));
+
+    let refused = Runner::resolve(root.path(), &pin, Some(Path::new("target/no-such-php")))
+        .expect_err("a path that names no file is refused");
+    assert!(
+        format!("{refused:#}").contains("target/no-such-php"),
+        "{refused:#}"
     );
 }

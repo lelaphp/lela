@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 
 use crate::generated;
 use crate::git;
+use crate::layout;
 use crate::lines;
 use crate::lock::CargoLock;
 use crate::manifest::{self, Budget, Crate, Manifest};
@@ -383,7 +384,8 @@ fn text_of(root: &Path, path: &str) -> Result<Option<String>> {
 /// own negative controls hold generated code on purpose and are left out.
 pub(crate) fn committed_generated(root: &Path, exceptions: &[&str]) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    for dir in sources::CRATE_DIRS {
+    let dirs = layout::CRATE_DIRS.iter().map(|d| d.dir);
+    for dir in dirs.chain([layout::HARNESS]) {
         for path in git::files(root, Path::new(dir))? {
             if exceptions.contains(&path.as_str()) || path.starts_with("xtask/fixtures/") {
                 continue;

@@ -53,4 +53,4 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 |---|---|---|---|---|
 | php_bundle | topological | 33 | pass | 34 workspace dependencies within its edges |
 
-<!-- /computed in=d708e83ca2ac9d7631b9cb08a036d301799fe037d1d5eb1dece72a1c2c1bd718 out=7b24621d601049f54c12f4dc2c88a82c3b775d3e27a2985d288c258752def651 -->
+<!-- /computed in=761873b526a8424c3782b4cca54c3d531b3addd703981686a75553f26c271102 out=7b24621d601049f54c12f4dc2c88a82c3b775d3e27a2985d288c258752def651 -->

@@ -429,17 +429,10 @@ since = "2026-09-18"
         "the id carries the kind's prefix: {err}"
     );
 
+    // The fixture's row is the registry's one row, whatever rows the
+    // workspace's own registry carries (#1252).
     let root = scratch("crosscheck");
-    let path = root.join(divergence::FILE);
-    let text = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(
-        &path,
-        format!(
-            "{text}
-{row}"
-        ),
-    )
-    .unwrap();
+    std::fs::write(root.join(divergence::FILE), row).unwrap();
     let registry = Registry::load(&root).unwrap();
     let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
     assert!(ok, "{err}");
@@ -451,14 +444,7 @@ since = "2026-09-18"
         md.contains(&counts_line(&registry, Some(Kind::Crosscheck))),
         "the kind's row of counts:\n{md}"
     );
-    // The workspace's own registry may carry crosscheck rows already
-    // (#1236's), so the fixture's row is one more on top of those.
-    let accepted = registry
-        .rows()
-        .iter()
-        .filter(|r| r.kind == Kind::Crosscheck && r.status == Status::Accepted)
-        .count();
-    assert!(accepted >= 1, "the fixture's row is counted: {md}");
+    assert!(md.contains("| crosscheck | 0 | 1 | 0 | 1 |"), "{md}");
     assert!(md.contains(&counts_line(&registry, None)), "{md}");
     let (ok, json, _) = xtask(
         &root,
@@ -466,7 +452,7 @@ since = "2026-09-18"
     );
     assert!(ok);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["counts"]["crosscheck"]["accepted"], accepted);
+    assert_eq!(value["counts"]["crosscheck"]["accepted"], 1);
 }
 
 #[test]
@@ -488,8 +474,14 @@ fn status_divergence_counts_a_proposed_row_as_open() {
 }
 
 /// `docs/divergence.md` is the view; the registry is the truth. Its region's
-/// command is the status section, so its body is that rendering, which is
-/// what `computed check` holds it to without running anything.
+/// command is the status section with every reason whole, over the
+/// registry beside it, so its body is that rendering: the body opens with
+/// the section's own table head, as the section renders it over a registry
+/// of one row. Whether the body is the rendering of the rows the registry
+/// has now is `computed check`'s to hold, which pre-commit runs after
+/// `xtask regions` has rendered it and CI runs over the tree; held here, a
+/// merge that brings rows from both sides fails before the hook renders
+/// them (#1252).
 #[test]
 fn docs_divergence_md_is_the_status_section_as_a_computed_region() {
     let page = std::fs::read_to_string(workspace().join("docs/divergence.md")).unwrap();
@@ -498,22 +490,24 @@ fn docs_divergence_md_is_the_status_section_as_a_computed_region() {
         .find(|l| l.starts_with("<!-- computed exec"))
         .expect("one exec region");
     assert!(
-        opener.contains("status --section divergence --uncut"),
+        opener.contains("cmd=\"cargo xtask status --section divergence --uncut\""),
         "the command is the status section, reasons whole: {opener}"
     );
     assert!(opener.contains("inputs=divergence.toml"), "{opener}");
     let start = page.find(opener).unwrap() + opener.len();
     let end = page[start..].find("<!-- /computed").unwrap() + start;
     let body = page[start..end].trim();
-    let (ok, md, err) = xtask(
-        workspace(),
-        &["status", "--section", "divergence", "--uncut"],
-    );
+
+    let root = scratch("page");
+    std::fs::write(root.join(divergence::FILE), COVERING).unwrap();
+    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
     assert!(ok, "{err}");
+    let head: Vec<&str> = md.trim().lines().take(2).collect();
+    assert_eq!(head.len(), 2, "{md}");
     assert_eq!(
-        body,
-        md.trim(),
-        "docs/divergence.md is stale: run `computed run docs/divergence.md`"
+        body.lines().take(2).collect::<Vec<_>>(),
+        head,
+        "the body is the section's rendering"
     );
 }
 

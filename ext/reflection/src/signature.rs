@@ -1360,7 +1360,7 @@ impl ReflectionParameter {
             return Err(no_default(req));
         };
         match expr {
-            ConstExpr::Constant { name, .. } => PhpString::new(req, &name.0).map(Some),
+            ConstExpr::Constant { name, .. } => PhpString::new(req, &name.resolved().0).map(Some),
             ConstExpr::ClassConstant { class, name, .. } => {
                 let text = format!(
                     "{}::{}",
@@ -1438,9 +1438,7 @@ impl ReflectionParameter {
         super::attr::reflect_attributes(
             req,
             &attributes,
-            scope,
-            super::attr::TARGET_PARAMETER,
-            file.as_deref(),
+            super::attr::Subject::new(scope, super::attr::TARGET_PARAMETER, file.as_deref()),
             name,
             flags,
         )

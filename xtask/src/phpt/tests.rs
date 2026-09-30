@@ -722,6 +722,44 @@ fn a_directory_the_pinned_tree_has_not_is_kept_and_named_absent() {
     assert_eq!(subset.absent(), [Path::new("Zend/nope")]);
 }
 
+/// An extension's row derives its subset, `ext/<name>/tests`, and where the
+/// pinned tree has no such directory the extension has no tests of its
+/// own, as `ext/lexbor` has none: its reading, asked for by name and in
+/// the lane alike, is a skip naming the directory, not the standing fail
+/// a row that names a directory the tree has not earns. A subset named on
+/// the command line that is no crate and no directory is still refused,
+/// so a typo is not a skip (#1231).
+#[test]
+fn an_extension_with_no_test_directory_reads_as_a_skip_and_a_name_that_is_nothing_fails() {
+    let tree = fixture_tree();
+    let manifest = manifest_of([Crate::named("ext/testless")], &tree);
+    let registry = registry("");
+    for subset in [Some("ext/testless".to_owned()), None] {
+        let ask = Ask {
+            subset,
+            jobs: NonZeroUsize::new(1),
+            ..Ask::default()
+        };
+        let readings = super::run(&workspace(), &manifest, &registry, &ask).unwrap();
+        assert_eq!(readings.len(), 1, "{readings:#?}");
+        let reading = &readings[0];
+        assert_eq!(reading.scope, "ext/testless", "{reading:#?}");
+        assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+        assert!(
+            reading.message.contains("ext/testless/tests")
+                && reading.message.contains("no tests of its own"),
+            "{}",
+            reading.message
+        );
+    }
+    let ask = Ask {
+        subset: Some("ext/nosuch".to_owned()),
+        ..Ask::default()
+    };
+    let refused = super::run(&workspace(), &manifest, &registry, &ask).unwrap_err();
+    assert!(format!("{refused:#}").contains("ext/nosuch"), "{refused:#}");
+}
+
 #[test]
 fn the_per_commit_lane_is_composed_from_the_crate_rows() {
     let tree = fixture_tree();
@@ -729,7 +767,7 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
         [
             Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"]),
             Crate::named("php_heap"),
-            Crate::named("php_sapi").with_phpt(&["sapi/cli/tests"]),
+            Crate::named("sapi/cli").with_phpt(&["sapi/cli/tests"]),
             Crate::named("ext/pcre"),
             Crate::named("ext/openssl").with_feature("openssl"),
             Crate::named("ext/curl").with_feature("curl"),
@@ -741,11 +779,11 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
         .map(|subset| subset.scope)
         .collect();
     // §7's per-commit row: Zend/tests and tests/ with php_engine, sapi/cli
-    // with php_sapi, and the extensions the binary carries: the default
+    // with its host, and the extensions the binary carries: the default
     // set's and the one behind a feature it turns on (revision 63). One
     // behind a feature it does not turn on is the nightly lane's, and a
     // crate with no subset owns none.
-    assert_eq!(lane, ["php_engine", "php_sapi", "ext/pcre", "ext/openssl"]);
+    assert_eq!(lane, ["php_engine", "sapi/cli", "ext/pcre", "ext/openssl"]);
 }
 
 /// The lane over the tracked manifest and the binary's own declaration:
@@ -1082,26 +1120,112 @@ fn a_census_that_drops_a_miss_fails() {
 /// tree standing where `php-src/ext/fixture/tests` would, so what its
 /// programs write lands there and not in the fixture.
 fn fixture_subset(name: &str) -> (Tree, Subset) {
-    fn copy(from: &Path, to: &Path) {
-        fs::create_dir_all(to).unwrap();
-        for entry in fs::read_dir(from).unwrap() {
-            let path = entry.unwrap().path();
-            let into = to.join(path.file_name().unwrap());
-            if path.is_dir() {
-                copy(&path, &into);
-            } else {
-                fs::copy(&path, &into).unwrap();
-            }
+    let (tree, subset) = subset(name, &[]);
+    copy(&fixture(name), tree.path());
+    (tree, subset)
+}
+
+/// A fixture directory under `xtask/fixtures/phpt`.
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/phpt")
+        .join(name)
+}
+
+/// Every file under `from` copied to the same place under `to`.
+fn copy(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let into = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy(&path, &into);
+        } else {
+            fs::copy(&path, &into).unwrap();
         }
     }
-    let (tree, subset) = subset(name, &[]);
-    copy(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/phpt")
-            .join(name),
-        tree.path(),
+}
+
+/// The redirect fixture laid down as a tree standing where the pinned
+/// php-src would, and the subset of one directory of it.
+fn redirect_subset(tree: &Tree, under: &str) -> Subset {
+    copy(&fixture("redirect"), tree.path());
+    Subset {
+        scope: "ext/driver".to_owned(),
+        dirs: vec![Dir::at(tree.path(), PathBuf::from(under))],
+        root: tree.path().to_path_buf(),
+    }
+}
+
+/// A `--REDIRECTTEST--` runs the set its section names in its place: each
+/// test under the environment the section returns and `REDIR_TEST_DIR`,
+/// its program written in the redirecting test's directory, needing the
+/// redirecting test's extensions beside its own, and its verdict naming
+/// both tests; the redirecting test is no verdict of its own. The set's
+/// own directory run as a subset has no driver and skips, and a redirect
+/// whose extension is not loaded or whose section names no directory runs
+/// no set and is a skip or a bork in upstream's words (#814).
+#[test]
+fn a_redirecttest_runs_its_set_under_the_environment_its_section_returns() {
+    if oracle().is_none() {
+        return;
+    }
+    let verdicts = |under: &str| {
+        let tree = Tree::new("phpt-redirect").unwrap();
+        let tally = run(&redirect_subset(&tree, under), &registry(""));
+        tally
+            .judged
+            .iter()
+            .map(|j| (j.id.clone(), j.name.clone(), j.judgement, j.note.clone()))
+            .collect::<Vec<_>>()
+    };
+    let driver = verdicts("ext/driver/tests");
+    assert_eq!(
+        driver
+            .iter()
+            .map(|(id, name, judgement, _)| (id.as_str(), name.as_str(), *judgement))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "phpt:php-src/ext/shared/tests/dsn.phpt via php-src/ext/driver/tests/common.phpt",
+                "ext/shared/tests/dsn.phpt via common.phpt",
+                Judgement::Pass
+            ),
+            (
+                "phpt:php-src/ext/driver/tests/own.phpt",
+                "own.phpt",
+                Judgement::Pass
+            ),
+        ],
+        "{driver:#?}"
     );
-    (tree, subset)
+    let shared = verdicts("ext/shared/tests");
+    assert_eq!(shared.len(), 1, "{shared:#?}");
+    assert_eq!(
+        (shared[0].2, shared[0].3.as_str()),
+        (Judgement::Skip, "no driver"),
+        "{shared:#?}"
+    );
+    let refused = verdicts("ext/refused/tests");
+    assert_eq!(
+        refused
+            .iter()
+            .map(|(_, name, judgement, note)| (name.as_str(), *judgement, note.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "no-extension.phpt",
+                Judgement::Skip,
+                "Required extension missing: not_an_extension"
+            ),
+            (
+                "no-set.phpt",
+                Judgement::Bork,
+                "Redirect info must contain exactly one TEST string to be used as redirect directory."
+            ),
+        ],
+        "{refused:#?}"
+    );
 }
 
 /// The fixture's subset run with the pinned oracle standing in for the

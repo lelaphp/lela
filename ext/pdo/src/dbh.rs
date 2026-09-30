@@ -10,7 +10,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{Function, call_array, known_method, lookup_class, new_object};
 use php_ext::coerce::value_name;
 use php_ext::decl::Name;
-use php_ext::raising::{Thrown, argument_error, deprecated, throw, throwing_warnings};
+use php_ext::raising::{Thrown, argument_error, deprecated, pending, throw, throwing_warnings};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -378,7 +378,23 @@ fn construct_driver(
 
 /// The DSN as the constructor reads it: a name without a colon looked
 /// up as `pdo.dsn.<name>`, and a `uri:` one read from the first line of
-/// what the URI opens, each refused as php refuses it.
+/// what the URI opens, each refused as php refuses it. A handler that
+/// throws on the `uri:` deprecation ends the constructor there, before
+/// anything is opened.
+///
+/// ```php
+/// $dsn = tempnam(sys_get_temp_dir(), 'dsn');
+/// $db = $dsn . '.db';
+/// file_put_contents($dsn, "sqlite:$db");
+/// set_error_handler(function ($no, $str) { throw new ErrorException($str); });
+/// try { new PDO("uri:$dsn"); } catch (ErrorException $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(file_exists($db));
+/// unlink($dsn);
+/// ```
+/// ```expect
+/// Looking up the DSN from a URI is deprecated due to possible security concerns with DSNs coming from remote URIs
+/// bool(false)
+/// ```
 fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown> {
     if !source.contains(&b':') {
         let alias = [b"pdo.dsn.".as_slice(), &source].concat();
@@ -405,6 +421,7 @@ fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown
             req,
             "Looking up the DSN from a URI is deprecated due to possible security concerns with DSNs coming from remote URIs",
         );
+        pending(req)?;
         let Some(line) = dsn_from_uri(req, &uri)? else {
             return Err(argument_error(
                 req,

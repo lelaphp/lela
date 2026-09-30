@@ -1,0 +1,45 @@
+# The positive control of `xtask new-sapi` (ADR-0008): a workspace with the
+# facade and the bundle present, a `[[crate]]` row for `sapi/demo` and the
+# rules the generated crate must pass untouched, the hosts' edge among them.
+# The pin is the real one, by path. The test copies this tree to a scratch
+# directory and lays the crate down there; nothing is generated in place.
+[oracle]
+pin = "../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "php_sapi"
+budget = 200
+[[crate]]
+name = "php_bundle"
+budget = 500
+[[crate]]
+name = "sapi/demo"
+budget = 500
+phpt = ["sapi/cli/tests"]
+
+[[edge]]
+from = "sapi/*"
+to = ["php_sapi", "php_proto", "php_bundle"]
+adr = "0008"
+
+[[rule]]
+id = "unsafe.homes"
+allow = ["php_heap", "ext/*/src/ffi/", "sapi/*/src/ffi/"]
+adr = "0006"
+text = "unsafe is permitted in three places; see design §4.1."
+
+[[rule]]
+id = "lints.no-panic"
+scope = ["crates/php_sapi", "sapi/*"]
+exempt = ["tests", "xtask"]
+deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
+text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."

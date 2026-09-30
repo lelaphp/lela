@@ -4,7 +4,7 @@
 
 pub use php_unit::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
-    ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, HookKind, IniDecl, MethodDecl, Name,
-    NameKind, Parameter, ParameterDefault, PropertyDecl, PropertyHooks, Radix, TraitAdaptation,
-    Type, Visibility, class_attribute_refusal,
+    ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind, IniDecl,
+    MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, PropertyHooks, Radix,
+    TraitAdaptation, Type, Visibility, class_attribute_refusal, hook_attribute_refusal,
 };

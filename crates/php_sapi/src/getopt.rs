@@ -6,19 +6,19 @@ use std::ffi::OsString;
 /// One row of a host's `OPTIONS`: the code `php_getopt` returns, a
 /// letter or php's number for a long switch, whether it takes a value
 /// (`1`), may (`2`) or does not (`0`), and its long name.
-pub(crate) struct Opt {
-    pub(crate) code: u8,
-    pub(crate) need: u8,
-    pub(crate) name: &'static str,
+pub struct Opt {
+    pub code: u8,
+    pub need: u8,
+    pub name: &'static str,
 }
 
-pub(crate) const fn opt(code: u8, need: u8, name: &'static str) -> Opt {
+pub const fn opt(code: u8, need: u8, name: &'static str) -> Opt {
     Opt { code, need, name }
 }
 
 /// `php_opt_error`'s three reasons, `main/getopt.c:20-24`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OptError {
+pub enum OptError {
     Colon,
     NotFound,
     NoArgument,
@@ -26,7 +26,7 @@ pub(crate) enum OptError {
 
 /// Where `php_getopt` stopped and why: the argument and the character
 /// its line names, and the reason.
-pub(crate) type Stopped = (usize, usize, OptError);
+pub type Stopped = (usize, usize, OptError);
 
 /// `php_getopt` (`Z/main/getopt.c:55-198`) over `argv[1..]`, with the
 /// state it keeps in statics, `optchr` and `dash`, kept here: `optchr`
@@ -34,22 +34,22 @@ pub(crate) type Stopped = (usize, usize, OptError);
 /// word, which is why the line php prints for a switch it does not know
 /// counts from the previous cluster's end. Copied as written, since that
 /// line is observable.
-pub(crate) struct Getopt {
+pub struct Getopt {
     options: &'static [Opt],
-    pub(crate) optind: usize,
+    pub optind: usize,
     optchr: usize,
     dash: bool,
 }
 
 /// One thing `php_getopt` returned: a switch with its value, or the end
 /// of the switches.
-pub(crate) enum Taken {
+pub enum Taken {
     Switch(u8, Option<Vec<u8>>),
     End,
 }
 
 impl Getopt {
-    pub(crate) fn new(options: &'static [Opt]) -> Getopt {
+    pub fn new(options: &'static [Opt]) -> Getopt {
         Getopt {
             options,
             optind: 0,
@@ -59,7 +59,7 @@ impl Getopt {
     }
 
     /// The next switch, `php_getopt` with `arg_start` 2.
-    pub(crate) fn next(&mut self, argv: &[Vec<u8>]) -> Result<Taken, Stopped> {
+    pub fn next(&mut self, argv: &[Vec<u8>]) -> Result<Taken, Stopped> {
         let Some(word) = argv.get(self.optind) else {
             return Ok(Taken::End);
         };
@@ -184,7 +184,7 @@ impl Getopt {
 /// `php_opt_error`'s line on stderr (`Z/main/getopt.c:28-50`), the
 /// argument counted from the program's name and the character from
 /// one; the host's usage follows it on stdout.
-pub(crate) fn getopt_line(argv: &[Vec<u8>], argument: usize, at: usize, error: OptError) -> String {
+pub fn getopt_line(argv: &[Vec<u8>], argument: usize, at: usize, error: OptError) -> String {
     let letter = argv
         .get(argument)
         .and_then(|word| word.get(at))
@@ -204,6 +204,6 @@ pub(crate) fn getopt_line(argv: &[Vec<u8>], argument: usize, at: usize, error: O
 }
 
 /// Bytes of the command line as a word the host hands on.
-pub(crate) fn os(bytes: &[u8]) -> OsString {
+pub fn os(bytes: &[u8]) -> OsString {
     OsString::from(String::from_utf8_lossy(bytes).into_owned())
 }

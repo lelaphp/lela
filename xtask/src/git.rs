@@ -419,13 +419,39 @@ mod tests {
     /// tree hash matches `hash-object` over the same listing and the
     /// commit is the first seven characters of `rev-parse HEAD`, a fixed
     /// width, where `--short=7` grows past seven once they are ambiguous.
+    /// Over a scratch repository of its own, so a merge in progress in
+    /// this one, or a file it adds under `docs/`, moves nothing (#1252).
     #[test]
     fn the_stamp_agrees_with_git() {
-        let root = built_root();
+        let root = crate::scratch::Tree::new("stamp").unwrap();
+        std::fs::create_dir_all(root.join("docs/deeper")).unwrap();
+        std::fs::write(root.join("docs/one.md"), "one\n").unwrap();
+        std::fs::write(root.join("docs/deeper/two.toml"), "two = 2\n").unwrap();
+        std::fs::write(root.join("elsewhere.md"), "not under docs\n").unwrap();
+        let named = ["-c", "user.name=x", "-c", "user.email=x@x"];
+        let unhooked = [
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
+        ];
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["add", "-A"],
+            &[
+                &named[..],
+                &unhooked[..],
+                &["commit", "-q", "-m", "scratch"],
+            ]
+            .concat(),
+        ] {
+            super::git(&root, args, None).unwrap();
+        }
+        let root = root.path();
         let out = |args: &[&str], stdin: Option<&str>| {
             let mut child = std::process::Command::new("git")
                 .arg("-C")
-                .arg(&root)
+                .arg(root)
                 .args(args)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
@@ -438,10 +464,11 @@ mod tests {
             String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
         };
         assert_eq!(
-            head_commit(&root).unwrap(),
+            head_commit(root).unwrap(),
             out(&["rev-parse", "HEAD"], None).trim()[..7]
         );
-        let paths = files(&root, Path::new("docs")).unwrap();
+        let paths = files(root, Path::new("docs")).unwrap();
+        assert_eq!(paths.len(), 2, "{paths:?}");
         let absolute = paths
             .iter()
             .map(|p| root.join(p).display().to_string())
@@ -456,7 +483,7 @@ mod tests {
             listing.push('\n');
         }
         assert_eq!(
-            tree_hash(&root, Path::new("docs")).unwrap(),
+            tree_hash(root, Path::new("docs")).unwrap(),
             out(&["hash-object", "--stdin"], Some(&listing)).trim()
         );
     }

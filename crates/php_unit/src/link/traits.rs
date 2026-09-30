@@ -803,6 +803,17 @@ impl Composer<'_, '_> {
     /// bool(true)
     /// int(42)
     /// ```
+    ///
+    /// A bare constant written in a namespace is the namespace's, so it
+    /// is the same value as the one written fully qualified (#1270):
+    ///
+    /// ```php
+    /// namespace N { const FOO = "foo"; trait T1 { public $var = FOO; } }
+    /// namespace { trait T2 { public $var = N\FOO; } class Baz { use N\T1, T2; } var_dump((new Baz)->var); }
+    /// ```
+    /// ```expect
+    /// string(3) "foo"
+    /// ```
     fn identical(&self, a: Option<&ConstExpr>, b: Option<&ConstExpr>) -> bool {
         match (a, b) {
             (None, None) => true,

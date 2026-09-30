@@ -384,7 +384,7 @@ fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
         [
             Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"]),
             Crate::named("php_heap"),
-            Crate::named("php_sapi").with_phpt(&["sapi/cli/tests"]),
+            Crate::named("sapi/cli").with_phpt(&["sapi/cli/tests"]),
             Crate::named("ext/pcre"),
             Crate::named("ext/curl").with_feature("curl"),
         ],
@@ -393,7 +393,7 @@ fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
     // No engine is built here, so every subset of the lane is a skip that
     // says so; what is under test is which subsets the lane is. §7's
     // per-commit row: Zend/tests and tests/ with php_engine, sapi/cli with
-    // php_sapi, and the default extensions' own. The scratch workspace
+    // its host, and the default extensions' own. The scratch workspace
     // has no binary crate, so it carries no feature and a crate behind
     // one is outside its lane (revision 63); one with no subset owns none.
     let root = Tree::new("phpt-lane").unwrap();
@@ -402,7 +402,7 @@ fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
     assert_eq!(
         scopes,
-        ["php_engine", "php_sapi", "ext/pcre"],
+        ["php_engine", "sapi/cli", "ext/pcre"],
         "{readings:#?}"
     );
 }
@@ -653,7 +653,9 @@ fn a_binary_the_tree_has_moved_past_runs_nothing_and_the_skip_names_it() {
         reading.message
     );
     assert!(
-        reading.message.contains("cargo build -p php"),
+        reading
+            .message
+            .contains("cargo build -p php_sapi_cli -p php_sapi_cgi"),
         "{}",
         reading.message
     );

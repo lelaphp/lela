@@ -36,8 +36,8 @@
 //! A `request` fence between the two describes a request of the web, in
 //! the sections a CGI-shaped `.phpt` carries (`--GET--`, `--POST--`,
 //! `--POST_RAW--`, `--COOKIE--`, `--ENV--`): the snippet is served by php-cgi beside
-//! the pinned php for the oracle and by the `php` binary run as php-cgi
-//! for the engine, each in a process of its own, and the `expect` fence
+//! the pinned php for the oracle and by the engine's `php-cgi` for the
+//! engine (`sapi/cgi`, ADR-0008), each in a process of its own, and the `expect` fence
 //! pins what php-cgi writes, its head and its body (#1197).
 //!
 //! A `process` says the snippet changes the process it runs in: it forks,
@@ -104,8 +104,9 @@ pub enum Served {
     /// The `php` binary built with `witness-trace`, in a process of its
     /// own: the fence carries `process` (harness §8, revision 61).
     Binary,
-    /// The same binary run as php-cgi, beside php-cgi for the oracle: a
-    /// `request` fence describes what the CGI host is handed (#1197).
+    /// The engine's `php-cgi` built the same way, beside php-cgi for the
+    /// oracle: a `request` fence describes what the CGI host is handed
+    /// (#1197).
     Cgi,
 }
 

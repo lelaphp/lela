@@ -412,14 +412,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "php"
-version = "0.0.0"
-dependencies = [
- "php_bundle",
- "php_sapi",
-]
-
-[[package]]
 name = "php_bundle"
 version = "0.0.0"
 dependencies = [
@@ -795,6 +787,23 @@ version = "0.0.0"
 dependencies = [
  "php_engine",
  "php_proto",
+]
+
+[[package]]
+name = "php_sapi_cgi"
+version = "0.0.0"
+dependencies = [
+ "php_bundle",
+ "php_proto",
+ "php_sapi",
+]
+
+[[package]]
+name = "php_sapi_cli"
+version = "0.0.0"
+dependencies = [
+ "php_bundle",
+ "php_sapi",
 ]
 
 [[package]]

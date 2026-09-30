@@ -64,6 +64,10 @@ const PREFIX: &str = "xtask-";
 /// among theirs would be a file they have to know about.
 const LOCK: &str = ".lock";
 
+/// What a lock is named while it is being taken, a name the sweep does
+/// not read: see [`hold`].
+const TAKING: &str = ".lock-taking";
+
 /// One scratch directory, removed when this value is dropped.
 ///
 /// [`Tree::new`] takes a name for the caller — the test, or the lane — and
@@ -105,7 +109,7 @@ impl Tree {
 
         // Before this process's first tree, and so before there is one of
         // ours to mistake for a dead run's.
-        SWEPT.call_once(reap);
+        SWEPT.call_once(|| reap(&std::env::temp_dir()));
 
         let named = std::env::temp_dir().join(format!(
             "{PREFIX}{name}-{}-{}",
@@ -248,31 +252,44 @@ pub fn repository(workspace: &Path, to: &Path) -> Result<()> {
 
 /// The lock beside `tree`, opened and taken.
 ///
+/// The file is made and locked under a name the sweep does not read, and
+/// only then renamed to the lock's own, so a sweep in another process
+/// never meets the lock before it is held. Made under its own name, it
+/// stood unlocked between the open and the lock, and a sweep that opened
+/// it there took it, read the tree as a dead run's and left this run
+/// refusing its own lock, which two runs starting at once under load did
+/// (#1252).
+///
 /// A lock that will not come says another live process is working at this
 /// exact path, which the process id and the counter in the name are
 /// supposed to make impossible; it is a failure rather than a thing to
 /// work around, because the alternative is two runs in one directory.
 fn hold(tree: &Path) -> Result<(PathBuf, File)> {
-    let mut named = tree.to_path_buf().into_os_string();
-    named.push(LOCK);
-    let lock = PathBuf::from(named);
+    let beside = |suffix: &str| {
+        let mut named = tree.to_path_buf().into_os_string();
+        named.push(suffix);
+        PathBuf::from(named)
+    };
+    let (taking, lock) = (beside(TAKING), beside(LOCK));
     let file = File::options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&lock)
-        .with_context(|| format!("opening the scratch lock {}", lock.display()))?;
+        .open(&taking)
+        .with_context(|| format!("opening the scratch lock {}", taking.display()))?;
     if file.try_lock().is_err() {
         anyhow::bail!(
             "the scratch lock {} is held: another run is working there",
-            lock.display()
+            taking.display()
         );
     }
+    std::fs::rename(&taking, &lock)
+        .with_context(|| format!("naming the scratch lock {}", lock.display()))?;
     Ok((lock, file))
 }
 
-/// Every scratch tree a dead process left, taken away.
+/// Every scratch tree a dead process left in `base`, taken away.
 ///
 /// The sweep reads the locks, not the trees. A lock it can take is one the
 /// operating system released when its holder ended, however it ended, so
@@ -287,9 +304,8 @@ fn hold(tree: &Path) -> Result<(PathBuf, File)> {
 /// a lock another run took between the listing and the open, a tree
 /// already gone: each is a reason to leave a path alone, and none is a
 /// reason to fail the run that was only trying to make a directory.
-fn reap() {
-    let base = std::env::temp_dir();
-    let Ok(entries) = std::fs::read_dir(&base) else {
+fn reap(base: &Path) {
+    let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
     for entry in entries.flatten() {
@@ -306,11 +322,22 @@ fn reap() {
         let Ok(file) = File::options().read(true).write(true).open(&lock) else {
             continue;
         };
-        if file.try_lock().is_err() {
+        if file.try_lock().is_err() || !names(&lock, &file) {
             continue;
         }
         let _ = std::fs::remove_dir_all(base.join(tree));
         let _ = std::fs::remove_file(&lock);
+    }
+}
+
+/// Whether `path` still names the file `file` has open: a lock renamed
+/// over the one the sweep opened, a new run's at a path an old one left,
+/// is that run's and not the sweep's to take away.
+fn names(path: &Path, file: &File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(path), file.metadata()) {
+        (Ok(named), Ok(open)) => named.dev() == open.dev() && named.ino() == open.ino(),
+        _ => false,
     }
 }
 
@@ -350,5 +377,45 @@ impl Drop for Tree {
             let _ = std::fs::remove_dir_all(&self.path);
             let _ = std::fs::remove_file(lock);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{Tree, hold, reap};
+
+    /// A sweep never meets a lock before it is held (#1252): one thread
+    /// takes lock after lock in a directory of its own while another sweeps
+    /// that directory without pause, and every lock is taken, and each is
+    /// still its taker's when the taker lets it go.
+    #[test]
+    fn a_sweep_beside_a_run_taking_its_locks_never_takes_one() {
+        let base = Tree::new("sweep-race").unwrap();
+        let taken = AtomicBool::new(false);
+        let failed = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !taken.load(Ordering::Relaxed) {
+                    reap(&base);
+                }
+            });
+            let failed = (0..2000).find_map(|n| {
+                let tree = base.join(format!("xtask-race-{n}"));
+                let (lock, file) = match hold(&tree) {
+                    Ok(held) => held,
+                    Err(err) => return Some(format!("lock {n}: {err:#}")),
+                };
+                if !lock.is_file() {
+                    return Some(format!("lock {n} was swept while held"));
+                }
+                drop(file);
+                let _ = std::fs::remove_file(&lock);
+                None
+            });
+            taken.store(true, Ordering::Relaxed);
+            failed
+        });
+        assert_eq!(failed, None);
     }
 }
