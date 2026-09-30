@@ -80,7 +80,62 @@ impl<T> Default for Stacked<T> {
 
 /// An alias row of the table of classes: the bucket it stands in, the
 /// lowered name, and the class it names.
-pub(crate) type Alias = (usize, Vec<u8>, ClassId);
+pub(crate) type Alias = (Bucket, Vec<u8>, ClassId);
+
+/// A bucket of `EG(class_table)` past the engine's classes: where a
+/// class or an alias stands, in the order php appends its rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Bucket(usize);
+
+/// A request's buckets: the next to hand out, and those a unit's load
+/// took for the classes it declares under runtime definition keys, as
+/// `zend_compile_class_decl` adds each under its key in the order
+/// written; the bind that renames the key (`zend_hash_set_bucket_key`)
+/// claims its bucket.
+#[derive(Default)]
+pub(crate) struct Buckets {
+    next: usize,
+    reserved: Vec<Reserved>,
+}
+
+/// The bucket a load took for the class at `at` of `unit`.
+struct Reserved {
+    unit: Arc<Unit>,
+    at: u32,
+    bucket: Bucket,
+}
+
+impl Buckets {
+    /// Buckets past the `rows` the preload left.
+    pub(crate) fn past(rows: usize) -> Buckets {
+        Buckets {
+            next: rows,
+            reserved: Vec::new(),
+        }
+    }
+
+    /// The next bucket, taken.
+    pub(crate) fn take(&mut self) -> Bucket {
+        self.next += 1;
+        Bucket(self.next - 1)
+    }
+
+    /// The next bucket, held for the class at `at` of `unit`.
+    pub(crate) fn reserve(&mut self, unit: &Arc<Unit>, at: u32) {
+        let bucket = self.take();
+        let unit = Arc::clone(unit);
+        self.reserved.push(Reserved { unit, at, bucket });
+    }
+
+    /// The bucket held for the class at `at` of `unit`, or the next.
+    pub(crate) fn claim(&mut self, unit: &Arc<Unit>, at: u32) -> Bucket {
+        let held = (self.reserved.iter()).position(|r| Arc::ptr_eq(&r.unit, unit) && r.at == at);
+        match held {
+            Some(i) => self.reserved.swap_remove(i).bucket,
+            None => self.take(),
+        }
+    }
+}
 
 /// What the preload left for every request (design §6.3):
 /// `ZCSG(preload_script)` and `ZCSG(saved_scripts)`. Built once by the
@@ -426,7 +481,7 @@ impl Request {
     fn class_rows(&mut self, candidates: Vec<Candidate>, aliases_before: usize) -> Vec<Row> {
         let natives = self.shared.classes.len();
         let aliases = self.aliases.take_own().into_iter().skip(aliases_before);
-        let mut placed: Vec<(usize, Row)> = (natives..)
+        let mut placed: Vec<(Bucket, Row)> = (natives..)
             .zip(self.declared.iter())
             .map(|(at, row)| (row.place, Row::Class(class_id(at))))
             .chain(aliases.map(|(place, alias, class)| (place, Row::Alias(alias, class))))
@@ -460,7 +515,7 @@ impl Request {
             .rev()
             .collect();
         let _ = self.enum_functions.take_own();
-        self.buckets = 0;
+        self.buckets = Buckets::default();
         let mut renumbered: Vec<(ClassId, ClassId)> = Vec::new();
         for row in rows {
             match row {
@@ -474,7 +529,7 @@ impl Request {
                         continue;
                     };
                     renumbered.push((*old, class_id(natives + self.declared.len())));
-                    let place = self.bucket();
+                    let place = self.buckets.take();
                     self.declared.push(Declared { place, ..declared });
                 }
                 Row::Alias(alias, old) => {
@@ -482,7 +537,7 @@ impl Request {
                         .iter()
                         .find(|(from, _)| from == old)
                         .map_or(*old, |(_, to)| *to);
-                    let place = self.bucket();
+                    let place = self.buckets.take();
                     self.aliases.push((place, alias.clone(), class));
                 }
                 Row::Unlinked(_) => {}

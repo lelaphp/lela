@@ -1982,13 +1982,8 @@ pub struct Request {
     /// class it names: `ZVAL_ALIAS_PTR` rows, request state as the
     /// classes the request declared are.
     aliases: Stacked<preload::Alias>,
-    /// `EG(class_table)`'s next bucket past the engine's classes, and
-    /// the buckets a unit's load took for the classes it declares under
-    /// runtime definition keys, as `zend_compile_class_decl` adds each
-    /// under its key in the order written: the bind that renames the key
-    /// (`zend_hash_set_bucket_key`) stands the class in its bucket.
-    buckets: usize,
-    reserved: Vec<(Arc<Unit>, u32, usize)>,
+    /// `EG(class_table)`'s buckets past the engine's classes.
+    buckets: preload::Buckets,
     /// `PHP_SAPI`, `sapi_module.name` as `php_module_startup` registers
     /// it: the host's, so the request's, the engine's interned string
     /// for the name the description carries.
@@ -2297,12 +2292,12 @@ pub(crate) enum MemberAt {
 /// the declaration's index there, for a class that uses traits the
 /// class composed with them at its link, which is the table's row in
 /// its place (`zend_do_bind_traits`), and the bucket of
-/// `EG(class_table)` it stands in ([`Request::buckets`]).
+/// `EG(class_table)` it stands in.
 pub(crate) struct Declared {
     unit: Arc<Unit>,
     at: u32,
     composed: Option<Box<php_unit::link::Composed>>,
-    place: usize,
+    place: preload::Bucket,
 }
 
 impl Declared {
@@ -2361,7 +2356,7 @@ impl Request {
         let mut stack = VmStack::new();
         let _laid = stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
-        let buckets = tables.classes.len() + tables.aliases.len();
+        let buckets = preload::Buckets::past(tables.classes.len() + tables.aliases.len());
         let mut req = Request {
             // Read before `shared` moves in, as fields are in the order written.
             realpath_cache: RealpathCache::startup(&shared),
@@ -2465,7 +2460,6 @@ impl Request {
             record: recording::Record::default(),
             keys_made: 0,
             buckets,
-            reserved: Vec::new(),
             aliases: tables.aliases,
             sapi_constant: Value::null(),
             user_functions: tables.functions,
@@ -14057,7 +14051,7 @@ impl Request {
                     .map(move |alias| (ClassId(at), alias))
             })
             .collect();
-        let mut own: Vec<(usize, ClassId, Option<Vec<u8>>)> = (natives..)
+        let mut own: Vec<(preload::Bucket, ClassId, Option<Vec<u8>>)> = (natives..)
             .zip(self.declared.iter())
             .map(|(at, row)| {
                 (
@@ -14138,9 +14132,8 @@ impl Request {
                 .iter()
                 .find(|(_, class)| usize::try_from(*class).ok() == Some(at));
             if let Some((key, _)) = key {
-                let place = self.bucket();
-                let at32 = u32::try_from(at).unwrap_or(u32::MAX);
-                self.reserved.push((Arc::clone(unit), at32, place));
+                self.buckets
+                    .reserve(unit, u32::try_from(at).unwrap_or(u32::MAX));
                 if decl.flags.is_anonymous {
                     if !self.link_unbound(unit, at, decl) {
                         return false;
@@ -14298,12 +14291,7 @@ impl Request {
             .len()
             .saturating_add(self.declared.len());
         let class = ClassId(u32::try_from(class).unwrap_or(u32::MAX));
-        let reserved = (self.reserved.iter())
-            .position(|(held, held_at, _)| Arc::ptr_eq(held, unit) && *held_at == at);
-        let place = match reserved {
-            Some(i) => self.reserved.swap_remove(i).2,
-            None => self.bucket(),
-        };
+        let place = self.buckets.claim(unit, at);
         self.declared.push(Declared {
             unit: Arc::clone(unit),
             at,
@@ -14311,12 +14299,6 @@ impl Request {
             place,
         });
         self.bind_members(class);
-    }
-
-    /// The next bucket of `EG(class_table)`, taken.
-    pub(crate) fn bucket(&mut self) -> usize {
-        self.buckets += 1;
-        self.buckets - 1
     }
 
     /// The members of `class`, bound, into the function table beside it:
@@ -17102,7 +17084,7 @@ impl Request {
         if self.class_named(alias).is_some() {
             return false;
         }
-        let place = self.bucket();
+        let place = self.buckets.take();
         self.aliases
             .push((place, alias.to_ascii_lowercase(), class));
         true
