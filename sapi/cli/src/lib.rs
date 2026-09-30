@@ -41,6 +41,8 @@
 //! 4, the body stream), so stdin is read whole where it is the program.
 
 #![forbid(unsafe_code)]
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -615,6 +617,23 @@ fn process_handles() -> FileHandles {
 
 /// Serve `program` on `engine` as `do_cli` serves it and hand back the
 /// exit code the process ends with; see [`describe`].
+///
+/// A file named relative to the working directory is served under its
+/// expanded path, so `__FILE__` is whole and the page `getmyinode()` and
+/// `getlastmod()` stat is found after a `chdir()`; `$argv[0]` keeps the
+/// name as given (a process fence runs the program as `php witness.php`
+/// in its own directory):
+///
+/// ```php
+/// chdir('..');
+/// var_dump(__FILE__ === getcwd() . '/' . basename(__DIR__) . '/witness.php', $argv[0], getmyinode() !== false, getlastmod() !== false);
+/// ```
+/// ```expect process
+/// bool(true)
+/// string(11) "witness.php"
+/// bool(true)
+/// bool(true)
+/// ```
 pub fn serve(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 {
     match describe(program, arguments) {
         Ok(description) => {

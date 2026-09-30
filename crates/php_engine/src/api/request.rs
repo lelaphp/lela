@@ -15396,6 +15396,23 @@ impl Request {
         }
     }
 
+    /// `php_execute_script`'s `expand_filepath` of the primary file
+    /// (`Z/main/main.c:2610-2619`): the file the request names made whole
+    /// against its working directory with its links resolved, which is
+    /// the name the unit compiles under and the page `php_statpage`
+    /// stats, put in `EG(included_files)`; the name as given where it
+    /// expands to nothing.
+    pub(crate) fn expand_primary_file(&mut self) -> Vec<u8> {
+        let script = self.description.script_name.clone().unwrap_or_default();
+        let cwd = self.cwd().into_os_string().into_encoded_bytes();
+        let expanded = self
+            .virtual_file_ex(&cwd, &script, crate::virtual_cwd::Resolve::FilePath)
+            .unwrap_or(script);
+        self.included_files.push(expanded.clone());
+        self.description.script_name = Some(expanded.clone());
+        expanded
+    }
+
     /// `zend_include_or_eval` (`Z/Zend/zend_execute.c:5287`) for the four
     /// file constructs: the once forms resolve the path first
     /// ([`Request::resolve_path`]) and answer [`Opened::Already`] for one

@@ -1981,20 +1981,70 @@ impl Engine {
         work: Work,
         traced: bool,
     ) -> (Observables, Trace) {
+        let source = description.source.clone();
+        let cwd = description.cwd.clone();
+        let mut req = match self.begin(description, sink, traced) {
+            Ok(req) => req,
+            Err(refused) => return (refused, Trace::default()),
+        };
+        // Where the unit's constant strings live is where the unit
+        // lives (design §5.2): a file's unit is published into the
+        // engine's table and shared by every request that serves it,
+        // and a source the host handed over is this request's alone,
+        // interned into this request's own memory and gone with it, as
+        // php holds what it compiles for `-r` and for `eval`.
+        if matches!(work, Work::Highlight | Work::Strip) {
+            // `open_file_for_scanning` over the program: the source the
+            // host handed over, or the file read whole.
+            let script = req
+                .script_name()
+                .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
+            let text = source.or_else(|| std::fs::read(cwd.join(OsStr::from_bytes(&script))).ok());
+            if let Some(text) = text {
+                let written = if work == Work::Highlight {
+                    crate::api::syntax::highlight(&req, &text)
+                } else {
+                    crate::api::syntax::strip(&req, &text)
+                };
+                req.write(&written);
+            }
+            return self.shutdown(&mut req, sink);
+        }
+        if work == Work::Serve {
+            self.execute_script(&mut req, source.as_deref());
+            return self.shutdown(&mut req, sink);
+        }
+        // `php_lint_script` compiles and drops the op array, and what
+        // the compiler warned of it rendered as it compiled.
+        match self.primary(&mut req, source.as_deref(), false) {
+            Some(Ok(unit)) => {
+                note_compiled(&mut req, &unit, SourceKind::File);
+            }
+            Some(Err(refused)) => {
+                let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+                refused_program(&mut req, &refused, &file);
+            }
+            None => {}
+        }
+        self.shutdown(&mut req, sink)
+    }
+
+    /// `php_request_startup` for `description`, and what `do_cli` does
+    /// after it before a program is compiled, the request handed back to
+    /// serve; the refusal `opcache.preload` answers with where it is one.
+    pub(crate) fn begin(
+        &self,
+        description: RequestDescription,
+        sink: &mut dyn OutputSink,
+        traced: bool,
+    ) -> Result<Request, Observables> {
         if let crate::preload::Started::Refused(status) = self.started(&description, sink) {
-            let refused = Observables {
+            return Err(Observables {
                 exit_code: status,
                 headers_sent: true,
                 fatal: None,
-            };
-            return (refused, Trace::default());
+            });
         }
-        let source = description.source.clone();
-        let cwd = description.cwd.clone();
-        let script = description
-            .script_name
-            .clone()
-            .unwrap_or_else(|| b"Standard input code".to_vec());
         let web = description.web.is_some();
         let mut req = Request::new(Arc::clone(&self.shared), description);
         #[cfg(feature = "witness-trace")]
@@ -2045,73 +2095,82 @@ impl Engine {
         }
         let _ = req.register_file_handles();
         req.enter_phase(crate::api::request::Phase::Running);
-        // Where the unit's constant strings live is where the unit
-        // lives (design §5.2): a file's unit is published into the
-        // engine's table and shared by every request that serves it,
-        // and a source the host handed over is this request's alone,
-        // interned into this request's own memory and gone with it, as
-        // php holds what it compiles for `-r` and for `eval`.
-        if matches!(work, Work::Highlight | Work::Strip) {
-            // `open_file_for_scanning` over the program: the source the
-            // host handed over, or the file read whole.
-            let text = source.or_else(|| std::fs::read(cwd.join(OsStr::from_bytes(&script))).ok());
-            if let Some(text) = text {
-                let written = if work == Work::Highlight {
-                    crate::api::syntax::highlight(&req, &text)
-                } else {
-                    crate::api::syntax::strip(&req, &text)
-                };
-                req.write(&written);
-            }
-            return self.shutdown(&mut req, sink);
+        Ok(req)
+    }
+
+    /// `php_execute_script` (`Z/main/main.c:2568-2648`) over the
+    /// request's program: `auto_prepend_file` required first, then the
+    /// program, then `auto_append_file`, each while the one before ran
+    /// to its end; whether the program did.
+    pub(crate) fn execute_script(&self, req: &mut Request, source: Option<&[u8]>) -> bool {
+        if !auto_file(req, b"auto_prepend_file", self.shared.entry) {
+            return false;
         }
-        let compiled = if let Some(source) = source {
-            Some(
-                self.shared
-                    .compile_for(&mut req, &source, &script, SourceKind::File),
-            )
-        } else {
-            req.note_primary_file(&script);
-            match req.compile_file_source(&script) {
-                Ok(Some(source)) => {
-                    Some(
-                        self.shared
-                            .compile_for(&mut req, &source, &script, SourceKind::File),
-                    )
-                }
-                Ok(None) => req.cached_file(&script, Some(&script)),
-                Err(thrown) => {
-                    req.leave_pending(&thrown);
-                    None
-                }
-            }
-        };
-        match compiled {
-            Some(Ok(unit)) if work == Work::Serve => {
-                let _ = serve_unit(&mut req, &unit, self.shared.entry);
-            }
-            // `php_lint_script` compiles and drops the op array, and what
-            // the compiler warned of it rendered as it compiled.
-            Some(Ok(unit)) => {
-                note_compiled(&mut req, &unit, SourceKind::File);
-            }
+        let ran = match self.primary(req, source, true) {
+            Some(Ok(unit)) => serve_unit(req, &unit, self.shared.entry),
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
             // request ends before a frame is pushed.
             Some(Err(refused)) => {
                 let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-                refused_program(&mut req, &refused, &file);
+                refused_program(req, &refused, &file);
+                false
             }
-            None => {}
+            None => false,
+        };
+        ran && auto_file(req, b"auto_append_file", self.shared.entry)
+    }
+
+    /// The program compiled: the source the host handed over under the
+    /// name the request gives it, or the file the request names; where `expand` says,
+    /// as `php_execute_script` and not `php_lint_script` does, the file's
+    /// path is expanded first and put in `EG(included_files)`, so the
+    /// unit and its diagnostics carry the whole path
+    /// (`Z/main/main.c:2610-2619`).
+    fn primary(
+        &self,
+        req: &mut Request,
+        source: Option<&[u8]>,
+        expand: bool,
+    ) -> Option<Result<Arc<Unit>, CompileError>> {
+        if let Some(source) = source {
+            let script = req
+                .script_name()
+                .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
+            return Some(
+                self.shared
+                    .compile_for(req, source, &script, SourceKind::File),
+            );
         }
-        self.shutdown(&mut req, sink)
+        let script = if expand {
+            req.expand_primary_file()
+        } else {
+            req.script_name().map(<[u8]>::to_vec).unwrap_or_default()
+        };
+        match req.compile_file_source(&script) {
+            Ok(Some(source)) => {
+                Some(
+                    self.shared
+                        .compile_for(req, &source, &script, SourceKind::File),
+                )
+            }
+            Ok(None) => req.cached_file(&script, Some(&script)),
+            Err(thrown) => {
+                req.leave_pending(&thrown);
+                None
+            }
+        }
     }
 
     /// `php_request_shutdown` and what the host is handed after it. The
     /// request is shut down where it was served and never moved first: a
     /// fiber still suspended holds the address it was resumed with, and
     /// is resumed with it again to be destroyed.
-    fn shutdown(&self, req: &mut Request, sink: &mut dyn OutputSink) -> (Observables, Trace) {
+    pub(crate) fn shutdown(
+        &self,
+        req: &mut Request,
+        sink: &mut dyn OutputSink,
+    ) -> (Observables, Trace) {
         Engine::shutdown_program(req);
         self.shutdown_request(req, sink)
     }
@@ -2445,6 +2504,29 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &
         req.note_error_in(raised.level, &raised.message, file, raised.line);
     }
     req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+}
+
+/// `zend_execute_script(ZEND_REQUIRE, NULL, file)` over the file the
+/// ini entry `name` gives, `auto_prepend_file` or `auto_append_file`
+/// (`Z/main/main.c:2621-2645`): required as `require` resolves it and
+/// served where the program is, and whether it ran to its end; an entry
+/// left empty is nothing to serve.
+fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
+    let Some(file) = req.ini_get(name).filter(|file| !file.is_empty()) else {
+        return true;
+    };
+    let file = file.to_vec();
+    match req.include_file(crate::exec::IncludeKind::Require, &file) {
+        Ok(crate::api::request::Opened::Unit(unit)) => serve_unit(req, &unit, entry),
+        Ok(_) => true,
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            if let Err(fatal) = req.uncaught() {
+                req.end_in(&fatal);
+            }
+            false
+        }
+    }
 }
 
 /// The unit's main op array served on a fresh entry frame, what it
@@ -3753,6 +3835,9 @@ mod tests {
             script_name: Some(name.clone()),
             ..RequestDescription::default()
         };
+        // `php_execute_script` expands the primary file's path with its
+        // links resolved, which a temporary directory behind a link shows.
+        let expanded = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         for _ in 0..2 {
             let mut sink = Kept::default();
             engine.serve(described(), &mut sink);
@@ -3760,7 +3845,7 @@ mod tests {
                 String::from_utf8_lossy(&sink.body),
                 format!(
                     "\nWarning: unexpected NAN value was coerced to string in {} on line 3\naNANz",
-                    path.to_string_lossy()
+                    expanded.to_string_lossy()
                 )
             );
         }
