@@ -231,7 +231,21 @@ impl Emit<'_> {
     /// `zend_verify_namespace`. An empty statement is php's `NULL`
     /// child, which the walk returns from before either.
     pub(super) fn top_statements(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
+        let mut after = 0;
         for stmt in stmts {
+            // A `?>` between two statements of the list is php's `;`, the
+            // `NULL` child, as much as an empty statement is.
+            let range = stmt.range(self.parsed);
+            let glue = self.top_list == super::TopList::Declares
+                && self.parsed.tokens.iter().any(|token| {
+                    token.kind == SyntaxKind::CLOSE_TAG
+                        && token.offset >= after
+                        && token.offset < range.start
+                });
+            after = range.end();
+            if glue || !matches!(stmt, Stmt::DeclareStmt(_)) {
+                self.top_list = super::TopList::Other;
+            }
             if matches!(stmt, Stmt::EmptyStmt(_)) {
                 continue;
             }
@@ -1698,7 +1712,7 @@ pub(super) struct Constant {
 /// The offset `__COMPILER_HALT_OFFSET__` compiles to in a file whose top
 /// statements end with `__halt_compiler();`, as `zend_compile_const`
 /// finds that statement at the end of `CG(ast)`; none in any other.
-pub(super) fn halt_offset(parsed: &Parsed) -> Option<i64> {
+pub(crate) fn halt_offset(parsed: &Parsed) -> Option<i64> {
     let file = parsed.tree.root()?.id::<tree::SourceFile>()?;
     match parsed.tree[file].stmts.last()? {
         Stmt::HaltCompilerStmt(id) => Some(halt_end(parsed, *id)),

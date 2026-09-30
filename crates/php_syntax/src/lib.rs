@@ -48,6 +48,7 @@ mod grammar;
 mod highlight;
 mod lexer;
 mod line_index;
+mod output;
 mod parser;
 mod php_names;
 mod scanner;
@@ -59,6 +60,7 @@ pub use highlight::{Colours, highlight, html_puts, strip};
 pub use kind::SyntaxKind;
 pub use lexer::{LexOptions, Lexed, Position, Token, lex};
 pub use line_index::{LineCol, LineIndex};
+pub use output::{Filtered, filter_tokens, token_text};
 pub use php_names::{amp_name, cast_name, int_overflows, magic_const_name, operator_name};
 pub use scanner::{ScannedToken, scanned};
 pub use source::{Diagnostic, FileId, Level, MAX_FILE_LEN, Span, TextRange, load_bytes};
@@ -104,6 +106,9 @@ pub struct Parsed {
     /// harness prints beside the dump and a reader of the tree treats as
     /// an internal error.
     pub missing: Vec<Missing>,
+    /// What php's token filter made of the tokens it converts, empty
+    /// until [`filter_tokens`] passes one.
+    pub filtered: Filtered,
 }
 
 impl Parsed {
@@ -136,6 +141,7 @@ pub fn parse(source: &[u8], options: &Options) -> Parsed {
         tree: built.tree,
         diagnostics,
         missing: built.missing,
+        filtered: Filtered::default(),
     }
 }
 

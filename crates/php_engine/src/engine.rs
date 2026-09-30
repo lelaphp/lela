@@ -2946,6 +2946,7 @@ fn compile(
         request_classes: origin.request_classes,
         stack,
         keys_before: origin.keys_before,
+        multibyte: None,
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
