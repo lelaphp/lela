@@ -1004,8 +1004,16 @@ pub struct ClassDecl {
     /// `memory_get_usage()` counts of each object beside the properties
     /// (design §5.13). `0` where the class and every class above it lay
     /// a plain `zend_object` down, which every class a program declares
-    /// does.
+    /// does. A class whose `create_object` asks `emalloc(sizeof(..))`
+    /// whole, as `Closure`'s, `Generator`'s and `Fiber`'s do, keeps the
+    /// properties slot `zend_object_alloc` would give back: its size is
+    /// the struct's and sixteen.
     pub object_size: u32,
+    /// The `emalloc`s the same `create_object` makes beside the object,
+    /// each the size php asks for (a random engine's state, a
+    /// connection's `pdo_dbh_t`), given back as the object is freed
+    /// (design §5.13). Empty where it makes none.
+    pub object_beside: Box<[u32]>,
 }
 
 /// A global constant, `const X = ...;` or `define()` folded at compile time.

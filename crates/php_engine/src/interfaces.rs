@@ -535,6 +535,7 @@ pub(crate) fn iterator_wrapper(builder: ExtensionBuilder) -> ExtensionBuilder {
         line: 0,
         end_line: 0,
         object_size: 0,
+        object_beside: Box::default(),
     };
     builder.class_created(
         decl,
@@ -934,7 +935,7 @@ impl ObjectHandlers for InternalHandlers {
 /// bool(true)
 /// bool(false)
 /// ```
-#[php_class(final, not_serializable, implements(Iterator), payload = Internal, handlers = INTERNAL)]
+#[php_class(final, not_serializable, implements(Iterator), size = 72, payload = Internal, handlers = INTERNAL)]
 pub(crate) struct InternalIterator;
 
 #[php_class]

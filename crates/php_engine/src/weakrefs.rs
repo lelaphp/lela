@@ -730,7 +730,7 @@ fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
     final,
     not_serializable,
     dynamic_properties = forbidden,
-    payload = WeakRef,
+    size = 64, payload = WeakRef,
     handlers = WEAK_REFERENCE
 )]
 pub(crate) struct WeakReference;
@@ -885,12 +885,31 @@ impl WeakReference {
 /// WeakMap key must be an object
 /// Cannot append to WeakMap
 /// ```
+///
+/// `zend_weakmap_create_object` allocates `sizeof(zend_weakmap)`, and
+/// `zend_weakref_new` its `zend_weakref`, which `memory_get_usage()`
+/// counts (design §5.13):
+///
+/// ```php
+/// $o = new stdClass;
+/// foreach ([false, true] as $shown) foreach (['WeakMap' => fn() => new WeakMap, 'WeakReference' => fn() => WeakReference::create($o)] as $c => $make) {
+///     $m = memory_get_usage();
+///     $w = $make();
+///     $used = memory_get_usage() - $m;
+///     $w = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// WeakMap 96
+/// WeakReference 48
+/// ```
 #[php_class(
     final,
     not_serializable,
     dynamic_properties = forbidden,
     implements(ArrayAccess, Countable, IteratorAggregate),
-    payload = ZendWeakMap,
+    size = 112, payload = ZendWeakMap,
     handlers = WEAK_MAP
 )]
 pub(crate) struct WeakMap;

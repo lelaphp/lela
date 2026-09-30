@@ -116,6 +116,7 @@ abi::ObjectHandlers::clone_obj
 abi::ObjectHandlers::clone_obj_with
 abi::ObjectHandlers::compare
 abi::ObjectHandlers::count_elements
+abi::ObjectHandlers::create_object
 abi::ObjectHandlers::current_place
 abi::ObjectHandlers::dimension_place
 abi::ObjectHandlers::do_operation

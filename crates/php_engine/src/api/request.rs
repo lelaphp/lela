@@ -1998,6 +1998,9 @@ pub struct Request {
     /// [`php_unit::OpArray::bound_vars`], which the published unit never
     /// holds (design §5.14). A closure's are its object's.
     static_vars: HashMap<Statics, PhpArray>,
+    /// The `emalloc`s php's `create_object` made beside each object
+    /// that has them, by the object's id ([`Request::lay_beside`]).
+    beside: HashMap<u32, Vec<php_heap::Block>>,
     /// Where the request is the preload's (design §6.3), the files it
     /// compiled into the preload.
     preloading: Option<Preloading>,
@@ -2458,6 +2461,7 @@ impl Request {
             sapi_constant: Value::null(),
             user_functions: tables.functions,
             static_vars: HashMap::new(),
+            beside: HashMap::new(),
             preloading: None,
             #[cfg(debug_assertions)]
             dirty: None,
@@ -6905,6 +6909,7 @@ impl Request {
             }
         };
         self.init_properties(object, defaults);
+        self.object_created(object)?;
         // `zend_default_exception_new`, the throwables' `create_object`:
         // `file`, `line` and `trace` are the site of `new`, written as
         // the object is made and before any constructor runs.
@@ -6938,6 +6943,7 @@ impl Request {
             }
         };
         self.init_properties(object, defaults);
+        self.object_created(object)?;
         Ok(object)
     }
 
@@ -11173,6 +11179,7 @@ impl Request {
         let custom = self.object_custom(object.class());
         let cloned = self.heap.object_clone_with(object.heap(), custom, payload);
         let new = PhpObject::of(self.fatal_of(cloned)?);
+        self.lay_beside(new)?;
         self.clone_slot_sources(new);
         if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
@@ -11392,7 +11399,9 @@ impl Request {
     ) -> Result<PhpObject, Thrown> {
         let custom = self.object_custom(object.class());
         let cloned = self.heap.object_clone_with(object.heap(), custom, payload);
-        self.fatal_of(cloned).map(PhpObject::of)
+        let new = self.fatal_of(cloned).map(PhpObject::of)?;
+        self.lay_beside(new)?;
+        Ok(new)
     }
 
     /// The native payload of `o` as `T`, borrowed for as long as the
@@ -19861,6 +19870,7 @@ impl HeapHooks for Hooks<'_> {
     fn free_native(&mut self, obj: Obj) {
         let table = self.0.object_handlers(obj);
         table.free_obj(self.0, PhpObject::of(obj));
+        self.0.free_beside(PhpObject::of(obj));
     }
 
     /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`:
@@ -20400,6 +20410,7 @@ mod tests {
             line: 0,
             end_line: 0,
             object_size: 0,
+            object_beside: Box::default(),
         }
     }
 

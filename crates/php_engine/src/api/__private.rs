@@ -98,6 +98,7 @@ pub fn class(name: &[u8], kind: ClassKind) -> ClassDecl {
         line: 0,
         end_line: 0,
         object_size: 0,
+        object_beside: Box::default(),
     }
 }
 

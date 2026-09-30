@@ -652,7 +652,14 @@ impl stdClass {}
 /// ```expect
 /// Instantiation of class Closure is not allowed
 /// ```
-#[php_class(final, not_serializable, dynamic_properties = forbidden, size = 344, handlers = CLOSURE)]
+#[php_class(
+    final,
+    not_serializable,
+    dynamic_properties = forbidden,
+    // `emalloc(sizeof(zend_closure))`, 344 bytes whole.
+    size = 360,
+    handlers = CLOSURE
+)]
 pub(crate) struct Closure;
 
 #[php_class]

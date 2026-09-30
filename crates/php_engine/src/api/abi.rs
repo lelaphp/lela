@@ -1193,6 +1193,16 @@ pub trait ClassIterator: Send {
 /// `do_operation` and `get_properties_for` answer the value or `None`
 /// in one call, since their kernels fall back either way.
 pub trait ObjectHandlers: Send + Sync {
+    /// `ce->create_object` past `zend_object_alloc`: what the class lays
+    /// down with a new object on the request's heap that its payload's
+    /// `Default` cannot, `array_init(&intern->array)` among them, after
+    /// the properties' defaults and before any constructor. `Std` lays
+    /// nothing down.
+    fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        let _ = (req, object);
+        Ok(())
+    }
+
     /// `free_obj` for the native payload: what the payload names of the
     /// heap given back before the payload is dropped, with the members
     /// already freed and the object's bucket already invalid. `Std`

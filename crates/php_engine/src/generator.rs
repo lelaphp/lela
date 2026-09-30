@@ -1764,7 +1764,8 @@ fn yielded_now(req: &mut Request, this: PhpObject, pick: fn(&ZendGenerator) -> V
     dynamic_properties = forbidden,
     implements(Iterator),
     payload = ZendGenerator,
-    size = 272,
+    // `emalloc(sizeof(zend_generator))`, 280 bytes whole.
+    size = 296,
     handlers = GENERATOR
 )]
 pub(crate) struct Generator;

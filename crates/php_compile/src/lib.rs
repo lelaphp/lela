@@ -5106,6 +5106,7 @@ mod tests {
                 line: 0,
                 end_line: 0,
                 object_size: 0,
+                object_beside: Box::default(),
             }],
             ..Options::default()
         };
@@ -6809,6 +6810,7 @@ class C {
                 line: 0,
                 end_line: 0,
                 object_size: 0,
+                object_beside: Box::default(),
             }],
             ..Options::default()
         };

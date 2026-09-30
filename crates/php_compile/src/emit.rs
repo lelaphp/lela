@@ -4993,6 +4993,7 @@ impl Emit<'_> {
             line,
             end_line: class.end_line,
             object_size: 0,
+            object_beside: Box::default(),
         };
         self.active_class = Some(ActiveClass {
             name: name.clone(),
