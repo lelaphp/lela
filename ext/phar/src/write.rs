@@ -597,25 +597,67 @@ pub(crate) fn copy_contents(
 
 // ---- the stream's writing half
 
-/// `phar_stream_write`: `buf` into the entry's own buffer at the stream's
-/// position, its sizes grown to it and the entry marked modified.
+/// `phar_stream_write`: `buf` into `idata->fp` at the stream's position,
+/// the entry's sizes grown to it and the entry marked modified. That is
+/// the entry's own buffer once written, or the archive's bytes the entry
+/// was opened to read where php holds them through a stream it wrote
+/// (the file the flush opened `w+b`, a temporary one); through the file
+/// opened `rb` the plain wrapper's write fails, with its notice.
+///
+/// ```php
+/// $f = __DIR__ . '/write-witness.phar';
+/// $p = new Phar($f); $p['a'] = '1'; unset($p);
+/// $p = new Phar($f);
+/// $e = $p['a']->openFile();
+/// var_dump($e->fwrite('2'));
+/// $p['b'] = '3';
+/// $e = $p['b']->openFile();
+/// $e->fseek(1);
+/// var_dump($e->fwrite('4'));
+/// $e->rewind();
+/// var_dump($e->fgets());
+/// unset($e, $p); Phar::unlinkArchive($f);
+/// ```
+/// ```expect regime=phar-writable
+/// Notice: SplFileObject::fwrite(): Write of 1 bytes failed with errno=9 Bad file descriptor in %s on line 6
+/// bool(false)
+/// int(1)
+/// string(2) "34"
+/// ```
 pub(crate) fn stream_write(req: &mut Request, data: &mut EntryData, buf: &[u8]) -> Option<usize> {
     let Target::Slot(slot) = data.target else {
         return None;
     };
-    let e = archives(req).get_mut(data.archive)?.manifest.at_mut(slot)?;
-    let Content::Mod(own) = &mut e.content else {
-        return None;
-    };
     let at = usize::try_from(data.position + data.zero).ok()?;
-    if own.len() < at {
-        own.resize(at, 0);
-    }
-    let end = at + buf.len();
-    if own.len() < end {
-        own.resize(end, 0);
-    }
-    own[at..end].copy_from_slice(buf);
+    let archive::Archive {
+        manifest, fp, ufp, ..
+    } = archives(req).get_mut(data.archive)?;
+    let e = manifest.at_mut(slot)?;
+    let end = match (&mut e.content, fp, ufp) {
+        (Content::Mod(own), _, _) => splice(own, at, buf),
+        (
+            Content::Fp,
+            Some(Fp {
+                bytes,
+                through: Through::Written,
+            }),
+            _,
+        )
+        | (Content::Ufp, _, Some(bytes)) => {
+            let end = splice(Arc::make_mut(bytes), at, buf);
+            data.fp = Some(entry::Efp::Shared(Arc::clone(bytes)));
+            end
+        }
+        (Content::Fp, Some(_), _) => {
+            let failed = format!(
+                "Write of {} bytes failed with errno=9 Bad file descriptor",
+                buf.len()
+            );
+            docref(req, Level::Notice, &failed);
+            return None;
+        }
+        _ => return None,
+    };
     data.position = i64::try_from(end).ok()? - data.zero;
     if data.position > i64::from(e.uncompressed_filesize) {
         e.uncompressed_filesize = u32::try_from(data.position).unwrap_or(u32::MAX);
@@ -624,6 +666,17 @@ pub(crate) fn stream_write(req: &mut Request, data: &mut EntryData, buf: &[u8]) 
     e.old_flags = e.flags;
     e.is_modified = true;
     Some(buf.len())
+}
+
+/// `buf` written over `bytes` at `at`, the bytes grown with NULs to reach
+/// it; where the write ends.
+fn splice(bytes: &mut Vec<u8>, at: usize, buf: &[u8]) -> usize {
+    let end = at + buf.len();
+    if bytes.len() < end {
+        bytes.resize(end, 0);
+    }
+    bytes[at..end].copy_from_slice(buf);
+    end
 }
 
 /// `phar_stream_flush`: an entry something wrote to stamped and its
