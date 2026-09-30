@@ -384,8 +384,8 @@ pub fn extension() -> Extension {
         .class::<FilterException>()
         .class::<FilterFailedException>()
         .ini(vec![
-            ini_entry(b"filter.default", b"unsafe_raw"),
-            ini_entry(b"filter.default_flags", b""),
+            ini_entry(b"filter.default", Some(b"unsafe_raw")),
+            ini_entry(b"filter.default_flags", None),
         ])
         .on_modify(b"filter.default", update_default_filter)
         .request_state::<State>()
@@ -424,7 +424,8 @@ pub fn extension() -> Extension {
 /// string(10) "unsafe_raw"
 /// ```
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature, which may throw
-fn update_default_filter(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn update_default_filter(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     let named = FILTERS
         .iter()
         .find(|(name, _, _)| name.as_bytes().eq_ignore_ascii_case(value));
@@ -465,11 +466,12 @@ fn filter_info(req: &mut Request) {
     ]);
 }
 
-/// `STD_PHP_INI_ENTRY(..., PHP_INI_SYSTEM|PHP_INI_PERDIR, ...)`.
-fn ini_entry(name: &[u8], default: &[u8]) -> IniDecl {
+/// `STD_PHP_INI_ENTRY(..., PHP_INI_SYSTEM|PHP_INI_PERDIR, ...)`, its
+/// default `None` for php's `NULL`.
+fn ini_entry(name: &[u8], default: Option<&[u8]>) -> IniDecl {
     IniDecl {
         name: Name(name.into()),
-        default: default.into(),
+        default: default.map(Into::into),
         user: false,
         per_dir: true,
         system: true,

@@ -102,7 +102,7 @@ const CACHE_LIST: &str = "phar.cache_list";
 pub fn extension() -> Extension {
     let ini = |name: &str, default: &str, user: bool| IniDecl {
         name: Name(name.as_bytes().into()),
-        default: default.as_bytes().into(),
+        default: Some(default.as_bytes().into()),
         user,
         per_dir: user,
         system: true,
@@ -152,14 +152,15 @@ fn master(req: &Request, name: &str) -> bool {
     req.extension_ini(id)
         .into_iter()
         .find(|e| e.decl.name.0.as_ref() == name.as_bytes())
-        .is_none_or(|e| Request::ini_parse_bool(e.original.as_deref().unwrap_or(&e.value)))
+        .is_none_or(|e| Request::ini_parse_bool(e.master.as_deref().unwrap_or_default()))
 }
 
 /// `phar_ini_modify_handler` for `phar.readonly`: at runtime an entry that
 /// started on may not be turned off; a change reaches every open
 /// executable archive's writable bit.
 #[allow(clippy::unnecessary_wraps)] // the ABI's `OnModify`
-fn on_readonly(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_readonly(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     let on = Request::ini_parse_bool(value);
     if req.ini_stage() == IniStage::Startup {
         return Ok(true);
@@ -177,7 +178,8 @@ fn on_readonly(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
 
 /// `phar_ini_modify_handler` for `phar.require_hash`.
 #[allow(clippy::unnecessary_wraps)] // the ABI's `OnModify`
-fn on_require_hash(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_require_hash(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     let on = Request::ini_parse_bool(value);
     Ok(req.ini_stage() == IniStage::Startup || on || !master(req, REQUIRE_HASH))
 }
@@ -298,8 +300,8 @@ fn info(req: &mut Request) {
             let entry = entries
                 .iter()
                 .find(|e| e.decl.name.0.as_ref() == name.as_bytes());
-            let local = entry.map_or(&[][..], |e| &e.value[..]);
-            let master = entry.map_or(&[][..], |e| e.original.as_deref().unwrap_or(&e.value[..]));
+            let local = entry.and_then(|e| e.value.as_deref()).unwrap_or_default();
+            let master = entry.and_then(|e| e.master.as_deref()).unwrap_or_default();
             [(*name).to_string(), shown(name, local), shown(name, master)]
         })
         .collect();

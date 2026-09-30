@@ -254,11 +254,10 @@ fn display_ini_entries(req: &mut Request) {
         .into_iter()
         .map(|held| {
             let name = &held.decl.name.0;
-            let master = held.original.as_deref().unwrap_or(&held.value);
             [
                 String::from_utf8_lossy(name).into_owned(),
-                shown(name, &held.value),
-                shown(name, master),
+                shown(name, held.value.as_deref().unwrap_or_default()),
+                shown(name, held.master.as_deref().unwrap_or_default()),
             ]
         })
         .collect();

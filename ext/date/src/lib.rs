@@ -197,7 +197,7 @@ fn ini() -> Vec<IniDecl> {
     INI.into_iter()
         .map(|(name, default)| IniDecl {
             name: Name(name.as_bytes().into()),
-            default: default.as_bytes().into(),
+            default: Some(default.as_bytes().into()),
             user: true,
             per_dir: true,
             system: true,
@@ -251,11 +251,10 @@ fn date_info(req: &mut Request) {
                 .find(|entry| entry.decl.name.0.as_ref() == name.as_bytes())
         })
         .map(|entry| {
-            let master = entry.original.as_deref().unwrap_or(&entry.value);
             [
                 String::from_utf8_lossy(&entry.decl.name.0).into_owned(),
-                shown(&entry.value),
-                shown(master),
+                shown(entry.value.as_deref().unwrap_or_default()),
+                shown(entry.master.as_deref().unwrap_or_default()),
             ]
         })
         .collect();

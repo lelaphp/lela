@@ -4966,13 +4966,13 @@ fn extension_ini_string(req: &Request, extension: ExtensionId, indent: &str) -> 
         let _ = writeln!(
             out,
             "    {indent}  Current = '{}'",
-            String::from_utf8_lossy(&entry.value)
+            String::from_utf8_lossy(entry.value.as_deref().unwrap_or_default())
         );
-        if let Some(original) = &entry.original {
+        if entry.modified {
             let _ = writeln!(
                 out,
                 "    {indent}  Default = '{}'",
-                String::from_utf8_lossy(original)
+                String::from_utf8_lossy(entry.master.as_deref().unwrap_or_default())
             );
         }
         let _ = writeln!(out, "    {indent}}}");
@@ -8044,7 +8044,15 @@ impl ReflectionExtension {
     }
 
     /// `ReflectionExtension::getINIEntries()`: `_addinientry` over the
-    /// extension's entries, each name keyed to the value in force.
+    /// extension's entries, each name keyed to the value in force, `null`
+    /// where the entry has none (php's `NULL`):
+    ///
+    /// ```php
+    /// var_dump((new ReflectionExtension('openssl'))->getINIEntries()['openssl.cafile']);
+    /// ```
+    /// ```expect
+    /// NULL
+    /// ```
     ///
     /// ```php
     /// ini_set('date.default_latitude', '1');
@@ -8070,7 +8078,10 @@ impl ReflectionExtension {
         let mut entries = PhpArray::new(req)?;
         for entry in req.extension_ini(extension) {
             let key = Key::Str(PhpString::new(req, &entry.decl.name.0)?);
-            let value = Value::string(PhpString::new(req, &entry.value)?);
+            let value = match entry.value {
+                Some(value) => Value::string(PhpString::new(req, &value)?),
+                None => Value::null(),
+            };
             entries.set(req, key, value)?;
         }
         Ok(entries)

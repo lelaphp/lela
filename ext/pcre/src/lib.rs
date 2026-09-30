@@ -143,7 +143,7 @@ pub fn extension() -> Extension {
             INI.iter()
                 .map(|(name, default)| IniDecl {
                     name: Name(name.as_bytes().into()),
-                    default: default.as_bytes().into(),
+                    default: Some(default.as_bytes().into()),
                     user: true,
                     per_dir: true,
                     system: true,

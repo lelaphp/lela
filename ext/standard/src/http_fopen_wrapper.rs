@@ -42,11 +42,10 @@ const PHP_URL_REDIRECT_MAX: i64 = 20;
 const TIMEOUT_MAX: f64 = 18_446_744_073_709.55;
 const TIMEOUT_MAX_SHOWN: u64 = 18_446_744_073_709;
 
-/// `file.c`'s `user_agent` and `from`, `PHP_INI_ALL` and unset, which
-/// the http wrapper sends as `User-Agent:` and `From:`, and the ftp
-/// wrapper as the anonymous password, in `PHP_INI_BEGIN`'s order ahead
-/// of `default_socket_timeout`. An empty value is none here, where php
-/// tells an entry never set from one set empty.
+/// `file.c`'s `user_agent` and `from`, `PHP_INI_ALL` and with no value
+/// (`NULL`), which the http wrapper sends as `User-Agent:` and `From:`,
+/// and the ftp wrapper as the anonymous password, in `PHP_INI_BEGIN`'s
+/// order ahead of `default_socket_timeout`.
 ///
 /// ```php
 /// var_dump(ini_get('user_agent'), ini_get('from'), ini_set('from', 'me@example.com'), ini_get('from'));
@@ -62,7 +61,7 @@ pub(crate) fn ini() -> Vec<IniDecl> {
         .into_iter()
         .map(|name| IniDecl {
             name: Name(name.into()),
-            default: b"".as_slice().into(),
+            default: None,
             user: true,
             per_dir: true,
             system: true,
@@ -70,11 +69,10 @@ pub(crate) fn ini() -> Vec<IniDecl> {
         .collect()
 }
 
-/// `FG(from_address)` and `FG(user_agent)`: the entry, where it is set.
+/// `FG(from_address)` and `FG(user_agent)`: the entry's value, none where
+/// it has none (`NULL`), where one set empty is the empty string.
 pub(crate) fn file_ini(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
-    req.ini_get(name)
-        .filter(|value| !value.is_empty())
-        .map(<[u8]>::to_vec)
+    req.ini_value(name).map(<[u8]>::to_vec)
 }
 
 /// `php_stream_http_wrapper`: `http`, a URL wrapper that opens streams

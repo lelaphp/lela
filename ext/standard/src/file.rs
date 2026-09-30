@@ -158,7 +158,7 @@ use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, Valu
 pub(crate) fn ini() -> Vec<IniDecl> {
     vec![IniDecl {
         name: Name(b"auto_detect_line_endings".as_slice().into()),
-        default: b"0".as_slice().into(),
+        default: Some(b"0".as_slice().into()),
         user: true,
         per_dir: true,
         system: true,
@@ -179,7 +179,11 @@ pub(crate) fn ini() -> Vec<IniDecl> {
 /// string(1) "1"
 /// ```
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
-pub(crate) fn on_auto_detect_line_endings(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+pub(crate) fn on_auto_detect_line_endings(
+    req: &mut Request,
+    value: Option<&[u8]>,
+) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     if Request::ini_parse_bool(value) {
         raise(
             req,

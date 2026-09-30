@@ -61,13 +61,13 @@ pub(crate) struct Hosted {
 }
 
 /// The extension built: `cgi-fcgi`'s natives in the stub's order and
-/// its `PHP_INI_BEGIN` rows at their defaults, `cgi.redirect_status_env`'s
-/// `NULL` read as empty, as `ini_get` answers it; `cli_server` with
+/// its `PHP_INI_BEGIN` rows at their defaults, `None` for php's `NULL`,
+/// as `cgi.redirect_status_env`'s; `cli_server` with
 /// `cli_server.color` off and nothing else, and its natives beside it.
 pub(crate) fn hosted(host: HostExtension) -> Hosted {
-    let row = |name: &str, default: &str, user: bool| IniDecl {
+    let row = |name: &str, default: Option<&str>, user: bool| IniDecl {
         name: Name(name.as_bytes().into()),
-        default: default.as_bytes().into(),
+        default: default.map(|default| default.as_bytes().into()),
         user,
         per_dir: user,
         system: true,
@@ -83,14 +83,14 @@ pub(crate) fn hosted(host: HostExtension) -> Hosted {
                         apache_response_headers::declared(),
                     ])
                     .ini(vec![
-                        row("cgi.rfc2616_headers", "0", true),
-                        row("cgi.nph", "0", true),
-                        row("cgi.check_shebang_line", "1", false),
-                        row("cgi.force_redirect", "1", false),
-                        row("cgi.redirect_status_env", "", false),
-                        row("cgi.fix_pathinfo", "1", false),
-                        row("cgi.discard_path", "0", false),
-                        row("fastcgi.logging", "1", false),
+                        row("cgi.rfc2616_headers", Some("0"), true),
+                        row("cgi.nph", Some("0"), true),
+                        row("cgi.check_shebang_line", Some("1"), false),
+                        row("cgi.force_redirect", Some("1"), false),
+                        row("cgi.redirect_status_env", None, false),
+                        row("cgi.fix_pathinfo", Some("1"), false),
+                        row("cgi.discard_path", Some("0"), false),
+                        row("fastcgi.logging", Some("1"), false),
                     ])
                     .build("cgi-fcgi"),
             ),
@@ -106,14 +106,14 @@ pub(crate) fn hosted(host: HostExtension) -> Hosted {
                         fpm_get_status::declared(),
                     ])
                     .ini(vec![
-                        row("cgi.rfc2616_headers", "0", true),
-                        row("cgi.nph", "0", true),
-                        row("cgi.fix_pathinfo", "1", false),
-                        row("cgi.discard_path", "0", false),
-                        row("fastcgi.script_path_encoded", "1", false),
-                        row("fastcgi.logging", "1", false),
-                        row("fastcgi.error_header", "", false),
-                        row("fpm.config", "", false),
+                        row("cgi.rfc2616_headers", Some("0"), true),
+                        row("cgi.nph", Some("0"), true),
+                        row("cgi.fix_pathinfo", Some("1"), false),
+                        row("cgi.discard_path", Some("0"), false),
+                        row("fastcgi.script_path_encoded", Some("1"), false),
+                        row("fastcgi.logging", Some("1"), false),
+                        row("fastcgi.error_header", None, false),
+                        row("fpm.config", None, false),
                     ])
                     .build("cgi-fcgi"),
             ),
@@ -129,7 +129,7 @@ pub(crate) fn hosted(host: HostExtension) -> Hosted {
         HostExtension::CliServer => Hosted {
             extension: Some(
                 ExtensionBuilder::default()
-                    .ini(vec![row("cli_server.color", "0", true)])
+                    .ini(vec![row("cli_server.color", Some("0"), true)])
                     .build("cli_server"),
             ),
             additional: vec![

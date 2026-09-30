@@ -170,7 +170,7 @@ type Out = Ref<Untyped<Value>>;
 pub(crate) fn ini() -> Vec<IniDecl> {
     vec![IniDecl {
         name: Name(b"default_socket_timeout".as_slice().into()),
-        default: b"60".as_slice().into(),
+        default: Some(b"60".as_slice().into()),
         user: true,
         per_dir: true,
         system: true,

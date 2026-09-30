@@ -542,7 +542,7 @@ pub(crate) struct Shared {
     pub(crate) trampolines: Vec<MethodDecl>,
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
-    ini: Vec<(Vec<u8>, Vec<u8>)>,
+    ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     /// The constants' values, the string ones interned into the engine's
     /// table as `REGISTER_STRING_CONSTANT` interns php's at `MINIT`, so
     /// a request reading one allocates nothing and counts nothing;
@@ -1115,14 +1115,27 @@ impl Shared {
         }
     }
 
+    /// The value the entry `name` starts every request with as
+    /// `zend_ini_get_value` reads it, the empty string where it has none
+    /// (php's `NULL`); `None` where php has no such entry.
     pub(crate) fn ini_default(&self, name: &[u8]) -> Option<&[u8]> {
         self.ini
             .iter()
             .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, v)| v.as_slice())
+            .map(|(_, v)| v.as_deref().unwrap_or_default())
     }
 
-    pub(crate) fn ini_defaults(&self) -> &[(Vec<u8>, Vec<u8>)] {
+    /// The value the entry `name` starts every request with as php holds
+    /// it, `INI_ORIG_STR`: `None` where it has none (php's `NULL`), as for
+    /// a name php has no entry for.
+    pub(crate) fn ini_default_value(&self, name: &[u8]) -> Option<&[u8]> {
+        self.ini
+            .iter()
+            .find(|(n, _)| n.as_slice() == name)
+            .and_then(|(_, v)| v.as_deref())
+    }
+
+    pub(crate) fn ini_defaults(&self) -> &[(Vec<u8>, Option<Vec<u8>>)] {
         &self.ini
     }
 
@@ -1187,12 +1200,13 @@ impl Shared {
 /// under the CLI's hardcoded overrides (`Z/sapi/cli/php_cli.c:116-121`),
 /// which is what the oracle answers with no `php.ini`. `max_execution_time`
 /// and `html_errors` are the two the CLI moves, from `30` and `1`.
-/// `error_prepend_string` and `error_append_string` are `NULL` in php's
-/// table and empty here, since an entry with no value at all is one
-/// `ini_set()` refuses to set; so are `internal_encoding`,
+/// An entry php registers with no value, `NULL`, has `None`: `ini_get()`
+/// reads it as the empty string, while its `on_modify` is handed it
+/// apart from one set empty. `error_prepend_string` and
+/// `error_append_string` are such, and so are `internal_encoding`,
 /// `input_encoding` and `output_encoding`, which an extension reads
-/// before `default_charset` (`php_get_internal_encoding` and its kin),
-/// and `default_mimetype` is `SAPI_DEFAULT_MIMETYPE`. `short_open_tag`
+/// before `default_charset` (`php_get_internal_encoding` and its kin);
+/// `default_mimetype` is `SAPI_DEFAULT_MIMETYPE`. `short_open_tag`
 /// is the one entry the scanner reads, `CG(short_tags)`, and
 /// `token_get_all` with it.
 ///
@@ -1206,180 +1220,180 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: &[(&str, &str)] = &[
-    ("short_open_tag", "1"),
-    ("fatal_error_backtraces", "1"),
-    ("precision", "14"),
-    ("serialize_precision", "-1"),
+const CORE_INI: &[(&str, Option<&str>)] = &[
+    ("short_open_tag", Some("1")),
+    ("fatal_error_backtraces", Some("1")),
+    ("precision", Some("14")),
+    ("serialize_precision", Some("-1")),
     // `error_reporting`, `NULL` in php's table (`Z/Zend/zend.c:262`),
     // which `ini_get` reads as the empty string, phpinfo as `no value`
     // and `OnUpdateErrorReporting` as `E_ALL`.
-    ("error_reporting", ""),
-    ("display_errors", "1"),
+    ("error_reporting", None),
+    ("display_errors", Some("1")),
     // `display_startup_errors`, `On` (`Z/main/main.c:800`): whether what
     // is raised while php starts is displayed ([`Request::display_errors`]).
-    ("display_startup_errors", "1"),
-    ("log_errors", "0"),
+    ("display_startup_errors", Some("1")),
+    ("log_errors", Some("0")),
     // `error_log`, `NULL` in php's table, and `error_log_mode`, both
     // `PHP_INI_ALL` (`Z/main/main.c:835-836`): the file `php_log_err`
     // appends to and the permissions it creates one with.
-    ("error_log", ""),
-    ("error_log_mode", "0644"),
-    ("html_errors", "0"),
+    ("error_log", None),
+    ("error_log_mode", Some("0644")),
+    ("html_errors", Some("0")),
     // `docref_root` and `docref_ext`, `PHP_INI_ALL`: where a function's
     // diagnostic under `html_errors` links to (`raising::origin`).
-    ("docref_root", ""),
-    ("docref_ext", ""),
-    ("error_prepend_string", ""),
-    ("error_append_string", ""),
-    ("ignore_repeated_errors", "0"),
-    ("ignore_repeated_source", "0"),
-    ("report_zend_debug", "0"),
-    ("xmlrpc_errors", "0"),
-    ("xmlrpc_error_number", "0"),
+    ("docref_root", Some("")),
+    ("docref_ext", Some("")),
+    ("error_prepend_string", None),
+    ("error_append_string", None),
+    ("ignore_repeated_errors", Some("0")),
+    ("ignore_repeated_source", Some("0")),
+    ("report_zend_debug", Some("0")),
+    ("xmlrpc_errors", Some("0")),
+    ("xmlrpc_error_number", Some("0")),
     // `max_memory_limit`, `PHP_INI_SYSTEM`, declared before
     // `memory_limit`, whose handler holds it under the maximum, and
     // `report_memleaks`, deprecated when off (`Z/main/main.c:814-866`).
-    ("max_memory_limit", "-1"),
-    ("memory_limit", "128M"),
-    ("report_memleaks", "1"),
-    ("max_execution_time", "0"),
+    ("max_memory_limit", Some("-1")),
+    ("memory_limit", Some("128M")),
+    ("report_memleaks", Some("1")),
+    ("max_execution_time", Some("0")),
     // `hard_timeout`, `PHP_INI_SYSTEM` (`Z/main/main.c:885`): the seconds
     // past a timeout the execution timer waits for the loop to take it
     // before it ends the process ([`crate::interrupt::Timer`]).
-    ("hard_timeout", "2"),
-    ("default_charset", "UTF-8"),
-    ("default_mimetype", "text/html"),
-    ("internal_encoding", ""),
-    ("input_encoding", ""),
-    ("output_encoding", ""),
+    ("hard_timeout", Some("2")),
+    ("default_charset", Some("UTF-8")),
+    ("default_mimetype", Some("text/html")),
+    ("internal_encoding", None),
+    ("input_encoding", None),
+    ("output_encoding", None),
     // `PHP_INCLUDE_PATH`, the pinned build's `.:${PEAR_INSTALLDIR}`,
     // which `DEFAULT_INCLUDE_PATH` says too.
-    ("include_path", crate::constants::PHP_INCLUDE_PATH),
+    ("include_path", Some(crate::constants::PHP_INCLUDE_PATH)),
     // `allow_url_fopen` and `allow_url_include`, `PHP_INI_SYSTEM`
     // (`Z/main/main.c:876-877`): whether a URL wrapper opens, and opens
     // for an include (`php_stream_locate_url_wrapper`).
-    ("allow_url_fopen", "1"),
-    ("allow_url_include", "0"),
+    ("allow_url_fopen", Some("1")),
+    ("allow_url_include", Some("0")),
     // `open_basedir`, `PHP_INI_ALL` and `NULL` in php's table
     // (`Z/main/main.c:841`): the base directories the guard holds a path
     // to ([`Request::check_open_basedir`]), any list at startup and only
     // a tighter one after (`OnUpdateBaseDir`).
-    ("open_basedir", ""),
-    ("zend.exception_ignore_args", "0"),
-    ("zend.exception_string_param_max_len", "15"),
-    ("zend.max_allowed_stack_size", "0"),
-    ("zend.reserved_stack_size", "0"),
+    ("open_basedir", None),
+    ("zend.exception_ignore_args", Some("0")),
+    ("zend.exception_string_param_max_len", Some("15")),
+    ("zend.max_allowed_stack_size", Some("0")),
+    ("zend.reserved_stack_size", Some("0")),
     // `zend.assertions`, `1` (`Z/Zend/zend.c:264`), `EG(assertions)`:
     // what `zend_compile_assert` compiles under and `ASSERT_CHECK`
     // reads, moved between `-1` and the rest only at startup
     // (`OnUpdateAssertions`, [`Request::assertions_updated`]).
-    ("zend.assertions", "1"),
+    ("zend.assertions", Some("1")),
     // `zend.enable_gc`, `On` (`Z/Zend/zend.c:265`), whose `on_modify` is
     // the collector's `gc_enable`.
-    ("zend.enable_gc", "1"),
+    ("zend.enable_gc", Some("1")),
     // `zend.multibyte`, `zend.script_encoding` and `zend.detect_unicode`
     // (`Z/Zend/zend.c:266-268`): whether a file is read in its own
     // encoding, the encodings it may be in, and whether a byte order
     // mark or NULs say which first ([`crate::multibyte`]).
-    ("zend.multibyte", "0"),
-    ("zend.script_encoding", ""),
-    ("zend.detect_unicode", "1"),
+    ("zend.multibyte", Some("0")),
+    ("zend.script_encoding", None),
+    ("zend.detect_unicode", Some("1")),
     // `zend.signal_check`, `ZEND_INI_SYSTEM` and `SIGNAL_CHECK_DEFAULT`
     // (`Z/Zend/zend.c:270`): whether shutdown checks the signal handlers
     // `zend_signal` installed were left in place.
-    ("zend.signal_check", "0"),
+    ("zend.signal_check", Some("0")),
     // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
     // as the empty string and `OnUpdateFiberStackSize` as php's default.
-    ("fiber.stack_size", ""),
+    ("fiber.stack_size", None),
     // `disable_functions`, `PHP_INI_SYSTEM` (`Z/main/main.c:872`): read
     // once, as the function table is built (`function_table`).
-    ("disable_functions", ""),
+    ("disable_functions", Some("")),
     // `variables_order` and `request_order`, `PHP_INI_SYSTEM|PHP_INI_PERDIR`
     // (`Z/main/main.c:851`): which auto-globals the request fills and
     // the order `$_REQUEST` merges them in, read as each is made.
-    ("variables_order", "EGPCS"),
-    ("request_order", ""),
+    ("variables_order", Some("EGPCS")),
+    ("request_order", None),
     // `main.c`'s entries for `mail()` and `php_syslog`, and
     // `sys_temp_dir`, `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`
     // but `SMTP`, `smtp_port` and `syslog.filter`; a `NULL` default is
-    // empty here, as the two error strings above are.
-    ("sys_temp_dir", ""),
-    ("SMTP", "localhost"),
-    ("smtp_port", "25"),
-    ("mail.add_x_header", "0"),
-    ("mail.mixed_lf_and_crlf", "0"),
-    ("mail.cr_lf_mode", "crlf"),
-    ("mail.log", ""),
-    ("sendmail_path", "/usr/sbin/sendmail -t -i"),
-    ("sendmail_from", ""),
-    ("mail.force_extra_parameters", ""),
-    ("syslog.facility", "LOG_USER"),
-    ("syslog.ident", "php"),
-    ("syslog.filter", "no-ctrl"),
+    // `None`, as the two error strings' above are.
+    ("sys_temp_dir", None),
+    ("SMTP", Some("localhost")),
+    ("smtp_port", Some("25")),
+    ("mail.add_x_header", Some("0")),
+    ("mail.mixed_lf_and_crlf", Some("0")),
+    ("mail.cr_lf_mode", Some("crlf")),
+    ("mail.log", None),
+    ("sendmail_path", Some("/usr/sbin/sendmail -t -i")),
+    ("sendmail_from", None),
+    ("mail.force_extra_parameters", None),
+    ("syslog.facility", Some("LOG_USER")),
+    ("syslog.ident", Some("php")),
+    ("syslog.filter", Some("no-ctrl")),
     // `main.c`'s `highlight.*`, `php_get_highlight_struct`'s colours,
     // which `highlight_string()`, `highlight_file()` and `php -s` read
     // (`Z/main/main.c:763-767`, `Z/main/php_ini.h`'s `HL_*_COLOR`).
-    ("highlight.comment", "#FF8000"),
-    ("highlight.default", "#0000BB"),
-    ("highlight.html", "#000000"),
-    ("highlight.keyword", "#007700"),
-    ("highlight.string", "#DD0000"),
+    ("highlight.comment", Some("#FF8000")),
+    ("highlight.default", Some("#0000BB")),
+    ("highlight.html", Some("#000000")),
+    ("highlight.keyword", Some("#007700")),
+    ("highlight.string", Some("#DD0000")),
     // `ignore_user_abort`, `PG(ignore_user_abort)`, and the two `dl()`
     // reads, `enable_dl` and `extension_dir`, `PHP_INI_SYSTEM`.
-    ("ignore_user_abort", "0"),
+    ("ignore_user_abort", Some("0")),
     // `implicit_flush`, `Off` in `main.c` and `On` among the CLI's
     // hardcoded entries (`Z/sapi/cli/php_cli.c:118`), which the web's
     // hosts lay back.
-    ("implicit_flush", "1"),
+    ("implicit_flush", Some("1")),
     // `realpath_cache_size` and `realpath_cache_ttl`, `PHP_INI_SYSTEM`,
     // the realpath cache's limit and time to live (`crate::virtual_cwd`).
-    ("realpath_cache_size", "4096K"),
+    ("realpath_cache_size", Some("4096K")),
     // `arg_separator.input` and `arg_separator.output`, `PHP_INI_ALL`:
     // what `parse_str` splits on and what the URL rewriter and
     // `http_build_query` join with.
-    ("arg_separator.input", "&"),
-    ("arg_separator.output", "&"),
+    ("arg_separator.input", Some("&")),
+    ("arg_separator.output", Some("&")),
     // `auto_prepend_file` and `auto_append_file`,
     // `PHP_INI_SYSTEM|PHP_INI_PERDIR`: required before and after the
     // primary script (`php_execute_script`).
-    ("auto_prepend_file", ""),
-    ("auto_append_file", ""),
-    ("realpath_cache_ttl", "120"),
+    ("auto_prepend_file", None),
+    ("auto_append_file", None),
+    ("realpath_cache_ttl", Some("120")),
     // `main.c`'s entries for what a request of the web carries
     // (`Z/main/main.c:802-878`): the `X-Powered-By` header, the auto
     // globals made when named, `$_SERVER['argv']`, the body and its
     // limits, and the uploads.
-    ("expose_php", "1"),
-    ("auto_globals_jit", "1"),
-    ("register_argc_argv", "0"),
-    ("enable_post_data_reading", "1"),
-    ("post_max_size", "8M"),
-    ("max_input_time", "-1"),
-    ("max_input_nesting_level", "64"),
-    ("max_input_vars", "1000"),
-    ("file_uploads", "1"),
-    ("upload_max_filesize", "2M"),
-    ("upload_tmp_dir", ""),
-    ("max_file_uploads", "20"),
-    ("max_multipart_body_parts", "-1"),
-    ("enable_dl", "1"),
-    ("extension_dir", crate::constants::PHP_EXTENSION_DIR),
+    ("expose_php", Some("1")),
+    ("auto_globals_jit", Some("1")),
+    ("register_argc_argv", Some("0")),
+    ("enable_post_data_reading", Some("1")),
+    ("post_max_size", Some("8M")),
+    ("max_input_time", Some("-1")),
+    ("max_input_nesting_level", Some("64")),
+    ("max_input_vars", Some("1000")),
+    ("file_uploads", Some("1")),
+    ("upload_max_filesize", Some("2M")),
+    ("upload_tmp_dir", None),
+    ("max_file_uploads", Some("20")),
+    ("max_multipart_body_parts", Some("-1")),
+    ("enable_dl", Some("1")),
+    ("extension_dir", Some(crate::constants::PHP_EXTENSION_DIR)),
     // Two `main.c` registers for ext/standard to read (`Z/main/main.c:822, 863`).
-    ("unserialize_callback_func", ""),
-    ("browscap", ""),
+    ("unserialize_callback_func", None),
+    ("browscap", None),
     // `doc_root`, `user_dir` and `user_ini.*`, `PHP_INI_SYSTEM`
     // (`Z/main/main.c:829-884`): what a host of the web reads to find a
     // request's program and its `.user.ini` files.
     // `output_buffering` and `output_handler`, `PHP_INI_PERDIR|
     // PHP_INI_SYSTEM` (`Z/main/main.c:816-817`): the buffer a request
     // starts with ([`crate::output::start_at_request`]).
-    ("output_buffering", "0"),
-    ("output_handler", ""),
-    ("doc_root", ""),
-    ("user_dir", ""),
-    ("user_ini.filename", ".user.ini"),
-    ("user_ini.cache_ttl", "300"),
+    ("output_buffering", Some("0")),
+    ("output_handler", None),
+    ("doc_root", None),
+    ("user_dir", None),
+    ("user_ini.filename", Some(".user.ini")),
+    ("user_ini.cache_ttl", Some("300")),
 ];
 
 /// `php_ini_builder_define`'s line (`Z/main/php_ini_builder.c:63-81`)
@@ -1724,7 +1738,7 @@ fn deprecated_directives(req: &mut Request) {
 /// off is `OnUpdateReportMemleaks`'s deprecation, and `memory_limit`
 /// past `max_memory_limit` is `OnChangeMemoryLimit`'s warning with the
 /// maximum's text in its place. What an entry takes is the answer.
-fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Vec<u8>)> {
+fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
     if req
         .ini_get(b"report_memleaks")
         .is_some_and(|v| !crate::api::request::ini_truth(Some(v)))
@@ -1739,7 +1753,7 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Vec<u8>)> {
     match req.memory_limit_verdict(&limit) {
         Some(taken) if taken != limit => {
             req.take_startup_value(b"memory_limit", &taken);
-            vec![(b"memory_limit".to_vec(), taken)]
+            vec![(b"memory_limit".to_vec(), Some(taken))]
         }
         _ => Vec::new(),
     }
@@ -1796,12 +1810,13 @@ fn function_table(
     core: &Extension,
     extensions: &[Extension],
     additional: Vec<(FunctionDecl, Entry)>,
-    ini: &[(Vec<u8>, Vec<u8>)],
+    ini: &[(Vec<u8>, Option<Vec<u8>>)],
 ) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
     let list = ini
         .iter()
         .find(|(name, _)| name.as_slice() == b"disable_functions")
-        .map_or(&[][..], |(_, list)| list.as_slice());
+        .and_then(|(_, list)| list.as_deref())
+        .unwrap_or_default();
     let disabled = disabled_functions(list);
     // `module_registry` numbers Core 0 and the bundle from 1.
     let standard = extensions
@@ -2027,9 +2042,9 @@ impl EngineBuilder {
     #[must_use]
     #[allow(clippy::too_many_lines)] // one line per field of the engine
     pub fn build(self) -> Engine {
-        let mut ini: Vec<(Vec<u8>, Vec<u8>)> = CORE_INI
+        let mut ini: Vec<(Vec<u8>, Option<Vec<u8>>)> = CORE_INI
             .iter()
-            .map(|(n, v)| (n.as_bytes().to_vec(), v.as_bytes().to_vec()))
+            .map(|(n, v)| (n.as_bytes().to_vec(), v.map(|v| v.as_bytes().to_vec())))
             .collect();
         let mut extensions = self.extensions;
         extensions.extend(self.tier_extension);
@@ -2055,7 +2070,10 @@ impl EngineBuilder {
         }
         for extension in &extensions {
             for entry in &extension.ini {
-                ini.push((entry.name.0.to_vec(), entry.default.to_vec()));
+                ini.push((
+                    entry.name.0.to_vec(),
+                    entry.default.as_deref().map(<[u8]>::to_vec),
+                ));
             }
         }
         let core = crate::core::extension();
@@ -2076,7 +2094,7 @@ impl EngineBuilder {
                 continue;
             }
             ini.retain(|(n, _)| *n != name);
-            ini.push((name, value));
+            ini.push((name, Some(value)));
         }
         let locked = host_ini(self.host_ini, &extensions, &mut ini, &mut held);
         let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) =
@@ -2183,7 +2201,7 @@ fn constant_values(
 fn host_ini(
     entries: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     extensions: &[Extension],
-    ini: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ini: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
     held: &mut Vec<(Vec<u8>, Vec<u8>, bool)>,
 ) -> Vec<Vec<u8>> {
     let mut admin = Vec::new();
@@ -2209,7 +2227,7 @@ fn host_ini(
             held.push((name, value, true));
         } else {
             ini.retain(|(n, _)| *n != name);
-            ini.push((name, value));
+            ini.push((name, Some(value)));
         }
     }
     admin
@@ -2368,16 +2386,16 @@ impl Engine {
                 IniStage::Startup
             });
             let accepted = on_modify(&self.shared.extensions, &name)
-                .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
+                .is_some_and(|handler| matches!(handler(&mut req, Some(&value)), Ok(true)));
             if accepted {
                 req.take_startup_value(&name, &value);
-                taken.push((name, value));
+                taken.push((name, Some(value)));
             }
         }
         req.set_ini_stage(IniStage::Startup);
         let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
         if taken_encoding == crate::multibyte::Startup::Refused {
-            taken.push((b"zend.script_encoding".to_vec(), Vec::new()));
+            taken.push((b"zend.script_encoding".to_vec(), None));
         }
         disable_warnings(&mut req);
         let raised = req.end_startup();
@@ -3728,7 +3746,7 @@ mod tests {
         let second: OnModify = |req, value| {
             let mut line = req.ini_get(b"t.first").unwrap_or_default().to_vec();
             line.extend_from_slice(b" then ");
-            line.extend_from_slice(value);
+            line.extend_from_slice(value.unwrap_or_default());
             line.push(b'\n');
             req.write_stderr(&line);
             Ok(true)
@@ -3736,7 +3754,7 @@ mod tests {
         let first: OnModify = |_, _| Ok(true);
         let entry = |name: &str| php_unit::decl::IniDecl {
             name: Name(name.as_bytes().into()),
-            default: b"0"[..].into(),
+            default: Some(b"0"[..].into()),
             user: true,
             per_dir: true,
             system: true,
@@ -3796,7 +3814,7 @@ mod tests {
     fn preloading(script: &Path) -> Extension {
         let entry = php_unit::decl::IniDecl {
             name: Name(b"t.preload"[..].into()),
-            default: b""[..].into(),
+            default: Some(b""[..].into()),
             user: false,
             per_dir: false,
             system: true,
@@ -3868,7 +3886,7 @@ mod tests {
     fn file_caching(dir: &Path) -> Extension {
         let entry = php_unit::decl::IniDecl {
             name: Name(b"t.file_cache"[..].into()),
-            default: b""[..].into(),
+            default: Some(b""[..].into()),
             user: false,
             per_dir: false,
             system: true,
@@ -5323,7 +5341,7 @@ mod tests {
         let opcache = || {
             let entry = php_unit::decl::IniDecl {
                 name: Name(b"opcache.opt_debug_level"[..].into()),
-                default: b"0"[..].into(),
+                default: Some(b"0"[..].into()),
                 user: false,
                 per_dir: false,
                 system: true,

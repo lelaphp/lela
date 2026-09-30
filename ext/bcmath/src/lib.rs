@@ -76,7 +76,7 @@ pub fn extension() -> Extension {
         .class::<number::Number>()
         .ini(vec![IniDecl {
             name: Name(SCALE.into()),
-            default: b"0".as_slice().into(),
+            default: Some(b"0".as_slice().into()),
             user: true,
             per_dir: true,
             system: true,
@@ -111,7 +111,8 @@ fn bcmath_info(req: &mut Request) {
     clippy::unnecessary_wraps,
     reason = "the `on_modify` slot's shape, which a handler that throws needs"
 )]
-fn on_update_scale(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+fn on_update_scale(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let value = value.unwrap_or_default();
     let (scale, error) = Request::ini_parse_quantity(value);
     if let Some(error) = error {
         let name = String::from_utf8_lossy(SCALE);

@@ -965,26 +965,25 @@ impl FiberError {
 }
 
 /// `EG(fiber_stack_size)`: what `OnUpdateFiberStackSize` last wrote,
-/// the startup entry's quantity, or php's 2 MiB where the entry is
-/// unset. php's table holds `NULL` there, which the update reads as the
-/// default, where an empty value given to `ini_set()` is a quantity of
-/// zero and refused at the next `start`.
+/// the startup entry's quantity, or php's 2 MiB where the entry has no
+/// value. php's table holds `NULL` there, which the update reads as the
+/// default, where an empty value is a quantity of zero and refused at
+/// the next `start`.
 fn stack_size(req: &Request) -> usize {
     if let Some(size) = req.fibers().stack_size {
         return size;
     }
-    match req.ini_get(b"fiber.stack_size") {
-        Some(value) if !value.is_empty() => {
-            usize::try_from(Request::ini_parse_bytes(value)).unwrap_or(DEFAULT_STACK)
-        }
-        _ => DEFAULT_STACK,
+    match req.ini_value(b"fiber.stack_size") {
+        Some(value) => usize::try_from(Request::ini_parse_bytes(value)).unwrap_or(DEFAULT_STACK),
+        None => DEFAULT_STACK,
     }
 }
 
 /// `OnUpdateFiberStackSize` (`Z/Zend/zend.c:238-252`) for an
 /// `ini_set()`: the value read as a quantity, a negative one php's
 /// warning and a refusal that keeps the entry as it was, and anything
-/// else the size the next `start` lays down.
+/// else the size the next `start` lays down; no value, php's `NULL`, is
+/// `ZEND_FIBER_DEFAULT_C_STACK_SIZE`, where the empty string is 0.
 ///
 /// ```php
 /// var_dump(ini_set("fiber.stack_size", "-1"), ini_get("fiber.stack_size"));
@@ -998,7 +997,11 @@ fn stack_size(req: &Request) -> usize {
 /// string(0) ""
 /// Fiber stack size is too small, it needs to be at least
 /// ```
-pub(crate) fn stack_size_updated(req: &mut Request, value: &[u8]) -> bool {
+pub(crate) fn stack_size_updated(req: &mut Request, value: Option<&[u8]>) -> bool {
+    let Some(value) = value else {
+        req.fibers_mut().stack_size = Some(DEFAULT_STACK);
+        return true;
+    };
     let size = Request::ini_parse_bytes(value);
     let Ok(size) = usize::try_from(size) else {
         crate::api::raising::warning(req, "fiber.stack_size must be a positive number");

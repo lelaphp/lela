@@ -257,11 +257,10 @@ pub(crate) fn minfo(req: &mut Request) {
                 true => String::from("Off"),
                 false => String::from_utf8_lossy(value).into_owned(),
             };
-            let master = entry.original.as_deref().unwrap_or(&entry.value);
             [
                 String::from_utf8_lossy(name).into_owned(),
-                shown(&entry.value),
-                shown(master),
+                shown(entry.value.as_deref().unwrap_or_default()),
+                shown(entry.master.as_deref().unwrap_or_default()),
             ]
         })
         .collect();
@@ -1151,7 +1150,34 @@ fn error_log(
 /// `global_value`, `local_value` and `access`; with an extension named
 /// as `module_registry` keys it, lower-case, its own entries alone,
 /// `core` being the one name every entry is walked for. A name no
-/// extension of the bundle has is the warning and `false`.
+/// extension of the bundle has is the warning and `false`. An entry with
+/// no value, php's `NULL`, is `null`, and its `global_value` once the
+/// request changed it is the value it was changed to, as php reads
+/// `orig_value` and then `value`:
+///
+/// ```php
+/// ini_set('from', 'me');
+/// var_dump(ini_get_all(null, false)['user_agent'], ini_get_all()['user_agent'], ini_get_all()['from']);
+/// ```
+/// ```expect
+/// NULL
+/// array(3) {
+///   ["global_value"]=>
+///   NULL
+///   ["local_value"]=>
+///   NULL
+///   ["access"]=>
+///   int(7)
+/// }
+/// array(3) {
+///   ["global_value"]=>
+///   string(2) "me"
+///   ["local_value"]=>
+///   string(2) "me"
+///   ["access"]=>
+///   int(7)
+/// }
+/// ```
 ///
 /// ```php
 /// var_dump(ini_get_all("reflection"), ini_get_all("pcre", false));
@@ -1212,17 +1238,13 @@ fn ini_get_all(
             let access = (i64::from(entry.decl.user) * INI_USER)
                 | (i64::from(entry.decl.per_dir) * INI_PERDIR)
                 | (i64::from(entry.decl.system) * INI_SYSTEM);
-            let global = entry.original.as_deref().unwrap_or(&entry.value).to_vec();
+            // `orig_value`, else `value`: an entry changed from no value
+            // shows the value it was changed to.
+            let global = entry.master.as_deref().or(entry.value.as_deref());
             let mut option = PhpArray::new(req)?;
             for (name, value) in [
-                (
-                    &b"global_value"[..],
-                    Value::string(PhpString::new(req, &global)?),
-                ),
-                (
-                    b"local_value",
-                    Value::string(PhpString::new(req, &entry.value)?),
-                ),
+                (&b"global_value"[..], ini_value(req, global)?),
+                (b"local_value", ini_value(req, entry.value.as_deref())?),
                 (b"access", Value::int(access)),
             ] {
                 let name = Key::Str(PhpString::new(req, name)?);
@@ -1230,11 +1252,20 @@ fn ini_get_all(
             }
             Value::array(option)
         } else {
-            Value::string(PhpString::new(req, &entry.value)?)
+            ini_value(req, entry.value.as_deref())?
         };
         all.set(req, key, value)?;
     }
     Ok(OrFalse::Value(all))
+}
+
+/// An entry's value as `ini_get_all()` answers it: the string, or `null`
+/// where the entry has none (php's `NULL`).
+fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Value, Thrown> {
+    Ok(match value {
+        Some(value) => Value::string(PhpString::new(req, value)?),
+        None => Value::null(),
+    })
 }
 
 /// `ini_restore(string $option): void`, `zend_restore_ini_entry` at

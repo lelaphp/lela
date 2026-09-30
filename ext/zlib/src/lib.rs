@@ -137,7 +137,7 @@ struct State {
 pub fn extension() -> Extension {
     let ini = |name: &str, default: &str| IniDecl {
         name: Name(name.as_bytes().into()),
-        default: default.as_bytes().into(),
+        default: Some(default.as_bytes().into()),
         user: true,
         per_dir: true,
         system: true,

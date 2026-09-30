@@ -53,7 +53,10 @@ pub(super) fn engine_state(ini: &StartupIni) -> Patterns {
             .iter()
             .rev()
             .find(|(n, _)| n.as_slice() == name.as_bytes())
-            .map_or_else(|| default.as_bytes().to_vec(), |(_, v)| v.clone())
+            .map_or_else(
+                || default.as_bytes().to_vec(),
+                |(_, v)| v.clone().unwrap_or_default(),
+            )
     });
     Patterns {
         cache: Cache::new(CACHE_SIZE),
