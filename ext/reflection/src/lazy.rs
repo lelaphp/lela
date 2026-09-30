@@ -12,11 +12,12 @@ use php_ext::call::{
     lookup_class, new_lazy_ghost, new_lazy_proxy, reset_as_lazy_ghost, reset_as_lazy_proxy,
 };
 use php_ext::coerce::value_name;
+use php_ext::decl::PropertyDecl;
 use php_ext::raising::{Thrown, arg_type_error, argument_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpObject};
 
-use super::{asked_class, class_chain, class_name_of, is_internal, this_class, this_property};
+use super::{class_chain, class_name_of, is_internal, this_class};
 
 /// `ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE`,
 /// `ReflectionClass::SKIP_INITIALIZATION_ON_SERIALIZE`.
@@ -139,14 +140,14 @@ fn held_options(req: &mut Request, position: u32, options: i64) -> Result<(), Th
 /// declared instance property, of an object whose class could be lazy.
 pub(super) fn lazy_compatible(
     req: &mut Request,
-    this: PhpObject,
+    asked: ClassId,
+    prop: Option<&(ClassId, PropertyDecl)>,
+    name: &[u8],
     object: PhpObject,
     method: &str,
-) -> Result<(ClassId, Vec<u8>), Thrown> {
-    let (class, name, declared) = this_property(req, this)?;
-    let asked = asked_class(req, this, class);
-    let shown = String::from_utf8_lossy(&name).into_owned();
-    let Some(declared) = declared else {
+) -> Result<(), Thrown> {
+    let shown = String::from_utf8_lossy(name).into_owned();
+    let Some((class, declared)) = prop else {
         let of = String::from_utf8_lossy(&class_name_of(req, asked)).into_owned();
         return Err(throw(
             req,
@@ -154,6 +155,7 @@ pub(super) fn lazy_compatible(
             &format!("Can not use {method} on dynamic property {of}::${shown}"),
         ));
     };
+    let class = *class;
     if !declared.is_instance {
         let of = String::from_utf8_lossy(&class_name_of(req, class)).into_owned();
         return Err(throw(
@@ -163,7 +165,7 @@ pub(super) fn lazy_compatible(
         ));
     }
     // `ZEND_ACC_VIRTUAL`: a property with no slot has none to write.
-    if php_ext::call::property_is_virtual(req, class, &name) {
+    if php_ext::call::property_is_virtual(req, class, name) {
         let of = String::from_utf8_lossy(&class_name_of(req, class)).into_owned();
         return Err(throw(
             req,
@@ -185,5 +187,5 @@ pub(super) fn lazy_compatible(
             &format!("Can not use {method} on internal class {of}"),
         ));
     }
-    Ok((asked, name))
+    Ok(())
 }

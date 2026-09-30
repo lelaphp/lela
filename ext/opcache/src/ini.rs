@@ -428,13 +428,24 @@ const MAX_INTERNED_STRINGS_BUFFER: i64 = 32767;
 /// ```
 fn on_enable(req: &mut Request, value: &[u8]) -> bool {
     if req.at_startup() || !Request::ini_parse_bool(value) {
-        if !req.at_startup() {
+        if !req.at_startup() && !req.at_activate() {
             req.state::<State>().accelerator_enabled = false;
         }
         return true;
     }
     if flag(req, "opcache.enable") {
         return true;
+    }
+    if req.at_activate() {
+        // `ZEND_INI_STAGE_ACTIVATE`: a host's own value, which php-fpm's
+        // pools set, logged rather than raised.
+        let message = if req.sapi_name() == "fpm-fcgi" {
+            "Zend OPcache can't be temporarily enabled. Are you using php_admin_value[opcache.enable]=1 in an individual pool's configuration?"
+        } else {
+            "Zend OPcache can't be temporarily enabled (it may be only disabled until the end of request)"
+        };
+        accel_log(req, Log::Warning, message);
+        return false;
     }
     warning(
         req,

@@ -2392,7 +2392,7 @@ impl Ops for HostFd {
         match self {
             HostFd::Stdin(body) => body.write(req, buf),
             HostFd::Stdout => {
-                req.ub_write(buf);
+                req.write_stdout(buf);
                 Some(buf.len())
             }
             HostFd::Stderr => {

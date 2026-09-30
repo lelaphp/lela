@@ -40,7 +40,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use php_proto::cgi::{Environment, RequestInfo};
-use php_sapi::cgi::{Disk, path_of};
+use php_sapi::cgi::{Disk, HOST_INI, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 use php_sapi::ini::{define, enabled, entry};
 use php_sapi::{
@@ -53,11 +53,6 @@ pub const NAME: &str = "cgi-fcgi";
 /// `cgi_module_entry`, which php-cgi hands `php_module_startup` to load
 /// after the bundle: the engine a CGI host serves on is built with it.
 pub const EXTENSION: HostExtension = HostExtension::CgiFcgi;
-
-/// The entries whose default php's CGI keeps where the engine's are the
-/// CLI's (`php_cli.c`'s `HARDCODED_INI`): laid over the engine's
-/// defaults before the line's `-d`, as `main.c`'s own table has them.
-const HOST_INI: [(&str, &str); 2] = [("html_errors", "1"), ("max_execution_time", "30")];
 
 /// `OPTIONS`, `cgi_main.c:142-163`, row for row.
 const OPTIONS: &[Opt] = &[
@@ -435,7 +430,9 @@ fn describe(
             return Err(Refusal::Redirect);
         }
     }
-    let info: RequestInfo = php_proto::cgi::request_info(&mut env, settings, &Disk);
+    let doc_root = entry(ini, "doc_root").filter(|root| !root.is_empty());
+    let info: RequestInfo =
+        php_proto::cgi::request_info(&mut env, settings, doc_root.map(str::as_bytes), &Disk);
     let (path, argv, query) = if server {
         (info.path_translated.clone(), Vec::new(), info.query.clone())
     } else {

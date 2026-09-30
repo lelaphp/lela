@@ -443,7 +443,8 @@ impl Errors {
 /// raised as php's handlers would have met it.
 pub trait DocumentHandlers: Sync {
     /// `dump_doc_to_str`: the document with the save `options`, `None`
-    /// where a step failed.
+    /// where a step failed, and what a serialiser threw, php's
+    /// `EG(exception)` beside the null it answers.
     fn dump_doc_to_str(
         &self,
         req: &mut Request,
@@ -451,7 +452,7 @@ pub trait DocumentHandlers: Sync {
         options: i32,
         no_empty: bool,
         encoding: Option<&[u8]>,
-    ) -> Option<Vec<u8>>;
+    ) -> Result<Option<Vec<u8>>, Thrown>;
 
     /// `dump_node_to_str`: one node of the document.
     fn dump_node_to_str(
@@ -462,7 +463,7 @@ pub trait DocumentHandlers: Sync {
         format: bool,
         no_empty: bool,
         encoding: Option<&[u8]>,
-    ) -> Option<Vec<u8>>;
+    ) -> Result<Option<Vec<u8>>, Thrown>;
 
     /// `dump_doc_to_file`: the bytes written to `path`, `-1` where it
     /// failed.
@@ -513,10 +514,10 @@ impl DocumentHandlers for DefaultHandlers {
         options: i32,
         no_empty: bool,
         encoding: Option<&[u8]>,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, Thrown> {
         let (saved, raised) = ffi::Save::doc(doc, options, no_empty, encoding);
         Errors::route(req, raised);
-        saved
+        Ok(saved)
     }
 
     fn dump_node_to_str(
@@ -527,10 +528,10 @@ impl DocumentHandlers for DefaultHandlers {
         format: bool,
         no_empty: bool,
         encoding: Option<&[u8]>,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, Thrown> {
         let (saved, raised) = ffi::Save::node(doc, node, format, no_empty, encoding);
         Errors::route(req, raised);
-        saved
+        Ok(saved)
     }
 
     fn dump_doc_to_file(

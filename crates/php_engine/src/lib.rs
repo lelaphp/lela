@@ -60,7 +60,8 @@ mod wrapper;
 pub use api::request::PHP_VERSION;
 pub use command_line::{CommandLine, EachLine};
 pub use engine::{
-    Dispatched, Engine, EngineBuilder, FileHandles, Method, Observables, OutputSink, ProcessTitle,
-    RequestDescription, ResponseHead, Routed, WebRequest,
+    Dispatched, Engine, EngineBuilder, FileHandles, HostValue, IniOrigin, Method, Observables,
+    OutputSink, ProcessTitle, RequestDescription, ResponseHead, Routed, WebRequest,
 };
 pub use host_extension::HostExtension;
+pub use ini_syntax::{IniEvent, IniValue};

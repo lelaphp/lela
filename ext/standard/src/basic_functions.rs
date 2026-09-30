@@ -176,7 +176,7 @@ fn getenv(
 ) -> Result<Union<PhpArray, OrFalse<PhpString>>, Thrown> {
     let _ = local_only;
     let Some(name) = name else {
-        let pairs = req.env_pairs().to_vec();
+        let pairs = req.loaded_env();
         let mut array = PhpArray::new(req)?;
         for (name, value) in pairs {
             if name.is_empty() || name.iter().any(|c| matches!(c, b' ' | b'.' | b'[')) {
@@ -1180,7 +1180,7 @@ fn ini_get_all(
         let module = registered.then(|| req.extension_named(name)).flatten();
         if name == b"core" {
         } else if let Some(module) = module {
-            entries.retain(|entry| entry.extension == Some(module));
+            entries.retain(|entry| entry.extension == module);
         } else {
             let text = format!(
                 "Extension \"{}\" cannot be found",

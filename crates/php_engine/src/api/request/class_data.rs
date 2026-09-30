@@ -495,6 +495,32 @@ impl Request {
     /// under the strict rule (`update_property`), php's
     /// `property initializers must always be evaluated with strict
     /// types`.
+    /// `default_properties_table[OBJ_PROP_TO_NUM(prop->offset)]` of
+    /// `class` for its instance property `name`, what `_property_string`
+    /// prints: the default `zend_update_class_constants` evaluated, a
+    /// view, once the class stands updated in this request; `None`
+    /// before, where php's table still holds the expression, and for a
+    /// typed slot with no default.
+    ///
+    /// ```php
+    /// class C { public stdClass $a = FOO; public $i = N; }
+    /// $r = new ReflectionProperty('C', 'i');
+    /// define('FOO', new stdClass); define('N', 5);
+    /// echo $r; new C; echo $r, new ReflectionProperty('C', 'a');
+    /// ```
+    /// ```expect
+    /// Property [ public $i = N ]
+    /// Property [ public $i = 5 ]
+    /// Property [ public stdClass $a = object(stdClass) ]
+    /// ```
+    #[must_use]
+    pub fn evaluated_default(&self, class: ClassId, name: &[u8]) -> Option<Value> {
+        let data = self.class_data.get(&class).filter(|data| data.updated)?;
+        let placed = self.placed_properties(class);
+        let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
+        data.defaults.get(at).copied().flatten()
+    }
+
     fn evaluate_defaults(&mut self, class: ClassId) -> Result<(), Thrown> {
         let rows = self.placed_properties(class);
         let done = self

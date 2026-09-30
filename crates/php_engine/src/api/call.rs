@@ -986,17 +986,20 @@ pub fn instantiate(
 /// [`call_named`] places them. A class with no constructor takes
 /// positional arguments and no named one, php's `Unknown named
 /// parameter`. The object is the caller's, one owner; what the
-/// constructor threw is the `Err`, the object given up. The arguments
-/// stay the caller's.
+/// constructor threw is the `Err`, the object given up destructed
+/// (`zend_object_store_ctor_failed`). The arguments stay the caller's.
 ///
 /// ```php
 /// #[Attribute] class MyAttrib {}
 /// #[MyAttrib(notinterned: '')] class Test1 {}
 /// $attr = (new ReflectionClass(Test1::class))->getAttributes()[0];
 /// try { $attr->newInstance(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// class T { function __construct() { throw new Exception('c'); } function __destruct() { echo "d\n"; } }
+/// try { (new ReflectionClass('T'))->newInstance(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// Unknown named parameter $notinterned
+/// c
 /// ```
 pub fn instantiate_named(
     req: &mut Request,

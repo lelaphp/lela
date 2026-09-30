@@ -4,8 +4,8 @@
 //! entities or notations, or the node set an `XPath` query answered.
 
 use php_ext::abi::{
-    CloneObj, DimensionRead, Instance, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest,
-    Raw, This, Union, Untyped,
+    ClassIterator, CloneObj, DimensionRead, Instance, ObjectHandlers, PropertyPlace, PropertyRead,
+    PropertyTest, Raw, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{numeric_string, to_long};
@@ -700,40 +700,24 @@ impl ObjectHandlers for MapHandlers {
         }
     }
 
-    fn iterator_element(
+    /// `php_dom_get_iterator`: the walk made standing at the first
+    /// item, php's `get_item(0)`, and refused by reference.
+    fn get_iterator(
         &self,
         req: &mut Request,
         object: PhpObject,
-        index: usize,
-    ) -> Result<Option<(Value, Value)>, Thrown> {
-        let at = i64::try_from(index).unwrap_or(i64::MAX);
-        let value = item(req, object, at)?;
-        if value.as_object().is_none() {
-            req.release(value);
-            return Ok(None);
+        by_ref: bool,
+    ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        if by_ref {
+            let message = "An iterator cannot be used with foreach by reference";
+            return Err(throw(req, "Error", message));
         }
-        let key = if named_keys(req, object) {
-            // `php_dom_iterator_current_key`: a modern attribute by its
-            // qualified name.
-            let modern = value
-                .as_object()
-                .is_some_and(|o| crate::modern::follows_spec(req, *o));
-            let name = value
-                .as_object()
-                .and_then(|o| node_of(req, *o))
-                .map(|n| {
-                    if modern && n.kind() == Kind::Attribute {
-                        crate::qualified_name(n)
-                    } else {
-                        n.name()
-                    }
-                })
-                .unwrap_or_default();
-            string(req, &name)?
-        } else {
-            Value::int(at)
-        };
-        Ok(Some((key, value)))
+        let current = item(req, object, 0)?;
+        Ok(Some(Box::new(NodeIter {
+            current: current.as_object().copied(),
+            index: 0,
+            steps: 0,
+        })))
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -763,6 +747,106 @@ impl ObjectHandlers for MapHandlers {
             if let MapKind::NodeSet(array) = &map.kind {
                 visit(Value::array(*array));
             }
+        }
+    }
+}
+
+/// `php_dom_iterator`: the item the walk stands at, taken when it is
+/// made and each time it moves, one owner held, `curobj`; its index; and
+/// how many steps were asked of it, which `InternalIterator::rewind`
+/// reads, since `php_dom_iterator_funcs` has no `rewind` of its own.
+///
+/// A legacy list of a node's children or attributes steps to the node
+/// after the one it stands at, so a removal under it ends the walk
+/// there; every other list asks for the item at the next index, live:
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<x><a/><b/><c/><d/></x>');
+/// foreach ($d->documentElement->childNodes as $i => $n) { echo $i, $n->nodeName, ';'; if ($i === 1) $n->remove(); }
+/// $m = Dom\XMLDocument::createFromString('<x><a/><b/><c/><d/></x>');
+/// foreach ($m->documentElement->childNodes as $i => $n) { echo $i, $n->nodeName, ';'; if ($i === 1) $n->remove(); }
+/// $it = $d->documentElement->childNodes->getIterator();
+/// foreach (new IteratorIterator($it) as $n) {}
+/// try { $it->rewind(); } catch (Error $e) { echo "\n", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 0a;1b;0a;1b;2d;
+/// Iterator does not support rewinding
+/// ```
+struct NodeIter {
+    current: Option<PhpObject>,
+    index: i64,
+    steps: u64,
+}
+
+impl ClassIterator for NodeIter {
+    fn rewind(&mut self, req: &mut Request, _: PhpObject) -> Result<(), Thrown> {
+        if self.steps == 0 {
+            return Ok(());
+        }
+        Err(throw(req, "Error", "Iterator does not support rewinding"))
+    }
+
+    fn valid(&mut self, _: &mut Request, _: PhpObject) -> Result<bool, Thrown> {
+        Ok(self.current.is_some())
+    }
+
+    fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
+        let Some(current) = self.current else {
+            return Ok(Value::null());
+        };
+        req.addref(&current.as_value());
+        Ok(current.as_value())
+    }
+
+    /// `php_dom_iterator_current_key`: the index, or a named map's item
+    /// by its name, a modern attribute by its qualified name.
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+        if !named_keys(req, object) {
+            return Ok(Value::int(self.index));
+        }
+        let Some(node) = self.current.and_then(|o| node_of(req, o)) else {
+            return Ok(Value::null());
+        };
+        let modern = self
+            .current
+            .is_some_and(|o| crate::modern::follows_spec(req, o));
+        let name = if modern && node.kind() == Kind::Attribute {
+            crate::qualified_name(node)
+        } else {
+            node.name()
+        };
+        string(req, &name)
+    }
+
+    fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        self.steps += 1;
+        let Some(old) = self.current.take() else {
+            return Ok(());
+        };
+        self.index += 1;
+        let cursor = !crate::modern::follows_spec(req, old)
+            && matches!(
+                dom(req, object),
+                Some(Dom { extra: Extra::Map(m), .. })
+                    if matches!(m.kind, MapKind::ChildNodes | MapKind::Attributes)
+            );
+        let next = match view(req, object) {
+            View::Nodes { base, .. } if cursor => match node_of(req, old).and_then(Node::next) {
+                Some(node) => object_for(req, node, Some(base))?,
+                None => Value::null(),
+            },
+            _ => item(req, object, self.index)?,
+        };
+        self.current = next.as_object().copied();
+        req.release(old.as_value());
+        Ok(())
+    }
+
+    fn release(&mut self, req: &mut Request, _: PhpObject) {
+        if let Some(current) = self.current.take() {
+            req.release(current.as_value());
         }
     }
 }

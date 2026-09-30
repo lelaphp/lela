@@ -775,13 +775,18 @@ pub const ENGINE: &str = "php";
 /// (ADR-0008), which a CGI-shaped test is run through.
 pub(crate) const ENGINE_CGI: &str = "php-cgi";
 
-/// The cargo line that builds [`ENGINE`] and [`ENGINE_CGI`]: their two
-/// crates by package, so the build turns on the features those crates
-/// declare and no others. A line naming the binaries alone builds them
-/// with every workspace member's features unified, the harness's
-/// extensions among them, which is not the binary the lane measures.
+/// Beside [`ENGINE`], the `FastCGI` process manager's binary, the one
+/// `sapi/fpm` builds (ADR-0008), which `sapi/fpm/tests` start.
+pub(crate) const ENGINE_FPM: &str = "php-fpm";
+
+/// The cargo line that builds [`ENGINE`], [`ENGINE_CGI`] and
+/// [`ENGINE_FPM`]: their crates by package, so the build turns on the
+/// features those crates declare and no others. A line naming the
+/// binaries alone builds them with every workspace member's features
+/// unified, the harness's extensions among them, which is not the binary
+/// the lane measures.
 pub(crate) fn engine_build() -> String {
-    let packages: Vec<String> = [crate::carried::BINARY, "sapi/cgi"]
+    let packages: Vec<String> = [crate::carried::BINARY, "sapi/cgi", "sapi/fpm"]
         .iter()
         .map(|krate| format!("-p {}", crate::layout::package(krate)))
         .collect();
@@ -942,18 +947,23 @@ fn engine_sources() -> impl Iterator<Item = &'static str> {
     crate::layout::CRATE_DIRS.iter().map(|d| d.dir)
 }
 
-/// The newest source of the engine under `root`, and when it was written.
-/// `None` where the tree carries none, and then no binary is behind
-/// anything: a workspace of a test's own with no engine in it is not a
-/// tree a binary can have fallen behind.
-fn newest_source(root: &Path) -> Option<(PathBuf, SystemTime)> {
+/// The newest source of the host at `host` under `root`, and when it was
+/// written: the engine's sources and the host's own, but no other
+/// host's. `None` where the tree carries none, and then no binary is
+/// behind anything: a workspace of a test's own with no engine in it is
+/// not a tree a binary can have fallen behind.
+fn newest_source(root: &Path, host: &Path) -> Option<(PathBuf, SystemTime)> {
     let mut found = Vec::new();
     for dir in engine_sources() {
         let _ = crate::tally::files_under(&root.join(dir), &mut found);
     }
     found
         .into_iter()
-        .filter(|path| is_engine_source(path.strip_prefix(root).unwrap_or(path)))
+        .filter(|path| {
+            let relative = path.strip_prefix(root).unwrap_or(path);
+            let other_host = relative.starts_with("sapi") && !relative.starts_with(host);
+            is_engine_source(relative) && !other_host
+        })
         .filter_map(|path| {
             let written = path.metadata().and_then(|at| at.modified()).ok()?;
             Some((path, written))
@@ -1007,25 +1017,28 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
 /// binary is behind the tree only where it measured that it is.
 ///
 /// The CGI host's binary beside it, [`ENGINE_CGI`], is what a CGI-shaped
-/// test of the lane runs, and since ADR-0008 it is built by a crate of its
-/// own, so a build of `php` alone leaves it where it was: where it stands
-/// there it is held to the tree with the engine's, and the pair is behind
-/// the tree when either is.
+/// test of the lane runs, and the `FastCGI` process manager's,
+/// [`ENGINE_FPM`], what `sapi/fpm/tests` start; since ADR-0008 each is
+/// built by a crate of its own, so a build of `php` alone leaves them
+/// where they were: where one stands there it is held to the tree with
+/// the engine's, and the lot is behind the tree when any is. Each is held
+/// to the sources it is built from, which are every host's but the other
+/// hosts' own, since writing `sapi/fpm` moves no `php` and cargo relinks
+/// none.
 fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
-    let Some((source, written)) = newest_source(root) else {
-        return Runner::Engine(path);
-    };
-    let cgi = path.with_file_name(ENGINE_CGI);
-    let behind = [path.as_path(), cgi.as_path()].into_iter().find(|binary| {
-        binary
-            .metadata()
-            .and_then(|at| at.modified())
-            .is_ok_and(|built| written > built)
+    let hosts = [
+        (path.clone(), crate::carried::BINARY),
+        (path.with_file_name(ENGINE_CGI), "sapi/cgi"),
+        (path.with_file_name(ENGINE_FPM), "sapi/fpm"),
+    ];
+    let behind = hosts.iter().find_map(|(binary, own)| {
+        let built = binary.metadata().and_then(|at| at.modified()).ok()?;
+        let (source, written) = newest_source(root, Path::new(own))?;
+        (written > built).then(|| (binary.clone(), source))
     });
-    let Some(behind) = behind else {
+    let Some((path, source)) = behind else {
         return Runner::Engine(path);
     };
-    let path = behind;
     Runner::Stale(format!(
         "the engine's binary at {} was built before {} was last written, so a lane running it \
          would measure an engine this tree no longer describes while stamping the reading with \

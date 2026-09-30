@@ -17,22 +17,40 @@
 use php_macros::php_function;
 use php_unit::decl::{FunctionDecl, IniDecl, Name};
 
-use crate::api::abi::{Entry, Extension, ExtensionBuilder};
+use crate::api::abi::{Entry, Extension, ExtensionBuilder, Union};
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpString, Value};
+use crate::engine::HostValue;
 
 /// The extension a host loads after the bundle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostExtension {
     /// `cgi_module_entry`, named `cgi-fcgi`.
     CgiFcgi,
+    /// php-fpm's `cgi_module_entry` (`Z/sapi/fpm/fpm/fpm_main.c:1543`),
+    /// also named `cgi-fcgi`, with the entries and natives of
+    /// `fpm_main.stub.php`.
+    FpmFcgi,
     /// php's CLI, which loads no extension of its own and adds its
     /// `additional_functions` under `standard`, the process title's two.
     Cli,
     /// The built-in server's `cli_server_module_entry`, named
     /// `cli_server`, and its natives under `standard`.
     CliServer,
+}
+
+impl HostExtension {
+    /// `sapi_module.name` of the host that loads it.
+    #[must_use]
+    pub fn sapi_name(self) -> &'static str {
+        match self {
+            HostExtension::CgiFcgi => "cgi-fcgi",
+            HostExtension::FpmFcgi => "fpm-fcgi",
+            HostExtension::Cli => "cli",
+            HostExtension::CliServer => "cli-server",
+        }
+    }
 }
 
 /// What a host adds: its extension, and the natives `php_module_startup`
@@ -78,6 +96,29 @@ pub(crate) fn hosted(host: HostExtension) -> Hosted {
             ),
             additional: Vec::new(),
         },
+        HostExtension::FpmFcgi => Hosted {
+            extension: Some(
+                ExtensionBuilder::default()
+                    .functions(vec![
+                        fastcgi_finish_request::declared(),
+                        apache_request_headers::declared(),
+                        getallheaders::declared(),
+                        fpm_get_status::declared(),
+                    ])
+                    .ini(vec![
+                        row("cgi.rfc2616_headers", "0", true),
+                        row("cgi.nph", "0", true),
+                        row("cgi.fix_pathinfo", "1", false),
+                        row("cgi.discard_path", "0", false),
+                        row("fastcgi.script_path_encoded", "1", false),
+                        row("fastcgi.logging", "1", false),
+                        row("fastcgi.error_header", "", false),
+                        row("fpm.config", "", false),
+                    ])
+                    .build("cgi-fcgi"),
+            ),
+            additional: Vec::new(),
+        },
         HostExtension::Cli => Hosted {
             extension: None,
             additional: vec![
@@ -100,6 +141,102 @@ pub(crate) fn hosted(host: HostExtension) -> Hosted {
             ],
         },
     }
+}
+
+/// php-fpm's `fastcgi.error_header` (`Z/sapi/fpm/fpm/fpm_main.c:1934`):
+/// a program that ended with exit status 255 before its head went has
+/// the entry's line put in, replacing its kind, before the request shuts
+/// down. Nothing under a host whose extension has no such entry.
+pub(crate) fn after_script(req: &mut Request) {
+    if req.exit_status() != 255 || req.output().headers_sent() {
+        return;
+    }
+    if let Some(line) = req
+        .ini_get(b"fastcgi.error_header")
+        .filter(|line| !line.is_empty())
+    {
+        let line = line.to_vec();
+        let _ = crate::output::header_add(req, &line, true, 0);
+    }
+}
+
+/// `fastcgi_finish_request(): bool`: where the response is open, every
+/// buffer of the request's flushed, the head sent and the connection told the
+/// response ends, and `true`; the program runs on, and what it writes
+/// after goes nowhere; `false` once the response is closed.
+///
+/// ```php
+/// echo "sent\n";
+/// var_dump(fastcgi_finish_request());
+/// echo "unheard\n";
+/// ```
+/// ```request fpm
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// sent
+/// ```
+#[php_function]
+fn fastcgi_finish_request(req: &mut Request) -> bool {
+    req.finish_response()
+}
+
+/// `fpm_get_status(): array|false` (`Z/sapi/fpm/fpm/fpm_status.c`
+/// `fpm_status_export_to_zval`): the pool's shared table as the host
+/// holds it, its counts and each process, or `false` where the host has none.
+///
+/// ```php
+/// $s = fpm_get_status();
+/// echo $s['pool'], ' ', $s['process-manager'], ' ', $s['accepted-conn'], ' ',
+///     $s['active-processes'], ' ', count($s['procs']), ' ', $s['procs'][0]['state'], "\n";
+/// ```
+/// ```request fpm
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// witness static 1 1 1 Running
+/// ```
+#[php_function]
+fn fpm_get_status(req: &mut Request) -> Result<Union<PhpArray, bool>, Thrown> {
+    match req.host_status() {
+        Some(status) => host_value(req, status).map(Union::A),
+        None => Ok(Union::B(false)),
+    }
+}
+
+/// A host's value made an array: a map's keys strings, a list's the
+/// next index.
+fn host_value(req: &mut Request, value: HostValue) -> Result<PhpArray, Thrown> {
+    let mut array = PhpArray::new(req)?;
+    let rows: Vec<(Option<Vec<u8>>, HostValue)> = match value {
+        HostValue::Map(rows) => rows.into_iter().map(|(k, v)| (Some(k), v)).collect(),
+        HostValue::List(rows) => rows.into_iter().map(|v| (None, v)).collect(),
+        other => vec![(None, other)],
+    };
+    for (key, row) in rows {
+        let value = match row {
+            HostValue::Int(n) => Value::int(n),
+            HostValue::Float(f) => Value::float(f),
+            HostValue::Str(s) => Value::string(PhpString::new(req, &s)?),
+            nested => Value::array(host_value(req, nested)?),
+        };
+        match key {
+            Some(key) => {
+                let key = Key::from_string(PhpString::new(req, &key)?);
+                array.set(req, key, value)?;
+            }
+            None => array.append(req, value)?,
+        }
+    }
+    Ok(array)
 }
 
 /// `apache_child_terminate(): void`: `fcgi_terminate` under `FastCGI` and

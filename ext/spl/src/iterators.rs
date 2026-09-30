@@ -20,10 +20,10 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
-    Function, Iter, call, call_method, instantiate, iterate, lookup_class, read_prop,
+    Function, Iter, call, call_method, instantiate, iterate, known_method, lookup_class, read_prop,
 };
 use php_ext::coerce::{coerce_param, to_string, truthy};
-use php_ext::decl::Type;
+use php_ext::decl::{Name, Type};
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw, throwing_warnings};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
@@ -595,7 +595,25 @@ impl IteratorIterator {
     /// `IteratorIterator::__construct(Traversable $iterator, ?string $class = null)`:
     /// an `IteratorAggregate` asked for its iterator; a second call is
     /// php's `BadMethodCallException`, refused before the arguments are
-    /// read.
+    /// read. `$class` downcasts a non-`Iterator` to a base class of its
+    /// own with an iterator, as `spl_dual_it_construct` sets `ce` to
+    /// `ce_cast` before it asks for `zend_ce_aggregate`, so the
+    /// `getIterator` asked is that class's, not the object's override.
+    ///
+    /// ```php
+    /// class A extends ArrayObject { function getIterator(): Iterator { echo "A\n"; return parent::getIterator(); } }
+    /// foreach (new IteratorIterator(new A([1, 2]), 'ArrayObject') as $v) echo $v, "\n";
+    /// foreach (new IteratorIterator(new A([3])) as $v) echo $v, "\n";
+    /// class B {} class C extends B implements IteratorAggregate { function getIterator(): Iterator { return new ArrayIterator([]); } }
+    /// try { new IteratorIterator(new C, 'B'); } catch (LogicException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// 1
+    /// 2
+    /// A
+    /// 3
+    /// Class to downcast to not found or not base class or does not implement Traversable
+    /// ```
     #[php(arity = manual)]
     fn __construct(
         req: &mut Request,
@@ -612,7 +630,12 @@ impl IteratorIterator {
             && let Some(name) = class.hold(req)?
         {
             match lookup_class(req, name.as_bytes())? {
-                Some(to) if crate::class_is(req, cast, to, 0) => cast = to,
+                Some(to)
+                    if crate::class_is(req, cast, to, 0)
+                        && crate::is_a(req, to, b"Traversable") =>
+                {
+                    cast = to;
+                }
                 _ => {
                     return Err(throw(
                         req,
@@ -625,7 +648,11 @@ impl IteratorIterator {
         if !crate::is_a(req, given.class(), b"Iterator")
             && crate::is_a(req, cast, b"IteratorAggregate")
         {
-            let answered = call_method(req, &given, b"getIterator", &[])?;
+            let method = Name(b"getIterator".as_slice().into());
+            let answered = match known_method(req, cast, &method, Some(given)) {
+                Some(callable) => call(req, &callable, &[])?,
+                None => call_method(req, &given, b"getIterator", &[])?,
+            };
             let Some(iterator) = answered
                 .as_object()
                 .copied()

@@ -23,7 +23,9 @@
 //!
 //! A fence with a `request` is served by `php-cgi-witness`, `sapi/cgi`'s
 //! host built the same way, through a link of the name php-cgi, beside
-//! php-cgi for the oracle ([`served_as_cgi`], #1197, ADR-0008).
+//! php-cgi for the oracle ([`served_as_cgi`], #1197, ADR-0008); a fence
+//! with a `request fpm` by `php-fpm-witness`, `sapi/fpm`'s, beside php-fpm
+//! (`served_as_fpm`, #1291).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,6 +59,12 @@ const CGI: Host = Host {
     binary: "php-cgi-witness",
 };
 
+/// `sapi/fpm`'s, which serves a fence with a `request fpm` (#1291).
+const FPM: Host = Host {
+    package: "php_sapi_fpm",
+    binary: "php-fpm-witness",
+};
+
 /// The variable the binaries read the trace file's path from
 /// (`php_sapi::start`).
 const TRACE: &str = "PHP_WITNESS_TRACE";
@@ -68,6 +76,7 @@ pub(crate) struct Binary {
     root: PathBuf,
     cli: OnceLock<Result<PathBuf, String>>,
     cgi: OnceLock<Result<PathBuf, String>>,
+    fpm: OnceLock<Result<PathBuf, String>>,
 }
 
 impl Binary {
@@ -77,6 +86,7 @@ impl Binary {
             root: root.to_path_buf(),
             cli: OnceLock::new(),
             cgi: OnceLock::new(),
+            fpm: OnceLock::new(),
         }
     }
 
@@ -134,6 +144,24 @@ impl Binary {
         let trace = traces.join("entered");
         let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
         let observed = served_as_cgi(oracle, &host, snippet, request, &env)?;
+        let text = fs::read_to_string(&trace).unwrap_or_default();
+        Ok((observed, text.lines().filter_map(Entry::parse).collect()))
+    }
+
+    /// `snippet` served as the request `request` describes by `sapi/fpm`'s
+    /// binary, as [`Binary::serve_cgi`] serves one by php-cgi; with the
+    /// natives its child entered.
+    pub(super) fn serve_fpm(
+        &self,
+        oracle: &Oracle<'_>,
+        snippet: &str,
+        request: &str,
+    ) -> Result<(Observation, Vec<Entry>)> {
+        let binary = built(&self.fpm, &self.root, FPM)?;
+        let traces = Tree::new("witness-trace")?;
+        let trace = traces.join("entered");
+        let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
+        let observed = super::fpm::served_as_fpm(oracle, binary, snippet, request, &env)?;
         let text = fs::read_to_string(&trace).unwrap_or_default();
         Ok((observed, text.lines().filter_map(Entry::parse).collect()))
     }

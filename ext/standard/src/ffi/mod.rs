@@ -1135,6 +1135,80 @@ pub(super) fn place_fds(command: &mut std::process::Command, moves: Vec<(RawFd, 
     unsafe { command.pre_exec(placed) };
 }
 
+/// The `envp` a child is started with, each `name=value` in the order
+/// given, which php hands `posix_spawn` and `execve` as it is: made before
+/// the fork and made the child's `environ` between `fork` and `exec`,
+/// since the standard library's own `envp` sorts the names. A later call
+/// stands over an earlier one, its hook called after it.
+pub(super) fn environment(command: &mut std::process::Command, pairs: &[(Vec<u8>, Vec<u8>)]) {
+    use std::os::unix::process::CommandExt;
+    let strings: Vec<std::ffi::CString> = pairs
+        .iter()
+        .filter_map(|(name, value)| {
+            let mut pair = name.clone();
+            pair.push(b'=');
+            pair.extend_from_slice(value);
+            std::ffi::CString::new(pair).ok()
+        })
+        .collect();
+    let mut addresses: Vec<usize> = strings.iter().map(|s| s.as_ptr() as usize).collect();
+    addresses.push(0);
+    let envp = Envp { strings, addresses };
+    let set = move || {
+        envp.install();
+        Ok(())
+    };
+    // SAFETY: the closure writes one pointer to `environ`, which is
+    // async-signal-safe, touches no lock and allocates nothing, which is
+    // what a closure run between `fork` and `exec` may do; the strings and
+    // the array it points `environ` at are the closure's own, alive until
+    // the child execs.
+    unsafe { command.pre_exec(set) };
+}
+
+/// A child's `envp`: the strings, and their addresses ended by a null.
+struct Envp {
+    strings: Vec<std::ffi::CString>,
+    addresses: Vec<usize>,
+}
+
+impl Envp {
+    /// `environ` pointed at the array, which the strings back.
+    fn install(&self) {
+        debug_assert_eq!(self.strings.len() + 1, self.addresses.len());
+        set_environ(
+            self.addresses
+                .as_ptr()
+                .cast::<*mut libc::c_char>()
+                .cast_mut(),
+        );
+    }
+}
+
+/// `environ = envp`.
+#[cfg(target_os = "macos")]
+fn set_environ(envp: *mut *mut libc::c_char) {
+    // SAFETY: `_NSGetEnviron` answers the address of the C runtime's
+    // `environ` and reads nothing.
+    let at = unsafe { libc::_NSGetEnviron() };
+    // SAFETY: `at` is `environ`'s address, which only this child's thread
+    // reads before it execs.
+    unsafe { *at = envp };
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" {
+    static mut environ: *mut *mut libc::c_char;
+}
+
+/// `environ = envp`.
+#[cfg(not(target_os = "macos"))]
+fn set_environ(envp: *mut *mut libc::c_char) {
+    // SAFETY: `environ` is the C library's, which only this child's thread
+    // reads before it execs.
+    unsafe { environ = envp };
+}
+
 /// `socketpair(domain, type, protocol, pair)`: the two ends of a new pair
 /// of connected sockets, close-on-exec, or the `errno` of its `-1`.
 pub(super) fn socketpair(

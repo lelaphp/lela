@@ -853,6 +853,7 @@ mod tests {
             parent: None,
             interfaces: Vec::new(),
             implementors: Vec::new(),
+            aliases: Vec::new(),
             traits: Vec::new(),
             adaptations: Vec::new(),
             backing: EnumBacking::Pure,

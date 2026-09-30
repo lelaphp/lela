@@ -74,6 +74,7 @@ abi::ExtensionBuilder::ticks
 abi::ExtensionBuilder::trampolines
 abi::ExtensionBuilder::treat_data
 abi::ExtensionBuilder::upload
+abi::ExtensionBuilder::version
 abi::ExtensionBuilder::zend_extension
 abi::False
 abi::FromArgument
@@ -413,6 +414,7 @@ request::Request::argument
 request::Request::argument_count
 request::Request::argv
 request::Request::assert_callback
+request::Request::at_activate
 request::Request::at_startup
 request::Request::autoload_functions
 request::Request::autoload_register
@@ -424,7 +426,6 @@ request::Request::caller_var
 request::Request::captured
 request::Request::cfg_entry
 request::Request::check_open_basedir
-request::Request::class_alias
 request::Request::class_decl
 request::Request::class_extension
 request::Request::class_extension_name
@@ -449,6 +450,7 @@ request::Request::env
 request::Request::env_pairs
 request::Request::error_log
 request::Request::error_reporting
+request::Request::evaluated_default
 request::Request::execution
 request::Request::execution_trace
 request::Request::extension_constants
@@ -459,6 +461,7 @@ request::Request::extension_ini
 request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number
+request::Request::extension_version
 request::Request::flush
 request::Request::forbid_dynamic_call
 request::Request::frame_args
@@ -491,6 +494,7 @@ request::Request::input_variables
 request::Request::interrupt
 request::Request::is_uploaded_file
 request::Request::last_error
+request::Request::loaded_env
 request::Request::loaded_extensions
 request::Request::made_superglobal
 request::Request::memory_peak
@@ -722,9 +726,11 @@ test::Engine::dispatch
 test::Engine::dump_before_optimizer
 test::Engine::frameless
 test::Engine::highlight
+test::Engine::ini_get
 test::Engine::lint
 test::Engine::loaded_extensions
 test::Engine::loaded_zend_extensions
+test::Engine::parse_ini
 test::Engine::serve
 test::Engine::serve_capture
 test::Engine::serve_capture_as

@@ -80,7 +80,7 @@ use php_ext::decl::{
     MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, throw};
-use php_ext::request::{ExtensionId, PHP_VERSION, Request};
+use php_ext::request::{ExtensionId, Request};
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -5205,9 +5205,23 @@ fn held_to(req: &mut Request, object: PhpObject, class: ClassId) -> Result<(), T
 }
 
 /// The instance arm `getValue` and `getRawValue` share, `read_property`
-/// under `fake_scope`: the slot or the dynamic table by name, a typed
-/// slot nothing has written php's `Error`, and any other miss php's
-/// `Undefined property` warning and `null`.
+/// under `fake_scope`: the slot or the dynamic table by name, a private
+/// property of a class above the object's by its mangled name, which is
+/// the slot that scope sees, a typed slot nothing has written php's
+/// `Error`, and any other miss the object's `read_property`, which asks
+/// `__get` or warns `Undefined property` and answers `null`.
+///
+/// ```php
+/// class A { private $p = "A"; } class B extends A { private $p = "B"; }
+/// var_dump((new ReflectionProperty('A', 'p'))->getValue(new B), (new ReflectionClass('B'))->getProperty('A::p')->getValue(new B));
+/// class G { private $g; function __construct() { unset($this->g); } function __get($n) { return "get $n"; } }
+/// var_dump((new ReflectionProperty('G', 'g'))->getValue(new G));
+/// ```
+/// ```expect
+/// string(1) "A"
+/// string(1) "A"
+/// string(5) "get g"
+/// ```
 fn read_instance_property(
     req: &mut Request,
     object: PhpObject,
@@ -5215,7 +5229,21 @@ fn read_instance_property(
     name: &[u8],
     declared: Option<&PropertyDecl>,
 ) -> Result<Value, Thrown> {
-    match object.prop(req, name) {
+    let private = declared.is_some_and(|decl| decl.visibility == Visibility::Private);
+    let above = private && object.class() != class;
+    let found = if above {
+        let mut mangled = vec![0];
+        mangled.extend(class_name_of(req, class));
+        mangled.push(0);
+        mangled.extend_from_slice(name);
+        let key = PhpString::new(req, &mangled)?;
+        let row = object.row(req, &Key::Str(key));
+        req.release(Value::string(key));
+        row?
+    } else {
+        object.prop(req, name)
+    };
+    match found {
         Some(value) => {
             let value = value.deref();
             req.addref(&value);
@@ -5233,6 +5261,7 @@ fn read_instance_property(
                 ),
             ))
         }
+        None if !above => php_ext::call::read_hooked_property(req, &object, name),
         None => {
             let of = class_name_of(req, object.class());
             php_ext::raising::warning(
@@ -5254,23 +5283,47 @@ fn asked_class(req: &mut Request, this: PhpObject, declaring: ClassId) -> ClassI
     kept_class(req, this).unwrap_or(declaring)
 }
 
-/// `reflection_property_get_effective_prop`: the class whose table the
-/// property is read off for `object`, the object's own where it is not
-/// the class the reflector names and the property is not private, since
-/// the object's class may override it with hooks of its own.
-fn effective_class(
+/// `reflection_property_get_effective_prop`: the property the raw
+/// accessors act on, the one the object's own class holds under the name
+/// (its `properties_info`, a parent's private one among them) where the
+/// object is not of the class the reflector was asked about and the
+/// reflected property is not private, since the object's class may
+/// redeclare it with hooks of its own, or none; the reflected one
+/// otherwise. Each with the class that declared it; none for a dynamic
+/// property.
+///
+/// ```php
+/// #[AllowDynamicProperties] class B { public $v { get => 1; set {} } }
+/// class T extends B { public $v { get => $this->v; set => $value; } public $d { get => $this->d; set => $value; } public static $s; }
+/// $b = new B; $b->d = 0; $b->s = 0;
+/// foreach ([[new ReflectionProperty('B', 'v'), 'v'], [new ReflectionProperty($b, 'd'), 'd'], [new ReflectionProperty($b, 's'), 's']] as [$r, $n]) {
+///     $t = new T;
+///     try { $r->setRawValueWithoutLazyInitialization($t, 43); var_dump($r->getRawValue($t)); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// int(43)
+/// int(43)
+/// Can not use setRawValueWithoutLazyInitialization on static property T::$s
+/// ```
+fn effective_prop(
+    req: &mut Request,
     asked: ClassId,
     object: PhpObject,
-    declared: Option<&PropertyDecl>,
-    declaring: ClassId,
-) -> ClassId {
-    if asked != object.class()
-        && !declared.is_some_and(|decl| decl.visibility == Visibility::Private)
-    {
-        object.class()
-    } else {
-        declaring
+    reflected: Option<(ClassId, PropertyDecl)>,
+    name: &[u8],
+) -> Option<(ClassId, PropertyDecl)> {
+    let private = reflected
+        .as_ref()
+        .is_some_and(|(_, decl)| decl.visibility == Visibility::Private);
+    if asked == object.class() || private {
+        return reflected;
     }
+    class_chain(req, object.class()).into_iter().find_map(|at| {
+        let decl = req.class_decl(at)?;
+        let found = decl.properties.iter().find(|p| &*p.name.0 == name)?;
+        Some((at, found.clone()))
+    })
 }
 
 // -------------------------------------------------- ReflectionClassConstant
@@ -5306,9 +5359,9 @@ fn this_class_constant(
 /// `Functions`, one `_function_string` per native; `Classes`, one
 /// `_class_string` per class, each preceded by a blank line as
 /// `_extension_class_string` writes it. Every bundled extension is
-/// `<persistent>`, as one compiled in is, and its version is
-/// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin are. The `INI`
-/// block is not rendered yet (#375); `json` has no ini entry.
+/// `<persistent>`, as one compiled in is, and its version is the
+/// extension's own. The `INI` block is not rendered yet (#375); `json` has
+/// no ini entry.
 fn extension_string(
     req: &mut Request,
     extension: ExtensionId,
@@ -5319,9 +5372,10 @@ fn extension_string(
         .extension_name(extension)
         .map(str::to_owned)
         .unwrap_or_default();
+    let version = req.extension_version(extension).unwrap_or_default();
     let _ = writeln!(
         out,
-        "{indent}Extension [ <persistent> extension #{} {name} version {PHP_VERSION} ] {{",
+        "{indent}Extension [ <persistent> extension #{} {name} version {version} ] {{",
         req.extension_number(extension)
     );
     let dependencies = req.extension_dependencies(extension);
@@ -5591,7 +5645,7 @@ fn class_string(
         // the object's own, and the block stands only for an object
         // reflector, after `Properties` and before `Methods`.
         if is_instance && let Some(object) = object {
-            let dynamic = dynamic_properties(req, class, object);
+            let dynamic = undeclared_properties(req, class, object);
             let _ = write!(
                 out,
                 "\n{indent}  - Dynamic properties [{}] {{\n",
@@ -5631,10 +5685,86 @@ fn class_string(
 }
 
 /// The names in the object's property table the class did not declare,
-/// in the table's order: php's `Dynamic properties` list, a mangled
-/// name (a private or protected slot, whose key begins with a zero
-/// byte) skipped as `ZSTR_VAL(prop_name)[0]` skips it.
+/// in the table's order: `_adddynproperty` over `get_properties`, which
+/// passes over every slot, `IS_INDIRECT`, and keeps the rest. A slot of
+/// a public property holds its bare name; any other holds a mangled one,
+/// so a row of a bare name beyond the non-public slots of that name the
+/// object holds is a dynamic property, one named as a parent's private
+/// property among them. `_class_string`'s count is another rule
+/// ([`undeclared_properties`]).
+///
+/// ```php
+/// class P { private $v = 1; }
+/// #[AllowDynamicProperties] class K extends P {}
+/// $o = new K; $o->v = 2;
+/// $r = new ReflectionObject($o);
+/// var_dump(count($r->getProperties()), $r->hasProperty('v'), $r->getProperty('v')->class);
+/// var_dump(count((new ReflectionObject(new DateTime))->getProperties()));
+/// ```
+/// ```expect
+/// int(1)
+/// bool(true)
+/// string(1) "K"
+/// int(0)
+/// ```
 fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
+    let mut public: Vec<Vec<u8>> = Vec::new();
+    let mut mangled: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for at in class_chain(req, class) {
+        let Some(decl) = req.class_decl(at).cloned() else {
+            continue;
+        };
+        for p in decl.properties.iter().filter(|p| p.is_instance) {
+            let name = p.name.0.to_vec();
+            let prefix = match p.visibility {
+                Visibility::Public => {
+                    public.push(name);
+                    continue;
+                }
+                Visibility::Protected => b"*".to_vec(),
+                Visibility::Private => decl.name.0.to_vec(),
+            };
+            let key = [&b"\0"[..], &prefix, &b"\0"[..], &name].concat();
+            if !mangled.iter().any(|(_, held)| *held == key) {
+                mangled.push((name, key));
+            }
+        }
+    }
+    let Ok(entries) = object.props(req) else {
+        return Vec::new();
+    };
+    let mut seen: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
+    let mut dynamic = Vec::new();
+    for (name, _) in entries {
+        let name = name.as_bytes().to_vec();
+        if name.first().is_none_or(|byte| *byte == 0) || public.contains(&name) {
+            continue;
+        }
+        let rows = seen.entry(name.clone()).or_insert(0);
+        *rows += 1;
+        let rows = *rows;
+        let mut held = 0;
+        for (_, key) in mangled.iter().filter(|(n, _)| *n == name) {
+            let Ok(string) = PhpString::new(req, key) else {
+                continue;
+            };
+            if object.row(req, &Key::Str(string)).ok().flatten().is_some() {
+                held += 1;
+            }
+            req.release(Value::string(string));
+        }
+        if rows > held {
+            dynamic.push(name);
+        }
+    }
+    dynamic
+}
+
+/// `_class_string`'s `Dynamic properties`: the bare names of
+/// `zend_get_properties_no_lazy_init` that `ce->properties_info` has not,
+/// which holds a parent's private property too, so a dynamic property
+/// named as one is not counted there.
+fn undeclared_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
     let declared: Vec<Vec<u8>> = class_chain(req, class)
         .into_iter()
         .filter_map(|at| req.class_decl(at))
@@ -5919,8 +6049,14 @@ fn property_string(
         let _ = write!(out, "{} ", type_to_string(ty));
     }
     let _ = write!(out, "${}", String::from_utf8_lossy(name));
+    let evaluated = (property.is_instance)
+        .then(|| req.evaluated_default(declaring, name))
+        .flatten();
     match (&property.default, &property.ty) {
         _ if is_virtual => {}
+        (Some(_), _) if let Some(value) = evaluated => {
+            let _ = write!(out, " = {}", value_default_string(req, &value));
+        }
         (Some(default), _) => {
             let _ = write!(out, " = {}", default_value_string(req, default));
         }
@@ -5956,6 +6092,85 @@ fn property_string(
     out
 }
 
+/// Whether the compiler folds `expr` to a value: a scalar written out,
+/// or an array of such, which prints as the value, its keys numbered as
+/// the array numbered them; an array of any other element prints as
+/// written.
+///
+/// ```php
+/// class A { public $a = [1, "k" => 2, 3]; public $b = [1, 2]; public $c = [FOO, 2 => X]; }
+/// foreach ((new ReflectionClass("A"))->getProperties() as $p) echo $p;
+/// ```
+/// ```expect
+/// Property [ public $a = [0 => 1, 'k' => 2, 1 => 3] ]
+/// Property [ public $b = [1, 2] ]
+/// Property [ public $c = [FOO, 2 => X] ]
+/// ```
+fn folded(expr: &ConstExpr) -> bool {
+    match expr {
+        ConstExpr::Null
+        | ConstExpr::Bool(_)
+        | ConstExpr::Long { .. }
+        | ConstExpr::Double(_)
+        | ConstExpr::Str(_) => true,
+        ConstExpr::Array { elements, .. } => elements
+            .iter()
+            .all(|(key, value)| key.as_ref().is_none_or(folded) && folded(value)),
+        _ => false,
+    }
+}
+
+/// `format_default_value` over a default already evaluated
+/// ([`Request::evaluated_default`]): a scalar as `smart_str_append_scalar`
+/// writes it, an enum case `Class::Case`, an array by its keys where it
+/// is no list, and any other object `object(Class)`, as GH-15902 has it.
+fn value_default_string(req: &mut Request, value: &Value) -> String {
+    match value.as_ref() {
+        ValueRef::Null => String::from("NULL"),
+        ValueRef::Bool(b) => String::from(if b { "true" } else { "false" }),
+        ValueRef::Int(n) => n.to_string(),
+        ValueRef::Float(f) => default_value_string(req, &ConstExpr::Double(f)),
+        ValueRef::Str(s) => format!("'{}'", escaped(s.as_bytes())),
+        ValueRef::Array(array) => {
+            let rows = array.snapshot_refs();
+            let is_list = (0..).zip(&rows).all(|(i, (key, _))| *key == Key::Int(i));
+            let mut out = String::from("[");
+            for (i, (key, value)) in rows.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                if !is_list {
+                    match key {
+                        Key::Str(s) => {
+                            let _ = write!(out, "'{}'", escaped(s.as_bytes()));
+                        }
+                        Key::Int(n) => out.push_str(&n.to_string()),
+                    }
+                    out.push_str(" => ");
+                }
+                out.push_str(&value_default_string(req, value));
+            }
+            out.push(']');
+            out
+        }
+        ValueRef::Object(object) => {
+            let class = class_name_of(req, object.class());
+            let class = String::from_utf8_lossy(&class).into_owned();
+            let is_enum = req
+                .class_decl(object.class())
+                .is_some_and(|decl| decl.kind == ClassKind::Enum);
+            match object.prop(req, b"name").filter(|_| is_enum) {
+                Some(case) => format!(
+                    "{class}::{}",
+                    String::from_utf8_lossy(case.as_str_bytes().unwrap_or_default())
+                ),
+                None => format!("object({class})"),
+            }
+        }
+        _ => String::from("<default>"),
+    }
+}
+
 /// `format_default_value` over a declared default: `smart_str_append_scalar`
 /// for a scalar, `NULL`, `true`, `false`, the number, or the string in
 /// single quotes with `smart_str_append_escaped`'s escapes; an array as
@@ -5981,20 +6196,31 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
         ),
         ConstExpr::Str(s) => format!("'{}'", escaped(s)),
+        // An array of scalars written out is the value the compiler folded
+        // it to, whose keys print unless it is a list; any other is the expression,
+        // `zend_ast_export`'s `ZEND_AST_ARRAY`, a key where one is written.
         ConstExpr::Array { elements, .. } => {
             let is_list = elements.iter().all(|(key, _)| key.is_none());
+            let folded = folded(expr);
+            // `nNextFreeElement` over the keys the array gives.
+            let mut next = 0i64;
             let mut out = String::from("[");
             for (i, (key, value)) in elements.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                if !is_list {
+                match key {
+                    Some(ConstExpr::Long { value: n, .. }) => next = next.max(n.saturating_add(1)),
+                    None => next = next.saturating_add(1),
+                    Some(_) => {}
+                }
+                if !is_list && (folded || key.is_some()) {
                     match key {
                         Some(ConstExpr::Str(s)) => {
                             let _ = write!(out, "'{}'", escaped(s));
                         }
                         Some(key) => out.push_str(&default_value_string(req, key)),
-                        None => out.push_str(&i.to_string()),
+                        None => out.push_str(&(next - 1).to_string()),
                     }
                     out.push_str(" => ");
                 }
@@ -7739,20 +7965,25 @@ impl ReflectionExtension {
     }
 
     /// `ReflectionExtension::getVersion()`: `module->version`, and `null`
-    /// for `NO_VERSION_YET`. Every extension compiled in here carries
-    /// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin do, which is what
-    /// `_extension_string`'s header prints.
+    /// for `NO_VERSION_YET`, which no extension compiled in here is: the
+    /// version the extension declared, `PHP_VERSION` where it declared
+    /// none, which is what `_extension_string`'s header prints.
     ///
     /// ```php
     /// var_dump((new ReflectionExtension('json'))->getVersion());
+    /// var_dump((new ReflectionExtension('dom'))->getVersion());
+    /// echo preg_replace('/#\d+/', '#N', strstr(new ReflectionExtension('dom'), "\n", true)), "\n";
     /// ```
     /// ```expect
     /// string(5) "8.5.9"
+    /// string(8) "20031129"
+    /// Extension [ <persistent> extension #N dom version 20031129 ] {
     /// ```
     #[php(tentative)]
     fn getVersion(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        this_extension(req, this.object())?;
-        PhpString::new(req, PHP_VERSION.as_bytes()).map(Some)
+        let extension = this_extension(req, this.object())?;
+        let version = req.extension_version(extension).unwrap_or_default();
+        PhpString::new(req, version.as_bytes()).map(Some)
     }
 
     /// `ReflectionExtension::getFunctions()`: one `ReflectionFunction` per

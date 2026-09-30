@@ -1,0 +1,47 @@
+# sapi/fpm: php's FastCGI process manager, `php-src/sapi/fpm`, one crate
+# under `sapi/` (ADR-0008), the binary `php-fpm`: a master that reads
+# php-fpm.conf and forks its pools' children, each serving FastCGI
+# requests on an engine of the bundle's enabled set with `cgi-fcgi` after
+# it. Three edges, php_bundle, php_sapi and php_proto for the FastCGI and
+# CGI codecs; the engine is named through the facade alone.
+[package]
+name = "php_sapi_fpm"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "php's FastCGI process manager, the binary php-fpm"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "php-fpm"
+path = "src/main.rs"
+
+# The same binary with `php_engine`'s `witness-trace` on, which the witness
+# lane builds and serves a fence with a `request fpm` through, and nothing
+# else does (harness §8, revision 61).
+[[bin]]
+name = "php-fpm-witness"
+path = "src/witness.rs"
+required-features = ["witness-trace"]
+
+[features]
+# Every request a child serves appends the natives it entered to the file
+# `PHP_WITNESS_TRACE` names (harness §4.5 condition 2, revision 61).
+witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
+
+[dependencies]
+# The bundle's default set and the seven the CLI turns on, which the
+# oracle's `php-fpm -m` lists as its `php -m` does (sapi/cli's manifest
+# says why each).
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar"] }
+php_proto = { path = "../../crates/php_proto" }
+php_sapi = { path = "../../crates/php_sapi" }
+# The process manager's system calls, safe where `nix` wraps them, and
+# `libc` in `src/ffi/` alone for the fork, the signal handlers, the
+# shared memory and the rest `nix` leaves unsafe (ADR-0008).
+nix = { workspace = true, features = ["process", "signal", "resource", "fs", "socket", "net", "poll", "event", "user", "time", "syslog"] }
+libc = { workspace = true }

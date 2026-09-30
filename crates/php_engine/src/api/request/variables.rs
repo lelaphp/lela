@@ -330,7 +330,11 @@ impl Request {
             .unwrap_or_default();
         let array = match global {
             AutoGlobal::Server if order.contains(&b'S') => self.create_server()?,
-            AutoGlobal::Env if order.contains(&b'E') => self.environment()?,
+            AutoGlobal::Env if order.contains(&b'E') => {
+                let env = self.environment()?;
+                self.register_params(env)?;
+                env
+            }
             AutoGlobal::Get if order.contains(&b'G') => {
                 let query = self.web().and_then(|web| web.query.clone());
                 self.treat_data(Input::Get, query.as_deref())?
@@ -502,6 +506,7 @@ impl Request {
     /// ```
     fn create_server(&mut self) -> Result<PhpArray, Thrown> {
         let mut server = self.environment()?;
+        self.register_params(server)?;
         // The host's rows each through the input filter, `PARSE_SERVER`,
         // as `cli_register_variables` and `sapi_cgi_register_variables`
         // hand them, and registered as `php_register_variable_safe` does.
@@ -557,7 +562,52 @@ impl Request {
             let name = PhpString::new(self, b"argc")?;
             server.set(self, Key::Str(name), Value::int(count))?;
         }
+        self.check_http_proxy(server)?;
         Ok(server)
+    }
+
+    /// `check_http_proxy` (`Z/main/php_variables.c:861`): a `HTTP_PROXY`
+    /// the request brought replaced by the environment's, or dropped
+    /// where the environment has none, lest a request name the process's
+    /// proxy (bug #72573).
+    fn check_http_proxy(&mut self, mut server: PhpArray) -> Result<(), Thrown> {
+        let named = |rows: &[(Vec<u8>, Vec<u8>)]| rows.iter().any(|(n, _)| n == b"HTTP_PROXY");
+        if !named(&self.description.params) && !named(&self.description.env) {
+            return Ok(());
+        }
+        let name = PhpString::new(self, b"HTTP_PROXY")?;
+        let key = Key::Str(name);
+        if server.get(&key).is_none() {
+            return Ok(());
+        }
+        let local = self
+            .description
+            .env
+            .iter()
+            .find(|(n, _)| n.as_slice() == b"HTTP_PROXY")
+            .map(|(_, v)| v.clone());
+        match local {
+            Some(value) => {
+                let value = PhpString::new(self, &value)?;
+                server.set(self, key, Value::string(value))?;
+            }
+            None => {
+                server.unset(self, &key)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `fcgi_loadenv` over `cgi_php_load_env_var`: the request's own
+    /// variables, each through the input filter and registered as
+    /// `php_register_variable_safe` does, after the environment.
+    fn register_params(&mut self, array: PhpArray) -> Result<(), Thrown> {
+        for (name, value) in self.description.params.clone() {
+            if let Some(value) = self.filter_input(Input::Server, &name, &value)? {
+                self.register_in(array, &name, value, false)?;
+            }
+        }
+        Ok(())
     }
 
     /// `php_import_environment_variables`
