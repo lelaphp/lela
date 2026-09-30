@@ -102,6 +102,7 @@ abi::FromArgument::hold
 abi::Header
 abi::Header::header
 abi::Header::register
+abi::IniStage
 abi::IniVerdict
 abi::Instance
 abi::Instance::object
@@ -431,8 +432,6 @@ request::Request::argument
 request::Request::argument_count
 request::Request::argv
 request::Request::assert_callback
-request::Request::at_activate
-request::Request::at_startup
 request::Request::autoload_functions
 request::Request::autoload_register
 request::Request::autoload_unregister
@@ -507,7 +506,9 @@ request::Request::ini_get
 request::Request::ini_parse_bool
 request::Request::ini_parse_bytes
 request::Request::ini_parse_quantity
+request::Request::ini_restore
 request::Request::ini_set
+request::Request::ini_stage
 request::Request::input_variables
 request::Request::interrupt
 request::Request::is_uploaded_file

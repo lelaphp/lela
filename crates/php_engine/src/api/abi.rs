@@ -74,8 +74,10 @@ pub enum IniVerdict {
 /// (`Z/Zend/zend_modules.h`): the other extension's name, how this one
 /// stands to it, and the `rel` and `version` a `ZEND_MOD_REQUIRED_EX`
 /// row carries, which php prints after the kind and
-/// `ReflectionExtension::getDependencies` reads. The startup-order
-/// check php makes over the table is `api-check`'s bundle order here.
+/// `ReflectionExtension::getDependencies` reads. The engine starts its
+/// extensions in the order `zend_sort_modules` leaves by the required
+/// and optional rows; the check php makes that a required one is
+/// loaded is `api-check`'s crate graph here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency {
     pub name: String,
@@ -439,12 +441,36 @@ pub enum Lookup {
 
 /// An ini entry's `on_modify`, php's `PHP_INI_MH`: served by `ini_set()`
 /// with the new value before the entry takes it
-/// (`ZEND_INI_STAGE_RUNTIME`), and by the engine as it is built with the
-/// value the host set (`ZEND_INI_STAGE_STARTUP`), raising what the
-/// entry's handler raises, and answering whether the value is taken,
-/// `false` being php's `FAILURE`, which leaves the entry as it was, its
-/// default at startup, and makes `ini_set()` answer `false`.
+/// (`ZEND_INI_STAGE_RUNTIME`), by the engine as it is built with the
+/// value the host set (`ZEND_INI_STAGE_STARTUP`), by a host laying its
+/// own entry over php once it has started (`ZEND_INI_STAGE_ACTIVATE`),
+/// and as the request ends with the value an entry the request changed
+/// started with (`ZEND_INI_STAGE_DEACTIVATE`); [`Request::ini_stage`]
+/// says which. It raises what the entry's handler
+/// raises, and answers whether the value is taken, `false` being php's
+/// `FAILURE`, which leaves the entry as it was, its default at startup,
+/// and makes `ini_set()` answer `false`.
 pub type OnModify = fn(&mut Request, &[u8]) -> Result<bool, Thrown>;
+
+/// The stage an [`OnModify`] is served at, php's `ZEND_INI_STAGE_*`
+/// (`Z/Zend/zend_ini.h`) as this engine reaches them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IniStage {
+    /// `ZEND_INI_STAGE_STARTUP`: as the engine is built, over the
+    /// host's values, before any request; `php_during_module_startup()`.
+    Startup,
+    /// `ZEND_INI_STAGE_ACTIVATE`: a host's own entry laid over php once
+    /// it has started, as php-fpm's child applies its pool's
+    /// `php_value`s.
+    Activate,
+    /// `ZEND_INI_STAGE_RUNTIME`: while a request runs, through
+    /// `ini_set()`, `ini_restore()` and the natives.
+    Runtime,
+    /// `ZEND_INI_STAGE_DEACTIVATE`: as the request ends, each entry it
+    /// changed handed back the value it started with
+    /// (`zend_ini_deactivate`).
+    Deactivate,
+}
 /// The `MINFO` function: writes the extension's `phpinfo()` table
 /// through [`Request::info_table`].
 pub(crate) type Info = fn(&mut Request);

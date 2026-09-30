@@ -23,6 +23,7 @@ use crate::tables::{
     MBFL_OUTPUTFILTER_ILLEGAL_MODE_LONG, MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE,
 };
 use crate::text::value_error;
+use php_ext::abi::IniStage;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
@@ -726,7 +727,16 @@ fn on_detect_order(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
     Ok(encoding_list(req, value, None)?.is_some_and(|list| !list.is_empty()))
 }
 
-fn deprecated_entry(req: &mut Request, name: &str) {
+/// `if (new_value) php_error_docref(...)`, the deprecation of
+/// `mbstring.http_input`, `http_output` and `internal_encoding`, which
+/// php registers with no value (`NULL`): raised for every value handed
+/// in, but as the request ends an entry the host did not set is handed
+/// back that `NULL`, which this engine holds as the empty value, and
+/// raises nothing there.
+fn deprecated_entry(req: &mut Request, name: &str, value: &[u8]) {
+    if req.ini_stage() == IniStage::Deactivate && value.is_empty() {
+        return;
+    }
     docref(
         req,
         Level::Deprecated,
@@ -736,7 +746,7 @@ fn deprecated_entry(req: &mut Request, name: &str) {
 
 /// `OnUpdate_mbstring_http_input`.
 fn on_http_input(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
-    deprecated_entry(req, "http_input");
+    deprecated_entry(req, "http_input", value);
     let (origin, value) = own_or_php(req, value.to_vec(), "input_encoding");
     settings(req).http_input_origin = origin;
     set_http_input(req, &value).map(|done| done || origin == Origin::Php)
@@ -761,7 +771,7 @@ fn set_http_input(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
 /// `OnUpdate_mbstring_http_output`.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
 fn on_http_output(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
-    deprecated_entry(req, "http_output");
+    deprecated_entry(req, "http_output", value);
     let (origin, value) = own_or_php(req, value.to_vec(), "output_encoding");
     let settings = settings(req);
     settings.http_output_origin = origin;
@@ -777,7 +787,7 @@ fn on_http_output(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
 /// `OnUpdate_mbstring_internal_encoding`.
 #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
 fn on_internal_encoding(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
-    deprecated_entry(req, "internal_encoding");
+    deprecated_entry(req, "internal_encoding", value);
     let (origin, value) = own_or_php(req, value.to_vec(), "internal_encoding");
     settings(req).internal_origin = origin;
     set_internal(req, &value);
@@ -837,7 +847,7 @@ fn changed(req: &mut Request, name: &str, value: &[u8]) -> Result<bool, Thrown> 
         (s.internal_origin, s.http_output_origin, s.http_input_origin)
     };
     let change = Some((name, value));
-    if req.at_startup() {
+    if req.ini_stage() == IniStage::Startup {
         if http_input == Origin::Php {
             let encoding = php_encoding(req, "input_encoding", change);
             set_http_input(req, &encoding)?;
