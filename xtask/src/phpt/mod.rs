@@ -121,7 +121,7 @@ pub(crate) use environment::env_of;
 pub(crate) mod against;
 pub(crate) mod cgi;
 mod fpm;
-mod phpdbg;
+pub(crate) mod phpdbg;
 /// The suffix of a control run's scope: the subset under the oracle.
 pub(crate) const CONTROL: &str = "@control";
 mod census;

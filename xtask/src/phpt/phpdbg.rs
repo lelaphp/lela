@@ -22,7 +22,7 @@ use crate::oracle::{self, Host, Pin};
 
 /// The flags before the program: no banner, no init file, no colours
 /// (run-tests.php:1908).
-pub(super) const FLAGS: [&str; 2] = ["-qIb", "-f"];
+pub(crate) const FLAGS: [&str; 2] = ["-qIb", "-f"];
 
 /// The flags before a section run beside the test: the same, and run it
 /// straight away and quit (run-tests.php:1912).
