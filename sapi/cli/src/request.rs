@@ -11,8 +11,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use php_sapi::{
-    CommandLine, EachLine, Engine, FileHandles, Observables, OutputSink, RequestDescription,
-    ResponseHead,
+    Aborted, CommandLine, EachLine, Engine, FileHandles, Observables, OutputSink,
+    RequestDescription, ResponseHead,
 };
 
 use crate::NAME;
@@ -31,10 +31,15 @@ use crate::options::{Each, Lines, Program, Report};
 pub struct Process;
 
 impl OutputSink for Process {
-    fn write(&mut self, bytes: &[u8]) {
-        let mut stdout = std::io::stdout().lock();
-        let _ = stdout.write_all(bytes);
-        let _ = stdout.flush();
+    /// `sapi_cli_ub_write` (`Z/sapi/cli/php_cli.c:263`): each chunk
+    /// `write(2)` to fd 1 until all of it went; one the fd refuses, a
+    /// closed fd or a pipe whose reader left, sets `EG(exit_status)` to
+    /// 255 and is `php_handle_aborted_connection`.
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
+        let _ = std::io::stdout().lock().flush();
+        crate::ffi::write_stdout(bytes).map_err(|_| Aborted {
+            exit_status: Some(255),
+        })
     }
 
     fn flush(&mut self) {
@@ -285,7 +290,7 @@ pub fn lint(engine: &Engine, program: &Program, sink: &mut dyn OutputSink) -> i3
     };
     line.extend_from_slice(&name);
     line.push(b'\n');
-    sink.write(&line);
+    let _ = sink.write(&line);
     sink.flush();
     if served.exit_code == 0 { 0 } else { 255 }
 }
@@ -407,8 +412,9 @@ mod tests {
     struct Capture(Vec<u8>);
 
     impl OutputSink for Capture {
-        fn write(&mut self, bytes: &[u8]) {
+        fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
             self.0.extend_from_slice(bytes);
+            Ok(())
         }
         fn flush(&mut self) {}
         fn send_headers(&mut self, _head: &ResponseHead) {}

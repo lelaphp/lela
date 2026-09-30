@@ -38,7 +38,7 @@ use crate::api::values::{
     ValueRef,
 };
 use crate::engine::{
-    Configured, ConfiguredKey, MethodAt, NativeMethod, OutputSink, RequestDescription,
+    Aborted, Configured, ConfiguredKey, MethodAt, NativeMethod, OutputSink, RequestDescription,
     ResponseHead, Shared,
 };
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
@@ -1555,6 +1555,14 @@ pub(crate) enum Ending {
     Parse,
 }
 
+/// `PG(connection_status)`'s bits this engine sets: `PHP_CONNECTION_NORMAL`
+/// and `PHP_CONNECTION_ABORTED` (`Z/main/php.h`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Connection {
+    Normal = 0,
+    Aborted = 1,
+}
+
 /// What a request wrote beside the body, one call the sink will see:
 /// an entry for the log or bytes for the error stream. Kept in the
 /// order they were written, since under php's CLI the two land on one
@@ -1610,14 +1618,16 @@ impl Kept {
         if let Some(headers) = self.headers {
             sink.send_headers(&headers);
         }
-        sink.write(&self.body);
+        // The request has ended; a refusal now has no request to abort.
+        let _ = sink.write(&self.body);
         sink.flush();
     }
 }
 
 impl OutputSink for Kept {
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
         self.body.extend_from_slice(bytes);
+        Ok(())
     }
 
     fn flush(&mut self) {}
@@ -1724,6 +1734,10 @@ pub struct Request {
     /// by `php_error_cb` for a fatal and the code by `exit`, whichever
     /// wrote last.
     exit_status: i32,
+    /// php's `PG(connection_status)`: whether the host's sink refused a
+    /// write, `PHP_CONNECTION_ABORTED`, which `connection_aborted()`
+    /// answers ([`Request::handle_aborted_connection`]).
+    connection: Connection,
     resources: Resources,
     /// php's `PG(http_globals)`: a second owner of each auto-global's
     /// array that has a track of its own ([`variables::HttpGlobals`]).
@@ -2454,6 +2468,7 @@ impl Request {
             last_fatal_error_backtrace: None,
             ending: None,
             exit_status: 0,
+            connection: Connection::Normal,
             resources,
             http_globals: variables::HttpGlobals::default(),
             post: post::Post::default(),
@@ -15427,9 +15442,56 @@ impl Request {
     }
 
     /// `sapi_module.ub_write`: bytes past the `php_output` layer, the
-    /// host's, handed to the sink as they come.
+    /// host's, handed to the sink as they come; one the host could not
+    /// write is [`Request::handle_aborted_connection`].
     pub(crate) fn ub_write(&mut self, bytes: &[u8]) {
-        self.sink.get().write(bytes);
+        if let Err(aborted) = self.sink.get().write(bytes) {
+            self.handle_aborted_connection(aborted);
+        }
+    }
+
+    /// `php_handle_aborted_connection` (`Z/main/main.c:2722`), after what
+    /// the host set `EG(exit_status)` to, where it set it, as php's CLI
+    /// sets 255 (`sapi_cli_ub_write`): the connection marked aborted, the
+    /// `php_output` layer disabled, and, unless `ignore_user_abort` is on,
+    /// `zend_bailout`, which leaves the program with no diagnostic for the
+    /// shutdown to go on from.
+    ///
+    /// ```php
+    /// $path = sys_get_temp_dir() . '/' . uniqid('a') . '.php';
+    /// file_put_contents($path, '<?php ignore_user_abort((bool) $argv[1]); register_shutdown_function(function () { file_put_contents("php://stderr", "shutdown " . connection_aborted() . connection_status() . "\n"); }); for ($i = 0; $i < 3; $i++) { echo str_repeat("x", 100000); file_put_contents("php://stderr", "wrote $i\n"); }');
+    /// foreach ([0, 1] as $ignore) {
+    ///     $p = proc_open([PHP_BINARY, '-n', $path, $ignore], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    ///     fclose($pipes[1]);
+    ///     echo stream_get_contents($pipes[2]), 'exit ', proc_close($p), "\n";
+    /// }
+    /// unlink($path);
+    /// ```
+    /// ```expect process
+    /// shutdown 11
+    /// exit 255
+    /// wrote 0
+    /// wrote 1
+    /// wrote 2
+    /// shutdown 11
+    /// exit 255
+    /// ```
+    pub(crate) fn handle_aborted_connection(&mut self, aborted: Aborted) {
+        if let Some(status) = aborted.exit_status {
+            self.exit_status = status;
+        }
+        self.connection = Connection::Aborted;
+        crate::output::disable(self);
+        if !self.ini_flag(b"ignore_user_abort") {
+            self.bailout = true;
+        }
+    }
+
+    /// `PG(connection_status)`: `CONNECTION_NORMAL`, 0, or
+    /// `CONNECTION_ABORTED`, 1, once the host's sink refused a write.
+    #[must_use]
+    pub fn connection_status(&self) -> i64 {
+        self.connection as i64
     }
 
     /// The `php_output` layer, and the heap it lays its handlers down in.

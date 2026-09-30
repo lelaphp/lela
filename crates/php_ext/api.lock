@@ -428,6 +428,7 @@ request::Request::class_has_create_object
 request::Request::clear_last_error
 request::Request::clear_stat_cache
 request::Request::closure_refuses_receiver
+request::Request::connection_status
 request::Request::constant_attributes
 request::Request::constant_file
 request::Request::constants

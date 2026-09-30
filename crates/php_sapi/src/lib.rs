@@ -31,7 +31,7 @@ use std::io::Write;
 use std::process::ExitCode;
 
 pub use php_engine::{
-    CommandLine, Dispatched, EachLine, Engine, EngineBuilder, FileHandles, HostExtension,
+    Aborted, CommandLine, Dispatched, EachLine, Engine, EngineBuilder, FileHandles, HostExtension,
     HostValue, IniEvent, IniOrigin, IniValue, Method, Observables, OutputSink, PHP_VERSION,
     ProcessTitle, RequestDescription, ResponseHead, Routed, WebRequest,
 };

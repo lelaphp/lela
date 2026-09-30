@@ -24,8 +24,9 @@ pub struct Capture {
 }
 
 impl OutputSink for Capture {
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), crate::engine::Aborted> {
         self.stdout.extend_from_slice(bytes);
+        Ok(())
     }
 
     fn flush(&mut self) {}

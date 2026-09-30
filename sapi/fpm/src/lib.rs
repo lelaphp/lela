@@ -283,8 +283,9 @@ fn run(ini: &[(String, String)], args: Args) -> u8 {
 struct Stdout;
 
 impl php_sapi::OutputSink for Stdout {
-    fn write(&mut self, bytes: &[u8]) {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), php_sapi::Aborted> {
         let _ = std::io::stdout().lock().write_all(bytes);
+        Ok(())
     }
 
     fn flush(&mut self) {

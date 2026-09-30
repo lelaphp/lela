@@ -348,11 +348,27 @@ impl FileHandles {
     }
 }
 
+/// A body write the host could not make, php's hosts'
+/// `php_handle_aborted_connection` (`Z/main/main.c:2722`): the client
+/// went away, or the process's fd 1 refused it; with what the host sets
+/// `EG(exit_status)` to first, php's CLI 255 (`sapi_cli_ub_write`), and
+/// nothing for a host that sets none, as the built-in server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Aborted {
+    pub exit_status: Option<i32>,
+}
+
 /// Where a request's bytes go (design §4.3 seam 4): the engine owns the
 /// header list, the status and the commit moment; a sink only writes.
 pub trait OutputSink {
-    /// Body bytes.
-    fn write(&mut self, bytes: &[u8]);
+    /// Body bytes, and whether the host could write them: [`Aborted`]
+    /// where the client went away or the fd refused them, which the
+    /// request meets as `php_handle_aborted_connection`.
+    ///
+    /// # Errors
+    ///
+    /// [`Aborted`], a write the host could not make.
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted>;
     /// The host may push what it has.
     fn flush(&mut self);
     /// The response's head, once, before the first body byte.
@@ -3165,8 +3181,9 @@ mod tests {
     }
 
     impl OutputSink for Kept {
-        fn write(&mut self, bytes: &[u8]) {
+        fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
             self.body.extend_from_slice(bytes);
+            Ok(())
         }
         fn flush(&mut self) {}
         fn send_headers(&mut self, _: &ResponseHead) {}

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
 use php_sapi::{
-    Engine, HostExtension, HostValue, IniEvent, IniOrigin, OutputSink, RequestDescription,
+    Aborted, Engine, HostExtension, HostValue, IniEvent, IniOrigin, OutputSink, RequestDescription,
     ResponseHead, WebRequest,
 };
 
@@ -103,12 +103,16 @@ struct Wire {
 
 impl Wire {
     /// `fcgi_write`, the connection kept no longer where it fails.
-    fn write(&mut self, kind: Kind, bytes: &[u8]) {
+    /// `fcgi_write`: whether the bytes went, which a connection the
+    /// web server closed refuses; none open takes them silently.
+    fn write(&mut self, kind: Kind, bytes: &[u8]) -> bool {
         if let Some(conn) = &mut self.conn
             && self.out.write(conn, kind, bytes).is_err()
         {
             self.keep = false;
+            return false;
         }
+        true
     }
 
     /// `fcgi_finish_request(req, force)`: `FCGI_END_REQUEST` sent where the
@@ -144,8 +148,15 @@ impl Response {
 }
 
 impl OutputSink for Response {
-    fn write(&mut self, bytes: &[u8]) {
-        self.wire().write(Kind::Stdout, bytes);
+    /// `sapi_cgibin_ub_write` (`Z/sapi/fpm/fpm/fpm_main.c:265`): a write
+    /// the web server's connection refuses is
+    /// `php_handle_aborted_connection`, with no status set.
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
+        if self.wire().write(Kind::Stdout, bytes) {
+            Ok(())
+        } else {
+            Err(Aborted { exit_status: None })
+        }
     }
 
     /// `sapi_cgibin_flush`.
@@ -166,7 +177,7 @@ impl OutputSink for Response {
         let block = php_sapi::cgi::head(head);
         let mut wire = self.wire();
         wire.head = Some(head.clone());
-        wire.write(Kind::Stdout, &block);
+        let _ = wire.write(Kind::Stdout, &block);
     }
 
     /// `sapi_cgi_log_message`: `PHP message: ` and the entry, through the
@@ -232,11 +243,11 @@ fn log_fastcgi(_level: Level, message: &[u8]) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if wire.stderr_started {
-        wire.write(Kind::Stderr, b"; ");
+        let _ = wire.write(Kind::Stderr, b"; ");
     } else {
         wire.stderr_started = true;
     }
-    wire.write(Kind::Stderr, message);
+    let _ = wire.write(Kind::Stderr, message);
 }
 
 /// `fcgi_set_allowed_clients`: the addresses `listen.allowed_clients`
@@ -802,7 +813,7 @@ impl Worker {
                     lines,
                 };
                 response.send_headers(&head);
-                response.write(&page.body);
+                let _ = response.write(&page.body);
                 (page.code, 0)
             }
             program => {

@@ -221,8 +221,9 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str, bin: &str) -> String {
          struct Streams;\n\
          \n\
          impl OutputSink for Streams {{\n\
-         \x20   fn write(&mut self, bytes: &[u8]) {{\n\
+         \x20   fn write(&mut self, bytes: &[u8]) -> Result<(), php_sapi::Aborted> {{\n\
          \x20       let _ = std::io::stdout().lock().write_all(bytes);\n\
+         \x20       Ok(())\n\
          \x20   }}\n\
          \n\
          \x20   fn flush(&mut self) {{\n\
