@@ -403,6 +403,15 @@ pub trait OutputSink {
     fn status(&mut self) -> Option<HostValue> {
         None
     }
+    /// `php://stdout` written to the host's own fd 1, where that is not
+    /// the response: php-fpm's, the pipe its master logs, which
+    /// `php_stream_url_wrap_php` reaches through `dup(STDOUT_FILENO)`.
+    /// `false`, the default, has the bytes go to the body as the CLI's
+    /// and a CGI's fd 1 is.
+    fn write_stdout(&mut self, bytes: &[u8]) -> bool {
+        let _ = bytes;
+        false
+    }
 }
 
 /// What the built-in server reads off a request it dispatched

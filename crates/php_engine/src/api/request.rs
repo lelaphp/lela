@@ -15342,6 +15342,14 @@ impl Request {
         self.sink.get().write_stderr(bytes);
     }
 
+    /// `php://stdout`'s write: the host's own fd 1 where it has one apart
+    /// from the response, else the body past the `php_output` layer.
+    pub(crate) fn write_stdout(&mut self, bytes: &[u8]) {
+        if !self.sink.get().write_stdout(bytes) {
+            self.ub_write(bytes);
+        }
+    }
+
     /// `flush()`, `sapi_flush`: the host may push what it has, the head
     /// sent first where the host's flush sends it; the handler stack is
     /// `ob_flush`'s, not this.

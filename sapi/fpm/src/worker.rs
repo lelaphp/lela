@@ -179,6 +179,14 @@ impl OutputSink for Response {
         let _ = std::io::stderr().write_all(bytes);
     }
 
+    /// fd 1, the pipe the master logs, or `/dev/null` where the pool does
+    /// not catch its workers' output.
+    fn write_stdout(&mut self, bytes: &[u8]) -> bool {
+        let _ = std::io::stdout().lock().write_all(bytes);
+        let _ = std::io::stdout().lock().flush();
+        true
+    }
+
     fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
         Some(Box::new(self.clone()))
     }
