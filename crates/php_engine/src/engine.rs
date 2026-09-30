@@ -172,15 +172,40 @@ pub struct ResponseHead {
 /// `fstat(2)` and `ftruncate(2)` of fds 0, 1 and 2; a host with no fd for
 /// one of them hands `None`, which `fstat(2)` and `ftruncate(2)` answer
 /// as they answer a closed fd, so both answer `false`.
+///
+/// `fclose()` on one of the three constants closes what is under it, as
+/// php's closes fd 0, 1 or 2 itself: a later `php://stdin`, `stdout` or
+/// `stderr` fails to open, and where the host handed the process's own
+/// fds ([`FileHandles::process`]) the fd is closed, so what the process
+/// opens next takes its number, as under php (`sapi/cli/tests/gh8827-*`).
 #[derive(Debug, Clone)]
 pub struct FileHandles {
-    fds: Arc<[Option<std::os::fd::OwnedFd>; 3]>,
+    fds: Arc<Fds>,
+}
+
+/// The fds under the three, and whose they are.
+#[derive(Debug)]
+struct Fds {
+    fds: [Option<std::os::fd::OwnedFd>; 3],
+    process: bool,
+}
+
+impl Drop for Fds {
+    /// Copies are closed with the last description that holds them; the
+    /// process's own are left open, as php's CLI leaves fds 0, 1 and 2
+    /// open at the end of a request (`PHP_STREAM_FLAG_NO_RSCR_DTOR_CLOSE`).
+    fn drop(&mut self) {
+        if self.process {
+            for fd in self.fds.iter_mut().filter_map(Option::take) {
+                let _ = std::os::fd::IntoRawFd::into_raw_fd(fd);
+            }
+        }
+    }
 }
 
 impl FileHandles {
-    /// The three over the fds the host hands, closed when the last
-    /// description holding them is dropped; a host hands copies of its
-    /// own, as `dup(2)` makes them.
+    /// The three over copies of the host's fds, as `dup(2)` makes them,
+    /// closed when the last description holding them is dropped.
     #[must_use]
     pub fn new(
         stdin: Option<std::os::fd::OwnedFd>,
@@ -188,20 +213,48 @@ impl FileHandles {
         stderr: Option<std::os::fd::OwnedFd>,
     ) -> FileHandles {
         FileHandles {
-            fds: Arc::new([stdin, stdout, stderr]),
+            fds: Arc::new(Fds {
+                fds: [stdin, stdout, stderr],
+                process: false,
+            }),
+        }
+    }
+
+    /// The three over the process's own fds 0, 1 and 2, as php's CLI
+    /// registers them: closed by `fclose()` on the constant alone, and
+    /// left open when the request ends; `php://stdout` and `php://stderr`
+    /// opened again are copies of them, as php's are.
+    #[must_use]
+    pub fn process(
+        stdin: Option<std::os::fd::OwnedFd>,
+        stdout: Option<std::os::fd::OwnedFd>,
+        stderr: Option<std::os::fd::OwnedFd>,
+    ) -> FileHandles {
+        FileHandles {
+            fds: Arc::new(Fds {
+                fds: [stdin, stdout, stderr],
+                process: true,
+            }),
         }
     }
 
     /// The fd under one of the three, `None` where the host handed none.
     pub(crate) fn fd(&self, standard: Standard) -> Option<std::os::fd::BorrowedFd<'_>> {
         use std::os::fd::AsFd;
-        let [stdin, stdout, stderr] = &*self.fds;
-        let fd = match standard {
-            Standard::Stdin => stdin,
-            Standard::Stdout => stdout,
-            Standard::Stderr => stderr,
-        };
-        fd.as_ref().map(AsFd::as_fd)
+        self.fds.fds[standard as usize].as_ref().map(AsFd::as_fd)
+    }
+
+    /// Whether the fds are the process's own.
+    pub(crate) fn is_process(&self) -> bool {
+        self.fds.process
+    }
+
+    /// The fd under the `at`th of the three closed, where this
+    /// description is the only one holding it.
+    pub(crate) fn close(&mut self, at: usize) {
+        if let Some(fd) = Arc::get_mut(&mut self.fds).and_then(|fds| fds.fds.get_mut(at)) {
+            *fd = None;
+        }
     }
 }
 

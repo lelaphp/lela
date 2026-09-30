@@ -129,17 +129,13 @@ fn server_variables(php_self: &[u8], file: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     ]
 }
 
-/// The process's fds 0, 1 and 2 as the engine is handed them, each a
-/// `dup(2)` of the host's, so the request's `fstat` and `ftruncate` ask
-/// of the fds php's `STDIO` kind asks of; a closed one is `None`, which
-/// both answer as `fstat(2)` answers `EBADF`.
+/// The process's own fds 0, 1 and 2 as the engine is handed them, so the
+/// request's `fstat` and `ftruncate` ask of the fds php's `STDIO` kind
+/// asks of and its `fclose()` of a constant closes the fd itself; a
+/// closed one is `None`, which both answer as `fstat(2)` answers `EBADF`.
 fn process_handles() -> FileHandles {
-    use std::os::fd::AsFd;
-    FileHandles::new(
-        std::io::stdin().as_fd().try_clone_to_owned().ok(),
-        std::io::stdout().as_fd().try_clone_to_owned().ok(),
-        std::io::stderr().as_fd().try_clone_to_owned().ok(),
-    )
+    let [stdin, stdout, stderr] = crate::ffi::standard_fds();
+    FileHandles::process(stdin, stdout, stderr)
 }
 
 /// The file a program names, where it names one.

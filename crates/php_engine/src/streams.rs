@@ -2273,9 +2273,9 @@ fn plain_open(req: &mut Request, path: &HostPath, mode: &[u8]) -> Result<PhpStre
 /// fd 0, 1 or 2 under php's CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Standard {
-    Stdin,
-    Stdout,
-    Stderr,
+    Stdin = 0,
+    Stdout = 1,
+    Stderr = 2,
 }
 
 /// The host's standard streams as `php://stdin`, `php://stdout` and
@@ -2488,6 +2488,11 @@ impl Request {
             }
             return Ok(());
         };
+        self.standard_streams = [
+            Some(stdin.resource()),
+            Some(stdout.resource()),
+            Some(stderr.resource()),
+        ];
         self.register_host_constant(b"STDIN", stdin.as_value());
         self.register_host_constant(b"STDOUT", stdout.as_value());
         self.register_host_constant(b"STDERR", stderr.as_value());
@@ -2602,6 +2607,7 @@ impl OpenOptions {
 /// `stdout`, `stderr`, `fd/N` or `filter/...`; anything else is php's
 /// `Invalid php:// URL specified` and nothing opened. `input`, `stdin`
 /// and `fd/` are refused an include under `allow_url_include=0`.
+#[allow(clippy::too_many_lines)] // php's one `php_stream_url_wrap_php`, kept as one
 fn php_open(
     req: &mut Request,
     path: &[u8],
@@ -2668,7 +2674,13 @@ fn php_open(
         // Each a pipe or a terminal under the CLI, which
         // `detect_is_seekable` says does not seek.
         b"stdin" if for_include_refused(req) => return Ok(Err(String::from("operation failed"))),
+        b"stdin" | b"stdout" | b"stderr" if req.standard_closed(standard_of(&lower)) => {
+            return Ok(Err(String::from("operation failed")));
+        }
         b"stdin" if req.host_fd(Standard::Stdin).is_some() => return stdin_open(req, mode),
+        b"stdout" | b"stderr" if req.copies_standard() => {
+            return standard_copy(req, standard_of(&lower), mode);
+        }
         b"stdin" | b"stdout" | b"stderr" => {
             let kind = match lower.as_slice() {
                 b"stdin" => HostFd::Stdin(Memory {
@@ -2878,6 +2890,38 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
 /// int(1)
 /// {"timed_out":false,"blocked":false,"eof":true,"wrapper_type":"PHP","stream_type":"STDIO","mode":"rb","unread_bytes":0,"seekable":false}
 /// ```
+/// Which of the three a `php://` name is, `stdin` for any other.
+fn standard_of(lower: &[u8]) -> Standard {
+    match lower {
+        b"stdout" => Standard::Stdout,
+        b"stderr" => Standard::Stderr,
+        _ => Standard::Stdin,
+    }
+}
+
+/// `php://stdout` or `php://stderr` opened again under php's CLI once the
+/// constants stand (`Z/ext/standard/php_fopen_wrapper.c:258-290`):
+/// `dup(STDOUT_FILENO)`, a plain file over a copy of the process's fd,
+/// which writes past the host's sink as php's writes past `php_output`;
+/// read as the constants are, a pipe or a terminal that does not seek.
+fn standard_copy(req: &mut Request, standard: Standard, mode: &[u8]) -> Result<Opened, Thrown> {
+    let duped = req.host_fd(standard).map_or_else(
+        || Err(std::io::Error::from_raw_os_error(EBADF)),
+        |fd| fd.try_clone_to_owned(),
+    );
+    match duped {
+        Ok(fd) => {
+            let stream = req.stream_from_fd(fd, FdStream::File { mode })?;
+            req.stream_op(stream, |_, opened| {
+                opened.flags.no_seek = true;
+                opened.position = -1;
+            });
+            Ok(Ok(stream))
+        }
+        Err(error) => Ok(Err(strerror(&error))),
+    }
+}
+
 fn stdin_open(req: &mut Request, mode: &[u8]) -> Result<Opened, Thrown> {
     let duped = req.host_fd(Standard::Stdin).map_or_else(
         || Err(std::io::Error::from_raw_os_error(EBADF)),

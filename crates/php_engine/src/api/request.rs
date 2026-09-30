@@ -945,6 +945,7 @@ impl Stream {
         if req.held_streams.contains(&self.0) {
             return false;
         }
+        req.close_standard(self.0);
         crate::streams::PhpStream::close_open(req, self);
         true
     }
@@ -1828,6 +1829,11 @@ pub struct Request {
     /// The streams an operation holds while it serves PHP code on them,
     /// php's `PHP_STREAM_FLAG_NO_FCLOSE`, which `fclose` refuses.
     pub(crate) held_streams: Vec<Resource>,
+    /// The streams `STDIN`, `STDOUT` and `STDERR` were registered on,
+    /// each until it is closed.
+    pub(crate) standard_streams: [Option<Resource>; 3],
+    /// Which of the three constants' streams a program closed.
+    standard_closed: [bool; 3],
     /// `FG(wrapper_errors)` of the extension wrapper whose opener is
     /// running: what [`Request::wrapper_log_error`] logged, which
     /// `php_stream_display_wrapper_errors` prints where the open fails.
@@ -2413,6 +2419,8 @@ impl Request {
             stream_thrown: None,
             filtering: None,
             held_streams: Vec::new(),
+            standard_streams: [None; 3],
+            standard_closed: [false; 3],
             wrapper_errors: Vec::new(),
             opened_path: None,
             filter_type,
@@ -17230,6 +17238,38 @@ impl Request {
     /// Whether the host asked for the CLI's standard handles.
     pub(crate) fn registers_file_handles(&self) -> bool {
         self.description.file_handles.is_some()
+    }
+
+    /// `fclose()` reaching one of the constants' streams: what is under
+    /// it closed ([`crate::engine::FileHandles`]).
+    pub(crate) fn close_standard(&mut self, closed: Resource) {
+        if let Some(at) = self
+            .standard_streams
+            .iter()
+            .position(|s| *s == Some(closed))
+        {
+            self.standard_streams[at] = None;
+            self.standard_closed[at] = true;
+            if let Some(handles) = &mut self.description.file_handles {
+                handles.close(at);
+            }
+        }
+    }
+
+    /// Whether the constant over one of the three was closed.
+    pub(crate) fn standard_closed(&self, standard: crate::streams::Standard) -> bool {
+        self.standard_closed[standard as usize]
+    }
+
+    /// Whether `php://stdout` and `php://stderr` are copies of the
+    /// process's fds, as under php's CLI once the constants stand.
+    pub(crate) fn copies_standard(&self) -> bool {
+        self.standard_streams.iter().any(Option::is_some)
+            && self
+                .description
+                .file_handles
+                .as_ref()
+                .is_some_and(crate::engine::FileHandles::is_process)
     }
 
     /// `zend_constant::attributes`: the attributes the declaration of
