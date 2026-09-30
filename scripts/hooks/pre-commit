@@ -19,11 +19,14 @@
 # its staged content and refuses the commit with the rule id on a denial
 # (the harness's own files are a note: a person commits those). Last,
 # `computed run` on the region files, always, since a staged change under
-# a crate makes a region stale without staging its file, plus the local
-# file by name, through `xtask regions`, which reads computed's exit once
+# a crate makes a region stale without staging its file, through `xtask
+# regions`, which reads computed's exit once
 # for every caller and refuses a broken marker, a missing computed and an
 # untrusted clone; what it wrote is re-staged, and a hand-edited region is
-# refused, since only a person runs --force. Every command's own exit is
+# refused, since only a person runs --force. The gitignored local file,
+# .claude/harness.local.md, is not rendered here: no commit takes it, and
+# every session re-renders it, so its render here could only refuse a
+# commit for another session's write (#1312). Every command's own exit is
 # read; past the first group the commit is refused while any failed and
 # none cuts the rest short. When a path under
 # harness-plugins/ is staged, the function-hook declarations are rewritten
@@ -143,7 +146,7 @@ rm -rf "$at_once"
 
 regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md'
 # shellcheck disable=SC2086
-if rendered=$($X regions $regions .claude/harness.local.md); then
+if rendered=$($X regions $regions); then
     echo "$rendered" | grep -E ' written$' | cut -d: -f1 | sort -u | while read -r file; do
         case " $regions " in *" $file "*) stage "$file" ;; esac
     done
