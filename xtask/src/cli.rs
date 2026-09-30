@@ -277,8 +277,12 @@ pub(crate) enum Command {
     Crosscheck {
         /// One extension by its php name, repeatable; default every
         /// extension the binary under test carries.
-        #[arg(long = "ext", value_name = "NAME")]
+        #[arg(long = "ext", value_name = "NAME", conflicts_with = "staged")]
         ext: Vec<String>,
+        /// For pre-commit: only the extensions the binary carries with a
+        /// staged change, the ones `done` holds to their rows (#1312).
+        #[arg(long)]
+        staged: bool,
     },
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit {
@@ -391,6 +395,11 @@ pub(crate) struct Witness {
     /// Only the crates with a staged change (pre-commit's touched crates).
     #[arg(long)]
     pub staged: bool,
+    /// Only the crates with no passing reading over their tree now, as
+    /// `done` reads fresh: the merge check's, after pre-commit measured
+    /// the staged crates (#1312).
+    #[arg(long, conflicts_with_all = ["crates", "staged"])]
+    pub unmeasured: bool,
     /// Write the oracle's status onto each `expect` fence line that
     /// does not already pin it; the only thing that writes an `exit`.
     #[arg(long)]

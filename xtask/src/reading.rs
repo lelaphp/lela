@@ -436,19 +436,44 @@ impl Store {
         instrument: &str,
         trees: &BTreeMap<String, String>,
     ) -> Result<BTreeMap<String, Reading>> {
+        let sought: Vec<(String, String, String)> = trees
+            .iter()
+            .map(|(scope, tree)| (instrument.to_owned(), scope.clone(), tree.clone()))
+            .collect();
+        Ok(self
+            .latest_over_each(&sought)?
+            .into_iter()
+            .map(|((_, scope), reading)| (scope, reading))
+            .collect())
+    }
+
+    /// [`Store::latest_over`] for several instruments at once, each sought
+    /// as `(instrument, scope, tree)` and found by instrument and scope,
+    /// the log passed over once for all of them: what `done` asks of a
+    /// touched crate whose file holds a reading over another tree, such as
+    /// a refused commit's, while a pass over the tree now is in the log
+    /// (#1312).
+    pub(crate) fn latest_over_each(
+        &self,
+        sought: &[(String, String, String)],
+    ) -> Result<BTreeMap<(String, String), Reading>> {
         const TREE: &str = "\"tree\":\"";
         let mut found = BTreeMap::new();
-        let mut sought: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for (scope, tree) in trees.iter().filter(|(_, tree)| !tree.is_empty()) {
+        let mut by_tree: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+        for (instrument, scope, tree) in sought.iter().filter(|(_, _, tree)| !tree.is_empty()) {
             // A file that is no reading is no reading over the tree, and
             // the log is asked instead, as for a stale one (#1235).
             match self.read(instrument, scope).ok().flatten() {
                 Some(reading) if reading.fresh_for(tree) => {
-                    found.insert(scope.clone(), reading);
+                    found.insert((instrument.clone(), scope.clone()), reading);
                 }
-                _ => sought.entry(tree.as_str()).or_default().push(scope),
+                _ => by_tree
+                    .entry(tree.as_str())
+                    .or_default()
+                    .push((instrument, scope)),
             }
         }
+        let sought = by_tree;
         if sought.is_empty() {
             return Ok(found);
         }
@@ -466,19 +491,19 @@ impl Store {
                 continue;
             };
             let tree = line[at + TREE.len()..].split('"').next().unwrap_or("");
-            let Some(scopes) = sought.get(tree) else {
+            let Some(wanted) = sought.get(tree) else {
                 continue;
             };
             let Ok(reading) = Reading::from_json(line) else {
                 continue;
             };
+            let key = (reading.instrument.clone(), reading.scope.clone());
             let later = |held: &Reading| reading.at.to_string() >= held.at.to_string();
-            if reading.instrument == instrument
-                && reading.fresh_for(tree)
-                && scopes.contains(&reading.scope.as_str())
-                && found.get(&reading.scope).is_none_or(later)
+            if reading.fresh_for(tree)
+                && wanted.contains(&(key.0.as_str(), key.1.as_str()))
+                && found.get(&key).is_none_or(later)
             {
-                found.insert(reading.scope.clone(), reading);
+                found.insert(key, reading);
             }
         }
         Ok(found)

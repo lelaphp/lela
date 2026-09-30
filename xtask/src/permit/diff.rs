@@ -178,20 +178,60 @@ fn displaced(root: &Path, rev: &str, path: &str) -> String {
 }
 
 /// The staged files with their staged content: what a commit would take,
-/// against what `HEAD` carries. A deleted file has nothing to judge.
+/// against what `HEAD` carries. A deleted file has nothing to judge. In a
+/// merge the commit displaces both parents, so what it is judged against
+/// is `HEAD`'s text and the lines the merged branch brought since the
+/// merge base: a line either parent carried, such as an `exit=` the
+/// branch's `witness --accept` captured, is that parent's and not the
+/// merge's (#1312).
 fn staged_files(root: &Path) -> Result<Vec<Diffed>> {
+    let merging = git::git(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"], None)
+        .ok()
+        .and_then(|theirs| {
+            let theirs = theirs.trim().to_owned();
+            let base = git::git(root, &["merge-base", "HEAD", &theirs], None).ok()?;
+            Some((theirs, base.trim().to_owned()))
+        });
     let mut files = Vec::new();
     for change in git::staged(root)?.into_iter().filter(|c| !c.deleted) {
         if let Some(content) = git::staged_content(root, &change.path)? {
-            let displaced = displaced(root, "HEAD", &change.path);
+            let mut before = displaced(root, "HEAD", &change.path);
+            if let Some((theirs, base)) = &merging {
+                let brought = brought(
+                    &displaced(root, theirs, &change.path),
+                    &displaced(root, base, &change.path),
+                );
+                before = format!("{before}\n{brought}");
+            }
             files.push(Diffed {
                 path: change.path,
                 content,
-                displaced,
+                displaced: before,
             });
         }
     }
     Ok(files)
+}
+
+/// The lines of `theirs` that `base` does not carry, each counted as
+/// often as `theirs` carries it beyond `base`: what one side of a merge
+/// brought.
+fn brought(theirs: &str, base: &str) -> String {
+    let mut held: BTreeMap<&str, usize> = BTreeMap::new();
+    for line in base.lines() {
+        *held.entry(line).or_default() += 1;
+    }
+    let mut out = String::new();
+    for line in theirs.lines() {
+        match held.get_mut(line) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 /// The changed files with their working-tree content, as `done` judges

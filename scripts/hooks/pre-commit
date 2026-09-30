@@ -6,23 +6,27 @@
 # the hook there, before clippy has built anything, since a vocab word or
 # a missing lock line is seconds to find and a clippy and test cycle is
 # minutes. Then clippy and test on the crates with a staged change, and
-# witness on them beside crosscheck; each writes a reading, so `done` has
+# witness on them beside crosscheck on the staged extensions the binary
+# carries (#1312); each writes a reading, so `done` has
 # the readings its condition 1 asks a touched crate for. With `--staged`
 # each leaves out a crate whose reading passes and was taken over exactly
 # what is staged, naming the reading (#1143), a retired worktree's
 # included, which is how a branch's passes stand at its merge (#1252).
-# crosscheck over the default extensions writes its readings the same way
-# and refuses nothing here, since a red row is an extension not yet
-# ported and `done` is what holds a touched one to it (#269);
+# crosscheck writes its readings the same way and refuses nothing here,
+# since a red row is an extension not yet ported and `done` is what holds
+# a touched one to it (#269);
 # `permit --diff` judges every staged file as the Write of
 # its staged content and refuses the commit with the rule id on a denial
 # (the harness's own files are a note: a person commits those). Last,
 # `computed run` on the region files, always, since a staged change under
-# a crate makes a region stale without staging its file, plus the local
-# file by name, through `xtask regions`, which reads computed's exit once
+# a crate makes a region stale without staging its file, through `xtask
+# regions`, which reads computed's exit once
 # for every caller and refuses a broken marker, a missing computed and an
 # untrusted clone; what it wrote is re-staged, and a hand-edited region is
-# refused, since only a person runs --force. Every command's own exit is
+# refused, since only a person runs --force. The gitignored local file,
+# .claude/harness.local.md, is not rendered here: no commit takes it, and
+# every session re-renders it, so its render here could only refuse a
+# commit for another session's write (#1312). Every command's own exit is
 # read; past the first group the commit is refused while any failed and
 # none cuts the rest short. When a path under
 # harness-plugins/ is staged, the function-hook declarations are rewritten
@@ -114,7 +118,7 @@ gather() {
         cat "$at_once/$i.out"
         [ "$(cat "$at_once/$i.exit")" = 0 ] && continue
         case "$(cat "$at_once/$i.cmd")" in
-            *" crosscheck") echo "pre-commit: crosscheck: a default extension's rendering is not the oracle's; done holds a touched one to its row" >&2 ;;
+            *" crosscheck --staged") echo "pre-commit: crosscheck: a staged extension's rendering is not the oracle's; done holds a touched one to its row" >&2 ;;
             *) echo "pre-commit: $(cat "$at_once/$i.cmd") failed" >&2; status=1 ;;
         esac
     done
@@ -136,13 +140,13 @@ fi
 step $X clippy --staged
 step $X test --staged
 spawn $X witness --staged
-spawn $X crosscheck
+spawn $X crosscheck --staged
 gather
 rm -rf "$at_once"
 
 regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md'
 # shellcheck disable=SC2086
-if rendered=$($X regions $regions .claude/harness.local.md); then
+if rendered=$($X regions $regions); then
     echo "$rendered" | grep -E ' written$' | cut -d: -f1 | sort -u | while read -r file; do
         case " $regions " in *" $file "*) stage "$file" ;; esac
     done

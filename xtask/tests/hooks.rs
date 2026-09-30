@@ -21,15 +21,14 @@ fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
 
-/// The region files pre-commit renders, in the order it names them, and
-/// the local one it names beside them.
+/// The region files pre-commit renders, in the order it names them; the
+/// gitignored local file is not one of them (#1312).
 const REGIONS: [&str; 4] = [
     "AGENTS.md",
     "ext/AGENTS.md",
     "data/INDEX.md",
     "docs/divergence.md",
 ];
-const LOCAL: &str = ".claude/harness.local.md";
 
 /// A scratch repository with the stand-ins beside it: `root` is the
 /// repository, `bin` holds `cargo` and `computed`, `plugin-bin` holds
@@ -261,8 +260,9 @@ impl Scratch {
 /// The instruments that only read the tree first, `fmt` and then at once
 /// `api-check`, `budget`, `unsafe-audit`, `vocab` and `permit --diff`;
 /// then `clippy` and `test`, then `witness` and `crosscheck` at once
-/// (#1252); then `xtask regions` over the four region files and the local
-/// one by name, which reaches `computed run`; the region file `computed`
+/// (#1252), crosscheck on the staged extensions alone (#1312); then
+/// `xtask regions` over the four region files and not the gitignored
+/// local one, which reaches `computed run`; the region file `computed`
 /// rewrote is re-staged, so the commit carries it and the tree is clean
 /// after, and `computed check` over the four holds the commit to a
 /// rendering.
@@ -274,7 +274,7 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     assert_eq!(code, 0, "{out}");
     assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
 
-    let regions = format!("{} {LOCAL}", REGIONS.join(" "));
+    let regions = REGIONS.join(" ");
     // A group runs at once, so its steps start in any order (#1144); what
     // they print comes out whole and in the hook's order, though
     // `api-check`, the first, ends last.
@@ -285,7 +285,7 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         "xtask vocab --staged",
         "xtask permit --diff",
     ];
-    let building = ["xtask witness --staged", "xtask crosscheck"];
+    let building = ["xtask witness --staged", "xtask crosscheck --staged"];
     let mut calls = scratch.calls("cargo");
     calls[1..6].sort_unstable();
     calls[8..10].sort_unstable();

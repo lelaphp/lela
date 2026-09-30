@@ -95,6 +95,7 @@
 //! `done` over the rule; the second Stop passes as it always did, so the
 //! hold costs one turn.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 
@@ -515,9 +516,27 @@ fn fresh_readings(
 ) -> Result<()> {
     let tree = git::tree_hash(root, &krate.path())?;
     let name = &krate.name;
+    // The scope's file holds the last reading written, which a refused
+    // commit's can be, taken over another tree; where it is, the latest
+    // one over the tree now stands before it, found in the log (#1312).
+    // A scope with no file has no reading, whatever the log holds.
+    let mut read = BTreeMap::new();
     for instrument in instruments_of(krate, lock_home, carried) {
         for scope in scopes_of(instrument, name) {
-            let Some(reading) = store.read(instrument, &scope)? else {
+            if let Some(reading) = store.read(instrument, &scope)? {
+                read.insert((instrument.to_owned(), scope), reading);
+            }
+        }
+    }
+    let stale: Vec<(String, String, String)> = read
+        .iter()
+        .filter(|(_, reading)| !reading.fresh_for(&tree))
+        .map(|((instrument, scope), _)| (instrument.clone(), scope.clone(), tree.clone()))
+        .collect();
+    read.extend(store.latest_over_each(&stale)?);
+    for instrument in instruments_of(krate, lock_home, carried) {
+        for scope in scopes_of(instrument, name) {
+            let Some(reading) = read.remove(&(instrument.to_owned(), scope.clone())) else {
                 unmet.push(format!("{instrument}: no reading for {scope}"));
                 continue;
             };

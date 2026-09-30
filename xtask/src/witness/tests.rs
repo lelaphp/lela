@@ -650,3 +650,54 @@ fn a_linux_build_and_a_darwin_one_each_count_their_own_natives() {
         );
     }
 }
+
+/// `--unmeasured` leaves out a crate whose pass was taken over its tree
+/// now and measures it again once one byte of it moves: what the merge
+/// check runs after pre-commit measured the staged crates (#1312).
+#[test]
+fn unmeasured_leaves_out_a_crate_with_a_pass_over_its_tree_now() {
+    use crate::git::git;
+    use crate::reading::{Reading, Status, Store};
+    let dir = Tree::new("witness-unmeasured").unwrap();
+    fs::create_dir_all(dir.join("xtask/src")).unwrap();
+    fs::write(dir.join("xtask/Cargo.toml"), "[package]\n").unwrap();
+    fs::write(dir.join("xtask/src/lib.rs"), "a\n").unwrap();
+    git(&dir, &["init", "-q"], None).unwrap();
+    git(&dir, &["add", "--", "xtask"], None).unwrap();
+    let unhooked = [
+        "-c",
+        "user.name=x",
+        "-c",
+        "user.email=x@x",
+        "-c",
+        "commit.gpgsign=false",
+    ];
+    let commit = [
+        &unhooked[..],
+        &["-c", "core.hooksPath=/var/empty", "commit", "-q", "-m", "x"],
+    ]
+    .concat();
+    git(&dir, &commit, None).unwrap();
+    let manifest = manifest();
+    let store = Store::at(dir.join("target/harness"));
+    assert_eq!(
+        super::unmeasured(&dir, &manifest, &store).unwrap(),
+        ["xtask"]
+    );
+
+    let krate = manifest.crate_named("xtask").unwrap();
+    let mut reading = Reading::for_crate(super::INSTRUMENT, krate, &dir).unwrap();
+    reading.status = Status::Pass;
+    store.record(&[reading]).unwrap();
+    assert!(
+        super::unmeasured(&dir, &manifest, &store)
+            .unwrap()
+            .is_empty()
+    );
+
+    fs::write(dir.join("xtask/src/lib.rs"), "b\n").unwrap();
+    assert_eq!(
+        super::unmeasured(&dir, &manifest, &store).unwrap(),
+        ["xtask"]
+    );
+}
