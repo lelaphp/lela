@@ -140,11 +140,25 @@ struct Options(Value);
 
 impl Options {
     /// `zend_hash_str_find(options, name)`, dereferenced.
+    ///
+    /// ```php
+    /// $w = deflate_init(ZLIB_ENCODING_RAW, ['level' => 1, 'window' => 9]); unset($w);
+    /// $m = memory_get_usage();
+    /// $d = deflate_init(ZLIB_ENCODING_RAW, ['level' => 1, 'window' => 9]); unset($d);
+    /// var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     fn find(&self, req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown> {
         match self.0.as_ref() {
             ValueRef::Array(array) => {
+                // A key for the lookup alone, given back once it is made,
+                // as `zend_hash_str_find` allocates none.
                 let key = PhpString::new(req, name)?;
-                Ok(array.get(&Key::Str(key)).map(|value| value.deref()))
+                let found = array.get(&Key::Str(key)).map(|value| value.deref());
+                req.release(Value::string(key));
+                Ok(found)
             }
             ValueRef::Object(object) => {
                 let object = *object;

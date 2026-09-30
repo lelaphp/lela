@@ -165,8 +165,11 @@ impl StreamFilter for Deflating {
 fn param(req: &mut Request, params: &Value, name: &[u8]) -> Result<Option<Value>, Thrown> {
     match params.as_ref() {
         ValueRef::Array(array) => {
+            // A key for the lookup alone, given back once it is made.
             let key = PhpString::new(req, name)?;
-            Ok(array.get(&Key::Str(key)).map(|value| value.deref()))
+            let found = array.get(&Key::Str(key)).map(|value| value.deref());
+            req.release(Value::string(key));
+            Ok(found)
         }
         ValueRef::Object(object) => {
             let object = *object;
