@@ -122,6 +122,7 @@ pub(crate) fn closed_by(store: &Store, session_id: &str) -> Result<Vec<Ticket>> 
         .max();
     let mut closed: Vec<Ticket> = store
         .readings()?
+        .readings
         .into_iter()
         .filter(|r| {
             r.instrument == ticket::INSTRUMENT

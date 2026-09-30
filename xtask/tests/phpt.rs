@@ -1213,3 +1213,132 @@ fn a_run_writes_nothing_into_the_pinned_tree() {
     assert_eq!(count(&reading, "borked"), 0, "{reading:#?}");
     assert_eq!(listing(&corpus), before, "the pinned tree moved");
 }
+
+/// The tests of a fixture directory, by file name and text.
+fn fixture_tests(dir: &str) -> Vec<(String, String)> {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+    let mut tests: Vec<(String, String)> = fs::read_dir(&fixture)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "phpt"))
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, fs::read_to_string(&path).unwrap())
+        })
+        .collect();
+    tests.sort();
+    tests
+}
+
+/// The fixture at `xtask/fixtures/phpt/environment` (#1186): a test's
+/// programs get run-tests.php's environment and pipes for their streams,
+/// so under the pinned php every one of its tests passes, the `SKIPIF`
+/// that skips on anything but a pipe included. Run again through a binary
+/// that hands its program `/dev/null` on stdin and a file on stdout, what
+/// the runner handed before, the three tests of the streams fail and are
+/// named: the fixture's negative control.
+#[test]
+fn a_test_gets_run_tests_environment_and_pipes_for_its_streams() {
+    if oracle().is_none() {
+        return;
+    }
+    let tests = fixture_tests("fixtures/phpt/environment");
+    assert_eq!(tests.len(), 5, "{tests:?}");
+    let tests: Vec<(&str, &str)> = tests
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let scratch = Scratch::new("environment", &tests);
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "passed"), 5, "{reading:#?}");
+
+    let nulled = scratch.root.join("engine/nulled");
+    fs::write(
+        &nulled,
+        format!(
+            "#!/bin/sh\nout=$(mktemp)\n\"{}\" \"$@\" </dev/null >\"$out\" 2>&1\ncat \"$out\"\nrm -f \"$out\"\n",
+            oracle().unwrap().display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&nulled, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let reading = scratch.run(&registry(""), &nulled);
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(&reading, "failed"), 3, "{reading:#?}");
+    for name in ["stdin-pipe.phpt", "stdin-section.phpt", "stdout-pipe.phpt"] {
+        assert!(reading.message.contains(name), "{}", reading.message);
+    }
+}
+
+/// The target (#1184): the runner's control keeps the oracle's verdict on
+/// every test under the pin's key, and an engine's reading of the subset
+/// then carries met-of-target. The oracle misses `oracle-miss.phpt`, whose
+/// expectation no php meets, so it is outside the target and the engine's
+/// fail on it is counted there and not against the target; the engine
+/// meets the one test the oracle meets. Before the control has run, the
+/// engine's reading says how to take a target and carries no such number.
+#[test]
+fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
+    let Some(binary) = oracle() else { return };
+    let scratch = Scratch::new(
+        "target",
+        &[
+            (
+                "met.phpt",
+                "--TEST--\nEcho\n--FILE--\n<?php echo \"one\";\n--EXPECT--\none\n",
+            ),
+            (
+                "oracle-miss.phpt",
+                "--TEST--\nEcho\n--FILE--\n<?php echo \"one\";\n--EXPECT--\ntwo\n",
+            ),
+        ],
+    );
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert!(!reading.numbers.contains_key("target"), "{reading:#?}");
+    assert!(
+        reading.message.contains("no target is kept under pin-"),
+        "{}",
+        reading.message
+    );
+
+    let control = scratch.run(&registry(""), &binary);
+    assert!(
+        control
+            .message
+            .contains("kept as the subset's target under pin-"),
+        "{}",
+        control.message
+    );
+    let pin = &scratch.manifest.pin;
+    let kept = scratch.root.join(format!(
+        "target/phpt-runs/pin-{}-{}/ext/fixture.json",
+        pin.source.tag, pin.oracle.md5
+    ));
+    let kept: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&kept).unwrap()).unwrap();
+    assert_eq!(
+        kept["verdicts"]["phpt:php-src/ext/fixture/tests/oracle-miss.phpt"],
+        "fail"
+    );
+    assert_eq!(
+        kept["verdicts"]["phpt:php-src/ext/fixture/tests/met.phpt"],
+        "pass"
+    );
+
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert_eq!(count(&reading, "target"), 1, "{reading:#?}");
+    assert_eq!(count(&reading, "met"), 1, "{reading:#?}");
+    assert_eq!(count(&reading, "outside"), 1, "{reading:#?}");
+    assert!(
+        reading
+            .message
+            .contains("1 of 1 target tests met, 1 outside"),
+        "{}",
+        reading.message
+    );
+}

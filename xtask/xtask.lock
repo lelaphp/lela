@@ -160,6 +160,8 @@ oracle::Source
 oracle::Source::named
 oracle::Source::path
 oracle::Source::tree
+oracle::Stdin
+oracle::Streams
 oracle::TREE_VARIABLE
 oracle::Verdict
 oracle::compare
@@ -196,6 +198,8 @@ reading::Chain
 reading::Chain::of_head
 reading::Chain::standing
 reading::DIR
+reading::Files
+reading::Files::unreadable_note
 reading::LOG
 reading::Log
 reading::Log::unreadable_note

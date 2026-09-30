@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use super::environment::Environment;
 use super::file::Phpt;
 use super::miss::Miss;
 use super::{Judged, Judgement};
@@ -66,27 +67,14 @@ pub(crate) fn linked(binary: &Path, root: &Path) -> Result<PathBuf> {
 /// on stdin, and the words after the program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Request {
-    pub(crate) env: Vec<(String, OsString)>,
+    pub(crate) env: Environment,
     pub(crate) stdin: Option<Vec<u8>>,
     pub(crate) args: Vec<String>,
 }
 
-/// The CGI variables run-tests.php empties for every test before it reads
-/// `--ENV--` (run-tests.php:2000-2008), so a test's own may set them.
-const RESET: [&str; 8] = [
-    "REDIRECT_STATUS",
-    "QUERY_STRING",
-    "PATH_TRANSLATED",
-    "SCRIPT_FILENAME",
-    "REQUEST_METHOD",
-    "CONTENT_TYPE",
-    "CONTENT_LENGTH",
-    "TZ",
-];
-
 /// The request a CGI-shaped test describes, as run-tests.php builds it
 /// (run-tests.php:2279-2425): over `env`, the test's own environment with
-/// its `--ENV--` in it, `REDIRECT_STATUS`, the query string of `--GET--`,
+/// the CGI variables emptied and its `--ENV--` over them, `REDIRECT_STATUS`, the query string of `--GET--`,
 /// `program` as `PATH_TRANSLATED` and `SCRIPT_FILENAME`, `--COOKIE--` as
 /// `HTTP_COOKIE`, each where `--ENV--` left it empty, and then the one body
 /// section it carries: `--POST_RAW--` and `--PUT--` with their
@@ -98,14 +86,10 @@ const RESET: [&str; 8] = [
 pub(crate) fn request(
     phpt: &Phpt,
     program: &Path,
-    env: &[(String, OsString)],
+    env: &Environment,
 ) -> Result<Request, (Refused, String)> {
-    let mut out = Env(RESET
-        .iter()
-        .map(|name| ((*name).to_owned(), OsString::new()))
-        .chain(env.iter().cloned())
-        .collect());
-    out.set("REDIRECT_STATUS", b"1".to_vec());
+    let mut out = env.clone();
+    out.set("REDIRECT_STATUS", "1");
     let path = program.as_os_str().as_encoded_bytes().to_vec();
     let query = trim_bytes(phpt.section("GET").unwrap_or_default()).to_vec();
     for (name, value) in [
@@ -114,11 +98,11 @@ pub(crate) fn request(
         ("SCRIPT_FILENAME", path),
     ] {
         if !out.given(name) {
-            out.set(name, value);
+            out.set(name, bytes(value));
         }
     }
     let cookie = trim_bytes(phpt.section("COOKIE").unwrap_or_default()).to_vec();
-    out.set("HTTP_COOKIE", cookie);
+    out.set("HTTP_COOKIE", bytes(cookie));
     let raw = [("POST_RAW", "POST"), ("PUT", "PUT")]
         .into_iter()
         .find(|(section, _)| phpt.filled(section).is_some());
@@ -127,11 +111,11 @@ pub(crate) fn request(
         if !out.given("CONTENT_TYPE")
             && let Some(content_type) = content_type
         {
-            out.set("CONTENT_TYPE", content_type);
+            out.set("CONTENT_TYPE", bytes(content_type));
         }
-        out.set("CONTENT_LENGTH", body.len().to_string().into_bytes());
+        out.set("CONTENT_LENGTH", bytes(body.len().to_string().into_bytes()));
         if method == "PUT" || !out.given("REQUEST_METHOD") {
-            out.set("REQUEST_METHOD", method.as_bytes().to_vec());
+            out.set("REQUEST_METHOD", method);
         }
         if body.is_empty() {
             return Err((Refused::Bork, "empty $request".to_owned()));
@@ -139,15 +123,12 @@ pub(crate) fn request(
         (Some(body), Vec::new())
     } else if let Some(post) = phpt.filled("POST") {
         let post = trim_bytes(post);
-        out.set("REQUEST_METHOD", b"POST".to_vec());
+        out.set("REQUEST_METHOD", "POST");
         if !out.given("CONTENT_TYPE") {
-            out.set(
-                "CONTENT_TYPE",
-                b"application/x-www-form-urlencoded".to_vec(),
-            );
+            out.set("CONTENT_TYPE", "application/x-www-form-urlencoded");
         }
         if !out.given("CONTENT_LENGTH") {
-            out.set("CONTENT_LENGTH", post.len().to_string().into_bytes());
+            out.set("CONTENT_LENGTH", bytes(post.len().to_string().into_bytes()));
         }
         (Some(post.to_vec()), Vec::new())
     } else if let Some(section) = ["GZIP_POST", "DEFLATE_POST"]
@@ -161,9 +142,9 @@ pub(crate) fn request(
             ),
         ));
     } else {
-        out.set("REQUEST_METHOD", b"GET".to_vec());
-        out.set("CONTENT_TYPE", Vec::new());
-        out.set("CONTENT_LENGTH", Vec::new());
+        out.set("REQUEST_METHOD", "GET");
+        out.set("CONTENT_TYPE", "");
+        out.set("CONTENT_LENGTH", "");
         let mut args = Vec::new();
         if let Some(words) = phpt.text("ARGS") {
             args.push("--".to_owned());
@@ -172,29 +153,15 @@ pub(crate) fn request(
         (None, args)
     };
     Ok(Request {
-        env: out.0,
+        env: out,
         stdin,
         args,
     })
 }
 
-/// The environment as run-tests.php builds it up, a later entry of a name
-/// standing over an earlier.
-struct Env(Vec<(String, OsString)>);
-
-impl Env {
-    /// php's `!empty()` over what the environment holds so far.
-    fn given(&self, name: &str) -> bool {
-        self.0
-            .iter()
-            .rev()
-            .find(|(had, _)| had == name)
-            .is_some_and(|(_, value)| !value.is_empty() && value != "0")
-    }
-
-    fn set(&mut self, name: &str, value: Vec<u8>) {
-        self.0.push((name.to_owned(), OsString::from_vec(value)));
-    }
+/// Bytes the test wrote as an environment value, no encoding of them.
+fn bytes(value: Vec<u8>) -> OsString {
+    OsString::from_vec(value)
 }
 
 /// The request a test describes where it is CGI-shaped, and none where it
@@ -202,7 +169,7 @@ impl Env {
 pub(super) fn request_of(
     phpt: &Phpt,
     program: &Path,
-    env: &[(String, OsString)],
+    env: &Environment,
 ) -> Result<Option<Request>, (Refused, String)> {
     phpt.is_cgi()
         .then(|| request(phpt, program, env))
@@ -416,6 +383,7 @@ mod tests {
     fn value<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
         request
             .env
+            .entries()
             .iter()
             .rev()
             .find(|(had, _)| had == name)
@@ -425,7 +393,7 @@ mod tests {
     #[test]
     fn a_post_section_is_a_form_on_stdin() {
         let test = phpt("--TEST--\nn\n--POST--\na=Hello+World\n--FILE--\nx\n--EXPECT--\n1\n");
-        let request = request(&test, Path::new("/t/x.php"), &[]).unwrap();
+        let request = request(&test, Path::new("/t/x.php"), &Environment::default()).unwrap();
         assert_eq!(value(&request, "REQUEST_METHOD"), Some("POST"));
         assert_eq!(
             value(&request, "CONTENT_TYPE"),
@@ -442,7 +410,7 @@ mod tests {
         let test = phpt(
             "--TEST--\nn\n--POST_RAW--\nContent-Type: multipart/form-data; boundary=x\n--x\r\nbody\n--x--\n--FILE--\nx\n--EXPECT--\n1\n",
         );
-        let request = request(&test, Path::new("/t/x.php"), &[]).unwrap();
+        let request = request(&test, Path::new("/t/x.php"), &Environment::default()).unwrap();
         assert_eq!(
             value(&request, "CONTENT_TYPE"),
             Some("multipart/form-data; boundary=x")
@@ -456,7 +424,10 @@ mod tests {
         let test = phpt(
             "--TEST--\nn\n--GET--\na=1\n--COOKIE--\nc=v\n--ARGS--\nx y\n--FILE--\nx\n--EXPECT--\n1\n",
         );
-        let env = [("SCRIPT_FILENAME".to_owned(), OsString::from("/own.php"))];
+        let env = Environment::from(vec![(
+            "SCRIPT_FILENAME".to_owned(),
+            OsString::from("/own.php"),
+        )]);
         let request = request(&test, Path::new("/t/x.php"), &env).unwrap();
         assert_eq!(value(&request, "QUERY_STRING"), Some("a=1"));
         assert_eq!(value(&request, "HTTP_COOKIE"), Some("c=v"));

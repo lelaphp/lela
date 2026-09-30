@@ -7,7 +7,7 @@ use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 
 use crate::constants::{CAL_EASTER_ALWAYS_GREGORIAN, CAL_EASTER_ALWAYS_JULIAN, CAL_EASTER_ROMAN};
-use crate::zone::Zone;
+use php_ext::request::Zone;
 
 /// The largest year either function takes, `(ZEND_LONG_MAX / 5) * 4`,
 /// under which php's reckoning stays in a `zend_long`.

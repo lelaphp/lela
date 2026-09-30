@@ -34,7 +34,7 @@ fn count(reading: &Reading, key: &str) -> i64 {
 
 #[test]
 fn the_planted_regression_fails_the_reading_and_is_named() {
-    let diff = diff(&fixture("base.json"), &fixture("head.json")).unwrap();
+    let diff = diff(&fixture("base.json"), &fixture("head.json"), None).unwrap();
     assert_eq!(
         diff.regressed,
         [(
@@ -63,7 +63,7 @@ fn the_planted_regression_fails_the_reading_and_is_named() {
 #[test]
 fn the_same_run_against_itself_passes() {
     let base = fixture("base.json");
-    let reading = reading_of(diff(&base, &base));
+    let reading = reading_of(diff(&base, &base, None));
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert!(
         reading.message.contains("none fails here"),
@@ -81,7 +81,7 @@ fn a_test_the_compiler_no_longer_reads_is_a_regression() {
         "phpt:php-src/ext/fixture/tests/kept.phpt".to_owned(),
         Judgement::Unread,
     );
-    let diff = diff(&base, &head).unwrap();
+    let diff = diff(&base, &head, None).unwrap();
     assert_eq!(diff.regressed.len(), 1, "{diff:?}");
     assert_eq!(diff.regressed[0].1, Judgement::Unread);
 }
@@ -113,7 +113,7 @@ fn runs_that_do_not_compare_give_no_verdict() {
         } else {
             &base
         };
-        let reading = reading_of(diff(was, head));
+        let reading = reading_of(diff(was, head, None));
         assert_eq!(reading.status, Status::Skip, "{reading:#?}");
         assert!(
             reading.message.contains("no verdict"),
