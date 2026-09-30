@@ -31,8 +31,8 @@ use std::io::Write;
 use std::process::ExitCode;
 
 pub use php_engine::{
-    Engine, EngineBuilder, FileHandles, HostExtension, Method, Observables, OutputSink,
-    PHP_VERSION, RequestDescription, ResponseHead, WebRequest,
+    CommandLine, EachLine, Engine, EngineBuilder, FileHandles, HostExtension, Method, Observables,
+    OutputSink, PHP_VERSION, RequestDescription, ResponseHead, WebRequest,
 };
 
 /// `php_module_startup` for a host: `builder`, which carries the host's
@@ -130,6 +130,20 @@ pub fn build_date(epoch: &str) -> String {
         clock / 3_600,
         clock % 3_600 / 60,
         clock % 60
+    )
+}
+
+/// `php_get_version` (`Z/main/main.c:128`), what each host's `-v`
+/// prints: the head line with the host's name and the date `built`
+/// carries, php's copyright line, and `get_zend_version`, the engine's
+/// line and one for each Zend extension loaded; php starts its
+/// extensions before it answers `-v`, so the engine is built first.
+#[must_use]
+pub fn version(name: &str, built: &str, engine: &Engine) -> String {
+    format!(
+        "PHP {PHP_VERSION} ({name}) (built: {}) (NTS)\nCopyright (c) The PHP Group\n{}",
+        build_date(built),
+        engine.zend_version_info()
     )
 }
 

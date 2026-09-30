@@ -44,8 +44,7 @@ use php_sapi::cgi::{Disk, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 use php_sapi::ini::{define, enabled, entry};
 use php_sapi::{
-    Engine, HostExtension, Observables, OutputSink, PHP_VERSION, RequestDescription, ResponseHead,
-    WebRequest,
+    Engine, HostExtension, Observables, OutputSink, RequestDescription, ResponseHead, WebRequest,
 };
 
 /// `sapi_module.name` for php's CGI: what `php_sapi_name()` answers.
@@ -349,17 +348,11 @@ pub fn usage_text(argv0: &OsStr) -> String {
     )
 }
 
-/// `php_print_version` for this host (`php_get_version`, `M/main.c:126`): the head line,
-/// php's copyright line and `get_zend_version`, the engine's line and one
-/// for each Zend extension loaded. php-cgi starts its extensions before it
-/// answers `-v`, so the engine is built first.
+/// `php_print_version` for this host, [`php_sapi::version`] under its
+/// name and the date its `build.rs` stamps.
 #[must_use]
 pub fn version(engine: &Engine) -> String {
-    format!(
-        "PHP {PHP_VERSION} ({NAME}) (built: {}) (NTS)\nCopyright (c) The PHP Group\n{}",
-        php_sapi::build_date(env!("PHP_BUILD_EPOCH")),
-        engine.zend_version_info()
-    )
+    php_sapi::version(NAME, env!("PHP_BUILD_EPOCH"), engine)
 }
 
 /// The process's standard streams as php-cgi writes them: the body on
