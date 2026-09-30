@@ -234,10 +234,11 @@ Options:
 ├── standard
 ├── tokenizer
 ├── uri
+├── xmlreader
 ├── xmlwriter
 └── zlib
 ```
-<!-- /computed in=868c2ed8b0e71e77a238082d892c0a9166b6002d8a39e5757461f27036a7ee03 out=39be6239086a276d9a6cf5e72781beb7f7916f013ab8ceda8deb263c2cfbb7a3 -->
+<!-- /computed in=e1aa794efae046559494e1b86096334aee32c30939607898d9358d7231fc7bbc out=e46140757bca32201d0c291de65d57a0af005d38f42b92cf6159b310a01037dd -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

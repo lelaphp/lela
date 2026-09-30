@@ -86,6 +86,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_simplexml::extension,
         #[cfg(feature = "calendar")]
         php_ext_calendar::extension,
+        #[cfg(feature = "xmlreader")]
+        php_ext_xmlreader::extension,
         #[cfg(feature = "xmlwriter")]
         php_ext_xmlwriter::extension,
     ]

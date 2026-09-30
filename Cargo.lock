@@ -448,6 +448,7 @@ dependencies = [
  "php_ext_standard",
  "php_ext_tokenizer",
  "php_ext_uri",
+ "php_ext_xmlreader",
  "php_ext_xmlwriter",
  "php_ext_zlib",
 ]
@@ -756,6 +757,15 @@ dependencies = [
  "cc",
  "php_ext",
  "php_ext_lexbor",
+]
+
+[[package]]
+name = "php_ext_xmlreader"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "php_ext_dom",
+ "php_ext_libxml",
 ]
 
 [[package]]
