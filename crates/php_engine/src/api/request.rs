@@ -1668,6 +1668,14 @@ pub struct Request {
     map: MapTable,
     states: Vec<(TypeId, Box<dyn Any + Send>)>,
     ini: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The entries this request's host locked past the engine's
+    /// ([`crate::engine::IniOrigin::Admin`]).
+    locked: Vec<Vec<u8>>,
+    /// `fcgi_is_closed`: the host closed the response when
+    /// `fastcgi_finish_request()` ended it.
+    closed: bool,
+    /// `ZEND_INI_STAGE_ACTIVATE`, while a host's entry is laid over.
+    activating: bool,
     /// `EG(error_reporting)`, the mask a diagnostic is held to
     /// ([`Request::error_cb`]): what `OnUpdateErrorReporting`
     /// (`Z/Zend/zend.c:111`) reads out of the `error_reporting` entry at
@@ -2418,6 +2426,9 @@ impl Request {
             map: MapTable::new(),
             states: Vec::new(),
             ini: Vec::new(),
+            locked: Vec::new(),
+            closed: false,
+            activating: false,
             error_reporting: 0,
             sink: Sink::Kept(Kept::default()),
             output,
@@ -6090,6 +6101,24 @@ impl Request {
             Sink::Kept(kept) => std::mem::take(&mut kept.aside),
             Sink::Held(_) => Vec::new(),
         }
+    }
+
+    /// `fastcgi_finish_request()` (`Z/sapi/fpm/fpm/fpm_main.c:1494`):
+    /// where the response is open, every buffer flushed, the head sent
+    /// and the host told the response ends; whether it was open.
+    pub(crate) fn finish_response(&mut self) -> bool {
+        if self.closed {
+            return false;
+        }
+        crate::output::end_all(self);
+        crate::output::header(self);
+        self.closed = self.sink.get().finish();
+        true
+    }
+
+    /// What the host says of itself, `fpm_get_status()`.
+    pub(crate) fn host_status(&mut self) -> Option<crate::engine::HostValue> {
+        self.sink.get().status()
     }
 
     /// `php_log_err`: one entry for the host's log, whole.
@@ -13543,7 +13572,20 @@ impl Request {
     /// `ZEND_INI_STAGE_STARTUP`: `true` while the engine serves the
     /// rules over the host's values, before any request.
     pub fn at_startup(&self) -> bool {
-        self.startup.is_some()
+        self.startup.is_some() && !self.activating
+    }
+
+    /// Whether an entry's `on_modify` runs at `ZEND_INI_STAGE_ACTIVATE`: a
+    /// host's own entry laid over php once it has started, as php-fpm's
+    /// child applies its pool's `php_value`s.
+    #[must_use]
+    pub fn at_activate(&self) -> bool {
+        self.activating
+    }
+
+    /// The stage the next `on_modify` runs at: activate, or startup.
+    pub(crate) fn set_activating(&mut self, activating: bool) {
+        self.activating = activating;
     }
 
     /// `get_active_function_name`: the declared name of the native being
@@ -15300,9 +15342,13 @@ impl Request {
         self.sink.get().write_stderr(bytes);
     }
 
-    /// `flush()`, `sapi_flush`: the host may push what it has; the
-    /// handler stack is `ob_flush`'s, not this.
+    /// `flush()`, `sapi_flush`: the host may push what it has, the head
+    /// sent first where the host's flush sends it; the handler stack is
+    /// `ob_flush`'s, not this.
     pub fn flush(&mut self) {
+        if self.sink.get().flush_sends_head() {
+            crate::output::header(self);
+        }
         self.sink.get().flush();
     }
 
@@ -18244,8 +18290,56 @@ impl Request {
     /// NAN
     /// ```
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+        let allowed =
+            Request::ini_modifiable(name).0 && self.ini_user(name) && !self.ini_locked(name);
+        self.ini_alter(name, value, allowed)
+    }
+
+    /// The host's entries for this request, each as its
+    /// [`crate::engine::IniOrigin`] says, before anything reads them.
+    pub(crate) fn apply_host_ini(&mut self) {
+        use crate::engine::IniOrigin;
+        for (name, value, mode) in std::mem::take(&mut self.description.ini) {
+            let allowed =
+                mode != IniOrigin::PerDir || (self.ini_per_dir(&name) && !self.ini_locked(&name));
+            let taken = matches!(self.ini_alter(&name, &value, allowed), Ok(Some(_)));
+            if taken && mode == IniOrigin::Admin {
+                self.locked.push(name);
+            }
+        }
+    }
+
+    /// Whether a host's `php_admin_value` holds the entry.
+    fn ini_locked(&self, name: &[u8]) -> bool {
+        self.shared
+            .locked
+            .iter()
+            .chain(&self.locked)
+            .any(|n| n == name)
+    }
+
+    /// Whether the entry is `PHP_INI_PERDIR`: its declaration's
+    /// `per_dir`, or the core table's.
+    fn ini_per_dir(&self, name: &[u8]) -> bool {
+        self.shared
+            .extensions
+            .iter()
+            .flat_map(|extension| extension.ini.iter())
+            .find(|decl| decl.name.0.as_ref() == name)
+            .map_or(Request::ini_modifiable(name).1, |decl| decl.per_dir)
+    }
+
+    /// `zend_alter_ini_entry_ex` once `allowed` has answered the entry's
+    /// `modifiable` for the stage: the previous value, or `None` where the
+    /// entry does not exist, is not allowed, or refuses the value.
+    fn ini_alter(
+        &mut self,
+        name: &[u8],
+        value: &[u8],
+        allowed: bool,
+    ) -> Result<Option<Vec<u8>>, Thrown> {
         let previous = self.ini_get(name).map(<[u8]>::to_vec);
-        if previous.is_none() || !Request::ini_modifiable(name).0 || !self.ini_user(name) {
+        if previous.is_none() || !allowed {
             return Ok(None);
         }
         if Request::ini_verdict(name, value) == IniVerdict::Rejected {
@@ -18338,12 +18432,26 @@ impl Request {
     /// bool(true)
     /// int(3)
     /// ```
-    fn ini_modifiable(name: &[u8]) -> (bool, bool, bool) {
+    pub(crate) fn ini_modifiable(name: &[u8]) -> (bool, bool, bool) {
         match name {
-            b"xmlrpc_errors" | b"sys_temp_dir" | b"sendmail_path" | b"syslog.facility"
-            | b"syslog.ident" | b"disable_functions" | b"enable_dl" | b"extension_dir"
-            | b"allow_url_fopen" | b"allow_url_include" | b"browscap" => (false, false, true),
+            b"xmlrpc_errors"
+            | b"sys_temp_dir"
+            | b"sendmail_path"
+            | b"syslog.facility"
+            | b"syslog.ident"
+            | b"disable_functions"
+            | b"enable_dl"
+            | b"extension_dir"
+            | b"allow_url_fopen"
+            | b"allow_url_include"
+            | b"browscap"
+            | b"doc_root"
+            | b"user_dir"
+            | b"user_ini.filename"
+            | b"user_ini.cache_ttl" => (false, false, true),
             b"short_open_tag"
+            | b"output_buffering"
+            | b"output_handler"
             | b"mail.add_x_header"
             | b"mail.mixed_lf_and_crlf"
             | b"mail.cr_lf_mode"
@@ -18396,8 +18504,11 @@ impl Request {
     /// bool(false)
     /// string(9) "text/html"
     /// ```
-    fn ini_verdict(name: &[u8], value: &[u8]) -> IniVerdict {
+    pub(crate) fn ini_verdict(name: &[u8], value: &[u8]) -> IniVerdict {
         match name {
+            // `OnSetPrecision` and `OnSetSerializePrecision`
+            // (`Z/main/main.c:120-141`): nothing below -1.
+            b"precision" | b"serialize_precision" if ini_atol(value) < -1 => IniVerdict::Rejected,
             b"zend.exception_string_param_max_len"
                 if !(0..=1_000_000).contains(&ini_atol(value)) =>
             {
@@ -18580,20 +18691,49 @@ impl Request {
 
     // -------------------------------------------------- environment
 
-    /// `getenv(name)`: the bytes the host's environment holds.
+    /// `getenv(name)`: `sapi_getenv`, the request's own variable, which
+    /// no name `HTTP_PROXY` begins with answers (bug #72573), then the
+    /// bytes the host's environment holds.
     #[must_use]
     pub fn env(&self, name: &[u8]) -> Option<&[u8]> {
-        self.description
-            .env
-            .iter()
-            .find(|(n, _)| n.as_slice() == name)
+        let proxy = b"HTTP_PROXY";
+        let refused = name.len() <= proxy.len() && proxy[..name.len()].eq_ignore_ascii_case(name);
+        let param = if refused {
+            None
+        } else {
+            self.description
+                .params
+                .iter()
+                .find(|(n, _)| n.as_slice() == name)
+        };
+        param
+            .or_else(|| {
+                self.description
+                    .env
+                    .iter()
+                    .find(|(n, _)| n.as_slice() == name)
+            })
             .map(|(_, v)| v.as_slice())
     }
 
-    /// `getenv()` with no name: every pair.
+    /// The environment's every pair, `environ`, what a spawned program
+    /// inherits.
     #[must_use]
     pub fn env_pairs(&self) -> &[(Vec<u8>, Vec<u8>)] {
         &self.description.env
+    }
+
+    /// `php_load_environment_variables`, what `getenv()` with no name
+    /// reads: the environment's pairs, then the request's own variables.
+    #[must_use]
+    pub fn loaded_env(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let description = &self.description;
+        description
+            .env
+            .iter()
+            .chain(&description.params)
+            .cloned()
+            .collect()
     }
 
     /// `putenv()`: set, or unset with `None`.
@@ -20291,7 +20431,7 @@ pub(crate) const E_ALL: i64 = 32767 & !Level::Strict.bit();
 /// whitespace skipped, one sign, the digits up to the first byte that is
 /// not one, and zero where there are none; a number past `i64` saturates
 /// as `strtoll` does.
-fn ini_atol(value: &[u8]) -> i64 {
+pub(crate) fn ini_atol(value: &[u8]) -> i64 {
     let mut bytes = value
         .iter()
         .skip_while(|b| b.is_ascii_whitespace())
