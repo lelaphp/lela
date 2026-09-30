@@ -233,11 +233,12 @@ Options:
 ├── sockets
 ├── spl
 ├── standard
+├── sysvmsg
 ├── tokenizer
 ├── uri
 └── zlib
 ```
-<!-- /computed in=21f0f7fce037e4522c9213b969bd82bc794f373a0e28174970218c9db51a0c17 out=ed689a9c316e4411f457e1242aa305be205e38248bfd5fa446cd2ff3a11b4891 -->
+<!-- /computed in=aad3d3d50d2afa18a654c5f00c107be82b75465390023f5c21d09981d452d20c out=119d2876606d56bc4883fce9ae0ba71f3d713aa02a7162bc311f2aab5f3d77d3 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

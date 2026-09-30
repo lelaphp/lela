@@ -88,6 +88,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_calendar::extension,
         #[cfg(feature = "shmop")]
         php_ext_shmop::extension,
+        #[cfg(feature = "sysvmsg")]
+        php_ext_sysvmsg::extension,
     ]
 }
 
