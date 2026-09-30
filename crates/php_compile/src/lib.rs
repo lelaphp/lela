@@ -39,8 +39,9 @@ pub use stack::StackLimit;
 pub mod syntax {
     pub use php_syntax::tree::{Element, TokenId, Tree};
     pub use php_syntax::{
-        Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, SyntaxKind, Token, amp_name,
-        cast_name, int_overflows, lex, magic_const_name, operator_name, parse,
+        Colours, Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, ScannedToken,
+        SyntaxKind, Token, amp_name, cast_name, highlight, int_overflows, lex, magic_const_name,
+        operator_name, parse, scanned, strip,
     };
 }
 

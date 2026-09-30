@@ -30,7 +30,6 @@ mod exec;
 mod fiber;
 mod generator;
 mod handlers;
-mod highlight;
 mod host_extension;
 mod ini_quantity;
 mod ini_syntax;
@@ -44,7 +43,6 @@ mod preload;
 #[cfg(test)]
 mod probe;
 mod rfc1867;
-mod scanner;
 mod signal;
 mod streams;
 // The test face is on for an extension's dev-dependency, and for this
