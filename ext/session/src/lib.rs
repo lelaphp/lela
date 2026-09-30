@@ -431,15 +431,17 @@ fn session_array_mut(req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
     }
 }
 
-/// `array` bound as the session's variables, which own it from here:
+/// `vars` bound as the session's variables, which own it from here:
 /// `PS(http_session_vars)` a new reference to it with a second owner,
 /// laid into `EG(symbol_table)` as `$_SESSION` by
-/// `zend_hash_update_ind`, and the reference held before given up.
-fn bind_array(req: &mut Request, array: PhpArray) -> Result<(), Thrown> {
+/// `zend_hash_update_ind`, and the reference held before given up. An
+/// array but for what `php_serialize` decodes, which binds whatever the
+/// data held.
+fn bind_vars(req: &mut Request, vars: Value) -> Result<(), Thrown> {
     if let Some(old) = req.state::<State>().vars.take() {
         req.release(old.as_value());
     }
-    let vars = PhpRef::new(req, array.to_value())?;
+    let vars = PhpRef::new(req, vars)?;
     req.addref(&vars.as_value());
     req.state::<State>().vars = Some(vars);
     req.set_global(b"_SESSION", Some(vars.as_value()));
