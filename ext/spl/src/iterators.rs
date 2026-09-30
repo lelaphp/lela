@@ -59,7 +59,7 @@ enum Kind {
 
 /// `spl_dual_it_object`.
 #[derive(Default)]
-pub(crate) struct DualIt {
+pub(crate) struct DualItState {
     kind: Kind,
     inner: Option<PhpObject>,
     /// `inner.iterator`: the iterator the inner object's `get_iterator`
@@ -79,6 +79,10 @@ pub(crate) struct DualIt {
     appended: Option<PhpObject>,
     regex: Option<RegexIt>,
 }
+
+/// The payload: `spl_dual_it_object`'s fields, boxed, inside the `sizeof` php
+/// allocates (design §5.13).
+pub(crate) type DualIt = Box<DualItState>;
 
 /// `regex_mode`: what `RegexIterator::accept` makes of its subject,
 /// each the `RegexIterator` constant of its number.
@@ -213,7 +217,7 @@ enum State {
 /// `spl_recursive_it_object`, and the prefix parts and postfix
 /// `RecursiveTreeIterator` draws with.
 #[derive(Default)]
-pub(crate) struct RecIt {
+pub(crate) struct RecItState {
     levels: Vec<Level>,
     mode: i64,
     flags: i64,
@@ -222,6 +226,10 @@ pub(crate) struct RecIt {
     prefix: Option<[Vec<u8>; 6]>,
     postfix: Vec<u8>,
 }
+
+/// The payload: `spl_recursive_it_object`'s fields, boxed, inside the `sizeof` php
+/// allocates (design §5.13).
+pub(crate) type RecIt = Box<RecItState>;
 
 /// `spl_handlers_dual_it`.
 pub(crate) struct DualHandlers;
@@ -322,7 +330,24 @@ impl OuterIterator {
 /// int(0)
 /// bool(true)
 /// ```
-#[php_class(implements(OuterIterator), payload = RecIt, handlers = REC)]
+///
+/// `zend_object_alloc(sizeof(spl_recursive_it_object))`, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['RecursiveIteratorIterator'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// RecursiveIteratorIterator 192
+/// ```
+#[php_class(implements(OuterIterator), size = 208, payload = RecIt, handlers = REC)]
 pub(crate) struct RecursiveIteratorIterator;
 
 #[php_class]
@@ -542,7 +567,27 @@ impl RecursiveIteratorIterator {
 /// bool(false)
 /// NULL
 /// ```
-#[php_class(implements(OuterIterator), payload = DualIt, handlers = DUAL)]
+///
+/// `zend_object_alloc(sizeof(spl_dual_it_object))`, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['IteratorIterator', 'CachingIterator', 'LimitIterator', 'AppendIterator'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// IteratorIterator 192
+/// CachingIterator 192
+/// LimitIterator 192
+/// AppendIterator 192
+/// ```
+#[php_class(implements(OuterIterator), size = 192, payload = DualIt, handlers = DUAL)]
 pub(crate) struct IteratorIterator;
 
 #[php_class]

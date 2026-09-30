@@ -161,9 +161,29 @@ pub(crate) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// x2,X9,x10
 /// x:i:0;a:3:{s:1:"c";s:2:"x2";s:1:"a";s:2:"X9";s:1:"b";s:3:"x10";};m:a:0:{} ArrayIterator 1
 /// ```
+///
+/// `spl_array_object_new_ex`: the object by `zend_object_alloc` and the
+/// table `array_init` lays down, which `memory_get_usage()` counts (design
+/// §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['ArrayObject', 'ArrayIterator', 'RecursiveArrayIterator'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// ArrayObject 216
+/// ArrayIterator 216
+/// RecursiveArrayIterator 216
+/// ```
 #[php_class(
     implements(IteratorAggregate, ArrayAccess, Serializable, Countable),
-    payload = SplArrayObject,
+    size = 144, payload = SplArrayObject,
     handlers = HANDLERS
 )]
 pub(crate) struct ArrayObject;
@@ -887,7 +907,7 @@ impl ArrayObject {
 /// ```
 #[php_class(
     implements(SeekableIterator, ArrayAccess, Serializable, Countable),
-    payload = SplArrayObject,
+    size = 144, payload = SplArrayObject,
     handlers = HANDLERS
 )]
 pub(crate) struct ArrayIterator;
@@ -1682,6 +1702,19 @@ fn as_props(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<bool, T
 }
 
 impl ObjectHandlers for Handlers {
+    /// `spl_array_object_new_ex` with no object to copy:
+    /// `array_init(&intern->array)`, the table a constructor replaces.
+    fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        let array = PhpArray::new(req)?;
+        let fresh = object.native_mut::<SplArrayObject>(req).and_then(|p| {
+            matches!(p.storage, Storage::Fresh).then(|| p.storage = Storage::Array(array))
+        });
+        if fresh.is_none() {
+            req.release(Value::array(array));
+        }
+        Ok(())
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let _ = forget_position(req, object);
         let held = object

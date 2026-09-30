@@ -33,7 +33,7 @@ enum RowKey {
 /// `spl_SplObjectStorage`: the rows with their places, the position,
 /// `intern->index`, and `MultipleIterator`'s flags.
 #[derive(Default)]
-pub(crate) struct Storage {
+pub(crate) struct StorageState {
     rows: Vec<Option<(RowKey, PhpObject, Value)>>,
     places: HashMap<RowKey, usize>,
     pos: usize,
@@ -41,7 +41,11 @@ pub(crate) struct Storage {
     flags: i64,
 }
 
-impl Storage {
+/// The payload: `spl_SplObjectStorage`'s fields, boxed, inside the `sizeof` php
+/// allocates (design §5.13).
+pub(crate) type Storage = Box<StorageState>;
+
+impl StorageState {
     fn len(&self) -> usize {
         self.places.len()
     }
@@ -258,9 +262,27 @@ impl SplSubject {
 ///
 /// Deprecated: Method SplObjectStorage::detach() is deprecated since 8.5, use method SplObjectStorage::offsetUnset() instead in %s on line 10
 /// ```
+///
+/// `zend_object_alloc(sizeof(spl_SplObjectStorage))`, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['SplObjectStorage', 'MultipleIterator'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// SplObjectStorage 160
+/// MultipleIterator 160
+/// ```
 #[php_class(
     implements(Countable, SeekableIterator, Serializable, ArrayAccess),
-    payload = Storage,
+    size = 144, payload = Storage,
     handlers = HANDLERS
 )]
 pub(crate) struct SplObjectStorage;
@@ -1034,7 +1056,7 @@ impl SplObjectStorage {
 /// bool(true)
 /// int(2)
 /// ```
-#[php_class(implements(Iterator), payload = Storage, handlers = HANDLERS)]
+#[php_class(implements(Iterator), size = 144, payload = Storage, handlers = HANDLERS)]
 pub(crate) struct MultipleIterator;
 
 #[php_class]
@@ -1163,7 +1185,7 @@ impl MultipleIterator {
             return Ok(false);
         }
         let expect = flags & Self::MIT_NEED_ALL != 0;
-        with(req, this, Storage::reset)?;
+        with(req, this, |s| s.reset())?;
         while let Some((iterator, held, _)) = held_here(req, this)? {
             let answered = crate::method(req, iterator, b"valid");
             held.let_go(req);
@@ -1173,7 +1195,7 @@ impl MultipleIterator {
             if expect != valid {
                 return Ok(!expect);
             }
-            with(req, this, Storage::forward)?;
+            with(req, this, |s| s.forward())?;
         }
         Ok(expect)
     }
@@ -1889,12 +1911,12 @@ fn held_here(
 /// Each sub-iterator served `method`, from the first row by the
 /// storage's position, until one throws.
 fn each(req: &mut Request, this: PhpObject, method: &[u8]) -> Result<(), Thrown> {
-    with(req, this, Storage::reset)?;
+    with(req, this, |s| s.reset())?;
     while let Some((iterator, held, _)) = held_here(req, this)? {
         let served = crate::effect(req, iterator, method);
         held.let_go(req);
         served?;
-        with(req, this, Storage::forward)?;
+        with(req, this, |s| s.forward())?;
     }
     Ok(())
 }
@@ -1928,14 +1950,14 @@ fn get_all_rows(
     method: &str,
     out: &mut PhpArray,
 ) -> Result<(), Thrown> {
-    with(req, this, Storage::reset)?;
+    with(req, this, |s| s.reset())?;
     while let Some((iterator, held, inf)) = held_here(req, this)? {
         let inf = Held::take(req, inf);
         let row = get_one(req, this, iterator, inf.value(), method, out);
         held.let_go(req);
         inf.let_go(req);
         row?;
-        with(req, this, Storage::forward)?;
+        with(req, this, |s| s.forward())?;
     }
     Ok(())
 }

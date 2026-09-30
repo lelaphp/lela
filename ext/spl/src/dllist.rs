@@ -46,7 +46,7 @@ struct Cursor {
 
 /// `spl_dllist_object`: the list, the traverse cursor and the flags.
 #[derive(Default)]
-pub(crate) struct Llist {
+pub(crate) struct LlistState {
     nodes: Vec<Node>,
     head: Option<usize>,
     tail: Option<usize>,
@@ -56,7 +56,11 @@ pub(crate) struct Llist {
     ready: bool,
 }
 
-impl Llist {
+/// The payload: `spl_dllist_object`'s fields, boxed, inside the `sizeof` php
+/// allocates (design §5.13).
+pub(crate) type Llist = Box<LlistState>;
+
+impl LlistState {
     fn push(&mut self, value: Value) {
         let at = self.nodes.len();
         self.nodes.push(Node {
@@ -235,9 +239,29 @@ pub(crate) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// int(2)
 /// int(0)
 /// ```
+///
+/// The object is `zend_object_alloc(sizeof(spl_dllist_object))` and the
+/// `spl_ptr_llist` `spl_ptr_llist_init` allocates beside it, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['SplDoublyLinkedList', 'SplQueue', 'SplStack'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// SplDoublyLinkedList 152
+/// SplQueue 152
+/// SplStack 152
+/// ```
 #[php_class(
     implements(Iterator, Countable, ArrayAccess, Serializable),
-    payload = Llist,
+    size = 128, beside(24), payload = Llist,
     handlers = HANDLERS
 )]
 pub(crate) struct SplDoublyLinkedList;
@@ -313,7 +337,7 @@ impl SplDoublyLinkedList {
     /// ```
     #[php(tentative)]
     fn pop(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
-        match with(req, this.object(), Llist::pop)? {
+        match with(req, this.object(), |l| l.pop())? {
             Some(value) => Ok(value),
             None => Err(throw(
                 req,
@@ -326,7 +350,7 @@ impl SplDoublyLinkedList {
     /// `shift(): mixed`; the witness is the class's.
     #[php(tentative)]
     fn shift(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
-        match with(req, this.object(), Llist::shift)? {
+        match with(req, this.object(), |l| l.shift())? {
             Some(value) => Ok(value),
             None => Err(throw(
                 req,
@@ -628,7 +652,7 @@ impl SplDoublyLinkedList {
         if data.is_empty() {
             return Ok(());
         }
-        while let Some(old) = with(req, this, Llist::pop)? {
+        while let Some(old) = with(req, this, |l| l.pop())? {
             req.release(old);
         }
         let mut reader = php_ext_standard::Unserializer::new(req, &data);
@@ -956,11 +980,11 @@ impl ClassIterator for ListIterator {
 /// element, the pointer at the head.
 fn clone_list(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let (values, flags) = with(req, object, |l| (l.values(), l.flags))?;
-    let mut copy = Llist {
+    let mut copy = Box::new(LlistState {
         flags,
         ready: true,
-        ..Llist::default()
-    };
+        ..LlistState::default()
+    });
     for value in values {
         req.addref(&value);
         copy.push(value);
