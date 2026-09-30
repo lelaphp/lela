@@ -13712,6 +13712,23 @@ impl Emit<'_> {
                     let node = &self.parsed.tree[id];
                     let (name, inner, dim, inner_line) =
                         (node.name, node.inner, node.dim, node.line());
+                    // The lexer's `T_STRING_VARNAME` is a label right after
+                    // the `${` and right before its `}` or `[`; one with
+                    // whitespace around it is an expression, a constant's
+                    // name, which names the variable by its value.
+                    let opened = node.range.start;
+                    let name = name.filter(|name| {
+                        self.parsed
+                            .tokens
+                            .get(name.0 as usize)
+                            .is_some_and(|token| {
+                                token.offset == opened + 2
+                                    && matches!(
+                                        self.parsed.source.get((token.offset + token.len) as usize),
+                                        Some(b'}' | b'[')
+                                    )
+                            })
+                    });
                     let (fetch, written) = match (name, inner) {
                         (Some(name), _) => {
                             let name = self.text(name).to_vec();
@@ -13937,6 +13954,18 @@ impl Emit<'_> {
     /// Deprecated: Using ${var} in strings is deprecated, use {$var} instead in %s on line 3
     /// 1-v-m-1-q-1-q-1
     /// ```
+    ///
+    /// A name with whitespace around it inside `${ }` is no
+    /// `T_STRING_VARNAME` but a constant, whose value names the variable:
+    ///
+    /// ```php
+    /// define("FOO", "a"); $a = 1;
+    /// echo "${ FOO }", PHP_EOL;
+    /// ```
+    /// ```expect
+    /// Deprecated: Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead in %s on line 3
+    /// 1
+    /// ```
     fn encaps(
         &mut self,
         parts: &[tree::StringPart],
@@ -13948,8 +13977,12 @@ impl Emit<'_> {
         let mut reserved: Option<usize> = None;
         let mut init_at: Option<usize> = None;
         let mut count = 0u32;
+        // `zend_compile_encaps_list` deprecates a piece before it compiles
+        // it, at the line the piece before it left, the list's own for
+        // the first.
+        let mut left = line;
         for piece in &pieces {
-            self.line = piece.line;
+            self.line = left;
             match piece.written {
                 Written::Plain => {}
                 Written::DollarCurly => self.raise(
@@ -13961,7 +13994,9 @@ impl Emit<'_> {
                     "Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead",
                 ),
             }
+            self.line = piece.line;
             let value = self.fetched(&piece.fetch)?;
+            left = self.line;
             if let Where::Constant(value) = value {
                 let value = self.stringified(value)?.unwrap_or(value);
                 if value.as_str().is_some_and(|s| s.bytes().is_empty()) {
