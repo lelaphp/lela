@@ -316,30 +316,6 @@ unsafe extern "C" fn collect(user: *mut c_void, error: *mut sys::xmlError) {
     });
 }
 
-/// What `generic.c`'s handler hands on from libxml's generic channel,
-/// `xmlGenericError` (an `XPath` function no one registered, and its kin):
-/// one call's text, kept beside the call's structured errors on its route
-/// to `php_libxml_error_handler`, which joins the pieces until a newline.
-///
-/// # Safety
-/// `ctx` is the record `Call::run` set as the channel's data, live for
-/// the call, and `text` is `len` bytes the handler owns meanwhile.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn dax_libxml_generic_text(ctx: *mut c_void, text: *const c_char, len: usize) {
-    if ctx.is_null() || text.is_null() {
-        return;
-    }
-    // SAFETY: `Call::run` set `ctx` to its own record, live for the call.
-    let call = unsafe { &mut *ctx.cast::<Call>() };
-    // SAFETY: `len` bytes the handler formatted, live for the callback.
-    let text = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), len) };
-    let mut error = Raised::internal(text);
-    if call.thrown() {
-        error.route = Route::Silent;
-    }
-    call.raised.push(error);
-}
-
 /// `xmlReportError` in 2.9.13, into bytes: the site from the parser's
 /// input (or the error's file and line), the element, the domain and the
 /// level, the message with its newline, then the input's line around the
@@ -732,25 +708,12 @@ impl Call {
             io,
             parent,
         };
-        // SAFETY: the address of this thread's generic channel.
-        let generic = unsafe { sys::__xmlGenericError() };
-        // SAFETY: the address of this thread's generic channel context.
-        let generic_context = unsafe { sys::__xmlGenericErrorContext() };
-        // SAFETY: both addresses are the thread's own globals, read by copy.
-        let saved_generic = unsafe { *generic };
-        // SAFETY: as above.
-        let saved_generic_context = unsafe { *generic_context };
         // SAFETY: `call` outlives the call, and the handler is taken off
         // again before it is dropped.
         unsafe { sys::xmlSetStructuredErrorFunc((&raw mut call).cast(), Some(collect)) };
-        let ours: sys::xmlGenericErrorFunc = sys::dax_libxml_generic;
-        // SAFETY: as above, for the generic channel.
-        unsafe { sys::xmlSetGenericErrorFunc((&raw mut call).cast(), Some(ours)) };
         let answered = f();
         // SAFETY: the handler and context that were set before.
         unsafe { sys::xmlSetStructuredErrorFunc(saved_context, saved_handler) };
-        // SAFETY: the same, for the generic channel.
-        unsafe { sys::xmlSetGenericErrorFunc(saved_generic_context, saved_generic) };
         if let Some(routing) = call.routing {
             routing.apply(&mut call.raised);
         }
