@@ -89,8 +89,9 @@
 //! **What is not run here.** The full corpus, the nightly verdict control
 //! and the tier's lanes are CI's, under the manifest's `lanes.nightly`
 //! rule; the per-commit lane and one subset are an agent's to run. A
-//! `--PHPDBG--` test and a `--REDIRECTTEST--` are skipped with their
-//! reason; a CGI-shaped one runs through the CGI host beside the binary,
+//! `--PHPDBG--` test is skipped with its reason; a `--REDIRECTTEST--` runs
+//! as the set it names, counted in its own subset (the `redirect` module,
+//! #814); a CGI-shaped one runs through the CGI host beside the binary,
 //! the php-cgi `[sapi]` pins for the control and the engine's own
 //! `php-cgi`, `sapi/cgi`'s binary, for the engine, as the `cgi` module
 //! has it (#1198, ADR-0008). Beyond those, the process adapter
@@ -109,6 +110,7 @@ pub(crate) const CONTROL: &str = "@control";
 mod census;
 pub(crate) mod file;
 pub(crate) mod miss;
+mod redirect;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -352,11 +354,16 @@ impl Subset {
     /// where the test stands in the corpus whichever directory of the
     /// subset it came from.
     pub(crate) fn id(&self, test: &Path) -> String {
-        let under = match self.found_in(test) {
+        format!("phpt:{CORPUS}/{}", self.under(test).display())
+    }
+
+    /// Where the test stands in the corpus, whichever directory of the
+    /// subset it came from.
+    fn under(&self, test: &Path) -> PathBuf {
+        match self.found_in(test) {
             Some(place) => place.under.join(place.inside(test)),
             None => PathBuf::from(self.name(test)),
-        };
-        format!("phpt:{CORPUS}/{}", under.display())
+        }
     }
 
     /// The test's name inside the subset: inside its directory, with the
@@ -499,6 +506,13 @@ pub(crate) fn reading(
     } = under;
     let scope = subset.scope(runner, lane);
     let absent = subset.absent();
+    // A directory the design derives for an extension and the pinned tree
+    // has not: an extension with no tests of its own, whose reading is a
+    // skip naming the directory, and not the manifest and the pin
+    // disagreeing, which a row that names its directories is (#1231).
+    let testless = manifest
+        .crate_named(&subset.scope)
+        .is_some_and(Crate::derives_subset);
     // A subset of a crate not yet created: its tests are that crate's, and
     // an engine built without it would not answer for it, so the reading
     // says so ahead of whether an engine is built, as `budget` and
@@ -512,7 +526,9 @@ pub(crate) fn reading(
     // and the pin disagree, and no run can settle it. It is the reading,
     // ahead of whether an engine is built, because building one would not
     // answer it.
-    let outcome = if !absent.is_empty() {
+    let outcome = if !absent.is_empty() && testless {
+        Outcome::Absent(NO_TESTS)
+    } else if !absent.is_empty() {
         Outcome::Failed
     } else if uncreated {
         Outcome::Absent(sources::NOT_YET_CREATED)
@@ -580,8 +596,12 @@ pub(crate) fn reading(
     Ok(reading)
 }
 
+/// Why an extension whose derived directory the pinned tree has not has
+/// no reading but a skip (#1231).
+const NO_TESTS: &str = "the extension has no tests of its own in php-src, so its subset is none";
+
 /// The reading's words: the rung's sentence over the subset's numbers,
-/// or the directories the row names and the pinned tree has not.
+/// or the directories the subset names and the pinned tree has not.
 fn words(
     scope: &str,
     tally: &Tally,
@@ -640,8 +660,12 @@ fn words(
             .map(|under| under.to_string_lossy().into_owned())
             .collect();
         let named: Vec<&str> = named.iter().map(String::as_str).collect();
+        let (whose, why) = match outcome {
+            Outcome::Absent(why) => ("the design derives", format!("; {why}")),
+            _ => ("the [[crate]] row names", String::new()),
+        };
         format!(
-            "{scope}: the [[crate]] row names {}, and the pinned php-src at {} ({}) has no such directory",
+            "{scope}: {whose} {}, and the pinned php-src at {} ({}) has no such directory{why}",
             listed(&named),
             source.display(),
             manifest.pin.source.tag
@@ -874,14 +898,15 @@ pub(crate) fn run_subset(
     let control = matches!(runner, Runner::Control(_));
     let host = cgi::host(oracle.pin(), binary, control);
     let adapter = Adapter::new(oracle, registry, binary, host, lane);
+    let items = adapter.listed(subset, tests)?;
     let mut dirs = BTreeMap::new();
-    let apart: Vec<_> = tests
+    let apart: Vec<_> = items
         .iter()
-        .map(|test| adapter::apart(test, &mut dirs))
+        .map(|item| adapter::apart(item, &mut dirs))
         .collect();
     let batch = adapter::batch(&apart, jobs);
-    Tally::judge_apart(&tests, jobs, batch, &apart, |test| {
-        adapter.judge(subset, test)
+    Tally::judge_apart(&items, jobs, batch, &apart, |item| {
+        adapter.judge(subset, item)
     })
 }
 

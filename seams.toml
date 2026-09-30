@@ -28,7 +28,7 @@ lock_packages = 135                        # design §4.1: `Cargo.lock` packages
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
 api_items = 900                            # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34)
 api_private_items = 16                     # design §4.4 (revision 34, D1 of #947): api::__private, the helpers only a macro expansion names, capped apart from api_items
-bindings = 15000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
+bindings = 16000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
 # Lines are non-blank, non-comment, tests excluded (`xtask budget`).
 
 [telemetry]
@@ -73,16 +73,7 @@ name = "php_proto"
 budget = 4000
 [[crate]]
 name = "php_sapi"
-budget = 5000
-# php-src's sapi/ suites: the hosts' own tests, in the lane beside the
-# extensions' (#1161: every test the oracle runs). The port is partial:
-# `phpt` is the meter, not a condition of done, until the no-regression rule
-# replaces the key (#652, #664); fpm and phpdbg read as skips until #1165.
-phpt = ["sapi/cli/tests", "sapi/cgi/tests", "sapi/fpm/tests", "sapi/phpdbg/tests"]
-porting = true
-[[crate]]
-name = "php"
-budget = 1000
+budget = 2000                              # the hosts' facade and what php-src shares between its SAPIs (ADR-0008); the hosts' phpt subsets are their rows'
 [[crate]]
 name = "xtask"
 budget = 23500                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
@@ -414,9 +405,6 @@ from = "php_sapi"
 to = ["php_proto", "php_engine"]
 lock = "sapi.lock" # the host face only; php_sapi never sees api
 [[edge]]
-from = "php"
-to = ["php_bundle", "php_sapi"]
-[[edge]]
 from = "xtask"
 to = ["php_bundle", "php_sapi"]
 [[edge]]
@@ -445,19 +433,19 @@ text = "Extension state is request-scoped or immutable; no lock or cell in ext/*
 
 [[rule]]
 id = "unsafe.homes"
-allow = ["php_heap", "ext/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter"]
+allow = ["php_heap", "ext/*/src/ffi/", "sapi/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter"]
 adr = "0006"
-text = "unsafe is permitted in five places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit and an extension with bindings are #![deny(unsafe_code)] with the allowance on the named module alone."
+text = "unsafe is permitted in six places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
 
 [[rule]]
 id = "unsafe.one-op"
-scope = ["crates/php_heap/**", "ext/*/src/ffi/**", "crates/timelib_sys/src/**", "crates/php_jit/src/table/code.rs", "crates/php_jit/src/enter.rs"]
+scope = ["crates/php_heap/**", "ext/*/src/ffi/**", "sapi/*/src/ffi/**", "crates/timelib_sys/src/**", "crates/php_jit/src/table/code.rs", "crates/php_jit/src/enter.rs"]
 deny_lints = ["clippy::undocumented_unsafe_blocks", "clippy::multiple_unsafe_ops_per_block"]   # grammar: deny_lints, design §10
 text = "Every unsafe block is one operation with a SAFETY comment."
 
 [[rule]]
 id = "lints.no-panic"
-scope = ["crates/php_syntax", "crates/php_heap", "crates/php_unit", "crates/php_compile", "crates/php_engine", "crates/php_jit", "crates/php_sapi", "ext/*"]  # php_syntax: the parser runs inside every request, so its panic reaches one (#236)
+scope = ["crates/php_syntax", "crates/php_heap", "crates/php_unit", "crates/php_compile", "crates/php_engine", "crates/php_jit", "crates/php_sapi", "ext/*", "sapi/*"]  # php_syntax: the parser runs inside every request, so its panic reaches one (#236)
 exempt = ["tests", "xtask"]
 deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
 text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."
