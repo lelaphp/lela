@@ -228,6 +228,7 @@ Options:
 ├── random
 ├── reflection
 ├── session
+├── shmop
 ├── simplexml
 ├── sockets
 ├── spl
@@ -236,7 +237,7 @@ Options:
 ├── uri
 └── zlib
 ```
-<!-- /computed in=ad0e73f07ddfa419db2579e8315eae227926a331cd98a3863b419c2bd220c36c out=06fd5b22292e333053445277b1f5010686c24594ee58fcb9bc7407ea46ea8833 -->
+<!-- /computed in=21f0f7fce037e4522c9213b969bd82bc794f373a0e28174970218c9db51a0c17 out=ed689a9c316e4411f457e1242aa305be205e38248bfd5fa446cd2ff3a11b4891 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .
