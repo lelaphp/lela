@@ -147,17 +147,38 @@ fn function_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<
 
 // ------------------------------------------------- ReflectionMethod
 
-/// `mptr->common.prototype`'s scope for the method `$name` names on
-/// the reflector's class.
-fn prototype_of(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
-    let Some(class) = req
-        .this()
-        .and_then(|this| this.prop(req, b"class"))
-        .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-    else {
-        return Ok(None);
+/// `mptr->common.prototype`'s scope for the method `$name` names in
+/// the table of `intern->ce`, the class the reflector was asked about:
+/// an inherited method an interface of that class names is its own row
+/// there, whose prototype `do_inheritance_check_on_method` set to the
+/// interface's (`SEPARATE_METHOD`), where the declaring class's row has
+/// none.
+///
+/// ```php
+/// interface a { function foo(); function bar(); }
+/// interface b { function foo(); }
+/// abstract class c { function bar() { } }
+/// class x extends c implements a, b { function foo() { } }
+/// var_dump((new ReflectionMethod("x", "foo"))->getPrototype()->class);
+/// var_dump((new ReflectionMethod("x", "bar"))->getPrototype()->class);
+/// var_dump((new ReflectionMethod("c", "bar"))->hasPrototype());
+/// ```
+/// ```expect
+/// string(1) "b"
+/// string(1) "a"
+/// bool(false)
+/// ```
+fn prototype_of(
+    req: &mut Request,
+    this: PhpObject,
+    name: &[u8],
+) -> Result<Option<ClassId>, Thrown> {
+    let named = (this.prop(req, b"class")).and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
+    let class = match (super::kept_class(req, this), named) {
+        (Some(class), _) => class,
+        (None, Some(named)) => class_named(req, &named)?,
+        (None, None) => return Ok(None),
     };
-    let class = class_named(req, &class)?;
     let lowered = name.to_ascii_lowercase();
     Ok(linked_methods(req, class)
         .into_iter()
@@ -2574,7 +2595,7 @@ impl ReflectionMethod {
         this: This<Self>,
     ) -> Result<Instance<ReflectionMethod>, Thrown> {
         let name = this_name(req, this.object(), "ReflectionMethod")?;
-        let Some(prototype) = prototype_of(req, &name)? else {
+        let Some(prototype) = prototype_of(req, this.object(), &name)? else {
             let (class, _, _) = this_method(req, this.object())?;
             let class = class_name_of(req, class);
             return Err(throw(
@@ -2607,7 +2628,7 @@ impl ReflectionMethod {
     /// ```
     fn hasPrototype(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let name = this_name(req, this.object(), "ReflectionMethod")?;
-        Ok(prototype_of(req, &name)?.is_some())
+        Ok(prototype_of(req, this.object(), &name)?.is_some())
     }
 
     /// `ReflectionMethod::setAccessible(bool $accessible)`: the argument
