@@ -611,19 +611,6 @@ impl Request {
         Ok((instance, None))
     }
 
-    /// [`Request::lazy_place`] with the lent guard given back at once, for
-    /// the sites that resolve the place and make the operation in one
-    /// body, a compound assignment and an increment (#1336).
-    pub(crate) fn lazy_place_unlent(
-        &mut self,
-        object: PhpObject,
-        name: &[u8],
-    ) -> Result<PhpObject, Thrown> {
-        let (object, lent) = self.lazy_place(object, name)?;
-        self.give_back_guard(lent);
-        Ok(object)
-    }
-
     /// The `IN_GET` a [`LentGuard`] took on the instance, given back once
     /// the place is resolved.
     pub(crate) fn give_back_guard(&mut self, lent: Option<LentGuard>) {
