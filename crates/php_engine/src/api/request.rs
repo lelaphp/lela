@@ -1790,9 +1790,9 @@ pub struct Request {
     /// [`crate::streams::Located::Ext`] row names by its place.
     pub(crate) wrappers: Vec<StreamWrapper>,
     /// `url_stream_wrappers_hash`: the table every request starts with,
-    /// the engine's wrappers and the extensions' in the order they were
-    /// registered, the engine's three standing first until the extension
-    /// that registers them places them.
+    /// the engine's wrappers and the extensions' in php's startup order
+    /// (`engine::serve_rinits`), the engine's three standing first
+    /// until the extension that registers them places them.
     pub(crate) url_stream_wrappers: Vec<crate::streams::Registered>,
     /// `FG(stream_wrappers)`: the request's own wrapper table once a
     /// program changed it, `None` while it has the built-in one.
@@ -1818,8 +1818,8 @@ pub struct Request {
     /// `FG(pclose_ret)`: what the last stream freed by its resource's
     /// destructor answered from its kind's close, which `pclose()` reads.
     pub(crate) pclose_ret: i32,
-    /// `FG(stream_filters)`: each filter name and its factory, in the
-    /// order they were registered.
+    /// `FG(stream_filters)`: each filter name and its factory, the
+    /// extensions' in php's startup order and a program's after.
     pub(crate) filters: Vec<(Vec<u8>, FilterFactory)>,
     /// A throwable PHP code served by a stream's kind or filter raised
     /// inside an operation whose answer has no room for it: php's
