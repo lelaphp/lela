@@ -13186,18 +13186,6 @@ impl Request {
     /// }
     /// ```
     ///
-    /// A `null` is an empty table, with php's deprecation since 8.5:
-    ///
-    /// ```php
-    /// class N { public $a = 1; public function __debugInfo() { return null; } }
-    /// var_dump(new N);
-    /// ```
-    /// ```expect
-    /// Deprecated: Returning null from N::__debugInfo() is deprecated, return an empty array instead in %s on line 3
-    /// object(N)#1 (0) {
-    /// }
-    /// ```
-    ///
     /// ```php
     /// class E { public function __debugInfo() { return 1; } }
     /// var_dump(new E);
@@ -13220,13 +13208,6 @@ impl Request {
             Some(array) => Ok(Some(*array)),
             None if value.tag() == TypeTag::Null => {
                 self.release(value);
-                let class = self.class_name(object.class());
-                crate::api::raising::deprecated(
-                    self,
-                    &format!(
-                        "Returning null from {class}::__debugInfo() is deprecated, return an empty array instead"
-                    ),
-                );
                 PhpArray::new(self).map(Some)
             }
             None => {
@@ -18129,8 +18110,24 @@ impl Request {
     /// bool(false)
     /// string(9) "text/html"
     /// ```
+    ///
+    /// `arg_separator.output` and `arg_separator.input` are
+    /// `OnUpdateStrNotEmpty` (`Z/main/main.c:824-825`): the empty value
+    /// is refused.
+    ///
+    /// ```php
+    /// var_dump(ini_set("arg_separator.output", ""), ini_get("arg_separator.output"), ini_set("arg_separator.output", ";"));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(1) "&"
+    /// string(1) "&"
+    /// ```
     fn ini_verdict(name: &[u8], value: &[u8]) -> IniVerdict {
         match name {
+            b"arg_separator.output" | b"arg_separator.input" if value.is_empty() => {
+                IniVerdict::Rejected
+            }
             b"zend.exception_string_param_max_len"
                 if !(0..=1_000_000).contains(&ini_atol(value)) =>
             {
