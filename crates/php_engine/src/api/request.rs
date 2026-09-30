@@ -6851,6 +6851,12 @@ impl Request {
     }
 
     pub(crate) fn end_in(&mut self, fatal: &Fatal) {
+        // `php_output_discard_all()` where the heap refused with its
+        // limit lifted, before the fatal is displayed
+        // (`zend_alloc_in_memory_limit_error_reporting`).
+        if self.heap.in_memory_limit_error() {
+            crate::output::discard_all(self);
+        }
         match fatal {
             Fatal::Error(message) => self.end_in_fatal(message),
             Fatal::OutOfMemory(bytes) => self.end_in_fatal(&format!(

@@ -289,6 +289,12 @@ impl Mm {
         self.limit = limit;
     }
 
+    /// `heap->overflow`, `zend_alloc_in_memory_limit_error_reporting`:
+    /// whether the fatal the limit raised is being reported.
+    pub(crate) fn overflowed(&self) -> bool {
+        self.overflow
+    }
+
     /// `heap->overflow = 0` after `zend_error` returns in
     /// `zend_mm_safe_error` (`Z/Zend/zend_alloc.c:417`): the fatal the
     /// heap raised is rendered, and the limit holds again.

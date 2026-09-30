@@ -215,6 +215,14 @@ impl Heap {
         self.mm.set_limit(limit);
     }
 
+    /// `zend_alloc_in_memory_limit_error_reporting`: whether the limit's
+    /// fatal is being reported, the window in which the limit refuses
+    /// nothing and php discards the buffers `ob_start()` laid down.
+    #[must_use]
+    pub fn in_memory_limit_error(&self) -> bool {
+        self.mm.overflowed()
+    }
+
     /// The fatal the heap raised when it refused an allocation is
     /// rendered: php's `heap->overflow = 0` in `zend_mm_safe_error`. From
     /// that refusal until here the limit refuses nothing, so the

@@ -1445,6 +1445,28 @@ pub(crate) fn end_all(req: &mut Request) {
     while req.output().level() > 0 && !req.bailing_out() && stack_pop(req, POP_FORCE) {}
 }
 
+/// `php_output_discard_all` (`Z/main/output.c:345`): every handler
+/// popped with its buffer thrown away, each handler still served its
+/// final call, which is what `php_error_cb` does before it displays the
+/// memory limit's fatal while the heap's limit is lifted
+/// (`Z/main/main.c:1405-1407`), so the fatal is not written into a
+/// buffer the request would then flush.
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// ob_start(function ($b) { fwrite(STDOUT, "handled\n"); return $b; });
+/// echo "discarded\n";
+/// $a = str_repeat('x', 4 << 20);
+/// ```
+/// ```expect exit=255
+/// handled
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 5
+/// ```
+pub(crate) fn discard_all(req: &mut Request) {
+    while req.output().level() > 0 && stack_pop(req, POP_DISCARD | POP_FORCE) {}
+}
+
 /// `php_output_deactivate` (`Z/main/output.c:176`): the header block
 /// committed if nothing sent it, the layer inactive, every handler
 /// left freed and the stack's storage with them; and
