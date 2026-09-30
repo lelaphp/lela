@@ -1557,6 +1557,41 @@ mod tests {
         );
     }
 
+    /// The oracle's dump of two arrow functions returning `never`
+    /// (#1262): `zend_compile_func_decl` wraps neither body in a
+    /// `return`, so the `throw` stands as an expression statement and
+    /// `42`, a constant, leaves no opline; each ends in the implicit
+    /// `VERIFY_NEVER_TYPE`.
+    #[test]
+    fn an_arrow_function_returning_never_compiles_its_body_as_a_statement() {
+        let dump = dump_of(
+            b"<?php\n$a = fn(): never => throw new Exception(\"Here\");\n$b = fn(): never => 42;\n",
+        );
+        let closures: Vec<&str> = dump.split("\n\n").skip(1).collect();
+        assert_eq!(closures.len(), 2, "{dump}");
+        assert!(
+            closures[0].ends_with(
+                "     ; (lines=5, args=0, vars=0, tmps=2)\n\
+                 \x20    ; (before optimizer)\n     ; :2-2\n     ; return  [] RANGE[0..0]\n\
+                 0000 V0 = NEW 1 string(\"Exception\")\n\
+                 0001 SEND_VAL_EX string(\"Here\") 1\n\
+                 0002 DO_FCALL\n\
+                 0003 THROW V0\n\
+                 0004 VERIFY_NEVER_TYPE\n\
+                 LIVE RANGES:\n     0: 0001 - 0003 (new)"
+            ),
+            "{dump}"
+        );
+        assert!(
+            closures[1].ends_with(
+                "     ; (lines=1, args=0, vars=0, tmps=0)\n\
+                 \x20    ; (before optimizer)\n     ; :3-3\n     ; return  [] RANGE[0..0]\n\
+                 0000 VERIFY_NEVER_TYPE\n"
+            ),
+            "{dump}"
+        );
+    }
+
     /// The oracle's dump under the pin's `dump` regime, `vars=1, tmps=4`:
     /// a `<` over a CV is `IS_SMALLER` into a temporary, `$a++` and
     /// `++$a` whose values are read are `POST_INC` and `PRE_INC`, and a

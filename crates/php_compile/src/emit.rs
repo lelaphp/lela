@@ -1701,15 +1701,7 @@ impl Emit<'_> {
                     self.tick();
                 }
             }
-            Stmt::ExprStmt(id) => {
-                let expr = tree[id].expr;
-                if let Some(operand) = self.void_cast_operand(expr) {
-                    self.void_cast(operand)?;
-                } else {
-                    let value = self.expr(expr)?;
-                    self.do_free(value);
-                }
-            }
+            Stmt::ExprStmt(id) => self.expr_stmt(tree[id].expr)?,
             Stmt::Block(id) => self.block(id)?,
             Stmt::ForStmt(id) => self.r#for(id)?,
             Stmt::WhileStmt(id) => {
@@ -4135,6 +4127,11 @@ impl Emit<'_> {
             self.line = value.line(self.parsed);
             self.statements_seen = self.statements_seen.saturating_add(1);
             match short {
+                // `zend_compile_func_decl` wraps an arrow function's
+                // body in `ZEND_AST_RETURN` only where the return type
+                // holds no `never`; under `never` the body is an
+                // expression statement, and `VERIFY_NEVER_TYPE` follows.
+                Short::Return(value) if self.returns_never() => self.expr_stmt(value)?,
                 Short::Return(value) => {
                     self.r#return(Some(value))?;
                 }
@@ -9832,6 +9829,30 @@ impl Emit<'_> {
             };
         }
         Ok(last)
+    }
+
+    /// `zend_compile_stmt`'s arm for an expression: a `(void)` cast
+    /// ([`Self::void_cast`]), or the expression compiled and its value
+    /// freed (`zend_do_free`). An arrow function returning `never` is
+    /// one, its body never wrapped in a `return`:
+    ///
+    /// ```php
+    /// $x = fn(): never => throw new Exception('Here');
+    /// try { $x(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// $y = fn(): never => 42;
+    /// try { $y(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Here
+    /// {closure:%s:4}(): never-returning function must not implicitly return
+    /// ```
+    fn expr_stmt(&mut self, expr: tree::Expr) -> Result<(), CompileError> {
+        if let Some(operand) = self.void_cast_operand(expr) {
+            return self.void_cast(operand);
+        }
+        let value = self.expr(expr)?;
+        self.do_free(value);
+        Ok(())
     }
 
     /// The operand of a `(void)` cast, php's `ZEND_AST_CAST_VOID`, which
@@ -16993,6 +17014,14 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Where::Returned(out)
+    }
+
+    /// Whether the return type declared holds `never`,
+    /// `ZEND_TYPE_CONTAINS_CODE(return_info->type, IS_NEVER)`.
+    fn returns_never(&self) -> bool {
+        self.return_type
+            .as_ref()
+            .is_some_and(|ty| ty.contains_code(NEVER_CODE))
     }
 
     /// `zend_emit_final_return` (`Z/Zend/zend_compile.c:2688`): a
