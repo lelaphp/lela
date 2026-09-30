@@ -9,7 +9,8 @@
 //! its `SKIPIF` and `CLEAN` sections run beside it under the oracle by the
 //! same shape of path, and what it wrote held to its `--EXPECT*--` section
 //! with php's normalisation. A CGI-shaped test runs through the CGI host
-//! beside the binary, as the `cgi` module has it. The verdict goes through [`oracle::verdict`], so
+//! beside the binary, as the `cgi` module has it, and a `--PHPDBG--` test
+//! through the debugger host, as the `phpdbg` module has it. The verdict goes through [`oracle::verdict`], so
 //! the registry decides what a difference means (harness §4.3). The tally,
 //! the subsets and the reading are `phpt`'s; this is the per-item judge it
 //! contributes.
@@ -28,6 +29,7 @@ use super::cgi;
 use super::environment::Environment;
 use super::file::{self, Phpt};
 use super::miss::Miss;
+use super::phpdbg;
 use super::redirect::{Item, Redirect, Test};
 use super::{Judged, Judgement, Lane, Subset};
 use crate::divergence::Registry;
@@ -39,16 +41,26 @@ use crate::oracle::{
 use crate::tally::{Apart, Within};
 
 /// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
-/// one run: the oracle and the registry, the binary it runs, the CGI host
-/// beside it where there is one, the tier lane it runs under, and the
-/// extensions that binary loads, which `--EXTENSIONS--` is answered from.
+/// one run: the oracle and the registry, the binary it runs, the CGI and
+/// debugger hosts beside it where there are, the tier lane it runs under,
+/// and the extensions that binary loads, which `--EXTENSIONS--` is
+/// answered from.
 pub(super) struct Adapter<'a> {
     oracle: &'a Oracle<'a>,
     registry: &'a Registry,
     binary: &'a Path,
-    cgi: Option<PathBuf>,
+    hosts: Hosts,
     lane: Option<Lane>,
     loaded: Vec<String>,
+    pinned_phpdbg: phpdbg::Pinned,
+}
+
+/// The hosts beside the binary under test a test of another shape runs
+/// through: the CGI host and the debugger host.
+#[derive(Debug, Default)]
+pub(super) struct Hosts {
+    pub(super) cgi: Option<PathBuf>,
+    pub(super) phpdbg: Option<PathBuf>,
 }
 
 impl<'a> Adapter<'a> {
@@ -56,7 +68,7 @@ impl<'a> Adapter<'a> {
         oracle: &'a Oracle<'a>,
         registry: &'a Registry,
         binary: &'a Path,
-        cgi: Option<PathBuf>,
+        hosts: Hosts,
         lane: Option<Lane>,
     ) -> Adapter<'a> {
         let loaded = loaded_extensions(oracle, binary).unwrap_or_else(|e| {
@@ -67,9 +79,10 @@ impl<'a> Adapter<'a> {
             oracle,
             registry,
             binary,
-            cgi,
+            hosts,
             lane,
             loaded,
+            pinned_phpdbg: phpdbg::Pinned::default(),
         }
     }
 
@@ -241,7 +254,7 @@ impl<'a> Adapter<'a> {
         phpt: &Phpt,
         (id, name): (&str, &str),
     ) -> Result<Result<Admitted, Judged>> {
-        if let Some(why) = unhosted(phpt, self.cgi.is_some()) {
+        if let Some(why) = unhosted(phpt, &self.hosts) {
             return Ok(Err(Judged::new(id, name, Judgement::Skip, why)));
         }
         if let Some(why) = self.missing(phpt, test) {
@@ -255,7 +268,7 @@ impl<'a> Adapter<'a> {
         let env = self.environment(phpt, test, &ini, &subset.root);
         let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
         if let Some(body) = phpt.filled("SKIPIF") {
-            let out = self.run_section(subset, test, &env, "skip", body)?;
+            let out = self.run_section(subset, test, &env, ("skip", body), phpt.has("PHPDBG"))?;
             let said = String::from_utf8_lossy(&out.stdout).into_owned();
             if let Some(reason) = reason_after("skip", &said) {
                 return Ok(Err(Judged::new(id, name, Judgement::Skip, reason)));
@@ -289,7 +302,9 @@ impl<'a> Adapter<'a> {
     ///
     /// A CGI-shaped test runs through the CGI host, `-C -f` before its
     /// program as run-tests.php hands it (run-tests.php:1897, 2342), in
-    /// the environment of the request it describes, its body on stdin.
+    /// the environment of the request it describes, its body on stdin; a
+    /// `--PHPDBG--` test through the debugger host, as the `phpdbg` module
+    /// has it.
     fn run_program(
         &self,
         subset: &Subset,
@@ -321,8 +336,24 @@ impl<'a> Adapter<'a> {
             cwd: Some(&subset.root),
             ..Invocation::new(self.binary, Program::Beside(&program))
         };
-        let ran = match (request, &self.cgi) {
-            (Some(request), Some(host)) => self.oracle.run_under(&Invocation {
+        let (dbg_flags, commands) = (phpdbg::FLAGS.map(String::from), phpdbg::stdin(phpt));
+        let ran = match (request, &self.hosts.cgi, &self.hosts.phpdbg) {
+            (_, _, Some(host)) if phpt.has("PHPDBG") => {
+                self.pinned_phpdbg.asserted(self.oracle.pin(), host)?;
+                self.oracle.run_under(&Invocation {
+                    binary: host,
+                    program: if phpt.has("FILE") {
+                        invocation.program
+                    } else {
+                        Program::Nothing
+                    },
+                    flags: &dbg_flags,
+                    args: &phpdbg::args(phpt),
+                    stdin: Stdin::Pipe(&commands),
+                    ..invocation
+                })
+            }
+            (Some(request), Some(host), _) => self.oracle.run_under(&Invocation {
                 binary: host,
                 flags: &cgi_flags,
                 args: &request.args,
@@ -345,7 +376,7 @@ impl<'a> Adapter<'a> {
             },
         };
         if let Some(body) = phpt.filled("CLEAN") {
-            self.run_section(subset, test, env, "clean", body)?;
+            self.run_section(subset, test, env, ("clean", body), phpt.has("PHPDBG"))?;
         }
         Ok(output)
     }
@@ -362,22 +393,34 @@ impl<'a> Adapter<'a> {
     /// run from the tree's root and in the test's environment, as the test's
     /// program does, so a `SKIPIF` that asks `TEST_PHP_EXECUTABLE` what it
     /// can do asks the binary under test, as upstream's asks it. Each reads
-    /// an empty pipe on stdin, as upstream's does.
+    /// an empty pipe on stdin, as upstream's does. A `--PHPDBG--` test's
+    /// run under the pinned phpdbg with `-rr` (`debugger`), as upstream's
+    /// run under the debugger it hosts the test through, where the pin
+    /// names one.
     fn run_section(
         &self,
         subset: &Subset,
         test: &Test,
         env: &Environment,
-        kind: &str,
-        body: &[u8],
+        (kind, body): (&str, &[u8]),
+        debugger: bool,
     ) -> Result<Observation> {
         let program = test.beside(Some(kind));
         let written = Written::new(&program, body)?;
         self.oracle.asserted()?;
-        let pinned = &self.oracle.pin().oracle.path;
+        let pin = self.oracle.pin();
+        let flags = phpdbg::SECTION_FLAGS.map(String::from);
+        let (pinned, flags) = match pin.sapi.phpdbg.as_ref().filter(|_| debugger) {
+            Some(host) => {
+                self.pinned_phpdbg.asserted(pin, &host.path)?;
+                (&host.path, &flags[..])
+            }
+            None => (&pin.oracle.path, &[][..]),
+        };
         let out = self
             .oracle
             .run_under(&Invocation {
+                flags,
                 env: env.entries(),
                 stdin: Stdin::Pipe(&[]),
                 streams: Streams::Pipes { merged: false },
@@ -421,7 +464,8 @@ impl<'a> Adapter<'a> {
     fn environment(&self, phpt: &Phpt, test: &Test, ini: &[String], root: &Path) -> Environment {
         let recipe = &self.oracle.pin().recipe;
         let redirected = test.via.as_ref().map_or(&[][..], |via| &via.env[..]);
-        Environment::of_runner(self.binary, self.cgi.as_deref(), root).of_test(
+        let hosts = (self.hosts.cgi.as_deref(), self.hosts.phpdbg.as_deref());
+        Environment::of_runner(self.binary, hosts, root).of_test(
             redirected,
             phpt,
             &test.file,
@@ -519,14 +563,14 @@ fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> 
 }
 
 /// Why this runner cannot host a test: a CGI-shaped one where no CGI host
-/// stands beside the binary, as upstream's runner skips it
-/// (run-tests.php:1894-1896), and a debugger's.
-fn unhosted(phpt: &Phpt, cgi: bool) -> Option<String> {
-    if phpt.is_cgi() && !cgi {
+/// stands beside the binary, and a debugger's where no debugger host
+/// does, as upstream's runner skips each (run-tests.php:1894-1896, 1914).
+fn unhosted(phpt: &Phpt, hosts: &Hosts) -> Option<String> {
+    if phpt.is_cgi() && hosts.cgi.is_none() {
         return Some("CGI not available".into());
     }
-    if phpt.has("PHPDBG") {
-        return Some("a --PHPDBG-- test; this engine has no debugger host".into());
+    if phpt.has("PHPDBG") && hosts.phpdbg.is_none() {
+        return Some("phpdbg not available".into());
     }
     None
 }

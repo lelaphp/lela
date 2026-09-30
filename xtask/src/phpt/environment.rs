@@ -49,11 +49,15 @@ impl Environment {
     /// are not all a terminal (run-tests.php:652-656), since this runner
     /// never hands a test a terminal on a stream it leaves uncaptured; the
     /// binary under test by the names the corpus spawns it by, and the CGI
-    /// host beside it, `cgi`, empty where there is none, and the debugger's
-    /// empty, as `get_binary` leaves a host it finds none of
+    /// host beside it, `cgi`, and the debugger host, `phpdbg`, each empty
+    /// where there is none, as `get_binary` leaves a host it finds none of
     /// (run-tests.php:667-677, 1003-1019); and `TEST_PHP_SRCDIR`, `root`,
     /// the tree the programs run in, never the pinned one (#1183).
-    pub(crate) fn of_runner(binary: &Path, cgi: Option<&Path>, root: &Path) -> Environment {
+    pub(crate) fn of_runner(
+        binary: &Path,
+        (cgi, phpdbg): (Option<&Path>, Option<&Path>),
+        root: &Path,
+    ) -> Environment {
         let mut env = Environment::default();
         env.set("SKIP_ONLINE_TESTS", "1");
         env.set("SKIP_IO_CAPTURE_TESTS", "1");
@@ -64,7 +68,7 @@ impl Environment {
         for (host, path) in [
             ("TEST_PHP_EXECUTABLE", named(Some(binary))),
             ("TEST_PHP_CGI_EXECUTABLE", named(cgi)),
-            ("TEST_PHPDBG_EXECUTABLE", String::new()),
+            ("TEST_PHPDBG_EXECUTABLE", named(phpdbg)),
         ] {
             env.set(&format!("{host}_ESCAPED"), escaped(&path));
             env.set(host, path);
@@ -194,7 +198,7 @@ mod tests {
 
     #[test]
     fn the_runner_skips_the_online_and_the_capture_tests_as_upstream_does_off_a_terminal() {
-        let env = Environment::of_runner(Path::new("/b/php"), None, Path::new("/tree"));
+        let env = Environment::of_runner(Path::new("/b/php"), (None, None), Path::new("/tree"));
         assert_eq!(value(&env, "SKIP_ONLINE_TESTS"), Some("1".as_ref()));
         assert_eq!(value(&env, "SKIP_IO_CAPTURE_TESTS"), Some("1".as_ref()));
         assert_eq!(value(&env, "TEST_PHP_EXECUTABLE"), Some("/b/php".as_ref()));
@@ -208,7 +212,7 @@ mod tests {
 
     #[test]
     fn a_test_empties_the_cgi_variables_and_its_own_env_stands_over_them() {
-        let runner = Environment::of_runner(Path::new("/b/php"), None, Path::new("/tree"));
+        let runner = Environment::of_runner(Path::new("/b/php"), (None, None), Path::new("/tree"));
         let text = "--TEST--\nn\n--ENV--\nTZ=GMT\nemptyval=\n--FILE--\nx\n--EXPECT--\n1\n";
         let phpt = Phpt::parse(Path::new("/t/x.phpt"), text.as_bytes()).unwrap();
         let redirected = [("REQUEST_METHOD".to_owned(), OsString::from("GET"))];

@@ -95,7 +95,10 @@
 //! **What is not run here.** The full corpus, the nightly verdict control
 //! and the tier's lanes are CI's, under the manifest's `lanes.nightly`
 //! rule; the per-commit lane and one subset are an agent's to run. A
-//! `--PHPDBG--` test is skipped with its reason; a `--REDIRECTTEST--` runs
+//! `--PHPDBG--` test runs through the debugger host beside the binary, the
+//! phpdbg `[sapi]` pins for the control and the engine's own `phpdbg`,
+//! `sapi/phpdbg`'s binary, for the engine, as the `phpdbg` module has it
+//! (#1304); a `--REDIRECTTEST--` runs
 //! as the set it names, counted in its own subset (the `redirect` module,
 //! #814); a CGI-shaped one runs through the CGI host beside the binary,
 //! the php-cgi `[sapi]` pins for the control and the engine's own
@@ -118,6 +121,7 @@ pub(crate) use environment::env_of;
 pub(crate) mod against;
 pub(crate) mod cgi;
 mod fpm;
+mod phpdbg;
 /// The suffix of a control run's scope: the subset under the oracle.
 pub(crate) const CONTROL: &str = "@control";
 mod census;
@@ -971,8 +975,11 @@ pub(crate) fn run_subset(
     oracle.asserted()?;
     let control = matches!(runner, Runner::Control(_));
     fpm::place(subset, fpm::host(oracle.pin(), binary, control).as_deref())?;
-    let host = cgi::host(oracle.pin(), binary, control);
-    let adapter = Adapter::new(oracle, registry, binary, host, lane);
+    let hosts = adapter::Hosts {
+        cgi: cgi::host(oracle.pin(), binary, control),
+        phpdbg: phpdbg::host(oracle.pin(), binary, control),
+    };
+    let adapter = Adapter::new(oracle, registry, binary, hosts, lane);
     let items = adapter.listed(subset, tests)?;
     let mut dirs = BTreeMap::new();
     let apart: Vec<_> = items
