@@ -794,6 +794,7 @@ fn wrap_http_ex(
     let xport = Xport::Client {
         timeout,
         connect: true,
+        persistent: None,
         socket,
         context,
     };

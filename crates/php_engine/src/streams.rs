@@ -43,6 +43,7 @@ use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 use crate::wrapper::TemporaryCheck;
 
 mod filters;
+pub(crate) mod persistent;
 mod rfc2397;
 mod sockets;
 pub(crate) use filters::FilterCall;
@@ -1406,6 +1407,9 @@ impl PhpStream {
         if let Some(taken) = taken {
             req.pclose_ret = taken.release(req);
         }
+        // `PHP_STREAM_FREE_CLOSE_PERSISTENT`: a persistent stream closed
+        // is gone from the list for every holder.
+        req.drop_persistent(res);
     }
 }
 
@@ -3992,7 +3996,19 @@ impl Request {
     /// `php_stream_alloc`'s `zend_register_resource(ret, le_stream)`: the
     /// stream as the payload of a resource of the `stream` type, one
     /// owner, under the next id.
-    pub(crate) fn stream_alloc(&mut self, mut stream: PhpStream) -> Result<Stream, Thrown> {
+    pub(crate) fn stream_alloc(&mut self, stream: PhpStream) -> Result<Stream, Thrown> {
+        self.stream_alloc_as(stream, false)
+    }
+
+    /// [`Request::stream_alloc`] under `le_pstream` where `persistent`
+    /// says, `_php_stream_alloc` handed a `persistent_id`: the resource's
+    /// type is `persistent stream`, whose regular-list destructor leaves
+    /// the socket open ([`persistent::dtor`]).
+    pub(crate) fn stream_alloc_as(
+        &mut self,
+        mut stream: PhpStream,
+        persistent: bool,
+    ) -> Result<Stream, Thrown> {
         // `_php_stream_alloc`'s `FG(auto_detect_line_endings)`
         // (`Z/main/streams/streams.c:326`).
         if self
@@ -4001,7 +4017,11 @@ impl Request {
         {
             stream.flags.eol = Eol::Detect;
         }
-        let kind = self.stream_type();
+        let kind = if persistent {
+            self.pstream_type()
+        } else {
+            self.stream_type()
+        };
         let res = self.new_resource(kind, Some(stream))?;
         if let Some(Some(stream)) = self.resource_native_mut::<Option<PhpStream>>(res.heap()) {
             stream.res = Some(res);
@@ -4041,10 +4061,12 @@ impl Request {
     }
 
     /// `php_stream_from_zval_no_verify_no_error`: the stream a value
-    /// names, which is an open resource of the `stream` type.
+    /// names, which is an open resource of the `stream` type or the
+    /// `persistent stream` type.
     pub(crate) fn stream_of(&self, value: &Value) -> Option<Stream> {
         let r = value.as_resource()?;
-        (r.kind() == Some(self.stream_type())).then(|| Stream::of(*r))
+        let kind = r.kind()?;
+        (kind == self.stream_type() || kind == self.pstream_type()).then(|| Stream::of(*r))
     }
 
     /// `php_stream_read_to_str` (`Z/main/streams/streams.c:822`): a
@@ -4419,8 +4441,14 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) {
     req.pclose_ret = stream.free(req);
 }
 
-/// The `stream` resource type, `le_stream`, as `PHP_MINIT(streams)`
-/// registers it (`Z/main/streams/streams.c:1910`).
-pub(crate) fn register(resources: &mut crate::api::request::Resources) -> ResourceType {
-    resources.register_type(b"stream", Some(dtor))
+/// The `stream` resource type, `le_stream`, and the `persistent stream`
+/// type, `le_pstream`, as `PHP_MINIT(streams)` registers them in turn
+/// (`Z/main/streams/streams.c:1910-1911`).
+pub(crate) fn register(
+    resources: &mut crate::api::request::Resources,
+) -> (ResourceType, ResourceType) {
+    (
+        resources.register_type(b"stream", Some(dtor)),
+        resources.register_type(b"persistent stream", Some(persistent::dtor)),
+    )
 }

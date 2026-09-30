@@ -519,12 +519,15 @@ impl std::fmt::Write for Bytes<'_> {
 /// even parsed; or a server bound to the name, listening where `listen`
 /// says; each with the `context` the native resolved, which the stream
 /// keeps as `PHP_STREAM_CONTEXT(stream)` before it connects, and the
-/// `socket` options read off it.
+/// `socket` options read off it. A client with a `persistent` key, php's
+/// `persistent_id`, is first looked for among the persistent streams
+/// under it, and one made is kept there.
 #[derive(Clone)]
 pub enum Xport {
     Client {
         timeout: Option<std::time::Duration>,
         connect: bool,
+        persistent: Option<Vec<u8>>,
         socket: SocketOptions,
         context: Option<Resource>,
     },
@@ -1984,6 +1987,12 @@ pub struct Request {
     started: std::time::Duration,
     /// `le_stream`, the resource type every stream is registered under.
     stream_type: ResourceType,
+    /// `le_pstream`, the `persistent stream` type.
+    pstream_type: ResourceType,
+    /// The entries of php's `EG(persistent_list)` this request holds,
+    /// lent from the engine's pool or opened here, until it ends
+    /// (`crate::streams::persistent`).
+    pub(crate) persistent: Vec<crate::streams::persistent::Held>,
     /// The fibers running on this request, innermost last, each with the
     /// execution state of the stack that resumed it, and where each
     /// suspends to (design §5.11, `crate::fiber`).
@@ -2432,7 +2441,7 @@ impl Request {
         let cwd = description.cwd.clone();
         let output = Output::activate(description.web.as_ref());
         let mut resources = Resources::default();
-        let stream_type = crate::streams::register(&mut resources);
+        let (stream_type, pstream_type) = crate::streams::register(&mut resources);
         let filter_type = resources.register_type(b"stream filter", None);
         // `init_executor`'s `zend_vm_stack_init`: the first page of the
         // VM stack, out of the heap the object store's table stands in.
@@ -2536,6 +2545,8 @@ impl Request {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default(),
             stream_type,
+            pstream_type,
+            persistent: Vec::new(),
             fibers: crate::fiber::Fibers::default(),
             raised: None,
             bailout: false,
@@ -19002,6 +19013,19 @@ impl Request {
     /// `le_stream`.
     pub(crate) const fn stream_type(&self) -> ResourceType {
         self.stream_type
+    }
+
+    /// `le_pstream`.
+    pub(crate) const fn pstream_type(&self) -> ResourceType {
+        self.pstream_type
+    }
+
+    /// The engine's persistent pool, which the request takes entries out
+    /// of and gives them back to.
+    pub(crate) fn persistent_pool(
+        &self,
+    ) -> &crate::api::abi::Pool<Vec<u8>, crate::streams::persistent::Entry> {
+        &self.shared.persistent
     }
 
     /// The heap's memory limit in bytes, `PG(memory_limit)` as

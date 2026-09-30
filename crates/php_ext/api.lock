@@ -147,6 +147,8 @@ abi::OnModify
 abi::OrFalse
 abi::Passed
 abi::Path
+abi::Pool
+abi::Pool::new
 abi::PostStartup
 abi::PropertyPlace
 abi::PropertyPurpose

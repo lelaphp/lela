@@ -121,3 +121,69 @@ echo 'done';
         format!("{}done", "Maximum call stack size\n".repeat(9))
     );
 }
+
+/// What `conn` sent until it went quiet for a moment.
+fn sent(conn: &mut std::net::TcpStream) -> Vec<u8> {
+    use std::io::Read;
+    conn.set_read_timeout(Some(std::time::Duration::from_millis(200)))
+        .unwrap_or_default();
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 64];
+    while let Ok(n) = conn.read(&mut chunk) {
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    bytes
+}
+
+/// The connections a listener was handed since it was last asked, each
+/// kept open so a pooled socket stays alive, with what it sent.
+fn accepted(listener: &std::net::TcpListener) -> Vec<(std::net::TcpStream, Vec<u8>)> {
+    listener.set_nonblocking(true).unwrap_or_default();
+    let mut conns = Vec::new();
+    while let Ok((mut conn, _)) = listener.accept() {
+        conn.set_nonblocking(false).unwrap_or_default();
+        let bytes = sent(&mut conn);
+        conns.push((conn, bytes));
+    }
+    conns
+}
+
+/// The persistent pool (design §4.10, #1172) across requests: two
+/// requests served in turn on one engine share one connection, as two
+/// requests of one php-fpm worker do, the second taking what the first
+/// gave back; two served at once hold two, as two workers do, since an
+/// entry is lent to one request at a time.
+#[test]
+fn a_persistent_socket_is_lent_to_one_request_at_a_time() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("{e}"));
+    let port = listener.local_addr().map_or(0, |a| a.port());
+    let engine = Engine::builder()
+        .extensions(&[php_ext_standard::extension()])
+        .build();
+    let source = |tag: &str| {
+        format!("<?php $s = pfsockopen('127.0.0.1', {port}); fwrite($s, '{tag}'); usleep(300000);")
+    };
+    for tag in ["a", "b"] {
+        let served = engine.serve_capture(&source(tag), Capture::default());
+        assert_eq!(served.fatal, None);
+    }
+    let mut first = accepted(&listener);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].1, b"ab");
+    std::thread::scope(|scope| {
+        for tag in ["c", "d"] {
+            let (engine, source) = (&engine, source(tag));
+            scope.spawn(move || engine.serve_capture(&source, Capture::default()));
+        }
+    });
+    // One of the two took the idle connection and the other opened its
+    // own.
+    let second = accepted(&listener);
+    assert_eq!(second.len(), 1);
+    let mut both = vec![sent(&mut first[0].0), second[0].1.clone()];
+    both.sort();
+    assert_eq!(both, vec![b"c".to_vec(), b"d".to_vec()]);
+}

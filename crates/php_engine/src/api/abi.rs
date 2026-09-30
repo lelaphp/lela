@@ -180,6 +180,64 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 }
 
+/// The engine-owned pool of persistent resources (ADR-0005's amendment of
+/// design ledger 50, #1172; design §4.10): php's `EG(persistent_list)`,
+/// one list per php-fpm process or per ZTS thread, as entries lent to one
+/// request at a time. A request takes an idle entry out by php's key,
+/// holds it alone for the rest of the request, and gives it back at its
+/// end unless the program closed it; two requests asking one key at once
+/// hold two entries, as two php-fpm workers hold two connections. `V`
+/// holds no request memory, only what the connection is: the socket, the
+/// `transport`'s and the crypto layer's state, a database connection.
+/// The `Mutex` and the bound are here and nowhere an extension can see.
+pub struct Pool<K, V> {
+    capacity: usize,
+    idle: Mutex<HashMap<K, Vec<V>>>,
+}
+
+impl<K: Hash + Eq, V> Pool<K, V> {
+    /// A pool keeping at most `capacity` idle entries; one given back past
+    /// the bound is dropped, which closes it.
+    #[must_use]
+    pub fn new(capacity: usize) -> Pool<K, V> {
+        Pool {
+            capacity: capacity.max(1),
+            idle: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn idle(&self) -> std::sync::MutexGuard<'_, HashMap<K, Vec<V>>> {
+        match self.idle.lock() {
+            Ok(idle) => idle,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// An idle entry under `key`, lent to the caller alone: the one given
+    /// back last, as php's one entry per key is the one a worker last used.
+    pub(crate) fn take(&self, key: &K) -> Option<V> {
+        let mut idle = self.idle();
+        let entries = idle.get_mut(key)?;
+        let entry = entries.pop();
+        if entries.is_empty() {
+            idle.remove(key);
+        }
+        entry
+    }
+
+    /// `entry` given back under `key` at the end of the request that
+    /// held it; past the bound it is handed back to the caller, whose
+    /// drop closes it outside the `Mutex`.
+    pub(crate) fn give(&self, key: K, entry: V) -> Option<V> {
+        let mut idle = self.idle();
+        if idle.values().map(Vec::len).sum::<usize>() >= self.capacity {
+            return Some(entry);
+        }
+        idle.entry(key).or_default().push(entry);
+        None
+    }
+}
+
 /// A Zend extension's `zend_extension` row (`Z/Zend/zend_extensions.h`),
 /// for an extension php loads both as a `zend_module_entry` and as a Zend extension, as
 /// opcache's `zend_extension_entry` stands beside its

@@ -312,6 +312,22 @@ impl Socket {
         self.context = context;
     }
 
+    /// The connection taken out of the stream it served, which is left
+    /// holding no socket: what a persistent stream's resource keeps in
+    /// the persistent list when its last owner lets go.
+    pub(crate) fn detach(&mut self) -> Socket {
+        let empty = Socket::new(None, self.label, self.timeout);
+        std::mem::replace(self, empty)
+    }
+
+    /// `forget_persistent_resource_id_numbers`: what of the request the
+    /// socket kept, its stream and its `stream->ctx`, forgotten before it
+    /// outlives the request.
+    pub(crate) fn forget_request(&mut self) {
+        self.own = None;
+        self.context = None;
+    }
+
     /// `recv(2)` with `MSG_DONTWAIT` on a socket that blocks: the socket
     /// made non-blocking for the one call.
     fn read_now(sock: &mut Sock, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -1156,6 +1172,17 @@ impl Request {
             } else {
                 (&b"tcp"[..], name)
             };
+        let persistent = match &xport {
+            Xport::Client { persistent, .. } => persistent.clone(),
+            Xport::Server { .. } => None,
+        };
+        // `php_stream_from_persistent_id` first, a live stream under the
+        // key answered as it stands.
+        if let Some(key) = &persistent
+            && let Some(stream) = self.persistent_stream(key)?
+        {
+            return Ok(Ok(stream));
+        }
         let Some(found) = self.transport_named(protocol) else {
             let shown = String::from_utf8_lossy(&protocol[..protocol.len().min(31)]);
             return Ok(Err(XportFailure {
@@ -1209,7 +1236,7 @@ impl Request {
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
         stream.orig_path = Some(name.to_vec());
         stream.flags.no_seek = true;
-        let stream = self.stream_alloc(stream)?;
+        let stream = self.stream_alloc_as(stream, persistent.is_some())?;
         stream.set_ctx(self, context);
         if role == Role::Peer && connected {
             let connected = self
@@ -1226,6 +1253,9 @@ impl Request {
                     text: String::new(),
                 }));
             }
+        }
+        if let Some(key) = persistent {
+            self.hold_persistent(key, stream);
         }
         Ok(Ok(stream))
     }
