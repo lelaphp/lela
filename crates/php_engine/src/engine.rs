@@ -2020,11 +2020,7 @@ impl Engine {
         // `accel_activate`: a reset a request asked for empties the unit
         // cache at the next request's start.
         self.shared.units.restart_if_pending();
-        for extension in &self.shared.extensions {
-            if let Some(rinit) = extension.rinit {
-                let _ = rinit(&mut req);
-            }
-        }
+        serve_rinits(&mut req, &self.shared.extensions);
         deprecated_directives(&mut req);
         self.arm_preloaded(&mut req);
         if req.web().is_some_and(|web| web.no_headers) {
@@ -2480,6 +2476,82 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
         req.end_in(&fatal);
     }
     !exited && !req.bailing_out() && req.ending().is_none()
+}
+
+/// The extensions of the pinned build in the order `internal_functions.c`
+/// starts them, what its `php -n` answers `get_loaded_extensions()` in
+/// past `Core`: the order php's `MINIT`s register their stream wrappers
+/// and filters in, which `stream_get_wrappers()`, `stream_get_filters()`
+/// and phpinfo's `Registered PHP Streams` list. The bundle is a
+/// topological order of the crates instead, `standard` ahead of the
+/// extensions that call into it, so the tables are put in this order
+/// after the extensions start ([`serve_rinits`]).
+#[rustfmt::skip]
+const MODULE_STARTUP: [&str; 65] = [
+    "date", "lexbor", "openssl", "pcre", "sqlite3", "zlib", "bcmath", "bz2", "calendar", "ctype",
+    "curl", "dba", "uri", "json", "mbstring", "SPL", "FFI", "fileinfo", "filter", "ftp", "gd",
+    "gettext", "gmp", "hash", "iconv", "intl", "session", "ldap", "standard", "libxml", "mysqlnd",
+    "mysqli", "odbc", "Zend OPcache", "pcntl", "PDO", "pdo_dblib", "pdo_mysql", "PDO_ODBC",
+    "pdo_pgsql", "pdo_sqlite", "pgsql", "Phar", "posix", "random", "readline", "Reflection",
+    "exif", "shmop", "SimpleXML", "snmp", "soap", "sockets", "sodium", "sysvmsg", "sysvsem",
+    "sysvshm", "tidy", "tokenizer", "dom", "xml", "xmlreader", "xmlwriter", "xsl", "zip",
+];
+
+/// Where php starts the extension `name`, [`MODULE_STARTUP`]'s place
+/// for it, the names compared without regard to case as php compares
+/// them; one php does not build starts after every one it does.
+fn startup_rank(name: &str) -> usize {
+    MODULE_STARTUP
+        .iter()
+        .position(|started| started.eq_ignore_ascii_case(name))
+        .unwrap_or(MODULE_STARTUP.len())
+}
+
+/// Each extension's `rinit` in bundle order, with the stream wrappers
+/// and filters each registers placed in php's startup order
+/// ([`MODULE_STARTUP`]): every extension registers into empty tables,
+/// its rows are gathered under its rank, and the tables are the rows
+/// stably sorted by rank, the engine's own wrappers ahead until the
+/// extension that registers them places them. A registration made once
+/// the program runs goes on at the end, as php's does. The pinned build
+/// has `zip`, which the bundle has not:
+///
+/// ```php
+/// echo implode(',', array_diff(stream_get_wrappers(), ['zip'])), "\n", implode(',', stream_get_filters()), "\n";
+/// ```
+/// ```expect
+/// https,ftps,compress.zlib,compress.bzip2,php,file,glob,data,http,ftp,phar
+/// zlib.*,bzip2.*,convert.iconv.*,string.rot13,string.toupper,string.tolower,convert.*,consumed,dechunk
+/// ```
+fn serve_rinits(req: &mut Request, extensions: &[Extension]) {
+    let mut wrappers: Vec<(usize, crate::streams::Registered)> =
+        std::mem::take(&mut req.url_stream_wrappers)
+            .into_iter()
+            .map(|row| (0, row))
+            .collect();
+    let mut filters = Vec::new();
+    for extension in extensions {
+        let Some(rinit) = extension.rinit else {
+            continue;
+        };
+        let rank = startup_rank(&extension.name) + 1;
+        let _ = rinit(req);
+        for row in std::mem::take(&mut req.url_stream_wrappers) {
+            // A wrapper the engine keeps is placed by the extension that
+            // registers it, as `register_engine_wrapper` moves its row.
+            wrappers.retain(|(_, held)| held.scheme != row.scheme);
+            wrappers.push((rank, row));
+        }
+        filters.extend(
+            std::mem::take(&mut req.filters)
+                .into_iter()
+                .map(|row| (rank, row)),
+        );
+    }
+    wrappers.sort_by_key(|(rank, _)| *rank);
+    filters.sort_by_key(|(rank, _)| *rank);
+    req.url_stream_wrappers = wrappers.into_iter().map(|(_, row)| row).collect();
+    req.filters = filters.into_iter().map(|(_, row)| row).collect();
 }
 
 #[cfg(test)]

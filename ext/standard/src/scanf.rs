@@ -320,7 +320,7 @@ fn strtol(buf: &[u8], base: u32, unsigned: bool) -> i64 {
 /// ```php
 /// var_dump(sscanf("age: 25 name: Bob", "age: %d name: %s"), sscanf("12 apples", "%d %s %s"), sscanf("0x1A 017 -5", "%i %i %u"), sscanf("3.5e2xyz", "%f%s"), sscanf("abc123", "%[a-z]%d"), sscanf("hello", "%2c%c"), sscanf("a b", "%s%n"), sscanf("", "%d"), sscanf("x", "%d"), sscanf("12", "%2\$s %1\$s"));
 /// var_dump(sscanf("10 20", "%d %d", $a, $b), $a, $b, sscanf("", "%d", $c), $c, sscanf("7", "%*d%n", $n), $n);
-/// foreach (["%d %d", "%q", "%1\$s %s", "%[abc", "%3c"] as $f) { try { var_dump(sscanf("1 2", $f, $x)); } catch (ValueError $e) { echo $e->getMessage(), "\n"; } }
+/// foreach (["%d %d", "%q", "%", "%1\$s %s", "%[abc", "%3c"] as $f) { try { var_dump(sscanf("1 2", $f, $x)); } catch (ValueError $e) { echo $e->getMessage(), "\n"; } }
 /// ```
 /// ```expect
 /// array(2) {
@@ -389,6 +389,7 @@ fn strtol(buf: &[u8], base: u32, unsigned: bool) -> i64 {
 /// int(1)
 /// Different numbers of variable names and field specifiers
 /// Bad scan conversion character "q"
+/// Bad scan conversion character "
 /// cannot mix "%" and "%n$" conversion specifiers
 /// Unmatched [ in format string
 /// int(1)

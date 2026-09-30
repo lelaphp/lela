@@ -13,9 +13,8 @@ use php_ext::request::Request;
 use php_ext::values::PhpArray;
 
 use crate::{
-    Format, Module, State, Status, absorb, bind_array, files, headers_sent, ini, ini_bool,
-    ini_long, pending, sent_error, serializers, session_array, shown, started_error, throw_error,
-    user,
+    Format, Module, State, Status, absorb, bind_vars, files, headers_sent, ini, ini_bool, ini_long,
+    pending, sent_error, serializers, session_array, shown, started_error, throw_error, user,
 };
 
 /// `PS_MAX_SID_LENGTH`.
@@ -219,7 +218,7 @@ pub(super) fn create_id(req: &mut Request) -> Option<Vec<u8>> {
 pub(super) fn track_init(req: &mut Request) -> Result<(), Thrown> {
     req.set_global(b"_SESSION", None);
     let array = PhpArray::new(req)?;
-    bind_array(req, array)
+    bind_vars(req, array.to_value())
 }
 
 /// `php_session_encode`: the session's variables through the serializer,

@@ -10,11 +10,9 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use std::ffi::OsStr;
 use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use php_ext::abi::{Passed, Path, Union};
 use php_ext::attr::php_function;
@@ -22,6 +20,8 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+
+use crate::basic_functions::c_string;
 
 /// `EX_TEMPFAIL`, the one non-zero exit `php_mail` takes as sent.
 const EX_TEMPFAIL: i32 = 75;
@@ -72,7 +72,8 @@ fn build_elem(
     key: &[u8],
     value: &Value,
 ) -> Result<(), Thrown> {
-    let name = String::from_utf8_lossy(key).into_owned();
+    // Each message prints the name as `ZSTR_VAL(key)`, a C string.
+    let name = String::from_utf8_lossy(c_string(key)).into_owned();
     match value.deref().as_ref() {
         ValueRef::Str(text) => {
             if key.iter().any(|&c| !(33..=126).contains(&c) || c == b':') {
@@ -107,10 +108,10 @@ fn build_elems(
     key: &[u8],
     array: PhpArray,
 ) -> Result<(), Thrown> {
-    let name = String::from_utf8_lossy(key).into_owned();
+    let name = String::from_utf8_lossy(c_string(key)).into_owned();
     for (element_key, element) in array.snapshot() {
         if let Key::Str(found) = element_key {
-            let found = String::from_utf8_lossy(found.as_bytes()).into_owned();
+            let found = String::from_utf8_lossy(c_string(found.as_bytes())).into_owned();
             let message =
                 format!("Header \"{name}\" must only contain numeric keys, \"{found}\" found");
             return Err(throw(req, "TypeError", &message));
@@ -324,6 +325,9 @@ pub fn php_mail(
             }
         }
     }
+    // `if (EG(exception))`: a handler that threw on the log's warning
+    // ends the call before anything is sent (GH-7875).
+    php_ext::raising::pending(req)?;
     let mode = ini(req, b"mail.cr_lf_mode");
     let line_sep: &[u8] = match mode.as_deref() {
         Some(b"lf" | b"mixed" | b"os") => b"\n",
@@ -371,16 +375,7 @@ pub fn php_mail(
         command.push(b' ');
         command.extend_from_slice(extra);
     }
-    let child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(OsStr::from_bytes(&command))
-        .current_dir(req.cwd())
-        .env_clear()
-        .envs(
-            req.env_pairs()
-                .iter()
-                .map(|(name, value)| (OsStr::from_bytes(name), OsStr::from_bytes(value))),
-        )
+    let child = crate::proc_open::shell(req, &command)
         .stdin(Stdio::piped())
         .spawn();
     let Ok(mut child) = child else {
@@ -460,7 +455,7 @@ pub fn php_mail(
 ///
 /// ```php
 /// var_dump(mail('a@example.com', 's', 'm', "Bad\r\n\r\nX: y"), mail('a@example.com', 's', 'm', " leading"));
-/// foreach ([['To' => 'x'], ['Subject' => 'x'], [1 => 'x'], ['From' => ['a']], ['X' => 1], ['X' => ['k' => 'v']], ['X' => [1]], ['Bad Name' => 'v'], ['X' => "a\rb"], ['X' => "a\nb"], ['X' => "a\r\nb"], ['X' => "a\0b"]] as $headers) {
+/// foreach ([['To' => 'x'], ['Subject' => 'x'], [1 => 'x'], ['From' => ['a']], ['X' => 1], ['X' => ['k' => 'v']], ['X' => [1]], ['Bad Name' => 'v'], ['X' => "a\rb"], ['X' => "a\nb"], ['X' => "a\r\nb"], ['X' => "a\0b"], ["\0foo" => 'v'], ["foo\0" => 'v']] as $headers) {
 ///     try { mail('a@example.com', 's', 'm', $headers); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
 /// }
 /// try { mail("a\0b", 's', 'm'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
@@ -484,6 +479,8 @@ pub fn php_mail(
 /// ValueError: Header "X" contains LF character that is not allowed in the header
 /// ValueError: Header "X" contains CRLF characters that are used as a line separator and are not allowed in the header
 /// ValueError: Header "X" contains NULL character that is not allowed in the header
+/// ValueError: Header name "" contains invalid characters
+/// ValueError: Header name "foo" contains invalid characters
 /// mail(): Argument #1 ($to) must not contain any null bytes
 /// mail(): Argument #4 ($additional_headers) must not contain any null bytes
 /// ```

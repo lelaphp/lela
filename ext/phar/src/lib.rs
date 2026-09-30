@@ -54,7 +54,7 @@ mod zip;
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{InfoRow, Request};
 
 use crate::archive::Archives;
 
@@ -268,8 +268,18 @@ fn info(req: &mut Request) {
         &["bzip2 compression", bz2],
         &openssl,
     ]);
-    // `php_info_print_box_start(0)`: the table start's newline, then the box's.
-    req.write(b"\n\nPhar based on pear/PHP_Archive, original concept by Davey Shafik.\nPhar fully realized by Gregory Beaver and Marcus Boerger.\nPortions of tar implementation Copyright (c) 2003-2009 Tim Kientzle.");
+    // `php_info_print_box_start(0)`, the three lines, `php_info_print_box_end`.
+    let lines = [
+        "Phar based on pear/PHP_Archive, original concept by Davey Shafik.",
+        "Phar fully realized by Gregory Beaver and Marcus Boerger.",
+        "Portions of tar implementation Copyright (c) 2003-2009 Tim Kientzle.",
+    ];
+    let boxed = if req.phpinfo_as_text() {
+        format!("\n{}", lines.join("\n"))
+    } else {
+        format!("<tr class=\"v\"><td>\n{}</td></tr>\n", lines.join("<br />"))
+    };
+    req.info_rows(&[InfoRow::Written(boxed.as_bytes())]);
     let entries = req.ini_entries();
     let shown = |name: &str, value: &[u8]| -> String {
         if name != CACHE_LIST {
@@ -280,11 +290,7 @@ fn info(req: &mut Request) {
             }
             .into();
         }
-        if value.is_empty() {
-            "no value".into()
-        } else {
-            String::from_utf8_lossy(value).into_owned()
-        }
+        String::from_utf8_lossy(value).into_owned()
     };
     let rows: Vec<[String; 3]> = [READONLY, REQUIRE_HASH, CACHE_LIST]
         .iter()
@@ -297,11 +303,9 @@ fn info(req: &mut Request) {
             [(*name).to_string(), shown(name, local), shown(name, master)]
         })
         .collect();
-    let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
     let cells: Vec<[&str; 3]> = rows
         .iter()
         .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
         .collect();
-    table.extend(cells.iter().map(<[&str; 3]>::as_slice));
-    req.info_table(&table);
+    req.info_ini_table(&cells);
 }

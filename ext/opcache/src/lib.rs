@@ -1183,11 +1183,9 @@ fn display_ini_entries(req: &mut Request) {
             Some([name.clone(), entry.shown(&held.value), entry.shown(master)])
         })
         .collect();
-    let mut table: Vec<[&str; 3]> = vec![["Directive", "Local Value", "Master Value"]];
-    table.extend(
-        rows.iter()
-            .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()]),
-    );
-    let table: Vec<&[&str]> = table.iter().map(<[&str; 3]>::as_slice).collect();
-    req.info_table(&table);
+    let rows: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()])
+        .collect();
+    req.info_ini_table(&rows);
 }

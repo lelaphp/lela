@@ -779,6 +779,7 @@ pub fn extension() -> Extension {
         .into_iter()
         .fold(builder, |b, (name, handler)| b.on_modify(name, handler))
         .request_state::<State>()
+        .info(basic_functions::minfo)
         .rshutdown(rshutdown)
         .rinit(rinit)
         .build("standard")

@@ -915,6 +915,25 @@ impl<H: Host> Parser<'_, '_, H> {
 
     /// `zend_ini_get_constant(result, name)`: the constant's value as a
     /// string, or the name where there is none or it holds a `:`.
+    ///
+    /// ```php
+    /// var_dump(parse_ini_string("a = \${nope:-TRUE}\nb = \${nope:-null}\nc = \${nope:-E_ALL}\nd[false] = x"));
+    /// ```
+    /// ```expect
+    /// array(4) {
+    ///   ["a"]=>
+    ///   string(1) "1"
+    ///   ["b"]=>
+    ///   string(0) ""
+    ///   ["c"]=>
+    ///   string(5) "30719"
+    ///   ["d"]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     string(1) "x"
+    ///   }
+    /// }
+    /// ```
     fn get_constant(&mut self, name: Val) -> Result<Val, H::Error> {
         let IniValue::Str(bytes) = &name.value else {
             return Ok(name);
@@ -924,7 +943,13 @@ impl<H: Host> Parser<'_, '_, H> {
         }
         match self.host.constant(bytes)? {
             Some(value) => Ok(Val::string(&value)),
-            None => Ok(name),
+            // `zend_get_constant` ends at `zend_get_special_const`:
+            // `true`, `false` and `null` in any case, as strings.
+            None => match bytes.to_ascii_lowercase().as_slice() {
+                b"true" => Ok(Val::string(b"1")),
+                b"false" | b"null" => Ok(Val::string(b"")),
+                _ => Ok(name),
+            },
         }
     }
 
