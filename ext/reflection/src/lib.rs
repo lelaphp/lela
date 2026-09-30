@@ -5275,23 +5275,47 @@ fn asked_class(req: &mut Request, this: PhpObject, declaring: ClassId) -> ClassI
     kept_class(req, this).unwrap_or(declaring)
 }
 
-/// `reflection_property_get_effective_prop`: the class whose table the
-/// property is read off for `object`, the object's own where it is not
-/// the class the reflector names and the property is not private, since
-/// the object's class may override it with hooks of its own.
-fn effective_class(
+/// `reflection_property_get_effective_prop`: the property the raw
+/// accessors act on, the one the object's own class holds under the name
+/// (its `properties_info`, a parent's private one among them) where the
+/// object is not of the class the reflector was asked about and the
+/// reflected property is not private, since the object's class may
+/// redeclare it with hooks of its own, or none; the reflected one
+/// otherwise. Each with the class that declared it; none for a dynamic
+/// property.
+///
+/// ```php
+/// #[AllowDynamicProperties] class B { public $v { get => 1; set {} } }
+/// class T extends B { public $v { get => $this->v; set => $value; } public $d { get => $this->d; set => $value; } public static $s; }
+/// $b = new B; $b->d = 0; $b->s = 0;
+/// foreach ([[new ReflectionProperty('B', 'v'), 'v'], [new ReflectionProperty($b, 'd'), 'd'], [new ReflectionProperty($b, 's'), 's']] as [$r, $n]) {
+///     $t = new T;
+///     try { $r->setRawValueWithoutLazyInitialization($t, 43); var_dump($r->getRawValue($t)); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// int(43)
+/// int(43)
+/// Can not use setRawValueWithoutLazyInitialization on static property T::$s
+/// ```
+fn effective_prop(
+    req: &mut Request,
     asked: ClassId,
     object: PhpObject,
-    declared: Option<&PropertyDecl>,
-    declaring: ClassId,
-) -> ClassId {
-    if asked != object.class()
-        && !declared.is_some_and(|decl| decl.visibility == Visibility::Private)
-    {
-        object.class()
-    } else {
-        declaring
+    reflected: Option<(ClassId, PropertyDecl)>,
+    name: &[u8],
+) -> Option<(ClassId, PropertyDecl)> {
+    let private = reflected
+        .as_ref()
+        .is_some_and(|(_, decl)| decl.visibility == Visibility::Private);
+    if asked == object.class() || private {
+        return reflected;
     }
+    class_chain(req, object.class()).into_iter().find_map(|at| {
+        let decl = req.class_decl(at)?;
+        let found = decl.properties.iter().find(|p| &*p.name.0 == name)?;
+        Some((at, found.clone()))
+    })
 }
 
 // -------------------------------------------------- ReflectionClassConstant

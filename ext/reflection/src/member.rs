@@ -25,7 +25,7 @@ use super::lazy::{lazy_compatible, object_of};
 use super::signature::type_factory;
 use super::{
     asked_class, attr, class_const_string, class_constant_named, class_name_of, class_named,
-    class_of, const_string, constant_key, dynamic_properties, effective_class, held_to, hooked,
+    class_of, const_string, constant_key, dynamic_properties, effective_prop, held_to, hooked,
     keep, kept_class, namespace_end, property_named, property_string, read_instance_property,
     reflection_class_factory, set_name, set_string_prop, string_value, this_class_constant,
     this_name, this_property,
@@ -838,18 +838,20 @@ impl ReflectionProperty {
         let (class, name, declared) = this_property(req, this.object())?;
         let asked = asked_class(req, this.object(), class);
         held_to(req, object, asked)?;
-        if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
+        let reflected = declared.map(|decl| (class, decl));
+        let prop = effective_prop(req, asked, object, reflected, &name);
+        if prop.as_ref().is_some_and(|(_, decl)| !decl.is_instance) {
             return Err(throw(
                 req,
                 "ReflectionException",
                 "May not use getRawValue on static properties",
             ));
         }
-        let effective = effective_class(asked, object, declared.as_ref(), class);
-        if php_ext::call::property_hook(req, effective, &name, HookKind::Get).is_some() {
+        let (at, decl) = prop.map_or((asked, None), |(at, decl)| (at, Some(decl)));
+        if property_hook(req, at, &name, HookKind::Get).is_some() {
             return php_ext::call::read_raw_property(req, &object, &name);
         }
-        read_instance_property(req, object, class, &name, declared.as_ref())
+        read_instance_property(req, object, at, &name, decl.as_ref())
     }
 
     /// `ReflectionProperty::setRawValue(object $object, mixed $value)`: the
@@ -880,7 +882,10 @@ impl ReflectionProperty {
         value: Value,
     ) -> Result<(), Thrown> {
         let (class, name, declared) = this_property(req, this.object())?;
-        if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
+        let asked = asked_class(req, this.object(), class);
+        let reflected = declared.map(|decl| (class, decl));
+        let prop = effective_prop(req, asked, object, reflected, &name);
+        if prop.as_ref().is_some_and(|(_, decl)| !decl.is_instance) {
             return Err(throw(
                 req,
                 "ReflectionException",
@@ -889,9 +894,7 @@ impl ReflectionProperty {
         }
         req.addref(&value);
         let key = PhpString::new(req, &name)?;
-        let asked = asked_class(req, this.object(), class);
-        let effective = effective_class(asked, object, declared.as_ref(), class);
-        if php_ext::call::property_hook(req, effective, &name, HookKind::Set).is_some() {
+        if prop.is_some_and(|(at, _)| property_hook(req, at, &name, HookKind::Set).is_some()) {
             php_ext::call::write_raw_property(req, &object, key, value)?;
             return Ok(());
         }
@@ -938,16 +941,14 @@ impl ReflectionProperty {
         object: PhpObject,
         value: Value,
     ) -> Result<(), Thrown> {
-        let (class, _, _) = this_property(req, this.object())?;
+        let (class, name, declared) = this_property(req, this.object())?;
         let asked = asked_class(req, this.object(), class);
         let object = object_of(req, object, asked, 1)?;
         let object = object.lazy_real(req).unwrap_or(object);
-        let (_, name) = lazy_compatible(
-            req,
-            this.object(),
-            object,
-            "setRawValueWithoutLazyInitialization",
-        )?;
+        let reflected = declared.map(|decl| (class, decl));
+        let prop = effective_prop(req, asked, object, reflected, &name);
+        let method = "setRawValueWithoutLazyInitialization";
+        lazy_compatible(req, asked, prop.as_ref(), &name, object, method)?;
         req.addref(&value);
         skip_lazy_initialization(req, &object, &name, Some(value))?;
         Ok(())
@@ -982,10 +983,12 @@ impl ReflectionProperty {
         this: This<Self>,
         object: PhpObject,
     ) -> Result<(), Thrown> {
-        let (class, _, _) = this_property(req, this.object())?;
+        let (class, name, declared) = this_property(req, this.object())?;
         let asked = asked_class(req, this.object(), class);
         let object = object_of(req, object, asked, 1)?;
-        let (_, name) = lazy_compatible(req, this.object(), object, "skipLazyInitialization")?;
+        let reflected = declared.map(|decl| (class, decl));
+        let method = "skipLazyInitialization";
+        lazy_compatible(req, asked, reflected.as_ref(), &name, object, method)?;
         skip_lazy_initialization(req, &object, &name, None)?;
         Ok(())
     }
