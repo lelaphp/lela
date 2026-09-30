@@ -18,11 +18,14 @@ use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 /// `gettype(mixed $value): string`, php's `PHP_FUNCTION(gettype)` over
 /// `zend_zval_get_legacy_type`: the names php has kept since PHP 4,
 /// `integer`, `double`, `boolean`, `NULL`, and `resource (closed)` for a
-/// closed resource.
+/// closed resource. php's compiler serves a call of one argument with
+/// `ZEND_GET_TYPE` (`zend_compile_func_gettype`); what reaches the
+/// native is a call by a name the program holds, a named or an unpacked
+/// argument, and a callback.
 ///
 /// ```php
-/// $f = fopen('php://memory', 'r'); fclose($f);
-/// var_dump(gettype(1), gettype(1.0), gettype("s"), gettype(null), gettype([]), gettype(new stdClass), gettype(true), gettype($f), gettype(fopen('php://memory', 'r')));
+/// $f = fopen('php://memory', 'r'); fclose($f); $g = 'gettype';
+/// var_dump($g(1), $g(1.0), $g("s"), $g(null), $g([]), $g(new stdClass), $g(true), $g($f), $g(fopen('php://memory', 'r')));
 /// ```
 /// ```expect
 /// string(7) "integer"
@@ -283,10 +286,14 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
 /// `PHP_FUNCTION(intval)` (`Z/ext/standard/type.c:150`): anything but a
 /// string, or any value under base 10, as `zval_get_long` reads it; a
 /// string under another base read by `strtol`, with `0x`, `0` and, for
-/// bases 0 and 2, `0b` prefixes, and clamped to the long's range.
+/// bases 0 and 2, `0b` prefixes, and clamped to the long's range. php's
+/// compiler serves a call of one argument with `ZEND_CAST`
+/// (`zend_compile_func_cast`); what reaches the native is a call of two,
+/// a call by a name the program holds, a named or an unpacked argument,
+/// and a callback.
 ///
 /// ```php
-/// var_dump(intval("0x1A", 16), intval("0x1A", 0), intval("012", 0), intval("0b11", 0), intval("-0b11", 2), intval(" 42abc"), intval("z", 36), intval("9999999999999999999999"), intval("-9999999999999999999999", 10), intval("777", 8), intval(42.9), intval("12", 5), intval(" +0x1f", 16), intval("1", 1), intval(null), intval([0]));
+/// $i = 'intval'; var_dump($i("0x1A", 16), $i("0x1A", 0), $i("012", 0), $i("0b11", 0), $i("-0b11", 2), $i(" 42abc"), $i("z", 36), $i("9999999999999999999999"), $i("-9999999999999999999999", 10), $i("777", 8), $i(42.9), $i("12", 5), $i(" +0x1f", 16), $i("1", 1), $i(null), $i([0]));
 /// ```
 /// ```expect
 /// int(26)
@@ -392,10 +399,13 @@ fn strtol(bytes: &[u8], base: i64) -> i64 {
 }
 
 /// `floatval(mixed $value): float` and its alias `doubleval`, php's
-/// `PHP_FUNCTION(floatval)`: `zval_get_double`.
+/// `PHP_FUNCTION(floatval)`: `zval_get_double`. php's compiler serves a
+/// call of one argument with `ZEND_CAST` (`zend_compile_func_cast`);
+/// what reaches the native is a call by a name the program holds, a
+/// named or an unpacked argument, and a callback.
 ///
 /// ```php
-/// var_dump(floatval("1.5e3abc"), floatval("abc"), floatval(true), doubleval("-.5"), floatval([1]));
+/// $f = 'floatval'; $d = 'doubleval'; var_dump($f("1.5e3abc"), $f("abc"), $f(true), $d("-.5"), $f([1]));
 /// ```
 /// ```expect
 /// float(1500)
@@ -410,10 +420,13 @@ fn floatval(req: &mut Request, value: Value) -> Result<f64, Thrown> {
 }
 
 /// `boolval(mixed $value): bool`, php's `PHP_FUNCTION(boolval)`:
-/// `zend_is_true`.
+/// `zend_is_true`. php's compiler serves a call of one argument with
+/// `ZEND_BOOL` (`zend_compile_func_cast`); what reaches the native is a
+/// call by a name the program holds, a named or an unpacked argument,
+/// and a callback.
 ///
 /// ```php
-/// var_dump(boolval(0), boolval("0"), boolval("0.0"), boolval([]), boolval([0]), boolval(new stdClass), boolval(0.0), boolval(null));
+/// $b = 'boolval'; var_dump($b(0), $b("0"), $b("0.0"), $b([]), $b([0]), $b(new stdClass), $b(0.0), $b(null));
 /// ```
 /// ```expect
 /// bool(false)
@@ -432,12 +445,15 @@ fn boolval(req: &mut Request, value: Value) -> bool {
 
 /// `strval(mixed $value): string`, php's `PHP_FUNCTION(strval)`:
 /// `zval_get_string`, with its warning for an array and its `Error` for
-/// an object that has no `__toString`.
+/// an object that has no `__toString`. php's compiler serves a call of
+/// one argument with `ZEND_CAST` (`zend_compile_func_cast`); what
+/// reaches the native is a call by a name the program holds, a named or
+/// an unpacked argument, and a callback.
 ///
 /// ```php
-/// var_dump(strval(1.0), strval(0.1 + 0.2), strval(true), strval(null), strval(-0.0), strval(1e25));
-/// var_dump(strval([1]));
-/// try { strval(new stdClass); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $s = 'strval'; var_dump($s(1.0), $s(0.1 + 0.2), $s(true), $s(null), $s(-0.0), $s(1e25));
+/// var_dump($s([1]));
+/// try { $s(new stdClass); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// string(1) "1"

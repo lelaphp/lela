@@ -790,20 +790,18 @@ impl Request {
     /// the file made in `dir`, or where that fails php's notice `file
     /// created in the system's temporary directory` and the file made
     /// there; no `dir`, or an empty one, goes to the temporary directory
-    /// with nothing said. Under `guarded`,
-    /// `PHP_TMP_FILE_OPEN_BASEDIR_CHECK_ALWAYS`, the guard is asked of
-    /// `dir` before it is tried and of the temporary directory before
-    /// that is, each warning; `PHP_TMP_FILE_DEFAULT` asks it of neither.
-    /// The file is open for reading and writing, and `None` is the one
-    /// that could not be made anywhere or was refused.
+    /// with nothing said. The guard is asked, warning, of the directories
+    /// `check` names before each is tried ([`TemporaryCheck`]). The file
+    /// is open for reading and writing, and `None` is the one that could
+    /// not be made anywhere or was refused.
     pub(crate) fn open_temporary_fd(
         &mut self,
         dir: Option<&[u8]>,
         prefix: &[u8],
-        guarded: bool,
+        check: TemporaryCheck,
     ) -> Option<(File, PathBuf)> {
         if let Some(dir) = dir.filter(|dir| !dir.is_empty()) {
-            if guarded && self.check_open_basedir(dir, true).is_err() {
+            if check == TemporaryCheck::Always && self.check_open_basedir(dir, true).is_err() {
                 return None;
             }
             let dir = self.absolutize(dir);
@@ -817,7 +815,7 @@ impl Request {
             );
         }
         let temp_dir = self.temp_dir();
-        if guarded
+        if check != TemporaryCheck::Never
             && self
                 .check_open_basedir(temp_dir.as_os_str().as_bytes(), true)
                 .is_err()
@@ -826,6 +824,22 @@ impl Request {
         }
         open_temporary_in(&temp_dir, prefix)
     }
+}
+
+/// Which directories `php_open_temporary_fd_ex` asks the `open_basedir`
+/// guard of, php's flags (`Z/main/php_open_temporary_file.h:20-28`)
+/// decoded once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemporaryCheck {
+    /// `PHP_TMP_FILE_DEFAULT`, what a temporary stream opens with: neither.
+    Never,
+    /// `PHP_TMP_FILE_OPEN_BASEDIR_CHECK_ON_FALLBACK`, what an upload's
+    /// file is made with (`Z/main/rfc1867.c:1006`): the system's temporary
+    /// directory only, where `dir` is unset or could not be used.
+    OnFallback,
+    /// `PHP_TMP_FILE_OPEN_BASEDIR_CHECK_ALWAYS`, what `tempnam()` makes
+    /// its file with: `dir` before it is tried, and the fallback.
+    Always,
 }
 
 /// `php_do_open_temporary_file` (`Z/main/php_open_temporary_file.c:92`):

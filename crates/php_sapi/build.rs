@@ -2,7 +2,7 @@
 //! `__DATE__ " " __TIME__` (`Z/main/main.c`), the clock of the compile
 //! that last rebuilt that file, as `Jul 28 2026 13:06:52`, the day padded
 //! with a space as `__DATE__` pads it. Stamped here in UTC, into
-//! `PHP_BUILD_DATE` for `php_sapi::cli::version`, and re-stamped when
+//! `PHP_BUILD_DATE` for `php_sapi::cli::version` and `php_sapi::cgi::version`, and re-stamped when
 //! this file or the host changes, which is when php's `__DATE__` moves.
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/cli.rs");
+    println!("cargo:rerun-if-changed=src/cgi.rs");
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());

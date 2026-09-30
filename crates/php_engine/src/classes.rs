@@ -30,8 +30,8 @@ use crate::api::abi::{
     Passed, Raw, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target};
-use crate::api::raising::{Thrown, throw, warning};
-use crate::api::request::Request;
+use crate::api::raising::{Thrown, throw, throw_over_pending, warning};
+use crate::api::request::{Refusal, Request};
 use crate::api::values::{ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpString, Value};
 
 /// `default_exception_handlers`: `clone_obj` null, so every throwable
@@ -779,6 +779,17 @@ impl Closure {
     /// NULL
     /// ```
     ///
+    /// Named arguments are placed at the closure's parameters:
+    ///
+    /// ```php
+    /// class Foo {}
+    /// $f = function ($a = 'a', $b = 'b', $c = 'c') { echo "$a $b $c\n"; };
+    /// $f->call(new Foo, 'A', c: 'C');
+    /// ```
+    /// ```expect
+    /// A b C
+    /// ```
+    ///
     /// A `static` closure takes no receiver:
     ///
     /// ```php
@@ -803,8 +814,16 @@ impl Closure {
         if !valid_closure_binding(req, &info, Some(newThis), Some(class)) {
             return Ok(Value::null());
         }
-        let named = args.named().to_vec();
-        let returned = req.serve_closure_as(closure, newThis, class, &args.positional, &named)?;
+        // `fci.named_params`, placed by `zend_call_function` over the
+        // closure's function.
+        let placed = crate::api::call::placed(req, info.function, &args.positional, args.named())?;
+        let returned = req.serve_closure_as(
+            closure,
+            newThis,
+            class,
+            &placed.arguments,
+            &placed.extra_named,
+        )?;
         Ok(returned.deref())
     }
 
@@ -908,13 +927,20 @@ impl Closure {
             return Ok(Instance::of(object));
         }
         let callable = match req.callable_checked(&given) {
+            Ok(_) if req.is_pending() => return Err(Thrown::of(req.take_pending())),
             Ok(callable) => callable,
-            Err(_) if req.is_pending() => return Err(Thrown::of(req.take_pending())),
-            Err(reason) => {
-                return Err(throw(
+            Err(Refusal::Said(reason)) => {
+                return Err(throw_over_pending(
                     req,
                     "TypeError",
                     &format!("Failed to create closure from callable: {reason}"),
+                ));
+            }
+            Err(Refusal::Unsaid) => {
+                return Err(throw_over_pending(
+                    req,
+                    "TypeError",
+                    "Failed to create closure from callable",
                 ));
             }
         };

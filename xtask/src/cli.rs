@@ -275,8 +275,8 @@ pub(crate) enum Command {
     /// oracle's fails naming the first differing line, and one the engine
     /// cannot render fails in the engine's own words.
     Crosscheck {
-        /// One extension by its php name, repeatable; default the
-        /// bundle's default set.
+        /// One extension by its php name, repeatable; default every
+        /// extension the binary under test carries.
         #[arg(long = "ext", value_name = "NAME")]
         ext: Vec<String>,
     },

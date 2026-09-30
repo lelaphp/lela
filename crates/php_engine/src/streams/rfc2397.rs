@@ -157,27 +157,9 @@ fn parse(path: &[u8]) -> Result<(Meta, bool, &[u8]), &'static str> {
     Ok((meta, base64, &path[comma + 1..]))
 }
 
-/// `php_url_decode`: `+` a space, `%` and two hex digits a byte, and
-/// anything else as it is.
+/// `php_url_decode`, the engine's one.
 pub(super) fn url_decode(s: &[u8]) -> Vec<u8> {
-    let hex = |c: u8| (c as char).to_digit(16);
-    let mut out = Vec::with_capacity(s.len());
-    let mut i = 0;
-    while i < s.len() {
-        match s[i] {
-            b'+' => out.push(b' '),
-            b'%' if i + 2 < s.len() => match (hex(s[i + 1]), hex(s[i + 2])) {
-                (Some(hi), Some(lo)) => {
-                    out.push(u8::try_from(hi * 16 + lo).unwrap_or(0));
-                    i += 2;
-                }
-                _ => out.push(b'%'),
-            },
-            c => out.push(c),
-        }
-        i += 1;
-    }
-    out
+    crate::api::request::url_decode(s, true)
 }
 
 /// `php_base64_decode_ex(str, len, 1)`, the strict decode: the four

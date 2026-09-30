@@ -13,7 +13,8 @@ impl Request {
     /// [`crate::api::call::load_file`]: the path resolved along the
     /// `include_path` as `php_stream_open_for_zend_ex(USE_PATH |
     /// STREAM_OPEN_FOR_INCLUDE)` opens it, with no warning where nothing
-    /// opens it; a path `EG(included_files)` has already is left alone
+    /// opens it, and a stream wrapper's URL opened by its wrapper, as
+    /// `Phar::webPhar` has an entry of its archive served; a path `EG(included_files)` has already is left alone
     /// (`zend_hash_add` failing), and any other is added before the
     /// compile; the unit compiled through the unit cache as a `require`
     /// is and served on a top-level code frame, `ZEND_CALL_TOP_CODE`,
@@ -27,12 +28,28 @@ impl Request {
         let path = match self.resolve_path(written) {
             Ok(path) => path,
             Err(super::Unresolved::Threw(thrown)) => return Err(thrown),
+            // A path a stream wrapper serves is opened as it is written,
+            // `zend_stream_open`'s `php_stream_open_for_zend_ex`.
+            Err(super::Unresolved::Missing(_)) if super::is_wrapper_url(written) => {
+                written.to_vec()
+            }
             Err(super::Unresolved::Missing(_)) => return Ok(false),
         };
         if self.included_files.contains(&path) {
             return Ok(false);
         }
         self.included_files.push(path.clone());
+        if super::is_wrapper_url(&path) {
+            let opened = self.include_stream(exec::IncludeKind::Require, written, &path)?;
+            let super::Opened::Unit(unit) = opened else {
+                return Ok(false);
+            };
+            if !crate::engine::note_compiled(self, &unit, php_compile::SourceKind::File) {
+                return Err(Thrown::of(self.take_pending()));
+            }
+            self.serve_top_code(unit)?;
+            return Ok(true);
+        }
         let replaced = match self.compile_file_source(&path)? {
             Some(source) => {
                 let shared = Arc::clone(&self.shared);

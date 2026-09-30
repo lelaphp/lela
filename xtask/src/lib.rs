@@ -13,7 +13,8 @@
 //! nothing beside it (#55): [`run`], the binary's body; each instrument's
 //! run function with the arguments it takes and the value it returns; the
 //! data modules, [`manifest`], [`oracle`] with the pin, [`divergence`]
-//! with the registry, and [`reading`]; and [`scratch`], the scratch tree
+//! with the registry, [`reading`], and [`carried`], which of the manifest's
+//! `feature` rows a build carries; and [`scratch`], the scratch tree
 //! both sides of the harness's own tests make one of. Everything else is
 //! crate-private, and a test that needs an internal is a unit test beside
 //! it.
@@ -23,6 +24,7 @@ pub mod api_check;
 pub mod bench;
 pub mod budget;
 mod built;
+pub mod carried;
 mod census_weight;
 mod cfg;
 pub mod cli;

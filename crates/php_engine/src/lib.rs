@@ -31,6 +31,7 @@ mod fiber;
 mod generator;
 mod handlers;
 mod highlight;
+mod host_extension;
 mod ini_quantity;
 mod ini_syntax;
 mod interfaces;
@@ -42,6 +43,7 @@ mod output;
 mod preload;
 #[cfg(test)]
 mod probe;
+mod rfc1867;
 mod scanner;
 mod signal;
 mod streams;
@@ -57,4 +59,8 @@ mod weakrefs;
 mod wrapper;
 
 pub use api::request::PHP_VERSION;
-pub use engine::{Engine, EngineBuilder, FileHandles, Observables, OutputSink, RequestDescription};
+pub use engine::{
+    Engine, EngineBuilder, FileHandles, Method, Observables, OutputSink, RequestDescription,
+    ResponseHead, WebRequest,
+};
+pub use host_extension::HostExtension;

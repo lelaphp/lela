@@ -1,0 +1,457 @@
+//! `session.upload_progress`, `php_session_rfc1867_callback`
+//! (`Z/ext/session/session.c:3169`): while a multipart body is read, the
+//! file uploads a form names under `session.upload_progress.name` are
+//! written into the session its cookie, query string or form names, as
+//! an array under `session.upload_progress.prefix` and that name, at
+//! every step of `session.upload_progress.freq` bytes and no oftener
+//! than `min_freq` seconds, and taken out again at the end under
+//! `session.upload_progress.cleanup`. It is the engine's upload hook
+//! ([`php_ext::abi::ExtensionBuilder::upload`]), served while the request
+//! starts, before the session's own `RINIT`.
+
+use php_ext::raising::Thrown;
+use php_ext::request::{Input, Request, Upload};
+use php_ext::values::{Key, PhpArray, PhpString, Value};
+
+use crate::{State, Status, absorb, ini, ini_bool, session, session_array_mut, string_value};
+
+/// `php_session_rfc1867_progress`: what one body's reading keeps.
+#[derive(Debug, Default)]
+pub(crate) struct Progress {
+    content_length: i64,
+    /// The id the form, the cookie or the query string named.
+    sid: Option<Vec<u8>>,
+    /// The key the progress is written under.
+    key: Option<Vec<u8>>,
+    apply_trans_sid: bool,
+    update_step: i64,
+    next_update: i64,
+    next_update_time: f64,
+    /// `progress->data`, from the first file on.
+    data: Option<Data>,
+    cancel_upload: bool,
+}
+
+/// The progress array's fields, in php's order.
+#[derive(Debug, Default)]
+struct Data {
+    start_time: i64,
+    content_length: i64,
+    bytes_processed: i64,
+    done: bool,
+    files: Vec<File>,
+}
+
+/// One file's array, in php's order.
+#[derive(Debug, Default)]
+struct File {
+    field_name: Vec<u8>,
+    name: Vec<u8>,
+    tmp_name: Option<Vec<u8>>,
+    error: i64,
+    done: bool,
+    start_time: i64,
+    bytes_processed: i64,
+}
+
+/// The upload hook: `php_session_rfc1867_callback` over one step, and
+/// `false`, php's `FAILURE`, once the session asked for the upload to be
+/// cancelled.
+///
+/// ```php
+/// var_dump(ini_get('session.upload_progress.enabled'), ini_get('session.upload_progress.name'));
+/// ```
+/// ```expect
+/// string(1) "1"
+/// string(27) "PHP_SESSION_UPLOAD_PROGRESS"
+/// ```
+pub(crate) fn hook(req: &mut Request, event: &Upload<'_>) -> Result<bool, Thrown> {
+    if !ini_bool(req, b"session.upload_progress.enabled") {
+        return Ok(true);
+    }
+    match *event {
+        Upload::Start { content_length } => {
+            req.state::<State>().progress = Some(Progress {
+                content_length,
+                ..Progress::default()
+            });
+        }
+        Upload::FormData { name, value, .. } => form_data(req, name, value)?,
+        Upload::FileStart {
+            read,
+            name,
+            filename,
+        } => file_start(req, read, name, filename)?,
+        Upload::FileData {
+            read,
+            offset,
+            length,
+        } => {
+            if tracking(req) {
+                with(req, |progress| {
+                    if let Some(data) = progress.data.as_mut() {
+                        if let Some(file) = data.files.last_mut() {
+                            file.bytes_processed = offset + length;
+                        }
+                        data.bytes_processed = read;
+                    }
+                });
+                update(req, false)?;
+            }
+        }
+        Upload::FileEnd { read, temp, error } => {
+            if tracking(req) {
+                with(req, |progress| {
+                    if let Some(data) = progress.data.as_mut() {
+                        if let Some(file) = data.files.last_mut() {
+                            if let Some(temp) = temp {
+                                file.tmp_name = Some(temp.to_vec());
+                            }
+                            file.error = error;
+                            file.done = true;
+                        }
+                        data.bytes_processed = read;
+                    }
+                });
+                update(req, false)?;
+            }
+        }
+        Upload::End { read } => {
+            end(req, read)?;
+            return Ok(true);
+        }
+    }
+    Ok(!req
+        .state::<State>()
+        .progress
+        .as_ref()
+        .is_some_and(|progress| progress.cancel_upload))
+}
+
+/// Whether the body names both a session and a progress key.
+fn tracking(req: &mut Request) -> bool {
+    req.state::<State>()
+        .progress
+        .as_ref()
+        .is_some_and(|progress| progress.sid.is_some() && progress.key.is_some())
+}
+
+/// The progress, changed by `change`, where there is one.
+fn with(req: &mut Request, change: impl FnOnce(&mut Progress)) {
+    if let Some(progress) = req.state::<State>().progress.as_mut() {
+        change(progress);
+    }
+}
+
+/// `MULTIPART_EVENT_FORMDATA`: the form's session id, or its progress key,
+/// which looks for the id in the cookie and the query string at once.
+fn form_data(req: &mut Request, name: &[u8], value: &[u8]) -> Result<(), Thrown> {
+    if tracking(req) || value.is_empty() {
+        return Ok(());
+    }
+    let session_name = ini(req, b"session.name");
+    if name == session_name.as_slice() {
+        with(req, |progress| progress.sid = Some(value.to_vec()));
+    } else if name == ini(req, b"session.upload_progress.name").as_slice() {
+        let mut key = ini(req, b"session.upload_progress.prefix");
+        key.extend_from_slice(value);
+        with(req, |progress| {
+            progress.key = Some(key);
+            progress.apply_trans_sid = true;
+        });
+        early_find_sid(req, &session_name)?;
+    }
+    Ok(())
+}
+
+/// `php_session_rfc1867_early_find_sid`: the id the cookie carries, and
+/// where cookies are not all, the query string's.
+fn early_find_sid(req: &mut Request, session_name: &[u8]) -> Result<(), Thrown> {
+    if ini_bool(req, b"session.use_cookies") {
+        let found = find_in(req, Input::Cookie, session_name)?;
+        if let Some(found) = found {
+            with(req, |progress| {
+                progress.sid = Some(found);
+                progress.apply_trans_sid = false;
+            });
+            return Ok(());
+        }
+    }
+    if ini_bool(req, b"session.use_only_cookies") {
+        return Ok(());
+    }
+    if let Some(found) = find_in(req, Input::Get, session_name)? {
+        with(req, |progress| progress.sid = Some(found));
+    }
+    Ok(())
+}
+
+/// `early_find_sid_in`: the string the input's variables hold under the
+/// session's name.
+fn find_in(req: &mut Request, input: Input, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+    let array = req.input_variables(input)?;
+    let found = array
+        .snapshot()
+        .into_iter()
+        .find_map(|(key, value)| match key {
+            Key::Str(s) if s.as_bytes() == name => value.as_str_bytes().map(<[u8]>::to_vec),
+            _ => None,
+        });
+    req.release(array.to_value());
+    Ok(found)
+}
+
+/// `MULTIPART_EVENT_FILE_START`: at the first file, the progress laid down
+/// and the session's request state started with the form's id; then the file's
+/// own array.
+fn file_start(req: &mut Request, read: i64, name: &[u8], filename: &[u8]) -> Result<(), Thrown> {
+    if !tracking(req) {
+        return Ok(());
+    }
+    let first = req
+        .state::<State>()
+        .progress
+        .as_ref()
+        .is_some_and(|progress| progress.data.is_none());
+    if first {
+        let freq = freq(req);
+        let start_time = req.request_time();
+        with(req, |progress| {
+            progress.update_step = if freq >= 0 {
+                freq
+            } else {
+                progress.content_length * -freq / 100
+            };
+            progress.next_update = 0;
+            progress.next_update_time = 0.0;
+            progress.data = Some(Data {
+                start_time,
+                content_length: progress.content_length,
+                bytes_processed: read,
+                done: false,
+                files: Vec::new(),
+            });
+        });
+        session::rinit_without_start(req);
+        let sid = req
+            .state::<State>()
+            .progress
+            .as_ref()
+            .and_then(|progress| progress.sid.clone());
+        let state = req.state::<State>();
+        state.id = sid;
+        state.send_cookie = false;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(0));
+    with(req, |progress| {
+        if let Some(data) = progress.data.as_mut() {
+            data.files.push(File {
+                field_name: name.to_vec(),
+                name: filename.to_vec(),
+                start_time: now,
+                bytes_processed: read,
+                ..File::default()
+            });
+        }
+    });
+    update(req, false)
+}
+
+/// `session.upload_progress.freq` as `OnUpdateRfc1867Freq` keeps it: a
+/// number of bytes, or a percentage of the body as its negative.
+fn freq(req: &mut Request) -> i64 {
+    let text = ini(req, b"session.upload_progress.freq");
+    let text = String::from_utf8_lossy(&text);
+    match text.trim().strip_suffix('%') {
+        Some(percent) => -percent.trim().parse::<i64>().unwrap_or(0),
+        None => crate::atol(text.as_bytes()),
+    }
+}
+
+/// `php_session_rfc1867_update`: past the next step and the next moment,
+/// or forced, the session started, a `cancel_upload` it holds read, the
+/// progress written under its key, and the session written and closed.
+fn update(req: &mut Request, force: bool) -> Result<(), Thrown> {
+    if !force {
+        let min_freq = String::from_utf8_lossy(&ini(req, b"session.upload_progress.min_freq"))
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(0.0);
+        let mut due = false;
+        with(req, |progress| {
+            let read = progress
+                .data
+                .as_ref()
+                .map_or(0, |data| data.bytes_processed);
+            if read < progress.next_update {
+                return;
+            }
+            if min_freq > 0.0 {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0.0, |since| since.as_secs_f64());
+                if now < progress.next_update_time {
+                    return;
+                }
+                progress.next_update_time = now + min_freq;
+            }
+            progress.next_update = read + progress.update_step;
+            due = true;
+        });
+        if !due {
+            return Ok(());
+        }
+    }
+    let initialized = session::initialize(req);
+    absorb(req, initialized)?;
+    req.state::<State>().status = Status::Active;
+    let key = req
+        .state::<State>()
+        .progress
+        .as_ref()
+        .and_then(|progress| progress.key.clone());
+    if let (Some(mut vars), Some(key)) = (session_array_mut(req)?, key) {
+        let cancel = cancelled(vars, &key);
+        with(req, |progress| progress.cancel_upload |= cancel);
+        let data = rendered(req)?;
+        let key = Key::Str(PhpString::new(req, &key)?);
+        vars.set(req, key, data)?;
+    }
+    session::flush(req, true)?;
+    Ok(())
+}
+
+/// `php_check_cancel_upload`: the progress array the session holds under
+/// the key, with `cancel_upload` set to `true` in it.
+fn cancelled(vars: PhpArray, key: &[u8]) -> bool {
+    let found = vars
+        .snapshot()
+        .into_iter()
+        .find_map(|(had, value)| match had {
+            Key::Str(s) if s.as_bytes() == key => Some(value),
+            Key::Int(n) if n.to_string().as_bytes() == key => Some(value),
+            _ => None,
+        });
+    found
+        .and_then(|value| value.deref().as_array().copied())
+        .and_then(|array| {
+            array
+                .snapshot()
+                .into_iter()
+                .find_map(|(had, value)| match had {
+                    Key::Str(s) if s.as_bytes() == b"cancel_upload" => value.as_bool(),
+                    _ => None,
+                })
+        })
+        .unwrap_or(false)
+}
+
+/// The progress as the array php keeps it.
+fn rendered(req: &mut Request) -> Result<Value, Thrown> {
+    let taken = req
+        .state::<State>()
+        .progress
+        .as_mut()
+        .and_then(|progress| progress.data.take());
+    let Some(data) = taken else {
+        return Ok(Value::null());
+    };
+    let mut array = PhpArray::new(req)?;
+    set(req, &mut array, b"start_time", Value::int(data.start_time))?;
+    set(
+        req,
+        &mut array,
+        b"content_length",
+        Value::int(data.content_length),
+    )?;
+    set(
+        req,
+        &mut array,
+        b"bytes_processed",
+        Value::int(data.bytes_processed),
+    )?;
+    set(req, &mut array, b"done", Value::bool(data.done))?;
+    let mut files = PhpArray::new(req)?;
+    for file in &data.files {
+        let mut entry = PhpArray::new(req)?;
+        let field_name = string_value(req, &file.field_name)?;
+        set(req, &mut entry, b"field_name", field_name)?;
+        let name = string_value(req, &file.name)?;
+        set(req, &mut entry, b"name", name)?;
+        let tmp_name = match &file.tmp_name {
+            Some(tmp) => string_value(req, tmp)?,
+            None => Value::null(),
+        };
+        set(req, &mut entry, b"tmp_name", tmp_name)?;
+        set(req, &mut entry, b"error", Value::int(file.error))?;
+        set(req, &mut entry, b"done", Value::bool(file.done))?;
+        set(req, &mut entry, b"start_time", Value::int(file.start_time))?;
+        set(
+            req,
+            &mut entry,
+            b"bytes_processed",
+            Value::int(file.bytes_processed),
+        )?;
+        files.append(req, entry.to_value())?;
+    }
+    set(req, &mut array, b"files", files.to_value())?;
+    with(req, |progress| progress.data = Some(data));
+    Ok(array.to_value())
+}
+
+/// `add_assoc_*_ex`.
+fn set(req: &mut Request, array: &mut PhpArray, name: &[u8], value: Value) -> Result<(), Thrown> {
+    let key = Key::Str(PhpString::new(req, name)?);
+    array.set(req, key, value)
+}
+
+/// `MULTIPART_EVENT_END`: the progress taken out of the session under
+/// `cleanup`, or marked done and written; the session's request state shut
+/// down; the progress given up.
+fn end(req: &mut Request, read: i64) -> Result<(), Thrown> {
+    if tracking(req) {
+        if ini_bool(req, b"session.upload_progress.cleanup") {
+            cleanup(req)?;
+        } else {
+            let started = req
+                .state::<State>()
+                .progress
+                .as_ref()
+                .is_some_and(|progress| progress.data.is_some());
+            if started {
+                with(req, |progress| {
+                    if let Some(data) = progress.data.as_mut() {
+                        data.done = true;
+                        data.bytes_processed = read;
+                    }
+                });
+                update(req, true)?;
+            }
+        }
+        session::rshutdown_globals(req)?;
+    }
+    req.state::<State>().progress = None;
+    Ok(())
+}
+
+/// `php_session_rfc1867_cleanup`: the key taken out of the session, and
+/// the session written and closed.
+fn cleanup(req: &mut Request) -> Result<(), Thrown> {
+    let initialized = session::initialize(req);
+    absorb(req, initialized)?;
+    req.state::<State>().status = Status::Active;
+    let key = req
+        .state::<State>()
+        .progress
+        .as_ref()
+        .and_then(|progress| progress.key.clone());
+    if let (Some(mut vars), Some(key)) = (session_array_mut(req)?, key) {
+        let name = PhpString::new(req, &key)?;
+        vars.unset(req, &Key::Str(name))?;
+        req.release(Value::string(name));
+    }
+    session::flush(req, true)?;
+    Ok(())
+}

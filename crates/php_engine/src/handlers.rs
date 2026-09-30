@@ -1402,11 +1402,7 @@ fn dynamic_call_string(
     name: &[u8],
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
-    let split = name
-        .windows(2)
-        .rposition(|pair| pair == b"::")
-        .filter(|at| *at > 0);
-    if let Some(at) = split {
+    if let Some(at) = crate::api::request::compound_split(name) {
         let class = dynamic_call_class(req, &name[..at])?;
         return dynamic_call_static(req, class, &name[at + 2..], this);
     }
@@ -2412,19 +2408,23 @@ pub(crate) fn init_user_call<T: Tier>(
 ) -> Edge {
     let callback = exec::operand(req, frame, code, op.op2_type, op.op2);
     let resolved = req.callable_checked(&callback);
-    if req.is_pending() {
-        exec::free_operand(req, frame, code, op.op2_type, op.op2);
-        return Ok(Stepped::Threw(frame));
-    }
     let target = match resolved {
+        // A deprecation's handler may have thrown with the callable found.
+        Ok(_) if req.is_pending() => {
+            exec::free_operand(req, frame, code, op.op2_type, op.op2);
+            return Ok(Stepped::Threw(frame));
+        }
         Ok(callable) => user_call_target(req, callable.target()),
-        Err(error) => {
+        // `zend_type_error`, chained onto what a deprecation's handler
+        // or an autoloader left pending, `(null)` where it left the
+        // resolution no sentence.
+        Err(refusal) => {
             let native = exec::constant(code, ConstIdx(op.op1));
             let native = String::from_utf8_lossy(native.as_str_bytes().unwrap_or_default());
-            Err(crate::api::raising::throw(
+            Err(crate::api::raising::throw_over_pending(
                 req,
                 "TypeError",
-                &format!("{native}(): Argument #1 ($callback) must be a valid callback, {error}"),
+                &format!("{native}(): Argument #1 ($callback) must be a valid callback, {refusal}"),
             ))
         }
     };
@@ -16436,6 +16436,10 @@ pub(crate) fn fe_fetch_r<T: Tier>(
         }
         ForeachVar::Properties { object, walk } => match req.object_walk(object, walk.0, false) {
             Ok(Some((key, walked))) => {
+                let key = match req.walked_key(key) {
+                    Ok(key) => key,
+                    Err(thrown) => return threw(req, frame, &thrown),
+                };
                 let value = Request::walked_value(object, walked);
                 if matches!(walked, crate::api::request::Walked::Hooked(..)) {
                     owned = Some(value);
@@ -17058,6 +17062,10 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
     let owned = matches!(walked, crate::api::request::Walked::Hooked(..));
     let cell = match req.walked_reference(object, walked) {
         Ok(cell) => cell,
+        Err(thrown) => return Ok(Err(thrown)),
+    };
+    let key = match req.walked_key(key) {
+        Ok(key) => key,
         Err(thrown) => return Ok(Err(thrown)),
     };
     Ok(fe_key_kept(req, op, key).map(|key| Some(BoundRw { key, cell, owned })))
@@ -18433,7 +18441,7 @@ pub(crate) fn defined<T: Tier>(
 /// as its slots hold them now, each reference followed and a slot
 /// nothing holds `null`, into the temporary; with a constant `op1`, the
 /// ones after the first that many, the form php's compiler makes of
-/// `array_slice(func_get_args(), n)` and this one does not make yet.
+/// `array_slice(func_get_args(), n)` (`zend_compile_func_array_slice`).
 ///
 /// ```php
 /// function f($a, &$b, $c = 3, ...$rest) { $a = 9; $b = 'b'; return func_get_args(); }
@@ -18497,6 +18505,284 @@ pub(crate) fn func_get_args<T: Tier>(
         Ok(array) => {
             let slot = exec::temporary_slot(code, op.out);
             let previous = req.set_slot(frame, slot, Value::array(array));
+            req.release(previous);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// `ZEND_FUNC_NUM_ARGS` (`Z/Zend/zend_vm_def.h:9628`), what php's
+/// compiler makes of `func_num_args()` inside a function
+/// (`zend_compile_func_num_args`): `EX_NUM_ARGS()`, every argument the
+/// frame was passed, the extra ones among them, into the temporary.
+///
+/// ```php
+/// function f($a, $b = 2) { return func_num_args(); }
+/// $g = function (...$r) { return func_num_args(); };
+/// var_dump(f(1), f(1, 2, 3), $g(), $g(1, 2));
+/// ```
+/// ```expect
+/// int(1)
+/// int(3)
+/// int(0)
+/// int(2)
+/// ```
+pub(crate) fn func_num_args<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let passed = req.vm().at(frame).map_or(0, |state| state.num_args);
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, Value::int(i64::from(passed)));
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_GET_CLASS` (`Z/Zend/zend_vm_def.h:9557`), what php's compiler
+/// makes of `get_class()` and `get_class($o)` (`zend_compile_func_get_class`):
+/// with no operand, the name of the class the frame's op array was
+/// written in, `EX(func)->common.scope`, behind the 8.3 deprecation,
+/// and php's `Error` where there is none; with one, the name of the
+/// object's class, a reference followed, and php's `TypeError` naming
+/// what it is for anything else, a variable nothing wrote warned of
+/// first. The name is the class's as declared.
+///
+/// ```php
+/// class A { function f() { return [get_class(), get_class($this)]; } static function s() { return get_class(); } }
+/// class B extends A {}
+/// $b = new B; $r = &$b;
+/// var_dump((new B)->f(), B::s(), get_class($r), get_class(new ArrayObject));
+/// try { get_class(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { get_class(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { get_class($u); } catch (TypeError $e) { echo $e->getMessage(), " at ", count($e->getTrace()), "\n"; }
+/// ```
+/// ```expect
+///
+/// Deprecated: Calling get_class() without arguments is deprecated in %s on line 2
+///
+/// Deprecated: Calling get_class() without arguments is deprecated in %s on line 2
+/// array(2) {
+///   [0]=>
+///   string(1) "A"
+///   [1]=>
+///   string(1) "B"
+/// }
+/// string(1) "A"
+/// string(1) "B"
+/// string(11) "ArrayObject"
+/// get_class() without arguments must be called from within a class
+/// get_class(): Argument #1 ($object) must be of type object, int given
+///
+/// Warning: Undefined variable $u in %s on line 8
+/// get_class(): Argument #1 ($object) must be of type object, null given at 0
+/// ```
+pub(crate) fn get_class<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let class = if op.op1_type == OperandKind::Unused {
+        let Some(scope) = req.frame_scope(frame) else {
+            let thrown = crate::api::raising::throw(
+                req,
+                "Error",
+                "get_class() without arguments must be called from within a class",
+            );
+            return threw(req, frame, &thrown);
+        };
+        crate::api::raising::deprecated(req, "Calling get_class() without arguments is deprecated");
+        scope
+    } else {
+        let value = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+        let class = value.as_object().map(PhpObject::class);
+        let Some(class) = class else {
+            let shown = crate::ops::value_name(req, &value);
+            let thrown = crate::api::raising::throw(
+                req,
+                "TypeError",
+                &format!(
+                    "get_class(): Argument #1 ($object) must be of type object, {shown} given"
+                ),
+            );
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        };
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        class
+    };
+    class_name_into(req, frame, code, op, class)
+}
+
+/// `ZEND_GET_CALLED_CLASS` (`Z/Zend/zend_vm_def.h:9603`), what php's
+/// compiler makes of `get_called_class()`
+/// (`zend_compile_func_get_called_class`): the name of the class
+/// `static` names in the frame, the receiver's where there is one and
+/// the called scope where there is not, and php's `Error` outside a
+/// class.
+///
+/// ```php
+/// class A { static function f() { return get_called_class(); } function g() { return get_called_class(); } }
+/// class B extends A {}
+/// var_dump(A::f(), B::f(), (new B)->g());
+/// function h() { return get_called_class(); }
+/// try { h(); } catch (Error $e) { echo $e->getMessage(), " at ", count($e->getTrace()), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "A"
+/// string(1) "B"
+/// string(1) "B"
+/// get_called_class() must be called from within a class at 1
+/// ```
+pub(crate) fn get_called_class<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let called = req
+        .vm()
+        .this(frame)
+        .map(|this| this.class())
+        .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope));
+    let Some(class) = called else {
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            "get_called_class() must be called from within a class",
+        );
+        return threw(req, frame, &thrown);
+    };
+    class_name_into(req, frame, code, op, class)
+}
+
+/// The declared name of `class` as a string of the request's, into the
+/// temporary the opline's `result` names, and on to the next opline:
+/// the tail `ZEND_GET_CLASS` and `ZEND_GET_CALLED_CLASS` share,
+/// `ZVAL_STR_COPY(EX_VAR(opline->result.var), ce->name)`.
+fn class_name_into(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    class: crate::api::values::ClassId,
+) -> Edge {
+    let name = req.class_name_bytes(class);
+    let name = match PhpString::new(req, &name) {
+        Ok(name) => name,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, Value::string(name));
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_GET_TYPE` (`Z/Zend/zend_vm_def.h:9623`), what php's compiler
+/// makes of `gettype($v)` (`zend_compile_func_gettype`):
+/// [`crate::ops::legacy_type`] over the operand, a variable nothing
+/// wrote warned of and `NULL`, into the temporary; the operand freed
+/// after it.
+///
+/// ```php
+/// $f = fopen('php://memory', 'r'); $c = fopen('php://memory', 'r'); fclose($c);
+/// $x = 1; $r = &$x;
+/// echo gettype(null), " ", gettype(false), " ", gettype($r), " ", gettype(1.5), " ", gettype("s"), " ", gettype([]), " ", gettype(new stdClass), " ", gettype($f), " ", gettype($c), "\n";
+/// echo gettype($u), "\n";
+/// ```
+/// ```expect
+/// NULL boolean integer double string array object resource resource (closed)
+///
+/// Warning: Undefined variable $u in %s on line 5
+/// NULL
+/// ```
+pub(crate) fn get_type<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    unary(req, frame, code, op, |req, value| {
+        PhpString::new(req, crate::ops::legacy_type(value)).map(Value::string)
+    })
+}
+
+/// `ZEND_ARRAY_KEY_EXISTS` (`Z/Zend/zend_vm_def.h:9747`), what php's
+/// compiler makes of `array_key_exists($k, $a)`
+/// (`zend_compile_func_array_key_exists`): over an array, a reference
+/// followed, [`crate::ops::array_key_exists`], with the key's
+/// `Undefined variable` raised where it asks; over anything else
+/// (`zend_array_key_exists_error`) the key and then the array warned of
+/// where nothing wrote them, and php's `TypeError` naming what the array
+/// is where neither warning threw. The answer into the temporary, the
+/// array freed and then the key. php branches on it where a `JMPZ` or a
+/// `JMPNZ` follows (`ZEND_VM_SMART_BRANCH`); the jump reads the
+/// temporary here, as after [`type_check`].
+///
+/// ```php
+/// $a = ['k' => null]; $r = &$a;
+/// var_dump(array_key_exists('k', $r), array_key_exists('j', $a), array_key_exists($u, ['' => 1]));
+/// if (array_key_exists('k', $a)) echo "branch\n";
+/// try { array_key_exists('k', 'x'); } catch (TypeError $e) { echo $e->getMessage(), " at ", count($e->getTrace()), "\n"; }
+/// try { array_key_exists($u, $v); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { array_key_exists('k', new ArrayObject(['k' => 1])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $u in %s on line 3
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// branch
+/// array_key_exists(): Argument #2 ($array) must be of type array, string given at 0
+///
+/// Warning: Undefined variable $u in %s on line 6
+///
+/// Warning: Undefined variable $v in %s on line 6
+/// array_key_exists(): Argument #2 ($array) must be of type array, null given
+/// array_key_exists(): Argument #2 ($array) must be of type array, ArrayObject given
+/// ```
+pub(crate) fn array_key_exists<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let key = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+    let subject = exec::operand_undef(req, frame, code, op.op2_type, op.op2).deref();
+    let answered = if let Some(array) = subject.as_array().copied() {
+        crate::ops::array_key_exists(req, array, &key, |req| {
+            exec::operand(req, frame, code, op.op1_type, op.op1);
+        })
+    } else {
+        if key.tag() == TypeTag::Undef {
+            exec::operand(req, frame, code, op.op1_type, op.op1);
+        }
+        if subject.tag() == TypeTag::Undef {
+            exec::operand(req, frame, code, op.op2_type, op.op2);
+        }
+        if !req.is_pending() {
+            let shown = crate::ops::value_name(req, &subject);
+            let thrown = crate::api::raising::throw(
+                req,
+                "TypeError",
+                &format!(
+                    "array_key_exists(): Argument #2 ($array) must be of type array, {shown} given"
+                ),
+            );
+            req.leave_pending(&thrown);
+        }
+        Ok(false)
+    };
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    match answered {
+        Ok(found) => {
+            let slot = exec::temporary_slot(code, op.out);
+            let previous = req.set_slot(frame, slot, Value::bool(found));
             req.release(previous);
             Ok(advance(req, frame))
         }

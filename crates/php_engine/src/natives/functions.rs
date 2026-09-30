@@ -12,7 +12,7 @@ use crate::api::request::{NativeCaller, Request};
 use crate::api::values::{Key, PhpArray, PhpString, Resource, TypeTag, Value};
 
 /// `ZEND_VERSION` at the pin (`Z/Zend/zend.h:23`).
-const ZEND_VERSION: &str = "4.5.9";
+pub(crate) const ZEND_VERSION: &str = "4.5.9";
 
 /// `zend_version(): string`, php's `ZEND_FUNCTION(zend_version)`
 /// (`Z/Zend/zend_builtin_functions.c:146`).

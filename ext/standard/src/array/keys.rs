@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use php_ext::abi::{OrFalse, Passed, PropertyRead, PropertyTest, Raw, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{
-    BinaryOp, binary_op, float_to_long, identical, loose_eq, numeric_string, to_string, value_name,
+    BinaryOp, binary_op, float_to_long, identical, loose_eq, numeric_string, to_string,
 };
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw, warning,
@@ -920,33 +920,40 @@ fn array_combine(req: &mut Request, keys: PhpArray, values: PhpArray) -> Result<
     Ok(out)
 }
 
-/// `array_key_exists($key, array $array): bool`, what php serves a call
-/// of the name with, `ZEND_ARRAY_KEY_EXISTS` over
-/// `zend_array_key_exists_fast` (`Z/Zend/zend_execute.c:3372`), since
-/// `zend_compile_func_array_key_exists` compiles every two-argument call
-/// of it to the opcode: whether the key the value makes is in the array,
-/// a string as `ZEND_HANDLE_NUMERIC` reads it, an int, a float truncated
-/// behind the deprecation where that loses something, a bool as 0 or 1,
-/// a resource by its id with php's warning, and `null` as the empty
-/// string behind the 8.5 deprecation; any other key is the opcode's
-/// `TypeError`.
+/// `array_key_exists($key, array $array): bool`, php's
+/// `PHP_FUNCTION(array_key_exists)` (`Z/ext/standard/array.c:6998`):
+/// whether the key the value makes is in the array, a string as
+/// `zend_symtable_exists` reads it, an int, a float truncated behind the
+/// deprecation where that loses something, a bool as 0 or 1, a resource
+/// by its id with php's warning, and `null` as the empty string behind
+/// the 8.5 deprecation; any other key is the function's `TypeError`.
+/// php's compiler serves a call of two arguments with
+/// `ZEND_ARRAY_KEY_EXISTS` (`zend_compile_func_array_key_exists`), whose
+/// error for such a key is the offset's; what reaches the native is a
+/// call by a name the program holds, one with a named argument or an
+/// unpacked one, and a callback.
 ///
 /// ```php
+/// $f = 'array_key_exists';
 /// $a = ["1" => 1, "" => 2, "x" => null, 0 => 3];
-/// var_dump(array_key_exists("1", $a), array_key_exists(1.9, $a), array_key_exists(false, $a), array_key_exists("x", $a), array_key_exists("y", $a), array_key_exists(null, $a));
+/// var_dump($f("1", $a), $f(1.9, $a), $f(false, $a), $f("x", $a), $f("y", $a), $f(null, $a), array_key_exists(key: "x", array: $a));
+/// try { $f([], $a); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// try { array_key_exists([], $a); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// try { array_key_exists(1, "x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $f(1, "x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
-/// Deprecated: Implicit conversion from float 1.9 to int loses precision in %s on line 3
 ///
-/// Deprecated: Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead in %s on line 3
+/// Deprecated: Implicit conversion from float 1.9 to int loses precision in %s on line 4
+///
+/// Deprecated: Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead in %s on line 4
 /// bool(true)
 /// bool(true)
 /// bool(true)
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// bool(true)
+/// array_key_exists(): Argument #1 ($key) must be a valid array offset type
 /// Cannot access offset of type array on array
 /// array_key_exists(): Argument #2 ($array) must be of type array, string given
 /// ```
@@ -956,7 +963,7 @@ fn array_key_exists(
     key: Untyped<Value>,
     array: PhpArray,
 ) -> Result<bool, Thrown> {
-    key_exists_as(req, key.0, array, true)
+    key_exists_as(req, key.0, array)
 }
 
 /// `key_exists($key, array $array): bool`, the alias, which php serves
@@ -975,15 +982,10 @@ fn array_key_exists(
 /// ```
 #[php_function]
 fn key_exists(req: &mut Request, key: Untyped<Value>, array: PhpArray) -> Result<bool, Thrown> {
-    key_exists_as(req, key.0, array, false)
+    key_exists_as(req, key.0, array)
 }
 
-fn key_exists_as(
-    req: &mut Request,
-    key: Value,
-    array: PhpArray,
-    opcode: bool,
-) -> Result<bool, Thrown> {
+fn key_exists_as(req: &mut Request, key: Value, array: PhpArray) -> Result<bool, Thrown> {
     let key = match key.as_ref() {
         ValueRef::Str(s) => Key::from_string(*s),
         ValueRef::Int(n) => Key::Int(n),
@@ -1003,14 +1005,6 @@ fn key_exists_as(
                 &format!("Resource ID#{id} used as offset, casting to integer ({id})"),
             );
             Key::Int(id)
-        }
-        _ if opcode => {
-            let name = value_name(req, &key);
-            return Err(throw(
-                req,
-                "TypeError",
-                &format!("Cannot access offset of type {name} on array"),
-            ));
         }
         _ => {
             return Err(arg_type_error(req, 1, "be a valid array offset type"));

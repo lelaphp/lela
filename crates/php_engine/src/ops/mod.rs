@@ -1042,6 +1042,7 @@ fn type_assignable(
         crate::api::coerce::Scopes {
             own: Some(declaring),
             called: Some(declaring),
+            callables: crate::api::request::Deprecations::Suppressed,
         },
     ) {
         return Assignable::Yes;
@@ -4259,6 +4260,117 @@ pub(crate) fn array_offset(
                 &format!("Cannot access offset of type {class} on array"),
             ))
         }
+    }
+}
+
+/// `zend_array_key_exists_fast` (`Z/Zend/zend_execute.c:3372`), what
+/// `ZEND_ARRAY_KEY_EXISTS` asks of an array: whether the key the value
+/// makes is in it. A string is read as `ZEND_HANDLE_NUMERIC` reads it
+/// and a long is itself, with nothing raised; a variable nothing wrote
+/// is `undefined`'s diagnostic, the handler's `ZVAL_UNDEFINED_OP1`, and
+/// then the empty string; `null` is the empty string behind php's 8.5
+/// deprecation, which names the function; and every other key is
+/// [`array_offset`]'s: a float truncated behind its deprecation, a bool
+/// zero or one, a resource its id behind the warning, and an array or an
+/// object php's `TypeError`. A handler a diagnostic reaches may give the
+/// array up, so the array is held across the conversion, php's
+/// `GC_TRY_ADDREF(ht)` around the float's, and a key it was the last
+/// owner of is not in it.
+///
+/// ```php
+/// $a = ["1" => 1, "" => 2, "x" => null, 0 => 3];
+/// var_dump(array_key_exists("1", $a), array_key_exists(1.9, $a), array_key_exists(true, $a), array_key_exists("x", $a), array_key_exists("01", $a), array_key_exists(null, $a), array_key_exists($u, $a));
+/// try { array_key_exists([], $a); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { array_key_exists(new stdClass, $a); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 1.9 to int loses precision in %s on line 3
+///
+/// Deprecated: Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead in %s on line 3
+///
+/// Warning: Undefined variable $u in %s on line 3
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// Cannot access offset of type array on array
+/// Cannot access offset of type stdClass on array
+/// ```
+///
+/// ```php
+/// set_error_handler(function ($no, $message) { echo $message, "\n"; $GLOBALS['a'] = null; return true; });
+/// $a = [1 => 1]; $a[2] = 2; $b = $a;
+/// var_dump(array_key_exists(1.5, $a), $a);
+/// $a = [1 => 1]; $a[2] = 2;
+/// var_dump(array_key_exists(1.5, $a), $a);
+/// ```
+/// ```expect
+/// Implicit conversion from float 1.5 to int loses precision
+/// bool(true)
+/// NULL
+/// Implicit conversion from float 1.5 to int loses precision
+/// bool(false)
+/// NULL
+/// ```
+pub(crate) fn array_key_exists(
+    req: &mut Request,
+    array: PhpArray,
+    key: &Value,
+    undefined: impl FnOnce(&mut Request),
+) -> Result<bool, Thrown> {
+    let key = key.deref();
+    match key.as_ref() {
+        ValueRef::Str(s) => return Ok(array.heap().contains(Key::from_string(*s).heap())),
+        ValueRef::Int(n) => return Ok(array.heap().contains(php_heap::Key::Long(n))),
+        _ => {}
+    }
+    let held = req.take_hold(Value::array(array));
+    let converted = match key.as_ref() {
+        ValueRef::Undef => {
+            undefined(req);
+            PhpString::new(req, b"").map(|s| php_heap::Key::Str(s.heap()))
+        }
+        ValueRef::Null => {
+            deprecated(
+                req,
+                "Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead",
+            );
+            PhpString::new(req, b"").map(|s| php_heap::Key::Str(s.heap()))
+        }
+        _ => array_offset(req, &key, false),
+    };
+    if req.let_go(held).freed() {
+        return Ok(false);
+    }
+    let key = converted?;
+    if req.is_pending() {
+        return Err(Thrown::of(None));
+    }
+    Ok(array.heap().contains(key))
+}
+
+/// `zend_zval_get_legacy_type` (`Z/Zend/zend_API.c:191`), the name
+/// `ZEND_GET_TYPE` answers for a value: `NULL`, `boolean`, `integer`,
+/// `double`, `string`, `array`, `object`, and `resource` or `resource
+/// (closed)`; a reference is the value it holds, and a variable nothing
+/// wrote is `null`, which the handler warned of as it read it.
+pub(crate) fn legacy_type(value: &Value) -> &'static [u8] {
+    match value.deref().as_ref() {
+        ValueRef::Undef | ValueRef::Null => b"NULL",
+        ValueRef::Bool(_) => b"boolean",
+        ValueRef::Int(_) => b"integer",
+        ValueRef::Float(_) => b"double",
+        ValueRef::Str(_) => b"string",
+        ValueRef::Array(_) => b"array",
+        ValueRef::Object(_) => b"object",
+        ValueRef::Resource(resource) if resource.is_closed() => b"resource (closed)",
+        ValueRef::Resource(_) => b"resource",
+        // `deref` followed it; php's `default` arm names none.
+        ValueRef::Reference(_) => b"unknown type",
     }
 }
 

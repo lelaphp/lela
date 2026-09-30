@@ -213,7 +213,7 @@ fn a_test_and_its_skipif_spawn_the_binary_under_test_with_its_extra_args() {
     // carries the test's own --INI-- (#906).
     let (_root, subset) = rooted(
         "spawn",
-        "--TEST--\nspawn\n--INI--\nprecision=3\n--SKIPIF--\n<?php if (getenv('TEST_PHP_EXTRA_ARGS') === false || getenv('TEST_PHP_CGI_EXECUTABLE') !== '') echo 'skip no environment';\n--FILE--\n<?php\n$php = getenv('TEST_PHP_EXECUTABLE_ESCAPED');\n$extra = getenv('TEST_PHP_EXTRA_ARGS');\necho shell_exec(\"$php $extra -r 'echo 1/3, ini_get(\\\"error_reporting\\\");'\"), \"\\n\";\nvar_dump(getenv('TEST_PHP_EXECUTABLE') === realpath(getenv('TEST_PHP_EXECUTABLE')));\n--EXPECT--\n0.33330719\nbool(true)\n",
+        "--TEST--\nspawn\n--INI--\nprecision=3\n--SKIPIF--\n<?php if (getenv('TEST_PHP_EXTRA_ARGS') === false || getenv('TEST_PHP_CGI_EXECUTABLE') === '') echo 'skip no environment';\n--FILE--\n<?php\n$php = getenv('TEST_PHP_EXECUTABLE_ESCAPED');\n$extra = getenv('TEST_PHP_EXTRA_ARGS');\necho shell_exec(\"$php $extra -r 'echo 1/3, ini_get(\\\"error_reporting\\\");'\"), \"\\n\";\nvar_dump(getenv('TEST_PHP_EXECUTABLE') === realpath(getenv('TEST_PHP_EXECUTABLE')));\n--EXPECT--\n0.33330719\nbool(true)\n",
     );
     let tally = run(&subset, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
@@ -557,22 +557,37 @@ fn a_file_that_is_not_a_test_borks_and_the_subset_fails_on_it() {
     );
 }
 
+/// The fixture at `xtask/fixtures/phpt/cgi` (#1198): a `--POST--` test
+/// with a query string, a cookie and a header it wants, which passes only
+/// where the runner hands it to a CGI host with its request described, so
+/// a runner that skips it, or serves it the command line, fails here; and
+/// its negative control, whose body is met and whose headers are not. The
+/// oracle stands in for the engine, so the host is the php-cgi `[sapi]` pins.
 #[test]
-fn a_cgi_test_is_skipped_because_this_runner_hosts_the_command_line() {
+fn a_post_test_runs_through_the_cgi_host() {
     if oracle().is_none() {
         return;
     }
-    let (_tree, subset) = subset(
-        "cgi",
-        &[(
-            "cgi.phpt",
-            "--TEST--\nA CGI test\n--CGI--\n--FILE--\n<?php echo \"never\";\n--EXPECT--\nnever\n",
-        )],
-    );
+    let (_tree, subset) = fixture_subset("cgi");
     let tally = run(&subset, &registry(""));
-    let (judgement, note) = only(&tally);
-    assert_eq!(judgement, Judgement::Skip);
-    assert!(note.contains("CGI"), "{note}");
+    let went: Vec<(&str, Judgement)> = tally
+        .judged
+        .iter()
+        .map(|j| (j.name.as_str(), j.judgement))
+        .collect();
+    assert_eq!(
+        went,
+        [
+            ("headers.phpt", Judgement::Fail),
+            ("post.phpt", Judgement::Pass)
+        ],
+        "{tally:#?}"
+    );
+    let note = &tally.judged[0].note;
+    assert!(
+        note.contains("-X-Never: 1") && note.contains("--HEADERS--"),
+        "{note}"
+    );
 }
 
 #[test]
@@ -716,18 +731,65 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
             Crate::named("php_heap"),
             Crate::named("php_sapi").with_phpt(&["sapi/cli/tests"]),
             Crate::named("ext/pcre"),
+            Crate::named("ext/openssl").with_feature("openssl"),
             Crate::named("ext/curl").with_feature("curl"),
         ],
         &tree,
     );
-    let lane: Vec<String> = Subset::lane(&manifest, &tree)
+    let lane: Vec<String> = Subset::lane(&manifest, &Carried::turning_on(&["openssl"]), &tree)
         .into_iter()
         .map(|subset| subset.scope)
         .collect();
     // §7's per-commit row: Zend/tests and tests/ with php_engine, sapi/cli
-    // with php_sapi, and the default extensions' own. A crate behind a
-    // feature is not in the default build, and one with no subset owns none.
-    assert_eq!(lane, ["php_engine", "php_sapi", "ext/pcre"]);
+    // with php_sapi, and the extensions the binary carries: the default
+    // set's and the one behind a feature it turns on (revision 63). One
+    // behind a feature it does not turn on is the nightly lane's, and a
+    // crate with no subset owns none.
+    assert_eq!(lane, ["php_engine", "php_sapi", "ext/pcre", "ext/openssl"]);
+}
+
+/// The lane over the tracked manifest and the binary's own declaration:
+/// every row whose `feature` the binary turns on and which owns a subset
+/// is in it, so a lane that drops one, by a filter that reads the
+/// manifest's `feature` alone or by a second list of the binary's
+/// features gone stale, is this test red (revision 63, #1252).
+#[test]
+fn the_lane_runs_every_feature_row_the_binary_turns_on() {
+    let tree = Tree::new("phpt-lane-carried").unwrap();
+    let manifest = tracked_over_fixture(&tree);
+    let carried = Carried::binary(&workspace()).unwrap();
+    let carried_rows: Vec<&Crate> = manifest
+        .crates
+        .iter()
+        .filter(|krate| krate.feature.is_some() && carried.carries(krate))
+        .filter(|krate| !krate.subsets().is_empty())
+        .collect();
+    assert!(
+        !carried_rows.is_empty(),
+        "the binary turns on no feature row"
+    );
+    for krate in &carried_rows {
+        for under in krate.subsets() {
+            fs::create_dir_all(tree.join(under)).unwrap();
+        }
+    }
+    let lane: Vec<String> = Subset::lane(&manifest, &carried, &tree)
+        .into_iter()
+        .map(|subset| subset.scope)
+        .collect();
+    for krate in carried_rows {
+        assert!(
+            lane.contains(&krate.name),
+            "the lane drops {}, whose feature the binary turns on: {lane:?}",
+            krate.name
+        );
+    }
+    let left_out = manifest
+        .crates
+        .iter()
+        .filter(|krate| !carried.carries(krate))
+        .find(|krate| lane.contains(&krate.name));
+    assert_eq!(left_out, None, "{lane:?}");
 }
 
 #[test]

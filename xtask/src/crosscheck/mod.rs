@@ -3,9 +3,9 @@
 //! <name>` constructs a `ReflectionExtension` and prints its
 //! `__toString()`, every constant, ini entry, function, class, method,
 //! property and the tentative-return row, in php's wording and order. The
-//! lane runs the oracle's `--re` under the recipe for each extension of
-//! the bundle's default set, or the one `--ext` names, keeps the oracle's
-//! bytes in the store under the extension's name and the oracle's digest,
+//! lane runs the oracle's `--re` under the recipe for each extension the
+//! binary under test carries ([`Carried`]), or the one `--ext` names, keeps
+//! the oracle's bytes in the store under the extension's name and the oracle's digest,
 //! and holds the engine's rendering to them byte for byte through
 //! [`oracle::compare`], one reading per extension scoped `ext/<name>`.
 //!
@@ -13,9 +13,12 @@
 //! `ReflectionExtension::__toString()` the witness on `ext/reflection`
 //! runs, `echo new ReflectionExtension('<name>');` served through the
 //! linked adapter, [`oracle::linked`], one fresh engine of `php_bundle`
-//! with every extension feature on (harness §7, revision 43) under the
-//! recipe's preamble, ini and normalisation, which is the seam the `php`
-//! binary's `--re` flag calls once the hosts exist (design §7.1). A
+//! with every extension feature on but `pcntl` (harness §7, revision 43)
+//! under the recipe's preamble, ini and normalisation, or, for `pcntl`,
+//! which the harness does not link, through the `php` binary the witness
+//! lane builds for a fence marked `process` (revision 61) under the same
+//! recipe; that `__toString()` is the seam the `php` binary's `--re` flag
+//! calls once the hosts exist (design §7.1). A
 //! request that ends on a status other than zero rendered nothing, and
 //! the engine's own words for why, `ReflectionException: Extension "x"
 //! does not exist` or a fatal, are the reading's cause
@@ -60,11 +63,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::carried::Carried;
 use crate::divergence::{Kind, Registry};
 use crate::manifest::Manifest;
 use crate::oracle::{self, Invocation, Observation, Oracle, Program, Verdict, linked};
 use crate::reading::{Reading, Status, Store, plural};
 use crate::sources;
+use crate::witness::Binary;
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "crosscheck";
@@ -146,8 +151,8 @@ impl Column {
 #[derive(Debug, Clone, Default)]
 pub struct Ask {
     /// The extensions, by their crates' names (`ctype`, `opcache`):
-    /// `--ext <name>`, repeatable; the bundle's default set when none is
-    /// named.
+    /// `--ext <name>`, repeatable; every extension the binary under test
+    /// carries when none is named.
     pub ext: Vec<String>,
     /// A directory of `<name>.re` and `<name>.ri` files standing for the
     /// engine's renderings, what a test hands the lane for the negative
@@ -299,16 +304,16 @@ pub(crate) fn recipe(manifest: &Manifest, name: &str, column: Column) -> String 
 }
 
 /// The extensions a run holds: the ones named, or the manifest's `ext/*`
-/// rows outside every feature, which is the bundle's default set (harness
-/// §7).
-pub(crate) fn extensions(manifest: &Manifest, ask: &Ask) -> Vec<String> {
+/// rows the binary under test carries, the bundle's default set and every
+/// feature the binary turns on (harness §7, revision 63).
+pub(crate) fn extensions(manifest: &Manifest, carried: &Carried, ask: &Ask) -> Vec<String> {
     if !ask.ext.is_empty() {
         return ask.ext.clone();
     }
     manifest
         .crates
         .iter()
-        .filter(|krate| !krate.optional())
+        .filter(|krate| carried.carries(krate))
         .filter_map(|krate| krate.name.strip_prefix("ext/"))
         .map(str::to_owned)
         .collect()
@@ -332,7 +337,11 @@ pub fn run(
     } else {
         Some(format!("the pinned php is not at {}", pinned.display()))
     };
-    extensions(manifest, ask)
+    let engines = Engines {
+        linked: Carried::linked()?,
+        binary: Binary::of(root),
+    };
+    extensions(manifest, &Carried::binary(root)?, ask)
         .iter()
         .flat_map(|name| Column::ALL.iter().map(move |column| (name, *column)))
         .map(|(name, column)| {
@@ -370,7 +379,7 @@ pub fn run(
             }
             fs::write(&path, &observed.stdout)
                 .with_context(|| format!("keeping the oracle's rendering at {}", path.display()))?;
-            let engine = rendering(manifest, ask, name, column)?;
+            let engine = rendering(manifest, ask, &engines, &oracle, name, column)?;
             let judgement = judge(registry, name, column, &observed.stdout, &engine);
             reading.status = judgement.status();
             reading.count("bytes", observed.stdout.len() as u64)?;
@@ -397,26 +406,55 @@ pub fn run(
         .collect()
 }
 
+/// What serves the engine's side of one run: the engine linked into this
+/// harness, and the `php` binary the witness lane serves a fence marked
+/// `process` through, for an extension the linked engine does not carry,
+/// which is `pcntl` (harness §8, revision 61). Both answer under the
+/// recipe, normalised as the oracle's stream is.
+struct Engines {
+    /// What the linked engine carries.
+    linked: Carried,
+    /// The binary, built at the first extension that asks for it.
+    binary: Binary,
+}
+
 /// The engine's side for `name` in `column`: the file a test handed the
 /// lane, through the recipe's normalisation as the oracle's stream went,
-/// or the linked engine's own rendering of [`Column::program`], which
-/// [`linked::serve`] answers
-/// normalised already. A request that did not end on zero rendered
-/// nothing, and the engine's words are why: under the recipe's
-/// `display_errors=1` what was thrown and not caught is on the first
-/// stream, and the trouble of a serve that did not run, a panic inside, is
-/// on neither.
-fn rendering(manifest: &Manifest, ask: &Ask, name: &str, column: Column) -> Result<Rendering> {
+/// or the engine's own rendering of [`Column::program`], served by the
+/// linked engine where it carries the extension and by the binary where
+/// it does not ([`Engines`]), normalised already. A request that did not
+/// end on zero rendered nothing, and the engine's words are why: under
+/// the recipe's `display_errors=1` what was thrown and not caught is on
+/// the first stream, and the trouble of a serve that did not run, a panic
+/// inside or a binary that did not build, is on neither.
+fn rendering(
+    manifest: &Manifest,
+    ask: &Ask,
+    engines: &Engines,
+    oracle: &Oracle<'_>,
+    name: &str,
+    column: Column,
+) -> Result<Rendering> {
     let Some(dir) = &ask.renderings else {
-        return Ok(
-            match linked::serve(&manifest.pin.recipe, None, &column.program(name)) {
-                Err(trouble) => {
-                    Rendering::Absent(format!("the linked engine did not serve it: {trouble:#}"))
-                }
-                Ok(served) if served.exit != Some(0) => Rendering::Absent(said(&served)),
-                Ok(served) => Rendering::Bytes(served.stdout),
-            },
-        );
+        let program = column.program(name);
+        let linked = manifest
+            .crate_named(&Column::Re.scope(name))
+            .is_none_or(|krate| engines.linked.carries(krate));
+        let served = if linked {
+            linked::serve(&manifest.pin.recipe, None, &program)
+                .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}"))
+        } else {
+            engines
+                .binary
+                .serve(oracle, &program, None)
+                .map(|(served, _)| served)
+                .map_err(|trouble| format!("the php binary did not serve it: {trouble:#}"))
+        };
+        return Ok(match served {
+            Err(why) => Rendering::Absent(why),
+            Ok(served) if served.exit != Some(0) => Rendering::Absent(said(&served)),
+            Ok(served) => Rendering::Bytes(served.stdout),
+        });
     };
     let path = dir.join(format!("{name}.{}", column.kept()));
     if !path.is_file() {

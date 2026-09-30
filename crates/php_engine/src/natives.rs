@@ -42,6 +42,8 @@ mod classes;
 mod errors;
 mod functions;
 
+pub(crate) use functions::ZEND_VERSION;
+
 /// The natives php keeps in `ext/standard` and this engine here, in
 /// the order they were declared, which follow Core's
 /// ([`crate::core::extension`]) in the function table.
@@ -667,10 +669,14 @@ fn class_exists(
 /// argument the executed scope's name, deprecated since 8.3, and php's
 /// `Error` where there is no scope. The scope is
 /// `zend_get_executed_scope`'s, which walks past this native's own
-/// frame to the method that called it.
+/// frame to the method that called it. php's compiler serves a call of
+/// none or one argument with `ZEND_GET_CLASS`
+/// (`zend_compile_func_get_class`); what reaches the native is a call by
+/// a name the program holds, a named or an unpacked argument, and a
+/// callback.
 ///
 /// ```php
-/// class M { function f() { return get_class(); } }
+/// class M { function f() { $g = 'get_class'; return $g(); } }
 /// var_dump((new M)->f());
 /// ```
 /// ```expect
@@ -679,9 +685,9 @@ fn class_exists(
 /// ```
 ///
 /// ```php
-/// class M {} $m = new M;
-/// var_dump(get_class($m), get_class(new Exception));
-/// try { get_class(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// class M {} $m = new M; $g = 'get_class';
+/// var_dump($g($m), $g(new Exception));
+/// try { $g(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// string(1) "M"
@@ -690,7 +696,7 @@ fn class_exists(
 /// ```
 ///
 /// ```php
-/// try { get_class(); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// $g = 'get_class'; try { $g(); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// Error: get_class() without arguments must be called from within a class
@@ -1699,7 +1705,7 @@ fn dump_property_name(req: &mut Request, out: &mut Vec<u8>, level: usize, name: 
 
 /// What `zend_unmangle_property_name_ex` answers for one name.
 #[derive(Clone, Copy)]
-enum Unmangled<'a> {
+pub(crate) enum Unmangled<'a> {
     /// A name with no `\0` at its head: `SUCCESS` with no class.
     Plain,
     /// The class part and the property: `SUCCESS` with a class.
@@ -1715,7 +1721,7 @@ enum Unmangled<'a> {
 /// it. The notice is `Illegal member variable name` for a name shorter
 /// than three bytes or with `\0` at its second byte, and `Corrupt
 /// member variable name` for one with no second `\0`.
-fn unmangle_property_name(name: &[u8]) -> Unmangled<'_> {
+pub(crate) fn unmangle_property_name(name: &[u8]) -> Unmangled<'_> {
     let Some(rest) = name.strip_prefix(b"\0") else {
         return Unmangled::Plain;
     };

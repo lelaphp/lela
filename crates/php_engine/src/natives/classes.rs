@@ -62,22 +62,23 @@ fn class_name(req: &mut Request, class: ClassId) -> Result<PhpString, Thrown> {
 /// `get_called_class(): string`, php's `ZEND_FUNCTION(get_called_class)`
 /// (`Z/Zend/zend_builtin_functions.c:654`): the class `static` names
 /// where the native was called, `zend_get_called_scope`, and php's
-/// `Error` outside a class. php's compiler serves a call of it with
-/// `ZEND_GET_CALLED_CLASS`, whose frame a trace does not show; this
-/// engine's serves it as a call, so the witness reads the `Error`'s
-/// message and not the trace.
+/// `Error` outside a class. php's compiler serves a call of no argument
+/// with `ZEND_GET_CALLED_CLASS` (`zend_compile_func_get_called_class`);
+/// what reaches the native is a call by a name the program holds and a
+/// callback, whose frame the `Error`'s trace shows.
 ///
 /// ```php
-/// class A { static function f() { return get_called_class(); } function g() { return get_called_class(); } }
+/// class A { static function f() { $g = 'get_called_class'; return $g(); } function g() { return call_user_func('get_called_class'); } }
 /// class B extends A {}
 /// var_dump(A::f(), B::f(), (new B)->g());
-/// try { get_called_class(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $g = 'get_called_class';
+/// try { $g(); } catch (Error $e) { echo $e->getMessage(), " at ", count($e->getTrace()), "\n"; }
 /// ```
 /// ```expect
 /// string(1) "A"
 /// string(1) "B"
 /// string(1) "B"
-/// get_called_class() must be called from within a class
+/// get_called_class() must be called from within a class at 1
 /// ```
 #[php_function]
 fn get_called_class(req: &mut Request) -> Result<PhpString, Thrown> {
@@ -378,53 +379,6 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<PhpArray, Throw
     Ok(array)
 }
 
-/// `zend_get_property_info` under the executed scope, as
-/// `zend_check_property_access` asks it about one name: the declared
-/// slot the name reaches, none where it reaches a dynamic property,
-/// and `Err` where the slot it reaches is not the scope's to read,
-/// php's `ZEND_WRONG_PROPERTY_INFO`. The row a name reaches is its last
-/// slot; where an earlier slot of the name is a parent's private one
-/// (`ZEND_ACC_CHANGED`) and the scope is that parent, the parent's is
-/// what it reaches.
-fn property_info(
-    req: &Request,
-    class: ClassId,
-    placed: &[(ClassId, PropertyDecl)],
-    name: &[u8],
-    scope: Option<ClassId>,
-) -> Result<Option<usize>, ()> {
-    let Some(last) = placed.iter().rposition(|(_, p)| &*p.name.0 == name) else {
-        return Ok(None);
-    };
-    let (declaring, property) = &placed[last];
-    let changed = placed
-        .iter()
-        .take(last)
-        .any(|(_, p)| &*p.name.0 == name && p.visibility == Visibility::Private);
-    if (changed || property.visibility != Visibility::Public) && Some(*declaring) != scope {
-        if changed {
-            if let Some(scope) = scope
-                && req.instance_of(class, scope)
-                && let Some(parent) = placed.iter().position(|(at, p)| {
-                    *at == scope && &*p.name.0 == name && p.visibility == Visibility::Private
-                })
-            {
-                return Ok(Some(parent));
-            }
-            if property.visibility == Visibility::Public {
-                return Ok(Some(last));
-            }
-        }
-        match property.visibility {
-            Visibility::Private if *declaring != class => return Ok(None),
-            Visibility::Private => return Err(()),
-            Visibility::Protected if !req.check_protected(*declaring, scope) => return Err(()),
-            _ => {}
-        }
-    }
-    Ok(Some(last))
-}
-
 /// `get_object_vars(object $object): array`, php's
 /// `ZEND_FUNCTION(get_object_vars)` (`Z/Zend/zend_builtin_functions.c:832`):
 /// the object's properties the executed scope may read, each named as
@@ -486,7 +440,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
     // class that answers the purpose itself hands back its table.
     let table = req.object_handlers(object.heap());
     if let Some(rows) = table.get_properties_for(req, object, PropertyPurpose::GetObjectVars)? {
-        return answered_vars(req, class, scope, rows);
+        return answered_vars(req, class, rows);
     }
     // Over a class with a hooked property it is the table its hooks
     // answer, each row one owner of its own.
@@ -509,30 +463,14 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
         }
         return Ok(array);
     }
-    let placed = req.placed_properties(class);
     let rows = req.property_rows(object)?;
     let mut array = PhpArray::new(req)?;
     for (name, value, declared) in rows {
-        let bytes = name.as_bytes();
-        let seen = match declared {
-            None => true,
-            Some((declaring, Visibility::Private)) => {
-                matches!(property_info(req, class, &placed, bytes, scope), Ok(Some(at))
-                    if placed[at].0 == declaring && placed[at].1.visibility == Visibility::Private)
-            }
-            Some((_, Visibility::Protected)) => {
-                matches!(
-                    property_info(req, class, &placed, bytes, scope),
-                    Ok(Some(_))
-                )
-            }
-            Some((_, Visibility::Public)) => match property_info(req, class, &placed, bytes, scope)
-            {
-                Ok(None) => true,
-                Ok(Some(at)) => placed[at].1.visibility == Visibility::Public,
-                Err(()) => false,
-            },
-        };
+        let seen = req.property_row_visible(
+            class,
+            name.as_bytes(),
+            declared.map(|(declaring, _)| declaring),
+        );
         if !seen {
             continue;
         }
@@ -576,10 +514,8 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
 fn answered_vars(
     req: &mut Request,
     class: ClassId,
-    scope: Option<ClassId>,
     rows: Vec<(Key, Value)>,
 ) -> Result<PhpArray, Thrown> {
-    let placed = req.placed_properties(class);
     let mut array = PhpArray::new(req)?;
     for (key, value) in rows {
         // An integer key is an element the class shows among its
@@ -592,14 +528,11 @@ fn answered_vars(
             }
             Key::Str(name) => name,
         };
-        let bytes = name.as_bytes();
-        let key = if bytes.first() == Some(&0) {
+        let key = if name.as_bytes().first() == Some(&0) {
             Key::Str(name)
         } else {
-            match property_info(req, class, &placed, bytes, scope) {
-                Ok(None) => {}
-                Ok(Some(at)) if placed[at].1.visibility == Visibility::Public => {}
-                _ => continue,
+            if !req.property_row_visible(class, name.as_bytes(), None) {
+                continue;
             }
             Key::from_string(name)
         };

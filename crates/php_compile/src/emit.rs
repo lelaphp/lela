@@ -4923,6 +4923,7 @@ impl Emit<'_> {
                 .iter()
                 .map(|i| Name(i.clone().into_boxed_slice()))
                 .collect(),
+            implementors: Vec::new(),
             traits,
             adaptations,
             backing,
@@ -5338,37 +5339,13 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_verify_enum_magic_methods` (`Z/Zend/zend_enum.c:79`) and
     /// `zend_enum_register_funcs` over the enum at `at` of the unit's
-    /// classes: a magic method php keeps off an enum is its compile
-    /// error, in php's order of the checks, and the enum takes `cases`,
-    /// and for a backed one `from` and `tryFrom`, after its own methods,
-    /// a method of its own under one of those names being php's
-    /// `Cannot redeclare`.
-    ///
-    /// ```php
-    /// enum E { case A; public function __toString(): string { return ''; } }
-    /// ```
-    /// ```expect exit=255
-    /// Fatal error: Enum E cannot include magic method __toString in %s on line 2
-    /// ```
+    /// classes: the enum takes `cases`, and for a backed one `from` and
+    /// `tryFrom`, after its own methods, a method of its own under one
+    /// of those names being php's `Cannot redeclare`. The magic methods
+    /// php keeps off an enum are the linker's to refuse, as
+    /// `zend_verify_enum` refuses them when the class links.
     fn verify_enum(&mut self, at: usize, name: &[u8]) -> Result<(), CompileError> {
-        const FORBIDDEN: [&str; 14] = [
-            "__construct",
-            "__destruct",
-            "__clone",
-            "__get",
-            "__set",
-            "__unset",
-            "__isset",
-            "__toString",
-            "__debugInfo",
-            "__serialize",
-            "__unserialize",
-            "__sleep",
-            "__wakeup",
-            "__set_state",
-        ];
         let Some(decl) = self.classes.get(at) else {
             return Err(self.fatal("InternalError: an enum the unit has not"));
         };
@@ -5377,12 +5354,6 @@ impl Emit<'_> {
                 .iter()
                 .any(|m| m.function.name.0.eq_ignore_ascii_case(wanted.as_bytes()))
         };
-        if let Some(magic) = FORBIDDEN.iter().find(|magic| has(magic)) {
-            return Err(self.compile_error(format!(
-                "Enum {} cannot include magic method {magic}",
-                String::from_utf8_lossy(name)
-            )));
-        }
         let builtins = php_unit::enum_methods(decl.backing);
         if let Some(clash) = builtins
             .iter()
@@ -5410,6 +5381,13 @@ impl Emit<'_> {
     /// ```
     /// ```expect exit=255
     /// Fatal error: Private constant A::X cannot be final as it is not visible to other classes in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface A { protected const FOO = 10; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access type for interface constant A::FOO must be public in %s on line 2
     /// ```
     ///
     /// ```php
@@ -5449,6 +5427,12 @@ impl Emit<'_> {
                     "Cannot use {} as value for class constant {member} of type {}",
                     zval_type_name(kind),
                     php_unit::type_to_string(ty)
+                )));
+            }
+            // `zend_declare_typed_class_constant`'s first test.
+            if decl.kind == ClassKind::Interface && constant.visibility != Visibility::Public {
+                return Err(self.compile_error(format!(
+                    "Access type for interface constant {member} must be public"
                 )));
             }
             if constant.name.eq_ignore_ascii_case(b"class") {
@@ -6697,7 +6681,9 @@ impl Emit<'_> {
                 linked: true,
             })
         };
-        let linking = php_unit::link::link(child, &lookup);
+        // A class that uses traits is never bound early, so nothing
+        // here composes one, and no value is evaluated.
+        let linking = php_unit::link::link(child, &lookup, &|_| None);
         // `zend_can_early_bind`'s `INHERITANCE_UNRESOLVED`, silent: the
         // class is left to its opline.
         if !linking.obligations.is_empty() {
@@ -13904,16 +13890,19 @@ impl Emit<'_> {
     /// (`zend_eval_const_expr`), so `(float)1` stands as an opline.
     fn cast(&mut self, to: CastTo, operand: tree::Expr) -> Result<Where, CompileError> {
         let operand = self.expr(operand)?;
-        Ok(match to {
-            CastTo::Bool => self.emit_unary(Opcode::Bool, operand, 0),
-            _ => self.emit_unary(Opcode::Cast, operand, to.type_code()),
-        })
+        Ok(self.emit_cast(operand, to))
     }
 
-    /// `ZEND_CAST` of `operand` to `to` into a temporary, what
+    /// `operand` converted to `to` into a temporary: `ZEND_BOOL` for a
+    /// bool and `ZEND_CAST` with the type in `extended_value` for the
+    /// rest. What `zend_compile_cast` emits, what `zend_compile_func_cast`
+    /// emits for `boolval`, `intval`, `floatval` and `strval`, and what
     /// `zend_compile_func_sprintf` emits before a `%d` and an array's `%s`.
     pub(crate) fn emit_cast(&mut self, operand: Where, to: CastTo) -> Where {
-        self.emit_unary(Opcode::Cast, operand, to.type_code())
+        match to {
+            CastTo::Bool => self.emit_unary(Opcode::Bool, operand, 0),
+            _ => self.emit_unary(Opcode::Cast, operand, to.type_code()),
+        }
     }
 
     /// `zend_emit_op_tmp(result, opcode, NULL, NULL)`: the opline with
@@ -14151,11 +14140,16 @@ impl Emit<'_> {
                     _ => Err(self.unread("a unary operator")),
                 }
             }
+            // `zend_compile_cast` folds nothing, which [`Self::cast`]
+            // copies: under a compile the cast is its opline, a `TMP`,
+            // and no fold over it happens, so `-(float)"0"` is the `CAST`
+            // and the `MUL` over it.
+            tree::Expr::CastExpr(_) if self.fold == Fold::Compile => {
+                Err(self.fatal("a cast compiled is its opline"))
+            }
             // `zend_eval_const_expr`'s `ZEND_AST_CAST` arm: the operand
-            // folded, then `zend_try_ct_eval_cast` over it;
-            // `zend_compile_cast` itself folds nothing, which
-            // [`Self::cast`] copies. `(unset)` is refused where it
-            // stands, as php's grammar puts it.
+            // folded, then `zend_try_ct_eval_cast` over it. `(unset)` is
+            // refused where it stands, as php's grammar puts it.
             tree::Expr::CastExpr(id) => {
                 let node = &tree[id];
                 let to = self.cast_to(node.op, line)?;
@@ -16278,6 +16272,29 @@ impl Emit<'_> {
     fn function_name(&self, name: &[u8]) -> (Vec<u8>, bool) {
         let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Function);
         (resolved, !fully_qualified && self.namespace.is_some())
+    }
+
+    /// A call of a name written as such, `ZEND_AST_CALL` whose name is a
+    /// `ZEND_AST_ZVAL` string: that name lowered as
+    /// `zend_resolve_function_name` resolves it through the file's
+    /// imports, and the arguments as written; nothing for a call of
+    /// anything else, a parenthesised name among them, which php's
+    /// grammar makes a constant, and nothing for anything but a call.
+    /// What `zend_compile_func_array_slice` and `zend_compile_func_cufa`
+    /// read of the call written as their argument.
+    pub(crate) fn named_call(&self, expr: tree::Expr) -> Option<(Vec<u8>, &[tree::Arg])> {
+        let tree::Expr::CallExpr(call) = self.peel(expr) else {
+            return None;
+        };
+        let node = &self.parsed.tree[call];
+        let tree::Expr::NameRef(name) = node.callee else {
+            return None;
+        };
+        let (resolved, _) = self.function_name(self.text(name));
+        Some((
+            resolved.to_ascii_lowercase(),
+            &self.parsed.tree[node.args].args,
+        ))
     }
 
     /// [`Self::function_name`] for a constant, `zend_resolve_const_name`,
