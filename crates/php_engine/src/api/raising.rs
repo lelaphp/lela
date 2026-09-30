@@ -253,7 +253,9 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
             crate::api::request::Phase::Running => req
                 .active_user_function()
                 .map_or_else(|| String::from("Unknown"), |name| format!("{name}()")),
-            crate::api::request::Phase::Shutdown => String::from("PHP Request Shutdown"),
+            crate::api::request::Phase::Shutdown | crate::api::request::Phase::ResourceShutdown => {
+                String::from("PHP Request Shutdown")
+            }
         };
         format!("{origin}: {message}")
     };

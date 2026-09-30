@@ -206,13 +206,16 @@ impl ConstantRow {
 /// (`Z/main/main.c:1086-1129`): `PG(during_request_startup)`, set by
 /// `php_request_startup` and cleared by the CLI before it compiles the
 /// file (`Z/sapi/cli/php_cli.c:943`), so the extensions' `RINIT` are
-/// served inside it; the main op array; and `EG_FLAGS_IN_SHUTDOWN`, which
-/// `php_request_shutdown` sets first (`Z/main/main.c:1960`).
+/// served inside it; the main op array; `EG_FLAGS_IN_SHUTDOWN`, which
+/// `php_request_shutdown` sets first (`Z/main/main.c:1960`); and
+/// `EG_FLAGS_IN_RESOURCE_SHUTDOWN`, which `shutdown_executor` sets beside
+/// it as it closes the resources (`Z/Zend/zend_execute_API.c:276`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     Startup,
     Running,
     Shutdown,
+    ResourceShutdown,
 }
 
 /// One `ob_*` operation on the request's buffer stack.
@@ -15872,6 +15875,26 @@ impl Request {
     /// include(): Failed opening 'data:,x' for inclusion (include_path='.')
     /// bool(false)
     /// ```
+    ///
+    /// A fatal while the file is read leaves its stream open, since
+    /// `zend_bailout` jumps past `zend_destroy_file_handle`: the stream is
+    /// closed with the request's resources, its `stream_close` served.
+    ///
+    /// ```php
+    /// class L { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_set_option($o, $a, $b) { return false; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_read($c) { function f() {} }
+    ///     function stream_close() { echo "closed\n"; } }
+    /// stream_wrapper_register('ll', 'L');
+    /// function f() {}
+    /// include 'll://x';
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot redeclare function f() (previously declared in %s:9) in %s on line 6
+    /// closed
+    /// ```
     pub(crate) fn include_stream(
         &mut self,
         kind: IncludeKind,
@@ -15902,7 +15925,13 @@ impl Request {
                 let source = self
                     .stream_op(*stream, |req, s| s.copy_to_mem(req, None))
                     .unwrap_or_default();
-                stream.free(self);
+                // A read that bailed out leaves the stream open, as
+                // `zend_bailout` leaves `zend_destroy_file_handle`
+                // unreached: it stands among the request's resources,
+                // which close it at shutdown.
+                if !self.bailing_out() {
+                    stream.free(self);
+                }
                 Some(source)
             }
             _ => None,
@@ -19473,8 +19502,35 @@ impl Request {
     /// `zend_close_rsrc_list`, the first act of
     /// `zend_shutdown_executor_values` (design §5.10): every open
     /// resource closed from the top down, its destructor served, before
-    /// the object storage is freed.
+    /// the object storage is freed. Each destructor is a `zend_try` of its
+    /// own: a fatal a user-space stream's `stream_close` raises is caught
+    /// after it, and the walk goes on from the top, where a resource the
+    /// destructor opened now stands (`Z/Zend/zend_list.c:215-247`).
+    ///
+    /// ```php
+    /// class W { public $context; static $n = 0;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_close() { echo "close ", ++self::$n, "\n"; if (self::$n == 1) undefined(); } }
+    /// stream_wrapper_register('ww', 'W');
+    /// $a = fopen('ww://a', 'r'); $b = fopen('ww://b', 'r');
+    /// undefined_too();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Call to undefined function undefined_too() in %s:7
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 7
+    /// close 1
+    ///
+    /// Fatal error: Uncaught Error: Call to undefined function undefined() in %s:4
+    /// Stack trace:
+    /// #0 [internal function]: W->stream_close()
+    /// #1 {main}
+    ///   thrown in %s on line 4
+    /// close 2
+    /// ```
     pub(crate) fn close_resources(&mut self) {
+        self.enter_phase(Phase::ResourceShutdown);
         Heap::close_resources(&mut Hooks(self));
     }
 
@@ -20381,6 +20437,11 @@ impl HeapHooks for Hooks<'_> {
     fn free_resource(&mut self, res: Res, kind: ResourceType) {
         if let Some(dtor) = self.0.resources.dtor(kind) {
             dtor(self.0, Resource::of(res));
+        }
+        // `zend_close_rsrc_list`'s `zend_catch`: what a destructor bailed
+        // out of is caught behind it, and the walk goes on.
+        if self.0.phase == Phase::ResourceShutdown {
+            self.0.catch_bailout();
         }
     }
 
