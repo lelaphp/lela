@@ -486,8 +486,9 @@ fn spl_autoload_unregister(req: &mut Request, callback: Raw<Callable>) -> Result
     Ok(req.autoload_unregister(&loader))
 }
 
-/// `SPL_LIST_CLASSES`, in its alphabetical order.
-const SPL_CLASSES: &[&str] = &[
+/// `SPL_LIST_CLASSES`, in its order: alphabetical but for `SplMinHeap`
+/// before `SplMaxHeap`.
+pub(crate) const SPL_CLASSES: &[&str] = &[
     "AppendIterator",
     "ArrayIterator",
     "ArrayObject",

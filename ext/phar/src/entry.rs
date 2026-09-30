@@ -295,7 +295,10 @@ pub(crate) fn open_archive_fp(req: &mut Request, id: ArchiveId) -> Result<bool, 
     let Some(archive) = archives(req).get_mut(id) else {
         return Ok(false);
     };
-    archive.fp = bytes.map(Arc::new);
+    archive.fp = bytes.map(|bytes| archive::Fp {
+        bytes: Arc::new(bytes),
+        through: archive::Through::File,
+    });
     Ok(archive.fp.is_some())
 }
 
@@ -330,8 +333,8 @@ pub(crate) fn efp(
             open_archive_fp(req, id)?;
             archives(req)
                 .get(id)
-                .and_then(|a| a.fp.clone())
-                .map(Efp::Shared)
+                .and_then(|a| a.fp.as_ref())
+                .map(|fp| Efp::Shared(Arc::clone(&fp.bytes)))
         }
         Kind::Ufp => archives(req)
             .get(id)

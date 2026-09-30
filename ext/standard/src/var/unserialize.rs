@@ -632,6 +632,23 @@ impl<'a> Unserializer<'a> {
     /// an owner of what was read until it is destroyed, as php's keeps
     /// the `var_tmp_var` a session variable is read into, so an `R:` read
     /// after the array has let the value go names a place that stands.
+    /// What the slot held is let go once the value is read, never
+    /// before: php reads into the `var_tmp_var` and updates the slot
+    /// after (`php_set_session_var`), so the objects read take no object id
+    /// the old value frees.
+    ///
+    /// ```php
+    /// class foo {}
+    /// ob_start(); session_start(["save_path" => __DIR__, "use_cookies" => 0, "cache_limiter" => ""]);
+    /// session_decode('baz|O:3:"foo":0:{}arr|a:1:{i:3;O:3:"foo":0:{}}');
+    /// session_decode('baz|O:3:"foo":0:{}arr|a:1:{i:3;O:3:"foo":0:{}}');
+    /// var_dump(spl_object_id($_SESSION["baz"]), spl_object_id($_SESSION["arr"][3]));
+    /// session_destroy(); ob_end_flush();
+    /// ```
+    /// ```expect
+    /// int(3)
+    /// int(1)
+    /// ```
     pub fn element(
         &mut self,
         req: &mut Request,
@@ -642,10 +659,17 @@ impl<'a> Unserializer<'a> {
         if let Key::Str(s) = &key {
             self.state.hash.dtors.push(Dtor::Kept(Value::string(*s)));
         }
+        let held = array.get(&written);
+        if let Some(old) = &held {
+            req.addref(old);
+        }
         let read = self.state.read(req, Slot::Element(array, key));
         if let Some(value) = array.get(&written) {
             req.addref(&value);
             self.state.hash.dtors.push(Dtor::Kept(value));
+        }
+        if let Some(old) = held {
+            req.release(old);
         }
         read
     }

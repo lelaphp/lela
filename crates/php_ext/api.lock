@@ -72,6 +72,7 @@ abi::ExtensionBuilder::rinit
 abi::ExtensionBuilder::rshutdown
 abi::ExtensionBuilder::ticks
 abi::ExtensionBuilder::trampolines
+abi::ExtensionBuilder::treat_data
 abi::ExtensionBuilder::upload
 abi::ExtensionBuilder::zend_extension
 abi::False
@@ -383,6 +384,7 @@ request::HandlerOp
 request::HandlerStatus
 request::Handshake
 request::HostPath
+request::InfoRow
 request::IniEntry
 request::Input
 request::Interrupt
@@ -476,6 +478,8 @@ request::Request::headers_list
 request::Request::headers_sent
 request::Request::included_files
 request::Request::info_ini_entries
+request::Request::info_ini_table
+request::Request::info_rows
 request::Request::info_table
 request::Request::ini_entries
 request::Request::ini_get
@@ -502,6 +506,7 @@ request::Request::output_buffer_op
 request::Request::output_started_at
 request::Request::parse_body
 request::Request::parse_query
+request::Request::phpinfo_as_text
 request::Request::plain_path
 request::Request::realpath
 request::Request::realpath_cache

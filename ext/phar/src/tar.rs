@@ -3,8 +3,6 @@
 //! its magic `.phar/` entries carrying the alias, the stub, the
 //! `metadata` and the signature.
 
-use std::sync::Arc;
-
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 
@@ -429,7 +427,7 @@ pub(crate) fn parse(
         ));
     }
     phar.fname = fname.to_vec();
-    phar.fp = Some(Arc::new(bytes));
+    phar.fp = Some(archive::Fp::opened(bytes, phar.flags));
     phar.find_ext();
     phar.version = archive::API_VERSION.to_string();
     if archives(req).by_fname(fname).is_some() {

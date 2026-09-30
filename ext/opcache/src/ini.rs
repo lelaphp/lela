@@ -263,13 +263,13 @@ impl Entry {
         }
     }
 
-    /// The value as `display_ini_entries` shows it: `On` and `Off` for a
-    /// boolean, `no value` for an empty one.
+    /// The value as its displayer shows it: `On` and `Off` for a boolean,
+    /// the value as it is otherwise, which `display_ini_entries` shows as
+    /// `no value` where it is empty.
     pub(crate) fn shown(&self, value: &[u8]) -> String {
         match self.kind {
             Kind::Bool | Kind::Enable if Request::ini_parse_bool(value) => String::from("On"),
             Kind::Bool | Kind::Enable => String::from("Off"),
-            _ if value.is_empty() => String::from("no value"),
             _ => String::from_utf8_lossy(value).into_owned(),
         }
     }

@@ -609,6 +609,18 @@ pub(crate) fn escape(text: &[u8], at: usize, quote: Quote) -> Escape {
 /// ```expect
 /// 65 195 169 226 130 172 240 159 152 128 0 244 143 191 191 92 117 32 120
 /// ```
+///
+/// A surrogate is written as the three bytes its number takes, as
+/// `zend_scan_escape_string` writes any codepoint below `0x10000`,
+/// though no UTF-8 text holds one:
+///
+/// ```php
+/// var_dump(bin2hex("\u{d800}"), bin2hex("\u{dfff}x"));
+/// ```
+/// ```expect
+/// string(6) "eda080"
+/// string(8) "edbfbf78"
+/// ```
 fn codepoint(text: &[u8], at: usize) -> Escape {
     if text.get(at + 2) != Some(&b'{') {
         return Escape::of(2, b"\\u");
@@ -632,9 +644,40 @@ fn codepoint(text: &[u8], at: usize) -> Escape {
         });
         return escape;
     }
-    let mut utf8 = [0u8; 4];
-    let encoded = char::from_u32(value).map_or(&[][..], |c| c.encode_utf8(&mut utf8).as_bytes());
-    Escape::of(i + 1 - at, encoded)
+    let (utf8, len) = utf8_of(value);
+    Escape::of(i + 1 - at, &utf8[..len])
+}
+
+/// A codepoint's UTF-8 bytes as `zend_scan_escape_string` lays them out,
+/// by its number alone, so a surrogate takes three as any other
+/// codepoint below `0x10000` does.
+fn utf8_of(value: u32) -> ([u8; 4], usize) {
+    let byte = |bits: u32| u8::try_from(bits & 0xFF).unwrap_or(0);
+    match value {
+        0..0x80 => ([byte(value), 0, 0, 0], 1),
+        0x80..0x800 => (
+            [byte(0xC0 | (value >> 6)), byte(0x80 | (value & 0x3F)), 0, 0],
+            2,
+        ),
+        0x800..0x1_0000 => (
+            [
+                byte(0xE0 | (value >> 12)),
+                byte(0x80 | ((value >> 6) & 0x3F)),
+                byte(0x80 | (value & 0x3F)),
+                0,
+            ],
+            3,
+        ),
+        _ => (
+            [
+                byte(0xF0 | (value >> 18)),
+                byte(0x80 | ((value >> 12) & 0x3F)),
+                byte(0x80 | ((value >> 6) & 0x3F)),
+                byte(0x80 | (value & 0x3F)),
+            ],
+            4,
+        ),
+    }
 }
 
 /// The bytes of one `"…"`, heredoc or `` `…` `` part: every `\` read by

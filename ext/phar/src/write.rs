@@ -13,8 +13,8 @@ use php_ext::request::{Opening, Request};
 use crate::archive::{
     self, API_VERSION_NODIR, API_VERSION_NUM, ArchiveId, Content, ENT_COMPRESSED_GZ,
     ENT_COMPRESSION_MASK, ENT_PERM_DEF_DIR, ENT_PERM_DEF_FILE, Entry, FILE_COMPRESSED_BZ2,
-    FILE_COMPRESSED_GZ, Format, HDR_SIGNATURE, Metadata, SIG_OPENSSL, SIG_OPENSSL_SHA256,
-    SIG_OPENSSL_SHA512, TAR_DIR, TAR_FILE, archives, lossy,
+    FILE_COMPRESSED_GZ, Format, Fp, HDR_SIGNATURE, Metadata, SIG_OPENSSL, SIG_OPENSSL_SHA256,
+    SIG_OPENSSL_SHA512, TAR_DIR, TAR_FILE, Through, archives, lossy,
 };
 use crate::entry::{self, Dir, EntryData, Target};
 use crate::open::{Failed, readonly};
@@ -63,7 +63,22 @@ fn find_halt(stub: &[u8]) -> Option<usize> {
 /// each entry's bytes (compressed where its flags ask), and the
 /// signature, the archive's bytes replaced by them and the file written.
 /// Tar and zip archives are their own formats' ([`crate::tar`],
-/// [`crate::zip`]).
+/// [`crate::zip`]). The stub is copied from the file as it stands, as
+/// php's stream on it reads it:
+///
+/// ```php
+/// $f = __DIR__ . '/flush-witness.phar';
+/// $p = new Phar($f); $p['a'] = '1'; unset($p);
+/// $p = new Phar($f);
+/// file_put_contents($f, '<?PHP' . substr(file_get_contents($f), 5));
+/// $p->setMetadata(1);
+/// var_dump(substr(file_get_contents($f), 0, 5), $p['a']->getContent());
+/// unset($p); Phar::unlinkArchive($f);
+/// ```
+/// ```expect regime=phar-writable
+/// string(5) "<?PHP"
+/// string(1) "1"
+/// ```
 #[allow(clippy::too_many_lines)] // php's one function, its steps in its order
 pub(crate) fn flush_ex(
     req: &mut Request,
@@ -91,10 +106,19 @@ pub(crate) fn flush_ex(
     };
     let fname = a.fname.clone();
     let name = lossy(&fname).into_owned();
-    let oldfile: Option<Arc<Vec<u8>>> = if a.fp.is_some() && !a.is_brandnew {
-        a.fp.clone()
-    } else {
-        archive::read_file(req, &fname, false)?.map(Arc::new)
+    // What the stub and the unchanged entries are copied from: through
+    // the file opened `rb`, the file as it stands now, rewritten under the
+    // archive or not, and what was read where it is gone (php's stream
+    // reads the unlinked file on); through a stream php wrote, its bytes.
+    let held = a.fp.clone().filter(|_| !a.is_brandnew);
+    let oldfile: Option<Arc<Vec<u8>>> = match held {
+        Some(Fp {
+            bytes,
+            through: Through::Written,
+        }) => Some(bytes),
+        held => archive::read_file(req, &fname, false)?
+            .map(Arc::new)
+            .or(held.map(|fp| fp.bytes)),
     };
     let mut newfile: Vec<u8> = Vec::new();
     let Some(a) = archives(req).get_mut(id) else {
@@ -382,7 +406,7 @@ pub(crate) fn write_out(
     };
     let (fname, flags, deferred) = (a.fname.clone(), a.flags, a.donotflush);
     let newfile = Arc::new(newfile);
-    a.fp = Some(Arc::clone(&newfile));
+    a.fp = Some(Fp::written(Arc::clone(&newfile)));
     if deferred {
         return Ok(None);
     }
@@ -573,25 +597,67 @@ pub(crate) fn copy_contents(
 
 // ---- the stream's writing half
 
-/// `phar_stream_write`: `buf` into the entry's own buffer at the stream's
-/// position, its sizes grown to it and the entry marked modified.
+/// `phar_stream_write`: `buf` into `idata->fp` at the stream's position,
+/// the entry's sizes grown to it and the entry marked modified. That is
+/// the entry's own buffer once written, or the archive's bytes the entry
+/// was opened to read where php holds them through a stream it wrote
+/// (the file the flush opened `w+b`, a temporary one); through the file
+/// opened `rb` the plain wrapper's write fails, with its notice.
+///
+/// ```php
+/// $f = __DIR__ . '/write-witness.phar';
+/// $p = new Phar($f); $p['a'] = '1'; unset($p);
+/// $p = new Phar($f);
+/// $e = $p['a']->openFile();
+/// var_dump($e->fwrite('2'));
+/// $p['b'] = '3';
+/// $e = $p['b']->openFile();
+/// $e->fseek(1);
+/// var_dump($e->fwrite('4'));
+/// $e->rewind();
+/// var_dump($e->fgets());
+/// unset($e, $p); Phar::unlinkArchive($f);
+/// ```
+/// ```expect regime=phar-writable
+/// Notice: SplFileObject::fwrite(): Write of 1 bytes failed with errno=9 Bad file descriptor in %s on line 6
+/// bool(false)
+/// int(1)
+/// string(2) "34"
+/// ```
 pub(crate) fn stream_write(req: &mut Request, data: &mut EntryData, buf: &[u8]) -> Option<usize> {
     let Target::Slot(slot) = data.target else {
         return None;
     };
-    let e = archives(req).get_mut(data.archive)?.manifest.at_mut(slot)?;
-    let Content::Mod(own) = &mut e.content else {
-        return None;
-    };
     let at = usize::try_from(data.position + data.zero).ok()?;
-    if own.len() < at {
-        own.resize(at, 0);
-    }
-    let end = at + buf.len();
-    if own.len() < end {
-        own.resize(end, 0);
-    }
-    own[at..end].copy_from_slice(buf);
+    let archive::Archive {
+        manifest, fp, ufp, ..
+    } = archives(req).get_mut(data.archive)?;
+    let e = manifest.at_mut(slot)?;
+    let end = match (&mut e.content, fp, ufp) {
+        (Content::Mod(own), _, _) => splice(own, at, buf),
+        (
+            Content::Fp,
+            Some(Fp {
+                bytes,
+                through: Through::Written,
+            }),
+            _,
+        )
+        | (Content::Ufp, _, Some(bytes)) => {
+            let end = splice(Arc::make_mut(bytes), at, buf);
+            data.fp = Some(entry::Efp::Shared(Arc::clone(bytes)));
+            end
+        }
+        (Content::Fp, Some(_), _) => {
+            let failed = format!(
+                "Write of {} bytes failed with errno=9 Bad file descriptor",
+                buf.len()
+            );
+            docref(req, Level::Notice, &failed);
+            return None;
+        }
+        _ => return None,
+    };
     data.position = i64::try_from(end).ok()? - data.zero;
     if data.position > i64::from(e.uncompressed_filesize) {
         e.uncompressed_filesize = u32::try_from(data.position).unwrap_or(u32::MAX);
@@ -600,6 +666,17 @@ pub(crate) fn stream_write(req: &mut Request, data: &mut EntryData, buf: &[u8]) 
     e.old_flags = e.flags;
     e.is_modified = true;
     Some(buf.len())
+}
+
+/// `buf` written over `bytes` at `at`, the bytes grown with NULs to reach
+/// it; where the write ends.
+fn splice(bytes: &mut Vec<u8>, at: usize, buf: &[u8]) -> usize {
+    let end = at + buf.len();
+    if bytes.len() < end {
+        bytes.resize(end, 0);
+    }
+    bytes[at..end].copy_from_slice(buf);
+    end
 }
 
 /// `phar_stream_flush`: an entry something wrote to stamped and its

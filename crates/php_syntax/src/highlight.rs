@@ -42,8 +42,9 @@ impl Colours {
 }
 
 /// `zend_html_putc` over each byte: `<`, `>` and `&` as entities and a
-/// tab as four spaces.
-fn html_puts(out: &mut Vec<u8>, text: &[u8]) {
+/// tab as four spaces, `zend_html_puts`, which `phpinfo()`'s tables
+/// write their values through as well.
+pub fn html_puts(out: &mut Vec<u8>, text: &[u8]) {
     for &c in text {
         match c {
             b'<' => out.extend_from_slice(b"&lt;"),

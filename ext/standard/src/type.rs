@@ -227,6 +227,7 @@ fn get_debug_type(req: &mut Request, value: Value) -> Result<PhpString, Thrown> 
 /// $o = ["a" => 1]; settype($o, "object"); var_dump($o);
 /// try { settype($w, "resource"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// try { settype($w, "x"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// $s = new stdClass; try { settype($s, "string"); } catch (Error $e) { echo $e->getMessage(), "\n"; } var_dump($s);
 /// ```
 /// ```expect
 /// bool(true)
@@ -244,6 +245,8 @@ fn get_debug_type(req: &mut Request, value: Value) -> Result<PhpString, Thrown> 
 /// }
 /// Cannot convert to resource type
 /// settype(): Argument #2 ($type) must be a valid type
+/// Object of class stdClass could not be converted to string
+/// string(0) ""
 /// ```
 ///
 /// A NAN made `null`, an array or an object is php's warning first,
@@ -316,7 +319,16 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
     let converted = match name.as_slice() {
         b"integer" | b"int" => Value::int(to_long(req, &current)?),
         b"float" | b"double" => Value::float(to_double(req, &current)?),
-        b"string" => Value::string(to_string(req, &current)?),
+        b"string" => match to_string(req, &current) {
+            Ok(string) => Value::string(string),
+            // `convert_to_string` leaves the empty string behind a
+            // conversion that threw.
+            Err(thrown) => {
+                let empty = PhpString::new(req, b"")?;
+                var.set(req, Value::string(empty))?;
+                return Err(thrown);
+            }
+        },
         b"array" => {
             if current.as_array().is_some() {
                 req.addref(&current);

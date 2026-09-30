@@ -55,7 +55,7 @@ mod source;
 pub mod tree;
 mod value;
 
-pub use highlight::{Colours, highlight, strip};
+pub use highlight::{Colours, highlight, html_puts, strip};
 pub use kind::SyntaxKind;
 pub use lexer::{LexOptions, Lexed, Position, Token, lex};
 pub use line_index::{LineCol, LineIndex};

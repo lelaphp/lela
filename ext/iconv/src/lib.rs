@@ -148,6 +148,9 @@ pub fn extension() -> Extension {
         ])
         .constants(constants::declared())
         .ini(Kind::ALL.map(ini).to_vec())
+        .on_modify(b"iconv.input_encoding", on_input_encoding)
+        .on_modify(b"iconv.output_encoding", on_output_encoding)
+        .on_modify(b"iconv.internal_encoding", on_internal_encoding)
         .register(BufferHandler {
             name: "ob_iconv_handler",
             conflicts: &["ob_iconv_handler", "mb_output_handler"],
@@ -195,6 +198,54 @@ fn info(req: &mut Request) {
     ]);
     let names = Kind::ALL.map(Kind::entry);
     req.info_ini_entries(&names.each_ref().map(String::as_bytes));
+}
+
+/// `OnUpdateInputEncoding`, `OnUpdateOutputEncoding` and
+/// `OnUpdateInternalEncoding`: a name of `ICONV_CSNMAXLEN` bytes or more
+/// refused, and past startup the entry's deprecation raised before the
+/// value is taken.
+///
+/// ```php
+/// var_dump(ini_set('iconv.output_encoding', 'ASCII'), ini_set('iconv.output_encoding', str_repeat('a', 64)), ini_get('iconv.output_encoding'));
+/// var_dump(iconv_set_encoding('internal_encoding', 'UTF-8'), ini_set('iconv.input_encoding', ''));
+/// ```
+/// ```expect
+///
+/// Deprecated: ini_set(): Use of iconv.output_encoding is deprecated in %s on line 2
+/// string(0) ""
+/// bool(false)
+/// string(5) "ASCII"
+///
+/// Deprecated: iconv_set_encoding(): Use of iconv.internal_encoding is deprecated in %s on line 3
+///
+/// Deprecated: ini_set(): Use of iconv.input_encoding is deprecated in %s on line 3
+/// bool(true)
+/// string(0) ""
+/// ```
+fn on_modify(req: &mut Request, kind: Kind, value: &[u8]) -> bool {
+    if value.len() >= MAX_NAME {
+        return false;
+    }
+    if !req.at_startup() {
+        let text = format!("Use of {} is deprecated", kind.entry());
+        docref(req, Level::Deprecated, &text);
+    }
+    true
+}
+
+#[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
+fn on_input_encoding(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+    Ok(on_modify(req, Kind::Input, value))
+}
+
+#[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
+fn on_output_encoding(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+    Ok(on_modify(req, Kind::Output, value))
+}
+
+#[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
+fn on_internal_encoding(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+    Ok(on_modify(req, Kind::Internal, value))
 }
 
 /// `get_input_encoding`, `get_output_encoding` and
@@ -752,14 +803,10 @@ fn iconv_set_encoding(
     let Some(kind) = Kind::parse(r#type.as_bytes()) else {
         return Ok(false);
     };
-    let name = kind.entry();
-    // `OnUpdateInternalEncoding` and its kin, at the runtime stage.
-    docref(
-        req,
-        Level::Deprecated,
-        &format!("Use of {name} is deprecated"),
-    );
-    Ok(req.ini_set(name.as_bytes(), encoding.as_bytes())?.is_some())
+    // The entry's rule ([`on_modify`]) raises its deprecation.
+    Ok(req
+        .ini_set(kind.entry().as_bytes(), encoding.as_bytes())?
+        .is_some())
 }
 
 /// `iconv_get_encoding(string $type = "all"): array|string|false`.

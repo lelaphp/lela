@@ -1636,6 +1636,49 @@ fn contents(req: &mut Request) -> Result<Option<Value>, Thrown> {
     Ok(Some(Value::string(PhpString::new(req, &buffered)?)))
 }
 
+/// `php_request_startup`'s buffer (`Z/main/main.c:1931-1941`): the
+/// handler `output_handler` names, started as `php_output_start_user`
+/// starts a string, an extension's registered one before a callable of
+/// that name; else the default handler where `output_buffering` asks
+/// for one, a size above one its chunk size. A name that is no callable
+/// is `php_output_handler_create_user`'s warning and no buffer.
+pub(crate) fn start_at_request(req: &mut Request) -> Result<(), Thrown> {
+    let name = req.ini_get(b"output_handler").unwrap_or_default().to_vec();
+    if name.is_empty() {
+        let size = req.ini_long(b"output_buffering");
+        if size != 0 {
+            let chunk = if size > 1 {
+                usize::try_from(size).unwrap_or(0)
+            } else {
+                0
+            };
+            start_user(req, &StartHandler::Default, chunk, HANDLER_STDFLAGS)?;
+        }
+        return Ok(());
+    }
+    if let Some(registered) = req.buffer_handler(&name) {
+        start_user(
+            req,
+            &StartHandler::Registered(registered),
+            0,
+            HANDLER_STDFLAGS,
+        )?;
+        return Ok(());
+    }
+    let value = Value::string(PhpString::new(req, &name)?);
+    let started = match crate::api::coerce::callable_checked(req, &value) {
+        Ok(callable) => {
+            start_user(req, &StartHandler::User(callable), 0, HANDLER_STDFLAGS).map(|_| ())
+        }
+        Err(error) => {
+            docref(req, Level::Warning, &error);
+            Ok(())
+        }
+    };
+    req.release(value);
+    started
+}
+
 /// `php_output_start_default`, what `body` writes, then
 /// `php_output_get_contents` and `php_output_discard`: how
 /// `highlight_file`, `highlight_string` and `php_strip_whitespace` hand

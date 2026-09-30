@@ -454,16 +454,14 @@ fn update_default_filter(req: &mut Request, value: &[u8]) -> Result<bool, Thrown
 /// ```
 fn filter_info(req: &mut Request) {
     req.info_table(&[&["Input Validation and Filtering", "enabled"]]);
-    let shown = |req: &Request, name: &[u8]| match req.ini_get(name) {
-        Some(value) if !value.is_empty() => String::from_utf8_lossy(value).into_owned(),
-        _ => String::from("no value"),
+    let shown = |req: &Request, name: &[u8]| {
+        String::from_utf8_lossy(req.ini_get(name).unwrap_or_default()).into_owned()
     };
     let default = shown(req, b"filter.default");
     let flags = shown(req, b"filter.default_flags");
-    req.info_table(&[
-        &["Directive", "Local Value", "Master Value"],
-        &["filter.default", &default, &default],
-        &["filter.default_flags", &flags, &flags],
+    req.info_ini_table(&[
+        ["filter.default", &default, &default],
+        ["filter.default_flags", &flags, &flags],
     ]);
 }
 

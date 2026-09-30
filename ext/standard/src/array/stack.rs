@@ -211,7 +211,11 @@ fn array_push(
 #[php_function]
 fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
     let mut stack = Stack::of(req, array)?;
-    let Some((key, value)) = stack.array.snapshot_refs().pop() else {
+    // The last element as `ZEND_HASH_REVERSE_FOREACH` finds it, from
+    // `nNumUsed` back: the internal pointer set to it, and reset below as
+    // php resets it.
+    stack.array.cursor_end();
+    let (Some(key), Some(value)) = (stack.array.cursor_key(), stack.array.cursor_current()) else {
         stack.finish(req);
         return Ok(Value::null());
     };

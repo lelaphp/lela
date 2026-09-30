@@ -313,7 +313,6 @@ fn session_info(req: &mut Request) {
                     String::from("On")
                 }
                 ini::Kind::Bool | ini::Kind::PerDirBool => String::from("Off"),
-                _ if value.is_empty() => String::from("no value"),
                 _ => String::from_utf8_lossy(value).into_owned(),
             };
             let local = req
@@ -322,13 +321,11 @@ fn session_info(req: &mut Request) {
             [(*name).to_owned(), local, shown(default.as_bytes())]
         })
         .collect();
-    let mut table: Vec<[&str; 3]> = vec![["Directive", "Local Value", "Master Value"]];
-    table.extend(
-        rows.iter()
-            .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()]),
-    );
-    let table: Vec<&[&str]> = table.iter().map(<[&str; 3]>::as_slice).collect();
-    req.info_table(&table);
+    let rows: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()])
+        .collect();
+    req.info_ini_table(&rows);
 }
 
 // ------------------------------------------------------------ helpers
@@ -431,15 +428,17 @@ fn session_array_mut(req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
     }
 }
 
-/// `array` bound as the session's variables, which own it from here:
+/// `vars` bound as the session's variables, which own it from here:
 /// `PS(http_session_vars)` a new reference to it with a second owner,
 /// laid into `EG(symbol_table)` as `$_SESSION` by
-/// `zend_hash_update_ind`, and the reference held before given up.
-fn bind_array(req: &mut Request, array: PhpArray) -> Result<(), Thrown> {
+/// `zend_hash_update_ind`, and the reference held before given up. An
+/// array but for what `php_serialize` decodes, which binds whatever the
+/// data held.
+fn bind_vars(req: &mut Request, vars: Value) -> Result<(), Thrown> {
     if let Some(old) = req.state::<State>().vars.take() {
         req.release(old.as_value());
     }
-    let vars = PhpRef::new(req, array.to_value())?;
+    let vars = PhpRef::new(req, vars)?;
     req.addref(&vars.as_value());
     req.state::<State>().vars = Some(vars);
     req.set_global(b"_SESSION", Some(vars.as_value()));

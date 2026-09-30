@@ -40,8 +40,8 @@ pub mod syntax {
     pub use php_syntax::tree::{Element, TokenId, Tree};
     pub use php_syntax::{
         Colours, Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, ScannedToken,
-        SyntaxKind, Token, amp_name, cast_name, highlight, int_overflows, lex, magic_const_name,
-        operator_name, parse, scanned, strip,
+        SyntaxKind, Token, amp_name, cast_name, highlight, html_puts, int_overflows, lex,
+        magic_const_name, operator_name, parse, scanned, strip,
     };
 }
 
