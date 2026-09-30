@@ -237,12 +237,25 @@ fn invoke(
 
 /// `zend_call_known_function` over the method a `ReflectionMethod`
 /// holds, which is what `reflection_method_invoke` ends in: the `fcc`
-/// php fills by hand, the method `decl` names on `class`, the
-/// reflector's class, as the called scope and on the receiver given,
+/// php fills by hand, the method `decl` names on `class`, `intern->ce`,
+/// the class the reflector was asked about, as the called scope
+/// (`fcc.called_scope = intern->ce`) and on the receiver given,
 /// with no visibility held against the caller ([`known_method`]),
 /// served by `serve`. A method the class does not hold is php's
 /// `Invocation of method ... failed`, named on `scope`, the class that
-/// declares it, as php names `mptr->common.scope`.
+/// declares it, as php names `mptr->common.scope`; one only `scope`
+/// holds, a parent's private method, is served on `scope`.
+///
+/// ```php
+/// abstract class A { const WHAT = 'A'; static function call() { echo static::WHAT; } }
+/// class B extends A { const WHAT = 'B'; }
+/// ReflectionMethod::createFromMethodName("b::call")->invoke(null);
+/// (new ReflectionMethod('B', 'call'))->invokeArgs(null, []);
+/// (new ReflectionMethod('A', 'call'))->invoke(null);
+/// ```
+/// ```expect
+/// BBA
+/// ```
 fn invoke_method(
     req: &mut Request,
     class: ClassId,
@@ -261,7 +274,10 @@ fn invoke_method(
         let callable = to_callable(req, &this.as_value())?;
         return serve(req, &callable);
     }
-    let Some(callable) = known_method(req, class, &decl.function.name, this) else {
+    let name = &decl.function.name;
+    let found =
+        known_method(req, class, name, this).or_else(|| known_method(req, scope, name, this));
+    let Some(callable) = found else {
         let held = FunctionRef::Method(scope, decl.function.name.0.to_vec());
         return Err(invocation_failed(req, &held));
     };
@@ -2471,6 +2487,7 @@ impl ReflectionMethod {
         args: NamedVariadic<Value>,
     ) -> Result<Value, Thrown> {
         let (class, decl, scope) = this_method(req, this.object())?;
+        let class = super::kept_class(req, this.object()).unwrap_or(class);
         abstract_refused(req, &decl, scope)?;
         at_least_arguments(req, 1)?;
         let this = receiver(req, &decl, scope, object)?;
@@ -2535,6 +2552,7 @@ impl ReflectionMethod {
         args: Raw<PhpArray>,
     ) -> Result<Value, Thrown> {
         let (class, decl, scope) = this_method(req, this.object())?;
+        let class = super::kept_class(req, this.object()).unwrap_or(class);
         abstract_refused(req, &decl, scope)?;
         exactly_arguments(req, 2)?;
         let this = receiver(req, &decl, scope, object)?;
