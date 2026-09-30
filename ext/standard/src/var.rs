@@ -437,6 +437,9 @@ impl ObjectHandlers for Incomplete {
 /// The ini entries the unserializer reads, `basic_functions.c`'s
 /// `unserialize_callback_func` and `unserialize_max_depth`.
 ///
+/// `var.c`'s one entry; `unserialize_callback_func`, which
+/// `unserialize()` reads too, is `main.c`'s.
+///
 /// ```php
 /// var_dump(ini_get("unserialize_max_depth"), ini_get("unserialize_callback_func"));
 /// ```
@@ -445,17 +448,13 @@ impl ObjectHandlers for Incomplete {
 /// string(0) ""
 /// ```
 pub(crate) fn ini() -> Vec<php_ext::decl::IniDecl> {
-    let entry = |name: &[u8], default: &[u8]| php_ext::decl::IniDecl {
-        name: php_ext::decl::Name(name.into()),
-        default: default.into(),
+    vec![php_ext::decl::IniDecl {
+        name: php_ext::decl::Name(b"unserialize_max_depth".as_slice().into()),
+        default: b"4096".as_slice().into(),
         user: true,
         per_dir: true,
         system: true,
-    };
-    vec![
-        entry(b"unserialize_callback_func", b""),
-        entry(b"unserialize_max_depth", b"4096"),
-    ]
+    }]
 }
 
 /// `PRINT_ZVAL_INDENT` (`Z/Zend/zend.c:80`): the four spaces a level of
