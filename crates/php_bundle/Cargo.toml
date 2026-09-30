@@ -54,6 +54,7 @@ linked = [
     "openssl", "curl", "iconv", "pdo_sqlite", "ctype", "hash", "libxml",
     "lexbor", "zlib", "posix", "sockets", "phar", "bz2", "uri", "opcache", "bcmath", "simplexml",
     "calendar",
+    "exif",
 ]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
 spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
@@ -88,6 +89,7 @@ opcache = ["dep:php_ext_opcache"]
 bcmath = ["dep:php_ext_bcmath"] # the `php` binary and the phpt lane, as php builds it with --enable-bcmath (#1163)
 simplexml = ["dep:php_ext_simplexml"]
 calendar = ["dep:php_ext_calendar"] # the `php` binary and the phpt lane, as php builds it with --enable-calendar (#1163)
+exif = ["dep:php_ext_exif", "mbstring"] # the `php` binary and the phpt lane, as php builds it with --enable-exif; exif.c decodes its multibyte tags through the functions mbstring hands zend_multibyte (#1323)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -125,6 +127,7 @@ php_ext_opcache = { path = "../../ext/opcache", optional = true }
 php_ext_bcmath = { path = "../../ext/bcmath", optional = true }
 php_ext_simplexml = { path = "../../ext/simplexml", optional = true }
 php_ext_calendar = { path = "../../ext/calendar", optional = true }
+php_ext_exif = { path = "../../ext/exif", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

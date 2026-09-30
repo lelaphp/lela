@@ -423,6 +423,7 @@ dependencies = [
  "php_ext_curl",
  "php_ext_date",
  "php_ext_dom",
+ "php_ext_exif",
  "php_ext_filter",
  "php_ext_hash",
  "php_ext_iconv",
@@ -535,6 +536,14 @@ dependencies = [
  "php_ext",
  "php_ext_lexbor",
  "php_ext_libxml",
+]
+
+[[package]]
+name = "php_ext_exif"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "php_ext_standard",
 ]
 
 [[package]]
