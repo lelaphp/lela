@@ -5613,7 +5613,7 @@ fn class_string(
         // the object's own, and the block stands only for an object
         // reflector, after `Properties` and before `Methods`.
         if is_instance && let Some(object) = object {
-            let dynamic = dynamic_properties(req, class, object);
+            let dynamic = undeclared_properties(req, class, object);
             let _ = write!(
                 out,
                 "\n{indent}  - Dynamic properties [{}] {{\n",
@@ -5653,10 +5653,86 @@ fn class_string(
 }
 
 /// The names in the object's property table the class did not declare,
-/// in the table's order: php's `Dynamic properties` list, a mangled
-/// name (a private or protected slot, whose key begins with a zero
-/// byte) skipped as `ZSTR_VAL(prop_name)[0]` skips it.
+/// in the table's order: `_adddynproperty` over `get_properties`, which
+/// passes over every slot, `IS_INDIRECT`, and keeps the rest. A slot of
+/// a public property holds its bare name; any other holds a mangled one,
+/// so a row of a bare name beyond the non-public slots of that name the
+/// object holds is a dynamic property, one named as a parent's private
+/// property among them. `_class_string`'s count is another rule
+/// ([`undeclared_properties`]).
+///
+/// ```php
+/// class P { private $v = 1; }
+/// #[AllowDynamicProperties] class K extends P {}
+/// $o = new K; $o->v = 2;
+/// $r = new ReflectionObject($o);
+/// var_dump(count($r->getProperties()), $r->hasProperty('v'), $r->getProperty('v')->class);
+/// var_dump(count((new ReflectionObject(new DateTime))->getProperties()));
+/// ```
+/// ```expect
+/// int(1)
+/// bool(true)
+/// string(1) "K"
+/// int(0)
+/// ```
 fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
+    let mut public: Vec<Vec<u8>> = Vec::new();
+    let mut mangled: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for at in class_chain(req, class) {
+        let Some(decl) = req.class_decl(at).cloned() else {
+            continue;
+        };
+        for p in decl.properties.iter().filter(|p| p.is_instance) {
+            let name = p.name.0.to_vec();
+            let prefix = match p.visibility {
+                Visibility::Public => {
+                    public.push(name);
+                    continue;
+                }
+                Visibility::Protected => b"*".to_vec(),
+                Visibility::Private => decl.name.0.to_vec(),
+            };
+            let key = [&b"\0"[..], &prefix, &b"\0"[..], &name].concat();
+            if !mangled.iter().any(|(_, held)| *held == key) {
+                mangled.push((name, key));
+            }
+        }
+    }
+    let Ok(entries) = object.props(req) else {
+        return Vec::new();
+    };
+    let mut seen: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
+    let mut dynamic = Vec::new();
+    for (name, _) in entries {
+        let name = name.as_bytes().to_vec();
+        if name.first().is_none_or(|byte| *byte == 0) || public.contains(&name) {
+            continue;
+        }
+        let rows = seen.entry(name.clone()).or_insert(0);
+        *rows += 1;
+        let rows = *rows;
+        let mut held = 0;
+        for (_, key) in mangled.iter().filter(|(n, _)| *n == name) {
+            let Ok(string) = PhpString::new(req, key) else {
+                continue;
+            };
+            if object.row(req, &Key::Str(string)).ok().flatten().is_some() {
+                held += 1;
+            }
+            req.release(Value::string(string));
+        }
+        if rows > held {
+            dynamic.push(name);
+        }
+    }
+    dynamic
+}
+
+/// `_class_string`'s `Dynamic properties`: the bare names of
+/// `zend_get_properties_no_lazy_init` that `ce->properties_info` has not,
+/// which holds a parent's private property too, so a dynamic property
+/// named as one is not counted there.
+fn undeclared_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
     let declared: Vec<Vec<u8>> = class_chain(req, class)
         .into_iter()
         .filter_map(|at| req.class_decl(at))
