@@ -1074,6 +1074,21 @@ enum LogTo<'a> {
 /// ```stderr
 /// to the log
 /// ```
+///
+/// The log is the file `error_log` names where it names one, each entry
+/// stamped `[d-M-Y H:i:s e]` in the request's zone, `date.timezone` as
+/// the ini names it (`php_log_err_with_severity`).
+///
+/// ```php
+/// $f = sys_get_temp_dir() . "/error-log-" . getmypid();
+/// ini_set("date.timezone", "ASIA/Tokyo"); ini_set("error_log", $f);
+/// var_dump(error_log("to the file"));
+/// readfile($f); unlink($f);
+/// ```
+/// ```expect
+/// bool(true)
+/// [%d-%s-%d %d:%d:%d ASIA/Tokyo] to the file
+/// ```
 #[php_function]
 fn error_log(
     req: &mut Request,
@@ -1223,9 +1238,10 @@ fn ini_get_all(
 }
 
 /// `ini_restore(string $option): void`, `zend_restore_ini_entry` at
-/// runtime: an entry the request changed set back to the value it
-/// started with, through the entry's own `on_modify`; an entry it did
-/// not change, or one `PHP_INI_USER` may not touch, is left as it is.
+/// runtime ([`Request::ini_restore`]): an entry the request changed set
+/// back to the value it started with, through the entry's own
+/// `on_modify`, and no longer changed; an entry it did not change, or
+/// one `PHP_INI_USER` may not touch, is left as it is.
 ///
 /// ```php
 /// var_dump(set_include_path("var"), ini_restore("include_path"), get_include_path() === set_include_path("x"));
@@ -1242,16 +1258,7 @@ fn ini_get_all(
 /// ```
 #[php_function]
 fn ini_restore(req: &mut Request, option: PhpString) -> Result<(), Thrown> {
-    let name = option.as_bytes();
-    let changed = req
-        .ini_entries()
-        .into_iter()
-        .find(|entry| entry.decl.name.0.as_ref() == name && entry.decl.user)
-        .and_then(|entry| entry.original);
-    if let Some(original) = changed {
-        req.ini_set(name, &original)?;
-    }
-    Ok(())
+    req.ini_restore(option.as_bytes())
 }
 
 /// `ini_parse_quantity(string $shorthand): int`: the quantity as an ini

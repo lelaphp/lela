@@ -197,6 +197,7 @@ fn server_engine(ini: &[(String, String)]) -> Engine {
         .tier::<php_bundle::Tier>()
         .skip_shebang()
         .ini("html_errors", "1")
+        .ini("implicit_flush", "0")
         .ini("max_execution_time", "30");
     php_sapi::start(builder, ini, Some(php_sapi::HostExtension::CliServer))
 }

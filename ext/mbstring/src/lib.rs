@@ -36,6 +36,7 @@ mod regex;
 mod settings;
 mod tables;
 mod text;
+mod zend;
 
 use ffi::mbfl::{Encoding, Language};
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OrFalse, Path, Union};
@@ -154,6 +155,7 @@ pub fn extension() -> Extension {
         }])
         .info(info)
         .treat_data(http::treat_data)
+        .encodings(zend::bind)
         .engine_state(regex::startup)
         .request_state::<State>()
         .rshutdown(rshutdown);

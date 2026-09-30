@@ -419,6 +419,26 @@ impl PhpArray {
         Ok(())
     }
 
+    /// Lay `value` down at `key` as `zend_hash_add_new` and
+    /// `zend_symtable_add_new` do after `SEPARATE_ARRAY`: a string key
+    /// appended without the lookup, so a key the array holds already is
+    /// held twice and a lookup finds this row. The value and a string key
+    /// are the array's from here.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn add_new(
+        &mut self,
+        req: &mut Request,
+        key: Key,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        self.separate(req)?;
+        req.array_add_new(self.0, key.heap(), value)?;
+        if let Key::Str(s) = key {
+            req.release(Value::string(s));
+        }
+        Ok(())
+    }
+
     /// Replace the value at `key` in place; `false`, and `value` given
     /// up, when it is absent.
     pub fn replace(&mut self, req: &mut Request, key: &Key, value: Value) -> Result<bool, Thrown> {
@@ -748,22 +768,45 @@ impl ArrayIter {
 #[derive(Debug)]
 #[must_use = "the rows are held until they are released"]
 pub struct HeldProperties {
-    rows: Vec<(Key, Value)>,
+    rows: Vec<(Key, HeldRow)>,
     owned: bool,
+    count: usize,
+}
+
+/// One row of [`HeldProperties`] as `zend_hash` walks it: a value, or
+/// under [`PropertyPurpose::Debug`] a typed property nothing has
+/// written, php's `IS_INDIRECT` to an `IS_UNDEF` slot that
+/// `zend_get_typed_property_info_for_slot` finds a type for, which a
+/// dumper shows as `uninitialized(T)` with the type's text.
+#[derive(Debug, Clone)]
+pub enum HeldRow {
+    Value(Value),
+    Uninitialized(String),
 }
 
 impl HeldProperties {
     /// The rows in the table's order.
     #[must_use]
-    pub fn rows(&self) -> &[(Key, Value)] {
+    pub fn rows(&self) -> &[(Key, HeldRow)] {
         &self.rows
+    }
+
+    /// `zend_array_count` over the table (`Z/Zend/zend_hash.c:519`), the
+    /// number a dumper prints before the rows: an uninitialised row not
+    /// counted, and under [`PropertyPurpose::Debug`] a slot `unset`
+    /// empties counted still inside the release that empties it.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.count
     }
 
     /// `zend_release_properties`: the owners the rows held given back.
     pub fn release(self, req: &mut Request) {
         if self.owned {
-            for (_, value) in self.rows {
-                req.release(value);
+            for (_, row) in self.rows {
+                if let HeldRow::Value(value) = row {
+                    req.release(value);
+                }
             }
         }
     }
@@ -905,6 +948,20 @@ pub struct ClosureInfo {
     /// compares two fake closures and holds every other pair
     /// uncomparable.
     pub fake: bool,
+}
+
+/// One move of an internal pointer, a pointer native's
+/// ([`PhpObject::pointer_move`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerMove {
+    /// `reset()`, `zend_hash_internal_pointer_reset`.
+    Reset,
+    /// `end()`, `zend_hash_internal_pointer_end`.
+    End,
+    /// `next()`, `zend_hash_move_forward`.
+    Forward,
+    /// `prev()`, `zend_hash_move_backwards`.
+    Backward,
 }
 
 /// An object (design §5.4): php's `zend_object *`, one allocation of
@@ -1093,7 +1150,16 @@ impl PhpObject {
                 req.addref(value);
             }
         }
-        Ok(HeldProperties { rows, owned })
+        if purpose == PropertyPurpose::Debug && !owned {
+            let (rows, count) = crate::ops::debug_rows(req, *self, rows)?;
+            return Ok(HeldProperties { rows, owned, count });
+        }
+        let count = rows.len();
+        let rows = rows
+            .into_iter()
+            .map(|(key, value)| (key, HeldRow::Value(value)))
+            .collect();
+        Ok(HeldProperties { rows, owned, count })
     }
 
     /// The object's property table as `get_properties` holds it,
@@ -1118,6 +1184,47 @@ impl PhpObject {
     /// ```
     pub fn entries(&self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         req.table_entries(*self)
+    }
+
+    /// `reset`, `end`, `next` or `prev` over the internal pointer of the
+    /// object's property table as `zend_std_get_properties` holds it, the
+    /// table `get_ht_for_iap` hands the pointer natives
+    /// (`Z/ext/standard/array.c:993`): separated first where another
+    /// holder shares it, laid down where the object has none, and a lazy
+    /// object initialised; `false` and nothing moved where the table has
+    /// no row. The pointer stays on the table between calls, and a
+    /// declared slot is a row to it whether or not it holds a value, as
+    /// php's `IS_INDIRECT` is. What a class whose `get_properties`
+    /// answers rows of its own holds is not this table
+    /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties)).
+    pub fn pointer_move(&self, req: &mut Request, how: PointerMove) -> Result<bool, Thrown> {
+        req.pointer_move(*self, how)
+    }
+
+    /// The row at the internal pointer of the object's property table,
+    /// `php_array_iter_seek_current`: a declared slot nothing holds, an
+    /// uninitialised typed property, stepped over back after an `end` or
+    /// a `prev` and on after anything else, `after` saying which move
+    /// came before, and the pointer left where the step stops. The key
+    /// is the table's, a declared property's its mangled name, and the
+    /// key and the value are views; `None` past the end.
+    pub fn pointer_row(
+        &self,
+        req: &mut Request,
+        after: Option<PointerMove>,
+    ) -> Result<Option<(Key, Value)>, Thrown> {
+        req.pointer_row(*self, after)
+    }
+
+    /// `zobj->properties = table`, how `spl_array_method` puts back the
+    /// table it handed a sort: `table` is the object's property table
+    /// from here, one owner passed to it, and holds every row itself,
+    /// the declared ones among them as copies the slots go on apart from
+    /// ([`php_heap::DeclaredRows::Copied`]); the table the object held is
+    /// released. A lazy object is initialised first and its instance
+    /// takes the table.
+    pub fn replace_table(&self, req: &mut Request, table: PhpArray) -> Result<(), Thrown> {
+        req.replace_table(*self, table)
     }
 
     /// One row of the property table by key, `zend_symtable_find_ind`:
@@ -1487,6 +1594,19 @@ impl PhpObject {
         matches!(self.0.laziness(), Laziness::Ghost | Laziness::Proxy)
     }
 
+    /// What the object's property table holds of its declared
+    /// properties: rows that stand for the slots, php's `IS_INDIRECT`s,
+    /// or copies of them, plain values under their mangled names, once a
+    /// table shared while it stood for the slots was separated (an
+    /// `ArrayObject` sort, a lazy ghost's initializer). A reader that
+    /// tells php's `IS_INDIRECT` from a plain value, as
+    /// `spl_array_object_count_elements_helper` does, reads it after
+    /// [`PhpObject::entries`] has laid the table down.
+    #[must_use]
+    pub fn declared_rows(&self) -> DeclaredRows {
+        self.0.declared_rows()
+    }
+
     /// `OBJ_EXTRA_FLAGS(obj)`'s two lazy bits as the one state they
     /// encode, what `php_var_dump_object_prefix` reads.
     #[must_use]
@@ -1691,6 +1811,11 @@ pub use php_heap::zend_sort;
 /// instance, or neither, which a dumper reads to print `lazy ghost ` or
 /// `lazy proxy ` before `object(` ([`PhpObject::laziness`]).
 pub use php_heap::Laziness;
+
+/// What an object's property table holds of its declared properties
+/// (design §5.4): the slots standing for them, or copies of them the
+/// table holds as plain values ([`PhpObject::declared_rows`]).
+pub use php_heap::DeclaredRows;
 
 /// A resource (design §5.5): php's `zend_resource *`, thirty-two bytes
 /// of the request's heap in the list `EG(regular_list)` is, its id the

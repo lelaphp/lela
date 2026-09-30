@@ -3,10 +3,12 @@ Arr
 Arr::addref
 Arr::backward
 Arr::contains
+Arr::declared_rows
 Arr::end
 Arr::entry_at
 Arr::forward
 Arr::get
+Arr::has_empty_ind
 Arr::has_iterators
 Arr::is_empty
 Arr::is_immutable
@@ -21,6 +23,8 @@ Arr::position
 Arr::protect
 Arr::refcount
 Arr::reset
+Arr::set_declared_rows
+Arr::set_has_empty_ind
 Arr::set_next_free
 Arr::table_size
 Arr::unprotect
@@ -34,6 +38,8 @@ Block::bytes_mut
 Block::is_empty
 Block::len
 CallStack
+DeclaredRows
+Direction
 EntryGuard
 Exponent
 Exponent::as_char
@@ -55,6 +61,7 @@ GcStatus
 Heap
 Heap::addref
 Heap::array
+Heap::array_add_new
 Heap::array_append
 Heap::array_del
 Heap::array_dup
@@ -106,6 +113,8 @@ Heap::object_clone
 Heap::object_clone_members_into
 Heap::object_clone_with
 Heap::object_properties
+Heap::object_properties_copy
+Heap::object_property_table
 Heap::object_set_properties
 Heap::object_set_slot
 Heap::object_take_properties
@@ -134,6 +143,7 @@ Heap::string_append
 Heap::string_safe_alloc
 Heap::string_with
 Heap::take_freed_use
+Heap::unpin
 HeapHooks
 HeapHooks::destruct
 HeapHooks::forget_lazy
@@ -171,6 +181,7 @@ Number::double
 Obj
 Obj::addref
 Obj::class
+Obj::declared_rows
 Obj::destructor_called
 Obj::has_native
 Obj::id
@@ -178,6 +189,8 @@ Obj::is_recursive
 Obj::is_same
 Obj::is_weakly_referenced
 Obj::laziness
+Obj::pin
+Obj::pins
 Obj::properties
 Obj::protect
 Obj::refcount
@@ -193,6 +206,17 @@ Obj::slots
 Obj::unprotect
 ObjectId
 PropBit
+PropertyTable
+PropertyTable::backward
+PropertyTable::end
+PropertyTable::forward
+PropertyTable::is_empty
+PropertyTable::len
+PropertyTable::reset
+PropertyTable::row_at
+PropertyTable::seek
+PropertyTable::table
+PropertyTable::used
 Readiness
 Ref
 Ref::addref
@@ -235,6 +259,7 @@ Strings::count
 Strings::new
 Suspensions
 Switched
+TableRow
 VmStack
 VmStack::close
 VmStack::current

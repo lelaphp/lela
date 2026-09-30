@@ -51,7 +51,7 @@ mod web;
 mod write;
 mod zip;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IniStage};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{InfoRow, Request};
@@ -161,7 +161,7 @@ fn master(req: &Request, name: &str) -> bool {
 #[allow(clippy::unnecessary_wraps)] // the ABI's `OnModify`
 fn on_readonly(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
     let on = Request::ini_parse_bool(value);
-    if req.at_startup() {
+    if req.ini_stage() == IniStage::Startup {
         return Ok(true);
     }
     if master(req, READONLY) && !on {
@@ -179,7 +179,7 @@ fn on_readonly(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
 #[allow(clippy::unnecessary_wraps)] // the ABI's `OnModify`
 fn on_require_hash(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
     let on = Request::ini_parse_bool(value);
-    Ok(req.at_startup() || on || !master(req, REQUIRE_HASH))
+    Ok(req.ini_stage() == IniStage::Startup || on || !master(req, REQUIRE_HASH))
 }
 
 /// `PHP_MINIT_FUNCTION(phar)`'s wrapper, made per request as the engine

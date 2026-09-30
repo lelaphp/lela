@@ -27,9 +27,10 @@ use php_compile::syntax::Colours;
 /// `zend_parse_ini_string` over `text` in a request, the one INI grammar
 /// the engine reads its startup entries by: each callback's event in
 /// order, or bison's message and the line the scanner stood at. A
-/// constant is the request's, a `${…}` reads the request's ini value of
-/// the name and then its environment, and a double is written at the
-/// request's `precision`. What an extension builds from the events,
+/// constant is the request's, a `${…}` reads what the host's ini text
+/// set under the name (`zend_get_configuration_directive`), not the
+/// entry's value, and then the environment, and a double is written at
+/// the request's `precision`. What an extension builds from the events,
 /// `php_simple_ini_parser_cb`'s array or `get_browser`'s sections, is
 /// its own.
 ///
@@ -48,6 +49,26 @@ use php_compile::syntax::Colours;
 ///   string(0) ""
 ///   ["s"]=>
 ///   string(5) "30711"
+/// }
+/// ```
+///
+/// The recipe sets `precision`, and `track_errors`, which php has no
+/// entry for, and both are read as it set them; the request's own change
+/// of `precision` is not read, and `zend.enable_gc`, an entry at a default
+/// no text set, is read empty:
+///
+/// ```php
+/// ini_set('precision', '5');
+/// var_dump(parse_ini_string("a = \${precision}\nb = \${track_errors}\nc = \${zend.enable_gc}"));
+/// ```
+/// ```expect
+/// array(3) {
+///   ["a"]=>
+///   string(2) "14"
+///   ["b"]=>
+///   string(1) "0"
+///   ["c"]=>
+///   string(0) ""
 /// }
 /// ```
 pub fn parse_ini(
@@ -79,7 +100,7 @@ impl Host for InRequest<'_> {
     }
 
     fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        self.req.ini_get(name).map(<[u8]>::to_vec)
+        self.req.shared.directive(name).map(<[u8]>::to_vec)
     }
 
     fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {

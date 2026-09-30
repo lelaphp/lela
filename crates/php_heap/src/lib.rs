@@ -48,6 +48,7 @@ mod object;
 mod payload;
 pub mod post;
 pub mod process;
+mod property_table;
 mod reference;
 mod resource;
 mod sort;
@@ -55,6 +56,7 @@ mod stack;
 mod string;
 mod zval;
 
+pub use array::DeclaredRows;
 pub use array::{Arr, ArrIter, Key, SortEntry, canonical_int};
 pub use block::Block;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
@@ -72,6 +74,7 @@ pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
 };
 pub use object::{Laziness, Obj, ObjectId};
+pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};
 pub use sort::zend_sort;

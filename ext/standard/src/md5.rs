@@ -9,7 +9,7 @@ use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{PhpString, Value};
 
 /// `PHP_MD5_CTX` in php's own layout, `lo, hi, a, b, c, d`, the block
 /// not yet full and the last block's words, which ext/hash's
@@ -291,28 +291,41 @@ fn md5(
     digest_value(req, &digest, binary)
 }
 
-/// The file's bytes, read as `md5_file`'s loop reads them: what
-/// `php_stream_open_wrapper(arg, "rb", REPORT_ERRORS, NULL)` and the
-/// read loop `md5_file` and `sha1_file` share read is every byte of the
-/// file, or `None` after the warning the open left or a read that
-/// stopped short of the end.
-pub(super) fn file_bytes(
+/// The read loop `md5_file` and `sha1_file` share
+/// (`PHP_NAMED_FUNCTION(php_if_md5_file)`, `Z/ext/standard/md5.c`): the
+/// file opened as `php_stream_open_wrapper(arg, "rb", REPORT_ERRORS,
+/// NULL)` opens it, and each read of up to 1024 bytes handed to
+/// `update` and given up before the next, as php's `buf[1024]` holds
+/// one read at a time, so hashing a file holds no more of it than that.
+/// `false` after the warning the open left, or where the reads stopped
+/// short of the end.
+pub(super) fn digest_file(
     req: &mut Request,
     filename: PhpString,
-) -> Result<Option<Vec<u8>>, Thrown> {
+    mut update: impl FnMut(&[u8]),
+) -> Result<bool, Thrown> {
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", false)? else {
-        return Ok(None);
+        return Ok(false);
     };
-    let mut bytes = Vec::new();
     loop {
-        match stream.read(req, 1024)? {
-            Some(chunk) if !chunk.is_empty() => bytes.extend_from_slice(chunk.as_bytes()),
-            _ => break,
-        }
+        let chunk = match stream.read(req, 1024) {
+            Ok(Some(chunk)) if !chunk.is_empty() => chunk,
+            Ok(Some(chunk)) => {
+                req.release(Value::string(chunk));
+                break;
+            }
+            Ok(None) => break,
+            Err(thrown) => {
+                stream.free(req);
+                return Err(thrown);
+            }
+        };
+        update(chunk.as_bytes());
+        req.release(Value::string(chunk));
     }
     let complete = stream.eof(req);
     stream.free(req);
-    Ok(complete.then_some(bytes))
+    Ok(complete)
 }
 
 /// `md5_file(string $filename, bool $binary = false): string|false`.
@@ -338,17 +351,30 @@ pub(super) fn file_bytes(
 /// md5_file(): Argument #1 ($filename) must not contain any null bytes
 /// md5_file(): Argument #2 ($binary) must be of type bool, array given
 /// ```
+///
+/// A file is hashed a read at a time, each read given up before the
+/// next, so a 2 MiB file raises the peak by no more than a stream's
+/// buffers, as php's `buf[1024]` loop does:
+///
+/// ```php
+/// $p = __DIR__ . '/big.txt'; $f = fopen($p, 'w'); for ($i = 0; $i < 512; $i++) fwrite($f, str_repeat("\0", 4096)); fclose($f);
+/// memory_reset_peak_usage(); $at = memory_get_usage();
+/// var_dump(md5_file($p), memory_get_peak_usage() - $at < 65536);
+/// ```
+/// ```expect
+/// string(32) "b2d1236c286a3c0704224fe4105eca49"
+/// bool(true)
+/// ```
 #[php_function]
 fn md5_file(
     req: &mut Request,
     filename: Path,
     #[php(default = false)] binary: bool,
 ) -> Result<OrFalse<PhpString>, Thrown> {
-    let Some(bytes) = file_bytes(req, filename.0)? else {
-        return Ok(OrFalse::False);
-    };
     let mut context = Md5::new();
-    context.update(&bytes);
+    if !digest_file(req, filename.0, |read| context.update(read))? {
+        return Ok(OrFalse::False);
+    }
     let digest = context.finish();
     digest_value(req, &digest, binary).map(OrFalse::Value)
 }

@@ -29,7 +29,7 @@ mod filter;
 mod mime;
 
 use ffi::{Cd, Errno};
-use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Union};
+use php_ext::abi::{Extension, ExtensionBuilder, IniStage, OrFalse, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
@@ -202,8 +202,9 @@ fn info(req: &mut Request) {
 
 /// `OnUpdateInputEncoding`, `OnUpdateOutputEncoding` and
 /// `OnUpdateInternalEncoding`: a name of `ICONV_CSNMAXLEN` bytes or more
-/// refused, and past startup the entry's deprecation raised before the
-/// value is taken.
+/// refused, and while a request runs, or a host lays its entry over, the
+/// entry's deprecation raised before the value is taken; not at startup,
+/// nor as the request ends and hands the entry back its value.
 ///
 /// ```php
 /// var_dump(ini_set('iconv.output_encoding', 'ASCII'), ini_set('iconv.output_encoding', str_repeat('a', 64)), ini_get('iconv.output_encoding'));
@@ -226,7 +227,7 @@ fn on_modify(req: &mut Request, kind: Kind, value: &[u8]) -> bool {
     if value.len() >= MAX_NAME {
         return false;
     }
-    if !req.at_startup() {
+    if matches!(req.ini_stage(), IniStage::Activate | IniStage::Runtime) {
         let text = format!("Use of {} is deprecated", kind.entry());
         docref(req, Level::Deprecated, &text);
     }

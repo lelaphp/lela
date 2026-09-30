@@ -138,7 +138,7 @@ mod pipe;
 mod target;
 mod types;
 mod user_call;
-mod walk;
+pub(crate) mod walk;
 
 /// One arm of an `if` as the tree holds it, php's `ZEND_AST_IF_ELEM`:
 /// the condition, none for the `else` arm, which is the last, as
@@ -442,6 +442,12 @@ pub(crate) struct Emit<'a> {
     /// before the node it is asked about, and a `namespace` statement
     /// is, since php's walk does not.
     statements_seen: u32,
+    /// Whether every statement of the file's own list compiled so far is
+    /// a `declare`, which `zend_is_first_statement` without `allow_nop`
+    /// holds an `encoding` directive to: an empty statement (php's `NULL`
+    /// child) ends it as any other does, and what a `declare`'s block
+    /// holds is not in the list.
+    pub(super) top_list: TopList,
     /// `ZEND_ACC_STRICT_TYPES` on the file's main op array, which
     /// `declare(strict_types=1)` sets and every op array compiled after
     /// it takes a copy of (`Z/Zend/zend_compile.c:8465`): the emitter's
@@ -1185,6 +1191,7 @@ pub(crate) fn unit(
     parsed: &Parsed,
     options: &Options<'_>,
     strings: &mut dyn Intern,
+    halt: Option<i64>,
 ) -> Result<Unit, CompileError> {
     let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
     let mut emit = Emit {
@@ -1212,6 +1219,7 @@ pub(crate) fn unit(
         active_hook: None,
         in_jmp_frameless_branch: false,
         statements_seen: 0,
+        top_list: TopList::Declares,
         typing: Typing::of(options.strict_types),
         ticks: None,
         stack: options.stack,
@@ -1258,7 +1266,7 @@ pub(crate) fn unit(
         try_catch_offset: None,
         generators: walk::generators(&parsed.tree),
         arms: Vec::new(),
-        halt: walk::halt_offset(parsed),
+        halt,
         halted: None,
     };
     // A fatal leaves the file with what `zend_error` had raised before
@@ -1280,6 +1288,7 @@ pub(crate) fn unit(
                 line,
                 raised: emit.diagnostics,
                 thrown: false,
+                stage: crate::Stage::Compiling,
             });
         };
         dynamic.push(def);
@@ -1399,6 +1408,7 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
             line: op.lineno,
             raised: Vec::new(),
             thrown: false,
+            stage: crate::Stage::Compiling,
         };
         if !op.opcode.is_safepoint_site() {
             return Err(refused("with no safepoint column for its number"));
@@ -1554,6 +1564,7 @@ impl Emit<'_> {
             line: self.line,
             raised: Vec::new(),
             thrown: false,
+            stage: crate::Stage::Compiling,
         }
     }
 
@@ -1796,14 +1807,8 @@ impl Emit<'_> {
     /// compile function looks at to sort an operand by its kind is the
     /// inner node, and the parenthesised conditional's mark is the one
     /// thing the parentheses leave, on the node ([`Self::expr`]).
-    pub(crate) fn peel(&self, mut expr: tree::Expr) -> tree::Expr {
-        while let tree::Expr::ParenExpr(id) = expr {
-            match self.parsed.tree[id].inner {
-                Some(inner) => expr = inner,
-                None => return expr,
-            }
-        }
-        expr
+    pub(crate) fn peel(&self, expr: tree::Expr) -> tree::Expr {
+        peel(self.parsed, expr)
     }
 
     /// The line php's node for `expr` carries, `zend_ast.lineno`: the
@@ -1820,15 +1825,10 @@ impl Emit<'_> {
             .map(|token| self.parsed.lines.line_number(token.offset))
     }
 
-    /// A token's text in the source.
+    /// A token's text as the scanner handed it over, the token filter's
+    /// where one stands ([`php_syntax::token_text`]).
     fn text(&self, id: TokenId) -> &[u8] {
-        let Some(token) = self.parsed.tokens.get(id.0 as usize) else {
-            return &[];
-        };
-        self.parsed
-            .source
-            .get(token.offset as usize..(token.offset + token.len) as usize)
-            .unwrap_or_default()
+        php_syntax::token_text(self.parsed, id)
     }
 
     /// A `<variable>` token's name, without its `$`.
@@ -2524,30 +2524,8 @@ impl Emit<'_> {
     /// value, [`TokenValue::of`]; a `"…"`, a heredoc or a nowdoc with
     /// nothing interpolated is one string as php's parser folds it.
     fn literal_of(&self, expr: tree::Expr) -> Option<Literal> {
-        let tree = &self.parsed.tree;
-        match self.peel(expr) {
-            tree::Expr::LiteralExpr(id) => {
-                let node = &tree[id];
-                match TokenValue::of(self.parsed, Holder::Scalar(node), node.value?)? {
-                    TokenValue::Int(n) => Some(Literal::Int(n)),
-                    TokenValue::Float(_) | TokenValue::Bytes(_) => Some(Literal::Other),
-                }
-            }
-            tree::Expr::InterpolatedStringExpr(id) => tree[id]
-                .parts
-                .iter()
-                .all(|part| matches!(part, tree::StringPart::LiteralStringPart(_)))
-                .then_some(Literal::Other),
-            tree::Expr::HeredocExpr(id) => tree[id]
-                .parts
-                .iter()
-                .all(|part| matches!(part, tree::StringPart::LiteralStringPart(_)))
-                .then_some(Literal::Other),
-            tree::Expr::NowdocExpr(_) => Some(Literal::Other),
-            _ => None,
-        }
+        written(self.parsed, expr)
     }
-
     /// Whether a node is php's `ZEND_AST_ZVAL`, one value its parser
     /// made before the compiler saw it: what
     /// `zend_compile_func_defined` and `zend_compile_func_chr` read an
@@ -5804,6 +5782,7 @@ impl Emit<'_> {
                     line: self.line,
                     raised: Vec::new(),
                     thrown: false,
+                    stage: crate::Stage::Compiling,
                 });
             }
             if out
@@ -5817,6 +5796,7 @@ impl Emit<'_> {
                     line: self.line,
                     raised: Vec::new(),
                     thrown: false,
+                    stage: crate::Stage::Compiling,
                 });
             }
             if !on_target {
@@ -6110,6 +6090,7 @@ impl Emit<'_> {
                     line: declared_at,
                     raised: Vec::new(),
                     thrown: false,
+                    stage: crate::Stage::Compiling,
                 });
             }
             if out
@@ -6123,6 +6104,7 @@ impl Emit<'_> {
                     line: declared_at,
                     raised: Vec::new(),
                     thrown: false,
+                    stage: crate::Stage::Compiling,
                 });
             }
         }
@@ -6856,6 +6838,7 @@ impl Emit<'_> {
                 line: refused.site.line,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             }),
         }
     }
@@ -7786,9 +7769,11 @@ impl Emit<'_> {
     /// `ticks` is the count [`Emit::tick`] emits `ZEND_TICKS` with after
     /// every statement in its scope, the value read as `zval_get_long`
     /// reads it and zero turning the ticks off, and the scope the rest of
-    /// the file or the statement after the `)`. `encoding` is refused for the scanner's
-    /// own warning, which this compiler does not raise. Every other
-    /// name is php's `E_COMPILE_WARNING`, and the file compiles on.
+    /// the file or the statement after the `)`. `encoding` is the
+    /// parser's to read ([`crate::multibyte`]); here it is held to
+    /// `zend_is_first_statement` without `allow_nop`, so an empty
+    /// statement before it refuses it too ([`Emit::top_list`]). Every
+    /// other name is php's `E_COMPILE_WARNING`, and the file compiles on.
     fn declare(&mut self, id: NodeId<tree::DeclareStmt>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         if node.stmt_list.is_some() {
@@ -7808,14 +7793,6 @@ impl Emit<'_> {
             // token the scanner made a zval of, so `-1`, `true` and
             // `1 + 0` are each the fatal and not a fold.
             let Some(value) = self.literal_of(written_value) else {
-                // `zend_handle_encoding_declaration`, which the parser runs
-                // before any of this, throws its own.
-                if written.eq_ignore_ascii_case(b"encoding") {
-                    return Err(CompileError {
-                        thrown: true,
-                        ..self.compile_error("Encoding must be a literal")
-                    });
-                }
                 return Err(self.compile_error(format!("declare({name}) value must be a literal")));
             };
             if written.eq_ignore_ascii_case(b"strict_types") {
@@ -7846,7 +7823,13 @@ impl Emit<'_> {
                 };
                 self.ticks = NonZeroI64::new(count);
             } else if written.eq_ignore_ascii_case(b"encoding") {
-                return Err(self.fatal("a `declare(encoding)` this compiler cannot read yet"));
+                // `zend_is_first_statement` without `allow_nop`: an empty
+                // statement before it is one too.
+                if self.depth != 1 || self.top_list != TopList::Declares {
+                    return Err(self.compile_error(
+                        "Encoding declaration pragma must be the very first statement in the script",
+                    ));
+                }
             } else {
                 self.raise(
                     Level::CompileWarning,
@@ -9320,6 +9303,7 @@ impl Emit<'_> {
             line,
             raised: Vec::new(),
             thrown: false,
+            stage: crate::Stage::Compiling,
         };
         let name = self
             .constants
@@ -9428,6 +9412,7 @@ impl Emit<'_> {
                 line,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             });
         }
         Ok(())
@@ -10016,6 +10001,7 @@ impl Emit<'_> {
             line: self.line,
             raised: Vec::new(),
             thrown: false,
+            stage: crate::Stage::Compiling,
         }
     }
 
@@ -16913,7 +16899,9 @@ impl Emit<'_> {
                 self.compile_error("__HALT_COMPILER() can only be used from the outermost scope")
             );
         }
-        self.halted = Some(walk::halt_end(self.parsed, id));
+        // The offset the parser took from the scanner, in the script as
+        // read (`zend_get_scanned_file_offset`), which [`Emit::halt`] holds.
+        self.halted = Some(self.halt.unwrap_or_else(|| walk::halt_end(self.parsed, id)));
         Ok(())
     }
 
@@ -18377,13 +18365,66 @@ impl Typing {
     }
 }
 
+/// An expression under any parentheses around it, the node php's
+/// parser makes of it (`(expr)` is `expr`).
+pub(crate) fn peel(parsed: &Parsed, mut expr: tree::Expr) -> tree::Expr {
+    while let tree::Expr::ParenExpr(id) = expr {
+        match parsed.tree[id].inner {
+            Some(inner) => expr = inner,
+            None => return expr,
+        }
+    }
+    expr
+}
+
+/// The `ZEND_AST_ZVAL` an expression is, or nothing where php's node
+/// is another kind: a number or a `'…'` string is its token's value,
+/// [`TokenValue::of`]; a `"…"`, a heredoc or a nowdoc with nothing
+/// interpolated is one string as php's parser folds it. What the parser's
+/// `declare` action holds an encoding to, and the compiler every other
+/// directive.
+pub(crate) fn written(parsed: &Parsed, expr: tree::Expr) -> Option<Literal> {
+    let tree = &parsed.tree;
+    match peel(parsed, expr) {
+        tree::Expr::LiteralExpr(id) => {
+            let node = &tree[id];
+            match TokenValue::of(parsed, Holder::Scalar(node), node.value?)? {
+                TokenValue::Int(n) => Some(Literal::Int(n)),
+                TokenValue::Float(_) | TokenValue::Bytes(_) => Some(Literal::Other),
+            }
+        }
+        tree::Expr::InterpolatedStringExpr(id) => tree[id]
+            .parts
+            .iter()
+            .all(|part| matches!(part, tree::StringPart::LiteralStringPart(_)))
+            .then_some(Literal::Other),
+        tree::Expr::HeredocExpr(id) => tree[id]
+            .parts
+            .iter()
+            .all(|part| matches!(part, tree::StringPart::LiteralStringPart(_)))
+            .then_some(Literal::Other),
+        tree::Expr::NowdocExpr(_) => Some(Literal::Other),
+        _ => None,
+    }
+}
+
+/// What the file's own statement list has held so far, as
+/// `zend_is_first_statement` reads it for an `encoding` directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TopList {
+    /// Nothing but `declare` statements.
+    Declares,
+    /// Some other statement, an empty one among them.
+    Other,
+}
+
 /// What php's `ZEND_AST_ZVAL` is among the tree's expressions: one
 /// token the scanner already made a zval of, or a string in any
 /// spelling with nothing interpolated, which php's parser hands the
 /// compiler as one value. `true`, `null` and `-1` are each a node of
 /// their own, which is why `zend_compile_declare` refuses them before
 /// it folds anything.
-enum Literal {
+pub(crate) enum Literal {
     /// `T_LNUMBER`, the one a directive here reads the value of.
     Int(i64),
     /// `T_DNUMBER` and `T_CONSTANT_ENCAPSED_STRING`: one php takes,
@@ -18431,6 +18472,7 @@ mod tests {
             active_hook: None,
             in_jmp_frameless_branch: false,
             statements_seen: 0,
+            top_list: TopList::Declares,
             typing: Typing::of(options.strict_types),
             ticks: None,
             stack: options.stack,

@@ -20,19 +20,22 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
-    Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni, Validation,
+    DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
+    Validation,
 };
 use crate::api::raising::Level;
-use crate::api::request::{Ending, ExtensionId, Request, Sink};
+use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
+use crate::natives::StubPlace;
 use crate::streams::Standard;
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 pub(crate) use crate::unit_cache::Cached;
@@ -374,18 +377,18 @@ pub trait OutputSink {
     /// The response's head, once, before the first body byte.
     fn send_headers(&mut self, head: &ResponseHead);
     /// One entry for the host's log, whole: what `php_log_err` was
-    /// given, a diagnostic in its log form with its stack trace under
-    /// it where it has one, or `error_log()`'s message as given, so it
-    /// may carry newlines inside it and ends in none. The host ends it:
-    /// php's CLI writes `"%s\n"` to stderr and a file log writes
-    /// `[date] ` before it and `PHP_EOL` after.
+    /// given where `error_log` names no file it could open
+    /// (`sapi_module.log_message`), a diagnostic in its log form with
+    /// its stack trace under it where it has one, or `error_log()`'s
+    /// message as given, so it may carry newlines inside it and ends in
+    /// none. The host ends it: php's CLI writes `"%s\n"` to stderr.
     fn log(&mut self, entry: &[u8]);
     /// Bytes for the host's error stream, as given: what php writes to
     /// the process's `stderr` past the host, the `display_errors=stderr`
     /// form of a diagnostic with its `\n` (`Z/main/main.c:1484`) and,
     /// when streams exist, what the `STDERR` stream constant is given.
-    /// Where the log goes is the host's: php's CLI puts it on this same
-    /// stream, and a host with an `error_log` file parts the two, so a
+    /// Where the host's log goes is the host's: php's CLI puts it on this
+    /// same stream, and an `error_log` file parts the two, so a
     /// diagnostic is logged and displayed in that order on one stream
     /// and in no order across two (#216).
     fn write_stderr(&mut self, bytes: &[u8]);
@@ -590,6 +593,10 @@ pub(crate) struct Shared {
     /// The entries a host's `php_admin_value` made `PHP_INI_SYSTEM`,
     /// which no request moves ([`IniOrigin::Admin`]).
     pub(crate) locked: Vec<Vec<u8>>,
+    /// `CG(script_encoding_list)` as the engine started: what the
+    /// startup `zend.script_encoding` named, through the encoding
+    /// functions ([`crate::multibyte`]).
+    pub(crate) script_encodings: Vec<php_compile::multibyte::Encoding>,
     pub(crate) units: UnitCache,
     /// The persistent pool (design §4.10, #1172): the sockets
     /// `pfsockopen` and `STREAM_CLIENT_PERSISTENT` keep between requests,
@@ -841,7 +848,9 @@ fn link_trampolines(
 /// the request made before it where it is an `eval`'s
 /// ([`php_compile::Options::keys_before`]), and the classes the request
 /// had declared by then, which a unit compiled for no request has none of
-/// ([`php_compile::RequestClasses`]).
+/// ([`php_compile::RequestClasses`]); and, where `zend.multibyte` is on,
+/// the encoding functions bound to the request and what the scanner
+/// reads beside them ([`crate::multibyte::Bound`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
@@ -849,6 +858,7 @@ struct Origin<'a> {
     kind: SourceKind,
     keys_before: u32,
     request_classes: RequestClasses<'a>,
+    multibyte: Option<Multibyte<'a>>,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -937,7 +947,9 @@ impl Shared {
             short_open_tag: req.short_open_tag(),
             assertions: req.assertions() >= 0,
             shebang: self.shebang,
+            multibyte: ini_truth(req.ini_get(b"zend.multibyte")),
         };
+        let bound = crate::multibyte::bound(req, ini.multibyte);
         let cwd = req.cwd();
         let keys_before = req.keys_made;
         let stack = req.stack_limit();
@@ -948,6 +960,7 @@ impl Shared {
                 kind,
                 keys_before,
                 request_classes,
+                multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
             compile(
                 source,
@@ -978,6 +991,23 @@ impl Shared {
         )
     }
 
+    /// `zend.multibyte` as the startup ini has it, which a unit bound for
+    /// the cache is compiled under ([`CompileIni`]).
+    pub(crate) fn compile_multibyte(&self) -> bool {
+        self.compile_ini().multibyte
+    }
+
+    /// What a file compiled for no request is read under where the
+    /// startup `zend.multibyte` is on: no request to bind the encoding
+    /// functions to, so Zend's own dummies, and no list.
+    fn unbound(&self) -> Option<Multibyte<'static>> {
+        self.compile_ini().multibyte.then_some(Multibyte {
+            encodings: &php_compile::multibyte::Dummy,
+            detect_unicode: true,
+            listed: &[],
+        })
+    }
+
     /// The compiler's ini as the startup one has it, which a unit bound
     /// for the cache is compiled under; a request compiles its own
     /// source under its own ([`CompileIni`]).
@@ -994,6 +1024,9 @@ impl Shared {
                 .ini_default(b"zend.assertions")
                 .is_none_or(|value| Request::ini_parse_bytes(value) >= 0),
             shebang: self.shebang,
+            multibyte: self
+                .ini_default(b"zend.multibyte")
+                .is_some_and(|value| ini_truth(Some(value))),
         }
     }
 
@@ -1015,7 +1048,17 @@ impl Shared {
         self.units
             .file(
                 asked,
-                |source| self.publish_file(source, path, cwd, stack, RequestClasses::default()),
+                |source| {
+                    let multibyte = self.unbound();
+                    self.publish_file(
+                        source,
+                        path,
+                        cwd,
+                        stack,
+                        RequestClasses::default(),
+                        multibyte,
+                    )
+                },
                 |_| None,
             )
             .0
@@ -1047,6 +1090,7 @@ impl Shared {
         cwd: &Path,
         stack: StackLimit,
         request_classes: RequestClasses<'_>,
+        multibyte: Option<Multibyte<'_>>,
     ) -> Result<Arc<Unit>, CompileError> {
         self.publish(
             source,
@@ -1056,6 +1100,7 @@ impl Shared {
                 kind: SourceKind::File,
                 keys_before: 0,
                 request_classes,
+                multibyte,
             },
             stack,
         )
@@ -1087,6 +1132,13 @@ impl Shared {
             .iter()
             .find(|(n, _)| n.as_slice() == name)
             .map(|(_, entry)| entry)
+    }
+
+    /// `zend_get_configuration_directive`, what an INI text's `${name}`
+    /// reads first: the string the host's ini text set under `name`,
+    /// whether or not an entry of that name exists.
+    pub(crate) fn directive(&self, name: &[u8]) -> Option<&[u8]> {
+        self.configured(name).and_then(Configured::text)
     }
 
     /// The value of the constant `name` as the bundle declared it, or as
@@ -1154,14 +1206,25 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 86] = [
+const CORE_INI: &[(&str, &str)] = &[
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
     ("serialize_precision", "-1"),
-    ("error_reporting", "32767"),
+    // `error_reporting`, `NULL` in php's table (`Z/Zend/zend.c:262`),
+    // which `ini_get` reads as the empty string, phpinfo as `no value`
+    // and `OnUpdateErrorReporting` as `E_ALL`.
+    ("error_reporting", ""),
     ("display_errors", "1"),
+    // `display_startup_errors`, `On` (`Z/main/main.c:800`): whether what
+    // is raised while php starts is displayed ([`Request::display_errors`]).
+    ("display_startup_errors", "1"),
     ("log_errors", "0"),
+    // `error_log`, `NULL` in php's table, and `error_log_mode`, both
+    // `PHP_INI_ALL` (`Z/main/main.c:835-836`): the file `php_log_err`
+    // appends to and the permissions it creates one with.
+    ("error_log", ""),
+    ("error_log_mode", "0644"),
     ("html_errors", "0"),
     // `docref_root` and `docref_ext`, `PHP_INI_ALL`: where a function's
     // diagnostic under `html_errors` links to (`raising::origin`).
@@ -1171,6 +1234,7 @@ const CORE_INI: [(&str, &str); 86] = [
     ("error_append_string", ""),
     ("ignore_repeated_errors", "0"),
     ("ignore_repeated_source", "0"),
+    ("report_zend_debug", "0"),
     ("xmlrpc_errors", "0"),
     ("xmlrpc_error_number", "0"),
     // `max_memory_limit`, `PHP_INI_SYSTEM`, declared before
@@ -1180,6 +1244,10 @@ const CORE_INI: [(&str, &str); 86] = [
     ("memory_limit", "128M"),
     ("report_memleaks", "1"),
     ("max_execution_time", "0"),
+    // `hard_timeout`, `PHP_INI_SYSTEM` (`Z/main/main.c:885`): the seconds
+    // past a timeout the execution timer waits for the loop to take it
+    // before it ends the process ([`crate::interrupt::Timer`]).
+    ("hard_timeout", "2"),
     ("default_charset", "UTF-8"),
     ("default_mimetype", "text/html"),
     ("internal_encoding", ""),
@@ -1210,6 +1278,17 @@ const CORE_INI: [(&str, &str); 86] = [
     // `zend.enable_gc`, `On` (`Z/Zend/zend.c:265`), whose `on_modify` is
     // the collector's `gc_enable`.
     ("zend.enable_gc", "1"),
+    // `zend.multibyte`, `zend.script_encoding` and `zend.detect_unicode`
+    // (`Z/Zend/zend.c:266-268`): whether a file is read in its own
+    // encoding, the encodings it may be in, and whether a byte order
+    // mark or NULs say which first ([`crate::multibyte`]).
+    ("zend.multibyte", "0"),
+    ("zend.script_encoding", ""),
+    ("zend.detect_unicode", "1"),
+    // `zend.signal_check`, `ZEND_INI_SYSTEM` and `SIGNAL_CHECK_DEFAULT`
+    // (`Z/Zend/zend.c:270`): whether shutdown checks the signal handlers
+    // `zend_signal` installed were left in place.
+    ("zend.signal_check", "0"),
     // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
     // as the empty string and `OnUpdateFiberStackSize` as php's default.
     ("fiber.stack_size", ""),
@@ -1233,6 +1312,7 @@ const CORE_INI: [(&str, &str); 86] = [
     ("mail.cr_lf_mode", "crlf"),
     ("mail.log", ""),
     ("sendmail_path", "/usr/sbin/sendmail -t -i"),
+    ("sendmail_from", ""),
     ("mail.force_extra_parameters", ""),
     ("syslog.facility", "LOG_USER"),
     ("syslog.ident", "php"),
@@ -1248,6 +1328,10 @@ const CORE_INI: [(&str, &str); 86] = [
     // `ignore_user_abort`, `PG(ignore_user_abort)`, and the two `dl()`
     // reads, `enable_dl` and `extension_dir`, `PHP_INI_SYSTEM`.
     ("ignore_user_abort", "0"),
+    // `implicit_flush`, `Off` in `main.c` and `On` among the CLI's
+    // hardcoded entries (`Z/sapi/cli/php_cli.c:118`), which the web's
+    // hosts lay back.
+    ("implicit_flush", "1"),
     // `realpath_cache_size` and `realpath_cache_ttl`, `PHP_INI_SYSTEM`,
     // the realpath cache's limit and time to live (`crate::virtual_cwd`).
     ("realpath_cache_size", "4096K"),
@@ -1435,9 +1519,7 @@ impl crate::ini_syntax::Host for Configure<'_> {
     }
 
     fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        self.shared
-            .configured(name)
-            .and_then(|entry| entry.text().map(<[u8]>::to_vec))
+        self.shared.directive(name).map(<[u8]>::to_vec)
     }
 
     fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
@@ -1705,6 +1787,9 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 /// and then each extension's in bundle order, the host's `additional`
 /// after them under `standard`, less what the list names
 /// ([`disabled_functions`]), each beside the extension that declared it.
+/// The natives the engine declares for `standard` ([`crate::natives::standard`])
+/// are `standard`'s where the bundle has it, at their stub places among
+/// its own, and follow Core's under no extension where it does not.
 /// The one place the disabled set is decided: what it takes out is in no
 /// table the compiler or a request reads.
 fn function_table(
@@ -1718,31 +1803,78 @@ fn function_table(
         .find(|(name, _)| name.as_slice() == b"disable_functions")
         .map_or(&[][..], |(_, list)| list.as_slice());
     let disabled = disabled_functions(list);
-    // A host's natives go under `standard` once every module has
-    // started (`Z/main/main.c:2359-2366`).
+    // `module_registry` numbers Core 0 and the bundle from 1.
     let standard = extensions
         .iter()
-        .position(|e| e.name == "standard")
-        .and_then(|at| u32::try_from(at).ok())
-        .map(ExtensionId);
-    core.functions
+        .zip(1u32..)
+        .find(|(e, _)| e.name == "standard")
+        .map(|(_, at)| ExtensionId(at));
+    let mut engine_standard = Some(crate::natives::standard());
+    let mut table: Vec<(Option<ExtensionId>, (FunctionDecl, Entry))> = core
+        .functions
         .iter()
         .cloned()
         .map(|native| (Some(ExtensionId::CORE), native))
-        .chain(
-            crate::natives::standard()
+        .collect();
+    if standard.is_none() {
+        table.extend(
+            engine_standard
+                .take()
                 .into_iter()
-                .map(|native| (None, native)),
-        )
-        .chain(extensions.iter().zip(1u32..).flat_map(|(e, at)| {
-            e.functions
-                .iter()
-                .cloned()
-                .map(move |native| (Some(ExtensionId(at)), native))
-        }))
-        .chain(additional.into_iter().map(|native| (standard, native)))
+                .flatten()
+                .map(|(_, native)| (None, native)),
+        );
+    }
+    for (e, at) in extensions.iter().zip(1u32..) {
+        let id = Some(ExtensionId(at));
+        let own = e.functions.iter().cloned();
+        match engine_standard.take_if(|_| Some(ExtensionId(at)) == standard) {
+            Some(engine) => {
+                table.extend(
+                    at_stub_places(engine, own)
+                        .into_iter()
+                        .map(|native| (id, native)),
+                );
+            }
+            None => table.extend(own.map(|native| (id, native))),
+        }
+    }
+    // A host's natives go under `standard` once every module has
+    // started (`Z/main/main.c:2359-2366`).
+    table.extend(additional.into_iter().map(|native| (standard, native)));
+    table
+        .into_iter()
         .filter(|(_, (decl, _))| !disabled.contains(&decl.name.0.to_ascii_lowercase().as_slice()))
         .unzip()
+}
+
+/// `ext/standard`'s natives in its own order with the engine's
+/// declared for it spliced in at their [`StubPlace`]s: each after the
+/// function it names, whichever side declared that one, and at the end
+/// where the stub's neighbour is not in the list.
+fn at_stub_places(
+    engine: Vec<(StubPlace, (FunctionDecl, Entry))>,
+    own: impl Iterator<Item = (FunctionDecl, Entry)>,
+) -> Vec<(FunctionDecl, Entry)> {
+    let mut waiting = engine;
+    let mut placed: Vec<(FunctionDecl, Entry)> = Vec::new();
+    let settle = |waiting: &mut Vec<(StubPlace, (FunctionDecl, Entry))>,
+                  placed: &mut Vec<(FunctionDecl, Entry)>| {
+        while let Some(at) = waiting
+            .iter()
+            .position(|(place, _)| place.follows(placed.last().map(|(decl, _)| decl)))
+        {
+            let (_, native) = waiting.remove(at);
+            placed.push(native);
+        }
+    };
+    settle(&mut waiting, &mut placed);
+    for native in own {
+        placed.push(native);
+        settle(&mut waiting, &mut placed);
+    }
+    placed.extend(waiting.into_iter().map(|(_, native)| native));
+    placed
 }
 
 /// `phar_intercept_functions_init` and opcache's
@@ -1802,7 +1934,9 @@ impl EngineBuilder {
         self
     }
 
-    /// The extensions in `MINIT` order, the bundle's `enabled()`.
+    /// The extensions in the bundle's order, `enabled()`, which the
+    /// engine starts in as `zend_sort_modules` leaves it
+    /// ([`sort_modules`]).
     #[must_use]
     pub fn extensions(mut self, extensions: &[Extension]) -> EngineBuilder {
         self.extensions.extend(extensions.iter().cloned());
@@ -1877,7 +2011,19 @@ impl EngineBuilder {
     }
 
     /// The engine: every engine state built from the startup ini, in
-    /// bundle order (ADR-0005), the declarations linked.
+    /// bundle order (ADR-0005), the declarations linked. A name the host
+    /// set that neither the core table nor an extension declares is no
+    /// entry, as the recipe's `track_errors`, gone since php 8, is not:
+    ///
+    /// ```php
+    /// var_dump(ini_get('track_errors'), get_cfg_var('track_errors'), ini_set('track_errors', '1'), isset(ini_get_all()['track_errors']));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(1) "0"
+    /// bool(false)
+    /// bool(false)
+    /// ```
     #[must_use]
     #[allow(clippy::too_many_lines)] // one line per field of the engine
     pub fn build(self) -> Engine {
@@ -1892,6 +2038,7 @@ impl EngineBuilder {
             extensions.extend(hosted.extension);
             hosted.additional
         });
+        sort_modules(&mut extensions);
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
         // `standard`'s constants: each extension's constants rewritten
@@ -1919,6 +2066,13 @@ impl EngineBuilder {
         for (name, value) in configuration.directives() {
             if on_modify(&extensions, &name).is_some() {
                 held.push((name, value, false));
+                continue;
+            }
+            // A name no table declares is no entry: it stays in the
+            // configuration table, where `get_cfg_var()` finds it, as
+            // `zend_register_ini_entries_ex` reads that table by the
+            // names it registers and by no other.
+            if !ini.iter().any(|(n, _)| *n == name) {
                 continue;
             }
             ini.retain(|(n, _)| *n != name);
@@ -1982,6 +2136,7 @@ impl EngineBuilder {
                 reenter: self.reenter,
                 resume: self.resume,
                 locked,
+                script_encodings: Vec::new(),
                 units,
                 persistent: crate::api::abi::Pool::new(PERSISTENT_ENTRIES),
                 strings: Mutex::new(strings),
@@ -2058,6 +2213,49 @@ fn host_ini(
         }
     }
     admin
+}
+
+/// `zend_sort_modules` (`Z/Zend/zend_API.c:2483-2515`), which
+/// `zend_startup_modules` runs over `module_registry` before the first
+/// `MINIT`: walking from the first, an extension that names a required
+/// or optional dependency standing after it trades places with that one,
+/// and the walk stays where it is until the extension there names none
+/// that stands later. The order the engine starts, registers and lists
+/// its extensions in is the bundle's as this leaves it, so `standard`,
+/// which names `session` optional (`standard_deps`), starts after it
+/// whatever the crates depend on:
+///
+/// ```php
+/// $loaded = get_loaded_extensions();
+/// var_dump(array_search('session', $loaded) < array_search('standard', $loaded), array_search('libxml', $loaded) < array_search('dom', $loaded));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
+///
+/// php loops for ever over a cycle of dependencies; the walk here stops
+/// after as many trades as a list of its length can need without one.
+fn sort_modules(modules: &mut [Extension]) {
+    let mut trades = modules.len() * modules.len();
+    let mut at = 0;
+    while at < modules.len() {
+        let later = modules[at]
+            .dependencies
+            .iter()
+            .filter(|dep| dep.kind != DependencyKind::Conflicts)
+            .find_map(|dep| {
+                (at + 1..modules.len())
+                    .find(|&other| modules[other].name.eq_ignore_ascii_case(&dep.name))
+            });
+        match later {
+            Some(other) if trades > 0 => {
+                modules.swap(at, other);
+                trades -= 1;
+            }
+            _ => at += 1,
+        }
+    }
 }
 
 /// The `on_modify` an extension of `extensions` gave the entry `name`.
@@ -2164,13 +2362,22 @@ impl Engine {
         req.begin_startup();
         let mut taken = core_startup(&mut req);
         for (name, value, activate) in held {
-            req.set_activating(activate);
+            req.set_ini_stage(if activate {
+                IniStage::Activate
+            } else {
+                IniStage::Startup
+            });
             let accepted = on_modify(&self.shared.extensions, &name)
                 .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
             if accepted {
                 req.take_startup_value(&name, &value);
                 taken.push((name, value));
             }
+        }
+        req.set_ini_stage(IniStage::Startup);
+        let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
+        if taken_encoding == crate::multibyte::Startup::Refused {
+            taken.push((b"zend.script_encoding".to_vec(), Vec::new()));
         }
         disable_warnings(&mut req);
         let raised = req.end_startup();
@@ -2190,6 +2397,7 @@ impl Engine {
             shared.ini.push((name, value));
         }
         shared.startup_raised = raised;
+        shared.script_encodings = script_encodings;
         shared
             .startup_errors
             .push_str(&String::from_utf8_lossy(&written));
@@ -2302,6 +2510,7 @@ impl Engine {
             kind: SourceKind::File,
             keys_before: 0,
             request_classes: RequestClasses::default(),
+            multibyte: self.shared.unbound(),
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -2349,6 +2558,7 @@ impl Engine {
                     kind: SourceKind::File,
                     keys_before: 0,
                     request_classes: RequestClasses::default(),
+                    multibyte: self.shared.unbound(),
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -2790,6 +3000,9 @@ impl Engine {
         req.catch_bailout();
         crate::output::end_all(req);
         req.catch_bailout();
+        // "4. Reset max_execution_time (no longer executing php code
+        // after response sent)" (`Z/main/main.c:1990-1994`).
+        req.unset_timer();
     }
 
     /// The rest of `php_request_shutdown` after
@@ -2817,6 +3030,9 @@ impl Engine {
         req.destroy_static_vars();
         req.free_default_arguments();
         req.free_object_storage();
+        // `zend_deactivate`'s `zend_ini_deactivate`, after
+        // `shutdown_executor` (`Z/Zend/zend.c:1320-1330`).
+        req.ini_deactivate();
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
         // for the host is the log form of it, whether or not `log_errors`
@@ -2906,6 +3122,8 @@ struct CompileIni {
     short_open_tag: bool,
     assertions: bool,
     shebang: php_compile::Shebang,
+    /// `CG(multibyte)`, `zend.multibyte`, `PHP_INI_PERDIR`.
+    multibyte: bool,
 }
 
 /// One source compiled, with what the compiler refused kept instead of
@@ -2946,6 +3164,7 @@ fn compile(
         request_classes: origin.request_classes,
         stack,
         keys_before: origin.keys_before,
+        multibyte: origin.multibyte,
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
@@ -3084,12 +3303,33 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKin
 /// A program in `file` the compiler refused: `php_error_cb` renders it
 /// where it renders every diagnostic, at the level the compiler refused
 /// at, what it raised before first, and the request ends before a frame
-/// is pushed.
+/// is pushed. A refusal php throws as a `CompileError` is uncaught here,
+/// so `zend_exception_error` renders it through `zend_error_cb` alone,
+/// with no fatal's trace after it:
+///
+/// ```php
+/// declare(encoding = M_PI);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Encoding must be a literal in %s on line 2
+/// ```
 pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &[u8]) {
     for raised in &refused.raised {
         req.note_error_in(raised.level, &raised.message, file, raised.line);
     }
-    req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+    match (refused.stage, refused.thrown) {
+        // Opened before anything compiled or ran: `zend_error` finds no
+        // file compiling and none executing.
+        (php_compile::Stage::Opening, _) => {
+            req.end_in_compile_time(refused.level, &refused.message, b"Unknown", 0);
+        }
+        (php_compile::Stage::Compiling, true) => {
+            req.end_in_uncaught(refused.level, &refused.message, file, refused.line);
+        }
+        (php_compile::Stage::Compiling, false) => {
+            req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+        }
+    }
 }
 
 /// `zend_execute_script(ZEND_REQUIRE, NULL, file)` over the file the
@@ -3129,6 +3369,23 @@ fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
 /// the shutdown functions and the extensions' `rshutdown`, until
 /// `shutdown_executor` destroys the table (design §5.10).
 ///
+/// A fatal the loop raised leaves every frame above the main one
+/// standing, as `zend_bailout` jumps past them; `_zend_bailout` sets
+/// `EG(current_execute_data)` to null (`Z/Zend/zend.c:1268`), so they are
+/// popped here, before the main one is left, and a shutdown function is
+/// called from nothing.
+///
+/// ```php
+/// set_time_limit(1);
+/// register_shutdown_function(function () { debug_print_backtrace(); });
+/// function spin() { while (true); }
+/// spin();
+/// ```
+/// ```expect exit=255 wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 4
+/// #0 [internal function]: {closure:%s:3}()
+/// ```
+///
 /// Whether the program ran to its end: not a fatal, a refused
 /// declaration or an `exit`, each of which php leaves by `zend_bailout`,
 /// and not a throwable no handler took.
@@ -3136,6 +3393,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if !note_compiled(req, unit, SourceKind::File) {
         return false;
     }
+    let standing = req.vm().frames().len();
     let frame = match req.push_frame(Arc::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
@@ -3145,6 +3403,9 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     };
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
+    }
+    while req.vm().frames().len() > standing + 1 {
+        req.pop_frame();
     }
     req.detach_symbol_table(frame);
     req.pop_frame();
@@ -3163,10 +3424,11 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 /// starts them, what its `php -n` answers `get_loaded_extensions()` in
 /// past `Core`: the order php's `MINIT`s register their stream wrappers
 /// and filters in, which `stream_get_wrappers()`, `stream_get_filters()`
-/// and phpinfo's `Registered PHP Streams` list. The bundle is a
-/// topological order of the crates instead, `standard` ahead of the
-/// extensions that call into it, so the tables are put in this order
-/// after the extensions start ([`serve_rinits`]).
+/// and phpinfo's `Registered PHP Streams` list. The engine starts the
+/// bundle's order as [`sort_modules`] leaves it, which is not the pinned
+/// build's (`openssl` after `standard`, `random` near the front), so the
+/// tables are put in this order after the extensions start
+/// ([`serve_rinits`]).
 #[rustfmt::skip]
 const MODULE_STARTUP: [&str; 65] = [
     "date", "lexbor", "openssl", "pcre", "sqlite3", "zlib", "bcmath", "bz2", "calendar", "ctype",
@@ -3188,7 +3450,7 @@ fn startup_rank(name: &str) -> usize {
         .unwrap_or(MODULE_STARTUP.len())
 }
 
-/// Each extension's `rinit` in bundle order, with the stream wrappers
+/// Each extension's `rinit` in startup order, with the stream wrappers
 /// and filters each registers placed in php's startup order
 /// ([`MODULE_STARTUP`]): every extension registers into empty tables,
 /// its rows are gathered under its rank, and the tables are the rows
@@ -4676,12 +4938,14 @@ mod tests {
                     kind: SourceKind::File,
                     keys_before: 0,
                     request_classes: RequestClasses::default(),
+                    multibyte: None,
                 },
                 CompileIni {
                     precision: 14,
                     short_open_tag: true,
                     assertions: true,
                     shebang: php_compile::Shebang::Read,
+                    multibyte: false,
                 },
                 Declared::default(),
                 StackLimit::UNCHECKED,
@@ -5055,21 +5319,43 @@ mod tests {
     /// what is held here is the switch.
     #[test]
     fn the_dump_before_the_optimizer_is_the_op_arrays_under_the_ini_bit_and_nothing_without_it() {
+        // The entry is opcache's, and php has none without it.
+        let opcache = || {
+            let entry = php_unit::decl::IniDecl {
+                name: Name(b"opcache.opt_debug_level"[..].into()),
+                default: b"0"[..].into(),
+                user: false,
+                per_dir: false,
+                system: true,
+            };
+            let extension = crate::api::abi::ExtensionBuilder::default()
+                .ini(vec![entry])
+                .build("t");
+            Engine::builder().extensions(&[extension])
+        };
         let described = description("<?php echo 1;");
         assert_eq!(
-            Engine::builder().build().dump_before_optimizer(&described),
+            Engine::builder()
+                .ini("opcache.opt_debug_level", "0x10000")
+                .build()
+                .dump_before_optimizer(&described),
+            None,
+            "no opcache, and so no entry"
+        );
+        assert_eq!(
+            opcache().build().dump_before_optimizer(&described),
             None,
             "no opt_debug_level at all"
         );
         assert_eq!(
-            Engine::builder()
+            opcache()
                 .ini("opcache.opt_debug_level", "0")
                 .build()
                 .dump_before_optimizer(&described),
             None,
             "the entry at its default"
         );
-        let dumped = Engine::builder()
+        let dumped = opcache()
             .ini("opcache.opt_debug_level", "0x10000")
             .build()
             .dump_before_optimizer(&described)
@@ -5080,7 +5366,7 @@ mod tests {
             "the one op array, in php's format"
         );
         assert_eq!(
-            Engine::builder()
+            opcache()
                 .ini("opcache.opt_debug_level", "0x10000")
                 .build()
                 .dump_before_optimizer(&description("<?php echo 1 +;")),

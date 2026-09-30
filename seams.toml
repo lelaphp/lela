@@ -24,9 +24,9 @@ total = 398500                             # every counted line of the workspace
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
 docs = 5000                                # design §10; `docs/**` plus the three living documents
 harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
-lock_packages = 135                        # design §4.1: `Cargo.lock` packages, default features, counted on day 31 with the Cranelift set
+lock_packages = 160                        # design §4.1: third-party `Cargo.lock` packages (those with a `source`); a workspace crate is held by its [[crate]] row and ceiling (#1335)
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
-api_items = 1000                            # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34)
+api_items = 1500                           # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34; #697)
 api_private_items = 16                     # design §4.4 (revision 34, D1 of #947): api::__private, the helpers only a macro expansion names, capped apart from api_items
 bindings = 18500                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
 # Lines are non-blank, non-comment, tests excluded (`xtask budget`).
@@ -399,7 +399,7 @@ lock = "sapi.lock"
 [[seam]]
 name = "tier"
 producer = "php_engine"
-consumers = ["php_jit"]
+consumers = ["php_jit", "php_sapi"]   # the face section is the one statement of the Tier face; kernels stay php_jit's (#1350)
 lock = "tier.lock"
 allowlist = true
 sections = ["face", "kernels"]
@@ -464,8 +464,8 @@ to = "php_engine::{serve,headers,gpc,output}"
 deny = true # design §4.2: keeps a later main/-style split possible
 [[edge]]
 from = "sapi/*"
-to = ["php_sapi", "php_proto", "php_bundle"]
-adr = "0008" # a host reaches the engine through php_sapi alone; never php_engine, api or ext/*
+to = ["php_sapi", "php_proto", "php_bundle", "php_ext"]
+adr = "0008" # a host reaches the engine through php_sapi; php_ext only to declare natives of its own (#1348); never php_engine or ext/*
 
 # ---------------------------------------------------------------- rules
 # Each rule: an `id`, a `scope` or a `tool`, one predicate, an optional `adr`,
@@ -604,7 +604,7 @@ text = "Nightly lanes run in CI only; run the per-crate subset."
 id = "lanes.builder-subset"
 tool = "Bash"
 where = "ticketed"   # grammar: where, a builder's worktree (branch.<b>.ticket); main's checkout, where the merge check runs the lane, records none (#1145, #1149)
-deny_pattern = '(?m)(^\s*|[|;&(]\s*|cargo\s+|-p\s+|--package\s+|/)xtask\s+(--\s+)?phpt\b'   # the instrument where it is run, never where it is cited
+deny_pattern = '(?m)(\A\s*|[|;&(]\s*|cargo\s+|-p\s+|--package\s+|/)xtask\s+(--\s+)?phpt\b'   # the instrument where it is run (first in the call, after a separator, under cargo or a path), never where it is cited, a message's line included (#790)
 unless_pattern = '--subset\b'   # grammar: unless_pattern, the command around the hit names its subset
 text = "A builder runs its crates' subsets, and Zend/tests when it touches php_engine, php_compile, php_syntax or php_heap; the whole lane is the merge check's (specs §6)."
 

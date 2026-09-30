@@ -9,27 +9,70 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::PhpString;
 
-use crate::md5::{digest_value, file_bytes};
+use crate::md5::{digest_file, digest_value};
 
-/// `PHP_SHA1Init`, `PHP_SHA1Update` and `PHP_SHA1Final` over one
-/// buffer: the twenty bytes.
-fn digest(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = INIT;
-    let bits = (data.len() as u64).wrapping_mul(8);
-    let mut message = data.to_vec();
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
+/// `PHP_SHA1_CTX` (`Z/ext/standard/sha1.h`): the five words, the bits
+/// counted, and the block being filled, which `PHP_SHA1Update` tops up
+/// and hands to [`transform`] each time it holds 64 bytes, so a file is
+/// hashed a read at a time.
+struct Sha1 {
+    state: [u32; 5],
+    bits: u64,
+    buffer: [u8; 64],
+    filled: usize,
+}
+
+impl Sha1 {
+    /// `PHP_SHA1Init`.
+    const fn new() -> Sha1 {
+        Sha1 {
+            state: INIT,
+            bits: 0,
+            buffer: [0; 64],
+            filled: 0,
+        }
     }
-    message.extend_from_slice(&bits.to_be_bytes());
-    for block in message.chunks_exact(64) {
-        transform(&mut h, block);
+
+    /// `PHP_SHA1Update`: the bits counted, the block topped up and
+    /// transformed once whole, every whole block of `input` after it,
+    /// and what is left kept for the next.
+    fn update(&mut self, mut input: &[u8]) {
+        self.bits = self.bits.wrapping_add((input.len() as u64).wrapping_mul(8));
+        if self.filled > 0 {
+            let take = input.len().min(64 - self.filled);
+            self.buffer[self.filled..self.filled + take].copy_from_slice(&input[..take]);
+            self.filled += take;
+            input = &input[take..];
+            if self.filled < 64 {
+                return;
+            }
+            transform(&mut self.state, &self.buffer);
+            self.filled = 0;
+        }
+        let mut blocks = input.chunks_exact(64);
+        for block in &mut blocks {
+            transform(&mut self.state, block);
+        }
+        let rest = blocks.remainder();
+        self.buffer[..rest.len()].copy_from_slice(rest);
+        self.filled = rest.len();
     }
-    let mut out = [0u8; 20];
-    for (i, word) in h.iter().enumerate() {
-        out[4 * i..4 * i + 4].copy_from_slice(&word.to_be_bytes());
+
+    /// `PHP_SHA1Final`: `0x80`, zeros to 56 bytes of the block, the bit
+    /// count big-endian, and the five words.
+    fn finish(mut self) -> [u8; 20] {
+        let bits = self.bits;
+        let mut pad = [0u8; 64];
+        pad[0] = 0x80;
+        let len = if self.filled < 56 { 56 } else { 120 } - self.filled;
+        self.update(&pad[..len]);
+        self.update(&bits.to_be_bytes());
+        let mut out = [0u8; 20];
+        for (i, word) in self.state.iter().enumerate() {
+            out[4 * i..4 * i + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        out
     }
-    out
 }
 
 /// `PHP_SHA1InitArgs`' five words, which ext/hash's `sha1` starts from.
@@ -134,8 +177,9 @@ fn sha1(
     string: PhpString,
     #[php(default = false)] binary: bool,
 ) -> Result<PhpString, Thrown> {
-    let digest = digest(string.as_bytes());
-    digest_value(req, &digest, binary)
+    let mut context = Sha1::new();
+    context.update(string.as_bytes());
+    digest_value(req, &context.finish(), binary)
 }
 
 /// `sha1_file(string $filename, bool $binary = false): string|false`.
@@ -151,15 +195,29 @@ fn sha1(
 /// string(40) "13d726010b8b0a0cec871360a41b7bc5ba1e5045"
 /// bool(false)
 /// ```
+///
+/// A file is hashed a read at a time, each read given up before the
+/// next, so a 2 MiB file raises the peak by no more than a stream's
+/// buffers, as php's `buf[1024]` loop does:
+///
+/// ```php
+/// $p = __DIR__ . '/big.txt'; $f = fopen($p, 'w'); for ($i = 0; $i < 512; $i++) fwrite($f, str_repeat("\0", 4096)); fclose($f);
+/// memory_reset_peak_usage(); $at = memory_get_usage();
+/// var_dump(sha1_file($p), memory_get_peak_usage() - $at < 65536);
+/// ```
+/// ```expect
+/// string(40) "7d76d48d64d7ac5411d714a4bb83f37e3e5b8df6"
+/// bool(true)
+/// ```
 #[php_function]
 fn sha1_file(
     req: &mut Request,
     filename: Path,
     #[php(default = false)] binary: bool,
 ) -> Result<OrFalse<PhpString>, Thrown> {
-    let Some(bytes) = file_bytes(req, filename.0)? else {
+    let mut context = Sha1::new();
+    if !digest_file(req, filename.0, |read| context.update(read))? {
         return Ok(OrFalse::False);
-    };
-    let digest = digest(&bytes);
-    digest_value(req, &digest, binary).map(OrFalse::Value)
+    }
+    digest_value(req, &context.finish(), binary).map(OrFalse::Value)
 }

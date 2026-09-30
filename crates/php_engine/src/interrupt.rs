@@ -80,6 +80,27 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// php's. One thread per armed timer, which is the only timed wake the
 /// standard library has; a request that is served before the seconds
 /// elapse wakes it at once rather than leaving it to the deadline.
+///
+/// Past a timeout the timer is armed again for `hard_timeout` seconds,
+/// as `zend_timeout_handler` arms it (`Z/Zend/zend_execute_API.c:1520`),
+/// and `zend_timeout` leaves it armed when the loop takes the fatal: so
+/// a shutdown function that loops is stopped by a second timeout, the
+/// same seconds in its text, and a program the loop does not reach a
+/// check in within `hard_timeout` seconds ends the process, as php's
+/// build without ZTS does. A `hard_timeout` of zero arms nothing past
+/// the first.
+///
+/// ```php
+/// set_time_limit(1);
+/// register_shutdown_function(function () { echo "shutdown\n"; for (;;) {} });
+/// for (;;) {}
+/// ```
+/// ```expect exit=255 wall=3s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 4
+/// shutdown
+///
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+/// ```
 #[derive(Debug)]
 pub(crate) struct Timer {
     unset: Arc<Unset>,
@@ -87,17 +108,19 @@ pub(crate) struct Timer {
 }
 
 impl Timer {
-    /// Armed for `seconds` on `interrupt`, and nothing at all for a
-    /// `seconds` that is zero or below, which is php's
+    /// Armed for `seconds` on `interrupt`, and again for `hard` seconds
+    /// past each timeout where `hard` is above zero; nothing at all for
+    /// a `seconds` that is zero or below, which is php's
     /// `max_execution_time = 0` and the CLI's own default.
-    pub(crate) fn arm(interrupt: &Interrupt, seconds: i64) -> Option<Timer> {
+    pub(crate) fn arm(interrupt: &Interrupt, seconds: i64, hard: i64) -> Option<Timer> {
         let elapses = Duration::from_secs(u64::try_from(seconds).ok().filter(|s| *s > 0)?);
+        let hard = u64::try_from(hard).ok().filter(|h| *h > 0);
         let unset = Arc::new(Unset::default());
         let waited = Arc::clone(&unset);
         let raised = interrupt.clone();
         thread::Builder::new()
             .name(String::from("php-execution-timer"))
-            .spawn(move || waited.elapse(&raised, elapses, seconds))
+            .spawn(move || waited.elapse(&raised, elapses, seconds, hard))
             .ok()?;
         Some(Timer {
             unset,
@@ -130,19 +153,37 @@ impl Unset {
     /// timer is dropped, and raise the interrupt when the deadline is
     /// what came first. `zend_timeout_handler` sets both words and
     /// returns (`Z/Zend/zend_execute_API.c:1516-1518`); so does this,
-    /// and the loop's next check is what raises the fatal.
-    fn elapse(&self, interrupt: &Interrupt, elapses: Duration, seconds: i64) {
-        let deadline = Instant::now() + elapses;
+    /// and the loop's next check is what raises the fatal. Then, where
+    /// there is a `hard` wait, the same again after it: a deadline that
+    /// finds the last timeout still unread ends the process
+    /// ([`terminate`]), and one that finds it taken is a timeout of its
+    /// own (`:1482`).
+    fn elapse(&self, interrupt: &Interrupt, elapses: Duration, seconds: i64, hard: Option<u64>) {
+        let mut deadline = Instant::now() + elapses;
         let mut set = self.held();
-        while !*set {
-            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                interrupt.elapsed(seconds);
+        loop {
+            while !*set {
+                let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                    break;
+                };
+                set = match self.woken.wait_timeout(set, left) {
+                    Ok((set, _)) => set,
+                    Err(poisoned) => poisoned.into_inner().0,
+                };
+            }
+            if *set {
+                return;
+            }
+            if let Some(hard) = hard
+                && interrupt.timed_out()
+            {
+                terminate(seconds, hard);
+            }
+            interrupt.elapsed(seconds);
+            let Some(hard) = hard else {
                 return;
             };
-            set = match self.woken.wait_timeout(set, left) {
-                Ok((set, _)) => set,
-                Err(poisoned) => poisoned.into_inner().0,
-            };
+            deadline = Instant::now() + Duration::from_secs(hard);
         }
     }
 
@@ -158,6 +199,20 @@ impl Unset {
     fn held(&self) -> MutexGuard<'_, bool> {
         self.set.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// The hard timeout (`Z/Zend/zend_execute_API.c:1482-1510`): php's
+/// line on the process's standard error and its status, 124, with no
+/// shutdown of any kind, as `_exit` ends it. The timer's thread cannot
+/// read the frame the request's thread is stuck under, so the place is
+/// php's where nothing is executing.
+fn terminate(seconds: i64, hard: u64) -> ! {
+    use std::io::Write as _;
+    let line = format!(
+        "\nFatal error: Maximum execution time of {seconds}+{hard} seconds exceeded (terminated) in Unknown on line 0\n"
+    );
+    let _ = std::io::stderr().write_all(line.as_bytes());
+    std::process::exit(124)
 }
 
 #[cfg(test)]
@@ -273,7 +328,7 @@ mod tests {
     #[test]
     fn unsetting_a_timer_that_elapsed_clears_what_it_raised() {
         let interrupt = Interrupt::default();
-        let timer = Timer::arm(&interrupt, 1);
+        let timer = Timer::arm(&interrupt, 1, 0);
         let armed = Instant::now();
         while !interrupt.raised().load(Ordering::Relaxed) {
             assert!(
@@ -295,8 +350,8 @@ mod tests {
     #[test]
     fn a_request_with_no_time_limit_arms_no_timer() {
         let interrupt = Interrupt::default();
-        assert!(Timer::arm(&interrupt, 0).is_none());
-        assert!(Timer::arm(&interrupt, -1).is_none());
+        assert!(Timer::arm(&interrupt, 0, 2).is_none());
+        assert!(Timer::arm(&interrupt, -1, 2).is_none());
         assert!(!interrupt.raised().load(Ordering::Relaxed));
     }
 

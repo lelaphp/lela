@@ -125,6 +125,11 @@ impl TokenValue {
     #[must_use]
     pub fn of(parsed: &Parsed, holder: Holder<'_>, token: TokenId) -> Option<TokenValue> {
         let at = parsed.tokens.get(token.0 as usize)?;
+        if matches!(at.kind, SyntaxKind::SINGLE_QUOTED | SyntaxKind::STRING_TEXT)
+            && let Some(filtered) = parsed.filtered.get(token)
+        {
+            return Some(TokenValue::Bytes(filtered.to_vec()));
+        }
         let text = parsed
             .source
             .get(at.offset as usize..(at.offset + at.len) as usize)?;

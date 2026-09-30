@@ -44,20 +44,89 @@ mod functions;
 
 pub(crate) use functions::ZEND_VERSION;
 
-/// The natives php keeps in `ext/standard` and this engine here, in
-/// the order they were declared, which follow Core's
-/// ([`crate::core::extension`]) in the function table.
-pub(crate) fn standard() -> Vec<(FunctionDecl, Entry)> {
+/// Where one of [`standard`]'s natives stands among `ext/standard`'s
+/// own in `basic_functions.stub.php`, which is the order
+/// `get_extension_funcs('standard')` and `php --re standard` list them
+/// in: first, or right after the function the stub declares before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StubPlace {
+    /// The stub's first function.
+    First,
+    /// Right after this function of the stub, whichever of the engine
+    /// or `ext/standard` declares it.
+    After(&'static str),
+}
+
+impl StubPlace {
+    /// Whether a native at this place goes right after `last`, the
+    /// function placed before it so far, none at the start of the list.
+    pub(crate) fn follows(self, last: Option<&FunctionDecl>) -> bool {
+        match (self, last) {
+            (Self::First, None) => true,
+            (Self::After(name), Some(decl)) => decl.name.0.eq_ignore_ascii_case(name.as_bytes()),
+            _ => false,
+        }
+    }
+}
+
+/// The natives php keeps in `ext/standard` and this engine here, each
+/// at its place in `basic_functions.stub.php`. Where the bundle has
+/// `ext/standard` they are its, spliced among its own at those places
+/// (`internal_function.module` naming it); an engine without it lists
+/// them after Core's under no extension.
+///
+/// ```php
+/// var_dump((new ReflectionFunction('var_dump'))->getExtensionName());
+/// var_dump((new ReflectionFunction('ini_get'))->getExtensionName());
+/// $f = get_extension_funcs('standard');
+/// foreach (['set_time_limit', 'forward_static_call_array', 'register_shutdown_function', 'highlight_file', 'highlight_string', 'ini_get', 'ini_get_all', 'ini_set', 'ini_alter', 'ini_restore', 'var_dump', 'var_export', 'unserialize', 'memory_get_usage', 'memory_get_peak_usage', 'memory_reset_peak_usage', 'version_compare'] as $name) {
+///     echo $name, ' ', array_search($name, $f) - array_search('set_time_limit', $f), "\n";
+/// }
+/// ```
+/// ```expect
+/// string(8) "standard"
+/// string(8) "standard"
+/// set_time_limit 0
+/// forward_static_call_array 129
+/// register_shutdown_function 130
+/// highlight_file 131
+/// highlight_string 134
+/// ini_get 135
+/// ini_get_all 136
+/// ini_set 137
+/// ini_alter 138
+/// ini_restore 139
+/// var_dump 532
+/// var_export 533
+/// unserialize 536
+/// memory_get_usage 537
+/// memory_get_peak_usage 538
+/// memory_reset_peak_usage 539
+/// version_compare 540
+/// ```
+pub(crate) fn standard() -> Vec<(StubPlace, (FunctionDecl, Entry))> {
     vec![
-        var_dump::declared(),
-        memory_get_usage::declared(),
-        memory_get_peak_usage::declared(),
-        memory_reset_peak_usage::declared(),
-        ini_get::declared(),
-        ini_set::declared(),
-        ini_alter::declared(),
-        set_time_limit::declared(),
-        register_shutdown_function::declared(),
+        (StubPlace::First, set_time_limit::declared()),
+        (
+            StubPlace::After("forward_static_call_array"),
+            register_shutdown_function::declared(),
+        ),
+        (StubPlace::After("highlight_string"), ini_get::declared()),
+        (StubPlace::After("ini_get_all"), ini_set::declared()),
+        (StubPlace::After("ini_set"), ini_alter::declared()),
+        (StubPlace::After("convert_uudecode"), var_dump::declared()),
+        (
+            StubPlace::After("unserialize"),
+            memory_get_usage::declared(),
+        ),
+        (
+            StubPlace::After("memory_get_usage"),
+            memory_get_peak_usage::declared(),
+        ),
+        (
+            StubPlace::After("memory_get_peak_usage"),
+            memory_reset_peak_usage::declared(),
+        ),
     ]
 }
 
@@ -1557,15 +1626,28 @@ fn dump_members(
     level: usize,
 ) {
     let class = object.class();
+    // `zend_std_get_debug_info`'s `get_properties`, or for a lazy object
+    // `zend_get_properties_no_lazy_init`: the table laid down as php's
+    // walk reads it, what a ghost's initializer later shares.
+    if let Err(thrown) = req.lay_properties_no_lazy_init(object) {
+        req.leave_pending(&thrown);
+        return;
+    }
     // `ce->properties_info_table` in slot order, which is what
     // `rebuild_object_properties_internal` walks: an inherited property
     // before the class's own, and a private one named by the class that
     // declared it (`zend_mangle_property_name`).
-    let declared: Vec<(Vec<u8>, ClassId, Visibility, Option<Type>)> = req
-        .placed_properties(class)
-        .into_iter()
-        .map(|(declaring, p)| (p.name.0.to_vec(), declaring, p.visibility, p.ty))
-        .collect();
+    // A table that holds copies of the declared rows is dumped as it
+    // stands, its plain values in place of the slots.
+    let declared: Vec<(Vec<u8>, ClassId, Visibility, Option<Type>)> =
+        match object.heap().declared_rows() {
+            php_heap::DeclaredRows::Slots => req
+                .placed_properties(class)
+                .into_iter()
+                .map(|(declaring, p)| (p.name.0.to_vec(), declaring, p.visibility, p.ty))
+                .collect(),
+            php_heap::DeclaredRows::Copied => Vec::new(),
+        };
     // Each row's key as php's property table holds it, mangled by
     // `zend_mangle_property_name` for a declared one, so every name is
     // printed through the one unmangling below.
@@ -1617,13 +1699,7 @@ fn dump_members(
         req.addref(&value);
         rows.push(MemberRow::Dynamic { name, value });
     }
-    let count = rows
-        .iter()
-        .filter(|row| match row {
-            MemberRow::Declared { slot, .. } => object.slot(*slot).is_some(),
-            MemberRow::Dynamic { .. } => true,
-        })
-        .count();
+    let count = member_count(req, object, &rows);
     // The name as its bytes stand, as php's `%s` prints `ZSTR_VAL`.
     out.extend_from_slice(format!("{common}object(").as_bytes());
     out.extend_from_slice(php_unit::decl::shown_bytes(&req.class_name_bytes(class)));
@@ -1670,6 +1746,34 @@ fn dump_members(
         out.extend(std::iter::repeat_n(b' ', level - 1));
     }
     out.extend_from_slice(b"}\n");
+}
+
+/// The count `php_var_dump` prints over an object's members:
+/// `zend_array_count` over the table `zend_std_get_properties` built,
+/// for an object that is not lazy ([`Request::property_count`]), and
+/// the rows that hold a value for one that is.
+fn member_count(
+    req: &mut Request,
+    object: crate::api::values::PhpObject,
+    rows: &[MemberRow],
+) -> usize {
+    let held = rows
+        .iter()
+        .filter(|row| match row {
+            MemberRow::Declared { slot, .. } => object.slot(*slot).is_some(),
+            MemberRow::Dynamic { .. } => true,
+        })
+        .count();
+    if object.heap().laziness() != php_heap::Laziness::Eager {
+        return held;
+    }
+    match req.property_count(object) {
+        Ok(count) => count,
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            held
+        }
+    }
 }
 
 /// `php_object_property_dump`'s string key: the indent, then the name
@@ -1841,7 +1945,7 @@ fn dump_rows(
 /// `zend_type_to_string` over a declared type: the scalar names, a
 /// class name as written, `?T`, and `|` and `&` between the members of
 /// a union and an intersection.
-fn type_text(ty: &Type) -> String {
+pub(crate) fn type_text(ty: &Type) -> String {
     match ty {
         Type::Mixed => String::from("mixed"),
         Type::Void => String::from("void"),

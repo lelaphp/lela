@@ -19,7 +19,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::abi::{Instance, Passed, Raw, Union};
+use php_ext::abi::{IniStage, Instance, Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
 use php_ext::coerce::{to_callable, to_string, truthy};
@@ -125,11 +125,13 @@ pub(crate) struct Stage {
     assert_options: bool,
 }
 
-/// One entry's handler at `ZEND_INI_STAGE_RUNTIME`, the `on_modify` of
-/// all five: the deprecation for a value that turns an assertion's
-/// default off, and for `assert.callback` the callback `assert_options`
-/// set given up, since php's `ASSERTG(callback)` is the entry's string
-/// from here.
+/// One entry's handler, the `on_modify` of all five: the deprecation for
+/// a value that turns an assertion's default off, and for
+/// `assert.callback` the callback `assert_options` set given up, since
+/// php's `ASSERTG(callback)` is the entry's string from here. As the
+/// request ends neither: `php_must_emit_ini_deprecation` is false at
+/// `ZEND_INI_STAGE_DEACTIVATE`, and with no code executing
+/// `OnChangeCallback` leaves `ASSERTG(callback)` alone.
 ///
 /// ```php
 /// ini_set('assert.warning', '0'); ini_set('assert.active', '1'); ini_set('assert.callback', 'strlen');
@@ -147,6 +149,9 @@ pub(crate) struct Stage {
 /// string(1) "1"
 /// ```
 fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) {
+    if req.ini_stage() == IniStage::Deactivate {
+        return;
+    }
     if name == b"assert.callback"
         && let Some(previous) = req.assert_callback().copied()
     {

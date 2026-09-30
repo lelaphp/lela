@@ -250,6 +250,7 @@ impl Request {
         }
         let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
         let shared = Arc::clone(&self.shared);
+        let bound = crate::multibyte::bound(self, shared.compile_multibyte());
         let holds = |name: &[u8]| self.class_named(name).is_some();
         let request_classes = php_compile::RequestClasses::new(&holds);
         let unit = shared.publish_file(
@@ -258,6 +259,7 @@ impl Request {
             &self.cwd,
             self.stack_limit(),
             request_classes,
+            bound.as_ref().map(crate::multibyte::Bound::settings),
         );
         if let (Ok(unit), Some(preloading)) = (&unit, &mut self.preloading) {
             let size = u64::try_from(source.len()).unwrap_or(u64::MAX);

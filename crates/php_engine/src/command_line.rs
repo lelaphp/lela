@@ -138,6 +138,7 @@ impl Engine {
         if !crate::engine::note_compiled(req, &unit, SourceKind::Eval) {
             return take_uncaught(req);
         }
+        let standing = req.vm().frames().len();
         let frame = match req.push_frame(Arc::clone(&unit)) {
             Ok(frame) => frame,
             Err(fatal) => {
@@ -146,6 +147,11 @@ impl Engine {
             }
         };
         let served = (self.shared.entry)(req, frame);
+        // What a fatal left standing above the main frame, as
+        // `serve_unit` pops it.
+        while req.vm().frames().len() > standing + 1 {
+            req.pop_frame();
+        }
         req.detach_symbol_table(frame);
         req.pop_frame();
         if let Err(fatal) = served {

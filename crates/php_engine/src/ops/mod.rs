@@ -892,6 +892,11 @@ struct MangledName {
 /// ```
 fn mangled_names(req: &Request, object: PhpObject) -> Vec<MangledName> {
     let o = object.heap();
+    // A table that holds copies of the declared rows holds them under
+    // the names php's does, which are read as they stand.
+    if o.declared_rows() == php_heap::DeclaredRows::Copied {
+        return Vec::new();
+    }
     let eager = o.laziness() == php_heap::Laziness::Eager;
     req.placed_properties(object.class())
         .into_iter()
@@ -1573,9 +1578,12 @@ pub(crate) fn properties_answered(
             // initialising it, and so does a serialization the object
             // was made to skip it for; every other reader initialises.
             PropertyPurpose::Debug => {
+                // `zend_lazy_object_debug_info`: a table of its own, the
+                // instance under `instance` with one more owner
+                // (`*is_temp = 1`).
                 if let Some(instance) = req.lazy_instance(object.heap()) {
                     let name = req.interned(b"instance")?;
-                    return Ok((vec![(Key::Str(name), instance.as_value())], false));
+                    return Ok((vec![(Key::Str(name), instance.as_value())], true));
                 }
                 req.properties_no_lazy_init(object)?
             }
@@ -1600,6 +1608,72 @@ pub(crate) fn properties_answered(
         out.push((Key::Str(name), entry));
     }
     Ok((out, false))
+}
+
+/// The object's own debug table as `php_debug_zval_dump` walks it
+/// (`Z/ext/standard/var.c:334-350`): each declared slot in slot order,
+/// its value where it holds one and `uninitialized(T)` where it is
+/// typed and holds none, then the dynamic rows; beside them
+/// `zend_array_count` over the table, [`Request::property_count`] for
+/// an object that is not lazy and the rows that hold a value for one
+/// that is. `rows` is what [`properties_answered`] read, the declared
+/// rows first; where they are not the slots this walks, as a class's
+/// own `get_properties` may answer, they stand as they are.
+pub(crate) fn debug_rows(
+    req: &mut Request,
+    object: PhpObject,
+    rows: Vec<(Key, Value)>,
+) -> Result<(Vec<(Key, crate::api::values::HeldRow)>, usize), Thrown> {
+    use crate::api::values::HeldRow;
+    let reader = req.lazy_reader(object);
+    let o = reader.heap();
+    // A table that holds copies of the declared rows has no
+    // `IS_INDIRECT` to a slot, so no row reads `uninitialized`.
+    let placed = match o.declared_rows() {
+        php_heap::DeclaredRows::Slots => req.placed_properties(reader.class()),
+        php_heap::DeclaredRows::Copied => Vec::new(),
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    let mut rest = rows.into_iter().peekable();
+    for ((declaring, p), at) in placed.into_iter().zip(0u32..) {
+        let key = {
+            let prefix = match p.visibility {
+                Visibility::Public => None,
+                Visibility::Protected => Some(b"\0*\0".to_vec()),
+                Visibility::Private => req
+                    .class_decl(declaring)
+                    .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
+            };
+            let bytes = [prefix.unwrap_or_default().as_slice(), &p.name.0].concat();
+            req.interned(&bytes)?
+        };
+        if !o.slot(at).is_undef() {
+            let Some((k, value)) = rest
+                .next_if(|(k, _)| matches!(k, Key::Str(name) if name.as_bytes() == key.as_bytes()))
+            else {
+                out.extend(rest.map(|(k, value)| (k, HeldRow::Value(value))));
+                let count = out.len();
+                return Ok((out, count));
+            };
+            out.push((k, HeldRow::Value(value)));
+        } else if let Some(ty) = &p.ty {
+            out.push((
+                Key::Str(key),
+                HeldRow::Uninitialized(crate::natives::type_text(ty)),
+            ));
+        }
+    }
+    out.extend(rest.map(|(k, value)| (k, HeldRow::Value(value))));
+    let held = out
+        .iter()
+        .filter(|(_, row)| matches!(row, HeldRow::Value(_)))
+        .count();
+    let count = if object.heap().laziness() == php_heap::Laziness::Eager {
+        req.property_count(object)?
+    } else {
+        held
+    };
+    Ok((out, count))
 }
 
 /// Rows keyed by property names, each a string key as a property

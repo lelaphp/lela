@@ -1342,7 +1342,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
         name: target.name,
         arguments: Vec::new(),
         count,
-        this: target.this,
+        receiver: target.this.map(exec::Receiver::Owned),
         called_scope: target.called_scope,
         closure: target.closure,
         extra_named: Vec::new(),
@@ -1736,7 +1736,7 @@ fn init_call(
         name: Some(name),
         arguments: Vec::new(),
         count,
-        this: None,
+        receiver: None,
         called_scope: None,
         closure: None,
         extra_named: Vec::new(),
@@ -2474,7 +2474,7 @@ pub(crate) fn init_user_call<T: Tier>(
         name: target.name,
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
-        this: target.this,
+        receiver: target.this.map(exec::Receiver::Owned),
         called_scope: target.called_scope,
         closure: target.closure,
         extra_named: Vec::new(),
@@ -4172,7 +4172,7 @@ pub(crate) fn callable_convert<T: Tier>(
         Some(closure) => crate::classes::CallFrame::Closure(closure),
         None => crate::classes::CallFrame::Callee {
             function: call.function,
-            this: call.this,
+            this: call.this(),
             called_scope: call.called_scope,
         },
     };
@@ -4610,7 +4610,7 @@ pub(crate) fn new<T: Tier>(
         name: Some(name),
         arguments: Vec::new(),
         count,
-        this,
+        receiver: this.map(exec::Receiver::Owned),
         called_scope: constructor.map(|_| class),
         closure: None,
         extra_named: Vec::new(),
@@ -4939,8 +4939,9 @@ fn static_call_frame(
             let thrown = non_static_method_call(req, function);
             return threw(req, frame, &thrown);
         };
-        req.addref(&this.as_value());
-        (Some(this), this.class())
+        // `ZEND_CALL_HAS_THIS` over the calling frame's own `$this`,
+        // which that frame keeps: no `ZEND_CALL_RELEASE_THIS`.
+        (Some(exec::Receiver::lent(this)), this.class())
     } else if op.op1_type == OperandKind::Unused
         && matches!(
             op.op1 & FETCH_CLASS_MASK,
@@ -4969,7 +4970,7 @@ fn static_call_frame(
         name: Some(name),
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
-        this,
+        receiver: this,
         called_scope: Some(called),
         closure: None,
         extra_named: Vec::new(),
@@ -5065,10 +5066,11 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         Some(function) => (function, false),
         None => (req.parent_hook_trampoline(kind), true),
     };
+    // `INIT_PARENT_PROPERTY_HOOK_CALL`: `ZEND_CALL_HAS_THIS` over the
+    // frame's own `$this`, which the frame keeps, and no
+    // `ZEND_CALL_RELEASE_THIS`.
     let this = req.vm().this(frame);
-    if let Some(this) = this {
-        req.addref(&this.as_value());
-    }
+    let receiver = this.map(exec::Receiver::lent);
     let written = format!("${shown}::{}", kind.name());
     let written = match crate::api::values::PhpString::new(req, written.as_bytes()) {
         Ok(written) => written,
@@ -5079,7 +5081,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         name: Some(written),
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
-        this,
+        receiver,
         called_scope: Some(match this {
             Some(this) if !trampoline => this.class(),
             _ => declaring,
@@ -5226,13 +5228,20 @@ pub(crate) fn init_method_call<T: Tier>(
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    // The frame's owner of the receiver: the temporary's own, moved,
-    // or one more of the CV's or the constant's; a reference the slot
-    // held is followed and given up.
-    let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    if taken.as_object().is_none() {
-        req.addref(&object.as_value());
-        req.release(taken);
+    // `$this->m()`, `INIT_METHOD_CALL` over `UNUSED`: the calling frame
+    // keeps its `$this`, and the call takes no owner of it (no
+    // `ZEND_CALL_RELEASE_THIS`), the object lent, unless the class's
+    // `method_receiver` handed another over.
+    let lends = op.op1_type == OperandKind::Unused && receiver.is_none();
+    // The frame's owner of the receiver otherwise: the temporary's own,
+    // moved, or one more of the CV's or the constant's; a reference the
+    // slot held is followed and given up.
+    if !lends {
+        let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+        if taken.as_object().is_none() {
+            req.addref(&object.as_value());
+            req.release(taken);
+        }
     }
     // A receiver `method_receiver` handed over stands in for the
     // object, one owner moved from the one to the other.
@@ -5252,7 +5261,13 @@ pub(crate) fn init_method_call<T: Tier>(
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
     {
-        Some(object)
+        Some(if lends {
+            exec::Receiver::lent(object)
+        } else {
+            exec::Receiver::Owned(object)
+        })
+    } else if lends {
+        None
     } else {
         req.release(object.as_value());
         if req.is_pending() {
@@ -5266,7 +5281,7 @@ pub(crate) fn init_method_call<T: Tier>(
         name: Some(name),
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
-        this,
+        receiver: this,
         called_scope: Some(called),
         closure: None,
         extra_named: Vec::new(),
@@ -7693,14 +7708,34 @@ fn property_place(
         let thrown = non_object_place(req, (frame, code, op), read, &container, &name);
         return Ok(PropertyFound::Threw(thrown));
     };
-    let object = match req.lazy_place(object, &name) {
-        Ok(object) => object,
+    let (object, lent) = match req.lazy_place(object, &name) {
+        Ok(placed) => placed,
         Err(thrown) => {
             return Ok(PropertyFound::Threw(freeing_container(
                 req, frame, code, op, thrown,
             )));
         }
     };
+    // The guard a proxy's `__get` lent the instance is held while the
+    // place is resolved there, and given back before what the fetch
+    // does with it.
+    let found = property_place_on(req, (frame, code, op), read, object, &name, &name_value);
+    req.give_back_guard(lent);
+    found
+}
+
+/// [`property_place`] on the object the place is resolved on:
+/// `zend_std_get_property_ptr_ptr`'s arms and what the fetch falls back
+/// to where it answers none.
+fn property_place_on(
+    req: &mut Request,
+    (frame, code, op): (FrameRef, &OpArray, &Opline),
+    read: PropertyRead,
+    object: PhpObject,
+    name: &[u8],
+    name_value: &Value,
+) -> Result<PropertyFound, Fatal> {
+    let name = name.to_vec();
     let place = match place_of(req, object, &name) {
         Ok(place) => place,
         // The class refused the place with a throwable, php's
@@ -7764,7 +7799,7 @@ fn property_place(
                     "InternalError: ZEND_FETCH_OBJ_W over a property whose name is no string",
                 )));
             };
-            req.addref(&name_value);
+            req.addref(name_value);
             // `zend_std_get_property_ptr_ptr`: under `BP_VAR_W` the
             // entry is laid down with the creation's diagnostics and no
             // read's warning, and under `BP_VAR_RW` with the warning
@@ -10564,7 +10599,7 @@ fn frameless_call(
         name: None,
         count: values.len(),
         arguments: values,
-        this: None,
+        receiver: None,
         called_scope: None,
         closure: None,
         extra_named: Vec::new(),
@@ -13756,6 +13791,34 @@ fn withheld_step(
 /// to the declared type where the slot carries one; every other name is
 /// `read_property` and `write_property`, php's
 /// `zend_assign_op_overloaded_property`.
+///
+/// Inside a lazy proxy's `__get` for `x`, `$obj->x += 1` resolves the
+/// place on the instance while the proxy's guard is lent to it, so the
+/// instance lays `x` down and its own `__get` is not served:
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class C { public $calls = 0;
+///     public function __get($n) { echo "__get($n)\n"; if (++$this->calls > 3) return 0; $this->$n += 1; return 7; } }
+/// $r = new ReflectionClass(C::class);
+/// $p = $r->newLazyProxy(function () { return new C; });
+/// var_dump($p->x, $p);
+/// ```
+/// ```expect
+/// __get(x)
+///
+/// Warning: Undefined property: C::$x in %s on line 4
+/// int(7)
+/// lazy proxy object(C)#3 (1) {
+///   ["instance"]=>
+///   object(C)#4 (2) {
+///     ["calls"]=>
+///     int(1)
+///     ["x"]=>
+///     int(1)
+///   }
+/// }
+/// ```
 fn step_property(
     req: &mut Request,
     frame: FrameRef,
@@ -13771,33 +13834,208 @@ fn step_property(
             "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
         )));
     };
-    let object = match req.lazy_place(object, &bytes) {
-        Ok(object) => object,
+    // The guard a proxy's `__get` lent the instance is held while the
+    // place is resolved there, and given back before the operation over
+    // it, as around php's `get_property_ptr_ptr` on the instance.
+    let placed = req.lazy_place(object, &bytes).and_then(|(object, lent)| {
+        let ptr = property_ptr(req, object, &bytes, key).and_then(|ptr| match ptr {
+            PropertyPtr::Slot(slot, typed) if object.heap().slot(slot).is_undef() => {
+                unwritten_step_slot(req, object, &bytes, slot, typed)
+            }
+            ptr => Ok(ptr),
+        });
+        req.give_back_guard(lent);
+        ptr.map(|ptr| (object, ptr))
+    });
+    let (object, ptr) = match placed {
+        Ok(placed) => placed,
         Err(thrown) => {
             exec::free_operand(req, frame, code, data.op1_type, data.op1);
             write_out(req, frame, code, op, &Value::null());
             return Ok(Err(thrown));
         }
     };
-    let mut precomputed: Option<Value> = None;
-    let place = match place_of(req, object, &bytes) {
-        Ok(place) => place,
-        Err(thrown) => {
-            exec::free_operand(req, frame, code, data.op1_type, data.op1);
-            write_out(req, frame, code, op, &Value::null());
-            return Ok(Err(thrown));
+    match ptr {
+        PropertyPtr::Served(back) => Ok(served_property_step(
+            req, frame, code, step, object, key, back,
+        )),
+        // A readonly or set-restricted property gets no place, so the
+        // operation is made over what `read_property` answers, and what
+        // it throws comes before what the write refuses
+        // (`zend_assign_op_overloaded_property`).
+        PropertyPtr::Withheld => {
+            let precomputed = match withheld_step(req, frame, code, step, object, &bytes) {
+                Ok(stepped) => stepped,
+                Err(thrown) => return Ok(Err(thrown)),
+            };
+            let silent = req.serves_accessor(object.class(), b"__get");
+            match req.declared_slot_for_write(object, &bytes, "modify", silent) {
+                Ok(Some((slot, typed))) => step_slot(
+                    req,
+                    frame,
+                    code,
+                    step,
+                    (object, slot, typed),
+                    &bytes,
+                    Some(precomputed),
+                ),
+                Ok(None) => {
+                    req.release(precomputed);
+                    Err(Fatal::Error(String::from(
+                        "InternalError: ZEND_ASSIGN_OBJ_OP withheld the place of a property no class declared",
+                    )))
+                }
+                Err(thrown) => {
+                    req.release(precomputed);
+                    write_out(req, frame, code, op, &Value::null());
+                    Ok(Err(thrown))
+                }
+            }
         }
-    };
-    let placed = match place {
+        PropertyPtr::Slot(slot, typed) => {
+            step_slot(req, frame, code, step, (object, slot, typed), &bytes, None)
+        }
+    }
+}
+
+/// `zend_std_get_property_ptr_ptr`'s valid-offset arm over a slot
+/// nothing has written, for a compound assignment
+/// (`Z/Zend/zend_object_handlers.c:1429`): the read's own diagnostic
+/// under `BP_VAR_RW` before the value is read, and then `ZVAL_NULL`
+/// over the slot. A `__get` the guard is not holding serves an untyped
+/// one instead, its class handing out no place at all; a typed slot
+/// takes the uninitialised-access error whatever the class serves,
+/// which is php's `prop_info && (Z_PROP_FLAG_P(retval) & IS_PROP_UNINIT)`.
+fn unwritten_step_slot(
+    req: &mut Request,
+    object: PhpObject,
+    bytes: &[u8],
+    slot: u32,
+    typed: bool,
+) -> Result<PropertyPtr, Thrown> {
+    let shown = String::from_utf8_lossy(bytes).into_owned();
+    if typed {
+        let class = req.class_name(object.class());
+        return Err(crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Typed property {class}::${shown} must not be accessed before initialization"),
+        ));
+    }
+    if req.overloaded_place(object, bytes) {
+        return Ok(PropertyPtr::Served(WriteBack::Property));
+    }
+    let class = req.class_name(object.class());
+    crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
+    Ok(PropertyPtr::Slot(slot, typed))
+}
+
+/// What `zend_std_get_property_ptr_ptr` answers an in-place operation
+/// over a property under `BP_VAR_RW`, a compound assignment's or an
+/// increment's: resolved while the guard a proxy's `__get` lent the
+/// instance stands ([`Request::lazy_place`]), and operated over once it
+/// is given back.
+enum PropertyPtr {
+    /// php's `NULL`: the pair of handlers takes the site, the stepped
+    /// value written back as the [`WriteBack`] says. A name the class
+    /// serves or keeps apart, one no class declared whose `__get` answers
+    /// it, and a dynamic entry laid down here, which the pair then finds.
+    Served(WriteBack),
+    /// A readonly or set-restricted property, which hands out no place:
+    /// `zend_assign_op_overloaded_property`, the write refused after it.
+    Withheld,
+    /// The declared slot, and whether its property is typed.
+    Slot(u32, bool),
+}
+
+/// The place `zend_std_get_property_ptr_ptr` answers for `name` on
+/// `object` under `BP_VAR_RW`, the class's `get_property_ptr_ptr` first:
+/// the class's own verdict, a withheld declared property, the declared
+/// slot, or, for a name no class declared, the overloaded pair where the
+/// class's `__get` answers it and the dynamic entry laid down otherwise,
+/// with the creation's diagnostics and the read's warning. An unwritten
+/// slot is the caller's to diagnose, the two sites raising differently.
+///
+/// For a compound assignment over a name no class declared, the place is
+/// the dynamic entry, taken before the value is read ([`Request::dynamic_property_ref`]) and so
+/// created with php's deprecation before the read's `Undefined
+/// property` warning, which is the order the pair of handlers raises
+/// them in the other way round.
+///
+/// php runs the kernel over that place, `zend_binary_op(zptr, zptr,
+/// value)`. Here the place is taken and then read and written by the
+/// same pair the overloaded arm uses: with the entry standing, the read
+/// finds it and raises nothing, and the write lands in it and raises
+/// nothing, so what the two do to the object is what the one kernel
+/// over the cell does.
+///
+/// ```php
+/// class C { public $p = 1; public $u; public int $t; }
+/// $o = new C;
+/// $o->fresh += 5;
+/// var_dump($o->fresh);
+/// unset($o->u);
+/// $o->u .= "x";
+/// var_dump($o->u);
+/// try { $o->t += 1; } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// var_dump($o);
+/// ```
+/// ```expect
+///
+/// Deprecated: Creation of dynamic property C::$fresh is deprecated in %s on line 4
+///
+/// Warning: Undefined property: C::$fresh in %s on line 4
+/// int(5)
+///
+/// Warning: Undefined property: C::$u in %s on line 7
+/// string(1) "x"
+/// Error: Typed property C::$t must not be accessed before initialization
+/// object(C)#1 (3) {
+///   ["p"]=>
+///   int(1)
+///   ["u"]=>
+///   string(1) "x"
+///   ["t"]=>
+///   uninitialized(int)
+///   ["fresh"]=>
+///   int(5)
+/// }
+/// ```
+///
+/// A class that allows the dynamic property raises the read's warning
+/// alone, the creation having nothing to say:
+///
+/// ```php
+/// #[\AllowDynamicProperties]
+/// class D { }
+/// $d = new D;
+/// $d->fresh += 5;
+/// var_dump($d->fresh);
+/// $s = new stdClass;
+/// $s->n .= "a";
+/// var_dump($s->n);
+/// ```
+/// ```expect
+///
+/// Warning: Undefined property: D::$fresh in %s on line 5
+/// int(5)
+///
+/// Warning: Undefined property: stdClass::$n in %s on line 8
+/// string(1) "a"
+/// ```
+fn property_ptr(
+    req: &mut Request,
+    object: PhpObject,
+    bytes: &[u8],
+    key: crate::api::values::PhpString,
+) -> Result<PropertyPtr, Thrown> {
+    let placed = match place_of(req, object, bytes)? {
         // php's `NULL` from the class's own slot: the class serves the
-        // name, so the pair of handlers takes the site.
-        // or php's pointer into what the class keeps apart, which the
-        // operation changes with nothing written back.
+        // name, so the pair of handlers takes the site, or php's pointer
+        // into what the class keeps apart, which the operation changes
+        // with nothing written back.
         served @ (PropertyPlace::Handlers | PropertyPlace::Apart) => {
-            let back = WriteBack::of(served);
-            return Ok(served_property_step(
-                req, frame, code, step, object, key, back,
-            ));
+            return Ok(PropertyPtr::Served(WriteBack::of(served)));
         }
         // `zend_std_get_property_ptr_ptr`, whose silence is
         // `ce->__get != NULL`: a class with a `__get` hands out no
@@ -13806,86 +14044,25 @@ fn step_property(
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
             // `BP_VAR_RW` reads an unwritten slot before the placement.
-            let read = req.read_before_write(object, &bytes);
-            // A readonly or set-restricted property gets no place, so
-            // the operation is made over what `read_property` answers
-            // and what it throws comes before what the write refuses
-            // (`zend_assign_op_overloaded_property`).
-            if read.is_ok() && req.place_withheld(object, &bytes) {
-                match withheld_step(req, frame, code, step, object, &bytes) {
-                    Ok(stepped) => precomputed = Some(stepped),
-                    Err(thrown) => return Ok(Err(thrown)),
-                }
+            req.read_before_write(object, bytes)?;
+            if req.place_withheld(object, bytes) {
+                return Ok(PropertyPtr::Withheld);
             }
-            let placed =
-                read.and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
-            match placed {
-                Ok(placed) => placed,
-                Err(thrown) => {
-                    if let Some(stepped) = precomputed {
-                        req.release(stepped);
-                    } else {
-                        exec::free_operand(req, frame, code, data.op1_type, data.op1);
-                    }
-                    write_out(req, frame, code, op, &Value::null());
-                    return Ok(Err(thrown));
-                }
-            }
+            req.declared_slot_for_write(object, bytes, "modify", silent)?
         }
     };
-    let Some((slot, typed)) = placed else {
-        // `zend_std_get_property_ptr_ptr`'s two answers for a name no
-        // class declared: a class with a `__get` the guard is not
-        // holding hands out no place and the overloaded pair takes the
-        // site; every other class takes the place, which is the dynamic
-        // entry laid down here.
-        if req.overloaded_place(object, &bytes) {
-            return Ok(overloaded_property_step(
-                req, frame, code, step, object, key,
-            ));
-        }
-        return Ok(dynamic_property_step(req, frame, code, step, object, key));
-    };
-    // `zend_std_get_property_ptr_ptr`'s valid-offset arm
-    // (`Z/Zend/zend_object_handlers.c:1429`): a slot nothing has
-    // written is the read's own diagnostic under `BP_VAR_RW`, raised
-    // before the value is read, and then `ZVAL_NULL` over the slot. A
-    // `__get` the guard is not holding serves an untyped one instead,
-    // its class handing out no place at all; a typed slot takes the
-    // uninitialised-access error whatever the class serves, which is
-    // php's `prop_info && (Z_PROP_FLAG_P(retval) & IS_PROP_UNINIT)`.
-    if object.heap().slot(slot).is_undef() {
-        let shown = String::from_utf8_lossy(&bytes).into_owned();
-        if typed {
-            let class = req.class_name(object.class());
-            let thrown = crate::api::raising::throw(
-                req,
-                "Error",
-                &format!(
-                    "Typed property {class}::${shown} must not be accessed before initialization"
-                ),
-            );
-            exec::free_operand(req, frame, code, data.op1_type, data.op1);
-            write_out(req, frame, code, op, &Value::null());
-            return Ok(Err(thrown));
-        }
-        if req.overloaded_place(object, &bytes) {
-            return Ok(overloaded_property_step(
-                req, frame, code, step, object, key,
-            ));
-        }
-        let class = req.class_name(object.class());
-        crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
+    if let Some((slot, typed)) = placed {
+        return Ok(PropertyPtr::Slot(slot, typed));
     }
-    step_slot(
-        req,
-        frame,
-        code,
-        step,
-        (object, slot, typed),
-        &bytes,
-        precomputed,
-    )
+    // `zend_std_get_property_ptr_ptr`'s two answers for a name no class
+    // declared: a class with a `__get` the guard is not holding hands
+    // out no place and the overloaded pair takes the site; every other
+    // class takes the place, which is the dynamic entry laid down here.
+    if !req.overloaded_place(object, bytes) {
+        req.addref(&Value::string(key));
+        req.dynamic_property_ref(object, key, PropertyRead::Warning)?;
+    }
+    Ok(PropertyPtr::Served(WriteBack::Property))
 }
 
 /// `ASSIGN_OBJ_OP` over the declared slot it placed: the kernel over
@@ -13988,93 +14165,6 @@ fn landed_out(
     req.release(garbage);
 }
 
-/// `ZEND_ASSIGN_OBJ_OP` over the place `zend_std_get_property_ptr_ptr`
-/// hands out for a name no class declared: the dynamic entry, taken
-/// before the value is read ([`Request::dynamic_property_ref`]) and so
-/// created with php's deprecation before the read's `Undefined
-/// property` warning, which is the order the pair of handlers raises
-/// them in the other way round.
-///
-/// php runs the kernel over that place, `zend_binary_op(zptr, zptr,
-/// value)`. Here the place is taken and then read and written by the
-/// same pair the overloaded arm uses: with the entry standing, the read
-/// finds it and raises nothing, and the write lands in it and raises
-/// nothing, so what the two do to the object is what the one kernel
-/// over the cell does.
-///
-/// ```php
-/// class C { public $p = 1; public $u; public int $t; }
-/// $o = new C;
-/// $o->fresh += 5;
-/// var_dump($o->fresh);
-/// unset($o->u);
-/// $o->u .= "x";
-/// var_dump($o->u);
-/// try { $o->t += 1; } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
-/// var_dump($o);
-/// ```
-/// ```expect
-///
-/// Deprecated: Creation of dynamic property C::$fresh is deprecated in %s on line 4
-///
-/// Warning: Undefined property: C::$fresh in %s on line 4
-/// int(5)
-///
-/// Warning: Undefined property: C::$u in %s on line 7
-/// string(1) "x"
-/// Error: Typed property C::$t must not be accessed before initialization
-/// object(C)#1 (3) {
-///   ["p"]=>
-///   int(1)
-///   ["u"]=>
-///   string(1) "x"
-///   ["t"]=>
-///   uninitialized(int)
-///   ["fresh"]=>
-///   int(5)
-/// }
-/// ```
-///
-/// A class that allows the dynamic property raises the read's warning
-/// alone, the creation having nothing to say:
-///
-/// ```php
-/// #[\AllowDynamicProperties]
-/// class D { }
-/// $d = new D;
-/// $d->fresh += 5;
-/// var_dump($d->fresh);
-/// $s = new stdClass;
-/// $s->n .= "a";
-/// var_dump($s->n);
-/// ```
-/// ```expect
-///
-/// Warning: Undefined property: D::$fresh in %s on line 5
-/// int(5)
-///
-/// Warning: Undefined property: stdClass::$n in %s on line 8
-/// string(1) "a"
-/// ```
-fn dynamic_property_step(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    step: Compound<'_>,
-    object: PhpObject,
-    name: crate::api::values::PhpString,
-) -> Result<(), Thrown> {
-    req.addref(&Value::string(name));
-    let place = req.dynamic_property_ref(object, name, PropertyRead::Warning);
-    if let Err(thrown) = place {
-        let Compound { op, data, .. } = step;
-        exec::free_operand(req, frame, code, data.op1_type, data.op1);
-        write_out(req, frame, code, op, &Value::null());
-        return Err(thrown);
-    }
-    overloaded_property_step(req, frame, code, step, object, name)
-}
-
 /// The kernel of a compound assignment over what a declared slot holds
 /// and `value`: `.=` grows the string in the slot where it stands
 /// ([`crate::ops::concat_assign`]), over a typed slot only where it holds
@@ -14127,19 +14217,8 @@ fn slot_step(
 /// object(O)#1 (0) {
 /// }
 /// ```
-fn overloaded_property_step(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    step: Compound<'_>,
-    object: PhpObject,
-    name: crate::api::values::PhpString,
-) -> Result<(), Thrown> {
-    served_property_step(req, frame, code, step, object, name, WriteBack::Property)
-}
-
-/// [`overloaded_property_step`] with the stepped value written back as `back`
-/// says.
+///
+/// The stepped value is written back as `back` says.
 fn served_property_step(
     req: &mut Request,
     frame: FrameRef,
@@ -14490,6 +14569,34 @@ fn incdec_obj(
 /// ```expect
 /// Cannot modify readonly property T::$p / Cannot increment stdClass
 /// ```
+///
+/// Inside a lazy proxy's `__get` for `x`, `$obj->x++` resolves the place
+/// on the instance while the proxy's guard is lent to it, so the
+/// instance lays `x` down and its own `__get` is not served:
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class D { public $calls = 0;
+///     public function __get($n) { echo "__get($n)\n"; if (++$this->calls > 3) return 0; $this->$n++; return 7; } }
+/// $r = new ReflectionClass(D::class);
+/// $p = $r->newLazyProxy(function () { return new D; });
+/// var_dump($p->x, $p);
+/// ```
+/// ```expect
+/// __get(x)
+///
+/// Warning: Undefined property: D::$x in %s on line 4
+/// int(7)
+/// lazy proxy object(D)#3 (1) {
+///   ["instance"]=>
+///   object(D)#4 (2) {
+///     ["calls"]=>
+///     int(1)
+///     ["x"]=>
+///     int(1)
+///   }
+/// }
+/// ```
 fn incdec_property(
     req: &mut Request,
     frame: FrameRef,
@@ -14505,64 +14612,39 @@ fn incdec_property(
             "InternalError: an increment of a property whose name is no string",
         )));
     };
-    let object = match req.lazy_place(object, &bytes) {
-        Ok(object) => object,
-        Err(thrown) => {
-            write_out(req, frame, code, op, &Value::null());
-            return Ok(Err(thrown));
-        }
-    };
-    let place = match place_of(req, object, &bytes) {
-        Ok(place) => place,
-        Err(thrown) => {
-            write_out(req, frame, code, op, &Value::null());
-            return Ok(Err(thrown));
-        }
-    };
-    let placed = match place {
-        // php's `NULL` from the class's own slot: the class serves the
-        // name, so the pair of handlers takes the site.
-        served @ (PropertyPlace::Handlers | PropertyPlace::Apart) => {
-            let back = WriteBack::of(served);
+    // The guard a proxy's `__get` lent the instance is held while the
+    // place is resolved there, and given back before the step over it.
+    let placed = req.lazy_place(object, &bytes).and_then(|(object, lent)| {
+        let ptr = property_ptr(req, object, &bytes, key).map(|ptr| match ptr {
+            // [`Request::read_before_write`] raised what an unwritten
+            // slot raises before the placement; one it let by is a
+            // `__get`'s to answer.
+            PropertyPtr::Slot(slot, _)
+                if object.heap().slot(slot).is_undef() && req.overloaded_place(object, &bytes) =>
+            {
+                PropertyPtr::Served(WriteBack::Property)
+            }
+            ptr => ptr,
+        });
+        req.give_back_guard(lent);
+        ptr.map(|ptr| (object, ptr))
+    });
+    let (object, (slot, typed)) = match placed {
+        Ok((object, PropertyPtr::Slot(slot, typed))) => (object, (slot, typed)),
+        Ok((object, PropertyPtr::Served(back))) => {
             return Ok(served_incdec(req, frame, code, op, step, object, key, back));
         }
-        PropertyPlace::Std => {
-            let silent = req.serves_accessor(object.class(), b"__get");
-            // `BP_VAR_RW` reads an unwritten slot before the placement.
-            let read = req.read_before_write(object, &bytes);
-            // A readonly or set-restricted property gets no place, so the
-            // step is the overloaded one, and what the write refuses is
-            // chained onto what the step threw.
-            if read.is_ok() && req.place_withheld(object, &bytes) {
-                return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
-            }
-            let placed =
-                read.and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
-            match placed {
-                Ok(placed) => placed,
-                Err(thrown) => {
-                    write_out(req, frame, code, op, &Value::null());
-                    return Ok(Err(thrown));
-                }
-            }
-        }
-    };
-    let Some((slot, typed)) = placed else {
-        if req.overloaded_place(object, &bytes) {
+        // A readonly or set-restricted property gets no place, so the
+        // step is the overloaded one, and what the write refuses is
+        // chained onto what the step threw.
+        Ok((object, PropertyPtr::Withheld)) => {
             return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
         }
-        req.addref(&Value::string(key));
-        if let Err(thrown) = req.dynamic_property_ref(object, key, PropertyRead::Warning) {
+        Err(thrown) => {
             write_out(req, frame, code, op, &Value::null());
             return Ok(Err(thrown));
         }
-        return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
     };
-    // [`Request::read_before_write`] raised what an unwritten slot raises
-    // before the placement; one it let by is a `__get`'s to answer.
-    if object.heap().slot(slot).is_undef() && req.overloaded_place(object, &bytes) {
-        return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
-    }
     let named = exec::value_of(object.heap().slot(slot));
     let held = named.deref().undef_as_null();
     req.addref(&held);
@@ -16624,7 +16706,7 @@ pub(crate) fn fe_fetch_r<T: Tier>(
                     Err(thrown) => return threw(req, frame, &thrown),
                 };
                 let value = Request::walked_value(object, walked);
-                if matches!(walked, crate::api::request::Walked::Hooked(..)) {
+                if walked.owned() {
                     owned = Some(value);
                 }
                 (key, value)
@@ -17242,7 +17324,7 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
     };
     // A `&get` hook's answer is the walk's own owner of the cell, as an
     // iterator's element is.
-    let owned = matches!(walked, crate::api::request::Walked::Hooked(..));
+    let owned = walked.owned();
     let cell = match req.walked_reference(object, walked) {
         Ok(cell) => cell,
         Err(thrown) => return Ok(Err(thrown)),
@@ -21467,7 +21549,7 @@ mod tests {
                 name: None,
                 arguments: Vec::new(),
                 count: 0,
-                this: None,
+                receiver: None,
                 called_scope: None,
                 closure: None,
                 extra_named: Vec::new(),

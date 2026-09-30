@@ -9,7 +9,9 @@
 //! holds the dynamic ones alone, so a key is looked for among the slots'
 //! mangled names first and in the dynamic table second. A slot nothing
 //! holds is no row, as `zend_hash_find_ind` skips an `IS_INDIRECT` to an
-//! `UNDEF`, and a write lands in it all the same.
+//! `UNDEF`, and a write lands in it all the same. A table that holds
+//! copies of the declared rows ([`php_heap::DeclaredRows::Copied`]) is
+//! read and written as it stands, every key its own row.
 //!
 //! The dynamic table keys a numeric name by its decimal string where
 //! php's `zend_symtable_update` makes it an integer key, since every
@@ -21,12 +23,14 @@
 //! table through `get_properties`, `zend_std_get_properties`, which
 //! calls `zend_lazy_object_init`.
 
-use php_heap::{Heap, Obj};
+use php_heap::{Direction, Heap, Obj, PropertyTable, TableRow};
 use php_unit::decl::Visibility;
 
 use super::{Hooks, Request};
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Key, PhpObject, PhpRef, PhpString, Value};
+use crate::api::values::{
+    ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, PointerMove, Value,
+};
 
 /// Where a key of the table stands: a declared slot, or a key of the
 /// dynamic table.
@@ -42,11 +46,13 @@ impl Request {
         self.lazy_init(object)
     }
 
-    /// The row `key` names on an object of `class`: the declared slot
+    /// The row `key` names on `object`: the declared slot
     /// whose mangled name is the key, `\0*\0p` for a protected property
     /// and `\0C\0p` for a private one declared by `C`, or the dynamic
     /// table's key, a number spelt in decimal.
-    fn table_row_of(&mut self, class: ClassId, key: &Key) -> Result<Row, Thrown> {
+    fn table_row_of(&mut self, object: PhpObject, key: &Key) -> Result<Row, Thrown> {
+        let class = object.class();
+        let object_rows = object.heap().declared_rows();
         let name = match key {
             Key::Str(name) => *name,
             Key::Int(n) => {
@@ -55,6 +61,11 @@ impl Request {
             }
         };
         let bytes = name.as_bytes();
+        // A table that holds copies of the declared rows answers every
+        // key itself, as php's plain values do.
+        if object_rows == php_heap::DeclaredRows::Copied {
+            return Ok(Row::Dynamic(php_heap::Key::Str(name.heap())));
+        }
         for (at, (declaring, property)) in self.placed_properties(class).iter().enumerate() {
             let prefix: Vec<u8> = match property.visibility {
                 Visibility::Public => Vec::new(),
@@ -82,7 +93,7 @@ impl Request {
     ) -> Result<Option<Value>, Thrown> {
         let object = self.table_owner(object)?;
         let o = object.heap();
-        Ok(match self.table_row_of(object.class(), key)? {
+        Ok(match self.table_row_of(object, key)? {
             Row::Slot(i) => {
                 let z = o.slot(i);
                 (!z.is_undef()).then(|| Value::of_zval(z))
@@ -107,7 +118,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         let placed = self
             .table_owner(object)
-            .and_then(|object| Ok((object, self.table_row_of(object.class(), key)?)));
+            .and_then(|object| Ok((object, self.table_row_of(object, key)?)));
         let (object, row) = match placed {
             Ok(placed) => placed,
             Err(thrown) => {
@@ -118,7 +129,7 @@ impl Request {
         let o = object.heap();
         match row {
             Row::Slot(i) => self.write_declared_slot(o, i, value),
-            Row::Dynamic(k) => match self.dynamic_table(o) {
+            Row::Dynamic(k) => match self.separated_properties(o) {
                 Ok(table) => self.array_update(table, k, value),
                 Err(thrown) => {
                     self.release(value);
@@ -133,15 +144,20 @@ impl Request {
     pub(crate) fn table_unset_row(&mut self, object: PhpObject, key: &Key) -> Result<(), Thrown> {
         let object = self.table_owner(object)?;
         let o = object.heap();
-        match self.table_row_of(object.class(), key)? {
+        match self.table_row_of(object, key)? {
             Row::Slot(i) => {
                 if !o.slot(i).is_undef() {
                     Heap::object_set_slot(&mut Hooks(self), o, i, php_heap::Zval::UNDEF);
+                    // `zend_hash_del_ind`: the table marked once what the
+                    // slot held is given up.
+                    if let Some(table) = o.properties() {
+                        table.set_has_empty_ind(true);
+                    }
                 }
             }
             Row::Dynamic(k) => {
                 if o.properties().is_some_and(|table| table.contains(k)) {
-                    let table = self.dynamic_table(o)?;
+                    let table = self.separated_properties(o)?;
                     self.array_del(table, k);
                 }
             }
@@ -177,10 +193,10 @@ impl Request {
     ) -> Result<php_heap::ZvalRef, Thrown> {
         let object = self.table_owner(object)?;
         let o = object.heap();
-        let place = match self.table_row_of(object.class(), key)? {
+        let place = match self.table_row_of(object, key)? {
             Row::Slot(i) => o.slot_ref(i),
             Row::Dynamic(k) => {
-                let table = self.dynamic_table(o)?;
+                let table = self.separated_properties(o)?;
                 self.array_lookup(table, k)?
             }
         };
@@ -206,7 +222,7 @@ impl Request {
         key: &Key,
     ) -> Result<PhpRef, Thrown> {
         let object = self.table_owner(object)?;
-        if let Row::Slot(i) = self.table_row_of(object.class(), key)?
+        if let Row::Slot(i) = self.table_row_of(object, key)?
             && let Some((typed, name)) = self.slot_typed_property(object.class(), i)
             && let Some(at) = object.heap().slot_ref(i)
         {
@@ -223,13 +239,215 @@ impl Request {
         crate::ops::properties_for(self, object, crate::api::abi::PropertyPurpose::Serialize)
     }
 
+    /// `get_ht_for_iap` (`Z/ext/standard/array.c:993`) past its
+    /// deprecation: the object's table separated first where another
+    /// holder shares it and `separate` asks, as `zend_array_dup` does,
+    /// then the class's `get_properties`, which lays the table down,
+    /// initialises a lazy object, whose instance's table is then the one
+    /// the pointer moves over, and at `DateInterval` writes the fields
+    /// into it. The object whose table it is rides beside it.
+    fn pointer_table(
+        &mut self,
+        object: PhpObject,
+        separate: bool,
+    ) -> Result<(PhpObject, PropertyTable), Thrown> {
+        if separate && object.heap().properties().is_some_and(|t| t.refcount() > 1) {
+            self.separated_properties(object.heap())?;
+        }
+        let object = self.table_owner(object)?;
+        let handlers = self.object_handlers(object.heap());
+        handlers.get_properties(self, object)?;
+        let table = self.heap.object_property_table(object.heap());
+        Ok((object, self.fatal_of(table)?))
+    }
+
+    /// [`PhpObject::pointer_move`]: `reset`, `end`, `next` or `prev`
+    /// over the table `get_ht_for_iap` answers with its separation,
+    /// nothing moved and `false` for a table with no row, php's
+    /// `zend_hash_num_elements(array) == 0`, which counts a declared
+    /// slot nothing holds.
+    pub(crate) fn pointer_move(
+        &mut self,
+        object: PhpObject,
+        how: PointerMove,
+    ) -> Result<bool, Thrown> {
+        let (_, table) = self.pointer_table(object, true)?;
+        if table.is_empty() {
+            return Ok(false);
+        }
+        match how {
+            PointerMove::Reset => table.reset(),
+            PointerMove::End => table.end(),
+            PointerMove::Forward => {
+                table.forward();
+            }
+            PointerMove::Backward => {
+                table.backward();
+            }
+        }
+        Ok(true)
+    }
+
+    /// [`PhpObject::pointer_row`]: `php_array_iter_seek_current` over the
+    /// table `get_ht_for_iap` answers without its separation, stepping
+    /// back over an uninitialised slot after `end` and `prev` and on
+    /// otherwise, the pointer left where it stops; the row's key, a
+    /// declared one by its mangled name, and its value, views.
+    pub(crate) fn pointer_row(
+        &mut self,
+        object: PhpObject,
+        after: Option<PointerMove>,
+    ) -> Result<Option<(Key, Value)>, Thrown> {
+        let (owner, table) = self.pointer_table(object, false)?;
+        let toward = match after {
+            Some(PointerMove::End | PointerMove::Backward) => Direction::Backward,
+            Some(PointerMove::Reset | PointerMove::Forward) | None => Direction::Forward,
+        };
+        let Some((row, z)) = table.seek(toward) else {
+            return Ok(None);
+        };
+        let key = match row {
+            TableRow::Entry(key) => Key::of(key),
+            TableRow::Slot(i) => {
+                let names = self.slot_names(owner.class())?;
+                let Some(name) = usize::try_from(i).ok().and_then(|i| names.get(i)) else {
+                    return self.fatal_of(Err(php_heap::Fatal::Error(String::from(
+                        "InternalError: a declared slot of an object's table with no name",
+                    ))));
+                };
+                Key::Str(PhpString::of(*name))
+            }
+        };
+        Ok(Some((key, Value::of_zval(z))))
+    }
+
+    /// [`PhpObject::replace_table`]: `*ht_ptr = Z_ARRVAL_P(ht_zv)` over
+    /// an object, the table a lazy object's instance keeps; `table` laid
+    /// down as the object's with its numeric keys spelt in decimal, as
+    /// every reader of the table here reads them.
+    pub(crate) fn replace_table(
+        &mut self,
+        object: PhpObject,
+        table: PhpArray,
+    ) -> Result<(), Thrown> {
+        let object = self.table_owner(object)?;
+        let o = object.heap();
+        let mut table = table;
+        if table.iter().any(|(key, _)| matches!(key, Key::Int(_))) {
+            let mut spelt = PhpArray::new(self)?;
+            for (key, value) in table.snapshot_refs() {
+                let key = match key {
+                    Key::Int(n) => Key::Str(PhpString::new(self, n.to_string().as_bytes())?),
+                    Key::Str(name) => {
+                        self.addref(&Value::string(name));
+                        Key::Str(name)
+                    }
+                };
+                self.addref(&value);
+                spelt.set(self, key, value)?;
+            }
+            self.release(Value::array(table));
+            table = spelt;
+        }
+        let table = table.heap();
+        table.set_declared_rows(php_heap::DeclaredRows::Copied);
+        let old = o.properties();
+        self.heap.object_set_properties(o, table);
+        if let Some(old) = old {
+            self.release(Value::array(PhpArray::of(old)));
+        }
+        Ok(())
+    }
+
     /// `rebuild_object_properties` then `SEPARATE_ARRAY` over the
-    /// object's dynamic table: the table with one owner, the object's.
-    fn dynamic_table(&mut self, o: Obj) -> Result<php_heap::Arr, Thrown> {
+    /// object's table, what every write to a dynamic property does before
+    /// it writes: the table with one owner, the object's. One a lazy
+    /// object's snapshot shares while it stands for the declared slots is
+    /// separated as `zend_array_dup` separates php's, which copies what
+    /// each `IS_INDIRECT` points at, so the copy holds the declared rows
+    /// as they stood from then on ([`php_heap::DeclaredRows::Copied`])
+    /// and every reader of the table reads them there, apart from the
+    /// slots.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class C { public int $b = 1; protected $p = 'p';
+    ///     function __construct() { $this->a = 1; $this->b = 3; $this->p = 'q'; } }
+    /// $o = (new ReflectionClass(C::class))->newLazyGhost(function ($o) { $o->__construct(); });
+    /// var_dump($o);
+    /// $o->a += 1;
+    /// var_dump($o, $o->b);
+    /// echo json_encode(get_object_vars($o)), "\n";
+    /// foreach ($o as $k => $v) { echo "$k => $v\n"; }
+    /// $c = clone $o; $c->b = 7; $c->d = 1;
+    /// var_dump($c);
+    /// ```
+    /// ```expect
+    /// lazy ghost object(C)#3 (0) {
+    ///   ["b"]=>
+    ///   uninitialized(int)
+    /// }
+    /// object(C)#3 (3) {
+    ///   ["b"]=>
+    ///   int(1)
+    ///   ["p":protected]=>
+    ///   string(1) "p"
+    ///   ["a"]=>
+    ///   int(2)
+    /// }
+    /// int(3)
+    /// {"b":1,"\u0000*\u0000p":"p","a":2}
+    /// b => 1
+    /// p => p
+    /// a => 2
+    /// object(C)#2 (4) {
+    ///   ["b"]=>
+    ///   int(1)
+    ///   ["p":protected]=>
+    ///   string(1) "p"
+    ///   ["a"]=>
+    ///   int(2)
+    ///   ["d"]=>
+    ///   int(1)
+    /// }
+    /// ```
+    pub(crate) fn separated_properties(&mut self, o: Obj) -> Result<php_heap::Arr, Thrown> {
         let table = self.heap.object_properties(o);
         let table = self.fatal_of(table)?;
+        if table.refcount() > 1
+            && table.declared_rows() == php_heap::DeclaredRows::Slots
+            && o.slots() > 0
+        {
+            let names = self.slot_names(ClassId(o.class()))?;
+            let copy = self.heap.object_properties_copy(o, &names);
+            return self.fatal_of(copy);
+        }
+        let rows = table.declared_rows();
         let table = self.array_separate(table)?;
+        table.set_declared_rows(rows);
         self.heap.object_set_properties(o, table);
         Ok(table)
+    }
+
+    /// The key php's table holds each declared slot of `class` under,
+    /// in slot order: `zend_mangle_property_name`'s `\0*\0p` for a
+    /// protected property, `\0C\0p` for a private one `C` declared, and
+    /// the name itself for a public one, interned as php's are.
+    pub(crate) fn slot_names(&mut self, class: ClassId) -> Result<Vec<php_heap::Str>, Thrown> {
+        let placed = self.placed_properties(class);
+        let mut names = Vec::with_capacity(placed.len());
+        for (declaring, property) in placed {
+            let prefix: Vec<u8> = match property.visibility {
+                Visibility::Public => Vec::new(),
+                Visibility::Protected => b"\0*\0".to_vec(),
+                Visibility::Private => self
+                    .class_decl(declaring)
+                    .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat())
+                    .unwrap_or_default(),
+            };
+            let name = self.interned(&[prefix.as_slice(), &property.name.0].concat())?;
+            names.push(name.heap());
+        }
+        Ok(names)
     }
 }

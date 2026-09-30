@@ -36,6 +36,25 @@ pub use marshal::{
     False, FromArgument, Instance, IntoReturn, Iterable, NamedVariadic, Never, Null, NullDefault,
     OrFalse, Passed, Path, Raw, Ref, Static, This, True, Union, Untyped, Variadic,
 };
+/// The encoding functions' vocabulary (`zend_multibyte_functions`),
+/// which the compiler's scanner calls and an extension implements for
+/// [`ExtensionBuilder::encodings`].
+pub use php_compile::multibyte::{Encoding, Encodings, Unicode};
+
+/// What an extension hands the engine with [`ExtensionBuilder::encodings`]:
+/// php's `zend_multibyte_functions` ([`Encodings`]), which the scanner
+/// calls, with the two answers rfc1867 asks through
+/// `php_rfc1867_set_multibyte_callbacks` besides them (`Z/main/rfc1867.c`).
+pub trait Multibyte: Encodings {
+    /// `php_rfc1867_encoding_translation` with `php_rfc1867_get_detect_order`:
+    /// the encodings a multipart body's header lines are detected among
+    /// where the body is translated, empty for the detect order, and
+    /// `None` where it is not translated.
+    fn http_input(&self) -> Option<Vec<Encoding>>;
+    /// `php_mb_mbchar_bytes`: how many bytes the character that opens
+    /// with `lead` takes in `encoding`, which the form's words step by.
+    fn char_len(&self, encoding: Encoding, lead: u8) -> usize;
+}
 
 /// The startup ini view an extension's engine state is built from: what
 /// the host set before the first request, immutable afterwards.
@@ -55,8 +74,10 @@ pub enum IniVerdict {
 /// (`Z/Zend/zend_modules.h`): the other extension's name, how this one
 /// stands to it, and the `rel` and `version` a `ZEND_MOD_REQUIRED_EX`
 /// row carries, which php prints after the kind and
-/// `ReflectionExtension::getDependencies` reads. The startup-order
-/// check php makes over the table is `api-check`'s bundle order here.
+/// `ReflectionExtension::getDependencies` reads. The engine starts its
+/// extensions in the order `zend_sort_modules` leaves by the required
+/// and optional rows; the check php makes that a required one is
+/// loaded is `api-check`'s crate graph here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency {
     pub name: String,
@@ -309,6 +330,10 @@ pub enum PostStartup {
 /// The path resolver, php's `zend_resolve_path` as an extension overrides
 /// it: [`ExtensionBuilder::resolve_path`].
 pub(crate) type ResolvePathHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
+
+/// What [`ExtensionBuilder::encodings`] takes: the encoding functions
+/// bound to one request.
+pub(crate) type EncodingsHook = fn(&mut Request) -> Box<dyn Multibyte>;
 /// The upload hook, php's `php_rfc1867_callback`:
 /// [`ExtensionBuilder::upload`].
 pub(crate) type UploadHook =
@@ -416,12 +441,36 @@ pub enum Lookup {
 
 /// An ini entry's `on_modify`, php's `PHP_INI_MH`: served by `ini_set()`
 /// with the new value before the entry takes it
-/// (`ZEND_INI_STAGE_RUNTIME`), and by the engine as it is built with the
-/// value the host set (`ZEND_INI_STAGE_STARTUP`), raising what the
-/// entry's handler raises, and answering whether the value is taken,
-/// `false` being php's `FAILURE`, which leaves the entry as it was, its
-/// default at startup, and makes `ini_set()` answer `false`.
+/// (`ZEND_INI_STAGE_RUNTIME`), by the engine as it is built with the
+/// value the host set (`ZEND_INI_STAGE_STARTUP`), by a host laying its
+/// own entry over php once it has started (`ZEND_INI_STAGE_ACTIVATE`),
+/// and as the request ends with the value an entry the request changed
+/// started with (`ZEND_INI_STAGE_DEACTIVATE`); [`Request::ini_stage`]
+/// says which. It raises what the entry's handler
+/// raises, and answers whether the value is taken, `false` being php's
+/// `FAILURE`, which leaves the entry as it was, its default at startup,
+/// and makes `ini_set()` answer `false`.
 pub type OnModify = fn(&mut Request, &[u8]) -> Result<bool, Thrown>;
+
+/// The stage an [`OnModify`] is served at, php's `ZEND_INI_STAGE_*`
+/// (`Z/Zend/zend_ini.h`) as this engine reaches them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IniStage {
+    /// `ZEND_INI_STAGE_STARTUP`: as the engine is built, over the
+    /// host's values, before any request; `php_during_module_startup()`.
+    Startup,
+    /// `ZEND_INI_STAGE_ACTIVATE`: a host's own entry laid over php once
+    /// it has started, as php-fpm's child applies its pool's
+    /// `php_value`s.
+    Activate,
+    /// `ZEND_INI_STAGE_RUNTIME`: while a request runs, through
+    /// `ini_set()`, `ini_restore()` and the natives.
+    Runtime,
+    /// `ZEND_INI_STAGE_DEACTIVATE`: as the request ends, each entry it
+    /// changed handed back the value it started with
+    /// (`zend_ini_deactivate`).
+    Deactivate,
+}
 /// The `MINFO` function: writes the extension's `phpinfo()` table
 /// through [`Request::info_table`].
 pub(crate) type Info = fn(&mut Request);
@@ -507,6 +556,8 @@ pub struct Extension {
     pub(crate) upload: Option<UploadHook>,
     /// What [`ExtensionBuilder::resolve_path`] was handed.
     pub(crate) resolve_path: Option<ResolvePathHook>,
+    /// What [`ExtensionBuilder::encodings`] was handed.
+    pub(crate) encodings: Option<EncodingsHook>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
     /// What [`ExtensionBuilder::intercept`] was handed: each native of
@@ -560,6 +611,7 @@ pub struct ExtensionBuilder {
     treat_data: Option<TreatDataHook>,
     upload: Option<UploadHook>,
     resolve_path: Option<ResolvePathHook>,
+    encodings: Option<EncodingsHook>,
     zend: Option<ZendExtension>,
     intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
@@ -869,6 +921,22 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The encoding functions, php's `zend_multibyte_functions` as
+    /// mbstring's `MINIT` hands them to `zend_multibyte_set_functions`:
+    /// `bind` answers them for one request as its settings stand, the
+    /// internal encoding, the detect order and the substitute character,
+    /// and the engine asks it each time it opens a file under
+    /// `zend.multibyte`, each time `zend.script_encoding` is set, and as it
+    /// reads a multipart form body ([`Multibyte`]). The last extension in bundle order that hands
+    /// them is the provider, as a later `zend_multibyte_set_functions`
+    /// replaces an earlier one; with none, Zend's dummies answer, under
+    /// which nothing is fetched or converted.
+    #[must_use]
+    pub fn encodings(mut self, bind: EncodingsHook) -> ExtensionBuilder {
+        self.encodings = Some(bind);
+        self
+    }
+
     /// The upload hook, php's `php_rfc1867_callback` as `ext/session`'s
     /// `MINIT` sets it for `session.upload_progress`: each step of a
     /// multipart body's reading is handed to `hook` as it is taken
@@ -1023,6 +1091,7 @@ impl ExtensionBuilder {
             treat_data: self.treat_data,
             upload: self.upload,
             resolve_path: self.resolve_path,
+            encodings: self.encodings,
             zend: self.zend,
             intercepts: self.intercepts,
             info: self.info,
@@ -1848,6 +1917,36 @@ pub trait ObjectHandlers: Send + Sync {
     /// stdClass backs
     /// ```
     fn properties_overloaded(&self) -> bool {
+        false
+    }
+
+    /// Whether the table's `get_properties` answers rows of its own
+    /// making, not the object's property table as
+    /// `zend_std_get_properties` holds it: `sxe_get_properties`, which
+    /// builds a table of the element's children on each call. The
+    /// internal pointer the pointer natives move over an object
+    /// ([`PhpObject::pointer_move`](crate::api::values::PhpObject::pointer_move))
+    /// is the object's table's, so over such a class they read a table
+    /// fresh on each call, which is php's answer for `SimpleXMLElement`, whose
+    /// table is rebuilt between calls. `false` at `Std`, at every class
+    /// that sets `get_properties_for` alone, and at one whose
+    /// `get_properties` writes into the object's own table and answers
+    /// it (`date_object_get_properties_interval`), whose pointer natives
+    /// read the object's own table as php's do.
+    ///
+    /// ```php
+    /// $x = simplexml_load_string('<a><b>1</b><c>2</c></a>');
+    /// var_dump(@next($x), @key($x));
+    /// $f = new SplFixedArray(2); $f[0] = 5;
+    /// var_dump(@current($f), @current(new ArrayObject([7])));
+    /// ```
+    /// ```expect
+    /// string(1) "2"
+    /// string(1) "b"
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    fn answers_properties(&self) -> bool {
         false
     }
 
