@@ -977,12 +977,37 @@ impl Shared {
     /// all, which is the `None` `serve` serves nothing for.
     pub(crate) fn cached(&self, path: &[u8], cwd: &Path, stack: StackLimit) -> Cached {
         let full = crate::unit_cache::full_path(path, cwd);
-        let now = crate::unit_cache::now();
+        let asked = crate::unit_cache::Asked {
+            path: &full,
+            written: None,
+            validation: Validation::EveryHit,
+            protection: 0,
+            now: crate::unit_cache::now(),
+            levels: crate::unit_cache::Levels::Memory,
+        };
         self.units
-            .file(&full, None, Validation::EveryHit, 0, now, |source| {
-                self.publish_file(source, path, cwd, stack, RequestClasses::default())
-            })
+            .file(
+                asked,
+                |source| self.publish_file(source, path, cwd, stack, RequestClasses::default()),
+                |_| None,
+            )
             .0
+    }
+
+    /// A unit the file cache kept, read back from its bytes and published
+    /// as a compiled one is: its strings and constant arrays laid down in
+    /// the engine's table and its op arrays given their map-pointer
+    /// offsets (design §6.3); none where the bytes are no whole unit.
+    pub(crate) fn publish_kept(&self, body: &[u8]) -> Option<Arc<Unit>> {
+        let mut strings = match self.strings.lock() {
+            Ok(strings) => strings,
+            // As in `publish`: the table is append-only and consistent.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut unit = crate::unit_cache::decode(body, &mut *strings)?;
+        drop(strings);
+        assign_map_ptrs(&mut unit, &self.map_ptr_last);
+        Some(unit.published())
     }
 
     /// `source`, read from the file `path` names, compiled and published
@@ -1843,6 +1868,7 @@ impl EngineBuilder {
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
+        let units = UnitCache::new(MAX_ACCELERATED_FILES, &functions, &classes);
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -1872,7 +1898,7 @@ impl EngineBuilder {
                 reenter: self.reenter,
                 resume: self.resume,
                 locked,
-                units: UnitCache::new(MAX_ACCELERATED_FILES),
+                units,
                 strings: Mutex::new(strings),
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
@@ -3429,6 +3455,7 @@ mod tests {
                 validation: Validation::Never,
                 lookup: crate::api::abi::Lookup::Resolved,
                 protection: 0,
+                file_cache: None,
             })
             .post_startup(|req| {
                 let script = req.ini_get(b"t.preload").unwrap_or_default().to_vec();
@@ -3482,6 +3509,77 @@ mod tests {
             String::from_utf8_lossy(&second.stdout),
             "fmyn\npreloading\nagain\n"
         );
+    }
+
+    /// An extension that keeps every file in the cache, never validated,
+    /// and names a file cache from an ini entry of its own.
+    fn file_caching(dir: &Path) -> Extension {
+        let entry = php_unit::decl::IniDecl {
+            name: Name(b"t.file_cache"[..].into()),
+            default: b""[..].into(),
+            user: false,
+            per_dir: false,
+            system: true,
+        };
+        crate::api::abi::ExtensionBuilder::default()
+            .ini(vec![entry])
+            .admission(|req, _| {
+                let dir = req.ini_get(b"t.file_cache").unwrap_or_default();
+                crate::api::abi::Admission::Held {
+                    validation: Validation::Never,
+                    lookup: crate::api::abi::Lookup::Resolved,
+                    protection: 0,
+                    file_cache: Some(crate::api::abi::FileCache {
+                        directory: std::path::PathBuf::from(
+                            String::from_utf8_lossy(dir).into_owned(),
+                        ),
+                        read_only: false,
+                    }),
+                }
+            })
+            .build(&dir.to_string_lossy())
+    }
+
+    /// `opcache.file_cache` as the unit cache's second level (design
+    /// §6.3): a file one engine compiled is kept on disk, and another
+    /// engine of the same build reads it back instead of compiling the
+    /// file, so what it serves is what was kept though the file has
+    /// changed since; a kept file another build wrote is never read.
+    #[test]
+    fn a_kept_unit_is_read_back_by_the_next_engine_and_another_builds_is_not() {
+        let dir = std::env::temp_dir().join(format!("engine-file-cache-{}", std::process::id()));
+        let cache = dir.join("cache");
+        let _ = std::fs::create_dir_all(&cache);
+        let script = dir.join("kept.inc");
+        let _ = std::fs::write(&script, "<?php return 'kept';");
+        let script = script.canonicalize().unwrap_or_default();
+        let engine = || {
+            Engine::builder()
+                .extensions(&[file_caching(&dir)])
+                .ini("t.file_cache", &cache.to_string_lossy())
+                .build()
+        };
+        let program = format!("<?php echo include '{}';", script.display());
+        let first = engine().serve_capture(&program, crate::test::Capture::default());
+        let _ = std::fs::write(&script, "<?php return 'compiled';");
+        let second = engine().serve_capture(&program, crate::test::Capture::default());
+        let kept = engine();
+        let kept_at = crate::unit_cache::Disk {
+            directory: &cache,
+            read_only: false,
+            build: &kept.shared.units.build,
+        }
+        .path(script.as_os_str().as_encoded_bytes());
+        let mut stale = std::fs::read(&kept_at).unwrap_or_default();
+        if let Some(byte) = stale.get_mut(8) {
+            *byte ^= 1;
+        }
+        let _ = std::fs::write(&kept_at, &stale);
+        let third = kept.serve_capture(&program, crate::test::Capture::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(String::from_utf8_lossy(&first.stdout), "kept");
+        assert_eq!(String::from_utf8_lossy(&second.stdout), "kept");
+        assert_eq!(String::from_utf8_lossy(&third.stdout), "compiled");
     }
 
     /// A startup an extension refuses serves nothing, and every request
