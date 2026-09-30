@@ -1080,11 +1080,17 @@ impl PhpStream {
     }
 
     /// `zend_stream_fixup` over `php_zend_stream_reader`
-    /// (`Z/Zend/zend_stream.c:198-262`): the whole stream read for the
+    /// (`Z/Zend/zend_stream.c:198-262`): the size asked first,
+    /// `php_zend_stream_fsizer`'s `php_stream_stat` on a stream with no
+    /// read filter (`Z/main/main.c:1661-1675`), which a user wrapper
+    /// serves with `stream_stat`; then the whole stream read for the
     /// compiler, a chunk at a time until a read gives nothing, and `None`
     /// where any read fails, which `compile_file` reports as the file it
     /// could not open.
     pub(crate) fn read_for_compile(&mut self, req: &mut Request) -> Option<Vec<u8>> {
+        if self.readfilters.is_empty() {
+            let _ = self.stat(req);
+        }
         let mut out = Vec::new();
         let mut chunk = vec![0; CHUNK_SIZE];
         loop {
