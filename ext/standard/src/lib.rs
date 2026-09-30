@@ -773,7 +773,6 @@ pub fn extension() -> Extension {
         .ini(file::ini())
         .dependencies(dependencies())
         .ini(assert::ini())
-        .ini(browscap::ini())
         .ini(url_scanner::ini());
     ini_handlers()
         .into_iter()

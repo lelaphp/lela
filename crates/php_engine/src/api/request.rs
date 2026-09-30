@@ -18369,7 +18369,7 @@ impl Request {
     /// is what `ini_set()` asks: every entry of the table is
     /// `PHP_INI_ALL` but `xmlrpc_errors`, `sys_temp_dir`,
     /// `sendmail_path`, `syslog.facility`, `syslog.ident`,
-    /// `disable_functions`, `enable_dl` and `extension_dir`,
+    /// `disable_functions`, `enable_dl`, `extension_dir` and `browscap`,
     /// `PHP_INI_SYSTEM` (`Z/main/main.c:806-890`), and
     /// `short_open_tag` and the four `mail.*` beside `sendmail_path`,
     /// `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820-871`).
@@ -18390,7 +18390,7 @@ impl Request {
         match name {
             b"xmlrpc_errors" | b"sys_temp_dir" | b"sendmail_path" | b"syslog.facility"
             | b"syslog.ident" | b"disable_functions" | b"enable_dl" | b"extension_dir"
-            | b"allow_url_fopen" | b"allow_url_include" => (false, false, true),
+            | b"allow_url_fopen" | b"allow_url_include" | b"browscap" => (false, false, true),
             b"short_open_tag"
             | b"mail.add_x_header"
             | b"mail.mixed_lf_and_crlf"

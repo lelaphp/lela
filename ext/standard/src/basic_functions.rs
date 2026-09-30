@@ -249,12 +249,6 @@ pub(crate) fn minfo(req: &mut Request) {
     let rows: Vec<[String; 3]> = req
         .extension_ini(me)
         .into_iter()
-        .filter(|entry| {
-            !matches!(
-                &*entry.decl.name.0,
-                b"browscap" | b"unserialize_callback_func"
-            )
-        })
         .map(|entry| {
             let name: &[u8] = &entry.decl.name.0;
             let boolean = booleans.contains(&name);

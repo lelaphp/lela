@@ -887,7 +887,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 72] = [
+const CORE_INI: [(&str, &str); 74] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1000,6 +1000,9 @@ const CORE_INI: [(&str, &str); 72] = [
     ("max_multipart_body_parts", "-1"),
     ("enable_dl", "1"),
     ("extension_dir", crate::constants::PHP_EXTENSION_DIR),
+    // Two `main.c` registers for ext/standard to read (`Z/main/main.c:822, 863`).
+    ("unserialize_callback_func", ""),
+    ("browscap", ""),
 ];
 
 /// `php_ini_builder_define`'s line (`Z/main/php_ini_builder.c:63-81`)
