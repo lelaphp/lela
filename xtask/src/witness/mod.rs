@@ -771,6 +771,23 @@ pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
     Ok(())
 }
 
+/// Every crate that exists less those whose `witness` reading passes and
+/// was taken over the crate's tree now, `done`'s fresh: what the merge
+/// check measures after pre-commit measured the staged crates (#1312).
+fn unmeasured(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<String>> {
+    let mut left = Vec::new();
+    for krate in manifest.crates.iter().filter(|k| sources::exists(root, k)) {
+        let tree = crate::git::tree_hash(root, &krate.path())?;
+        let stands = store
+            .read(INSTRUMENT, &krate.name)?
+            .is_some_and(|r| r.status == Status::Pass && r.fresh_for(&tree));
+        if !stands {
+            left.push(krate.name.clone());
+        }
+    }
+    Ok(left)
+}
+
 /// The command line's entry. Without `journal`, the run is served in a
 /// process of its own and watched, and every reading is written here
 /// ([`watch`]); with one, this is that process: the run served, and
@@ -787,8 +804,18 @@ pub(crate) fn command(
         (None, Some(item)) => Scope::Item(item),
         (None, None) => Scope::Crate,
     };
+    let crates = if asked.unmeasured {
+        let left = unmeasured(root, manifest, store)?;
+        if left.is_empty() {
+            println!("witness: every crate stands on a pass over its tree now; not run again");
+            return Ok(());
+        }
+        left
+    } else {
+        asked.crates
+    };
     let ask = Ask {
-        crates: asked.crates,
+        crates,
         accept: asked.accept,
         staged: asked.staged,
         scope,
