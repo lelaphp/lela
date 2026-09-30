@@ -7749,10 +7749,7 @@ impl ReflectionExtension {
     #[php(tentative)]
     fn getVersion(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
         let extension = this_extension(req, this.object())?;
-        let version = req
-            .extension_version(extension)
-            .unwrap_or_default()
-            .to_owned();
+        let version = req.extension_version(extension).unwrap_or_default();
         PhpString::new(req, version.as_bytes()).map(Some)
     }
 

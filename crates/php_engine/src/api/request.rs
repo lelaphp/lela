@@ -17522,8 +17522,8 @@ impl Request {
     /// `module->version`: what the extension declared with
     /// `ExtensionBuilder::version`, else `PHP_VERSION`, as `Core`'s is.
     #[must_use]
-    pub fn extension_version(&self, extension: ExtensionId) -> Option<&str> {
-        self.extension_of(extension).map(|e| e.version.as_str())
+    pub fn extension_version(&self, extension: ExtensionId) -> Option<&'static str> {
+        self.extension_of(extension).map(|e| e.version)
     }
 
     /// `module->module_number`, `zend_next_free_module` at registration:
@@ -17712,7 +17712,7 @@ impl Request {
             info(self);
             return;
         }
-        self.info_table(&[&["Version", module.version.as_str()]]);
+        self.info_table(&[&["Version", module.version]]);
         let names: Vec<&[u8]> = module.ini.iter().map(|entry| &*entry.name.0).collect();
         self.info_ini_entries(&names);
     }

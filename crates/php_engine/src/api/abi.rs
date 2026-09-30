@@ -391,7 +391,7 @@ pub struct Extension {
     pub(crate) name: String,
     /// `zend_module_entry.version`, what [`ExtensionBuilder::version`]
     /// declared, `PHP_VERSION` where it declared none.
-    pub(crate) version: String,
+    pub(crate) version: &'static str,
     pub(crate) functions: Vec<(FunctionDecl, Entry)>,
     pub(crate) classes: Vec<NativeClassDecl>,
     pub(crate) constants: Vec<ConstDecl>,
@@ -451,7 +451,7 @@ impl std::fmt::Debug for Extension {
 /// The builder of an [`Extension`], what a crate's `extension()` calls.
 #[derive(Default)]
 pub struct ExtensionBuilder {
-    version: Option<String>,
+    version: Option<&'static str>,
     functions: Vec<(FunctionDecl, Entry)>,
     classes: Vec<NativeClassDecl>,
     constants: Vec<ConstDecl>,
@@ -904,8 +904,8 @@ impl ExtensionBuilder {
     /// extension that declares none has `PHP_VERSION`, as
     /// `PHP_CTYPE_VERSION` and its kin are.
     #[must_use]
-    pub fn version(mut self, version: &str) -> ExtensionBuilder {
-        self.version = Some(version.to_owned());
+    pub fn version(mut self, version: &'static str) -> ExtensionBuilder {
+        self.version = Some(version);
         self
     }
 
@@ -914,9 +914,7 @@ impl ExtensionBuilder {
     pub fn build(self, name: &str) -> Extension {
         Extension {
             name: name.to_owned(),
-            version: self
-                .version
-                .unwrap_or_else(|| crate::api::request::PHP_VERSION.to_owned()),
+            version: self.version.unwrap_or(crate::api::request::PHP_VERSION),
             functions: self.functions,
             classes: self.classes,
             constants: self.constants,

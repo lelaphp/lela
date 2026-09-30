@@ -442,10 +442,7 @@ fn phpversion(
     let Some(extension) = req.extension_named(name.as_bytes()) else {
         return Ok(OrFalse::False);
     };
-    let version = req
-        .extension_version(extension)
-        .unwrap_or_default()
-        .to_owned();
+    let version = req.extension_version(extension).unwrap_or_default();
     PhpString::new(req, version.as_bytes()).map(OrFalse::Value)
 }
 
