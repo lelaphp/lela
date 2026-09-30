@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use php_ext::abi::{Cache, StartupIni};
-use php_ext::raising::{Level, docref};
+use php_ext::raising::{Level, Thrown, docref, raise_while_pending};
 use php_ext::request::Request;
 
 use crate::constants::PREG_INTERNAL_ERROR;
@@ -64,6 +64,25 @@ pub(super) fn engine_state(ini: &StartupIni) -> Patterns {
 /// `pcre_get_compiled_regex_cache(regex)`: the compiled pattern, or
 /// `None` with php's warning raised and `PREG_INTERNAL_ERROR` set.
 pub(super) fn compiled(req: &mut Request, regex: &[u8]) -> Option<Arc<Pattern>> {
+    compiled_under(req, regex, None)
+}
+
+/// [`compiled`] where a throwable may be pending, as php compiles on
+/// past one in a loop that does not stop for it: what it warns is
+/// raised while the throwable carries, which no user error handler is
+/// handed.
+pub(super) fn compiled_under(
+    req: &mut Request,
+    regex: &[u8],
+    pending: Option<&Thrown>,
+) -> Option<Arc<Pattern>> {
+    let warn = |req: &mut Request, message: &str| match pending {
+        None => docref(req, Level::Warning, message),
+        Some(pending) => {
+            let text = format!("{}(): {message}", req.active_function_name());
+            raise_while_pending(req, pending, Level::Warning, &text);
+        }
+    };
     let jit = crate::ini_bool(req, "pcre.jit");
     let mut jit_failure = None;
     let built = match req.engine::<Patterns>() {
@@ -73,13 +92,13 @@ pub(super) fn compiled(req: &mut Request, regex: &[u8]) -> Option<Arc<Pattern>> 
         None => Arc::new(compile(regex, jit, &mut jit_failure)),
     };
     if let Some(message) = jit_failure {
-        docref(req, Level::Warning, &message);
+        warn(req, &message);
         set_error(req, PREG_INTERNAL_ERROR);
     }
     match &*built {
         Ok(pattern) => Some(Arc::clone(pattern)),
         Err(message) => {
-            docref(req, Level::Warning, message);
+            warn(req, message);
             set_error(req, PREG_INTERNAL_ERROR);
             None
         }
