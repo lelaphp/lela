@@ -264,6 +264,12 @@ impl Output {
         &self.headers
     }
 
+    /// `SG(sapi_headers).send_default_content_type = 0`: no default
+    /// `Content-type` at the commit.
+    pub(crate) fn no_default_content_type(&mut self) {
+        self.send_default_content_type = false;
+    }
+
     /// `SG(sapi_headers).http_response_code`.
     pub(crate) fn response_code(&self) -> i64 {
         self.response_code

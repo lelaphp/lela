@@ -280,74 +280,38 @@ fn atol(bytes: &[u8]) -> i64 {
     }
 }
 
-/// `php_handle_auth_data`'s `Basic` half (`Z/main/main.c:2735`): the user
-/// before the first `:` of the decoded credentials and the password
-/// after it, where it is not empty.
+/// `php_handle_auth_data`'s `Basic` half: the user and the password.
 fn basic_auth(auth: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    let head = auth.get(..6)?;
-    if !head.eq_ignore_ascii_case(b"Basic ") {
-        return None;
+    match crate::http::credentials(auth)? {
+        crate::http::Credentials::Basic { user, password } => Some((user, password)),
+        crate::http::Credentials::Digest(_) => None,
     }
-    let decoded = base64(&auth[6..])?;
-    let decoded = decoded.split(|b| *b == 0).next().unwrap_or_default();
-    let colon = decoded.iter().position(|b| *b == b':')?;
-    let pass = &decoded[colon + 1..];
-    Some((
-        decoded[..colon].to_vec(),
-        (!pass.is_empty()).then(|| pass.to_vec()),
-    ))
-}
-
-/// `php_base64_decode`, the lenient one: bytes outside the alphabet
-/// skipped, and `None` for a lone digit left over.
-fn base64(input: &[u8]) -> Option<Vec<u8>> {
-    let value = |c: u8| match c {
-        b'A'..=b'Z' => Some(c - b'A'),
-        b'a'..=b'z' => Some(c - b'a' + 26),
-        b'0'..=b'9' => Some(c - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    };
-    let mut out = Vec::new();
-    let mut acc = 0u32;
-    let mut bits = 0;
-    let mut digits = 0;
-    for c in input {
-        if *c == b'=' {
-            break;
-        }
-        let Some(v) = value(*c) else { continue };
-        acc = (acc << 6) | u32::from(v);
-        bits += 6;
-        digits += 1;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(u8::try_from((acc >> bits) & 0xff).unwrap_or(0));
-        }
-    }
-    (digits % 4 != 1).then_some(out)
 }
 
 /// The request headers a CGI environment carries, as php-cgi's
 /// `apache_request_headers` reads them: each `HTTP_` variable with the
 /// prefix taken off, `_` read as `-`, and each letter lowered but the
-/// first and the one after a `-`; `CONTENT_TYPE` and `CONTENT_LENGTH`
+/// first and the one after a `-`, whatever it is; `CONTENT_TYPE` and `CONTENT_LENGTH`
 /// under their header names.
 #[must_use]
 pub fn request_headers(env: &Environment) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut headers = Vec::new();
     for (name, value) in &env.0 {
         let name = if let Some(rest) = name.strip_prefix(b"HTTP_").filter(|r| !r.is_empty()) {
+            // `apache_request_headers`' walk (`Z/sapi/cgi/cgi_main.c:1619`):
+            // the first byte as it stands, each `_` a `-` with the byte
+            // after it as it stands, and every other byte lowered.
             let mut out = Vec::with_capacity(rest.len());
-            let mut upper = true;
-            for &c in rest {
+            let mut bytes = rest.iter().copied();
+            if let Some(first) = bytes.next() {
+                out.push(first);
+            }
+            while let Some(c) = bytes.next() {
                 if c == b'_' {
                     out.push(b'-');
-                    upper = true;
-                } else if upper {
-                    out.push(c);
-                    upper = false;
+                    if let Some(next) = bytes.next() {
+                        out.push(next);
+                    }
                 } else {
                     out.push(c.to_ascii_lowercase());
                 }
@@ -365,64 +329,7 @@ pub fn request_headers(env: &Environment) -> Vec<(Vec<u8>, Vec<u8>)> {
     headers
 }
 
-/// `http_status_map` (`Z/main/http_status_codes.h`): the reason phrase
-/// php knows a code by.
-#[must_use]
-pub fn reason(code: i64) -> Option<&'static str> {
-    const MAP: [(i64, &str); 48] = [
-        (100, "Continue"),
-        (101, "Switching Protocols"),
-        (200, "OK"),
-        (201, "Created"),
-        (202, "Accepted"),
-        (203, "Non-Authoritative Information"),
-        (204, "No Content"),
-        (205, "Reset Content"),
-        (206, "Partial Content"),
-        (300, "Multiple Choices"),
-        (301, "Moved Permanently"),
-        (302, "Found"),
-        (303, "See Other"),
-        (304, "Not Modified"),
-        (305, "Use Proxy"),
-        (307, "Temporary Redirect"),
-        (308, "Permanent Redirect"),
-        (400, "Bad Request"),
-        (401, "Unauthorized"),
-        (402, "Payment Required"),
-        (403, "Forbidden"),
-        (404, "Not Found"),
-        (405, "Method Not Allowed"),
-        (406, "Not Acceptable"),
-        (407, "Proxy Authentication Required"),
-        (408, "Request Timeout"),
-        (409, "Conflict"),
-        (410, "Gone"),
-        (411, "Length Required"),
-        (412, "Precondition Failed"),
-        (413, "Request Entity Too Large"),
-        (414, "Request-URI Too Long"),
-        (415, "Unsupported Media Type"),
-        (416, "Requested Range Not Satisfiable"),
-        (417, "Expectation Failed"),
-        (426, "Upgrade Required"),
-        (428, "Precondition Required"),
-        (429, "Too Many Requests"),
-        (431, "Request Header Fields Too Large"),
-        (451, "Unavailable For Legal Reasons"),
-        (500, "Internal Server Error"),
-        (501, "Not Implemented"),
-        (502, "Bad Gateway"),
-        (503, "Service Unavailable"),
-        (504, "Gateway Timeout"),
-        (505, "HTTP Version Not Supported"),
-        (506, "Variant Also Negotiates"),
-        (511, "Network Authentication Required"),
-    ];
-    MAP.iter()
-        .find(|(had, _)| *had == code)
-        .map(|(_, text)| *text)
-}
+use crate::http::reason;
 
 /// `SAPI_CGI_MAX_HEADER_LENGTH`: the most a `Status:` line php builds holds.
 const MAX_HEADER_LENGTH: usize = 1024;

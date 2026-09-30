@@ -45,3 +45,7 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 # oracle is built with (#1173, #1260).
 php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring"] }
 php_sapi = { path = "../../crates/php_sapi" }
+php_proto = { path = "../../crates/php_proto" }
+# The C library in `src/ffi/` alone, for what the standard library does
+# not answer: the local time the server's log writes (ADR-0008).
+libc = { workspace = true }

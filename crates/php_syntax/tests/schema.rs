@@ -50,7 +50,7 @@ fn real_grammar_parses_validates_and_generates() {
         counts.classes, 19,
         "token classes are an explicit, cross-checked list"
     );
-    assert_eq!(counts.extras, 9, "extras are a fixed list");
+    assert_eq!(counts.extras, 10, "extras are a fixed list");
 
     // Convention A1 spot checks: enums and token-set aliases exist and do
     // not become struct nodes.

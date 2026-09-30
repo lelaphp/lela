@@ -8,3 +8,5 @@
 
 pub mod cgi;
 pub mod fcgi;
+pub mod http;
+pub mod mime;
