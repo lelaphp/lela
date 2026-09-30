@@ -23,12 +23,14 @@
 //! table through `get_properties`, `zend_std_get_properties`, which
 //! calls `zend_lazy_object_init`.
 
-use php_heap::{Heap, Obj};
+use php_heap::{Direction, Heap, Obj, PropertyTable, TableRow};
 use php_unit::decl::Visibility;
 
 use super::{Hooks, Request};
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Key, PhpObject, PhpRef, PhpString, Value};
+use crate::api::values::{
+    ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, PointerMove, Value,
+};
 
 /// Where a key of the table stands: a declared slot, or a key of the
 /// dynamic table.
@@ -235,6 +237,123 @@ impl Request {
     pub(crate) fn table_entries(&mut self, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
         let object = self.table_owner(object)?;
         crate::ops::properties_for(self, object, crate::api::abi::PropertyPurpose::Serialize)
+    }
+
+    /// `get_ht_for_iap` (`Z/ext/standard/array.c:993`) past its
+    /// deprecation: the object's table separated first where another
+    /// holder shares it and `separate` asks, as `zend_array_dup` does,
+    /// then `get_properties`, which lays the table down and initialises
+    /// a lazy object, whose instance's table is then the one the
+    /// pointer moves over. The object whose table it is rides beside it.
+    fn pointer_table(
+        &mut self,
+        object: PhpObject,
+        separate: bool,
+    ) -> Result<(PhpObject, PropertyTable), Thrown> {
+        if separate && object.heap().properties().is_some_and(|t| t.refcount() > 1) {
+            self.separated_properties(object.heap())?;
+        }
+        let object = self.table_owner(object)?;
+        let table = self.heap.object_property_table(object.heap());
+        Ok((object, self.fatal_of(table)?))
+    }
+
+    /// [`PhpObject::pointer_move`]: `reset`, `end`, `next` or `prev`
+    /// over the table `get_ht_for_iap` answers with its separation,
+    /// nothing moved and `false` for a table with no row, php's
+    /// `zend_hash_num_elements(array) == 0`, which counts a declared
+    /// slot nothing holds.
+    pub(crate) fn pointer_move(
+        &mut self,
+        object: PhpObject,
+        how: PointerMove,
+    ) -> Result<bool, Thrown> {
+        let (_, table) = self.pointer_table(object, true)?;
+        if table.is_empty() {
+            return Ok(false);
+        }
+        match how {
+            PointerMove::Reset => table.reset(),
+            PointerMove::End => table.end(),
+            PointerMove::Forward => {
+                table.forward();
+            }
+            PointerMove::Backward => {
+                table.backward();
+            }
+        }
+        Ok(true)
+    }
+
+    /// [`PhpObject::pointer_row`]: `php_array_iter_seek_current` over the
+    /// table `get_ht_for_iap` answers without its separation, stepping
+    /// back over an uninitialised slot after `end` and `prev` and on
+    /// otherwise, the pointer left where it stops; the row's key, a
+    /// declared one by its mangled name, and its value, views.
+    pub(crate) fn pointer_row(
+        &mut self,
+        object: PhpObject,
+        after: Option<PointerMove>,
+    ) -> Result<Option<(Key, Value)>, Thrown> {
+        let (owner, table) = self.pointer_table(object, false)?;
+        let toward = match after {
+            Some(PointerMove::End | PointerMove::Backward) => Direction::Backward,
+            Some(PointerMove::Reset | PointerMove::Forward) | None => Direction::Forward,
+        };
+        let Some((row, z)) = table.seek(toward) else {
+            return Ok(None);
+        };
+        let key = match row {
+            TableRow::Entry(key) => Key::of(key),
+            TableRow::Slot(i) => {
+                let names = self.slot_names(owner.class())?;
+                let Some(name) = usize::try_from(i).ok().and_then(|i| names.get(i)) else {
+                    return self.fatal_of(Err(php_heap::Fatal::Error(String::from(
+                        "InternalError: a declared slot of an object's table with no name",
+                    ))));
+                };
+                Key::Str(PhpString::of(*name))
+            }
+        };
+        Ok(Some((key, Value::of_zval(z))))
+    }
+
+    /// [`PhpObject::replace_table`]: `*ht_ptr = Z_ARRVAL_P(ht_zv)` over
+    /// an object, the table a lazy object's instance keeps; `table` laid
+    /// down as the object's with its numeric keys spelt in decimal, as
+    /// every reader of the table here reads them.
+    pub(crate) fn replace_table(
+        &mut self,
+        object: PhpObject,
+        table: PhpArray,
+    ) -> Result<(), Thrown> {
+        let object = self.table_owner(object)?;
+        let o = object.heap();
+        let mut table = table;
+        if table.iter().any(|(key, _)| matches!(key, Key::Int(_))) {
+            let mut spelt = PhpArray::new(self)?;
+            for (key, value) in table.snapshot_refs() {
+                let key = match key {
+                    Key::Int(n) => Key::Str(PhpString::new(self, n.to_string().as_bytes())?),
+                    Key::Str(name) => {
+                        self.addref(&Value::string(name));
+                        Key::Str(name)
+                    }
+                };
+                self.addref(&value);
+                spelt.set(self, key, value)?;
+            }
+            self.release(Value::array(table));
+            table = spelt;
+        }
+        let table = table.heap();
+        table.set_declared_rows(php_heap::DeclaredRows::Copied);
+        let old = o.properties();
+        self.heap.object_set_properties(o, table);
+        if let Some(old) = old {
+            self.release(Value::array(PhpArray::of(old)));
+        }
+        Ok(())
     }
 
     /// `rebuild_object_properties` then `SEPARATE_ARRAY` over the

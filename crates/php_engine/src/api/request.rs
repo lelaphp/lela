@@ -14119,39 +14119,124 @@ impl Request {
         Ok(order)
     }
 
-    /// `zend_compare_symbol_tables` over the two objects' rebuilt tables
-    /// (`rebuild_object_properties_internal`): every declared slot, held
-    /// or not, in declaration order and then the dynamic table, so the
-    /// count is the slots and the dynamic entries, and `zend_hash_compare`
-    /// with `ordered` off over them.
+    /// `zend_compare_symbol_tables` over the two objects' tables as
+    /// `zend_std_get_properties_ex` lays them down
+    /// (`rebuild_object_properties_internal`), each in php's positions:
+    /// one table compares equal to itself; else the counts first, every
+    /// declared slot a row while the slots stand for them and every copy
+    /// a row once the table holds copies of them
+    /// ([`php_heap::DeclaredRows::Copied`]), then `zend_hash_compare`
+    /// with `ordered` off, the left table guarded for the walk: each of
+    /// its rows looked up by key in the right one, a key the right one
+    /// lacks `1`, an uninitialised slot `-1` against a held row and `1`
+    /// the other way, two held ones as `zend_compare` compares them.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class C { public int $b = 1; function __construct() { $this->a = 1; $this->b = 3; } }
+    /// $o = (new ReflectionClass(C::class))->newLazyGhost(function ($o) { $o->__construct(); });
+    /// var_dump($o); $o->a += 1;
+    /// $q = new C; $q->a = 2; $q->b = 1;
+    /// var_dump($o == $q, $q == $o, $o == new C, $o < $q, $o->b);
+    /// #[AllowDynamicProperties]
+    /// class R { public $r; }
+    /// $x = new R; $x->r = $x; $x->d = 1; $y = new R; $y->r = $y; $y->d = 1;
+    /// try { var_dump($x == $y); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// lazy ghost object(C)#3 (0) {
+    ///   ["b"]=>
+    ///   uninitialized(int)
+    /// }
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// int(3)
+    /// Nesting level too deep - recursive dependency?
+    /// ```
     fn compare_tables(&mut self, x: Obj, y: Obj) -> Result<std::cmp::Ordering, Thrown> {
-        use std::cmp::Ordering;
-        let dynamic = |o: Obj| o.properties().map_or(0, |t| t.len());
-        if dynamic(x) != dynamic(y) {
-            return Ok(dynamic(x).cmp(&dynamic(y)));
+        let left = self.heap.object_property_table(x);
+        let left = self.fatal_of(left)?;
+        let right = self.heap.object_property_table(y);
+        let right = self.fatal_of(right)?;
+        let table = left.table();
+        if table.is_same(right.table()) {
+            return Ok(std::cmp::Ordering::Equal);
         }
-        for i in 0..x.slots() {
-            let (p, q) = (x.slot(i), y.slot(i));
-            match (p.is_undef(), q.is_undef()) {
-                (true, true) => {}
-                (true, false) => return Ok(Ordering::Less),
-                (false, true) => return Ok(Ordering::Greater),
-                (false, false) => {
-                    let order = crate::ops::compare(self, &Value::of_zval(p), &Value::of_zval(q))?;
-                    if order != Ordering::Equal {
-                        return Ok(order);
-                    }
+        if left.len() != right.len() {
+            return Ok(left.len().cmp(&right.len()));
+        }
+        if table.is_recursive() {
+            return Err(crate::ops::nesting_too_deep(self));
+        }
+        table.protect();
+        let order = self.compare_rows(left, right, ClassId(x.class()));
+        table.unprotect();
+        order
+    }
+
+    /// The walk of [`Request::compare_tables`]: each row of `left` in
+    /// its order against the row of the same key in `right`, both
+    /// objects of `class`, whose slots' mangled names key their
+    /// declared rows.
+    fn compare_rows(
+        &mut self,
+        left: php_heap::PropertyTable,
+        right: php_heap::PropertyTable,
+        class: ClassId,
+    ) -> Result<std::cmp::Ordering, Thrown> {
+        use std::cmp::Ordering;
+        let names = self.slot_names(class)?;
+        let key_of = |row: php_heap::TableRow| match row {
+            php_heap::TableRow::Entry(key) => Some(key),
+            php_heap::TableRow::Slot(i) => usize::try_from(i)
+                .ok()
+                .and_then(|i| names.get(i))
+                .map(|name| php_heap::Key::Str(*name)),
+        };
+        let mut pos = 0;
+        while pos < left.used() {
+            let at = left.row_at(pos);
+            pos += 1;
+            let Some((row, p)) = at else {
+                continue;
+            };
+            let Some(key) = key_of(row) else {
+                continue;
+            };
+            // `zend_hash_find` over the right table: a declared slot by
+            // its mangled name while the slots stand for the declared
+            // rows, the table's own row otherwise.
+            let mut found = None;
+            let mut at = 0;
+            while let Some((php_heap::TableRow::Slot(i), z)) = right.row_at(at) {
+                if key_of(php_heap::TableRow::Slot(i)) == Some(key) {
+                    found = Some(z);
+                    break;
                 }
+                at += 1;
+            }
+            let q = match found {
+                Some(z) => z,
+                None => match right.table().get(key) {
+                    Some(z) => z,
+                    None => return Ok(Ordering::Greater),
+                },
+            };
+            let order = match (p.is_undef(), q.is_undef()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                (false, false) => {
+                    crate::ops::compare(self, &Value::of_zval(p), &Value::of_zval(q))?
+                }
+            };
+            if order != Ordering::Equal {
+                return Ok(order);
             }
         }
-        let (Some(p), Some(q)) = (x.properties(), y.properties()) else {
-            return Ok(Ordering::Equal);
-        };
-        crate::ops::compare(
-            self,
-            &Value::array(PhpArray::of(p)),
-            &Value::array(PhpArray::of(q)),
-        )
+        Ok(Ordering::Equal)
     }
 
     /// The cast path of [`Request::compare_objects`]: the object's

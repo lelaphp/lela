@@ -1435,4 +1435,81 @@ mod tests {
             "each walk serves each object once"
         );
     }
+
+    /// The pointer of an object's table moves in php's positions: each
+    /// declared slot a row whether or not it holds a value, then the
+    /// dynamic rows, a tombstone stepped over; the seek steps over a
+    /// slot nothing holds in the way it is asked; and the copy a
+    /// separation makes carries the pointer to the row it stood at.
+    #[test]
+    fn the_pointer_of_an_object_s_table_walks_slots_then_rows() {
+        use crate::{Direction, TableRow};
+        let _alone = alone();
+        let mut r = Recorder::new();
+        let Ok(o) = r.heap.object(2, 3, 0) else {
+            return;
+        };
+        o.write_slot(1, Zval::long(1));
+        let Ok(table) = r.heap.object_properties(o) else {
+            return;
+        };
+        let mut keys = Vec::new();
+        for (name, n) in [(&b"x"[..], 5), (&b"y"[..], 6)] {
+            let Ok(key) = r.heap.string(name) else {
+                return;
+            };
+            assert!(Heap::array_update(&mut r, table, crate::Key::Str(key), Zval::long(n)).is_ok());
+            keys.push(key);
+        }
+        let Ok(t) = r.heap.object_property_table(o) else {
+            return;
+        };
+        assert_eq!((t.len(), t.used()), (5, 5));
+        t.reset();
+        assert_eq!(t.position(), 0);
+        assert_eq!(
+            t.seek(Direction::Forward).map(|(row, _)| row),
+            Some(TableRow::Slot(1))
+        );
+        assert!(t.forward());
+        assert_eq!(
+            t.seek(Direction::Forward).map(|(row, _)| row),
+            Some(TableRow::Entry(crate::Key::Str(keys[0])))
+        );
+        t.end();
+        assert_eq!(t.position(), 4);
+        assert!(t.backward() && t.backward());
+        assert_eq!(t.position(), 2);
+        assert_eq!(
+            t.seek(Direction::Backward).map(|(row, _)| row),
+            Some(TableRow::Slot(1))
+        );
+        assert!(Heap::array_del(&mut r, table, crate::Key::Str(keys[0])));
+        t.end();
+        assert!(t.backward());
+        assert_eq!(t.position(), 2, "the tombstone is no row to a move");
+        t.end();
+        table.addref();
+        let Ok(copy) = r
+            .heap
+            .object_properties_copy(o, &[keys[0], keys[0], keys[1]])
+        else {
+            return;
+        };
+        let Some(copied) = o.property_table() else {
+            return;
+        };
+        assert!(copied.table().is_same(copy));
+        assert_eq!(
+            copied.seek(Direction::Forward).map(|(row, _)| row),
+            Some(TableRow::Entry(crate::Key::Str(keys[1]))),
+            "the copy's pointer stands at the row the source's stood at"
+        );
+        Heap::release(&mut r, Zval::array(table));
+        for key in keys {
+            r.heap.release_string(key);
+        }
+        Heap::release(&mut r, Zval::object(o));
+        assert_eq!(r.heap.memory_usage(false), INIT_BYTES);
+    }
 }

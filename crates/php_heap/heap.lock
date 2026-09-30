@@ -39,6 +39,7 @@ Block::is_empty
 Block::len
 CallStack
 DeclaredRows
+Direction
 EntryGuard
 Exponent
 Exponent::as_char
@@ -112,6 +113,7 @@ Heap::object_clone_members_into
 Heap::object_clone_with
 Heap::object_properties
 Heap::object_properties_copy
+Heap::object_property_table
 Heap::object_set_properties
 Heap::object_set_slot
 Heap::object_take_properties
@@ -200,6 +202,17 @@ Obj::slots
 Obj::unprotect
 ObjectId
 PropBit
+PropertyTable
+PropertyTable::backward
+PropertyTable::end
+PropertyTable::forward
+PropertyTable::is_empty
+PropertyTable::len
+PropertyTable::reset
+PropertyTable::row_at
+PropertyTable::seek
+PropertyTable::table
+PropertyTable::used
 Readiness
 Ref
 Ref::addref
@@ -242,6 +255,7 @@ Strings::count
 Strings::new
 Suspensions
 Switched
+TableRow
 VmStack
 VmStack::close
 VmStack::current

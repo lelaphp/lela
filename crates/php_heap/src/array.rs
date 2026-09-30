@@ -348,8 +348,10 @@ pub enum DeclaredRows {
     /// for the slots was separated, since `zend_array_dup` copies what
     /// each `IS_INDIRECT` points at and drops the indirection
     /// (`Z/Zend/zend_hash.c:2504-2505`): the table holds every row
-    /// itself, the declared ones first under their mangled names, and a
-    /// reader reads the table alone while the slots go on apart from it.
+    /// itself, the declared ones under their mangled names, first where
+    /// a separation made the copy and wherever a sort put them where
+    /// `spl_array_method` laid its sorted copy down, and a reader reads
+    /// the table alone while the slots go on apart from it.
     Copied,
 }
 
@@ -376,9 +378,18 @@ pub(crate) struct ArrHeader {
     internal_pointer: Cell<u32>,
     /// `nNextFreeElement`.
     next_free: Cell<i64>,
-    /// `pDestructor`: `ZVAL_PTR_DTOR` for every array here, kept for the
-    /// size.
-    _dtor: usize,
+    /// The declared rows the internal pointer of an object's property
+    /// table has passed ([`crate::PropertyTable`]), in the half of
+    /// php's `pDestructor` word this heap does not need, since its one
+    /// destructor is `ZVAL_PTR_DTOR` for every array: php's table holds
+    /// an `IS_INDIRECT` per declared slot before the dynamic rows and
+    /// points into either with `nInternalPointer`, and this one holds
+    /// the dynamic rows alone, so where php's pointer stands among the
+    /// slots is kept here, as `HtIter::lead` keeps a walk's. Zero for
+    /// every other table.
+    lead: Cell<u32>,
+    /// The rest of `pDestructor`, kept for the size.
+    _dtor: u32,
 }
 
 /// `Bucket`: a zval, the hash or the integer key, and the string key or
@@ -504,6 +515,7 @@ impl Arr {
                 table_size: Cell::new(size),
                 internal_pointer: Cell::new(0),
                 next_free: Cell::new(i64::MIN),
+                lead: Cell::new(0),
                 _dtor: 0,
             });
         }
@@ -975,6 +987,33 @@ impl Arr {
             pos += 1;
         }
         pos
+    }
+
+    /// `nInternalPointer` as it was written, no tombstone stepped over.
+    pub(crate) fn raw_pointer(self) -> u32 {
+        self.header().internal_pointer.get()
+    }
+
+    /// `nInternalPointer = pos`.
+    pub(crate) fn set_raw_pointer(self, pos: u32) {
+        self.header().internal_pointer.set(pos);
+    }
+
+    /// The declared rows an object table's pointer has passed
+    /// (`ArrHeader::lead`).
+    pub(crate) fn lead(self) -> u32 {
+        self.header().lead.get()
+    }
+
+    /// The pointer of an object's table set among its declared rows.
+    pub(crate) fn set_lead(self, lead: u32) {
+        self.header().lead.set(lead);
+    }
+
+    /// Whether position `pos` holds a bucket, php's
+    /// `Z_TYPE(p->val) != IS_UNDEF`: below `nNumUsed` and no tombstone.
+    pub(crate) fn is_live(self, pos: u32) -> bool {
+        pos < self.num_used() && !self.value_at(pos).is_undef()
     }
 
     /// `zend_hash_get_current_pos`: where the internal pointer stands,
@@ -1813,22 +1852,43 @@ impl crate::Heap {
         let dynamic = source.map_or(0, |table| table.len());
         let size = u32::try_from(held + dynamic).unwrap_or(u32::MAX);
         let copy = self.array_mixed(size)?;
+        // `target->nInternalPointer`: the source's where it stands before
+        // the end and zero past it, then moved with the row it stands at
+        // as the holes close up; a pointer at a row the copy leaves out
+        // keeps the number it had.
+        let (from, used) = o
+            .property_table()
+            .map_or((0, 0), |table| (table.raw_pointer(), table.used()));
+        let mut pointer = if from < used { from } else { 0 };
+        let mut at = 0;
         for (i, name) in (0..o.slots()).zip(names) {
             let z = o.slot(i);
             if z.is_undef() {
                 continue;
             }
+            if i == from {
+                pointer = at;
+            }
+            at += 1;
             let z = self.dup_value(z, source);
             self.array_write_str(copy, *name, z)?;
         }
         if let Some(table) = source {
             copy.set_next_free(table.next_free());
-            for (key, z) in &table {
+            for pos in 0..table.num_used() {
+                let Some((key, z)) = table.entry_at(pos) else {
+                    continue;
+                };
+                if o.slots() + pos == from {
+                    pointer = at;
+                }
+                at += 1;
                 let z = self.dup_value(z, Some(table));
                 self.array_add_copy(copy, key, z)?;
             }
             let _ = table.delref();
         }
+        copy.set_raw_pointer(pointer);
         copy.set_declared_rows(DeclaredRows::Copied);
         self.object_set_properties(o, copy);
         Ok(copy)

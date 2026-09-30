@@ -128,6 +128,7 @@ abi::Never
 abi::Null
 abi::NullDefault
 abi::ObjectHandlers
+abi::ObjectHandlers::answers_properties
 abi::ObjectHandlers::cast_object
 abi::ObjectHandlers::clone_obj
 abi::ObjectHandlers::clone_obj_with
@@ -845,12 +846,15 @@ values::PhpObject::mark_destructor_called
 values::PhpObject::native
 values::PhpObject::native_mut
 values::PhpObject::native_mut_or_fatal
+values::PhpObject::pointer_move
+values::PhpObject::pointer_row
 values::PhpObject::prop
 values::PhpObject::props
 values::PhpObject::props_for
 values::PhpObject::props_held
 values::PhpObject::protect
 values::PhpObject::protect_in
+values::PhpObject::replace_table
 values::PhpObject::row
 values::PhpObject::row_place
 values::PhpObject::row_ref
@@ -881,6 +885,7 @@ values::PhpString::mark_valid_utf8
 values::PhpString::new
 values::PhpString::product
 values::Place
+values::PointerMove
 values::RecursionGuard
 values::Resource
 values::Resource::as_value
