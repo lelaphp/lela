@@ -1274,3 +1274,71 @@ fn a_test_gets_run_tests_environment_and_pipes_for_its_streams() {
         assert!(reading.message.contains(name), "{}", reading.message);
     }
 }
+
+/// The target (#1184): the runner's control keeps the oracle's verdict on
+/// every test under the pin's key, and an engine's reading of the subset
+/// then carries met-of-target. The oracle misses `oracle-miss.phpt`, whose
+/// expectation no php meets, so it is outside the target and the engine's
+/// fail on it is counted there and not against the target; the engine
+/// meets the one test the oracle meets. Before the control has run, the
+/// engine's reading says how to take a target and carries no such number.
+#[test]
+fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
+    let Some(binary) = oracle() else { return };
+    let scratch = Scratch::new(
+        "target",
+        &[
+            (
+                "met.phpt",
+                "--TEST--\nEcho\n--FILE--\n<?php echo \"one\";\n--EXPECT--\none\n",
+            ),
+            (
+                "oracle-miss.phpt",
+                "--TEST--\nEcho\n--FILE--\n<?php echo \"one\";\n--EXPECT--\ntwo\n",
+            ),
+        ],
+    );
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert!(!reading.numbers.contains_key("target"), "{reading:#?}");
+    assert!(
+        reading.message.contains("no target is kept under pin-"),
+        "{}",
+        reading.message
+    );
+
+    let control = scratch.run(&registry(""), &binary);
+    assert!(
+        control
+            .message
+            .contains("kept as the subset's target under pin-"),
+        "{}",
+        control.message
+    );
+    let pin = &scratch.manifest.pin;
+    let kept = scratch.root.join(format!(
+        "target/phpt-runs/pin-{}-{}/ext/fixture.json",
+        pin.source.tag, pin.oracle.md5
+    ));
+    let kept: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&kept).unwrap()).unwrap();
+    assert_eq!(
+        kept["verdicts"]["phpt:php-src/ext/fixture/tests/oracle-miss.phpt"],
+        "fail"
+    );
+    assert_eq!(
+        kept["verdicts"]["phpt:php-src/ext/fixture/tests/met.phpt"],
+        "pass"
+    );
+
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert_eq!(count(&reading, "target"), 1, "{reading:#?}");
+    assert_eq!(count(&reading, "met"), 1, "{reading:#?}");
+    assert_eq!(count(&reading, "outside"), 1, "{reading:#?}");
+    assert!(
+        reading
+            .message
+            .contains("1 of 1 target tests met, 1 outside"),
+        "{}",
+        reading.message
+    );
+}

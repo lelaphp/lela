@@ -42,6 +42,12 @@
 //! kept run carries them; `--census` groups every miss of the run by that
 //! signature, the widest first (#1185).
 //!
+//! **Held to the target.** The runner's control keeps the oracle's
+//! verdict on every test of a subset under the pin, and every engine's
+//! reading of the subset carries met-of-target, `target`, `met` and
+//! `outside`, with the target's misses named; the `target` module says
+//! what is in it (#1184).
+//!
 //! **Held against a commit.** Every run the engine judged whole is kept
 //! as its verdicts, and `--against <commit>` holds each subset to the run
 //! kept at the commit, test by test, in one more reading per subset; the
@@ -115,6 +121,7 @@ mod census;
 pub(crate) mod file;
 pub(crate) mod miss;
 mod redirect;
+pub(crate) mod target;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -129,12 +136,13 @@ use serde::{Deserialize, Serialize};
 use crate::carried::{BINARY, Carried};
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
-use crate::oracle::{Oracle, Runner, Source};
+use crate::oracle::{Oracle, Pin, Runner, Source};
 use crate::reading::{Reading, listed};
 use crate::scratch::Tree;
 use crate::sources;
 use crate::tally::{self, Outcome};
 use adapter::Adapter;
+use target::{Measure, Target};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "phpt";
@@ -600,6 +608,49 @@ pub(crate) fn reading(
     Ok(reading)
 }
 
+/// The reading held to the subset's target (#1184). A run of the engine
+/// that judged a test carries met-of-target, its numbers `target`, `met`
+/// and `outside` and the target's misses named, or says how to take a
+/// target where none is kept under the pin; the runner's control says it
+/// kept its verdicts as the target, where it judged every test.
+fn held_to(
+    reading: &mut Reading,
+    tally: &Tally,
+    (target, kept): (Option<&Target>, bool),
+    registry: &Registry,
+    (runner, pin): (&Runner, &Pin),
+) -> Result<()> {
+    let key = target::key(pin);
+    let words = match (runner, target) {
+        (Runner::Control(_), _) if kept => format!("kept as the subset's target under {key}"),
+        (Runner::Engine(_) | Runner::Linked, Some(target)) if !tally.judged.is_empty() => {
+            let verdicts = tally.judged.iter().map(|j| (j.id.as_str(), j.judgement));
+            let measure = Measure::of(target, registry, verdicts);
+            reading.count("target", measure.target)?;
+            reading.count("met", measure.met)?;
+            reading.count("outside", measure.outside)?;
+            measure.words()
+        }
+        (Runner::Engine(_) | Runner::Linked, None) if !tally.judged.is_empty() => format!(
+            "no target is kept under {key}; `xtask phpt --subset <scope> --engine {}` keeps one",
+            pin.oracle.path.display()
+        ),
+        _ => return Ok(()),
+    };
+    // Before the stamp of the engine that ran, which stays the message's
+    // last words.
+    let stamp = runner
+        .stamp()
+        .map(|engine| format!("; run by {engine}"))
+        .unwrap_or_default();
+    let said = reading
+        .message
+        .strip_suffix(&stamp)
+        .unwrap_or(&reading.message);
+    reading.message = format!("{said}; {words}{stamp}");
+    Ok(())
+}
+
 /// Why an extension whose derived directory the pinned tree has not has
 /// no reading but a skip (#1231).
 const NO_TESTS: &str = "the extension has no tests of its own in php-src, so its subset is none";
@@ -789,7 +840,23 @@ pub fn run(
         let within = copy.as_ref().map(|copy| subset.rooted(copy));
         let tally = run_subset(&oracle, registry, within.as_ref().unwrap_or(subset), under)?;
         let mut reading = reading(&tally, root, manifest, &source, subset, under)?;
-        let held = runs.after(manifest, &scope, &tally, &runner, &reading)?;
+        let (target, kept) =
+            runs.target_of(&manifest.pin, &subset.scope, (&tally, &runner), ask.lane)?;
+        let against = (target.as_ref(), kept);
+        held_to(
+            &mut reading,
+            &tally,
+            against,
+            registry,
+            (&runner, &manifest.pin),
+        )?;
+        let held = runs.after(
+            manifest,
+            &scope,
+            (&tally, &runner),
+            &reading,
+            target.as_ref(),
+        )?;
         if ask.census {
             let mut counted = census::Census::default();
             counted.add(census::misses(&tally));

@@ -28,6 +28,14 @@
 //! nothing to hold. A test past the recipe's limit is its own fail where
 //! the adapter judges it so (#691), and a regression like any other.
 //!
+//! **What the target leaves out.** Where the subset's target is kept
+//! (the `target` module, #1184), a test outside it, one the oracle itself
+//! skips or misses, is neither held nor a regression nor a fix: its
+//! verdict under the engine may flip between a row's `diverged` and a fail
+//! past the recipe's limit from one run to the next, as
+//! `ext/openssl/tests/stream_server_reneg_limit.phpt` did, and there is no
+//! php behaviour on this machine to hold it to.
+//!
 //! **What the exit answers.** With `--against` the exit is the
 //! comparisons', 1 while any is not a pass, so a caller that merges on the
 //! exit merges on a pass alone; the subset's own reading is written
@@ -41,10 +49,11 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::miss::Miss;
-use super::{CORPUS, INSTRUMENT, Judgement, Tally};
+use super::target::Target;
+use super::{CORPUS, INSTRUMENT, Judgement, Lane, Tally};
 use crate::git;
 use crate::manifest::Manifest;
-use crate::oracle::Runner;
+use crate::oracle::{Pin, Runner};
 use crate::reading::{Reading, Status, listed};
 use crate::tally::Judgement as _;
 
@@ -95,6 +104,9 @@ pub(crate) struct Diff {
 /// keys its own by, what names them, and the commit asked for.
 pub(crate) struct Runs {
     root: PathBuf,
+    /// The workspaces a target is looked for in: this one, then the main
+    /// worktree, whose store is the track's.
+    roots: Vec<PathBuf>,
     tree: String,
     commit: String,
     corpus: String,
@@ -120,20 +132,17 @@ impl Runs {
                 let full = git::git(root, &["rev-parse", "--verify", "--quiet", &spec], None)
                     .with_context(|| format!("--against {named}: no such commit"))?;
                 let full = full.trim();
-                // The run is looked for here, and in the main worktree,
-                // whose store is the track's (harness-design.md §4.2).
-                let mut roots = vec![root.to_path_buf()];
-                roots.extend(crate::track::main_worktree(root).ok());
                 Some(Base {
                     commit: full.chars().take(7).collect(),
                     tree: git::tracked_hash(root, &built_from(), Some(full))?,
-                    roots,
+                    roots: roots(root),
                 })
             }
         };
         let source = &manifest.pin.source;
         Ok(Runs {
             root: root.to_path_buf(),
+            roots: roots(root),
             tree: git::tracked_hash(root, &built_from(), None)?,
             commit: git::head_commit(root)?,
             corpus: format!("{} {}", source.tag, source.commit),
@@ -160,16 +169,39 @@ impl Runs {
         }
     }
 
+    /// The target of the subset `scope` names after its run, and whether
+    /// this run kept it: where the runner's control judged every test,
+    /// outside a tier lane, the oracle's verdicts kept under the pin
+    /// (#1184); otherwise the one kept under the pin here or in the main
+    /// worktree, if any is.
+    pub(crate) fn target_of(
+        &self,
+        pin: &Pin,
+        scope: &str,
+        (tally, runner): (&Tally, &Runner),
+        lane: Option<Lane>,
+    ) -> Result<(Option<Target>, bool)> {
+        if let (Runner::Control(oracle), None) = (runner, lane) {
+            let engine = format!("{} md5 {}", oracle.display(), pin.oracle.md5);
+            if let Some(run) = self.kept(tally, engine) {
+                let target = Target::of(run);
+                target.keep(&self.root, pin, scope)?;
+                return Ok((Some(target), true));
+            }
+        }
+        Ok((Target::kept(&self.roots, pin, scope)?, false))
+    }
+
     /// After a subset ran: its run kept, where the engine judged every
     /// test and the sources stood still, and with `--against` the
-    /// comparison's reading.
+    /// comparison's reading, over the target where one is kept.
     pub(crate) fn after(
         &self,
         manifest: &Manifest,
         scope: &str,
-        tally: &Tally,
-        runner: &Runner,
+        (tally, runner): (&Tally, &Runner),
         subset: &Reading,
+        target: Option<&Target>,
     ) -> Result<Option<Reading>> {
         let run = self.run_of(tally, runner);
         let moved = git::tracked_hash(&self.root, &built_from(), None)? != self.tree;
@@ -189,7 +221,7 @@ impl Runs {
                 Err("the engine's sources were written while the subset ran".to_owned())
             }
             (Ok(_), None) => Err(format!("this run measured no engine: {}", subset.message)),
-            (Ok(was), Some(run)) => diff(&was, &run),
+            (Ok(was), Some(run)) => diff(&was, &run, target),
         };
         held(manifest, &self.root, scope, &base.commit, diff).map(Some)
     }
@@ -202,6 +234,12 @@ impl Runs {
             Runner::Linked => "the linked engine".to_owned(),
             _ => return None,
         };
+        self.kept(tally, engine)
+    }
+
+    /// The run a tally is where it judged every test the subset holds,
+    /// named by `engine`.
+    fn kept(&self, tally: &Tally, engine: String) -> Option<Run> {
         (tally.found > 0 && tally.judged.len() == tally.found).then(|| Run {
             commit: self.commit.clone(),
             corpus: self.corpus.clone(),
@@ -243,6 +281,14 @@ impl Base {
             self.commit
         )))
     }
+}
+
+/// The workspaces a kept run or target is looked for in: `root`, then the
+/// main worktree, whose store is the track's (harness-design.md §4.2).
+fn roots(root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![root.to_path_buf()];
+    roots.extend(crate::track::main_worktree(root).ok());
+    roots
 }
 
 fn path(root: &Path, tree: &str, scope: &str) -> PathBuf {
@@ -292,8 +338,10 @@ pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
     Ok(carried)
 }
 
-/// The head's run against the stored one, or why the two do not compare.
-pub(crate) fn diff(was: &Run, run: &Run) -> Result<Diff, String> {
+/// The head's run against the stored one, or why the two do not compare;
+/// a test outside `target`, where one is kept, is none of held, regressed
+/// or fixed.
+pub(crate) fn diff(was: &Run, run: &Run, target: Option<&Target>) -> Result<Diff, String> {
     if was.corpus != run.corpus {
         return Err(format!(
             "the stored run is over the corpus {} and this one over {}",
@@ -309,6 +357,9 @@ pub(crate) fn diff(was: &Run, run: &Run) -> Result<Diff, String> {
     }
     let mut diff = Diff::default();
     for ((id, then), now) in was.verdicts.iter().zip(run.verdicts.values()) {
+        if target.is_some_and(|target| !target.holds(id)) {
+            continue;
+        }
         if then.met() {
             diff.held += 1;
             // The compiler refusing a test it read there is a loss as a
