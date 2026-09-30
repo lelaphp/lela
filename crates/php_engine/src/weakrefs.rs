@@ -22,7 +22,9 @@
 use php_heap::Obj;
 use php_macros::php_class;
 
-use crate::api::abi::{CloneObj, DimensionRead, Instance, ObjectHandlers, This, Untyped};
+use crate::api::abi::{
+    CloneObj, DebugInfo, DimensionRead, Instance, ObjectHandlers, This, Untyped,
+};
 use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpString, Place, Value};
@@ -241,14 +243,14 @@ impl ObjectHandlers for WeakReferenceHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<DebugInfo>, Thrown> {
         let referent = object.native::<WeakRef>(req).and_then(|p| p.referent);
         let mut table = PhpArray::new(req)?;
         let value = referent.map_or(Value::null(), |referent| referent.as_value());
         req.addref(&value);
         let key = Key::Str(PhpString::new(req, b"object")?);
         table.set(req, key, value)?;
-        Ok(Some(table))
+        Ok(Some(table.into()))
     }
 }
 
@@ -480,7 +482,7 @@ impl ObjectHandlers for WeakMapHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<DebugInfo>, Thrown> {
         let mut table = PhpArray::new(req)?;
         for (key, value) in entries_of(req, object)
             .map(|e| e.snapshot())
@@ -499,7 +501,7 @@ impl ObjectHandlers for WeakMapHandlers {
             pair.set(req, at, value)?;
             table.append(req, Value::array(pair))?;
         }
-        Ok(Some(table))
+        Ok(Some(table.into()))
     }
 
     /// `zend_weakmap_get_gc`: the values, which the map owns; the keys it

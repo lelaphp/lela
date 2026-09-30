@@ -575,7 +575,7 @@ impl ObjectHandlers for DateHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         if has_debug_info(req, object) {
             return Std.get_debug_info(req, object);
         }
@@ -585,7 +585,7 @@ impl ObjectHandlers for DateHandlers {
             Some(t) => date_fields(req, t)?,
             None => Vec::new(),
         };
-        rows_array(req, &own, fields, false).map(Some)
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -692,7 +692,7 @@ impl ObjectHandlers for TzHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         if has_debug_info(req, object) {
             return Std.get_debug_info(req, object);
         }
@@ -702,7 +702,7 @@ impl ObjectHandlers for TzHandlers {
             Some(kind) => tz_fields(req, kind)?,
             None => Vec::new(),
         };
-        rows_array(req, &own, fields, false).map(Some)
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -904,13 +904,13 @@ impl ObjectHandlers for IntervalHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         if has_debug_info(req, object) {
             return Std.get_debug_info(req, object);
         }
         let own = std_rows(req, object)?;
         let fields = interval_rows(req, object)?;
-        rows_array(req, &own, fields, false).map(Some)
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -1142,7 +1142,7 @@ impl ObjectHandlers for PeriodHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         if has_debug_info(req, object) {
             return Std.get_debug_info(req, object);
         }
@@ -1155,7 +1155,7 @@ impl ObjectHandlers for PeriodHandlers {
         } else {
             Vec::new()
         };
-        rows_array(req, &own, fields, false).map(Some)
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {

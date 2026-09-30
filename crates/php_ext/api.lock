@@ -38,6 +38,7 @@ abi::CloneObjWith
 abi::ConstArray
 abi::ConstValue
 abi::CurrentPlace
+abi::DebugInfo
 abi::Dependency
 abi::DependencyKind
 abi::DimensionRead
@@ -310,6 +311,7 @@ process::uid
 raising::Level
 raising::Level::bit
 raising::Thrown
+raising::Thrown::chain
 raising::Thrown::exception
 raising::arg_count_error
 raising::arg_null_deprecated

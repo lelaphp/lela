@@ -1316,7 +1316,7 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         let rows = self
             .get_properties_for(req, object, PropertyPurpose::Debug)?
             .unwrap_or_default();
@@ -1328,7 +1328,7 @@ impl ObjectHandlers for Handlers {
             req.addref(&value);
             table.set(req, key, value)?;
         }
-        Ok(Some(table))
+        Ok(Some(table.into()))
     }
 
     fn properties_overloaded(&self) -> bool {

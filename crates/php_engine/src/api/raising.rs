@@ -37,6 +37,36 @@ impl Thrown {
     pub fn exception(&self) -> Option<&PhpObject> {
         self.pending.as_ref()
     }
+
+    /// `zend_throw_exception_internal` with a throwable already in
+    /// `EG(exception)`: `later`, raised while this one was pending, is
+    /// what is pending from here, with this one chained onto the end of
+    /// its `previous` chain (`zend_exception_set_previous`,
+    /// `Z/Zend/zend_exceptions.c:103`). A fatal or an `exit` is not
+    /// chained: where `later` is one, this throwable is given up and
+    /// `later` is what leaves; where this is one, `later` could not have
+    /// been raised past it and is given up. A dump of a `DOMNode` no
+    /// constructor made is the witness, in `ext/dom`: each property's
+    /// reader fails in turn and the throwables leave as one chain.
+    #[must_use]
+    pub fn chain(self, req: &mut Request, later: Thrown) -> Thrown {
+        match (self.pending, later.pending) {
+            (Some(earlier), Some(now)) => {
+                req.set_previous(now, earlier);
+                later
+            }
+            (Some(earlier), None) => {
+                req.release(earlier.as_value());
+                later
+            }
+            (None, now) => {
+                if let Some(now) = now {
+                    req.release(now.as_value());
+                }
+                self
+            }
+        }
+    }
 }
 
 /// Raise a diagnostic at `level` with php's message text.

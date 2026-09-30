@@ -1112,6 +1112,30 @@ pub enum PropertyPurpose {
     GetObjectVars,
 }
 
+/// What the `get_debug_info` slot answers: php's `HashTable *` with its
+/// `*is_temp` owner, the caller's, and the throwable a handler raised
+/// while it built the table and left in `EG(exception)`, which
+/// `dom_get_debug_info_helper` does for a property whose reader fails
+/// (`Z/ext/dom/php_dom.c:526`). A dumper renders the table and then
+/// hands the throwable on, so the dump is printed and the throwable is
+/// thrown once the dumper returns, as `php_var_dump` leaves it
+/// (`Z/ext/standard/var.c:184`). A second throwable the handler raises
+/// is chained onto the first with [`Thrown::chain`].
+#[derive(Debug)]
+pub struct DebugInfo {
+    pub table: PhpArray,
+    pub thrown: Option<Thrown>,
+}
+
+impl From<PhpArray> for DebugInfo {
+    fn from(table: PhpArray) -> DebugInfo {
+        DebugInfo {
+            table,
+            thrown: None,
+        }
+    }
+}
+
 /// The `clone_obj` slot: a fresh object holding what this one holds,
 /// one owner, the caller's.
 pub type CloneObj = fn(&mut Request, PhpObject) -> Result<PhpObject, Thrown>;
@@ -1513,13 +1537,16 @@ pub trait ObjectHandlers: Send + Sync {
     /// `__debugInfo` returns. `None` is the members themselves, which
     /// php's slot answers as the properties table it is handed
     /// (`get_properties(object)`) and a reader here walks for itself, so
-    /// a typed property nothing has written still shows as one.
+    /// a typed property nothing has written still shows as one. A table
+    /// built with a throwable left pending is [`DebugInfo::thrown`]; the
+    /// `Err` is a table that could not be made.
     fn get_debug_info(
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<DebugInfo>, Thrown> {
         req.debug_info(object)
+            .map(|table| table.map(DebugInfo::from))
     }
 
     /// `get_closure`: the function a call on the object serves, with

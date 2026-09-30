@@ -323,7 +323,7 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         let Some(rows) = self.get_properties_for(req, object, PropertyPurpose::Debug)? else {
             return Ok(None);
         };
@@ -332,7 +332,7 @@ impl ObjectHandlers for Handlers {
             req.addref(&value);
             out.set(req, key, value)?;
         }
-        Ok(Some(out))
+        Ok(Some(out.into()))
     }
 
     fn properties_overloaded(&self) -> bool {

@@ -6,7 +6,7 @@
 use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::NodeObject;
 
 use crate::map::Map;
@@ -187,7 +187,7 @@ impl ObjectHandlers for NodeHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         debug_info(req, object)
     }
 

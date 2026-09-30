@@ -26,8 +26,8 @@ use php_unit::decl::{
 use php_macros::php_class;
 
 use crate::api::abi::{
-    Callable, CloneObj, ConstArray, Entry, FromArgument, Instance, NamedVariadic, ObjectHandlers,
-    Passed, Raw, Static, This, Union, Untyped,
+    Callable, CloneObj, ConstArray, DebugInfo, Entry, FromArgument, Instance, NamedVariadic,
+    ObjectHandlers, Passed, Raw, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Thrown, throw, throw_over_pending, warning};
@@ -307,12 +307,12 @@ impl ObjectHandlers for ClosureHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<DebugInfo>, Thrown> {
         let Some(closure) = object.closure(req).cloned() else {
             return Ok(None);
         };
         let Some(decl) = req.function_decl(closure.function).cloned() else {
-            return PhpArray::new(req).map(Some);
+            return PhpArray::new(req).map(|table| Some(table.into()));
         };
         let mut out = PhpArray::new(req)?;
         let written = String::from_utf8_lossy(&decl.name.0).into_owned();
@@ -374,7 +374,7 @@ impl ObjectHandlers for ClosureHandlers {
             }
             set_row(req, &mut out, b"parameter", Value::array(parameters))?;
         }
-        Ok(Some(out))
+        Ok(Some(out.into()))
     }
 
     /// `zend_closure_compare` (`Z/Zend/zend_closures.c:446`): two fake

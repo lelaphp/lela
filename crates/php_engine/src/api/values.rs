@@ -1033,8 +1033,13 @@ impl PhpObject {
     /// the rows have been read. `None` for a class that shows its
     /// members, which [`PhpObject::props_for`] answers under the same
     /// purpose; a dumper asks this first and that second, so a typed
-    /// property nothing has written still shows as one.
-    pub fn debug_info(&self, req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
+    /// property nothing has written still shows as one. The throwable
+    /// the class left pending while it built the table rides beside it,
+    /// for the dumper to hand on after the rows are printed.
+    pub fn debug_info(
+        &self,
+        req: &mut Request,
+    ) -> Result<Option<crate::api::abi::DebugInfo>, Thrown> {
         req.object_handlers(self.0).get_debug_info(req, *self)
     }
 

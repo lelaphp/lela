@@ -939,7 +939,7 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         crate::debug_info(req, object)
     }
 
