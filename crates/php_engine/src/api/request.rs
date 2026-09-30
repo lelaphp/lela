@@ -2365,6 +2365,49 @@ pub(crate) struct Declared {
     place: preload::Bucket,
 }
 
+/// The class `EG(class_table)` holds under `name`, any case: an engine's
+/// class, a class the request declared, then a native class's alias and
+/// an alias the request added; what [`Request::class_named`] answers.
+fn class_in(
+    shared: &Shared,
+    declared: &Stacked<Declared>,
+    aliases: &Stacked<preload::Alias>,
+    name: &[u8],
+) -> Option<ClassId> {
+    let wanted = name.to_ascii_lowercase();
+    shared
+        .classes
+        .iter()
+        .map(|decl| &decl.name)
+        .chain(
+            declared
+                .iter()
+                .filter_map(Declared::decl)
+                .map(|decl| &decl.name),
+        )
+        .position(|name| name.0.to_ascii_lowercase() == wanted)
+        .and_then(|i| u32::try_from(i).ok())
+        .map(ClassId)
+        .or_else(|| {
+            // What `zend_register_class_alias` added for a native
+            // class's stub `@alias` ([`ClassDecl::aliases`]).
+            (0u32..)
+                .zip(&shared.classes)
+                .find(|(_, decl)| {
+                    decl.aliases
+                        .iter()
+                        .any(|a| a.0.eq_ignore_ascii_case(&wanted))
+                })
+                .map(|(at, _)| ClassId(at))
+        })
+        .or_else(|| {
+            aliases
+                .iter()
+                .find(|(_, alias, _)| *alias == wanted)
+                .map(|(_, _, class)| *class)
+        })
+}
+
 impl Declared {
     /// The declaration the table holds for the class.
     fn decl(&self) -> Option<&ClassDecl> {
@@ -14209,38 +14252,20 @@ impl Request {
     }
 
     pub(crate) fn class_named(&self, name: &[u8]) -> Option<ClassId> {
-        let wanted = name.to_ascii_lowercase();
-        self.shared
-            .classes
-            .iter()
-            .map(|decl| &decl.name)
-            .chain(
-                self.declared
-                    .iter()
-                    .filter_map(Declared::decl)
-                    .map(|decl| &decl.name),
-            )
-            .position(|name| name.0.to_ascii_lowercase() == wanted)
-            .and_then(|i| u32::try_from(i).ok())
-            .map(ClassId)
-            .or_else(|| {
-                // What `zend_register_class_alias` added for a native
-                // class's stub `@alias` ([`ClassDecl::aliases`]).
-                (0u32..)
-                    .zip(&self.shared.classes)
-                    .find(|(_, decl)| {
-                        decl.aliases
-                            .iter()
-                            .any(|a| a.0.eq_ignore_ascii_case(&wanted))
-                    })
-                    .map(|(at, _)| ClassId(at))
-            })
-            .or_else(|| {
-                self.aliases
-                    .iter()
-                    .find(|(_, alias, _)| *alias == wanted)
-                    .map(|(_, _, class)| *class)
-            })
+        class_in(&self.shared, &self.declared, &self.aliases, name)
+    }
+
+    /// The request's heap, which the units it compiles for itself intern
+    /// into, beside its classes as the compiler asks after one
+    /// ([`php_compile::RequestClasses`]), borrowed apart so both are
+    /// handed to one compile.
+    pub(crate) fn compiling<R>(
+        &mut self,
+        compile: impl FnOnce(&mut Heap, php_compile::RequestClasses<'_>) -> R,
+    ) -> R {
+        let (shared, declared, aliases) = (&self.shared, &self.declared, &self.aliases);
+        let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
+        compile(&mut self.heap, php_compile::RequestClasses::new(&holds))
     }
 
     /// `EG(class_table)` in its order, each row the class and, for an
@@ -14312,6 +14337,24 @@ impl Request {
     /// ```expect
     /// bool(true)
     /// P C Q
+    /// ```
+    ///
+    /// A file compiled while the request already holds a class of its
+    /// name binds none early, as php's compiler, which sees the
+    /// request's table, leaves it to its opline (GH-8846): what stands
+    /// before the declaration serves, and the opline raises the
+    /// redeclaration.
+    ///
+    /// ```php
+    /// class Foo {}
+    /// file_put_contents(__DIR__ . '/again.inc', "<?php\necho \"before\\n\";\nclass Foo {}\n");
+    /// register_shutdown_function(fn () => unlink(__DIR__ . '/again.inc'));
+    /// include __DIR__ . '/again.inc';
+    /// ```
+    /// ```expect exit=255
+    /// before
+    ///
+    /// Fatal error: Cannot redeclare class Foo (previously declared in %s:2) in %s on line 3
     /// ```
     pub(crate) fn declare_classes(&mut self, unit: &Arc<Unit>) -> bool {
         let delayed: Vec<Vec<u8>> = unit

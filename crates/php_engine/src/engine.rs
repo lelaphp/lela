@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use php_compile::{CompileError, SourceKind, StackLimit};
+use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
@@ -812,13 +812,16 @@ fn link_trampolines(
 /// ([`Engine::unit`]), and whether the source is a file or the string an
 /// `eval` handed over ([`SourceKind`]), with the runtime definition keys
 /// the request made before it where it is an `eval`'s
-/// ([`php_compile::Options::keys_before`]).
+/// ([`php_compile::Options::keys_before`]), and the classes the request
+/// had declared by then, which a unit compiled for no request has none of
+/// ([`php_compile::RequestClasses`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
     cwd: &'a Path,
     kind: SourceKind,
     keys_before: u32,
+    request_classes: RequestClasses<'a>,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -909,22 +912,26 @@ impl Shared {
             shebang: self.shebang,
         };
         let cwd = req.cwd();
-        let origin = Origin {
-            filename,
-            cwd: &cwd,
-            kind,
-            keys_before: req.keys_made,
-        };
+        let keys_before = req.keys_made;
         let stack = req.stack_limit();
-        let unit = compile(
-            source,
-            origin,
-            ini,
-            self.declared(),
-            stack,
-            req.heap_mut(),
-            &self.map_ptr_last,
-        )?;
+        let unit = req.compiling(|heap, request_classes| {
+            let origin = Origin {
+                filename,
+                cwd: &cwd,
+                kind,
+                keys_before,
+                request_classes,
+            };
+            compile(
+                source,
+                origin,
+                ini,
+                self.declared(),
+                stack,
+                heap,
+                &self.map_ptr_last,
+            )
+        })?;
         let made = u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX);
         req.keys_made = req.keys_made.saturating_add(made);
         Ok(unit)
@@ -973,19 +980,21 @@ impl Shared {
         let now = crate::unit_cache::now();
         self.units
             .file(&full, None, Validation::EveryHit, 0, now, |source| {
-                self.publish_file(source, path, cwd, stack)
+                self.publish_file(source, path, cwd, stack, RequestClasses::default())
             })
             .0
     }
 
     /// `source`, read from the file `path` names, compiled and published
-    /// as a file of its own.
+    /// as a file of its own, for a request that has declared
+    /// `request_classes`.
     pub(crate) fn publish_file(
         &self,
         source: &[u8],
         path: &[u8],
         cwd: &Path,
         stack: StackLimit,
+        request_classes: RequestClasses<'_>,
     ) -> Result<Arc<Unit>, CompileError> {
         self.publish(
             source,
@@ -994,6 +1003,7 @@ impl Shared {
                 cwd,
                 kind: SourceKind::File,
                 keys_before: 0,
+                request_classes,
             },
             stack,
         )
@@ -2182,6 +2192,7 @@ impl Engine {
             cwd: &cwd,
             kind: SourceKind::File,
             keys_before: 0,
+            request_classes: RequestClasses::default(),
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -2228,6 +2239,7 @@ impl Engine {
                     cwd: &description.cwd,
                     kind: SourceKind::File,
                     keys_before: 0,
+                    request_classes: RequestClasses::default(),
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -2816,6 +2828,7 @@ fn compile(
         persistent: declared.constants,
         functions: declared.functions,
         classes: declared.classes,
+        request_classes: origin.request_classes,
         stack,
         keys_before: origin.keys_before,
     };
@@ -4463,6 +4476,7 @@ mod tests {
                     cwd: Path::new(""),
                     kind: SourceKind::File,
                     keys_before: 0,
+                    request_classes: RequestClasses::default(),
                 },
                 CompileIni {
                     precision: 14,

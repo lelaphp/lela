@@ -228,13 +228,14 @@ impl Request {
             Lookup::Resolved => None,
         };
         let now = self.request_time();
-        let cwd = self.cwd.clone();
         let stack = self.stack_limit();
+        let holds = |name: &[u8]| self.class_named(name).is_some();
+        let request_classes = php_compile::RequestClasses::new(&holds);
         let (cached, filed) =
             shared
                 .units
                 .file(&full, written, validation, protection, now, |source| {
-                    shared.publish_file(source, path, &cwd, stack)
+                    shared.publish_file(source, path, &self.cwd, stack, request_classes)
                 });
         if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
             self.tell_cached(&full);

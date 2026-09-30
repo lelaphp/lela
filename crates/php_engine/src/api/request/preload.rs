@@ -250,7 +250,15 @@ impl Request {
         }
         let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
         let shared = Arc::clone(&self.shared);
-        let unit = shared.publish_file(&source, path, &self.cwd, self.stack_limit());
+        let holds = |name: &[u8]| self.class_named(name).is_some();
+        let request_classes = php_compile::RequestClasses::new(&holds);
+        let unit = shared.publish_file(
+            &source,
+            path,
+            &self.cwd,
+            self.stack_limit(),
+            request_classes,
+        );
         if let (Ok(unit), Some(preloading)) = (&unit, &mut self.preloading) {
             let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
             preloading.scripts.push((full, Arc::clone(unit), size));
