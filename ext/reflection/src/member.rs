@@ -672,6 +672,20 @@ impl ReflectionProperty {
     /// int(2)
     /// ```
     ///
+    /// A deprecation a handler throws from ends the call
+    /// before the write:
+    ///
+    /// ```php
+    /// class T { public static $s = 1; }
+    /// set_error_handler(function () { throw new Exception('d'); });
+    /// try { (new ReflectionProperty('T', 's'))->setValue('T', 2); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(T::$s);
+    /// ```
+    /// ```expect
+    /// d
+    /// int(1)
+    /// ```
+    ///
     /// The single-argument form, php's 8.3 deprecation, whose value is the
     /// one argument:
     ///
