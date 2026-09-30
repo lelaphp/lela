@@ -598,6 +598,16 @@ fn context_socket_options(req: &mut Request, context: Resource) -> Result<Socket
 /// 3
 /// 1
 /// ```
+///
+/// Its warning prints the address as the C string php holds:
+///
+/// ```php
+/// var_dump(stream_socket_server("tcp://127.0.0.1\0x:1"));
+/// ```
+/// ```expect
+/// Warning: stream_socket_server(): Unable to connect to tcp://127.0.0.1 (The hostname must not contain null bytes) in %s on line 2
+/// bool(false)
+/// ```
 #[php_function]
 fn stream_socket_server(
     req: &mut Request,
