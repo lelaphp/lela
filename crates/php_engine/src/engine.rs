@@ -375,18 +375,18 @@ pub trait OutputSink {
     /// The response's head, once, before the first body byte.
     fn send_headers(&mut self, head: &ResponseHead);
     /// One entry for the host's log, whole: what `php_log_err` was
-    /// given, a diagnostic in its log form with its stack trace under
-    /// it where it has one, or `error_log()`'s message as given, so it
-    /// may carry newlines inside it and ends in none. The host ends it:
-    /// php's CLI writes `"%s\n"` to stderr and a file log writes
-    /// `[date] ` before it and `PHP_EOL` after.
+    /// given where `error_log` names no file it could open
+    /// (`sapi_module.log_message`), a diagnostic in its log form with
+    /// its stack trace under it where it has one, or `error_log()`'s
+    /// message as given, so it may carry newlines inside it and ends in
+    /// none. The host ends it: php's CLI writes `"%s\n"` to stderr.
     fn log(&mut self, entry: &[u8]);
     /// Bytes for the host's error stream, as given: what php writes to
     /// the process's `stderr` past the host, the `display_errors=stderr`
     /// form of a diagnostic with its `\n` (`Z/main/main.c:1484`) and,
     /// when streams exist, what the `STDERR` stream constant is given.
-    /// Where the log goes is the host's: php's CLI puts it on this same
-    /// stream, and a host with an `error_log` file parts the two, so a
+    /// Where the host's log goes is the host's: php's CLI puts it on this
+    /// same stream, and an `error_log` file parts the two, so a
     /// diagnostic is logged and displayed in that order on one stream
     /// and in no order across two (#216).
     fn write_stderr(&mut self, bytes: &[u8]);
@@ -1155,7 +1155,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 86] = [
+const CORE_INI: [(&str, &str); 88] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1163,6 +1163,11 @@ const CORE_INI: [(&str, &str); 86] = [
     ("error_reporting", "32767"),
     ("display_errors", "1"),
     ("log_errors", "0"),
+    // `error_log`, `NULL` in php's table, and `error_log_mode`, both
+    // `PHP_INI_ALL` (`Z/main/main.c:835-836`): the file `php_log_err`
+    // appends to and the permissions it creates one with.
+    ("error_log", ""),
+    ("error_log_mode", "0644"),
     ("html_errors", "0"),
     // `docref_root` and `docref_ext`, `PHP_INI_ALL`: where a function's
     // diagnostic under `html_errors` links to (`raising::origin`).

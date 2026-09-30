@@ -6273,9 +6273,60 @@ impl Request {
         self.sink.get().status()
     }
 
-    /// `php_log_err`: one entry for the host's log, whole.
+    /// `php_log_err_with_severity` (`Z/main/main.c:919-990`): one entry
+    /// appended to the file `error_log` names, as it stands when the
+    /// entry is written, opened `O_CREAT | O_APPEND` against the working
+    /// directory with the permissions `error_log_mode` names where they
+    /// lie within `0777`, `0644` where they do not, and written as `[<stamp>] <entry>\n`; the host's
+    /// log where no file is named, where it names `syslog`, or where the
+    /// file cannot be opened. The stamp is `d-M-Y H:i:s e`, taken in UTC.
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . "/witness-log-" . getmypid();
+    /// ini_set('log_errors', 1); ini_set('display_errors', 0);
+    /// ini_set('error_log', $f); ini_set('error_log_mode', '0600');
+    /// echo $undefined;
+    /// $old = umask(0); error_log("two\nlines"); umask($old);
+    /// printf("%o\n", fileperms($f) & 0777);
+    /// readfile($f); unlink($f);
+    /// ```
+    /// ```expect
+    /// 600
+    /// [%d-%s-%d %d:%d:%d UTC] PHP Warning:  Undefined variable $undefined in %s on line 5
+    /// [%d-%s-%d %d:%d:%d UTC] two
+    /// lines
+    /// ```
     fn log_err(&mut self, entry: &[u8]) {
-        self.sink.get().log(entry);
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let named = self.ini_get(b"error_log").unwrap_or_default();
+        if named.is_empty() || named == b"syslog" {
+            self.sink.get().log(entry);
+            return;
+        }
+        let path = self.cwd().join(std::ffi::OsStr::from_bytes(named));
+        let mode =
+            crate::ini_quantity::parse(self.ini_get(b"error_log_mode").unwrap_or_default()).0;
+        let mode = u32::try_from(mode)
+            .ok()
+            .filter(|mode| (1..=0o777).contains(mode))
+            .unwrap_or(0o644);
+        let opened = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(mode)
+            .open(path);
+        let Ok(mut file) = opened else {
+            self.sink.get().log(entry);
+            return;
+        };
+        let mut line = Vec::with_capacity(entry.len() + 32);
+        line.push(b'[');
+        line.extend_from_slice(zone::utc_log_stamp(std::time::SystemTime::now()).as_bytes());
+        line.extend_from_slice(b"] ");
+        line.extend_from_slice(entry);
+        line.push(b'\n');
+        let _ = file.write_all(&line);
     }
 
     /// `sapi_module.send_headers`: the response's head handed to the
