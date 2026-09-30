@@ -4121,7 +4121,17 @@ impl Request {
     /// path, `mode` as `stream->mode`. A fd of a pipe, a fifo or a
     /// character device cannot seek (`detect_is_seekable`) and has no
     /// position; any other has the one `lseek(SEEK_CUR)` answers. A
-    /// process pipe never seeks, and its close waits for the child.
+    /// process pipe never seeks, tells the zero it opened at, and its
+    /// close waits for the child.
+    ///
+    /// ```php
+    /// $p = popen('true', 'r');
+    /// var_dump(ftell($p), pclose($p));
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// int(0)
+    /// ```
     ///
     /// The `Err` is the memory limit, met registering the resource.
     pub fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown> {
@@ -4138,9 +4148,14 @@ impl Request {
                 let kind = meta.file_type();
                 !(kind.is_fifo() || kind.is_char_device() || kind.is_socket())
             });
+        // A process pipe keeps the zero `php_stream_alloc` gives it
+        // (`_php_stream_fopen_from_pipe`); only `_php_stream_fopen_from_fd`
+        // marks a descriptor that cannot seek with no position.
         let position = if is_seekable {
             file.stream_position()
                 .map_or(-1, |at| i64::try_from(at).unwrap_or(i64::MAX))
+        } else if process.is_some() {
+            0
         } else {
             -1
         };
