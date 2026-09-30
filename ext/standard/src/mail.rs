@@ -322,6 +322,9 @@ pub(super) fn php_mail(
             }
         }
     }
+    // `if (EG(exception))`: a handler that threw on the log's warning
+    // ends the call before anything is sent (GH-7875).
+    php_ext::raising::pending(req)?;
     let mode = ini(req, b"mail.cr_lf_mode");
     let line_sep: &[u8] = match mode.as_deref() {
         Some(b"lf" | b"mixed" | b"os") => b"\n",
