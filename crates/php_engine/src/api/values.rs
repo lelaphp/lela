@@ -930,6 +930,20 @@ pub struct ClosureInfo {
     pub fake: bool,
 }
 
+/// One move of an internal pointer, a pointer native's
+/// ([`PhpObject::pointer_move`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerMove {
+    /// `reset()`, `zend_hash_internal_pointer_reset`.
+    Reset,
+    /// `end()`, `zend_hash_internal_pointer_end`.
+    End,
+    /// `next()`, `zend_hash_move_forward`.
+    Forward,
+    /// `prev()`, `zend_hash_move_backwards`.
+    Backward,
+}
+
 /// An object (design §5.4): php's `zend_object *`, one allocation of
 /// the request's heap in the object store, the forty-byte header, a
 /// zval per declared property and, for an internal class, the native
@@ -1150,6 +1164,36 @@ impl PhpObject {
     /// ```
     pub fn entries(&self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         req.table_entries(*self)
+    }
+
+    /// `reset`, `end`, `next` or `prev` over the internal pointer of the
+    /// object's property table as `zend_std_get_properties` holds it, the
+    /// table `get_ht_for_iap` hands the pointer natives
+    /// (`Z/ext/standard/array.c:993`): separated first where another
+    /// holder shares it, laid down where the object has none, and a lazy
+    /// object initialised; `false` and nothing moved where the table has
+    /// no row. The pointer stays on the table between calls, and a
+    /// declared slot is a row to it whether or not it holds a value, as
+    /// php's `IS_INDIRECT` is. What a class whose `get_properties`
+    /// answers rows of its own holds is not this table
+    /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties)).
+    pub fn pointer_move(&self, req: &mut Request, how: PointerMove) -> Result<bool, Thrown> {
+        req.pointer_move(*self, how)
+    }
+
+    /// The row at the internal pointer of the object's property table,
+    /// `php_array_iter_seek_current`: a declared slot nothing holds, an
+    /// uninitialised typed property, stepped over back after an `end` or
+    /// a `prev` and on after anything else, `after` saying which move
+    /// came before, and the pointer left where the step stops. The key
+    /// is the table's, a declared property's its mangled name, and the
+    /// key and the value are views; `None` past the end.
+    pub fn pointer_row(
+        &self,
+        req: &mut Request,
+        after: Option<PointerMove>,
+    ) -> Result<Option<(Key, Value)>, Thrown> {
+        req.pointer_row(*self, after)
     }
 
     /// One row of the property table by key, `zend_symtable_find_ind`:

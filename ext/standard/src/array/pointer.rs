@@ -7,10 +7,11 @@
 //! `zend_compare`.
 //!
 //! An object is php's 8.1 deprecation and then its property table
-//! (`get_ht_for_iap`). The face has no pointer on that table, so what is
-//! read is a fresh table per call: `current` and `key` read its first
-//! row, and a move answers from that row, which is php's answer for an
-//! object whose pointer has not moved.
+//! (`get_ht_for_iap`), whose pointer stays on the table between calls
+//! and steps over a declared slot nothing holds as
+//! `php_array_iter_seek_current` does. A class whose `get_properties`
+//! answers rows of its own keeps no such table here, so over one what
+//! is read is a fresh table per call.
 
 use std::cmp::Ordering;
 
@@ -20,7 +21,7 @@ use php_ext::coerce::{coerce_param, compare, to_array, value_name};
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpObject, PhpString, PointerMove, Value, ValueRef};
 
 use super::keys::key_return;
 
@@ -28,24 +29,13 @@ use super::keys::key_return;
 /// refuses anything else as "must be of type array".
 pub(super) type ArrayOrObject = Raw<Union<PhpArray, PhpObject>>;
 
-/// One move of the pointer: `reset`, `end`, one on or one back.
-#[derive(Clone, Copy)]
-enum Move {
-    Reset,
-    End,
-    Next,
-    Prev,
-}
-
-impl Move {
-    /// The native that makes the move.
-    fn name(self) -> &'static str {
-        match self {
-            Move::Reset => "reset",
-            Move::End => "end",
-            Move::Next => "next",
-            Move::Prev => "prev",
-        }
+/// The native that makes the move.
+fn move_name(how: PointerMove) -> &'static str {
+    match how {
+        PointerMove::Reset => "reset",
+        PointerMove::End => "end",
+        PointerMove::Forward => "next",
+        PointerMove::Backward => "prev",
     }
 }
 
@@ -83,7 +73,7 @@ impl Move {
 /// ```
 #[php_function]
 fn end(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
-    moved(req, &array, Move::End)
+    moved(req, &array, PointerMove::End)
 }
 
 /// `prev(array|object &$array): mixed`, php's `PHP_FUNCTION(prev)`
@@ -101,9 +91,43 @@ fn end(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
+///
+/// Over an object the pointer is its property table's and stays there
+/// between calls: every declared property is a row to a move, and the
+/// value read steps over one whose typed slot nothing wrote, back after
+/// `end` and `prev` and on otherwise, moving the pointer as it goes, so
+/// a move whose value nobody reads (`USED_RET()`) leaves the pointer on
+/// the uninitialised row. A private property's key is its mangled name.
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class T { public int $a; public int $b; private int $c = 3; public int $d; }
+/// $x = new T; $x->b = 1; $x->e = 5;
+/// var_dump(@reset($x), @next($x), @key($x), @next($x), @prev($x), @prev($x), @key($x));
+/// @end($x); @prev($x); var_dump(@key($x));
+/// @end($x); var_dump(@prev($x), @prev($x), @key($x));
+/// class U { public int $a; }
+/// $y = new U; var_dump(@key($y)); $y->a = 1; var_dump(@key($y)); @reset($y); var_dump(@key($y));
+/// ```
+/// ```expect
+/// int(1)
+/// int(3)
+/// string(4) "%0T%0c"
+/// int(5)
+/// int(3)
+/// int(1)
+/// string(1) "b"
+/// string(1) "e"
+/// int(3)
+/// int(1)
+/// string(1) "b"
+/// NULL
+/// NULL
+/// string(1) "a"
+/// ```
 #[php_function]
 fn prev(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
-    moved(req, &array, Move::Prev)
+    moved(req, &array, PointerMove::Backward)
 }
 
 /// `next(array|object &$array): mixed`, php's `PHP_FUNCTION(next)`
@@ -129,7 +153,7 @@ fn prev(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
 /// ```
 #[php_function]
 fn next(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
-    moved(req, &array, Move::Next)
+    moved(req, &array, PointerMove::Forward)
 }
 
 /// `reset(array|object &$array): mixed`, php's `PHP_FUNCTION(reset)`
@@ -152,7 +176,7 @@ fn next(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
 /// ```
 #[php_function]
 fn reset(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
-    moved(req, &array, Move::Reset)
+    moved(req, &array, PointerMove::Reset)
 }
 
 /// `current(array|object $array): mixed` and its alias `pos`, php's
@@ -213,16 +237,23 @@ fn current(req: &mut Request, array: ArrayOrObject) -> Result<Value, Thrown> {
 }
 
 fn read_current(req: &mut Request, given: Value, name: &str) -> Result<Value, Thrown> {
-    let Some(array) = read_table(req, given, name)? else {
-        return Ok(Value::bool(false));
+    let current = match pointed(req, &given, name)? {
+        Pointed::Array(array) => array.cursor_current(),
+        Pointed::Object(object) => object.pointer_row(req, None)?.map(|(_, value)| value),
     };
-    match array.cursor_current() {
+    Ok(owned_current(req, current))
+}
+
+/// What `php_array_iter_return_current` answers: the value, a
+/// reference followed, one more owner, or `false`.
+fn owned_current(req: &mut Request, current: Option<Value>) -> Value {
+    match current {
         Some(value) => {
             let value = value.deref();
             req.addref(&value);
-            Ok(value)
+            value
         }
-        None => Ok(Value::bool(false)),
+        None => Value::bool(false),
     }
 }
 
@@ -243,34 +274,40 @@ fn read_current(req: &mut Request, given: Value, name: &str) -> Result<Value, Th
 /// ```
 #[php_function]
 fn key(req: &mut Request, array: ArrayOrObject) -> Result<Option<Union<PhpString, i64>>, Thrown> {
-    let Some(array) = read_table(req, array.value(), "key")? else {
-        return Ok(None);
+    let key = match pointed(req, &array.value(), "key")? {
+        Pointed::Array(array) => array.cursor_key(),
+        Pointed::Object(object) => object.pointer_row(req, None)?.map(|(key, _)| key),
     };
-    match array.cursor_key() {
-        Some(key) => Ok(Some(key_return(req, &key))),
-        None => Ok(None),
-    }
+    Ok(key.map(|key| key_return(req, &key)))
 }
 
-/// `Z_PARAM_ARRAY_OR_OBJECT` for the readers: the array, or an object's
-/// property table after the deprecation; the `TypeError` otherwise.
-fn read_table(req: &mut Request, given: Value, name: &str) -> Result<Option<PhpArray>, Thrown> {
+/// What a pointer native reads: an array, or an object whose property
+/// table holds the pointer.
+enum Pointed {
+    Array(PhpArray),
+    Object(PhpObject),
+}
+
+/// `Z_PARAM_ARRAY_OR_OBJECT`, then `get_ht_for_iap` over an object: the
+/// deprecation, and the object, or the table a class that answers its
+/// rows itself builds, the `(array)` cast's; the `TypeError` for
+/// anything else.
+fn pointed(req: &mut Request, given: &Value, name: &str) -> Result<Pointed, Thrown> {
     match given.as_ref() {
-        ValueRef::Array(array) => Ok(Some(*array)),
-        ValueRef::Object(_) => object_table(req, name, &given).map(Some),
-        _ => Err(not_an_array(req, &given)),
+        ValueRef::Array(array) => Ok(Pointed::Array(*array)),
+        ValueRef::Object(object) => {
+            docref(
+                req,
+                Level::Deprecated,
+                &format!("Calling {name}() on an object is deprecated"),
+            );
+            if object.handlers(req).answers_properties() {
+                return to_array(req, given).map(Pointed::Array);
+            }
+            Ok(Pointed::Object(*object))
+        }
+        _ => Err(not_an_array(req, given)),
     }
-}
-
-/// `get_ht_for_iap` over an object: the deprecation, and the table the
-/// `(array)` cast builds, which is the property table as php keys it.
-fn object_table(req: &mut Request, name: &str, object: &Value) -> Result<PhpArray, Thrown> {
-    docref(
-        req,
-        Level::Deprecated,
-        &format!("Calling {name}() on an object is deprecated"),
-    );
-    to_array(req, object)
 }
 
 /// The `TypeError` `Z_PARAM_ARRAY_OR_OBJECT` raises, naming the array.
@@ -280,10 +317,14 @@ fn not_an_array(req: &mut Request, given: &Value) -> Thrown {
 }
 
 /// The four movers: the array the reference holds, separated as
-/// `Z_PARAM_ARRAY_OR_OBJECT_EX(array_zv, 0, 1)` separates it; `false`
-/// where it is empty, the pointer untouched; else the move, and the
-/// value it lands on as `php_array_iter_return_current` reads it.
-fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: Move) -> Result<Value, Thrown> {
+/// `Z_PARAM_ARRAY_OR_OBJECT_EX(array_zv, 0, 1)` separates it, or the
+/// object's table, which `get_ht_for_iap` separates; `false` where it
+/// is empty, the pointer untouched; else the move, and the value it
+/// lands on as `php_array_iter_return_current` reads it, which over an
+/// object steps over a slot nothing holds and so moves the pointer
+/// again, and which php reads only where the caller reads the return
+/// (`USED_RET()`).
+fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: PointerMove) -> Result<Value, Thrown> {
     let target = given.get().map_or_else(Value::null, Raw::value);
     let mut array = match target.as_ref() {
         ValueRef::Array(array) => match given.separated(req)? {
@@ -293,26 +334,30 @@ fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: Move) -> Result<Val
             // reads after, so the move is over a copy.
             _ => array.copy(req)?,
         },
-        ValueRef::Object(_) => object_table(req, how.name(), &target)?,
-        _ => return Err(not_an_array(req, &target)),
+        _ => match pointed(req, &target, move_name(how))? {
+            Pointed::Array(array) => array,
+            Pointed::Object(object) => {
+                if !object.pointer_move(req, how)? {
+                    return Ok(Value::bool(false));
+                }
+                if !req.return_value_used() {
+                    return Ok(Value::null());
+                }
+                let current = object.pointer_row(req, Some(how))?.map(|(_, value)| value);
+                return Ok(owned_current(req, current));
+            }
+        },
     };
     if array.is_empty() {
         return Ok(Value::bool(false));
     }
     match how {
-        Move::Reset => array.cursor_reset(),
-        Move::End => array.cursor_end(),
-        Move::Next => array.cursor_next(),
-        Move::Prev => array.cursor_prev(),
+        PointerMove::Reset => array.cursor_reset(),
+        PointerMove::End => array.cursor_end(),
+        PointerMove::Forward => array.cursor_next(),
+        PointerMove::Backward => array.cursor_prev(),
     }
-    match array.cursor_current() {
-        Some(value) => {
-            let value = value.deref();
-            req.addref(&value);
-            Ok(value)
-        }
-        None => Ok(Value::bool(false)),
-    }
+    Ok(owned_current(req, array.cursor_current()))
 }
 
 /// `min(mixed $value, mixed ...$values): mixed`, php's

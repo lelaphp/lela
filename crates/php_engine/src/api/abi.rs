@@ -1894,6 +1894,35 @@ pub trait ObjectHandlers: Send + Sync {
         false
     }
 
+    /// Whether the table's `get_properties` answers rows of its own
+    /// making, not the object's property table as
+    /// `zend_std_get_properties` holds it: `sxe_get_properties`, which
+    /// builds a table of the element's children on each call, and
+    /// `date_object_get_properties_interval`. The internal pointer the
+    /// pointer natives move over an object
+    /// ([`PhpObject::pointer_move`](crate::api::values::PhpObject::pointer_move))
+    /// is the object's table's, so over such a class they read a table
+    /// fresh on each call, which is php's answer for `SimpleXMLElement`, whose
+    /// table is rebuilt between calls. `false` at `Std`, and at every
+    /// class that sets `get_properties_for` alone, whose pointer natives
+    /// read the object's own table as php's do.
+    ///
+    /// ```php
+    /// $x = simplexml_load_string('<a><b>1</b><c>2</c></a>');
+    /// var_dump(@next($x), @key($x));
+    /// $f = new SplFixedArray(2); $f[0] = 5;
+    /// var_dump(@current($f), @current(new ArrayObject([7])));
+    /// ```
+    /// ```expect
+    /// string(1) "2"
+    /// string(1) "b"
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    fn answers_properties(&self) -> bool {
+        false
+    }
+
     /// Whether the table's `write_property` is not
     /// `zend_std_write_property` and answers for a property the class
     /// declares: `ZEND_ASSIGN_OBJ` writes a declared slot in place only

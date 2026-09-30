@@ -933,6 +933,12 @@ impl ObjectHandlers for IntervalHandlers {
         true
     }
 
+    /// `date_object_get_properties_interval` writes the fields into
+    /// the table it answers.
+    fn answers_properties(&self) -> bool {
+        true
+    }
+
     fn get_properties_for(
         &self,
         req: &mut Request,
