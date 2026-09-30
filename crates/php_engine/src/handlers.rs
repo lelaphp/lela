@@ -1533,14 +1533,22 @@ fn dynamic_call_array(
 }
 
 /// `zend_fetch_class_by_name` under `ZEND_FETCH_CLASS_EXCEPTION`: the
-/// class of that name, a leading `\` skipped, and php's `Error` where
-/// nothing declares it.
+/// class of that name, a leading `\` skipped, the autoloaders asked,
+/// what they throw handed on, and php's `Error` where nothing declares
+/// it.
+///
+/// ```php
+/// spl_autoload_register(function ($name) { throw new Exception("loading $name"); });
+/// try { $a = ["Nope", "f"]; $a(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// loading Nope
+/// ```
 fn dynamic_call_class(
     req: &mut Request,
     name: &[u8],
 ) -> Result<crate::api::values::ClassId, Thrown> {
-    let bare = name.strip_prefix(b"\\").unwrap_or(name);
-    match req.class_named(bare) {
+    match crate::api::call::autoload(req, name)? {
         Some(class) => Ok(class),
         None => Err(crate::api::raising::throw(
             req,
