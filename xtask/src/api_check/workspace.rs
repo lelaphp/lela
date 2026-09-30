@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result};
 use toml::Value;
 
+use crate::layout;
 use crate::manifest::Manifest;
 
 /// One crate that exists, by its manifest name (`php_heap`, `ext/random`,
@@ -175,41 +176,14 @@ fn dep_crate(key: &str, value: &Value, dir: &Path, root: &Path) -> Option<String
     if let Some(path) = entry.get("path").and_then(Value::as_str) {
         let target = normalize(&dir.join(path));
         let rel = target.strip_prefix(normalize(root)).ok()?;
-        return crate_of_path(rel);
+        return layout::name_of_path(rel);
     }
     let package = entry
         .get("package")
         .and_then(Value::as_str)
         .unwrap_or(key)
         .replace('-', "_");
-    crate_of_package(&package)
-}
-
-/// The manifest name of the crate at `rel` (relative to the root):
-/// `crates/<name>` is `<name>`, `ext/<name>` is `ext/<name>`, `xtask` is
-/// itself. The inverse of `manifest::Crate::path`.
-pub fn crate_of_path(rel: &Path) -> Option<String> {
-    let parts: Vec<&str> = rel.iter().filter_map(|c| c.to_str()).collect();
-    match parts.as_slice() {
-        ["crates", name] => Some((*name).to_owned()),
-        ["ext", name] => Some(format!("ext/{name}")),
-        ["xtask"] => Some("xtask".to_owned()),
-        _ => None,
-    }
-}
-
-/// The manifest name of the crate with package name `package`, for the
-/// packages of this workspace: `php_ext_<name>` is `ext/<name>` (ADR-0004),
-/// `php_*` and `xtask` are themselves. Anything else is not a workspace
-/// crate.
-pub fn crate_of_package(package: &str) -> Option<String> {
-    if let Some(name) = package.strip_prefix("php_ext_") {
-        Some(format!("ext/{name}"))
-    } else if package.starts_with("php_") || package == "php" || package == "xtask" {
-        Some(package.to_owned())
-    } else {
-        None
-    }
+    layout::name_of_package(&package)
 }
 
 /// A path with its `.` and `..` components folded, without touching the

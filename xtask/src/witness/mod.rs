@@ -606,7 +606,7 @@ pub(crate) fn extract(
     // once the fences have run.
     if anchored.declares() {
         out.anchored = Some(anchor::Coverage {
-            package: crate::clippy::package(krate),
+            package: krate.package(),
             anchored,
         });
     }

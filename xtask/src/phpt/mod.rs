@@ -10,7 +10,7 @@
 //! sink under `Engine::serve`, which arrives with the engine. The process
 //! adapter, `adapter`, runs the engine's own `php` under
 //! `Oracle::run_under`, the same recipe the oracle runs under, which is
-//! what makes the two comparable. Until `crates/php` is built there is no
+//! what makes the two comparable. Until `sapi/cli` is built there is no
 //! binary and the reading is a skip that says so. The recipe is the pin's,
 //! so the pin's digest is asserted once before the first test where the
 //! pinned php is on this machine; where it is not, as on the runner (harness
@@ -92,8 +92,8 @@
 //! `--PHPDBG--` test and a `--REDIRECTTEST--` are skipped with their
 //! reason; a CGI-shaped one runs through the CGI host beside the binary,
 //! the php-cgi `[sapi]` pins for the control and the engine's own
-//! binary under that name for the engine, as the `cgi` module has it
-//! (#1198). Beyond those, the process adapter
+//! `php-cgi`, `sapi/cgi`'s binary, for the engine, as the `cgi` module
+//! has it (#1198, ADR-0008). Beyond those, the process adapter
 //! gives a test one stdin and two streams captured as one, so a test that
 //! wants a terminal on a stream it did not capture, an interactive shell
 //! or a listening server is where the runner and upstream still part; the
@@ -872,7 +872,7 @@ pub(crate) fn run_subset(
     // test rather than at its first SKIPIF.
     oracle.asserted()?;
     let control = matches!(runner, Runner::Control(_));
-    let host = cgi::host(oracle.pin(), binary, control, &subset.root)?;
+    let host = cgi::host(oracle.pin(), binary, control);
     let adapter = Adapter::new(oracle, registry, binary, host, lane);
     let mut dirs = BTreeMap::new();
     let apart: Vec<_> = tests

@@ -41,10 +41,12 @@ mod glossary;
 /// `xtask`'s own sources (harness-design.md §4.4, #16). Shared with
 /// `build.rs`, which includes the file rather than importing it.
 mod inputs;
+mod layout;
 mod lines;
 mod lock;
 pub mod manifest;
 pub mod new_ext;
+pub mod new_sapi;
 pub mod oracle;
 pub mod permit;
 pub mod phpt;
@@ -191,13 +193,11 @@ fn command_line() -> Result<()> {
         }
         Command::DivergenceReason => divergence_command(&root, &manifest, &store),
         Command::NewExt { name } => {
-            let laid = new_ext::run(&root, &manifest, &name)?;
-            for path in &laid.written {
-                println!("wrote {path}");
-            }
-            for note in &laid.notes {
-                println!("{note}");
-            }
+            said(&new_ext::run(&root, &manifest, &name)?);
+            Ok(())
+        }
+        Command::NewSapi { name, binary } => {
+            said(&new_sapi::run(&root, &manifest, &name, binary.as_deref())?);
             Ok(())
         }
         Command::Witness(ask) => witness::command(&root, &manifest, &store, ask),
@@ -212,6 +212,16 @@ fn command_line() -> Result<()> {
         Command::Regions { .. } => bail!("regions: answered above"),
         Command::Worktree { .. } => bail!("worktree: answered above"),
         Command::Steer { .. } => bail!("steer: answered above"),
+    }
+}
+
+/// What `new-ext` or `new-sapi` laid down, a file a line, and its notes.
+fn said(laid: &new_ext::Laid) {
+    for path in &laid.written {
+        println!("wrote {path}");
+    }
+    for note in &laid.notes {
+        println!("{note}");
     }
 }
 

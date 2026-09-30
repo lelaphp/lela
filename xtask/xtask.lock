@@ -116,6 +116,7 @@ manifest::Where
 manifest::scope_matches
 new_ext::Laid
 new_ext::run
+new_sapi::run
 oracle::Binary
 oracle::Binary::file
 oracle::ENGINE

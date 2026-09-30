@@ -1,0 +1,42 @@
+# sapi/cgi: php's CGI, `php-src/sapi/cgi`, one crate under `sapi/` (ADR-0008),
+# the binary `php-cgi`: the bundle's enabled set on one engine with
+# `cgi-fcgi` after it, the request the server describes in the environment.
+# Three edges, php_bundle, php_sapi and php_proto for the CGI environment's
+# codec; the engine is named through the facade alone.
+[package]
+name = "php_sapi_cgi"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "php's CGI host, the binary php-cgi"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "php-cgi"
+path = "src/main.rs"
+
+# The same binary with `php_engine`'s `witness-trace` on, which the witness
+# lane builds and serves a fence with a `request` through, and nothing else
+# does (harness §8, revision 61; #1197).
+[[bin]]
+name = "php-cgi-witness"
+path = "src/witness.rs"
+required-features = ["witness-trace"]
+
+[features]
+# Every request the binary serves appends the natives it entered to the file
+# `PHP_WITNESS_TRACE` names (harness §4.5 condition 2, revision 61).
+witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
+
+[dependencies]
+# The bundle's default set and the seven the CLI turns on (sapi/cli's
+# manifest says why each): php builds its CGI with its CLI's extensions,
+# `pcntl` and `posix` among them, and the oracle's `php-cgi -m` lists all
+# seven (design §7.2, revision 35).
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar"] }
+php_proto = { path = "../../crates/php_proto" }
+php_sapi = { path = "../../crates/php_sapi" }

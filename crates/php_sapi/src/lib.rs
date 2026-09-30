@@ -1,12 +1,17 @@
-//! The hosts (design §4.1, §4.3 seam 4, §5.14): each builds a request
-//! description from what it was given and supplies a sink, and the engine
-//! crosses `serve` for every one of them. The CLI is [`cli`] and CGI
-//! [`cgi`]; the `FastCGI` worker and the dev server land beside them, each
-//! reading its wire through `php_proto`. Which one a binary is, is chosen
-//! once, by the name it was started under ([`Host::of`]). The engine's host
-//! face is re-exported here so the binary names one crate for it: what
-//! this crate imports from `php_engine` is `sapi.lock`, and `api` is never
-//! among it.
+//! The hosts' facade (ADR-0008; design §4.1, §4.3 seam 4, §5.14), as
+//! `php_ext` is the extensions': one crate per host under `sapi/` builds a
+//! request description from what it was given and supplies a sink, and
+//! reaches the engine through this crate alone. What this crate imports
+//! from `php_engine` is `sapi.lock`, the host face, re-exported here whole,
+//! and `api` is never among it.
+//!
+//! Beside the face it holds only what php-src shares between its hosts in
+//! `main/`: [`getopt`], `php_getopt`, which the CLI and CGI read their
+//! command lines with; [`cgi`], the CGI environment made a request
+//! description and the response's head written, which php's CGI and its
+//! `FastCGI` process manager both do; [`ini`], the line's `-d` entries as
+//! `php_ini_builder` reads them; and [`start`], `php_module_startup` over
+//! them, with what a host prints before it serves anything.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -19,36 +24,129 @@
 )]
 
 pub mod cgi;
-pub mod cli;
-mod getopt;
+pub mod getopt;
+pub mod ini;
+
+use std::io::Write;
+use std::process::ExitCode;
 
 pub use php_engine::{
     Engine, EngineBuilder, FileHandles, HostExtension, Method, Observables, OutputSink,
-    RequestDescription, ResponseHead, WebRequest,
+    PHP_VERSION, RequestDescription, ResponseHead, WebRequest,
 };
 
-/// Which host a binary is, chosen once, by the name it was started under, as
-/// php builds its CLI and its CGI as `php` and `php-cgi`: a name opening
-/// with `php-cgi` is CGI, and any other the command line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Host {
-    Cli,
-    Cgi,
+/// `php_module_startup` for a host: `builder`, which carries the host's
+/// extensions and tier, with the host's own extension after them where it
+/// names one, the line's `-d` entries read by the engine's INI grammar
+/// over its defaults in the order given, and what that reading wrote for
+/// `stderr` written there, as php's `ini_error` writes it during startup.
+#[must_use]
+pub fn start(
+    builder: EngineBuilder,
+    ini: &[(String, String)],
+    host: Option<HostExtension>,
+) -> Engine {
+    let mut builder = builder;
+    if let Some(host) = host {
+        builder = builder.host_extension(host);
+    }
+    #[cfg(feature = "witness-trace")]
+    if let Some(path) = std::env::var_os(TRACE) {
+        builder = builder.trace_natives_to(path.into());
+    }
+    for (name, value) in ini {
+        builder = builder.ini(name, value);
+    }
+    let engine = builder.build();
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(engine.startup_errors().as_bytes());
+    engine
 }
 
-impl Host {
-    /// The host `argv[0]` names.
-    #[must_use]
-    pub fn of(argv0: &std::ffi::OsStr) -> Host {
-        let path = std::path::Path::new(argv0);
-        let named = path
-            .file_name()
-            .map(std::ffi::OsStr::as_encoded_bytes)
-            .unwrap_or_default();
-        if named.starts_with(b"php-cgi") {
-            Host::Cgi
-        } else {
-            Host::Cli
-        }
+/// The variable naming the file a `witness-trace` build appends the
+/// natives each request entered to; the witness lane sets it for a fence
+/// it serves through a host's binary (harness §8, revision 61).
+#[cfg(feature = "witness-trace")]
+const TRACE: &str = "PHP_WITNESS_TRACE";
+
+/// `print_modules` and `print_extensions`, which php's CLI and CGI each
+/// write for `-m`: the loaded extensions sorted as `module_name_cmp` sorts
+/// them, without regard to case, under `[PHP Modules]`, and the Zend
+/// extensions in the order they were loaded under `[Zend Modules]`,
+/// opcache's `Zend OPcache` being both.
+#[must_use]
+pub fn modules(engine: &Engine) -> String {
+    let mut names = engine.loaded_extensions();
+    names.sort_by_key(|name| name.to_ascii_lowercase());
+    let mut text = String::from("[PHP Modules]\n");
+    for name in names {
+        text.push_str(&name);
+        text.push('\n');
+    }
+    text.push_str("\n[Zend Modules]\n");
+    for name in engine.loaded_zend_extensions() {
+        text.push_str(&name);
+        text.push('\n');
+    }
+    text.push('\n');
+    text
+}
+
+/// The date a host's version line carries, php's `__DATE__ " " __TIME__`
+/// of the compile that last rebuilt the host (`Z/main/main.c`), as `Jul
+/// 28 2026 13:06:52`, the day padded with a space as `__DATE__` pads it:
+/// rendered in UTC from `epoch`, the Unix seconds each host's `build.rs`
+/// stamps when its sources change, which is when php's `__DATE__` moves.
+/// The civil date is Howard Hinnant's `civil_from_days`.
+#[must_use]
+pub fn build_date(epoch: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let seconds: u64 = epoch.parse().unwrap_or(0);
+    let days = i64::try_from(seconds / 86_400).unwrap_or(0);
+    let clock = seconds % 86_400;
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    let name = MONTHS
+        .get(usize::try_from(month - 1).unwrap_or(0))
+        .copied()
+        .unwrap_or("Jan");
+    format!(
+        "{name} {day:>2} {year} {:02}:{:02}:{:02}",
+        clock / 3_600,
+        clock % 3_600 / 60,
+        clock % 60
+    )
+}
+
+/// php's exit status as the process's: `exit()` takes the low byte.
+#[must_use]
+pub fn exit_code(status: i32) -> ExitCode {
+    ExitCode::from(u8::try_from(status & 0xff).unwrap_or(255))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_date;
+
+    #[test]
+    fn the_build_date_is_phps_date_and_time_in_utc() {
+        assert_eq!(build_date("0"), "Jan  1 1970 00:00:00");
+        assert_eq!(build_date("1785243412"), "Jul 28 2026 12:56:52");
+        assert_eq!(build_date("951782400"), "Feb 29 2000 00:00:00");
     }
 }

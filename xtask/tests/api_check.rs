@@ -254,6 +254,28 @@ fn a_crate_depending_outside_its_edges_fails_with_the_adr() {
     assert_eq!(json.adr, "0004");
 }
 
+/// A host reaches the engine through its facade and never past it
+/// (ADR-0008): `sapi/cli` naming `php_engine` fails with the ADR, and
+/// `sapi/cgi` on the facade, the codecs and the bundle is within its
+/// edges.
+#[test]
+fn a_host_depending_on_the_engine_past_its_facade_fails_with_the_adr() {
+    let readings = readings("host-edge");
+    let cli = of(&readings, "sapi/cli");
+    assert_eq!(cli.status, Status::Fail, "{}", cli.message);
+    assert!(cli.message.contains("php_engine"), "{}", cli.message);
+    assert!(
+        cli.message
+            .contains("ADR-0008: Hosts are one crate each under `sapi/`"),
+        "the ADR's text is printed: {}",
+        cli.message
+    );
+    assert_eq!(cli.adr, "0008");
+    let cgi = of(&readings, "sapi/cgi");
+    assert_eq!(cgi.status, Status::Pass, "{}", cgi.message);
+    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+}
+
 #[test]
 fn a_use_path_across_a_denied_module_edge_fails() {
     let readings = readings("deny-edge");

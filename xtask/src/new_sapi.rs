@@ -1,0 +1,282 @@
+//! `xtask new-sapi <name>` (ADR-0008; design §4.1): one host crate laid
+//! down at `sapi/<name>` in the topology the CLI and CGI hosts have, as
+//! `new-ext` lays an extension down, so the shape is made by the harness and
+//! not copied by hand. The crate reaches the engine through the facade
+//! alone and the enabled set through the bundle, the `[[edge]]` `sapi/*`
+//! permits; its one entry is `main`, which the binary calls; the template
+//! host serves the file its line names on one engine of the bundle's
+//! enabled set, the request description and the sink on the process's
+//! streams, until the host's own replace them; `build.rs` stamps the epoch
+//! its version line renders (`php_sapi::build_date`); a test runs the
+//! binary; the lints the manifest denies under `sapi/*` stand at its root.
+//! `sapi/*` is a workspace member by its glob, and the crate joins the
+//! members where the root lists them one by one.
+//!
+//! What the template is exercised on is the fixture at
+//! `xtask/fixtures/new-sapi`, whose own `seams.toml` carries the
+//! `[[crate]]` row for `sapi/demo`: `cargo test -p xtask --test new_sapi`
+//! lays the crate down there and holds it to `budget`, `unsafe-audit` and
+//! `api-check`, the shipped manifest carrying no row for a name nobody
+//! ships.
+//!
+//! Four refusals, each before anything is written: a name with no
+//! `[[crate]]` row (the ceiling is the manifest's, and the row is a
+//! person's), a workspace without `crates/php_sapi` (the facade) or without
+//! `crates/php_bundle` (the enabled set), and a directory already at
+//! `sapi/<name>` (the crate is laid down once and never overwritten).
+
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result, bail};
+
+use crate::layout;
+use crate::manifest::Manifest;
+use crate::new_ext::{Laid, add_member, lint_attributes};
+use crate::phpt;
+use crate::reading::listed;
+
+/// The facade every host depends on (ADR-0008), relative to the root.
+const FACADE: &str = "crates/php_sapi";
+
+/// The enabled set every host serves on (ADR-0004), relative to the root.
+const BUNDLE: &str = "crates/php_bundle";
+
+/// Lay `sapi/<name>` down with its binary `binary`, `php-<name>` where the
+/// line names none, or refuse and write nothing.
+pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -> Result<Laid> {
+    if name.is_empty()
+        || !name.starts_with(|c: char| c.is_ascii_lowercase())
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        bail!("{name}: a host's name is lowercase ascii letters and digits, as php-src spells it");
+    }
+    let bin = binary.map_or_else(|| format!("php-{name}"), str::to_owned);
+    if bin.is_empty()
+        || !bin
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("{bin}: a binary's name is ascii letters, digits, `-` and `_`");
+    }
+    let row = format!("sapi/{name}");
+    let Some(krate) = manifest.crate_named(&row) else {
+        bail!(
+            "seams.toml has no [[crate]] row for {row}, so the crate would have no ceiling; the row is a person's (harness §11): propose it in the commit message"
+        );
+    };
+    for (dir, what) in [(FACADE, "the facade"), (BUNDLE, "the bundle")] {
+        if !root.join(dir).join("Cargo.toml").is_file() {
+            bail!("{dir} is not a crate yet; {what} lands before any host (ADR-0008)");
+        }
+    }
+    let dir = root.join(layout::path(&row));
+    if dir.exists() {
+        bail!("{row} exists; new-sapi lays a crate down once and never overwrites");
+    }
+    let package = layout::package(&row);
+
+    let mut laid = Laid {
+        dir: dir.clone(),
+        written: Vec::new(),
+        notes: Vec::new(),
+    };
+    for (rel, text) in [
+        ("Cargo.toml", cargo_toml(name, &package, &bin)),
+        ("build.rs", build_rs(&bin)),
+        ("src/lib.rs", lib_rs(manifest, name, &bin)),
+        ("src/main.rs", main_rs(&package, &bin)),
+        ("tests/serve.rs", serve_rs(name, &bin)),
+    ] {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        laid.written.push(format!("{row}/{rel}"));
+    }
+    if add_member(root, &row)? {
+        laid.written.push("Cargo.toml".to_owned());
+    }
+
+    // Which subsets are the crate's is the `[[crate]]` row's sentence and
+    // is read there, never spelled again here (#18, harness §4.1).
+    let owned: Vec<String> = krate
+        .subsets()
+        .iter()
+        .map(|under| format!("{}/{}", phpt::CORPUS, under.display()))
+        .collect();
+    let named: Vec<&str> = owned.iter().map(String::as_str).collect();
+    laid.notes.push(if owned.is_empty() {
+        format!("phpt subset: none; the [[crate]] row for {row} names none")
+    } else {
+        format!("phpt subset: {} at the pinned tag", listed(&named))
+    });
+    laid.notes.push(format!(
+        "left: the host itself; {bin} serves the file its line names until the host's own request description and sink replace the template's"
+    ));
+    Ok(laid)
+}
+
+/// The crate's manifest: the facade and the bundle, and the one binary.
+fn cargo_toml(name: &str, package: &str, bin: &str) -> String {
+    format!(
+        "# sapi/{name}: php-src/sapi/{name}, one crate under `sapi/` (ADR-0008), laid\n\
+         # down by `xtask new-sapi`: the binary `{bin}`. Two edges, php_bundle and\n\
+         # php_sapi; the engine is named through the facade alone.\n\
+         [package]\n\
+         name = \"{package}\"\n\
+         version = \"0.0.0\"\n\
+         edition.workspace = true\n\
+         license.workspace = true\n\
+         rust-version.workspace = true\n\
+         publish = false\n\
+         description = \"php's {name} host, the binary {bin}\"\n\
+         \n\
+         [lints]\n\
+         workspace = true\n\
+         \n\
+         [[bin]]\n\
+         name = \"{bin}\"\n\
+         path = \"src/main.rs\"\n\
+         \n\
+         [dependencies]\n\
+         php_bundle = {{ path = \"../../{BUNDLE}\" }}\n\
+         php_sapi = {{ path = \"../../{FACADE}\" }}\n"
+    )
+}
+
+/// `build.rs`: the epoch the version line renders, stamped when
+/// the host's sources change, as php's `__DATE__` moves.
+fn build_rs(bin: &str) -> String {
+    format!(
+        "//! The clock `{bin} -v` carries: php prints `__DATE__ \" \" __TIME__` of the\n\
+         //! compile that last rebuilt the host, so this host stamps the Unix\n\
+         //! seconds into `PHP_BUILD_EPOCH` when this file or its sources change,\n\
+         //! and `php_sapi::build_date` renders them as php's.\n\
+         \n\
+         use std::time::{{SystemTime, UNIX_EPOCH}};\n\
+         \n\
+         fn main() {{\n\
+         \x20   println!(\"cargo:rerun-if-changed=build.rs\");\n\
+         \x20   println!(\"cargo:rerun-if-changed=src\");\n\
+         \x20   let seconds = SystemTime::now()\n\
+         \x20       .duration_since(UNIX_EPOCH)\n\
+         \x20       .map_or(0, |since| since.as_secs());\n\
+         \x20   println!(\"cargo:rustc-env=PHP_BUILD_EPOCH={{seconds}}\");\n\
+         }}\n"
+    )
+}
+
+/// The crate root: the host's name, its `main` and the template's sink.
+pub(crate) fn lib_rs(manifest: &Manifest, name: &str, bin: &str) -> String {
+    let lints = lint_attributes(manifest, &format!("sapi/{name}"));
+    format!(
+        "//! php's `{name}` host, `php-src/sapi/{name}`, as one crate under `sapi/`\n\
+         //! (ADR-0008): the binary `{bin}`, reaching the engine through `php_sapi`\n\
+         //! alone. A host builds a request description from what it was given,\n\
+         //! supplies a sink for what the request writes, and crosses `serve`\n\
+         //! between them (design §4.3 seam 4).\n\
+         #![forbid(unsafe_code)]\n\
+         {lints}\
+         \n\
+         use std::io::Write;\n\
+         use std::process::ExitCode;\n\
+         \n\
+         use php_sapi::{{Engine, OutputSink, RequestDescription, ResponseHead}};\n\
+         \n\
+         /// `sapi_module.name`: what `php_sapi_name()` answers.\n\
+         pub const NAME: &str = \"{name}\";\n\
+         \n\
+         /// The host's `main`: the file the line names served on one engine of\n\
+         /// the bundle's enabled set with the bundle's tier bound, and the\n\
+         /// process ending with the code the request ended with.\n\
+         pub fn main() -> ExitCode {{\n\
+         \x20   let Some(file) = std::env::args_os().nth(1) else {{\n\
+         \x20       let _ = std::io::stderr()\n\
+         \x20           .lock()\n\
+         \x20           .write_all(b\"Usage: {bin} <file>\\n\");\n\
+         \x20       return php_sapi::exit_code(1);\n\
+         \x20   }};\n\
+         \x20   let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();\n\
+         \x20   let builder = Engine::builder()\n\
+         \x20       .extensions(&extensions)\n\
+         \x20       .tier::<php_bundle::Tier>();\n\
+         \x20   let engine = php_sapi::start(builder, &[], None);\n\
+         \x20   let description = RequestDescription {{\n\
+         \x20       argv: vec![file.as_encoded_bytes().to_vec()],\n\
+         \x20       cwd: std::env::current_dir().unwrap_or_default(),\n\
+         \x20       sapi_name: NAME.to_owned(),\n\
+         \x20       script_name: Some(file.as_encoded_bytes().to_vec()),\n\
+         \x20       ..RequestDescription::default()\n\
+         \x20   }};\n\
+         \x20   php_sapi::exit_code(engine.serve(description, &mut Streams).exit_code)\n\
+         }}\n\
+         \n\
+         /// The process's two streams: the body on stdout, no header block, and\n\
+         /// the log and the error stream on stderr, each log entry with `\\n`\n\
+         /// after it.\n\
+         struct Streams;\n\
+         \n\
+         impl OutputSink for Streams {{\n\
+         \x20   fn write(&mut self, bytes: &[u8]) {{\n\
+         \x20       let _ = std::io::stdout().lock().write_all(bytes);\n\
+         \x20   }}\n\
+         \n\
+         \x20   fn flush(&mut self) {{\n\
+         \x20       let _ = std::io::stdout().lock().flush();\n\
+         \x20   }}\n\
+         \n\
+         \x20   fn send_headers(&mut self, _head: &ResponseHead) {{}}\n\
+         \n\
+         \x20   fn log(&mut self, entry: &[u8]) {{\n\
+         \x20       let mut stderr = std::io::stderr().lock();\n\
+         \x20       let _ = stderr.write_all(entry);\n\
+         \x20       let _ = stderr.write_all(b\"\\n\");\n\
+         \x20   }}\n\
+         \n\
+         \x20   fn write_stderr(&mut self, bytes: &[u8]) {{\n\
+         \x20       let _ = std::io::stderr().lock().write_all(bytes);\n\
+         \x20   }}\n\
+         }}\n"
+    )
+}
+
+/// The binary: the host's `main`, and nothing else.
+fn main_rs(package: &str, bin: &str) -> String {
+    format!(
+        "//! `{bin}`, the binary (design §4.1; ADR-0008): [`{package}::main`].\n\
+         #![forbid(unsafe_code)]\n\
+         \n\
+         use std::process::ExitCode;\n\
+         \n\
+         fn main() -> ExitCode {{\n\
+         \x20   {package}::main()\n\
+         }}\n"
+    )
+}
+
+/// The integration test: the binary serves the file its line names,
+/// under the host's name.
+fn serve_rs(name: &str, bin: &str) -> String {
+    format!(
+        "//! The binary serves the file its line names, under the host's name.\n\
+         \n\
+         use std::process::Command;\n\
+         \n\
+         #[test]\n\
+         fn the_file_the_line_names_is_served_under_the_host_s_name() {{\n\
+         \x20   let file = std::env::temp_dir().join(format!(\"sapi-{name}-{{}}.php\", std::process::id()));\n\
+         \x20   std::fs::write(&file, \"<?php echo PHP_SAPI, \\\"\\\\n\\\";\").unwrap();\n\
+         \x20   let out = Command::new(env!(\"CARGO_BIN_EXE_{bin}\"))\n\
+         \x20       .arg(&file)\n\
+         \x20       .output()\n\
+         \x20       .unwrap();\n\
+         \x20   let _ = std::fs::remove_file(&file);\n\
+         \x20   assert_eq!(String::from_utf8_lossy(&out.stdout), \"{name}\\n\");\n\
+         \x20   assert!(out.status.success(), \"{{out:?}}\");\n\
+         }}\n"
+    )
+}

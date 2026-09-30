@@ -8,7 +8,7 @@
 //! serves one request on the one thread it has, as design revision 35
 //! requires of pcntl.
 //!
-//! The binary is `php-witness`, `crates/php`'s `main.rs` built with
+//! The binary is `php-witness`, `sapi/cli`'s host built with
 //! `php_engine`'s `witness-trace`, which this module builds once per run
 //! with cargo where the run meets its first such fence. Its build shares
 //! the engine's compiled crates with this harness's, since both turn the
@@ -21,9 +21,9 @@
 //! §4.5 condition 2, revision 58), what a fence entered and nothing it
 //! only spells.
 //!
-//! A fence with a `request` is served by the same binary run as php-cgi,
-//! through a link of that name, beside php-cgi for the oracle
-//! ([`served_as_cgi`], #1197).
+//! A fence with a `request` is served by `php-cgi-witness`, `sapi/cgi`'s
+//! host built the same way, through a link of the name php-cgi, beside
+//! php-cgi for the oracle ([`served_as_cgi`], #1197, ADR-0008).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,37 +37,58 @@ use crate::oracle::{Invocation, Observation, Oracle, Program};
 use crate::phpt::{cgi, file::Phpt};
 use crate::scratch::Tree;
 
-/// The binary's name, `crates/php`'s second `[[bin]]`.
-const BINARY: &str = "php-witness";
+/// A host whose witness build serves a fence: its package and the name
+/// of its `witness-trace` binary.
+#[derive(Debug, Clone, Copy)]
+struct Host {
+    package: &'static str,
+    binary: &'static str,
+}
 
-/// The variable the binary reads the trace file's path from
-/// (`crates/php/src/main.rs`).
+/// `sapi/cli`'s witness build, which serves a fence marked `process`.
+const CLI: Host = Host {
+    package: "php_sapi_cli",
+    binary: "php-witness",
+};
+
+/// `sapi/cgi`'s, which serves a fence with a `request`.
+const CGI: Host = Host {
+    package: "php_sapi_cgi",
+    binary: "php-cgi-witness",
+};
+
+/// The variable the binaries read the trace file's path from
+/// (`php_sapi::start`).
 const TRACE: &str = "PHP_WITNESS_TRACE";
 
-/// The binary for one run: built at the first fence that asks for it, and
-/// the build's failure the trouble each such fence borks on.
+/// The binaries for one run: each built at the first fence that asks for
+/// it, and the build's failure the trouble each such fence borks on.
 #[derive(Debug)]
 pub(crate) struct Binary {
     root: PathBuf,
-    built: OnceLock<Result<PathBuf, String>>,
+    cli: OnceLock<Result<PathBuf, String>>,
+    cgi: OnceLock<Result<PathBuf, String>>,
 }
 
 impl Binary {
-    /// The binary of the workspace at `root`, not yet built.
+    /// The binaries of the workspace at `root`, not yet built.
     pub(crate) fn of(root: &Path) -> Binary {
         Binary {
             root: root.to_path_buf(),
-            built: OnceLock::new(),
+            cli: OnceLock::new(),
+            cgi: OnceLock::new(),
         }
     }
 
-    /// Where the binary is, built from the tree now if this run has not
-    /// built it yet.
+    /// Where the CLI's binary is, built from the tree now if this run has
+    /// not built it yet.
     fn path(&self) -> Result<&Path> {
-        self.built
-            .get_or_init(|| build(&self.root).map_err(|e| format!("{e:#}")))
-            .as_deref()
-            .map_err(|why| anyhow!("{why}"))
+        built(&self.cli, &self.root, CLI)
+    }
+
+    /// Where the CGI's binary is, as [`Binary::path`].
+    fn cgi_path(&self) -> Result<&Path> {
+        built(&self.cgi, &self.root, CGI)
     }
 
     /// `snippet` served by the binary under the recipe, and `regime`'s ini
@@ -97,16 +118,16 @@ impl Binary {
 }
 
 impl Binary {
-    /// `snippet` served as the request `request` describes by the binary
-    /// run as php-cgi, as [`Binary::serve`] serves a `process` fence; with
-    /// the natives it entered.
+    /// `snippet` served as the request `request` describes by the CGI's
+    /// binary run under the name php-cgi, as [`Binary::serve`] serves a
+    /// `process` fence; with the natives it entered.
     pub(super) fn serve_cgi(
         &self,
         oracle: &Oracle<'_>,
         snippet: &str,
         request: &str,
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.path()?;
+        let binary = self.cgi_path()?;
         let hosts = Tree::new("witness-cgi")?;
         let host = cgi::linked(binary, hosts.path())?;
         let traces = Tree::new("witness-trace")?;
@@ -157,35 +178,48 @@ pub(crate) fn served_as_cgi(
     })
 }
 
-/// `cargo build -p php --bin php-witness --features witness-trace` in
+/// Where `host`'s binary is, built into `slot` from the tree at `root`
+/// now if this run has not built it yet.
+fn built<'a>(
+    slot: &'a OnceLock<Result<PathBuf, String>>,
+    root: &Path,
+    host: Host,
+) -> Result<&'a Path> {
+    slot.get_or_init(|| build(root, host).map_err(|e| format!("{e:#}")))
+        .as_deref()
+        .map_err(|why| anyhow!("{why}"))
+}
+
+/// `cargo build -p <package> --bin <binary> --features witness-trace` in
 /// `root`, and where cargo put the binary: the target directory cargo
 /// was told of, or `root`'s own.
-fn build(root: &Path) -> Result<PathBuf> {
+fn build(root: &Path, host: Host) -> Result<PathBuf> {
+    let Host { package, binary } = host;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
         .args([
             "build",
             "--quiet",
             "--package",
-            "php",
+            package,
             "--bin",
-            BINARY,
+            binary,
             "--features",
             "witness-trace",
         ])
         .current_dir(root)
         .status()
-        .with_context(|| format!("running cargo to build {BINARY}"))?;
+        .with_context(|| format!("running cargo to build {binary}"))?;
     if !status.success() {
         bail!(
-            "cargo could not build {BINARY} ({status}); its errors are on the harness's second stream"
+            "cargo could not build {binary} ({status}); its errors are on the harness's second stream"
         );
     }
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| root.join("target"), |dir| root.join(dir));
-    let binary = target.join("debug").join(BINARY);
-    if !binary.is_file() {
-        bail!("cargo built {BINARY} and it is not at {}", binary.display());
+    let built = target.join("debug").join(binary);
+    if !built.is_file() {
+        bail!("cargo built {binary} and it is not at {}", built.display());
     }
-    Ok(binary)
+    Ok(built)
 }

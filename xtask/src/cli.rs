@@ -324,6 +324,20 @@ pub(crate) enum Command {
         /// The extension's name as php-src spells it, with a `[[crate]]` row.
         name: String,
     },
+    /// Lay one host crate down at sapi/<name> in the topology the CLI and CGI
+    /// have, its binary and its test; refuses one without its `[[crate]]` row
+    /// or an existing one (ADR-0008).
+    ///
+    /// The template: the facade and the bundle as its two dependencies,
+    /// `main`, a host that serves the file its line names until its own
+    /// replaces it, the build date's `build.rs` and a test of the binary.
+    NewSapi {
+        /// The host's name as php-src spells its directory, with a `[[crate]]` row.
+        name: String,
+        /// The binary's name; `php-<name>` where none is given.
+        #[arg(long = "bin", value_name = "NAME")]
+        binary: Option<String>,
+    },
     /// Extract every `php` fence and its `expect` fence from a crate's
     /// rustdoc, run each under the oracle's recipe and hold it to what the
     /// fence pins. One reading per crate.

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::layout;
 use crate::oracle::Pin;
 
 /// The file name of the manifest at the workspace root.
@@ -227,14 +228,18 @@ impl Crate {
     }
 
     /// Where the crate's sources are, relative to the workspace root:
-    /// `ext/<name>` for an extension, `crates/<name>` otherwise, and
-    /// `xtask` for the harness.
+    /// `ext/<name>` for an extension, `sapi/<name>` for a host,
+    /// `crates/<name>` otherwise, and `xtask` for the harness
+    /// ([`crate::layout`]).
     pub fn path(&self) -> PathBuf {
-        if self.name == "xtask" || self.name.starts_with("ext/") {
-            PathBuf::from(&self.name)
-        } else {
-            Path::new("crates").join(&self.name)
-        }
+        layout::path(&self.name)
+    }
+
+    /// The crate's cargo package: `php_ext_<name>` for `ext/<name>`
+    /// (ADR-0004), `php_sapi_<name>` for `sapi/<name>` (ADR-0008), the
+    /// name itself otherwise ([`crate::layout`]).
+    pub(crate) fn package(&self) -> String {
+        layout::package(&self.name)
     }
 
     /// The subsets of the pinned corpus this crate owns, relative to the

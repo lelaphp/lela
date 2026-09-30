@@ -767,8 +767,26 @@ impl<'a> Oracle<'a> {
     }
 }
 
-/// The engine's binary, the one `crates/php` builds (design §4.1).
+/// The engine's binary, the one `sapi/cli` builds (design §4.1,
+/// ADR-0008).
 pub const ENGINE: &str = "php";
+
+/// Beside [`ENGINE`], the CGI host's binary, the one `sapi/cgi` builds
+/// (ADR-0008), which a CGI-shaped test is run through.
+pub(crate) const ENGINE_CGI: &str = "php-cgi";
+
+/// The cargo line that builds [`ENGINE`] and [`ENGINE_CGI`]: their two
+/// crates by package, so the build turns on the features those crates
+/// declare and no others. A line naming the binaries alone builds them
+/// with every workspace member's features unified, the harness's
+/// extensions among them, which is not the binary the lane measures.
+pub(crate) fn engine_build() -> String {
+    let packages: Vec<String> = [crate::carried::BINARY, "sapi/cgi"]
+        .iter()
+        .map(|krate| format!("-p {}", crate::layout::package(krate)))
+        .collect();
+    format!("cargo build {}", packages.join(" "))
+}
 
 /// The extensions php names otherwise than their crates, the module's
 /// name beside the crate's, as upstream's own runner pairs them
@@ -832,8 +850,7 @@ impl Runner {
     /// so `release` is preferred among the binaries that are the tree's
     /// and not over them: before this, a release binary built once and
     /// never again was the lane's engine for every run after, however far
-    /// the tree moved, and `cargo build -p php` could not displace it
-    /// (#475). Where every binary found is behind the tree, the first is
+    /// the tree moved, and a debug build could not displace it (#475). Where every binary found is behind the tree, the first is
     /// the one the skip names.
     pub fn resolve(root: &Path, pin: &Pin, named: Option<&Path>) -> Result<Runner> {
         if let Some(path) = named {
@@ -920,10 +937,13 @@ impl Runner {
     }
 }
 
-/// Where the engine's binary is built from: the crates that go into it
-/// (design §4.1). `xtask` is not among them, since the harness is not
-/// linked into `php`, and `target` is no source at all.
-const ENGINE_SOURCES: [&str; 2] = ["crates", "ext"];
+/// Where the engine's binary is built from: the crates that go into it,
+/// every directory of [`crate::layout::CRATE_DIRS`] (design §4.1,
+/// ADR-0008). `xtask` is not among them, since the harness is not linked
+/// into `php`, and `target` is no source at all.
+fn engine_sources() -> impl Iterator<Item = &'static str> {
+    crate::layout::CRATE_DIRS.iter().map(|d| d.dir)
+}
 
 /// The newest source of the engine under `root`, and when it was written.
 /// `None` where the tree carries none, and then no binary is behind
@@ -931,7 +951,7 @@ const ENGINE_SOURCES: [&str; 2] = ["crates", "ext"];
 /// tree a binary can have fallen behind.
 fn newest_source(root: &Path) -> Option<(PathBuf, SystemTime)> {
     let mut found = Vec::new();
-    for dir in ENGINE_SOURCES {
+    for dir in engine_sources() {
         let _ = crate::tally::files_under(&root.join(dir), &mut found);
     }
     found
@@ -944,7 +964,7 @@ fn newest_source(root: &Path) -> Option<(PathBuf, SystemTime)> {
         .max_by_key(|(_, written)| *written)
 }
 
-/// Whether one file under [`ENGINE_SOURCES`], named relative to the root,
+/// Whether one file under [`engine_sources`], named relative to the root,
 /// is code the binary is built from: a `.rs` the crate is compiled from or
 /// a `.toml` its `build.rs` reads, and not one of the files
 /// [`crate::sources::rust`] leaves out of a crate's sources for the same
@@ -972,23 +992,34 @@ fn is_engine_source(relative: &Path) -> bool {
 /// decides a rebuild by. A binary whose write time cannot be read, and a
 /// tree with no engine source in it, are left as the engine: this says a
 /// binary is behind the tree only where it measured that it is.
+///
+/// The CGI host's binary beside it, [`ENGINE_CGI`], is what a CGI-shaped
+/// test of the lane runs, and since ADR-0008 it is built by a crate of its
+/// own, so a build of `php` alone leaves it where it was: where it stands
+/// there it is held to the tree with the engine's, and the pair is behind
+/// the tree when either is.
 fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
-    let (Ok(built), Some((source, written))) = (
-        path.metadata().and_then(|at| at.modified()),
-        newest_source(root),
-    ) else {
+    let Some((source, written)) = newest_source(root) else {
         return Runner::Engine(path);
     };
-    if written <= built {
+    let cgi = path.with_file_name(ENGINE_CGI);
+    let behind = [path.as_path(), cgi.as_path()].into_iter().find(|binary| {
+        binary
+            .metadata()
+            .and_then(|at| at.modified())
+            .is_ok_and(|built| written > built)
+    });
+    let Some(behind) = behind else {
         return Runner::Engine(path);
-    }
+    };
+    let path = behind;
     Runner::Stale(format!(
         "the engine's binary at {} was built before {} was last written, so a lane running it \
          would measure an engine this tree no longer describes while stamping the reading with \
-         the tree. Rebuild it: `cargo build -p {ENGINE}`, or `cargo build --release -p {ENGINE}` \
-         for the release binary a lane prefers.",
+         the tree. Rebuild it: `{}`, or with `--release` for the release binary a lane prefers.",
         path.display(),
-        source.display()
+        source.display(),
+        engine_build()
     ))
 }
 

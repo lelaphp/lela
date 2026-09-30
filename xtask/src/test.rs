@@ -15,7 +15,6 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::clippy::package;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status, Store, plural};
 use crate::sources;
@@ -76,7 +75,7 @@ pub(crate) fn command(
 /// what it printed otherwise, the numbers summed off the lines cargo's
 /// harness prints per test binary either way.
 pub(crate) fn check(root: &Path, krate: &Crate) -> Result<Reading> {
-    let package = package(krate);
+    let package = krate.package();
     let mut cargo = Command::new("cargo");
     cargo.args(["test", "-q", "-p", &package]).current_dir(root);
     // Pre-commit runs this, and git exports `GIT_DIR`, `GIT_INDEX_FILE`

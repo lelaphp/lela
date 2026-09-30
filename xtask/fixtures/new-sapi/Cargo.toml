@@ -1,0 +1,13 @@
+# The fixture workspace, its members listed one by one: `new-sapi` adds the
+# crate it lays down.
+[workspace]
+resolver = "3"
+members = ["crates/php_sapi", "crates/php_bundle"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
