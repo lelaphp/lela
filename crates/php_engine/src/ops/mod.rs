@@ -1731,6 +1731,17 @@ pub(crate) fn get_long(req: &mut Request, value: &Value) -> i64 {
 /// float(7)
 /// float(1)
 /// ```
+///
+/// `zend_strtod` keeps the sign of a zero, which an integer read would
+/// lose:
+///
+/// ```php
+/// var_dump((float)"-0", +(float)" -0");
+/// ```
+/// ```expect
+/// float(-0)
+/// float(-0)
+/// ```
 pub(crate) fn get_double(req: &mut Request, value: &Value) -> f64 {
     match value.deref().as_ref() {
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => 0.0,
@@ -1741,6 +1752,7 @@ pub(crate) fn get_double(req: &mut Request, value: &Value) -> f64 {
         // `zend_strtod` over the string: the number it opens with after
         // any leading whitespace, read to a double, and zero for none.
         ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
+            Some((Number::Long(0), _)) if negative_text(s.as_bytes()) => -0.0,
             Some((Number::Long(n), _)) => wide(n),
             Some((Number::Double(d), _)) => d,
             None => 0.0,
@@ -1752,6 +1764,15 @@ pub(crate) fn get_double(req: &mut Request, value: &Value) -> f64 {
         },
         ValueRef::Reference(r) => get_double(req, &r.get()),
     }
+}
+
+/// Whether the number a string opens with, past its whitespace, is
+/// written with a `-`.
+fn negative_text(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .find(|b| !matches!(**b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+        == Some(&b'-')
 }
 
 /// `convert_object_to_type`'s warning, for an object whose class has no
