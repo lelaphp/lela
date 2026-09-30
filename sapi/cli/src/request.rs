@@ -428,7 +428,8 @@ mod tests {
     }
 
     /// What `-r` prints under the `-d` switches given, served by an engine
-    /// built from them as the binary builds it.
+    /// of the bundle built from them as the binary builds it, so an
+    /// extension's entry, `date.timezone`, is one.
     fn served_under(switches: &[&str], code: &str) -> (String, String) {
         let mut words = vec!["-n"];
         for switch in switches {
@@ -438,7 +439,10 @@ mod tests {
         let Ok(options) = parse(&words) else {
             return (String::from("refused"), String::new());
         };
-        let mut builder = Engine::builder();
+        let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
+        let mut builder = Engine::builder()
+            .extensions(&extensions)
+            .tier::<php_bundle::Tier>();
         for (name, value) in &options.ini {
             builder = builder.ini(name, value);
         }

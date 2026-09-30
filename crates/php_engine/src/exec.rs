@@ -158,6 +158,98 @@ impl Caller {
     }
 }
 
+/// `EX(This)` as an object, and whether the call holds an owner of it,
+/// which php says with `ZEND_CALL_RELEASE_THIS`. php sets that bit, and
+/// takes the owner, where the call's receiver came from a value the
+/// caller may give up while the call runs (`INIT_METHOD_CALL` over a
+/// variable or a temporary, `new`, a dynamic or user call over an array
+/// callable, a generator's frame) and leaves it clear where the caller
+/// keeps the object: `zend_call_function`, which every call a native
+/// makes goes through, and a method called on the calling frame's own
+/// `$this`. So the destructor of an object whose last outside owner
+/// lets it go while one of its methods runs from a native is served
+/// there, inside the method.
+///
+/// A lent receiver is a name with no owner, so it pins the object
+/// ([`Receiver::lent`], [`php_heap::Obj::pin`]): php frees the
+/// object under the running frame when its last owner lets it go, and
+/// here its destructor and its members' release are served at that
+/// moment while its bytes and its id stand until the last pin is
+/// let go ([`Request::give_up_receiver`]); and a frame that leaves the
+/// running chain, a generator's or a suspended fiber's, owns what it was
+/// lent.
+#[derive(Clone, Copy)]
+pub(crate) enum Receiver {
+    /// `ZEND_CALL_RELEASE_THIS`: one owner the call holds, which the
+    /// frame it becomes gives up when it is popped and the collector
+    /// counts as one of the object's.
+    Owned(PhpObject),
+    /// No `ZEND_CALL_RELEASE_THIS`: the object whoever made the call
+    /// keeps, named and not owned.
+    Lent(PhpObject),
+}
+
+impl Receiver {
+    /// The receiver of a call php makes without `ZEND_CALL_RELEASE_THIS`
+    /// (`zend_call_function`, `$this->m()`, a forwarding `parent::m()`):
+    /// lent, the object named with no owner and pinned
+    /// ([`php_heap::Obj::pin`]) until the call or the frame it becomes
+    /// gives the name up ([`Request::give_up_receiver`]). An autoloader
+    /// that unregisters itself gives up the object's last owner outside
+    /// the call, and php frees the object there, inside the method: its
+    /// destructor is served and its members are released at that
+    /// moment, while the method goes on over the object it still names,
+    /// whose bytes stand until the pin is let go:
+    ///
+    /// ```php
+    /// class A { function __invoke($c) { spl_autoload_unregister($this); echo "unregistered\n"; $this->after(); }
+    ///     function after() { echo "after\n"; }
+    ///     function __destruct() { echo "A gone\n"; } }
+    /// spl_autoload_register(new A);
+    /// var_dump(class_exists('X'));
+    /// ```
+    /// ```expect
+    /// A gone
+    /// unregistered
+    /// after
+    /// bool(false)
+    /// ```
+    pub(crate) fn lent(object: PhpObject) -> Receiver {
+        object.heap().pin();
+        Receiver::Lent(object)
+    }
+
+    /// The object, owned or not.
+    pub(crate) fn object(self) -> PhpObject {
+        match self {
+            Receiver::Owned(object) | Receiver::Lent(object) => object,
+        }
+    }
+
+    /// The object where the call owns it, which is what a pop gives up
+    /// and what `zend_unfinished_execution_gc` walks.
+    pub(crate) fn owned(self) -> Option<PhpObject> {
+        match self {
+            Receiver::Owned(object) => Some(object),
+            Receiver::Lent(_) => None,
+        }
+    }
+}
+
+impl CallState {
+    /// `Z_OBJ(call->This)`: the receiver, a view.
+    pub(crate) fn this(&self) -> Option<PhpObject> {
+        self.receiver.map(Receiver::object)
+    }
+}
+
+impl FrameState {
+    /// `Z_OBJ(EX(This))`: the receiver, a view.
+    pub(crate) fn this(&self) -> Option<PhpObject> {
+        self.receiver.map(Receiver::object)
+    }
+}
+
 /// One frame's engine state.
 pub(crate) struct FrameState {
     /// The unit being served, shared with every other request serving it
@@ -178,10 +270,11 @@ pub(crate) struct FrameState {
     /// `EX(prev_execute_data)` as far as a diagnostic reads it
     /// ([`Caller`]).
     pub(crate) caller: Caller,
-    /// `EX(This)` as an object: the receiver of a method call, one owner
-    /// the frame holds until it is popped (`ZEND_CALL_RELEASE_THIS`);
-    /// none for the main op array, a function or a method declared `static`.
-    pub(crate) this: Option<PhpObject>,
+    /// `EX(This)` as an object: the receiver of a method call, with
+    /// whether the frame owns it until it is popped
+    /// (`ZEND_CALL_RELEASE_THIS`); none for the main op array, a function
+    /// or a method declared `static`.
+    pub(crate) receiver: Option<Receiver>,
     /// The called scope, `static`; none for the main op array or a
     /// function.
     pub(crate) called_scope: Option<ClassId>,
@@ -445,10 +538,10 @@ pub(crate) struct CallState {
     /// How many the `INIT_FCALL` said there are, which bounds them.
     pub(crate) count: usize,
     /// `ZEND_CALL_HAS_THIS`: the receiver of a method call, php's
-    /// `EX(This)`, one owner the frame holds until it is popped
+    /// `EX(This)`, with whether the call owns it
     /// (`ZEND_CALL_RELEASE_THIS`); none for a function or a method
     /// called on the class.
-    pub(crate) this: Option<PhpObject>,
+    pub(crate) receiver: Option<Receiver>,
     /// The called scope, `static`: the class a method was called on,
     /// which is the receiver's for an instance call and the one named
     /// for a call on the class; none for a function.
@@ -663,7 +756,7 @@ impl Vm {
         unit: Arc<Unit>,
         body: Body,
         function: Option<Function>,
-        this: Option<PhpObject>,
+        receiver: Option<Receiver>,
         called_scope: Option<ClassId>,
         num_args: u32,
         returns_to: Option<(FrameRef, u32)>,
@@ -678,7 +771,7 @@ impl Vm {
             opline: 0,
             returns_to,
             caller,
-            this,
+            receiver,
             called_scope,
             scope: None,
             symbol_table: None,
@@ -718,6 +811,25 @@ impl Vm {
         Some((state, calls))
     }
 
+    /// Every frame and call of this execution lent its receiver made its
+    /// owner: the objects the caller is to take one owner of for each,
+    /// and let one pin of each go.
+    pub(crate) fn own_lent(&mut self) -> Vec<PhpObject> {
+        let mut taken = Vec::new();
+        let receivers = self
+            .frames
+            .iter_mut()
+            .map(|state| &mut state.receiver)
+            .chain(self.calls.iter_mut().map(|call| &mut call.receiver));
+        for receiver in receivers {
+            if let Some(Receiver::Lent(held)) = *receiver {
+                *receiver = Some(Receiver::Owned(held));
+                taken.push(held);
+            }
+        }
+        taken
+    }
+
     /// The frame's state off the stack; its slots are the heap frame's,
     /// released by the request before it pops both, and its receiver and
     /// extra arguments are handed back for the request to release.
@@ -738,7 +850,7 @@ impl Vm {
     /// `Z_OBJ(EX(This))`: the receiver of `frame`, a view with no owner
     /// taken; none where the frame has none.
     pub(crate) fn this(&self, frame: FrameRef) -> Option<PhpObject> {
-        self.at(frame).and_then(|state| state.this)
+        self.at(frame).and_then(FrameState::this)
     }
 
     pub(crate) fn at(&self, frame: FrameRef) -> Option<&FrameState> {
@@ -1743,7 +1855,7 @@ pub(crate) fn unfinished_execution_gc(
     calls: &[CallState],
     visit: &mut dyn FnMut(Value),
 ) {
-    if let Some(this) = state.this {
+    if let Some(this) = state.receiver.and_then(Receiver::owned) {
         visit(this.as_value());
     }
     if let Some(closure) = state.closure {
@@ -1791,7 +1903,7 @@ pub(crate) fn unfinished_calls_gc(calls: &[CallState], visit: &mut dyn FnMut(Val
         for argument in &call.arguments {
             visit(*argument);
         }
-        if let Some(this) = call.this {
+        if let Some(this) = call.receiver.and_then(Receiver::owned) {
             visit(this.as_value());
         }
         for (_, value) in &call.extra_named {

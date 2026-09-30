@@ -45,7 +45,9 @@ mod xp_ssl;
 use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
 
-use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, ObjectHandlers, OrFalse, StartupIni};
+use php_ext::abi::{
+    CloneObj, Extension, ExtensionBuilder, IniStage, ObjectHandlers, OrFalse, StartupIni,
+};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::Function;
 use php_ext::decl::{IniDecl, Name};
@@ -458,7 +460,7 @@ fn on_update_libctx(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
     if value == b"default" || value == b"custom" {
         return Ok(true);
     }
-    let level = if req.at_startup() {
+    let level = if req.ini_stage() == IniStage::Startup {
         php_ext::raising::Level::Error
     } else {
         php_ext::raising::Level::Warning

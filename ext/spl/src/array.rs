@@ -30,7 +30,8 @@ use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{Level, Thrown, deprecated, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{
-    ClassId, HashIterator, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, Value, ValueRef,
+    ClassId, DeclaredRows, HashIterator, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, Value,
+    ValueRef,
 };
 
 use crate::{
@@ -406,6 +407,28 @@ impl ArrayObject {
     /// int(3)
     /// int(2)
     /// a=1;d=4;
+    /// ```
+    ///
+    /// Once a sort has laid the object's table down as copies of its
+    /// declared rows, a protected one is a plain value to the count,
+    /// which counts it, and iteration still leaves it out.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class C { public $b = 'q'; protected $a = 'z'; }
+    /// $c = new C; $c->{'5'} = 'm';
+    /// $ao = @new ArrayObject($c);
+    /// var_dump(count($ao), $ao->count());
+    /// $ao->asort();
+    /// var_dump(count($ao), $ao->count());
+    /// foreach ($ao as $k => $v) echo "$k=$v;";
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(2)
+    /// int(3)
+    /// int(3)
+    /// 5=m;b=q;
     /// ```
     #[php(tentative)]
     fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
@@ -1245,6 +1268,12 @@ fn store(req: &mut Request, owner: PhpObject, array: PhpArray) -> Result<(), Thr
     Ok(())
 }
 
+/// Whether `key` is a protected or private property's mangled name,
+/// which `spl_array_skip_protected` reads off its first byte.
+fn mangled(key: &Key) -> bool {
+    matches!(key, Key::Str(s) if s.as_bytes().starts_with(b"\0"))
+}
+
 impl Table {
     /// The elements in order, views, no owner taken; a property table's
     /// protected and private rows left out, as `spl_array_skip_protected`
@@ -1253,7 +1282,7 @@ impl Table {
         Ok(self
             .every_row(req)?
             .into_iter()
-            .filter(|(key, _)| !matches!(key, Key::Str(s) if s.as_bytes().starts_with(b"\0")))
+            .filter(|(key, _)| !mangled(key))
             .collect())
     }
 
@@ -1306,10 +1335,21 @@ impl Table {
         }
     }
 
+    /// `spl_array_object_count_elements_helper` over a property table:
+    /// a declared row the slots stand for, php's `IS_INDIRECT`, is left
+    /// out under a mangled name, and a plain value counts whatever its
+    /// key, so a protected or private row the table holds as a copy
+    /// counts where iteration leaves it out.
     fn len(self, req: &mut Request) -> Result<usize, Thrown> {
         match self {
             Table::Array(_, array) => Ok(array.len()),
-            Table::Props(_) => Ok(self.rows(req)?.len()),
+            Table::Props(object) => {
+                let rows = self.every_row(req)?;
+                Ok(match object.declared_rows() {
+                    DeclaredRows::Copied => rows.len(),
+                    DeclaredRows::Slots => rows.iter().filter(|(key, _)| !mangled(key)).count(),
+                })
+            }
         }
     }
 
@@ -2383,13 +2423,40 @@ fn sort_through(
 
 /// `spl_array_method`'s write-back, `*ht_ptr = Z_ARRVAL_P(ht_zv)`: the
 /// sorted array made the storage, or, over an object, the object's
-/// rows laid down again in the sorted order. A declared property keeps
-/// its slot and so its place among the rows, where php's table moves
-/// its `IS_INDIRECT` row with the rest (#912); a dynamic one moves.
+/// property table, which from then on holds its declared rows as the
+/// copies the sort moved with the rest, the slots going on apart from
+/// them, as php's table holds the plain values `zend_array_dup` left
+/// when the sort separated it.
+///
+/// ```php
+/// class C { public $prop1 = 'x'; public $prop2 = 'z'; private $prop3 = 'a'; public $prop4 = 'x'; }
+/// $c = new C; $c->d = 'b';
+/// $ao = @new ArrayObject($c);
+/// $ao->ksort();
+/// $c->prop1 = 'changed';
+/// var_dump($c, $c->prop1, $ao['prop1']);
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property C::$d is deprecated in %s on line 3
+/// object(C)#1 (5) {
+///   ["prop3":"C":private]=>
+///   string(1) "a"
+///   ["d"]=>
+///   string(1) "b"
+///   ["prop1"]=>
+///   string(1) "x"
+///   ["prop2"]=>
+///   string(1) "z"
+///   ["prop4"]=>
+///   string(1) "x"
+/// }
+/// string(7) "changed"
+/// string(1) "x"
+/// ```
 fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thrown> {
+    req.addref(&Value::array(sorted));
     match table {
         Table::Array(owner, _) => {
-            req.addref(&Value::array(sorted));
             let old = with(req, owner, |p| {
                 std::mem::replace(&mut p.storage, Storage::Array(sorted))
             })?;
@@ -2398,17 +2465,7 @@ fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thr
             }
             Ok(())
         }
-        Table::Props(object) => {
-            let rows = sorted.snapshot_refs();
-            for (key, _) in &rows {
-                object.unset_row(req, key)?;
-            }
-            for (key, value) in rows {
-                req.addref(&value);
-                object.set_row(req, &key, value)?;
-            }
-            Ok(())
-        }
+        Table::Props(object) => object.replace_table(req, sorted),
     }
 }
 

@@ -53,6 +53,10 @@ pub(crate) const OBJ_LAZY_UNINITIALIZED: u32 = 1 << 31;
 /// `IS_OBJ_LAZY_PROXY`: the other bit of `extra_flags`, standing on a
 /// proxy before its factory ran and after.
 pub(crate) const OBJ_LAZY_PROXY: u32 = 1 << 30;
+/// The thirty bits of `extra_flags` below php's two lazy ones, which
+/// php leaves unused: how many frames name the object with no owner of
+/// it ([`crate::Obj::pin`]).
+pub(crate) const OBJ_PINS: u32 = (1 << 30) - 1;
 
 /// `GC_TYPE_MASK`: the type byte's four bits at the bottom of the word.
 const TYPE_MASK: u32 = 0x0000_000f;
