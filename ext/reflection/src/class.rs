@@ -9,7 +9,7 @@
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::{
-    eval_const_expr, initialize_lazy, instantiate, instantiate_named, mark_lazy_initialized,
+    call_named, eval_const_expr, initialize_lazy, known_method, mark_lazy_initialized,
     read_class_prop_silent, update_class_constants, write_static_prop,
 };
 use php_ext::decl::{ClassKind, MethodDecl, Name, TraitAdaptation, Visibility};
@@ -204,13 +204,17 @@ fn method_bits(decl: &MethodDecl) -> i64 {
 
 // ------------------------------------------------------ making one
 
-/// php's `zend_throw_exception_ex(reflection_exception_ptr, ...)` for
-/// a class `new` refuses, the message `ReflectionClass` gives before
-/// the engine's own.
 /// The body `newInstance` and `newInstanceArgs` share: `object_init_ex`,
-/// then `get_constructor` under the class's fake scope, a non-public one
-/// php's `Access to non-public constructor` and a class with none
-/// refusing arguments; else the constructor served with them.
+/// which refuses what cannot be instantiated in the engine's words;
+/// then the object's own `get_constructor` asked under the class's fake
+/// scope, so a private constructor is found and not refused as
+/// `zend_std_get_constructor` refuses it from the caller's scope, and a
+/// class whose handler refuses construction (`Generator`, `Closure`,
+/// `Directory`) throws its own `Error`; then a non-public constructor
+/// php's `Access to non-public constructor`, and a class with none
+/// refusing arguments; else the constructor served with them, and the
+/// object marked as one whose constructor failed where it throws
+/// (`Z/ext/reflection/php_reflection.c:5072-5113`).
 ///
 /// ```php
 /// class Priv { private function __construct() {} } class None {} class Pub { function __construct(public $a = 0) {} }
@@ -228,34 +232,72 @@ fn method_bits(decl: &MethodDecl) -> i64 {
 ///   int(2)
 /// }
 /// ```
+///
+/// ```php
+/// trait T {}
+/// foreach (['Closure', 'Generator', 'Directory', 'T'] as $c) {
+///     try { (new ReflectionClass($c))->newInstance(); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Error: Instantiation of class Closure is not allowed
+/// Error: The "Generator" class is reserved for internal use and cannot be manually instantiated
+/// Error: Cannot directly construct Directory, use dir() instead
+/// Error: Cannot instantiate trait T
+/// ```
 fn new_instance(
     req: &mut Request,
     class: ClassId,
     arguments: ConstructorArguments<'_>,
 ) -> Result<PhpObject, Thrown> {
-    instantiable(req, class)?;
-    let refusal = match constructor_of(req, class) {
+    let object = new_object(req, class)?;
+    let asked = req.with_fake_scope(class, |req| {
+        object.handlers(req).get_constructor(req, object)
+    });
+    let constructor = match asked {
+        Ok(constructor) => constructor.and_then(|_| constructor_of(req, class)),
+        Err(thrown) => {
+            req.release(object.as_value());
+            return Err(thrown);
+        }
+    };
+    let refusal = match &constructor {
         Some((decl, _)) if decl.visibility != Visibility::Public => {
             Some("Access to non-public constructor of class {}")
         }
         None if arguments.counted() > 0 => Some(
             "Class {} does not have a constructor, so you cannot pass any constructor arguments",
         ),
-        None => return instantiate(req, class, &[]),
+        None => return Ok(object),
         Some(_) => None,
     };
     if let Some(refusal) = refusal {
+        req.release(object.as_value());
         let name = class_name_of(req, class);
         let message = refusal.replace("{}", &String::from_utf8_lossy(&name));
         return Err(throw(req, "ReflectionException", &message));
     }
-    match arguments {
+    let Some(callable) = constructor
+        .and_then(|(decl, _)| known_method(req, class, &decl.function.name, Some(object)))
+    else {
+        return Ok(object);
+    };
+    let served = match arguments {
         ConstructorArguments::Variadic(args) => {
-            instantiate_named(req, class, &args.positional, args.named())
+            call_named(req, &callable, &args.positional, args.named())
         }
-        ConstructorArguments::Array(args) => {
-            let unpacked = Unpacked::of(req, args)?;
-            instantiate_named(req, class, &unpacked.positional, &unpacked.named)
+        ConstructorArguments::Array(args) => Unpacked::of(req, args)
+            .and_then(|unpacked| call_named(req, &callable, &unpacked.positional, &unpacked.named)),
+    };
+    match served {
+        Ok(returned) => {
+            req.release(returned);
+            Ok(object)
+        }
+        Err(thrown) => {
+            object.mark_destructor_called();
+            req.release(object.as_value());
+            Err(thrown)
         }
     }
 }
@@ -316,24 +358,6 @@ impl Unpacked {
         }
         Ok(unpacked)
     }
-}
-
-fn instantiable(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
-    if !cannot_instantiate(req, class) {
-        return Ok(());
-    }
-    let name = class_name_of(req, class);
-    let what = match kind_of(req, class) {
-        ClassKind::Interface => "interface",
-        ClassKind::Trait => "trait",
-        ClassKind::Enum => "enum",
-        ClassKind::Class => "abstract class",
-    };
-    Err(throw(
-        req,
-        "ReflectionException",
-        &format!("Class {} is an {what}", String::from_utf8_lossy(&name)),
-    ))
 }
 
 /// `ReflectionClass` as the stub declares it.

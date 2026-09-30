@@ -6820,6 +6820,21 @@ impl Request {
         out
     }
 
+    /// `EG(fake_scope) = class` for the length of `f`, and the scope
+    /// that stood put back after it, so it cannot leak past the call:
+    /// the scope a native asks the engine to measure visibility from as
+    /// though `class` were executing, as `ReflectionClass::newInstance`
+    /// asks the object's `get_constructor` (`Z/ext/reflection/php_reflection.c:5086-5088`)
+    /// and `zend_update_property_ex` writes. `ReflectionClass::newInstance`
+    /// on a class with a private constructor is the witness, in
+    /// `ext/reflection`.
+    pub fn with_fake_scope<R>(&mut self, class: ClassId, f: impl FnOnce(&mut Request) -> R) -> R {
+        let saved = self.fake_scope.replace(class);
+        let out = f(self);
+        self.fake_scope = saved;
+        out
+    }
+
     /// The request's [`Phase`].
     pub(crate) fn phase(&self) -> Phase {
         self.phase
@@ -13057,14 +13072,25 @@ impl Request {
     }
 
     /// `zend_std_get_constructor`: the class's `__construct` where the
-    /// executed scope may reach it, `zend_bad_constructor_call`'s
-    /// `Error` where it may not, and none for a class with no
+    /// fake or the executed scope may reach it, `zend_bad_constructor_call`'s
+    /// `Error` where it may not, the object then marked as one whose
+    /// constructor failed so no destructor is served for it
+    /// (`zend_object_store_ctor_failed`), and none for a class with no
     /// constructor.
+    ///
+    /// ```php
+    /// class P { private function __construct() {} function __destruct() { echo "destructed\n"; } }
+    /// try { new P; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Call to private P::__construct() from global scope
+    /// ```
     pub(crate) fn constructor_of(&mut self, object: PhpObject) -> Result<Option<Function>, Thrown> {
         let Some(constructor) = self.method_named(object.class(), b"__construct") else {
             return Ok(None);
         };
-        if self.method_accessible(constructor) {
+        let scope = self.property_scope();
+        if self.method_accessible_from(constructor, scope) {
             return Ok(Some(constructor));
         }
         // `zend_bad_constructor_call`: the sentence names no `method`.
@@ -13072,7 +13098,11 @@ impl Request {
         let class = self
             .method_class(constructor)
             .map_or_else(|| String::from("object"), |class| self.class_name(class));
-        let from = self.scope_phrase();
+        let from = match scope {
+            Some(scope) => format!("scope {}", self.class_name(scope)),
+            None => String::from("global scope"),
+        };
+        object.heap().set_destructor_called(true);
         Err(crate::api::raising::throw(
             self,
             "Error",
