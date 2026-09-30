@@ -57,7 +57,7 @@ fn built_from() -> Vec<&'static str> {
     files.into_iter().chain(dirs).collect()
 }
 /// Where a workspace keeps its runs, relative to its root.
-const RUNS: &str = "target/phpt-runs";
+pub(crate) const RUNS: &str = "target/phpt-runs";
 /// What a comparison's scope adds to its subset's.
 pub(crate) const SCOPE: &str = "@against";
 
@@ -248,6 +248,49 @@ impl Base {
 
 fn path(root: &Path, tree: &str, scope: &str) -> PathBuf {
     root.join(RUNS).join(tree).join(format!("{scope}.json"))
+}
+
+/// What [`carry`] did with one worktree's kept runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Carried {
+    /// The runs copied in, which the workspace kept none of.
+    pub carried: usize,
+    /// The runs the workspace kept already, left as they stood.
+    pub kept: usize,
+}
+
+/// Every run the workspace at `from` keeps, copied into the one at `into`
+/// where that one keeps no run of the same scope under the same engine
+/// tree; one it keeps already is left standing. A run is keyed by the tree
+/// the engine's binary is built from, so a run taken anywhere at that tree
+/// is the same run, and the one standing is as good as the one carried. What
+/// `worktree retire` keeps of a worktree before removing it, so a run
+/// taken in a checkout of a base, as the skip of [`Base::run`] asks, is
+/// still there for the comparison once the checkout is gone (#1268).
+pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
+    let runs = from.join(RUNS);
+    let mut files = Vec::new();
+    crate::tally::files_under(&runs, &mut files)?;
+    files.retain(|file| file.extension().is_some_and(|e| e == "json"));
+    files.sort();
+    let mut carried = Carried::default();
+    for file in files {
+        let Ok(under) = file.strip_prefix(&runs) else {
+            continue;
+        };
+        let to = into.join(RUNS).join(under);
+        if to.exists() {
+            carried.kept += 1;
+            continue;
+        }
+        if let Some(dir) = to.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        fs::copy(&file, &to)
+            .with_context(|| format!("copying {} to {}", file.display(), to.display()))?;
+        carried.carried += 1;
+    }
+    Ok(carried)
 }
 
 /// The head's run against the stored one, or why the two do not compare.

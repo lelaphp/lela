@@ -1734,7 +1734,9 @@ impl PDOStatement {
 
     /// `PDOStatement::getIterator(): Iterator`: an `InternalIterator` over
     /// the statement, its first row fetched now, as `pdo_stmt_iter_get`
-    /// fetches it.
+    /// fetches it once `zend_iterator_init` has given the iterator its
+    /// number in the object store, so a `PDORow` the fetch makes takes
+    /// the number after it.
     ///
     /// ```php
     /// $db = new PDO('sqlite::memory:');
@@ -1751,10 +1753,22 @@ impl PDOStatement {
     /// 1:2
     /// S object is uninitialized
     /// ```
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// foreach ($db->query('SELECT 1 AS n', PDO::FETCH_LAZY) as $row) var_dump(spl_object_id($row));
+    /// ```
+    /// ```expect
+    /// int(4)
+    /// ```
     fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
         let stmt = this.object();
         handle(req, stmt)?;
-        fetch_ahead(req, stmt, 0, 0)?;
-        internal_iterator(req, &stmt).map(Instance::of)
+        let iterator = internal_iterator(req, &stmt)?;
+        if let Err(thrown) = fetch_ahead(req, stmt, 0, 0) {
+            req.release(iterator.as_value());
+            return Err(thrown);
+        }
+        Ok(Instance::of(iterator))
     }
 }

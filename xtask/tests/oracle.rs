@@ -843,3 +843,33 @@ fn a_tree_with_no_engine_source_leaves_every_binary_the_engine() {
         Runner::Engine(old)
     );
 }
+
+/// A binary named by a path relative to where `xtask` was invoked is the
+/// one its programs are handed by its absolute path: they run in the run's
+/// copy of the tree, where the relative path named nothing, and every test
+/// of the subset skipped for it (#1259). A path that names no file is
+/// refused before anything runs, naming the path.
+#[test]
+fn a_named_binary_is_handed_on_by_its_absolute_path_and_one_not_there_is_refused() {
+    let root = fixture_tree("named-relative");
+    let binary = built(root.path(), "release", 0);
+    let pin = pin_with_path(root.path());
+    let here = std::env::current_dir().unwrap();
+    let relative: PathBuf = here
+        .components()
+        .skip(1)
+        .map(|_| std::path::Component::ParentDir)
+        .chain(binary.components().skip(1))
+        .collect();
+    assert!(relative.is_relative(), "{}", relative.display());
+    let runner = Runner::resolve(root.path(), &pin, Some(&relative)).unwrap();
+    let absolute = std::fs::canonicalize(&binary).unwrap();
+    assert_eq!(runner, Runner::Engine(absolute));
+
+    let refused = Runner::resolve(root.path(), &pin, Some(Path::new("target/no-such-php")))
+        .expect_err("a path that names no file is refused");
+    assert!(
+        format!("{refused:#}").contains("target/no-such-php"),
+        "{refused:#}"
+    );
+}
