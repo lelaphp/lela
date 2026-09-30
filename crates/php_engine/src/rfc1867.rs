@@ -4,10 +4,13 @@
 //! and described in `$_FILES`, with php's limits, its warnings and its
 //! quirks of a buffer filled from the host a block at a time: a line
 //! longer than the buffer is handed out whole-buffer at a time, and a
-//! boundary is looked for only in what the buffer holds. Encoding
-//! translation (`mbstring.encoding_translation`) is not read, since no
-//! extension of this engine registers it.
+//! boundary is looked for only in what the buffer holds. Under
+//! `mbstring.encoding_translation` each part's names and value are
+//! read in the encoding its header lines are detected in and converted
+//! to the internal one, through the functions an extension handed the
+//! engine ([`Translation`]).
 
+use crate::api::abi::{Encoding, Multibyte};
 use crate::api::raising::{Level, Thrown, docref, throw};
 use crate::api::request::{BodyLimits, Input, Request, Upload};
 use crate::api::values::{PhpArray, PhpString, Value};
@@ -35,6 +38,9 @@ struct Buffer {
     size: usize,
     boundary: Vec<u8>,
     boundary_next: Vec<u8>,
+    /// The last header line read, which translation detects the part's
+    /// encoding over (`self->input_encoding`, `Z/main/rfc1867.c:390`).
+    last: Vec<u8>,
 }
 
 impl Buffer {
@@ -52,6 +58,7 @@ impl Buffer {
             size,
             boundary: dashed,
             boundary_next: next,
+            last: Vec::new(),
         }
     }
 
@@ -140,6 +147,7 @@ impl Buffer {
             if line.is_empty() {
                 break;
             }
+            self.last.clone_from(&line);
             let colon = if line.first().is_some_and(|b| is_space(*b)) {
                 None
             } else {
@@ -244,8 +252,9 @@ fn is_space(c: u8) -> bool {
 }
 
 /// `php_ap_getword`: the text up to `stop` outside quotes, a quote's
-/// escaped quote kept inside it, and every `stop` after it passed over.
-fn getword(line: &mut &[u8], stop: u8) -> Vec<u8> {
+/// escaped quote kept inside it, and every `stop` after it passed over;
+/// `php_mb_rfc1867_getword` where `width` walks a character at a time.
+fn getword(line: &mut &[u8], stop: u8, width: &dyn Fn(u8) -> usize) -> Vec<u8> {
     let s = *line;
     let mut pos = 0;
     while pos < s.len() && s[pos] != stop {
@@ -263,7 +272,7 @@ fn getword(line: &mut &[u8], stop: u8) -> Vec<u8> {
                 pos += 1;
             }
         } else {
-            pos += 1;
+            pos += width(s[pos]).max(1);
         }
     }
     let pos = pos.min(s.len());
@@ -274,32 +283,33 @@ fn getword(line: &mut &[u8], stop: u8) -> Vec<u8> {
     let word = s[..pos].to_vec();
     let mut rest = pos;
     while rest < s.len() && s[rest] == stop {
-        rest += 1;
+        rest += width(s[rest]).max(1);
     }
-    *line = &s[rest..];
+    *line = &s[rest.min(s.len())..];
     word
 }
 
 /// `php_ap_getword_conf`: the value after its leading white space,
 /// quoted or up to the next white space, an escaped quote or backslash
-/// taken for itself.
-fn getword_conf(s: &[u8]) -> Vec<u8> {
+/// taken for itself; `php_mb_rfc1867_getword_conf` under `step`.
+fn getword_conf(s: &[u8], step: &dyn Fn(u8) -> usize) -> Vec<u8> {
     let start = s.iter().take_while(|b| is_space(**b)).count();
     let s = &s[start..];
     let Some(&first) = s.first() else {
         return Vec::new();
     };
     if first == b'"' || first == b'\'' {
-        substring_conf(&s[1..], first)
+        substring_conf(&s[1..], first, step)
     } else {
         let end = s.iter().position(|b| is_space(*b)).unwrap_or(s.len());
-        substring_conf(&s[..end], 0)
+        substring_conf(&s[..end], 0, step)
     }
 }
 
 /// `substring_conf`: up to the closing `quote`, `\\` and `\<quote>` read
-/// as the byte after the backslash.
-fn substring_conf(s: &[u8], quote: u8) -> Vec<u8> {
+/// as the byte after the backslash, any other character copied whole
+/// (`php_mb_rfc1867_substring_conf` under `step`).
+fn substring_conf(s: &[u8], quote: u8, step: &dyn Fn(u8) -> usize) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < s.len() && (quote == 0 || s[i] != quote) && s[i] != 0 {
@@ -307,19 +317,68 @@ fn substring_conf(s: &[u8], quote: u8) -> Vec<u8> {
             && s.get(i + 1)
                 .is_some_and(|next| *next == b'\\' || (quote != 0 && *next == quote))
         {
-            i += 1;
+            out.push(s[i + 1]);
+            i += 2;
+            continue;
         }
-        out.push(s[i]);
-        i += 1;
+        let end = (i + step(s[i]).max(1)).min(s.len());
+        out.extend_from_slice(&s[i..end]);
+        i = end;
     }
     out
 }
 
-/// `php_ap_basename`: what follows the last `\` or `/`.
-fn basename(path: &[u8]) -> &[u8] {
-    match path.iter().rposition(|b| *b == b'\\' || *b == b'/') {
+/// `php_ap_basename`: what follows the last `\` or `/`, found a
+/// character at a time under `step` (`php_mb_rfc1867_basename` over
+/// `php_mb_safe_strrchr`).
+fn basename<'p>(path: &'p [u8], step: &dyn Fn(u8) -> usize) -> &'p [u8] {
+    let mut last = None;
+    let mut at = 0;
+    while at < path.len() {
+        if matches!(path[at], b'\\' | b'/') {
+            last = Some(at);
+        }
+        at += step(path[at]).max(1);
+    }
+    match last {
         Some(at) => &path[at + 1..],
         None => path,
+    }
+}
+
+/// `mbstring.encoding_translation` as rfc1867 asks it
+/// (`php_rfc1867_set_multibyte_callbacks`): the functions bound to the
+/// request, the encodings a part's header lines are detected among, and
+/// the internal encoding the part is converted to.
+struct Translation {
+    functions: Box<dyn Multibyte>,
+    http_input: Vec<Encoding>,
+    internal: Option<Encoding>,
+}
+
+impl Translation {
+    /// The request's, where it translates a form body.
+    fn of(req: &mut Request) -> Option<Translation> {
+        let functions = crate::multibyte::bind(req);
+        let http_input = functions.http_input()?;
+        let internal = functions.internal();
+        Some(Translation {
+            functions,
+            http_input,
+            internal,
+        })
+    }
+
+    /// `text` in `input`, converted to the internal encoding where both
+    /// stand and the conversion answers.
+    fn convert(&self, text: Vec<u8>, input: Option<Encoding>) -> Vec<u8> {
+        match (input, self.internal) {
+            (Some(input), Some(internal)) => self
+                .functions
+                .convert(&text, internal, input)
+                .unwrap_or(text),
+            _ => text,
+        }
     }
 }
 
@@ -495,6 +554,7 @@ pub(crate) fn post_handler(
         return Ok(());
     }
     let mut mbuff = Buffer::new(boundary);
+    let translation = Translation::of(req);
     let limits = Limits {
         upload_cnt,
         body_parts_cnt,
@@ -503,7 +563,7 @@ pub(crate) fn post_handler(
         upload_max_filesize,
     };
     if req.upload_event(&Upload::Start { content_length })? {
-        parts(req, &mut upload, &mut mbuff, limits)?;
+        parts(req, &mut upload, &mut mbuff, limits, translation.as_ref())?;
     }
     let read = req.post_bytes_read();
     req.upload_event(&Upload::End { read })?;
@@ -528,6 +588,7 @@ fn parts(
     upload: &mut Handler,
     mbuff: &mut Buffer,
     limits: Limits,
+    translation: Option<&Translation>,
 ) -> Result<(), Thrown> {
     let Limits {
         mut upload_cnt,
@@ -563,19 +624,32 @@ fn parts(
             )?;
             break;
         }
+        // Translated, the part is read in the encoding its last header
+        // line is detected in, its words a character at a time where
+        // there is an internal encoding to convert them to.
+        let input = translation.and_then(|t| t.functions.detect(&mbuff.last, &t.http_input));
+        let words = translation.filter(|t| t.internal.is_some());
+        let step_in = |lead: u8| match (words, input) {
+            (Some(t), Some(input)) => t.functions.char_len(input, lead),
+            _ => 1,
+        };
+        let convert = |text: Vec<u8>| match translation {
+            Some(t) => t.convert(text, input),
+            None => text,
+        };
         let mut cd: &[u8] = &cd[cd.iter().take_while(|b| is_space(**b)).count()..];
         let mut param: Option<Vec<u8>> = None;
         let mut filename: Option<Vec<u8>> = None;
         while !cd.is_empty() {
-            let pair = getword(&mut cd, b';');
+            let pair = getword(&mut cd, b';', &step_in);
             cd = &cd[cd.iter().take_while(|b| is_space(**b)).count()..];
             if pair.contains(&b'=') {
                 let mut rest: &[u8] = &pair;
-                let key = getword(&mut rest, b'=');
+                let key = getword(&mut rest, b'=', &step_in);
                 if key.eq_ignore_ascii_case(b"name") {
-                    param = Some(getword_conf(rest));
+                    param = Some(convert(getword_conf(rest, &step_in)));
                 } else if key.eq_ignore_ascii_case(b"filename") {
-                    filename = Some(getword_conf(rest));
+                    filename = Some(convert(getword_conf(rest, &step_in)));
                 }
             }
         }
@@ -584,7 +658,7 @@ fn parts(
         if filename.is_none()
             && let Some(param) = param
         {
-            let value = mbuff.read_body(req).unwrap_or_default();
+            let value = convert(mbuff.read_body(req).unwrap_or_default());
             count += 1;
             let read = req.post_bytes_read();
             let kept = if count <= max_input_vars {
@@ -777,7 +851,16 @@ fn parts(
             }
             name
         };
-        upload.file_string(req, &slot("name"), basename(&filename), false)?;
+        let step_internal = |lead: u8| match words.zip(words.and_then(|t| t.internal)) {
+            Some((t, internal)) => t.functions.char_len(internal, lead),
+            None => 1,
+        };
+        upload.file_string(
+            req,
+            &slot("name"),
+            basename(&filename, &step_internal),
+            false,
+        )?;
         upload.file_string(req, &slot("full_path"), &filename, false)?;
         let content_type = if cancel_upload != 0 {
             Vec::new()
@@ -826,17 +909,23 @@ mod tests {
     #[test]
     fn a_disposition_word_keeps_its_quotes_and_its_value_reads_them() {
         let mut line: &[u8] = b"form-data; name=\"a;b\"; filename='x\\'y'";
-        assert_eq!(getword(&mut line, b';'), b"form-data");
+        let byte = |_: u8| 1;
+        assert_eq!(getword(&mut line, b';', &byte), b"form-data");
         let rest = line.trim_ascii_start();
         let mut rest = rest;
-        let pair = getword(&mut rest, b';');
+        let pair = getword(&mut rest, b';', &byte);
         assert_eq!(pair, b"name=\"a;b\"");
         let mut value: &[u8] = &pair;
-        assert_eq!(getword(&mut value, b'='), b"name");
-        assert_eq!(getword_conf(value), b"a;b");
-        assert_eq!(getword_conf(b" 'x\\'y'"), b"x'y");
-        assert_eq!(getword_conf(b"name\\\\5"), b"name\\5");
-        assert_eq!(basename(b"C:\\dir/sub\\f.txt"), b"f.txt");
+        assert_eq!(getword(&mut value, b'=', &byte), b"name");
+        assert_eq!(getword_conf(value, &byte), b"a;b");
+        assert_eq!(getword_conf(b" 'x\\'y'", &byte), b"x'y");
+        assert_eq!(getword_conf(b"name\\\\5", &byte), b"name\\5");
+        assert_eq!(basename(b"C:\\dir/sub\\f.txt", &byte), b"f.txt");
+        // Shift_JIS's `\x95\x5c`, one character whose second byte is a
+        // backslash: stepped over whole, it neither escapes nor splits.
+        let sjis = |lead: u8| if lead >= 0x81 { 2 } else { 1 };
+        assert_eq!(getword_conf(b"\"a\x95\\b\"", &sjis), b"a\x95\\b");
+        assert_eq!(basename(b"d/\x95\\x", &sjis), b"\x95\\x");
         assert_eq!(normalize_protected(b" a.b[ x][y]"), b"a_b[x][y]");
     }
 

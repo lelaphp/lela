@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
@@ -29,10 +30,11 @@ use crate::api::abi::{
     Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni, Validation,
 };
 use crate::api::raising::Level;
-use crate::api::request::{Ending, ExtensionId, Request, Sink};
+use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
+use crate::natives::StubPlace;
 use crate::streams::Standard;
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 pub(crate) use crate::unit_cache::Cached;
@@ -407,18 +409,18 @@ pub trait OutputSink {
     /// The response's head, once, before the first body byte.
     fn send_headers(&mut self, head: &ResponseHead);
     /// One entry for the host's log, whole: what `php_log_err` was
-    /// given, a diagnostic in its log form with its stack trace under
-    /// it where it has one, or `error_log()`'s message as given, so it
-    /// may carry newlines inside it and ends in none. The host ends it:
-    /// php's CLI writes `"%s\n"` to stderr and a file log writes
-    /// `[date] ` before it and `PHP_EOL` after.
+    /// given where `error_log` names no file it could open
+    /// (`sapi_module.log_message`), a diagnostic in its log form with
+    /// its stack trace under it where it has one, or `error_log()`'s
+    /// message as given, so it may carry newlines inside it and ends in
+    /// none. The host ends it: php's CLI writes `"%s\n"` to stderr.
     fn log(&mut self, entry: &[u8]);
     /// Bytes for the host's error stream, as given: what php writes to
     /// the process's `stderr` past the host, the `display_errors=stderr`
     /// form of a diagnostic with its `\n` (`Z/main/main.c:1484`) and,
     /// when streams exist, what the `STDERR` stream constant is given.
-    /// Where the log goes is the host's: php's CLI puts it on this same
-    /// stream, and a host with an `error_log` file parts the two, so a
+    /// Where the host's log goes is the host's: php's CLI puts it on this
+    /// same stream, and an `error_log` file parts the two, so a
     /// diagnostic is logged and displayed in that order on one stream
     /// and in no order across two (#216).
     fn write_stderr(&mut self, bytes: &[u8]);
@@ -626,6 +628,10 @@ pub(crate) struct Shared {
     /// The entries a host's `php_admin_value` made `PHP_INI_SYSTEM`,
     /// which no request moves ([`IniOrigin::Admin`]).
     pub(crate) locked: Vec<Vec<u8>>,
+    /// `CG(script_encoding_list)` as the engine started: what the
+    /// startup `zend.script_encoding` named, through the encoding
+    /// functions ([`crate::multibyte`]).
+    pub(crate) script_encodings: Vec<php_compile::multibyte::Encoding>,
     pub(crate) units: UnitCache,
     /// The persistent pool (design §4.10, #1172): the sockets
     /// `pfsockopen` and `STREAM_CLIENT_PERSISTENT` keep between requests,
@@ -877,7 +883,9 @@ fn link_trampolines(
 /// the request made before it where it is an `eval`'s
 /// ([`php_compile::Options::keys_before`]), and the classes the request
 /// had declared by then, which a unit compiled for no request has none of
-/// ([`php_compile::RequestClasses`]).
+/// ([`php_compile::RequestClasses`]); and, where `zend.multibyte` is on,
+/// the encoding functions bound to the request and what the scanner
+/// reads beside them ([`crate::multibyte::Bound`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
@@ -885,6 +893,7 @@ struct Origin<'a> {
     kind: SourceKind,
     keys_before: u32,
     request_classes: RequestClasses<'a>,
+    multibyte: Option<Multibyte<'a>>,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -973,7 +982,9 @@ impl Shared {
             short_open_tag: req.short_open_tag(),
             assertions: req.assertions() >= 0,
             shebang: self.shebang,
+            multibyte: ini_truth(req.ini_get(b"zend.multibyte")),
         };
+        let bound = crate::multibyte::bound(req, ini.multibyte);
         let cwd = req.cwd();
         let keys_before = req.keys_made;
         let stack = req.stack_limit();
@@ -984,6 +995,7 @@ impl Shared {
                 kind,
                 keys_before,
                 request_classes,
+                multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
             compile(
                 source,
@@ -1014,6 +1026,23 @@ impl Shared {
         )
     }
 
+    /// `zend.multibyte` as the startup ini has it, which a unit bound for
+    /// the cache is compiled under ([`CompileIni`]).
+    pub(crate) fn compile_multibyte(&self) -> bool {
+        self.compile_ini().multibyte
+    }
+
+    /// What a file compiled for no request is read under where the
+    /// startup `zend.multibyte` is on: no request to bind the encoding
+    /// functions to, so Zend's own dummies, and no list.
+    fn unbound(&self) -> Option<Multibyte<'static>> {
+        self.compile_ini().multibyte.then_some(Multibyte {
+            encodings: &php_compile::multibyte::Dummy,
+            detect_unicode: true,
+            listed: &[],
+        })
+    }
+
     /// The compiler's ini as the startup one has it, which a unit bound
     /// for the cache is compiled under; a request compiles its own
     /// source under its own ([`CompileIni`]).
@@ -1030,6 +1059,9 @@ impl Shared {
                 .ini_default(b"zend.assertions")
                 .is_none_or(|value| Request::ini_parse_bytes(value) >= 0),
             shebang: self.shebang,
+            multibyte: self
+                .ini_default(b"zend.multibyte")
+                .is_some_and(|value| ini_truth(Some(value))),
         }
     }
 
@@ -1051,7 +1083,17 @@ impl Shared {
         self.units
             .file(
                 asked,
-                |source| self.publish_file(source, path, cwd, stack, RequestClasses::default()),
+                |source| {
+                    let multibyte = self.unbound();
+                    self.publish_file(
+                        source,
+                        path,
+                        cwd,
+                        stack,
+                        RequestClasses::default(),
+                        multibyte,
+                    )
+                },
                 |_| None,
             )
             .0
@@ -1083,6 +1125,7 @@ impl Shared {
         cwd: &Path,
         stack: StackLimit,
         request_classes: RequestClasses<'_>,
+        multibyte: Option<Multibyte<'_>>,
     ) -> Result<Arc<Unit>, CompileError> {
         self.publish(
             source,
@@ -1092,6 +1135,7 @@ impl Shared {
                 kind: SourceKind::File,
                 keys_before: 0,
                 request_classes,
+                multibyte,
             },
             stack,
         )
@@ -1190,7 +1234,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 86] = [
+const CORE_INI: &[(&str, &str)] = &[
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1198,6 +1242,11 @@ const CORE_INI: [(&str, &str); 86] = [
     ("error_reporting", "32767"),
     ("display_errors", "1"),
     ("log_errors", "0"),
+    // `error_log`, `NULL` in php's table, and `error_log_mode`, both
+    // `PHP_INI_ALL` (`Z/main/main.c:835-836`): the file `php_log_err`
+    // appends to and the permissions it creates one with.
+    ("error_log", ""),
+    ("error_log_mode", "0644"),
     ("html_errors", "0"),
     // `docref_root` and `docref_ext`, `PHP_INI_ALL`: where a function's
     // diagnostic under `html_errors` links to (`raising::origin`).
@@ -1216,6 +1265,10 @@ const CORE_INI: [(&str, &str); 86] = [
     ("memory_limit", "128M"),
     ("report_memleaks", "1"),
     ("max_execution_time", "0"),
+    // `hard_timeout`, `PHP_INI_SYSTEM` (`Z/main/main.c:885`): the seconds
+    // past a timeout the execution timer waits for the loop to take it
+    // before it ends the process ([`crate::interrupt::Timer`]).
+    ("hard_timeout", "2"),
     ("default_charset", "UTF-8"),
     ("default_mimetype", "text/html"),
     ("internal_encoding", ""),
@@ -1246,6 +1299,13 @@ const CORE_INI: [(&str, &str); 86] = [
     // `zend.enable_gc`, `On` (`Z/Zend/zend.c:265`), whose `on_modify` is
     // the collector's `gc_enable`.
     ("zend.enable_gc", "1"),
+    // `zend.multibyte`, `zend.script_encoding` and `zend.detect_unicode`
+    // (`Z/Zend/zend.c:266-268`): whether a file is read in its own
+    // encoding, the encodings it may be in, and whether a byte order
+    // mark or NULs say which first ([`crate::multibyte`]).
+    ("zend.multibyte", "0"),
+    ("zend.script_encoding", ""),
+    ("zend.detect_unicode", "1"),
     // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
     // as the empty string and `OnUpdateFiberStackSize` as php's default.
     ("fiber.stack_size", ""),
@@ -1741,6 +1801,9 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 /// and then each extension's in bundle order, the host's `additional`
 /// after them under `standard`, less what the list names
 /// ([`disabled_functions`]), each beside the extension that declared it.
+/// The natives the engine declares for `standard` ([`crate::natives::standard`])
+/// are `standard`'s where the bundle has it, at their stub places among
+/// its own, and follow Core's under no extension where it does not.
 /// The one place the disabled set is decided: what it takes out is in no
 /// table the compiler or a request reads.
 fn function_table(
@@ -1754,31 +1817,78 @@ fn function_table(
         .find(|(name, _)| name.as_slice() == b"disable_functions")
         .map_or(&[][..], |(_, list)| list.as_slice());
     let disabled = disabled_functions(list);
-    // A host's natives go under `standard` once every module has
-    // started (`Z/main/main.c:2359-2366`).
+    // `module_registry` numbers Core 0 and the bundle from 1.
     let standard = extensions
         .iter()
-        .position(|e| e.name == "standard")
-        .and_then(|at| u32::try_from(at).ok())
-        .map(ExtensionId);
-    core.functions
+        .zip(1u32..)
+        .find(|(e, _)| e.name == "standard")
+        .map(|(_, at)| ExtensionId(at));
+    let mut engine_standard = Some(crate::natives::standard());
+    let mut table: Vec<(Option<ExtensionId>, (FunctionDecl, Entry))> = core
+        .functions
         .iter()
         .cloned()
         .map(|native| (Some(ExtensionId::CORE), native))
-        .chain(
-            crate::natives::standard()
+        .collect();
+    if standard.is_none() {
+        table.extend(
+            engine_standard
+                .take()
                 .into_iter()
-                .map(|native| (None, native)),
-        )
-        .chain(extensions.iter().zip(1u32..).flat_map(|(e, at)| {
-            e.functions
-                .iter()
-                .cloned()
-                .map(move |native| (Some(ExtensionId(at)), native))
-        }))
-        .chain(additional.into_iter().map(|native| (standard, native)))
+                .flatten()
+                .map(|(_, native)| (None, native)),
+        );
+    }
+    for (e, at) in extensions.iter().zip(1u32..) {
+        let id = Some(ExtensionId(at));
+        let own = e.functions.iter().cloned();
+        match engine_standard.take_if(|_| Some(ExtensionId(at)) == standard) {
+            Some(engine) => {
+                table.extend(
+                    at_stub_places(engine, own)
+                        .into_iter()
+                        .map(|native| (id, native)),
+                );
+            }
+            None => table.extend(own.map(|native| (id, native))),
+        }
+    }
+    // A host's natives go under `standard` once every module has
+    // started (`Z/main/main.c:2359-2366`).
+    table.extend(additional.into_iter().map(|native| (standard, native)));
+    table
+        .into_iter()
         .filter(|(_, (decl, _))| !disabled.contains(&decl.name.0.to_ascii_lowercase().as_slice()))
         .unzip()
+}
+
+/// `ext/standard`'s natives in its own order with the engine's
+/// declared for it spliced in at their [`StubPlace`]s: each after the
+/// function it names, whichever side declared that one, and at the end
+/// where the stub's neighbour is not in the list.
+fn at_stub_places(
+    engine: Vec<(StubPlace, (FunctionDecl, Entry))>,
+    own: impl Iterator<Item = (FunctionDecl, Entry)>,
+) -> Vec<(FunctionDecl, Entry)> {
+    let mut waiting = engine;
+    let mut placed: Vec<(FunctionDecl, Entry)> = Vec::new();
+    let settle = |waiting: &mut Vec<(StubPlace, (FunctionDecl, Entry))>,
+                  placed: &mut Vec<(FunctionDecl, Entry)>| {
+        while let Some(at) = waiting
+            .iter()
+            .position(|(place, _)| place.follows(placed.last().map(|(decl, _)| decl)))
+        {
+            let (_, native) = waiting.remove(at);
+            placed.push(native);
+        }
+    };
+    settle(&mut waiting, &mut placed);
+    for native in own {
+        placed.push(native);
+        settle(&mut waiting, &mut placed);
+    }
+    placed.extend(waiting.into_iter().map(|(_, native)| native));
+    placed
 }
 
 /// `phar_intercept_functions_init` and opcache's
@@ -2018,6 +2128,7 @@ impl EngineBuilder {
                 reenter: self.reenter,
                 resume: self.resume,
                 locked,
+                script_encodings: Vec::new(),
                 units,
                 persistent: crate::api::abi::Pool::new(PERSISTENT_ENTRIES),
                 strings: Mutex::new(strings),
@@ -2208,6 +2319,10 @@ impl Engine {
                 taken.push((name, value));
             }
         }
+        let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
+        if taken_encoding == crate::multibyte::Startup::Refused {
+            taken.push((b"zend.script_encoding".to_vec(), Vec::new()));
+        }
         disable_warnings(&mut req);
         let raised = req.end_startup();
         let written = req.startup_stderr();
@@ -2226,6 +2341,7 @@ impl Engine {
             shared.ini.push((name, value));
         }
         shared.startup_raised = raised;
+        shared.script_encodings = script_encodings;
         shared
             .startup_errors
             .push_str(&String::from_utf8_lossy(&written));
@@ -2338,6 +2454,7 @@ impl Engine {
             kind: SourceKind::File,
             keys_before: 0,
             request_classes: RequestClasses::default(),
+            multibyte: self.shared.unbound(),
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -2385,6 +2502,7 @@ impl Engine {
                     kind: SourceKind::File,
                     keys_before: 0,
                     request_classes: RequestClasses::default(),
+                    multibyte: self.shared.unbound(),
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -2827,6 +2945,9 @@ impl Engine {
         req.catch_bailout();
         crate::output::end_all(req);
         req.catch_bailout();
+        // "4. Reset max_execution_time (no longer executing php code
+        // after response sent)" (`Z/main/main.c:1990-1994`).
+        req.unset_timer();
     }
 
     /// The rest of `php_request_shutdown` after
@@ -2944,6 +3065,8 @@ struct CompileIni {
     short_open_tag: bool,
     assertions: bool,
     shebang: php_compile::Shebang,
+    /// `CG(multibyte)`, `zend.multibyte`, `PHP_INI_PERDIR`.
+    multibyte: bool,
 }
 
 /// One source compiled, with what the compiler refused kept instead of
@@ -2984,6 +3107,7 @@ fn compile(
         request_classes: origin.request_classes,
         stack,
         keys_before: origin.keys_before,
+        multibyte: origin.multibyte,
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
@@ -3122,12 +3246,33 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKin
 /// A program in `file` the compiler refused: `php_error_cb` renders it
 /// where it renders every diagnostic, at the level the compiler refused
 /// at, what it raised before first, and the request ends before a frame
-/// is pushed.
+/// is pushed. A refusal php throws as a `CompileError` is uncaught here,
+/// so `zend_exception_error` renders it through `zend_error_cb` alone,
+/// with no fatal's trace after it:
+///
+/// ```php
+/// declare(encoding = M_PI);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Encoding must be a literal in %s on line 2
+/// ```
 pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &[u8]) {
     for raised in &refused.raised {
         req.note_error_in(raised.level, &raised.message, file, raised.line);
     }
-    req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+    match (refused.stage, refused.thrown) {
+        // Opened before anything compiled or ran: `zend_error` finds no
+        // file compiling and none executing.
+        (php_compile::Stage::Opening, _) => {
+            req.end_in_compile_time(refused.level, &refused.message, b"Unknown", 0);
+        }
+        (php_compile::Stage::Compiling, true) => {
+            req.end_in_uncaught(refused.level, &refused.message, file, refused.line);
+        }
+        (php_compile::Stage::Compiling, false) => {
+            req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+        }
+    }
 }
 
 /// `zend_execute_script(ZEND_REQUIRE, NULL, file)` over the file the
@@ -3167,6 +3312,23 @@ fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
 /// the shutdown functions and the extensions' `rshutdown`, until
 /// `shutdown_executor` destroys the table (design §5.10).
 ///
+/// A fatal the loop raised leaves every frame above the main one
+/// standing, as `zend_bailout` jumps past them; `_zend_bailout` sets
+/// `EG(current_execute_data)` to null (`Z/Zend/zend.c:1268`), so they are
+/// popped here, before the main one is left, and a shutdown function is
+/// called from nothing.
+///
+/// ```php
+/// set_time_limit(1);
+/// register_shutdown_function(function () { debug_print_backtrace(); });
+/// function spin() { while (true); }
+/// spin();
+/// ```
+/// ```expect exit=255 wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 4
+/// #0 [internal function]: {closure:%s:3}()
+/// ```
+///
 /// Whether the program ran to its end: not a fatal, a refused
 /// declaration or an `exit`, each of which php leaves by `zend_bailout`,
 /// and not a throwable no handler took.
@@ -3174,6 +3336,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if !note_compiled(req, unit, SourceKind::File) {
         return false;
     }
+    let standing = req.vm().frames().len();
     let frame = match req.push_frame(Arc::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
@@ -3183,6 +3346,9 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     };
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
+    }
+    while req.vm().frames().len() > standing + 1 {
+        req.pop_frame();
     }
     req.detach_symbol_table(frame);
     req.pop_frame();
@@ -4772,12 +4938,14 @@ mod tests {
                     kind: SourceKind::File,
                     keys_before: 0,
                     request_classes: RequestClasses::default(),
+                    multibyte: None,
                 },
                 CompileIni {
                     precision: 14,
                     short_open_tag: true,
                     assertions: true,
                     shebang: php_compile::Shebang::Read,
+                    multibyte: false,
                 },
                 Declared::default(),
                 StackLimit::UNCHECKED,

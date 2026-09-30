@@ -43,6 +43,32 @@ const fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (yoe + era * 400 + if month <= 2 { 1 } else { 0 }, month, day)
 }
 
+/// `php_format_date("d-M-Y H:i:s e", t, 1)` where the default zone is
+/// UTC, the stamp `php_log_err` writes before a file log's entry:
+/// `30-Sep-2026 14:05:03 UTC`.
+pub(super) fn utc_log_stamp(at: std::time::SystemTime) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let secs = match at.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
+        Err(before) => i64::try_from(before.duration().as_secs()).map_or(i64::MIN, |s| -s),
+    };
+    let (year, month, day) = civil_from_days(secs.div_euclid(DAY));
+    let of_day = secs.rem_euclid(DAY);
+    let name = usize::try_from(month - 1)
+        .ok()
+        .and_then(|at| MONTHS.get(at))
+        .copied()
+        .unwrap_or_default();
+    format!(
+        "{day:02}-{name}-{year:04} {:02}:{:02}:{:02} UTC",
+        of_day / 3600,
+        of_day % 3600 / 60,
+        of_day % 60
+    )
+}
+
 const fn is_leap(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }

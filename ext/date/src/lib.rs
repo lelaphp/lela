@@ -123,6 +123,9 @@ pub fn extension() -> Extension {
         .class::<DateMalformedIntervalStringException>()
         .class::<DateMalformedPeriodStringException>()
         .ini(ini())
+        // `php_format_date`, what php's `main` and ext/standard call
+        // into ext/date for (`php_date.h`).
+        .register(php_ext::request::FormatDate(format::format_timestamp))
         .constants(constants::declared())
         .functions(vec![
             parse::strtotime::declared(),

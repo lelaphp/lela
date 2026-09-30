@@ -1074,6 +1074,21 @@ enum LogTo<'a> {
 /// ```stderr
 /// to the log
 /// ```
+///
+/// The log is the file `error_log` names where it names one, each entry
+/// stamped `[d-M-Y H:i:s e]` in the request's zone, `date.timezone` as
+/// the ini names it (`php_log_err_with_severity`).
+///
+/// ```php
+/// $f = sys_get_temp_dir() . "/error-log-" . getmypid();
+/// ini_set("date.timezone", "ASIA/Tokyo"); ini_set("error_log", $f);
+/// var_dump(error_log("to the file"));
+/// readfile($f); unlink($f);
+/// ```
+/// ```expect
+/// bool(true)
+/// [%d-%s-%d %d:%d:%d ASIA/Tokyo] to the file
+/// ```
 #[php_function]
 fn error_log(
     req: &mut Request,

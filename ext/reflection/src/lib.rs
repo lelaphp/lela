@@ -5730,7 +5730,10 @@ fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> V
             }
         }
     }
-    let Ok(entries) = object.props(req) else {
+    // `classname_obj->handlers->get_properties(classname_obj)`: the
+    // table the class answers, a `DateInterval`'s fields among it.
+    let handlers = object.handlers(req);
+    let Ok(entries) = handlers.get_properties(req, object) else {
         return Vec::new();
     };
     let mut seen: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
@@ -5763,14 +5766,38 @@ fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> V
 /// `_class_string`'s `Dynamic properties`: the bare names of
 /// `zend_get_properties_no_lazy_init` that `ce->properties_info` has not,
 /// which holds a parent's private property too, so a dynamic property
-/// named as one is not counted there.
+/// named as one is not counted there. A lazy object is read as it
+/// stands and not initialised; any other is the rows its class's
+/// `get_properties` answers.
+///
+/// ```php
+/// class C { public int $a; }
+/// $r = new ReflectionClass(C::class);
+/// $g = $r->newLazyGhost(function () { echo "init\n"; });
+/// $s = (string) new ReflectionObject($g);
+/// var_dump($r->isUninitializedLazyObject($g));
+/// preg_match("/Dynamic properties \\[(\\d+)\\]/", (string) new ReflectionObject(new DateInterval("P1D")), $m); echo $m[1], "\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// 10
+/// ```
 fn undeclared_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
     let declared: Vec<Vec<u8>> = class_chain(req, class)
         .into_iter()
         .filter_map(|at| req.class_decl(at))
         .flat_map(|decl| decl.properties.iter().map(|p| p.name.0.to_vec()))
         .collect();
-    let Ok(entries) = object.props(req) else {
+    // `zend_get_properties_no_lazy_init`: a lazy object's rows as they
+    // stand, nothing initialised, and any other's class table, a
+    // `DateInterval`'s fields among it.
+    let entries = if object.is_lazy() {
+        object.props(req)
+    } else {
+        let handlers = object.handlers(req);
+        handlers.get_properties(req, object)
+    };
+    let Ok(entries) = entries else {
         return Vec::new();
     };
     entries
@@ -6171,6 +6198,35 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
     }
 }
 
+/// `smart_str_append_double(str, num, EG(precision), true)`, which
+/// `smart_str_append_scalar` renders a float default with: the number as
+/// `precision` prints it, with `.0` after a finite one that prints no
+/// point, for a user function's default and a native's alike.
+///
+/// ```php
+/// function f(float $t = 1.0, $u = 2.50, $v = -0.0, $w = 1e100, $x = 0.1, $y = [1.0]) {}
+/// foreach ((new ReflectionFunction('f'))->getParameters() as $p) echo $p, "\n";
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> float $t = 1.0 ]
+/// Parameter #1 [ <optional> $u = 2.5 ]
+/// Parameter #2 [ <optional> $v = -0.0 ]
+/// Parameter #3 [ <optional> $w = 1.0E+100 ]
+/// Parameter #4 [ <optional> $x = 0.1 ]
+/// Parameter #5 [ <optional> $y = [1.0] ]
+/// ```
+fn double_string(req: &mut Request, f: f64) -> String {
+    let Ok(printed) = php_ext::coerce::to_string(req, &Value::float(f)) else {
+        return String::new();
+    };
+    let mut text = String::from_utf8_lossy(printed.as_bytes()).into_owned();
+    req.release(Value::string(printed));
+    if f.is_finite() && !text.contains('.') {
+        text.push_str(".0");
+    }
+    text
+}
+
 /// `format_default_value` over a declared default: `smart_str_append_scalar`
 /// for a scalar, `NULL`, `true`, `false`, the number, or the string in
 /// single quotes with `smart_str_append_escaped`'s escapes; an array as
@@ -6191,10 +6247,7 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
         ConstExpr::Null => String::from("NULL"),
         ConstExpr::Bool(b) => String::from(if *b { "true" } else { "false" }),
         ConstExpr::Long { value, .. } => value.to_string(),
-        ConstExpr::Double(f) => php_ext::coerce::to_string(req, &Value::float(*f)).map_or_else(
-            |_| String::new(),
-            |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
-        ),
+        ConstExpr::Double(f) => double_string(req, *f),
         ConstExpr::Str(s) => format!("'{}'", escaped(s)),
         // An array of scalars written out is the value the compiler folded
         // it to, whose keys print unless it is a list; any other is the expression,
@@ -7372,13 +7425,22 @@ fn function_parameter_string(
 /// printer makes of the expression, which for a scalar is the scalar as
 /// written, for a string the bytes double-quoted with its escapes
 /// ([`stub_escaped`]), a class constant as `Class::NAME`, and constants
-/// joined by `|` as the stub joins them.
+/// joined by `|` as the stub joins them. A float is written with its
+/// point, `1.0` and never `1`:
+///
+/// ```php
+/// echo (new ReflectionFunction('curl_multi_select'))->getParameters()[1], "\n";
+/// ```
+/// ```expect
+/// Parameter #1 [ <optional> float $timeout = 1.0 ]
+/// ```
 fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
     use php_ext::decl::ConstExpr;
     match expr {
         ConstExpr::Null => String::from("null"),
         ConstExpr::Bool(b) => String::from(if *b { "true" } else { "false" }),
         ConstExpr::Long { value, radix } => radix.written(*value),
+        ConstExpr::Double(f) if f.is_finite() && f.fract() == 0.0 => format!("{f:.1}"),
         ConstExpr::Double(f) => f.to_string(),
         ConstExpr::Str(s) => format!("\"{}\"", stub_escaped(s)),
         ConstExpr::Constant { name, .. } => {

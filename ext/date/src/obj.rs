@@ -942,12 +942,47 @@ impl ObjectHandlers for IntervalHandlers {
         if purpose == PropertyPurpose::Debug {
             return Ok(None);
         }
-        let fields = interval_rows(req, object)?;
-        rows_view(req, object, fields, |req, o| {
-            o.native_mut::<IntervalObj>(req).map(|i| &mut i.rows)
-        })
-        .map(Some)
+        interval_table(req, object).map(Some)
     }
+
+    /// `date_object_get_properties_interval`, the class's
+    /// `get_properties`: the object's own rows with the interval's
+    /// fields over them, which `ReflectionProperty`'s dynamic arm reads.
+    ///
+    /// ```php
+    /// $i = new DateInterval('P1Y2D');
+    /// $p = new ReflectionProperty($i, 'y');
+    /// var_dump($p->getValue($i), $p->isLazy($i), $p->isDefault());
+    /// var_dump((new ReflectionObject($i))->hasProperty('days'));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    fn get_properties(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+        Ok(interval_table(req, object)?
+            .into_iter()
+            .filter_map(|(key, value)| match key {
+                Key::Str(name) => Some((name, value)),
+                Key::Int(_) => None,
+            })
+            .collect())
+    }
+}
+
+/// `Z_OBJPROP_P` as `date_object_get_properties_interval` fills it: the
+/// object's own rows with the fields over them, kept on the payload.
+fn interval_table(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
+    let fields = interval_rows(req, object)?;
+    rows_view(req, object, fields, |req, o| {
+        o.native_mut::<IntervalObj>(req).map(|i| &mut i.rows)
+    })
 }
 
 /// The interval's fields, none for one no constructor set.

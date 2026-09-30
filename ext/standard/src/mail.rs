@@ -18,7 +18,7 @@ use php_ext::abi::{Passed, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
-use php_ext::request::Request;
+use php_ext::request::{FormatDate, Request};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::basic_functions::c_string;
@@ -240,36 +240,18 @@ fn multiple_crlf(hdr: &[u8]) -> bool {
     false
 }
 
-/// `php_format_date("d-M-Y H:i:s e", now, 1)` under the default
-/// `date.timezone`, UTC: the stamp `mail.log` lines begin with.
-fn log_date() -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let secs = std::time::SystemTime::now()
+/// `php_format_date("d-M-Y H:i:s e", now, 1)`: the stamp `mail.log`
+/// lines begin with, in the request's default zone through the
+/// [`FormatDate`] ext/date registers.
+fn log_date(req: &mut Request) -> Result<Vec<u8>, Thrown> {
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Howard Hinnant's `civil_from_days`.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    let name = MONTHS
-        .get(usize::try_from(month - 1).unwrap_or(0))
-        .copied()
-        .unwrap_or("Jan");
-    format!(
-        "{day:02}-{name}-{year} {:02}:{:02}:{:02} UTC",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
-    )
+    let registered = req.registered::<FormatDate>().next().copied();
+    match registered {
+        Some(FormatDate(format)) => format(req, b"d-M-Y H:i:s e", now, true),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// `php_mail` (`Z/ext/standard/mail.c:444`): the log line where
@@ -309,7 +291,9 @@ pub fn php_mail(
         if log == b"syslog" {
             crate::syslog::php_syslog(req, LOG_NOTICE, &line);
         } else {
-            let mut entry = format!("[{}] ", log_date()).into_bytes();
+            let mut entry = b"[".to_vec();
+            entry.extend_from_slice(&log_date(req)?);
+            entry.extend_from_slice(b"] ");
             entry.extend_from_slice(&line);
             entry.push(b'\n');
             // `REPORT_ERRORS | STREAM_DISABLE_OPEN_BASEDIR`: the log is
