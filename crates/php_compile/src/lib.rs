@@ -51,7 +51,7 @@ use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name};
 use php_unit::{Diagnostic, Level, Unit};
 
 /// What the compiler is told beside the source (design §4.1).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Options<'a> {
     /// The file name the unit and its errors carry.
     pub filename: Name,
@@ -118,6 +118,9 @@ pub struct Options<'a> {
     /// method is resolved as the program serves. Every class here is a
     /// native one; a class the file itself declares stands beside them.
     pub classes: &'a [ClassDecl],
+    /// The classes the request the source compiles for has declared by
+    /// then, [`RequestClasses`].
+    pub request_classes: RequestClasses<'a>,
     /// The stack limit of the thread the compiler runs on, php's
     /// `EG(stack_limit)`, which the engine works out once per request
     /// (`zend_call_stack_init`) and the compiler's recursion is held to
@@ -147,9 +150,50 @@ impl Default for Options<'_> {
             persistent: &[],
             functions: &[],
             classes: &[],
+            request_classes: RequestClasses::default(),
             stack: StackLimit::UNCHECKED,
             keys_before: 0,
         }
+    }
+}
+
+/// The names of the classes a request has declared, as the compiler
+/// asks after one while a source compiles for it: php's
+/// `CG(class_table)` is `EG(class_table)` then, so a top-level class
+/// whose name the request already holds fails the `zend_hash_add_ptr`
+/// that would bind it early (`Z/Zend/zend_compile.c:9381`), and is left
+/// to its `DECLARE_CLASS_DELAYED`, which binds it as the unit loads where
+/// the name is free by then and raises the redeclaration where it stands
+/// where it is not (GH-8846). A parent is never looked for here: opcache
+/// compiles with `ZEND_COMPILE_IGNORE_OTHER_FILES`, and a class of
+/// another file is no parent an early bind takes. Asked by the lowered
+/// name; a source compiled for no request holds none.
+#[derive(Clone, Copy)]
+pub struct RequestClasses<'a>(&'a dyn Fn(&[u8]) -> bool);
+
+impl<'a> RequestClasses<'a> {
+    /// The request's classes as `holds` answers for a lowered name.
+    #[must_use]
+    pub fn new(holds: &'a dyn Fn(&[u8]) -> bool) -> RequestClasses<'a> {
+        RequestClasses(holds)
+    }
+
+    /// Whether the request has declared a class by the lowered `name`.
+    #[must_use]
+    pub fn holds(&self, name: &[u8]) -> bool {
+        (self.0)(name)
+    }
+}
+
+impl Default for RequestClasses<'_> {
+    fn default() -> Self {
+        RequestClasses(&|_| false)
+    }
+}
+
+impl std::fmt::Debug for RequestClasses<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RequestClasses")
     }
 }
 

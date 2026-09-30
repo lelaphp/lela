@@ -375,6 +375,8 @@ pub(crate) struct Emit<'a> {
     functions: &'a [FunctionDecl],
     /// The engine's classes, [`Options::classes`].
     known_classes: &'a [ClassDecl],
+    /// The request's, [`Options::request_classes`].
+    request_classes: crate::RequestClasses<'a>,
     /// `zend_flf_functions` over them, what a `FRAMELESS_ICALL_*`'s
     /// `extended_value` indexes (`find_frameless_function_offset`).
     frameless: Vec<FramelessEntry>,
@@ -1193,6 +1195,7 @@ pub(crate) fn unit(
         persistent: options.persistent,
         functions: options.functions,
         known_classes: options.classes,
+        request_classes: options.request_classes,
         frameless: frameless_table(options.functions),
         namespace: None,
         namespacing: Namespacing::Global,
@@ -4903,8 +4906,9 @@ impl Emit<'_> {
         // counts, and an enum, which `zend_enum_add_interfaces` gave
         // `UnitEnum`, is never bound early; nor is a class that uses a
         // trait, whose methods only the link copies in. A name the table
-        // already holds fails `zend_hash_add_ptr` before any link is
-        // tried (`register_early_bound_ce`), and the opline raises the
+        // already holds, the file's, the engine's or the request's, fails
+        // `zend_hash_add_ptr` before any link is tried
+        // (`register_early_bound_ce`), and the opline raises the
         // redeclaration when it runs.
         let early = toplevel
             && self
@@ -4912,6 +4916,7 @@ impl Emit<'_> {
                 .get(at)
                 .is_some_and(|decl| decl.interfaces.is_empty() && decl.traits.is_empty())
             && self.bound_class(&name).is_none()
+            && !self.request_classes.holds(&name.to_ascii_lowercase())
             && match &parent {
                 None => true,
                 Some(parent) => self.bound_class(parent).is_some(),
@@ -18407,6 +18412,7 @@ mod tests {
             persistent: options.persistent,
             functions: options.functions,
             known_classes: options.classes,
+            request_classes: options.request_classes,
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
             namespacing: Namespacing::Unbracketed,

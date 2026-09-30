@@ -36,7 +36,7 @@ fn in_cache(req: &mut Request) -> Result<Value, Thrown> {
     };
     if let Some(name) = named
         && overriding(req)
-        && req.unit_cache().holds(&name)?
+        && req.unit_cache().holds(&name, None)?
     {
         return Ok(Value::bool(true));
     }

@@ -273,8 +273,9 @@ pub(crate) type InputFilterHook = fn(
 /// answer to [`ExtensionBuilder::admission`] (design §6.3, revision 45):
 /// what `persistent_compile_file` decides from `accelerator_enabled`,
 /// the blacklist and `opcache.validate_timestamps`,
-/// `opcache.revalidate_freq` and `opcache.revalidate_path`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `opcache.revalidate_freq`, `opcache.revalidate_path` and
+/// `opcache.file_cache`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Admission {
     /// Kept out: compiled as the request's own unit, published nowhere
     /// and counted among the cache's blacklist misses, as
@@ -284,12 +285,38 @@ pub enum Admission {
     /// `lookup` says; a file compiled at a request that starts within
     /// `protection` seconds of the file's last write is compiled and not
     /// held, `opcache.file_update_protection`, since the second a file
-    /// was written in cannot tell a later write in the same second.
+    /// was written in cannot tell a later write in the same second. With
+    /// a `file_cache`, a miss is looked for there before it is compiled,
+    /// and what is compiled is kept there too.
     Held {
         validation: Validation,
         lookup: Lookup,
         protection: u32,
+        file_cache: Option<FileCache>,
     },
+    /// Kept in the `file_cache` alone and held in no memory, which
+    /// `file_cache_compile_file` is: `opcache.file_cache_only`, or a
+    /// request whose accelerator is off beside a file cache. A file kept
+    /// there is read back as `validation` validates it, never looking
+    /// at the file except to compare its `mtime` in whole seconds, and
+    /// one compiled within `protection` seconds of its last write is not
+    /// kept.
+    OnDisk {
+        validation: Validation,
+        protection: u32,
+        file_cache: FileCache,
+    },
+}
+
+/// `opcache.file_cache`, the unit cache's second level (design §6.3):
+/// the directory the compiled files are kept under, each at the path
+/// `zend_file_cache_get_bin_file_path` makes of it, and whether the
+/// cache may only read there, `opcache.file_cache_read_only`. What is
+/// kept is this build's alone; another build's files are never read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileCache {
+    pub directory: std::path::PathBuf,
+    pub read_only: bool,
 }
 
 /// When a hit on a held file is held to the file as it stands.
