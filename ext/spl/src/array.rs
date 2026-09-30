@@ -2383,13 +2383,40 @@ fn sort_through(
 
 /// `spl_array_method`'s write-back, `*ht_ptr = Z_ARRVAL_P(ht_zv)`: the
 /// sorted array made the storage, or, over an object, the object's
-/// rows laid down again in the sorted order. A declared property keeps
-/// its slot and so its place among the rows, where php's table moves
-/// its `IS_INDIRECT` row with the rest (#912); a dynamic one moves.
+/// property table, which from then on holds its declared rows as the
+/// copies the sort moved with the rest, the slots going on apart from
+/// them, as php's table holds the plain values `zend_array_dup` left
+/// when the sort separated it.
+///
+/// ```php
+/// class C { public $prop1 = 'x'; public $prop2 = 'z'; private $prop3 = 'a'; public $prop4 = 'x'; }
+/// $c = new C; $c->d = 'b';
+/// $ao = @new ArrayObject($c);
+/// $ao->ksort();
+/// $c->prop1 = 'changed';
+/// var_dump($c, $c->prop1, $ao['prop1']);
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property C::$d is deprecated in %s on line 3
+/// object(C)#1 (5) {
+///   ["prop3":"C":private]=>
+///   string(1) "a"
+///   ["d"]=>
+///   string(1) "b"
+///   ["prop1"]=>
+///   string(1) "x"
+///   ["prop2"]=>
+///   string(1) "z"
+///   ["prop4"]=>
+///   string(1) "x"
+/// }
+/// string(7) "changed"
+/// string(1) "x"
+/// ```
 fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thrown> {
+    req.addref(&Value::array(sorted));
     match table {
         Table::Array(owner, _) => {
-            req.addref(&Value::array(sorted));
             let old = with(req, owner, |p| {
                 std::mem::replace(&mut p.storage, Storage::Array(sorted))
             })?;
@@ -2398,17 +2425,7 @@ fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thr
             }
             Ok(())
         }
-        Table::Props(object) => {
-            let rows = sorted.snapshot_refs();
-            for (key, _) in &rows {
-                object.unset_row(req, key)?;
-            }
-            for (key, value) in rows {
-                req.addref(&value);
-                object.set_row(req, &key, value)?;
-            }
-            Ok(())
-        }
+        Table::Props(object) => object.replace_table(req, sorted),
     }
 }
 

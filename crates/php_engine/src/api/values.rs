@@ -1196,6 +1196,17 @@ impl PhpObject {
         req.pointer_row(*self, after)
     }
 
+    /// `zobj->properties = table`, how `spl_array_method` puts back the
+    /// table it handed a sort: `table` is the object's property table
+    /// from here, one owner passed to it, and holds every row itself,
+    /// the declared ones among them as copies the slots go on apart from
+    /// ([`php_heap::DeclaredRows::Copied`]); the table the object held is
+    /// released. A lazy object is initialised first and its instance
+    /// takes the table.
+    pub fn replace_table(&self, req: &mut Request, table: PhpArray) -> Result<(), Thrown> {
+        req.replace_table(*self, table)
+    }
+
     /// One row of the property table by key, `zend_symtable_find_ind`:
     /// no handler, hook or visibility in the way, a declared property
     /// under its mangled name, a view; `None` for a key the table has

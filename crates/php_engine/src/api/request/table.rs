@@ -28,7 +28,9 @@ use php_unit::decl::Visibility;
 
 use super::{Hooks, Request};
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Key, PhpObject, PhpRef, PhpString, PointerMove, Value};
+use crate::api::values::{
+    ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, PointerMove, Value,
+};
 
 /// Where a key of the table stands: a declared slot, or a key of the
 /// dynamic table.
@@ -314,6 +316,44 @@ impl Request {
             }
         };
         Ok(Some((key, Value::of_zval(z))))
+    }
+
+    /// [`PhpObject::replace_table`]: `*ht_ptr = Z_ARRVAL_P(ht_zv)` over
+    /// an object, the table a lazy object's instance keeps; `table` laid
+    /// down as the object's with its numeric keys spelt in decimal, as
+    /// every reader of the table here reads them.
+    pub(crate) fn replace_table(
+        &mut self,
+        object: PhpObject,
+        table: PhpArray,
+    ) -> Result<(), Thrown> {
+        let object = self.table_owner(object)?;
+        let o = object.heap();
+        let mut table = table;
+        if table.iter().any(|(key, _)| matches!(key, Key::Int(_))) {
+            let mut spelt = PhpArray::new(self)?;
+            for (key, value) in table.snapshot_refs() {
+                let key = match key {
+                    Key::Int(n) => Key::Str(PhpString::new(self, n.to_string().as_bytes())?),
+                    Key::Str(name) => {
+                        self.addref(&Value::string(name));
+                        Key::Str(name)
+                    }
+                };
+                self.addref(&value);
+                spelt.set(self, key, value)?;
+            }
+            self.release(Value::array(table));
+            table = spelt;
+        }
+        let table = table.heap();
+        table.set_declared_rows(php_heap::DeclaredRows::Copied);
+        let old = o.properties();
+        self.heap.object_set_properties(o, table);
+        if let Some(old) = old {
+            self.release(Value::array(PhpArray::of(old)));
+        }
+        Ok(())
     }
 
     /// `rebuild_object_properties` then `SEPARATE_ARRAY` over the

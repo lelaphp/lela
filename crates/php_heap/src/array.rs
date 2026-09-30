@@ -348,8 +348,10 @@ pub enum DeclaredRows {
     /// for the slots was separated, since `zend_array_dup` copies what
     /// each `IS_INDIRECT` points at and drops the indirection
     /// (`Z/Zend/zend_hash.c:2504-2505`): the table holds every row
-    /// itself, the declared ones first under their mangled names, and a
-    /// reader reads the table alone while the slots go on apart from it.
+    /// itself, the declared ones under their mangled names, first where
+    /// a separation made the copy and wherever a sort put them where
+    /// `spl_array_method` laid its sorted copy down, and a reader reads
+    /// the table alone while the slots go on apart from it.
     Copied,
 }
 
