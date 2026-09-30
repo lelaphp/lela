@@ -71,6 +71,7 @@ abi::ExtensionBuilder::rinit
 abi::ExtensionBuilder::rshutdown
 abi::ExtensionBuilder::ticks
 abi::ExtensionBuilder::trampolines
+abi::ExtensionBuilder::treat_data
 abi::ExtensionBuilder::upload
 abi::ExtensionBuilder::zend_extension
 abi::False

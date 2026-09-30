@@ -2637,6 +2637,36 @@ mod tests {
         assert_eq!(serve("output_handler", ""), "xy");
     }
 
+    /// `sapi_module.treat_data` replaced, as mbstring replaces it: the
+    /// query string is handed to the extension's treater, whose variables
+    /// are registered; a source it leaves, the cookie header here, is
+    /// `php_default_treat_data`'s.
+    #[test]
+    fn a_treat_data_hook_reads_the_sources_it_takes_and_leaves_the_rest() {
+        use crate::api::request::Input;
+        let upper: crate::api::abi::TreatDataHook = |_, input, source| {
+            Ok((input == Input::Get).then(|| vec![(b"q".to_vec(), source.to_ascii_uppercase())]))
+        };
+        let extension = crate::api::abi::ExtensionBuilder::default()
+            .treat_data(upper)
+            .build("t");
+        let engine = Engine::builder().extensions(&[extension]).build();
+        let mut sink = crate::test::Capture::default();
+        engine.serve(
+            RequestDescription {
+                web: Some(WebRequest {
+                    query: Some(b"a=1&b=2".to_vec()),
+                    cookies: Some(b"c=3".to_vec()),
+                    ..WebRequest::default()
+                }),
+                sapi_name: String::from("cgi-fcgi"),
+                ..description("<?php echo $_GET['q'], ' ', isset($_GET['a']) ? 'a' : '-', ' ', $_COOKIE['c'];")
+            },
+            &mut sink,
+        );
+        assert_eq!(sink.stdout, b"A=1&B=2 - 3");
+    }
+
     /// `-d error_append_string=<value>`: `Off`, `OFF`, `oFf`, `FALSE`,
     /// `none`, `None`, `NULL` and `off ` are `string(0) ""`; `On`, `YES`
     /// and `true` are `string(1) "1"`; `0`, `2`, `abc`, `stderr`, `1M`,
