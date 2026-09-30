@@ -288,3 +288,30 @@ fn after_the_open_tag_the_first_byte_is_code() {
     );
     check("echo", &[(INLINE_HTML, "echo")]);
 }
+
+/// `CG(skip_shebang)`'s position: a first line that opens with `#!` is
+/// one token the parser passes over, through its line end, a `\r` where
+/// no `\n` follows, and inline HTML after it; anything else is the file
+/// as it stands.
+#[test]
+fn at_the_shebang_a_first_hash_bang_line_is_passed_over() {
+    let shebang = LexOptions {
+        position: Position::AtShebang,
+        ..LexOptions::default()
+    };
+    check_opts(
+        "#!/usr/bin/env php\nola\n<?php 1;",
+        &shebang,
+        &[
+            (SHEBANG, "#!/usr/bin/env php\n"),
+            (INLINE_HTML, "ola\n"),
+            (OPEN_TAG, "<?php "),
+            (INT, "1"),
+            (SEMICOLON, ";"),
+        ],
+    );
+    check_opts("#!php\r", &shebang, &[(SHEBANG, "#!php\r")]);
+    check_opts("#!php", &shebang, &[(INLINE_HTML, "#!php")]);
+    check_opts(" #!php\n", &shebang, &[(INLINE_HTML, " #!php\n")]);
+    check("#!php\n", &[(INLINE_HTML, "#!php\n")]);
+}

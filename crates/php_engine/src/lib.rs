@@ -22,6 +22,7 @@
 pub mod api;
 mod attributes;
 mod classes;
+mod command_line;
 mod constants;
 mod core;
 mod engine;
@@ -59,8 +60,9 @@ mod weakrefs;
 mod wrapper;
 
 pub use api::request::PHP_VERSION;
+pub use command_line::{CommandLine, EachLine};
 pub use engine::{
-    Engine, EngineBuilder, FileHandles, Method, Observables, OutputSink, RequestDescription,
-    ResponseHead, WebRequest,
+    Dispatched, Engine, EngineBuilder, FileHandles, Method, Observables, OutputSink, ProcessTitle,
+    RequestDescription, ResponseHead, Routed, WebRequest,
 };
 pub use host_extension::HostExtension;

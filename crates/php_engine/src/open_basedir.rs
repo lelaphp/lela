@@ -153,7 +153,7 @@ impl Request {
     /// `expand_filepath(path, buf)`: the path against the working
     /// directory under `CWD_FILEPATH`, links resolved where the file is
     /// there; `None` for the empty path and one too long.
-    fn expand_filepath(&mut self, path: &[u8]) -> Option<Vec<u8>> {
+    pub(crate) fn expand_filepath(&mut self, path: &[u8]) -> Option<Vec<u8>> {
         let cwd = self.cwd().into_os_string().into_encoded_bytes();
         self.virtual_file_ex(&cwd, path, Resolve::FilePath)
     }

@@ -806,7 +806,9 @@ dependencies = [
 name = "php_sapi_cli"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "php_bundle",
+ "php_proto",
  "php_sapi",
 ]
 

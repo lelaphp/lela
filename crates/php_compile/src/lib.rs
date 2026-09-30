@@ -92,6 +92,10 @@ pub struct Options<'a> {
     /// (`OnUpdateAssertions`), so what the request started under is what
     /// every file it compiles reads; php's default is `1`.
     pub assertions: bool,
+    /// `CG(skip_shebang)`, which php's CLI, CGI and built-in server set
+    /// once a request has started. An `eval`'s string begins after an
+    /// open tag whatever it says.
+    pub shebang: Shebang,
     /// The persistent constants the engine's extensions declared
     /// (`CONST_PERSISTENT`), which `zend_try_ct_eval_const` substitutes
     /// where they are written; a name not here is fetched as the program serves.
@@ -138,6 +142,7 @@ impl Default for Options<'_> {
             precision: 14,
             short_open_tag: true,
             assertions: true,
+            shebang: Shebang::Read,
             persistent: &[],
             functions: &[],
             classes: &[],
@@ -145,6 +150,17 @@ impl Default for Options<'_> {
             keys_before: 0,
         }
     }
+}
+
+/// What a file's `#!` first line is to the scanner, `CG(skip_shebang)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Shebang {
+    /// Off: the line is inline HTML like any other.
+    #[default]
+    Read,
+    /// On: a file begins at `ZEND_COMPILE_POSITION_AT_SHEBANG`, its `#!`
+    /// first line passed over (`Z/Zend/zend_language_scanner.l:570`).
+    Skipped,
 }
 
 /// What the source is, the `type` php's `zend_compile` is called with
@@ -238,6 +254,9 @@ pub fn compile_source(
         lex: php_syntax::LexOptions {
             short_open_tag: options.short_open_tag,
             position: match options.kind {
+                SourceKind::File if options.shebang == Shebang::Skipped => {
+                    php_syntax::Position::AtShebang
+                }
                 SourceKind::File => php_syntax::Position::AtOpenTag,
                 SourceKind::Eval => php_syntax::Position::AfterOpenTag,
             },

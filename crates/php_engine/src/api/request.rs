@@ -999,6 +999,7 @@ impl Stream {
         if req.held_streams.contains(&self.0) {
             return false;
         }
+        req.close_standard(self.0);
         crate::streams::PhpStream::close_open(req, self);
         true
     }
@@ -1884,6 +1885,11 @@ pub struct Request {
     /// The streams an operation holds while it serves PHP code on them,
     /// php's `PHP_STREAM_FLAG_NO_FCLOSE`, which `fclose` refuses.
     pub(crate) held_streams: Vec<Resource>,
+    /// The streams `STDIN`, `STDOUT` and `STDERR` were registered on,
+    /// each until it is closed.
+    pub(crate) standard_streams: [Option<Resource>; 3],
+    /// Which of the three constants' streams a program closed.
+    standard_closed: [bool; 3],
     /// `FG(wrapper_errors)` of the extension wrapper whose opener is
     /// running: what [`Request::wrapper_log_error`] logged, which
     /// `php_stream_display_wrapper_errors` prints where the open fails.
@@ -2473,6 +2479,8 @@ impl Request {
             stream_thrown: None,
             filtering: None,
             held_streams: Vec::new(),
+            standard_streams: [None; 3],
+            standard_closed: [false; 3],
             wrapper_errors: Vec::new(),
             opened_path: None,
             filter_type,
@@ -4530,6 +4538,11 @@ impl Request {
         self.returned = value;
     }
 
+    /// What the entry frame last returned, taken, `null` left in its place.
+    pub(crate) fn take_returned(&mut self) -> Value {
+        std::mem::replace(&mut self.returned, Value::null())
+    }
+
     /// Leave what a raise made pending where the loop reads it, php's
     /// `EG(exception)`. A `Thrown` that carries none is a fatal or an
     /// `exit` the raiser already recorded on the request. The
@@ -6133,6 +6146,14 @@ impl Request {
         self.sink.get().send_headers(&head);
     }
 
+    /// `sapi_module.send_headers` made one that sends nothing, for the
+    /// rest of the request.
+    pub(crate) fn discard_headers(&mut self) {
+        if let Some(web) = &mut self.description.web {
+            web.no_headers = true;
+        }
+    }
+
     /// The header block as the sink is handed it: `SG(sapi_headers).headers`
     /// rendered one line each, and nothing else, since the status line
     /// and its shape are the host's (`sapi_cgi_send_headers` writes
@@ -6743,6 +6764,15 @@ impl Request {
     fn end_at_level(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
         self.heap.gc_protect(true);
         self.exit_status = 255;
+        // `php_error_cb`'s arm for what it cannot recover from
+        // (`Z/main/main.c:1517`): with nothing displayed, a response not
+        // yet committed at 200 answers `HTTP/1.0 500 Internal Server Error`.
+        if self.display_errors() == Display::Off
+            && !self.output.headers_sent()
+            && self.output.response_code() == 200
+        {
+            let _ = crate::output::header_add(self, b"HTTP/1.0 500 Internal Server Error", true, 0);
+        }
         self.bailout = true;
         if self.ending.is_some() {
             return;
@@ -15590,6 +15620,20 @@ impl Request {
         }
     }
 
+    /// `php_execute_script`'s `expand_filepath` of the primary file
+    /// (`Z/main/main.c:2610-2619`): the file the request names made whole
+    /// against its working directory with its links resolved, which is
+    /// the name the unit compiles under and the page `php_statpage`
+    /// stats, put in `EG(included_files)`; the name as given where it
+    /// expands to nothing.
+    pub(crate) fn expand_primary_file(&mut self) -> Vec<u8> {
+        let script = self.description.script_name.clone().unwrap_or_default();
+        let expanded = self.expand_filepath(&script).unwrap_or(script);
+        self.included_files.push(expanded.clone());
+        self.description.script_name = Some(expanded.clone());
+        expanded
+    }
+
     /// `zend_include_or_eval` (`Z/Zend/zend_execute.c:5287`) for the four
     /// file constructs: the once forms resolve the path first
     /// ([`Request::resolve_path`]) and answer [`Opened::Already`] for one
@@ -16155,6 +16199,22 @@ impl Request {
             array.set(self, key, trace)?;
         }
         Ok(Some(array))
+    }
+
+    /// The last error where its level is one of `E_FATAL_ERRORS`, its
+    /// message, file and line.
+    pub(crate) fn last_fatal(&self) -> Option<(String, Vec<u8>, u32)> {
+        let (level, message, file, line) = self.last_error.clone()?;
+        matches!(
+            level,
+            Level::Error
+                | Level::CoreError
+                | Level::CompileError
+                | Level::UserError
+                | Level::RecoverableError
+                | Level::Parse
+        )
+        .then_some((message, file, line))
     }
 
     /// `error_clear_last()`.
@@ -17369,9 +17429,46 @@ impl Request {
         self.description.file_handles.as_ref()?.fd(standard)
     }
 
+    /// The process's title, where the host saved its area.
+    pub(crate) fn process_title(&self) -> Option<&crate::engine::ProcessTitle> {
+        self.description.process_title.as_ref()
+    }
+
     /// Whether the host asked for the CLI's standard handles.
     pub(crate) fn registers_file_handles(&self) -> bool {
         self.description.file_handles.is_some()
+    }
+
+    /// `fclose()` reaching one of the constants' streams: what is under
+    /// it closed ([`crate::engine::FileHandles`]).
+    pub(crate) fn close_standard(&mut self, closed: Resource) {
+        if let Some(at) = self
+            .standard_streams
+            .iter()
+            .position(|s| *s == Some(closed))
+        {
+            self.standard_streams[at] = None;
+            self.standard_closed[at] = true;
+            if let Some(handles) = &mut self.description.file_handles {
+                handles.close(at);
+            }
+        }
+    }
+
+    /// Whether the constant over one of the three was closed.
+    pub(crate) fn standard_closed(&self, standard: crate::streams::Standard) -> bool {
+        self.standard_closed[standard as usize]
+    }
+
+    /// Whether `php://stdout` and `php://stderr` are copies of the
+    /// process's fds, as under php's CLI once the constants stand.
+    pub(crate) fn copies_standard(&self) -> bool {
+        self.standard_streams.iter().any(Option::is_some)
+            && self
+                .description
+                .file_handles
+                .as_ref()
+                .is_some_and(crate::engine::FileHandles::is_process)
     }
 
     /// `zend_constant::attributes`: the attributes the declaration of
