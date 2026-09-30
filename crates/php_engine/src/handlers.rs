@@ -1342,7 +1342,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
         name: target.name,
         arguments: Vec::new(),
         count,
-        this: target.this,
+        receiver: target.this.map(exec::Receiver::Owned),
         called_scope: target.called_scope,
         closure: target.closure,
         extra_named: Vec::new(),
@@ -1736,7 +1736,7 @@ fn init_call(
         name: Some(name),
         arguments: Vec::new(),
         count,
-        this: None,
+        receiver: None,
         called_scope: None,
         closure: None,
         extra_named: Vec::new(),
@@ -2474,7 +2474,7 @@ pub(crate) fn init_user_call<T: Tier>(
         name: target.name,
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
-        this: target.this,
+        receiver: target.this.map(exec::Receiver::Owned),
         called_scope: target.called_scope,
         closure: target.closure,
         extra_named: Vec::new(),
@@ -4172,7 +4172,7 @@ pub(crate) fn callable_convert<T: Tier>(
         Some(closure) => crate::classes::CallFrame::Closure(closure),
         None => crate::classes::CallFrame::Callee {
             function: call.function,
-            this: call.this,
+            this: call.this(),
             called_scope: call.called_scope,
         },
     };
@@ -4610,7 +4610,7 @@ pub(crate) fn new<T: Tier>(
         name: Some(name),
         arguments: Vec::new(),
         count,
-        this,
+        receiver: this.map(exec::Receiver::Owned),
         called_scope: constructor.map(|_| class),
         closure: None,
         extra_named: Vec::new(),
@@ -4939,8 +4939,9 @@ fn static_call_frame(
             let thrown = non_static_method_call(req, function);
             return threw(req, frame, &thrown);
         };
-        req.addref(&this.as_value());
-        (Some(this), this.class())
+        // `ZEND_CALL_HAS_THIS` over the calling frame's own `$this`,
+        // which that frame keeps: no `ZEND_CALL_RELEASE_THIS`.
+        (Some(req.lent_receiver(this)), this.class())
     } else if op.op1_type == OperandKind::Unused
         && matches!(
             op.op1 & FETCH_CLASS_MASK,
@@ -4969,7 +4970,7 @@ fn static_call_frame(
         name: Some(name),
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
-        this,
+        receiver: this,
         called_scope: Some(called),
         closure: None,
         extra_named: Vec::new(),
@@ -5065,10 +5066,11 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         Some(function) => (function, false),
         None => (req.parent_hook_trampoline(kind), true),
     };
+    // `INIT_PARENT_PROPERTY_HOOK_CALL`: `ZEND_CALL_HAS_THIS` over the
+    // frame's own `$this`, which the frame keeps, and no
+    // `ZEND_CALL_RELEASE_THIS`.
     let this = req.vm().this(frame);
-    if let Some(this) = this {
-        req.addref(&this.as_value());
-    }
+    let receiver = this.map(|this| req.lent_receiver(this));
     let written = format!("${shown}::{}", kind.name());
     let written = match crate::api::values::PhpString::new(req, written.as_bytes()) {
         Ok(written) => written,
@@ -5079,7 +5081,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         name: Some(written),
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
-        this,
+        receiver,
         called_scope: Some(match this {
             Some(this) if !trampoline => this.class(),
             _ => declaring,
@@ -5226,13 +5228,19 @@ pub(crate) fn init_method_call<T: Tier>(
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    // The frame's owner of the receiver: the temporary's own, moved,
-    // or one more of the CV's or the constant's; a reference the slot
-    // held is followed and given up.
-    let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    if taken.as_object().is_none() {
-        req.addref(&object.as_value());
-        req.release(taken);
+    // `$this->m()`, `INIT_METHOD_CALL` over `UNUSED`: the calling frame
+    // keeps its `$this`, and the call takes no owner of it (no
+    // `ZEND_CALL_RELEASE_THIS`) where the object may be lent.
+    let lends = op.op1_type == OperandKind::Unused && receiver.is_none() && req.lendable(object);
+    // The frame's owner of the receiver otherwise: the temporary's own,
+    // moved, or one more of the CV's or the constant's; a reference the
+    // slot held is followed and given up.
+    if !lends {
+        let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+        if taken.as_object().is_none() {
+            req.addref(&object.as_value());
+            req.release(taken);
+        }
     }
     // A receiver `method_receiver` handed over stands in for the
     // object, one owner moved from the one to the other.
@@ -5252,7 +5260,13 @@ pub(crate) fn init_method_call<T: Tier>(
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
     {
-        Some(object)
+        Some(if lends {
+            exec::Receiver::Lent(object)
+        } else {
+            exec::Receiver::Owned(object)
+        })
+    } else if lends {
+        None
     } else {
         req.release(object.as_value());
         if req.is_pending() {
@@ -5266,7 +5280,7 @@ pub(crate) fn init_method_call<T: Tier>(
         name: Some(name),
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
-        this,
+        receiver: this,
         called_scope: Some(called),
         closure: None,
         extra_named: Vec::new(),
@@ -10584,7 +10598,7 @@ fn frameless_call(
         name: None,
         count: values.len(),
         arguments: values,
-        this: None,
+        receiver: None,
         called_scope: None,
         closure: None,
         extra_named: Vec::new(),
@@ -21487,7 +21501,7 @@ mod tests {
                 name: None,
                 arguments: Vec::new(),
                 count: 0,
-                this: None,
+                receiver: None,
                 called_scope: None,
                 closure: None,
                 extra_named: Vec::new(),

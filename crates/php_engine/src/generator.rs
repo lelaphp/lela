@@ -762,9 +762,21 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
         .vm()
         .at(frame)
         .map_or((None, None), |state| (state.function, state.closure));
-    if let Some(state) = req.vm_mut().at_mut(frame) {
+    // `ZEND_CALL_RELEASE_THIS` and `Z_ADDREF` on a receiver the frame
+    // was lent: the generator's frame outlives the call that lent it.
+    let lent = req.vm_mut().at_mut(frame).and_then(|state| {
         state.generator = Some(object);
         state.returns_to = None;
+        match state.receiver {
+            Some(crate::exec::Receiver::Lent(this)) => {
+                state.receiver = Some(crate::exec::Receiver::Owned(this));
+                Some(this)
+            }
+            _ => None,
+        }
+    });
+    if let Some(this) = lent {
+        req.addref(&this.as_value());
     }
     with(req, object, |g| {
         g.function = function;
@@ -1386,7 +1398,7 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
         req.release(Value::string(name));
         req.release(value);
     }
-    if let Some(this) = state.this {
+    if let Some(this) = state.receiver.and_then(crate::exec::Receiver::owned) {
         req.release(this.as_value());
     }
     for extra in state.extra_args {

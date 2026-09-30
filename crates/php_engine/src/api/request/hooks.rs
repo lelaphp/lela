@@ -292,8 +292,8 @@ impl Request {
     /// `EG(current_execute_data)`'s function and `$this`.
     fn current_call(&self) -> Option<(Option<Function>, Option<PhpObject>)> {
         Some(match self.chain().next()? {
-            Link::Frame(_, state) => (state.function, state.this),
-            Link::Call(call) => (Some(call.function), call.this),
+            Link::Frame(_, state) => (state.function, state.this()),
+            Link::Call(call) => (Some(call.function), call.this()),
             Link::Site(_) => (None, None),
         })
     }

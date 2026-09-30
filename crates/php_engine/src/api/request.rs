@@ -2768,6 +2768,9 @@ impl Request {
     /// the current frame and the entry slot with it, so neither is
     /// saved on its own.
     pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
+        // The execution left off the running chain keeps what it was
+        // lent ([`exec::Receiver`]).
+        self.own_lent_receivers(None);
         std::mem::swap(&mut self.stack, &mut other.stack);
         std::mem::swap(&mut self.vm, &mut other.vm);
         std::mem::swap(&mut self.error_reporting, &mut other.error_reporting);
@@ -2844,11 +2847,11 @@ impl Request {
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         let (this, called_scope, scope) = self.vm.at(caller).map_or((None, None, None), |state| {
-            (state.this, state.called_scope, self.frame_scope(caller))
+            (state.this(), state.called_scope, self.frame_scope(caller))
         });
-        if let Some(this) = this {
-            self.addref(&this.as_value());
-        }
+        // `ZEND_CALL_HAS_THIS` carried from the including frame, whose
+        // `$this` that frame keeps: no `ZEND_CALL_RELEASE_THIS`.
+        let receiver = this.map(|this| self.lent_receiver(this));
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
@@ -2856,7 +2859,7 @@ impl Request {
             unit,
             exec::Body::Main,
             None,
-            this,
+            receiver,
             called_scope,
             0,
             returns_to,
@@ -2953,7 +2956,7 @@ impl Request {
             unit,
             body,
             Some(function),
-            call.this,
+            call.receiver,
             call.called_scope,
             num_args,
             returns_to,
@@ -3035,7 +3038,7 @@ impl Request {
             (
                 std::mem::take(&mut state.extra_named),
                 std::mem::take(&mut state.extra_args),
-                state.this.take(),
+                state.receiver.take().and_then(exec::Receiver::owned),
                 state.closure.take().filter(|_| state.generator.is_none()),
             )
         });
@@ -3190,6 +3193,61 @@ impl Request {
     /// int(0)
     /// int(1)
     /// ```
+    /// Whether a call php makes without `ZEND_CALL_RELEASE_THIS` may
+    /// name `object` with no owner ([`exec::Receiver::Lent`]): where the
+    /// heap cannot free it but through its destructor, which is served
+    /// once and hands every such call an owner
+    /// ([`Request::own_lent_receivers`]). An object whose class serves no
+    /// destructor, or whose destructor has been served, the collector
+    /// may free with no call up, so a call names it with an owner of its
+    /// own, whose release nothing but a destructor could observe.
+    pub(crate) fn lendable(&mut self, object: PhpObject) -> bool {
+        let o = object.heap();
+        !o.destructor_called() && Hooks(self).has_destructor(o)
+    }
+
+    /// The receiver of a call php makes without `ZEND_CALL_RELEASE_THIS`
+    /// (`zend_call_function`, `$this->m()`, a forwarding `parent::m()`):
+    /// lent where [`Request::lendable`], and one more owner otherwise.
+    /// An autoloader that unregisters itself gives up the object's last
+    /// owner outside the call, and its destructor is served there, inside
+    /// the method, which goes on over the object it still names:
+    ///
+    /// ```php
+    /// class A { function __invoke($c) { spl_autoload_unregister($this); echo "unregistered\n"; $this->after(); }
+    ///     function after() { echo "after\n"; }
+    ///     function __destruct() { echo "A gone\n"; } }
+    /// spl_autoload_register(new A);
+    /// var_dump(class_exists('X'));
+    /// ```
+    /// ```expect
+    /// A gone
+    /// unregistered
+    /// after
+    /// bool(false)
+    /// ```
+    pub(crate) fn lent_receiver(&mut self, object: PhpObject) -> exec::Receiver {
+        if self.lendable(object) {
+            exec::Receiver::Lent(object)
+        } else {
+            self.addref(&object.as_value());
+            exec::Receiver::Owned(object)
+        }
+    }
+
+    /// What follows a destructor served while calls on the running chain
+    /// name the object with no owner, the release that served it being
+    /// php's last: each such call and frame takes an owner of its own,
+    /// so the object php frees here stands until the last of them is
+    /// popped. `None` hands an owner to every lent receiver of the
+    /// running execution, what a fiber switch does to the execution it
+    /// leaves, which no destructor served meanwhile could find.
+    pub(crate) fn own_lent_receivers(&mut self, object: Option<PhpObject>) {
+        for held in self.vm.own_lent(object) {
+            self.addref(&held.as_value());
+        }
+    }
+
     pub(crate) fn pop_call(&mut self) {
         if let Some(call) = self.vm.pop_call() {
             // `zend_vm_stack_free_args`, whose `zval_ptr_dtor_nogc` makes
@@ -3204,7 +3262,7 @@ impl Request {
             if let Some(name) = call.name {
                 self.release(Value::string(name));
             }
-            if let Some(this) = call.this {
+            if let Some(this) = call.receiver.and_then(exec::Receiver::owned) {
                 self.release(this.as_value());
             }
             if let Some(closure) = call.closure {
@@ -3510,9 +3568,9 @@ impl Request {
             self.addref(&Value::string(*extra));
             self.addref(value);
         }
-        if let Some(this) = this {
-            self.addref(&this.as_value());
-        }
+        // `zend_call_function`: `ZEND_CALL_HAS_THIS` and no
+        // `ZEND_CALL_RELEASE_THIS`, the caller keeping the object.
+        let receiver = this.map(|this| self.lent_receiver(this));
         // `ZEND_CALL_MAY_HAVE_UNDEF`: a named argument skipped a slot.
         let may_have_undef = sent
             .iter()
@@ -3526,7 +3584,7 @@ impl Request {
             name: None,
             count: sent.len(),
             arguments: sent,
-            this,
+            receiver,
             called_scope,
             closure,
             extra_named: extra_named.to_vec(),
@@ -5661,7 +5719,7 @@ impl Request {
                     let arguments = self.traced_arguments(slots, state, function);
                     rows.push((
                         Traced::Function(function),
-                        state.this,
+                        state.this(),
                         self.closure_scope(state.closure),
                         arguments,
                         state.extra_named.clone(),
@@ -5697,7 +5755,7 @@ impl Request {
                 Link::Call(call) => {
                     rows.push((
                         Traced::Function(call.function),
-                        call.this,
+                        call.this(),
                         self.closure_scope(call.closure),
                         call.arguments.clone(),
                         call.extra_named.clone(),
@@ -17400,7 +17458,7 @@ impl Request {
     pub(crate) fn serving_callee(&self) -> Option<(Function, Option<PhpObject>, Option<ClassId>)> {
         self.vm
             .serving_call()
-            .map(|call| (call.function, call.this, call.called_scope))
+            .map(|call| (call.function, call.this(), call.called_scope))
     }
 
     /// The arguments of the call being served and its extra named ones,
@@ -17664,8 +17722,8 @@ impl Request {
     pub fn called_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, this, called) = match link {
-                Link::Frame(_, state) => (state.function, state.this, state.called_scope),
-                Link::Call(call) => (Some(call.function), call.this, call.called_scope),
+                Link::Frame(_, state) => (state.function, state.this(), state.called_scope),
+                Link::Call(call) => (Some(call.function), call.this(), call.called_scope),
                 Link::Site(_) => return None,
             };
             if let Some(this) = this {
@@ -17689,9 +17747,9 @@ impl Request {
     #[must_use]
     pub fn this(&self) -> Option<PhpObject> {
         if let Some(call) = self.vm.serving_call() {
-            return call.this;
+            return call.this();
         }
-        self.vm.innermost()?.this
+        self.vm.innermost()?.this()
     }
 
     /// `zend_get_this_object(EG(current_execute_data))`
@@ -17715,8 +17773,8 @@ impl Request {
     pub fn this_object(&self) -> Option<PhpObject> {
         for link in self.chain() {
             let (function, this) = match link {
-                Link::Frame(_, state) => (state.function, state.this),
-                Link::Call(call) => (Some(call.function), call.this),
+                Link::Frame(_, state) => (state.function, state.this()),
+                Link::Call(call) => (Some(call.function), call.this()),
                 Link::Site(_) => return None,
             };
             if this.is_some() {
@@ -20990,6 +21048,7 @@ impl HeapHooks for Hooks<'_> {
     fn destruct(&mut self, obj: Obj) {
         let table = self.0.object_handlers(obj);
         table.dtor_obj(self.0, PhpObject::of(obj));
+        self.0.own_lent_receivers(Some(PhpObject::of(obj)));
     }
 
     /// `free_obj`, through the table: the payload's release is the
