@@ -2725,12 +2725,16 @@ impl Engine {
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
             let text = source.or_else(|| std::fs::read(cwd.join(OsStr::from_bytes(&script))).ok());
             if let Some(text) = text {
+                use crate::api::syntax::Scanning;
                 let written = if work == Work::Highlight {
-                    crate::api::syntax::highlight(&req, &text)
+                    crate::api::syntax::highlight(&mut req, &text, Scanning::File)
                 } else {
-                    crate::api::syntax::strip(&req, &text)
+                    crate::api::syntax::strip(&mut req, &text)
                 };
-                req.write(&written);
+                // A source the filter refused ended the request.
+                if let Ok(written) = written {
+                    req.write(&written);
+                }
             }
             return self.shutdown(&mut req, sink);
         }

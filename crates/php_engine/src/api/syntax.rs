@@ -22,6 +22,7 @@ use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::Value;
 use crate::ini_syntax::Host;
+use php_compile::multibyte::{self, Filter, Step};
 use php_compile::syntax::Colours;
 
 /// `zend_parse_ini_string` over `text` in a request, the one INI grammar
@@ -131,9 +132,24 @@ fn scanned_file(req: &Request, source: &[u8]) -> Vec<ScannedToken> {
     scanned(source, &lexed.tokens)
 }
 
+/// How the scanner is handed a source it highlights or strips: a file,
+/// whose encoding `open_file_for_scanning` finds, or a string, which
+/// `zend_prepare_string_for_scanning` reads in the internal encoding;
+/// both are scanned from `INITIAL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scanning {
+    File,
+    String,
+}
+
 /// `zend_highlight` over `source` under the request's
 /// `php_get_highlight_struct`, the five `highlight.*` entries: the HTML
-/// `highlight_string()`, `highlight_file()` and `php -s` write.
+/// `highlight_string()`, `highlight_file()` and `php -s` write. Under
+/// `zend.multibyte` the source is read as a compile reads it
+/// ([`php_compile::multibyte::open`]), and each token's text passes the
+/// scanner's token filter
+/// on its way out, as `zend_html_puts` passes it through
+/// `LANG_SCNG(output_filter)`.
 ///
 /// ```php
 /// ini_set('highlight.keyword', 'green');
@@ -146,8 +162,12 @@ fn scanned_file(req: &Request, source: &[u8]) -> Vec<ScannedToken> {
 /// </span><span style="color: #0000BB">$a </span><span style="color: green">= </span><span style="color: #DD0000">"x</span><span style="color: green">{</span><span style="color: #0000BB">$b</span><span style="color: green">}</span><span style="color: #DD0000">\t" </span><span style="color: green">. </span><span style="color: #0000BB">1 </span><span style="color: green">&lt;=&gt; </span><span style="color: #0000BB">A</span><span style="color: green">::</span><span style="color: #0000BB">B</span><span style="color: green">; </span><span style="color: #0000BB">?&gt;
 /// </span>end</code></pre>
 /// ```
-#[must_use]
-pub fn highlight(req: &Request, source: &[u8]) -> Vec<u8> {
+///
+/// # Errors
+///
+/// The `E_COMPILE_ERROR` that ends the request where the source filter
+/// cannot convert the source.
+pub fn highlight(req: &mut Request, source: &[u8], scanning: Scanning) -> Result<Vec<u8>, Thrown> {
     let read = |name: &[u8]| req.ini_get(name).unwrap_or_default().to_vec();
     let colours = Colours {
         comment: read(b"highlight.comment"),
@@ -156,7 +176,36 @@ pub fn highlight(req: &Request, source: &[u8]) -> Vec<u8> {
         keyword: read(b"highlight.keyword"),
         string: read(b"highlight.string"),
     };
-    php_compile::syntax::highlight(source, &scanned_file(req, source), &colours)
+    let opened = self::read(req, source, scanning)?;
+    let tokens = scanned_file(req, &opened.text);
+    let Some((bound, filter, step)) = opened.tokens else {
+        return Ok(php_compile::syntax::highlight(
+            &opened.text,
+            &tokens,
+            &colours,
+        ));
+    };
+    // Each token's text through the token filter, laid end to end, the
+    // tokens spanning what their text became.
+    let encodings = bound.settings().encodings;
+    let mut text = Vec::with_capacity(opened.text.len());
+    let tokens: Vec<ScannedToken> = tokens
+        .into_iter()
+        .map(|token| {
+            let written = opened.text.get(token.start..token.end).unwrap_or_default();
+            let start = text.len();
+            match filter.convert(encodings, step, written) {
+                Some(converted) => text.extend_from_slice(&converted),
+                None => text.extend_from_slice(written),
+            }
+            ScannedToken {
+                start,
+                end: text.len(),
+                ..token
+            }
+        })
+        .collect();
+    Ok(php_compile::syntax::highlight(&text, &tokens, &colours))
 }
 
 /// `zend_strip` over `source`: what `php_strip_whitespace()` and
@@ -174,7 +223,71 @@ pub fn highlight(req: &Request, source: &[u8]) -> Vec<u8> {
 ///  E;
 /// echo $a; "
 /// ```
-#[must_use]
-pub fn strip(req: &Request, source: &[u8]) -> Vec<u8> {
-    php_compile::syntax::strip(source, &scanned_file(req, source))
+///
+/// # Errors
+///
+/// The `E_COMPILE_ERROR` that ends the request where the source filter
+/// cannot convert the file.
+pub fn strip(req: &mut Request, source: &[u8]) -> Result<Vec<u8>, Thrown> {
+    let opened = read(req, source, Scanning::File)?;
+    let tokens = scanned_file(req, &opened.text);
+    Ok(php_compile::syntax::strip(&opened.text, &tokens))
+}
+
+/// What the scanner reads of a source it highlights or strips.
+struct Read {
+    /// The text the lexer reads.
+    text: Vec<u8>,
+    /// The functions, the filters and the token filter's step, where the
+    /// scanner has one.
+    tokens: Option<(crate::multibyte::Bound, Filter, Step)>,
+}
+
+/// `open_file_for_scanning` and `zend_prepare_string_for_scanning` over
+/// `source` under `zend.multibyte`, as a compile reads it
+/// ([`php_compile::multibyte::open`]): the encoding found, the byte order
+/// mark taken off and the source filter passed over the text; the bytes
+/// as they are without it. A source the filter refuses is php's
+/// `zend_error_noreturn(E_COMPILE_ERROR, ...)`, placed where the request
+/// is executing.
+fn read(req: &mut Request, source: &[u8], scanning: Scanning) -> Result<Read, Thrown> {
+    let shared = std::sync::Arc::clone(&req.shared);
+    let Some(bound) = crate::multibyte::bound(req, shared.compile_multibyte()) else {
+        return Ok(Read {
+            text: source.to_vec(),
+            tokens: None,
+        });
+    };
+    let settings = bound.settings();
+    let from = match scanning {
+        Scanning::File => multibyte::Source::File {
+            detect_unicode: settings.detect_unicode,
+            listed: settings.listed,
+        },
+        Scanning::String => multibyte::Source::Eval,
+    };
+    match multibyte::open(settings.encodings, source, from) {
+        Ok(opened) => {
+            let tokens = opened
+                .filter
+                .and_then(|filter| Some((filter, filter.tokens?)));
+            Ok(Read {
+                text: opened.text,
+                tokens: tokens.map(|(filter, step)| (bound, filter, step)),
+            })
+        }
+        Err(refused) => {
+            let file = req
+                .current_file()
+                .map_or_else(|| b"Unknown".to_vec(), <[u8]>::to_vec);
+            let line = req.current_line();
+            req.end_in_compile_time(
+                crate::api::raising::Level::CompileError,
+                &refused.message(),
+                &file,
+                line,
+            );
+            Err(Thrown::of(None))
+        }
+    }
 }

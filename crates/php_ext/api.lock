@@ -726,6 +726,7 @@ syntax::Options
 syntax::Parsed
 syntax::Parsed::dump
 syntax::ScannedToken
+syntax::Scanning
 syntax::SyntaxKind
 syntax::Token
 syntax::TokenId
