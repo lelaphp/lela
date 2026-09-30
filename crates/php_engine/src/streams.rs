@@ -2285,7 +2285,7 @@ pub(crate) enum Standard {
 /// (`sapi_cli_ub_write`, since php's CLI writes both to the one fd), fd 2
 /// is the sink's error stream (design revision 16), and fd 0, under a
 /// host that handed none, is the request's body read whole; a host that
-/// handed its fd 0 has `php://stdin` read it ([`stdin_open`]). Reading
+/// handed its fd 0 has `php://stdin` read it ([`standard_open`]). Reading
 /// fd 1 or fd 2 is the `EBADF` a write-only fd answers.
 ///
 /// `fstat` and `ftruncate` are `fstat(2)` and `ftruncate(2)` of the fd
@@ -2679,9 +2679,11 @@ fn php_open(
         b"stdin" | b"stdout" | b"stderr" if req.standard_closed(standard_of(&lower)) => {
             return Ok(Err(String::from("operation failed")));
         }
-        b"stdin" if req.host_fd(Standard::Stdin).is_some() => return stdin_open(req, mode),
+        b"stdin" if req.host_fd(Standard::Stdin).is_some() => {
+            return standard_open(req, Standard::Stdin, mode);
+        }
         b"stdout" | b"stderr" if req.copies_standard() => {
-            return standard_copy(req, standard_of(&lower), mode);
+            return standard_open(req, standard_of(&lower), mode);
         }
         b"stdin" | b"stdout" | b"stderr" => {
             let kind = match lower.as_slice() {
@@ -2852,19 +2854,25 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
             )));
         }
     };
-    // `zend_fstat(fd, &st) == 0 && (st.st_mode & S_IFMT) == S_IFSOCK`.
-    let is_socket = fd.try_clone().is_ok_and(|copy| {
-        use std::os::unix::fs::FileTypeExt;
+    let kind = fd_kind(&fd, mode);
+    Ok(Ok(req.stream_from_fd(fd, kind)?))
+}
+
+/// What a `php://` fd opens as: a socket's kind where
+/// `zend_fstat(fd, &st) == 0 && (st.st_mode & S_IFMT) == S_IFSOCK`, the
+/// plain file's otherwise (`Z/ext/standard/php_fopen_wrapper.c:361`).
+fn fd_kind<'m>(fd: &OwnedFd, mode: &'m [u8]) -> FdStream<'m> {
+    use std::os::unix::fs::FileTypeExt;
+    let socket = fd.try_clone().is_ok_and(|copy| {
         std::fs::File::from(copy)
             .metadata()
             .is_ok_and(|meta| meta.file_type().is_socket())
     });
-    let kind = if is_socket {
+    if socket {
         FdStream::Socket
     } else {
         FdStream::File { mode }
-    };
-    Ok(Ok(req.stream_from_fd(fd, kind)?))
+    }
 }
 
 /// `php://stdin` under a host that handed its fd 0
@@ -2892,46 +2900,39 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
 /// int(1)
 /// {"timed_out":false,"blocked":false,"eof":true,"wrapper_type":"PHP","stream_type":"STDIO","mode":"rb","unread_bytes":0,"seekable":false}
 /// ```
+///
+/// `php://stdout` and `php://stderr` opened again under php's CLI once the
+/// constants stand are `dup(STDOUT_FILENO)` in the same way, writing past
+/// the host's sink as php's write past `php_output`, and read as the
+/// constants are, a pipe or a terminal that does not seek; a socket is
+/// the socket kind (`Z/ext/standard/php_fopen_wrapper.c:361`).
+fn standard_open(req: &mut Request, standard: Standard, mode: &[u8]) -> Result<Opened, Thrown> {
+    let duped = req.host_fd(standard).map_or_else(
+        || Err(std::io::Error::from_raw_os_error(EBADF)),
+        |fd| fd.try_clone_to_owned(),
+    );
+    let fd = match duped {
+        Ok(fd) => fd,
+        Err(error) => return Ok(Err(strerror(&error))),
+    };
+    let kind = fd_kind(&fd, mode);
+    let seeks = standard == Standard::Stdin || matches!(kind, FdStream::Socket);
+    let stream = req.stream_from_fd(fd, kind)?;
+    if !seeks {
+        req.stream_op(stream, |_, opened| {
+            opened.flags.no_seek = true;
+            opened.position = -1;
+        });
+    }
+    Ok(Ok(stream))
+}
+
 /// Which of the three a `php://` name is, `stdin` for any other.
 fn standard_of(lower: &[u8]) -> Standard {
     match lower {
         b"stdout" => Standard::Stdout,
         b"stderr" => Standard::Stderr,
         _ => Standard::Stdin,
-    }
-}
-
-/// `php://stdout` or `php://stderr` opened again under php's CLI once the
-/// constants stand (`Z/ext/standard/php_fopen_wrapper.c:258-290`):
-/// `dup(STDOUT_FILENO)`, a plain file over a copy of the process's fd,
-/// which writes past the host's sink as php's writes past `php_output`;
-/// read as the constants are, a pipe or a terminal that does not seek.
-fn standard_copy(req: &mut Request, standard: Standard, mode: &[u8]) -> Result<Opened, Thrown> {
-    let duped = req.host_fd(standard).map_or_else(
-        || Err(std::io::Error::from_raw_os_error(EBADF)),
-        |fd| fd.try_clone_to_owned(),
-    );
-    match duped {
-        Ok(fd) => {
-            let stream = req.stream_from_fd(fd, FdStream::File { mode })?;
-            req.stream_op(stream, |_, opened| {
-                opened.flags.no_seek = true;
-                opened.position = -1;
-            });
-            Ok(Ok(stream))
-        }
-        Err(error) => Ok(Err(strerror(&error))),
-    }
-}
-
-fn stdin_open(req: &mut Request, mode: &[u8]) -> Result<Opened, Thrown> {
-    let duped = req.host_fd(Standard::Stdin).map_or_else(
-        || Err(std::io::Error::from_raw_os_error(EBADF)),
-        |fd| fd.try_clone_to_owned(),
-    );
-    match duped {
-        Ok(fd) => Ok(Ok(req.stream_from_fd(fd, FdStream::File { mode })?)),
-        Err(error) => Ok(Err(strerror(&error))),
     }
 }
 
