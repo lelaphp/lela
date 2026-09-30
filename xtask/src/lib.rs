@@ -182,7 +182,9 @@ fn command_line() -> Result<()> {
         Command::Phpt(ask) => phpt_command(&root, &manifest, &store, ask),
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
         Command::CompileIdentity(ask) => identity_command(&root, &manifest, &store, ask),
-        Command::Crosscheck { ext } => crosscheck_command(&root, &manifest, &store, ext),
+        Command::Crosscheck { ext, staged } => {
+            crosscheck_command(&root, &manifest, &store, ext, staged)
+        }
         Command::UnsafeAudit { staged } => record(
             &store,
             &unsafe_audit::measure(&root, &manifest, &store, staged)?,
@@ -403,8 +405,31 @@ fn crosscheck_command(
     manifest: &Manifest,
     store: &Store,
     ext: Vec<String>,
+    staged: bool,
 ) -> Result<()> {
     let registry = Registry::load(root)?;
+    let ext = if staged {
+        // The carried extensions with a staged change: what `done` holds
+        // to its row, and nothing it does not (#1312).
+        let carried = crosscheck::extensions(
+            manifest,
+            &carried::Carried::binary(root)?,
+            &crosscheck::Ask::default(),
+        );
+        let touched: Vec<String> = sources::staged_crates(root, manifest)?
+            .iter()
+            .filter_map(|name| name.strip_prefix("ext/"))
+            .filter(|name| carried.iter().any(|c| c == name))
+            .map(str::to_owned)
+            .collect();
+        if touched.is_empty() {
+            println!("crosscheck: no extension the binary carries has a staged change");
+            return Ok(());
+        }
+        touched
+    } else {
+        ext
+    };
     let ask = crosscheck::Ask {
         ext,
         renderings: None,

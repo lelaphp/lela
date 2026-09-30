@@ -6,14 +6,15 @@
 # the hook there, before clippy has built anything, since a vocab word or
 # a missing lock line is seconds to find and a clippy and test cycle is
 # minutes. Then clippy and test on the crates with a staged change, and
-# witness on them beside crosscheck; each writes a reading, so `done` has
+# witness on them beside crosscheck on the staged extensions the binary
+# carries (#1312); each writes a reading, so `done` has
 # the readings its condition 1 asks a touched crate for. With `--staged`
 # each leaves out a crate whose reading passes and was taken over exactly
 # what is staged, naming the reading (#1143), a retired worktree's
 # included, which is how a branch's passes stand at its merge (#1252).
-# crosscheck over the default extensions writes its readings the same way
-# and refuses nothing here, since a red row is an extension not yet
-# ported and `done` is what holds a touched one to it (#269);
+# crosscheck writes its readings the same way and refuses nothing here,
+# since a red row is an extension not yet ported and `done` is what holds
+# a touched one to it (#269);
 # `permit --diff` judges every staged file as the Write of
 # its staged content and refuses the commit with the rule id on a denial
 # (the harness's own files are a note: a person commits those). Last,
@@ -114,7 +115,7 @@ gather() {
         cat "$at_once/$i.out"
         [ "$(cat "$at_once/$i.exit")" = 0 ] && continue
         case "$(cat "$at_once/$i.cmd")" in
-            *" crosscheck") echo "pre-commit: crosscheck: a default extension's rendering is not the oracle's; done holds a touched one to its row" >&2 ;;
+            *" crosscheck --staged") echo "pre-commit: crosscheck: a staged extension's rendering is not the oracle's; done holds a touched one to its row" >&2 ;;
             *) echo "pre-commit: $(cat "$at_once/$i.cmd") failed" >&2; status=1 ;;
         esac
     done
@@ -136,7 +137,7 @@ fi
 step $X clippy --staged
 step $X test --staged
 spawn $X witness --staged
-spawn $X crosscheck
+spawn $X crosscheck --staged
 gather
 rm -rf "$at_once"
 

@@ -527,3 +527,38 @@ fn an_absent_oracle_is_a_skip_and_not_a_pass() {
         );
     }
 }
+
+/// `--staged`, pre-commit's (#1312): a commit that stages no extension the
+/// binary carries renders nothing and writes no reading, where the lane
+/// without it renders every one.
+#[test]
+fn staged_with_no_extension_staged_renders_nothing() {
+    let root = Tree::new("crosscheck-staged").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    fs::create_dir_all(root.join("crates/php_heap/src")).unwrap();
+    fs::write(root.join("crates/php_heap/src/lib.rs"), "// moved\n").unwrap();
+    let add = std::process::Command::new("git")
+        .args(["add", "--", "crates/php_heap/src/lib.rs"])
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(add.success());
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(&*root)
+        .args(["crosscheck", "--staged"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("no extension the binary carries has a staged change"),
+        "{stdout}"
+    );
+    let store = Store::of_workspace(&root);
+    assert!(store.read("crosscheck", "ext/json").unwrap().is_none());
+}
