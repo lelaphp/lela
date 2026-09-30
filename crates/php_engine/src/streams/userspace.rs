@@ -185,8 +185,36 @@ fn not_implemented(req: &mut Request, object: PhpObject, method: &str) {
 /// reference; a true answer opens a stream of the user kind, `mode` as
 /// given. `options` is what `php_stream_open_wrapper_ex` hands on, its
 /// own less `REPORT_ERRORS`: `STREAM_USE_PATH` where `fopen` asked for the
-/// include path. The `Err` inside is the text php's wrapper logged,
-/// printed after `Failed to open stream: `.
+/// include path. A string `stream_open` left in `$opened_path` is the name
+/// the open hands back, which an include compiles the file under and
+/// lists among the included files. The `Err` inside is the text php's
+/// wrapper logged, printed after `Failed to open stream: `.
+///
+/// ```php
+/// file_put_contents(__DIR__ . '/opened.inc', '<?php function g() {}');
+/// class W {
+///     public $context; private $s;
+///     function stream_open($path, $mode, $options, &$opened) {
+///         $real = substr($path, strlen('wrap://'));
+///         $this->s = fopen($real, $mode);
+///         $opened = realpath($real);
+///         return true;
+///     }
+///     function stream_read($n) { return fread($this->s, $n); }
+///     function stream_eof() { return feof($this->s); }
+///     function stream_stat() { return fstat($this->s); }
+///     function stream_set_option($o, $a, $b) { return false; }
+/// }
+/// stream_wrapper_register('wrap', 'W');
+/// require 'wrap://' . __DIR__ . '/opened.inc';
+/// var_dump((new ReflectionFunction('g'))->getFileName() === realpath(__DIR__ . '/opened.inc'));
+/// var_dump(in_array(realpath(__DIR__ . '/opened.inc'), get_included_files(), true));
+/// unlink(__DIR__ . '/opened.inc');
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
 pub(crate) fn open(
     req: &mut Request,
     user: &UserWrapper,
@@ -240,6 +268,7 @@ fn open_with(
         opened_path.as_value(),
     ];
     let called = call(req, object, b"stream_open", &args);
+    let named = opened_path.get().deref().as_str_bytes().map(<[u8]>::to_vec);
     for arg in args {
         req.release(arg);
     }
@@ -268,6 +297,9 @@ fn open_with(
             return Err(thrown);
         }
         return Ok(Err(message));
+    }
+    if let Some(named) = named {
+        req.set_opened_path(&named);
     }
     let kind = UserStream {
         object,
