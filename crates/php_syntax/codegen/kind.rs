@@ -163,6 +163,11 @@ const EXTRAS: &[(&str, &str, bool)] = &[
         true,
     ),
     (
+        "SHEBANG",
+        "A file's `#!` first line the scanner's `SHEBANG` state passes over when the host sets `CG(skip_shebang)` (trivia).",
+        true,
+    ),
+    (
         "OPEN_TAG",
         "`<?php` / `<?` open tag — structural token owned by parser glue (convention A6).",
         false,

@@ -4,7 +4,7 @@
 //! limits) is covered by the natives it entered, as a fence served by the
 //! engine linked into the harness is (harness §4.5 condition 2, §8,
 //! revision 61). A name of its own keeps `target/*/php` the default build.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use std::process::ExitCode;
 
