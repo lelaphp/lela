@@ -590,6 +590,32 @@ fn fresh_passing_readings_for_the_touched_crate_pass_and_an_edit_after_them_is_s
     }
 }
 
+/// A refused merge commit measures the tree it would have taken and
+/// leaves its readings in the scope's files; once that tree is gone, the
+/// passes over the tree now, still in the log, stand and are not shadowed
+/// by the later readings over the tree that never landed (#1312).
+#[test]
+fn a_refused_commits_readings_over_another_tree_do_not_shadow_the_pass_over_the_tree_now() {
+    let root = scratch("shadowed");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let store = Store::of_workspace(&root);
+    record_asked(&store, &root, "ext/pcre");
+
+    write(
+        &root,
+        "ext/pcre/src/lib.rs",
+        "pub fn preg_match() -> u8 { 0 }\n",
+    );
+    let mut refused = fresh(&root, "clippy", "ext/pcre");
+    refused.status = Status::Fail;
+    refused.message = "ext/pcre: clippy is not clean".into();
+    store.record(&[refused]).unwrap();
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+
+    let verdict = judge(&root);
+    assert!(verdict.met(), "{verdict:#?}");
+}
+
 /// The constructor and `done` agree on the path a scope's tree is hashed
 /// over: a reading written through it is fresh for its scope, and one
 /// byte under that scope makes every one of them stale (harness-design.md
