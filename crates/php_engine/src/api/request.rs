@@ -2773,7 +2773,7 @@ impl Request {
     pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
         // The execution left off the running chain keeps what it was
         // lent ([`exec::Receiver`]).
-        self.own_lent_receivers(None);
+        self.own_lent_receivers();
         std::mem::swap(&mut self.stack, &mut other.stack);
         std::mem::swap(&mut self.vm, &mut other.vm);
         std::mem::swap(&mut self.error_reporting, &mut other.error_reporting);
@@ -2854,7 +2854,7 @@ impl Request {
         });
         // `ZEND_CALL_HAS_THIS` carried from the including frame, whose
         // `$this` that frame keeps: no `ZEND_CALL_RELEASE_THIS`.
-        let receiver = this.map(|this| self.lent_receiver(this));
+        let receiver = this.map(exec::Receiver::lent);
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
@@ -3041,17 +3041,17 @@ impl Request {
             (
                 std::mem::take(&mut state.extra_named),
                 std::mem::take(&mut state.extra_args),
-                state.receiver.take().and_then(exec::Receiver::owned),
+                state.receiver.take(),
                 state.closure.take().filter(|_| state.generator.is_none()),
             )
         });
-        if let Some((named, extra_args, this, closure)) = held {
+        if let Some((named, extra_args, receiver, closure)) = held {
             self.release_named(named);
             for extra in extra_args {
                 self.release_nogc(extra);
             }
-            if let Some(this) = this {
-                self.release(this.as_value());
+            if let Some(receiver) = receiver {
+                self.give_up_receiver(receiver);
             }
             if let Some(closure) = closure {
                 self.release(closure.as_value());
@@ -3178,6 +3178,33 @@ impl Request {
         self.stack.frame_mut(frame)?.slot_ptr(Slot(at))
     }
 
+    /// A call's or a frame's receiver given up: the owner an owned one
+    /// holds released, which may free the object, and the pin a lent one
+    /// holds let go, which gives back the bytes of an object freed while
+    /// it stood.
+    pub(crate) fn give_up_receiver(&mut self, receiver: exec::Receiver) {
+        match receiver {
+            exec::Receiver::Owned(object) => self.release(object.as_value()),
+            exec::Receiver::Lent(object) => self.heap.unpin(object.heap()),
+        }
+    }
+
+    /// A lent receiver made an owned one, what a frame that leaves the
+    /// running chain does with what it was lent: one owner taken, then
+    /// the pin let go.
+    pub(crate) fn own_receiver(&mut self, object: PhpObject) {
+        self.addref(&object.as_value());
+        self.heap.unpin(object.heap());
+    }
+
+    /// Every lent receiver of the running execution made an owned one,
+    /// what a fiber switch does to the execution it leaves.
+    pub(crate) fn own_lent_receivers(&mut self) {
+        for held in self.vm.own_lent() {
+            self.own_receiver(held);
+        }
+    }
+
     /// The served call off the stack, `zend_vm_stack_free_args` over what
     /// the `SEND_*` oplines placed and `zend_vm_stack_free_call_frame`
     /// after it. A native's argument is given up as php's `nogc` gives it
@@ -3196,61 +3223,6 @@ impl Request {
     /// int(0)
     /// int(1)
     /// ```
-    /// Whether a call php makes without `ZEND_CALL_RELEASE_THIS` may
-    /// name `object` with no owner ([`exec::Receiver::Lent`]): where the
-    /// heap cannot free it but through its destructor, which is served
-    /// once and hands every such call an owner
-    /// ([`Request::own_lent_receivers`]). An object whose class serves no
-    /// destructor, or whose destructor has been served, the collector
-    /// may free with no call up, so a call names it with an owner of its
-    /// own, whose release nothing but a destructor could observe.
-    pub(crate) fn lendable(&mut self, object: PhpObject) -> bool {
-        let o = object.heap();
-        !o.destructor_called() && Hooks(self).has_destructor(o)
-    }
-
-    /// The receiver of a call php makes without `ZEND_CALL_RELEASE_THIS`
-    /// (`zend_call_function`, `$this->m()`, a forwarding `parent::m()`):
-    /// lent where [`Request::lendable`], and one more owner otherwise.
-    /// An autoloader that unregisters itself gives up the object's last
-    /// owner outside the call, and its destructor is served there, inside
-    /// the method, which goes on over the object it still names:
-    ///
-    /// ```php
-    /// class A { function __invoke($c) { spl_autoload_unregister($this); echo "unregistered\n"; $this->after(); }
-    ///     function after() { echo "after\n"; }
-    ///     function __destruct() { echo "A gone\n"; } }
-    /// spl_autoload_register(new A);
-    /// var_dump(class_exists('X'));
-    /// ```
-    /// ```expect
-    /// A gone
-    /// unregistered
-    /// after
-    /// bool(false)
-    /// ```
-    pub(crate) fn lent_receiver(&mut self, object: PhpObject) -> exec::Receiver {
-        if self.lendable(object) {
-            exec::Receiver::Lent(object)
-        } else {
-            self.addref(&object.as_value());
-            exec::Receiver::Owned(object)
-        }
-    }
-
-    /// What follows a destructor served while calls on the running chain
-    /// name the object with no owner, the release that served it being
-    /// php's last: each such call and frame takes an owner of its own,
-    /// so the object php frees here stands until the last of them is
-    /// popped. `None` hands an owner to every lent receiver of the
-    /// running execution, what a fiber switch does to the execution it
-    /// leaves, which no destructor served meanwhile could find.
-    pub(crate) fn own_lent_receivers(&mut self, object: Option<PhpObject>) {
-        for held in self.vm.own_lent(object) {
-            self.addref(&held.as_value());
-        }
-    }
-
     pub(crate) fn pop_call(&mut self) {
         if let Some(call) = self.vm.pop_call() {
             // `zend_vm_stack_free_args`, whose `zval_ptr_dtor_nogc` makes
@@ -3265,8 +3237,8 @@ impl Request {
             if let Some(name) = call.name {
                 self.release(Value::string(name));
             }
-            if let Some(this) = call.receiver.and_then(exec::Receiver::owned) {
-                self.release(this.as_value());
+            if let Some(receiver) = call.receiver {
+                self.give_up_receiver(receiver);
             }
             if let Some(closure) = call.closure {
                 self.release(closure.as_value());
@@ -3573,7 +3545,7 @@ impl Request {
         }
         // `zend_call_function`: `ZEND_CALL_HAS_THIS` and no
         // `ZEND_CALL_RELEASE_THIS`, the caller keeping the object.
-        let receiver = this.map(|this| self.lent_receiver(this));
+        let receiver = this.map(exec::Receiver::lent);
         // `ZEND_CALL_MAY_HAVE_UNDEF`: a named argument skipped a slot.
         let may_have_undef = sent
             .iter()
@@ -20832,6 +20804,19 @@ impl Request {
         self.fatal_of(written)
     }
 
+    /// `zend_hash_add_new` or `zend_hash_index_add_new` over `a`, which
+    /// has one owner: `value` is the array's from here and a string key
+    /// one more owner, appended without the lookup.
+    pub(crate) fn array_add_new(
+        &mut self,
+        a: Arr,
+        key: php_heap::Key,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let added = self.heap.array_add_new(a, key, value.into_zval());
+        self.fatal_of(added)
+    }
+
     /// `zend_hash_next_index_insert` over `a`, which has one owner:
     /// `false`, and `value` given up, when the next element is taken.
     pub(crate) fn array_append(&mut self, a: Arr, value: Value) -> Result<bool, Thrown> {
@@ -21636,7 +21621,6 @@ impl HeapHooks for Hooks<'_> {
     fn destruct(&mut self, obj: Obj) {
         let table = self.0.object_handlers(obj);
         table.dtor_obj(self.0, PhpObject::of(obj));
-        self.0.own_lent_receivers(Some(PhpObject::of(obj)));
     }
 
     /// `free_obj`, through the table: the payload's release is the

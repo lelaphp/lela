@@ -419,6 +419,26 @@ impl PhpArray {
         Ok(())
     }
 
+    /// Lay `value` down at `key` as `zend_hash_add_new` and
+    /// `zend_symtable_add_new` do after `SEPARATE_ARRAY`: a string key
+    /// appended without the lookup, so a key the array holds already is
+    /// held twice and a lookup finds this row. The value and a string key
+    /// are the array's from here.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn add_new(
+        &mut self,
+        req: &mut Request,
+        key: Key,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        self.separate(req)?;
+        req.array_add_new(self.0, key.heap(), value)?;
+        if let Key::Str(s) = key {
+            req.release(Value::string(s));
+        }
+        Ok(())
+    }
+
     /// Replace the value at `key` in place; `false`, and `value` given
     /// up, when it is absent.
     pub fn replace(&mut self, req: &mut Request, key: &Key, value: Value) -> Result<bool, Thrown> {
@@ -1574,6 +1594,19 @@ impl PhpObject {
         matches!(self.0.laziness(), Laziness::Ghost | Laziness::Proxy)
     }
 
+    /// What the object's property table holds of its declared
+    /// properties: rows that stand for the slots, php's `IS_INDIRECT`s,
+    /// or copies of them, plain values under their mangled names, once a
+    /// table shared while it stood for the slots was separated (an
+    /// `ArrayObject` sort, a lazy ghost's initializer). A reader that
+    /// tells php's `IS_INDIRECT` from a plain value, as
+    /// `spl_array_object_count_elements_helper` does, reads it after
+    /// [`PhpObject::entries`] has laid the table down.
+    #[must_use]
+    pub fn declared_rows(&self) -> DeclaredRows {
+        self.0.declared_rows()
+    }
+
     /// `OBJ_EXTRA_FLAGS(obj)`'s two lazy bits as the one state they
     /// encode, what `php_var_dump_object_prefix` reads.
     #[must_use]
@@ -1778,6 +1811,11 @@ pub use php_heap::zend_sort;
 /// instance, or neither, which a dumper reads to print `lazy ghost ` or
 /// `lazy proxy ` before `object(` ([`PhpObject::laziness`]).
 pub use php_heap::Laziness;
+
+/// What an object's property table holds of its declared properties
+/// (design §5.4): the slots standing for them, or copies of them the
+/// table holds as plain values ([`PhpObject::declared_rows`]).
+pub use php_heap::DeclaredRows;
 
 /// A resource (design §5.5): php's `zend_resource *`, thirty-two bytes
 /// of the request's heap in the list `EG(regular_list)` is, its id the

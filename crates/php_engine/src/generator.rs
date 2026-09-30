@@ -776,7 +776,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
         }
     });
     if let Some(this) = lent {
-        req.addref(&this.as_value());
+        req.own_receiver(this);
     }
     with(req, object, |g| {
         g.function = function;

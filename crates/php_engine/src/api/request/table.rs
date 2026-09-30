@@ -242,9 +242,10 @@ impl Request {
     /// `get_ht_for_iap` (`Z/ext/standard/array.c:993`) past its
     /// deprecation: the object's table separated first where another
     /// holder shares it and `separate` asks, as `zend_array_dup` does,
-    /// then `get_properties`, which lays the table down and initialises
-    /// a lazy object, whose instance's table is then the one the
-    /// pointer moves over. The object whose table it is rides beside it.
+    /// then the class's `get_properties`, which lays the table down,
+    /// initialises a lazy object, whose instance's table is then the one
+    /// the pointer moves over, and at `DateInterval` writes the fields
+    /// into it. The object whose table it is rides beside it.
     fn pointer_table(
         &mut self,
         object: PhpObject,
@@ -254,6 +255,8 @@ impl Request {
             self.separated_properties(object.heap())?;
         }
         let object = self.table_owner(object)?;
+        let handlers = self.object_handlers(object.heap());
+        handlers.get_properties(self, object)?;
         let table = self.heap.object_property_table(object.heap());
         Ok((object, self.fatal_of(table)?))
     }

@@ -1923,14 +1923,15 @@ pub trait ObjectHandlers: Send + Sync {
     /// Whether the table's `get_properties` answers rows of its own
     /// making, not the object's property table as
     /// `zend_std_get_properties` holds it: `sxe_get_properties`, which
-    /// builds a table of the element's children on each call, and
-    /// `date_object_get_properties_interval`. The internal pointer the
-    /// pointer natives move over an object
+    /// builds a table of the element's children on each call. The
+    /// internal pointer the pointer natives move over an object
     /// ([`PhpObject::pointer_move`](crate::api::values::PhpObject::pointer_move))
     /// is the object's table's, so over such a class they read a table
     /// fresh on each call, which is php's answer for `SimpleXMLElement`, whose
-    /// table is rebuilt between calls. `false` at `Std`, and at every
-    /// class that sets `get_properties_for` alone, whose pointer natives
+    /// table is rebuilt between calls. `false` at `Std`, at every class
+    /// that sets `get_properties_for` alone, and at one whose
+    /// `get_properties` writes into the object's own table and answers
+    /// it (`date_object_get_properties_interval`), whose pointer natives
     /// read the object's own table as php's do.
     ///
     /// ```php

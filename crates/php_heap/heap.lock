@@ -61,6 +61,7 @@ GcStatus
 Heap
 Heap::addref
 Heap::array
+Heap::array_add_new
 Heap::array_append
 Heap::array_del
 Heap::array_dup
@@ -142,6 +143,7 @@ Heap::string_append
 Heap::string_safe_alloc
 Heap::string_with
 Heap::take_freed_use
+Heap::unpin
 HeapHooks
 HeapHooks::destruct
 HeapHooks::forget_lazy
@@ -187,6 +189,8 @@ Obj::is_recursive
 Obj::is_same
 Obj::is_weakly_referenced
 Obj::laziness
+Obj::pin
+Obj::pins
 Obj::properties
 Obj::protect
 Obj::refcount

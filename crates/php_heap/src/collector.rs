@@ -1244,7 +1244,9 @@ impl Heap {
     /// out of the store, turned to `IS_NULL` and its members freed once,
     /// every garbage table turned to `IS_NULL` and its contents
     /// destroyed; then, in a second pass, what is still garbage off the
-    /// buffer and its bytes back to the heap.
+    /// buffer and its bytes back to the heap, but for an object a
+    /// running frame pins, whose bytes and id wait for the last pin
+    /// ([`Heap::unpin`]).
     fn gc_free_garbage(hooks: &mut dyn HeapHooks, end: u32) {
         for idx in FIRST_ROOT..end {
             let Some(Entry::Garbage(node)) = hooks.heap().gc.entry(idx) else {
@@ -1261,7 +1263,11 @@ impl Heap {
                         Heap::object_free(hooks, o);
                         o.delref();
                     }
-                    hooks.heap().store.add_to_free_list(handle);
+                    // A pinned object's id waits with its bytes for
+                    // the last pin ([`Heap::unpin`]).
+                    if o.pins() == 0 {
+                        hooks.heap().store.add_to_free_list(handle);
+                    }
                 }
                 Node::Arr(a) => {
                     a.gc().set_kind_null();
@@ -1277,6 +1283,7 @@ impl Heap {
             };
             heap.gc.remove_from_roots(idx);
             let at = match node {
+                Node::Obj(o) if o.pins() > 0 => continue,
                 Node::Obj(o) => o.address(),
                 Node::Arr(a) => a.address(),
                 Node::Ref(_) => continue,
