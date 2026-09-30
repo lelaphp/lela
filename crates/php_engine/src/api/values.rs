@@ -1175,6 +1175,25 @@ impl PhpObject {
         req.table_entries(*self)
     }
 
+    /// `zend_std_get_properties_ex` for what it leaves behind: the
+    /// object's property table built where it has none
+    /// (`rebuild_object_properties_internal`), as a class's
+    /// `create_object` builds it for its objects from the start
+    /// (`pdo_dbh_new`), so `memory_get_usage()` counts the table where
+    /// php's does. The `Err` is the memory limit.
+    ///
+    /// ```php
+    /// $r = new ReflectionClass('PDO'); $w = $r->newInstanceWithoutConstructor();
+    /// $m = memory_get_usage(); $p = $r->newInstanceWithoutConstructor(); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 264
+    /// ```
+    pub fn rebuild_properties(&self, req: &mut Request) -> Result<(), Thrown> {
+        let table = req.heap_mut().object_properties(self.heap());
+        req.fatal_of(table).map(|_| ())
+    }
+
     /// One row of the property table by key, `zend_symtable_find_ind`:
     /// no handler, hook or visibility in the way, a declared property
     /// under its mangled name, a view; `None` for a key the table has

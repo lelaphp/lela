@@ -859,6 +859,7 @@ values::PhpObject::props_for
 values::PhpObject::props_held
 values::PhpObject::protect
 values::PhpObject::protect_in
+values::PhpObject::rebuild_properties
 values::PhpObject::row
 values::PhpObject::row_place
 values::PhpObject::row_ref

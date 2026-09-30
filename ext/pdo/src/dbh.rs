@@ -145,6 +145,12 @@ pub(crate) struct Handlers;
 pub(crate) static HANDLERS: Handlers = Handlers;
 
 impl ObjectHandlers for Handlers {
+    /// `pdo_dbh_new` past the allocation: the property table built at
+    /// once, `zend_std_get_properties_ex(&dbh->std)`.
+    fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        object.rebuild_properties(req)
+    }
+
     /// `pdo_dbh_free_storage`: a transaction still open rolled back, and
     /// then `dbh_free`: the failed statement given up, the connection
     /// closed and the constructor arguments released.
