@@ -722,6 +722,44 @@ fn a_directory_the_pinned_tree_has_not_is_kept_and_named_absent() {
     assert_eq!(subset.absent(), [Path::new("Zend/nope")]);
 }
 
+/// An extension's row derives its subset, `ext/<name>/tests`, and where the
+/// pinned tree has no such directory the extension has no tests of its
+/// own, as `ext/lexbor` has none: its reading, asked for by name and in
+/// the lane alike, is a skip naming the directory, not the standing fail
+/// a row that names a directory the tree has not earns. A subset named on
+/// the command line that is no crate and no directory is still refused,
+/// so a typo is not a skip (#1231).
+#[test]
+fn an_extension_with_no_test_directory_reads_as_a_skip_and_a_name_that_is_nothing_fails() {
+    let tree = fixture_tree();
+    let manifest = manifest_of([Crate::named("ext/testless")], &tree);
+    let registry = registry("");
+    for subset in [Some("ext/testless".to_owned()), None] {
+        let ask = Ask {
+            subset,
+            jobs: NonZeroUsize::new(1),
+            ..Ask::default()
+        };
+        let readings = super::run(&workspace(), &manifest, &registry, &ask).unwrap();
+        assert_eq!(readings.len(), 1, "{readings:#?}");
+        let reading = &readings[0];
+        assert_eq!(reading.scope, "ext/testless", "{reading:#?}");
+        assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+        assert!(
+            reading.message.contains("ext/testless/tests")
+                && reading.message.contains("no tests of its own"),
+            "{}",
+            reading.message
+        );
+    }
+    let ask = Ask {
+        subset: Some("ext/nosuch".to_owned()),
+        ..Ask::default()
+    };
+    let refused = super::run(&workspace(), &manifest, &registry, &ask).unwrap_err();
+    assert!(format!("{refused:#}").contains("ext/nosuch"), "{refused:#}");
+}
+
 #[test]
 fn the_per_commit_lane_is_composed_from_the_crate_rows() {
     let tree = fixture_tree();
