@@ -313,7 +313,6 @@ fn session_info(req: &mut Request) {
                     String::from("On")
                 }
                 ini::Kind::Bool | ini::Kind::PerDirBool => String::from("Off"),
-                _ if value.is_empty() => String::from("no value"),
                 _ => String::from_utf8_lossy(value).into_owned(),
             };
             let local = req
@@ -322,13 +321,11 @@ fn session_info(req: &mut Request) {
             [(*name).to_owned(), local, shown(default.as_bytes())]
         })
         .collect();
-    let mut table: Vec<[&str; 3]> = vec![["Directive", "Local Value", "Master Value"]];
-    table.extend(
-        rows.iter()
-            .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()]),
-    );
-    let table: Vec<&[&str]> = table.iter().map(<[&str; 3]>::as_slice).collect();
-    req.info_table(&table);
+    let rows: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()])
+        .collect();
+    req.info_ini_table(&rows);
 }
 
 // ------------------------------------------------------------ helpers
