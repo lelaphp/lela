@@ -104,15 +104,15 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 329 |  | pass |
+| heap | heap.lock | 354 |  | pass |
 | unit | unit.lock | 107 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 900 | 1000 | pass |
+| api | api.lock | 924 | 1500 | pass |
 | sapi | sapi.lock | 78 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 353 |  | pass |
 
-<!-- /computed -->
+<!-- /computed in=8b4ddee4612972fad822b97a72d83e16c0d547a84209bc236cfd6bc226e0e4e2 out=a7620f529dc44b630555cba1ffb3dac11b004bbfd6986b59adfe3c15f0029ea4 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -242,6 +242,7 @@ Options:
 .
 ├── cgi
 ├── cli
-└── fpm
+├── fpm
+└── phpdbg
 ```
-<!-- /computed in=c8a7b3fcbb6a403ba7abf1b232ce6acebcb51647351a19a7d7e64fcae3b3e2ba out=13133fa5fc4724f6c6436169b502ba6a835994124d1e31fcf89f3c5fde41ee69 -->
+<!-- /computed in=d9792c70e043b4549f1ed04bf5ddbc594d3104b27bce7a39b12cc5c2dc6ef79d out=470dec71ee5cf90528ce6b4eef3301fa86defac22de9048c8274b9ca2838028e -->
