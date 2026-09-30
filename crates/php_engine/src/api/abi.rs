@@ -442,9 +442,11 @@ pub enum Lookup {
 /// An ini entry's `on_modify`, php's `PHP_INI_MH`: served by `ini_set()`
 /// with the new value before the entry takes it
 /// (`ZEND_INI_STAGE_RUNTIME`), by the engine as it is built with the
-/// value the host set (`ZEND_INI_STAGE_STARTUP`), and by a host laying
-/// its own entry over php once it has started (`ZEND_INI_STAGE_ACTIVATE`);
-/// [`Request::ini_stage`] says which. It raises what the entry's handler
+/// value the host set (`ZEND_INI_STAGE_STARTUP`), by a host laying its
+/// own entry over php once it has started (`ZEND_INI_STAGE_ACTIVATE`),
+/// and as the request ends with the value an entry the request changed
+/// started with (`ZEND_INI_STAGE_DEACTIVATE`); [`Request::ini_stage`]
+/// says which. It raises what the entry's handler
 /// raises, and answers whether the value is taken, `false` being php's
 /// `FAILURE`, which leaves the entry as it was, its default at startup,
 /// and makes `ini_set()` answer `false`.
@@ -462,8 +464,12 @@ pub enum IniStage {
     /// `php_value`s.
     Activate,
     /// `ZEND_INI_STAGE_RUNTIME`: while a request runs, through
-    /// `ini_set()` and the natives.
+    /// `ini_set()`, `ini_restore()` and the natives.
     Runtime,
+    /// `ZEND_INI_STAGE_DEACTIVATE`: as the request ends, each entry it
+    /// changed handed back the value it started with
+    /// (`zend_ini_deactivate`).
+    Deactivate,
 }
 /// The `MINFO` function: writes the extension's `phpinfo()` table
 /// through [`Request::info_table`].

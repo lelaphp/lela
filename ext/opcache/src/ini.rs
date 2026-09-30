@@ -410,9 +410,11 @@ pub(crate) fn modify<const AT: usize>(req: &mut Request, value: &[u8]) -> Result
 /// `nTableMask` bounds, `UINT32_MAX / (32 * 1024 * 4)`.
 const MAX_INTERNED_STRINGS_BUFFER: i64 = 32767;
 
-/// `OnEnable`: at startup a boolean like any other; in a request, off
-/// turns the cache off for the rest of it, and on is refused with php's
-/// warning unless it is on already.
+/// `OnEnable`: at startup, and as the request ends and hands the entry
+/// back the value it started with, a boolean like any other; in a
+/// request, off turns the cache off for the rest of it, and on is
+/// refused with php's warning unless it is on already, so the request's
+/// end raises nothing over the value it turned off.
 ///
 /// ```php
 /// var_dump(ini_set('opcache.enable', '1'), ini_set('opcache.enable', '0'), ini_get('opcache.enable'));
@@ -429,7 +431,8 @@ const MAX_INTERNED_STRINGS_BUFFER: i64 = 32767;
 /// ```
 fn on_enable(req: &mut Request, value: &[u8]) -> bool {
     let stage = req.ini_stage();
-    if stage == IniStage::Startup || !Request::ini_parse_bool(value) {
+    if matches!(stage, IniStage::Startup | IniStage::Deactivate) || !Request::ini_parse_bool(value)
+    {
         if stage == IniStage::Runtime {
             req.state::<State>().accelerator_enabled = false;
         }
@@ -481,11 +484,14 @@ fn on_enable(req: &mut Request, value: &[u8]) -> bool {
 /// string(7) "tracing"
 /// ```
 fn on_jit(req: &mut Request, value: &[u8]) -> bool {
-    if req.ini_stage() != IniStage::Startup && !jit_configured(req) {
-        warning(
-            req,
-            "Cannot change opcache.jit setting at run-time (JIT is disabled)",
-        );
+    let stage = req.ini_stage();
+    if stage != IniStage::Startup && !jit_configured(req) {
+        if stage == IniStage::Runtime {
+            warning(
+                req,
+                "Cannot change opcache.jit setting at run-time (JIT is disabled)",
+            );
+        }
         return false;
     }
     if jit_setting(value) != Jit::Invalid {

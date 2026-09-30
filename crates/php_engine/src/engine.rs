@@ -2990,6 +2990,9 @@ impl Engine {
         req.destroy_static_vars();
         req.free_default_arguments();
         req.free_object_storage();
+        // `zend_deactivate`'s `zend_ini_deactivate`, after
+        // `shutdown_executor` (`Z/Zend/zend.c:1320-1330`).
+        req.ini_deactivate();
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
         // for the host is the log form of it, whether or not `log_errors`

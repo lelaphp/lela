@@ -115,9 +115,27 @@ pub(super) fn declared() -> Vec<IniDecl> {
 }
 
 /// `SESSION_CHECK_ACTIVE_STATE` and `SESSION_CHECK_OUTPUT_STATE`: `false`
-/// after php's warning while a session is active or the headers are
-/// sent.
-fn changeable(req: &mut Request) -> bool {
+/// after php's warning while a session is active, or while the headers
+/// are sent at any stage but the request's end, where the entries are
+/// restored after the response went out. An entry refused here is still
+/// one the request changed, so its end hands it back the value it
+/// started with:
+///
+/// ```php
+/// echo "sent\n"; var_dump(ini_set('session.use_only_cookies', '1'));
+/// ```
+/// ```expect regime=session-startup
+/// Deprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0
+///
+/// Deprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0
+/// sent
+///
+/// Warning: ini_set(): Session ini settings cannot be changed after headers have already been sent (sent from %s on line 2) in %s on line 2
+/// bool(false)
+///
+/// Deprecated: PHP Request Shutdown: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0
+/// ```
+fn changeable(req: &mut Request, stage: IniStage) -> bool {
     if req.state::<State>().status == crate::Status::Active {
         started_error(
             req,
@@ -126,7 +144,7 @@ fn changeable(req: &mut Request) -> bool {
         );
         return false;
     }
-    if headers_sent(req) {
+    if stage != IniStage::Deactivate && headers_sent(req) {
         sent_error(
             req,
             "Session ini settings cannot be changed after headers have already been sent",
@@ -148,24 +166,42 @@ fn whole_number(value: &[u8]) -> Option<i64> {
     digits.parse().ok()
 }
 
-/// When a rule runs, php's `ZEND_INI_STAGE_*` as the session's rules
-/// tell them apart: as the engine starts, over the host's values, or
-/// while a request runs, through `ini_set()` and the natives.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Stage {
-    Startup,
-    Runtime,
+/// `php_error_docref` at the stage: behind `PHP Startup` in `Unknown`
+/// on line 0 as the engine starts, which is `php_verror`'s origin while
+/// `php_during_module_startup()`, and behind the origin the request
+/// names otherwise, the active native's name while it runs and `PHP
+/// Request Shutdown` as it ends.
+fn raise(req: &mut Request, stage: IniStage, level: Level, message: &str) {
+    match stage {
+        IniStage::Startup => raising::startup(req, level, &format!("PHP Startup: {message}")),
+        IniStage::Activate | IniStage::Runtime | IniStage::Deactivate => {
+            docref(req, level, message);
+        }
+    }
 }
 
-impl Stage {
-    /// `php_error_docref` at the stage: behind the active native's name
-    /// at runtime, and behind `PHP Startup` in `Unknown` on line 0 as
-    /// the engine starts, which is `php_verror`'s origin while
-    /// `php_during_module_startup()`.
-    fn raise(self, req: &mut Request, level: Level, message: &str) {
-        match self {
-            Stage::Runtime => docref(req, level, message),
-            Stage::Startup => raising::startup(req, level, &format!("PHP Startup: {message}")),
+/// php's `err_type` for a save handler or serializer refused:
+/// `E_WARNING` at runtime, `E_ERROR` at any other stage.
+fn refusal(stage: IniStage) -> Level {
+    if stage == IniStage::Runtime {
+        Level::Warning
+    } else {
+        Level::Error
+    }
+}
+
+/// A save handler or serializer that is not found: taken without a
+/// word before any request has activated the extensions
+/// (`PG(modules_activated)`), refused without one as the request ends
+/// (php's comment: restoring says nothing), and refused
+/// after `message` otherwise.
+fn not_found(req: &mut Request, stage: IniStage, message: &str) -> bool {
+    match stage {
+        IniStage::Startup | IniStage::Activate => true,
+        IniStage::Deactivate => false,
+        IniStage::Runtime => {
+            docref(req, refusal(stage), message);
+            false
         }
     }
 }
@@ -174,7 +210,9 @@ impl Stage {
 /// value. At startup no session is active and no header is sent, and
 /// `PG(modules_activated)` is not yet set, so an unknown save handler or
 /// serializer is taken without a word there, and the session is disabled
-/// when a request starts under it (`PHP_RINIT_FUNCTION(session)`).
+/// when a request starts under it (`PHP_RINIT_FUNCTION(session)`). As
+/// the request ends its session is closed, and the headers it sent do
+/// not hold an entry back from the value it started with.
 ///
 /// What a rule raises at startup is displayed before any request, in the
 /// order the entries are declared, and sends no header, so the session
@@ -192,7 +230,7 @@ impl Stage {
 /// string(4) "/tmp"
 /// ```
 #[allow(clippy::too_many_lines)] // one arm per `PHP_INI_MH` of session.c
-fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool {
+fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> bool {
     let kind = ENTRIES
         .iter()
         .find(|(n, _, _)| n.as_bytes() == name)
@@ -202,11 +240,11 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool
         Some(Kind::PerDir | Kind::PerDirBool) => return per_dir(req, name, value, stage),
         Some(_) => {}
     }
-    if stage == Stage::Runtime && !changeable(req) {
+    if stage != IniStage::Startup && !changeable(req, stage) {
         return false;
     }
     let deprecated =
-        |req: &mut Request, message: &str| stage.raise(req, Level::Deprecated, message);
+        |req: &mut Request, message: &str| raise(req, stage, Level::Deprecated, message);
     match name {
         b"session.save_path" => {
             if value.contains(&0) {
@@ -224,7 +262,9 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool
                 }
                 None => value,
             };
-            stage != Stage::Runtime || dir.is_empty() || req.check_open_basedir(dir, true).is_ok()
+            stage != IniStage::Runtime
+                || dir.is_empty()
+                || req.check_open_basedir(dir, true).is_ok()
         }
         b"session.name" => {
             let forbidden = value.iter().any(|c| b"=,;.[ \t\r\n\x0b\x0c".contains(c));
@@ -233,8 +273,13 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool
                 || numeric_string(value).is_some()
                 || forbidden
             {
-                stage.raise(
+                // "Do not output error when restoring ini options."
+                if stage == IniStage::Deactivate {
+                    return false;
+                }
+                raise(
                     req,
+                    stage,
                     Level::Warning,
                     &format!(
                         "session.name \"{}\" must not be numeric, empty, contain null bytes or any of the following characters \"=,;.[ \\t\\r\\n\\013\\014\"",
@@ -247,25 +292,15 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool
         }
         b"session.save_handler" => {
             let Some(module) = Module::find(value) else {
-                if stage == Stage::Startup {
-                    return true;
-                }
-                docref(
-                    req,
-                    Level::Warning,
-                    &format!("Session save handler \"{}\" cannot be found", shown(value)),
-                );
-                return false;
+                let message = format!("Session save handler \"{}\" cannot be found", shown(value));
+                return not_found(req, stage, &message);
             };
             let session = req.state::<State>();
             if !session.set_handler && module == Module::User {
-                let level = match stage {
-                    Stage::Runtime => Level::Warning,
-                    Stage::Startup => Level::Error,
-                };
-                stage.raise(
+                raise(
                     req,
-                    level,
+                    stage,
+                    refusal(stage),
                     "Session save handler \"user\" cannot be set by ini_set()",
                 );
                 return false;
@@ -276,22 +311,20 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool
         }
         b"session.serialize_handler" => {
             let Some(format) = Format::find(value) else {
-                if stage == Stage::Startup {
-                    return true;
-                }
-                docref(
-                    req,
-                    Level::Warning,
-                    &format!("Serialization handler \"{}\" cannot be found", shown(value)),
-                );
-                return false;
+                let message = format!("Serialization handler \"{}\" cannot be found", shown(value));
+                return not_found(req, stage, &message);
             };
             req.state::<State>().format = Some(format);
             true
         }
         b"session.cookie_lifetime" => {
             if crate::atol(value) < 0 {
-                stage.raise(req, Level::Warning, "CookieLifetime cannot be negative");
+                raise(
+                    req,
+                    stage,
+                    Level::Warning,
+                    "CookieLifetime cannot be negative",
+                );
                 return false;
             }
             true
@@ -308,8 +341,9 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool
             if whole_number(value).is_some_and(|n| bounds.contains(&n)) {
                 return true;
             }
-            stage.raise(
+            raise(
                 req,
+                stage,
                 Level::Warning,
                 &format!(
                     "session.configuration \"{what}\" must be between {} and {}",
@@ -320,16 +354,18 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool
             false
         }
         b"session.gc_probability" if Request::ini_parse_bytes(value) < 0 => {
-            stage.raise(
+            raise(
                 req,
+                stage,
                 Level::Warning,
                 "session.gc_probability must be greater than or equal to 0",
             );
             false
         }
         b"session.gc_divisor" if Request::ini_parse_bytes(value) <= 0 => {
-            stage.raise(
+            raise(
                 req,
+                stage,
                 Level::Warning,
                 "session.gc_divisor must be greater than 0",
             );
@@ -369,22 +405,24 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool
 /// The rules of the entries `ZEND_INI_PERDIR` leaves no user to
 /// change, which only the host's values meet: `OnUpdateRfc1867Freq`'s,
 /// and `OnUpdateBool` and `OnUpdateStr`, which take anything.
-fn per_dir(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool {
+fn per_dir(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> bool {
     if name != b"session.upload_progress.freq" {
         return true;
     }
     let percent = crate::atol(value);
     if percent < 0 {
-        stage.raise(
+        raise(
             req,
+            stage,
             Level::Warning,
             "session.upload_progress.freq must be greater than or equal to 0",
         );
         return false;
     }
     if value.last() == Some(&b'%') && percent > 100 {
-        stage.raise(
+        raise(
             req,
+            stage,
             Level::Warning,
             "session.upload_progress.freq must be less than or equal to 100%",
         );
@@ -401,11 +439,7 @@ fn modify<const AT: usize>(req: &mut Request, value: &[u8]) -> Result<bool, Thro
     let Some((name, _, _)) = ENTRIES.get(AT) else {
         return Ok(true);
     };
-    let stage = if req.ini_stage() == IniStage::Startup {
-        Stage::Startup
-    } else {
-        Stage::Runtime
-    };
+    let stage = req.ini_stage();
     Ok(on_modify(req, name.as_bytes(), value, stage))
 }
 

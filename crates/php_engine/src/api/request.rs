@@ -29,7 +29,7 @@ use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
     Callable, Dependency, DimensionRead, Extension, IniStage, IniVerdict, NativeNew,
-    ObjectHandlers, PropertyRead, PropertyTest, Std, ZendExtension,
+    ObjectHandlers, OnModify, PropertyRead, PropertyTest, Std, ZendExtension,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Level, Thrown};
@@ -1720,6 +1720,9 @@ pub struct Request {
     /// stands in it ([`exec::RuntimeCache`]) and nowhere else.
     map: MapTable,
     states: Vec<(TypeId, Box<dyn Any + Send>)>,
+    /// `EG(modified_ini_directives)`: each entry the request changed,
+    /// in the order it first changed, with the value it holds now; the
+    /// value it started with is the engine's ([`Request::ini_deactivate`]).
     ini: Vec<(Vec<u8>, Vec<u8>)>,
     /// The entries this request's host locked past the engine's
     /// ([`crate::engine::IniOrigin::Admin`]).
@@ -14065,8 +14068,7 @@ impl Request {
     /// value before it walks to the next: `opcache.log_verbosity_level`
     /// decides what opcache's handlers after it log.
     pub(crate) fn take_startup_value(&mut self, name: &[u8], value: &[u8]) {
-        self.ini.retain(|(n, _)| n.as_slice() != name);
-        self.ini.push((name.to_vec(), value.to_vec()));
+        self.ini_hold(name, value);
     }
 
     /// What the startup's handlers wrote to the error stream, php's
@@ -16886,9 +16888,7 @@ impl Request {
     /// replaced by the number's decimal text, `zend_long_to_str`, past
     /// its `on_modify`, and the word set to the number.
     pub(crate) fn alter_error_reporting(&mut self, level: i64) {
-        self.ini.retain(|(n, _)| n.as_slice() != b"error_reporting");
-        self.ini
-            .push((b"error_reporting".to_vec(), level.to_string().into_bytes()));
+        self.ini_hold(b"error_reporting", level.to_string().as_bytes());
         self.error_reporting = level;
     }
 
@@ -19077,10 +19077,16 @@ impl Request {
         value: &[u8],
         allowed: bool,
     ) -> Result<Option<Vec<u8>>, Thrown> {
-        let previous = self.ini_get(name).map(<[u8]>::to_vec);
-        if previous.is_none() || !allowed {
+        let Some(previous) = self.ini_get(name).map(<[u8]>::to_vec) else {
+            return Ok(None);
+        };
+        if !allowed {
             return Ok(None);
         }
+        // Changed from here, whether the rules below take the value or
+        // not, as `zend_alter_ini_entry_ex` marks the entry `modified`
+        // before it serves `on_modify`.
+        self.ini_hold(name, &previous);
         if Request::ini_verdict(name, value) == IniVerdict::Rejected {
             return Ok(None);
         }
@@ -19134,19 +19140,12 @@ impl Request {
             let message = "Directive 'report_memleaks' is deprecated";
             crate::api::raising::docref(self, Level::Deprecated, message);
         }
-        let handler = self.shared.extensions.iter().find_map(|e| {
-            e.on_modify
-                .iter()
-                .find(|(n, _)| n.as_slice() == name)
-                .map(|(_, h)| *h)
-        });
-        if let Some(handler) = handler
+        if let Some(handler) = self.ini_handler(name)
             && !handler(self, value)?
         {
             return Ok(None);
         }
-        self.ini.retain(|(n, _)| n.as_slice() != name);
-        self.ini.push((name.to_vec(), value.to_vec()));
+        self.ini_hold(name, value);
         match name {
             b"max_execution_time" => self.arm_timer(),
             b"error_reporting" => self.update_error_reporting(),
@@ -19155,7 +19154,116 @@ impl Request {
             }
             _ => {}
         }
-        Ok(previous)
+        Ok(Some(previous))
+    }
+
+    /// The entry `name` holding `value` in the request: in its place
+    /// among the entries the request changed, or last where it had not
+    /// changed it yet.
+    fn ini_hold(&mut self, name: &[u8], value: &[u8]) {
+        match self.ini.iter_mut().find(|(n, _)| n.as_slice() == name) {
+            Some((_, held)) => *held = value.to_vec(),
+            None => self.ini.push((name.to_vec(), value.to_vec())),
+        }
+    }
+
+    /// The `on_modify` an extension gave the entry `name`.
+    fn ini_handler(&self, name: &[u8]) -> Option<OnModify> {
+        self.shared.extensions.iter().find_map(|e| {
+            e.on_modify
+                .iter()
+                .find(|(n, _)| n.as_slice() == name)
+                .map(|(_, h)| *h)
+        })
+    }
+
+    /// `ini_restore()`, `zend_restore_ini_entry` at
+    /// `ZEND_INI_STAGE_RUNTIME` (`Z/Zend/zend_ini.c:360-381`): an entry
+    /// the request changed set back to the value it started with through
+    /// its rules, as `ini_set()` serves them, and changed no longer, so
+    /// the request's end leaves it be; one its rules refuse stays changed.
+    /// An entry `PHP_INI_USER` may not touch, or a host's
+    /// `php_admin_value` holds, is left as it is.
+    ///
+    /// ```php
+    /// ini_set('session.use_only_cookies', '1');
+    /// ini_restore('session.use_only_cookies');
+    /// var_dump(ini_get('session.use_only_cookies'));
+    /// ```
+    /// ```expect regime=session-startup
+    /// Deprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0
+    ///
+    /// Deprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0
+    ///
+    /// Deprecated: ini_restore(): Disabling session.use_only_cookies INI setting is deprecated in %s on line 3
+    /// string(1) "0"
+    /// ```
+    pub fn ini_restore(&mut self, name: &[u8]) -> Result<(), Thrown> {
+        let user = Request::ini_modifiable(name).0 && self.ini_user(name);
+        if !user || self.ini_locked(name) || !self.ini.iter().any(|(n, _)| n == name) {
+            return Ok(());
+        }
+        let Some(original) = self.shared.ini_default(name).map(<[u8]>::to_vec) else {
+            return Ok(());
+        };
+        if self.ini_alter(name, &original, true)?.is_some() {
+            self.ini.retain(|(n, _)| n.as_slice() != name);
+        }
+        Ok(())
+    }
+
+    /// `zend_ini_deactivate` (`Z/Zend/zend_ini.c:190-203`), from
+    /// `zend_deactivate` after `shutdown_executor`: each entry the
+    /// request changed, in the order it first changed, handed back the
+    /// value it started with through its extension's `on_modify` at
+    /// [`IniStage::Deactivate`], `zend_restore_ini_entry_cb`, and its
+    /// startup value after whatever the rule answers. What a rule raises
+    /// is displayed past the `php_output` layer, inactive by then, as
+    /// `PHP Request Shutdown: …` at no file; `error_reporting` restored
+    /// before it holds it again, as `OnUpdateErrorReporting` sets the
+    /// word:
+    ///
+    /// ```php
+    /// var_dump(ini_set('session.use_only_cookies', '1'));
+    /// echo "end\n";
+    /// ```
+    /// ```expect regime=session-startup
+    /// Deprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0
+    ///
+    /// Deprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0
+    /// string(1) "0"
+    /// end
+    ///
+    /// Deprecated: PHP Request Shutdown: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0
+    /// ```
+    ///
+    /// An entry changed after `error_reporting` is restored while the
+    /// request's level still holds, so it raises nothing seen:
+    ///
+    /// ```php
+    /// ini_set('session.use_only_cookies', '1'); error_reporting(0);
+    /// ```
+    /// ```expect regime=session-startup
+    /// Deprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0
+    ///
+    /// Deprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0
+    /// ```
+    pub(crate) fn ini_deactivate(&mut self) {
+        self.ini_stage = IniStage::Deactivate;
+        let changed: Vec<Vec<u8>> = self.ini.iter().map(|(n, _)| n.clone()).collect();
+        for name in changed {
+            if let Some(handler) = self.ini_handler(&name) {
+                let original = self.shared.ini_default(&name).unwrap_or_default().to_vec();
+                // Each rule under its own `zend_try`: what it bails out
+                // with leaves it, and the next entry is restored.
+                let _ = handler(self, &original);
+                self.catch_bailout();
+            }
+            self.ini.retain(|(n, _)| *n != name);
+            if name == b"error_reporting" {
+                self.update_error_reporting();
+            }
+        }
     }
 
     /// Whether an extension's entry is `PHP_INI_USER`, its declaration's
@@ -20378,8 +20486,7 @@ impl Request {
     /// call left.
     pub fn gc_enable(&mut self, enabled: bool) {
         let value: &[u8] = if enabled { b"1" } else { b"0" };
-        self.ini.retain(|(n, _)| n.as_slice() != b"zend.enable_gc");
-        self.ini.push((b"zend.enable_gc".to_vec(), value.to_vec()));
+        self.ini_hold(b"zend.enable_gc", value);
         self.heap.gc_enable(enabled);
     }
 
