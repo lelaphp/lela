@@ -5073,6 +5073,20 @@ impl Request {
     /// #1 %s(3): include('%s...')
     /// #2 {main}
     /// ```
+    ///
+    /// An anonymous class is named whole, `ce->name` with its NUL and
+    /// site, where the rendered trace cuts it at the NUL:
+    ///
+    /// ```php
+    /// $o = new class { function b() { return new Exception; } };
+    /// $e = $o->b();
+    /// var_dump(strlen($e->getTrace()[0]['class']) > 15, strstr($e->getTraceAsString(), 'class@'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(30) "class@anonymous->b()
+    /// #1 {main}"
+    /// ```
     fn render_trace(&mut self, links: Vec<TraceRow>, options: i64) -> Result<PhpArray, Thrown> {
         let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
         let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
@@ -5091,8 +5105,9 @@ impl Request {
                     let name = Value::string(PhpString::new(self, name.as_bytes())?);
                     self.set_string_key(&mut row, b"function", name)?;
                     if let Some(class) = self.method_class(function).or(scope) {
-                        let class = self.class_name(class);
-                        let class = Value::string(PhpString::new(self, class.as_bytes())?);
+                        // `ce->name` whole: an anonymous class's with its NUL and site.
+                        let class = self.class_name_bytes(class);
+                        let class = Value::string(PhpString::new(self, &class)?);
                         self.set_string_key(&mut row, b"class", class)?;
                         if provide_object && let Some(this) = this {
                             self.addref(&this.as_value());
@@ -5718,7 +5733,10 @@ impl Request {
                 let Some(value) = field(key.as_bytes()) else {
                     continue;
                 };
+                // `smart_str_appends(Z_STRVAL_P)`: up to a NUL, which cuts
+                // an anonymous class's name to `class@anonymous`.
                 if let Some(text) = value.as_str_bytes() {
+                    let text = text.split(|byte| *byte == 0).next().unwrap_or_default();
                     out.push_str(&String::from_utf8_lossy(text));
                 } else {
                     crate::api::raising::warning(self, &format!("Value for {key} is not a string"));
