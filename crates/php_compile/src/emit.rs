@@ -5000,7 +5000,7 @@ impl Emit<'_> {
         self.active_parent = enclosing_parent;
         let (attributes, dynamic_properties) = attributes?;
         let is_enum = class.kind == ClassKind::Enum;
-        let mut decl = ClassDecl {
+        let decl = ClassDecl {
             name: Name(name.clone().into_boxed_slice()),
             kind: class.kind,
             flags: class_flags(class, dynamic_properties, anonymous),
@@ -5033,13 +5033,7 @@ impl Emit<'_> {
             anonymous,
         });
         self.active_parent.clone_from(&parent);
-        self.class_constants(&mut decl, class, &name)?;
-        self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
-        self.class_properties(&mut decl, class, &name)?;
-        if self.classes.len() != at {
-            return Err(self.fatal("InternalError: a class declared inside a class's members"));
-        }
-        self.classes.push(decl);
+        self.class_placed(decl, class, &name, at)?;
         if anonymous {
             self.runtime_keys.push((
                 Name(name.to_ascii_lowercase().into_boxed_slice()),
@@ -5068,6 +5062,28 @@ impl Emit<'_> {
             self.verify_enum(at, &name)?;
         }
         Ok((at, parent))
+    }
+
+    /// The class's constants and properties laid down, its place `at`
+    /// in the unit taken first, so a class a property hook declares,
+    /// `new class {}` in a `get`, takes the next place; the declaration
+    /// stands there once its members do.
+    fn class_placed(
+        &mut self,
+        mut decl: ClassDecl,
+        class: &Class,
+        name: &[u8],
+        at: usize,
+    ) -> Result<(), CompileError> {
+        self.classes.push(decl.clone());
+        self.class_constants(&mut decl, class, name)?;
+        self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
+        self.class_properties(&mut decl, class, name)?;
+        let Some(place) = self.classes.get_mut(at) else {
+            return Err(self.fatal("InternalError: a class whose place the unit has not"));
+        };
+        *place = decl;
+        Ok(())
     }
 
     /// `zend_compile_new`'s anonymous arm, `zend_compile_class_decl`
@@ -5135,6 +5151,21 @@ impl Emit<'_> {
     /// $1
     /// $2
     /// ```
+    ///
+    /// A property hook may declare one, with properties and hooks of its
+    /// own, and stays the hook it was around it:
+    ///
+    /// ```php
+    /// class Base { public $y { get => 1; } }
+    /// class Test extends Base { public $y { get => [new class { public $i = 2; public $j { get => __PROPERTY__; } }, parent::$y::get()]; } }
+    /// $y = (new Test)->y;
+    /// var_dump($y[1], $y[0]->i, $y[0]->j);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// string(1) "j"
+    /// ```
     fn anonymous_class(&mut self, id: NodeId<tree::AnonClassDecl>) -> Result<u32, CompileError> {
         let class = self.walk_anon_class(id)?;
         self.line = class.line;
@@ -5148,14 +5179,24 @@ impl Emit<'_> {
         name.extend_from_slice(&self.filename.0);
         name.extend_from_slice(format!(":{}${:x}", class.line, self.keys_made()).as_bytes());
         // `CG(active_class_entry)` is the anonymous class while its body
-        // compiles and the enclosing one's again after.
+        // compiles and the enclosing one's again after, and so is the
+        // property hook a `new class` in a hook's body stands in, which
+        // the class's own properties would otherwise leave behind.
         let enclosing = (
             self.active_class.take(),
             self.active_parent.take(),
             std::mem::take(&mut self.active_constants),
+            self.active_property.take(),
+            self.active_hook.take(),
         );
         let entered = self.class_entry(&class, &name, true);
-        (self.active_class, self.active_parent, self.active_constants) = enclosing;
+        (
+            self.active_class,
+            self.active_parent,
+            self.active_constants,
+            self.active_property,
+            self.active_hook,
+        ) = enclosing;
         let (_, parent) = entered?;
         // "Reset lineno for final opcodes and errors".
         self.line = class.line;
@@ -6170,7 +6211,11 @@ impl Emit<'_> {
             let (hooks, is_virtual) = match &property.hooks {
                 Some(hooks) => {
                     let hooked = hooks::Hooked {
-                        class: u32::try_from(self.classes.len()).unwrap_or(u32::MAX),
+                        class: self
+                            .active_class
+                            .as_ref()
+                            .and_then(|active| u32::try_from(active.at).ok())
+                            .unwrap_or(u32::MAX),
                         property: u32::try_from(decl.properties.len()).unwrap_or(u32::MAX),
                         class_name: name,
                         kind: class.kind,
