@@ -14359,7 +14359,17 @@ fn incdec_obj(
 /// `BP_VAR_RW` and what php does with the place it answers: a declared
 /// slot stepped in place and held to its declared type, the dynamic
 /// entry laid down, or the overloaded pair where the class hands out no
-/// place.
+/// place. A readonly property holding an object gets none either, so
+/// the step throws and the write it goes on to throws again, chained:
+///
+/// ```php
+/// class T { public readonly object $p; function __construct() { $this->p = new stdClass; } }
+/// $t = new T;
+/// try { $t->p++; } catch (Error $e) { echo $e->getMessage(), ' / ', $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot modify readonly property T::$p / Cannot increment stdClass
+/// ```
 fn incdec_property(
     req: &mut Request,
     frame: FrameRef,
@@ -14399,9 +14409,15 @@ fn incdec_property(
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
             // `BP_VAR_RW` reads an unwritten slot before the placement.
-            let placed = req
-                .read_before_write(object, &bytes)
-                .and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
+            let read = req.read_before_write(object, &bytes);
+            // A readonly or set-restricted property gets no place, so the
+            // step is the overloaded one, and what the write refuses is
+            // chained onto what the step threw.
+            if read.is_ok() && req.place_withheld(object, &bytes) {
+                return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
+            }
+            let placed =
+                read.and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
             match placed {
                 Ok(placed) => placed,
                 Err(thrown) => {

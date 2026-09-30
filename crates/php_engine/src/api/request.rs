@@ -9553,6 +9553,21 @@ impl Request {
         Ok(Value::null())
     }
 
+    /// `zend_std_write_property`'s `found` arm over a slot that holds a
+    /// value: an initialised readonly property is modified from no scope,
+    /// save once more under `IS_PROP_REINITABLE`, and a set visibility
+    /// the scope lacks refuses the write too; `None` lets it through.
+    fn found_refusal(&mut self, o: Obj, p: &DeclaredSlot, name: &[u8]) -> Option<Thrown> {
+        if p.readonly && !o.slot_bit(p.slot, php_heap::PropBit::Reinitable) {
+            return Some(self.readonly_modification(p.declaring, name, "modify"));
+        }
+        let set = p.set_visibility?;
+        if self.has_set_access(p.declaring, set) {
+            return None;
+        }
+        Some(self.set_inaccessible_property(p.declaring, set, p.readonly, name, "modify"))
+    }
+
     /// Whether `zend_std_get_property_ptr_ptr`
     /// (`Z/Zend/zend_object_handlers.c:1485`) hands out no place for the
     /// declared property `name` the scope reaches, so that a compound
@@ -10088,6 +10103,11 @@ impl Request {
             && self.reaches(p)
         {
             if !o.slot(p.slot).is_undef() {
+                if let Some(thrown) = self.found_refusal(o, p, name.as_bytes()) {
+                    self.release(value);
+                    self.release(Value::string(name));
+                    return Err(thrown);
+                }
                 return self.write_std_property(object, name, value);
             }
             // `IS_PROP_LAZY`: a slot that waits is the initializer's
