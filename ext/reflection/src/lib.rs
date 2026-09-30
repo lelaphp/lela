@@ -5197,9 +5197,23 @@ fn held_to(req: &mut Request, object: PhpObject, class: ClassId) -> Result<(), T
 }
 
 /// The instance arm `getValue` and `getRawValue` share, `read_property`
-/// under `fake_scope`: the slot or the dynamic table by name, a typed
-/// slot nothing has written php's `Error`, and any other miss php's
-/// `Undefined property` warning and `null`.
+/// under `fake_scope`: the slot or the dynamic table by name, a private
+/// property of a class above the object's by its mangled name, which is
+/// the slot that scope sees, a typed slot nothing has written php's
+/// `Error`, and any other miss the object's `read_property`, which asks
+/// `__get` or warns `Undefined property` and answers `null`.
+///
+/// ```php
+/// class A { private $p = "A"; } class B extends A { private $p = "B"; }
+/// var_dump((new ReflectionProperty('A', 'p'))->getValue(new B), (new ReflectionClass('B'))->getProperty('A::p')->getValue(new B));
+/// class G { private $g; function __construct() { unset($this->g); } function __get($n) { return "get $n"; } }
+/// var_dump((new ReflectionProperty('G', 'g'))->getValue(new G));
+/// ```
+/// ```expect
+/// string(1) "A"
+/// string(1) "A"
+/// string(5) "get g"
+/// ```
 fn read_instance_property(
     req: &mut Request,
     object: PhpObject,
@@ -5207,7 +5221,21 @@ fn read_instance_property(
     name: &[u8],
     declared: Option<&PropertyDecl>,
 ) -> Result<Value, Thrown> {
-    match object.prop(req, name) {
+    let private = declared.is_some_and(|decl| decl.visibility == Visibility::Private);
+    let above = private && object.class() != class;
+    let found = if above {
+        let mut mangled = vec![0];
+        mangled.extend(class_name_of(req, class));
+        mangled.push(0);
+        mangled.extend_from_slice(name);
+        let key = PhpString::new(req, &mangled)?;
+        let row = object.row(req, &Key::Str(key));
+        req.release(Value::string(key));
+        row?
+    } else {
+        object.prop(req, name)
+    };
+    match found {
         Some(value) => {
             let value = value.deref();
             req.addref(&value);
@@ -5225,6 +5253,7 @@ fn read_instance_property(
                 ),
             ))
         }
+        None if !above => php_ext::call::read_hooked_property(req, &object, name),
         None => {
             let of = class_name_of(req, object.class());
             php_ext::raising::warning(
