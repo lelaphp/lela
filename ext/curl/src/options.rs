@@ -2,7 +2,7 @@
 //! `CURLOPT_*` `_php_curl_setopt` accepts decoded once to the kind of
 //! value it takes ([`Opt`]), and each kind set as php sets it.
 
-use php_ext::abi::{Instance, Untyped};
+use php_ext::abi::Instance;
 use php_ext::attr::php_function;
 use php_ext::coerce::{callable_checked, to_long, to_string, truthy};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw};
@@ -856,9 +856,9 @@ fn curl_setopt(
     req: &mut Request,
     handle: Instance<CurlHandle>,
     option: i64,
-    value: Untyped<Value>,
+    value: Value,
 ) -> Result<bool, Thrown> {
-    setopt(req, handle.object(), option, &value.0, false)
+    setopt(req, handle.object(), option, &value, false)
 }
 
 /// `curl_setopt_array(CurlHandle $handle, array $options): bool`: each
