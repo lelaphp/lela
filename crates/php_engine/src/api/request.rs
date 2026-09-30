@@ -10017,7 +10017,18 @@ impl Request {
     /// (`zend_wrong_offset`) rather than a write.
     ///
     /// `value` is given up here whatever arm runs, as php's caller
-    /// gives it up, and so is `name`.
+    /// gives it up, and so is `name`. An initialised readonly slot is
+    /// php's `Error`, from the declaring scope too, as Reflection writes:
+    ///
+    /// ```php
+    /// enum Foo: int { case Bar = 0; }
+    /// try { (new ReflectionProperty(Foo::class, 'value'))->setValue(Foo::Bar, 1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(Foo::Bar->value);
+    /// ```
+    /// ```expect
+    /// Cannot modify readonly property Foo::$value
+    /// int(0)
+    /// ```
     ///
     /// ```php
     /// class M { public $kept = 1; public function __set($k, $v) { echo "set $k=$v\n"; } }
@@ -10072,7 +10083,16 @@ impl Request {
         if let Some(p) = placed.as_ref()
             && self.reaches(p)
         {
-            if !o.slot(p.slot).is_undef() {
+            // `zend_readonly_property_modification_error`: an initialised
+            // readonly slot is written again only under `IS_PROP_REINITABLE`.
+            let slot_held = !o.slot(p.slot).is_undef();
+            if slot_held && p.readonly && !o.slot_bit(p.slot, php_heap::PropBit::Reinitable) {
+                let thrown = self.readonly_modification(p.declaring, name.as_bytes(), "modify");
+                self.release(value);
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+            if slot_held {
                 return self.write_std_property(object, name, value);
             }
             // `IS_PROP_LAZY`: a slot that waits is the initializer's
