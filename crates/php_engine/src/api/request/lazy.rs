@@ -18,7 +18,7 @@
 
 use php_heap::{Heap, Laziness, Obj};
 
-use super::{Hooks, Request};
+use super::{Hooks, IN_GET, Request};
 use crate::api::abi::Callable;
 use crate::api::call::Target;
 use crate::api::raising::{Thrown, throw};
@@ -63,6 +63,15 @@ struct Info {
 #[derive(Debug, Default)]
 pub(crate) struct Table {
     rows: std::collections::HashMap<u32, Info>,
+}
+
+/// The `IN_GET` [`Request::lazy_place`] set on an instance's guard for
+/// `name` while a place is resolved there on behalf of a proxy whose
+/// own `__get` guard held the name.
+#[must_use = "the guard is given back once the place is resolved"]
+pub(crate) struct LentGuard {
+    instance: PhpObject,
+    name: Vec<u8>,
 }
 
 impl Request {
@@ -521,14 +530,43 @@ impl Request {
     /// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 9
     /// string(2) "1y"
     /// ```
+    ///
+    /// Where the object's `__get` guard holds `name` (the place is asked
+    /// from inside that `__get`), the guard is lent to what the
+    /// initialisation answers for as long as the place is resolved there
+    /// (GH-20873, GH-20875): php sets `IN_GET` on the instance's guard
+    /// around its `get_property_ptr_ptr` (`Z/Zend/zend_object_handlers.c:1444-1458`,
+    /// `:1504-1518`), so the instance lays the property down rather than
+    /// serve its own `__get` a second time. The [`LentGuard`] is the
+    /// caller's to give back ([`Request::give_back_guard`]).
+    ///
+    /// ```php
+    /// class A { public $_;
+    ///     public function __get($n) { echo "get $n\n"; global $obj; $obj->x =& $this->_; } }
+    /// $rc = new ReflectionClass(A::class);
+    /// $obj = $rc->newLazyProxy(fn () => new A);
+    /// $rc->initializeLazyObject($obj);
+    /// try { $obj->p; } catch (Error $e) { echo $e->getMessage(), "\n", $e->getTraceAsString(), "\n"; }
+    /// ```
+    /// ```expect
+    /// get p
+    /// get x
+    ///
+    /// Deprecated: Creation of dynamic property A::$x is deprecated in %s on line 3
+    ///
+    /// Notice: Indirect modification of overloaded property A::$x has no effect in %s on line 3
+    /// Cannot assign by reference to overloaded object
+    /// #0 %s(7): A->__get('p')
+    /// #1 {main}
+    /// ```
     pub(crate) fn lazy_place(
         &mut self,
         object: PhpObject,
         name: &[u8],
-    ) -> Result<PhpObject, Thrown> {
+    ) -> Result<(PhpObject, Option<LentGuard>), Thrown> {
         let o = object.heap();
         if o.laziness() == Laziness::Eager {
-            return Ok(object);
+            return Ok((object, None));
         }
         let initialises = match self.declared_slot(object.class(), name) {
             Some(placed) if self.reaches(&placed) => {
@@ -537,10 +575,45 @@ impl Request {
             Some(_) => false,
             None => Self::dynamic_prop(o, name).is_none() && !self.overloaded_place(object, name),
         };
-        if initialises {
-            return self.lazy_init(object);
+        if !initialises {
+            return Ok((object, None));
         }
+        let guarded = self.serves_accessor(object.class(), b"__get")
+            && self.guard_word(object, name) & IN_GET != 0;
+        let instance = self.lazy_init(object)?;
+        if guarded
+            && self.uses_guards(instance.class())
+            && self.guard_word(instance, name) & IN_GET == 0
+        {
+            self.guard_take(instance, name, IN_GET);
+            let lent = LentGuard {
+                instance,
+                name: name.to_vec(),
+            };
+            return Ok((instance, Some(lent)));
+        }
+        Ok((instance, None))
+    }
+
+    /// [`Request::lazy_place`] with the lent guard given back at once, for
+    /// the sites that resolve the place and make the operation in one
+    /// body, a compound assignment and an increment (#1336).
+    pub(crate) fn lazy_place_unlent(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+    ) -> Result<PhpObject, Thrown> {
+        let (object, lent) = self.lazy_place(object, name)?;
+        self.give_back_guard(lent);
         Ok(object)
+    }
+
+    /// The `IN_GET` a [`LentGuard`] took on the instance, given back once
+    /// the place is resolved.
+    pub(crate) fn give_back_guard(&mut self, lent: Option<LentGuard>) {
+        if let Some(LentGuard { instance, name }) = lent {
+            self.guard_drop(instance, &name, IN_GET);
+        }
     }
 
     /// The initializer and the waiting slots of an object that waits.
