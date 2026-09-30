@@ -258,6 +258,17 @@ impl Crate {
         }
     }
 
+    /// Whether the crate's subset is the one the design derives for an
+    /// extension, `ext/<name>/tests`, and not one its row names. A derived
+    /// directory the pinned tree does not have is an extension with no
+    /// tests of its own, as `ext/lexbor`, php-src's vendored library whose
+    /// tests are `ext/dom`'s and `ext/uri`'s, is: its reading is a skip that
+    /// says so. A named one the tree does not have is the manifest and the
+    /// pin disagreeing, and its reading fails (#18, #1231).
+    pub(crate) fn derives_subset(&self) -> bool {
+        self.phpt.is_empty() && self.name.starts_with("ext/")
+    }
+
     /// Whether the crate is behind a feature, and so outside the default
     /// build the per-commit lane measures (harness §7).
     pub fn optional(&self) -> bool {

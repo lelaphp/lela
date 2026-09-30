@@ -19,6 +19,7 @@ use std::fs;
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use regex_lite::Regex;
@@ -26,6 +27,7 @@ use regex_lite::Regex;
 use super::cgi;
 use super::file::{self, Phpt};
 use super::miss::Miss;
+use super::redirect::{Item, Redirect, Test};
 use super::{Judged, Judgement, Lane, Subset};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
@@ -69,41 +71,95 @@ impl<'a> Adapter<'a> {
         }
     }
 
-    /// One test, end to end.
-    pub(super) fn judge(&self, subset: &Subset, test: &Path) -> Result<Judged> {
-        let id = subset.id(test);
-        let name = subset.name(test);
-        let phpt = match Phpt::load(test) {
+    /// Every file of the subset as the items its run judges: a file as
+    /// itself, and a `--REDIRECTTEST--` in its place as the set it names,
+    /// each test of it under the redirect, once the redirecting test has
+    /// passed what upstream holds it to before it redirects
+    /// (run-tests.php:2027-2202). One that does not, or whose section names
+    /// no set, is its verdict, reached here.
+    pub(super) fn listed(&self, subset: &Subset, files: Vec<PathBuf>) -> Result<Vec<Item>> {
+        let mut items = Vec::with_capacity(files.len());
+        for file in files {
+            let test = Test::own(file);
+            let phpt = match Phpt::load(&test.file) {
+                Ok(phpt) if phpt.has("REDIRECTTEST") => phpt,
+                _ => {
+                    items.push(Item::Test(test));
+                    continue;
+                }
+            };
+            let (id, name) = (test.id(subset), test.name(subset));
+            if let Err(stopped) = self.admit(subset, &test, &phpt, (&id, &name))? {
+                items.push(Item::Reached(stopped));
+                continue;
+            }
+            match Redirect::read(self.oracle, subset, &test.file, &phpt)? {
+                Ok((redirect, set)) => {
+                    println!(
+                        "phpt: {name} redirects {} tests of {} under {}",
+                        set.len(),
+                        redirect.set.under.display(),
+                        redirect
+                            .env
+                            .iter()
+                            .map(|(key, value)| format!("{key}={}", value.to_string_lossy()))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                    let redirect = Arc::new(redirect);
+                    items.extend(set.into_iter().map(|file| {
+                        Item::Test(Test {
+                            file,
+                            via: Some(Arc::clone(&redirect)),
+                        })
+                    }));
+                }
+                Err(why) => {
+                    let miss = Miss::bork(&why);
+                    items.push(Item::Reached(
+                        Judged::new(&id, &name, Judgement::Bork, why).keeping(miss),
+                    ));
+                }
+            }
+        }
+        Ok(items)
+    }
+
+    /// One item, end to end.
+    pub(super) fn judge(&self, subset: &Subset, item: &Item) -> Result<Judged> {
+        let test = match item {
+            Item::Reached(judged) => return Ok(judged.clone()),
+            Item::Test(test) => test,
+        };
+        let id = test.id(subset);
+        let name = test.name(subset);
+        let phpt = match Phpt::load(&test.file) {
             Ok(phpt) => phpt,
             Err(borked) => {
                 let miss = Miss::bork(&borked.0);
                 return Ok(Judged::new(&id, &name, Judgement::Bork, borked.0).keeping(miss));
             }
         };
-        if let Some(why) = unhosted(&phpt, self.cgi.is_some()) {
-            return Ok(Judged::new(&id, &name, Judgement::Skip, why));
+        // A test of a set that redirects again, which upstream's
+        // `TestFile` refuses (run-tests.php:3830-3833); and a redirecting
+        // test reached as a test, which [`Adapter::listed`] never hands on.
+        if phpt.has("REDIRECTTEST") {
+            let why = if test.via.is_some() {
+                "Can't redirect a test from within a redirected test"
+            } else {
+                "a --REDIRECTTEST-- runs as the set it names, and this one was judged as a test"
+            };
+            return Ok(Judged::new(&id, &name, Judgement::Bork, why).keeping(Miss::bork(why)));
         }
-        if let Some(why) = self.missing(&phpt) {
-            return Ok(Judged::new(&id, &name, Judgement::Skip, why));
-        }
-        let mut ini = match ini_of(&phpt, test) {
-            Ok(ini) => ini,
-            Err(why) => return Ok(Judged::new(&id, &name, Judgement::Skip, why)),
+        let Admitted {
+            ini,
+            env,
+            expected_to_fail,
+        } = match self.admit(subset, test, &phpt, (&id, &name))? {
+            Ok(admitted) => admitted,
+            Err(stopped) => return Ok(stopped),
         };
-        ini.extend(self.lane.map(Lane::ini));
-        let env = self.environment(&phpt, test, &ini, &subset.root);
-        let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
-        if let Some(body) = phpt.filled("SKIPIF") {
-            let out = self.run_section(subset, test, &env, "skip", body)?;
-            let said = String::from_utf8_lossy(&out.stdout).into_owned();
-            if let Some(reason) = reason_after("skip", &said) {
-                return Ok(Judged::new(&id, &name, Judgement::Skip, reason));
-            }
-            if let Some(reason) = reason_after("xfail", &said) {
-                expected_to_fail = Some(reason);
-            }
-        }
-        let request = match cgi::request_of(&phpt, &beside(test, None), &env) {
+        let request = match cgi::request_of(&phpt, &test.beside(None), &env) {
             Ok(request) => request,
             Err((refused, why)) => return Ok(refused.judged(&id, &name, why)),
         };
@@ -171,6 +227,48 @@ impl<'a> Adapter<'a> {
         })
     }
 
+    /// What a test must pass before its program runs, in upstream's
+    /// order: a host for its shape, the extensions it needs, the
+    /// `{ENV:NAME}` its `--INI--` names, and its `SKIPIF`; and what it runs
+    /// with once it has passed them. The first it does not pass is its
+    /// verdict.
+    fn admit(
+        &self,
+        subset: &Subset,
+        test: &Test,
+        phpt: &Phpt,
+        (id, name): (&str, &str),
+    ) -> Result<Result<Admitted, Judged>> {
+        if let Some(why) = unhosted(phpt, self.cgi.is_some()) {
+            return Ok(Err(Judged::new(id, name, Judgement::Skip, why)));
+        }
+        if let Some(why) = self.missing(phpt, test) {
+            return Ok(Err(Judged::new(id, name, Judgement::Skip, why)));
+        }
+        let mut ini = match ini_of(phpt, &test.file) {
+            Ok(ini) => ini,
+            Err(why) => return Ok(Err(Judged::new(id, name, Judgement::Skip, why))),
+        };
+        ini.extend(self.lane.map(Lane::ini));
+        let env = self.environment(phpt, test, &ini, &subset.root);
+        let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
+        if let Some(body) = phpt.filled("SKIPIF") {
+            let out = self.run_section(subset, test, &env, "skip", body)?;
+            let said = String::from_utf8_lossy(&out.stdout).into_owned();
+            if let Some(reason) = reason_after("skip", &said) {
+                return Ok(Err(Judged::new(id, name, Judgement::Skip, reason)));
+            }
+            if let Some(reason) = reason_after("xfail", &said) {
+                expected_to_fail = Some(reason);
+            }
+        }
+        Ok(Ok(Admitted {
+            ini,
+            env,
+            expected_to_fail,
+        }))
+    }
+
     /// The test's program, written where upstream writes it, run through
     /// the binary under test with the sections that shape one run, and
     /// taken away after; then `CLEAN`, which takes away what the test
@@ -194,11 +292,11 @@ impl<'a> Adapter<'a> {
         &self,
         subset: &Subset,
         phpt: &Phpt,
-        test: &Path,
+        test: &Test,
         ini: &[String],
         (env, request): (&[(String, OsString)], Option<&cgi::Request>),
     ) -> Result<Result<Vec<u8>, Stopped>> {
-        let program = beside(test, None);
+        let program = test.beside(None);
         if program.exists() {
             return Ok(Err(Stopped::Occupied(format!(
                 "a file already stands where the test's program goes, {}",
@@ -235,7 +333,7 @@ impl<'a> Adapter<'a> {
             Ok(output) => Ok(output.stdout),
             Err(e) => match e.downcast_ref::<PastLimit>() {
                 Some(past) => Err(Stopped::PastLimit(past.to_string())),
-                None => return Err(e.context(format!("running {}", test.display()))),
+                None => return Err(e.context(format!("running {}", test.file.display()))),
             },
         };
         if let Some(body) = phpt.filled("CLEAN") {
@@ -259,12 +357,12 @@ impl<'a> Adapter<'a> {
     fn run_section(
         &self,
         subset: &Subset,
-        test: &Path,
+        test: &Test,
         env: &[(String, OsString)],
         kind: &str,
         body: &[u8],
     ) -> Result<Observation> {
-        let program = beside(test, Some(kind));
+        let program = test.beside(Some(kind));
         let written = Written::new(&program, body)?;
         self.oracle.asserted()?;
         let pinned = &self.oracle.pin().oracle.path;
@@ -275,17 +373,20 @@ impl<'a> Adapter<'a> {
                 cwd: Some(&subset.root),
                 ..Invocation::new(pinned, Program::Beside(&program))
             })
-            .with_context(|| format!("running the {kind} section of {}", test.display()))?;
+            .with_context(|| format!("running the {kind} section of {}", test.file.display()))?;
         drop(written);
         Ok(out)
     }
 
     /// The `--EXTENSIONS--` the runner's binary does not load, in
-    /// upstream's words.
-    fn missing(&self, phpt: &Phpt) -> Option<String> {
+    /// upstream's words, with a redirected test's redirecting test's
+    /// after its own (run-tests.php:2029-2031).
+    fn missing(&self, phpt: &Phpt, test: &Test) -> Option<String> {
         let wanted = phpt.text("EXTENSIONS").unwrap_or_default().into_owned();
+        let redirected = test.via.iter().flat_map(|via| &via.extensions);
         let missing: Vec<&str> = wanted
             .split_whitespace()
+            .chain(redirected.map(String::as_str))
             .filter(|name| !self.loaded.iter().any(|had| had == &name.to_lowercase()))
             .collect();
         if missing.is_empty() {
@@ -318,7 +419,7 @@ impl<'a> Adapter<'a> {
     fn environment(
         &self,
         phpt: &Phpt,
-        test: &Path,
+        test: &Test,
         ini: &[String],
         root: &Path,
     ) -> Vec<(String, OsString)> {
@@ -347,13 +448,24 @@ impl<'a> Adapter<'a> {
             env.push((format!("{host}_ESCAPED"), escaped(&path).into()));
             env.push((host.to_owned(), path.into()));
         }
-        env.extend(env_of(phpt, test));
+        // A redirect's environment over the runner's, and the test's own
+        // over both (run-tests.php:2228, 2009-2018).
+        env.extend(test.via.iter().flat_map(|via| via.env.iter().cloned()));
+        env.extend(env_of(phpt, &test.file));
         env.push((
             "TEST_PHP_EXTRA_ARGS".to_owned(),
             extra_args(&recipe.args, recipe.ini.iter().chain(ini)).into(),
         ));
         env
     }
+}
+
+/// What a test runs with once it has passed what it is held to: its ini, its
+/// environment, and why it is expected to fail where it is.
+struct Admitted {
+    ini: Vec<String>,
+    env: Vec<(String, OsString)>,
+    expected_to_fail: Option<String>,
 }
 
 /// Why a test's program gave nothing to hold to its expectation, each
@@ -365,20 +477,20 @@ enum Stopped {
     Occupied(String),
 }
 
-/// Where a test's run writes a file beside it, as upstream does: its
-/// program at `x.php`, and a section run beside it at `x.skip.php` or
-/// `x.clean.php`.
-fn beside(test: &Path, kind: Option<&str>) -> PathBuf {
-    test.with_extension(kind.map_or_else(|| "php".to_owned(), |kind| format!("{kind}.php")))
-}
-
 /// What a test may not run beside in its run: its conflict keys and the
 /// three files its run writes beside it, so no two tests whose files would
 /// stand at one path run at once; alone where its conflict keys name
 /// `all`, as upstream has it (run-tests.php:1365-1370). Another run is in
-/// a copy of its own and holds nothing against this one (#1183).
-pub(super) fn apart(test: &Path, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Apart {
-    let mut keys = file::conflicts(test, dirs);
+/// a copy of its own and holds nothing against this one (#1183). A test of
+/// a redirected set holds its redirecting test as a key too, so the set
+/// runs one test after another, as upstream's worker runs it inside the
+/// redirecting test (run-tests.php:2230-2232). A verdict reached where the
+/// set was listed runs nothing and holds nothing.
+pub(super) fn apart(item: &Item, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Apart {
+    let Item::Test(test) = item else {
+        return Apart::default();
+    };
+    let mut keys = file::conflicts(&test.file, dirs);
     let within = if keys.iter().any(|key| key == "all") {
         Within::Alone
     } else {
@@ -386,8 +498,9 @@ pub(super) fn apart(test: &Path, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> A
     };
     keys.retain(|key| key != "all");
     keys.extend(
-        [None, Some("skip"), Some("clean")].map(|kind| beside(test, kind).display().to_string()),
+        [None, Some("skip"), Some("clean")].map(|kind| test.beside(kind).display().to_string()),
     );
+    keys.extend(test.via.iter().map(|via| via.by.display().to_string()));
     Apart { within, keys }
 }
 
@@ -437,13 +550,10 @@ fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> 
 
 /// Why this runner cannot host a test: a CGI-shaped one where no CGI host
 /// stands beside the binary, as upstream's runner skips it
-/// (run-tests.php:1894-1896), and the two shapes below, another program's.
+/// (run-tests.php:1894-1896), and a debugger's.
 fn unhosted(phpt: &Phpt, cgi: bool) -> Option<String> {
     if phpt.is_cgi() && !cgi {
         return Some("CGI not available".into());
-    }
-    if phpt.has("REDIRECTTEST") {
-        return Some("a --REDIRECTTEST--; this runner runs a subset, not a redirected set".into());
     }
     if phpt.has("PHPDBG") {
         return Some("a --PHPDBG-- test; this engine has no debugger host".into());
@@ -684,12 +794,12 @@ fn words(text: &str) -> Vec<String> {
 /// after, which is where upstream puts a test's program too. A run killed
 /// while it stands leaves it in the run's copy, which the next run's sweep
 /// takes away whole (#1183).
-struct Written {
+pub(super) struct Written {
     path: PathBuf,
 }
 
 impl Written {
-    fn new(path: &Path, body: &[u8]) -> Result<Written> {
+    pub(super) fn new(path: &Path, body: &[u8]) -> Result<Written> {
         fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
         Ok(Written {
             path: path.to_path_buf(),

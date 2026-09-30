@@ -67,7 +67,11 @@
 //! fresh for nothing (§5, "A track's worktrees"; #35). What the log
 //! carries is found at the branch's merge by the tree each reading was
 //! taken over, so a pass over what the merge stages is not run again
-//! there (`Store::latest_over`, #1252). A
+//! there (`Store::latest_over`, #1252). The worktree's kept phpt runs
+//! are carried into the main worktree's beside the log, each one main
+//! keeps none of: a run is keyed by the engine's tree and not by the
+//! checkout, so it is the same run wherever it was taken, and one main
+//! keeps already stays (#1268). A
 //! worktree with uncommitted work is a refusal after the append, since
 //! the worktree's copy is emptied once appended and the call that follows
 //! cannot count the same readings twice. The branch is kept, and the
@@ -81,6 +85,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::computed;
 use crate::git::{git, has_ref};
+use crate::phpt::against;
 use crate::reading::{self, Store};
 use crate::track::{self, Ticket, Track};
 
@@ -252,6 +257,7 @@ pub fn retire(root: &Path, branch: &str) -> Result<()> {
         );
     }
     let appended = append_log(&dir, store)?;
+    carry_runs(&dir)?;
     git(store, &["worktree", "remove", &dir.to_string_lossy()], None).with_context(|| {
         if appended {
             "git worktree remove refused; the readings are appended already, so commit or discard what is uncommitted and call again"
@@ -309,6 +315,33 @@ fn append_log(dir: &Path, root: &Path) -> Result<bool> {
         ),
     );
     Ok(true)
+}
+
+/// The worktree's kept phpt runs carried into the main worktree's, where
+/// `phpt --against` looks for a base's run beside the checkout it runs in
+/// ([`against::carry`]): each one main keeps none of is copied, and one it
+/// keeps already stays as it stood. Before this a run taken in a worktree
+/// at the base, which is what the comparison's skip asks for, went with
+/// the worktree (#1268).
+fn carry_runs(dir: &Path) -> Result<()> {
+    let main = track::main_worktree(dir)?;
+    let carried = against::carry(dir, &main)?;
+    let runs = main.join(against::RUNS);
+    say(
+        RETIRE,
+        &match carried {
+            against::Carried {
+                carried: 0,
+                kept: 0,
+            } => "this worktree kept no phpt run".to_owned(),
+            against::Carried { carried, kept } => format!(
+                "carried {carried} kept phpt run{} into {}; {kept} it keeps already stayed as they stood",
+                if carried == 1 { "" } else { "s" },
+                runs.display()
+            ),
+        },
+    );
+    Ok(())
 }
 
 /// The worktree's `target/debug` seeded from the clone's at `root` with
