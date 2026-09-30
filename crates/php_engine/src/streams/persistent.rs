@@ -1,4 +1,4 @@
-//! Persistent streams (design §4.10, ledger 50, #1172): php's
+//! Persistent streams (design §4.10, ledger 51, #1172): php's
 //! `EG(persistent_list)` as far as `pfsockopen` and
 //! `STREAM_CLIENT_PERSISTENT` reach it (`Z/main/streams/streams.c:68-138`,
 //! `Z/main/streams/transports.c:75-93`), over the engine's [`Pool`].

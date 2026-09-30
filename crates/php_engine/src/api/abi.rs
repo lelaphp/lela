@@ -181,7 +181,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
 }
 
 /// The engine-owned pool of persistent resources (ADR-0005's amendment of
-/// design ledger 50, #1172; design §4.10): php's `EG(persistent_list)`,
+/// design ledger 51, #1172; design §4.10): php's `EG(persistent_list)`,
 /// one list per php-fpm process or per ZTS thread, as entries lent to one
 /// request at a time. A request takes an idle entry out by php's key,
 /// holds it alone for the rest of the request, and gives it back at its
