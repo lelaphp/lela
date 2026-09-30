@@ -3139,7 +3139,39 @@ fn caught(req: &mut Request, this: PhpObject, thrown: Thrown) -> Result<(), Thro
     }
 }
 
-/// `spl_recursive_it_move_forward_ex`.
+/// `spl_recursive_it_move_forward_ex`. A level's `valid()` that
+/// re-enters `next()` and so pops its own level runs over an object the
+/// step holds an owner of until the call returns, as php's
+/// `GC_ADDREF(sub_object)` holds it.
+///
+/// ```php
+/// class RIt implements RecursiveIterator {
+///     public $pos = 0; public $rii; public static bool $fired = false;
+///     function __construct(public array $data, public int $depth = 0) {}
+///     function current(): mixed { return $this->data[$this->pos] ?? null; }
+///     function key(): mixed { return $this->pos; }
+///     function next(): void { $this->pos++; }
+///     function rewind(): void { $this->pos = 0; }
+///     function valid(): bool {
+///         if ($this->rii && $this->depth === 2 && $this->pos === count($this->data) && !self::$fired) {
+///             self::$fired = true;
+///             $this->rii->next();
+///         }
+///         return $this->pos < count($this->data);
+///     }
+///     function hasChildren(): bool { return is_array($this->current()); }
+///     function getChildren(): RecursiveIterator { $c = new RIt($this->current(), $this->depth + 1); $c->rii = $this->rii; return $c; }
+/// }
+/// $root = new RIt([[[1, 2], 3], 4]);
+/// $rii = new RecursiveIteratorIterator($root, RecursiveIteratorIterator::SELF_FIRST);
+/// $root->rii = $rii;
+/// $seen = [];
+/// foreach ($rii as $v) $seen[] = is_array($v) ? 'array' : $v;
+/// echo implode(' ', $seen), "\n";
+/// ```
+/// ```expect
+/// array array 1 2 3 4
+/// ```
 // `spl_recursive_it_move_forward_ex`'s state machine, one arm per state,
 // kept whole as php keeps it.
 #[allow(clippy::too_many_lines)]
@@ -3167,10 +3199,16 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         let mut ended = false;
         if state == State::Start {
             let depth = rec(req, this, |it| it.levels.len())?;
-            let valid = sub.valid(req)?;
-            if rec(req, this, |it| it.levels.len())? != depth
-                || top(req, this)?.map(|l| l.sub) != Some(sub)
-            {
+            // `GC_ADDREF(sub_object)` around the call: a `next()` the
+            // level's `valid()` re-enters may pop the level, and the
+            // object its method runs on stands until the call returns.
+            req.addref(&iterator.as_value());
+            let valid = sub.valid(req);
+            let reentered = rec(req, this, |it| it.levels.len())
+                .and_then(|n| Ok(n != depth || top(req, this)?.map(|l| l.sub) != Some(sub)));
+            req.release(iterator.as_value());
+            let valid = valid?;
+            if reentered? {
                 return Ok(());
             }
             if valid {
