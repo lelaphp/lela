@@ -1103,16 +1103,33 @@ fn internal_walked(req: &Request, iterator: PhpObject) -> Option<PhpObject> {
 /// `zend_create_internal_iterator_zval`: the class's own iterator over
 /// `object`, where it has one, made first, as php makes it, then the
 /// `InternalIterator` holding it; a class walked by index is held itself.
+/// The `InternalIterator` is `zend_internal_iterator`, `emalloc`'d whole,
+/// and the iterator is the struct the class's `get_iterator` makes
+/// ([`ObjectHandlers::iterator_size`]):
+///
+/// ```php
+/// $per = new DatePeriod(new DateTime('2020-01-01'), new DateInterval('P1D'), 2); $w3 = $per->getIterator();
+/// $f = SplFixedArray::fromArray([1, 2]); $w4 = $f->getIterator();
+/// $wm = new WeakMap; $w5 = $wm->getIterator();
+/// $m = memory_get_usage(); $a = $f->getIterator(); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = $wm->getIterator(); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($a, $b); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 176
+/// 176
+/// -352
+/// ```
 pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+    const ZEND_INTERNAL_ITERATOR: usize = 72;
     let Some(class) = req.class_named(b"internaliterator") else {
         return Err(crate::api::raising::fatal(
             req,
             "InternalError: InternalIterator is not declared",
         ));
     };
-    let own = req
-        .object_handlers(object.heap())
-        .get_iterator(req, object, false)?;
+    let handlers = req.object_handlers(object.heap());
+    let own = handlers.get_iterator(req, object, false)?;
     req.addref(&object.as_value());
     let (state, held) = match own {
         Some(own) => {
@@ -1127,11 +1144,15 @@ pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<
         }
         None => (Internal::Elements { object, index: 0 }, object),
     };
+    // `zend_internal_iterator_create`: `emalloc(sizeof(zend_internal_iterator))`
+    // whole; and for a walk by index the iterator php's `get_iterator`
+    // makes, which the class's handlers size, beside it.
+    let by_index = matches!(state, Internal::Elements { .. });
     let iterator = req
-        .new_object(class)
+        .new_object_sized(class, state, ZEND_INTERNAL_ITERATOR)
         .inspect_err(|_| req.release(held.as_value()))?;
-    if let Some(it) = iterator.native_mut::<Internal>(req) {
-        *it = state;
+    if by_index {
+        req.lay_beside_sized(iterator, handlers.iterator_size())?;
     }
     Ok(iterator)
 }

@@ -141,6 +141,25 @@ impl Request {
         Ok(())
     }
 
+    /// `size` bytes allocated beside `object` after it was made, given
+    /// back with it as [`Request::lay_beside`]'s are: what a native
+    /// class's `get_iterator` `emalloc`s for the `InternalIterator`
+    /// `zend_create_internal_iterator_zval` makes over one of its objects
+    /// walked by index ([`crate::interfaces::internal_iterator`]).
+    pub(crate) fn lay_beside_sized(
+        &mut self,
+        object: PhpObject,
+        size: usize,
+    ) -> Result<(), Thrown> {
+        let block = self.heap.block(size);
+        let block = self.fatal_of(block)?;
+        self.beside
+            .entry(object.heap().id().0)
+            .or_default()
+            .push(block);
+        Ok(())
+    }
+
     /// The rest of `create_object` over a new `object`, its properties
     /// laid down: what is allocated beside it ([`Request::lay_beside`]),
     /// then what its class lays down with it
