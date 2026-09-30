@@ -839,7 +839,22 @@ impl Request {
     /// its default, or `value` written without the class's `__set`, and
     /// no longer waits; an object with no slot left waiting is realised,
     /// `zend_lazy_object_realize`. A throwing write leaves the slot
-    /// waiting, as php flags it lazy again.
+    /// waiting, as php flags it lazy again. The write is
+    /// `write_property`'s, so a readonly property the first write
+    /// initialised refuses the second.
+    ///
+    /// ```php
+    /// class C { public readonly int $a; }
+    /// $r = new ReflectionClass(C::class);
+    /// $g = $r->newLazyGhost(function () { echo "init\n"; });
+    /// $r->getProperty('a')->setRawValueWithoutLazyInitialization($g, 1);
+    /// try { $r->getProperty('a')->setRawValueWithoutLazyInitialization($g, 2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($g->a);
+    /// ```
+    /// ```expect
+    /// Cannot modify readonly property C::$a
+    /// int(1)
+    /// ```
     pub(crate) fn lazy_skip(
         &mut self,
         object: PhpObject,
@@ -876,6 +891,17 @@ impl Request {
                 self.lazy_set_waiting(o, slot, false);
                 let key = PhpString::new(self, name)?;
                 let written = self.in_declared_scope(object.class(), name, |req| {
+                    // `write_property`'s `found` arm over a slot that
+                    // holds a value: an initialised readonly property
+                    // is not written again.
+                    if !o.slot(slot).is_undef()
+                        && let Some(placed) = req.declared_slot(object.class(), name)
+                        && let Some(thrown) = req.found_refusal(o, &placed, name)
+                    {
+                        req.release(value);
+                        req.release(Value::string(key));
+                        return Err(thrown);
+                    }
                     req.write_std_property(object, key, value)
                 });
                 if written.is_err()
