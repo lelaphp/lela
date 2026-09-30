@@ -12186,9 +12186,33 @@ impl Request {
     /// `EG(current_execute_data)`: whether a frame or a native's call
     /// stands, which is every release inside a serving and none of the
     /// releases `php_request_shutdown` makes after the main frame popped.
+    /// A frame being popped is not one: `zend_leave_helper` has made its
+    /// caller current before it frees the CVs (`Z/Zend/zend_vm_def.h:2970`),
+    /// so a destructor a top frame's last release serves at shutdown
+    /// finds nothing executing, and what it raises is the uncaught fatal
+    /// `zend_call_function`'s tail renders there, the throwable the
+    /// frame was left with never chained under it.
+    ///
+    /// ```php
+    /// class C {
+    ///     public function __destruct() {
+    ///         static $n = 0;
+    ///         if (++$n === 1) { $c = new C; }
+    ///         throw new Exception("from destructor $n");
+    ///     }
+    /// }
+    /// $c = new C;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Exception: from destructor 2 in %s:6
+    /// Stack trace:
+    /// #0 [internal function]: C->__destruct()
+    /// #1 {main}
+    ///   thrown in %s on line 6
+    /// ```
     pub(crate) fn executing(&self) -> bool {
         self.fibers.active().is_some()
-            || self.vm.innermost().is_some()
+            || self.vm.frames().iter().any(|frame| !frame.leaving)
             || self.vm.serving_call().is_some()
     }
 
