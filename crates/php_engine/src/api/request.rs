@@ -4500,6 +4500,12 @@ impl Request {
         function: Function,
         written: &[u8],
     ) -> Result<(), Thrown> {
+        // A public method is anyone's, so the scope is not read for it,
+        // as `zend_std_get_method` reads it only under
+        // `ZEND_ACC_PRIVATE|ZEND_ACC_PROTECTED`.
+        if self.method_visibility(function) == Visibility::Public {
+            return Ok(());
+        }
         let scope = self.executed_scope();
         self.check_method_access_from(function, written, scope)
     }
@@ -4586,7 +4592,9 @@ impl Request {
     /// `zend_check_protected` relates to it. A function that is no
     /// method, and one the tables have no declaration for, is anyone's.
     pub(crate) fn method_accessible(&self, function: Function) -> bool {
-        self.method_accessible_from(function, self.executed_scope())
+        // As [`Request::check_method_access`]: no scope for a public one.
+        self.method_visibility(function) == Visibility::Public
+            || self.method_accessible_from(function, self.executed_scope())
     }
 
     /// `zend_get_function_root_class`: the class of the method's
@@ -14833,6 +14841,14 @@ impl Request {
     /// ```
     pub(crate) fn std_method(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
         let found = self.method_named(class, lowered)?;
+        // `zend_std_get_method` reads the scope only for a method its
+        // flags mark `ZEND_ACC_CHANGED`, private or protected: a public
+        // one no class above its own declares privately is the answer
+        // whatever the scope, since the scope's private method can
+        // stand in for it only from above it.
+        if self.method_visibility(found) == Visibility::Public && !self.changed(found, lowered) {
+            return Some(found);
+        }
         let Some(scope) = self.executed_scope() else {
             return Some(found);
         };
@@ -14851,6 +14867,41 @@ impl Request {
             }
             _ => Some(found),
         }
+    }
+
+    /// `ZEND_ACC_CHANGED` on `function`, which
+    /// `do_inheritance_check_on_method` sets where a class above the
+    /// method's own declares a private method of its name, found here by
+    /// walking up from its class: a call from that class's scope reaches
+    /// its private method, whatever the child made public. The walk is
+    /// cut at a depth no declaration can make.
+    ///
+    /// ```php
+    /// class M { private function f() { return "M"; } function g() { return $this->f(); } }
+    /// class P extends M { public function f() { return "P"; } }
+    /// $p = new P;
+    /// echo $p->g(), $p->f(), "\n";
+    /// ```
+    /// ```expect
+    /// MP
+    /// ```
+    fn changed(&self, function: Function, lowered: &[u8]) -> bool {
+        let mut at = self
+            .method_class(function)
+            .and_then(|class| self.class_parent(class));
+        for _ in 0..64 {
+            let Some(class) = at else {
+                return false;
+            };
+            if self
+                .own_method_named(class, lowered)
+                .is_some_and(|own| self.method_visibility(own) == Visibility::Private)
+            {
+                return true;
+            }
+            at = self.class_parent(class);
+        }
+        false
     }
 
     /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`) with
