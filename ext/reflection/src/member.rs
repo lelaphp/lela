@@ -752,6 +752,7 @@ impl ReflectionProperty {
                         req,
                         "Calling ReflectionProperty::setValue() with a single argument is deprecated",
                     );
+                    php_ext::raising::pending(req)?;
                     objectOrValue
                 }
                 Passed::Given(value) => {
@@ -760,6 +761,7 @@ impl ReflectionProperty {
                             req,
                             "Calling ReflectionProperty::setValue() with a 1st argument which is not null or an object is deprecated",
                         );
+                        php_ext::raising::pending(req)?;
                     }
                     value
                 }
