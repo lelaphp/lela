@@ -52,6 +52,11 @@ pub use unit_cache::{
     CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
 };
 
+mod build_defs;
+pub use build_defs::BuildDefs;
+#[cfg(php_build_provider)]
+pub(crate) use build_defs::PROVIDER as BUILD_PROVIDER;
+pub(crate) use build_defs::build_date;
 mod callable;
 mod class_data;
 mod crypto;
@@ -20126,6 +20131,14 @@ impl Request {
             self.description.env.push((name.to_vec(), value.to_vec()));
         }
         true
+    }
+
+    /// The facts of the build serving the request, php's
+    /// `main/build-defs.h`: its date, system, provider and `configure`
+    /// line, which phpinfo's general table prints.
+    #[must_use]
+    pub fn build_defs(&self) -> &BuildDefs {
+        &self.shared.build_defs
     }
 
     /// `php_sapi_name()`: `sapi_module.name`.

@@ -189,6 +189,7 @@ fn engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
         .extensions(&extensions)
+        .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
     php_sapi::start(builder, ini, Some(HostExtension::FpmFcgi))
 }
@@ -223,11 +224,7 @@ pub fn main() -> ExitCode {
             EXIT_OK
         }
         Ask::Version => {
-            print(&php_sapi::version(
-                worker::NAME,
-                env!("PHP_BUILD_EPOCH"),
-                &engine(&ini),
-            ));
+            print(&php_sapi::version(worker::NAME, &engine(&ini)));
             EXIT_OK
         }
         Ask::Info => {

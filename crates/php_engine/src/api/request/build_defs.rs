@@ -1,0 +1,126 @@
+//! `main/build-defs.h` and `php_build_date`: the facts of the build an
+//! engine is, stamped once by the crate's `build.rs` and read here by
+//! every host's `-v`, by `PHP_BUILD_DATE` and `PHP_BUILD_PROVIDER`, and by
+//! phpinfo's rows, so the binary gives one answer to each.
+
+/// The Unix seconds the build was stamped at (`build.rs`).
+const EPOCH: &str = env!("PHP_BUILD_EPOCH");
+
+/// `PHP_BUILD_PROVIDER`, where the environment named one at build, which
+/// the constant is declared with.
+#[cfg(php_build_provider)]
+pub(crate) const PROVIDER: Option<&str> = Some(env!("PHP_BUILD_PROVIDER"));
+#[cfg(not(php_build_provider))]
+pub(crate) const PROVIDER: Option<&str> = None;
+
+/// What one build of the engine is, as php's `configure` and `main.c`
+/// fix it for a build of php: its date, the system it was built for, who
+/// built it where anyone said, and the `configure` switches that would
+/// build the bundle it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildDefs {
+    date: String,
+    configure: String,
+}
+
+impl BuildDefs {
+    /// This build's facts, with `switches` as its `configure` line, one
+    /// argument each, php's spelling (`--enable-mbstring`).
+    pub(crate) fn of(switches: &[&str]) -> BuildDefs {
+        BuildDefs {
+            date: build_date(),
+            configure: configure(switches),
+        }
+    }
+
+    /// `php_build_date`, `__DATE__ " " __TIME__` of the build as
+    /// `Jul 28 2026 13:06:52`: what `-v` prints after `built:`, what
+    /// `PHP_BUILD_DATE` is and phpinfo's `Build Date`.
+    #[must_use]
+    pub fn date(&self) -> &str {
+        &self.date
+    }
+
+    /// `PHP_BUILD_SYSTEM`, phpinfo's `Build System`: the target triple
+    /// the engine was built for, `aarch64-apple-darwin`.
+    #[must_use]
+    pub fn system(&self) -> &'static str {
+        env!("PHP_BUILD_SYSTEM")
+    }
+
+    /// `PHP_BUILD_PROVIDER`: who built the binary, where the build named
+    /// one, `-v`'s `Built by` line and phpinfo's `Build Provider`; none
+    /// otherwise, when the constant is not declared either.
+    #[must_use]
+    pub fn provider(&self) -> Option<&'static str> {
+        PROVIDER
+    }
+
+    /// `CONFIGURE_COMMAND`, phpinfo's `Configure Command`: the switches
+    /// the host's bundle names, each in `configure`'s quotes. No
+    /// `./configure` stands first, since none ran.
+    #[must_use]
+    pub fn configure(&self) -> &str {
+        &self.configure
+    }
+}
+
+/// `CONFIGURE_COMMAND` as `configure` writes it: each argument in single
+/// quotes, one space between.
+fn configure(switches: &[&str]) -> String {
+    switches
+        .iter()
+        .map(|switch| format!("'{switch}'"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `__DATE__ " " __TIME__` of `seconds`: `Mmm dd yyyy hh:mm:ss`, the day
+/// padded with a space as `__DATE__` pads it, in UTC, as a compiler
+/// renders it under `SOURCE_DATE_EPOCH`.
+fn date(seconds: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const DAY: i64 = 86_400;
+    let (year, month, day) = super::zone::civil_from_days(seconds.div_euclid(DAY));
+    let of_day = seconds.rem_euclid(DAY);
+    let name = usize::try_from(month - 1)
+        .ok()
+        .and_then(|at| MONTHS.get(at))
+        .copied()
+        .unwrap_or_default();
+    format!(
+        "{name} {day:>2} {year} {:02}:{:02}:{:02}",
+        of_day / 3600,
+        of_day % 3600 / 60,
+        of_day % 60
+    )
+}
+
+/// `php_build_date`, this build's ([`BuildDefs::date`]), which
+/// `PHP_BUILD_DATE` is declared with.
+pub(crate) fn build_date() -> String {
+    date(EPOCH.parse().unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{configure, date};
+
+    #[test]
+    fn the_build_date_is_phps_date_and_time_in_utc() {
+        assert_eq!(date(0), "Jan  1 1970 00:00:00");
+        assert_eq!(date(1_785_243_412), "Jul 28 2026 12:56:52");
+        assert_eq!(date(951_782_400), "Feb 29 2000 00:00:00");
+    }
+
+    #[test]
+    fn the_configure_line_quotes_each_switch() {
+        assert_eq!(configure(&[]), "");
+        assert_eq!(
+            configure(&["--enable-mbstring", "--with-openssl"]),
+            "'--enable-mbstring' '--with-openssl'"
+        );
+    }
+}

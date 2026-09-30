@@ -29,15 +29,6 @@ use constants::{
 /// not declare.
 const CREDITS_WEB: i64 = 1 << 7;
 
-/// `PHP_BUILD_SYSTEM`, the pinned build's: the `uname -a` of the machine
-/// that built it, which `configure` wrote into `main/build-defs.h`.
-const BUILD_SYSTEM: &str = "Darwin Sequoia-arm64.local 24.6.0 Darwin Kernel Version 24.6.0: Tue Jul 21 20:51:34 PDT 2026; root:xnu-11417.140.69.711.44~1/RELEASE_ARM64_VMAPPLE arm64";
-
-/// `CONFIGURE_COMMAND`, the pinned build's `configure` line, as it
-/// wrote it into `main/build-defs.h`.
-#[rustfmt::skip]
-const CONFIGURE_COMMAND: &str = " './configure'  '--prefix=/opt/homebrew/Cellar/php/8.5.9' '--localstatedir=/opt/homebrew/var' '--sysconfdir=/opt/homebrew/etc/php/8.5' '--with-config-file-path=/opt/homebrew/etc/php/8.5' '--with-config-file-scan-dir=/opt/homebrew/etc/php/8.5/conf.d' '--with-pear=/opt/homebrew/Cellar/php/8.5.9/share/php/pear' '--enable-bcmath' '--enable-calendar' '--enable-dba' '--enable-exif' '--enable-ftp' '--enable-fpm' '--enable-gd' '--enable-intl' '--enable-mbregex' '--enable-mbstring' '--enable-mysqlnd' '--enable-pcntl' '--enable-phpdbg' '--enable-phpdbg-readline' '--enable-shmop' '--enable-soap' '--enable-sockets' '--enable-sysvmsg' '--enable-sysvsem' '--enable-sysvshm' '--with-apxs2=/opt/homebrew/opt/httpd/bin/apxs' '--with-bz2=/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk/usr' '--with-curl' '--with-external-gd' '--with-external-pcre' '--with-ffi' '--with-fpm-user=_www' '--with-fpm-group=_www' '--with-gettext=/opt/homebrew/opt/gettext' '--with-gmp=/opt/homebrew/opt/gmp' '--with-iconv=/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk/usr' '--with-layout=GNU' '--with-ldap-sasl' '--with-ldap=/opt/homebrew/opt/openldap' '--with-libedit' '--with-libxml' '--with-mhash=/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk/usr' '--with-mysql-sock=/tmp/mysql.sock' '--with-mysqli=mysqlnd' '--with-ndbm=/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk/usr' '--with-openssl' '--with-password-argon2=/opt/homebrew/opt/argon2' '--with-pdo-dblib=/opt/homebrew/opt/freetds' '--with-pdo-mysql=mysqlnd' '--with-pdo-odbc=unixODBC,/opt/homebrew/opt/unixodbc' '--with-pdo-pgsql=/opt/homebrew/opt/libpq' '--with-pdo-sqlite' '--with-pgsql=/opt/homebrew/opt/libpq' '--with-pic' '--with-snmp=/opt/homebrew/opt/net-snmp' '--with-sodium' '--with-sqlite3' '--with-tidy=/opt/homebrew/opt/tidy-html5' '--with-unixODBC' '--with-xsl' '--with-zip' '--with-zlib' '--enable-dtrace' 'PKG_CONFIG_PATH=/opt/homebrew/opt/pkgconf/lib/pkgconfig:/opt/homebrew/opt/apr/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/apr-util/lib/pkgconfig:/opt/homebrew/opt/argon2/lib/pkgconfig:/opt/homebrew/opt/brotli/lib/pkgconfig:/opt/homebrew/opt/libnghttp2/lib/pkgconfig:/opt/homebrew/opt/libnghttp3/lib/pkgconfig:/opt/homebrew/opt/libngtcp2/lib/pkgconfig:/opt/homebrew/opt/libpsl/lib/pkgconfig:/opt/homebrew/opt/libssh2/lib/pkgconfig:/opt/homebrew/opt/lz4/lib/pkgconfig:/opt/homebrew/opt/xz/lib/pkgconfig:/opt/homebrew/opt/zstd/lib/pkgconfig:/opt/homebrew/opt/curl/lib/pkgconfig:/opt/homebrew/opt/unixodbc/lib/pkgconfig:/opt/homebrew/opt/libpng/lib/pkgconfig:/opt/homebrew/opt/freetype/lib/pkgconfig:/opt/homebrew/opt/json-c/lib/pkgconfig:/opt/homebrew/opt/fontconfig/lib/pkgconfig:/opt/homebrew/opt/jpeg-turbo/lib/pkgconfig:/opt/homebrew/opt/libvmaf/lib/pkgconfig:/opt/homebrew/opt/aom/lib/pkgconfig:/opt/homebrew/opt/dav1d/lib/pkgconfig:/opt/homebrew/opt/libavif/lib/pkgconfig:/opt/homebrew/opt/webp/lib/pkgconfig:/opt/homebrew/opt/libtiff/lib/pkgconfig:/opt/homebrew/opt/gd/lib/pkgconfig:/opt/homebrew/opt/gmp/lib/pkgconfig:/opt/homebrew/opt/icu4c@78/lib/pkgconfig:/opt/homebrew/opt/krb5/lib/pkgconfig:/opt/homebrew/opt/readline/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/libsodium/lib/pkgconfig:/opt/homebrew/opt/libzip/lib/pkgconfig:/opt/homebrew/opt/net-snmp/lib/pkgconfig:/opt/homebrew/opt/oniguruma/lib/pkgconfig:/opt/homebrew/opt/openldap/lib/pkgconfig:/opt/homebrew/opt/pcre2/lib/pkgconfig:/opt/homebrew/opt/sqlite/lib/pkgconfig:/opt/homebrew/opt/tidy-html5/lib/pkgconfig' 'PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/opt/homebrew/Library/Homebrew/os/mac/pkgconfig/15' 'SASL_CFLAGS=-I/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk/usr/include/sasl' 'SASL_LIBS=-lsasl2' 'PHP_BUILD_PROVIDER=Homebrew'";
-
 /// The constants, in the stub's order.
 ///
 /// ```php
@@ -247,8 +238,9 @@ fn zend_version(req: &Request) -> String {
 /// The general table of `php_print_info` (`Z/ext/standard/info.c:766`):
 /// the version, in HTML inside the box with php's logo, the table of
 /// what this build is, and the box naming the engine. The build's own
-/// facts, its date, system, provider and configure line, are the pinned
-/// build's, as `PHP_BUILD_DATE` and `PHP_BUILD_PROVIDER` are; the rows
+/// facts, its date, the target it was built for, its provider where it
+/// named one and the bundle's `configure` switches, are the engine's
+/// `BuildDefs`, the one stamp `-v` and `PHP_BUILD_DATE` read too; the rows
 /// after them say what this engine is.
 fn general(req: &mut Request) {
     if html(req) {
@@ -266,8 +258,7 @@ fn general(req: &mut Request) {
     }
     let uname = String::from_utf8_lossy(&get_uname(b'a')).into_owned();
     let api = pretty_name(req.sapi_name()).to_owned();
-    let date = constant_text(req, b"PHP_BUILD_DATE");
-    let provider = constant_text(req, b"PHP_BUILD_PROVIDER");
+    let defs = req.build_defs().clone();
     let ini_path = constant_text(req, b"PHP_CONFIG_FILE_PATH");
     let wrappers: Vec<Vec<u8>> = req
         .stream_wrappers()
@@ -287,14 +278,14 @@ fn general(req: &mut Request) {
     ];
     let mut cells: Vec<[&str; 2]> = vec![
         ["System", &uname],
-        ["Build Date", &date],
-        ["Build System", BUILD_SYSTEM],
+        ["Build Date", defs.date()],
+        ["Build System", defs.system()],
     ];
-    if !provider.is_empty() {
-        cells.push(["Build Provider", &provider]);
+    if let Some(provider) = defs.provider() {
+        cells.push(["Build Provider", provider]);
     }
     cells.extend([
-        ["Configure Command", CONFIGURE_COMMAND],
+        ["Configure Command", defs.configure()],
         ["Server API", &api],
         ["Virtual Directory Support", "disabled"],
         ["Configuration File (php.ini) Path", &ini_path],

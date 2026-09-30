@@ -437,6 +437,7 @@ fn build(ini: &[(String, String)], config: &PoolConfig, started: &str) -> Engine
     let mut builder = php_sapi::prepare(
         Engine::builder()
             .extensions(&extensions)
+            .configure(php_bundle::CONFIGURE)
             .tier::<php_bundle::Tier>(),
         ini,
         Some(HostExtension::FpmFcgi),

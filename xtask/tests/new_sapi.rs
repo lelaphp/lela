@@ -141,8 +141,10 @@ fn the_host_laid_down_has_the_topology_of_the_cli_and_the_cgi() {
     }
     let main = read(&root, "sapi/demo/src/main.rs");
     assert!(main.contains("php_sapi_demo::main()"), "{main}");
-    let build = read(&root, "sapi/demo/build.rs");
-    assert!(build.contains("PHP_BUILD_EPOCH"), "{build}");
+    // No build script: the build's facts are the engine's own stamp, and
+    // the bundle's `configure` switches are handed to it.
+    assert!(!root.join("sapi/demo/build.rs").exists());
+    assert!(lib.contains(".configure(php_bundle::CONFIGURE)"), "{lib}");
     let test = read(&root, "sapi/demo/tests/serve.rs");
     assert!(test.contains("CARGO_BIN_EXE_php-demo"), "{test}");
 

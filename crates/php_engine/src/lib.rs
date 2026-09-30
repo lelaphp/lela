@@ -58,7 +58,7 @@ mod virtual_cwd;
 mod weakrefs;
 mod wrapper;
 
-pub use api::request::PHP_VERSION;
+pub use api::request::{BuildDefs, PHP_VERSION};
 pub use command_line::{CommandLine, EachLine};
 pub use engine::{
     Aborted, Dispatched, Engine, EngineBuilder, FileHandles, HostValue, IniOrigin, Method,
