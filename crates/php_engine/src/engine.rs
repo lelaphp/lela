@@ -1998,6 +1998,7 @@ impl Engine {
             let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
             let _ = req.header_add(line.as_bytes(), true, 0);
         }
+        let _ = crate::output::start_at_request(&mut req);
         let _ = req.hash_environment();
         // Displayed past the `php_output` layer, as php displays what
         // `MINIT` raised before `php_output_activate`, so no header is
@@ -2616,6 +2617,26 @@ mod tests {
 
     /// What the pinned oracle answers for
     /// `var_dump(ini_get('error_append_string'))` under
+    /// `php_request_startup` starts the buffer the ini asks for before
+    /// the program runs: the handler `output_handler` names, which must
+    /// be a function by then, php's warning where it is not, or else
+    /// `output_buffering`'s default handler.
+    #[test]
+    fn the_request_starts_the_buffer_output_handler_or_output_buffering_names() {
+        let program = "<?php function h($s) { return '[' . $s . ']'; } echo 'x'; echo 'y';";
+        let serve = |name: &str, value: &str| {
+            let engine = Engine::builder().ini(name, value).build();
+            let out = engine.serve_capture(program, crate::test::Capture::default());
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        assert_eq!(
+            serve("output_handler", "h"),
+            "\nWarning: PHP Request Startup: function \"h\" not found or invalid function name in Unknown on line 0\nxy"
+        );
+        assert_eq!(serve("output_buffering", "4096"), "xy");
+        assert_eq!(serve("output_handler", ""), "xy");
+    }
+
     /// `-d error_append_string=<value>`: `Off`, `OFF`, `oFf`, `FALSE`,
     /// `none`, `None`, `NULL` and `off ` are `string(0) ""`; `On`, `YES`
     /// and `true` are `string(1) "1"`; `0`, `2`, `abc`, `stderr`, `1M`,
