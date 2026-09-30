@@ -6,6 +6,10 @@ Engine
 EngineBuilder
 FileHandles
 HostExtension
+HostValue
+IniEvent
+IniOrigin
+IniValue
 Method
 Observables
 OutputSink

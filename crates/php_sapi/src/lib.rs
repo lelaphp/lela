@@ -31,9 +31,9 @@ use std::io::Write;
 use std::process::ExitCode;
 
 pub use php_engine::{
-    CommandLine, Dispatched, EachLine, Engine, EngineBuilder, FileHandles, HostExtension, Method,
-    Observables, OutputSink, PHP_VERSION, ProcessTitle, RequestDescription, ResponseHead, Routed,
-    WebRequest,
+    CommandLine, Dispatched, EachLine, Engine, EngineBuilder, FileHandles, HostExtension,
+    HostValue, IniEvent, IniOrigin, IniValue, Method, Observables, OutputSink, PHP_VERSION,
+    ProcessTitle, RequestDescription, ResponseHead, Routed, WebRequest,
 };
 
 /// `php_module_startup` for a host: `builder`, which carries the host's
@@ -47,6 +47,23 @@ pub fn start(
     ini: &[(String, String)],
     host: Option<HostExtension>,
 ) -> Engine {
+    let engine = prepare(builder, ini, host).build();
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(engine.startup_errors().as_bytes());
+    engine
+}
+
+/// [`start`]'s builder before it is built: the host's extension, the
+/// witness lane's trace, and the line's `-d` entries; for a host that
+/// builds more than one engine and writes the startup errors once, as
+/// php-fpm's children build theirs after the master has started.
+#[must_use]
+pub fn prepare(
+    builder: EngineBuilder,
+    ini: &[(String, String)],
+    host: Option<HostExtension>,
+) -> EngineBuilder {
     let mut builder = builder;
     if let Some(host) = host {
         builder = builder.host_extension(host);
@@ -58,11 +75,7 @@ pub fn start(
     for (name, value) in ini {
         builder = builder.ini(name, value);
     }
-    let engine = builder.build();
-    let _ = std::io::stderr()
-        .lock()
-        .write_all(engine.startup_errors().as_bytes());
-    engine
+    builder
 }
 
 /// The variable naming the file a `witness-trace` build appends the

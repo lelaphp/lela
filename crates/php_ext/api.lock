@@ -408,6 +408,7 @@ request::Request::argument
 request::Request::argument_count
 request::Request::argv
 request::Request::assert_callback
+request::Request::at_activate
 request::Request::at_startup
 request::Request::autoload_functions
 request::Request::autoload_register
@@ -488,6 +489,7 @@ request::Request::interrupt
 request::Request::is_unwind_exit
 request::Request::is_uploaded_file
 request::Request::last_error
+request::Request::loaded_env
 request::Request::loaded_extensions
 request::Request::made_superglobal
 request::Request::memory_peak
@@ -718,9 +720,11 @@ test::Engine::dispatch
 test::Engine::dump_before_optimizer
 test::Engine::frameless
 test::Engine::highlight
+test::Engine::ini_get
 test::Engine::lint
 test::Engine::loaded_extensions
 test::Engine::loaded_zend_extensions
+test::Engine::parse_ini
 test::Engine::serve
 test::Engine::serve_capture
 test::Engine::serve_capture_as

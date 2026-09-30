@@ -94,6 +94,7 @@
 
 mod anchor;
 pub(crate) mod fence;
+mod fpm;
 mod judge;
 mod process;
 #[cfg(test)]
