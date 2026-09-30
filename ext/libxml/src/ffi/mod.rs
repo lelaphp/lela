@@ -28,8 +28,11 @@
 
 mod io;
 mod loader;
+mod reader;
+mod sax;
 pub(crate) mod sys;
 mod tree;
+mod writer;
 mod xpath;
 
 pub(crate) use io::Reader;
@@ -38,6 +41,8 @@ pub use io::{
     Validate, Validated,
 };
 pub(crate) use loader::{Context, Site, Uri};
+pub use reader::{Expanded, RelaxNg, TextReader};
+pub use sax::{At, AttributeNs, Position, PushParser, Sax};
 pub use sys::{
     HTML_PARSE_NOBLANKS, HTML_PARSE_NODEFDTD, HTML_PARSE_NOERROR, HTML_PARSE_NOIMPLIED,
     HTML_PARSE_NONET, HTML_PARSE_NOWARNING, HTML_PARSE_RECOVER, XML_ATTRIBUTE_ID,
@@ -48,6 +53,7 @@ pub use sys::{
     XML_PARSE_XINCLUDE, XML_SAVE_AS_XML, XML_SAVE_FORMAT, XML_SAVE_NO_DECL, XML_SAVE_NO_EMPTY,
 };
 pub use tree::{DocString, DtdTable, HashTable, Kind, Name, Node, Ns, Utf8};
+pub use writer::Emitter;
 pub use xpath::{Answer, Called, Handler, Item, Object, Operand, Returned, Scope, XPath};
 
 /// A copy of `bytes` up to its first NUL with the NUL after, which is
@@ -133,6 +139,15 @@ impl Library {
     /// libxml's own default outside a call that lends a request.
     pub fn install_loader() {
         loader::EntityLoader::install();
+    }
+
+    /// Whether `source`, escaped as `xmlURIEscapeStr(source, ":")`,
+    /// parses as a URI with a scheme: the test `_xmlreader_get_valid_file_path`
+    /// and `_xmlwriter_get_valid_file_path` make before reading `source` as
+    /// a local path.
+    #[must_use]
+    pub fn escaped_has_scheme(source: &[u8]) -> bool {
+        Uri::escaped_has_scheme(source)
     }
 
     /// `xmlParserVersion`, the library's own version string: `"20913"`.
