@@ -966,7 +966,9 @@ pub fn write_raw_property(
 /// `new $class(...$arguments)`: [`new_object`] and then the class's
 /// constructor served on it with `arguments`, as `NEW` and its
 /// `DO_FCALL` serve them; a class with none takes the arguments and
-/// serves nothing (`zend_pass_function`).
+/// serves nothing (`zend_pass_function`). An object whose constructor
+/// threw is given up destructed (`zend_object_store_ctor_failed`), so
+/// its `__destruct()` never runs.
 pub fn instantiate(
     req: &mut Request,
     class: ClassId,
@@ -976,6 +978,7 @@ pub fn instantiate(
     if let Some(constructor) = req.method_named(class, b"__construct") {
         let served = req.serve_method(constructor, Some(object), class, arguments, &[]);
         if let Err(thrown) = served {
+            object.mark_destructor_called();
             req.release(object.as_value());
             return Err(thrown);
         }
@@ -992,17 +995,20 @@ pub fn instantiate(
 /// [`call_named`] places them. A class with no constructor takes
 /// positional arguments and no named one, php's `Unknown named
 /// parameter`. The object is the caller's, one owner; what the
-/// constructor threw is the `Err`, the object given up. The arguments
-/// stay the caller's.
+/// constructor threw is the `Err`, the object given up destructed
+/// (`zend_object_store_ctor_failed`). The arguments stay the caller's.
 ///
 /// ```php
 /// #[Attribute] class MyAttrib {}
 /// #[MyAttrib(notinterned: '')] class Test1 {}
 /// $attr = (new ReflectionClass(Test1::class))->getAttributes()[0];
 /// try { $attr->newInstance(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// class T { function __construct() { throw new Exception('c'); } function __destruct() { echo "d\n"; } }
+/// try { (new ReflectionClass('T'))->newInstance(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// Unknown named parameter $notinterned
+/// c
 /// ```
 pub fn instantiate_named(
     req: &mut Request,
@@ -1048,6 +1054,7 @@ pub fn instantiate_named(
             Ok(object)
         }
         Err(thrown) => {
+            object.mark_destructor_called();
             req.release(object.as_value());
             Err(thrown)
         }

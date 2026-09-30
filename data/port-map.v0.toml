@@ -1336,8 +1336,8 @@ api = "request::Request::called_scope"
 mahout = "RequestCtx::class_alias_bind"
 sites = 1
 crates = 1
-status = "renamed"
-api = "request::Request::class_alias"
+status = "gone"
+rule = "a native class's alias is its stub's @alias, ClassDecl::aliases, which the engine links with the class; class_alias() is the engine's own"
 
 [[item]]
 mahout = "RequestCtx::clear_last_error"

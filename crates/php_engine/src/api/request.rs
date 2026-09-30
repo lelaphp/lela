@@ -93,12 +93,17 @@ const IN_SET: u32 = 1 << 1;
 const IN_UNSET: u32 = 1 << 2;
 const IN_ISSET: u32 = 1 << 3;
 
-/// A linked extension, by identity: its position in the bundle's startup
-/// order, which is where its `zend_module_entry` stands in
-/// `module_registry`. `Core`, which php registers first, is no
-/// `Extension` value of the bundle and has no identity here yet.
+/// A linked extension, by identity: its `module_number`, where its
+/// `zend_module_entry` stands in `module_registry`: `Core` zero, as
+/// `zend_startup` registers it first, and each extension of the bundle
+/// the next in startup order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtensionId(pub(crate) u32);
+
+impl ExtensionId {
+    /// `Core`, the engine's own natives, classes, constants and ini.
+    pub(crate) const CORE: ExtensionId = ExtensionId(0);
+}
 
 /// The name `__halt_compiler()` registers its file's offset under.
 const HALT_OFFSET: &[u8] = b"__COMPILER_HALT_OFFSET__";
@@ -118,14 +123,14 @@ pub(crate) fn halt_offset_key(file: &[u8]) -> Vec<u8> {
 /// One ini entry as this request sees it, php's `zend_ini_entry` read
 /// by `_extension_ini_string`, `ReflectionExtension::getINIEntries` and
 /// `ini_get_all`: the declaration with its `modifiable` bits, the
-/// extension that registered it (`module_number`), none for the
+/// extension that registered it (`module_number`), `Core` for the
 /// engine's own table, the value in force, and the value the entry had
 /// before the request changed it, php's `orig_value`, which is `Some`
 /// exactly where php's `modified` is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IniEntry {
     pub decl: IniDecl,
-    pub extension: Option<ExtensionId>,
+    pub extension: ExtensionId,
     pub value: Box<[u8]>,
     pub original: Option<Box<[u8]>>,
 }
@@ -2030,11 +2035,12 @@ pub struct Request {
     /// ([`crate::engine::Shared::compile_for`]).
     pub(crate) keys_made: u32,
     /// The aliases `class_alias()` added to `EG(class_table)`, each the
-    /// lowered name it is keyed by, the class it names, and how many
-    /// classes the table held when it was added, which is where php's
-    /// table has it among them: `ZVAL_ALIAS_PTR` rows, request state as
-    /// the classes the request declared are.
+    /// bucket it stands in, the lowered name it is keyed by and the
+    /// class it names: `ZVAL_ALIAS_PTR` rows, request state as the
+    /// classes the request declared are.
     aliases: Stacked<preload::Alias>,
+    /// `EG(class_table)`'s buckets past the engine's classes.
+    buckets: preload::Buckets,
     /// `PHP_SAPI`, `sapi_module.name` as `php_module_startup` registers
     /// it: the host's, so the request's, the engine's interned string
     /// for the name the description carries.
@@ -2340,13 +2346,15 @@ pub(crate) enum MemberAt {
 }
 
 /// One class a request declared: the unit that holds its declaration and
-/// the declaration's index there, and, for a class that uses traits,
-/// the class composed with them at its link, which is the table's row
-/// in its place (`zend_do_bind_traits`).
+/// the declaration's index there, for a class that uses traits the
+/// class composed with them at its link, which is the table's row in
+/// its place (`zend_do_bind_traits`), and the bucket of
+/// `EG(class_table)` it stands in.
 pub(crate) struct Declared {
     unit: Arc<Unit>,
     at: u32,
     composed: Option<Box<php_unit::link::Composed>>,
+    place: preload::Bucket,
 }
 
 impl Declared {
@@ -2405,6 +2413,7 @@ impl Request {
         let mut stack = VmStack::new();
         let _laid = stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
+        let buckets = preload::Buckets::past(tables.classes.len() + tables.aliases.len());
         let mut req = Request {
             // Read before `shared` moves in, as fields are in the order written.
             realpath_cache: RealpathCache::startup(&shared),
@@ -2509,6 +2518,7 @@ impl Request {
             links: linking::Links::default(),
             record: recording::Record::default(),
             keys_made: 0,
+            buckets,
             aliases: tables.aliases,
             sapi_constant: Value::null(),
             user_functions: tables.functions,
@@ -5127,6 +5137,20 @@ impl Request {
     /// #1 %s(3): include('%s...')
     /// #2 {main}
     /// ```
+    ///
+    /// An anonymous class is named whole, `ce->name` with its NUL and
+    /// site, where the rendered trace cuts it at the NUL:
+    ///
+    /// ```php
+    /// $o = new class { function b() { return new Exception; } };
+    /// $e = $o->b();
+    /// var_dump(strlen($e->getTrace()[0]['class']) > 15, strstr($e->getTraceAsString(), 'class@'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(30) "class@anonymous->b()
+    /// #1 {main}"
+    /// ```
     fn render_trace(&mut self, links: Vec<TraceRow>, options: i64) -> Result<PhpArray, Thrown> {
         let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
         let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
@@ -5145,8 +5169,9 @@ impl Request {
                     let name = Value::string(PhpString::new(self, name.as_bytes())?);
                     self.set_string_key(&mut row, b"function", name)?;
                     if let Some(class) = self.method_class(function).or(scope) {
-                        let class = self.class_name(class);
-                        let class = Value::string(PhpString::new(self, class.as_bytes())?);
+                        // `ce->name` whole: an anonymous class's with its NUL and site.
+                        let class = self.class_name_bytes(class);
+                        let class = Value::string(PhpString::new(self, &class)?);
                         self.set_string_key(&mut row, b"class", class)?;
                         if provide_object && let Some(this) = this {
                             self.addref(&this.as_value());
@@ -5772,7 +5797,10 @@ impl Request {
                 let Some(value) = field(key.as_bytes()) else {
                     continue;
                 };
+                // `smart_str_appends(Z_STRVAL_P)`: up to a NUL, which cuts
+                // an anonymous class's name to `class@anonymous`.
                 if let Some(text) = value.as_str_bytes() {
+                    let text = text.split(|byte| *byte == 0).next().unwrap_or_default();
                     out.push_str(&String::from_utf8_lossy(text));
                 } else {
                     crate::api::raising::warning(self, &format!("Value for {key} is not a string"));
@@ -6883,6 +6911,21 @@ impl Request {
         self.fibers.block_switch();
         let out = f(self);
         self.fibers.unblock_switch();
+        out
+    }
+
+    /// `EG(fake_scope) = class` for the length of `f`, and the scope
+    /// that stood put back after it, so it cannot leak past the call:
+    /// the scope a native asks the engine to measure visibility from as
+    /// though `class` were executing, as `ReflectionClass::newInstance`
+    /// asks the object's `get_constructor` (`Z/ext/reflection/php_reflection.c:5086-5088`)
+    /// and `zend_update_property_ex` writes. `ReflectionClass::newInstance`
+    /// on a class with a private constructor is the witness, in
+    /// `ext/reflection`.
+    pub fn with_fake_scope<R>(&mut self, class: ClassId, f: impl FnOnce(&mut Request) -> R) -> R {
+        let saved = self.fake_scope.replace(class);
+        let out = f(self);
+        self.fake_scope = saved;
         out
     }
 
@@ -10094,7 +10137,18 @@ impl Request {
     /// (`zend_wrong_offset`) rather than a write.
     ///
     /// `value` is given up here whatever arm runs, as php's caller
-    /// gives it up, and so is `name`.
+    /// gives it up, and so is `name`. An initialised readonly slot is
+    /// php's `Error`, from the declaring scope too, as Reflection writes:
+    ///
+    /// ```php
+    /// enum Foo: int { case Bar = 0; }
+    /// try { (new ReflectionProperty(Foo::class, 'value'))->setValue(Foo::Bar, 1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(Foo::Bar->value);
+    /// ```
+    /// ```expect
+    /// Cannot modify readonly property Foo::$value
+    /// int(0)
+    /// ```
     ///
     /// ```php
     /// class M { public $kept = 1; public function __set($k, $v) { echo "set $k=$v\n"; } }
@@ -10149,7 +10203,16 @@ impl Request {
         if let Some(p) = placed.as_ref()
             && self.reaches(p)
         {
-            if !o.slot(p.slot).is_undef() {
+            // `zend_readonly_property_modification_error`: an initialised
+            // readonly slot is written again only under `IS_PROP_REINITABLE`.
+            let slot_held = !o.slot(p.slot).is_undef();
+            if slot_held && p.readonly && !o.slot_bit(p.slot, php_heap::PropBit::Reinitable) {
+                let thrown = self.readonly_modification(p.declaring, name.as_bytes(), "modify");
+                self.release(value);
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+            if slot_held {
                 return self.write_std_property(object, name, value);
             }
             // `IS_PROP_LAZY`: a slot that waits is the initializer's
@@ -14119,6 +14182,18 @@ impl Request {
             .and_then(|i| u32::try_from(i).ok())
             .map(ClassId)
             .or_else(|| {
+                // What `zend_register_class_alias` added for a native
+                // class's stub `@alias` ([`ClassDecl::aliases`]).
+                (0u32..)
+                    .zip(&self.shared.classes)
+                    .find(|(_, decl)| {
+                        decl.aliases
+                            .iter()
+                            .any(|a| a.0.eq_ignore_ascii_case(&wanted))
+                    })
+                    .map(|(at, _)| ClassId(at))
+            })
+            .or_else(|| {
                 self.aliases
                     .iter()
                     .find(|(_, alias, _)| *alias == wanted)
@@ -14126,21 +14201,38 @@ impl Request {
             })
     }
 
-    /// `EG(class_table)` in its order, each row the class and, for a row
-    /// `class_alias()` added, the lowered name it is keyed by: the
-    /// engine's classes, then the request's in the order they were
-    /// bound, each alias standing where it was added.
+    /// `EG(class_table)` in its order, each row the class and, for an
+    /// alias's row, the lowered name it is keyed by: the engine's
+    /// classes, each native alias after its class, then the request's
+    /// rows in their buckets.
     pub(crate) fn class_table(&self) -> Vec<(ClassId, Option<Vec<u8>>)> {
-        let count = self.shared.classes.len() + self.declared.len();
-        let mut rows = Vec::with_capacity(count + self.aliases.len());
-        let mut aliases = self.aliases.iter().peekable();
-        for at in 0..count {
-            while let Some((_, alias, class)) = aliases.next_if(|(before, _, _)| *before <= at) {
-                rows.push((*class, Some(alias.clone())));
-            }
-            rows.push((ClassId(u32::try_from(at).unwrap_or(u32::MAX)), None));
-        }
-        rows.extend(aliases.map(|(_, alias, class)| (*class, Some(alias.clone()))));
+        let natives = self.shared.classes.len();
+        let mut rows: Vec<(ClassId, Option<Vec<u8>>)> = (0u32..)
+            .zip(&self.shared.classes)
+            .flat_map(|(at, decl)| {
+                let aliases = decl.aliases.iter();
+                std::iter::once(None)
+                    .chain(aliases.map(|alias| Some(alias.0.to_ascii_lowercase())))
+                    .map(move |alias| (ClassId(at), alias))
+            })
+            .collect();
+        let mut own: Vec<(preload::Bucket, ClassId, Option<Vec<u8>>)> = (natives..)
+            .zip(self.declared.iter())
+            .map(|(at, row)| {
+                (
+                    row.place,
+                    ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
+                    None,
+                )
+            })
+            .chain(
+                self.aliases
+                    .iter()
+                    .map(|(place, alias, class)| (*place, *class, Some(alias.clone()))),
+            )
+            .collect();
+        own.sort_by_key(|(place, _, _)| *place);
+        rows.extend(own.into_iter().map(|(_, class, alias)| (class, alias)));
         rows
     }
 
@@ -14205,6 +14297,8 @@ impl Request {
                 .iter()
                 .find(|(_, class)| usize::try_from(*class).ok() == Some(at));
             if let Some((key, _)) = key {
+                self.buckets
+                    .reserve(unit, u32::try_from(at).unwrap_or(u32::MAX));
                 if decl.flags.is_anonymous {
                     if !self.link_unbound(unit, at, decl) {
                         return false;
@@ -14333,7 +14427,23 @@ impl Request {
     /// The class at `at` of `unit` into the request's table, with its
     /// methods into the function table beside it, which is the whole of
     /// what binding a class is here: the parent chain is walked from the
-    /// declaration on every lookup, so nothing is copied.
+    /// declaration on every lookup, so nothing is copied. It stands in
+    /// the bucket its unit's load took for it, where php's runtime
+    /// definition key stood, or in the next:
+    ///
+    /// ```php
+    /// class A {}
+    /// if (true) { class B {} }
+    /// class C implements Countable { function count(): int { return 0; } }
+    /// class D {}
+    /// function f() { class F {} }
+    /// f();
+    /// class_alias('A', 'AA');
+    /// echo implode(",", array_slice(get_declared_classes(), -6)), "\n";
+    /// ```
+    /// ```expect
+    /// A,B,C,D,F,aa
+    /// ```
     fn bind_declared(
         &mut self,
         unit: &Arc<Unit>,
@@ -14346,10 +14456,12 @@ impl Request {
             .len()
             .saturating_add(self.declared.len());
         let class = ClassId(u32::try_from(class).unwrap_or(u32::MAX));
+        let place = self.buckets.claim(unit, at);
         self.declared.push(Declared {
             unit: Arc::clone(unit),
             at,
             composed: composed.map(Box::new),
+            place,
         });
         self.bind_members(class);
     }
@@ -17133,14 +17245,7 @@ impl Request {
     /// row.
     pub(crate) fn constant_table(&self) -> Vec<(Option<&str>, Vec<u8>, Value)> {
         let decls = self.shared.declared().constants;
-        let from_extensions: usize = self
-            .shared
-            .extensions
-            .iter()
-            .map(|e| e.constants.len())
-            .sum();
-        let own = decls.len().saturating_sub(from_extensions);
-        let mut modules: Vec<&str> = vec!["Core"; own];
+        let mut modules: Vec<&str> = Vec::with_capacity(decls.len());
         for extension in &self.shared.extensions {
             modules.extend(std::iter::repeat_n(
                 extension.name.as_str(),
@@ -17176,12 +17281,13 @@ impl Request {
     /// `false` where the table has that name already, a class's or
     /// another alias's, and nothing is added. The name is the caller's
     /// to have lowered and held to php's reserved names.
-    pub fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> bool {
+    pub(crate) fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> bool {
         if self.class_named(alias).is_some() {
             return false;
         }
-        let at = self.shared.classes.len() + self.declared.len();
-        self.aliases.push((at, alias.to_ascii_lowercase(), class));
+        let place = self.buckets.take();
+        self.aliases
+            .push((place, alias.to_ascii_lowercase(), class));
         true
     }
 
@@ -17587,12 +17693,14 @@ impl Request {
         self.included_files.clone()
     }
 
-    /// `get_loaded_extensions()`: the bundle in `MINIT` order, after
-    /// `Core`, each the name its `zend_module_entry` carries.
+    /// `get_loaded_extensions()`: `Core`, then the bundle in `MINIT`
+    /// order, each the name its `zend_module_entry` carries.
     #[must_use]
     pub fn loaded_extensions(&self) -> Vec<String> {
-        std::iter::once(String::from("Core"))
-            .chain(self.shared.extensions.iter().map(|e| e.name.clone()))
+        self.shared
+            .extensions
+            .iter()
+            .map(|e| e.name.clone())
             .collect()
     }
 
@@ -17611,8 +17719,26 @@ impl Request {
 
     /// `zend_hash_str_find_ptr(&module_registry, lcname)`: the linked
     /// extension named, php's table being keyed by the lowered name;
-    /// none for a name the bundle has not, and none for `Core` until
-    /// the engine's own natives are an `Extension` value.
+    /// none for a name the engine has not. `Core` is the engine's own
+    /// natives, classes, constants and ini entries.
+    ///
+    /// ```php
+    /// $core = new ReflectionExtension('core');
+    /// var_dump($core->getName(), get_loaded_extensions()[0]);
+    /// var_dump((new ReflectionConstant('E_ALL'))->getExtensionName());
+    /// var_dump((new ReflectionFunction('strlen'))->getExtensionName());
+    /// var_dump((new ReflectionClass('stdClass'))->getExtension()->name);
+    /// var_dump(isset($core->getINIEntries()['precision']), isset($core->getFunctions()['strlen']));
+    /// ```
+    /// ```expect
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// bool(true)
+    /// bool(true)
+    /// ```
     #[must_use]
     pub fn extension_named(&self, name: &[u8]) -> Option<ExtensionId> {
         let wanted = name.to_ascii_lowercase();
@@ -17631,13 +17757,19 @@ impl Request {
         self.extension_of(extension).map(|e| e.name.as_str())
     }
 
+    /// `module->version`: what the extension declared with
+    /// `ExtensionBuilder::version`, else `PHP_VERSION`, as `Core`'s is.
+    #[must_use]
+    pub fn extension_version(&self, extension: ExtensionId) -> Option<&'static str> {
+        self.extension_of(extension).map(|e| e.version)
+    }
+
     /// `module->module_number`, `zend_next_free_module` at registration:
     /// `Core` takes zero at `zend_startup` and each extension the next
-    /// number in startup order, so an extension's is its position in
-    /// the bundle plus one.
+    /// number in startup order.
     #[must_use]
     pub fn extension_number(&self, extension: ExtensionId) -> u32 {
-        extension.0.saturating_add(1)
+        extension.0
     }
 
     /// The natives an extension declared, in the order it declared
@@ -17655,8 +17787,9 @@ impl Request {
     }
 
     /// `internal_function.module`: the extension that declared a native
-    /// function; none for a native the engine declares itself, for a
-    /// method and for a user function.
+    /// function, `Core` for Zend's own; none for a native of php's
+    /// `standard` the engine declares itself, for a method and for a
+    /// user function.
     #[must_use]
     pub fn function_extension(&self, function: Function) -> Option<ExtensionId> {
         let at = usize::try_from(function.0).ok()?;
@@ -17664,18 +17797,12 @@ impl Request {
     }
 
     /// `ce->info.internal.module`: the extension that declared a native
-    /// class, `ReflectionClass::getExtension` reads it; none for a class
-    /// Zend declares itself, whose `zend_module_entry` php has as `Core` and this
-    /// engine as no `Extension` value yet, and none for a user class.
+    /// class, `Core` for one Zend declares itself, as
+    /// `ReflectionClass::getExtension` reads it; none for a user class.
     #[must_use]
     pub fn class_extension(&self, class: ClassId) -> Option<ExtensionId> {
         let at = usize::try_from(class.0).ok()?;
-        let zend = self
-            .shared
-            .classes
-            .len()
-            .saturating_sub(self.shared.extensions.iter().map(|e| e.classes.len()).sum());
-        let mut start = zend;
+        let mut start = 0usize;
         for (i, extension) in self.shared.extensions.iter().enumerate() {
             let end = start.saturating_add(extension.classes.len());
             if (start..end).contains(&at) {
@@ -17687,18 +17814,13 @@ impl Request {
     }
 
     /// `ce->info.internal.module->name` as `_class_string` and
-    /// `_function_string` print it after `<internal:`: the extension's
-    /// name for a class an extension declared, `Core` for one Zend
-    /// declares itself, whose `zend_module_entry` php has under that
-    /// name and this engine as no `Extension` value yet (#320), and
-    /// none for a user class.
+    /// `_function_string` print it after `<internal:`: the name of the
+    /// extension that declared a native class, `Core` for one Zend
+    /// declares itself, and none for a user class.
     #[must_use]
     pub fn class_extension_name(&self, class: ClassId) -> Option<&str> {
-        if let Some(extension) = self.class_extension(class) {
-            return self.extension_name(extension);
-        }
-        let at = usize::try_from(class.0).ok()?;
-        (at < self.shared.classes.len()).then_some("Core")
+        self.class_extension(class)
+            .and_then(|extension| self.extension_name(extension))
     }
 
     /// `ZEND_CONSTANT_MODULE_NUMBER(constant) == module->module_number`
@@ -17715,20 +17837,13 @@ impl Request {
         let Some(at) = usize::try_from(extension.0).ok() else {
             return Vec::new();
         };
-        let all: usize = self
-            .shared
-            .extensions
-            .iter()
-            .map(|e| e.constants.len())
-            .sum();
-        let own = self.shared.declared().constants.len().saturating_sub(all);
         let start: usize = self
             .shared
             .extensions
             .iter()
             .take(at)
             .map(|e| e.constants.len())
-            .fold(own, usize::saturating_add);
+            .sum();
         let count = self
             .extension_of(extension)
             .map_or(0, |e| e.constants.len());
@@ -17760,20 +17875,50 @@ impl Request {
     /// again as `original` where the request changed it.
     #[must_use]
     pub fn extension_ini(&self, extension: ExtensionId) -> Vec<IniEntry> {
+        if extension == ExtensionId::CORE {
+            return self.core_ini();
+        }
         let Some(module) = self.extension_of(extension) else {
             return Vec::new();
         };
         module
             .ini
             .iter()
-            .map(|decl| self.ini_entry(decl.clone(), Some(extension)))
+            .map(|decl| self.ini_entry(decl.clone(), extension))
+            .collect()
+    }
+
+    /// `Core`'s entries, `main.c`'s and `zend.c`'s table: every entry of
+    /// the engine's no extension declared.
+    fn core_ini(&self) -> Vec<IniEntry> {
+        let owned = |name: &[u8]| {
+            self.shared
+                .extensions
+                .iter()
+                .any(|e| e.ini.iter().any(|entry| entry.name.0.as_ref() == name))
+        };
+        self.shared
+            .ini_defaults()
+            .iter()
+            .filter(|(name, _)| !owned(name))
+            .map(|(name, default)| {
+                let (user, per_dir, system) = Request::ini_modifiable(name);
+                let decl = IniDecl {
+                    name: Name(name.as_slice().into()),
+                    default: default.as_slice().into(),
+                    user,
+                    per_dir,
+                    system,
+                };
+                self.ini_entry(decl, ExtensionId::CORE)
+            })
             .collect()
     }
 
     /// One entry as the request sees it: the value in force, the
     /// request's `ini_set` over the engine's startup value, and the
     /// startup value again as `original` where the request changed it.
-    fn ini_entry(&self, decl: IniDecl, extension: Option<ExtensionId>) -> IniEntry {
+    fn ini_entry(&self, decl: IniDecl, extension: ExtensionId) -> IniEntry {
         let name = decl.name.0.as_ref();
         let startup = self.shared.ini_default(name).unwrap_or(&decl.default);
         let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
@@ -17799,8 +17944,8 @@ impl Request {
     /// as a one-column table in text and as the `module_<name>` anchor
     /// `<h2>` in HTML, then the extension's `MINFO`; for an extension that
     /// declared none, a `Version` row and `DISPLAY_INI_ENTRIES`. Every
-    /// bundled extension has a version, `PHP_VERSION`, so php's other
-    /// branch, the bare name, is never taken. What `phpinfo()`,
+    /// extension has a version, so php's other branch, the bare name, is
+    /// never taken. What `phpinfo()`,
     /// `ReflectionExtension::info` and `php --ri` print.
     pub fn extension_info(&mut self, extension: ExtensionId) {
         let Some(module) = self.extension_of(extension).cloned() else {
@@ -17831,7 +17976,7 @@ impl Request {
             info(self);
             return;
         }
-        self.info_table(&[&["Version", PHP_VERSION]]);
+        self.info_table(&[&["Version", module.version]]);
         let names: Vec<&[u8]> = module.ini.iter().map(|entry| &*entry.name.0).collect();
         self.info_ini_entries(&names);
     }
@@ -18450,32 +18595,10 @@ impl Request {
     /// ```
     #[must_use]
     pub fn ini_entries(&self) -> Vec<IniEntry> {
-        let owned = |name: &[u8]| {
-            self.shared
-                .extensions
-                .iter()
-                .any(|e| e.ini.iter().any(|entry| entry.name.0.as_ref() == name))
-        };
-        let core = self
-            .shared
-            .ini_defaults()
-            .iter()
-            .filter(|(name, _)| !owned(name))
-            .map(|(name, default)| {
-                let (user, per_dir, system) = Request::ini_modifiable(name);
-                let decl = IniDecl {
-                    name: Name(name.as_slice().into()),
-                    default: default.as_slice().into(),
-                    user,
-                    per_dir,
-                    system,
-                };
-                self.ini_entry(decl, None)
-            });
-        let extensions = (0..self.shared.extensions.len())
+        (0..self.shared.extensions.len())
             .filter_map(|at| u32::try_from(at).ok())
-            .flat_map(|at| self.extension_ini(ExtensionId(at)));
-        core.chain(extensions).collect()
+            .flat_map(|at| self.extension_ini(ExtensionId(at)))
+            .collect()
     }
 
     /// `zend_ini_parse_bool`: `1`, `on`, `yes`, `true` are true.
@@ -20499,6 +20622,7 @@ mod tests {
             parent: None,
             interfaces: Vec::new(),
             implementors: Vec::new(),
+            aliases: Vec::new(),
             traits: Vec::new(),
             adaptations: Vec::new(),
             backing: EnumBacking::Pure,

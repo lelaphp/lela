@@ -147,17 +147,38 @@ fn function_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<
 
 // ------------------------------------------------- ReflectionMethod
 
-/// `mptr->common.prototype`'s scope for the method `$name` names on
-/// the reflector's class.
-fn prototype_of(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
-    let Some(class) = req
-        .this()
-        .and_then(|this| this.prop(req, b"class"))
-        .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-    else {
-        return Ok(None);
+/// `mptr->common.prototype`'s scope for the method `$name` names in
+/// the table of `intern->ce`, the class the reflector was asked about:
+/// an inherited method an interface of that class names is its own row
+/// there, whose prototype `do_inheritance_check_on_method` set to the
+/// interface's (`SEPARATE_METHOD`), where the declaring class's row has
+/// none.
+///
+/// ```php
+/// interface a { function foo(); function bar(); }
+/// interface b { function foo(); }
+/// abstract class c { function bar() { } }
+/// class x extends c implements a, b { function foo() { } }
+/// var_dump((new ReflectionMethod("x", "foo"))->getPrototype()->class);
+/// var_dump((new ReflectionMethod("x", "bar"))->getPrototype()->class);
+/// var_dump((new ReflectionMethod("c", "bar"))->hasPrototype());
+/// ```
+/// ```expect
+/// string(1) "b"
+/// string(1) "a"
+/// bool(false)
+/// ```
+fn prototype_of(
+    req: &mut Request,
+    this: PhpObject,
+    name: &[u8],
+) -> Result<Option<ClassId>, Thrown> {
+    let named = (this.prop(req, b"class")).and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
+    let class = match (super::kept_class(req, this), named) {
+        (Some(class), _) => class,
+        (None, Some(named)) => class_named(req, &named)?,
+        (None, None) => return Ok(None),
     };
-    let class = class_named(req, &class)?;
     let lowered = name.to_ascii_lowercase();
     Ok(linked_methods(req, class)
         .into_iter()
@@ -216,12 +237,25 @@ fn invoke(
 
 /// `zend_call_known_function` over the method a `ReflectionMethod`
 /// holds, which is what `reflection_method_invoke` ends in: the `fcc`
-/// php fills by hand, the method `decl` names on `class`, the
-/// reflector's class, as the called scope and on the receiver given,
+/// php fills by hand, the method `decl` names on `class`, `intern->ce`,
+/// the class the reflector was asked about, as the called scope
+/// (`fcc.called_scope = intern->ce`) and on the receiver given,
 /// with no visibility held against the caller ([`known_method`]),
 /// served by `serve`. A method the class does not hold is php's
 /// `Invocation of method ... failed`, named on `scope`, the class that
-/// declares it, as php names `mptr->common.scope`.
+/// declares it, as php names `mptr->common.scope`; one only `scope`
+/// holds, a parent's private method, is served on `scope`.
+///
+/// ```php
+/// abstract class A { const WHAT = 'A'; static function call() { echo static::WHAT; } }
+/// class B extends A { const WHAT = 'B'; }
+/// ReflectionMethod::createFromMethodName("b::call")->invoke(null);
+/// (new ReflectionMethod('B', 'call'))->invokeArgs(null, []);
+/// (new ReflectionMethod('A', 'call'))->invoke(null);
+/// ```
+/// ```expect
+/// BBA
+/// ```
 fn invoke_method(
     req: &mut Request,
     class: ClassId,
@@ -240,7 +274,10 @@ fn invoke_method(
         let callable = to_callable(req, &this.as_value())?;
         return serve(req, &callable);
     }
-    let Some(callable) = known_method(req, class, &decl.function.name, this) else {
+    let name = &decl.function.name;
+    let found =
+        known_method(req, class, name, this).or_else(|| known_method(req, scope, name, this));
+    let Some(callable) = found else {
         let held = FunctionRef::Method(scope, decl.function.name.0.to_vec());
         return Err(invocation_failed(req, &held));
     };
@@ -1166,8 +1203,10 @@ impl ReflectionFunctionAbstract {
     /// `ReflectionFunctionAbstract::getAttributes(?string $name = null,
     /// int $flags = 0)`: `reflect_attributes` over
     /// `fptr->common.attributes`, with `ZEND_ATTRIBUTE_TARGET_METHOD` where
-    /// the function has a scope and `ZEND_ATTRIBUTE_TARGET_FUNCTION` where
-    /// it has none. The arguments are evaluated in `fptr->common.scope`,
+    /// the function has a scope and is no closure the program wrote, a
+    /// fake closure of a method among them, and
+    /// `ZEND_ATTRIBUTE_TARGET_FUNCTION` otherwise. The arguments are
+    /// evaluated in `fptr->common.scope`,
     /// which for a closure is the scope it is bound to:
     ///
     /// ```php
@@ -1184,6 +1223,15 @@ impl ReflectionFunctionAbstract {
     /// ```expect
     /// C1,foo C1
     /// T1,bar
+    /// ```
+    ///
+    /// ```php
+    /// #[Attribute(Attribute::TARGET_METHOD)] class M {}
+    /// class C { #[M] function m() {} }
+    /// echo get_class((new ReflectionFunction((new C)->m(...)))->getAttributes()[0]->newInstance()), "\n";
+    /// ```
+    /// ```expect
+    /// M
     /// ```
     ///
     /// ```php
@@ -1209,10 +1257,17 @@ impl ReflectionFunctionAbstract {
         // `fptr->common.scope`: a method's class, a closure's bound scope.
         let (scope, target) = match function {
             FunctionRef::Method(scope, _) => (Some(scope), super::attr::TARGET_METHOD),
-            FunctionRef::Closure(closure) => (
-                closure.closure(req).and_then(|info| info.scope),
-                super::attr::TARGET_FUNCTION,
-            ),
+            FunctionRef::Closure(closure) => {
+                let info = closure.closure(req);
+                let scope = info.as_ref().and_then(|info| info.scope);
+                let fake = info.is_some_and(|info| info.fake);
+                let target = if fake && scope.is_some() {
+                    super::attr::TARGET_METHOD
+                } else {
+                    super::attr::TARGET_FUNCTION
+                };
+                (scope, target)
+            }
             _ => (None, super::attr::TARGET_FUNCTION),
         };
         let hook = super::kept_hook(req, this.object());
@@ -2450,6 +2505,7 @@ impl ReflectionMethod {
         args: NamedVariadic<Value>,
     ) -> Result<Value, Thrown> {
         let (class, decl, scope) = this_method(req, this.object())?;
+        let class = super::kept_class(req, this.object()).unwrap_or(class);
         abstract_refused(req, &decl, scope)?;
         at_least_arguments(req, 1)?;
         let this = receiver(req, &decl, scope, object)?;
@@ -2514,6 +2570,7 @@ impl ReflectionMethod {
         args: Raw<PhpArray>,
     ) -> Result<Value, Thrown> {
         let (class, decl, scope) = this_method(req, this.object())?;
+        let class = super::kept_class(req, this.object()).unwrap_or(class);
         abstract_refused(req, &decl, scope)?;
         exactly_arguments(req, 2)?;
         let this = receiver(req, &decl, scope, object)?;
@@ -2574,7 +2631,7 @@ impl ReflectionMethod {
         this: This<Self>,
     ) -> Result<Instance<ReflectionMethod>, Thrown> {
         let name = this_name(req, this.object(), "ReflectionMethod")?;
-        let Some(prototype) = prototype_of(req, &name)? else {
+        let Some(prototype) = prototype_of(req, this.object(), &name)? else {
             let (class, _, _) = this_method(req, this.object())?;
             let class = class_name_of(req, class);
             return Err(throw(
@@ -2607,7 +2664,7 @@ impl ReflectionMethod {
     /// ```
     fn hasPrototype(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let name = this_name(req, this.object(), "ReflectionMethod")?;
-        Ok(prototype_of(req, &name)?.is_some())
+        Ok(prototype_of(req, this.object(), &name)?.is_some())
     }
 
     /// `ReflectionMethod::setAccessible(bool $accessible)`: the argument

@@ -763,6 +763,7 @@ fn int(n: i64) -> i32 {
 ///
 /// ```php
 /// var_dump(phpversion() === PHP_VERSION, phpversion('standard') === PHP_VERSION, phpversion('Core') === PHP_VERSION, phpversion('nope'), phpversion(null) === PHP_VERSION);
+/// var_dump(phpversion('DOM'));
 /// ```
 /// ```expect
 /// bool(true)
@@ -770,6 +771,7 @@ fn int(n: i64) -> i32 {
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// string(8) "20031129"
 /// ```
 #[php_function]
 fn phpversion(
@@ -779,13 +781,11 @@ fn phpversion(
     let Some(name) = extension else {
         return PhpString::new(req, PHP_VERSION.as_bytes()).map(OrFalse::Value);
     };
-    let name = name.as_bytes().to_vec();
-    let found = name.eq_ignore_ascii_case(b"core") || req.extension_named(&name).is_some();
-    if found {
-        PhpString::new(req, PHP_VERSION.as_bytes()).map(OrFalse::Value)
-    } else {
-        Ok(OrFalse::False)
-    }
+    let Some(extension) = req.extension_named(name.as_bytes()) else {
+        return Ok(OrFalse::False);
+    };
+    let version = req.extension_version(extension).unwrap_or_default();
+    PhpString::new(req, version.as_bytes()).map(OrFalse::Value)
 }
 
 /// `php_print_credits(flag)` (`Z/ext/standard/credits.c:26`), in the

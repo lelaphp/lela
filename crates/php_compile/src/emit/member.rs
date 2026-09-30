@@ -215,4 +215,27 @@ impl Emit<'_> {
         };
         Ok(MethodName::Constant(name))
     }
+
+    /// `zend_ast_get_lineno(method_ast)`: the line of a method's name,
+    /// which php's `DO_FCALL` of a call to it carries, so a call whose
+    /// receiver spans lines stands in a trace where its name is written.
+    ///
+    /// ```php
+    /// class X { function __construct($f) {} function start() { echo debug_backtrace()[0]['line'], "\n"; } }
+    /// (new X(function () {
+    ///     return 1;
+    /// }))->start();
+    /// ```
+    /// ```expect
+    /// 5
+    /// ```
+    pub(super) fn member_line(&self, member: Member) -> u32 {
+        match member {
+            Member::Written(token) => (self.parsed.tokens.get(token.0 as usize))
+                .map_or(self.line, |token| {
+                    self.parsed.lines.line_number(token.offset)
+                }),
+            Member::Computed(expr) => self.line_of(expr),
+        }
+    }
 }

@@ -9,22 +9,26 @@
 //! writes itself (a document's declaration, a DTD) through a save
 //! `xmlSaveCtxt`, both converting into the document's encoding ([`Dump`]).
 //! php recurses over the tree and raises "Maximum call stack size
-//! reached" where the stack runs out; this walks it with a stack of its
-//! own, so a deep tree is serialised where php raises.
+//! reached" where the stack comes down to its limit; so does this, the
+//! limit being the one `Request::stack_overflowed` reads.
 
 use std::ffi::c_int;
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::PhpObject;
-use php_ext_libxml::ffi::{self as f, Dump, Kind, Name, Node, Ns, Raised};
+use php_ext_libxml::ffi::{self as f, Dump, Kind, Name, Node, Ns};
 
 use crate::document::{XML_NS, XMLNS_NS};
 use crate::private::{HTML_NS, Private, ns_is};
 
 /// A step of the serialisation that failed: a write libxml refused, or
-/// markup that well-formedness, where it is required, forbids.
-struct Failed;
+/// markup that well-formedness, where it is required, forbids; or the
+/// stack come down to its limit on the way down the tree, php's `Error`.
+enum Failed {
+    Refused,
+    Deep,
+}
 
 type Step<T = ()> = Result<T, Failed>;
 
@@ -187,7 +191,7 @@ fn is_xml_char(c: char) -> bool {
 fn chars_ok(content: &[u8]) -> Step {
     match std::str::from_utf8(content) {
         Ok(s) if s.chars().all(is_xml_char) => Ok(()),
-        _ => Err(Failed),
+        _ => Err(Failed::Refused),
     }
 }
 
@@ -260,6 +264,7 @@ struct Frame {
 
 /// One pass of `dom_xml_serialize`.
 struct Serializer<'a> {
+    req: &'a Request,
     dump: &'a mut Dump,
     private: Option<&'a Private>,
     well_formed: bool,
@@ -274,7 +279,7 @@ impl Serializer<'_> {
         if self.dump.write(bytes) {
             Ok(())
         } else {
-            Err(Failed)
+            Err(Failed::Refused)
         }
     }
 
@@ -350,34 +355,54 @@ impl Serializer<'_> {
         map.add(b"xml", Some(XML_NS));
         self.index = 1;
         let indent = if format { 0 } else { -1 };
-        let mut stack: Vec<Frame> = Vec::new();
-        if let Some(frame) = self.node(node, &map, None, indent)? {
-            stack.push(frame);
+        self.algorithm(node, &map, None, indent)
+    }
+
+    /// `dom_xml_serialization_algorithm`: the node, then each child by
+    /// the same algorithm, php's recursion, refused where the stack has
+    /// come down to its limit, as `dom_xml_serialize_check_stack_limit`
+    /// refuses it.
+    ///
+    /// ```php
+    /// $doc = Dom\XMLDocument::createEmpty();
+    /// $node = $doc->createElement('a');
+    /// for ($i = 0; $i < 40000; $i++) { $p = $doc->createElement('a'); $p->appendChild($node); $node = $p; }
+    /// $doc->appendChild($node);
+    /// try { $doc->saveXml(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $doc->documentElement->innerHTML; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Maximum call stack size reached. Infinite recursion?
+    /// Maximum call stack size reached. Infinite recursion?
+    /// ```
+    fn algorithm(
+        &mut self,
+        node: Node,
+        map: &PrefixMap,
+        namespace: Option<&[u8]>,
+        indent: i32,
+    ) -> Step {
+        if self.req.stack_overflowed() {
+            return Err(Failed::Deep);
         }
-        while let Some(top) = stack.last_mut() {
-            if let Some(child) = top.next {
-                top.next = child.next();
-                if top.format {
-                    let indent = top.indent;
-                    self.indents(indent)?;
-                }
-                let Some(top) = stack.last() else {
-                    break;
-                };
-                let frame = self.node(child, &top.map, top.inherited.as_deref(), top.indent)?;
-                if let Some(frame) = frame {
-                    stack.push(frame);
-                }
-            } else if let Some(done) = stack.pop() {
-                if done.format {
-                    self.indents(done.indent - 1)?;
-                }
-                if let Some(end) = done.end {
-                    self.write(b"</")?;
-                    self.qname(&end)?;
-                    self.write(b">")?;
-                }
+        let Some(frame) = self.node(node, map, namespace, indent)? else {
+            return Ok(());
+        };
+        let mut next = frame.next;
+        while let Some(child) = next {
+            next = child.next();
+            if frame.format {
+                self.indents(frame.indent)?;
             }
+            self.algorithm(child, &frame.map, frame.inherited.as_deref(), frame.indent)?;
+        }
+        if frame.format {
+            self.indents(frame.indent - 1)?;
+        }
+        if let Some(end) = &frame.end {
+            self.write(b"</")?;
+            self.qname(end)?;
+            self.write(b">")?;
         }
         Ok(())
     }
@@ -405,7 +430,7 @@ impl Serializer<'_> {
             Kind::Document | Kind::HtmlDocument => {
                 // DOM-Parsing issue 50: the declaration libxml writes.
                 if !self.dump.document_head(node) {
-                    return Err(Failed);
+                    return Err(Failed::Refused);
                 }
                 return Ok(Some(children_of(node)));
             }
@@ -425,7 +450,7 @@ impl Serializer<'_> {
                 {
                     chars_ok(content)?;
                     if content.windows(2).any(|w| w == b"--") || content.last() == Some(&b'-') {
-                        return Err(Failed);
+                        return Err(Failed::Refused);
                     }
                 }
                 self.write(b"<!--")?;
@@ -439,12 +464,12 @@ impl Serializer<'_> {
                 let content = node.content();
                 if self.well_formed {
                     if name.contains(&b':') || name.eq_ignore_ascii_case(b"xml") {
-                        return Err(Failed);
+                        return Err(Failed::Refused);
                     }
                     if let Some(content) = &content {
                         chars_ok(content)?;
                         if content.windows(2).any(|w| w == b"?>") {
-                            return Err(Failed);
+                            return Err(Failed::Refused);
                         }
                     }
                 }
@@ -475,7 +500,7 @@ impl Serializer<'_> {
             }
             kind => {
                 if !self.dump.tree(node) {
-                    return Err(Failed);
+                    return Err(Failed::Refused);
                 }
                 if kind == Kind::Dtd {
                     self.write(b"\n")?;
@@ -497,7 +522,7 @@ impl Serializer<'_> {
     ) -> Step<Option<Frame>> {
         let name = element.name();
         if self.well_formed && !Name::valid_ncname(&name) {
-            return Err(Failed);
+            return Err(Failed::Refused);
         }
         let first = element.children();
         let format = indent >= 0 && first.is_some_and(should_format);
@@ -581,7 +606,7 @@ impl Serializer<'_> {
             };
             if prefix.as_deref() == Some(b"xmlns") {
                 if self.well_formed {
-                    return Err(Failed);
+                    return Err(Failed::Refused);
                 }
                 candidate.clone_from(&prefix);
             }
@@ -663,7 +688,7 @@ impl Serializer<'_> {
             if self.well_formed {
                 let key = (attr_ns.clone(), name.clone());
                 if localnames.contains(&key) {
-                    return Err(Failed);
+                    return Err(Failed::Refused);
                 }
                 localnames.push(key);
             }
@@ -698,7 +723,7 @@ impl Serializer<'_> {
                     if self.well_formed
                         && (value == XMLNS_NS || (value.is_empty() && candidate.is_some()))
                     {
-                        return Err(Failed);
+                        return Err(Failed::Refused);
                     }
                 } else if candidate.is_none() {
                     // DOM-Parsing issue 29.
@@ -728,7 +753,7 @@ impl Serializer<'_> {
             if self.well_formed
                 && (!Name::valid_ncname(&name) || (name == b"xmlns" && attr_ns.is_none()))
             {
-                return Err(Failed);
+                return Err(Failed::Refused);
             }
             self.attribute_node_value(attr)?;
         }
@@ -737,23 +762,44 @@ impl Serializer<'_> {
 }
 
 /// `dom_xml_serialize` over `dump`: `node` written, formatted where
-/// `format`, held to well-formedness where `well_formed`.
+/// `format`, held to well-formedness where `well_formed`; whether it
+/// was, and `deep` set where the stack's limit stopped it.
+#[allow(clippy::too_many_arguments)] // `dom_xml_serialize`'s own, and the flag it raises
 fn serialize(
+    req: &Request,
     dump: &mut Dump,
     node: Node,
     format: bool,
     well_formed: bool,
     no_empty: bool,
     private: Option<&Private>,
+    deep: &mut bool,
 ) -> bool {
     let mut serializer = Serializer {
+        req,
         dump,
         private,
         well_formed,
         no_empty,
         index: 1,
     };
-    serializer.serialize(node, format).is_ok()
+    match serializer.serialize(node, format) {
+        Ok(()) => true,
+        Err(Failed::Refused) => false,
+        Err(Failed::Deep) => {
+            *deep = true;
+            false
+        }
+    }
+}
+
+/// `dom_xml_serialize`'s refusal where the stack came down to its limit.
+fn too_deep(req: &mut Request) -> Thrown {
+    php_ext::raising::throw(
+        req,
+        "Error",
+        "Maximum call stack size reached. Infinite recursion?",
+    )
 }
 
 /// The document's private data, `get_private_data_from_node`.
@@ -778,17 +824,27 @@ fn private_of(req: &Request, object: PhpObject) -> Option<&Private> {
 /// <r xmlns:a="urn:a" a:b="&e;"><a:c/>&e;<?p d?><![CDATA[<]]></r>
 /// ```
 fn dump_to_string(
+    req: &mut Request,
     node: Node,
     options: c_int,
     format: bool,
     no_empty: bool,
     encoding: Option<&[u8]>,
-) -> (Option<Vec<u8>>, Vec<Raised>) {
+) -> Result<Option<Vec<u8>>, Thrown> {
     let owner = node.doc().and_then(Node::wrapper);
     let private = owner.as_ref().and_then(|o| o.private_data::<Private>());
-    Dump::serialise(encoding, f::XML_SAVE_AS_XML | options, |dump| {
-        serialize(dump, node, format, false, no_empty, private)
-    })
+    let mut deep = false;
+    let reader = &*req;
+    let (saved, raised) = Dump::serialise(encoding, f::XML_SAVE_AS_XML | options, |dump| {
+        serialize(
+            reader, dump, node, format, false, no_empty, private, &mut deep,
+        )
+    });
+    php_ext_libxml::Errors::route(req, raised);
+    if deep {
+        return Err(too_deep(req));
+    }
+    Ok(saved)
 }
 
 /// `php_new_dom_dump_node_to_file`: the file opened through php's streams,
@@ -817,8 +873,13 @@ fn dump_to_file(
     let Some(stream) = req.open_stream(path, b"wb", false)? else {
         return Ok(-1);
     };
-    let (saved, raised) = dump_to_string(node, 0, format, no_empty, encoding);
-    php_ext_libxml::Errors::route(req, raised);
+    let saved = match dump_to_string(req, node, 0, format, no_empty, encoding) {
+        Ok(saved) => saved,
+        Err(thrown) => {
+            stream.free(req);
+            return Err(thrown);
+        }
+    };
     let written = match saved {
         Some(bytes) => {
             let _ = stream.write(req, &bytes);
@@ -858,11 +919,9 @@ impl php_ext_libxml::DocumentHandlers for Modern {
         options: i32,
         no_empty: bool,
         encoding: Option<&[u8]>,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, Thrown> {
         let format = options & f::XML_SAVE_FORMAT != 0;
-        let (saved, raised) = dump_to_string(doc, options, format, no_empty, encoding);
-        php_ext_libxml::Errors::route(req, raised);
-        saved
+        dump_to_string(req, doc, options, format, no_empty, encoding)
     }
 
     fn dump_node_to_str(
@@ -873,10 +932,8 @@ impl php_ext_libxml::DocumentHandlers for Modern {
         format: bool,
         no_empty: bool,
         encoding: Option<&[u8]>,
-    ) -> Option<Vec<u8>> {
-        let (saved, raised) = dump_to_string(node, 0, format, no_empty, encoding);
-        php_ext_libxml::Errors::route(req, raised);
-        saved
+    ) -> Result<Option<Vec<u8>>, Thrown> {
+        dump_to_string(req, node, 0, format, no_empty, encoding)
     }
 
     fn dump_doc_to_file(
@@ -904,8 +961,9 @@ impl php_ext_libxml::DocumentHandlers for Modern {
 }
 
 /// `dom_element_html_fragment_serialize`'s XML arm: each of `nodes`
-/// serialised on its own, held to well-formedness, into UTF-8; `None`
-/// where one was not well formed.
+/// serialised on its own, held to well-formedness, into UTF-8, what
+/// libxml raised routed; `None` where one was not well formed, and php's
+/// `Error` where the tree is deeper than the stack takes.
 ///
 /// ```php
 /// $x = Dom\XMLDocument::createFromString('<r><p:a xmlns:p="urn:p"/></r>');
@@ -922,14 +980,21 @@ impl php_ext_libxml::DocumentHandlers for Modern {
 /// The resulting XML serialization is not well-formed
 /// ```
 pub(crate) fn well_formed(
-    req: &Request,
+    req: &mut Request,
     object: PhpObject,
     nodes: &[Node],
-) -> (Option<Vec<u8>>, Vec<Raised>) {
-    let private = private_of(req, object);
-    Dump::serialise(Some(b"UTF-8"), f::XML_SAVE_AS_XML, |dump| {
+) -> Result<Option<Vec<u8>>, Thrown> {
+    let mut deep = false;
+    let reader = &*req;
+    let private = private_of(reader, object);
+    let (saved, raised) = Dump::serialise(Some(b"UTF-8"), f::XML_SAVE_AS_XML, |dump| {
         nodes
             .iter()
-            .all(|node| serialize(dump, *node, false, true, false, private))
-    })
+            .all(|node| serialize(reader, dump, *node, false, true, false, private, &mut deep))
+    });
+    php_ext_libxml::Errors::route(req, raised);
+    if deep {
+        return Err(too_deep(req));
+    }
+    Ok(saved)
 }

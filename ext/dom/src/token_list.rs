@@ -5,8 +5,8 @@
 //! again whenever the attribute has changed under it.
 
 use php_ext::abi::{
-    CloneObj, DimensionRead, Instance, ObjectHandlers, Path, PropertyPlace, PropertyRead,
-    PropertyTest, Raw, This, Variadic,
+    ClassIterator, CloneObj, DimensionRead, Instance, ObjectHandlers, Path, PropertyPlace,
+    PropertyRead, PropertyTest, Raw, This, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{to_long, truthy};
@@ -106,12 +106,70 @@ pub(crate) fn strip_and_collapse(input: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `dom_token_list_object`'s own fields: the token set and the value it
-/// was parsed from, `cached_string`.
+/// `dom_token_list_object`'s token set, php's `HashTable` of tokens: its
+/// buckets in the order the tokens came, a removed token's left empty,
+/// so an iterator's `HashPosition` outlives the removal, until the table
+/// grows (`zend_hash_do_resize` compacts one with holes) or is parsed
+/// again; the value it was parsed from, `cached_string`; and
+/// `cache_tag`, moved on by every update and every parse.
 #[derive(Default)]
 pub(crate) struct TokenSet {
-    tokens: Vec<Vec<u8>>,
+    buckets: Vec<Option<Vec<u8>>>,
+    capacity: usize,
     cached: Option<Vec<u8>>,
+    tag: u64,
+}
+
+impl TokenSet {
+    /// The tokens, in order.
+    fn live(&self) -> impl Iterator<Item = &Vec<u8>> {
+        self.buckets.iter().flatten()
+    }
+
+    /// The bucket that holds `token`.
+    fn find(&self, token: &[u8]) -> Option<usize> {
+        self.buckets
+            .iter()
+            .position(|b| b.as_deref() == Some(token))
+    }
+
+    /// `zend_hash_add_empty_element` of a token the set has not: a new
+    /// bucket past the last, the table compacted first where it is full
+    /// of holes and doubled where it is full of tokens.
+    fn add(&mut self, token: Vec<u8>) {
+        if self.buckets.len() >= self.capacity.max(8) {
+            let live = self.live().count();
+            if self.buckets.len() > live + (live >> 5) {
+                self.buckets.retain(Option::is_some);
+            } else {
+                self.capacity = self.capacity.max(8) * 2;
+            }
+        }
+        self.buckets.push(Some(token));
+    }
+
+    /// `_zend_hash_get_valid_pos`: the first bucket at or past `pos` that
+    /// holds a token, or the end.
+    fn valid_from(&self, pos: usize) -> usize {
+        (pos..self.buckets.len())
+            .find(|&at| self.buckets[at].is_some())
+            .unwrap_or(self.buckets.len())
+    }
+
+    /// The set parsed from `value`, in a fresh table.
+    fn parse(&mut self, value: Option<Vec<u8>>) {
+        self.buckets.clear();
+        self.capacity = 0;
+        for token in value
+            .as_deref()
+            .map(|v| ordered_set(v, false))
+            .unwrap_or_default()
+        {
+            self.add(token);
+        }
+        self.cached = value;
+        self.tag += 1;
+    }
 }
 
 /// The element's `class` value, `None` where it has no such attribute or
@@ -127,33 +185,37 @@ fn element(req: &Request, object: PhpObject) -> Option<Node> {
     crate::node_of(req, object)
 }
 
-/// `dom_token_list_ensure_set_up_to_date`: the set, parsed again where the
-/// attribute moved on.
-fn tokens(req: &mut Request, object: PhpObject) -> Vec<Vec<u8>> {
+/// `dom_token_list_ensure_set_up_to_date`, then `f` over the set: parsed
+/// again where the attribute moved on.
+fn with_set<R>(
+    req: &mut Request,
+    object: PhpObject,
+    f: impl FnOnce(&mut TokenSet) -> R,
+) -> Option<R> {
     let value = element(req, object).and_then(class_value);
     let Some(Dom {
         extra: Extra::TokenList(set),
         ..
     }) = dom_mut(req, object)
     else {
-        return Vec::new();
+        return None;
     };
     // `xmlStrEqual` treats null and the empty string alike.
-    let now = value.as_deref().unwrap_or_default();
-    let then = set.cached.as_deref().unwrap_or_default();
-    if now != then {
-        set.tokens = value
-            .as_deref()
-            .map(|v| ordered_set(v, false))
-            .unwrap_or_default();
-        set.cached = value;
+    if value.as_deref().unwrap_or_default() != set.cached.as_deref().unwrap_or_default() {
+        set.parse(value);
     }
-    set.tokens.clone()
+    Some(f(set))
+}
+
+/// The tokens, the set brought up to date.
+fn tokens(req: &mut Request, object: PhpObject) -> Vec<Vec<u8>> {
+    with_set(req, object, |set| set.live().cloned().collect()).unwrap_or_default()
 }
 
 /// `dom_token_list_update`: the set written back as the attribute's
-/// value, unless there is no attribute and no token.
-fn update(req: &mut Request, object: PhpObject, tokens: Vec<Vec<u8>>) {
+/// value, unless there is no attribute and no token; the cache tag moved
+/// on either way.
+fn update(req: &mut Request, object: PhpObject) {
     let Some(elem) = element(req, object) else {
         return;
     };
@@ -163,14 +225,13 @@ fn update(req: &mut Request, object: PhpObject, tokens: Vec<Vec<u8>>) {
         ..
     }) = dom_mut(req, object)
     {
-        if !has_attr && tokens.is_empty() {
-            set.tokens = tokens;
+        set.tag += 1;
+        if !has_attr && set.live().next().is_none() {
             return;
         }
-        let value = tokens.join(&b' ');
+        let value = set.live().cloned().collect::<Vec<_>>().join(&b' ');
         elem.set_ns_prop(None, b"class", &value);
         set.cached = Some(value);
-        set.tokens = tokens;
     }
 }
 
@@ -212,12 +273,10 @@ pub(crate) fn create(req: &mut Request, element_object: PhpObject) -> Result<Val
         if let Some(n) = node {
             d.obj.attach(n, shared);
         }
-        let cached = node.and_then(class_value);
-        let tokens = cached
-            .as_deref()
-            .map(|v| ordered_set(v, false))
-            .unwrap_or_default();
-        d.extra = Extra::TokenList(Box::new(TokenSet { tokens, cached }));
+        let mut set = TokenSet::default();
+        set.parse(node.and_then(class_value));
+        set.tag = 0;
+        d.extra = Extra::TokenList(Box::new(set));
     }
     Ok(object.as_value())
 }
@@ -280,6 +339,90 @@ fn value_write(req: &mut Request, object: PhpObject, value: &Value) -> Result<()
         elem.set_ns_prop(None, b"class", &bytes);
     }
     Ok(())
+}
+
+/// `dom_token_list_it`: a `HashPosition` into the token set, the index
+/// the walk's caller counts, php's `iter->index`, moved with each step and
+/// counted again from the set where it changed since the walk's cache tag,
+/// which is never taken again, so a set changed under a walk reads its keys
+/// by position from then on.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r class="A B C D E F"/>');
+/// $l = $d->documentElement->classList;
+/// foreach ($l as $i => $t) { echo "$i$t;"; $l->remove('A', 'D'); }
+/// ```
+/// ```expect
+/// 0A;0B;1C;2E;3F;
+/// ```
+struct TokenIter {
+    pos: usize,
+    index: i64,
+    tag: u64,
+}
+
+impl ClassIterator for TokenIter {
+    fn rewind(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        self.pos = with_set(req, object, |set| set.valid_from(0)).unwrap_or_default();
+        self.index = 0;
+        Ok(())
+    }
+
+    fn valid(&mut self, req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
+        let pos = self.pos;
+        let (at, used) = with_set(req, object, |set| (set.valid_from(pos), set.buckets.len()))
+            .unwrap_or_default();
+        self.pos = at;
+        Ok(at < used)
+    }
+
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+        let pos = self.pos;
+        let token = with_set(req, object, |set| {
+            let at = set.valid_from(pos);
+            set.buckets.get(at).cloned().flatten()
+        })
+        .flatten();
+        match token {
+            Some(token) => string(req, &token),
+            None => Ok(Value::null()),
+        }
+    }
+
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+        let (pos, tag) = (self.pos, self.tag);
+        let counted = with_set(req, object, |set| {
+            (set.tag != tag).then(|| {
+                set.buckets[..pos.min(set.buckets.len())]
+                    .iter()
+                    .flatten()
+                    .count()
+            })
+        })
+        .flatten();
+        if let Some(counted) = counted {
+            self.index = i64::try_from(counted).unwrap_or(i64::MAX);
+        }
+        Ok(Value::int(self.index))
+    }
+
+    /// `dom_token_list_it_move_forward`: where a change under the walk
+    /// moved it on already, to the token that now stands there and no
+    /// further; one step otherwise.
+    fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        let pos = self.pos;
+        self.pos = with_set(req, object, |set| {
+            let validated = set.valid_from(pos);
+            if validated == pos {
+                set.valid_from(pos + 1)
+            } else {
+                validated
+            }
+        })
+        .unwrap_or(pos);
+        self.index += 1;
+        Ok(())
+    }
 }
 
 /// `dom_token_list_prop_handlers`.
@@ -438,18 +581,21 @@ impl ObjectHandlers for TokenListHandlers {
         Ok(usize::try_from(index).is_ok_and(|i| i < n))
     }
 
-    fn iterator_element(
+    /// `dom_token_list_get_iterator`: the walk made at the set's first
+    /// token, its cache tag taken, and refused by reference.
+    fn get_iterator(
         &self,
         req: &mut Request,
         object: PhpObject,
-        index: usize,
-    ) -> Result<Option<(Value, Value)>, Thrown> {
-        let tokens = tokens(req, object);
-        let Some(token) = tokens.get(index) else {
-            return Ok(None);
-        };
-        let key = Value::int(i64::try_from(index).unwrap_or(i64::MAX));
-        Ok(Some((key, string(req, token)?)))
+        by_ref: bool,
+    ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        if by_ref {
+            let message = "An iterator cannot be used with foreach by reference";
+            return Err(throw(req, "Error", message));
+        }
+        let (pos, tag) =
+            with_set(req, object, |set| (set.valid_from(0), set.tag)).unwrap_or_default();
+        Ok(Some(Box::new(TokenIter { pos, index: 0, tag })))
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -589,13 +735,14 @@ impl TokenList {
     ) -> Result<(), Thrown> {
         let added = varargs(req, &tokens.0, "add")?;
         let this = this.object();
-        let mut set = self::tokens(req, this);
-        for token in added {
-            if !set.contains(&token) {
-                set.push(token);
+        with_set(req, this, |set| {
+            for token in added {
+                if set.find(&token).is_none() {
+                    set.add(token);
+                }
             }
-        }
-        update(req, this, set);
+        });
+        update(req, this);
         Ok(())
     }
 
@@ -607,9 +754,14 @@ impl TokenList {
     ) -> Result<(), Thrown> {
         let removed = varargs(req, &tokens.0, "remove")?;
         let this = this.object();
-        let mut set = self::tokens(req, this);
-        set.retain(|t| !removed.contains(t));
-        update(req, this, set);
+        with_set(req, this, |set| {
+            for bucket in &mut set.buckets {
+                if bucket.as_ref().is_some_and(|t| removed.contains(t)) {
+                    *bucket = None;
+                }
+            }
+        });
+        update(req, this);
         Ok(())
     }
 
@@ -623,21 +775,15 @@ impl TokenList {
         let token = token.0.as_bytes().to_vec();
         validate(req, &token)?;
         let this = this.object();
-        let mut set = tokens(req, this);
-        if let Some(at) = set.iter().position(|t| *t == token) {
-            if force != Some(true) {
-                set.remove(at);
-                update(req, this, set);
-                return Ok(false);
-            }
-            return Ok(true);
-        }
-        if force != Some(false) {
-            set.push(token);
-            update(req, this, set);
-            return Ok(true);
-        }
-        Ok(false)
+        let at = with_set(req, this, |set| set.find(&token)).flatten();
+        let answer = match at {
+            Some(_) if force == Some(true) => return Ok(true),
+            None if force == Some(false) => return Ok(false),
+            Some(at) => with_set(req, this, |set| set.buckets[at] = None).map(|()| false),
+            None => with_set(req, this, |set| set.add(token)).map(|()| true),
+        };
+        update(req, this);
+        Ok(answer.unwrap_or(false))
     }
 
     /// `Dom\TokenList::replace(string $token, string $newToken): bool`: the
@@ -653,16 +799,19 @@ impl TokenList {
         validate(req, token)?;
         validate(req, &fresh)?;
         let this = this.object();
-        let mut set = tokens(req, this);
-        let Some(at) = set.iter().position(|t| t.as_slice() == token) else {
+        // `zend_hash_set_bucket_key`, or the bucket dropped where the new
+        // token is in the set already.
+        let replaced = with_set(req, this, |set| {
+            let at = set.find(token)?;
+            let present = set.find(&fresh).is_some_and(|other| other != at);
+            set.buckets[at] = (!present).then_some(fresh);
+            Some(())
+        })
+        .flatten();
+        if replaced.is_none() {
             return Ok(false);
-        };
-        if set.iter().enumerate().any(|(i, t)| i != at && *t == fresh) {
-            set.remove(at);
-        } else if let Some(slot) = set.get_mut(at) {
-            *slot = fresh;
         }
-        update(req, this, set);
+        update(req, this);
         Ok(true)
     }
 
@@ -683,7 +832,21 @@ impl TokenList {
         i64::try_from(n).unwrap_or(i64::MAX)
     }
 
-    /// `Dom\TokenList::getIterator(): Iterator`.
+    /// `Dom\TokenList::getIterator(): Iterator`: an `InternalIterator`
+    /// over the list's own iterator, which rewinds.
+    ///
+    /// ```php
+    /// $l = Dom\XMLDocument::createFromString('<r class="A B"/>')->documentElement->classList;
+    /// $it = $l->getIterator();
+    /// var_dump(get_class($it));
+    /// foreach ($it as $k => $v) echo "$k=$v;";
+    /// $it->rewind();
+    /// var_dump($it->current());
+    /// ```
+    /// ```expect
+    /// string(16) "InternalIterator"
+    /// 0=A;1=B;string(1) "A"
+    /// ```
     fn getIterator(
         req: &mut Request,
         this: This<Self>,
