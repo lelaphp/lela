@@ -8,7 +8,7 @@
 use std::io::Read;
 
 use php_ext::decl::{Attribute, AttributeArgument, ConstExpr, Name};
-use php_ext::raising::{Level, Thrown, docref};
+use php_ext::raising::{Cause, Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::PhpArray;
 
@@ -237,20 +237,58 @@ pub(super) fn encode(req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
 
 /// `php_session_decode`: the data through the serializer into the
 /// session's array; a failure destroys the session with php's warning.
+/// The serializer runs under `zend_try`, and a fatal raised under it,
+/// a class declaration the data's autoloader compiles among them, is
+/// caught to destroy the session and warn before it goes on
+/// (`zend_catch`, `Z/ext/session/session.c:289-302`); the warning names
+/// no function and no file, since the fatal left every frame.
+///
+/// ```php
+/// session_set_save_handler(new class implements SessionHandlerInterface {
+///     function open($p, $n): bool { return true; } function close(): bool { return true; }
+///     function read($id): string|false { return 'x|O:1:"X":0:{}'; } function write($id, $d): bool { return true; }
+///     function destroy($id): bool { return true; } function gc($m): int|false { return 0; }
+/// });
+/// spl_autoload_register(function ($c) { eval('class X { public int $p = null; }'); });
+/// register_shutdown_function(function () { var_dump($_SESSION); });
+/// session_start();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Default value for property of type int may not be null. Use the nullable type ?int to allow null default value in %s(7) : eval()'d code on line 1
+///
+/// Warning: Unknown: Failed to decode session object. Session has been destroyed in Unknown on line 0
+/// array(0) {
+/// }
+/// ```
 pub(super) fn decode(req: &mut Request, data: &[u8]) -> Result<bool, Thrown> {
     let format = req.state::<State>().format.unwrap_or(Format::Php);
-    let decoded = serializers::decode(req, format, data);
+    let decoded = match serializers::decode(req, format, data) {
+        Err(thrown) if thrown.cause(req) == Cause::Fatal => {
+            // `zend_catch { php_session_cancel_decode(); zend_bailout(); }`:
+            // what the cancel raises in turn cannot outlive the fatal.
+            let _ = cancel_decode(req);
+            return Err(thrown);
+        }
+        decoded => decoded,
+    };
     let ok = absorb(req, decoded)?.unwrap_or(false);
     if !ok {
-        destroy(req)?;
-        track_init(req)?;
-        docref(
-            req,
-            Level::Warning,
-            "Failed to decode session object. Session has been destroyed",
-        );
+        cancel_decode(req)?;
     }
     Ok(ok)
+}
+
+/// `php_session_cancel_decode`: the session destroyed, its tracking
+/// begun again, and php's warning.
+fn cancel_decode(req: &mut Request) -> Result<(), Thrown> {
+    destroy(req)?;
+    track_init(req)?;
+    docref(
+        req,
+        Level::Warning,
+        "Failed to decode session object. Session has been destroyed",
+    );
+    Ok(())
 }
 
 // ------------------------------------------------------------ lifecycle

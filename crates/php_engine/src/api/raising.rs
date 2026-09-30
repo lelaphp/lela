@@ -38,6 +38,24 @@ impl Thrown {
         self.pending.as_ref()
     }
 
+    /// Which of the three ways out this is: a throwable, the `exit` a
+    /// callback unwinds (`zend_is_unwind_exit`), which php's C code goes
+    /// on past with the unwind exit pending, or a fatal, which
+    /// `zend_bailout` leaves a native by and a `zend_catch` sees. A
+    /// native that cleans up after a fatal raised under it, as
+    /// `php_session_decode` does in its `zend_catch`
+    /// (`Z/ext/session/session.c:289-302`), matches on
+    /// [`Cause::Fatal`] and hands the `Thrown` on. The session's decode
+    /// is the witness, in `ext/session`.
+    #[must_use]
+    pub fn cause(&self, req: &Request) -> Cause<'_> {
+        match &self.pending {
+            Some(throwable) => Cause::Throwable(throwable),
+            None if req.unwind_exit() => Cause::Exit,
+            None => Cause::Fatal,
+        }
+    }
+
     /// `zend_throw_exception_internal` with a throwable already in
     /// `EG(exception)`: `later`, raised while this one was pending, is
     /// what is pending from here, with this one chained onto the end of
@@ -67,6 +85,16 @@ impl Thrown {
             }
         }
     }
+}
+
+/// What a [`Thrown`] carries, [`Thrown::cause`]: the throwable pending,
+/// the unwind exit an `exit` throws, or a fatal leaving by
+/// `zend_bailout`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Cause<'a> {
+    Throwable(&'a PhpObject),
+    Exit,
+    Fatal,
 }
 
 /// Raise a diagnostic at `level` with php's message text.
@@ -271,15 +299,19 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 pub fn docref(req: &mut Request, level: Level, message: &str) {
     // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
     // `PHP Startup`, no function and so no `()`.
+    // A fatal in flight is no native served: `_zend_bailout` empties
+    // `EG(current_execute_data)` before it jumps (`Z/Zend/zend.c:1267`),
+    // so what a `zend_catch` raises names no function.
     let text = if req.at_startup() {
         format!("PHP Startup: {message}")
-    } else if req.vm_serving_native() || req.serving_include() {
+    } else if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
         format!("{}(): {message}", req.active_native())
     } else {
         let origin = match req.phase() {
             crate::api::request::Phase::Startup => String::from("PHP Request Startup"),
             // The code being served names it, as
             // `get_active_function_name` does when a handler raises it.
+            crate::api::request::Phase::Running if req.bailing_out() => String::from("Unknown"),
             crate::api::request::Phase::Running => req
                 .active_user_function()
                 .map_or_else(|| String::from("Unknown"), |name| format!("{name}()")),

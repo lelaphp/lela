@@ -308,9 +308,11 @@ decl::hook_attribute_refusal
 process::gid
 process::groups
 process::uid
+raising::Cause
 raising::Level
 raising::Level::bit
 raising::Thrown
+raising::Thrown::cause
 raising::Thrown::chain
 raising::Thrown::exception
 raising::arg_count_error
@@ -481,7 +483,6 @@ request::Request::ini_parse_quantity
 request::Request::ini_set
 request::Request::input_variables
 request::Request::interrupt
-request::Request::is_unwind_exit
 request::Request::is_uploaded_file
 request::Request::last_error
 request::Request::loaded_extensions

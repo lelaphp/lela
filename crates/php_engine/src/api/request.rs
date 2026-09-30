@@ -3580,7 +3580,26 @@ impl Request {
     /// ```expect exit=255 wall=1s
     /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 4
     /// ```
+    ///
+    /// A native that serves user code while a fatal is in flight is in
+    /// php's `zend_catch`, where `_zend_bailout` has landed: the call
+    /// runs as any other, and the fatal is in flight again once it
+    /// returns, the `zend_bailout()` php's catch blocks end with. The
+    /// session's decode is the witness, in `ext/session`: its handler's
+    /// `destroy` is served after the fatal a class declaration raised.
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
+        let caught = self.bailout;
+        self.bailout = false;
+        let served = self.serve_user_uncaught(function, call);
+        self.bailout |= caught;
+        served
+    }
+
+    fn serve_user_uncaught(
+        &mut self,
+        function: Function,
+        call: CallState,
+    ) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
         let caller = self
@@ -6090,8 +6109,10 @@ impl Request {
         // executing and nothing compiling, no file at all, which
         // `php_error_cb` is handed as `Unknown` at line zero
         // (`ZEND_STR_UNKNOWN_CAPITALIZED`). A destructor the shutdown
-        // walk refuses to serve raises there.
-        if !self.executing() {
+        // walk refuses to serve raises there, and so does what a
+        // `zend_catch` raises while a fatal is in flight, since
+        // `_zend_bailout` empties `EG(current_execute_data)` first.
+        if !self.executing() || self.bailout {
             return self.note_error_in(level, message, b"Unknown", 0);
         }
         let line = self.current_line();
@@ -6797,17 +6818,6 @@ impl Request {
         let out = f(self);
         self.fibers.unblock_switch();
         out
-    }
-
-    /// `zend_is_unwind_exit(EG(exception))` for a native: whether a
-    /// [`Thrown`] that carries no throwable is the `exit` a callback
-    /// unwinds, which php's C code goes on past with the unwind exit
-    /// pending, rather than a fatal, which `zend_bailout` leaves the
-    /// native by. The session's save handler reads it after a user
-    /// handler returns (`ps_call_handler`).
-    #[must_use]
-    pub fn is_unwind_exit(&self) -> bool {
-        self.unwind_exit()
     }
 
     /// The request's [`Phase`].
