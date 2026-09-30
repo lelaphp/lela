@@ -892,6 +892,11 @@ struct MangledName {
 /// ```
 fn mangled_names(req: &Request, object: PhpObject) -> Vec<MangledName> {
     let o = object.heap();
+    // A table that holds copies of the declared rows holds them under
+    // the names php's does, which are read as they stand.
+    if o.declared_rows() == php_heap::DeclaredRows::Copied {
+        return Vec::new();
+    }
     let eager = o.laziness() == php_heap::Laziness::Eager;
     req.placed_properties(object.class())
         .into_iter()
@@ -1622,7 +1627,12 @@ pub(crate) fn debug_rows(
     use crate::api::values::HeldRow;
     let reader = req.lazy_reader(object);
     let o = reader.heap();
-    let placed = req.placed_properties(reader.class());
+    // A table that holds copies of the declared rows has no
+    // `IS_INDIRECT` to a slot, so no row reads `uninitialized`.
+    let placed = match o.declared_rows() {
+        php_heap::DeclaredRows::Slots => req.placed_properties(reader.class()),
+        php_heap::DeclaredRows::Copied => Vec::new(),
+    };
     let mut out = Vec::with_capacity(rows.len());
     let mut rest = rows.into_iter().peekable();
     for ((declaring, p), at) in placed.into_iter().zip(0u32..) {

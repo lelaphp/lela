@@ -10721,9 +10721,9 @@ impl Request {
             // before the entry is looked for, so a reference the other
             // holder's copy owns alone is its value here and not a cell
             // both write through.
-            if let Some(table) = o.properties().filter(|table| table.refcount() > 1) {
-                match self.array_separate(table) {
-                    Ok(table) => self.heap.object_set_properties(o, table),
+            if o.properties().is_some_and(|table| table.refcount() > 1) {
+                match self.separated_properties(o) {
+                    Ok(_) => {}
                     Err(thrown) => {
                         self.release(value);
                         self.release(Value::string(name));
@@ -10751,10 +10751,7 @@ impl Request {
                 self.release(Value::string(name));
                 return Err(thrown);
             }
-            let table = self.heap.object_properties(o);
-            let table = self.fatal_of(table)?;
-            let table = self.array_separate(table)?;
-            self.heap.object_set_properties(o, table);
+            let table = self.separated_properties(o)?;
             self.array_update(table, key, value)?;
         }
         self.release(Value::string(name));
@@ -10832,10 +10829,7 @@ impl Request {
             self.release(Value::string(key));
             return Err(thrown);
         }
-        let table = self.heap.object_properties(o);
-        let table = self.fatal_of(table)?;
-        let table = self.array_separate(table)?;
-        self.heap.object_set_properties(o, table);
+        let table = self.separated_properties(o)?;
         self.array_update(table, table_key, value)?;
         self.release(Value::string(key));
         Ok(true)
@@ -10957,10 +10951,7 @@ impl Request {
             let name = key.to_prop_name(self)?;
             self.addref(&entry);
             let o = object.heap();
-            let table = self.heap.object_properties(o);
-            let table = self.fatal_of(table)?;
-            let table = self.array_separate(table)?;
-            self.heap.object_set_properties(o, table);
+            let table = self.separated_properties(o)?;
             self.array_update(table, php_heap::Key::Str(name.heap()), entry)?;
             self.release(Value::string(name));
         }
@@ -11047,11 +11038,9 @@ impl Request {
     /// `Z_OBJ_P(array_ptr)->properties` being there at all.
     pub(crate) fn separate_object_properties(&mut self, object: PhpObject) -> Result<(), Thrown> {
         let o = object.heap();
-        let Some(table) = o.properties() else {
-            return Ok(());
-        };
-        let table = self.array_separate(table)?;
-        self.heap.object_set_properties(o, table);
+        if o.properties().is_some() {
+            self.separated_properties(o)?;
+        }
         Ok(())
     }
 
@@ -11073,7 +11062,11 @@ impl Request {
         let o = object.heap();
         let table = self.heap.object_properties(o);
         let table = self.fatal_of(table)?;
-        if self.class_slots(object.class()) == 0 && table.is_empty() {
+        let slots = match table.declared_rows() {
+            php_heap::DeclaredRows::Slots => self.class_slots(object.class()),
+            php_heap::DeclaredRows::Copied => 0,
+        };
+        if slots == 0 && table.is_empty() {
             return Ok(None);
         }
         Ok(Some(self.heap.iterator_add(table, 0)))
@@ -11116,11 +11109,16 @@ impl Request {
                 return Ok(Some((php_heap::Key::Str(key.heap()), walked)));
             }
         } else {
-            let declared: Vec<(Box<[u8]>, ClassId)> = self
-                .placed_properties(class)
-                .into_iter()
-                .map(|(declaring, p)| (p.name.0, declaring))
-                .collect();
+            // A table that holds copies of the declared rows is walked
+            // alone, each of them a row of its own.
+            let declared: Vec<(Box<[u8]>, ClassId)> = match o.declared_rows() {
+                php_heap::DeclaredRows::Slots => self
+                    .placed_properties(class)
+                    .into_iter()
+                    .map(|(declaring, p)| (p.name.0, declaring))
+                    .collect(),
+                php_heap::DeclaredRows::Copied => Vec::new(),
+            };
             let mut at = self.heap.iterator_lead(idx) as usize;
             while let Some((name, declaring)) = declared.get(at) {
                 let slot = u32::try_from(at).unwrap_or(u32::MAX);
@@ -11337,10 +11335,7 @@ impl Request {
         // `zend_hash_add(zobj->properties, name, &EG(uninitialized_zval))`
         // after the warning: the table as the handler the warning reached
         // left it, and a name it wrote kept as it wrote it.
-        let table = self.heap.object_properties(o);
-        let table = self.fatal_of(table)?;
-        let table = self.array_separate(table)?;
-        self.heap.object_set_properties(o, table);
+        let table = self.separated_properties(o)?;
         if !table.contains(key) {
             self.array_update(table, key, Value::null())?;
         }
@@ -11376,7 +11371,12 @@ impl Request {
     pub(crate) fn property_rows(&mut self, object: PhpObject) -> Result<Vec<PropertyRow>, Thrown> {
         let table = self.object_handlers(object.heap());
         let rows = table.get_properties(self, object)?;
-        let placed = self.placed_properties(object.class());
+        // Rows a table holds as copies are plain values to php's
+        // `zend_check_property_access`, `is_dynamic` for each.
+        let placed = match object.heap().declared_rows() {
+            php_heap::DeclaredRows::Slots => self.placed_properties(object.class()),
+            php_heap::DeclaredRows::Copied => Vec::new(),
+        };
         let mut at = 0;
         Ok(rows
             .into_iter()
@@ -11397,11 +11397,16 @@ impl Request {
 
     pub(crate) fn object_entries(&mut self, o: Obj) -> Result<Vec<(PhpString, Value)>, Thrown> {
         let mut entries = Vec::new();
-        let declared: Vec<Box<[u8]>> = self
-            .placed_properties(ClassId(o.class()))
-            .into_iter()
-            .map(|(_, p)| p.name.0)
-            .collect();
+        // A table that holds copies of the declared rows is read alone,
+        // as php reads the plain values its `zend_array_dup` left.
+        let declared: Vec<Box<[u8]>> = match o.declared_rows() {
+            php_heap::DeclaredRows::Slots => self
+                .placed_properties(ClassId(o.class()))
+                .into_iter()
+                .map(|(_, p)| p.name.0)
+                .collect(),
+            php_heap::DeclaredRows::Copied => Vec::new(),
+        };
         for (i, name) in declared.iter().enumerate() {
             let z = o.slot(u32::try_from(i).unwrap_or(u32::MAX));
             if z.is_undef() {
@@ -11466,6 +11471,10 @@ impl Request {
         let o = object.heap();
         let built = self.heap.object_properties(o);
         let table = self.fatal_of(built)?;
+        // A copy holds no `IS_INDIRECT`, so it counts its rows.
+        if table.declared_rows() == php_heap::DeclaredRows::Copied {
+            return Ok(table.len());
+        }
         let declared = self.placed_properties(object.class()).len();
         let total = declared + table.len();
         if !table.has_empty_ind() {
@@ -11578,7 +11587,7 @@ impl Request {
             self.release(Value::of_zval(Zval::array(table)));
         }
         let displaced = self.heap.object_clone_members_into(new.heap(), old.heap());
-        for held in displaced {
+        for held in self.fatal_of(displaced)? {
             self.release(Value::of_zval(held));
         }
         self.clone_slot_sources(new);
@@ -13422,8 +13431,7 @@ impl Request {
             let key = self.interned(name)?;
             let key = php_heap::Key::Str(key.heap());
             if table.contains(key) {
-                let table = self.array_separate(table)?;
-                self.heap.object_set_properties(o, table);
+                let table = self.separated_properties(o)?;
                 self.array_del(table, key);
                 return Ok(());
             }

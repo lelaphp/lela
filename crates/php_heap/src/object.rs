@@ -42,7 +42,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::ptr::NonNull;
 
-use crate::array::Arr;
+use crate::array::{Arr, DeclaredRows};
 use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
@@ -354,6 +354,14 @@ impl Obj {
     #[must_use]
     pub fn properties(&self) -> Option<Arr> {
         self.header().properties.get()
+    }
+
+    /// What the object's table holds of its declared properties, the
+    /// slots standing for them while it has no table.
+    #[must_use]
+    pub fn declared_rows(&self) -> DeclaredRows {
+        self.properties()
+            .map_or(DeclaredRows::Slots, |table| table.declared_rows())
     }
 
     /// Whether the object carries a native payload.
@@ -723,7 +731,9 @@ impl Heap {
     /// first ask (`rebuild_object_properties`). php appends an
     /// `IS_INDIRECT` per declared slot there; those slots are read off
     /// the object here, and the table holds the dynamic properties
-    /// alone. A declared slot empty as the table is built marks it
+    /// alone until a separation copies them in
+    /// ([`Heap::object_properties_copy`]). A declared slot empty as the
+    /// table is built marks it
     /// `HASH_FLAG_HAS_EMPTY_IND`, as php's rebuild does. The table is
     /// the object's, one owner.
     pub fn object_properties(&mut self, o: Obj) -> Result<Arr, Fatal> {
@@ -786,8 +796,8 @@ impl Heap {
 
     /// `zend_objects_clone_members` (`Z/Zend/zend_objects.c:197`) over a
     /// fresh object of the same class: every slot one more owner of what
-    /// the old holds, and the dynamic table shared with one more owner,
-    /// separated by the first write. An object with a native payload is
+    /// the old holds, and a copy of the dynamic table of its own. An
+    /// object with a native payload is
     /// its class's `clone_obj` to copy through
     /// [`Heap::object_clone_with`] and is refused here, since the heap
     /// cannot copy a payload it only knows how to drop.
@@ -796,7 +806,7 @@ impl Heap {
             return Ok(None);
         }
         let new = self.object(o.class(), o.slots(), custom)?;
-        self.clone_members(new, o);
+        self.clone_members(new, o)?;
         Ok(Some(new))
     }
 
@@ -805,13 +815,13 @@ impl Heap {
     /// `clone_obj` made itself before it copies the members
     /// (`spl_object_storage_clone`), with no dynamic table yet: each slot
     /// one more owner of the old object's value and the dynamic table
-    /// shared, as [`Heap::object_clone`] copies them, and what `new`'s
+    /// copied, as [`Heap::object_clone`] copies them, and what `new`'s
     /// slots held handed back, the caller's to give up
     /// (`i_zval_ptr_dtor(dst)`).
-    pub fn object_clone_members_into(&mut self, new: Obj, old: Obj) -> Vec<Zval> {
+    pub fn object_clone_members_into(&mut self, new: Obj, old: Obj) -> Result<Vec<Zval>, Fatal> {
         let displaced = (0..new.slots()).map(|i| new.slot(i)).collect();
-        self.clone_members(new, old);
-        displaced
+        self.clone_members(new, old)?;
+        Ok(displaced)
     }
 
     /// A class's `clone_obj` over an object with a native payload
@@ -827,25 +837,41 @@ impl Heap {
         payload: T,
     ) -> Result<Obj, Fatal> {
         let new = self.object_with(o.class(), o.slots(), custom, payload)?;
-        self.clone_members(new, o);
+        self.clone_members(new, o)?;
         Ok(new)
     }
 
     /// The loop of `zend_objects_clone_members`: each declared slot one
     /// more owner of the old object's value as `zval_add_ref` takes it,
-    /// a reference nothing else owns copied as the value it holds, and
-    /// the dynamic table shared with one more owner, separated by the
-    /// first write, whose `zend_array_dup` unwraps such a reference the
-    /// same way.
-    fn clone_members(&self, new: Obj, old: Obj) {
+    /// a reference nothing else owns copied as the value it holds, and a
+    /// table of the new object's own beside the old one's wherever
+    /// php's holds a row (`zend_hash_num_elements(old_object->properties)`,
+    /// which counts a row per declared slot where the slots stand for
+    /// them): its rows copied the same way, `HASH_FLAG_HAS_EMPTY_IND`
+    /// carried, and what the old table holds of the declared properties
+    /// with it, since php points each `IS_INDIRECT` at the new object's
+    /// slot and copies a plain value as it is.
+    fn clone_members(&mut self, new: Obj, old: Obj) -> Result<(), Fatal> {
         for i in 0..old.slots() {
             let z = self.dup_value(old.slot(i), None);
             new.write_slot(i, z);
         }
-        if let Some(table) = old.properties() {
-            table.addref();
-            new.header().properties.set(Some(table));
+        let Some(table) = old.properties() else {
+            return Ok(());
+        };
+        let rows = table.declared_rows();
+        if table.is_empty() && (rows == DeclaredRows::Copied || old.slots() == 0) {
+            return Ok(());
         }
+        let copy = self.array_sized(u32::try_from(table.len()).unwrap_or(u32::MAX))?;
+        new.header().properties.set(Some(copy));
+        for (key, z) in &table {
+            let z = self.dup_value(z, None);
+            Heap::array_add_copy(self, copy, key, z)?;
+        }
+        copy.set_has_empty_ind(table.has_empty_ind());
+        copy.set_declared_rows(rows);
+        Ok(())
     }
 
     /// `zend_objects_store_del` (`Z/Zend/zend_objects_API.c:162`):
@@ -1293,7 +1319,7 @@ mod tests {
 
     /// A clone is a fresh entry of the same class whose slots name what
     /// the old ones name with one more owner each, and whose dynamic
-    /// table is the same table shared until a write separates it.
+    /// table is a copy of its own.
     #[test]
     fn a_clone_shares_what_the_old_holds_with_one_more_owner() {
         let _alone = alone();
@@ -1320,11 +1346,16 @@ mod tests {
         assert_eq!(new.id(), ObjectId(2));
         assert_eq!(new.class(), 2);
         assert_eq!(s.refcount(), 2);
-        assert_eq!(table.refcount(), 2);
-        assert_eq!(new.properties().map(|t| t.is_same(table)), Some(true));
+        assert_eq!(table.refcount(), 1);
+        let copy = new.properties();
+        assert_eq!(copy.map(|t| t.is_same(table)), Some(false));
+        assert_eq!(
+            copy.and_then(|t| t.get(crate::Key::Str(name)))
+                .and_then(Zval::as_long),
+            Some(1)
+        );
         Heap::release(&mut r, Zval::object(o));
         assert_eq!(s.refcount(), 1);
-        assert_eq!(table.refcount(), 1);
         Heap::release(&mut r, Zval::object(new));
         assert_eq!(r.heap.memory_usage(false), INIT_BYTES);
     }
