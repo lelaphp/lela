@@ -12,19 +12,22 @@
 //! is boxed, since zlib's state names the stream it was made for, and
 //! each call hands zlib the caller's slices for that call alone, which is
 //! all zlib reads of `next_in` and `next_out`. zlib allocates through
-//! [`alloc`] and [`free`], over Rust's allocator.
+//! [`alloc`] and [`free`], on the request's heap as `php_zlib_alloc`
+//! `ecalloc`s (design §5.13); a `gzFile` allocates through zlib's own.
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
 )]
 
-use std::alloc::Layout;
 use std::ffi::{CStr, c_int, c_uint};
 use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::ptr::NonNull;
 
 use libz_sys as z;
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
+use php_ext::values::Emalloc;
 
 // SAFETY: zlib's own `zError`, which libz-sys does not declare, from the
 // library it links: an `int` in, a pointer into a static table out.
@@ -159,52 +162,57 @@ pub(crate) fn version() -> String {
     text.to_string_lossy().into_owned()
 }
 
-/// The size of the header [`alloc`] keeps before each block, where the
-/// block's length lives for [`free`].
-const HEADER: usize = 16;
-
-/// zlib's `zalloc`: `items * size` zeroed bytes from Rust's allocator,
-/// as `php_zlib_alloc` takes them from php's, null where they cannot be.
-extern "C" fn alloc(_opaque: z::voidpf, items: z::uInt, size: z::uInt) -> z::voidpf {
-    let Some(len) = (items as usize)
-        .checked_mul(size as usize)
-        .and_then(|n| n.checked_add(HEADER))
-    else {
-        return std::ptr::null_mut();
-    };
-    let Ok(layout) = Layout::from_size_align(len, HEADER) else {
-        return std::ptr::null_mut();
-    };
-    // SAFETY: the layout has a non-zero size, HEADER at least.
-    let base = unsafe { std::alloc::alloc_zeroed(layout) };
-    if base.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: the block holds HEADER bytes, aligned to HEADER, before
-    // what zlib is handed; HEADER's alignment is usize's and more.
-    #[allow(clippy::cast_ptr_alignment)]
-    unsafe {
-        base.cast::<usize>().write(len);
-    }
-    // SAFETY: HEADER is within the block just allocated.
-    unsafe { base.add(HEADER).cast() }
+/// What zlib's allocator callbacks reach while one call into a stream
+/// runs, through the stream's `opaque`: the request whose heap
+/// `php_zlib_alloc` `ecalloc`s from, the allocations the stream holds,
+/// and the memory limit's fatal where one was refused.
+struct Zmm<'a> {
+    req: &'a mut Request,
+    held: &'a mut Vec<Emalloc>,
+    refused: Option<Thrown>,
 }
 
-/// zlib's `zfree`: gives back a block [`alloc`] handed out.
-extern "C" fn free(_opaque: z::voidpf, address: z::voidpf) {
-    if address.is_null() {
+/// zlib's `zalloc`, `php_zlib_alloc` (`Z/ext/zlib/zlib.c`): `items *
+/// size` zeroed bytes of the request's heap, held by the stream until
+/// zlib frees them; null outside a call, and where the memory limit
+/// refused them, whose fatal the call answers.
+extern "C" fn alloc(opaque: z::voidpf, items: z::uInt, size: z::uInt) -> z::voidpf {
+    if opaque.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a non-null `opaque` is the `Zmm` `Stream::call` set for the
+    // length of the call it is making, which is the call zlib is in.
+    let zmm = unsafe { &mut *opaque.cast::<Zmm<'_>>() };
+    let Some(len) = (items as usize).checked_mul(size as usize) else {
+        return std::ptr::null_mut();
+    };
+    match Emalloc::new(zmm.req, len) {
+        Ok(mut block) => {
+            let at = block.as_mut_ptr();
+            zmm.held.push(block);
+            at.cast()
+        }
+        Err(thrown) => {
+            zmm.refused = Some(thrown);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// zlib's `zfree`, `php_zlib_free`: the allocation [`alloc`] handed out
+/// at `address` given back to the request's heap.
+extern "C" fn free(opaque: z::voidpf, address: z::voidpf) {
+    if opaque.is_null() || address.is_null() {
         return;
     }
-    // SAFETY: every address zlib frees is one alloc answered, HEADER bytes
-    // past the start of its block.
-    let base = unsafe { address.cast::<u8>().sub(HEADER) };
-    // SAFETY: alloc wrote the block's length at its start, aligned to
-    // HEADER.
-    #[allow(clippy::cast_ptr_alignment)]
-    let len = unsafe { base.cast::<usize>().read() };
-    if let Ok(layout) = Layout::from_size_align(len, HEADER) {
-        // SAFETY: the block was allocated with this layout by alloc.
-        unsafe { std::alloc::dealloc(base, layout) };
+    // SAFETY: as in `alloc`, the `Zmm` of the call zlib is in.
+    let zmm = unsafe { &mut *opaque.cast::<Zmm<'_>>() };
+    let at = zmm
+        .held
+        .iter_mut()
+        .position(|block| block.as_mut_ptr().cast::<std::ffi::c_void>() == address);
+    if let Some(at) = at {
+        zmm.held.swap_remove(at).free(zmm.req);
     }
 }
 
@@ -241,35 +249,91 @@ fn avail(len: usize) -> c_uint {
     c_uint::try_from(len).unwrap_or(c_uint::MAX)
 }
 
-/// One call over `stream` with `input` and `output` for its length.
-fn step(
-    stream: &mut z::z_stream,
-    input: &[u8],
-    output: &mut [u8],
-    call: impl FnOnce(&mut z::z_stream) -> c_int,
-) -> Step {
-    let avail_in = avail(input.len());
-    let avail_out = avail(output.len());
-    stream.next_in = input.as_ptr().cast_mut();
-    stream.avail_in = avail_in;
-    stream.next_out = output.as_mut_ptr();
-    stream.avail_out = avail_out;
-    let status = Status::of(call(stream));
-    let read = (avail_in - stream.avail_in) as usize;
-    let written = (avail_out - stream.avail_out) as usize;
-    stream.next_in = std::ptr::null_mut();
-    stream.avail_in = 0;
-    stream.next_out = std::ptr::null_mut();
-    stream.avail_out = 0;
-    Step {
-        status,
-        read,
-        written,
+/// One `z_stream` and what zlib allocated for it on the request's heap
+/// (design §5.13). Every call into zlib is made through [`Stream::call`],
+/// which lends the allocator the request for that call alone. A stream
+/// is ended through [`Deflate::end`] or [`Inflate::end`], which gives its
+/// state back; one dropped without is left to the request's end, whose
+/// heap takes what zlib held, and zlib is not called again, since its
+/// state is in memory the heap may already have given back.
+///
+/// ```php
+/// $w1 = inflate_init(ZLIB_ENCODING_DEFLATE); $w2 = deflate_init(ZLIB_ENCODING_DEFLATE);
+/// $m = memory_get_usage(); $i = inflate_init(ZLIB_ENCODING_DEFLATE); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $d = deflate_init(ZLIB_ENCODING_DEFLATE); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $s = deflate_init(ZLIB_ENCODING_RAW, ['level' => 9, 'memory' => 1, 'window' => 9]); echo memory_get_usage() - $m, "\n";
+/// $c = deflate_add($d, str_repeat('abc', 1000), ZLIB_FINISH);
+/// $m = memory_get_usage(); $o = inflate_add($i, $c); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($i, $d, $s); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $g = gzuncompress(gzcompress(str_repeat('x', 100))); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 8416
+/// 270560
+/// 11488
+/// 3072
+/// -290464
+/// 128
+/// ```
+struct Stream {
+    z: Box<z::z_stream>,
+    held: Vec<Emalloc>,
+}
+
+impl Stream {
+    /// `call` over the stream, zlib's allocator reaching `req`'s heap for
+    /// its length; the `Err` is the memory limit's fatal an allocation
+    /// met, which ends the request as php's `emalloc` does.
+    fn call(
+        &mut self,
+        req: &mut Request,
+        call: impl FnOnce(*mut z::z_stream) -> c_int,
+    ) -> Result<c_int, Thrown> {
+        let mut zmm = Zmm {
+            req,
+            held: &mut self.held,
+            refused: None,
+        };
+        self.z.opaque = (&raw mut zmm).cast();
+        let code = call(&raw mut *self.z);
+        self.z.opaque = std::ptr::null_mut();
+        match zmm.refused {
+            Some(thrown) => Err(thrown),
+            None => Ok(code),
+        }
+    }
+
+    /// One step over `input` into `output` for their length alone.
+    fn step(
+        &mut self,
+        req: &mut Request,
+        input: &[u8],
+        output: &mut [u8],
+        call: impl FnOnce(*mut z::z_stream) -> c_int,
+    ) -> Result<Step, Thrown> {
+        let avail_in = avail(input.len());
+        let avail_out = avail(output.len());
+        self.z.next_in = input.as_ptr().cast_mut();
+        self.z.avail_in = avail_in;
+        self.z.next_out = output.as_mut_ptr();
+        self.z.avail_out = avail_out;
+        let code = self.call(req, call);
+        let read = (avail_in - self.z.avail_in) as usize;
+        let written = (avail_out - self.z.avail_out) as usize;
+        self.z.next_in = std::ptr::null_mut();
+        self.z.avail_in = 0;
+        self.z.next_out = std::ptr::null_mut();
+        self.z.avail_out = 0;
+        Ok(Step {
+            status: Status::of(code?),
+            read,
+            written,
+        })
     }
 }
 
-/// A `z_stream` after `deflateInit2`, ended by `deflateEnd` when dropped.
-pub(crate) struct Deflate(Box<z::z_stream>);
+/// A `z_stream` after `deflateInit2`, its state on the request's heap.
+pub(crate) struct Deflate(Stream);
 
 // SAFETY: the stream and the state zlib hangs off it are reached only
 // through this value, which one request owns and serves on one thread at
@@ -277,136 +341,173 @@ pub(crate) struct Deflate(Box<z::z_stream>);
 unsafe impl Send for Deflate {}
 
 impl Deflate {
-    /// `deflateInit2(&Z, level, Z_DEFLATED, window, memory, strategy)`.
+    /// `deflateInit2(&Z, level, Z_DEFLATED, window, memory, strategy)`:
+    /// the stream, or zlib's refusal; the outer `Err` is the memory
+    /// limit's fatal.
     pub(crate) fn new(
+        req: &mut Request,
         level: i64,
         window: i64,
         memory: i64,
         strategy: i64,
-    ) -> Result<Deflate, Status> {
+    ) -> Result<Result<Deflate, Status>, Thrown> {
         let int = |n: i64| c_int::try_from(n).map_err(|_| Status::StreamError);
-        let (level, window, memory, strategy) =
-            (int(level)?, int(window)?, int(memory)?, int(strategy)?);
-        let mut stream = fresh();
+        let (Ok(level), Ok(window), Ok(memory), Ok(strategy)) =
+            (int(level), int(window), int(memory), int(strategy))
+        else {
+            return Ok(Err(Status::StreamError));
+        };
+        let mut stream = Stream {
+            z: fresh(),
+            held: Vec::new(),
+        };
         // SAFETY: zlibVersion answers the library's static version string.
         let version = unsafe { z::zlibVersion() };
-        // SAFETY: the stream is fresh with its allocator set, and the
-        // version and size are the library's own and the struct's.
-        let code = unsafe {
-            z::deflateInit2_(
-                &raw mut *stream,
-                level,
-                z::Z_DEFLATED,
-                window,
-                memory,
-                strategy,
-                version,
-                stream_size(),
-            )
-        };
-        match Status::of(code) {
+        let code = stream.call(req, |z| {
+            // SAFETY: the stream is fresh with its allocator set, and the
+            // version and size are the library's own and the struct's.
+            unsafe {
+                z::deflateInit2_(
+                    z,
+                    level,
+                    z::Z_DEFLATED,
+                    window,
+                    memory,
+                    strategy,
+                    version,
+                    stream_size(),
+                )
+            }
+        })?;
+        Ok(match Status::of(code) {
             Status::Ok => Ok(Deflate(stream)),
             refused => Err(refused),
-        }
+        })
     }
 
     /// `deflate(&Z, flush)` over `input` into `output`.
-    pub(crate) fn deflate(&mut self, input: &[u8], output: &mut [u8], flush: Flush) -> Step {
+    pub(crate) fn deflate(
+        &mut self,
+        req: &mut Request,
+        input: &[u8],
+        output: &mut [u8],
+        flush: Flush,
+    ) -> Result<Step, Thrown> {
         let flush = flush.code();
         // SAFETY: the stream was initialised by deflateInit2, and step
         // points it at the two slices for this call alone.
-        step(&mut self.0, input, output, |s| unsafe {
-            z::deflate(s, flush)
-        })
+        self.0
+            .step(req, input, output, |z| unsafe { z::deflate(z, flush) })
     }
 
     /// `deflateSetDictionary`.
-    pub(crate) fn set_dictionary(&mut self, dictionary: &[u8]) -> Status {
-        let stream: *mut z::z_stream = &raw mut *self.0;
+    pub(crate) fn set_dictionary(
+        &mut self,
+        req: &mut Request,
+        dictionary: &[u8],
+    ) -> Result<Status, Thrown> {
         // SAFETY: an initialised stream, and the dictionary read for the
         // length given during the call alone.
-        Status::of(unsafe {
-            z::deflateSetDictionary(stream, dictionary.as_ptr(), avail(dictionary.len()))
-        })
+        let code = self.0.call(req, |z| unsafe {
+            z::deflateSetDictionary(z, dictionary.as_ptr(), avail(dictionary.len()))
+        })?;
+        Ok(Status::of(code))
     }
 
     /// `deflateReset`.
-    pub(crate) fn reset(&mut self) {
-        let stream: *mut z::z_stream = &raw mut *self.0;
+    pub(crate) fn reset(&mut self, req: &mut Request) -> Result<(), Thrown> {
         // SAFETY: an initialised stream.
-        unsafe { z::deflateReset(stream) };
+        self.0
+            .call(req, |z| unsafe { z::deflateReset(z) })
+            .map(|_| ())
+    }
+
+    /// `deflateEnd`: the state given back to the request's heap.
+    pub(crate) fn end(mut self, req: &mut Request) {
+        // SAFETY: an initialised stream, ended once, here, as `self` is
+        // given up.
+        let _ = self.0.call(req, |z| unsafe { z::deflateEnd(z) });
     }
 }
 
-impl Drop for Deflate {
-    fn drop(&mut self) {
-        let stream: *mut z::z_stream = &raw mut *self.0;
-        // SAFETY: an initialised stream, ended once, here.
-        unsafe { z::deflateEnd(stream) };
-    }
-}
-
-/// A `z_stream` after `inflateInit2`, ended by `inflateEnd` when dropped.
-pub(crate) struct Inflate(Box<z::z_stream>);
+/// A `z_stream` after `inflateInit2`, its state on the request's heap.
+pub(crate) struct Inflate(Stream);
 
 // SAFETY: as Deflate's: one owner, one thread at a time (ADR-0005).
 unsafe impl Send for Inflate {}
 
 impl Inflate {
-    /// `inflateInit2(&Z, window)`.
-    pub(crate) fn new(window: i64) -> Result<Inflate, Status> {
-        let window = c_int::try_from(window).map_err(|_| Status::StreamError)?;
-        let mut stream = fresh();
+    /// `inflateInit2(&Z, window)`: the stream, or zlib's refusal; the
+    /// outer `Err` is the memory limit's fatal.
+    pub(crate) fn new(req: &mut Request, window: i64) -> Result<Result<Inflate, Status>, Thrown> {
+        let Ok(window) = c_int::try_from(window) else {
+            return Ok(Err(Status::StreamError));
+        };
+        let mut stream = Stream {
+            z: fresh(),
+            held: Vec::new(),
+        };
         // SAFETY: zlibVersion answers the library's static version string.
         let version = unsafe { z::zlibVersion() };
         // SAFETY: the stream is fresh with its allocator set, and the
         // version and size are the library's own and the struct's.
-        let code = unsafe { z::inflateInit2_(&raw mut *stream, window, version, stream_size()) };
-        match Status::of(code) {
+        let code = stream.call(req, |z| unsafe {
+            z::inflateInit2_(z, window, version, stream_size())
+        })?;
+        Ok(match Status::of(code) {
             Status::Ok => Ok(Inflate(stream)),
             refused => Err(refused),
-        }
+        })
     }
 
     /// `inflate(&Z, flush)` over `input` into `output`.
-    pub(crate) fn inflate(&mut self, input: &[u8], output: &mut [u8], flush: Flush) -> Step {
+    pub(crate) fn inflate(
+        &mut self,
+        req: &mut Request,
+        input: &[u8],
+        output: &mut [u8],
+        flush: Flush,
+    ) -> Result<Step, Thrown> {
         let flush = flush.code();
         // SAFETY: the stream was initialised by inflateInit2, and step
         // points it at the two slices for this call alone.
-        step(&mut self.0, input, output, |s| unsafe {
-            z::inflate(s, flush)
-        })
+        self.0
+            .step(req, input, output, |z| unsafe { z::inflate(z, flush) })
     }
 
     /// `inflateSetDictionary`.
-    pub(crate) fn set_dictionary(&mut self, dictionary: &[u8]) -> Status {
-        let stream: *mut z::z_stream = &raw mut *self.0;
+    pub(crate) fn set_dictionary(
+        &mut self,
+        req: &mut Request,
+        dictionary: &[u8],
+    ) -> Result<Status, Thrown> {
         // SAFETY: an initialised stream, and the dictionary read for the
         // length given during the call alone.
-        Status::of(unsafe {
-            z::inflateSetDictionary(stream, dictionary.as_ptr(), avail(dictionary.len()))
-        })
+        let code = self.0.call(req, |z| unsafe {
+            z::inflateSetDictionary(z, dictionary.as_ptr(), avail(dictionary.len()))
+        })?;
+        Ok(Status::of(code))
     }
 
     /// `inflateReset`.
-    pub(crate) fn reset(&mut self) {
-        let stream: *mut z::z_stream = &raw mut *self.0;
+    pub(crate) fn reset(&mut self, req: &mut Request) -> Result<(), Thrown> {
         // SAFETY: an initialised stream.
-        unsafe { z::inflateReset(stream) };
+        self.0
+            .call(req, |z| unsafe { z::inflateReset(z) })
+            .map(|_| ())
     }
 
     /// `Z.total_in`: every byte read since the init or the last reset.
     pub(crate) fn total_in(&self) -> u64 {
         #[allow(clippy::useless_conversion)] // `uLong` is `u64` on the 64-bit targets
-        u64::from(self.0.total_in)
+        u64::from(self.0.z.total_in)
     }
-}
 
-impl Drop for Inflate {
-    fn drop(&mut self) {
-        let stream: *mut z::z_stream = &raw mut *self.0;
-        // SAFETY: an initialised stream, ended once, here.
-        unsafe { z::inflateEnd(stream) };
+    /// `inflateEnd`: the state given back to the request's heap.
+    pub(crate) fn end(mut self, req: &mut Request) {
+        // SAFETY: an initialised stream, ended once, here, as `self` is
+        // given up.
+        let _ = self.0.call(req, |z| unsafe { z::inflateEnd(z) });
     }
 }
 

@@ -33,6 +33,7 @@ Arr::value_ref_at
 ArrIter
 BUFSIZ
 Block
+Block::as_mut_ptr
 Block::bytes
 Block::bytes_mut
 Block::is_empty

@@ -771,6 +771,7 @@ values::ArrayIter::value
 values::ClassId
 values::ClosureInfo
 values::Emalloc
+values::Emalloc::as_mut_ptr
 values::Emalloc::bytes
 values::Emalloc::bytes_mut
 values::Emalloc::free

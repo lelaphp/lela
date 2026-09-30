@@ -66,6 +66,16 @@ impl Emalloc {
         self.block.bytes_mut()
     }
 
+    /// The first byte's address, what php's `emalloc` answers, for a C
+    /// library the allocation is made for (`php_zlib_alloc`'s zlib,
+    /// uriparser's memory manager), which writes it through the pointer
+    /// and hands it back to be freed; making it makes no reference to
+    /// the bytes.
+    #[must_use]
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.block.as_mut_ptr()
+    }
+
     /// `erealloc(ptr, len)`: the bytes kept to the shorter of the two
     /// lengths and zero past them; the `Err` is the memory limit's
     /// fatal, and what was held is the request's end's.

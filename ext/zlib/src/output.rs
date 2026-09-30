@@ -92,6 +92,15 @@ struct Context {
     buffer: Vec<u8>,
 }
 
+impl Context {
+    /// `deflateEnd` over the stream there is, its state given back.
+    fn end(&mut self, req: &mut Request) {
+        if let Some(stream) = self.stream.take() {
+            stream.end(req);
+        }
+    }
+}
+
 /// The buffer handlers' half of `zend_zlib_globals`, per request.
 #[derive(Default)]
 pub(crate) struct Globals {
@@ -162,25 +171,37 @@ type Handed = Option<Vec<u8>>;
 /// deflated into a buffer of [`size_guess`] with a sync flush, a full
 /// one on a flush and a finish at the end; `Err` is php's `FAILURE`.
 fn handle(
+    req: &mut Request,
     ctx: &mut Context,
     op: HandlerOp,
     input: &[u8],
     level: i64,
     coding: Coding,
-) -> Result<Handed, ()> {
-    let init =
-        || Deflate::new(level, coding.bits(), MAX_MEM_LEVEL, DEFAULT_STRATEGY).map_err(|_| ());
+) -> Result<Result<Handed, ()>, Thrown> {
+    let init = |req: &mut Request| -> Result<Result<Deflate, ()>, Thrown> {
+        Ok(
+            Deflate::new(req, level, coding.bits(), MAX_MEM_LEVEL, DEFAULT_STRATEGY)?
+                .map_err(|_| ()),
+        )
+    };
     if op.start {
-        ctx.stream = Some(init()?);
+        ctx.end(req);
+        match init(req)? {
+            Ok(stream) => ctx.stream = Some(stream),
+            Err(()) => return Ok(Err(())),
+        }
     }
     if op.clean {
-        ctx.stream = None;
+        ctx.end(req);
         if op.finish {
-            return Ok(None);
+            return Ok(Ok(None));
         }
-        ctx.stream = Some(init()?);
+        match init(req)? {
+            Ok(stream) => ctx.stream = Some(stream),
+            Err(()) => return Ok(Err(())),
+        }
         ctx.buffer.clear();
-        return Ok(None);
+        return Ok(Ok(None));
     }
     ctx.buffer.extend_from_slice(input);
     let mut out = vec![0; size_guess(input.len())];
@@ -192,27 +213,27 @@ fn handle(
         Flush::Sync
     };
     let Some(stream) = ctx.stream.as_mut() else {
-        return Err(());
+        return Ok(Err(()));
     };
-    let step = stream.deflate(&ctx.buffer, &mut out, flush);
+    let step = stream.deflate(req, &ctx.buffer, &mut out, flush)?;
     match step.status {
         Status::Ok if flush == Flush::Finish => {
-            ctx.stream = None;
-            return Err(());
+            ctx.end(req);
+            return Ok(Err(()));
         }
         Status::Ok | Status::StreamEnd => {
             ctx.buffer.drain(..step.read);
             out.truncate(step.written);
         }
         _ => {
-            ctx.stream = None;
-            return Err(());
+            ctx.end(req);
+            return Ok(Err(()));
         }
     }
     if op.finish {
-        ctx.stream = None;
+        ctx.end(req);
     }
-    Ok(Some(out))
+    Ok(Ok(Some(out)))
 }
 
 /// `php_zlib_output_handler`, both names' handler: nothing compressed
@@ -231,14 +252,16 @@ fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatu
     }
     let level = level(req);
     let mut ctx = std::mem::take(&mut globals(req).handler);
-    let handed = handle(&mut ctx, op, call.input, level, coding);
+    let handed = handle(req, &mut ctx, op, call.input, level, coding);
     globals(req).handler = ctx;
-    let Ok(handed) = handed else {
+    let Ok(handed) = handed? else {
         return Ok(HandlerStatus::Failure);
     };
     if (!op.clean || !op.finish) && op.start {
         if req.headers_sent().is_some() || globals(req).compression == 0 {
-            globals(req).handler.stream = None;
+            let mut ctx = std::mem::take(&mut globals(req).handler);
+            ctx.end(req);
+            globals(req).handler = ctx;
             return Ok(HandlerStatus::Failure);
         }
         if let Some(header) = coding.header() {
@@ -424,14 +447,13 @@ pub(crate) fn ob_gzhandler(
     }
     let level = level(req);
     let mut ctx = globals(req).legacy.take().unwrap_or_default();
-    match handle(&mut ctx, op, data.as_bytes(), level, coding) {
-        Ok(handed) => {
-            globals(req).legacy = Some(ctx);
-            let out = PhpString::new(req, &handed.unwrap_or_default())?;
-            Ok(OrFalse::Value(out))
-        }
-        Err(()) => Ok(OrFalse::False),
-    }
+    let Ok(handed) = handle(req, &mut ctx, op, data.as_bytes(), level, coding)? else {
+        ctx.end(req);
+        return Ok(OrFalse::False);
+    };
+    globals(req).legacy = Some(ctx);
+    let out = PhpString::new(req, &handed.unwrap_or_default())?;
+    Ok(OrFalse::Value(out))
 }
 
 /// `zlib_get_coding_type(): string|false`: the coding chosen, which only

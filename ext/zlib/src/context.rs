@@ -123,6 +123,23 @@ impl ObjectHandlers for Handlers {
         None
     }
 
+    /// `deflate_context_free_obj` and `inflate_context_free_obj`: the
+    /// stream ended, its state given back to the request's heap.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        if let Some(stream) = object
+            .native_mut::<Deflating>(req)
+            .and_then(|payload| payload.0.take())
+        {
+            stream.end(req);
+        }
+        if let Some(stream) = object
+            .native_mut::<Inflating>(req)
+            .and_then(|payload| payload.stream.take())
+        {
+            stream.end(req);
+        }
+    }
+
     fn compare(
         &self,
         req: &mut Request,
@@ -331,7 +348,8 @@ fn deflate_init(
         ));
     }
     let dictionary = options.dictionary(req)?;
-    let Ok(mut stream) = Deflate::new(level, windowed(encoding, window), memory, strategy) else {
+    let Ok(mut stream) = Deflate::new(req, level, windowed(encoding, window), memory, strategy)?
+    else {
         docref(
             req,
             Level::Warning,
@@ -340,7 +358,7 @@ fn deflate_init(
         return Ok(OrFalse::False);
     };
     if let Some(dictionary) = dictionary {
-        stream.set_dictionary(&dictionary);
+        stream.set_dictionary(req, &dictionary)?;
     }
     let object = made::<Deflating>(req, b"DeflateContext", |payload| payload.0 = Some(stream))?;
     Ok(OrFalse::Value(Instance::of(object)))
@@ -389,25 +407,33 @@ fn deflate_add(
     }
     let mut out = vec![0; size_guess(input.len()).max(64)];
     let (mut read, mut used) = (0, 0);
-    let status = {
-        let Some(stream) = context.payload_mut(req)?.0.as_mut() else {
-            return Err(throw(req, "Error", "DeflateContext has no stream"));
+    let Some(mut stream) = context.payload_mut(req)?.0.take() else {
+        return Err(throw(req, "Error", "DeflateContext has no stream"));
+    };
+    let status = loop {
+        if used == out.len() {
+            out.resize(out.len() + 64, 0);
+        }
+        let step = match stream.deflate(req, &input[read..], &mut out[used..], flush) {
+            Ok(step) => step,
+            Err(thrown) => {
+                context.payload_mut(req)?.0 = Some(stream);
+                return Err(thrown);
+            }
         };
-        loop {
-            if used == out.len() {
-                out.resize(out.len() + 64, 0);
+        read += step.read;
+        used += step.written;
+        if step.status != Status::Ok || used != out.len() {
+            if step.status == Status::StreamEnd
+                && let Err(thrown) = stream.reset(req)
+            {
+                context.payload_mut(req)?.0 = Some(stream);
+                return Err(thrown);
             }
-            let step = stream.deflate(&input[read..], &mut out[used..], flush);
-            read += step.read;
-            used += step.written;
-            if step.status != Status::Ok || used != out.len() {
-                if step.status == Status::StreamEnd {
-                    stream.reset();
-                }
-                break step.status;
-            }
+            break step.status;
         }
     };
+    context.payload_mut(req)?.0 = Some(stream);
     match status {
         Status::Ok | Status::StreamEnd => {
             out.truncate(used);
@@ -461,7 +487,7 @@ fn inflate_init(
     }
     let mut dictionary = options.dictionary(req)?;
     let bits = windowed(encoding, window);
-    let Ok(mut stream) = Inflate::new(bits) else {
+    let Ok(mut stream) = Inflate::new(req, bits)? else {
         docref(
             req,
             Level::Warning,
@@ -471,7 +497,7 @@ fn inflate_init(
     };
     if bits == ZLIB_ENCODING_RAW
         && let Some(dict) = dictionary.take_if(|dict| !dict.is_empty())
-        && stream.set_dictionary(&dict) == Status::DataError
+        && stream.set_dictionary(req, &dict)? == Status::DataError
     {
         docref(
             req,
@@ -545,27 +571,27 @@ fn inflate_add(
         ));
     };
     let input = data.as_bytes();
-    let inflated = {
-        let payload = context.payload_mut(req)?;
-        let Some(stream) = payload.stream.as_mut() else {
-            return Err(throw(req, "Error", "InflateContext has no stream"));
-        };
-        if payload.status == Status::StreamEnd {
-            payload.status = Status::Ok;
-            stream.reset();
+    let payload = context.payload_mut(req)?;
+    let Some(mut stream) = payload.stream.take() else {
+        return Err(throw(req, "Error", "InflateContext has no stream"));
+    };
+    let (mut dictionary, mut status) = (payload.dictionary.take(), payload.status);
+    let inflated = (|| {
+        if status == Status::StreamEnd {
+            status = Status::Ok;
+            stream.reset(req)?;
         }
         if input.is_empty() && flush != Flush::Finish {
-            Inflated::Out(Vec::new())
+            Ok(Inflated::Out(Vec::new()))
         } else {
-            inflate_rounds(
-                stream,
-                &mut payload.dictionary,
-                &mut payload.status,
-                input,
-                flush,
-            )
+            inflate_rounds(req, &mut stream, &mut dictionary, &mut status, input, flush)
         }
-    };
+    })();
+    let payload = context.payload_mut(req)?;
+    payload.stream = Some(stream);
+    payload.dictionary = dictionary;
+    payload.status = status;
+    let inflated = inflated?;
     match inflated {
         Inflated::Out(out) => Ok(OrFalse::Value(PhpString::new(req, &out)?)),
         Inflated::Refused(text) => {
@@ -577,16 +603,17 @@ fn inflate_add(
 
 /// `inflate_add`'s loop.
 fn inflate_rounds(
+    req: &mut Request,
     stream: &mut Inflate,
     dictionary: &mut Option<Vec<u8>>,
     last: &mut Status,
     input: &[u8],
     flush: Flush,
-) -> Inflated {
+) -> Result<Inflated, Thrown> {
     let mut out = vec![0; input.len().max(CHUNK_SIZE)];
     let (mut read, mut used) = (0, 0);
     loop {
-        let step = stream.inflate(&input[read..], &mut out[used..], flush);
+        let step = stream.inflate(req, &input[read..], &mut out[used..], flush)?;
         read += step.read;
         used += step.written;
         *last = step.status;
@@ -600,23 +627,23 @@ fn inflate_rounds(
             Status::Ok | Status::BufError | Status::StreamEnd => break,
             Status::NeedDict => match dictionary.take() {
                 Some(dict) => {
-                    if stream.set_dictionary(&dict) == Status::DataError {
-                        return Inflated::Refused(
+                    if stream.set_dictionary(req, &dict)? == Status::DataError {
+                        return Ok(Inflated::Refused(
                             "Dictionary does not match expected dictionary (incorrect adler32 hash)".into(),
-                        );
+                        ));
                     }
                 }
                 None => {
-                    return Inflated::Refused(
+                    return Ok(Inflated::Refused(
                         "Inflating this data requires a preset dictionary, please specify it in the options array of inflate_init()".into(),
-                    );
+                    ));
                 }
             },
-            failed => return Inflated::Refused(failed.message()),
+            failed => return Ok(Inflated::Refused(failed.message())),
         }
     }
     out.truncate(used);
-    Inflated::Out(out)
+    Ok(Inflated::Out(out))
 }
 
 /// `inflate_get_status(InflateContext $context): int`: the last
