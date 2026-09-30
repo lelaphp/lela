@@ -357,7 +357,7 @@ impl Reflection {
 }
 
 /// `ReflectionProperty` as the stub declares it.
-#[php_class(implements(crate::Reflector), not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(implements(crate::Reflector), not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionProperty;
 
 #[php_class]
@@ -1711,7 +1711,7 @@ impl ReflectionProperty {
 }
 
 /// `ReflectionClassConstant` as the stub declares it.
-#[php_class(implements(crate::Reflector), not_serializable)]
+#[php_class(implements(crate::Reflector), not_serializable, size = 96)]
 pub(crate) struct ReflectionClassConstant;
 
 #[php_class]
@@ -2117,7 +2117,7 @@ impl ReflectionClassConstant {
 }
 
 /// `ReflectionConstant` as the stub declares it.
-#[php_class(implements(crate::Reflector), not_serializable)]
+#[php_class(implements(crate::Reflector), not_serializable, size = 96)]
 pub(crate) struct ReflectionConstant;
 
 #[php_class]

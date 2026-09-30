@@ -1153,9 +1153,19 @@ fn header_add_op(req: &mut Request, replace: bool, line: Vec<u8>) {
 /// and stops the default one; a `Location` outside a redirect sets
 /// `response_code` or 302 (the 303 a non-`GET` request past HTTP/1.0
 /// takes reads `request_method` and `proto_num`, which no description
-/// carries yet); a `WWW-Authenticate` sets 401. `Content-Length`'s
-/// switch on `zlib.output_compression` is not read, since there is no
-/// zlib. Then `response_code`, when given, and `sapi_header_add_op`.
+/// carries yet); a `WWW-Authenticate` sets 401; a `Content-Length`
+/// switches `zlib.output_compression` off, as a user's `ini_set()` would
+/// (`Z/main/SAPI.c:819-828`). Then `response_code`, when given, and
+/// `sapi_header_add_op`.
+///
+/// ```php
+/// ini_set('zlib.output_compression', '1');
+/// header('Content-Length: 3');
+/// var_dump(ini_get('zlib.output_compression'));
+/// ```
+/// ```expect
+/// string(1) "0"
+/// ```
 /// Whether the line was taken is the answer.
 pub(crate) fn header_add(
     req: &mut Request,
@@ -1227,6 +1237,10 @@ pub(crate) fn header_add(
             }
         } else if name.eq_ignore_ascii_case(b"WWW-Authenticate") {
             update_response_code(req, 401);
+        } else if name.eq_ignore_ascii_case(b"Content-Length") {
+            // Req #44164: a script that sets the length cannot know the
+            // size after compression, so compression is switched off.
+            let _ = req.ini_set(b"zlib.output_compression", b"0");
         }
     }
     if response_code != 0 {
@@ -1437,6 +1451,28 @@ pub(crate) fn end_all(req: &mut Request) {
     while req.output().level() > 0 && !req.bailing_out() && stack_pop(req, POP_FORCE) {}
 }
 
+/// `php_output_discard_all` (`Z/main/output.c:345`): every handler
+/// popped with its buffer thrown away, each handler still served its
+/// final call, which is what `php_error_cb` does before it displays the
+/// memory limit's fatal while the heap's limit is lifted
+/// (`Z/main/main.c:1405-1407`), so the fatal is not written into a
+/// buffer the request would then flush.
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// ob_start(function ($b) { fwrite(STDOUT, "handled\n"); return $b; });
+/// echo "discarded\n";
+/// $a = str_repeat('x', 4 << 20);
+/// ```
+/// ```expect exit=255
+/// handled
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 5
+/// ```
+pub(crate) fn discard_all(req: &mut Request) {
+    while req.output().level() > 0 && stack_pop(req, POP_DISCARD | POP_FORCE) {}
+}
+
 /// `php_output_deactivate` (`Z/main/output.c:176`): the header block
 /// committed if nothing sent it, the layer inactive, every handler
 /// left freed and the stack's storage with them; and
@@ -1537,6 +1573,12 @@ fn start_user(
     flags: u32,
 ) -> Result<bool, Thrown> {
     let handler = match start {
+        // `php_output_handler_start(NULL)`: the lock check, then the
+        // refusal.
+        StartHandler::Refused => {
+            lock_error(req, HANDLER_START);
+            return Ok(false);
+        }
         StartHandler::Default => {
             let name = req.string(DEFAULT_NAME)?.heap();
             let (_, heap) = req.output_and_heap();
@@ -1684,6 +1726,18 @@ fn refused(req: &mut Request, message: &str) -> Value {
 /// The `PHP_FUNCTION` bodies of `Z/main/output.c:1373-1591`, each over
 /// the operation it wraps, with php's notices: the ones that move the
 /// stack here, the ones that read it in [`read_op`].
+///
+/// `ob_start()` inside a running handler is `php_output_lock_error`'s
+/// fatal, which leaves by `zend_bailout` with no notice after it:
+///
+/// ```php
+/// function f($s) { ob_start(); return $s; }
+/// ob_start('f');
+/// echo "done";
+/// ```
+/// ```expect exit=255
+/// Fatal error: ob_start(): Cannot use output buffering in output buffering display handlers in %s on line 2
+/// ```
 pub(crate) fn buffer_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
     let level = req.output().level();
     Ok(match op {
@@ -1696,6 +1750,10 @@ pub(crate) fn buffer_op(req: &mut Request, op: &OutputOp) -> Result<Value, Throw
             let flags = u32::try_from(*flags).unwrap_or(HANDLER_STDFLAGS);
             if start_user(req, handler, chunk_size, flags)? {
                 Value::bool(true)
+            } else if req.bailing_out() {
+                // `php_output_lock_error`'s fatal leaves by
+                // `zend_bailout`, before `ob_start()` could say more.
+                return Err(Thrown::of(None));
             } else {
                 refused(req, "Failed to create buffer")
             }

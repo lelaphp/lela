@@ -96,6 +96,8 @@ const HEADER_KEYS: &[(&str, Form)] = &[
     ("not_serializable", Form::Flag),
     ("use_guards", Form::Flag),
     ("payload", Form::FlagOrEq),
+    ("size", Form::Eq),
+    ("beside", Form::List),
     ("handlers", Form::Eq),
     ("new", Form::Eq),
     ("dynamic_properties", Form::Eq),
@@ -183,7 +185,15 @@ fn flags(keys: &Keys) -> syn::Result<Tokens> {
         let php = bytes("AllowDynamicProperties");
         attributes.insert(0, quote!(#root::__private::attribute(#php, Vec::new())));
     }
+    let size = keys
+        .eq("size")
+        .map(|size| quote!(class.object_size = #size;));
+    let beside = keys
+        .list("beside")
+        .map(|sizes| quote!(class.object_beside = ::std::vec![#sizes].into_boxed_slice();));
     Ok(quote! {
+        #size
+        #beside
         class.flags.is_abstract = #is_abstract;
         class.flags.is_final = #is_final;
         class.flags.is_readonly = #readonly;
@@ -214,7 +224,28 @@ fn header(attribute: Tokens, item: &ItemStruct) -> syn::Result<Tokens> {
     let parent = extends.first().filter(|_| !interface);
     let (payload, new, own) = payload(&keys, ident, parent)?;
     let facts = (interface || keys.has("abstract"), keys.has("extern"));
-    let class = class_impl(ident, &php, &payload, &new, facts);
+    let mut class = class_impl(ident, &php, &payload, &new, facts);
+    // `size = N`, php's `sizeof` of the struct `create_object` asks
+    // `zend_object_alloc` for: the payload sits in the bytes it lays
+    // beside the `zend_object`, so it must fit them (design §5.13).
+    // `beside(..)`, the `emalloc`s the same `create_object` makes, is
+    // the struct's company and names no struct of its own.
+    if keys.list("beside").is_some() && keys.eq("size").is_none() {
+        return Err(error(
+            keys.span("beside"),
+            "`beside(..)` goes with the `size = N` of the struct it is allocated beside",
+        ));
+    }
+    if let Some(size) = keys.eq("size") {
+        let message = format!("the payload of `{php}` does not fit the struct php allocates");
+        class.extend(quote! {
+            const _: () = ::core::assert!(
+                ::core::mem::size_of::<#payload>() + 56 <= #size
+                    && ::core::mem::align_of::<#payload>() <= 8,
+                #message
+            );
+        });
+    }
     let allow = quote!(#[allow(non_camel_case_types, clippy::upper_case_acronyms)]);
     let name = bytes(&php);
     if keys.has("extern") {

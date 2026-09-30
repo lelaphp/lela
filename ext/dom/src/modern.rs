@@ -475,7 +475,7 @@ pub(crate) fn is_stream_path(path: &[u8]) -> bool {
 #[php_class(
     namespace(Dom),
     dynamic_properties = forbidden,
-    payload = Dom,
+    size = 80, payload = Dom,
     handlers = crate::object::NODE_HANDLERS
 )]
 pub(crate) struct Node;

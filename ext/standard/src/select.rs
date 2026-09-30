@@ -317,8 +317,14 @@ fn stream_select(
 /// ```
 #[php_function]
 fn stream_isatty(req: &mut Request, stream: Stream) -> bool {
-    let fd = stream
-        .cast(req, Cast::Select, false)
-        .or_else(|| stream.cast(req, Cast::Internal, false));
+    // `php_stream_can_cast` before each cast, so a stream that cannot
+    // is neither flushed nor sought, nor warned of.
+    let fd = if stream.can_cast(req, Cast::Select) {
+        stream.cast(req, Cast::Select, false)
+    } else if stream.can_cast(req, Cast::Internal) {
+        stream.cast(req, Cast::Internal, false)
+    } else {
+        None
+    };
     fd.is_some_and(crate::ffi::isatty)
 }

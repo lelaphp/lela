@@ -67,7 +67,7 @@ impl Default for Inflating {
 #[php_class(
     final,
     not_serializable,
-    payload = Inflating,
+    size = 232, payload = Inflating,
     handlers = INFLATE,
     dynamic_properties = forbidden
 )]
@@ -89,7 +89,7 @@ impl InflateContext {}
 #[php_class(
     final,
     not_serializable,
-    payload = Deflating,
+    size = 232, payload = Deflating,
     handlers = DEFLATE,
     dynamic_properties = forbidden
 )]

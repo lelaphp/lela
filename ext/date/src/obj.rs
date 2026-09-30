@@ -31,10 +31,14 @@ pub(super) const WALL: i64 = 2;
 /// `php_date_obj`: the time, none until a constructor set it, and the
 /// values the last property read made, which the rows it answered name.
 #[derive(Default)]
-pub(crate) struct DateObj {
+pub(crate) struct DateState {
     pub time: Option<Time>,
     rows: Vec<Value>,
 }
+
+/// The payload: `php_date_obj` keeps its state behind pointers, and so the
+/// payload is one, inside the `sizeof` php allocates (design §5.13).
+pub(crate) type DateObj = Box<DateState>;
 
 /// What a `DateTimeZone` holds, `php_timezone_obj`'s `type` and `tzi`.
 #[derive(Clone)]
@@ -70,14 +74,18 @@ impl TzKind {
 
 /// `php_timezone_obj`.
 #[derive(Default)]
-pub(crate) struct TzObj {
+pub(crate) struct TzState {
     pub tz: Option<TzKind>,
     rows: Vec<Value>,
 }
 
+/// The payload: `php_timezone_obj` keeps its state behind pointers, and so the
+/// payload is one, inside the `sizeof` php allocates (design §5.13).
+pub(crate) type TzObj = Box<TzState>;
+
 /// `php_interval_obj`.
 #[derive(Default)]
-pub(crate) struct IntervalObj {
+pub(crate) struct IntervalState {
     pub diff: Option<RelTime>,
     pub civil_or_wall: i64,
     pub from_string: bool,
@@ -85,9 +93,13 @@ pub(crate) struct IntervalObj {
     rows: Vec<Value>,
 }
 
+/// The payload: `php_interval_obj` keeps its state behind pointers, and so the
+/// payload is one, inside the `sizeof` php allocates (design §5.13).
+pub(crate) type IntervalObj = Box<IntervalState>;
+
 /// `php_period_obj`.
 #[derive(Default)]
-pub(crate) struct PeriodObj {
+pub(crate) struct PeriodState {
     pub start: Option<Time>,
     pub start_ce: Option<ClassId>,
     pub current: Option<Time>,
@@ -102,6 +114,10 @@ pub(crate) struct PeriodObj {
     pub cursor: Option<usize>,
     rows: Vec<Value>,
 }
+
+/// The payload: `php_period_obj` keeps its state behind pointers, and so the
+/// payload is one, inside the `sizeof` php allocates (design §5.13).
+pub(crate) type PeriodObj = Box<PeriodState>;
 
 /// `date_create_tz_offset_str`: `+05:00`, or `+05:00:01` where the
 /// offset has seconds.
@@ -575,7 +591,7 @@ impl ObjectHandlers for DateHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         if has_debug_info(req, object) {
             return Std.get_debug_info(req, object);
         }
@@ -585,7 +601,7 @@ impl ObjectHandlers for DateHandlers {
             Some(t) => date_fields(req, t)?,
             None => Vec::new(),
         };
-        rows_array(req, &own, fields, false).map(Some)
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -692,7 +708,7 @@ impl ObjectHandlers for TzHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         if has_debug_info(req, object) {
             return Std.get_debug_info(req, object);
         }
@@ -702,7 +718,7 @@ impl ObjectHandlers for TzHandlers {
             Some(kind) => tz_fields(req, kind)?,
             None => Vec::new(),
         };
-        rows_array(req, &own, fields, false).map(Some)
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -904,13 +920,13 @@ impl ObjectHandlers for IntervalHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         if has_debug_info(req, object) {
             return Std.get_debug_info(req, object);
         }
         let own = std_rows(req, object)?;
         let fields = interval_rows(req, object)?;
-        rows_array(req, &own, fields, false).map(Some)
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -1142,7 +1158,7 @@ impl ObjectHandlers for PeriodHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         if has_debug_info(req, object) {
             return Std.get_debug_info(req, object);
         }
@@ -1155,7 +1171,7 @@ impl ObjectHandlers for PeriodHandlers {
         } else {
             Vec::new()
         };
-        rows_array(req, &own, fields, false).map(Some)
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -1195,11 +1211,11 @@ impl ObjectHandlers for PeriodHandlers {
     }
 }
 
-impl PeriodObj {
+impl PeriodState {
     /// The period's state, copied, without the rows its last property
     /// read made and with no walk standing on `current`.
     pub(super) fn copied(&self) -> PeriodObj {
-        PeriodObj {
+        Box::new(PeriodState {
             start: self.start.clone(),
             start_ce: self.start_ce,
             current: self.current.clone(),
@@ -1211,14 +1227,14 @@ impl PeriodObj {
             initialized: self.initialized,
             cursor: None,
             rows: Vec::new(),
-        }
+        })
     }
 
     /// `state` put in place of the period's, the rows its readers hold
     /// kept for `free_obj` to give back.
     pub(super) fn replace(&mut self, state: PeriodObj) {
         let rows = std::mem::take(&mut self.rows);
-        *self = state;
+        *self = *state;
         self.rows = rows;
     }
 }
@@ -1229,7 +1245,9 @@ fn clone_period(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
     // payload is fresh while `__clone` runs, as php's is, and is filled
     // after it.
     let copy = object.clone_with(req, PeriodObj::default())?;
-    let state = object.native::<PeriodObj>(req).map(PeriodObj::copied);
+    let state = object
+        .native::<PeriodObj>(req)
+        .map(|period| period.copied());
     if let (Some(state), Some(payload)) = (state, copy.native_mut::<PeriodObj>(req)) {
         payload.replace(state);
     }

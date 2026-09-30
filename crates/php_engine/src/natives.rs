@@ -1475,11 +1475,57 @@ fn dump_object(
     };
     let common = format!("{common}{prefix}");
     if let Some(own) = own {
-        dump_rows(req, out, &common, object, own, level);
+        dump_rows(req, out, &common, object, own.table, level);
+        if let Some(thrown) = own.thrown {
+            leave_chained(req, thrown);
+        }
     } else {
         dump_members(req, out, &common, object, level);
     }
     object.unprotect_in(req, RecursionGuard::Debug);
+}
+
+/// What a class's debug table raised, left in `EG(exception)` once its
+/// rows are printed, as `php_var_dump` leaves it
+/// (`Z/ext/standard/var.c:184`): chained onto a throwable an earlier
+/// object of the same dump left there, as `zend_throw_exception_internal`
+/// chains it (`Thrown::chain`).
+///
+/// ```php
+/// $n = (new ReflectionClass('DOMNode'))->newInstanceWithoutConstructor();
+/// foreach ([[$n], [$n, $n]] as $a) {
+///     try { var_dump($a); } catch (DOMException $e) { for ($i = 0; $e; $e = $e->getPrevious()) $i++; echo $i, "\n"; }
+/// }
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   object(DOMNode)#2 (0) {
+///   }
+/// }
+/// 18
+/// array(2) {
+///   [0]=>
+///   object(DOMNode)#2 (0) {
+///   }
+///   [1]=>
+///   object(DOMNode)#2 (0) {
+///   }
+/// }
+/// 36
+/// ```
+fn leave_chained(req: &mut Request, thrown: crate::api::raising::Thrown) {
+    use crate::api::request::Raised;
+    let thrown = match req.take_raised() {
+        Some(Raised::Throwable(earlier)) => {
+            crate::api::raising::Thrown::of(Some(earlier)).chain(req, thrown)
+        }
+        other => {
+            req.set_raised(other);
+            thrown
+        }
+    };
+    req.leave_pending(&thrown);
 }
 
 /// One row of [`dump_members`]'s walk, as php's rebuilt property table

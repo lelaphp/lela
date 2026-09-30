@@ -534,7 +534,7 @@ fn register_into(
 /// Warning: DOMXPath::query(): Invalid expression in %s on line %d
 /// bool(false)
 /// ```
-#[php_class(not_serializable, payload = Dom, handlers = HANDLERS)]
+#[php_class(not_serializable, size = 112, payload = Dom, handlers = HANDLERS)]
 pub(crate) struct DOMXPath;
 
 #[php_class]
@@ -824,11 +824,25 @@ impl DOMXPath {
 
 /// `final class Dom\XPath`, `@not-serializable`: `DOMXPath`'s bodies
 /// over the modern document, its failures thrown.
+///
+/// `dom_xpath_objects_new` allocates a `dom_xpath_object`, which
+/// `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// $doc = Dom\HTMLDocument::createEmpty();
+/// new Dom\XPath($doc);
+/// $m = memory_get_usage();
+/// $x = new Dom\XPath($doc);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 96
+/// ```
 #[php_class(
     namespace(Dom),
     final,
     not_serializable,
-    payload = Dom,
+    size = 112, payload = Dom,
     handlers = HANDLERS
 )]
 pub(crate) struct XPath;
@@ -939,7 +953,7 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         crate::debug_info(req, object)
     }
 

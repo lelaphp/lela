@@ -72,7 +72,7 @@ fn drawn_string(
     final,
     namespace(Random),
     dynamic_properties = forbidden,
-    payload = RandomizerEngine,
+    size = 80, payload = RandomizerEngine,
     handlers = crate::UNCLONEABLE
 )]
 pub(crate) struct Randomizer;

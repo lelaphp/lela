@@ -1276,6 +1276,7 @@ pub(crate) fn unit(
                 ),
                 line,
                 raised: emit.diagnostics,
+                thrown: false,
             });
         };
         dynamic.push(def);
@@ -1394,6 +1395,7 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
             ),
             line: op.lineno,
             raised: Vec::new(),
+            thrown: false,
         };
         if !op.opcode.is_safepoint_site() {
             return Err(refused("with no safepoint column for its number"));
@@ -1548,6 +1550,7 @@ impl Emit<'_> {
             message: message.into(),
             line: self.line,
             raised: Vec::new(),
+            thrown: false,
         }
     }
 
@@ -1761,8 +1764,12 @@ impl Emit<'_> {
             // `CompileError`, a top statement being walked by
             // `top_statements`.
             Stmt::HaltCompilerStmt(_) => {
-                return Err(self
-                    .compile_error("__HALT_COMPILER() can only be used from the outermost scope"));
+                return Err(CompileError {
+                    thrown: true,
+                    ..self.compile_error(
+                        "__HALT_COMPILER() can only be used from the outermost scope",
+                    )
+                });
             }
         }
         Ok(())
@@ -1800,6 +1807,14 @@ impl Emit<'_> {
     /// node's own, under any parentheses around it.
     fn line_of(&self, expr: tree::Expr) -> u32 {
         self.peel(expr).line(self.parsed)
+    }
+
+    /// The line a token stands on, what php's node for it carries.
+    pub(super) fn token_line(&self, id: TokenId) -> Option<u32> {
+        self.parsed
+            .tokens
+            .get(id.0 as usize)
+            .map(|token| self.parsed.lines.line_number(token.offset))
     }
 
     /// A token's text in the source.
@@ -4107,18 +4122,25 @@ impl Emit<'_> {
         };
         let is_ctor = scope.is_some() && name.eq_ignore_ascii_case(b"__construct");
         // `get_function_or_method_name`, what a deprecation of the
-        // prologue names the function by.
-        let owner = scope
-            .map(<[u8]>::to_vec)
-            .or_else(|| self.fn_flags.closure.then(|| self.active_name()).flatten());
-        let shown = match owner {
+        // prologue names the function by: a method by its class, and a
+        // closure by its name alone, since its op array has no scope
+        // while it compiles.
+        let shown = match scope {
             Some(owner) => format!(
                 "{}::{}",
-                String::from_utf8_lossy(&owner),
+                String::from_utf8_lossy(owner),
                 String::from_utf8_lossy(name)
             ),
             None => String::from_utf8_lossy(name).into_owned(),
         };
+        // `zend_compile_params` over the return type, before any
+        // parameter: `&` over `void` is deprecated.
+        if function.by_ref && matches!(self.return_type, Some(Type::Void)) {
+            self.raise(
+                Level::Deprecated,
+                &format!("{shown}(): Returning by reference from a void function is deprecated"),
+            );
+        }
         let parameters = self.recv_prologue(function, is_ctor, &shown)?;
         self.no_discard_refused(&attributes)?;
         // The entry safepoint is the opline after the prologue (design
@@ -4236,6 +4258,30 @@ impl Emit<'_> {
     /// ```expect exit=0
     /// Deprecated: C::m(): Implicitly marking parameter $x as nullable is deprecated, the explicit nullable type must be used instead in %s on line 2
     /// NULL
+    /// ```
+    ///
+    /// A function that returns by reference and is declared `void` is
+    /// deprecated before its parameters are read:
+    ///
+    /// ```php
+    /// function &f(): void {}
+    /// $r = &f();
+    /// var_dump($r);
+    /// ```
+    /// ```expect
+    /// Deprecated: f(): Returning by reference from a void function is deprecated in %s on line 2
+    ///
+    /// Notice: Only variable references should be returned by reference in %s on line 2
+    /// NULL
+    /// ```
+    ///
+    /// A closure is named without a class, even written in a method:
+    ///
+    /// ```php
+    /// class C { function m() { return function ($a = 1, $b) {}; } }
+    /// ```
+    /// ```expect
+    /// Deprecated: {closure:C::m():2}(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter in %s on line 2
     /// ```
     fn recv_prologue(
         &mut self,
@@ -4900,6 +4946,20 @@ impl Emit<'_> {
     /// method declared, which is `CG(class_table)`'s order, each class
     /// added as its declaration completes, and so the order php's dump
     /// walks.
+    ///
+    /// The class's own attributes compile with the class as the active
+    /// one, so `self` in them is the class, an anonymous one's too:
+    ///
+    /// ```php
+    /// class C3 { private const FOO = 'foo'; static function foo() { return new #[A1(self::class, self::FOO)] class() { private const FOO = 'bar'; }; } }
+    /// $r = new ReflectionObject(C3::foo());
+    /// $a = $r->getAttributes()[0]->getArguments();
+    /// var_dump($a[0] == $r->getName(), $a[1]);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(3) "bar"
+    /// ```
     fn class_entry(
         &mut self,
         class: &Class,
@@ -4932,9 +4992,23 @@ impl Emit<'_> {
         // ZEND_FETCH_CLASS_NO_AUTOLOAD)` stands before the class itself
         // goes into the table, so a class naming itself as its parent
         // finds nothing and binds as the program serves.
-        let (attributes, dynamic_properties) = self.class_attributes(class, &name, class.line)?;
+        // `CG(active_class_entry) = ce` before `zend_compile_attributes`,
+        // so `self` in an attribute of the class is the class, an
+        // anonymous one's inside a method among them.
+        let at = self.classes.len();
+        let enclosing = self.active_class.replace(ActiveClass {
+            name: name.clone(),
+            kind: class.kind,
+            at,
+            anonymous,
+        });
+        let enclosing_parent = std::mem::replace(&mut self.active_parent, parent.clone());
+        let attributes = self.class_attributes(class, &name, class.line);
+        self.active_class = enclosing;
+        self.active_parent = enclosing_parent;
+        let (attributes, dynamic_properties) = attributes?;
         let is_enum = class.kind == ClassKind::Enum;
-        let mut decl = ClassDecl {
+        let decl = ClassDecl {
             name: Name(name.clone().into_boxed_slice()),
             kind: class.kind,
             flags: class_flags(class, dynamic_properties, anonymous),
@@ -4958,8 +5032,9 @@ impl Emit<'_> {
             file: self.filename.clone(),
             line,
             end_line: class.end_line,
+            object_size: 0,
+            object_beside: Box::default(),
         };
-        let at = self.classes.len();
         self.active_class = Some(ActiveClass {
             name: name.clone(),
             kind: class.kind,
@@ -4967,13 +5042,7 @@ impl Emit<'_> {
             anonymous,
         });
         self.active_parent.clone_from(&parent);
-        self.class_constants(&mut decl, class, &name)?;
-        self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
-        self.class_properties(&mut decl, class, &name)?;
-        if self.classes.len() != at {
-            return Err(self.fatal("InternalError: a class declared inside a class's members"));
-        }
-        self.classes.push(decl);
+        self.class_placed(decl, class, &name, at)?;
         if anonymous {
             self.runtime_keys.push((
                 Name(name.to_ascii_lowercase().into_boxed_slice()),
@@ -5002,6 +5071,28 @@ impl Emit<'_> {
             self.verify_enum(at, &name)?;
         }
         Ok((at, parent))
+    }
+
+    /// The class's constants and properties laid down, its place `at`
+    /// in the unit taken first, so a class a property hook declares,
+    /// `new class {}` in a `get`, takes the next place; the declaration
+    /// stands there once its members do.
+    fn class_placed(
+        &mut self,
+        mut decl: ClassDecl,
+        class: &Class,
+        name: &[u8],
+        at: usize,
+    ) -> Result<(), CompileError> {
+        self.classes.push(decl.clone());
+        self.class_constants(&mut decl, class, name)?;
+        self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
+        self.class_properties(&mut decl, class, name)?;
+        let Some(place) = self.classes.get_mut(at) else {
+            return Err(self.fatal("InternalError: a class whose place the unit has not"));
+        };
+        *place = decl;
+        Ok(())
     }
 
     /// `zend_compile_new`'s anonymous arm, `zend_compile_class_decl`
@@ -5069,6 +5160,21 @@ impl Emit<'_> {
     /// $1
     /// $2
     /// ```
+    ///
+    /// A property hook may declare one, with properties and hooks of its
+    /// own, and stays the hook it was around it:
+    ///
+    /// ```php
+    /// class Base { public $y { get => 1; } }
+    /// class Test extends Base { public $y { get => [new class { public $i = 2; public $j { get => __PROPERTY__; } }, parent::$y::get()]; } }
+    /// $y = (new Test)->y;
+    /// var_dump($y[1], $y[0]->i, $y[0]->j);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// string(1) "j"
+    /// ```
     fn anonymous_class(&mut self, id: NodeId<tree::AnonClassDecl>) -> Result<u32, CompileError> {
         let class = self.walk_anon_class(id)?;
         self.line = class.line;
@@ -5082,14 +5188,24 @@ impl Emit<'_> {
         name.extend_from_slice(&self.filename.0);
         name.extend_from_slice(format!(":{}${:x}", class.line, self.keys_made()).as_bytes());
         // `CG(active_class_entry)` is the anonymous class while its body
-        // compiles and the enclosing one's again after.
+        // compiles and the enclosing one's again after, and so is the
+        // property hook a `new class` in a hook's body stands in, which
+        // the class's own properties would otherwise leave behind.
         let enclosing = (
             self.active_class.take(),
             self.active_parent.take(),
             std::mem::take(&mut self.active_constants),
+            self.active_property.take(),
+            self.active_hook.take(),
         );
         let entered = self.class_entry(&class, &name, true);
-        (self.active_class, self.active_parent, self.active_constants) = enclosing;
+        (
+            self.active_class,
+            self.active_parent,
+            self.active_constants,
+            self.active_property,
+            self.active_hook,
+        ) = enclosing;
         let (_, parent) = entered?;
         // "Reset lineno for final opcodes and errors".
         self.line = class.line;
@@ -5682,6 +5798,7 @@ impl Emit<'_> {
                     ),
                     line: self.line,
                     raised: Vec::new(),
+                    thrown: false,
                 });
             }
             if out
@@ -5694,6 +5811,7 @@ impl Emit<'_> {
                     message: format!("Attribute \"{shown}\" must not be repeated"),
                     line: self.line,
                     raised: Vec::new(),
+                    thrown: false,
                 });
             }
             if !on_target {
@@ -5986,6 +6104,7 @@ impl Emit<'_> {
                     ),
                     line: declared_at,
                     raised: Vec::new(),
+                    thrown: false,
                 });
             }
             if out
@@ -5998,6 +6117,7 @@ impl Emit<'_> {
                     message: format!("Attribute \"{shown}\" must not be repeated"),
                     line: declared_at,
                     raised: Vec::new(),
+                    thrown: false,
                 });
             }
         }
@@ -6100,7 +6220,11 @@ impl Emit<'_> {
             let (hooks, is_virtual) = match &property.hooks {
                 Some(hooks) => {
                     let hooked = hooks::Hooked {
-                        class: u32::try_from(self.classes.len()).unwrap_or(u32::MAX),
+                        class: self
+                            .active_class
+                            .as_ref()
+                            .and_then(|active| u32::try_from(active.at).ok())
+                            .unwrap_or(u32::MAX),
                         property: u32::try_from(decl.properties.len()).unwrap_or(u32::MAX),
                         class_name: name,
                         kind: class.kind,
@@ -6726,6 +6850,7 @@ impl Emit<'_> {
                 message: refused.refusal.to_string(),
                 line: refused.site.line,
                 raised: Vec::new(),
+                thrown: false,
             }),
         }
     }
@@ -7678,6 +7803,14 @@ impl Emit<'_> {
             // token the scanner made a zval of, so `-1`, `true` and
             // `1 + 0` are each the fatal and not a fold.
             let Some(value) = self.literal_of(written_value) else {
+                // `zend_handle_encoding_declaration`, which the parser runs
+                // before any of this, throws its own.
+                if written.eq_ignore_ascii_case(b"encoding") {
+                    return Err(CompileError {
+                        thrown: true,
+                        ..self.compile_error("Encoding must be a literal")
+                    });
+                }
                 return Err(self.compile_error(format!("declare({name}) value must be a literal")));
             };
             if written.eq_ignore_ascii_case(b"strict_types") {
@@ -7790,7 +7923,12 @@ impl Emit<'_> {
             let (name, value, line) = self.const_declarator(*declarator)?;
             self.line = line;
             // The fold, or the tree `DECLARE_CONST` evaluates as it runs.
-            let value = self.const_expr_to_zval(value)?;
+            let (value, unevaluated) = if let Some(folded) = self.eval_const(value)? {
+                (folded, None)
+            } else {
+                let tree = self.dynamic_const_expr(value)?;
+                (self.unevaluated(tree.clone()), Some(tree))
+            };
             if [&b"true"[..], b"false", b"null"]
                 .iter()
                 .any(|special| name.eq_ignore_ascii_case(special))
@@ -7801,7 +7939,7 @@ impl Emit<'_> {
                 )));
             }
             let full = self.declare_symbol(Symbol::Const, &name)?;
-            declared = Some((full.clone(), value));
+            declared = Some((full.clone(), value, unevaluated));
             let name = self.string(&full)?;
             let op1 = self.literal(name);
             let op2 = self.literal(value);
@@ -7817,7 +7955,7 @@ impl Emit<'_> {
         if node.attrs.is_empty() {
             return Ok(());
         }
-        let Some((name, value)) = declared else {
+        let Some((name, value, unevaluated)) = declared else {
             return Err(self.fatal("InternalError: an attributed `const` that declared nothing"));
         };
         let first = node
@@ -7830,7 +7968,9 @@ impl Emit<'_> {
         }
         let written = self.walk_attributes(&node.attrs)?;
         let attributes = self.member_attributes(&written, attributes::TARGET_CONST, 0, first)?;
-        let Some(value) = folded_const_expr(value, first) else {
+        // The value `ZEND_DECLARE_ATTRIBUTED_CONST` evaluates, which a
+        // value the compiler could not fold is the tree of.
+        let Some(value) = unevaluated.or_else(|| folded_const_expr(value, first)) else {
             return Err(
                 self.fatal("InternalError: an attributed `const` whose value folded to no scalar")
             );
@@ -9174,6 +9314,7 @@ impl Emit<'_> {
             message,
             line,
             raised: Vec::new(),
+            thrown: false,
         };
         let name = self
             .constants
@@ -9281,6 +9422,7 @@ impl Emit<'_> {
                 message: String::from(refused),
                 line,
                 raised: Vec::new(),
+                thrown: false,
             });
         }
         Ok(())
@@ -9636,10 +9778,14 @@ impl Emit<'_> {
         let mut table = None;
         let mut jumps = Vec::new();
         let mut default_jump = None;
-        if self.match_uses_jumptable(arms)? {
+        // `CG(zend_lineno)` as the subject left it, the line a condition
+        // `can_match_use_jumptable` folded is created at.
+        let subject_line = self.line;
+        let (uses_table, folded) = self.match_uses_jumptable(arms)?;
+        if uses_table {
             table = Some(self.emit_table(Opcode::Match, subject));
         } else {
-            jumps = self.match_chain(subject, case_node, arms)?;
+            jumps = self.match_chain(subject, case_node, arms, &folded, subject_line)?;
             default_jump = Some(self.push(Opline {
                 opcode: Opcode::Jmp,
                 ..Opline::default()
@@ -9668,12 +9814,17 @@ impl Emit<'_> {
     }
 
     /// `can_match_use_jumptable` and `count_match_conds`: every
-    /// condition a constant `long` or `string`, and two or more of them.
+    /// condition a constant `long` or `string`, and two or more of them;
+    /// beside it, the conditions its `zend_eval_const_expr` replaced
+    /// with the value they fold to, each one it reached that was written
+    /// as more than a number or a string and folded, whose node the
+    /// replacement gives the line the compile stands at.
     fn match_uses_jumptable(
         &mut self,
         arms: &[NodeId<tree::MatchArm>],
-    ) -> Result<bool, CompileError> {
+    ) -> Result<(bool, Vec<tree::Expr>), CompileError> {
         let mut count = 0;
+        let mut folded = Vec::new();
         for arm in arms {
             let Some(conds) = self.parsed.tree[*arm].conds else {
                 continue;
@@ -9682,14 +9833,17 @@ impl Emit<'_> {
                 let cond = *cond;
                 count += 1;
                 let Some(value) = self.constant_of(cond)? else {
-                    return Ok(false);
+                    return Ok((false, folded));
                 };
+                if self.literal_of(cond).is_none() {
+                    folded.push(cond);
+                }
                 if !matches!(value.kind(), ZvalType::Long | ZvalType::String) {
-                    return Ok(false);
+                    return Ok((false, folded));
                 }
             }
         }
-        Ok(count >= 2)
+        Ok((count >= 2, folded))
     }
 
     /// Every condition of every arm, in written order: the conditions
@@ -9724,16 +9878,37 @@ impl Emit<'_> {
     /// #0 {main}
     ///   thrown in %s on line 4
     /// ```
+    ///
+    /// A condition `can_match_use_jumptable` folded, a constant written
+    /// as more than a number or a string, stands at the line the subject
+    /// left:
+    ///
+    /// ```php
+    /// var_dump(match ($u) {
+    ///     null => 1,
+    ///     default => 2,
+    /// });
+    /// ```
+    /// ```expect
+    /// Warning: Undefined variable $u in %s on line 2
+    /// int(1)
+    /// ```
     fn match_chain(
         &mut self,
         subject: Where,
         case_node: u32,
         arms: &[NodeId<tree::MatchArm>],
+        folded: &[tree::Expr],
+        subject_line: u32,
     ) -> Result<Vec<u32>, CompileError> {
         let mut jumps = Vec::new();
         for cond in self.match_conds(arms) {
+            let was_folded = folded.contains(&cond);
             self.line = self.line_of(cond);
             let cond = self.expr(cond)?;
+            if was_folded {
+                self.line = subject_line;
+            }
             let opcode = match subject {
                 Where::Temporary(_) | Where::Returned(_) => Opcode::CaseStrict,
                 _ => Opcode::IsIdentical,
@@ -9835,6 +10010,7 @@ impl Emit<'_> {
             message: message.into(),
             line: self.line,
             raised: Vec::new(),
+            thrown: false,
         }
     }
 
@@ -13515,6 +13691,23 @@ impl Emit<'_> {
                     let node = &self.parsed.tree[id];
                     let (name, inner, dim, inner_line) =
                         (node.name, node.inner, node.dim, node.line());
+                    // The lexer's `T_STRING_VARNAME` is a label right after
+                    // the `${` and right before its `}` or `[`; one with
+                    // whitespace around it is an expression, a constant's
+                    // name, which names the variable by its value.
+                    let opened = node.range.start;
+                    let name = name.filter(|name| {
+                        self.parsed
+                            .tokens
+                            .get(name.0 as usize)
+                            .is_some_and(|token| {
+                                token.offset == opened + 2
+                                    && matches!(
+                                        self.parsed.source.get((token.offset + token.len) as usize),
+                                        Some(b'}' | b'[')
+                                    )
+                            })
+                    });
                     let (fetch, written) = match (name, inner) {
                         (Some(name), _) => {
                             let name = self.text(name).to_vec();
@@ -13740,6 +13933,18 @@ impl Emit<'_> {
     /// Deprecated: Using ${var} in strings is deprecated, use {$var} instead in %s on line 3
     /// 1-v-m-1-q-1-q-1
     /// ```
+    ///
+    /// A name with whitespace around it inside `${ }` is no
+    /// `T_STRING_VARNAME` but a constant, whose value names the variable:
+    ///
+    /// ```php
+    /// define("FOO", "a"); $a = 1;
+    /// echo "${ FOO }", PHP_EOL;
+    /// ```
+    /// ```expect
+    /// Deprecated: Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead in %s on line 3
+    /// 1
+    /// ```
     fn encaps(
         &mut self,
         parts: &[tree::StringPart],
@@ -13751,8 +13956,12 @@ impl Emit<'_> {
         let mut reserved: Option<usize> = None;
         let mut init_at: Option<usize> = None;
         let mut count = 0u32;
+        // `zend_compile_encaps_list` deprecates a piece before it compiles
+        // it, at the line the piece before it left, the list's own for
+        // the first.
+        let mut left = line;
         for piece in &pieces {
-            self.line = piece.line;
+            self.line = left;
             match piece.written {
                 Written::Plain => {}
                 Written::DollarCurly => self.raise(
@@ -13764,7 +13973,9 @@ impl Emit<'_> {
                     "Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead",
                 ),
             }
+            self.line = piece.line;
             let value = self.fetched(&piece.fetch)?;
+            left = self.line;
             if let Where::Constant(value) = value {
                 let value = self.stringified(value)?.unwrap_or(value);
                 if value.as_str().is_some_and(|s| s.bytes().is_empty()) {
@@ -15434,7 +15645,7 @@ impl Emit<'_> {
         arguments: &Args,
     ) -> Result<Where, CompileError> {
         let line = self.member_line(method);
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+        let class = self.class_link(class)?;
         let method = match self.method_name(method)? {
             MethodName::Constant(method) => method,
             MethodName::Computed((op2_type, op2)) => {
@@ -15970,7 +16181,7 @@ impl Emit<'_> {
         class: ClassSpec,
         name: &ScopedName,
     ) -> Result<StaticOperands, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+        let class = self.class_link(class)?;
         let name = match name {
             ScopedName::Written(bytes) => Where::Constant(self.string(bytes)?),
             ScopedName::Computed(expr) => match self.expr(*expr)? {
@@ -16209,6 +16420,26 @@ impl Emit<'_> {
                 Ok(ClassRef::Scope(fetch | flags))
             }
         }
+    }
+
+    /// `zend_short_circuiting_mark_inner(class_ast)` and then
+    /// `zend_compile_class_ref` under `ZEND_FETCH_CLASS_EXCEPTION`, what
+    /// `zend_compile_static_prop` and `zend_compile_static_call` do: a
+    /// class written as a `?->` chain is a link of the chain the property
+    /// or the call ends, so its `JMP_NULL` skips them too.
+    ///
+    /// ```php
+    /// var_dump(null?->bar()::$baz, null?->bar()::baz());
+    /// ```
+    /// ```expect
+    /// NULL
+    /// NULL
+    /// ```
+    fn class_link(&mut self, class: ClassSpec) -> Result<ClassRef, CompileError> {
+        if let ClassSpec::Expr(expr) = class {
+            self.chain_inner = Some(self.peel(expr));
+        }
+        self.class_ref(class, FETCH_CLASS_EXCEPTION)
     }
 
     /// `zend_set_class_name_op1` and its kin: the operand a class

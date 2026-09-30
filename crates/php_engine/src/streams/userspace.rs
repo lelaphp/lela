@@ -534,11 +534,14 @@ impl UserStream {
         req: &mut Request,
         select: bool,
         own: Option<Stream>,
+        report_errors: bool,
     ) -> Option<Stream> {
         let castas = if select { 3 } else { 0 };
         let value = match call(req, self.object, b"stream_cast", &[Value::int(castas)]) {
             Called::Missing => {
-                not_implemented(req, self.object, "stream_cast");
+                if report_errors {
+                    not_implemented(req, self.object, "stream_cast");
+                }
                 return None;
             }
             Called::Threw => return None,
@@ -557,8 +560,10 @@ impl UserStream {
             }
             Some(inner) => return Some(inner),
         };
-        let text = format!("{}::stream_cast {complaint}", class_name(req, self.object));
-        docref(req, Level::Warning, &text);
+        if report_errors {
+            let text = format!("{}::stream_cast {complaint}", class_name(req, self.object));
+            docref(req, Level::Warning, &text);
+        }
         None
     }
 
@@ -641,8 +646,24 @@ impl Ops for UserStream {
         own: Option<Stream>,
     ) -> CastTarget<'_> {
         let select = cast == Cast::Select;
-        self.held(req, |this, req| this.cast_target_held(req, select, own))
-            .map_or(CastTarget::Refused, CastTarget::Stream)
+        self.held(req, |this, req| {
+            this.cast_target_held(req, select, own, true)
+        })
+        .map_or(CastTarget::Refused, CastTarget::Stream)
+    }
+
+    /// `php_userstreamop_cast` with no `retptr`: `report_errors` false.
+    fn can_cast_target(
+        &mut self,
+        req: &mut Request,
+        cast: Cast,
+        own: Option<Stream>,
+    ) -> CastTarget<'_> {
+        let select = cast == Cast::Select;
+        self.held(req, |this, req| {
+            this.cast_target_held(req, select, own, false)
+        })
+        .map_or(CastTarget::Refused, CastTarget::Stream)
     }
 
     fn adopt(&mut self, own: Stream) {

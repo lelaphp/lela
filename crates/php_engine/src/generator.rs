@@ -614,7 +614,7 @@ fn push(req: &mut Request, generator: PhpObject) -> Option<FrameRef> {
 /// The frame on top of the stack, which is `generator`'s, off it again
 /// and suspended: what `YIELD` and `YIELD_FROM` leave.
 pub(crate) fn suspend(req: &mut Request, generator: PhpObject) -> Result<(), Fatal> {
-    let Some(slots) = req.stack_mut().move_to_heap() else {
+    let Some(slots) = req.move_frame_to_heap()? else {
         return Err(Fatal::Error(String::from(
             "InternalError: a generator suspended with no frame on the stack",
         )));
@@ -696,6 +696,46 @@ pub(crate) fn with_frames<R>(
 /// ```expect
 /// made
 /// body
+/// ```
+///
+/// The frame is copied into an allocation of its own, `emalloc(used_stack)`,
+/// beside the object's `zend_generator`, so what `memory_get_usage()`
+/// counts is php's, and a call made while the generator is suspended
+/// lands on the page it left and not on its variables:
+///
+/// ```php
+/// function gen($a, $b) { $c = [$a + $b]; yield $c[0]; $d = [$a, $b]; yield $d[1]; yield $c[0]; }
+/// function other($p) { $z = str_repeat('q', 10); $y = [$z, $z]; $w = 5; return count($y) + $p; }
+/// function deeper($p) { $q1 = 1; $q2 = 2; return other($p) + other($p); }
+/// $keep = []; $m = memory_get_usage();
+/// for ($i = 0; $i < 100; $i++) $keep[] = gen(1, 2);
+/// echo (memory_get_usage() - $m) / 100, "\n";
+/// $g = gen(1, 2);
+/// echo $g->current(), deeper(1), deeper(2);
+/// $g->next();
+/// echo $g->current(), deeper(3);
+/// $g->next();
+/// echo $g->current(), "\n";
+/// ```
+/// ```expect
+/// 666.16
+/// 3682103
+/// ```
+///
+/// ```php
+/// function gen() { $a = 'xyz'; $b = [1, 2]; yield $a; yield $b[1]; yield $a; }
+/// function mk() { return gen(); }
+/// function other($p) { $z = str_repeat('q', 10); $y = [$z, $z]; $w = 5; return count($y) + $p; }
+/// function deeper($p) { $q1 = 1; $q2 = 2; return other($p) + other($p); }
+/// $g = mk();
+/// echo $g->current(), deeper(1), deeper(2);
+/// $g->next();
+/// echo $g->current(), deeper(3);
+/// $g->next();
+/// echo $g->current(), "\n";
+/// ```
+/// ```expect
+/// xyz68210xyz
 /// ```
 pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::Stepped, Fatal> {
     let entry = req.stack_mut().entry() == frame;
@@ -1292,7 +1332,7 @@ fn finish_on_stack(req: &mut Request, generator: PhpObject, finished: bool) {
     if !on_top {
         return;
     }
-    let Some(slots) = req.stack_mut().move_to_heap() else {
+    let Ok(Some(slots)) = req.move_frame_to_heap() else {
         return;
     };
     let Some((state, calls)) = req.vm_mut().suspend() else {
@@ -1387,6 +1427,7 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
         let value = take(&mut slots, at);
         req.release(value);
     }
+    slots.free(req.heap_mut());
 }
 
 /// `zend_generator_dtor_storage` (`Z/Zend/zend_generators.c:249`): a
@@ -1723,6 +1764,8 @@ fn yielded_now(req: &mut Request, this: PhpObject, pick: fn(&ZendGenerator) -> V
     dynamic_properties = forbidden,
     implements(Iterator),
     payload = ZendGenerator,
+    // `emalloc(sizeof(zend_generator))`, 280 bytes whole.
+    size = 296,
     handlers = GENERATOR
 )]
 pub(crate) struct Generator;

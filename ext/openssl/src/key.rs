@@ -55,10 +55,24 @@ pub(crate) struct Key {
 /// object(OpenSSLAsymmetricKey)#1 (0) {
 /// }
 /// ```
+///
+/// `php_openssl_pkey_create_object` allocates a `php_openssl_pkey_object`,
+/// which `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// $k = openssl_pkey_new(['private_key_bits' => 1024, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+/// openssl_pkey_get_private($k);
+/// $m = memory_get_usage();
+/// $p = openssl_pkey_get_private($k);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 56
+/// ```
 #[php_class(
     final,
     not_serializable,
-    payload = Key,
+    size = 72, payload = Key,
     handlers = HANDLERS,
     dynamic_properties = forbidden
 )]

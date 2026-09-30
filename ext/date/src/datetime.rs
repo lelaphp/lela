@@ -1316,7 +1316,28 @@ fn date_timestamp_get(
 /// int(86400)
 /// string(4) "1 12"
 /// ```
-#[php_class(implements(DateTimeInterface), payload = DateObj, handlers = DATE)]
+///
+/// Each class's `create_object` allocates its `php_*_obj` by
+/// `zend_object_alloc`, which `memory_get_usage()` counts (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['DateTime', 'DateTimeImmutable', 'DateTimeZone', 'DateInterval', 'DatePeriod'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// DateTime 48
+/// DateTimeImmutable 48
+/// DateTimeZone 80
+/// DateInterval 64
+/// DatePeriod 96
+/// ```
+#[php_class(implements(DateTimeInterface), size = 64, payload = DateObj, handlers = DATE)]
 pub(crate) struct DateTime;
 
 #[php_class]
@@ -1815,7 +1836,7 @@ impl DateTime {
 
 /// `class DateTimeImmutable implements DateTimeInterface`, over the
 /// payload and the table `DateTime` has.
-#[php_class(implements(DateTimeInterface), payload = DateObj, handlers = DATE)]
+#[php_class(implements(DateTimeInterface), size = 64, payload = DateObj, handlers = DATE)]
 pub(crate) struct DateTimeImmutable;
 
 #[php_class]

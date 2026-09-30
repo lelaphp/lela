@@ -1355,21 +1355,75 @@ pub(crate) fn free_container_var(req: &mut Request, frame: FrameRef, code: &OpAr
     req.release_nogc(container);
 }
 
-/// `zend_array_dup(op_array->static_variables)`: the values a request's
-/// copy of the op array's `static` table starts at, each a view of the
-/// unit's immutable value, and a closure's `use` variable undefined
-/// until its `BIND_LEXICAL` fills it.
-pub(crate) fn starting_statics(code: &OpArray) -> Vec<Value> {
-    code.bound_vars
-        .iter()
-        .map(|var| {
-            if var.lexical {
-                Value::undef()
-            } else {
-                value_of(var.value)
-            }
-        })
-        .collect()
+/// `zend_array_dup(op_array->static_variables)`: a request's copy of
+/// the op array's `static` table on its heap (design §5.13), each name
+/// at the value the unit starts it at and a closure's `use` variable
+/// `null` until its `BIND_LEXICAL` fills it, each at the position the
+/// compiler recorded; none where the op array binds nothing, php's null
+/// `static_variables`. The table's one owner is the caller's.
+///
+/// ```php
+/// function t() { $k = 1; return function () use ($k) {}; }
+/// $keep = []; $m = memory_get_usage();
+/// for ($i = 0; $i < 100; $i++) $keep[] = t();
+/// echo (memory_get_usage() - $m) / 100, "\n";
+/// ```
+/// ```expect
+/// 786.16
+/// ```
+pub(crate) fn starting_statics(
+    req: &mut Request,
+    code: &OpArray,
+) -> Result<Option<crate::api::values::PhpArray>, Thrown> {
+    if code.bound_vars.is_empty() {
+        return Ok(None);
+    }
+    let mut table = crate::api::values::PhpArray::new(req)?;
+    for var in &code.bound_vars {
+        let value = if var.lexical {
+            Value::null()
+        } else {
+            value_of(var.value)
+        };
+        req.addref(&value);
+        let set = req
+            .interned(&var.name.0)
+            .and_then(|name| table.set(req, crate::api::values::Key::Str(name), value));
+        if let Err(thrown) = set {
+            req.release(Value::array(table));
+            return Err(thrown);
+        }
+    }
+    Ok(Some(table))
+}
+
+/// The values of a `static` table in position order, views; the
+/// starting ones where the table was never laid down.
+pub(crate) fn statics_values(
+    code: &OpArray,
+    table: Option<crate::api::values::PhpArray>,
+) -> Vec<Value> {
+    match table {
+        Some(table) => (0..code.bound_vars.len())
+            .map(|at| {
+                u32::try_from(at)
+                    .ok()
+                    .and_then(|at| table.at_position(at))
+                    .map_or_else(Value::undef, |(value, _)| value)
+            })
+            .collect(),
+        None => code
+            .bound_vars
+            .iter()
+            .map(|var| {
+                if var.lexical {
+                    Value::undef()
+                } else {
+                    value_of(var.value)
+                }
+            })
+            .collect(),
+    }
 }
 
 /// The op array's constant at `at`, as a value.

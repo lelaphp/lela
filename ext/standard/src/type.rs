@@ -11,9 +11,9 @@ use php_ext::coerce::{
     callable_name, is_callable as callable, is_type, numeric_string, to_array, to_double, to_long,
     to_object, to_string, truthy,
 };
-use php_ext::raising::{Thrown, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_value_error, throw, warning};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
 
 /// `gettype(mixed $value): string`, php's `PHP_FUNCTION(gettype)` over
 /// `zend_zval_get_legacy_type`: the names php has kept since PHP 4,
@@ -248,10 +248,74 @@ fn get_debug_type(req: &mut Request, value: Value) -> Result<PhpString, Thrown> 
 /// Object of class stdClass could not be converted to string
 /// string(0) ""
 /// ```
+///
+/// A NAN made `null`, an array or an object is php's warning first,
+/// `zend_nan_coerced_to_type_warning`, and the conversion reads the
+/// variable again after it, so what an error handler wrote there is
+/// what the array or the object holds (`convert_scalar_to_array`,
+/// `convert_to_object`):
+///
+/// ```php
+/// set_error_handler(function ($no, $str) { global $n; $n = "h"; echo $str, "\n"; });
+/// foreach (['null', 'array', 'object'] as $t) { $n = NAN; settype($n, $t); var_dump($n); }
+/// ```
+/// ```expect
+/// unexpected NAN value was coerced to null
+/// NULL
+/// unexpected NAN value was coerced to array
+/// array(1) {
+///   [0]=>
+///   string(1) "h"
+/// }
+/// unexpected NAN value was coerced to object
+/// object(stdClass)#2 (1) {
+///   ["scalar"]=>
+///   string(1) "h"
+/// }
+/// ```
 #[php_function]
 fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool, Thrown> {
     let name = r#type.as_bytes().to_ascii_lowercase();
     let current = var.get().copied().unwrap_or_default();
+    if current.as_float().is_some_and(f64::is_nan)
+        && let Some(target) = match name.as_slice() {
+            b"null" => Some("null"),
+            b"array" => Some("array"),
+            b"object" => Some("object"),
+            _ => None,
+        }
+    {
+        warning(
+            req,
+            &format!("unexpected NAN value was coerced to {target}"),
+        );
+        let now = var.reference().map_or(current, |cell| cell.get());
+        req.addref(&now);
+        let converted = match target {
+            "null" => {
+                req.release(now);
+                Value::null()
+            }
+            "array" => {
+                let mut array = PhpArray::new(req)?;
+                array.append(req, now)?;
+                Value::array(array)
+            }
+            // `object_init` and `scalar` added to its table, which is
+            // the object an array of that one row casts to.
+            _ => {
+                let mut row = PhpArray::new(req)?;
+                let key = Key::Str(PhpString::new(req, b"scalar")?);
+                row.set(req, key, now)?;
+                let row = Value::array(row);
+                let object = to_object(req, &row);
+                req.release(row);
+                Value::object(object?)
+            }
+        };
+        var.set(req, converted)?;
+        return Ok(true);
+    }
     let converted = match name.as_slice() {
         b"integer" | b"int" => Value::int(to_long(req, &current)?),
         b"float" | b"double" => Value::float(to_double(req, &current)?),

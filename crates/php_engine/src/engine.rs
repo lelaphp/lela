@@ -1092,7 +1092,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 80] = [
+const CORE_INI: [(&str, &str); 86] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1101,13 +1101,22 @@ const CORE_INI: [(&str, &str); 80] = [
     ("display_errors", "1"),
     ("log_errors", "0"),
     ("html_errors", "0"),
+    // `docref_root` and `docref_ext`, `PHP_INI_ALL`: where a function's
+    // diagnostic under `html_errors` links to (`raising::origin`).
+    ("docref_root", ""),
+    ("docref_ext", ""),
     ("error_prepend_string", ""),
     ("error_append_string", ""),
     ("ignore_repeated_errors", "0"),
     ("ignore_repeated_source", "0"),
     ("xmlrpc_errors", "0"),
     ("xmlrpc_error_number", "0"),
+    // `max_memory_limit`, `PHP_INI_SYSTEM`, declared before
+    // `memory_limit`, whose handler holds it under the maximum, and
+    // `report_memleaks`, deprecated when off (`Z/main/main.c:814-866`).
+    ("max_memory_limit", "-1"),
     ("memory_limit", "128M"),
+    ("report_memleaks", "1"),
     ("max_execution_time", "0"),
     ("default_charset", "UTF-8"),
     ("default_mimetype", "text/html"),
@@ -1185,6 +1194,11 @@ const CORE_INI: [(&str, &str); 80] = [
     // `http_build_query` join with.
     ("arg_separator.input", "&"),
     ("arg_separator.output", "&"),
+    // `auto_prepend_file` and `auto_append_file`,
+    // `PHP_INI_SYSTEM|PHP_INI_PERDIR`: required before and after the
+    // primary script (`php_execute_script`).
+    ("auto_prepend_file", ""),
+    ("auto_append_file", ""),
     ("realpath_cache_ttl", "120"),
     // `main.c`'s entries for what a request of the web carries
     // (`Z/main/main.c:802-878`): the `X-Powered-By` header, the auto
@@ -1561,6 +1575,49 @@ fn deprecated_directives(req: &mut Request) {
     }
 }
 
+/// The core entries' handlers over what the host set, in the order
+/// `main.c` declares them (`Z/main/main.c:814-866`): `report_memleaks`
+/// off is `OnUpdateReportMemleaks`'s deprecation, and `memory_limit`
+/// past `max_memory_limit` is `OnChangeMemoryLimit`'s warning with the
+/// maximum's text in its place. What an entry takes is the answer.
+fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Vec<u8>)> {
+    if req
+        .ini_get(b"report_memleaks")
+        .is_some_and(|v| !crate::api::request::ini_truth(Some(v)))
+    {
+        let message = "Directive 'report_memleaks' is deprecated";
+        crate::api::raising::docref(req, Level::Deprecated, message);
+    }
+    let limit = req
+        .ini_get(b"memory_limit")
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    match req.memory_limit_verdict(&limit) {
+        Some(taken) if taken != limit => {
+            req.take_startup_value(b"memory_limit", &taken);
+            vec![(b"memory_limit".to_vec(), taken)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `zend_disable_function`'s refusal of `exit`, `die` and `clone`: a
+/// startup warning for each the list names, which keeps it.
+fn disable_warnings(req: &mut Request) {
+    let list = req
+        .ini_get(b"disable_functions")
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    let names = list.split(|byte| matches!(byte, b' ' | b','));
+    for name in names.filter(|name| matches!(*name, b"exit" | b"die" | b"clone")) {
+        let message = format!(
+            "Cannot disable function {}()",
+            String::from_utf8_lossy(name)
+        );
+        crate::api::raising::warning(req, &message);
+    }
+}
+
 /// `zend_disable_functions` (`Z/Zend/zend_API.c:3668-3710`): the names
 /// the startup ini's `disable_functions` takes out of the function table
 /// before any request runs, so a call to one is a call to an undefined
@@ -1572,8 +1629,7 @@ fn deprecated_directives(req: &mut Request) {
 /// name no native has is passed over. `exit`, `die` and `clone` are the
 /// three `zend_disable_function` keeps in the table; php says so with a
 /// startup `E_WARNING`, `Cannot disable function %s()` in `Unknown` on
-/// line 0, which this engine does not raise, since it has no diagnostic
-/// before a request (#776).
+/// line 0 ([`disable_warnings`]).
 fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
     list.split(|byte| matches!(byte, b' ' | b','))
         .filter(|name| !name.is_empty())
@@ -2033,30 +2089,28 @@ impl Engine {
         // A host's own entries after, at `ZEND_INI_STAGE_ACTIVATE`, as
         // php-fpm's child applies its pool's once php has started.
         held.sort_by_key(|(name, _, activate)| (*activate, declared_at(name)));
-        let mut taken = Vec::new();
-        let mut raised = Vec::new();
-        let mut written = Vec::new();
-        if !held.is_empty() {
-            let description = RequestDescription {
-                sapi_name: host
-                    .map_or("", crate::host_extension::HostExtension::sapi_name)
-                    .to_owned(),
-                ..RequestDescription::default()
-            };
-            let mut req = Request::new(Arc::clone(&self.shared), description);
-            req.begin_startup();
-            for (name, value, activate) in held {
-                req.set_activating(activate);
-                let accepted = on_modify(&self.shared.extensions, &name)
-                    .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
-                if accepted {
-                    req.take_startup_value(&name, &value);
-                    taken.push((name, value));
-                }
+        let description = RequestDescription {
+            sapi_name: host
+                .map_or("", crate::host_extension::HostExtension::sapi_name)
+                .to_owned(),
+            ..RequestDescription::default()
+        };
+        let mut req = Request::new(Arc::clone(&self.shared), description);
+        req.begin_startup();
+        let mut taken = core_startup(&mut req);
+        for (name, value, activate) in held {
+            req.set_activating(activate);
+            let accepted = on_modify(&self.shared.extensions, &name)
+                .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
+            if accepted {
+                req.take_startup_value(&name, &value);
+                taken.push((name, value));
             }
-            raised = req.end_startup();
-            written = req.startup_stderr();
         }
+        disable_warnings(&mut req);
+        let raised = req.end_startup();
+        let written = req.startup_stderr();
+        drop(req);
         let Some(shared) = Arc::get_mut(&mut self.shared) else {
             return;
         };
@@ -2507,6 +2561,11 @@ impl Engine {
         source: Option<&[u8]>,
         expand: bool,
     ) -> Option<Result<Arc<Unit>, CompileError>> {
+        let laid = req.heap_mut().lay_interned_table();
+        if let Err(thrown) = req.fatal_of(laid) {
+            req.leave_pending(&thrown);
+            return None;
+        }
         if let Some(source) = source {
             let script = req
                 .script_name()
@@ -3542,7 +3601,8 @@ mod tests {
     /// function to a call, a dynamic call, `function_exists()`,
     /// `get_defined_functions()` or a callback's check; the list splits
     /// at spaces and commas alone; a name is matched as the table's
-    /// lowered key; an unknown one is passed over; `exit` and `die` stay;
+    /// lowered key; an unknown one is passed over; `exit` and `die` stay,
+    /// each with php's startup warning;
     /// and a user function may take a disabled native's name (Zend's
     /// `bug79382.phpt`).
     #[test]
@@ -3587,7 +3647,17 @@ mod tests {
             ("die,strlen", false, true),
             ("exit", true, true),
         ] {
-            assert_eq!(served_under(list), answers(strlen, defined), "{list:?}");
+            // `zend_disable_function`'s startup warning for a name it keeps.
+            let mut kept = String::new();
+            for name in list.split([' ', ',']) {
+                if matches!(name, "exit" | "die" | "clone") {
+                    kept.push_str("\nWarning: Cannot disable function ");
+                    kept.push_str(name);
+                    kept.push_str("() in Unknown on line 0\n");
+                }
+            }
+            let expected = kept + &answers(strlen, defined);
+            assert_eq!(served_under(list), expected, "{list:?}");
         }
         let engine = Engine::builder().ini("disable_functions", "strlen").build();
         let (out, _) = served(

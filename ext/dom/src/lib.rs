@@ -46,7 +46,7 @@ mod xml_serializer;
 mod xpath;
 
 use php_ext::abi::{
-    Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance,
+    DebugInfo, Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance,
     ObjectHandlers, OrFalse, Passed, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
     Raw, Std, Union, Untyped,
 };
@@ -828,8 +828,23 @@ fn unset_property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<(
 
 /// `dom_get_debug_info_helper`: the object's own properties, then every
 /// handled property read with deprecations quiet, an object shown as
-/// `(object value omitted)`.
-fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<PhpArray>, Thrown> {
+/// `(object value omitted)`. A reader that fails is left out and its
+/// throwable is left pending beside the table, each later one chained
+/// onto it, as php leaves them in `EG(exception)`
+/// (`Z/ext/dom/php_dom.c:526-528`), so the dump prints and then throws.
+///
+/// ```php
+/// class Demo extends DOMXPath { public function __construct() {} }
+/// try { var_dump(new Demo); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// object(Demo)#1 (1) {
+///   ["registerNodeNamespaces"]=>
+///   bool(true)
+/// }
+/// Invalid State Error
+/// ```
+fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>, Thrown> {
     if matches!(Std.get_method(req, object, b"__debuginfo"), Ok(Some(_))) {
         return Std.get_debug_info(req, object);
     }
@@ -840,23 +855,28 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<PhpArray>, 
         out.set(req, key, value)?;
     }
     let Some(table) = table_of(req, object) else {
-        return Ok(Some(out));
+        return Ok(Some(out.into()));
     };
+    let mut pending: Option<Thrown> = None;
     req.state::<State>().suppress_warnings = true;
     for prop in table.iter().flat_map(|t| t.iter()) {
         // A reader that fails is left out, as `dom_get_debug_info_helper`
-        // leaves it out. php leaves its exception pending, to be thrown
-        // once the dump is printed; a handler here cannot, so it is
-        // cleared, and one that cannot be cleared ends the dump.
+        // leaves it out, its throwable kept for the dumper; a fatal or an
+        // exit ends the dump.
         let read = match (prop.read)(req, object) {
             Ok(Some(v)) => v,
             Ok(None) => continue,
             Err(thrown) => {
-                if let Err(thrown) = php_ext::raising::clear(req, thrown) {
+                let thrown = match pending.take() {
+                    Some(earlier) => earlier.chain(req, thrown),
+                    None => thrown,
+                };
+                if thrown.exception().is_none() {
                     req.state::<State>().suppress_warnings = false;
                     req.release(Value::array(out));
                     return Err(thrown);
                 }
+                pending = Some(thrown);
                 continue;
             }
         };
@@ -870,7 +890,10 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<PhpArray>, 
         out.set(req, key, shown)?;
     }
     req.state::<State>().suppress_warnings = false;
-    Ok(Some(out))
+    Ok(Some(DebugInfo {
+        table: out,
+        thrown: pending,
+    }))
 }
 
 /// `DOM_PROP_NODE`: the node, php's "Invalid State Error" where the object

@@ -875,7 +875,8 @@ pub(crate) enum Internal {
     Unmade,
     Elements {
         object: PhpObject,
-        index: usize,
+        // Four bytes, so the payload fits `zend_internal_iterator`.
+        index: u32,
     },
     Own {
         iter: PhpObject,
@@ -954,7 +955,7 @@ impl ObjectHandlers for InternalHandlers {
 /// bool(true)
 /// bool(false)
 /// ```
-#[php_class(final, not_serializable, implements(Iterator), payload = Internal, handlers = INTERNAL)]
+#[php_class(final, not_serializable, implements(Iterator), size = 72, payload = Internal, handlers = INTERNAL)]
 pub(crate) struct InternalIterator;
 
 #[php_class]
@@ -1015,7 +1016,7 @@ impl InternalIterator {
             return funcs.move_forward(req, walk);
         }
         if let Some(Internal::Elements { index, .. }) = this.object().native_mut::<Internal>(req) {
-            *index += 1;
+            *index = index.saturating_add(1);
         }
         Ok(())
     }
@@ -1109,7 +1110,7 @@ fn internal_element(req: &mut Request, this: PhpObject) -> Result<Option<(Value,
             "The InternalIterator object has not been properly initialized",
         ));
     };
-    let (object, index) = (*object, *index);
+    let (object, index) = (*object, *index as usize);
     let table = req.object_handlers(object.heap());
     table.iterator_element(req, object, index)
 }

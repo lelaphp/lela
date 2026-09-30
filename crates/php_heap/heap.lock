@@ -25,6 +25,7 @@ Arr::set_next_free
 Arr::table_size
 Arr::unprotect
 Arr::value_ref
+Arr::value_ref_at
 ArrIter
 BUFSIZ
 Block
@@ -43,6 +44,7 @@ FiberStack::end
 FiberStack::new
 FiberStack::resume
 Frame
+Frame::free
 Frame::is_empty
 Frame::len
 Frame::set
@@ -77,6 +79,7 @@ Heap::gc_mem_caches
 Heap::gc_protect
 Heap::gc_startup
 Heap::gc_status
+Heap::in_memory_limit_error
 Heap::interned
 Heap::iterator_add
 Heap::iterator_del
@@ -89,6 +92,7 @@ Heap::iterators_advance
 Heap::iterators_carry
 Heap::iterators_lower_pos
 Heap::iterators_update
+Heap::lay_interned_table
 Heap::mark_destructed
 Heap::memory_limit
 Heap::memory_peak

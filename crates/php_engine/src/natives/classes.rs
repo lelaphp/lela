@@ -706,12 +706,28 @@ fn class_of_argument(req: &mut Request, given: Value) -> Result<(Option<ClassId>
 /// #1 {main}
 ///   thrown in %s on line 4
 /// ```
+///
+/// An object's own `get_method` is asked past the table, so a method an
+/// outer iterator hands to its inner one exists on the outer
+/// (`spl_dual_it_get_method`), and a `__call` trampoline does not:
+///
+/// ```php
+/// $it = new IteratorIterator(new ArrayIterator([1, 2, 3]));
+/// class M { function __call($n, $a) {} }
+/// var_dump(method_exists($it, 'offsetGet'), method_exists($it, 'nope'), method_exists(new M, 'any'));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ```
 #[php_function]
 fn method_exists(
     req: &mut Request,
     object_or_class: Untyped<Value>,
     method: PhpString,
 ) -> Result<bool, Thrown> {
+    let object = object_or_class.0.deref().as_object().copied();
     let (class, is_object) = class_of_argument(req, object_or_class.0)?;
     let Some(class) = class else {
         return Ok(false);
@@ -722,6 +738,22 @@ fn method_exists(
             .method_decl(function)
             .is_some_and(|decl| decl.visibility == Visibility::Private);
         return Ok(is_object || !private || req.method_class(function) == Some(class));
+    }
+    // `Z_OBJ_HT_P(klass)->get_method`, and the object it hands an
+    // unknown name to; a trampoline answers `false`.
+    let mut on = object;
+    while let Some(object) = on {
+        let table = req.object_handlers(object.heap());
+        if table.get_method(req, object, &lowered)?.is_some() {
+            return Ok(true);
+        }
+        if req
+            .call_trampoline(object.class(), method.as_bytes(), false)
+            .is_some()
+        {
+            break;
+        }
+        on = table.method_receiver(req, object);
     }
     let closure = req.class_named(b"Closure") == Some(class);
     Ok(closure && lowered == b"__invoke")

@@ -201,6 +201,7 @@ impl StackLimit {
             ),
             line,
             raised: Vec::new(),
+            thrown: false,
         })
     }
 }

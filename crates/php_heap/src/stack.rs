@@ -104,12 +104,14 @@ struct Page {
 }
 
 /// Where a frame stands: on the page that was the top, from slot
-/// `from`, or at the start of a page it opened, php's
-/// `ZEND_CALL_ALLOCATED`.
+/// `from`, at the start of a page it opened, php's
+/// `ZEND_CALL_ALLOCATED`, or in an allocation of its own beginning at
+/// `block`, the generator's `emalloc(used_stack)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Placed {
     On { from: usize },
     Opened,
+    Heap { block: NonNull<Zval> },
 }
 
 /// One call frame: its header fields live with the engine's `Func`; here
@@ -131,6 +133,19 @@ unsafe impl Send for Frame {}
 unsafe impl Send for Page {}
 
 impl Frame {
+    /// A frame no stack holds given back: the allocation of its own a
+    /// generator's frame stands in, `efree(execute_data)`, and nothing
+    /// for a frame on a page, whose room its stack gives back. Its
+    /// values are the caller's to have released.
+    pub fn free(self, heap: &mut Heap) {
+        if let Placed::Heap { block } = self.placed {
+            // SAFETY: the block came from this heap's `alloc` in
+            // `move_to_heap`, and this frame, taken by value, was its last
+            // name, so it is freed once.
+            unsafe { heap.mm.free(block.cast()) };
+        }
+    }
+
     /// How many slots the frame has: the CVs and the temporaries, which
     /// is what `i_free_compiled_variables` and the temporaries' release
     /// walk when the frame leaves.
@@ -334,7 +349,14 @@ impl VmStack {
         let Some(frame) = self.frames.pop() else {
             return;
         };
+        self.leave(heap, frame);
+    }
+
+    /// Where a frame the stack let go of stood given back: its room on
+    /// the page, the page it opened, or the allocation of its own.
+    fn leave(&mut self, heap: &mut Heap, frame: Frame) {
         match frame.placed {
+            Placed::Heap { .. } => frame.free(heap),
             Placed::On { from } => {
                 if let Some(page) = self.pages.last_mut() {
                     page.top = from;
@@ -351,13 +373,49 @@ impl VmStack {
     /// The frame the loop is executing, off the stack and handed over
     /// whole with every slot it holds (design §5.6, §5.11): what
     /// `GENERATOR_CREATE` and `YIELD` do to a generator's frame, which
-    /// lives on the heap between its runs as php's `zend_generator`
-    /// keeps its own `execute_data`. The slots are one allocation that
-    /// moves with the frame and not through it, so a `ZvalRef` into one
-    /// names the same zval while the frame is off the stack. None on an
-    /// empty stack.
-    pub fn move_to_heap(&mut self) -> Option<Frame> {
-        self.frames.pop()
+    /// lives on the heap from its creation as php's `zend_generator`
+    /// keeps its own `execute_data`. The first time, the frame, its
+    /// header and extra arguments with it, is copied into an allocation
+    /// of its own, `emalloc(used_stack)` and the `memcpy` beside it
+    /// (`Z/Zend/zend_vm_def.h:4674-4682`), and its room on the page is
+    /// given back; after that the slots are one allocation that moves
+    /// with the frame and not through it, so a `ZvalRef` into one names
+    /// the same zval while the frame is off the stack, and a frame
+    /// pushed while it runs never lands on them. None on an empty stack.
+    pub fn move_to_heap(&mut self, heap: &mut Heap) -> Result<Option<Frame>, Fatal> {
+        let Some(frame) = self.frames.pop() else {
+            return Ok(None);
+        };
+        let start = match frame.placed {
+            Placed::Heap { .. } => return Ok(Some(frame)),
+            Placed::On { from } => from,
+            Placed::Opened => PAGE_HEADER_SLOTS,
+        };
+        let Some(page) = self.pages.last() else {
+            return Err(Fatal::Error(String::from(
+                "InternalError: a frame moved off a VM stack with no page",
+            )));
+        };
+        let used = page.top.saturating_sub(start);
+        let block = match heap.mm.alloc(used * SLOT) {
+            Ok(block) => block.cast::<Zval>(),
+            Err(fatal) => {
+                self.frames.push(frame);
+                return Err(fatal);
+            }
+        };
+        // SAFETY: the page's `used` slots from `start` are the frame's,
+        // inside the page's allocation, and the block was just allocated
+        // for `used` slots; the two do not overlap.
+        unsafe { std::ptr::copy_nonoverlapping(page.slot(start).as_ptr(), block.as_ptr(), used) };
+        let len = frame.len;
+        self.leave(heap, frame);
+        Ok(Some(Frame {
+            // SAFETY: the header's slots are inside the block.
+            at: unsafe { block.add(FRAME_HEADER_SLOTS) },
+            len,
+            placed: Placed::Heap { block },
+        }))
     }
 
     /// A frame [`VmStack::move_to_heap`] took, back on top of this

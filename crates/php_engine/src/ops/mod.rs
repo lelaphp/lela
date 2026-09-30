@@ -811,15 +811,39 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
 /// array(0) {
 /// }
 /// ```
+///
+/// php hands the object's own table back where it can
+/// (`zend_proptable_to_symtable`), and duplicates it where the class
+/// declares a property or has handlers of its own; a duplicate holds a
+/// reference nothing else holds as its value (`zend_array_dup_element`),
+/// so the cast of a property bound by reference once is no reference:
+///
+/// ```php
+/// class Foo { public $foo; }
+/// $o = new Foo;
+/// (function ($p, $o) { foreach ($p as $n => &$v) { $o->$n = &$v; } })(['foo' => 1], $o);
+/// $a = (array) $o;
+/// $o->foo = 2;
+/// var_dump(ReflectionReference::fromArrayElement($a, 'foo'), $a['foo']);
+/// ```
+/// ```expect
+/// NULL
+/// int(1)
+/// ```
 pub(crate) fn mangled_array(
     req: &mut Request,
     object: PhpObject,
     rows: Vec<(Key, Value)>,
 ) -> Result<PhpArray, Thrown> {
     let mangled = mangled_names(req, object);
+    let duplicate = !mangled.is_empty() || req.own_handlers(object.class()).is_some();
     let mut array = PhpArray::new(req)?;
     let mut at = 0;
     for (key, entry) in rows {
+        let entry = match entry.as_ref() {
+            ValueRef::Reference(cell) if duplicate && cell.heap().refcount() == 1 => entry.deref(),
+            _ => entry,
+        };
         let name = match key {
             Key::Int(n) => {
                 req.addref(&entry);
@@ -1723,6 +1747,17 @@ pub(crate) fn get_long(req: &mut Request, value: &Value) -> i64 {
 /// float(7)
 /// float(1)
 /// ```
+///
+/// `zend_strtod` keeps the sign of a zero, which an integer read would
+/// lose:
+///
+/// ```php
+/// var_dump((float)"-0", +(float)" -0");
+/// ```
+/// ```expect
+/// float(-0)
+/// float(-0)
+/// ```
 pub(crate) fn get_double(req: &mut Request, value: &Value) -> f64 {
     match value.deref().as_ref() {
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => 0.0,
@@ -1733,6 +1768,7 @@ pub(crate) fn get_double(req: &mut Request, value: &Value) -> f64 {
         // `zend_strtod` over the string: the number it opens with after
         // any leading whitespace, read to a double, and zero for none.
         ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
+            Some((Number::Long(0), _)) if negative_text(s.as_bytes()) => -0.0,
             Some((Number::Long(n), _)) => wide(n),
             Some((Number::Double(d), _)) => d,
             None => 0.0,
@@ -1744,6 +1780,15 @@ pub(crate) fn get_double(req: &mut Request, value: &Value) -> f64 {
         },
         ValueRef::Reference(r) => get_double(req, &r.get()),
     }
+}
+
+/// Whether the number a string opens with, past its whitespace, is
+/// written with a `-`.
+fn negative_text(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .find(|b| !matches!(**b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+        == Some(&b'-')
 }
 
 /// `convert_object_to_type`'s warning, for an object whose class has no
@@ -4412,6 +4457,20 @@ pub(crate) fn legacy_type(value: &Value) -> &'static [u8] {
 /// bool(false)
 /// bool(true)
 /// ```
+///
+/// A float offset's warning may reach a handler that takes the
+/// container's last owner; the table is destroyed and the entry is not
+/// found:
+///
+/// ```php
+/// set_error_handler(function ($no, $str) { global $a; $a = null; echo $str, "\n"; });
+/// $a = [random_int(1, 1)];
+/// var_dump(isset($a[1.0E+42]));
+/// ```
+/// ```expect
+/// The float 1.0E+42 is not representable as an int, cast occurred
+/// bool(false)
+/// ```
 pub(crate) fn isset_dim(
     req: &mut Request,
     array: PhpArray,
@@ -4419,7 +4478,19 @@ pub(crate) fn isset_dim(
     constant: bool,
     empty: bool,
 ) -> Result<bool, Thrown> {
-    let key = isset_offset(req, offset, constant)?;
+    // `GC_TRY_ADDREF(ht)` around a float's warning in
+    // `zend_find_array_dim_slow`: a handler that took the container's
+    // last owner destroys the table, and the entry is then not found.
+    let key = if offset.deref().as_float().is_some() {
+        let held = req.take_hold(array.to_value());
+        let key = isset_offset(req, offset, constant);
+        if req.let_go(held).freed() {
+            return key.map(|_| empty);
+        }
+        key?
+    } else {
+        isset_offset(req, offset, constant)?
+    };
     let found = array.heap().get(key).map(crate::exec::value_of);
     if empty {
         return Ok(match found {

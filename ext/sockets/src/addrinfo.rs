@@ -21,9 +21,11 @@ use crate::socket::{Sock, Socket, made, socket_error, strerror};
 use php_ext::raising::{Level, docref};
 
 /// One `getaddrinfo` entry as `php_addrinfo` holds it; `None` only
-/// while `socket_addrinfo_lookup` lays the object down.
+/// while `socket_addrinfo_lookup` lays the object down. The entry, which
+/// owns its address and its name, is boxed, inside the `sizeof` php
+/// allocates (design §5.13).
 #[derive(Default)]
-pub(crate) struct Entry(Option<ffi::AddrInfo>);
+pub(crate) struct Entry(Option<Box<ffi::AddrInfo>>);
 
 /// `final class AddressInfo`, `@strict-properties`, `@not-serializable`.
 ///
@@ -42,7 +44,7 @@ pub(crate) struct Entry(Option<ffi::AddrInfo>);
 #[php_class(
     final,
     not_serializable,
-    payload = Entry,
+    size = 104, payload = Entry,
     handlers = ADDRESS_INFO,
     dynamic_properties = forbidden
 )]
@@ -198,7 +200,7 @@ fn socket_addrinfo_lookup(
         }
         let object = made(req, b"AddressInfo")?;
         if let Some(entry) = object.native_mut::<Entry>(req) {
-            entry.0 = Some(info);
+            entry.0 = Some(Box::new(info));
         }
         out.append(req, object.as_value())?;
     }
@@ -208,7 +210,7 @@ fn socket_addrinfo_lookup(
 /// The entry an `AddressInfo` holds, and an `InternalError` for one
 /// that holds none, which only a lookup lays down.
 fn entry(req: &mut Request, address: Instance<AddressInfo>) -> Result<ffi::AddrInfo, Thrown> {
-    let held = address.payload_mut(req)?.0.clone();
+    let held = address.payload_mut(req)?.0.as_deref().cloned();
     held.ok_or_else(|| php_ext::raising::fatal(req, "InternalError: an AddressInfo holds no entry"))
 }
 

@@ -169,6 +169,24 @@ impl Heap {
         }
     }
 
+    /// The request's table of interned strings laid down, the 40960 bytes
+    /// php's compiler lays down with the first string it interns while it
+    /// compiles the primary file (`zend_add_interned_string`), so what
+    /// `memory_get_usage()` counts from the file's first line on is php's
+    /// whether or not anything is interned after it:
+    ///
+    /// ```php
+    /// $m = memory_get_usage();
+    /// $c = get_class(new ArrayObject);
+    /// echo memory_get_usage() - $m < 4096 ? "no table laid down here\n" : "a table laid down here\n";
+    /// ```
+    /// ```expect
+    /// no table laid down here
+    /// ```
+    pub fn lay_interned_table(&mut self) -> Result<(), Fatal> {
+        self.interned.lay_down(&mut self.mm)
+    }
+
     /// Bytes in use: the bin accounting for `real == false`, the bytes
     /// the chunks hold for `real == true`, which is their count times
     /// 2 MiB (design §5.13).
@@ -208,11 +226,20 @@ impl Heap {
         self.mm.limit()
     }
 
-    /// Hold the request to `limit` bytes, which the ini setting sets
-    /// once at request start. The limit is met on chunk growth, with
-    /// php's exact message as the [`Fatal`].
-    pub fn set_memory_limit(&mut self, limit: usize) {
-        self.mm.set_limit(limit);
+    /// Hold the request to `limit` bytes, `zend_set_memory_limit`: the
+    /// limit is met on chunk growth, with php's exact message as the
+    /// [`Fatal`]. A limit under what the chunks hold is `false` unless
+    /// giving back cached chunks brings them under it.
+    pub fn set_memory_limit(&mut self, limit: usize) -> bool {
+        self.mm.set_limit(limit)
+    }
+
+    /// `zend_alloc_in_memory_limit_error_reporting`: whether the limit's
+    /// fatal is being reported, the window in which the limit refuses
+    /// nothing and php discards the buffers `ob_start()` laid down.
+    #[must_use]
+    pub fn in_memory_limit_error(&self) -> bool {
+        self.mm.overflowed()
     }
 
     /// The fatal the heap raised when it refused an allocation is

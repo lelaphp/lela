@@ -34,10 +34,15 @@ const EXPAND_SCALE: usize = 10;
 /// the names its property table is answered under, released with the
 /// object.
 #[derive(Default)]
-pub(crate) struct Slot {
+pub(crate) struct SlotState {
     held: Option<Decimal>,
     kept: Option<Kept>,
 }
+
+/// The payload: `bcmath_number_obj_t` keeps its number behind pointers,
+/// and so the payload is one, inside the `sizeof` php allocates (design
+/// §5.13).
+pub(crate) type Slot = Box<SlotState>;
 
 /// What a `BcMath\Number` keeps for the readers of its properties: the
 /// rendering (`intern->value`) and the two property names, each with
@@ -84,7 +89,7 @@ pub(crate) struct Handlers;
     namespace(BcMath),
     implements(Stringable),
     dynamic_properties = forbidden,
-    payload = Slot,
+    size = 80, payload = Slot,
     handlers = crate::number::HANDLERS
 )]
 pub(crate) struct Number;
@@ -1316,7 +1321,7 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<PhpArray>, Thrown> {
+    ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         let rows = self
             .get_properties_for(req, object, PropertyPurpose::Debug)?
             .unwrap_or_default();
@@ -1328,7 +1333,7 @@ impl ObjectHandlers for Handlers {
             req.addref(&value);
             table.set(req, key, value)?;
         }
-        Ok(Some(table))
+        Ok(Some(table.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -1350,9 +1355,9 @@ impl ObjectHandlers for Handlers {
 /// int(1)
 /// ```
 fn clone_number(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
-    let slot = Slot {
+    let slot = Box::new(SlotState {
         held: held_of(req, object),
         kept: None,
-    };
+    });
     clone_with(req, &object, slot)
 }

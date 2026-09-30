@@ -741,7 +741,7 @@ pub(super) fn this_function(
 }
 
 /// `ReflectionParameter` as the stub declares it.
-#[php_class(implements(crate::Reflector), not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+#[php_class(implements(crate::Reflector), not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionParameter;
 
 #[php_class]
@@ -1446,7 +1446,7 @@ impl ReflectionParameter {
 }
 
 /// `ReflectionType` as the stub declares it.
-#[php_class(abstract, implements(crate::Stringable), not_serializable)]
+#[php_class(abstract, implements(crate::Stringable), not_serializable, size = 96)]
 pub(crate) struct ReflectionType;
 
 #[php_class]

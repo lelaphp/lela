@@ -9,20 +9,20 @@
 //! tree's names php's grammar takes as an identifier, stays with it.
 
 pub use php_compile::syntax::{
-    Diagnostic, Element, FileId, Level, LexOptions, Lexed, Options, Parsed, SyntaxKind, Token,
-    TokenId, Tree, amp_name, cast_name, int_overflows, lex, magic_const_name, operator_name, parse,
+    Diagnostic, Element, FileId, Level, LexOptions, Lexed, Options, Parsed, ScannedToken,
+    SyntaxKind, Token, TokenId, Tree, amp_name, cast_name, int_overflows, lex, magic_const_name,
+    operator_name, parse, scanned,
 };
 
 pub use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
-pub use crate::scanner::{ScannedToken, scanned};
 
 use crate::api::call::constant;
 use crate::api::coerce::to_string;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::Value;
-use crate::highlight::Colours;
 use crate::ini_syntax::Host;
+use php_compile::syntax::Colours;
 
 /// `zend_parse_ini_string` over `text` in a request, the one INI grammar
 /// the engine reads its startup entries by: each callback's event in
@@ -135,7 +135,7 @@ pub fn highlight(req: &Request, source: &[u8]) -> Vec<u8> {
         keyword: read(b"highlight.keyword"),
         string: read(b"highlight.string"),
     };
-    crate::highlight::highlight(source, &scanned_file(req, source), &colours)
+    php_compile::syntax::highlight(source, &scanned_file(req, source), &colours)
 }
 
 /// `zend_strip` over `source`: what `php_strip_whitespace()` and
@@ -155,5 +155,5 @@ pub fn highlight(req: &Request, source: &[u8]) -> Vec<u8> {
 /// ```
 #[must_use]
 pub fn strip(req: &Request, source: &[u8]) -> Vec<u8> {
-    crate::highlight::strip(source, &scanned_file(req, source))
+    php_compile::syntax::strip(source, &scanned_file(req, source))
 }

@@ -423,12 +423,16 @@ fn hash_hmac_file(
 /// the hash state (`None` once finalised), the options and the
 /// HMAC key.
 #[derive(Default)]
-pub(crate) struct Context {
+pub(crate) struct ContextState {
     algo: Option<&'static Algo>,
     state: Option<Box<dyn State>>,
     flags: Flags,
     key: Option<Vec<u8>>,
 }
+
+/// The payload: `php_hashcontext_object`'s fields, boxed, inside the `sizeof` php
+/// allocates (design §5.13).
+pub(crate) type Context = Box<ContextState>;
 
 /// `hash_init(string $algo, int $flags = 0, string $key = "", array $options = []): HashContext`.
 ///
@@ -510,7 +514,7 @@ fn hash_init(
     };
     let object = new_object(req, class)?;
     if let Some(context) = object.native_mut::<Context>(req) {
-        *context = Context {
+        **context = ContextState {
             algo: Some(algo),
             state: Some(state),
             flags,
@@ -725,7 +729,7 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         copy.set_prop(req, name, value)?;
     }
     if let Some(context) = copy.native_mut::<Context>(req) {
-        *context = Context {
+        **context = ContextState {
             algo,
             state: Some(state),
             flags,
@@ -1159,7 +1163,7 @@ fn int_of(value: Option<Value>) -> Option<i64> {
 /// bool(true)
 /// bool(false)
 /// ```
-#[php_class(final, payload = Context, handlers = HANDLERS)]
+#[php_class(final, size = 88, payload = Context, handlers = HANDLERS)]
 pub(crate) struct HashContext;
 
 /// `php_hashcontext_handlers`: `clone_obj` is `php_hashcontext_clone`,

@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(s.refcount(), 1);
         // A write through the reference: the string is released after
         // the write and the heap reads the cell and the long alone.
-        let Ok(o) = rec.heap.object(7, 0) else {
+        let Ok(o) = rec.heap.object(7, 0, 0) else {
             return;
         };
         Heap::reference_set(&mut rec, r, Zval::object(o));

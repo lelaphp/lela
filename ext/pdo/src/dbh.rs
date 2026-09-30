@@ -87,7 +87,7 @@ enum Conn {
 // `alloc_own_columns`, one each.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
-pub(crate) struct Dbh {
+pub(crate) struct DbhState {
     /// `dbh->driver`: set once the factory succeeded, which is what
     /// `PDO_CONSTRUCT_CHECK` asks.
     pub(crate) driver: Option<&'static dyn Connector>,
@@ -124,16 +124,20 @@ pub(crate) struct Dbh {
     pub(crate) describes_at_execute: bool,
 }
 
-impl Dbh {
+impl DbhState {
     /// `PDO_FETCH_BOTH`, the connection's default before the constructor
     /// sets it.
-    fn fresh() -> Dbh {
-        Dbh {
+    fn fresh() -> DbhState {
+        DbhState {
             default_fetch: 4,
-            ..Dbh::default()
+            ..DbhState::default()
         }
     }
 }
+
+/// The payload, `pdo_dbh_object_t`'s `inner`: the pointer to the
+/// `pdo_dbh_t` php allocates beside the object (design §5.13).
+pub(crate) type Dbh = Box<DbhState>;
 
 /// `pdo_dbh_object_handlers`.
 pub(crate) struct Handlers;
@@ -462,14 +466,14 @@ fn open(
     let mode = crate::connector::option_long(req, options, PDO::ATTR_ERRMODE, 2)?;
     let _ = auto_commit;
     dbh_mut(req, object, |d| {
-        *d = Dbh {
+        **d = DbhState {
             persistent,
             error_mode: match mode {
                 0 => OnError::Silent,
                 1 => OnError::Warn,
                 _ => OnError::Throw,
             },
-            ..Dbh::fresh()
+            ..DbhState::fresh()
         };
     });
     throwing_warnings(req, "PDOException", |req| {
@@ -1004,7 +1008,7 @@ fn end_transaction(
 /// bool(true)
 /// bool(true)
 /// ```
-#[php_class(not_serializable, payload = Dbh, handlers = HANDLERS)]
+#[php_class(not_serializable, size = 64, beside(152), payload = Dbh, handlers = HANDLERS)]
 pub(crate) struct PDO;
 
 /// The constants in the stub's order, each `@cvalue` written as its value,

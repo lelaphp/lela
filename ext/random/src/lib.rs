@@ -50,10 +50,10 @@ use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
 pub use rng::Rng;
 
-use engine_mt19937::{Mode, Mt19937, StateMt19937};
-use engine_pcgoneseq128xslrr64::{PcgOneseq128XslRr64, StatePcgOneseq128XslRr64};
+use engine_mt19937::{EngineMt19937, Mode, Mt19937, StateMt19937};
+use engine_pcgoneseq128xslrr64::{EnginePcgOneseq128XslRr64, PcgOneseq128XslRr64};
 use engine_secure::{Secure, StateSecure};
-use engine_xoshiro256starstar::{StateXoshiro256StarStar, Xoshiro256StarStar};
+use engine_xoshiro256starstar::{EngineXoshiro256StarStar, Xoshiro256StarStar};
 use randomizer::{IntervalBoundary, Randomizer};
 
 /// `PHP_MT_RAND_MAX`, `(1 << 31) - 1`.
@@ -326,14 +326,14 @@ fn with_engine<R, F: FnOnce(&mut dyn Algo) -> R>(
     object: PhpObject,
     f: F,
 ) -> Result<R, F> {
-    if let Some(state) = object.native_mut::<StateMt19937>(req) {
-        return Ok(f(state));
+    if let Some(state) = object.native_mut::<EngineMt19937>(req) {
+        return Ok(f(&mut **state));
     }
-    if let Some(state) = object.native_mut::<StatePcgOneseq128XslRr64>(req) {
-        return Ok(f(state));
+    if let Some(state) = object.native_mut::<EnginePcgOneseq128XslRr64>(req) {
+        return Ok(f(&mut **state));
     }
-    if let Some(state) = object.native_mut::<StateXoshiro256StarStar>(req) {
-        return Ok(f(state));
+    if let Some(state) = object.native_mut::<EngineXoshiro256StarStar>(req) {
+        return Ok(f(&mut **state));
     }
     if let Some(state) = object.native_mut::<StateSecure>(req) {
         return Ok(f(state));
@@ -347,14 +347,14 @@ fn with_serial<R>(
     object: PhpObject,
     f: impl FnOnce(&mut dyn Serial) -> R,
 ) -> Option<R> {
-    if let Some(state) = object.native_mut::<StateMt19937>(req) {
-        return Some(f(state));
+    if let Some(state) = object.native_mut::<EngineMt19937>(req) {
+        return Some(f(&mut **state));
     }
-    if let Some(state) = object.native_mut::<StatePcgOneseq128XslRr64>(req) {
-        return Some(f(state));
+    if let Some(state) = object.native_mut::<EnginePcgOneseq128XslRr64>(req) {
+        return Some(f(&mut **state));
     }
-    if let Some(state) = object.native_mut::<StateXoshiro256StarStar>(req) {
-        return Some(f(state));
+    if let Some(state) = object.native_mut::<EngineXoshiro256StarStar>(req) {
+        return Some(f(&mut **state));
     }
     None
 }
@@ -522,7 +522,7 @@ fn exception_with_previous(
 /// the state copied into the clone.
 pub(crate) struct Copying<T>(PhantomData<fn() -> T>);
 
-impl<T: Algo + Clone + Default + Any + Send> ObjectHandlers for Copying<T> {
+impl<T: Clone + Default + Any + Send> ObjectHandlers for Copying<T> {
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_engine::<T>)
     }
@@ -536,9 +536,9 @@ fn clone_engine<T: Clone + Default + Any + Send>(
     clone_with(req, &object, state)
 }
 
-pub(crate) static MT19937: Copying<StateMt19937> = Copying(PhantomData);
-pub(crate) static PCG: Copying<StatePcgOneseq128XslRr64> = Copying(PhantomData);
-pub(crate) static XOSHIRO: Copying<StateXoshiro256StarStar> = Copying(PhantomData);
+pub(crate) static MT19937: Copying<EngineMt19937> = Copying(PhantomData);
+pub(crate) static PCG: Copying<EnginePcgOneseq128XslRr64> = Copying(PhantomData);
+pub(crate) static XOSHIRO: Copying<EngineXoshiro256StarStar> = Copying(PhantomData);
 
 /// The handlers of `Secure` and `Randomizer`, whose `clone_obj` php
 /// leaves null: an uncloneable object.

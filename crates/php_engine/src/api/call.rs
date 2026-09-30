@@ -963,28 +963,19 @@ pub fn write_raw_property(
     req.write_raw(*object, name, value)
 }
 
-/// `new $class(...$arguments)`: [`new_object`] and then the class's
-/// constructor served on it with `arguments`, as `NEW` and its
-/// `DO_FCALL` serve them; a class with none takes the arguments and
-/// serves nothing (`zend_pass_function`). An object whose constructor
-/// threw is given up destructed (`zend_object_store_ctor_failed`), so
-/// its `__destruct()` never runs.
+/// `new $class(...$arguments)`: [`new_object`] and then the
+/// constructor the object's `get_constructor` answers, served on it
+/// with `arguments`, as `NEW` and its `DO_FCALL` serve them; a class
+/// with none takes the arguments and serves nothing
+/// (`zend_pass_function`). A constructor that throws leaves the object
+/// marked as one whose constructor failed, so it is given up with no
+/// destructor served (`zend_object_store_ctor_failed`).
 pub fn instantiate(
     req: &mut Request,
     class: ClassId,
     arguments: &[Value],
 ) -> Result<PhpObject, Thrown> {
-    let object = new_object(req, class)?;
-    if let Some(constructor) = req.method_named(class, b"__construct") {
-        let served = req.serve_method(constructor, Some(object), class, arguments, &[]);
-        if let Err(thrown) = served {
-            object.mark_destructor_called();
-            req.release(object.as_value());
-            return Err(thrown);
-        }
-        req.release(served.unwrap_or_default());
-    }
-    Ok(object)
+    instantiate_named(req, class, arguments, &[])
 }
 
 /// `object_init_with_constructor` (`Z/Zend/zend_API.c:1876`), what
@@ -1017,7 +1008,7 @@ pub fn instantiate_named(
     named: &[(PhpString, Value)],
 ) -> Result<PhpObject, Thrown> {
     let object = new_object(req, class)?;
-    let constructor = match req.handlers_of(class).get_constructor(req, object) {
+    let constructor = match object.handlers(req).get_constructor(req, object) {
         Ok(constructor) => constructor,
         Err(thrown) => {
             req.release(object.as_value());

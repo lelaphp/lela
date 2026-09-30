@@ -38,6 +38,7 @@ abi::CloneObjWith
 abi::ConstArray
 abi::ConstValue
 abi::CurrentPlace
+abi::DebugInfo
 abi::Dependency
 abi::DependencyKind
 abi::DimensionRead
@@ -117,6 +118,7 @@ abi::ObjectHandlers::clone_obj
 abi::ObjectHandlers::clone_obj_with
 abi::ObjectHandlers::compare
 abi::ObjectHandlers::count_elements
+abi::ObjectHandlers::create_object
 abi::ObjectHandlers::current_place
 abi::ObjectHandlers::dimension_place
 abi::ObjectHandlers::do_operation
@@ -142,6 +144,7 @@ abi::ObjectHandlers::read_property
 abi::ObjectHandlers::unset_dimension
 abi::ObjectHandlers::unset_property
 abi::ObjectHandlers::write_dimension
+abi::ObjectHandlers::write_overloaded
 abi::ObjectHandlers::write_property
 abi::OnModify
 abi::OrFalse
@@ -309,9 +312,12 @@ decl::hook_attribute_refusal
 process::gid
 process::groups
 process::uid
+raising::Cause
 raising::Level
 raising::Level::bit
 raising::Thrown
+raising::Thrown::cause
+raising::Thrown::chain
 raising::Thrown::exception
 raising::arg_count_error
 raising::arg_null_deprecated
@@ -486,7 +492,6 @@ request::Request::ini_parse_quantity
 request::Request::ini_set
 request::Request::input_variables
 request::Request::interrupt
-request::Request::is_unwind_exit
 request::Request::is_uploaded_file
 request::Request::last_error
 request::Request::loaded_env
@@ -600,6 +605,7 @@ request::Stream
 request::Stream::accept
 request::Stream::add_filter
 request::Stream::as_value
+request::Stream::can_cast
 request::Stream::cast
 request::Stream::close
 request::Stream::copy_to_mem
@@ -868,6 +874,12 @@ values::Resource::native_mut
 values::Resource::new
 values::Resource::type_name
 values::ResourceType
+values::SmartStr
+values::SmartStr::append
+values::SmartStr::as_bytes
+values::SmartStr::clear
+values::SmartStr::free
+values::SmartStr::remove
 values::TypeTag
 values::Value
 values::Value::array

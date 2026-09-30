@@ -252,6 +252,10 @@ pub enum StartHandler {
     Registered(BufferHandler),
     /// Anything else, as the callable it resolved to.
     User(Callable),
+    /// A callable `zend_fcall_info_init` refused, its warning raised:
+    /// no handler, which `php_output_handler_start` refuses after its
+    /// check for a running handler, so inside one it is still the fatal.
+    Refused,
 }
 
 /// A handler of the buffer stack an extension hands to
@@ -2066,7 +2070,10 @@ pub struct Request {
     /// touched: the values, one per entry of the op array's
     /// [`php_unit::OpArray::bound_vars`], which the published unit never
     /// holds (design §5.14). A closure's are its object's.
-    static_vars: HashMap<Statics, Vec<Value>>,
+    static_vars: HashMap<Statics, PhpArray>,
+    /// The `emalloc`s php's `create_object` made beside each object
+    /// that has them, by the object's id ([`Request::lay_beside`]).
+    beside: HashMap<u32, Vec<php_heap::Block>>,
     /// Where the request is the preload's (design §6.3), the files it
     /// compiled into the preload.
     preloading: Option<Preloading>,
@@ -2536,6 +2543,7 @@ impl Request {
             sapi_constant: Value::null(),
             user_functions: tables.functions,
             static_vars: HashMap::new(),
+            beside: HashMap::new(),
             preloading: None,
             #[cfg(debug_assertions)]
             dirty: None,
@@ -2606,6 +2614,11 @@ impl Request {
 
     pub(crate) fn stack_mut(&mut self) -> &mut VmStack {
         &mut self.stack
+    }
+
+    /// [`VmStack::move_to_heap`] over the request's stack and heap.
+    pub(crate) fn move_frame_to_heap(&mut self) -> Result<Option<php_heap::Frame>, Fatal> {
+        self.stack.move_to_heap(&mut self.heap)
     }
 
     /// The first page of the VM stack the request runs on, out of its
@@ -3662,7 +3675,26 @@ impl Request {
     /// ```expect exit=255 wall=1s
     /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 4
     /// ```
+    ///
+    /// A native that serves user code while a fatal is in flight is in
+    /// php's `zend_catch`, where `_zend_bailout` has landed: the call
+    /// runs as any other, and the fatal is in flight again once it
+    /// returns, the `zend_bailout()` php's catch blocks end with. The
+    /// session's decode is the witness, in `ext/session`: its handler's
+    /// `destroy` is served after the fatal a class declaration raised.
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
+        let caught = self.bailout;
+        self.bailout = false;
+        let served = self.serve_user_uncaught(function, call);
+        self.bailout |= caught;
+        served
+    }
+
+    fn serve_user_uncaught(
+        &mut self,
+        function: Function,
+        call: CallState,
+    ) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
         let caller = self
@@ -5443,6 +5475,24 @@ impl Request {
     /// #1 %s(3): include()
     /// #2 %s(4): f()
     /// ```
+    ///
+    /// A frame with a symbol table, one an `eval` or an include in it
+    /// attached, has its declared arguments read through the table, where
+    /// what the code wrote stands:
+    ///
+    /// ```php
+    /// class A { public function __call($name, $args) { eval('$args = array(); var_dump(debug_backtrace()[1]["args"]);'); } }
+    /// (new A)->test("test");
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   string(4) "test"
+    ///   [1]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// ```
     fn trace_rows(&self, chain: &[Link<'_>]) -> Vec<TraceRow> {
         // The include the link below `at` stands at, where it is a user
         // frame at an `INCLUDE_OR_EVAL`.
@@ -5494,17 +5544,7 @@ impl Request {
                         ));
                         continue;
                     };
-                    let passed = usize::try_from(state.num_args).unwrap_or(0);
-                    let mut arguments: Vec<Value> = (0..passed
-                        .saturating_sub(state.extra_args.len()))
-                        .map(|slot| {
-                            let slot = Slot(u32::try_from(slot).unwrap_or(u32::MAX));
-                            slots
-                                .frame()
-                                .map_or(Value::undef(), |f| Value::of_zval(f.slot(slot)))
-                        })
-                        .collect();
-                    arguments.extend(state.extra_args.iter().copied());
+                    let arguments = self.traced_arguments(slots, state, function);
                     rows.push((
                         Traced::Function(function),
                         state.this,
@@ -5574,17 +5614,14 @@ impl Request {
         let Some(code) = exec::body_of(&user.unit, user.body) else {
             return Vec::new();
         };
-        let starting: Vec<Value>;
-        let values = if closure.fake {
-            if let Some(held) = self.static_vars.get(&Statics::Function(closure.function)) {
-                held.as_slice()
-            } else {
-                starting = exec::starting_statics(code);
-                starting.as_slice()
-            }
+        let table = if closure.fake {
+            self.static_vars
+                .get(&Statics::Function(closure.function))
+                .copied()
         } else {
-            closure.bound.as_slice()
+            closure.bound
         };
+        let values = exec::statics_values(code, table);
         code.bound_vars
             .iter()
             .zip(values.iter())
@@ -5624,33 +5661,49 @@ impl Request {
         at: StaticsAt,
         code: &OpArray,
         slot: usize,
-    ) -> Option<Value> {
-        match at {
-            StaticsAt::Closure(object) => object.closure(self)?.bound.get(slot).copied(),
-            StaticsAt::Table(of) => self
-                .static_vars
-                .entry(of)
-                .or_insert_with(|| exec::starting_statics(code))
-                .get(slot)
-                .copied(),
-        }
+    ) -> Result<Option<Value>, Thrown> {
+        let table = self.static_table(at, code)?;
+        Ok(table
+            .zip(u32::try_from(slot).ok())
+            .and_then(|(table, slot)| table.at_position(slot))
+            .map(|(value, _)| value))
+    }
+
+    /// The `static` table `at` names, laid down from `code`'s starting
+    /// values where the request has not touched a function's yet.
+    fn static_table(&mut self, at: StaticsAt, code: &OpArray) -> Result<Option<PhpArray>, Thrown> {
+        Ok(match at {
+            StaticsAt::Closure(object) => object.closure(self).and_then(|closure| closure.bound),
+            StaticsAt::Table(of) => {
+                if let Some(table) = self.static_vars.get(&of) {
+                    Some(*table)
+                } else {
+                    let table = exec::starting_statics(self, code)?;
+                    if let Some(table) = table {
+                        self.static_vars.insert(of, table);
+                    }
+                    table
+                }
+            }
+        })
     }
 
     /// `value` into `slot` of a `static` table, which takes the owner
     /// the caller held; what stood there is handed back, since the table
     /// only ever trades a value for the reference made over it.
     pub(crate) fn set_static(&mut self, at: StaticsAt, slot: usize, value: Value) -> Value {
-        let cell = match at {
-            StaticsAt::Closure(object) => object
-                .native_mut::<ClosureInfo>(self)
-                .and_then(|payload| payload.bound.get_mut(slot)),
-            StaticsAt::Table(of) => self
-                .static_vars
-                .get_mut(&of)
-                .and_then(|table| table.get_mut(slot)),
+        let table = match at {
+            StaticsAt::Closure(object) => object.closure(self).and_then(|closure| closure.bound),
+            StaticsAt::Table(of) => self.static_vars.get(&of).copied(),
         };
-        match cell {
-            Some(cell) => std::mem::replace(cell, value),
+        let place = table
+            .zip(u32::try_from(slot).ok())
+            .and_then(|(table, slot)| table.at_position(slot));
+        match place {
+            Some((previous, place)) => {
+                place.heap().write(value.to_zval());
+                previous
+            }
             None => value,
         }
     }
@@ -5680,17 +5733,14 @@ impl Request {
         let Some(code) = exec::body_of(&unit, body) else {
             return Vec::new();
         };
-        if code.bound_vars.is_empty() {
+        let at = StaticsAt::Table(Statics::Function(function));
+        let Ok(table) = self.static_table(at, code) else {
             return Vec::new();
-        }
-        let values = self
-            .static_vars
-            .entry(Statics::Function(function))
-            .or_insert_with(|| exec::starting_statics(code));
+        };
         code.bound_vars
             .iter()
-            .zip(values.iter())
-            .map(|(var, value)| (var.name.0.to_vec(), *value))
+            .zip(exec::statics_values(code, table))
+            .map(|(var, value)| (var.name.0.to_vec(), value))
             .collect()
     }
 
@@ -5698,10 +5748,8 @@ impl Request {
     /// `offset` given up: php compiles a file afresh at each include, so
     /// its main op array's table starts over each time it is entered.
     fn forget_main_statics(&mut self, offset: u32) {
-        if let Some(values) = self.static_vars.remove(&Statics::Main(offset)) {
-            for value in values {
-                self.release(value);
-            }
+        if let Some(table) = self.static_vars.remove(&Statics::Main(offset)) {
+            self.release(Value::array(table));
         }
     }
 
@@ -5711,10 +5759,8 @@ impl Request {
     /// destructors are behind the request by then, so this frees and
     /// serves nothing.
     pub(crate) fn destroy_static_vars(&mut self) {
-        for (_, values) in std::mem::take(&mut self.static_vars) {
-            for value in values {
-                self.release(value);
-            }
+        for (_, table) in std::mem::take(&mut self.static_vars) {
+            self.release(Value::array(table));
         }
     }
 
@@ -6220,8 +6266,10 @@ impl Request {
         // executing and nothing compiling, no file at all, which
         // `php_error_cb` is handed as `Unknown` at line zero
         // (`ZEND_STR_UNKNOWN_CAPITALIZED`). A destructor the shutdown
-        // walk refuses to serve raises there.
-        if !self.executing() {
+        // walk refuses to serve raises there, and so does what a
+        // `zend_catch` raises while a fatal is in flight, since
+        // `_zend_bailout` empties `EG(current_execute_data)` first.
+        if !self.executing() || self.bailout {
             return self.note_error_in(level, message, b"Unknown", 0);
         }
         let line = self.current_line();
@@ -6960,17 +7008,6 @@ impl Request {
         out
     }
 
-    /// `zend_is_unwind_exit(EG(exception))` for a native: whether a
-    /// [`Thrown`] that carries no throwable is the `exit` a callback
-    /// unwinds, which php's C code goes on past with the unwind exit
-    /// pending, rather than a fatal, which `zend_bailout` leaves the
-    /// native by. The session's save handler reads it after a user
-    /// handler returns (`ps_call_handler`).
-    #[must_use]
-    pub fn is_unwind_exit(&self) -> bool {
-        self.unwind_exit()
-    }
-
     /// The request's [`Phase`].
     pub(crate) fn phase(&self) -> Phase {
         self.phase
@@ -6983,6 +7020,12 @@ impl Request {
     }
 
     pub(crate) fn end_in(&mut self, fatal: &Fatal) {
+        // `php_output_discard_all()` where the heap refused with its
+        // limit lifted, before the fatal is displayed
+        // (`zend_alloc_in_memory_limit_error_reporting`).
+        if self.heap.in_memory_limit_error() {
+            crate::output::discard_all(self);
+        }
         match fatal {
             Fatal::Error(message) => self.end_in_fatal(message),
             Fatal::OutOfMemory(bytes) => self.end_in_fatal(&format!(
@@ -7007,9 +7050,10 @@ impl Request {
         // lays it down here, with the object, as
         // `zend_object_alloc(sizeof(custom), ce)` does; every other
         // class is `zend_objects_new` (design §5.4).
+        let custom = self.object_custom(class);
         let allocated = match self.native_new_of(class) {
-            Some(new) => new(&mut self.heap, class.0, slots),
-            None => self.heap.object(class.0, slots),
+            Some(new) => new(&mut self.heap, class.0, slots, custom),
+            None => self.heap.object(class.0, slots, custom),
         };
         let object = match self.fatal_of(allocated).map(PhpObject::of) {
             Ok(object) => object,
@@ -7019,6 +7063,7 @@ impl Request {
             }
         };
         self.init_properties(object, defaults);
+        self.object_created(object)?;
         // `zend_default_exception_new`, the throwables' `create_object`:
         // `file`, `line` and `trace` are the site of `new`, written as
         // the object is made and before any constructor runs.
@@ -7042,7 +7087,8 @@ impl Request {
     ) -> Result<PhpObject, Thrown> {
         let slots = self.class_slots(class);
         let defaults = self.property_defaults(class)?;
-        let allocated = self.heap.object_with(class.0, slots, payload);
+        let custom = self.object_custom(class);
+        let allocated = self.heap.object_with(class.0, slots, custom, payload);
         let object = match self.fatal_of(allocated).map(PhpObject::of) {
             Ok(object) => object,
             Err(thrown) => {
@@ -7051,6 +7097,7 @@ impl Request {
             }
         };
         self.init_properties(object, defaults);
+        self.object_created(object)?;
         Ok(object)
     }
 
@@ -9689,6 +9736,21 @@ impl Request {
         Ok(Value::null())
     }
 
+    /// `zend_std_write_property`'s `found` arm over a slot that holds a
+    /// value: an initialised readonly property is modified from no scope,
+    /// save once more under `IS_PROP_REINITABLE`, and a set visibility
+    /// the scope lacks refuses the write too; `None` lets it through.
+    fn found_refusal(&mut self, o: Obj, p: &DeclaredSlot, name: &[u8]) -> Option<Thrown> {
+        if p.readonly && !o.slot_bit(p.slot, php_heap::PropBit::Reinitable) {
+            return Some(self.readonly_modification(p.declaring, name, "modify"));
+        }
+        let set = p.set_visibility?;
+        if self.has_set_access(p.declaring, set) {
+            return None;
+        }
+        Some(self.set_inaccessible_property(p.declaring, set, p.readonly, name, "modify"))
+    }
+
     /// Whether `zend_std_get_property_ptr_ptr`
     /// (`Z/Zend/zend_object_handlers.c:1485`) hands out no place for the
     /// declared property `name` the scope reaches, so that a compound
@@ -10234,16 +10296,12 @@ impl Request {
         if let Some(p) = placed.as_ref()
             && self.reaches(p)
         {
-            // `zend_readonly_property_modification_error`: an initialised
-            // readonly slot is written again only under `IS_PROP_REINITABLE`.
-            let slot_held = !o.slot(p.slot).is_undef();
-            if slot_held && p.readonly && !o.slot_bit(p.slot, php_heap::PropBit::Reinitable) {
-                let thrown = self.readonly_modification(p.declaring, name.as_bytes(), "modify");
-                self.release(value);
-                self.release(Value::string(name));
-                return Err(thrown);
-            }
-            if slot_held {
+            if !o.slot(p.slot).is_undef() {
+                if let Some(thrown) = self.found_refusal(o, p, name.as_bytes()) {
+                    self.release(value);
+                    self.release(Value::string(name));
+                    return Err(thrown);
+                }
                 return self.write_std_property(object, name, value);
             }
             // `IS_PROP_LAZY`: a slot that waits is the initializer's
@@ -11184,7 +11242,8 @@ impl Request {
         if object.heap().laziness() != php_heap::Laziness::Eager {
             return self.lazy_clone(object);
         }
-        let cloned = self.heap.object_clone(object.heap());
+        let custom = self.object_custom(object.class());
+        let cloned = self.heap.object_clone(object.heap(), custom);
         let Some(new) = self.fatal_of(cloned)? else {
             let class = self.class_name(object.class());
             return self.fatal_of(Err(Fatal::Error(format!(
@@ -11282,8 +11341,10 @@ impl Request {
         object: PhpObject,
         payload: T,
     ) -> Result<PhpObject, Thrown> {
-        let cloned = self.heap.object_clone_with(object.heap(), payload);
+        let custom = self.object_custom(object.class());
+        let cloned = self.heap.object_clone_with(object.heap(), custom, payload);
         let new = PhpObject::of(self.fatal_of(cloned)?);
+        self.lay_beside(new)?;
         self.clone_slot_sources(new);
         if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
@@ -11501,8 +11562,11 @@ impl Request {
         object: PhpObject,
         payload: T,
     ) -> Result<PhpObject, Thrown> {
-        let cloned = self.heap.object_clone_with(object.heap(), payload);
-        self.fatal_of(cloned).map(PhpObject::of)
+        let custom = self.object_custom(object.class());
+        let cloned = self.heap.object_clone_with(object.heap(), custom, payload);
+        let new = self.fatal_of(cloned).map(PhpObject::of)?;
+        self.lay_beside(new)?;
+        Ok(new)
     }
 
     /// The native payload of `o` as `T`, borrowed for as long as the
@@ -12286,6 +12350,69 @@ impl Request {
         let _ = self.globals();
         TableId::GLOBAL
     }
+    /// A user frame's arguments for its trace row
+    /// (`debug_backtrace_get_args`): its parameters' CVs up to the number
+    /// passed, read through its symbol table where it has one, whose
+    /// values the stack may hold stale (`ZEND_CALL_HAS_SYMBOL_TABLE`,
+    /// bug #73156), then its extra ones. Views, no owner taken.
+    fn traced_arguments(
+        &self,
+        slots: &Slots<'_>,
+        state: &exec::FrameState,
+        function: Function,
+    ) -> Vec<Value> {
+        let passed = usize::try_from(state.num_args).unwrap_or(0);
+        let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
+            .map(|slot| {
+                let slot = Slot(u32::try_from(slot).unwrap_or(u32::MAX));
+                slots
+                    .frame()
+                    .map_or(Value::undef(), |f| Value::of_zval(f.slot(slot)))
+            })
+            .collect();
+        if let Some(table) = state.symbol_table {
+            let names = exec::body_of(&state.unit, state.body)
+                .map(|code| code.vars.clone())
+                .unwrap_or_default();
+            let declared = self
+                .function_decl(function)
+                .map_or(0, |decl| decl.parameters.len());
+            for (at, argument) in arguments.iter_mut().enumerate().take(declared) {
+                if let Some(name) = names.get(at)
+                    && let Some(value) = self.symbol_view(table, &name.0)
+                {
+                    *argument = value;
+                }
+            }
+        }
+        arguments.extend(state.extra_args.iter().copied());
+        arguments
+    }
+
+    /// [`Request::symbol_value`] with nothing borrowed mutably: an
+    /// `IS_INDIRECT` bucket followed to the CV on the stack the table's
+    /// frames stand on, what `zend_hash_find_ex_ind` reads.
+    fn symbol_view(&self, table: TableId, name: &[u8]) -> Option<Value> {
+        let symbol = self
+            .tables
+            .get(table.0 as usize)?
+            .entries
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, symbol)| *symbol)?;
+        Some(match symbol {
+            Symbol::Value(value) => value,
+            Symbol::Held(cell) => cell.get(),
+            Symbol::Indirect(frame, at) => {
+                let stack = match self.fibers.request_stack() {
+                    Some(own) if table == TableId::GLOBAL => own,
+                    _ => &self.stack,
+                };
+                Value::of_zval(stack.frame(frame)?.slot(php_heap::Slot(at)))
+            }
+        })
+    }
+
     /// `zend_hash_find` in a symbol table for a fetch by name that
     /// reads: what the bucket `name` holds, an `IS_INDIRECT` bucket
     /// followed to the CV of the frame attached to it; `None` where the
@@ -12579,6 +12706,13 @@ impl Request {
     /// it installs, and `Std`'s at a root and for every user class. The
     /// walk is cut at a depth no declaration can make.
     pub(crate) fn handlers_of(&self, class: ClassId) -> &'static dyn ObjectHandlers {
+        self.own_handlers(class).unwrap_or(&Std)
+    }
+
+    /// The handler table of `class` where it is not
+    /// `std_object_handlers`: its own or the nearest parent's, or an
+    /// enum's; `None` where its objects are served by [`Std`].
+    pub(crate) fn own_handlers(&self, class: ClassId) -> Option<&'static dyn ObjectHandlers> {
         let mut at = Some(class);
         for _ in 0..64 {
             let Some(class) = at else {
@@ -12588,17 +12722,13 @@ impl Request {
                 .ok()
                 .and_then(|i| self.shared.handlers.get(i))
             {
-                return *table;
+                return Some(*table);
             }
             at = self.class_parent(class);
         }
-        if self
-            .class_decl(class)
+        self.class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Enum)
-        {
-            return &crate::enums::ENUM;
-        }
-        &Std
+            .then_some(&crate::enums::ENUM as &'static dyn ObjectHandlers)
     }
 
     /// The `create_object` of the class or of the nearest parent that
@@ -13228,14 +13358,25 @@ impl Request {
     }
 
     /// `zend_std_get_constructor`: the class's `__construct` where the
-    /// executed scope may reach it, `zend_bad_constructor_call`'s
-    /// `Error` where it may not, and none for a class with no
+    /// fake or the executed scope may reach it, `zend_bad_constructor_call`'s
+    /// `Error` where it may not, the object then marked as one whose
+    /// constructor failed so no destructor is served for it
+    /// (`zend_object_store_ctor_failed`), and none for a class with no
     /// constructor.
+    ///
+    /// ```php
+    /// class P { private function __construct() {} function __destruct() { echo "destructed\n"; } }
+    /// try { new P; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Call to private P::__construct() from global scope
+    /// ```
     pub(crate) fn constructor_of(&mut self, object: PhpObject) -> Result<Option<Function>, Thrown> {
         let Some(constructor) = self.method_named(object.class(), b"__construct") else {
             return Ok(None);
         };
-        if self.method_accessible(constructor) {
+        let scope = self.property_scope();
+        if self.method_accessible_from(constructor, scope) {
             return Ok(Some(constructor));
         }
         // `zend_bad_constructor_call`: the sentence names no `method`.
@@ -13243,7 +13384,11 @@ impl Request {
         let class = self
             .method_class(constructor)
             .map_or_else(|| String::from("object"), |class| self.class_name(class));
-        let from = self.scope_phrase();
+        let from = match scope {
+            Some(scope) => format!("scope {}", self.class_name(scope)),
+            None => String::from("global scope"),
+        };
+        object.heap().set_destructor_called(true);
         Err(crate::api::raising::throw(
             self,
             "Error",
@@ -13327,6 +13472,18 @@ impl Request {
     /// }
     /// ```
     ///
+    /// A `null` is an empty table, with php's deprecation since 8.5:
+    ///
+    /// ```php
+    /// class N { public $a = 1; public function __debugInfo() { return null; } }
+    /// var_dump(new N);
+    /// ```
+    /// ```expect
+    /// Deprecated: Returning null from N::__debugInfo() is deprecated, return an empty array instead in %s on line 3
+    /// object(N)#1 (0) {
+    /// }
+    /// ```
+    ///
     /// ```php
     /// class E { public function __debugInfo() { return 1; } }
     /// var_dump(new E);
@@ -13349,6 +13506,13 @@ impl Request {
             Some(array) => Ok(Some(*array)),
             None if value.tag() == TypeTag::Null => {
                 self.release(value);
+                let class = self.class_name(object.class());
+                crate::api::raising::deprecated(
+                    self,
+                    &format!(
+                        "Returning null from {class}::__debugInfo() is deprecated, return an empty array instead"
+                    ),
+                );
                 PhpArray::new(self).map(Some)
             }
             None => {
@@ -13371,7 +13535,7 @@ impl Request {
             this: Some(object),
             scope: Some(object.class()),
             called_scope: Some(object.class()),
-            bound: Vec::new(),
+            bound: None,
             fake: true,
         })
     }
@@ -13736,6 +13900,36 @@ impl Request {
             || String::from("native"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         )
+    }
+
+    /// `get_function_or_method_name(EX(func))` over the function `frame`
+    /// serves: its declared name after its scope's, a closure's scope
+    /// being the one it was made or bound in, which its frame reads
+    /// ([`Request::frame_scope`]); empty for a frame that serves none.
+    ///
+    /// ```php
+    /// class C { function m() { return function (int $a): array { return []; }; } }
+    /// $f = (new C)->m();
+    /// try { $f("x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// C::{closure:C::m():2}(): Argument #1 ($a) must be of type int, string given, called in %s on line 4
+    /// ```
+    pub(crate) fn frame_function_name(&self, frame: FrameRef) -> String {
+        let Some(state) = self.vm.at(frame) else {
+            return String::new();
+        };
+        let Some(function) = state.function else {
+            return String::new();
+        };
+        if state.closure.is_none() {
+            return self.qualified_name_of(function);
+        }
+        let name = self.declared_name(function);
+        match self.frame_scope(frame) {
+            Some(scope) => format!("{}::{name}", self.class_name(scope)),
+            None => name,
+        }
     }
 
     /// The name a raise or a trace prints a callee under: a function's
@@ -16120,11 +16314,9 @@ impl Request {
         let reason = reason
             .split_once(" (os error")
             .map_or(reason.as_str(), |(text, _)| text);
-        let message = format!(
-            "{}({}): Failed to open stream: {reason}",
-            self.opener(kind),
-            String::from_utf8_lossy(written)
-        );
+        let opener = self.opener(kind);
+        let origin = crate::api::raising::origin(self, &opener, &String::from_utf8_lossy(written));
+        let message = format!("{origin}: Failed to open stream: {reason}");
         crate::api::raising::warning(self, &message);
     }
 
@@ -16199,14 +16391,14 @@ impl Request {
                 self.note_error_in(raised.level, &raised.message, path, raised.line);
             }
         }
-        if refused.level == Level::Parse {
-            let thrown = crate::api::raising::throw_at(
-                self,
-                "ParseError",
-                &refused.message,
-                path,
-                refused.line,
-            );
+        if refused.level == Level::Parse || refused.thrown {
+            let class = if refused.level == Level::Parse {
+                "ParseError"
+            } else {
+                "CompileError"
+            };
+            let thrown =
+                crate::api::raising::throw_at(self, class, &refused.message, path, refused.line);
             if kind == SourceKind::File {
                 self.while_pending(&thrown, |req| {
                     for raised in raised {
@@ -18138,7 +18330,7 @@ impl Request {
             (true, true) => out.extend_from_slice(b"no value"),
             (true, false) => out.extend_from_slice(b"<i>no value</i>"),
             (false, true) => out.extend_from_slice(shown.as_bytes()),
-            (false, false) => crate::highlight::html_puts(out, shown.as_bytes()),
+            (false, false) => php_compile::syntax::html_puts(out, shown.as_bytes()),
         };
         for [name, local, master] in rows {
             if text {
@@ -18528,6 +18720,22 @@ impl Request {
         } else {
             value
         };
+        let limited;
+        let value = if name == b"memory_limit" {
+            match self.memory_limit_verdict(value) {
+                Some(text) => {
+                    limited = text;
+                    limited.as_slice()
+                }
+                None => return Ok(None),
+            }
+        } else {
+            value
+        };
+        if name == b"report_memleaks" && !ini_truth(Some(value)) {
+            let message = "Directive 'report_memleaks' is deprecated";
+            crate::api::raising::docref(self, Level::Deprecated, message);
+        }
         let handler = self.shared.extensions.iter().find_map(|e| {
             e.on_modify
                 .iter()
@@ -18543,7 +18751,6 @@ impl Request {
         self.ini.push((name.to_vec(), value.to_vec()));
         match name {
             b"max_execution_time" => self.arm_timer(),
-            b"memory_limit" => self.set_memory_limit(),
             b"error_reporting" => self.update_error_reporting(),
             b"zend.enable_gc" => {
                 self.heap.gc_enable(ini_truth(Some(value)));
@@ -18599,6 +18806,7 @@ impl Request {
             | b"extension_dir"
             | b"allow_url_fopen"
             | b"allow_url_include"
+            | b"max_memory_limit"
             | b"browscap"
             | b"doc_root"
             | b"user_dir"
@@ -18611,7 +18819,9 @@ impl Request {
             | b"mail.mixed_lf_and_crlf"
             | b"mail.cr_lf_mode"
             | b"mail.log"
-            | b"mail.force_extra_parameters" => (false, true, true),
+            | b"mail.force_extra_parameters"
+            | b"auto_prepend_file"
+            | b"auto_append_file" => (false, true, true),
             _ => (true, true, true),
         }
     }
@@ -18659,11 +18869,27 @@ impl Request {
     /// bool(false)
     /// string(9) "text/html"
     /// ```
+    ///
+    /// `arg_separator.output` and `arg_separator.input` are
+    /// `OnUpdateStrNotEmpty` (`Z/main/main.c:824-825`): the empty value
+    /// is refused.
+    ///
+    /// ```php
+    /// var_dump(ini_set("arg_separator.output", ""), ini_get("arg_separator.output"), ini_set("arg_separator.output", ";"));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(1) "&"
+    /// string(1) "&"
+    /// ```
     pub(crate) fn ini_verdict(name: &[u8], value: &[u8]) -> IniVerdict {
         match name {
             // `OnSetPrecision` and `OnSetSerializePrecision`
             // (`Z/main/main.c:120-141`): nothing below -1.
             b"precision" | b"serialize_precision" if ini_atol(value) < -1 => IniVerdict::Rejected,
+            b"arg_separator.output" | b"arg_separator.input" if value.is_empty() => {
+                IniVerdict::Rejected
+            }
             b"zend.exception_string_param_max_len"
                 if !(0..=1_000_000).contains(&ini_atol(value)) =>
             {
@@ -19601,13 +19827,66 @@ impl Request {
         }
     }
 
-    /// `zend_set_memory_limit` over the ini entry as the table has it:
-    /// at request start, and again when `ini_set()` moves the entry,
-    /// which is php's `OnChangeMemoryLimit`. `-1` is no limit.
+    /// The limit the heap holds a request to from its start: what
+    /// `php_module_startup` left, `memory_limit` where it is under
+    /// `max_memory_limit` and the maximum's otherwise, since
+    /// `OnChangeMaxMemoryLimit` runs first and set it. `-1` is no limit.
     fn set_memory_limit(&mut self) {
-        let limit = self.ini_parse_bytes_of("memory_limit");
-        self.heap
-            .set_memory_limit(usize::try_from(limit).unwrap_or(usize::MAX >> 1));
+        let limit = self
+            .limit_bytes(b"memory_limit")
+            .min(self.limit_bytes(b"max_memory_limit"));
+        self.heap.set_memory_limit(limit.min(usize::MAX >> 1));
+    }
+
+    /// An entry `zend_ini_parse_uquantity` reads, `-1` the largest size.
+    fn limit_bytes(&self, name: &[u8]) -> usize {
+        let bytes = self.ini_get(name).map_or(0, Request::ini_parse_bytes);
+        usize::try_from(bytes.cast_unsigned()).unwrap_or(usize::MAX)
+    }
+
+    /// `OnChangeMemoryLimit` (`Z/main/main.c:333-367`) over `value` at
+    /// runtime or at startup: a value past `max_memory_limit` is php's
+    /// warning (silent for `-1`) and the maximum's text in its place,
+    /// the heap left as it was; otherwise `zend_set_memory_limit`, whose
+    /// refusal of a limit under what the chunks hold is php's other
+    /// warning and the entry kept. The text the entry takes is the
+    /// answer.
+    ///
+    /// ```php
+    /// $a = str_repeat("0", 5 * 1024 * 1024);
+    /// var_dump(ini_set("memory_limit", "3M"), ini_get("memory_limit"));
+    /// ```
+    /// ```expect
+    /// Warning: Failed to set memory limit to 3145728 bytes (Current memory usage is 7356416 bytes) in %s on line 3
+    /// bool(false)
+    /// string(4) "128M"
+    /// ```
+    pub(crate) fn memory_limit_verdict(&mut self, value: &[u8]) -> Option<Vec<u8>> {
+        let wanted =
+            usize::try_from(Request::ini_parse_bytes(value).cast_unsigned()).unwrap_or(usize::MAX);
+        let max = self.limit_bytes(b"max_memory_limit");
+        if wanted > max {
+            if wanted != usize::MAX {
+                crate::api::raising::warning(
+                    self,
+                    &format!(
+                        "Failed to set memory_limit to {wanted} bytes. Setting to max_memory_limit instead (currently: {max} bytes)"
+                    ),
+                );
+            }
+            return self.ini_get(b"max_memory_limit").map(<[u8]>::to_vec);
+        }
+        if !self.heap.set_memory_limit(wanted.min(usize::MAX >> 1)) {
+            let usage = self.heap.memory_usage(true);
+            crate::api::raising::warning(
+                self,
+                &format!(
+                    "Failed to set memory limit to {wanted} bytes (Current memory usage is {usage} bytes)"
+                ),
+            );
+            return None;
+        }
+        Some(value.to_vec())
     }
 
     /// `memory_get_usage()`.
@@ -20264,6 +20543,7 @@ impl HeapHooks for Hooks<'_> {
     fn free_native(&mut self, obj: Obj) {
         let table = self.0.object_handlers(obj);
         table.free_obj(self.0, PhpObject::of(obj));
+        self.0.free_beside(PhpObject::of(obj));
     }
 
     /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`:
@@ -20549,7 +20829,7 @@ fn seconds(d: std::time::Duration) -> f64 {
 
 /// `zend_ini_parse_bool`: an ini entry read as on or off, where "off",
 /// "no", "false" and "" are off beside "0" and everything else is on.
-fn ini_truth(value: Option<&[u8]>) -> bool {
+pub(crate) fn ini_truth(value: Option<&[u8]>) -> bool {
     let Some(value) = value else { return false };
     let text = value.to_ascii_lowercase();
     !matches!(text.as_slice(), b"" | b"0" | b"off" | b"no" | b"false")
@@ -20803,6 +21083,8 @@ mod tests {
             file: Name(Box::new([])),
             line: 0,
             end_line: 0,
+            object_size: 0,
+            object_beside: Box::default(),
         }
     }
 

@@ -39,8 +39,9 @@ pub use stack::StackLimit;
 pub mod syntax {
     pub use php_syntax::tree::{Element, TokenId, Tree};
     pub use php_syntax::{
-        Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, SyntaxKind, Token, amp_name,
-        cast_name, int_overflows, lex, magic_const_name, operator_name, parse,
+        Colours, Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, ScannedToken,
+        SyntaxKind, Token, amp_name, cast_name, highlight, html_puts, int_overflows, lex,
+        magic_const_name, operator_name, parse, scanned, strip,
     };
 }
 
@@ -202,6 +203,12 @@ pub struct CompileError {
     pub message: String,
     pub line: u32,
     pub raised: Vec<Diagnostic>,
+    /// Whether php throws the refusal as a `CompileError`,
+    /// `zend_throw_exception(zend_ce_compile_error)` from the parser's
+    /// modifier lists and two statements, rather than raising it as a
+    /// fatal: a `try` around the `include` or the `eval` catches it, and
+    /// uncaught it renders as the fatal at [`CompileError::level`].
+    pub thrown: bool,
 }
 
 /// Parse and compile one source file: what the engine calls for the
@@ -290,6 +297,7 @@ pub fn compile(
                 message: diagnostic.message.clone(),
                 line: diagnostic.line,
                 raised,
+                thrown: false,
             });
         }
         raised.push(Diagnostic {
@@ -1385,6 +1393,7 @@ mod tests {
                 message: "syntax error, unexpected token \";\"".into(),
                 line: 3,
                 raised: vec![overflow(2)],
+                thrown: false,
             })
         );
         assert_eq!(
@@ -1394,6 +1403,7 @@ mod tests {
                 message: "The (unset) cast is no longer supported".into(),
                 line: 3,
                 raised: vec![overflow(2), overflow(4)],
+                thrown: false,
             })
         );
     }
@@ -3269,6 +3279,7 @@ mod tests {
                 message: "Namespace declaration statement has to be the very first statement or after any declare call in the script".into(),
                 line: 2,
                 raised: Vec::new(),
+                thrown: false,
             })
         );
     }
@@ -3305,6 +3316,7 @@ mod tests {
                 message: "syntax error, unexpected token \";\"".into(),
                 line: 2,
                 raised: Vec::new(),
+                thrown: false,
             })
         );
     }
@@ -3404,6 +3416,7 @@ mod tests {
                 message: "Constant expression contains invalid operations".into(),
                 line: 1,
                 raised: Vec::new(),
+                thrown: false,
             }),
             "`zend_is_allowed_in_const_expr` has no `ZEND_AST_SILENCE`"
         );
@@ -3505,6 +3518,7 @@ mod tests {
                 message: "Constant expression contains invalid operations".into(),
                 line: 1,
                 raised: Vec::new(),
+                thrown: false,
             }),
             "`zend_is_allowed_in_const_expr` has no `ZEND_AST_ENCAPS_LIST`"
         );
@@ -3820,6 +3834,7 @@ mod tests {
             message: String::from("compiled"),
             line: 0,
             raised: Vec::new(),
+            thrown: false,
         };
         let error = refused(b"<?php\n$a = (function () { declare(ticks=0): enddeclare; });\n")
             .unwrap_or_else(compiled);
@@ -4212,6 +4227,7 @@ mod tests {
                 message: String::from("compiled"),
                 line: 0,
                 raised: Vec::new(),
+                thrown: false,
             });
             assert_eq!(error.level, Level::CompileError, "{message}");
             assert_eq!(error.message, message);
@@ -5109,6 +5125,8 @@ mod tests {
                 file: Name(Box::new([])),
                 line: 0,
                 end_line: 0,
+                object_size: 0,
+                object_beside: Box::default(),
             }],
             ..Options::default()
         };
@@ -6812,6 +6830,8 @@ class C {
                 file: Name(Box::new([])),
                 line: 0,
                 end_line: 0,
+                object_size: 0,
+                object_beside: Box::default(),
             }],
             ..Options::default()
         };
@@ -7212,6 +7232,7 @@ class C {
                 message: String::from("compiled"),
                 line: 0,
                 raised: Vec::new(),
+                thrown: false,
             });
             assert_eq!(error.level, Level::CompileError, "{message}");
             assert_eq!(error.message, message);

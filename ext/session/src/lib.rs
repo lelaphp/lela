@@ -41,7 +41,7 @@ mod user;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IntoReturn};
 use php_ext::attr::php_const;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Cause, Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpRef, PhpString, Value};
 
@@ -461,7 +461,7 @@ fn unbind(req: &mut Request) {
 fn absorb<T>(req: &mut Request, done: Result<T, Thrown>) -> Result<Option<T>, Thrown> {
     match done {
         Ok(value) => Ok(Some(value)),
-        Err(thrown) if thrown.exception().is_some() || req.is_unwind_exit() => {
+        Err(thrown) if thrown.cause(req) != Cause::Fatal => {
             let state = req.state::<State>();
             if state.thrown.is_none() {
                 state.thrown = Some(thrown);
