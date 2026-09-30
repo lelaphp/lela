@@ -18655,6 +18655,22 @@ impl Request {
         self.extension_of(extension).map(|e| e.name.as_str())
     }
 
+    /// `zend_multibyte_get_functions()`: the extension that handed the
+    /// engine its encoding functions
+    /// ([`crate::api::abi::ExtensionBuilder::encodings`]), the last in
+    /// bundle order as a later `zend_multibyte_set_functions` replaces
+    /// an earlier one; none where no extension did, and Zend's dummies
+    /// answer. Its name is php's `provider_name`.
+    #[must_use]
+    pub fn multibyte_provider(&self) -> Option<ExtensionId> {
+        self.shared
+            .extensions
+            .iter()
+            .rposition(|e| e.encodings.is_some())
+            .and_then(|at| u32::try_from(at).ok())
+            .map(ExtensionId)
+    }
+
     /// `module->version`: what the extension declared with
     /// `ExtensionBuilder::version`, else `PHP_VERSION`, as `Core`'s is.
     #[must_use]

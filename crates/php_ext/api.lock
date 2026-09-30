@@ -519,6 +519,7 @@ request::Request::loaded_extensions
 request::Request::made_superglobal
 request::Request::memory_peak
 request::Request::memory_usage
+request::Request::multibyte_provider
 request::Request::named_arguments
 request::Request::new_stream
 request::Request::open_dir
