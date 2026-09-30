@@ -1079,6 +1079,22 @@ impl PhpStream {
         (!line.is_empty()).then_some(line)
     }
 
+    /// `zend_stream_fixup` over `php_zend_stream_reader`
+    /// (`Z/Zend/zend_stream.c:198-262`): the whole stream read for the
+    /// compiler, a chunk at a time until a read gives nothing, and `None`
+    /// where any read fails, which `compile_file` reports as the file it
+    /// could not open.
+    pub(crate) fn read_for_compile(&mut self, req: &mut Request) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut chunk = vec![0; CHUNK_SIZE];
+        loop {
+            match self.read(req, &mut chunk)? {
+                0 => return Some(out),
+                n => out.extend_from_slice(chunk.get(..n)?),
+            }
+        }
+    }
+
     /// `_php_stream_copy_to_mem` (`Z/main/streams/streams.c:1569`): up
     /// to `maxlen` bytes, `None` for all of them. A bound under four
     /// chunks reads into a string of that size until it is full or the

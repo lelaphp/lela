@@ -16281,6 +16281,22 @@ impl Request {
     /// Fatal error: Cannot redeclare function f() (previously declared in %s:9) in %s on line 6
     /// closed
     /// ```
+    ///
+    /// A read that fails, as one through a filter that answers
+    /// `PSFS_ERR_FATAL` fails, is the file php could not open
+    /// (`zend_stream_fixup`, [`crate::streams::PhpStream::read_for_compile`]).
+    ///
+    /// ```php
+    /// class F extends php_user_filter { }
+    /// stream_filter_register('f.fatal', F::class);
+    /// var_dump(include 'php://filter/read=f.fatal/resource=' . __FILE__);
+    /// ```
+    /// ```expect
+    /// Warning: include(): Unprocessed filter buckets remaining on input brigade in %s on line 4
+    ///
+    /// Warning: include(): Failed opening 'php://filter/read=f.fatal/resource=%s' for inclusion (include_path='%s') in %s on line 4
+    /// bool(false)
+    /// ```
     pub(crate) fn include_stream(
         &mut self,
         kind: IncludeKind,
@@ -16309,8 +16325,8 @@ impl Request {
                 };
                 stream.set_option(self, unbuffered);
                 let source = self
-                    .stream_op(*stream, |req, s| s.copy_to_mem(req, None))
-                    .unwrap_or_default();
+                    .stream_op(*stream, |req, s| s.read_for_compile(req))
+                    .flatten();
                 // A read that bailed out leaves the stream open, as
                 // `zend_bailout` leaves `zend_destroy_file_handle`
                 // unreached: it stands among the request's resources,
@@ -16318,18 +16334,25 @@ impl Request {
                 if !self.bailing_out() {
                     stream.free(self);
                 }
-                Some(source)
+                source
             }
             _ => None,
         };
         self.including = outer;
         opened?;
-        let Some(source) = source else {
-            return self.failed_opening(kind, written);
-        };
+        // `compile_file` reports the file it could not open or read only
+        // where nothing is pending (`if (!EG(exception))`).
         if let Some(thrown) = self.stream_thrown.take() {
             return Err(thrown);
         }
+        let Some(source) = source else {
+            // A read a fatal ended is no file php reports: the bailout
+            // jumps past `compile_file`'s message.
+            if self.bailing_out() {
+                return Ok(Opened::Failed);
+            }
+            return self.failed_opening(kind, written);
+        };
         let path = opened_path.as_deref().unwrap_or(path);
         let shared = Arc::clone(&self.shared);
         let unit = match shared.compile_for(self, &source, path, SourceKind::File) {
