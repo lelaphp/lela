@@ -659,6 +659,9 @@ impl Request {
         let Some(source) = source.filter(|source| !source.is_empty()) else {
             return Ok(());
         };
+        if self.treated(input, source, into)? {
+            return Ok(());
+        }
         let source = source.split(|b| *b == 0).next().unwrap_or_default();
         let separators = match input {
             Input::Cookie => b";".to_vec(),
@@ -739,6 +742,9 @@ impl Request {
         body: &[u8],
         limits: &BodyLimits,
     ) -> Result<(), Thrown> {
+        if self.treated(Input::Post, body, into)? {
+            return Ok(());
+        }
         let max_input_vars = limits
             .max_input_vars
             .unwrap_or_else(|| self.ini_long(b"max_input_vars"));
@@ -769,6 +775,35 @@ impl Request {
             }
         }
         Ok(())
+    }
+
+    /// `sapi_module.treat_data` where an extension registered one
+    /// ([`crate::api::abi::ExtensionBuilder::treat_data`]): the variables
+    /// the last such extension read of `source`, each handed to the input
+    /// filter and registered into `into`, as mbstring's handler hands
+    /// each to `sapi_module.input_filter` and `php_register_variable_safe`;
+    /// `false` where none takes the source, which is then
+    /// `php_default_treat_data`'s.
+    fn treated(&mut self, input: Input, source: &[u8], into: PhpArray) -> Result<bool, Thrown> {
+        let shared = std::sync::Arc::clone(&self.shared);
+        let hook = shared
+            .extensions
+            .iter()
+            .rev()
+            .find_map(|extension| extension.treat_data);
+        let Some(variables) = hook
+            .map(|hook| hook(self, input, source))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(false);
+        };
+        for (name, value) in variables {
+            if let Some(value) = self.filter_input(input, &name, &value)? {
+                self.register_in(into, &name, value, false)?;
+            }
+        }
+        Ok(true)
     }
 
     /// `sapi_module.input_filter` for one variable: the filter the last

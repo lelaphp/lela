@@ -253,6 +253,13 @@ pub(crate) type ResolvePathHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u
 /// [`ExtensionBuilder::upload`].
 pub(crate) type UploadHook =
     fn(&mut Request, &crate::api::request::Upload<'_>) -> Result<bool, Thrown>;
+/// The data treater, php's `sapi_module.treat_data`:
+/// [`ExtensionBuilder::treat_data`].
+pub(crate) type TreatDataHook = fn(
+    &mut Request,
+    crate::api::request::Input,
+    &[u8],
+) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>, Thrown>;
 /// The input filter, php's `sapi_module.input_filter`:
 /// [`ExtensionBuilder::input_filter`].
 pub(crate) type InputFilterHook = fn(
@@ -403,6 +410,8 @@ pub struct Extension {
     pub(crate) cached: Option<CachedHook>,
     /// What [`ExtensionBuilder::input_filter`] was handed.
     pub(crate) input_filter: Option<InputFilterHook>,
+    /// What [`ExtensionBuilder::treat_data`] was handed.
+    pub(crate) treat_data: Option<TreatDataHook>,
     /// What [`ExtensionBuilder::upload`] was handed.
     pub(crate) upload: Option<UploadHook>,
     /// What [`ExtensionBuilder::resolve_path`] was handed.
@@ -456,6 +465,7 @@ pub struct ExtensionBuilder {
     post_startup: Option<PostStartupHook>,
     cached: Option<CachedHook>,
     input_filter: Option<InputFilterHook>,
+    treat_data: Option<TreatDataHook>,
     upload: Option<UploadHook>,
     resolve_path: Option<ResolvePathHook>,
     zend: Option<ZendExtension>,
@@ -739,6 +749,22 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The data treater, php's `sapi_module.treat_data` as mbstring's
+    /// `MINIT` registers `mbstr_treat_data` (`sapi_register_treat_data`),
+    /// with the form body's post handler it registers beside it: a query
+    /// string's, a cookie header's, a form body's and `parse_str()`'s
+    /// source is handed to `hook` first, which answers the variables it
+    /// read, each name and value as they are to be registered; the
+    /// engine hands each to the input filter and registers what the
+    /// filter keeps, as `_php_mb_encoding_handler_ex` does. `None` leaves
+    /// the source to `php_default_treat_data`. The last extension in
+    /// bundle order with a hook treats the data.
+    #[must_use]
+    pub fn treat_data(mut self, hook: TreatDataHook) -> ExtensionBuilder {
+        self.treat_data = Some(hook);
+        self
+    }
+
     /// `zend_resolve_path` overridden, as phar's `MINIT` overrides it with
     /// `phar_resolve_path`: a path an include or an open along the
     /// `include_path` names is handed to `hook` first, which may answer
@@ -890,6 +916,7 @@ impl ExtensionBuilder {
             post_startup: self.post_startup,
             cached: self.cached,
             input_filter: self.input_filter,
+            treat_data: self.treat_data,
             upload: self.upload,
             resolve_path: self.resolve_path,
             zend: self.zend,
