@@ -116,7 +116,7 @@ pub(crate) enum Ahead {
 
 /// `pdo_stmt_t`, the payload of a `PDOStatement` and of every subclass.
 #[derive(Default)]
-pub(crate) struct Stmt {
+pub(crate) struct StmtState {
     slot: Slot,
     pub(crate) dbh: DbLink,
     /// `stmt->query_string`.
@@ -151,6 +151,10 @@ pub(crate) struct Stmt {
     pub(crate) error_code: Option<SqlState>,
     pub(crate) ahead: Ahead,
 }
+
+/// The payload: `pdo_stmt_t`'s fields, boxed, inside the `sizeof` php
+/// allocates (design §5.13).
+pub(crate) type Stmt = Box<StmtState>;
 
 /// `pdo_dbstmt_object_handlers`.
 pub(crate) struct Handlers;
@@ -932,7 +936,24 @@ pub(crate) struct Iterator;
 /// `@not-serializable class PDOStatement implements IteratorAggregate`, as
 /// `pdo_stmt.stub.php` declares it, over the statement as its payload and
 /// `pdo_dbh_stmt_handlers`.
-#[php_class(not_serializable, implements(IteratorAggregate), payload = Stmt, handlers = HANDLERS)]
+///
+/// `pdo_dbstmt_new` allocates a `pdo_stmt_t`, which `memory_get_usage()`
+/// counts (design §5.13):
+///
+/// ```php
+/// foreach ([false, true] as $shown) foreach (['PDOStatement'] as $c) {
+///     $r = new ReflectionClass($c);
+///     $m = memory_get_usage();
+///     $o = $r->newInstanceWithoutConstructor();
+///     $used = memory_get_usage() - $m;
+///     $o = null;
+///     if ($shown) echo $c, ' ', $used, "\n";
+/// }
+/// ```
+/// ```expect
+/// PDOStatement 224
+/// ```
+#[php_class(not_serializable, implements(IteratorAggregate), size = 216, payload = Stmt, handlers = HANDLERS)]
 pub(crate) struct PDOStatement;
 
 /// `public string $queryString`, then the methods in the stub's order.
