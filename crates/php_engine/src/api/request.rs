@@ -261,6 +261,22 @@ pub enum StartHandler {
     Refused,
 }
 
+/// `php_format_date(format, len, ts, localtime)` (`Z/ext/date/php_date.c:882`),
+/// the one function of ext/date php's `main` and its other extensions
+/// call: `format` over the timestamp in the request's default zone
+/// where `localtime` says, in UTC where it does not. ext/date hands it
+/// to [`ExtensionBuilder::register`]; `php_log_err` stamps a file log
+/// with it, and `mail.log` its lines. An engine without ext/date stamps
+/// in UTC.
+///
+/// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
+#[derive(Debug, Clone, Copy)]
+pub struct FormatDate(pub FormatDateFn);
+
+/// [`FormatDate`]'s function: the request, the format, the timestamp
+/// and whether it is taken in the request's zone.
+type FormatDateFn = fn(&mut Request, &[u8], i64, bool) -> Result<Vec<u8>, Thrown>;
+
 /// A handler of the buffer stack an extension hands to
 /// [`ExtensionBuilder::register`] under a name `ob_start()` takes,
 /// `php_output_handler_alias_register` from its `MINIT`, with the
@@ -6296,7 +6312,8 @@ impl Request {
     /// directory with the permissions `error_log_mode` names where they
     /// lie within `0777`, `0644` where they do not, and written as `[<stamp>] <entry>\n`; the host's
     /// log where no file is named, where it names `syslog`, or where the
-    /// file cannot be opened. The stamp is `d-M-Y H:i:s e`, taken in UTC.
+    /// file cannot be opened. The stamp is `d-M-Y H:i:s e` in the
+    /// request's default zone ([`Request::log_stamp`]).
     ///
     /// ```php
     /// $f = sys_get_temp_dir() . "/witness-log-" . getmypid();
@@ -6337,13 +6354,38 @@ impl Request {
             self.sink.get().log(entry);
             return;
         };
+        let stamp = self.log_stamp(std::time::SystemTime::now());
         let mut line = Vec::with_capacity(entry.len() + 32);
         line.push(b'[');
-        line.extend_from_slice(zone::utc_log_stamp(std::time::SystemTime::now()).as_bytes());
+        line.extend_from_slice(&stamp);
         line.extend_from_slice(b"] ");
         line.extend_from_slice(entry);
         line.push(b'\n');
         let _ = file.write_all(&line);
+    }
+
+    /// `php_format_date("d-M-Y H:i:s e", now, 1)`: through the
+    /// [`FormatDate`] the bundle registered, so in the request's default
+    /// zone, and in UTC where none is registered or it threw, whose
+    /// throwable is left pending as php's `get_timezone_info` leaves
+    /// its `DateError`.
+    fn log_stamp(&mut self, now: std::time::SystemTime) -> Vec<u8> {
+        let utc = zone::utc_log_stamp(now);
+        let Some(FormatDate(format)) = self.registered::<FormatDate>().next().copied() else {
+            return utc.into_bytes();
+        };
+        let secs = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        match format(self, b"d-M-Y H:i:s e", secs, true) {
+            Ok(stamp) => stamp,
+            Err(thrown) => {
+                self.leave_pending(&thrown);
+                utc.into_bytes()
+            }
+        }
     }
 
     /// `sapi_module.send_headers`: the response's head handed to the

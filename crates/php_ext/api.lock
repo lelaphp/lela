@@ -382,6 +382,7 @@ request::FdStream
 request::FilterFactory
 request::FilterFlags
 request::FilterStatus
+request::FormatDate
 request::HandlerCall
 request::HandlerOp
 request::HandlerStatus
