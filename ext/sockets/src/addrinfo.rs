@@ -11,7 +11,7 @@ use php_ext::call::Function;
 use php_ext::coerce::{float_to_long, numeric_string, type_name};
 use php_ext::raising::{Thrown, argument_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::State;
 use crate::conv::put;
@@ -25,7 +25,45 @@ use php_ext::raising::{Level, docref};
 /// owns its address and its name, is boxed, inside the `sizeof` php
 /// allocates (design §5.13).
 #[derive(Default)]
-pub(crate) struct Entry(Option<Box<ffi::AddrInfo>>);
+pub(crate) struct Entry(Option<Held>);
+
+/// The entry, with what `socket_addrinfo_lookup` `emalloc`s beside
+/// `php_addrinfo` for it on the request's heap: `ai_addr`'s
+/// `ai_addrlen` bytes, and `ai_canonname`'s `estrdup` where there is a
+/// name, given back by `address_info_free_obj`.
+///
+/// ```php
+/// $w = socket_addrinfo_lookup('127.0.0.1', '80', ['ai_family' => AF_INET]);
+/// $m = memory_get_usage(); $a = socket_addrinfo_lookup('127.0.0.1', '80', ['ai_family' => AF_INET]); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = socket_addrinfo_lookup('::1', '80', ['ai_family' => AF_INET6]); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($a, $b); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 440
+/// 472
+/// -912
+/// ```
+pub(crate) struct Held {
+    info: Box<ffi::AddrInfo>,
+    addr: Emalloc,
+    canonname: Option<Emalloc>,
+}
+
+impl Held {
+    /// The entry and its two allocations; the `Err` is the memory limit.
+    fn new(req: &mut Request, info: ffi::AddrInfo) -> Result<Held, Thrown> {
+        let addr = Emalloc::new(req, info.addrlen)?;
+        let canonname = match &info.canonname {
+            Some(name) => Some(Emalloc::new(req, name.len() + 1)?),
+            None => None,
+        };
+        Ok(Held {
+            info: Box::new(info),
+            addr,
+            canonname,
+        })
+    }
+}
 
 /// `final class AddressInfo`, `@strict-properties`, `@not-serializable`.
 ///
@@ -73,6 +111,19 @@ impl ObjectHandlers for Handlers {
 
     fn clone_obj(&self) -> Option<CloneObj> {
         None
+    }
+
+    /// `address_info_free_obj`: `ai_canonname` and `ai_addr` given back.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let held = object
+            .native_mut::<Entry>(req)
+            .and_then(|entry| entry.0.take());
+        if let Some(held) = held {
+            if let Some(canonname) = held.canonname {
+                canonname.free(req);
+            }
+            held.addr.free(req);
+        }
     }
 
     fn compare(
@@ -199,8 +250,9 @@ fn socket_addrinfo_lookup(
             continue;
         }
         let object = made(req, b"AddressInfo")?;
+        let held = Held::new(req, info)?;
         if let Some(entry) = object.native_mut::<Entry>(req) {
-            entry.0 = Some(Box::new(info));
+            entry.0 = Some(held);
         }
         out.append(req, object.as_value())?;
     }
@@ -210,7 +262,11 @@ fn socket_addrinfo_lookup(
 /// The entry an `AddressInfo` holds, and an `InternalError` for one
 /// that holds none, which only a lookup lays down.
 fn entry(req: &mut Request, address: Instance<AddressInfo>) -> Result<ffi::AddrInfo, Thrown> {
-    let held = address.payload_mut(req)?.0.as_deref().cloned();
+    let held = address
+        .payload_mut(req)?
+        .0
+        .as_ref()
+        .map(|held| (*held.info).clone());
     held.ok_or_else(|| php_ext::raising::fatal(req, "InternalError: an AddressInfo holds no entry"))
 }
 
