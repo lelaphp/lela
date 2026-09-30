@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use php_heap::{Readiness, SockOpt};
 
-use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf, stat_buf, strerror};
+use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
     BindTo, Cast, Crypto, CryptoSocket, Handshake, OptionAnswer, Request, SocketOptions, Stream,
@@ -509,6 +509,7 @@ impl Ops for Socket {
         _req: &mut Request,
         cast: Cast,
         _own: Option<Stream>,
+        _ret: Ret,
     ) -> CastTarget<'_> {
         if cast != Cast::Select && self.crypto_active() {
             return CastTarget::Refused;

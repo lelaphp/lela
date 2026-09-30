@@ -19,7 +19,7 @@
 //! copied from the built-in one at the first change and dropped with
 //! the request (ADR-0005).
 
-use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf};
+use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf};
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::request::{Cast, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
@@ -530,22 +530,27 @@ impl UserStream {
         }
     }
 
-    /// `php_userstreamop_cast` (`Z/main/streams/userspace.c:1413`):
+    /// `php_userstreamop_cast` (`Z/main/streams/userspace.c:1398`):
     /// `stream_cast` with `STREAM_CAST_FOR_SELECT` or
     /// `STREAM_CAST_AS_STREAM`, and the stream it answers cast in this
     /// one's place; a class without it, an answer that is no stream and
-    /// the stream itself are php's warnings, and a false answer is
-    /// refused in silence.
+    /// the stream itself are php's warnings where a `ret` was handed and
+    /// silent refusals when none was, and a false answer is refused in
+    /// silence either way.
     fn cast_target_held(
         &mut self,
         req: &mut Request,
         select: bool,
         own: Option<Stream>,
+        ret: Ret,
     ) -> Option<Stream> {
+        let report = ret == Ret::Given;
         let castas = if select { 3 } else { 0 };
         let value = match call(req, self.object, b"stream_cast", &[Value::int(castas)]) {
             Called::Missing => {
-                not_implemented(req, self.object, "stream_cast");
+                if report {
+                    not_implemented(req, self.object, "stream_cast");
+                }
                 return None;
             }
             Called::Threw => return None,
@@ -564,6 +569,9 @@ impl UserStream {
             }
             Some(inner) => return Some(inner),
         };
+        if !report {
+            return None;
+        }
         let text = format!("{}::stream_cast {complaint}", class_name(req, self.object));
         docref(req, Level::Warning, &text);
         None
@@ -646,10 +654,13 @@ impl Ops for UserStream {
         req: &mut Request,
         cast: Cast,
         own: Option<Stream>,
+        ret: Ret,
     ) -> CastTarget<'_> {
         let select = cast == Cast::Select;
-        self.held(req, |this, req| this.cast_target_held(req, select, own))
-            .map_or(CastTarget::Refused, CastTarget::Stream)
+        self.held(req, |this, req| {
+            this.cast_target_held(req, select, own, ret)
+        })
+        .map_or(CastTarget::Refused, CastTarget::Stream)
     }
 
     fn adopt(&mut self, own: Stream) {

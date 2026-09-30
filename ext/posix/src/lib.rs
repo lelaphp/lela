@@ -742,22 +742,23 @@ fn fd_of(req: &mut Request, given: &Value, reader: FdReader) -> Result<Option<i3
                 &format!("{name}(): supplied resource is not a valid stream resource"),
             ));
         };
-        let fd = stream
-            .cast(req, Cast::Select, false)
-            .or_else(|| stream.cast(req, Cast::Internal, false));
-        let Some(fd) = fd else {
-            let label = stream_type(req, stream)?;
+        // `php_posix_stream_get_fd`: each cast asked first, and taken
+        // only where the kind says it would answer; a cast that fails
+        // after that leaves php's `-1`.
+        let fd = if stream.can_cast(req, Cast::Select) {
+            stream.cast(req, Cast::Select, false)
+        } else if stream.can_cast(req, Cast::Internal) {
+            stream.cast(req, Cast::Internal, false)
+        } else {
+            let label = stream.label(req).unwrap_or_default();
             docref(
                 req,
                 Level::Warning,
-                &format!(
-                    "Could not use stream of type '{}'",
-                    String::from_utf8_lossy(&label)
-                ),
+                &format!("Could not use stream of type '{label}'"),
             );
             return Ok(None);
         };
-        i64::from(fd)
+        fd.map_or(-1, i64::from)
     } else {
         match coerce_param(req, &given, &Type::Int, 1) {
             Ok(value) => match value.as_ref() {
@@ -797,18 +798,6 @@ fn fd_of(req: &mut Request, given: &Value, reader: FdReader) -> Result<Option<i3
     );
     req.state::<State>().last_error = Errno::EBADF as i32;
     Ok(None)
-}
-
-/// `stream->ops->label`, as `stream_get_meta_data` reads it out.
-fn stream_type(req: &mut Request, stream: Stream) -> Result<Vec<u8>, Thrown> {
-    let meta = stream.meta_data(req)?;
-    let key = Key::Str(PhpString::new(req, b"stream_type")?);
-    let label = meta
-        .get(&key)
-        .and_then(|v| v.deref().as_str_bytes().map(<[u8]>::to_vec))
-        .unwrap_or_default();
-    req.release(Value::array(meta));
-    Ok(label)
 }
 
 /// `posix_ttyname($file_descriptor): string|false`: `ttyname_r(3)` over
@@ -854,6 +843,24 @@ fn posix_ttyname(
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// bool(false)
+/// ```
+///
+/// A stream is asked whether it would cast before it is cast, as
+/// `php_posix_stream_get_fd` asks, so a user-space stream whose
+/// `stream_cast` refuses is neither sought nor asked its end, and the
+/// warning names its kind.
+///
+/// ```php
+/// class W { public $context;
+///     function stream_open($p, $m, $o, &$op) { return true; }
+///     function stream_seek($o, $w) { echo "sought\n"; return true; }
+///     function stream_cast($as) { return false; } }
+/// stream_wrapper_register('ww', 'W');
+/// var_dump(posix_isatty(fopen('ww://x', 'r')));
+/// ```
+/// ```expect
+/// Warning: posix_isatty(): Could not use stream of type 'user-space' in %s on line 7
 /// bool(false)
 /// ```
 #[php_function]

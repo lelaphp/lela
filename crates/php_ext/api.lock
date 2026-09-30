@@ -600,6 +600,7 @@ request::Stream
 request::Stream::accept
 request::Stream::add_filter
 request::Stream::as_value
+request::Stream::can_cast
 request::Stream::cast
 request::Stream::close
 request::Stream::copy_to_mem
@@ -619,6 +620,7 @@ request::Stream::glob_count
 request::Stream::glob_path
 request::Stream::is_dir
 request::Stream::is_stdio
+request::Stream::label
 request::Stream::meta_data
 request::Stream::no_fclose
 request::Stream::orig_path
