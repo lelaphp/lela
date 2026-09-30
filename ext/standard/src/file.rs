@@ -2093,32 +2093,11 @@ fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Th
     };
     let mut done = false;
     if let Some(to) = req.open_stream(target, b"wb", false)? {
-        done = copy_to_stream(req, from, to)?;
+        done = crate::streamsfuncs::copy_stream(req, from, to, None)?.is_some();
         to.free(req);
     }
     from.free(req);
     Ok(done)
-}
-
-/// `_php_stream_copy_to_stream_ex` under `PHP_STREAM_COPY_ALL`: a chunk
-/// read and written until a read gives nothing; a write that takes less
-/// than it was given is the copy that failed.
-fn copy_to_stream(req: &mut Request, from: Stream, to: Stream) -> Result<bool, Thrown> {
-    loop {
-        let Some(chunk) = from.read(req, 8192)? else {
-            return Ok(false);
-        };
-        if chunk.is_empty() {
-            return Ok(true);
-        }
-        let mut rest = chunk.as_bytes();
-        while !rest.is_empty() {
-            match to.write(req, rest) {
-                Some(n) if n > 0 => rest = &rest[n..],
-                _ => return Ok(false),
-            }
-        }
-    }
 }
 
 /// `copy(string $from, string $to, $context = null): bool`,
