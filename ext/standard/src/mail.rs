@@ -21,6 +21,8 @@ use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
+use crate::basic_functions::c_string;
+
 /// `EX_TEMPFAIL`, the one non-zero exit `php_mail` takes as sent.
 const EX_TEMPFAIL: i32 = 75;
 
@@ -70,7 +72,8 @@ fn build_elem(
     key: &[u8],
     value: &Value,
 ) -> Result<(), Thrown> {
-    let name = String::from_utf8_lossy(key).into_owned();
+    // Each message prints the name as `ZSTR_VAL(key)`, a C string.
+    let name = String::from_utf8_lossy(c_string(key)).into_owned();
     match value.deref().as_ref() {
         ValueRef::Str(text) => {
             if key.iter().any(|&c| !(33..=126).contains(&c) || c == b':') {
@@ -105,10 +108,10 @@ fn build_elems(
     key: &[u8],
     array: PhpArray,
 ) -> Result<(), Thrown> {
-    let name = String::from_utf8_lossy(key).into_owned();
+    let name = String::from_utf8_lossy(c_string(key)).into_owned();
     for (element_key, element) in array.snapshot() {
         if let Key::Str(found) = element_key {
-            let found = String::from_utf8_lossy(found.as_bytes()).into_owned();
+            let found = String::from_utf8_lossy(c_string(found.as_bytes())).into_owned();
             let message =
                 format!("Header \"{name}\" must only contain numeric keys, \"{found}\" found");
             return Err(throw(req, "TypeError", &message));
@@ -452,7 +455,7 @@ pub(super) fn php_mail(
 ///
 /// ```php
 /// var_dump(mail('a@example.com', 's', 'm', "Bad\r\n\r\nX: y"), mail('a@example.com', 's', 'm', " leading"));
-/// foreach ([['To' => 'x'], ['Subject' => 'x'], [1 => 'x'], ['From' => ['a']], ['X' => 1], ['X' => ['k' => 'v']], ['X' => [1]], ['Bad Name' => 'v'], ['X' => "a\rb"], ['X' => "a\nb"], ['X' => "a\r\nb"], ['X' => "a\0b"]] as $headers) {
+/// foreach ([['To' => 'x'], ['Subject' => 'x'], [1 => 'x'], ['From' => ['a']], ['X' => 1], ['X' => ['k' => 'v']], ['X' => [1]], ['Bad Name' => 'v'], ['X' => "a\rb"], ['X' => "a\nb"], ['X' => "a\r\nb"], ['X' => "a\0b"], ["\0foo" => 'v'], ["foo\0" => 'v']] as $headers) {
 ///     try { mail('a@example.com', 's', 'm', $headers); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
 /// }
 /// try { mail("a\0b", 's', 'm'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
@@ -476,6 +479,8 @@ pub(super) fn php_mail(
 /// ValueError: Header "X" contains LF character that is not allowed in the header
 /// ValueError: Header "X" contains CRLF characters that are used as a line separator and are not allowed in the header
 /// ValueError: Header "X" contains NULL character that is not allowed in the header
+/// ValueError: Header name "" contains invalid characters
+/// ValueError: Header name "foo" contains invalid characters
 /// mail(): Argument #1 ($to) must not contain any null bytes
 /// mail(): Argument #4 ($additional_headers) must not contain any null bytes
 /// ```
