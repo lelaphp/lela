@@ -174,9 +174,34 @@ pub(crate) struct Serializable;
 #[php_class(extern)]
 pub(crate) struct JsonSerializable;
 
-/// `PHP_MINFO_FUNCTION(spl)`: `SPL support => enabled`.
+/// `PHP_MINFO_FUNCTION(spl)`: `SPL support => enabled`, then
+/// `SPL_LIST_CLASSES` twice, its interfaces and then the rest, each
+/// joined by `, ` in the list's order (`spl_build_class_list_string`).
+///
+/// ```php
+/// $e = new ReflectionExtension('spl'); ob_start(); $e->info(); $rows = explode("\n", ob_get_clean());
+/// echo $rows[4], "\n", substr($rows[5], 0, 70), "\n", count(explode(', ', $rows[5])), "\n";
+/// ```
+/// ```expect
+/// Interfaces => OuterIterator, RecursiveIterator, SeekableIterator, SplObserver, SplSubject
+/// Classes => AppendIterator, ArrayIterator, ArrayObject, BadFunctionCall
+/// 50
+/// ```
 fn spl_info(req: &mut Request) {
-    req.info_table(&[&["SPL support", "enabled"]]);
+    let (interfaces, classes): (Vec<&str>, Vec<&str>) =
+        functions::SPL_CLASSES.iter().partition(|name| {
+            lookup_class(req, name.as_bytes())
+                .ok()
+                .flatten()
+                .and_then(|class| req.class_decl(class))
+                .is_some_and(|decl| decl.kind == ClassKind::Interface)
+        });
+    let (interfaces, classes) = (interfaces.join(", "), classes.join(", "));
+    req.info_table(&[
+        &["SPL support", "enabled"],
+        &["Interfaces", &interfaces],
+        &["Classes", &classes],
+    ]);
 }
 
 /// `ce->name`.
