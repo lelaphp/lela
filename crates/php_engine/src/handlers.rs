@@ -15441,7 +15441,19 @@ pub(crate) fn add_array_element<T: Tier>(
 /// `ZEND_ARRAY_ELEMENT_REF`, `[&$x]`, `op1` is the place a CV or a write
 /// fetch names (`GET_OP1_ZVAL_PTR_PTR(BP_VAR_W)`, which warns of
 /// nothing), made a reference where it holds none, and the entry is
-/// that cell.
+/// that cell; a `VAR` is freed after it, so `[&$this]` holds a cell
+/// nothing else does, which `array_slice()` copies as its value:
+///
+/// ```php
+/// function r(&$r) {}
+/// class K { function __construct() { $a = [&$this]; var_dump(ReflectionReference::fromArrayElement($a, 0)); $b = array_slice($a, 0, 1); call_user_func_array('r', $b); } }
+/// new K;
+/// ```
+/// ```expect
+/// NULL
+///
+/// Warning: r(): Argument #1 ($r) must be passed by reference, value given in %s on line 3
+/// ```
 fn add_element(
     req: &mut Request,
     frame: FrameRef,
@@ -15455,7 +15467,14 @@ fn add_element(
                 "InternalError: ADD_ARRAY_ELEMENT by reference over an operand php compiles no write over",
             )));
         };
-        match bound_at(req, at) {
+        let bound = bound_at(req, at);
+        // `FREE_OP1_VAR_PTR()`: a `VAR` holding a value of its own, what
+        // `FETCH_THIS` left for `[&$this]`, gives its owner up, so the
+        // cell the entry holds is the entry's alone.
+        if op.op1_type == OperandKind::Var {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        }
+        match bound {
             Ok(bound) => bound,
             Err(thrown) => return threw(req, frame, &thrown),
         }
