@@ -473,8 +473,11 @@ fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
 /// inside parentheses, since `emit`'s walk names the construct inside them
 /// and not the parentheses (#595); `php_compile`'s own test,
 /// `an_unread_expression_inside_parentheses_names_the_expression`, holds
-/// that half. With no expression left unread, the fixture is the one
-/// statement the census of Zend/tests still counts, `declare(encoding)`.
+/// that half. With no expression left unread, the fixture was the one
+/// statement the census of Zend/tests still counted, `declare(encoding)`,
+/// until #1272 read it (#1352). Since then the fixture is a refusal
+/// `php_compile`'s own tests hold, `declare(ticks=1): … enddeclare;`,
+/// the alternative syntax php runs and no test of Zend/tests writes.
 #[test]
 fn a_refusal_of_the_compiler_is_read_as_unread() {
     let pin = manifest().pin;
@@ -488,7 +491,7 @@ fn a_refusal_of_the_compiler_is_read_as_unread() {
     let served = crate::oracle::linked::serve(&pin.recipe, None, &snippet).unwrap();
     assert_eq!(
         adapter::unread(&served.stdout),
-        Some("a `declare(encoding)` this compiler cannot read yet".to_owned()),
+        Some("a `declare` in the alternative syntax this compiler cannot read yet".to_owned()),
         "{}",
         String::from_utf8_lossy(&served.stdout)
     );
