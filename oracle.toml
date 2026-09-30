@@ -92,6 +92,11 @@ LC_ALL = "C"
 # own php.ini (the Homebrew keg's, for the oracle) is never read and both binaries
 # answer as upstream's CI, which has none; -n and -c are unaffected (#1176).
 PHPRC = "/dev/null"
+# The MySQL server of ci/mysql/compose.yaml (#1345): both suites' other defaults (root, an empty
+# password, the test database, port 3306) are what the service sets; 127.0.0.1 because
+# mysqlnd reads localhost as the unix socket, which the container does not expose.
+MYSQL_TEST_HOST = "127.0.0.1"
+PDO_MYSQL_TEST_DSN = "mysql:host=127.0.0.1;dbname=test"
 
 [recipe.limits]
 # `run-tests.php:1187`: 60 s per test, 300 under valgrind. A witness's `wall=`

@@ -146,6 +146,8 @@ porting = true
 name = "ext/pdo_mysql"
 budget = 2500
 feature = "pdo_mysql"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/filter"
 budget = 3000
@@ -318,6 +320,18 @@ feature = "sysvshm"
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 
+[[crate]]
+name = "ext/mysqlnd"
+budget = 16500    # mysqlnd/*.c, 13,089 lines of C: the wire protocol over mysql_common's codec and the engine's streams, charsets, statistics, auth, result typing, prepared statements; the driver mysqli and pdo_mysql share, as php's mysqlnd is (#1345)
+feature = "mysqlnd"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/mysqli"
+budget = 5000     # mysqli*.c, 3,713 lines of C, over ext/mysqlnd (#1345)
+feature = "mysqli"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 # ---------------------------------------------------------------- sapi/
 # One crate per SAPI, package `php_sapi_<name>` at `sapi/<name>`, each its
 # binary, reaching the engine through php_sapi alone (ADR-0008). Budgets by
