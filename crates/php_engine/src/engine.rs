@@ -884,7 +884,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 74] = [
+const CORE_INI: [(&str, &str); 75] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -899,6 +899,10 @@ const CORE_INI: [(&str, &str); 74] = [
     ("ignore_repeated_source", "0"),
     ("xmlrpc_errors", "0"),
     ("xmlrpc_error_number", "0"),
+    // `max_memory_limit`, `PHP_INI_SYSTEM`, declared before
+    // `memory_limit`, whose handler holds it under the maximum
+    // (`Z/main/main.c:865-866`).
+    ("max_memory_limit", "-1"),
     ("memory_limit", "128M"),
     ("max_execution_time", "0"),
     ("default_charset", "UTF-8"),
@@ -1302,6 +1306,24 @@ fn deprecated_directives(req: &mut Request) {
     }
 }
 
+/// The core entries' handlers over what the host set, in the order
+/// `main.c` declares them (`Z/main/main.c:814-866`): `memory_limit`
+/// past `max_memory_limit` is `OnChangeMemoryLimit`'s warning with the
+/// maximum's text in its place. What an entry takes is the answer.
+fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let limit = req
+        .ini_get(b"memory_limit")
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    match req.memory_limit_verdict(&limit) {
+        Some(taken) if taken != limit => {
+            req.take_startup_value(b"memory_limit", &taken);
+            vec![(b"memory_limit".to_vec(), taken)]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// `zend_disable_functions` (`Z/Zend/zend_API.c:3668-3710`): the names
 /// the startup ini's `disable_functions` takes out of the function table
 /// before any request runs, so a call to one is a call to an undefined
@@ -1686,23 +1708,20 @@ impl Engine {
                 .unwrap_or(usize::MAX)
         };
         held.sort_by_key(|(name, _)| declared_at(name));
-        let mut taken = Vec::new();
-        let mut raised = Vec::new();
-        let mut written = Vec::new();
-        if !held.is_empty() {
-            let mut req = Request::new(Arc::clone(&self.shared), RequestDescription::default());
-            req.begin_startup();
-            for (name, value) in held {
-                let accepted = on_modify(&self.shared.extensions, &name)
-                    .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
-                if accepted {
-                    req.take_startup_value(&name, &value);
-                    taken.push((name, value));
-                }
+        let mut req = Request::new(Arc::clone(&self.shared), RequestDescription::default());
+        req.begin_startup();
+        let mut taken = core_startup(&mut req);
+        for (name, value) in held {
+            let accepted = on_modify(&self.shared.extensions, &name)
+                .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
+            if accepted {
+                req.take_startup_value(&name, &value);
+                taken.push((name, value));
             }
-            raised = req.end_startup();
-            written = req.startup_stderr();
         }
+        let raised = req.end_startup();
+        let written = req.startup_stderr();
+        drop(req);
         let Some(shared) = Arc::get_mut(&mut self.shared) else {
             return;
         };

@@ -208,11 +208,12 @@ impl Heap {
         self.mm.limit()
     }
 
-    /// Hold the request to `limit` bytes, which the ini setting sets
-    /// once at request start. The limit is met on chunk growth, with
-    /// php's exact message as the [`Fatal`].
-    pub fn set_memory_limit(&mut self, limit: usize) {
-        self.mm.set_limit(limit);
+    /// Hold the request to `limit` bytes, `zend_set_memory_limit`: the
+    /// limit is met on chunk growth, with php's exact message as the
+    /// [`Fatal`]. A limit under what the chunks hold is `false` unless
+    /// giving back cached chunks brings them under it.
+    pub fn set_memory_limit(&mut self, limit: usize) -> bool {
+        self.mm.set_limit(limit)
     }
 
     /// `zend_alloc_in_memory_limit_error_reporting`: whether the limit's

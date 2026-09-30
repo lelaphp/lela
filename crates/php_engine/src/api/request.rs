@@ -18045,6 +18045,18 @@ impl Request {
         } else {
             value
         };
+        let limited;
+        let value = if name == b"memory_limit" {
+            match self.memory_limit_verdict(value) {
+                Some(text) => {
+                    limited = text;
+                    limited.as_slice()
+                }
+                None => return Ok(None),
+            }
+        } else {
+            value
+        };
         let handler = self.shared.extensions.iter().find_map(|e| {
             e.on_modify
                 .iter()
@@ -18060,7 +18072,6 @@ impl Request {
         self.ini.push((name.to_vec(), value.to_vec()));
         match name {
             b"max_execution_time" => self.arm_timer(),
-            b"memory_limit" => self.set_memory_limit(),
             b"error_reporting" => self.update_error_reporting(),
             b"zend.enable_gc" => {
                 self.heap.gc_enable(ini_truth(Some(value)));
@@ -18108,7 +18119,9 @@ impl Request {
         match name {
             b"xmlrpc_errors" | b"sys_temp_dir" | b"sendmail_path" | b"syslog.facility"
             | b"syslog.ident" | b"disable_functions" | b"enable_dl" | b"extension_dir"
-            | b"allow_url_fopen" | b"allow_url_include" => (false, false, true),
+            | b"allow_url_fopen" | b"allow_url_include" | b"max_memory_limit" => {
+                (false, false, true)
+            }
             b"short_open_tag"
             | b"mail.add_x_header"
             | b"mail.mixed_lf_and_crlf"
@@ -19112,13 +19125,66 @@ impl Request {
         }
     }
 
-    /// `zend_set_memory_limit` over the ini entry as the table has it:
-    /// at request start, and again when `ini_set()` moves the entry,
-    /// which is php's `OnChangeMemoryLimit`. `-1` is no limit.
+    /// The limit the heap holds a request to from its start: what
+    /// `php_module_startup` left, `memory_limit` where it is under
+    /// `max_memory_limit` and the maximum's otherwise, since
+    /// `OnChangeMaxMemoryLimit` runs first and set it. `-1` is no limit.
     fn set_memory_limit(&mut self) {
-        let limit = self.ini_parse_bytes_of("memory_limit");
-        self.heap
-            .set_memory_limit(usize::try_from(limit).unwrap_or(usize::MAX >> 1));
+        let limit = self
+            .limit_bytes(b"memory_limit")
+            .min(self.limit_bytes(b"max_memory_limit"));
+        self.heap.set_memory_limit(limit.min(usize::MAX >> 1));
+    }
+
+    /// An entry `zend_ini_parse_uquantity` reads, `-1` the largest size.
+    fn limit_bytes(&self, name: &[u8]) -> usize {
+        let bytes = self.ini_get(name).map_or(0, Request::ini_parse_bytes);
+        usize::try_from(bytes.cast_unsigned()).unwrap_or(usize::MAX)
+    }
+
+    /// `OnChangeMemoryLimit` (`Z/main/main.c:333-367`) over `value` at
+    /// runtime or at startup: a value past `max_memory_limit` is php's
+    /// warning (silent for `-1`) and the maximum's text in its place,
+    /// the heap left as it was; otherwise `zend_set_memory_limit`, whose
+    /// refusal of a limit under what the chunks hold is php's other
+    /// warning and the entry kept. The text the entry takes is the
+    /// answer.
+    ///
+    /// ```php
+    /// $a = str_repeat("0", 5 * 1024 * 1024);
+    /// var_dump(ini_set("memory_limit", "3M"), ini_get("memory_limit"));
+    /// ```
+    /// ```expect
+    /// Warning: Failed to set memory limit to 3145728 bytes (Current memory usage is 7356416 bytes) in %s on line 3
+    /// bool(false)
+    /// string(4) "128M"
+    /// ```
+    pub(crate) fn memory_limit_verdict(&mut self, value: &[u8]) -> Option<Vec<u8>> {
+        let wanted =
+            usize::try_from(Request::ini_parse_bytes(value).cast_unsigned()).unwrap_or(usize::MAX);
+        let max = self.limit_bytes(b"max_memory_limit");
+        if wanted > max {
+            if wanted != usize::MAX {
+                crate::api::raising::warning(
+                    self,
+                    &format!(
+                        "Failed to set memory_limit to {wanted} bytes. Setting to max_memory_limit instead (currently: {max} bytes)"
+                    ),
+                );
+            }
+            return self.ini_get(b"max_memory_limit").map(<[u8]>::to_vec);
+        }
+        if !self.heap.set_memory_limit(wanted.min(usize::MAX >> 1)) {
+            let usage = self.heap.memory_usage(true);
+            crate::api::raising::warning(
+                self,
+                &format!(
+                    "Failed to set memory limit to {wanted} bytes (Current memory usage is {usage} bytes)"
+                ),
+            );
+            return None;
+        }
+        Some(value.to_vec())
     }
 
     /// `memory_get_usage()`.
