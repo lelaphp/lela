@@ -195,6 +195,19 @@ pub(crate) trait Ops: Send {
         CastTarget::Refused
     }
 
+    /// `ops->cast` with no return pointer, what `php_stream_can_cast`
+    /// asks: [`Ops::cast_target`] for every kind but the one whose
+    /// answer is a call, which asks it without the warnings a cast with
+    /// a place to write raises.
+    fn can_cast_target(
+        &mut self,
+        req: &mut Request,
+        cast: Cast,
+        own: Option<Stream>,
+    ) -> CastTarget<'_> {
+        self.cast_target(req, cast, own)
+    }
+
     /// `ops->set_option` for the options [`StreamOption`] names: php's
     /// `PHP_STREAM_OPTION_RETURN_NOTIMPL` for a kind that takes none of
     /// them, which the generic layer answers next.
@@ -1281,6 +1294,24 @@ impl PhpStream {
             warning(req, &text);
         }
         Some(fd)
+    }
+
+    /// `php_stream_can_cast` (`_php_stream_cast` with no `ret`): whether
+    /// the stream casts to a fd as `cast` asks, with nothing flushed or
+    /// sought and nothing warned of.
+    pub(crate) fn can_cast(&mut self, req: &mut Request, cast: Cast) -> bool {
+        if !self.readfilters.is_empty() || !self.writefilters.is_empty() {
+            return false;
+        }
+        let own = self.res.map(Stream::of);
+        match self.ops.can_cast_target(req, cast, own) {
+            CastTarget::Fd(_) => true,
+            CastTarget::Host(standard) => req.host_fd(standard).is_some(),
+            CastTarget::Stream(inner) => req
+                .stream_op(inner, |req, s| s.can_cast(req, cast))
+                .unwrap_or(false),
+            CastTarget::Refused => false,
+        }
     }
 
     /// `_php_stream_free` under `PHP_STREAM_FREE_CLOSE`
@@ -4069,6 +4100,24 @@ impl Stream {
     pub fn cast(self, req: &mut Request, cast: Cast, warn: bool) -> Option<RawFd> {
         req.stream_op(self, |req, stream| stream.cast(req, cast, warn))
             .flatten()
+    }
+
+    /// `php_stream_can_cast`: whether [`Stream::cast`] would answer a fd,
+    /// asked with nothing flushed, sought or warned of, which a
+    /// user-space stream's `stream_cast` is asked without a place to
+    /// write its warnings to.
+    ///
+    /// ```php
+    /// class W { public $context; function stream_open($p, $m, $o, &$op) { return true; } function stream_eof() { return false; } function stream_seek($o, $w) { echo "seek\n"; return true; } }
+    /// stream_wrapper_register('wr', 'W');
+    /// var_dump(stream_isatty(fopen('wr://x', 'r')));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
+    pub fn can_cast(self, req: &mut Request, cast: Cast) -> bool {
+        req.stream_op(self, |req, stream| stream.can_cast(req, cast))
+            .unwrap_or(false)
     }
 
     /// `stream->writepos - stream->readpos`: the bytes read from the

@@ -601,6 +601,7 @@ request::Stream
 request::Stream::accept
 request::Stream::add_filter
 request::Stream::as_value
+request::Stream::can_cast
 request::Stream::cast
 request::Stream::close
 request::Stream::copy_to_mem
