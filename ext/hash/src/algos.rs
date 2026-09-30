@@ -102,13 +102,29 @@ pub(crate) type Init = fn(&mut Request, Options) -> Result<Box<dyn State>, Throw
 pub(crate) struct Options(pub(crate) Option<PhpArray>);
 
 impl Options {
-    /// `zend_hash_str_find_deref(args, name)`.
+    /// `zend_hash_str_find_deref(args, name)`: the name is a key for
+    /// the lookup alone, given back once it is made, as php's
+    /// `zend_hash_str_find` allocates none.
+    ///
+    /// ```php
+    /// $a = hash_init('murmur3a', options: ['seed' => 1]);
+    /// $m = memory_get_usage();
+    /// $b = hash_init('murmur3a', options: ['seed' => 1]);
+    /// $n = memory_get_usage();
+    /// unset($b);
+    /// var_dump(memory_get_usage() - $n + ($n - $m));
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     pub(crate) fn get(self, req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown> {
         let Some(options) = self.0 else {
             return Ok(None);
         };
         let key = PhpString::new(req, name)?;
-        Ok(options.get(&Key::Str(key)).map(|value| value.deref()))
+        let found = options.get(&Key::Str(key)).map(|value| value.deref());
+        req.release(Value::string(key));
+        Ok(found)
     }
 
     /// The `seed` option as `PHP_MURMUR3AInit` and `PHP_XXH32Init` read
