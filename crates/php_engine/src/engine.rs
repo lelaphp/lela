@@ -3192,6 +3192,23 @@ fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
 /// the shutdown functions and the extensions' `rshutdown`, until
 /// `shutdown_executor` destroys the table (design §5.10).
 ///
+/// A fatal the loop raised leaves every frame above the main one
+/// standing, as `zend_bailout` jumps past them; `_zend_bailout` sets
+/// `EG(current_execute_data)` to null (`Z/Zend/zend.c:1268`), so they are
+/// popped here, before the main one is left, and a shutdown function is
+/// called from nothing.
+///
+/// ```php
+/// set_time_limit(1);
+/// register_shutdown_function(function () { debug_print_backtrace(); });
+/// function spin() { while (true); }
+/// spin();
+/// ```
+/// ```expect exit=255 wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 4
+/// #0 [internal function]: {closure:%s:3}()
+/// ```
+///
 /// Whether the program ran to its end: not a fatal, a refused
 /// declaration or an `exit`, each of which php leaves by `zend_bailout`,
 /// and not a throwable no handler took.
@@ -3199,6 +3216,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if !note_compiled(req, unit, SourceKind::File) {
         return false;
     }
+    let standing = req.vm().frames().len();
     let frame = match req.push_frame(Arc::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
@@ -3208,6 +3226,9 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     };
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
+    }
+    while req.vm().frames().len() > standing + 1 {
+        req.pop_frame();
     }
     req.detach_symbol_table(frame);
     req.pop_frame();
