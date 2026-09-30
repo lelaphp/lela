@@ -9769,6 +9769,13 @@ pub(crate) fn instanceof<T: Tier>(
             cached_class(req, frame, code, op.op2, slot)
                 .is_some_and(|class| req.instance_of(object.class(), class))
         }
+        // `ce && instanceof_function(...)`: a silent `FETCH_CLASS` found
+        // nothing.
+        (Some(_), OperandKind::Var)
+            if req.slot(frame, exec::temporary_slot(code, op.op2)).tag() == TypeTag::Null =>
+        {
+            false
+        }
         (Some(object), _) => match class_operand(req, frame, code, op.op2_type, op.op2, None) {
             Ok(class) => req.instance_of(object.class(), class),
             Err(thrown) => {
@@ -9870,6 +9877,11 @@ fn class_operand(
 /// `ZEND_FETCH_CLASS_MASK` (`Z/Zend/zend_compile.h:1034`): the bits of a
 /// class operand's number that are its fetch type, the flags above them.
 const FETCH_CLASS_MASK: u32 = 0x0f;
+
+/// `ZEND_FETCH_CLASS_NO_AUTOLOAD` and `ZEND_FETCH_CLASS_SILENT`
+/// (`Z/Zend/zend_compile.h:1035-1036`).
+const FETCH_CLASS_NO_AUTOLOAD: u32 = 0x80;
+const FETCH_CLASS_SILENT: u32 = 0x100;
 
 /// `ZEND_FETCH_CLASS_SELF` and `ZEND_FETCH_CLASS_PARENT`
 /// (`Z/Zend/zend_compile.h:1028`), the two fetch types a call on the class
@@ -10046,6 +10058,22 @@ pub(crate) fn fetch_class_name<T: Tier>(
 /// Class name must be a valid object or a string
 /// Class "Nope" not found
 /// ```
+///
+/// Under `ZEND_FETCH_CLASS_SILENT`, which `instanceof` compiles with
+/// beside `ZEND_FETCH_CLASS_NO_AUTOLOAD`, a name nothing declares is no
+/// class and no error, and the operation after it reads the null:
+///
+/// ```php
+/// namespace Foo; class Bar {}
+/// $n = 'Bar'; $f = 'Foo\Bar';
+/// spl_autoload_register(function ($c) { echo "autoload $c\n"; });
+/// var_dump(new \stdClass instanceof $n, new Bar instanceof $n, new Bar instanceof $f);
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// ```
 pub(crate) fn fetch_class<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -10053,14 +10081,21 @@ pub(crate) fn fetch_class<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let class = if op.op2_type == OperandKind::Unused {
-        scope_class(req, op.op1)
+        scope_class(req, op.op1).map(Some)
     } else {
         let value = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
         let class = if let Some(object) = value.as_object() {
-            Ok(object.class())
+            Ok(Some(object.class()))
         } else if let Some(name) = value.as_str_bytes() {
             let name = name.to_vec();
-            crate::api::call::fetch_class(req, &name)
+            match (
+                op.op1 & FETCH_CLASS_SILENT,
+                op.op1 & FETCH_CLASS_NO_AUTOLOAD,
+            ) {
+                (0, _) => crate::api::call::fetch_class(req, &name).map(Some),
+                (_, 0) => crate::api::call::autoload(req, &name),
+                _ => crate::api::call::lookup_class(req, &name),
+            }
         } else {
             Err(crate::api::raising::throw(
                 req,
@@ -10072,8 +10107,14 @@ pub(crate) fn fetch_class<T: Tier>(
         class
     };
     match class {
-        Ok(class) => {
+        Ok(Some(class)) => {
             hold_class(req, frame, code, op.out, class);
+            Ok(advance(req, frame))
+        }
+        // `Z_CE_P(EX_VAR(opline->result.var)) = NULL`.
+        Ok(None) => {
+            let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), Value::null());
+            req.release(previous);
             Ok(advance(req, frame))
         }
         Err(thrown) => threw(req, frame, &thrown),
