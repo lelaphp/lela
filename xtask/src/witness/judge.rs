@@ -73,6 +73,12 @@ pub(super) fn one(
     kept: &mut Kept,
 ) -> Judged {
     let oracle_run = match &witness.request {
+        Some(request) if witness.served == Served::Fpm => oracle.asserted().and_then(|()| {
+            let Some(fpm) = &oracle.pin().sapi.fpm else {
+                anyhow::bail!("oracle.toml's [sapi] names no php-fpm to serve the request");
+            };
+            super::fpm::served_as_fpm(oracle, &fpm.path, &witness.snippet, request, &[])
+        }),
         Some(request) => oracle.asserted().and_then(|()| {
             let Some(cgi) = &oracle.pin().sapi.cgi else {
                 anyhow::bail!("oracle.toml's [sapi] names no php-cgi to serve the request");
@@ -168,6 +174,13 @@ pub(super) fn serve(
                 witness.request.as_deref().unwrap_or_default(),
             )
             .map_err(|trouble| format!("the php-cgi binary did not serve it: {trouble:#}")),
+        Served::Fpm => binary
+            .serve_fpm(
+                oracle,
+                &witness.snippet,
+                witness.request.as_deref().unwrap_or_default(),
+            )
+            .map_err(|trouble| format!("the php-fpm binary did not serve it: {trouble:#}")),
     }
 }
 

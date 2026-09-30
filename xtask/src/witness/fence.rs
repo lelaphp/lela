@@ -38,7 +38,10 @@
 //! `--POST_RAW--`, `--COOKIE--`, `--ENV--`): the snippet is served by php-cgi beside
 //! the pinned php for the oracle and by the engine's `php-cgi` for the
 //! engine (`sapi/cgi`, ADR-0008), each in a process of its own, and the `expect` fence
-//! pins what php-cgi writes, its head and its body (#1197).
+//! pins what php-cgi writes, its head and its body (#1197). A `request fpm`
+//! fence is the same request handed to a php-fpm as `FastCGI` records, the
+//! oracle's pinned php-fpm and the engine's `php-fpm` each over a pool of
+//! one child, for the natives php-fpm's own module declares (#1291).
 //!
 //! A `process` says the snippet changes the process it runs in: it forks,
 //! sends or takes a signal, or sets the process's ids, session or limits.
@@ -68,6 +71,8 @@ const STDERR: &str = "stderr";
 /// The info string of the optional fence between the two that describes
 /// the request a CGI host serves the program as.
 const REQUEST: &str = "request";
+/// The word after `request` that hands the request to a php-fpm.
+const FPM: &str = "fpm";
 
 /// What the `exit` attribute of an `expect` fence says.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -108,6 +113,9 @@ pub enum Served {
     /// oracle: a `request` fence describes what the CGI host is handed
     /// (#1197).
     Cgi,
+    /// The engine's `php-fpm` built the same way, beside php-fpm for the
+    /// oracle: the fence is `request fpm` (#1291).
+    Fpm,
 }
 
 /// One witness: the program, what it prints, and where it stands.
@@ -163,6 +171,9 @@ impl Witness {
         };
         if let Some(request) = &self.request {
             program = format!("{request}\n{program}");
+        }
+        if self.served == Served::Fpm {
+            program = format!("{FPM}\n{program}");
         }
         format!("witness:{}", git::blob_id(program.as_bytes()))
     }
@@ -305,11 +316,27 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
     // The request a CGI host serves the snippet as, where a `request`
     // fence stands between the two.
     let mut request = None;
+    let mut host = Served::Cgi;
     if let Some(at) = next_fence(lines, after)
         && first_word(info_at(lines, at).unwrap_or_default()) == REQUEST
     {
         let (body, next) = body_of(lines, at)
             .ok_or_else(|| Problem::at(file, at, "a request fence no line of the block closes"))?;
+        match info_at(lines, at)
+            .unwrap_or_default()
+            .split_whitespace()
+            .nth(1)
+        {
+            None => {}
+            Some(FPM) => host = Served::Fpm,
+            Some(_) => {
+                return Err(Problem::at(
+                    file,
+                    at,
+                    "a request fence names `fpm` after `request` or nothing",
+                ));
+            }
+        }
         request = Some(body);
         after = next;
     }
@@ -367,7 +394,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             wall: attributes.wall,
             regime: attributes.regime,
             served: if request.is_some() {
-                Served::Cgi
+                host
             } else {
                 attributes.served
             },
@@ -765,6 +792,26 @@ mod tests {
         assert_eq!(witness.request.as_deref(), Some("--GET--\nq=1"));
         assert_eq!(witness.stdout, "1");
         assert_ne!(witness.id(), plain.witnesses[0].id());
+    }
+
+    /// `request fpm` hands the same request to a php-fpm, and is a run of
+    /// its own under the key (#1291).
+    #[test]
+    fn a_request_fpm_fence_serves_the_snippet_by_a_process_manager() {
+        let block = |info: &str| {
+            php(&format!(
+                "/// ```php\n/// echo $_GET['q'];\n/// ```\n/// ```{info}\n/// --GET--\n/// q=1\n/// ```\n/// ```expect\n/// 1\n/// ```\n"
+            ))
+        };
+        let (fpm, cgi, other) = (
+            block("request fpm"),
+            block("request"),
+            block("request apache"),
+        );
+        assert!(fpm.problems.is_empty(), "{fpm:#?}");
+        assert_eq!(fpm.witnesses[0].served, Served::Fpm);
+        assert_ne!(fpm.witnesses[0].id(), cgi.witnesses[0].id());
+        assert_eq!(other.problems.len(), 1, "{other:#?}");
     }
 
     #[test]
