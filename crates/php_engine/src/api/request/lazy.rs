@@ -452,7 +452,7 @@ impl Request {
         if let Some(table) = self.heap.object_take_properties(o) {
             self.release(Value::array(PhpArray::of(table)));
         }
-        let placed = self.placed_properties(object.class());
+        let placed = self.placed_properties(object.class()).to_vec();
         let reset = self.class_slots(class) as usize;
         let final_class = self
             .class_decl(object.class())

@@ -555,6 +555,11 @@ pub(crate) struct Shared {
     /// once as `zend_register_internal_class_ex` links it: a native
     /// class's parent is a native class.
     pub(crate) parents: Vec<Option<ClassId>>,
+    /// Each class's placed properties, one row per row of `classes`,
+    /// built at the first read by any request
+    /// ([`Request::placed_properties`]): what the class and its native
+    /// parents declare, which never changes.
+    pub(crate) placed: Vec<OnceLock<crate::api::request::Placed>>,
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
     ini: Vec<(Vec<u8>, Vec<u8>)>,
@@ -2177,6 +2182,7 @@ impl EngineBuilder {
                 class_keys.get(&*lowered(&parent.0)).copied()
             })
             .collect();
+        let placed = classes.iter().map(|_| OnceLock::new()).collect();
         // `module_registry`: `Core` first, as `zend_startup` registers it,
         // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
@@ -2206,6 +2212,7 @@ impl EngineBuilder {
                 class_keys,
                 function_tables,
                 parents,
+                placed,
                 constants,
                 engine_states: Vec::new(),
                 ini,

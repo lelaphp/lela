@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use php_compile::{CompileError, SourceKind, StackLimit};
 use php_heap::{
@@ -2425,13 +2425,20 @@ pub(crate) enum MemberAt {
 /// the declaration's index there, for a class that uses traits the
 /// class composed with them at its link, which is the table's row in
 /// its place (`zend_do_bind_traits`), and the bucket of
-/// `EG(class_table)` it stands in.
+/// `EG(class_table)` it stands in; beside them its placed properties,
+/// once read ([`Request::placed_properties`]).
 pub(crate) struct Declared {
     unit: Arc<Unit>,
     at: u32,
     composed: Option<Box<php_unit::link::Composed>>,
     place: preload::Bucket,
+    placed: OnceLock<Placed>,
 }
+
+/// A class's declared instance properties in slot order, each beside the
+/// class that declared it: `ce->properties_info_table` over
+/// `ce->default_properties_table` ([`Request::placed_properties`]).
+pub(crate) type Placed = Box<[(ClassId, PropertyDecl)]>;
 
 /// The class `EG(class_table)` holds under `name`, any case: an engine's
 /// class or a native class's alias, a class the request declared, then
@@ -7437,7 +7444,26 @@ impl Request {
     ///   int(4)
     /// }
     /// ```
-    pub(crate) fn placed_properties(&self, class: ClassId) -> Vec<(ClassId, PropertyDecl)> {
+    ///
+    /// The table is built once per class, at the first read, and read
+    /// from the class's row after, as php builds it once at the link
+    /// (`zend_build_properties_info_table`): what a linked class
+    /// declares, and the chain above it, never changes.
+    pub(crate) fn placed_properties(&self, class: ClassId) -> &[(ClassId, PropertyDecl)] {
+        let row = usize::try_from(class.0).ok().and_then(|at| {
+            match at.checked_sub(self.shared.classes.len()) {
+                None => self.shared.placed.get(at),
+                Some(declared) => self.declared.get(declared).map(|row| &row.placed),
+            }
+        });
+        match row {
+            Some(row) => row.get_or_init(|| self.place_properties(class)),
+            None => &[],
+        }
+    }
+
+    /// [`Request::placed_properties`] built from the declarations.
+    fn place_properties(&self, class: ClassId) -> Placed {
         let mut chain = Vec::new();
         let mut at = Some(class);
         for _ in 0..64 {
@@ -8887,12 +8913,13 @@ impl Request {
     /// is unset, reset or freed. A slot of an untyped property typed
     /// nothing.
     pub(crate) fn slot_source_gone(&mut self, object: PhpObject, slot: u32, cell: Ref) {
-        let placed = self.placed_properties(object.class());
-        let Some((declaring, p)) = usize::try_from(slot).ok().and_then(|at| placed.get(at)) else {
-            return;
-        };
-        if p.ty.is_some() {
-            self.ref_del_type_source(cell, *declaring, &p.name.0);
+        let typed = usize::try_from(slot)
+            .ok()
+            .and_then(|at| self.placed_properties(object.class()).get(at))
+            .filter(|(_, p)| p.ty.is_some())
+            .map(|(declaring, p)| (*declaring, p.name.0.clone()));
+        if let Some((declaring, name)) = typed {
+            self.ref_del_type_source(cell, declaring, &name);
         }
     }
 
@@ -8997,11 +9024,11 @@ impl Request {
     ) -> Option<(TypedProperty, Vec<u8>)> {
         let placed = self.placed_properties(class);
         let at = usize::try_from(slot).ok()?;
-        let (declaring, p) = placed.into_iter().nth(at)?;
+        let (declaring, p) = placed.get(at)?;
         let name = p.name.0.to_vec();
         let typed = TypedProperty {
-            declaring,
-            ty: p.ty?,
+            declaring: *declaring,
+            ty: p.ty.clone()?,
             readonly: p.is_readonly,
         };
         Some((typed, name))
@@ -11143,8 +11170,8 @@ impl Request {
             let declared: Vec<(Box<[u8]>, ClassId)> = match o.declared_rows() {
                 php_heap::DeclaredRows::Slots => self
                     .placed_properties(class)
-                    .into_iter()
-                    .map(|(declaring, p)| (p.name.0, declaring))
+                    .iter()
+                    .map(|(declaring, p)| (p.name.0.clone(), *declaring))
                     .collect(),
                 php_heap::DeclaredRows::Copied => Vec::new(),
             };
@@ -11501,7 +11528,7 @@ impl Request {
         // `zend_check_property_access`, `is_dynamic` for each.
         let placed = match object.heap().declared_rows() {
             php_heap::DeclaredRows::Slots => self.placed_properties(object.class()),
-            php_heap::DeclaredRows::Copied => Vec::new(),
+            php_heap::DeclaredRows::Copied => &[],
         };
         let mut at = 0;
         Ok(rows
@@ -11528,8 +11555,8 @@ impl Request {
         let declared: Vec<Box<[u8]>> = match o.declared_rows() {
             php_heap::DeclaredRows::Slots => self
                 .placed_properties(ClassId(o.class()))
-                .into_iter()
-                .map(|(_, p)| p.name.0)
+                .iter()
+                .map(|(_, p)| p.name.0.clone())
                 .collect(),
             php_heap::DeclaredRows::Copied => Vec::new(),
         };
@@ -15205,6 +15232,7 @@ impl Request {
             at,
             composed: composed.map(Box::new),
             place,
+            placed: OnceLock::new(),
         });
         self.bind_members(class);
     }

@@ -899,7 +899,7 @@ fn mangled_names(req: &Request, object: PhpObject) -> Vec<MangledName> {
     }
     let eager = o.laziness() == php_heap::Laziness::Eager;
     req.placed_properties(object.class())
-        .into_iter()
+        .iter()
         .zip(0u32..)
         .filter(|(_, i)| !eager || *i >= o.slots() || !o.slot(*i).is_undef())
         .map(|((declaring, p), _)| {
@@ -910,11 +910,11 @@ fn mangled_names(req: &Request, object: PhpObject) -> Vec<MangledName> {
                 // mangled with the class that declared it, which for an
                 // inherited one is a class above.
                 Visibility::Private => req
-                    .class_decl(declaring)
+                    .class_decl(*declaring)
                     .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
             };
             MangledName {
-                name: p.name.0,
+                name: p.name.0.clone(),
                 prefix,
             }
         })
@@ -1630,18 +1630,18 @@ pub(crate) fn debug_rows(
     // A table that holds copies of the declared rows has no
     // `IS_INDIRECT` to a slot, so no row reads `uninitialized`.
     let placed = match o.declared_rows() {
-        php_heap::DeclaredRows::Slots => req.placed_properties(reader.class()),
+        php_heap::DeclaredRows::Slots => req.placed_properties(reader.class()).to_vec(),
         php_heap::DeclaredRows::Copied => Vec::new(),
     };
     let mut out = Vec::with_capacity(rows.len());
     let mut rest = rows.into_iter().peekable();
-    for ((declaring, p), at) in placed.into_iter().zip(0u32..) {
+    for ((declaring, p), at) in placed.iter().zip(0u32..) {
         let key = {
             let prefix = match p.visibility {
                 Visibility::Public => None,
                 Visibility::Protected => Some(b"\0*\0".to_vec()),
                 Visibility::Private => req
-                    .class_decl(declaring)
+                    .class_decl(*declaring)
                     .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
             };
             let bytes = [prefix.unwrap_or_default().as_slice(), &p.name.0].concat();

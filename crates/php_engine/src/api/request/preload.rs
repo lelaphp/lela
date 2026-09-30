@@ -649,7 +649,13 @@ impl Request {
                     };
                     renumbered.push((*old, class_id(natives + self.declared.len())));
                     let place = self.buckets.take();
-                    self.declared.push(Declared { place, ..declared });
+                    // Renumbered, so the placed rows are built again
+                    // under the new numbers.
+                    self.declared.push(Declared {
+                        place,
+                        placed: std::sync::OnceLock::new(),
+                        ..declared
+                    });
                 }
                 Row::Alias(alias, old) => {
                     let class = renumbered
