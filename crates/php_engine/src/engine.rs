@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
@@ -29,7 +30,7 @@ use crate::api::abi::{
     Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni, Validation,
 };
 use crate::api::raising::Level;
-use crate::api::request::{Ending, ExtensionId, Request, Sink};
+use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
@@ -590,6 +591,10 @@ pub(crate) struct Shared {
     /// The entries a host's `php_admin_value` made `PHP_INI_SYSTEM`,
     /// which no request moves ([`IniOrigin::Admin`]).
     pub(crate) locked: Vec<Vec<u8>>,
+    /// `CG(script_encoding_list)` as the engine started: what the
+    /// startup `zend.script_encoding` named, through the encoding
+    /// functions ([`crate::multibyte`]).
+    pub(crate) script_encodings: Vec<php_compile::multibyte::Encoding>,
     pub(crate) units: UnitCache,
     /// The persistent pool (design §4.10, #1172): the sockets
     /// `pfsockopen` and `STREAM_CLIENT_PERSISTENT` keep between requests,
@@ -841,7 +846,9 @@ fn link_trampolines(
 /// the request made before it where it is an `eval`'s
 /// ([`php_compile::Options::keys_before`]), and the classes the request
 /// had declared by then, which a unit compiled for no request has none of
-/// ([`php_compile::RequestClasses`]).
+/// ([`php_compile::RequestClasses`]); and, where `zend.multibyte` is on,
+/// the encoding functions bound to the request and what the scanner
+/// reads beside them ([`crate::multibyte::Bound`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
@@ -849,6 +856,7 @@ struct Origin<'a> {
     kind: SourceKind,
     keys_before: u32,
     request_classes: RequestClasses<'a>,
+    multibyte: Option<Multibyte<'a>>,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -937,7 +945,9 @@ impl Shared {
             short_open_tag: req.short_open_tag(),
             assertions: req.assertions() >= 0,
             shebang: self.shebang,
+            multibyte: ini_truth(req.ini_get(b"zend.multibyte")),
         };
+        let bound = crate::multibyte::bound(req, ini.multibyte);
         let cwd = req.cwd();
         let keys_before = req.keys_made;
         let stack = req.stack_limit();
@@ -948,6 +958,7 @@ impl Shared {
                 kind,
                 keys_before,
                 request_classes,
+                multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
             compile(
                 source,
@@ -978,6 +989,23 @@ impl Shared {
         )
     }
 
+    /// `zend.multibyte` as the startup ini has it, which a unit bound for
+    /// the cache is compiled under ([`CompileIni`]).
+    pub(crate) fn compile_multibyte(&self) -> bool {
+        self.compile_ini().multibyte
+    }
+
+    /// What a file compiled for no request is read under where the
+    /// startup `zend.multibyte` is on: no request to bind the encoding
+    /// functions to, so Zend's own dummies, and no list.
+    fn unbound(&self) -> Option<Multibyte<'static>> {
+        self.compile_ini().multibyte.then_some(Multibyte {
+            encodings: &php_compile::multibyte::Dummy,
+            detect_unicode: true,
+            listed: &[],
+        })
+    }
+
     /// The compiler's ini as the startup one has it, which a unit bound
     /// for the cache is compiled under; a request compiles its own
     /// source under its own ([`CompileIni`]).
@@ -994,6 +1022,9 @@ impl Shared {
                 .ini_default(b"zend.assertions")
                 .is_none_or(|value| Request::ini_parse_bytes(value) >= 0),
             shebang: self.shebang,
+            multibyte: self
+                .ini_default(b"zend.multibyte")
+                .is_some_and(|value| ini_truth(Some(value))),
         }
     }
 
@@ -1015,7 +1046,17 @@ impl Shared {
         self.units
             .file(
                 asked,
-                |source| self.publish_file(source, path, cwd, stack, RequestClasses::default()),
+                |source| {
+                    let multibyte = self.unbound();
+                    self.publish_file(
+                        source,
+                        path,
+                        cwd,
+                        stack,
+                        RequestClasses::default(),
+                        multibyte,
+                    )
+                },
                 |_| None,
             )
             .0
@@ -1047,6 +1088,7 @@ impl Shared {
         cwd: &Path,
         stack: StackLimit,
         request_classes: RequestClasses<'_>,
+        multibyte: Option<Multibyte<'_>>,
     ) -> Result<Arc<Unit>, CompileError> {
         self.publish(
             source,
@@ -1056,6 +1098,7 @@ impl Shared {
                 kind: SourceKind::File,
                 keys_before: 0,
                 request_classes,
+                multibyte,
             },
             stack,
         )
@@ -1154,7 +1197,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 86] = [
+const CORE_INI: [(&str, &str); 89] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -1210,6 +1253,13 @@ const CORE_INI: [(&str, &str); 86] = [
     // `zend.enable_gc`, `On` (`Z/Zend/zend.c:265`), whose `on_modify` is
     // the collector's `gc_enable`.
     ("zend.enable_gc", "1"),
+    // `zend.multibyte`, `zend.script_encoding` and `zend.detect_unicode`
+    // (`Z/Zend/zend.c:266-268`): whether a file is read in its own
+    // encoding, the encodings it may be in, and whether a byte order
+    // mark or NULs say which first ([`crate::multibyte`]).
+    ("zend.multibyte", "0"),
+    ("zend.script_encoding", ""),
+    ("zend.detect_unicode", "1"),
     // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
     // as the empty string and `OnUpdateFiberStackSize` as php's default.
     ("fiber.stack_size", ""),
@@ -1982,6 +2032,7 @@ impl EngineBuilder {
                 reenter: self.reenter,
                 resume: self.resume,
                 locked,
+                script_encodings: Vec::new(),
                 units,
                 persistent: crate::api::abi::Pool::new(PERSISTENT_ENTRIES),
                 strings: Mutex::new(strings),
@@ -2172,6 +2223,10 @@ impl Engine {
                 taken.push((name, value));
             }
         }
+        let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
+        if taken_encoding == crate::multibyte::Startup::Refused {
+            taken.push((b"zend.script_encoding".to_vec(), Vec::new()));
+        }
         disable_warnings(&mut req);
         let raised = req.end_startup();
         let written = req.startup_stderr();
@@ -2190,6 +2245,7 @@ impl Engine {
             shared.ini.push((name, value));
         }
         shared.startup_raised = raised;
+        shared.script_encodings = script_encodings;
         shared
             .startup_errors
             .push_str(&String::from_utf8_lossy(&written));
@@ -2302,6 +2358,7 @@ impl Engine {
             kind: SourceKind::File,
             keys_before: 0,
             request_classes: RequestClasses::default(),
+            multibyte: self.shared.unbound(),
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -2349,6 +2406,7 @@ impl Engine {
                     kind: SourceKind::File,
                     keys_before: 0,
                     request_classes: RequestClasses::default(),
+                    multibyte: self.shared.unbound(),
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -2906,6 +2964,8 @@ struct CompileIni {
     short_open_tag: bool,
     assertions: bool,
     shebang: php_compile::Shebang,
+    /// `CG(multibyte)`, `zend.multibyte`, `PHP_INI_PERDIR`.
+    multibyte: bool,
 }
 
 /// One source compiled, with what the compiler refused kept instead of
@@ -2946,7 +3006,7 @@ fn compile(
         request_classes: origin.request_classes,
         stack,
         keys_before: origin.keys_before,
-        multibyte: None,
+        multibyte: origin.multibyte,
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
@@ -3099,10 +3159,18 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &
     for raised in &refused.raised {
         req.note_error_in(raised.level, &raised.message, file, raised.line);
     }
-    if refused.thrown {
-        req.end_in_uncaught(refused.level, &refused.message, file, refused.line);
-    } else {
-        req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+    match (refused.stage, refused.thrown) {
+        // Opened before anything compiled or ran: `zend_error` finds no
+        // file compiling and none executing.
+        (php_compile::Stage::Opening, _) => {
+            req.end_in_compile_time(refused.level, &refused.message, b"Unknown", 0);
+        }
+        (php_compile::Stage::Compiling, true) => {
+            req.end_in_uncaught(refused.level, &refused.message, file, refused.line);
+        }
+        (php_compile::Stage::Compiling, false) => {
+            req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+        }
     }
 }
 
@@ -4690,12 +4758,14 @@ mod tests {
                     kind: SourceKind::File,
                     keys_before: 0,
                     request_classes: RequestClasses::default(),
+                    multibyte: None,
                 },
                 CompileIni {
                     precision: 14,
                     short_open_tag: true,
                     assertions: true,
                     shebang: php_compile::Shebang::Read,
+                    multibyte: false,
                 },
                 Declared::default(),
                 StackLimit::UNCHECKED,

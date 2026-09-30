@@ -260,6 +260,24 @@ pub struct CompileError {
     /// fatal: a `try` around the `include` or the `eval` catches it, and
     /// uncaught it renders as the fatal at [`CompileError::level`].
     pub thrown: bool,
+    /// Where php stood when it refused, which is where `zend_error`
+    /// places it.
+    pub stage: Stage,
+}
+
+/// Where php stood when it refused a source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Stage {
+    /// Compiling it, `zend_is_compiling()`: the refusal stands in the
+    /// file at [`CompileError::line`].
+    #[default]
+    Compiling,
+    /// Opening it for the scanner, before anything compiled
+    /// (`open_file_for_scanning`, `zend_prepare_string_for_scanning`):
+    /// the refusal stands where the request is executing, the `include`
+    /// or the `eval` that asked, and at `Unknown` on line 0 for the
+    /// program itself.
+    Opening,
 }
 
 /// Parse and compile one source file: what the engine calls for the
@@ -308,11 +326,35 @@ pub fn compile_source(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    compile(
-        &php_syntax::parse(source, &syntax_options(options)),
-        options,
-        strings,
-    )
+    let Some(multibyte) = options.multibyte else {
+        return compile(
+            &php_syntax::parse(source, &syntax_options(options)),
+            options,
+            strings,
+        );
+    };
+    let from = match options.kind {
+        SourceKind::File => multibyte::Source::File {
+            detect_unicode: multibyte.detect_unicode,
+            listed: multibyte.listed,
+        },
+        SourceKind::Eval => multibyte::Source::Eval,
+    };
+    let opened =
+        multibyte::open(multibyte.encodings, source, from).map_err(|refused| CompileError {
+            level: Level::CompileError,
+            message: refused.message(),
+            line: 0,
+            raised: Vec::new(),
+            thrown: false,
+            stage: Stage::Opening,
+        })?;
+    let parsed = php_syntax::parse(&opened.text, &syntax_options(options));
+    let scanning = multibyte::Scanning {
+        original: source.get(opened.bom..).unwrap_or_default(),
+        filter: opened.filter,
+    };
+    compile_scanned(&parsed, options, strings, Some(scanning))
 }
 
 /// What the lexer is told of a source the compiler is handed: the
@@ -340,6 +382,17 @@ pub fn compile(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
+    compile_scanned(parsed, options, strings, None)
+}
+
+/// [`compile`] over a parse of what the scanner read through
+/// `scanning`, the file as it was opened.
+fn compile_scanned<'p>(
+    parsed: &'p Parsed,
+    options: &Options<'p>,
+    strings: &mut dyn Intern,
+    scanning: Option<multibyte::Scanning<'p>>,
+) -> Result<Unit, CompileError> {
     // `Parsed::diagnostics` is in php's order (design §6.1): the
     // scanner's and the parser's by position, the compiler's one after
     // them all. php's scanner raises as it scans and its parser stops at
@@ -352,7 +405,7 @@ pub fn compile(
     // The parser's `declare` action runs as it parses
     // ([`multibyte::scan`]): what it warned stands among the parse's
     // diagnostics, and the fatal it threw stands where it threw it.
-    let scanned = multibyte::scan(parsed, options);
+    let scanned = multibyte::scan(parsed, options, scanning);
     let parsed = &*scanned.parsed;
     let mut raised = Vec::new();
     for (at, diagnostic) in parsed.diagnostics.iter().enumerate() {
@@ -367,6 +420,7 @@ pub fn compile(
                 line: diagnostic.line,
                 raised,
                 thrown: false,
+                stage: crate::Stage::Compiling,
             });
         }
         raised.push(Diagnostic {
@@ -1467,6 +1521,7 @@ mod tests {
                 line: 3,
                 raised: vec![overflow(2)],
                 thrown: false,
+                stage: crate::Stage::Compiling,
             })
         );
         assert_eq!(
@@ -1477,6 +1532,7 @@ mod tests {
                 line: 3,
                 raised: vec![overflow(2), overflow(4)],
                 thrown: false,
+                stage: crate::Stage::Compiling,
             })
         );
     }
@@ -3353,6 +3409,7 @@ mod tests {
                 line: 2,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             })
         );
     }
@@ -3390,6 +3447,7 @@ mod tests {
                 line: 2,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             })
         );
     }
@@ -3490,6 +3548,7 @@ mod tests {
                 line: 1,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             }),
             "`zend_is_allowed_in_const_expr` has no `ZEND_AST_SILENCE`"
         );
@@ -3592,6 +3651,7 @@ mod tests {
                 line: 1,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             }),
             "`zend_is_allowed_in_const_expr` has no `ZEND_AST_ENCAPS_LIST`"
         );
@@ -3908,6 +3968,7 @@ mod tests {
             line: 0,
             raised: Vec::new(),
             thrown: false,
+            stage: crate::Stage::Compiling,
         };
         let error = refused(b"<?php\n$a = (function () { declare(ticks=0): enddeclare; });\n")
             .unwrap_or_else(compiled);
@@ -4301,6 +4362,7 @@ mod tests {
                 line: 0,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             });
             assert_eq!(error.level, Level::CompileError, "{message}");
             assert_eq!(error.message, message);
@@ -7326,6 +7388,7 @@ class C {
                 line: 0,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             });
             assert_eq!(error.level, Level::CompileError, "{message}");
             assert_eq!(error.message, message);

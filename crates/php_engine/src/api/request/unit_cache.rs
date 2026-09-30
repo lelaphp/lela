@@ -257,11 +257,15 @@ impl Request {
             levels,
         };
         let stack = self.stack_limit();
+        let bound = crate::multibyte::bound(self, shared.compile_multibyte());
+        let multibyte = bound.as_ref().map(crate::multibyte::Bound::settings);
         let holds = |name: &[u8]| self.class_named(name).is_some();
         let request_classes = php_compile::RequestClasses::new(&holds);
         let (cached, filed) = shared.units.file(
             asked,
-            |source| shared.publish_file(source, path, &self.cwd, stack, request_classes),
+            |source| {
+                shared.publish_file(source, path, &self.cwd, stack, request_classes, multibyte)
+            },
             |body| shared.publish_kept(body),
         );
         if filed == Filed::Held && matches!(cached, Some(Ok(_))) {

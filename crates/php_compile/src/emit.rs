@@ -1288,6 +1288,7 @@ pub(crate) fn unit(
                 line,
                 raised: emit.diagnostics,
                 thrown: false,
+                stage: crate::Stage::Compiling,
             });
         };
         dynamic.push(def);
@@ -1407,6 +1408,7 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
             line: op.lineno,
             raised: Vec::new(),
             thrown: false,
+            stage: crate::Stage::Compiling,
         };
         if !op.opcode.is_safepoint_site() {
             return Err(refused("with no safepoint column for its number"));
@@ -1562,6 +1564,7 @@ impl Emit<'_> {
             line: self.line,
             raised: Vec::new(),
             thrown: false,
+            stage: crate::Stage::Compiling,
         }
     }
 
@@ -5779,6 +5782,7 @@ impl Emit<'_> {
                     line: self.line,
                     raised: Vec::new(),
                     thrown: false,
+                    stage: crate::Stage::Compiling,
                 });
             }
             if out
@@ -5792,6 +5796,7 @@ impl Emit<'_> {
                     line: self.line,
                     raised: Vec::new(),
                     thrown: false,
+                    stage: crate::Stage::Compiling,
                 });
             }
             if !on_target {
@@ -6085,6 +6090,7 @@ impl Emit<'_> {
                     line: declared_at,
                     raised: Vec::new(),
                     thrown: false,
+                    stage: crate::Stage::Compiling,
                 });
             }
             if out
@@ -6098,6 +6104,7 @@ impl Emit<'_> {
                     line: declared_at,
                     raised: Vec::new(),
                     thrown: false,
+                    stage: crate::Stage::Compiling,
                 });
             }
         }
@@ -6831,6 +6838,7 @@ impl Emit<'_> {
                 line: refused.site.line,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             }),
         }
     }
@@ -9295,6 +9303,7 @@ impl Emit<'_> {
             line,
             raised: Vec::new(),
             thrown: false,
+            stage: crate::Stage::Compiling,
         };
         let name = self
             .constants
@@ -9403,6 +9412,7 @@ impl Emit<'_> {
                 line,
                 raised: Vec::new(),
                 thrown: false,
+                stage: crate::Stage::Compiling,
             });
         }
         Ok(())
@@ -9991,6 +10001,7 @@ impl Emit<'_> {
             line: self.line,
             raised: Vec::new(),
             thrown: false,
+            stage: crate::Stage::Compiling,
         }
     }
 

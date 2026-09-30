@@ -61,6 +61,14 @@ pub trait Encodings {
     fn convert(&self, text: &[u8], to: Encoding, from: Encoding) -> Option<Vec<u8>>;
     /// `internal_encoding_getter`.
     fn internal(&self) -> Option<Encoding>;
+    /// `encoding_list_parser` over a comma-separated list, what
+    /// `zend.script_encoding` holds: the encodings in order, or the first
+    /// name that names none.
+    ///
+    /// # Errors
+    ///
+    /// The name the functions could not fetch.
+    fn list(&self, names: &[u8]) -> Result<Vec<Encoding>, Vec<u8>>;
 }
 
 /// Zend's dummy functions (`Z/Zend/zend_multibyte.c:25-80`), what the
@@ -104,6 +112,10 @@ impl Encodings for Dummy {
 
     fn internal(&self) -> Option<Encoding> {
         None
+    }
+
+    fn list(&self, _: &[u8]) -> Result<Vec<Encoding>, Vec<u8>> {
+        Ok(Vec::new())
     }
 }
 
@@ -182,19 +194,29 @@ impl Filter {
 pub struct Multibyte<'a> {
     /// The functions, bound to the request.
     pub encodings: &'a dyn Encodings,
-    /// `SCNG(script_org)`: the file as read, its byte order mark
-    /// taken off, which a re-read converts again.
-    pub original: &'a [u8],
-    /// The filters [`open`] chose, none where it found no encoding.
-    pub filter: Option<Filter>,
+    /// `zend.detect_unicode`, `CG(detect_unicode)`.
+    pub detect_unicode: bool,
+    /// `CG(script_encoding_list)`, what `zend.script_encoding` named.
+    pub listed: &'a [Encoding],
 }
 
 impl std::fmt::Debug for Multibyte<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Multibyte")
-            .field("filter", &self.filter)
+            .field("detect_unicode", &self.detect_unicode)
+            .field("listed", &self.listed)
             .finish_non_exhaustive()
     }
+}
+
+/// What the scanner holds of a file [`open`] read: `SCNG(script_org)`,
+/// the file as read with its byte order mark taken off, which a re-read
+/// converts again, and the filters chosen, none where no encoding was
+/// found.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Scanning<'p> {
+    pub(crate) original: &'p [u8],
+    pub(crate) filter: Option<Filter>,
 }
 
 /// A file [`open`] could not convert: php's `Could not convert the
@@ -417,6 +439,7 @@ impl Refusal {
             line: self.line,
             raised,
             thrown: self.thrown,
+            stage: crate::Stage::Compiling,
         }
     }
 }
@@ -491,10 +514,18 @@ struct Declared {
 /// scanner stands (`zend_multibyte_yyinput_again`); with it off, php's
 /// warning that the declaration is ignored. Then the token filter the
 /// last one chose, over the parse.
-pub(crate) fn scan<'p>(parsed: &'p Parsed, options: &Options<'p>) -> Scanned<'p> {
+pub(crate) fn scan<'p>(
+    parsed: &'p Parsed,
+    options: &Options<'p>,
+    scanning: Option<Scanning<'p>>,
+) -> Scanned<'p> {
+    let scanning = scanning.unwrap_or(Scanning {
+        original: &parsed.source,
+        filter: None,
+    });
     let multibyte = options.multibyte;
     let mut current = Cow::Borrowed(parsed);
-    let mut filter = multibyte.and_then(|m| m.filter);
+    let mut filter = scanning.filter;
     let mut warnings: Vec<(u32, php_syntax::Diagnostic)> = Vec::new();
     let mut read_to = 0;
     let mut refused = None;
@@ -509,7 +540,7 @@ pub(crate) fn scan<'p>(parsed: &'p Parsed, options: &Options<'p>) -> Scanned<'p>
                 continue;
             }
             read_to = declared.close;
-            match read(&current, &declared, options, &mut filter) {
+            match read(&current, &declared, options, scanning.original, &mut filter) {
                 Read::Kept => {}
                 Read::Warned(message) => warnings.push((
                     declared.close,
@@ -561,7 +592,7 @@ pub(crate) fn scan<'p>(parsed: &'p Parsed, options: &Options<'p>) -> Scanned<'p>
     let halt = multibyte.zip(filter).and_then(|(multibyte, filter)| {
         filter.source.map(|step| Halt {
             encodings: multibyte.encodings,
-            original: multibyte.original,
+            original: scanning.original,
             filter,
             step,
         })
@@ -603,6 +634,7 @@ fn read(
     parsed: &Parsed,
     declared: &Declared,
     options: &Options<'_>,
+    original: &[u8],
     filter: &mut Option<Filter>,
 ) -> Read {
     if crate::emit::written(parsed, declared.value).is_none() {
@@ -633,8 +665,8 @@ fn read(
         return Read::Kept;
     }
     let reread = match new.source {
-        None => Some(multibyte.original.to_vec()),
-        Some(step) => new.convert(multibyte.encodings, step, multibyte.original),
+        None => Some(original.to_vec()),
+        Some(step) => new.convert(multibyte.encodings, step, original),
     };
     match reread {
         Some(reread) => Read::Again(reread),
@@ -792,6 +824,12 @@ mod tests {
         fn internal(&self) -> Option<Encoding> {
             self.0
         }
+        fn list(&self, names: &[u8]) -> Result<Vec<Encoding>, Vec<u8>> {
+            names
+                .split(|&b| b == b',')
+                .map(|name| self.fetch(name.trim_ascii()).ok_or_else(|| name.to_vec()))
+                .collect()
+        }
     }
 
     const LATIN: Option<Encoding> = Some(Encoding(5));
@@ -803,27 +841,16 @@ mod tests {
         script: &[u8],
         listed: &[Encoding],
     ) -> Result<(crate::Unit, php_heap::Strings), CompileError> {
-        let source = Source::File {
-            detect_unicode: true,
-            listed,
-        };
-        let opened = open(encodings, script, source).map_err(|u| CompileError {
-            level: Level::CompileError,
-            message: u.message(),
-            line: 0,
-            raised: Vec::new(),
-            thrown: false,
-        })?;
         let options = Options {
             multibyte: Some(Multibyte {
                 encodings,
-                original: script.get(opened.bom..).unwrap_or_default(),
-                filter: opened.filter,
+                detect_unicode: true,
+                listed,
             }),
             ..Options::default()
         };
         let mut strings = php_heap::Strings::new();
-        crate::compile_source(&opened.text, &options, &mut strings).map(|unit| (unit, strings))
+        crate::compile_source(script, &options, &mut strings).map(|unit| (unit, strings))
     }
 
     /// The dump, read while the unit's strings stand.
