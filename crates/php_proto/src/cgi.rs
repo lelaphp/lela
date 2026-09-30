@@ -1,6 +1,8 @@
-//! CGI/1.1 as php's CGI host reads and writes it (`sapi/cgi/cgi_main.c` at
-//! the pin): the environment a server hands a request in, read into the
-//! plain fields php's `SG(request_info)` keeps (`init_request_info`), and
+//! CGI/1.1 as php's CGI host and its `FastCGI` process manager read and
+//! write it (`sapi/cgi/cgi_main.c` and `sapi/fpm/fpm/fpm_main.c` at the
+//! pin): the environment a server hands a request in, read into the plain
+//! fields php's `SG(request_info)` keeps (`init_request_info`, one
+//! algorithm in both, php-fpm's reading Apache's proxy URLs besides), and
 //! the head a response goes out with (`sapi_cgi_send_headers`). Bytes and
 //! plain values: the one question asked of the file system, whether a
 //! path names a file, is the caller's to answer.
@@ -20,9 +22,9 @@ impl Environment {
             .map(|(_, value)| value.as_slice())
     }
 
-    /// `CGI_PUTENV`: `setenv(3)`, or `unsetenv(3)` for `None`; the value
-    /// set is answered.
-    fn put(&mut self, name: &[u8], value: Option<&[u8]>) -> Option<Vec<u8>> {
+    /// `CGI_PUTENV` and `FCGI_PUTENV`: set, a name set again keeping its
+    /// place, or unset for `None`; the value set is answered.
+    pub fn put(&mut self, name: &[u8], value: Option<&[u8]>) -> Option<Vec<u8>> {
         let Some(value) = value else {
             self.0.retain(|(had, _)| had != name);
             return None;
@@ -45,13 +47,27 @@ pub trait Files {
     fn is_file(&self, path: &[u8]) -> bool;
 }
 
-/// The `cgi.*` entries `init_request_info` reads, at php's defaults.
+/// The `cgi.*` entries `init_request_info` reads, at php's defaults, and
+/// whether it reads Apache's proxy URLs as php-fpm's does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     /// `cgi.fix_pathinfo`.
     pub fix_pathinfo: bool,
     /// `cgi.discard_path`.
     pub discard_path: bool,
+    /// How a `SCRIPT_FILENAME` of Apache's proxy is read.
+    pub proxy: Proxy,
+}
+
+/// php-fpm's reading of a `SCRIPT_FILENAME` of `proxy:fcgi://` or
+/// `proxy:balancer://`, which `mod_proxy_fcgi` sends, and php-cgi's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Proxy {
+    /// php-cgi's: the variable read as it stands.
+    Ignored,
+    /// php-fpm's: the URL cut to its path, which stays percent-encoded
+    /// where `fastcgi.script_path_encoded` says.
+    Read { encoded: bool },
 }
 
 impl Default for Settings {
@@ -59,6 +75,7 @@ impl Default for Settings {
         Settings {
             fix_pathinfo: true,
             discard_path: false,
+            proxy: Proxy::Ignored,
         }
     }
 }
@@ -88,47 +105,110 @@ pub struct RequestInfo {
     pub auth: Option<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
-/// `init_request_info` (`Z/sapi/cgi/cgi_main.c:1159`) over `env`, which it
-/// rewrites as php's does: `SCRIPT_FILENAME`, `PATH_INFO`, `SCRIPT_NAME`
-/// and `PATH_TRANSLATED` fixed where `cgi.fix_pathinfo` finds the file
-/// the path names, each value replaced kept under its `ORIG_` name.
+/// `init_request_info` (`Z/sapi/cgi/cgi_main.c:1159`,
+/// `Z/sapi/fpm/fpm/fpm_main.c:971`) over `env`, which it rewrites as php's
+/// does: IIS's `PATH_INFO` cut past `SCRIPT_NAME`; under php-fpm a proxy
+/// URL cut to its path; `DOCUMENT_ROOT` from `doc_root` where the
+/// environment has none; and `SCRIPT_FILENAME`, `PATH_INFO`,
+/// `SCRIPT_NAME` and `PATH_TRANSLATED` fixed where `cgi.fix_pathinfo`
+/// finds the file the path names, each value replaced kept under its
+/// `ORIG_` name.
 #[must_use]
 #[allow(clippy::too_many_lines)] // php's one function, kept as one
-pub fn request_info(env: &mut Environment, settings: Settings, files: &dyn Files) -> RequestInfo {
-    let env_script_filename = env.get(b"SCRIPT_FILENAME").map(<[u8]>::to_vec);
+pub fn request_info(
+    env: &mut Environment,
+    settings: Settings,
+    doc_root: Option<&[u8]>,
+    files: &dyn Files,
+) -> RequestInfo {
+    let mut env_script_filename = env.get(b"SCRIPT_FILENAME").map(<[u8]>::to_vec);
     let env_path_translated = env.get(b"PATH_TRANSLATED").map(<[u8]>::to_vec);
-    let mut script_path_translated = env_script_filename
-        .clone()
-        .or_else(|| env_path_translated.clone());
     let mut info = RequestInfo {
         response_code: 200,
+        method: env.get(b"REQUEST_METHOD").map(<[u8]>::to_vec),
         ..RequestInfo::default()
     };
-    let Some(mut script) = script_path_translated.take() else {
+    if env_script_filename.is_none() && env_path_translated.is_none() {
         return info;
-    };
+    }
     let content_length = env.get(b"CONTENT_LENGTH").map(<[u8]>::to_vec);
     let content_type = env.get(b"CONTENT_TYPE").map(<[u8]>::to_vec);
     let mut env_path_info = env.get(b"PATH_INFO").map(<[u8]>::to_vec);
     let mut env_script_name = env.get(b"SCRIPT_NAME").map(<[u8]>::to_vec);
+    if let (Some(software), Some(name), Some(path_info)) = (
+        env.get(b"SERVER_SOFTWARE"),
+        &env_script_name,
+        &env_path_info,
+    ) && software.starts_with(b"Microsoft-IIS")
+        && path_info.starts_with(name)
+    {
+        let path_info = path_info.clone();
+        env.put(b"ORIG_PATH_INFO", Some(&path_info));
+        let rest = &path_info[name.len()..];
+        env_path_info = env.put(b"PATH_INFO", (!rest.is_empty()).then_some(rest));
+    }
+    let mut apache_was_here = false;
+    let encoded = match settings.proxy {
+        Proxy::Read { encoded } => encoded,
+        Proxy::Ignored => true,
+    };
+    if settings.proxy != Proxy::Ignored
+        && let Some(filename) = &mut env_script_filename
+    {
+        for prefix in [&b"proxy:fcgi://"[..], b"proxy:balancer://"] {
+            if filename.len() >= prefix.len()
+                && filename[..prefix.len()].eq_ignore_ascii_case(prefix)
+            {
+                if let Some(slash) = filename[prefix.len()..].iter().position(|b| *b == b'/') {
+                    filename.drain(..prefix.len() + slash);
+                    apache_was_here = true;
+                }
+                if let Some(q) = filename.iter().position(|b| *b == b'?') {
+                    filename.truncate(q);
+                }
+            }
+        }
+        if apache_was_here && !encoded {
+            *filename = raw_url_decode(filename);
+        }
+        // php cuts the variable's own bytes in place.
+        if env.get(b"SCRIPT_FILENAME") != Some(filename.as_slice()) {
+            let cut = filename.clone();
+            env.put(b"SCRIPT_FILENAME", Some(&cut));
+        }
+    }
+    let mut script = match &env_script_filename {
+        Some(filename) => filename.clone(),
+        None => env_path_translated.clone().unwrap_or_default(),
+    };
     let mut path_translated_kept = Some(script.clone());
     if settings.fix_pathinfo {
         let env_redirect_url = env.get(b"REDIRECT_URL").map(<[u8]>::to_vec);
-        let env_document_root = env.get(b"DOCUMENT_ROOT").map(<[u8]>::to_vec);
+        let mut env_document_root = env.get(b"DOCUMENT_ROOT").map(<[u8]>::to_vec);
         let orig_path_translated = env_path_translated.clone();
         let orig_path_info = env_path_info.clone();
         let orig_script_name = env_script_name.clone();
         let orig_script_filename = env_script_filename.clone();
-        if let (Some(translated), Some(redirect)) = (&env_path_translated, &env_redirect_url)
+        if env_document_root.is_none()
+            && let Some(root) = doc_root
+        {
+            env_document_root = env.put(b"DOCUMENT_ROOT", Some(root));
+        }
+        if !apache_was_here
+            && let (Some(translated), Some(redirect)) = (&env_path_translated, &env_redirect_url)
             && *translated != script
         {
             script.clone_from(translated);
             env_script_name = Some(redirect.clone());
         }
-        if script.last() == Some(&b'/') || !files.resolves(&script) {
+        if !script.is_empty() && (script.last() == Some(&b'/') || !files.resolves(&script)) {
             let mut pt = script.clone();
             let mut found = false;
-            while let Some(slash) = pt.iter().rposition(|b| *b == b'/') {
+            while let Some(slash) = pt
+                .iter()
+                .rposition(|b| *b == b'/')
+                .or_else(|| pt.iter().rposition(|b| *b == b'\\'))
+            {
                 pt.truncate(slash);
                 if !files.is_file(&pt) {
                     continue;
@@ -137,23 +217,60 @@ pub fn request_info(env: &mut Environment, settings: Settings, files: &dyn Files
                 // The file is `pt`, and what the path had past it is
                 // `PATH_INFO`'s tail.
                 let slen = script.len() - pt.len();
-                let path_info = env_path_info
-                    .as_ref()
-                    .map(|info| info[info.len().saturating_sub(slen)..].to_vec());
-                if orig_path_info != path_info {
+                let pilen = env_path_info.as_ref().map_or(0, Vec::len);
+                let (path_info, tflag) = if apache_was_here {
+                    let tail = script[pt.len()..].to_vec();
+                    let differs = orig_path_info.as_ref() != Some(&tail);
+                    (Some(tail), slen != 0 && differs)
+                } else {
+                    let tail = env_path_info
+                        .as_ref()
+                        .filter(|_| pilen > slen)
+                        .map(|info| info[pilen - slen..].to_vec());
+                    let differs = tail.is_some() && tail != orig_path_info;
+                    (tail, differs)
+                };
+                if tflag && let Some(path_info) = path_info {
+                    let mut decoded = None;
                     if let Some(orig) = &orig_path_info {
                         env.put(b"ORIG_PATH_INFO", Some(orig));
-                        let head = &orig[..orig.len().saturating_sub(slen)];
-                        if orig_script_name.as_deref() == Some(head) {
+                        let current = env_path_info.clone().unwrap_or_default();
+                        let head = if apache_was_here {
+                            current.clone()
+                        } else {
+                            current[..current.len() - path_info.len()].to_vec()
+                        };
+                        if orig_script_name.as_deref() == Some(head.as_slice()) {
                             info.request_uri.clone_from(&orig_script_name);
                         } else {
                             if let Some(name) = &orig_script_name {
                                 env.put(b"ORIG_SCRIPT_NAME", Some(name));
                             }
-                            info.request_uri = env.put(b"SCRIPT_NAME", Some(head));
+                            info.request_uri = env.put(b"SCRIPT_NAME", Some(&head));
+                        }
+                    } else if apache_was_here && let Some(name) = env_script_name.clone() {
+                        if encoded && path_info.contains(&b'%') {
+                            decoded = Some(raw_url_decode(&path_info));
+                        }
+                        let suffix = |tail: &[u8]| name.len() > tail.len() && name.ends_with(tail);
+                        let cut = if name.len() > slen && name[name.len() - slen..] == path_info[..]
+                        {
+                            Some(name.len() - slen)
+                        } else {
+                            decoded
+                                .as_ref()
+                                .filter(|d| suffix(d))
+                                .map(|d| name.len() - d.len())
+                        };
+                        if let Some(cut) = cut {
+                            if let Some(orig) = &orig_script_name {
+                                env.put(b"ORIG_SCRIPT_NAME", Some(orig));
+                            }
+                            info.request_uri = env.put(b"SCRIPT_NAME", Some(&name[..cut]));
                         }
                     }
-                    env_path_info = env.put(b"PATH_INFO", path_info.as_deref());
+                    env_path_info =
+                        env.put(b"PATH_INFO", Some(decoded.as_deref().unwrap_or(&path_info)));
                 }
                 if orig_script_filename.as_deref() != Some(pt.as_slice()) {
                     if let Some(name) = &orig_script_filename {
@@ -173,8 +290,8 @@ pub fn request_info(env: &mut Environment, settings: Settings, files: &dyn Files
                 } else if let Some(name) = &env_script_name
                     && find(&pt, name).is_some()
                 {
-                    let ptlen = pt.len() - name.len();
-                    let mut translated = pt[..ptlen].to_vec();
+                    let root_len = pt.len() - name.len();
+                    let mut translated = pt[..root_len].to_vec();
                     translated.extend_from_slice(env_path_info.as_deref().unwrap_or_default());
                     if let Some(orig) = &orig_path_translated {
                         env.put(b"ORIG_PATH_TRANSLATED", Some(orig));
@@ -192,7 +309,7 @@ pub fn request_info(env: &mut Environment, settings: Settings, files: &dyn Files
                 info.response_code = 404;
             }
             if info.request_uri.is_none() {
-                if orig_script_name == env_script_name {
+                if orig_script_name.is_some() && orig_script_name == env_script_name {
                     info.request_uri = orig_script_name;
                 } else {
                     if let Some(name) = &orig_script_name {
@@ -211,7 +328,7 @@ pub fn request_info(env: &mut Environment, settings: Settings, files: &dyn Files
                 }
                 env.put(b"SCRIPT_FILENAME", Some(&script));
             }
-            if env_redirect_url.is_some() {
+            if !apache_was_here && env_redirect_url.is_some() {
                 if let Some(orig) = &orig_path_info {
                     env.put(b"ORIG_PATH_INFO", Some(orig));
                     env.put(b"PATH_INFO", None);
@@ -240,12 +357,31 @@ pub fn request_info(env: &mut Environment, settings: Settings, files: &dyn Files
         }
     }
     info.path_translated = path_translated_kept.filter(|path| valid_path(path));
-    info.method = env.get(b"REQUEST_METHOD").map(<[u8]>::to_vec);
     info.query = env.get(b"QUERY_STRING").map(<[u8]>::to_vec);
     info.content_type = Some(content_type.unwrap_or_default());
     info.content_length = content_length.as_deref().map_or(0, atol);
     info.auth = env.get(b"HTTP_AUTHORIZATION").and_then(basic_auth);
     info
+}
+
+/// `php_raw_url_decode`: each `%XX` its byte.
+fn raw_url_decode(text: &[u8]) -> Vec<u8> {
+    let hex = |c: u8| char::from(c).to_digit(16);
+    let mut out = Vec::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if text[i] == b'%'
+            && i + 2 < text.len()
+            && let (Some(hi), Some(lo)) = (hex(text[i + 1]), hex(text[i + 2]))
+        {
+            out.push(u8::try_from(hi * 16 + lo).unwrap_or(0));
+            i += 3;
+            continue;
+        }
+        out.push(text[i]);
+        i += 1;
+    }
+    out
 }
 
 /// `is_valid_path`: no `..` segment.
@@ -423,7 +559,12 @@ mod tests {
             ("SCRIPT_NAME", "/t.php"),
             ("HTTP_AUTHORIZATION", "Basic dXNlcjpwdw=="),
         ]);
-        let info = request_info(&mut vars, Settings::default(), &Fake(vec![b"/d/t.php"]));
+        let info = request_info(
+            &mut vars,
+            Settings::default(),
+            None,
+            &Fake(vec![b"/d/t.php"]),
+        );
         assert_eq!(info.path_translated.as_deref(), Some(&b"/d/t.php"[..]));
         assert_eq!(info.request_uri.as_deref(), Some(&b"/t.php"[..]));
         assert_eq!(info.method.as_deref(), Some(&b"POST"[..]));
@@ -439,7 +580,12 @@ mod tests {
             ("SCRIPT_FILENAME", "/d/t.php/a/b"),
             ("PATH_INFO", "/t.php/a/b"),
         ]);
-        let info = request_info(&mut vars, Settings::default(), &Fake(vec![b"/d/t.php"]));
+        let info = request_info(
+            &mut vars,
+            Settings::default(),
+            None,
+            &Fake(vec![b"/d/t.php"]),
+        );
         assert_eq!(info.path_translated.as_deref(), Some(&b"/d/t.php"[..]));
         assert_eq!(vars.get(b"PATH_INFO"), Some(&b"/a/b"[..]));
         assert_eq!(vars.get(b"SCRIPT_FILENAME"), Some(&b"/d/t.php"[..]));
@@ -448,7 +594,7 @@ mod tests {
             Some(&b"/d/t.php/a/b"[..])
         );
         let mut none = env(&[("SCRIPT_FILENAME", "/nope/x.php")]);
-        let info = request_info(&mut none, Settings::default(), &Fake(Vec::new()));
+        let info = request_info(&mut none, Settings::default(), None, &Fake(Vec::new()));
         assert_eq!((info.path_translated, info.response_code), (None, 404));
     }
 
