@@ -6,8 +6,6 @@
 //! (`phar_create_or_parse_filename`, `phar_open_or_create_filename`).
 //! An error is php's message, `None` where php sets none.
 
-use std::sync::Arc;
-
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::Value;
@@ -433,7 +431,7 @@ fn parse_pharfile(
     data.alias = Some(alias.clone().unwrap_or_else(|| fname.to_vec()));
     data.sig_flags = sig_flags;
     data.signature = signature;
-    data.fp = Some(Arc::new(fp));
+    data.fp = Some(archive::Fp::opened(fp, data.flags));
     data.is_temporary_alias = !register_alias || temp_alias;
     if register_alias {
         let alias = alias.unwrap_or_default();
@@ -752,7 +750,7 @@ pub(crate) fn compile_file(req: &mut Request, path: &[u8]) -> Result<Option<Vec<
         return Ok(Some(source?));
     }
     if a.flags & FILE_COMPRESSION_MASK != 0 {
-        return Ok(a.fp.as_deref().cloned());
+        return Ok(a.fp.as_ref().map(|fp| fp.bytes.to_vec()));
     }
     Ok(None)
 }

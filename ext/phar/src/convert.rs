@@ -215,7 +215,7 @@ pub(crate) fn to_other(
         }
         phar.add_virtual_dirs(&filename);
     }
-    phar.fp = Some(Arc::new(fp));
+    phar.fp = Some(archive::Fp::written(Arc::new(fp)));
     let new = archives(req).insert(phar);
     let made = rename(req, new, ext);
     match made {

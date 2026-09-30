@@ -259,7 +259,10 @@ pub(crate) fn stub_of(req: &mut Request, id: ArchiveId) -> Result<Vec<u8>, Throw
         return Ok(Vec::new());
     };
     let fname = a.fname.clone();
-    let shared = a.fp.clone().filter(|_| !a.is_brandnew);
+    let shared =
+        a.fp.as_ref()
+            .map(|fp| Arc::clone(&fp.bytes))
+            .filter(|_| !a.is_brandnew);
     if a.is_tar() || a.is_zip() {
         let Some(stub) = a.manifest.get(b".phar/stub.php") else {
             return Ok(Vec::new());

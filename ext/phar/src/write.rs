@@ -13,8 +13,8 @@ use php_ext::request::{Opening, Request};
 use crate::archive::{
     self, API_VERSION_NODIR, API_VERSION_NUM, ArchiveId, Content, ENT_COMPRESSED_GZ,
     ENT_COMPRESSION_MASK, ENT_PERM_DEF_DIR, ENT_PERM_DEF_FILE, Entry, FILE_COMPRESSED_BZ2,
-    FILE_COMPRESSED_GZ, Format, HDR_SIGNATURE, Metadata, SIG_OPENSSL, SIG_OPENSSL_SHA256,
-    SIG_OPENSSL_SHA512, TAR_DIR, TAR_FILE, archives, lossy,
+    FILE_COMPRESSED_GZ, Format, Fp, HDR_SIGNATURE, Metadata, SIG_OPENSSL, SIG_OPENSSL_SHA256,
+    SIG_OPENSSL_SHA512, TAR_DIR, TAR_FILE, Through, archives, lossy,
 };
 use crate::entry::{self, Dir, EntryData, Target};
 use crate::open::{Failed, readonly};
@@ -63,7 +63,22 @@ fn find_halt(stub: &[u8]) -> Option<usize> {
 /// each entry's bytes (compressed where its flags ask), and the
 /// signature, the archive's bytes replaced by them and the file written.
 /// Tar and zip archives are their own formats' ([`crate::tar`],
-/// [`crate::zip`]).
+/// [`crate::zip`]). The stub is copied from the file as it stands, as
+/// php's stream on it reads it:
+///
+/// ```php
+/// $f = __DIR__ . '/flush-witness.phar';
+/// $p = new Phar($f); $p['a'] = '1'; unset($p);
+/// $p = new Phar($f);
+/// file_put_contents($f, '<?PHP' . substr(file_get_contents($f), 5));
+/// $p->setMetadata(1);
+/// var_dump(substr(file_get_contents($f), 0, 5), $p['a']->getContent());
+/// unset($p); Phar::unlinkArchive($f);
+/// ```
+/// ```expect regime=phar-writable
+/// string(5) "<?PHP"
+/// string(1) "1"
+/// ```
 #[allow(clippy::too_many_lines)] // php's one function, its steps in its order
 pub(crate) fn flush_ex(
     req: &mut Request,
@@ -91,10 +106,19 @@ pub(crate) fn flush_ex(
     };
     let fname = a.fname.clone();
     let name = lossy(&fname).into_owned();
-    let oldfile: Option<Arc<Vec<u8>>> = if a.fp.is_some() && !a.is_brandnew {
-        a.fp.clone()
-    } else {
-        archive::read_file(req, &fname, false)?.map(Arc::new)
+    // What the stub and the unchanged entries are copied from: through
+    // the file opened `rb`, the file as it stands now, rewritten under the
+    // archive or not, and what was read where it is gone (php's stream
+    // reads the unlinked file on); through a stream php wrote, its bytes.
+    let held = a.fp.clone().filter(|_| !a.is_brandnew);
+    let oldfile: Option<Arc<Vec<u8>>> = match held {
+        Some(Fp {
+            bytes,
+            through: Through::Written,
+        }) => Some(bytes),
+        held => archive::read_file(req, &fname, false)?
+            .map(Arc::new)
+            .or(held.map(|fp| fp.bytes)),
     };
     let mut newfile: Vec<u8> = Vec::new();
     let Some(a) = archives(req).get_mut(id) else {
@@ -382,7 +406,7 @@ pub(crate) fn write_out(
     };
     let (fname, flags, deferred) = (a.fname.clone(), a.flags, a.donotflush);
     let newfile = Arc::new(newfile);
-    a.fp = Some(Arc::clone(&newfile));
+    a.fp = Some(Fp::written(Arc::clone(&newfile)));
     if deferred {
         return Ok(None);
     }
