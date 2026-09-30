@@ -64,7 +64,10 @@
 //! no line of either log (#56). The per-key files beside it stay with the
 //! worktree, each being a scope's latest run over a tree the track does
 //! not have, and copying one in would hand `done` a reading that is
-//! fresh for nothing (§5, "A track's worktrees"; #35). A
+//! fresh for nothing (§5, "A track's worktrees"; #35). What the log
+//! carries is found at the branch's merge by the tree each reading was
+//! taken over, so a pass over what the merge stages is not run again
+//! there (`Store::latest_over`, #1252). A
 //! worktree with uncommitted work is a refusal after the append, since
 //! the worktree's copy is emptied once appended and the call that follows
 //! cannot count the same readings twice. The branch is kept, and the

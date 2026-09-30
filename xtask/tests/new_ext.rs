@@ -231,14 +231,16 @@ fn the_bundle_gains_the_feature_and_the_enabled_line() {
         Some("dep:php_ext_demo"),
         "{bundle:?}"
     );
-    assert!(
-        bundle["features"]["default"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v.as_str() == Some("demo")),
-        "{bundle:?}"
-    );
+    for list in ["default", "linked"] {
+        assert!(
+            bundle["features"][list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str() == Some("demo")),
+            "{list}: {bundle:?}"
+        );
+    }
     assert_eq!(bundle["features"]["jit"].as_array().map(Vec::len), Some(0));
     let dep = bundle["dependencies"]["php_ext_demo"].as_table().unwrap();
     assert_eq!(dep["path"].as_str(), Some("../../ext/demo"));
@@ -274,6 +276,7 @@ fn the_bundle_gains_the_feature_and_the_enabled_line() {
             .any(|n| n.starts_with("crates/php_bundle/Cargo.toml:")
                 && n.contains("demo = [\"dep:php_ext_demo\"]")
                 && n.contains("in default")
+                && n.contains("in linked")
                 && n.contains("php_ext_demo as an optional dependency at ext/demo")),
         "{:#?}",
         laid.notes

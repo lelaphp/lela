@@ -424,6 +424,66 @@ impl Store {
         Self::read_file(&path).map(Some)
     }
 
+    /// Of `instrument`, the latest reading of each scope of `trees` taken
+    /// over the content its tree hash names, by scope: the scope's file when
+    /// the reading there is over it, since that one is the latest of all,
+    /// and otherwise the latest such line of the log, one pass over it for
+    /// every scope. The log is where a retired worktree's readings are:
+    /// `worktree retire` appends its log here and leaves its files, so a
+    /// branch's pass stands at its merge only when it is found by the tree
+    /// it was taken over (#1252). A scope with no reading over its tree is
+    /// absent, and so is one whose hash is empty, which names no content.
+    pub(crate) fn latest_over(
+        &self,
+        instrument: &str,
+        trees: &BTreeMap<String, String>,
+    ) -> Result<BTreeMap<String, Reading>> {
+        const TREE: &str = "\"tree\":\"";
+        let mut found = BTreeMap::new();
+        let mut sought: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (scope, tree) in trees.iter().filter(|(_, tree)| !tree.is_empty()) {
+            match self.read(instrument, scope)? {
+                Some(reading) if reading.fresh_for(tree) => {
+                    found.insert(scope.clone(), reading);
+                }
+                _ => sought.entry(tree.as_str()).or_default().push(scope),
+            }
+        }
+        if sought.is_empty() {
+            return Ok(found);
+        }
+        let path = self.root.join(LOG);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+            Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+        };
+        // `tree` is the last key of a line (`to_json` writes them sorted),
+        // so the search from the end finds it at once; only a line over a
+        // sought tree is parsed.
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let Some(at) = line.rfind(TREE) else {
+                continue;
+            };
+            let tree = line[at + TREE.len()..].split('"').next().unwrap_or("");
+            let Some(scopes) = sought.get(tree) else {
+                continue;
+            };
+            let Ok(reading) = Reading::from_json(line) else {
+                continue;
+            };
+            let later = |held: &Reading| reading.at.to_string() >= held.at.to_string();
+            if reading.instrument == instrument
+                && reading.fresh_for(tree)
+                && scopes.contains(&reading.scope.as_str())
+                && found.get(&reading.scope).is_none_or(later)
+            {
+                found.insert(reading.scope.clone(), reading);
+            }
+        }
+        Ok(found)
+    }
+
     /// The append-only log, oldest first: what the store held across every
     /// run and every session, and the lines it could not read. A missing
     /// log is empty. A line that is not a reading, which a write the kernel

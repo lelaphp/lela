@@ -430,11 +430,17 @@ fn table_end(text: &str, table: &str) -> Option<usize> {
     end
 }
 
+/// The features of the bundle a new extension is listed in: `default`, the
+/// build a person prunes a non-default extension from when porting it
+/// (design §4.10), and `linked`, the engine the harness links (harness §7,
+/// revision 43), so a branch that adds an extension links it in the same
+/// commit and its merge breaks no harness test (#1252).
+const LISTS: [&str; 2] = ["default", "linked"];
+
 /// The bundle's manifest gains `php_ext_<name>` as an optional path
-/// dependency and the feature `<name> = ["dep:php_ext_<name>"]`, listed
-/// in `default`; a person removes a non-default extension from `default`
-/// when porting it (design §4.10). The edit is textual, so the comments
-/// stay; nothing is written here.
+/// dependency and the feature `<name> = ["dep:php_ext_<name>"]`, listed in
+/// each of [`LISTS`]. The edit is textual, so the comments stay; nothing is
+/// written here.
 fn bundle_feature(root: &Path, name: &str) -> Result<Edit> {
     let path = root.join(BUNDLE).join("Cargo.toml");
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -455,17 +461,19 @@ fn bundle_feature(root: &Path, name: &str) -> Result<Edit> {
         out.insert_str(at, &format!("\n{name} = [\"dep:{package}\"]"));
         did.push(format!("the feature {name} = [\"dep:{package}\"]"));
     }
-    let listed = table
-        .get("features")
-        .and_then(|f| f.get("default"))
-        .and_then(toml::Value::as_array)
-        .is_some_and(|d| d.iter().any(|v| v.as_str() == Some(name)));
-    if !listed {
-        let start = key_line(&out, "features", "default")
-            .with_context(|| format!("{} has no `default =` line", path.display()))?;
-        let (at, insert) = push_array(&out, start, name)?;
-        out.insert_str(at, &insert);
-        did.push("in default".to_owned());
+    for list in LISTS {
+        let listed = table
+            .get("features")
+            .and_then(|f| f.get(list))
+            .and_then(toml::Value::as_array)
+            .is_some_and(|d| d.iter().any(|v| v.as_str() == Some(name)));
+        if !listed {
+            let start = key_line(&out, "features", list)
+                .with_context(|| format!("{} has no `{list} =` line", path.display()))?;
+            let (at, insert) = push_array(&out, start, name)?;
+            out.insert_str(at, &insert);
+            did.push(format!("in {list}"));
+        }
     }
     if !has("dependencies", &package) {
         let at = table_end(&out, "dependencies")
