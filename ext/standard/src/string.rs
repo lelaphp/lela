@@ -2809,7 +2809,7 @@ fn utf8_decode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown
 /// strategy takes as the ill-formed sequence: a non-initial byte that
 /// is a lead or encodes a character of its own is left for the next
 /// read.
-pub(super) fn next_utf8_char(s: &[u8], pos: usize) -> (Option<u32>, usize) {
+pub fn next_utf8_char(s: &[u8], pos: usize) -> (Option<u32>, usize) {
     let avail = s.len() - pos;
     let lead = |c: u8| c < 0x80 || (0xc2..=0xf4).contains(&c);
     let trail = |c: u8| (0x80..=0xbf).contains(&c);

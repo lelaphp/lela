@@ -32,7 +32,7 @@ description = "The enabled set of extensions and the tier's name"
 workspace = true
 
 [features]
-default = ["standard", "spl", "date", "reflection", "pcre", "session", "pdo", "dom", "random", "filter", "tokenizer", "json", "iconv", "pdo_sqlite", "ctype", "hash", "libxml", "lexbor", "zlib", "phar", "uri", "opcache", "simplexml", "xmlreader", "xmlwriter"]
+default = ["standard", "spl", "date", "reflection", "pcre", "session", "pdo", "dom", "random", "filter", "tokenizer", "json", "iconv", "pdo_sqlite", "ctype", "hash", "libxml", "lexbor", "zlib", "phar", "uri", "opcache", "simplexml", "xml", "xmlreader", "xmlwriter"]
 # The compiled tier (design §4.1, §11): a name that enables nothing until
 # php_jit exists, when it enables the crate on the four targets.
 jit = []
@@ -54,6 +54,7 @@ linked = [
     "openssl", "curl", "iconv", "pdo_sqlite", "ctype", "hash", "libxml",
     "lexbor", "zlib", "posix", "sockets", "phar", "bz2", "uri", "opcache", "bcmath", "simplexml",
     "calendar",
+    "xml",
     "xmlreader",
     "xmlwriter",
 ]
@@ -90,6 +91,7 @@ opcache = ["dep:php_ext_opcache"]
 bcmath = ["dep:php_ext_bcmath"] # the `php` binary and the phpt lane, as php builds it with --enable-bcmath (#1163)
 simplexml = ["dep:php_ext_simplexml"]
 calendar = ["dep:php_ext_calendar"] # the `php` binary and the phpt lane, as php builds it with --enable-calendar (#1163)
+xml = ["dep:php_ext_xml"]
 xmlreader = ["dep:php_ext_xmlreader"]
 xmlwriter = ["dep:php_ext_xmlwriter"]
 
@@ -129,6 +131,7 @@ php_ext_opcache = { path = "../../ext/opcache", optional = true }
 php_ext_bcmath = { path = "../../ext/bcmath", optional = true }
 php_ext_simplexml = { path = "../../ext/simplexml", optional = true }
 php_ext_calendar = { path = "../../ext/calendar", optional = true }
+php_ext_xml = { path = "../../ext/xml", optional = true }
 php_ext_xmlreader = { path = "../../ext/xmlreader", optional = true }
 php_ext_xmlwriter = { path = "../../ext/xmlwriter", optional = true }
 

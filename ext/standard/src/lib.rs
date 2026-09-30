@@ -96,6 +96,9 @@ mod virtual_cwd;
 /// and ext/spl's serializers (ADR-0004; design §4.10).
 pub use html::escape as escape_html_entities;
 pub use string::strip_tags_ex;
+// `html.h`'s `php_next_utf8_char`, which `xml.c` decodes a target
+// encoding's characters with (design §4.10).
+pub use string::next_utf8_char as php_next_utf8_char;
 pub use var::{Serializer, Unserializer, php_unserialize_with_options};
 
 /// What `file.h`, `php_filestat.h`, `scanf.h` and `main/php_glob.h`
