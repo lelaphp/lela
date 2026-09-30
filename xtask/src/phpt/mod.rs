@@ -89,8 +89,9 @@
 //! **What is not run here.** The full corpus, the nightly verdict control
 //! and the tier's lanes are CI's, under the manifest's `lanes.nightly`
 //! rule; the per-commit lane and one subset are an agent's to run. A
-//! `--PHPDBG--` test and a `--REDIRECTTEST--` are skipped with their
-//! reason; a CGI-shaped one runs through the CGI host beside the binary,
+//! `--PHPDBG--` test is skipped with its reason; a `--REDIRECTTEST--` runs
+//! as the set it names, counted in its own subset (the `redirect` module,
+//! #814); a CGI-shaped one runs through the CGI host beside the binary,
 //! the php-cgi `[sapi]` pins for the control and the engine's own
 //! `php-cgi`, `sapi/cgi`'s binary, for the engine, as the `cgi` module
 //! has it (#1198, ADR-0008). Beyond those, the process adapter
@@ -109,6 +110,7 @@ pub(crate) const CONTROL: &str = "@control";
 mod census;
 pub(crate) mod file;
 pub(crate) mod miss;
+mod redirect;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -352,11 +354,16 @@ impl Subset {
     /// where the test stands in the corpus whichever directory of the
     /// subset it came from.
     pub(crate) fn id(&self, test: &Path) -> String {
-        let under = match self.found_in(test) {
+        format!("phpt:{CORPUS}/{}", self.under(test).display())
+    }
+
+    /// Where the test stands in the corpus, whichever directory of the
+    /// subset it came from.
+    fn under(&self, test: &Path) -> PathBuf {
+        match self.found_in(test) {
             Some(place) => place.under.join(place.inside(test)),
             None => PathBuf::from(self.name(test)),
-        };
-        format!("phpt:{CORPUS}/{}", under.display())
+        }
     }
 
     /// The test's name inside the subset: inside its directory, with the
@@ -891,14 +898,15 @@ pub(crate) fn run_subset(
     let control = matches!(runner, Runner::Control(_));
     let host = cgi::host(oracle.pin(), binary, control);
     let adapter = Adapter::new(oracle, registry, binary, host, lane);
+    let items = adapter.listed(subset, tests)?;
     let mut dirs = BTreeMap::new();
-    let apart: Vec<_> = tests
+    let apart: Vec<_> = items
         .iter()
-        .map(|test| adapter::apart(test, &mut dirs))
+        .map(|item| adapter::apart(item, &mut dirs))
         .collect();
     let batch = adapter::batch(&apart, jobs);
-    Tally::judge_apart(&tests, jobs, batch, &apart, |test| {
-        adapter.judge(subset, test)
+    Tally::judge_apart(&items, jobs, batch, &apart, |item| {
+        adapter.judge(subset, item)
     })
 }
 

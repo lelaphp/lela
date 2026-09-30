@@ -1120,26 +1120,112 @@ fn a_census_that_drops_a_miss_fails() {
 /// tree standing where `php-src/ext/fixture/tests` would, so what its
 /// programs write lands there and not in the fixture.
 fn fixture_subset(name: &str) -> (Tree, Subset) {
-    fn copy(from: &Path, to: &Path) {
-        fs::create_dir_all(to).unwrap();
-        for entry in fs::read_dir(from).unwrap() {
-            let path = entry.unwrap().path();
-            let into = to.join(path.file_name().unwrap());
-            if path.is_dir() {
-                copy(&path, &into);
-            } else {
-                fs::copy(&path, &into).unwrap();
-            }
+    let (tree, subset) = subset(name, &[]);
+    copy(&fixture(name), tree.path());
+    (tree, subset)
+}
+
+/// A fixture directory under `xtask/fixtures/phpt`.
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/phpt")
+        .join(name)
+}
+
+/// Every file under `from` copied to the same place under `to`.
+fn copy(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let into = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy(&path, &into);
+        } else {
+            fs::copy(&path, &into).unwrap();
         }
     }
-    let (tree, subset) = subset(name, &[]);
-    copy(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/phpt")
-            .join(name),
-        tree.path(),
+}
+
+/// The redirect fixture laid down as a tree standing where the pinned
+/// php-src would, and the subset of one directory of it.
+fn redirect_subset(tree: &Tree, under: &str) -> Subset {
+    copy(&fixture("redirect"), tree.path());
+    Subset {
+        scope: "ext/driver".to_owned(),
+        dirs: vec![Dir::at(tree.path(), PathBuf::from(under))],
+        root: tree.path().to_path_buf(),
+    }
+}
+
+/// A `--REDIRECTTEST--` runs the set its section names in its place: each
+/// test under the environment the section returns and `REDIR_TEST_DIR`,
+/// its program written in the redirecting test's directory, needing the
+/// redirecting test's extensions beside its own, and its verdict naming
+/// both tests; the redirecting test is no verdict of its own. The set's
+/// own directory run as a subset has no driver and skips, and a redirect
+/// whose extension is not loaded or whose section names no directory runs
+/// no set and is a skip or a bork in upstream's words (#814).
+#[test]
+fn a_redirecttest_runs_its_set_under_the_environment_its_section_returns() {
+    if oracle().is_none() {
+        return;
+    }
+    let verdicts = |under: &str| {
+        let tree = Tree::new("phpt-redirect").unwrap();
+        let tally = run(&redirect_subset(&tree, under), &registry(""));
+        tally
+            .judged
+            .iter()
+            .map(|j| (j.id.clone(), j.name.clone(), j.judgement, j.note.clone()))
+            .collect::<Vec<_>>()
+    };
+    let driver = verdicts("ext/driver/tests");
+    assert_eq!(
+        driver
+            .iter()
+            .map(|(id, name, judgement, _)| (id.as_str(), name.as_str(), *judgement))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "phpt:php-src/ext/shared/tests/dsn.phpt via php-src/ext/driver/tests/common.phpt",
+                "ext/shared/tests/dsn.phpt via common.phpt",
+                Judgement::Pass
+            ),
+            (
+                "phpt:php-src/ext/driver/tests/own.phpt",
+                "own.phpt",
+                Judgement::Pass
+            ),
+        ],
+        "{driver:#?}"
     );
-    (tree, subset)
+    let shared = verdicts("ext/shared/tests");
+    assert_eq!(shared.len(), 1, "{shared:#?}");
+    assert_eq!(
+        (shared[0].2, shared[0].3.as_str()),
+        (Judgement::Skip, "no driver"),
+        "{shared:#?}"
+    );
+    let refused = verdicts("ext/refused/tests");
+    assert_eq!(
+        refused
+            .iter()
+            .map(|(_, name, judgement, note)| (name.as_str(), *judgement, note.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "no-extension.phpt",
+                Judgement::Skip,
+                "Required extension missing: not_an_extension"
+            ),
+            (
+                "no-set.phpt",
+                Judgement::Bork,
+                "Redirect info must contain exactly one TEST string to be used as redirect directory."
+            ),
+        ],
+        "{refused:#?}"
+    );
 }
 
 /// The fixture's subset run with the pinned oracle standing in for the
