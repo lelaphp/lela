@@ -424,6 +424,7 @@ dependencies = [
  "php_ext_date",
  "php_ext_dom",
  "php_ext_filter",
+ "php_ext_ftp",
  "php_ext_hash",
  "php_ext_iconv",
  "php_ext_json",
@@ -549,6 +550,14 @@ dependencies = [
  "php_ext_pcre",
  "php_ext_standard",
  "php_ext_uri",
+]
+
+[[package]]
+name = "php_ext_ftp"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "php_ext",
 ]
 
 [[package]]

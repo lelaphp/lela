@@ -58,6 +58,7 @@ linked = [
     "sysvsem",
     "sysvmsg",
     "sysvshm",
+    "ftp",
 ]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
 spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
@@ -96,6 +97,7 @@ shmop = ["dep:php_ext_shmop"] # the `php` binary and the phpt lane, as php build
 sysvsem = ["dep:php_ext_sysvsem"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvsem (#1323)
 sysvmsg = ["dep:php_ext_sysvmsg"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvmsg (#1323)
 sysvshm = ["dep:php_ext_sysvshm"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvshm (#1323)
+ftp = ["dep:php_ext_ftp", "openssl"] # the `php` binary and the phpt lane, as php builds it with --enable-ftp; ftp_ssl_connect secures its connections through the crypto layer openssl registers (#1323)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -137,6 +139,7 @@ php_ext_shmop = { path = "../../ext/shmop", optional = true }
 php_ext_sysvsem = { path = "../../ext/sysvsem", optional = true }
 php_ext_sysvmsg = { path = "../../ext/sysvmsg", optional = true }
 php_ext_sysvshm = { path = "../../ext/sysvshm", optional = true }
+php_ext_ftp = { path = "../../ext/ftp", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

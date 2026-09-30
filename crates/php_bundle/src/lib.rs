@@ -94,6 +94,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_sysvmsg::extension,
         #[cfg(feature = "sysvshm")]
         php_ext_sysvshm::extension,
+        #[cfg(feature = "ftp")]
+        php_ext_ftp::extension,
     ]
 }
 

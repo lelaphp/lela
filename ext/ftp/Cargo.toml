@@ -1,0 +1,23 @@
+# ext/ftp: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_ftp"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The ftp extension, php-src/ext/ftp"
+
+[lints]
+workspace = true
+
+# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+# `ETIMEDOUT`, whose text a read that runs out of time warns with; the
+# sockets are the engine's.
+libc = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }
