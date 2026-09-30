@@ -54,6 +54,11 @@ mod http;
 mod http_fopen_wrapper;
 mod image;
 pub use image::{ImageHandler, ImageSize};
+/// What `php_image.h` and `php_string.h` declare `PHPAPI` for ext/exif,
+/// which includes both: an image's type, a type's MIME type, and the
+/// base name of the file it reports (#1330).
+pub use image::{php_getimagetype, php_image_type_to_mime_type};
+pub use string::path::php_basename;
 mod info;
 mod ini;
 mod iptc;

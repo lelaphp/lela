@@ -209,6 +209,7 @@ Options:
 ├── curl
 ├── date
 ├── dom
+├── exif
 ├── filter
 ├── hash
 ├── iconv
@@ -236,7 +237,7 @@ Options:
 ├── uri
 └── zlib
 ```
-<!-- /computed in=ad0e73f07ddfa419db2579e8315eae227926a331cd98a3863b419c2bd220c36c out=06fd5b22292e333053445277b1f5010686c24594ee58fcb9bc7407ea46ea8833 -->
+<!-- /computed in=0f92d6106cbb1775eb0ac1051076a30c1971ceba23f0258fea3dcbc78140f1c2 out=c7e9484cb0d27f73bc9c21668c037055546d9a5786652c6162caac8d355b84fa -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

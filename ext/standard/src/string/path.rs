@@ -19,8 +19,10 @@ use crate::ffi::locale::{self as c, Mblen};
 /// `php_basename(s, len, suffix, suffix_len)`
 /// (`Z/ext/standard/string.c:1364`): the last component, trailing
 /// slashes dropped, and the suffix taken off when it ends the component
-/// and is shorter than it. `tempnam` reads it with no suffix.
-pub(crate) fn php_basename<'a>(s: &'a [u8], suffix: &[u8]) -> &'a [u8] {
+/// and is shorter than it. `tempnam` reads it with no suffix, and so
+/// does `exif_read_data` for the name it reports, through the
+/// `php_string.h` it includes.
+pub fn php_basename<'a>(s: &'a [u8], suffix: &[u8]) -> &'a [u8] {
     let (start, end) = if c::ascii_compatible() {
         let Some(end) = s.iter().rposition(|c| *c != b'/') else {
             return &[];
