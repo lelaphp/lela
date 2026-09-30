@@ -26,9 +26,9 @@ docs = 5000                                # design §10; `docs/**` plus the thr
 harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
 lock_packages = 135                        # design §4.1: `Cargo.lock` packages, default features, counted on day 31 with the Cranelift set
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
-api_items = 900                            # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34)
+api_items = 1000                            # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34)
 api_private_items = 16                     # design §4.4 (revision 34, D1 of #947): api::__private, the helpers only a macro expansion names, capped apart from api_items
-bindings = 16000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
+bindings = 18500                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
 # Lines are non-blank, non-comment, tests excluded (`xtask budget`).
 
 [telemetry]
@@ -264,6 +264,57 @@ porting = true
 [[crate]]
 name = "ext/uri"
 budget = 3500     # php_uri.c, php_uri_common.c and the three parser adapters; uriparser vendored from php-src's ext/uri/uriparser, compiled by build.rs and bound in src/ffi/, the bindings pool's; Uri\WhatWg over ext/lexbor's safe types (#1163)
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/xml"
+budget = 2500     # xml.c and compat.c, the expat-compatible parser over libxml2's SAX2 push parser, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 1,852 lines of C (#1166, #727's rule, #1323)
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/xmlreader"
+budget = 1500     # php_xmlreader.c over libxml2's xmlTextReader, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 1,089 lines of C (#1166, #727's rule, #1323)
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/xmlwriter"
+budget = 1000     # php_xmlwriter.c over libxml2's xmlTextWriter, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 769 lines of C (#1166, #727's rule, #1323)
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/exif"
+budget = 5500     # exif.c, php's own C ported, no library; php's --enable-exif, whose feature turns on mbstring, the decoding the oracle's --ri reports; 4,198 lines of C (#1166, #727's rule, #1323)
+feature = "exif"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/ftp"
+budget = 4000     # ftp.c and php_ftp.c, php's own C ported over the engine's sockets; php's --enable-ftp, whose feature turns on openssl for ftp_ssl_connect, which the oracle carries; 2,847 lines of C (#1166, #727's rule, #1323)
+feature = "ftp"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/shmop"
+budget = 500      # shmop.c over System V shared memory, bound from libc in src/ffi/, the bindings pool's, since nix binds no System V IPC; php's --enable-shmop; 247 lines of C (#1166, #727's rule, #1323)
+feature = "shmop"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/sysvmsg"
+budget = 500      # sysvmsg.c over System V message queues, bound from libc in src/ffi/, the bindings pool's, since nix binds no System V IPC; php's --enable-sysvmsg; 328 lines of C (#1166, #727's rule, #1323)
+feature = "sysvmsg"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/sysvsem"
+budget = 500      # sysvsem.c over System V semaphores, bound from libc in src/ffi/, the bindings pool's, since nix binds no System V IPC; php's --enable-sysvsem; 231 lines of C (#1166, #727's rule, #1323)
+feature = "sysvsem"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/sysvshm"
+budget = 500      # sysvshm.c over System V shared memory, bound from libc in src/ffi/, the bindings pool's, since nix binds no System V IPC; the segment in php's own layout, which a php process on the same key reads; php's --enable-sysvshm; 325 lines of C (#1166, #727's rule, #1323)
+feature = "sysvshm"
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 

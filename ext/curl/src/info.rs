@@ -1,0 +1,282 @@
+//! `curl_getinfo`: one piece of what the last transfer left, by its
+//! `CURLINFO_*` number, or all of it as php's array.
+
+use php_ext::abi::Instance;
+use php_ext::attr::php_function;
+use php_ext::raising::{Level, Thrown, docref};
+use php_ext::request::Request;
+use php_ext::values::{Key, PhpArray, PhpString, Value};
+
+use crate::constants as c;
+use crate::ffi::{Easy, Info};
+use crate::handle::{CurlHandle, curl, easy_of};
+
+/// An array of the request's being filled with `add_assoc_*`.
+pub(crate) struct Assoc(pub(crate) PhpArray);
+
+impl Assoc {
+    pub(crate) fn new(req: &mut Request) -> Result<Assoc, Thrown> {
+        PhpArray::new(req).map(Assoc)
+    }
+
+    /// `add_assoc_zval`: `value` is the array's from here.
+    pub(crate) fn add(&mut self, req: &mut Request, key: &str, value: Value) -> Result<(), Thrown> {
+        let key = Key::Str(PhpString::new(req, key.as_bytes())?);
+        self.0.set(req, key, value)
+    }
+
+    /// `add_assoc_string`.
+    pub(crate) fn add_str(
+        &mut self,
+        req: &mut Request,
+        key: &str,
+        bytes: &[u8],
+    ) -> Result<(), Thrown> {
+        let value = Value::string(PhpString::new(req, bytes)?);
+        self.add(req, key, value)
+    }
+
+    pub(crate) fn value(self) -> Value {
+        Value::array(self.0)
+    }
+}
+
+/// A list of strings, `add_next_index_string` each.
+pub(crate) fn list(req: &mut Request, items: &[Vec<u8>]) -> Result<Value, Thrown> {
+    let mut array = PhpArray::new(req)?;
+    for item in items {
+        let value = Value::string(PhpString::new(req, item)?);
+        array.append(req, value)?;
+    }
+    Ok(Value::array(array))
+}
+
+/// `create_certinfo`: each certificate an array of its `key:value`
+/// lines, the key cut at the first colon of the line's first 63 bytes.
+fn certinfo(req: &mut Request, certs: &[Vec<Vec<u8>>], into: &mut PhpArray) -> Result<(), Thrown> {
+    for cert in certs {
+        let mut hash = Assoc::new(req)?;
+        for line in cert {
+            let head = &line[..line.len().min(63)];
+            match head.iter().position(|b| *b == b':') {
+                Some(at) => {
+                    let key = String::from_utf8_lossy(&line[..at]).into_owned();
+                    hash.add_str(req, &key, &line[at + 1..])?;
+                }
+                None => docref(
+                    req,
+                    Level::Warning,
+                    "Could not extract hash key from certificate info",
+                ),
+            }
+        }
+        into.append(req, hash.value())?;
+    }
+    Ok(())
+}
+
+/// What the whole-array form reads each row as.
+#[derive(Clone, Copy)]
+enum Row {
+    /// `CAAS`: a string, `""` for none.
+    Str,
+    /// `content_type`: a string, `null` for none.
+    OrNull,
+    /// `CAAL` or `CAAD`: the number as the info's type gives it.
+    Number,
+}
+
+/// The rows of `curl_getinfo($ch)` before `certinfo`, in php's order.
+const HEAD: &[(&str, i64, Row)] = &[
+    ("url", c::CURLINFO_EFFECTIVE_URL, Row::Str),
+    ("content_type", c::CURLINFO_CONTENT_TYPE, Row::OrNull),
+    ("http_code", c::CURLINFO_HTTP_CODE, Row::Number),
+    ("header_size", c::CURLINFO_HEADER_SIZE, Row::Number),
+    ("request_size", c::CURLINFO_REQUEST_SIZE, Row::Number),
+    ("filetime", c::CURLINFO_FILETIME, Row::Number),
+    (
+        "ssl_verify_result",
+        c::CURLINFO_SSL_VERIFYRESULT,
+        Row::Number,
+    ),
+    ("redirect_count", c::CURLINFO_REDIRECT_COUNT, Row::Number),
+    ("total_time", c::CURLINFO_TOTAL_TIME, Row::Number),
+    ("namelookup_time", c::CURLINFO_NAMELOOKUP_TIME, Row::Number),
+    ("connect_time", c::CURLINFO_CONNECT_TIME, Row::Number),
+    (
+        "pretransfer_time",
+        c::CURLINFO_PRETRANSFER_TIME,
+        Row::Number,
+    ),
+    ("size_upload", c::CURLINFO_SIZE_UPLOAD, Row::Number),
+    ("size_download", c::CURLINFO_SIZE_DOWNLOAD, Row::Number),
+    ("speed_download", c::CURLINFO_SPEED_DOWNLOAD, Row::Number),
+    ("speed_upload", c::CURLINFO_SPEED_UPLOAD, Row::Number),
+    (
+        "download_content_length",
+        c::CURLINFO_CONTENT_LENGTH_DOWNLOAD,
+        Row::Number,
+    ),
+    (
+        "upload_content_length",
+        c::CURLINFO_CONTENT_LENGTH_UPLOAD,
+        Row::Number,
+    ),
+    (
+        "starttransfer_time",
+        c::CURLINFO_STARTTRANSFER_TIME,
+        Row::Number,
+    ),
+    ("redirect_time", c::CURLINFO_REDIRECT_TIME, Row::Number),
+    ("redirect_url", c::CURLINFO_REDIRECT_URL, Row::Str),
+    ("primary_ip", c::CURLINFO_PRIMARY_IP, Row::Str),
+];
+
+/// The rows after `certinfo` and before `request_header`.
+const MIDDLE: &[(&str, i64, Row)] = &[
+    ("primary_port", c::CURLINFO_PRIMARY_PORT, Row::Number),
+    ("local_ip", c::CURLINFO_LOCAL_IP, Row::Str),
+    ("local_port", c::CURLINFO_LOCAL_PORT, Row::Number),
+    ("http_version", c::CURLINFO_HTTP_VERSION, Row::Number),
+    ("protocol", c::CURLINFO_PROTOCOL, Row::Number),
+    (
+        "ssl_verifyresult",
+        c::CURLINFO_PROXY_SSL_VERIFYRESULT,
+        Row::Number,
+    ),
+    ("scheme", c::CURLINFO_SCHEME, Row::Str),
+    (
+        "appconnect_time_us",
+        c::CURLINFO_APPCONNECT_TIME_T,
+        Row::Number,
+    ),
+    ("queue_time_us", c::CURLINFO_QUEUE_TIME_T, Row::Number),
+    ("connect_time_us", c::CURLINFO_CONNECT_TIME_T, Row::Number),
+    (
+        "namelookup_time_us",
+        c::CURLINFO_NAMELOOKUP_TIME_T,
+        Row::Number,
+    ),
+    (
+        "pretransfer_time_us",
+        c::CURLINFO_PRETRANSFER_TIME_T,
+        Row::Number,
+    ),
+    ("redirect_time_us", c::CURLINFO_REDIRECT_TIME_T, Row::Number),
+    (
+        "starttransfer_time_us",
+        c::CURLINFO_STARTTRANSFER_TIME_T,
+        Row::Number,
+    ),
+    (
+        "posttransfer_time_us",
+        c::CURLINFO_POSTTRANSFER_TIME_T,
+        Row::Number,
+    ),
+    ("total_time_us", c::CURLINFO_TOTAL_TIME_T, Row::Number),
+];
+
+/// The rows after `request_header`.
+const TAIL: &[(&str, i64, Row)] = &[
+    ("effective_method", c::CURLINFO_EFFECTIVE_METHOD, Row::Str),
+    ("capath", c::CURLINFO_CAPATH, Row::Str),
+    ("cainfo", c::CURLINFO_CAINFO, Row::Str),
+    ("used_proxy", c::CURLINFO_USED_PROXY, Row::Number),
+    ("httpauth_used", c::CURLINFO_HTTPAUTH_USED, Row::Number),
+    ("proxyauth_used", c::CURLINFO_PROXYAUTH_USED, Row::Number),
+    ("conn_id", c::CURLINFO_CONN_ID, Row::Number),
+];
+
+/// Each row the library answers, added as `row` reads it.
+fn rows(
+    req: &mut Request,
+    easy: &Easy,
+    out: &mut Assoc,
+    rows: &[(&str, i64, Row)],
+) -> Result<(), Thrown> {
+    for (key, info, row) in rows {
+        let value = match (easy.info(*info), row) {
+            (Some(Info::Str(None)), Row::OrNull) => Value::null(),
+            (Some(Info::Str(text)), _) => {
+                Value::string(PhpString::new(req, &text.unwrap_or_default())?)
+            }
+            (Some(Info::Long(n) | Info::OffT(n)), _) => Value::int(n),
+            (Some(Info::Double(f)), _) => Value::float(f),
+            (None | Some(Info::List(_) | Info::Certs(_)), _) => continue,
+        };
+        out.add(req, key, value)?;
+    }
+    Ok(())
+}
+
+/// `curl_getinfo(CurlHandle $handle, ?int $option = null): mixed`.
+///
+/// ```php
+/// $c = curl_init('file:///nonexistent-curl-witness');
+/// $i = curl_getinfo($c);
+/// var_dump(count($i), $i['url'], $i['content_type'], $i['http_code'], array_key_exists('request_header', $i));
+/// var_dump(curl_getinfo($c, CURLINFO_HEADER_OUT), curl_getinfo($c, CURLINFO_PRIVATE), curl_getinfo($c, CURLINFO_CERTINFO), curl_getinfo($c, CURLINFO_RESPONSE_CODE), curl_getinfo($c, 12345));
+/// ```
+/// ```expect
+/// int(46)
+/// string(32) "file:///nonexistent-curl-witness"
+/// NULL
+/// int(0)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// array(0) {
+/// }
+/// int(0)
+/// bool(false)
+/// ```
+#[php_function]
+fn curl_getinfo(
+    req: &mut Request,
+    handle: Instance<CurlHandle>,
+    #[php(default = null)] option: Option<i64>,
+) -> Result<Value, Thrown> {
+    let object = handle.object();
+    let easy = easy_of(req, object)?;
+    let Some(option) = option else {
+        let mut out = Assoc::new(req)?;
+        rows(req, &easy, &mut out, HEAD)?;
+        if let Some(Info::Certs(certs)) = easy.info(c::CURLINFO_CERTINFO) {
+            let mut array = PhpArray::new(req)?;
+            certinfo(req, &certs, &mut array)?;
+            out.add(req, "certinfo", Value::array(array))?;
+        }
+        rows(req, &easy, &mut out, MIDDLE)?;
+        if let Some(header) = curl(req, handle)?.header_out.clone() {
+            out.add_str(req, "request_header", &header)?;
+        }
+        rows(req, &easy, &mut out, TAIL)?;
+        return Ok(out.value());
+    };
+    let value = match option {
+        c::CURLINFO_HEADER_OUT => match curl(req, handle)?.header_out.clone() {
+            Some(header) => Value::string(PhpString::new(req, &header)?),
+            None => Value::bool(false),
+        },
+        c::CURLINFO_PRIVATE => match curl(req, handle)?.private {
+            Some(private) => {
+                req.addref(&private);
+                private
+            }
+            None => Value::bool(false),
+        },
+        _ => match easy.info(option) {
+            Some(Info::Str(Some(text))) => Value::string(PhpString::new(req, &text)?),
+            Some(Info::Long(n) | Info::OffT(n)) => Value::int(n),
+            Some(Info::Double(f)) => Value::float(f),
+            Some(Info::List(lines)) => list(req, &lines)?,
+            Some(Info::Certs(certs)) => {
+                let mut array = PhpArray::new(req)?;
+                certinfo(req, &certs, &mut array)?;
+                Value::array(array)
+            }
+            Some(Info::Str(None)) | None => Value::bool(false),
+        },
+    };
+    Ok(value)
+}
