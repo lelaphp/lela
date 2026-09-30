@@ -1,18 +1,29 @@
 //! `zend.multibyte`'s engine half (design §4.9, §6.1): the three entries
 //! of `Z/Zend/zend.c` that say whether and how a file is read in its own
-//! encoding, and the encoding functions bound to the request a file
-//! compiles for: Zend's dummies (`Z/Zend/zend_multibyte.c:25-80`) until an
-//! extension can hand the engine its own. What the scanner does with them
-//! is the compiler's ([`php_compile::multibyte`]).
+//! encoding, and the encoding functions an extension hands the engine
+//! (`zend_multibyte_set_functions`, [`ExtensionBuilder::encodings`])
+//! bound to the request a file compiles for. What the scanner does with
+//! them is the compiler's ([`php_compile::multibyte`]).
+//!
+//! [`ExtensionBuilder::encodings`]: crate::api::abi::ExtensionBuilder::encodings
 
-use php_compile::multibyte::{Dummy, Encoding, Encodings, Multibyte};
+use php_compile::multibyte::{Dummy, Encoding, Multibyte};
 
+use crate::api::abi::{EncodingsHook, Multibyte as Provided};
+use crate::api::raising::{Level, docref};
 use crate::api::request::{Request, ini_truth};
+use crate::engine::Shared;
+
+/// `zend_multibyte_get_functions`: the functions the last extension in
+/// bundle order handed the engine, none where no extension did.
+pub(crate) fn provider(shared: &Shared) -> Option<EncodingsHook> {
+    shared.extensions.iter().rev().find_map(|e| e.encodings)
+}
 
 /// The functions bound to one request, with what the scanner reads
 /// beside them: what the compiler's [`Multibyte`] borrows.
 pub(crate) struct Bound {
-    encodings: Box<dyn Encodings>,
+    encodings: Box<dyn Provided>,
     detect_unicode: bool,
     listed: Vec<Encoding>,
 }
@@ -28,10 +39,24 @@ impl Bound {
     }
 }
 
-/// The functions bound to a request: Zend's dummies, since no
-/// extension sets any yet (`zend_multibyte_get_functions()` is none).
-fn bind() -> Box<dyn Encodings> {
-    Box::new(Dummy)
+/// Zend's dummies answer rfc1867 as php's do without mbstring: no
+/// translation (`dummy_encoding_translation`), and a byte a character.
+impl Provided for Dummy {
+    fn http_input(&self) -> Option<Vec<Encoding>> {
+        None
+    }
+
+    fn char_len(&self, _: Encoding, _: u8) -> usize {
+        1
+    }
+}
+
+/// The functions bound to `req`: the provider's, or Zend's dummies.
+pub(crate) fn bind(req: &mut Request) -> Box<dyn Provided> {
+    match provider(&req.shared) {
+        Some(bind) => bind(req),
+        None => Box::new(Dummy),
+    }
 }
 
 /// What a file compiled for `req` is read under where `multibyte`, the
@@ -48,7 +73,7 @@ pub(crate) fn bound(req: &mut Request, multibyte: bool) -> Option<Bound> {
         .clone()
         .unwrap_or_else(|| req.shared.script_encodings.clone());
     Some(Bound {
-        encodings: bind(),
+        encodings: bind(req),
         detect_unicode,
         listed,
     })
@@ -74,11 +99,25 @@ pub(crate) fn bound(req: &mut Request, multibyte: bool) -> Option<Bound> {
 /// string(1) "1"
 /// string(0) ""
 /// ```
-pub(crate) fn script_encoding(req: &mut Request, _value: &[u8]) -> Option<Vec<Encoding>> {
+pub(crate) fn script_encoding(req: &mut Request, value: &[u8]) -> Option<Vec<Encoding>> {
     if !ini_truth(req.ini_get(b"zend.multibyte")) {
         return None;
     }
-    Some(Vec::new())
+    if provider(&req.shared).is_none() || value.is_empty() {
+        return Some(Vec::new());
+    }
+    match bind(req).list(value) {
+        Ok(list) if list.is_empty() => None,
+        Ok(list) => Some(list),
+        Err(name) => {
+            let message = format!(
+                "INI setting contains invalid encoding \"{}\"",
+                String::from_utf8_lossy(&name)
+            );
+            docref(req, Level::Warning, &message);
+            None
+        }
+    }
 }
 
 /// `zend.script_encoding` as the engine starts: the entry registered
