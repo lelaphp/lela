@@ -522,6 +522,7 @@ pub(crate) fn iterator_wrapper(builder: ExtensionBuilder) -> ExtensionBuilder {
         },
         parent: None,
         interfaces: Vec::new(),
+        implementors: Vec::new(),
         traits: Vec::new(),
         adaptations: Vec::new(),
         backing: EnumBacking::Pure,

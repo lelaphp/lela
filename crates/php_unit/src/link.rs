@@ -244,9 +244,22 @@ pub enum Refusal {
     /// `Non-backed enum %s cannot implement interface %s`, a pure enum
     /// naming `BackedEnum` (`zend_implement_backed_enum`).
     NonBackedEnumInterface { class: String, interface: String },
-    /// `Class %s must implement interface Traversable as part of either
-    /// Iterator or IteratorAggregate`.
-    Traversable { class: String },
+    /// `%s %s must implement interface Traversable as part of either
+    /// Iterator or IteratorAggregate`, the object's kind first.
+    Traversable { kind: ClassKind, class: String },
+    /// `Class %s cannot implement both Iterator and IteratorAggregate at
+    /// the same time` (`zend_implement_aggregate`, `zend_implement_iterator`).
+    IteratorAndAggregate { class: String },
+    /// `%s can't be implemented by user classes`, an extension's
+    /// `interface_gets_implemented` over a class that descends from none
+    /// of the classes the interface names ([`ClassDecl::implementors`]).
+    UserImplementor { interface: String },
+    /// `Enum %s cannot include magic method %s`
+    /// (`zend_verify_enum_magic_methods`).
+    EnumMagic { class: String, method: &'static str },
+    /// `Enum %s cannot implement the Serializable interface`
+    /// (`zend_verify_enum_interfaces`).
+    EnumSerializable { class: String },
     /// `Class %s contains %d abstract method%s and must therefore be
     /// declared abstract or implement the remaining method%s (%s)`, with
     /// every method left, of which php names three; an enum, which
@@ -413,7 +426,9 @@ impl Refusal {
             | Refusal::NotAnInterface { .. }
             | Refusal::Throwable { .. }
             | Refusal::EnumInterface { .. }
-            | Refusal::NonBackedEnumInterface { .. } => Level::Error,
+            | Refusal::NonBackedEnumInterface { .. }
+            | Refusal::IteratorAndAggregate { .. }
+            | Refusal::UserImplementor { .. } => Level::Error,
             Refusal::Traversable { .. } => Level::CoreError,
             _ => Level::CompileError,
         }
@@ -707,10 +722,27 @@ impl fmt::Display for Refusal {
                     "{class} cannot implement {interface} - it is not an interface"
                 )
             }
-            Refusal::Traversable { class } => write!(
+            Refusal::Traversable { kind, class } => write!(
                 f,
-                "Class {class} must implement interface Traversable as part of either Iterator or IteratorAggregate"
+                "{} {class} must implement interface Traversable as part of either Iterator or IteratorAggregate",
+                object_type_uc(*kind)
             ),
+            Refusal::IteratorAndAggregate { class } => write!(
+                f,
+                "Class {class} cannot implement both Iterator and IteratorAggregate at the same time"
+            ),
+            Refusal::UserImplementor { interface } => {
+                write!(f, "{interface} can't be implemented by user classes")
+            }
+            Refusal::EnumMagic { class, method } => {
+                write!(f, "Enum {class} cannot include magic method {method}")
+            }
+            Refusal::EnumSerializable { class } => {
+                write!(
+                    f,
+                    "Enum {class} cannot implement the Serializable interface"
+                )
+            }
             Refusal::EnumInterface { class, interface } => {
                 write!(
                     f,
@@ -1213,19 +1245,25 @@ fn is_variadic(function: &FunctionDecl) -> bool {
 }
 
 /// A default as `zend_get_function_declaration` prints it.
+///
+/// A float is written at php's `precision` of 14 in the `E` form:
+///
+/// ```php
+/// class B { function t($x = 3.141592653589793, $y = 1.0, $z = 1e100) {} }
+/// class S extends B { function t() {} }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Declaration of S::t() must be compatible with B::t($x = 3.1415926535898, $y = 1, $z = 1.0E+100) in %s on line 3
+/// ```
 fn default_text(default: &ConstExpr) -> String {
     match default {
         ConstExpr::Null => String::from("null"),
         ConstExpr::Bool(false) => String::from("false"),
         ConstExpr::Bool(true) => String::from("true"),
         ConstExpr::Long { value, radix } => radix.written(*value),
-        ConstExpr::Double(d) => {
-            if d.fract() == 0.0 && d.is_finite() && d.abs() < 1e15 {
-                format!("{d:.0}")
-            } else {
-                d.to_string()
-            }
-        }
+        // `smart_str_append_double(&str, d, EG(precision), false)`, at
+        // php's default `precision` of 14.
+        ConstExpr::Double(d) => php_heap::double_to_string(*d, 14, php_heap::Exponent::Upper),
         ConstExpr::Str(bytes) => {
             let shown = &bytes[..bytes.len().min(10)];
             let more = if bytes.len() > 10 { "..." } else { "" };
@@ -1342,7 +1380,11 @@ struct Linker<'a> {
 /// among them: the traits bound first ([`traits`]), then every refusal
 /// `zend_do_inheritance_ex` and `do_interface_implementation` make,
 /// the first in php's order.
-pub fn link<'a>(child: &'a ClassDecl, lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>) -> Linking {
+pub fn link<'a>(
+    child: &'a ClassDecl,
+    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
+    values: &'a dyn Fn(&ConstExpr) -> Option<ConstExpr>,
+) -> Linking {
     if child.traits.is_empty() {
         let mut linker = Linker::over(lookup, Vec::new());
         let settled = linker.link_refused(child, &[]);
@@ -1355,7 +1397,7 @@ pub fn link<'a>(child: &'a ClassDecl, lookup: &'a dyn Fn(&[u8]) -> Option<Held<'
             autoloads: deferred.autoloads,
         };
     }
-    let composition = match traits::compose(child, lookup) {
+    let composition = match traits::compose(child, lookup, values) {
         Ok(composition) => composition,
         Err(failed) => {
             let (refused, raised) = *failed;
@@ -1512,7 +1554,18 @@ impl<'a> Linker<'a> {
             .any(|up| self.instance_of_at(up, of, depth + 1))
     }
 
-    /// The members `class` has with what it inherited, its own first.
+    /// The members `class` has with what it inherited, its own first,
+    /// and the methods of the interfaces the chain implements, which
+    /// php's table holds after its own and its parents':
+    ///
+    /// ```php
+    /// interface I { function __construct(); }
+    /// abstract class P implements I {}
+    /// class C extends P { function __construct($a) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Declaration of C::__construct($a) must be compatible with I::__construct() in %s on line 4
+    /// ```
     fn tables(&self, class: &'a ClassDecl) -> Tables<'a> {
         let mut tables = Tables {
             methods: Vec::new(),
@@ -1556,6 +1609,16 @@ impl<'a> Linker<'a> {
                 break;
             }
             at = self.class_parent(here);
+        }
+        // `do_interface_implementation` put each interface's methods the
+        // chain did not declare in the class's table too, so the table a
+        // child inherits holds them.
+        for interface in self.all_interfaces(class) {
+            for method in &interface.methods {
+                if !tables.methods.iter().any(|(_, m)| same_method(m, method)) {
+                    tables.methods.push((interface, method));
+                }
+            }
         }
         tables
     }
@@ -2399,7 +2462,7 @@ impl<'a> Linker<'a> {
         if let Some(refusal) = abstract_left(child, &methods, hooks) {
             return Settled::of(Linked::Refused(at_class(child, refusal)));
         }
-        if let Some(refusal) = enum_properties(child) {
+        if let Some(refusal) = enum_properties(child).or_else(|| self.enum_refused(child)) {
             return Settled::of(Linked::Refused(at_class(child, refusal)));
         }
         if let Some(linked) = self.set_hooks_refused(child) {
@@ -2883,6 +2946,18 @@ impl<'a> Linker<'a> {
     /// refused where it is not one or is named twice, then each of them
     /// and each one's parents, `do_interface_implementation` over its
     /// constants and methods and then `interface_gets_implemented`.
+    ///
+    /// A method another interface or a parent put in the table is
+    /// held to the interface's as the class's own is:
+    ///
+    /// ```php
+    /// interface d { static function B(); }
+    /// interface c { function b(); }
+    /// interface a extends d, c {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot make non static method c::B() static in class d in %s on line 2
+    /// ```
     fn implement(
         &mut self,
         child: &'a ClassDecl,
@@ -2916,6 +2991,10 @@ impl<'a> Linker<'a> {
             }
             named.push(interface);
         }
+        let all = self.all_interfaces(child);
+        if let Some(refusal) = self.inherited_interfaces_refused(child, &all) {
+            return Some(Linked::Refused(at_class(child, refusal)));
+        }
         let mut interfaces = Vec::new();
         self.interfaces_of(&child.interfaces, &mut interfaces, 0);
         for interface in interfaces {
@@ -2947,6 +3026,24 @@ impl<'a> Linker<'a> {
                             return Some(linked);
                         }
                     }
+                    // `do_inherit_method` over a method another class of
+                    // the chain or another interface put there: held to
+                    // the interface's as php holds it, unless it is that
+                    // very method.
+                    Some((Some(held_by), held)) if !same(held_by, interface) => {
+                        let (held_by, held) = (*held_by, *held);
+                        let fe_side = Side {
+                            scope: Self::scope_of(child, Cls::Linked(held_by)),
+                            shown: &held_by.name.0,
+                        };
+                        let (_, proto_side) = Self::own_over(child, interface);
+                        let check = Check::Interface;
+                        let refused =
+                            self.method_refused(child, held, fe_side, method, proto_side, check);
+                        if refused.is_some() {
+                            return refused;
+                        }
+                    }
                     Some(_) => {}
                     None => methods.push((Some(interface), method)),
                 }
@@ -2965,7 +3062,7 @@ impl<'a> Linker<'a> {
                 }
             }
             if child.kind != ClassKind::Interface
-                && let Some(refusal) = self.interface_refused(child, interface)
+                && let Some(refusal) = self.interface_refused(child, interface, &all)
             {
                 return Some(Linked::Refused(at_class(child, refusal)));
             }
@@ -2973,12 +3070,96 @@ impl<'a> Linker<'a> {
         None
     }
 
+    /// `zend_do_inheritance`'s `do_implement_interface` over what the
+    /// parent implements, whose guards hold the child too, before its
+    /// own interfaces'.
+    fn inherited_interfaces_refused(
+        &self,
+        child: &'a ClassDecl,
+        all: &[&'a ClassDecl],
+    ) -> Option<Refusal> {
+        if child.kind == ClassKind::Interface {
+            return None;
+        }
+        let mut own = Vec::new();
+        self.interfaces_of(&child.interfaces, &mut own, 0);
+        all.iter()
+            .filter(|interface| !own.iter().any(|o| same(o, interface)))
+            .find_map(|interface| self.interface_refused(child, interface, all))
+    }
+
+    /// `ce->interfaces` once `zend_do_link_class` has resolved them: the
+    /// interfaces each parent up the chain holds, then the class's own
+    /// and those each one extends, each once.
+    fn all_interfaces(&self, child: &'a ClassDecl) -> Vec<&'a ClassDecl> {
+        let mut chain: Vec<&'a ClassDecl> = Vec::new();
+        let mut at = self.class_parent(child);
+        while let Some(parent) = at {
+            if chain.len() > 64 || chain.iter().any(|seen| same(seen, parent)) {
+                break;
+            }
+            chain.push(parent);
+            at = self.class_parent(parent);
+        }
+        let mut all = Vec::new();
+        for class in chain.into_iter().rev() {
+            self.interfaces_of(&class.interfaces, &mut all, 0);
+        }
+        self.interfaces_of(&child.interfaces, &mut all, 0);
+        all
+    }
+
     /// `interface_gets_implemented` of the interfaces php's engine
     /// guards: `Throwable` only through `Exception` or `Error`,
     /// `Traversable` only through `Iterator` or `IteratorAggregate`, the
     /// enum interfaces only on an enum and `BackedEnum` only on a backed
     /// one.
-    fn interface_refused(&self, child: &'a ClassDecl, interface: &ClassDecl) -> Option<Refusal> {
+    ///
+    /// Each guard runs over what the class holds once linked, its
+    /// parents' interfaces included, as `ce->interfaces` is by then:
+    ///
+    /// ```php
+    /// abstract class A implements IteratorAggregate, Iterator {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class A cannot implement both Iterator and IteratorAggregate at the same time in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// abstract class A implements Traversable {}
+    /// class B extends A {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class B must implement interface Traversable as part of either Iterator or IteratorAggregate in Unknown on line 0
+    /// ```
+    ///
+    /// ```php
+    /// enum Foo implements Traversable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum Foo must implement interface Traversable as part of either Iterator or IteratorAggregate in Unknown on line 0
+    /// ```
+    ///
+    /// An extension's interface that names the classes an implementor
+    /// must descend from holds any other to it:
+    ///
+    /// ```php
+    /// class A extends DateTime implements DateTimeInterface {}
+    /// class B extends DateTimeImmutable {}
+    /// echo "linked\n";
+    /// class C implements DateTimeInterface {}
+    /// ```
+    /// ```expect exit=255
+    /// linked
+    ///
+    /// Fatal error: DateTimeInterface can't be implemented by user classes in %s on line 5
+    /// ```
+    fn interface_refused(
+        &self,
+        child: &'a ClassDecl,
+        interface: &ClassDecl,
+        all: &[&'a ClassDecl],
+    ) -> Option<Refusal> {
         let name = &interface.name.0;
         let class = text(&child.name.0);
         if name.eq_ignore_ascii_case(b"Throwable") {
@@ -2994,20 +3175,36 @@ impl<'a> Linker<'a> {
                 });
             }
         }
-        if name.eq_ignore_ascii_case(b"Traversable") && !child.flags.is_abstract {
-            let mut all = Vec::new();
-            self.interfaces_of(&child.interfaces, &mut all, 0);
-            let through_iterator = all.iter().any(|interface| {
-                interface.name.0.eq_ignore_ascii_case(b"Iterator")
-                    || interface.name.0.eq_ignore_ascii_case(b"IteratorAggregate")
-            }) || child
-                .parent
-                .as_ref()
-                .and_then(|p| self.class_named(&p.0))
-                .is_some_and(|parent| self.instance_of(parent, interface));
-            if !through_iterator {
-                return Some(Refusal::Traversable { class });
-            }
+        let holds = |wanted: &[u8]| all.iter().any(|i| i.name.0.eq_ignore_ascii_case(wanted));
+        if name.eq_ignore_ascii_case(b"Traversable")
+            && !child.flags.is_abstract
+            && !holds(b"Iterator")
+            && !holds(b"IteratorAggregate")
+        {
+            return Some(Refusal::Traversable {
+                kind: child.kind,
+                class,
+            });
+        }
+        let other: &[u8] = if name.eq_ignore_ascii_case(b"Iterator") {
+            b"IteratorAggregate"
+        } else {
+            b"Iterator"
+        };
+        if (name.eq_ignore_ascii_case(b"Iterator")
+            || name.eq_ignore_ascii_case(b"IteratorAggregate"))
+            && holds(other)
+        {
+            return Some(Refusal::IteratorAndAggregate { class });
+        }
+        let descends = |implementor: &Name| {
+            self.class_named(&implementor.0)
+                .is_some_and(|implementor| self.instance_of(child, implementor))
+        };
+        if !interface.implementors.is_empty() && !interface.implementors.iter().any(descends) {
+            return Some(Refusal::UserImplementor {
+                interface: text(name),
+            });
         }
         let backed = name.eq_ignore_ascii_case(b"BackedEnum");
         if !backed && !name.eq_ignore_ascii_case(b"UnitEnum") {
@@ -3047,7 +3244,8 @@ impl<'a> Linker<'a> {
     /// linked
     /// ```
     fn serializable_deprecated(&mut self, child: &'a ClassDecl, methods: &Table<'a, MethodDecl>) {
-        if child.kind != ClassKind::Class || child.flags.is_abstract {
+        if matches!(child.kind, ClassKind::Interface | ClassKind::Trait) || child.flags.is_abstract
+        {
             return;
         }
         let serializable = self
@@ -3067,6 +3265,73 @@ impl<'a> Linker<'a> {
                 },
             });
         }
+    }
+}
+
+impl<'a> Linker<'a> {
+    /// `zend_verify_enum_magic_methods` and `zend_verify_enum_interfaces`,
+    /// after `zend_verify_enum_properties`: an enum holding a magic
+    /// method php keeps off one, its own or a trait's, and an enum that
+    /// is `Serializable`, whose deprecation
+    /// `zend_implement_serializable` raised first.
+    ///
+    /// ```php
+    /// trait T { public function __construct() {} }
+    /// enum E { use T; case A; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum E cannot include magic method __construct in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// enum E { case A; public function __toString(): string { return ''; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum E cannot include magic method __toString in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// enum E implements Serializable { case A;
+    ///     public function serialize() {} public function unserialize($s) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: E implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 2
+    ///
+    /// Fatal error: Enum E cannot implement the Serializable interface in %s on line 2
+    /// ```
+    fn enum_refused(&self, child: &'a ClassDecl) -> Option<Refusal> {
+        const FORBIDDEN: [&str; 14] = [
+            "__construct",
+            "__destruct",
+            "__clone",
+            "__get",
+            "__set",
+            "__unset",
+            "__isset",
+            "__toString",
+            "__debugInfo",
+            "__serialize",
+            "__unserialize",
+            "__sleep",
+            "__wakeup",
+            "__set_state",
+        ];
+        if child.kind != ClassKind::Enum {
+            return None;
+        }
+        let class = text(&child.name.0);
+        let has = |wanted: &str| {
+            child
+                .methods
+                .iter()
+                .any(|m| m.function.name.0.eq_ignore_ascii_case(wanted.as_bytes()))
+        };
+        if let Some(method) = FORBIDDEN.into_iter().find(|magic| has(magic)) {
+            return Some(Refusal::EnumMagic { class, method });
+        }
+        self.class_named(b"serializable")
+            .is_some_and(|interface| self.instance_of(child, interface))
+            .then_some(Refusal::EnumSerializable { class })
     }
 }
 
