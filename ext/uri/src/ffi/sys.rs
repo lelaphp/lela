@@ -1,8 +1,8 @@
 //! uriparser's ANSI interface as the vendored headers declare it
 //! (uriparser 1.0.2, php-src's copy): `UriUriA` and the structs it names
 //! laid out as C lays them out, and the sixteen functions
-//! `uri_parser_rfc3986.c` calls. The memory manager is always null,
-//! uriparser's default.
+//! `uri_parser_rfc3986.c` calls, with the memory manager php hands each
+//! of them.
 #![allow(non_camel_case_types, non_snake_case, dead_code)]
 
 use std::ffi::{c_char, c_int, c_uint, c_void};
@@ -43,6 +43,21 @@ pub(crate) struct UriHostDataA {
     pub ip4: *mut c_void,
     pub ip6: *mut c_void,
     pub(crate) ipFuture: UriTextRangeA,
+}
+
+/// `UriMemoryManager` (`UriBase.h`): the five allocator functions
+/// uriparser calls with the manager itself, and the data they reach it
+/// through.
+#[repr(C)]
+pub(crate) struct UriMemoryManager {
+    pub(crate) malloc: unsafe extern "C" fn(*mut UriMemoryManager, usize) -> *mut c_void,
+    pub(crate) calloc: unsafe extern "C" fn(*mut UriMemoryManager, usize, usize) -> *mut c_void,
+    pub(crate) realloc:
+        unsafe extern "C" fn(*mut UriMemoryManager, *mut c_void, usize) -> *mut c_void,
+    pub(crate) reallocarray:
+        unsafe extern "C" fn(*mut UriMemoryManager, *mut c_void, usize, usize) -> *mut c_void,
+    pub(crate) free: unsafe extern "C" fn(*mut UriMemoryManager, *mut c_void),
+    pub(crate) userData: *mut c_void,
 }
 
 /// `UriUriA`.
