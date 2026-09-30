@@ -4742,10 +4742,29 @@ impl Request {
         self.qualified_name(function, None)
     }
 
-    /// An interned string of this request's heap, never refcounted, for
-    /// a name the engine holds as bytes; the `Err` is the memory limit
-    /// refusing the intern.
+    /// An interned string, never refcounted, for a name the engine holds
+    /// as bytes, as `zend_string_init_interned_request` answers it: the
+    /// engine's permanent one where a declaration made the name
+    /// ([`crate::engine::Shared::permanent`]), which costs the request
+    /// nothing, else this request's heap's; the `Err` is the memory
+    /// limit refusing the intern.
+    ///
+    /// A class's and a method's names are `ce->name` and
+    /// `function_name`, so only the array of names is counted:
+    ///
+    /// ```php
+    /// $o = new ArrayObject; $i = new ArrayIterator;
+    /// $m = memory_get_usage();
+    /// $a = get_class($o); $b = $o::class; $c = get_parent_class($i); $d = get_class_methods('Countable');
+    /// var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(216)
+    /// ```
     pub(crate) fn interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        if let Some(permanent) = self.shared.permanent(bytes) {
+            return Ok(PhpString::of(permanent));
+        }
         let interned = self.heap.intern(bytes);
         self.fatal_of(interned).map(PhpString::of)
     }

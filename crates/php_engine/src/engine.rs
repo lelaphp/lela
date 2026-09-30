@@ -605,6 +605,12 @@ pub(crate) struct Shared {
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
     strings: Mutex<Strings>,
+    /// php's `interned_strings_permanent` as `zend_interned_strings_switch_storage`
+    /// leaves it after `MINIT`: the name of every class, method,
+    /// property, class constant and function the engine and the bundle
+    /// declare, interned at startup and frozen, so a request asking for
+    /// one finds it here and allocates nothing ([`Shared::permanent`]).
+    names: Strings,
     /// How the engine's startup finished, which the first request's
     /// host finishes ([`Engine::started`]): serving, with what the unit
     /// cache preloaded, or refusing to serve anything.
@@ -1103,6 +1109,13 @@ impl Shared {
             },
             stack,
         )
+    }
+
+    /// The permanent string for `bytes`, a name the engine or the bundle
+    /// declared, or `None` for one no declaration made
+    /// (`zend_string_init_interned_request`'s first lookup).
+    pub(crate) fn permanent(&self, bytes: &[u8]) -> Option<php_heap::Str> {
+        self.names.find(bytes)
     }
 
     /// How many strings the engine's table holds, opcache's
@@ -2059,6 +2072,7 @@ impl EngineBuilder {
             .iter()
             .flat_map(|e| e.constants.iter().cloned())
             .collect();
+        let names = permanent_names(&functions, &classes);
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
@@ -2096,6 +2110,7 @@ impl EngineBuilder {
                 units,
                 persistent: crate::api::abi::Pool::new(PERSISTENT_ENTRIES),
                 strings: Mutex::new(strings),
+                names,
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
             }),
@@ -2103,6 +2118,29 @@ impl EngineBuilder {
         engine.register_ini(held, self.host_extension);
         engine
     }
+}
+
+/// The names `MINIT` interns permanently as the engine and the bundle
+/// register their declarations (`zend_register_functions`,
+/// `zend_register_internal_class_ex`, `zend_declare_typed_property`,
+/// `zend_declare_class_constant_ex`): every function's, class's,
+/// method's, property's and class constant's name as declared. A name
+/// the table refuses is left to the request that asks for it.
+fn permanent_names(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings {
+    let mut names = Strings::new();
+    let declared = functions
+        .iter()
+        .map(|decl| &decl.name)
+        .chain(classes.iter().flat_map(|decl| {
+            std::iter::once(&decl.name)
+                .chain(decl.methods.iter().map(|method| &method.function.name))
+                .chain(decl.properties.iter().map(|property| &property.name))
+                .chain(decl.constants.iter().map(|constant| &constant.name))
+        }));
+    for name in declared {
+        let _ = names.intern(&name.0);
+    }
+    names
 }
 
 /// `zend_register_constant` at `MINIT`: each constant's value, a string
