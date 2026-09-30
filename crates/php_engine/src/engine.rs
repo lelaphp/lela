@@ -13,6 +13,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
@@ -540,6 +541,15 @@ pub(crate) struct Shared {
     /// synthesises, which `ce->function_table` has no row for, so no
     /// lookup by name and no rendering finds it.
     pub(crate) trampolines: Vec<MethodDecl>,
+    /// `CG(class_table)`'s keys as startup leaves them
+    /// ([`class_keys`]): what a lookup by name finds among the engine's
+    /// classes in one hash lookup, as `zend_hash_find` does, before the
+    /// request's own rows.
+    pub(crate) class_keys: HashMap<Box<[u8]>, ClassId>,
+    /// Each class's `ce->parent`, one row per row of `classes`, resolved
+    /// once as `zend_register_internal_class_ex` links it: a native
+    /// class's parent is a native class.
+    pub(crate) parents: Vec<Option<ClassId>>,
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
     ini: Vec<(Vec<u8>, Vec<u8>)>,
@@ -762,6 +772,30 @@ fn link_classes(core: &Extension, extensions: &[Extension]) -> LinkedClasses {
         methods,
         trampolines,
     }
+}
+
+/// `CG(class_table)`'s keys at the end of startup: each class under its
+/// lowered name, as `zend_register_internal_class_ex` adds it, then each
+/// stub `@alias` under its own, as `zend_register_class_alias_ex` adds
+/// it after its class. `zend_hash_add` refuses a key the table holds, so
+/// the first row of a name is the one found.
+fn class_keys(classes: &[ClassDecl]) -> HashMap<Box<[u8]>, ClassId> {
+    let mut keys = HashMap::with_capacity(classes.len());
+    let ids = (0u32..).map(ClassId);
+    for (class, decl) in ids.clone().zip(classes) {
+        keys.entry(lowered(&decl.name.0)).or_insert(class);
+    }
+    for (class, decl) in ids.zip(classes) {
+        for alias in &decl.aliases {
+            keys.entry(lowered(&alias.0)).or_insert(class);
+        }
+    }
+    keys
+}
+
+/// `zend_string_tolower`: the key a name is found under.
+fn lowered(name: &[u8]) -> Box<[u8]> {
+    name.to_ascii_lowercase().into_boxed_slice()
 }
 
 /// `zend_declare_class_constant_ex` over a class another extension
@@ -2095,6 +2129,14 @@ impl EngineBuilder {
             methods,
             trampolines,
         } = link_classes(&core, &extensions);
+        let class_keys = class_keys(&classes);
+        let parents = classes
+            .iter()
+            .map(|decl| {
+                let parent = decl.parent.as_ref()?;
+                class_keys.get(&*lowered(&parent.0)).copied()
+            })
+            .collect();
         // `module_registry`: `Core` first, as `zend_startup` registers it,
         // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
@@ -2121,6 +2163,8 @@ impl EngineBuilder {
                 natives,
                 methods,
                 trampolines,
+                class_keys,
+                parents,
                 constants,
                 engine_states: Vec::new(),
                 ini,

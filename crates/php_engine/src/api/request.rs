@@ -78,7 +78,7 @@ pub use zone::Zone;
 
 pub(crate) use hooks::parent_hook_trampolines;
 pub(crate) use lazy::Strategy;
-pub(crate) use preload::{Preloaded, Preloading, Stacked};
+pub(crate) use preload::{Keyed, Preloaded, Preloading, Stacked};
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
@@ -2083,7 +2083,7 @@ pub struct Request {
     /// immutable linked class shared across requests is not built yet,
     /// so every class a unit declares is this request's, the
     /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
-    declared: Stacked<Declared>,
+    declared: Keyed<Declared>,
     /// The classes a unit's load bound early at their
     /// `DECLARE_CLASS_DELAYED` ([`Request::declare_classes`]), each the
     /// unit and the class's index, until that opline runs and passes
@@ -2111,7 +2111,7 @@ pub struct Request {
     /// bucket it stands in, the lowered name it is keyed by and the
     /// class it names: `ZVAL_ALIAS_PTR` rows, request state as the
     /// classes the request declared are.
-    aliases: Stacked<preload::Alias>,
+    aliases: Keyed<preload::Alias>,
     /// `EG(class_table)`'s buckets past the engine's classes.
     buckets: preload::Buckets,
     /// `PHP_SAPI`, `sapi_module.name` as `php_module_startup` registers
@@ -2434,46 +2434,44 @@ pub(crate) struct Declared {
 }
 
 /// The class `EG(class_table)` holds under `name`, any case: an engine's
-/// class, a class the request declared, then a native class's alias and
+/// class or a native class's alias, a class the request declared, then
 /// an alias the request added; what [`Request::class_named`] answers.
+/// Each is one lookup in its table's keys, as `zend_hash_find` over the
+/// lowered name is: a class declared at `at` of the request's rows is
+/// the `ClassId` past the engine's classes.
 fn class_in(
     shared: &Shared,
-    declared: &Stacked<Declared>,
-    aliases: &Stacked<preload::Alias>,
+    declared: &Keyed<Declared>,
+    aliases: &Keyed<preload::Alias>,
     name: &[u8],
 ) -> Option<ClassId> {
-    let wanted = name.to_ascii_lowercase();
-    shared
-        .classes
-        .iter()
-        .map(|decl| &decl.name)
-        .chain(
+    lowered_key(name, |key| {
+        shared.class_keys.get(key).copied().or_else(|| {
             declared
-                .iter()
-                .filter_map(Declared::decl)
-                .map(|decl| &decl.name),
-        )
-        .position(|name| name.0.to_ascii_lowercase() == wanted)
-        .and_then(|i| u32::try_from(i).ok())
-        .map(ClassId)
-        .or_else(|| {
-            // What `zend_register_class_alias` added for a native
-            // class's stub `@alias` ([`ClassDecl::aliases`]).
-            (0u32..)
-                .zip(&shared.classes)
-                .find(|(_, decl)| {
-                    decl.aliases
-                        .iter()
-                        .any(|a| a.0.eq_ignore_ascii_case(&wanted))
-                })
-                .map(|(at, _)| ClassId(at))
+                .find(key)
+                .and_then(|(at, _)| u32::try_from(shared.classes.len().checked_add(at)?).ok())
+                .map(ClassId)
+                .or_else(|| aliases.find(key).map(|(_, (_, _, class))| *class))
         })
-        .or_else(|| {
-            aliases
-                .iter()
-                .find(|(_, alias, _)| *alias == wanted)
-                .map(|(_, _, class)| *class)
-        })
+    })
+}
+
+/// `zend_string_tolower` for a lookup: `find` over `name` lowered, on the
+/// stack where it fits, since the key is only read, and over `name`
+/// itself where it has nothing to lower.
+pub(crate) fn lowered_key<R>(name: &[u8], find: impl FnOnce(&[u8]) -> R) -> R {
+    if !name.iter().any(u8::is_ascii_uppercase) {
+        return find(name);
+    }
+    let mut buffer = [0u8; 128];
+    match buffer.get_mut(..name.len()) {
+        Some(lowered) => {
+            lowered.copy_from_slice(name);
+            lowered.make_ascii_lowercase();
+            find(lowered)
+        }
+        None => find(&name.to_ascii_lowercase()),
+    }
 }
 
 impl Declared {
@@ -4176,11 +4174,7 @@ impl Request {
             if depth > 64 {
                 return None;
             }
-            at = self
-                .class_decl(class)?
-                .parent
-                .as_ref()
-                .and_then(|name| self.class_named(&name.0));
+            at = self.class_parent(class);
         }
         None
     }
@@ -4360,10 +4354,7 @@ impl Request {
             if depth > 64 {
                 return false;
             }
-            at = decl
-                .parent
-                .as_ref()
-                .and_then(|name| self.class_named(&name.0));
+            at = self.class_parent(class);
         }
         false
     }
@@ -4459,8 +4450,13 @@ impl Request {
         None
     }
 
-    /// `ce->parent`: the linked parent of a class, none at a root.
+    /// `ce->parent`: the linked parent of a class, none at a root; an
+    /// engine's class's as startup linked it.
     pub(crate) fn class_parent(&self, class: ClassId) -> Option<ClassId> {
+        let at = usize::try_from(class.0).ok()?;
+        if let Some(parent) = self.shared.parents.get(at) {
+            return *parent;
+        }
         self.class_decl(class)?
             .parent
             .as_ref()
