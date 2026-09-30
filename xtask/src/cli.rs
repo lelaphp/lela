@@ -391,6 +391,11 @@ pub(crate) struct Witness {
     /// Only the crates with a staged change (pre-commit's touched crates).
     #[arg(long)]
     pub staged: bool,
+    /// Only the crates with no passing reading over their tree now, as
+    /// `done` reads fresh: the merge check's, after pre-commit measured
+    /// the staged crates (#1312).
+    #[arg(long, conflicts_with_all = ["crates", "staged"])]
+    pub unmeasured: bool,
     /// Write the oracle's status onto each `expect` fence line that
     /// does not already pin it; the only thing that writes an `exit`.
     #[arg(long)]
