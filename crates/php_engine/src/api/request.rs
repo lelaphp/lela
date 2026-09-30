@@ -18184,9 +18184,10 @@ impl Request {
     }
 
     /// `internal_function.module`: the extension that declared a native
-    /// function, `Core` for Zend's own; none for a native of php's
-    /// `standard` the engine declares itself, for a method and for a
-    /// user function.
+    /// function, `Core` for Zend's own and `standard` for a native of
+    /// php's `standard` the engine declares itself where the bundle has
+    /// it; none for such a native in an engine without it, for a method
+    /// and for a user function.
     #[must_use]
     pub fn function_extension(&self, function: Function) -> Option<ExtensionId> {
         let at = usize::try_from(function.0).ok()?;

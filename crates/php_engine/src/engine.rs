@@ -33,6 +33,7 @@ use crate::api::request::{Ending, ExtensionId, Request, Sink};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
+use crate::natives::StubPlace;
 use crate::streams::Standard;
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 pub(crate) use crate::unit_cache::Cached;
@@ -1705,6 +1706,9 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 /// and then each extension's in bundle order, the host's `additional`
 /// after them under `standard`, less what the list names
 /// ([`disabled_functions`]), each beside the extension that declared it.
+/// The natives the engine declares for `standard` ([`crate::natives::standard`])
+/// are `standard`'s where the bundle has it, at their stub places among
+/// its own, and follow Core's under no extension where it does not.
 /// The one place the disabled set is decided: what it takes out is in no
 /// table the compiler or a request reads.
 fn function_table(
@@ -1718,31 +1722,78 @@ fn function_table(
         .find(|(name, _)| name.as_slice() == b"disable_functions")
         .map_or(&[][..], |(_, list)| list.as_slice());
     let disabled = disabled_functions(list);
-    // A host's natives go under `standard` once every module has
-    // started (`Z/main/main.c:2359-2366`).
+    // `module_registry` numbers Core 0 and the bundle from 1.
     let standard = extensions
         .iter()
-        .position(|e| e.name == "standard")
-        .and_then(|at| u32::try_from(at).ok())
-        .map(ExtensionId);
-    core.functions
+        .zip(1u32..)
+        .find(|(e, _)| e.name == "standard")
+        .map(|(_, at)| ExtensionId(at));
+    let mut engine_standard = Some(crate::natives::standard());
+    let mut table: Vec<(Option<ExtensionId>, (FunctionDecl, Entry))> = core
+        .functions
         .iter()
         .cloned()
         .map(|native| (Some(ExtensionId::CORE), native))
-        .chain(
-            crate::natives::standard()
+        .collect();
+    if standard.is_none() {
+        table.extend(
+            engine_standard
+                .take()
                 .into_iter()
-                .map(|native| (None, native)),
-        )
-        .chain(extensions.iter().zip(1u32..).flat_map(|(e, at)| {
-            e.functions
-                .iter()
-                .cloned()
-                .map(move |native| (Some(ExtensionId(at)), native))
-        }))
-        .chain(additional.into_iter().map(|native| (standard, native)))
+                .flatten()
+                .map(|(_, native)| (None, native)),
+        );
+    }
+    for (e, at) in extensions.iter().zip(1u32..) {
+        let id = Some(ExtensionId(at));
+        let own = e.functions.iter().cloned();
+        match engine_standard.take_if(|_| Some(ExtensionId(at)) == standard) {
+            Some(engine) => {
+                table.extend(
+                    at_stub_places(engine, own)
+                        .into_iter()
+                        .map(|native| (id, native)),
+                );
+            }
+            None => table.extend(own.map(|native| (id, native))),
+        }
+    }
+    // A host's natives go under `standard` once every module has
+    // started (`Z/main/main.c:2359-2366`).
+    table.extend(additional.into_iter().map(|native| (standard, native)));
+    table
+        .into_iter()
         .filter(|(_, (decl, _))| !disabled.contains(&decl.name.0.to_ascii_lowercase().as_slice()))
         .unzip()
+}
+
+/// `ext/standard`'s natives in its own order with the engine's
+/// declared for it spliced in at their [`StubPlace`]s: each after the
+/// function it names, whichever side declared that one, and at the end
+/// where the stub's neighbour is not in the list.
+fn at_stub_places(
+    engine: Vec<(StubPlace, (FunctionDecl, Entry))>,
+    own: impl Iterator<Item = (FunctionDecl, Entry)>,
+) -> Vec<(FunctionDecl, Entry)> {
+    let mut waiting = engine;
+    let mut placed: Vec<(FunctionDecl, Entry)> = Vec::new();
+    let settle = |waiting: &mut Vec<(StubPlace, (FunctionDecl, Entry))>,
+                  placed: &mut Vec<(FunctionDecl, Entry)>| {
+        while let Some(at) = waiting
+            .iter()
+            .position(|(place, _)| place.follows(placed.last().map(|(decl, _)| decl)))
+        {
+            let (_, native) = waiting.remove(at);
+            placed.push(native);
+        }
+    };
+    settle(&mut waiting, &mut placed);
+    for native in own {
+        placed.push(native);
+        settle(&mut waiting, &mut placed);
+    }
+    placed.extend(waiting.into_iter().map(|(_, native)| native));
+    placed
 }
 
 /// `phar_intercept_functions_init` and opcache's

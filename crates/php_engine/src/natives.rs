@@ -44,20 +44,89 @@ mod functions;
 
 pub(crate) use functions::ZEND_VERSION;
 
-/// The natives php keeps in `ext/standard` and this engine here, in
-/// the order they were declared, which follow Core's
-/// ([`crate::core::extension`]) in the function table.
-pub(crate) fn standard() -> Vec<(FunctionDecl, Entry)> {
+/// Where one of [`standard`]'s natives stands among `ext/standard`'s
+/// own in `basic_functions.stub.php`, which is the order
+/// `get_extension_funcs('standard')` and `php --re standard` list them
+/// in: first, or right after the function the stub declares before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StubPlace {
+    /// The stub's first function.
+    First,
+    /// Right after this function of the stub, whichever of the engine
+    /// or `ext/standard` declares it.
+    After(&'static str),
+}
+
+impl StubPlace {
+    /// Whether a native at this place goes right after `last`, the
+    /// function placed before it so far, none at the start of the list.
+    pub(crate) fn follows(self, last: Option<&FunctionDecl>) -> bool {
+        match (self, last) {
+            (Self::First, None) => true,
+            (Self::After(name), Some(decl)) => decl.name.0.eq_ignore_ascii_case(name.as_bytes()),
+            _ => false,
+        }
+    }
+}
+
+/// The natives php keeps in `ext/standard` and this engine here, each
+/// at its place in `basic_functions.stub.php`. Where the bundle has
+/// `ext/standard` they are its, spliced among its own at those places
+/// (`internal_function.module` naming it); an engine without it lists
+/// them after Core's under no extension.
+///
+/// ```php
+/// var_dump((new ReflectionFunction('var_dump'))->getExtensionName());
+/// var_dump((new ReflectionFunction('ini_get'))->getExtensionName());
+/// $f = get_extension_funcs('standard');
+/// foreach (['set_time_limit', 'forward_static_call_array', 'register_shutdown_function', 'highlight_file', 'highlight_string', 'ini_get', 'ini_get_all', 'ini_set', 'ini_alter', 'ini_restore', 'var_dump', 'var_export', 'unserialize', 'memory_get_usage', 'memory_get_peak_usage', 'memory_reset_peak_usage', 'version_compare'] as $name) {
+///     echo $name, ' ', array_search($name, $f) - array_search('set_time_limit', $f), "\n";
+/// }
+/// ```
+/// ```expect
+/// string(8) "standard"
+/// string(8) "standard"
+/// set_time_limit 0
+/// forward_static_call_array 129
+/// register_shutdown_function 130
+/// highlight_file 131
+/// highlight_string 134
+/// ini_get 135
+/// ini_get_all 136
+/// ini_set 137
+/// ini_alter 138
+/// ini_restore 139
+/// var_dump 532
+/// var_export 533
+/// unserialize 536
+/// memory_get_usage 537
+/// memory_get_peak_usage 538
+/// memory_reset_peak_usage 539
+/// version_compare 540
+/// ```
+pub(crate) fn standard() -> Vec<(StubPlace, (FunctionDecl, Entry))> {
     vec![
-        var_dump::declared(),
-        memory_get_usage::declared(),
-        memory_get_peak_usage::declared(),
-        memory_reset_peak_usage::declared(),
-        ini_get::declared(),
-        ini_set::declared(),
-        ini_alter::declared(),
-        set_time_limit::declared(),
-        register_shutdown_function::declared(),
+        (StubPlace::First, set_time_limit::declared()),
+        (
+            StubPlace::After("forward_static_call_array"),
+            register_shutdown_function::declared(),
+        ),
+        (StubPlace::After("highlight_string"), ini_get::declared()),
+        (StubPlace::After("ini_get_all"), ini_set::declared()),
+        (StubPlace::After("ini_set"), ini_alter::declared()),
+        (StubPlace::After("convert_uudecode"), var_dump::declared()),
+        (
+            StubPlace::After("unserialize"),
+            memory_get_usage::declared(),
+        ),
+        (
+            StubPlace::After("memory_get_usage"),
+            memory_get_peak_usage::declared(),
+        ),
+        (
+            StubPlace::After("memory_get_peak_usage"),
+            memory_reset_peak_usage::declared(),
+        ),
     ]
 }
 
