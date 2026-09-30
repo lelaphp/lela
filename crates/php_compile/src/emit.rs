@@ -9799,10 +9799,14 @@ impl Emit<'_> {
         let mut table = None;
         let mut jumps = Vec::new();
         let mut default_jump = None;
-        if self.match_uses_jumptable(arms)? {
+        // `CG(zend_lineno)` as the subject left it, the line a condition
+        // `can_match_use_jumptable` folded is created at.
+        let subject_line = self.line;
+        let (uses_table, folded) = self.match_uses_jumptable(arms)?;
+        if uses_table {
             table = Some(self.emit_table(Opcode::Match, subject));
         } else {
-            jumps = self.match_chain(subject, case_node, arms)?;
+            jumps = self.match_chain(subject, case_node, arms, &folded, subject_line)?;
             default_jump = Some(self.push(Opline {
                 opcode: Opcode::Jmp,
                 ..Opline::default()
@@ -9831,12 +9835,17 @@ impl Emit<'_> {
     }
 
     /// `can_match_use_jumptable` and `count_match_conds`: every
-    /// condition a constant `long` or `string`, and two or more of them.
+    /// condition a constant `long` or `string`, and two or more of them;
+    /// beside it, the conditions its `zend_eval_const_expr` replaced
+    /// with the value they fold to, each one it reached that was written
+    /// as more than a number or a string and folded, whose node the
+    /// replacement gives the line the compile stands at.
     fn match_uses_jumptable(
         &mut self,
         arms: &[NodeId<tree::MatchArm>],
-    ) -> Result<bool, CompileError> {
+    ) -> Result<(bool, Vec<tree::Expr>), CompileError> {
         let mut count = 0;
+        let mut folded = Vec::new();
         for arm in arms {
             let Some(conds) = self.parsed.tree[*arm].conds else {
                 continue;
@@ -9845,14 +9854,17 @@ impl Emit<'_> {
                 let cond = *cond;
                 count += 1;
                 let Some(value) = self.constant_of(cond)? else {
-                    return Ok(false);
+                    return Ok((false, folded));
                 };
+                if self.literal_of(cond).is_none() {
+                    folded.push(cond);
+                }
                 if !matches!(value.kind(), ZvalType::Long | ZvalType::String) {
-                    return Ok(false);
+                    return Ok((false, folded));
                 }
             }
         }
-        Ok(count >= 2)
+        Ok((count >= 2, folded))
     }
 
     /// Every condition of every arm, in written order: the conditions
@@ -9887,16 +9899,37 @@ impl Emit<'_> {
     /// #0 {main}
     ///   thrown in %s on line 4
     /// ```
+    ///
+    /// A condition `can_match_use_jumptable` folded, a constant written
+    /// as more than a number or a string, stands at the line the subject
+    /// left:
+    ///
+    /// ```php
+    /// var_dump(match ($u) {
+    ///     null => 1,
+    ///     default => 2,
+    /// });
+    /// ```
+    /// ```expect
+    /// Warning: Undefined variable $u in %s on line 2
+    /// int(1)
+    /// ```
     fn match_chain(
         &mut self,
         subject: Where,
         case_node: u32,
         arms: &[NodeId<tree::MatchArm>],
+        folded: &[tree::Expr],
+        subject_line: u32,
     ) -> Result<Vec<u32>, CompileError> {
         let mut jumps = Vec::new();
         for cond in self.match_conds(arms) {
+            let was_folded = folded.contains(&cond);
             self.line = self.line_of(cond);
             let cond = self.expr(cond)?;
+            if was_folded {
+                self.line = subject_line;
+            }
             let opcode = match subject {
                 Where::Temporary(_) | Where::Returned(_) => Opcode::CaseStrict,
                 _ => Opcode::IsIdentical,
