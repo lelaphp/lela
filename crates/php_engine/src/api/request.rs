@@ -1978,11 +1978,17 @@ pub struct Request {
     /// ([`crate::engine::Shared::compile_for`]).
     pub(crate) keys_made: u32,
     /// The aliases `class_alias()` added to `EG(class_table)`, each the
-    /// lowered name it is keyed by, the class it names, and how many
-    /// classes the table held when it was added, which is where php's
-    /// table has it among them: `ZVAL_ALIAS_PTR` rows, request state as
-    /// the classes the request declared are.
+    /// bucket it stands in, the lowered name it is keyed by and the
+    /// class it names: `ZVAL_ALIAS_PTR` rows, request state as the
+    /// classes the request declared are.
     aliases: Stacked<preload::Alias>,
+    /// `EG(class_table)`'s next bucket past the engine's classes, and
+    /// the buckets a unit's load took for the classes it declares under
+    /// runtime definition keys, as `zend_compile_class_decl` adds each
+    /// under its key in the order written: the bind that renames the key
+    /// (`zend_hash_set_bucket_key`) stands the class in its bucket.
+    buckets: usize,
+    reserved: Vec<(Arc<Unit>, u32, usize)>,
     /// `PHP_SAPI`, `sapi_module.name` as `php_module_startup` registers
     /// it: the host's, so the request's, the engine's interned string
     /// for the name the description carries.
@@ -2288,13 +2294,15 @@ pub(crate) enum MemberAt {
 }
 
 /// One class a request declared: the unit that holds its declaration and
-/// the declaration's index there, and, for a class that uses traits,
-/// the class composed with them at its link, which is the table's row
-/// in its place (`zend_do_bind_traits`).
+/// the declaration's index there, for a class that uses traits the
+/// class composed with them at its link, which is the table's row in
+/// its place (`zend_do_bind_traits`), and the bucket of
+/// `EG(class_table)` it stands in ([`Request::buckets`]).
 pub(crate) struct Declared {
     unit: Arc<Unit>,
     at: u32,
     composed: Option<Box<php_unit::link::Composed>>,
+    place: usize,
 }
 
 impl Declared {
@@ -2353,6 +2361,7 @@ impl Request {
         let mut stack = VmStack::new();
         let _laid = stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
+        let buckets = tables.classes.len() + tables.aliases.len();
         let mut req = Request {
             // Read before `shared` moves in, as fields are in the order written.
             realpath_cache: RealpathCache::startup(&shared),
@@ -2455,6 +2464,8 @@ impl Request {
             links: linking::Links::default(),
             record: recording::Record::default(),
             keys_made: 0,
+            buckets,
+            reserved: Vec::new(),
             aliases: tables.aliases,
             sapi_constant: Value::null(),
             user_functions: tables.functions,
@@ -14012,39 +14023,57 @@ impl Request {
             .and_then(|i| u32::try_from(i).ok())
             .map(ClassId)
             .or_else(|| {
-                self.native_aliases()
-                    .chain(self.aliases.iter().cloned())
+                // What `zend_register_class_alias` added for a native
+                // class's stub `@alias` ([`ClassDecl::aliases`]).
+                (0u32..)
+                    .zip(&self.shared.classes)
+                    .find(|(_, decl)| {
+                        decl.aliases
+                            .iter()
+                            .any(|a| a.0.eq_ignore_ascii_case(&wanted))
+                    })
+                    .map(|(at, _)| ClassId(at))
+            })
+            .or_else(|| {
+                self.aliases
+                    .iter()
                     .find(|(_, alias, _)| *alias == wanted)
-                    .map(|(_, _, class)| class)
+                    .map(|(_, _, class)| *class)
             })
     }
 
-    /// What `zend_register_class_alias` added for each native class's
-    /// stub `@alias` ([`ClassDecl::aliases`]), right after its class.
-    fn native_aliases(&self) -> impl Iterator<Item = preload::Alias> + '_ {
-        (0u32..).zip(&self.shared.classes).flat_map(|(at, decl)| {
-            let after = usize::try_from(at).map_or(usize::MAX, |at| at + 1);
-            let row = move |alias: &Name| (after, alias.0.to_ascii_lowercase(), ClassId(at));
-            decl.aliases.iter().map(row)
-        })
-    }
-
-    /// `EG(class_table)` in its order, each row the class and, for a row
-    /// `class_alias()` added, the lowered name it is keyed by: the
-    /// engine's classes, then the request's in the order they were
-    /// bound, each alias standing where it was added.
+    /// `EG(class_table)` in its order, each row the class and, for an
+    /// alias's row, the lowered name it is keyed by: the engine's
+    /// classes, each native alias after its class, then the request's
+    /// rows in their buckets.
     pub(crate) fn class_table(&self) -> Vec<(ClassId, Option<Vec<u8>>)> {
-        let count = self.shared.classes.len() + self.declared.len();
-        let mut rows = Vec::with_capacity(count + self.aliases.len());
-        let native: Vec<preload::Alias> = self.native_aliases().collect();
-        let mut aliases = native.iter().chain(self.aliases.iter()).peekable();
-        for at in 0..count {
-            while let Some((_, alias, class)) = aliases.next_if(|(before, _, _)| *before <= at) {
-                rows.push((*class, Some(alias.clone())));
-            }
-            rows.push((ClassId(u32::try_from(at).unwrap_or(u32::MAX)), None));
-        }
-        rows.extend(aliases.map(|(_, alias, class)| (*class, Some(alias.clone()))));
+        let natives = self.shared.classes.len();
+        let mut rows: Vec<(ClassId, Option<Vec<u8>>)> = (0u32..)
+            .zip(&self.shared.classes)
+            .flat_map(|(at, decl)| {
+                let aliases = decl.aliases.iter();
+                std::iter::once(None)
+                    .chain(aliases.map(|alias| Some(alias.0.to_ascii_lowercase())))
+                    .map(move |alias| (ClassId(at), alias))
+            })
+            .collect();
+        let mut own: Vec<(usize, ClassId, Option<Vec<u8>>)> = (natives..)
+            .zip(self.declared.iter())
+            .map(|(at, row)| {
+                (
+                    row.place,
+                    ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
+                    None,
+                )
+            })
+            .chain(
+                self.aliases
+                    .iter()
+                    .map(|(place, alias, class)| (*place, *class, Some(alias.clone()))),
+            )
+            .collect();
+        own.sort_by_key(|(place, _, _)| *place);
+        rows.extend(own.into_iter().map(|(_, class, alias)| (class, alias)));
         rows
     }
 
@@ -14109,6 +14138,9 @@ impl Request {
                 .iter()
                 .find(|(_, class)| usize::try_from(*class).ok() == Some(at));
             if let Some((key, _)) = key {
+                let place = self.bucket();
+                let at32 = u32::try_from(at).unwrap_or(u32::MAX);
+                self.reserved.push((Arc::clone(unit), at32, place));
                 if decl.flags.is_anonymous {
                     if !self.link_unbound(unit, at, decl) {
                         return false;
@@ -14237,7 +14269,23 @@ impl Request {
     /// The class at `at` of `unit` into the request's table, with its
     /// methods into the function table beside it, which is the whole of
     /// what binding a class is here: the parent chain is walked from the
-    /// declaration on every lookup, so nothing is copied.
+    /// declaration on every lookup, so nothing is copied. It stands in
+    /// the bucket its unit's load took for it, where php's runtime
+    /// definition key stood, or in the next:
+    ///
+    /// ```php
+    /// class A {}
+    /// if (true) { class B {} }
+    /// class C implements Countable { function count(): int { return 0; } }
+    /// class D {}
+    /// function f() { class F {} }
+    /// f();
+    /// class_alias('A', 'AA');
+    /// echo implode(",", array_slice(get_declared_classes(), -6)), "\n";
+    /// ```
+    /// ```expect
+    /// A,B,C,D,F,aa
+    /// ```
     fn bind_declared(
         &mut self,
         unit: &Arc<Unit>,
@@ -14250,12 +14298,25 @@ impl Request {
             .len()
             .saturating_add(self.declared.len());
         let class = ClassId(u32::try_from(class).unwrap_or(u32::MAX));
+        let reserved = (self.reserved.iter())
+            .position(|(held, held_at, _)| Arc::ptr_eq(held, unit) && *held_at == at);
+        let place = match reserved {
+            Some(i) => self.reserved.swap_remove(i).2,
+            None => self.bucket(),
+        };
         self.declared.push(Declared {
             unit: Arc::clone(unit),
             at,
             composed: composed.map(Box::new),
+            place,
         });
         self.bind_members(class);
+    }
+
+    /// The next bucket of `EG(class_table)`, taken.
+    pub(crate) fn bucket(&mut self) -> usize {
+        self.buckets += 1;
+        self.buckets - 1
     }
 
     /// The members of `class`, bound, into the function table beside it:
@@ -17041,8 +17102,9 @@ impl Request {
         if self.class_named(alias).is_some() {
             return false;
         }
-        let at = self.shared.classes.len() + self.declared.len();
-        self.aliases.push((at, alias.to_ascii_lowercase(), class));
+        let place = self.bucket();
+        self.aliases
+            .push((place, alias.to_ascii_lowercase(), class));
         true
     }
 

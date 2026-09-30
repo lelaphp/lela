@@ -78,8 +78,8 @@ impl<T> Default for Stacked<T> {
     }
 }
 
-/// An alias row of the table of classes: where among the classes it was
-/// added, the lowered name, and the class it names.
+/// An alias row of the table of classes: the bucket it stands in, the
+/// lowered name, and the class it names.
 pub(crate) type Alias = (usize, Vec<u8>, ClassId);
 
 /// What the preload left for every request (design §6.3):
@@ -425,20 +425,14 @@ impl Request {
     /// linked after the rest.
     fn class_rows(&mut self, candidates: Vec<Candidate>, aliases_before: usize) -> Vec<Row> {
         let natives = self.shared.classes.len();
-        let mut aliases = self
-            .aliases
-            .take_own()
-            .into_iter()
-            .skip(aliases_before)
-            .peekable();
-        let mut rows = Vec::new();
-        for at in natives..natives + self.declared.len() {
-            while let Some((_, alias, class)) = aliases.next_if(|(before, _, _)| *before <= at) {
-                rows.push(Row::Alias(alias, class));
-            }
-            rows.push(Row::Class(class_id(at)));
-        }
-        rows.extend(aliases.map(|(_, alias, class)| Row::Alias(alias, class)));
+        let aliases = self.aliases.take_own().into_iter().skip(aliases_before);
+        let mut placed: Vec<(usize, Row)> = (natives..)
+            .zip(self.declared.iter())
+            .map(|(at, row)| (row.place, Row::Class(class_id(at))))
+            .chain(aliases.map(|(place, alias, class)| (place, Row::Alias(alias, class))))
+            .collect();
+        placed.sort_by_key(|(place, _)| *place);
+        let mut rows: Vec<Row> = placed.into_iter().map(|(_, row)| row).collect();
         rows.extend(
             candidates
                 .into_iter()
@@ -466,6 +460,7 @@ impl Request {
             .rev()
             .collect();
         let _ = self.enum_functions.take_own();
+        self.buckets = 0;
         let mut renumbered: Vec<(ClassId, ClassId)> = Vec::new();
         for row in rows {
             match row {
@@ -479,15 +474,16 @@ impl Request {
                         continue;
                     };
                     renumbered.push((*old, class_id(natives + self.declared.len())));
-                    self.declared.push(declared);
+                    let place = self.bucket();
+                    self.declared.push(Declared { place, ..declared });
                 }
                 Row::Alias(alias, old) => {
                     let class = renumbered
                         .iter()
                         .find(|(from, _)| from == old)
                         .map_or(*old, |(_, to)| *to);
-                    let at = natives + self.declared.len();
-                    self.aliases.push((at, alias.clone(), class));
+                    let place = self.bucket();
+                    self.aliases.push((place, alias.clone(), class));
                 }
                 Row::Unlinked(_) => {}
             }
