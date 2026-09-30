@@ -388,7 +388,24 @@ fn symtable_key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
 
 /// `do_fetch`: the next row shaped as `how` asks, with the group key
 /// where `grouped`; `None` where no row came or the fetch failed, its
-/// error recorded on the statement and not yet handled.
+/// error recorded on the statement and not yet handled. The statement is
+/// fetching from the container's making on, so a `FETCH_PROPS_LATE`
+/// constructor that calls `setFetchMode` is refused.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// class C { public $a; function __construct() { global $s; try { $s->setFetchMode(PDO::FETCH_NUM); } catch (Error $e) { echo $e->getMessage(), "\n"; } } }
+/// $s = $db->query('SELECT 1 AS a');
+/// $s->setFetchMode(PDO::FETCH_CLASS | PDO::FETCH_PROPS_LATE, 'C');
+/// var_dump($s->fetch());
+/// ```
+/// ```expect
+/// Cannot change default fetch mode while fetching
+/// object(C)#3 (1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// ```
 fn shaped(
     req: &mut Request,
     object: PhpObject,
@@ -417,6 +434,26 @@ fn shaped(
     let Some(dbh) = stmt::dbh_of(req, object) else {
         return Ok(None);
     };
+    // `stmt->in_fetch` from the container's making to the row's end, so
+    // an error the class refuses the fetch with, or a constructor served
+    // on the row, meets a statement that is fetching.
+    stmt::write(req, object, |s| s.in_fetch = true);
+    let row = made(req, object, dbh, (kind, flags), target, grouped, with);
+    stmt::write(req, object, |s| s.in_fetch = false);
+    row
+}
+
+/// `do_fetch` from the container's making on: the container the style
+/// fetches into, filled.
+fn made(
+    req: &mut Request,
+    object: PhpObject,
+    dbh: PhpObject,
+    (kind, flags): (Kind, Flags),
+    target: Target,
+    grouped: bool,
+    with: &With,
+) -> Result<Option<(Value, Option<Value>)>, Thrown> {
     let failed =
         |req: &mut Request, supp: &str| -> Result<Option<(Value, Option<Value>)>, Thrown> {
             error::raise_impl(req, dbh, On::Stmt(object), SqlState::GENERAL, Some(supp))?;
@@ -465,12 +502,9 @@ fn shaped(
         }
         Kind::Lazy | Kind::Bound | Kind::Column | Kind::KeyPair => Value::null(),
     };
-    stmt::write(req, object, |s| s.in_fetch = true);
-    let filled = fill(
+    fill(
         req, object, kind, flags, out, next, count, grouped, with, class, class_args,
-    );
-    stmt::write(req, object, |s| s.in_fetch = false);
-    filled
+    )
 }
 
 /// `FETCH_CLASS`'s object: of the class the first column names under
