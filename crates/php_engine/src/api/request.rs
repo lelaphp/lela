@@ -18104,7 +18104,9 @@ impl Request {
             | b"mail.mixed_lf_and_crlf"
             | b"mail.cr_lf_mode"
             | b"mail.log"
-            | b"mail.force_extra_parameters" => (false, true, true),
+            | b"mail.force_extra_parameters"
+            | b"auto_prepend_file"
+            | b"auto_append_file" => (false, true, true),
             _ => (true, true, true),
         }
     }

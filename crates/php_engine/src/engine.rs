@@ -884,7 +884,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 72] = [
+const CORE_INI: [(&str, &str); 74] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -977,6 +977,11 @@ const CORE_INI: [(&str, &str); 72] = [
     // `http_build_query` join with.
     ("arg_separator.input", "&"),
     ("arg_separator.output", "&"),
+    // `auto_prepend_file` and `auto_append_file`,
+    // `PHP_INI_SYSTEM|PHP_INI_PERDIR`: required before and after the
+    // primary script (`php_execute_script`).
+    ("auto_prepend_file", ""),
+    ("auto_append_file", ""),
     ("realpath_cache_ttl", "120"),
     // `main.c`'s entries for what a request of the web carries
     // (`Z/main/main.c:802-878`): the `X-Powered-By` header, the auto
@@ -2047,30 +2052,21 @@ impl Engine {
             }
             return self.shutdown(&mut req, sink);
         }
-        let compiled = if let Some(source) = source {
-            Some(
-                self.shared
-                    .compile_for(&mut req, &source, &script, SourceKind::File),
-            )
-        } else {
-            req.note_primary_file(&script);
-            match req.compile_file_source(&script) {
-                Ok(Some(source)) => {
-                    Some(
-                        self.shared
-                            .compile_for(&mut req, &source, &script, SourceKind::File),
-                    )
-                }
-                Ok(None) => req.cached_file(&script, Some(&script)),
-                Err(thrown) => {
-                    req.leave_pending(&thrown);
-                    None
-                }
-            }
-        };
-        match compiled {
+        // `zend_execute_scripts(ZEND_REQUIRE, NULL, 3, prepend, primary,
+        // append)`: the prepended file is compiled and run before the
+        // primary one is compiled, and an `exit` or a fatal in it ends
+        // the three (`Z/main/main.c:2614-2640`).
+        if work == Work::Serve
+            && !serve_auto_file(&mut req, self.shared.entry, b"auto_prepend_file")
+        {
+            return self.shutdown(&mut req, sink);
+        }
+        match self.compile_primary(&mut req, source, &script) {
             Some(Ok(unit)) if work == Work::Serve => {
-                let _ = serve_unit(&mut req, &unit, self.shared.entry);
+                let entry = self.shared.entry;
+                if serve_unit(&mut req, &unit, entry) {
+                    serve_auto_file(&mut req, entry, b"auto_append_file");
+                }
             }
             // `php_lint_script` compiles and drops the op array, and what
             // the compiler warned of it rendered as it compiled.
@@ -2087,6 +2083,37 @@ impl Engine {
             None => {}
         }
         self.shutdown(&mut req, sink)
+    }
+
+    /// The primary file compiled: the source the host handed over, or
+    /// the file read and compiled through the unit cache; `None` where
+    /// it could not be opened, what that raised left pending.
+    fn compile_primary(
+        &self,
+        req: &mut Request,
+        source: Option<Vec<u8>>,
+        script: &[u8],
+    ) -> crate::unit_cache::Cached {
+        if let Some(source) = source {
+            return Some(
+                self.shared
+                    .compile_for(req, &source, script, SourceKind::File),
+            );
+        }
+        req.note_primary_file(script);
+        match req.compile_file_source(script) {
+            Ok(Some(source)) => {
+                Some(
+                    self.shared
+                        .compile_for(req, &source, script, SourceKind::File),
+                )
+            }
+            Ok(None) => req.cached_file(script, Some(script)),
+            Err(thrown) => {
+                req.leave_pending(&thrown);
+                None
+            }
+        }
     }
 
     /// `php_request_shutdown` and what the host is handed after it. The
@@ -2424,6 +2451,33 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &
         req.note_error_in(raised.level, &raised.message, file, raised.line);
     }
     req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+}
+
+/// `auto_prepend_file` or `auto_append_file` required as
+/// `zend_execute_scripts` requires them: nothing where the entry is
+/// empty, the file opened along the include path and served as the
+/// primary file is, and whether the files after it are to be served.
+/// `Zend/tests/exit/bug79948.phpt`'s prepended `exit` is the proof: no
+/// ini entry a witness can set reaches here.
+fn serve_auto_file(req: &mut Request, entry: Loop, name: &[u8]) -> bool {
+    let Some(path) = req
+        .ini_get(name)
+        .filter(|p| !p.is_empty())
+        .map(<[u8]>::to_vec)
+    else {
+        return true;
+    };
+    match req.include_file(crate::exec::IncludeKind::Require, &path) {
+        Ok(crate::api::request::Opened::Unit(unit)) => serve_unit(req, &unit, entry),
+        Ok(_) => true,
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            if let Err(fatal) = req.uncaught() {
+                req.end_in(&fatal);
+            }
+            false
+        }
+    }
 }
 
 /// The unit's main op array served on a fresh entry frame, what it
