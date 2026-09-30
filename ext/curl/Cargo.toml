@@ -11,9 +11,16 @@ description = "The curl extension, php-src/ext/curl"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+# `fdopen` over a stream's fd for `CURLOPT_STDERR`, in `src/ffi/` alone.
+libc = { workspace = true }
+
+# libcurl is the platform's, the library the oracle links, declared in
+# `src/ffi/sys.rs` and found by `build.rs` (design §7.2, #1324).
+[build-dependencies]
+pkg-config = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
