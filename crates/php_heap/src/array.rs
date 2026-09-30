@@ -324,6 +324,9 @@ const UNINITIALIZED: u32 = 1 << 3;
 /// `HASH_FLAG_STATIC_KEYS`: every key is an integer or an interned
 /// string, so destroying the table releases none.
 const STATIC_KEYS: u32 = 1 << 4;
+/// `HASH_FLAG_HAS_EMPTY_IND`: an object's property table, one of whose
+/// declared slots may be empty, so `zend_array_count` counts again.
+const HAS_EMPTY_IND: u32 = 1 << 5;
 
 /// `zend_array`: fifty-six bytes, php's own order, out of the heap.
 #[repr(C)]
@@ -528,6 +531,27 @@ impl Arr {
     #[must_use]
     pub fn is_packed(&self) -> bool {
         self.header().flags.get() & PACKED != 0
+    }
+
+    /// `HT_FLAGS(ht) & HASH_FLAG_HAS_EMPTY_IND`: whether an object's
+    /// property table may stand for a declared slot that is empty, which
+    /// `rebuild_object_properties` sets where it finds one and
+    /// `zend_std_unset_property` sets once the value it emptied a slot
+    /// of is given up.
+    #[must_use]
+    pub fn has_empty_ind(&self) -> bool {
+        self.header().flags.get() & HAS_EMPTY_IND != 0
+    }
+
+    /// `HASH_FLAG_HAS_EMPTY_IND` set, or cleared as `zend_array_count`
+    /// clears it once a count finds no slot empty.
+    pub fn set_has_empty_ind(&self, on: bool) {
+        let flags = self.header().flags.get();
+        self.header().flags.set(if on {
+            flags | HAS_EMPTY_IND
+        } else {
+            flags & !HAS_EMPTY_IND
+        });
     }
 
     fn is_uninitialized(self) -> bool {
@@ -1010,7 +1034,10 @@ impl Arr {
         let at = mm.alloc(Arr::packed_size(self.table_size()))?;
         self.header().table_mask.set(MIN_MASK);
         self.set_data_addr(at);
-        self.set_flag_byte(PACKED | STATIC_KEYS);
+        // php real-inits an object's table where it rebuilds it, before
+        // it sets the flag; this table is initialised at its first
+        // dynamic property, so the flag a rebuild set stands.
+        self.set_flag_byte(PACKED | STATIC_KEYS | (self.flags() & HAS_EMPTY_IND));
         self.hash_reset();
         Ok(())
     }
@@ -1021,7 +1048,7 @@ impl Arr {
         let at = mm.alloc(Arr::data_size(size))?;
         self.header().table_mask.set(Arr::size_to_mask(size));
         self.set_data_addr(at);
-        self.set_flag_byte(STATIC_KEYS);
+        self.set_flag_byte(STATIC_KEYS | (self.flags() & HAS_EMPTY_IND));
         self.hash_reset();
         Ok(())
     }

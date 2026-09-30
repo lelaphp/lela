@@ -11374,6 +11374,66 @@ impl Request {
         Ok(entries)
     }
 
+    /// `zend_array_count` over the property table
+    /// `zend_std_get_properties` builds for `object` (`Z/Zend/zend_hash.c:519`):
+    /// one row per declared slot and one per dynamic property, the
+    /// declared slots counted again, the empty ones left out, only where
+    /// the table is marked `HASH_FLAG_HAS_EMPTY_IND`, and the mark
+    /// cleared where that finds none empty. So a slot `unset` empties
+    /// still counts inside the release that empties it, before the mark
+    /// is set.
+    ///
+    /// ```php
+    /// class N { public $p = null; public $c = [];
+    ///     function __destruct() { var_dump($this); unset($this->c); } }
+    /// $a = new N; $a->c[] = new N; $a->c[0]->p = $a;
+    /// ```
+    /// ```expect
+    /// object(N)#1 (2) {
+    ///   ["p"]=>
+    ///   NULL
+    ///   ["c"]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     object(N)#2 (2) {
+    ///       ["p"]=>
+    ///       *RECURSION*
+    ///       ["c"]=>
+    ///       array(0) {
+    ///       }
+    ///     }
+    ///   }
+    /// }
+    /// object(N)#2 (2) {
+    ///   ["p"]=>
+    ///   object(N)#1 (2) {
+    ///     ["p"]=>
+    ///     NULL
+    ///   }
+    ///   ["c"]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// ```
+    pub(crate) fn property_count(&mut self, object: PhpObject) -> Result<usize, Thrown> {
+        let o = object.heap();
+        let built = self.heap.object_properties(o);
+        let table = self.fatal_of(built)?;
+        let declared = self.placed_properties(object.class()).len();
+        let total = declared + table.len();
+        if !table.has_empty_ind() {
+            return Ok(total);
+        }
+        let held = (0..declared)
+            .filter(|at| !o.slot(u32::try_from(*at).unwrap_or(u32::MAX)).is_undef())
+            .count();
+        let counted = held + table.len();
+        if counted == total {
+            table.set_has_empty_ind(false);
+        }
+        Ok(counted)
+    }
+
     /// `zend_objects_clone_obj`, the `Std` `clone_obj` slot: a fresh
     /// entry of the same class holding what this one holds, one more
     /// owner each, and the class's `__clone` served on it, the copy held
@@ -13218,6 +13278,24 @@ impl Request {
     /// __get u
     /// int(7)
     /// ```
+    /// `zend_std_unset_property`'s declared arm over a slot that holds
+    /// a value: the value given up with the slot left `UNDEF`, no longer
+    /// `IS_PROP_UNINIT` whatever it was made with, and then
+    /// `HT_FLAGS(zobj->properties) |= HASH_FLAG_HAS_EMPTY_IND`, so a
+    /// destructor the release served counted the slot still
+    /// ([`Request::property_count`]).
+    fn empty_slot(&mut self, object: PhpObject, slot: u32) {
+        let o = object.heap();
+        if let Some(cell) = o.slot(slot).as_reference() {
+            self.slot_source_gone(object, slot, cell);
+        }
+        Heap::object_set_slot(&mut Hooks(self), o, slot, Zval::UNDEF);
+        o.set_slot_bit(slot, php_heap::PropBit::Uninit, false);
+        if let Some(table) = o.properties() {
+            table.set_has_empty_ind(true);
+        }
+    }
+
     pub(crate) fn unset_property(&mut self, object: PhpObject, name: &[u8]) -> Result<(), Thrown> {
         let class = object.class();
         let o = object.heap();
@@ -13269,13 +13347,7 @@ impl Request {
                         ));
                     }
                     if !empty {
-                        if let Some(cell) = o.slot(placed.slot).as_reference() {
-                            self.slot_source_gone(object, placed.slot, cell);
-                        }
-                        Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
-                        // An emptied slot is no longer `IS_PROP_UNINIT`,
-                        // whatever it was made with.
-                        o.set_slot_bit(placed.slot, php_heap::PropBit::Uninit, false);
+                        self.empty_slot(object, placed.slot);
                     } else if uninit && !waits {
                         // `Z_PROP_FLAG_P(slot) = 0`: the bit reset and
                         // `__unset` passed by.

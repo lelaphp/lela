@@ -1686,13 +1686,7 @@ fn dump_members(
         req.addref(&value);
         rows.push(MemberRow::Dynamic { name, value });
     }
-    let count = rows
-        .iter()
-        .filter(|row| match row {
-            MemberRow::Declared { slot, .. } => object.slot(*slot).is_some(),
-            MemberRow::Dynamic { .. } => true,
-        })
-        .count();
+    let count = member_count(req, object, &rows);
     // The name as its bytes stand, as php's `%s` prints `ZSTR_VAL`.
     out.extend_from_slice(format!("{common}object(").as_bytes());
     out.extend_from_slice(php_unit::decl::shown_bytes(&req.class_name_bytes(class)));
@@ -1739,6 +1733,34 @@ fn dump_members(
         out.extend(std::iter::repeat_n(b' ', level - 1));
     }
     out.extend_from_slice(b"}\n");
+}
+
+/// The count `php_var_dump` prints over an object's members:
+/// `zend_array_count` over the table `zend_std_get_properties` built,
+/// for an object that is not lazy ([`Request::property_count`]), and
+/// the rows that hold a value for one that is.
+fn member_count(
+    req: &mut Request,
+    object: crate::api::values::PhpObject,
+    rows: &[MemberRow],
+) -> usize {
+    let held = rows
+        .iter()
+        .filter(|row| match row {
+            MemberRow::Declared { slot, .. } => object.slot(*slot).is_some(),
+            MemberRow::Dynamic { .. } => true,
+        })
+        .count();
+    if object.heap().laziness() != php_heap::Laziness::Eager {
+        return held;
+    }
+    match req.property_count(object) {
+        Ok(count) => count,
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            held
+        }
+    }
 }
 
 /// `php_object_property_dump`'s string key: the indent, then the name

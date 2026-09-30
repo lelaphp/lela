@@ -723,12 +723,17 @@ impl Heap {
     /// first ask (`rebuild_object_properties`). php appends an
     /// `IS_INDIRECT` per declared slot there; those slots are read off
     /// the object here, and the table holds the dynamic properties
-    /// alone. The table is the object's, one owner.
+    /// alone. A declared slot empty as the table is built marks it
+    /// `HASH_FLAG_HAS_EMPTY_IND`, as php's rebuild does. The table is
+    /// the object's, one owner.
     pub fn object_properties(&mut self, o: Obj) -> Result<Arr, Fatal> {
         if let Some(table) = o.properties() {
             return Ok(table);
         }
         let table = self.array()?;
+        if (0..o.slots()).any(|i| o.slot(i).is_undef()) {
+            table.set_has_empty_ind(true);
+        }
         o.header().properties.set(Some(table));
         Ok(table)
     }
