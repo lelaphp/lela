@@ -534,6 +534,7 @@ pub(crate) fn iterator_wrapper(builder: ExtensionBuilder) -> ExtensionBuilder {
         file: Name(Box::new([])),
         line: 0,
         end_line: 0,
+        object_size: 0,
     };
     builder.class_created(
         decl,

@@ -864,6 +864,7 @@ mod tests {
             file: Name::from("a.php"),
             line: 3,
             end_line: 9,
+            object_size: 0,
         };
         let at = |line_start: u32| OpArray {
             line_start,

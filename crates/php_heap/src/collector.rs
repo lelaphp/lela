@@ -1499,8 +1499,8 @@ mod tests {
 
     /// Two objects, each in the other's slot: `$a->b = $b; $b->a = $a;`.
     fn pair(r: &mut Recorder) -> Option<(Obj, Obj)> {
-        let a = r.heap.object(1, 1).ok()?;
-        let b = r.heap.object(1, 1).ok()?;
+        let a = r.heap.object(1, 1, 0).ok()?;
+        let b = r.heap.object(1, 1, 0).ok()?;
         Heap::object_set_slot(r, a, 0, Zval::object(b));
         b.addref();
         Heap::object_set_slot(r, b, 0, Zval::object(a));

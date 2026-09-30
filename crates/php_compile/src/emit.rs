@@ -4957,6 +4957,7 @@ impl Emit<'_> {
             file: self.filename.clone(),
             line,
             end_line: class.end_line,
+            object_size: 0,
         };
         let at = self.classes.len();
         self.active_class = Some(ActiveClass {

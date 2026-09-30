@@ -999,6 +999,13 @@ pub struct ClassDecl {
     pub file: Name,
     pub line: u32,
     pub end_line: u32,
+    /// `sizeof` of the struct an internal class's `create_object` asks
+    /// `zend_object_alloc` for, its `zend_object` included: what
+    /// `memory_get_usage()` counts of each object beside the properties
+    /// (design §5.13). `0` where the class and every class above it lay
+    /// a plain `zend_object` down, which every class a program declares
+    /// does.
+    pub object_size: u32,
 }
 
 /// A global constant, `const X = ...;` or `define()` folded at compile time.

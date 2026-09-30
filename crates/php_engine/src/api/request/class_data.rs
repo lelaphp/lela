@@ -38,9 +38,51 @@ pub(super) struct ClassData {
     /// `IS_CONSTANT_VISITED` (`MARK_CONSTANT_VISITED`) while
     /// `zend_get_class_constant_ex` evaluates them, by name.
     visiting: Vec<Box<[u8]>>,
+    /// [`Request::object_custom`] once read: what the linked class, an
+    /// immutable one, makes every object of it count.
+    custom: Option<usize>,
 }
 
 impl Request {
+    /// What `zend_object_alloc(sizeof(custom), ce)` counts of an object
+    /// of `class` past the header and the declared slots (design §5.13):
+    /// the fields of the struct the nearest internal class above it
+    /// declares ([`php_unit::decl::ClassDecl::object_size`]), and the
+    /// guard slot `zend_object_properties_size` adds for a class that
+    /// uses guards.
+    ///
+    /// ```php
+    /// class G { public $a; function __get($n) {} }
+    /// class P { public $a; }
+    /// foreach (['G', 'P'] as $c) { $keep = []; $m = memory_get_usage(); for ($i = 0; $i < 100; $i++) $keep[] = new $c; echo $c, ' ', (memory_get_usage() - $m) / 100, "\n"; }
+    /// ```
+    /// ```expect
+    /// G 106.48
+    /// P 82.16
+    /// ```
+    pub(crate) fn object_custom(&mut self, class: ClassId) -> usize {
+        const ZEND_OBJECT: usize = 56;
+        if let Some(custom) = self.class_data.get(&class).and_then(|data| data.custom) {
+            return custom;
+        }
+        let mut at = Some(class);
+        let mut size = 0;
+        for _ in 0..64 {
+            let Some(decl) = at.and_then(|at| self.class_decl(at)) else {
+                break;
+            };
+            if decl.object_size != 0 {
+                size = decl.object_size as usize;
+                break;
+            }
+            at = at.and_then(|at| self.class_parent(at));
+        }
+        let guards = if self.uses_guards(class) { 16 } else { 0 };
+        let custom = size.saturating_sub(ZEND_OBJECT) + guards;
+        self.class_data.entry(class).or_default().custom = Some(custom);
+        custom
+    }
+
     /// `zend_update_class_constants` (`Z/Zend/zend_API.c:1535`), which
     /// `object_init_ex` and `zend_std_get_static_property_with_info` call
     /// before anything of the class is read: the parent's first, then

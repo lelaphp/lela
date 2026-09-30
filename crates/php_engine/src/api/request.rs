@@ -6881,9 +6881,10 @@ impl Request {
         // lays it down here, with the object, as
         // `zend_object_alloc(sizeof(custom), ce)` does; every other
         // class is `zend_objects_new` (design §5.4).
+        let custom = self.object_custom(class);
         let allocated = match self.native_new_of(class) {
-            Some(new) => new(&mut self.heap, class.0, slots),
-            None => self.heap.object(class.0, slots),
+            Some(new) => new(&mut self.heap, class.0, slots, custom),
+            None => self.heap.object(class.0, slots, custom),
         };
         let object = match self.fatal_of(allocated).map(PhpObject::of) {
             Ok(object) => object,
@@ -6916,7 +6917,8 @@ impl Request {
     ) -> Result<PhpObject, Thrown> {
         let slots = self.class_slots(class);
         let defaults = self.property_defaults(class)?;
-        let allocated = self.heap.object_with(class.0, slots, payload);
+        let custom = self.object_custom(class);
+        let allocated = self.heap.object_with(class.0, slots, custom, payload);
         let object = match self.fatal_of(allocated).map(PhpObject::of) {
             Ok(object) => object,
             Err(thrown) => {
@@ -11058,7 +11060,8 @@ impl Request {
         if object.heap().laziness() != php_heap::Laziness::Eager {
             return self.lazy_clone(object);
         }
-        let cloned = self.heap.object_clone(object.heap());
+        let custom = self.object_custom(object.class());
+        let cloned = self.heap.object_clone(object.heap(), custom);
         let Some(new) = self.fatal_of(cloned)? else {
             let class = self.class_name(object.class());
             return self.fatal_of(Err(Fatal::Error(format!(
@@ -11156,7 +11159,8 @@ impl Request {
         object: PhpObject,
         payload: T,
     ) -> Result<PhpObject, Thrown> {
-        let cloned = self.heap.object_clone_with(object.heap(), payload);
+        let custom = self.object_custom(object.class());
+        let cloned = self.heap.object_clone_with(object.heap(), custom, payload);
         let new = PhpObject::of(self.fatal_of(cloned)?);
         self.clone_slot_sources(new);
         if let Err(thrown) = self.serve_clone_method(new) {
@@ -11375,7 +11379,8 @@ impl Request {
         object: PhpObject,
         payload: T,
     ) -> Result<PhpObject, Thrown> {
-        let cloned = self.heap.object_clone_with(object.heap(), payload);
+        let custom = self.object_custom(object.class());
+        let cloned = self.heap.object_clone_with(object.heap(), custom, payload);
         self.fatal_of(cloned).map(PhpObject::of)
     }
 
@@ -20383,6 +20388,7 @@ mod tests {
             file: Name(Box::new([])),
             line: 0,
             end_line: 0,
+            object_size: 0,
         }
     }
 

@@ -5090,6 +5090,7 @@ mod tests {
                 file: Name(Box::new([])),
                 line: 0,
                 end_line: 0,
+                object_size: 0,
             }],
             ..Options::default()
         };
@@ -6792,6 +6793,7 @@ class C {
                 file: Name(Box::new([])),
                 line: 0,
                 end_line: 0,
+                object_size: 0,
             }],
             ..Options::default()
         };

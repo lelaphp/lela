@@ -97,6 +97,7 @@ pub fn class(name: &[u8], kind: ClassKind) -> ClassDecl {
         file: Name(Box::new([])),
         line: 0,
         end_line: 0,
+        object_size: 0,
     }
 }
 
@@ -207,8 +208,14 @@ fn new_by<C: Class>(
     heap: &mut php_heap::Heap,
     class: u32,
     slots: u32,
+    custom: usize,
 ) -> Result<php_heap::Obj, php_heap::Fatal> {
-    heap.object_with(class, slots, C::new_payload(ClassRef(ClassId(class))))
+    heap.object_with(
+        class,
+        slots,
+        custom,
+        C::new_payload(ClassRef(ClassId(class))),
+    )
 }
 
 /// The entry of a native on its way in, named as the expansion names it:

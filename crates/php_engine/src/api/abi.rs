@@ -357,7 +357,7 @@ pub(crate) type NativeClassDecl = (
 /// php's null slot, a class whose objects are `zend_objects_new` and
 /// carry nothing; the engine takes the nearest parent's, as php
 /// inherits `create_object`.
-pub(crate) type NativeNew = fn(&mut Heap, u32, u32) -> Result<Obj, Fatal>;
+pub(crate) type NativeNew = fn(&mut Heap, u32, u32, usize) -> Result<Obj, Fatal>;
 
 /// One [`NativeNew`], the payload's `Default` into a fresh object of
 /// `class` with `slots` declared property slots.
@@ -372,8 +372,9 @@ fn new_with_payload<T: Any + Send + Default>(
     heap: &mut Heap,
     class: u32,
     slots: u32,
+    custom: usize,
 ) -> Result<Obj, Fatal> {
-    heap.object_with(class, slots, T::default())
+    heap.object_with(class, slots, custom, T::default())
 }
 
 /// One extension (design §7.1): declarations paired with entries,
