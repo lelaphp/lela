@@ -740,12 +740,17 @@ fn print(text: &str) -> i32 {
 
 /// A fresh engine of `php_bundle::enabled()`, every extension in startup
 /// order and `php_bundle::Tier` bound, and [`EXTENSION`] after them,
-/// started over the line's `ini` ([`php_sapi::start`]).
+/// started over the line's `ini` ([`php_sapi::start`]); a file's shebang
+/// line passed over while `cgi.check_shebang_line` is on, as `main` sets
+/// `CG(skip_shebang)` under it (`Z/sapi/cgi/cgi_main.c:2523`).
 fn engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
-    let builder = Engine::builder()
+    let mut builder = Engine::builder()
         .extensions(&extensions)
         .tier::<php_bundle::Tier>();
+    if enabled(ini, "cgi.check_shebang_line", true) {
+        builder = builder.skip_shebang();
+    }
     php_sapi::start(builder, ini, Some(EXTENSION))
 }
 

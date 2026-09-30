@@ -327,6 +327,9 @@ pub(crate) struct Shared {
     /// the other constants, so a request that reads the name its host
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
     sapi_names: Vec<(Box<[u8]>, Zval)>,
+    /// `CG(skip_shebang)` for every file a request compiles, which the
+    /// host asked for ([`EngineBuilder::skip_shebang`]).
+    pub(crate) shebang: php_compile::Shebang,
     /// What reading the host's ini entries wrote to `stderr` in php
     /// ([`Configuration`]), and after it what the extensions' `on_modify`
     /// wrote there over the host's values, as opcache's handlers log a
@@ -700,6 +703,7 @@ impl Shared {
             precision: req.precision(),
             short_open_tag: req.short_open_tag(),
             assertions: req.assertions() >= 0,
+            shebang: self.shebang,
         };
         let cwd = req.cwd();
         let origin = Origin {
@@ -752,6 +756,7 @@ impl Shared {
             assertions: self
                 .ini_default(b"zend.assertions")
                 .is_none_or(|value| Request::ini_parse_bytes(value) >= 0),
+            shebang: self.shebang,
         }
     }
 
@@ -1384,6 +1389,7 @@ pub struct EngineBuilder {
     resume: Loop,
     tier_extension: Option<Extension>,
     host_extension: Option<crate::host_extension::HostExtension>,
+    shebang: php_compile::Shebang,
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
 }
@@ -1443,6 +1449,16 @@ impl EngineBuilder {
     #[must_use]
     pub fn host_extension(mut self, host: crate::host_extension::HostExtension) -> EngineBuilder {
         self.host_extension = Some(host);
+        self
+    }
+
+    /// `CG(skip_shebang)` for every request: a file's `#!` first line is
+    /// passed over, primary or included, as php's CLI, CGI and built-in
+    /// server set it once a request has started
+    /// (`Z/sapi/cli/php_cli.c:925`, `Z/sapi/cgi/cgi_main.c:2524`).
+    #[must_use]
+    pub fn skip_shebang(mut self) -> EngineBuilder {
+        self.shebang = php_compile::Shebang::Skipped;
         self
     }
 
@@ -1549,6 +1565,7 @@ impl EngineBuilder {
                 ini,
                 constant_values,
                 sapi_names,
+                shebang: self.shebang,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
                 configuration: configuration.table,
@@ -1624,6 +1641,7 @@ impl Engine {
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
             host_extension: None,
+            shebang: php_compile::Shebang::Read,
             #[cfg(feature = "witness-trace")]
             trace_to: None,
         }
@@ -2232,7 +2250,8 @@ enum Work {
 /// `short_open_tag`, which php's scanner opens a `<?` under
 /// (`CG(short_tags)`, `Z/main/main.c:820`), and whether `zend.assertions`
 /// is at or above zero, which `zend_compile_assert` compiles a call of
-/// `assert()` under (`EG(assertions)`). php keeps them where its
+/// `assert()` under (`EG(assertions)`); beside them `CG(skip_shebang)`,
+/// which the host sets and no ini moves. php keeps them where its
 /// compiler reads them as it compiles, so what the ini says when the
 /// compile begins is what the whole file is compiled under: the startup ini's
 /// for a unit bound for the cache, which every request that serves it
@@ -2242,6 +2261,7 @@ struct CompileIni {
     precision: i32,
     short_open_tag: bool,
     assertions: bool,
+    shebang: php_compile::Shebang,
 }
 
 /// One source compiled, with what the compiler refused kept instead of
@@ -2275,6 +2295,7 @@ fn compile(
         precision: ini.precision,
         short_open_tag: ini.short_open_tag,
         assertions: ini.assertions,
+        shebang: ini.shebang,
         persistent: declared.constants,
         functions: declared.functions,
         classes: declared.classes,
@@ -3778,6 +3799,7 @@ mod tests {
                     precision: 14,
                     short_open_tag: true,
                     assertions: true,
+                    shebang: php_compile::Shebang::Read,
                 },
                 Declared::default(),
                 StackLimit::UNCHECKED,

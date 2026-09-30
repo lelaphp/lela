@@ -771,13 +771,15 @@ fn print(text: &str) -> i32 {
 }
 
 /// A fresh engine of `php_bundle::enabled()`, every extension in startup
-/// order and `php_bundle::Tier` bound, started over the line's `ini`
-/// ([`php_sapi::start`]).
+/// order and `php_bundle::Tier` bound, the shebang line of every file
+/// passed over as `do_cli` sets `CG(skip_shebang)`, started over the
+/// line's `ini` ([`php_sapi::start`]).
 fn engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
         .extensions(&extensions)
-        .tier::<php_bundle::Tier>();
+        .tier::<php_bundle::Tier>()
+        .skip_shebang();
     php_sapi::start(builder, ini, None)
 }
 
