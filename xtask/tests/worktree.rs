@@ -13,6 +13,7 @@ use std::process::Command;
 use xtask::cli::{Format, Section};
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
+use xtask::oracle::Promise;
 use xtask::permit::{Call, judge};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::{self, Tree};
@@ -709,4 +710,109 @@ fn an_add_records_the_ticket_and_a_retire_keeps_it_with_the_branch() {
     );
     let (code, out) = worktree(&root, "add", &["t-x/thirty-again", "--ticket", "30"]);
     assert_eq!(code, 1, "the retired branch still holds the ticket: {out}");
+}
+
+/// `xtask phpt` in `root` over one subset, held against `HEAD`: what it
+/// printed.
+fn phpt_against_head(root: &Path, subset: &str) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(root)
+        .args([
+            "phpt",
+            "--subset",
+            subset,
+            "--against",
+            "HEAD",
+            "--jobs",
+            "1",
+        ])
+        .current_dir(root)
+        .env_remove("CARGO")
+        .env_remove("CARGO_MANIFEST_DIR")
+        .output()
+        .unwrap();
+    joined(&out).1
+}
+
+/// The retire carries the worktree's kept phpt runs into the main
+/// worktree's, where `phpt --against` looks for a base's run: a run is
+/// keyed by the engine's tree, so one taken in a worktree at the base is
+/// the run the comparison asks for, and before this it went with the
+/// worktree (#1268). A run main keeps already is not overwritten.
+#[test]
+fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    if Promise::Tree
+        .or_skip(manifest.pin.source.tree())
+        .unwrap()
+        .is_none()
+    {
+        return;
+    }
+    let root = repository("retire-runs");
+    let dir = worktree_of(&root, "t-x/runs");
+    sh(
+        &root,
+        &[
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "t-x/runs",
+            dir.to_str().unwrap(),
+            "origin/t-x",
+        ],
+    );
+    // No run is kept at HEAD, and the comparison's skip names the engine
+    // tree a run would be kept under.
+    let unkept = phpt_against_head(&root, "ext/pcre");
+    assert!(unkept.contains("no run of ext/pcre is kept"), "{unkept}");
+    let tree = unkept
+        .split_once("(the engine's tree ")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map_or_else(|| panic!("{unkept}"), |(tree, _)| tree.to_owned());
+
+    let run = |engine: &str| {
+        format!(
+            "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"{engine}\", \"verdicts\": {{}}}}\n"
+        )
+    };
+    let runs = format!("target/phpt-runs/{tree}");
+    write(
+        &dir,
+        &format!("{runs}/ext/pcre.json"),
+        &run("the worktree's"),
+    );
+    write(
+        &dir,
+        &format!("{runs}/ext/ctype.json"),
+        &run("the worktree's"),
+    );
+    write(&root, &format!("{runs}/ext/ctype.json"), &run("main's"));
+
+    let (code, out) = retire(&root, &["t-x/runs"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!dir.exists(), "{out}");
+    assert!(
+        out.contains("carried 1 kept phpt run into")
+            && out.contains("1 it keeps already stayed as they stood"),
+        "{out}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(&runs).join("ext/pcre.json")).unwrap(),
+        run("the worktree's")
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(&runs).join("ext/ctype.json")).unwrap(),
+        run("main's"),
+        "a run main keeps is not overwritten: {out}"
+    );
+
+    // The comparison in main now finds the carried run: what it gives no
+    // verdict for is the engine this scratch repository has not built.
+    let found = phpt_against_head(&root, "ext/pcre");
+    assert!(!found.contains("no run of ext/pcre is kept"), "{found}");
+    assert!(found.contains("this run measured no engine"), "{found}");
 }
