@@ -16705,7 +16705,7 @@ pub(crate) fn fe_fetch_r<T: Tier>(
                     Err(thrown) => return threw(req, frame, &thrown),
                 };
                 let value = Request::walked_value(object, walked);
-                if matches!(walked, crate::api::request::Walked::Hooked(..)) {
+                if walked.owned() {
                     owned = Some(value);
                 }
                 (key, value)
@@ -17323,7 +17323,7 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
     };
     // A `&get` hook's answer is the walk's own owner of the cell, as an
     // iterator's element is.
-    let owned = matches!(walked, crate::api::request::Walked::Hooked(..));
+    let owned = walked.owned();
     let cell = match req.walked_reference(object, walked) {
         Ok(cell) => cell,
         Err(thrown) => return Ok(Err(thrown)),

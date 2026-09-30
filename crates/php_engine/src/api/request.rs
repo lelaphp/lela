@@ -11120,6 +11120,16 @@ impl Request {
         let o = object.heap();
         let table = self.heap.object_properties(o);
         let table = self.fatal_of(table)?;
+        // `Z_OBJPROP_P` of a class whose `get_properties` answers its
+        // own rows: the walk stands on the object's table as any does,
+        // and goes over what the class answers.
+        let handlers = self.object_handlers(o);
+        if handlers.properties_overloaded() {
+            if handlers.get_properties(self, object)?.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(self.heap.iterator_add(table, 0)));
+        }
         let slots = match table.declared_rows() {
             php_heap::DeclaredRows::Slots => self.class_slots(object.class()),
             php_heap::DeclaredRows::Copied => 0,
@@ -11155,6 +11165,9 @@ impl Request {
     ) -> Result<Option<(php_heap::Key, Walked)>, Thrown> {
         let o = object.heap();
         let class = object.class();
+        if self.object_handlers(o).properties_overloaded() {
+            return self.answered_walk(object, idx);
+        }
         // `zend_hooked_object_get_iterator`: a class with a hooked
         // property walks its declared rows in the table's order, each
         // hooked one read through its hook.
@@ -11215,6 +11228,98 @@ impl Request {
         }
     }
 
+    /// [`Request::object_walk`] over an object whose class answers its
+    /// own rows, `zend_fe_fetch_object_helper` over `Z_OBJPROP_P`, which
+    /// is the class's `get_properties` asked again at every fetch: the
+    /// next row from the iterator's lead, the rows' index, that the
+    /// executing scope may see, a row the class answered for a property
+    /// the object holds walked as that slot or that dynamic entry, so a
+    /// walk by reference binds it where the std walk does, and any other
+    /// row, a `DateInterval`'s field, as the value the class answered.
+    ///
+    /// ```php
+    /// foreach (new DateInterval('P1D') as $k => $v) { echo $k, '=', var_export($v, true), "\n"; }
+    /// class D extends DateTime { public $own = 1; protected $hidden = 2; }
+    /// $d = new D('2020-01-01');
+    /// foreach ($d as $k => &$v) { $v = 5; }
+    /// unset($v);
+    /// var_dump(get_object_vars($d), $k);
+    /// $i = new DateInterval('P2D');
+    /// foreach ($i as $k => &$v) { if ($k === 'd') { $v = 9; } }
+    /// unset($v);
+    /// var_dump($i->d);
+    /// ```
+    /// ```expect
+    /// y=0
+    /// m=0
+    /// d=1
+    /// h=0
+    /// i=0
+    /// s=0
+    /// f=0.0
+    /// invert=0
+    /// days=false
+    /// from_string=false
+    /// array(1) {
+    ///   ["own"]=>
+    ///   int(5)
+    /// }
+    /// string(3) "own"
+    /// int(2)
+    /// ```
+    fn answered_walk(
+        &mut self,
+        object: PhpObject,
+        idx: u32,
+    ) -> Result<Option<(php_heap::Key, Walked)>, Thrown> {
+        let class = object.class();
+        let o = object.heap();
+        let handlers = self.object_handlers(o);
+        let rows = handlers.get_properties(self, object)?;
+        let placed = self.placed_properties(class);
+        let mut cursor = 0;
+        let mut at = self.heap.iterator_lead(idx) as usize;
+        let mut found = None;
+        for (i, (name, value)) in rows.into_iter().enumerate() {
+            // The declared slot a row is, by the cursor over the
+            // placed properties `object_entries` answers them in.
+            let slot = placed
+                .iter()
+                .skip(cursor)
+                .position(|(_, p)| &*p.name.0 == name.as_bytes())
+                .map(|found| found + cursor);
+            if let Some(slot) = slot {
+                cursor = slot + 1;
+            }
+            if i < at {
+                continue;
+            }
+            at = i + 1;
+            let declaring = slot
+                .and_then(|slot| placed.get(slot))
+                .map(|(declaring, _)| *declaring);
+            if !self.property_row_visible(class, name.as_bytes(), declaring) {
+                continue;
+            }
+            let key = php_heap::Key::Str(name.heap());
+            let walked = match slot.and_then(|slot| u32::try_from(slot).ok()) {
+                Some(slot) if !o.slot(slot).is_undef() => Walked::Slot(slot),
+                _ if o.properties().is_some_and(|table| table.contains(key)) => {
+                    Walked::Dynamic(key)
+                }
+                _ => {
+                    self.addref(&value);
+                    Walked::Answered(value)
+                }
+            };
+            found = Some((key, walked));
+            break;
+        }
+        self.heap
+            .iterator_set_lead(idx, u32::try_from(at).unwrap_or(u32::MAX));
+        Ok(found)
+    }
+
     /// The key `FE_FETCH` hands a loop over an object's table for the row
     /// [`Request::object_walk`] found: a name as it is, and a mangled
     /// one, which a cast of an array can leave in the dynamic table,
@@ -11255,7 +11360,7 @@ impl Request {
                 .properties()
                 .and_then(|table| table.get(key))
                 .unwrap_or(php_heap::Zval::UNDEF),
-            Walked::Hooked(value) => return value,
+            Walked::Hooked(value) | Walked::Answered(value) => return value,
         };
         Value::of_zval(z)
     }
@@ -11321,6 +11426,11 @@ impl Request {
             // A hook that answered no reference has no place to bind; the
             // walk refused one whose `get` hook returns none before it
             // ran it ([`Request::hooked_object_walk`]).
+            // A row the class answered and the object holds nowhere, a
+            // `DateInterval`'s field: php binds it in the table
+            // `get_properties` filled, which the next fetch fills again,
+            // so the cell stands on its own.
+            Walked::Answered(value) => self.reference(value),
             Walked::Hooked(value) => {
                 self.release(value);
                 self.fatal_of(Err(Fatal::Error(String::from(
@@ -21012,14 +21122,23 @@ fn include_path_entries(include_path: &[u8]) -> Vec<Vec<u8>> {
 struct Hooks<'a>(&'a mut Request);
 
 /// Where a walk over an object stands at a property: a declared slot,
-/// the key of a bucket of the dynamic table, or a hooked property's
-/// value as its `get` hook answered it, one owner the walker's to give
-/// up.
+/// the key of a bucket of the dynamic table, a hooked property's value
+/// as its `get` hook answered it, or a row the class's `get_properties`
+/// answered that the object holds nowhere of its own; each of the last
+/// two one owner the walker's to give up.
 #[derive(Clone, Copy)]
 pub(crate) enum Walked {
     Slot(u32),
     Dynamic(php_heap::Key),
     Hooked(Value),
+    Answered(Value),
+}
+
+impl Walked {
+    /// Whether the walk holds an owner of the value it found.
+    pub(crate) fn owned(self) -> bool {
+        matches!(self, Walked::Hooked(_) | Walked::Answered(_))
+    }
 }
 
 /// One `zend_property_info *` of a reference's source list
