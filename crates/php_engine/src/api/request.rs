@@ -1645,8 +1645,10 @@ pub struct Request {
     /// `zend_trace_to_string`: the trace `zend_error_impl` fetched for the
     /// fatal being raised under `fatal_error_backtraces`, cleared for
     /// every diagnostic and by `zend_exception_error`, read by
-    /// `php_error_cb` for the display and the log forms.
-    last_fatal_error_backtrace: Option<String>,
+    /// `php_error_cb` for the display and the log forms and handed out
+    /// by `error_get_last()` as its `trace`: the array, one owner held
+    /// here, beside its rendering.
+    last_fatal_error_backtrace: Option<(Option<PhpArray>, String)>,
     ending: Option<Ending>,
     /// php's `EG(exit_status)`: what the process ends with, 255 written
     /// by `php_error_cb` for a fatal and the code by `exit`, whichever
@@ -5731,16 +5733,15 @@ impl Request {
     }
 
     /// The backtrace a fatal carries, `zend_fetch_debug_backtrace`
-    /// rendered by `zend_trace_to_string` at the site, its rows given
-    /// back once rendered; the memory limit refusing the rows leaves the
-    /// fatal without one.
-    fn trace_as_string(&mut self) -> String {
+    /// beside its rendering by `zend_trace_to_string` at the site; the
+    /// memory limit refusing the rows leaves the fatal `{main}` alone
+    /// and no rows for `error_get_last()`.
+    fn trace_as_string(&mut self) -> (Option<PhpArray>, String) {
         let Ok(trace) = self.debug_backtrace() else {
-            return String::from("#0 {main}");
+            return (None, String::from("#0 {main}"));
         };
         let text = self.trace_to_string(trace, true);
-        self.release(Value::array(trace));
-        text
+        (Some(trace), text)
     }
 
     /// `_build_trace_args` (`Z/Zend/zend_exceptions.c:539`) over one
@@ -6304,7 +6305,7 @@ impl Request {
             return false;
         }
         // "Always clear the last backtrace."
-        self.last_fatal_error_backtrace = None;
+        self.clear_fatal_error_backtrace();
         if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
@@ -6411,8 +6412,15 @@ impl Request {
     /// nothing at all while none was fetched.
     fn stack_trace_after_the_site(&self) -> String {
         self.last_fatal_error_backtrace
-            .as_deref()
-            .map_or_else(String::new, |trace| format!("\nStack trace:\n{trace}"))
+            .as_ref()
+            .map_or_else(String::new, |(_, trace)| format!("\nStack trace:\n{trace}"))
+    }
+
+    /// `zval_ptr_dtor(&EG(last_fatal_error_backtrace))` and `ZVAL_UNDEF`.
+    fn clear_fatal_error_backtrace(&mut self) {
+        if let Some((Some(trace), _)) = self.last_fatal_error_backtrace.take() {
+            self.release(Value::array(trace));
+        }
     }
 
     /// `fatal_error_backtraces`, `EG(fatal_error_backtrace_on)` through
@@ -6611,7 +6619,7 @@ impl Request {
         if self.bailout {
             return;
         }
-        self.last_fatal_error_backtrace = None;
+        self.clear_fatal_error_backtrace();
         self.error_cb(level, message, file, line);
         self.end_at_level(level, message, file, line);
     }
@@ -15978,6 +15986,12 @@ impl Request {
         ] {
             let key = Key::Str(PhpString::new(self, name)?);
             array.set(self, key, value)?;
+        }
+        if let Some((Some(trace), _)) = self.last_fatal_error_backtrace {
+            let trace = Value::array(trace);
+            self.addref(&trace);
+            let key = Key::Str(PhpString::new(self, b"trace")?);
+            array.set(self, key, trace)?;
         }
         Ok(Some(array))
     }

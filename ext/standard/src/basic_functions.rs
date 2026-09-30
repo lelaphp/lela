@@ -451,6 +451,30 @@ fn get_include_path(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
 /// Notice: z in %s on line 4
 /// string(1) "z"
 /// ```
+///
+/// A fatal raised under `fatal_error_backtraces` carries its backtrace
+/// as `trace`, `EG(last_fatal_error_backtrace)`:
+///
+/// ```php
+/// ini_set('fatal_error_backtraces', '1');
+/// register_shutdown_function(function () { $e = error_get_last(); var_dump($e["type"], array_column($e["trace"], "function")); });
+/// function f() { eval("class C {} class C {}"); }
+/// f();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Cannot redeclare class C (previously declared in %s(4) : eval()'d code:1) in %s(4) : eval()'d code on line 1
+/// Stack trace:
+/// #0 %s(4): eval()
+/// #1 %s(5): f()
+/// #2 {main}
+/// int(64)
+/// array(2) {
+///   [0]=>
+///   string(4) "eval"
+///   [1]=>
+///   string(1) "f"
+/// }
+/// ```
 #[php_function]
 fn error_get_last(req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
     req.last_error()
