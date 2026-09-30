@@ -4941,7 +4941,7 @@ fn static_call_frame(
         };
         // `ZEND_CALL_HAS_THIS` over the calling frame's own `$this`,
         // which that frame keeps: no `ZEND_CALL_RELEASE_THIS`.
-        (Some(req.lent_receiver(this)), this.class())
+        (Some(exec::Receiver::lent(this)), this.class())
     } else if op.op1_type == OperandKind::Unused
         && matches!(
             op.op1 & FETCH_CLASS_MASK,
@@ -5070,7 +5070,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     // frame's own `$this`, which the frame keeps, and no
     // `ZEND_CALL_RELEASE_THIS`.
     let this = req.vm().this(frame);
-    let receiver = this.map(|this| req.lent_receiver(this));
+    let receiver = this.map(exec::Receiver::lent);
     let written = format!("${shown}::{}", kind.name());
     let written = match crate::api::values::PhpString::new(req, written.as_bytes()) {
         Ok(written) => written,
@@ -5230,8 +5230,9 @@ pub(crate) fn init_method_call<T: Tier>(
     };
     // `$this->m()`, `INIT_METHOD_CALL` over `UNUSED`: the calling frame
     // keeps its `$this`, and the call takes no owner of it (no
-    // `ZEND_CALL_RELEASE_THIS`) where the object may be lent.
-    let lends = op.op1_type == OperandKind::Unused && receiver.is_none() && req.lendable(object);
+    // `ZEND_CALL_RELEASE_THIS`), the object lent, unless the class's
+    // `method_receiver` handed another over.
+    let lends = op.op1_type == OperandKind::Unused && receiver.is_none();
     // The frame's owner of the receiver otherwise: the temporary's own,
     // moved, or one more of the CV's or the constant's; a reference the
     // slot held is followed and given up.
@@ -5261,7 +5262,7 @@ pub(crate) fn init_method_call<T: Tier>(
         .is_some_and(|decl| decl.is_instance)
     {
         Some(if lends {
-            exec::Receiver::Lent(object)
+            exec::Receiver::lent(object)
         } else {
             exec::Receiver::Owned(object)
         })

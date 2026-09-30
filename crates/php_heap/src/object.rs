@@ -279,6 +279,29 @@ impl Obj {
         }
     }
 
+    /// How many frames and calls name the object as a receiver they hold
+    /// no owner of, php's `EX(This)` without `ZEND_CALL_RELEASE_THIS`,
+    /// kept in the bits of `extra_flags` php leaves unused. php frees
+    /// such an object under the running frame when its last owner lets
+    /// it go (`zend_objects_store_del`); here its members go at that
+    /// moment and its bytes and its id stand while a pin does
+    /// ([`Heap::unpin`]), so no frame names freed memory.
+    #[must_use]
+    pub fn pins(&self) -> u32 {
+        self.header().extra_flags.get() & gc::OBJ_PINS
+    }
+
+    /// One more frame names the object with no owner of it. The count
+    /// cannot outgrow its thirty bits: every pin is a frame or a call
+    /// on a stack the call-stack limit bounds long before.
+    pub fn pin(&self) {
+        let word = &self.header().extra_flags;
+        let pins = (word.get() & gc::OBJ_PINS)
+            .saturating_add(1)
+            .min(gc::OBJ_PINS);
+        word.set((word.get() & !gc::OBJ_PINS) | pins);
+    }
+
     /// `OBJ_FLAGS(obj) & IS_OBJ_DESTRUCTOR_CALLED`: the destructor was
     /// served, or the object is marked as though it had been.
     #[must_use]
@@ -904,12 +927,67 @@ impl Heap {
             Heap::object_free(hooks, o);
         }
         let heap = hooks.heap();
-        heap.gc.remove_from_buffer(crate::collector::Node::Obj(o));
+        if o.pins() > 0 {
+            // A running frame names it: the members went at php's
+            // moment, and the bytes and the id wait for the last
+            // pin to be let go ([`Heap::unpin`]).
+            o.header().gc.set_refcount(0);
+            heap.gc.remove_from_buffer(crate::collector::Node::Obj(o));
+            return;
+        }
+        heap.object_bytes_free(o);
+    }
+
+    /// One pin [`Obj::pin`] took let go. The last one over an object
+    /// whose members were freed while it stood and that nothing owns
+    /// since gives the bytes back and puts the id on the free list,
+    /// what `zend_objects_store_del` did at the free the pin deferred.
+    /// An autoloader that unregisters itself from inside its call, which
+    /// `zend_call_function` makes with the object lent, is freed there:
+    /// its destructor and its members' release are served before the
+    /// method goes on, whether or not its class serves a destructor.
+    ///
+    /// ```php
+    /// class In { function __destruct() { echo "inner gone\n"; } }
+    /// class A { public $in; function __construct() { $this->in = new In; }
+    ///     function __invoke($c) { spl_autoload_unregister($this); echo "unregistered\n"; }
+    ///     function __destruct() { echo "A gone\n"; } }
+    /// class B { public $in; function __construct() { $this->in = new In; }
+    ///     function __invoke($c) { spl_autoload_unregister($this); echo "B unregistered\n"; } }
+    /// spl_autoload_register(new A);
+    /// class_exists('X');
+    /// spl_autoload_register(new B);
+    /// class_exists('Y');
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// A gone
+    /// inner gone
+    /// unregistered
+    /// inner gone
+    /// B unregistered
+    /// end
+    /// ```
+    pub fn unpin(&mut self, o: Obj) {
+        let pins = o.pins();
+        let word = &o.header().extra_flags;
+        word.set((word.get() & !gc::OBJ_PINS) | pins.saturating_sub(1));
+        if pins == 1 && o.has_flag(gc::OBJ_FREE_CALLED) && o.refcount() == 0 {
+            self.object_bytes_free(o);
+        }
+    }
+
+    /// The end of `zend_objects_store_del` past `free_obj`: the object
+    /// off the root buffer, its bytes back to the heap and its id on
+    /// the free list.
+    fn object_bytes_free(&mut self, o: Obj) {
+        let handle = o.id().0;
+        self.gc.remove_from_buffer(crate::collector::Node::Obj(o));
         // SAFETY: the object came from `object_alloc`, its bucket is
-        // invalid, its members are freed and the root buffer names it no
-        // more, so nothing names it.
-        unsafe { heap.mm.free(o.address()) };
-        heap.store.add_to_free_list(handle);
+        // invalid, its members are freed, no pin stands and the root
+        // buffer names it no more, so nothing names it.
+        unsafe { self.mm.free(o.address()) };
+        self.store.add_to_free_list(handle);
     }
 
     /// `free_obj`: `zend_object_std_dtor` (`Z/Zend/zend_objects.c:77`),
@@ -1115,6 +1193,63 @@ mod tests {
             vec![Some(ObjectId(1)), Some(ObjectId(2)), Some(ObjectId(4))]
         );
         assert_eq!(recorder.heap.objects(), 4);
+    }
+
+    /// A receiver a running frame names with no owner is pinned: its
+    /// last release frees its members at php's moment, the destructor
+    /// and the member's free served there, while its bytes and its
+    /// id stand until the pin is let go, and a second release of
+    /// the object meanwhile frees nothing twice.
+    #[test]
+    fn a_pinned_object_keeps_its_bytes_and_id_until_the_pin_goes() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        let (Ok(outer), Ok(inner)) = (r.heap.object(1, 1, 0), r.heap.object(1, 0, 0)) else {
+            return;
+        };
+        let (id, member) = (outer.id(), inner.id());
+        outer.write_slot(0, Zval::object(inner));
+        let start = r.heap.memory_usage(false);
+        outer.pin();
+        outer.pin();
+        assert_eq!(outer.pins(), 2);
+        Heap::release(&mut r, Zval::object(outer));
+        assert_eq!(
+            r.log,
+            vec![(id, "destruct"), (member, "destruct")],
+            "the destructor and the member's release are served at the release"
+        );
+        assert!(outer.slot(0).is_undef(), "the members are gone");
+        assert!(r.heap.stored(outer.id()).is_none());
+        assert_eq!(
+            start - r.heap.memory_usage(false),
+            40,
+            "the member's forty bytes are back and the pinned object's stand"
+        );
+        let Ok(other) = r.heap.object(1, 0, 0) else {
+            return;
+        };
+        assert_ne!(other.id(), id, "a pinned object's id is not reused");
+        Heap::release(&mut r, Zval::object(other));
+        let held = r.heap.memory_usage(false);
+        outer.addref();
+        Heap::release(&mut r, Zval::object(outer));
+        r.heap.unpin(outer);
+        assert_eq!(outer.pins(), 1);
+        assert_eq!(r.heap.memory_usage(false), held, "one pin still stands");
+        r.heap.unpin(outer);
+        assert_eq!(
+            held - r.heap.memory_usage(false),
+            56,
+            "the last pin frees the bytes"
+        );
+        assert_eq!(
+            r.log.iter().filter(|(at, _)| *at == id).count(),
+            1,
+            "nothing is served twice"
+        );
+        let reused = r.heap.object(1, 0, 0).ok().map(|o| o.id());
+        assert_eq!(reused, Some(id), "and puts the id on the free list");
     }
 
     /// The table doubles where php's doubles, on the object past the
