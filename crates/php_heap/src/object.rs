@@ -867,7 +867,7 @@ impl Heap {
         new.header().properties.set(Some(copy));
         for (key, z) in &table {
             let z = self.dup_value(z, None);
-            Heap::array_add_copy(self, copy, key, z)?;
+            Heap::array_add_new(self, copy, key, z)?;
         }
         copy.set_has_empty_ind(table.has_empty_ind());
         copy.set_declared_rows(rows);

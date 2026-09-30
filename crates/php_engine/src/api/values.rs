@@ -419,6 +419,26 @@ impl PhpArray {
         Ok(())
     }
 
+    /// Lay `value` down at `key` as `zend_hash_add_new` and
+    /// `zend_symtable_add_new` do after `SEPARATE_ARRAY`: a string key
+    /// appended without the lookup, so a key the array holds already is
+    /// held twice and a lookup finds this row. The value and a string key
+    /// are the array's from here.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn add_new(
+        &mut self,
+        req: &mut Request,
+        key: Key,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        self.separate(req)?;
+        req.array_add_new(self.0, key.heap(), value)?;
+        if let Key::Str(s) = key {
+            req.release(Value::string(s));
+        }
+        Ok(())
+    }
+
     /// Replace the value at `key` in place; `false`, and `value` given
     /// up, when it is absent.
     pub fn replace(&mut self, req: &mut Request, key: &Key, value: Value) -> Result<bool, Thrown> {

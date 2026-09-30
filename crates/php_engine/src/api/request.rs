@@ -20447,6 +20447,19 @@ impl Request {
         self.fatal_of(written)
     }
 
+    /// `zend_hash_add_new` or `zend_hash_index_add_new` over `a`, which
+    /// has one owner: `value` is the array's from here and a string key
+    /// one more owner, appended without the lookup.
+    pub(crate) fn array_add_new(
+        &mut self,
+        a: Arr,
+        key: php_heap::Key,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let added = self.heap.array_add_new(a, key, value.into_zval());
+        self.fatal_of(added)
+    }
+
     /// `zend_hash_next_index_insert` over `a`, which has one owner:
     /// `false`, and `value` given up, when the next element is taken.
     pub(crate) fn array_append(&mut self, a: Arr, value: Value) -> Result<bool, Thrown> {
