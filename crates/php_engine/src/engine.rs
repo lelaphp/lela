@@ -263,6 +263,8 @@ const MAX_ACCELERATED_FILES: usize = 10_000;
 /// What every request shares: the bundle, the linked declarations, the
 /// engine states, the ini defaults and the loop (design §5.14).
 pub(crate) struct Shared {
+    /// `module_registry`: `Core`, then the bundle in startup order, each
+    /// at its [`ExtensionId`].
     pub(crate) extensions: Vec<Extension>,
     /// `CG(function_table)`'s natives, the engine's own and then each
     /// extension's in bundle order, less what the startup ini's
@@ -279,8 +281,9 @@ pub(crate) struct Shared {
     /// ([`crate::api::abi::ExtensionBuilder::intercept`]).
     pub(crate) replaced: Vec<Vec<Entry>>,
     /// Each native's `internal_function.module`, one row per row of
-    /// `functions`: the extension that declared it, or none for one the
-    /// engine declares itself.
+    /// `functions`: the extension that declared it, `Core` for Zend's
+    /// own, and none for the natives of php's `standard` the engine
+    /// declares itself.
     pub(crate) function_modules: Vec<Option<ExtensionId>>,
     /// Each native's `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, one
     /// row per row of `functions`, decoded from its declaration's
@@ -1337,9 +1340,13 @@ fn function_table(
     core.functions
         .iter()
         .cloned()
-        .chain(crate::natives::standard())
-        .map(|native| (None, native))
-        .chain(extensions.iter().zip(0u32..).flat_map(|(e, at)| {
+        .map(|native| (Some(ExtensionId::CORE), native))
+        .chain(
+            crate::natives::standard()
+                .into_iter()
+                .map(|native| (None, native)),
+        )
+        .chain(extensions.iter().zip(1u32..).flat_map(|(e, at)| {
             e.functions
                 .iter()
                 .cloned()
@@ -1527,6 +1534,8 @@ impl EngineBuilder {
             .into_iter()
             .chain(extensions.iter().flat_map(|e| e.constants.iter().cloned()))
             .collect();
+        // `module_registry`: `Core` first, as `zend_startup` registers it.
+        extensions.insert(0, core);
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
@@ -1734,8 +1743,10 @@ impl Engine {
     /// CLI's `-m` list them: what a host prints without a request.
     #[must_use]
     pub fn loaded_extensions(&self) -> Vec<String> {
-        std::iter::once(String::from("Core"))
-            .chain(self.shared.extensions.iter().map(|e| e.name.clone()))
+        self.shared
+            .extensions
+            .iter()
+            .map(|e| e.name.clone())
             .collect()
     }
 

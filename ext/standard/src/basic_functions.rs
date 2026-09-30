@@ -1079,7 +1079,7 @@ fn ini_get_all(
         let module = registered.then(|| req.extension_named(name)).flatten();
         if name == b"core" {
         } else if let Some(module) = module {
-            entries.retain(|entry| entry.extension == Some(module));
+            entries.retain(|entry| entry.extension == module);
         } else {
             let text = format!(
                 "Extension \"{}\" cannot be found",
