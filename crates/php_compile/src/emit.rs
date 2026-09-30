@@ -15523,7 +15523,7 @@ impl Emit<'_> {
         arguments: &Args,
     ) -> Result<Where, CompileError> {
         let line = self.line;
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+        let class = self.class_link(class)?;
         let method = match self.method_name(method)? {
             MethodName::Constant(method) => method,
             MethodName::Computed((op2_type, op2)) => {
@@ -16059,7 +16059,7 @@ impl Emit<'_> {
         class: ClassSpec,
         name: &ScopedName,
     ) -> Result<StaticOperands, CompileError> {
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+        let class = self.class_link(class)?;
         let name = match name {
             ScopedName::Written(bytes) => Where::Constant(self.string(bytes)?),
             ScopedName::Computed(expr) => match self.expr(*expr)? {
@@ -16298,6 +16298,26 @@ impl Emit<'_> {
                 Ok(ClassRef::Scope(fetch | flags))
             }
         }
+    }
+
+    /// `zend_short_circuiting_mark_inner(class_ast)` and then
+    /// `zend_compile_class_ref` under `ZEND_FETCH_CLASS_EXCEPTION`, what
+    /// `zend_compile_static_prop` and `zend_compile_static_call` do: a
+    /// class written as a `?->` chain is a link of the chain the property
+    /// or the call ends, so its `JMP_NULL` skips them too.
+    ///
+    /// ```php
+    /// var_dump(null?->bar()::$baz, null?->bar()::baz());
+    /// ```
+    /// ```expect
+    /// NULL
+    /// NULL
+    /// ```
+    fn class_link(&mut self, class: ClassSpec) -> Result<ClassRef, CompileError> {
+        if let ClassSpec::Expr(expr) = class {
+            self.chain_inner = Some(self.peel(expr));
+        }
+        self.class_ref(class, FETCH_CLASS_EXCEPTION)
     }
 
     /// `zend_set_class_name_op1` and its kin: the operand a class
