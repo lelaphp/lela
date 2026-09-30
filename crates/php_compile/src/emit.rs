@@ -3799,7 +3799,11 @@ impl Emit<'_> {
     /// Fatal error: A never returning function does not return a value, but #[\NoDiscard] requires a return value in %s on line 2
     /// ```
     ///
-    /// `validate_nodiscard` refuses it on a property's `get` or `set` first.
+    /// `validate_nodiscard` refuses it on a property's `get` or `set`
+    /// first ([`php_unit::decl::hook_attribute_refusal`]), and sets no
+    /// `ZEND_ACC_NODISCARD` there, so nothing after it is checked; under
+    /// `#[\DelayedTargetValidation]` the refusal waits for
+    /// `ReflectionAttribute::newInstance` and the hook compiles.
     ///
     /// ```php
     /// class A { public $p { #[\NoDiscard] get => 1; } }
@@ -3807,12 +3811,33 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: #[\NoDiscard] is not supported for property hooks in %s on line 2
     /// ```
+    ///
+    /// ```php
+    /// class A { public string $p { #[DelayedTargetValidation] #[NoDiscard] set => strtoupper($value); } }
+    /// $a = new A;
+    /// $a->p = "x";
+    /// var_dump($a->p);
+    /// ```
+    /// ```expect
+    /// string(1) "X"
+    /// ```
     fn no_discard_refused(&self, attributes: &[Attribute]) -> Result<(), CompileError> {
-        let marked = attributes
-            .iter()
-            .any(|a| InternalAttribute::named(&a.name.0) == Some(InternalAttribute::NoDiscard));
+        let named = |which: InternalAttribute| {
+            attributes
+                .iter()
+                .any(|a| InternalAttribute::named(&a.name.0) == Some(which))
+        };
+        let marked = named(InternalAttribute::NoDiscard);
         if marked && self.active_hook.is_some() {
-            return Err(self.compile_error("#[\\NoDiscard] is not supported for property hooks"));
+            let refused = attributes
+                .iter()
+                .find_map(|a| php_unit::decl::hook_attribute_refusal(&a.name.0));
+            return match refused {
+                Some(refused) if !named(InternalAttribute::DelayedTargetValidation) => {
+                    Err(self.compile_error(refused))
+                }
+                _ => Ok(()),
+            };
         }
         let Some(ty) = self.return_type.as_ref().filter(|_| marked) else {
             return Ok(());

@@ -1438,9 +1438,7 @@ impl ReflectionParameter {
         super::attr::reflect_attributes(
             req,
             &attributes,
-            scope,
-            super::attr::TARGET_PARAMETER,
-            file.as_deref(),
+            super::attr::Subject::new(scope, super::attr::TARGET_PARAMETER, file.as_deref()),
             name,
             flags,
         )

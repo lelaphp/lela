@@ -1506,9 +1506,7 @@ impl ReflectionProperty {
         super::attr::reflect_attributes(
             req,
             &attributes,
-            Some(scope),
-            super::attr::TARGET_PROPERTY,
-            file.as_deref(),
+            super::attr::Subject::new(Some(scope), super::attr::TARGET_PROPERTY, file.as_deref()),
             name,
             flags,
         )
@@ -1976,9 +1974,11 @@ impl ReflectionClassConstant {
         super::attr::reflect_attributes(
             req,
             &attributes,
-            Some(scope),
-            super::attr::TARGET_CLASS_CONST,
-            file.as_deref(),
+            super::attr::Subject::new(
+                Some(scope),
+                super::attr::TARGET_CLASS_CONST,
+                file.as_deref(),
+            ),
             name,
             flags,
         )
@@ -2332,9 +2332,7 @@ impl ReflectionConstant {
         attr::reflect_attributes(
             req,
             &attributes,
-            None,
-            attr::TARGET_CONST,
-            file.as_deref(),
+            attr::Subject::new(None, attr::TARGET_CONST, file.as_deref()),
             name,
             flags,
         )

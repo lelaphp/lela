@@ -39,6 +39,22 @@ fn visibility_bit(visibility: Visibility) -> i64 {
     }
 }
 
+/// A hook's reflector holds the hook itself, found among the hooks of
+/// the property its name names in `class`, with the class that wrote
+/// it; none for the reflector of any other method.
+fn kept_hook_method(
+    req: &mut Request,
+    this: PhpObject,
+    class: ClassId,
+    name: &[u8],
+) -> Option<(ClassId, MethodDecl)> {
+    if !super::kept_hook(req, this) {
+        return None;
+    }
+    let (property, kind) = super::member::hook_name(name)?;
+    php_ext::call::property_hook(req, class, property, kind)
+}
+
 /// The method a `ReflectionMethod` reflects, with the class its
 /// `$class` names: php's `GET_REFLECTION_OBJECT_PTR(mptr)` beside
 /// `intern->ce`.
@@ -59,12 +75,7 @@ fn this_method(
         ));
     };
     let class = class_named(req, &class)?;
-    // A hook's reflector holds the hook itself, found among the hooks
-    // of the property its name names.
-    if super::kept_hook(req, this)
-        && let Some((property, kind)) = super::member::hook_name(&name)
-        && let Some((scope, decl)) = php_ext::call::property_hook(req, class, property, kind)
-    {
+    if let Some((scope, decl)) = kept_hook_method(req, this, class, &name) {
         return Ok((class, decl, scope));
     }
     let kept = kept_closure(req, this);
@@ -1204,14 +1215,16 @@ impl ReflectionFunctionAbstract {
             ),
             _ => (None, super::attr::TARGET_FUNCTION),
         };
+        let hook = super::kept_hook(req, this.object());
         let attributes = decl.attributes.clone();
         let file = super::attr::declared_in(&decl.file.0);
         super::attr::reflect_attributes(
             req,
             &attributes,
-            scope,
-            target,
-            file.as_deref(),
+            super::attr::Subject {
+                hook,
+                ..super::attr::Subject::new(scope, target, file.as_deref())
+            },
             name,
             flags,
         )
@@ -2149,6 +2162,32 @@ impl ReflectionMethod {
     ///   }
     /// }
     /// ```
+    ///
+    /// A hook's reflector renders the hook it holds, which no method
+    /// table has:
+    ///
+    /// ```php
+    /// class A { public string $p { get => "x"; set => strtoupper($value); } }
+    /// echo (new ReflectionProperty("A", "p"))->getHook(PropertyHookType::Get);
+    /// echo (new ReflectionProperty("A", "p"))->getHook(PropertyHookType::Set);
+    /// ```
+    /// ```expect
+    /// Method [ <user> public method $p::get ] {
+    ///   @@ %s 2 - 2
+    ///
+    ///   - Parameters [0] {
+    ///   }
+    ///   - Return [ string ]
+    /// }
+    /// Method [ <user> public method $p::set ] {
+    ///   @@ %s 2 - 2
+    ///
+    ///   - Parameters [1] {
+    ///     Parameter #0 [ <required> string $value ]
+    ///   }
+    ///   - Return [ void ]
+    /// }
+    /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let name = this_name(req, this.object(), "ReflectionMethod")?;
         let Some(class) = this
@@ -2163,8 +2202,16 @@ impl ReflectionMethod {
             ));
         };
         let class = class_named(req, &class)?;
+        let hook = kept_hook_method(req, this.object(), class, &name).map(|(scope, decl)| {
+            super::LinkedMethod {
+                decl,
+                scope,
+                prototype: None,
+                via_handler: false,
+            }
+        });
         let kept = kept_closure(req, this.object());
-        let Some(found) = method_or_invoke(req, class, &name, kept) else {
+        let Some(found) = hook.or_else(|| method_or_invoke(req, class, &name, kept)) else {
             let class = class_name_of(req, class);
             return Err(throw(
                 req,

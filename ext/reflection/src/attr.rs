@@ -12,7 +12,8 @@
 //! The `validation_error` an internal attribute's own validator leaves
 //! where `#[\DelayedTargetValidation]` deferred it is the refusal
 //! [`class_attribute_refusal`] answers for the class the attribute
-//! stands on, the one rule the compiler raises by.
+//! stands on, and [`hook_attribute_refusal`] for a property hook, the
+//! rules the compiler raises by.
 
 use std::fmt::Write as _;
 
@@ -20,7 +21,7 @@ use php_ext::abi::This;
 use php_ext::attr::php_class;
 use php_ext::call::{attribute_object, eval_const_expr, lookup_class};
 use php_ext::coerce::value_name;
-use php_ext::decl::{Attribute, class_attribute_refusal};
+use php_ext::decl::{Attribute, class_attribute_refusal, hook_attribute_refusal};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString};
@@ -63,14 +64,17 @@ const TARGET_NAMES: [&str; 7] = [
 
 /// php's `attribute_reference` (`php_reflection.c:196-201`), kept by
 /// value: the attribute as written, the class its constant expressions
-/// are evaluated in, the target bit of the subject it sits on, and
-/// `zend_is_attribute_repeated` answered where the sibling list was
-/// still at hand.
+/// are evaluated in, the target bit of the subject it sits on, whether
+/// that subject is a property hook, and `zend_is_attribute_repeated`
+/// answered where the sibling list was still at hand.
 #[derive(Clone)]
 pub(super) struct AttributeRef {
     pub(super) attribute: Attribute,
     pub(super) scope: Option<ClassId>,
     pub(super) target: i64,
+    /// The subject is a property hook, which `validate_nodiscard`
+    /// refuses ([`hook_attribute_refusal`]).
+    pub(super) hook: bool,
     pub(super) repeated: bool,
     /// The file the subject was declared in, php's `attr->filename`:
     /// none for a native's.
@@ -91,6 +95,30 @@ fn target_names(flags: i64) -> String {
         out.push_str(name);
     }
     out
+}
+
+/// What `reflect_attributes` reads off the subject whose attributes it
+/// reflects: the class its attributes' constant expressions are
+/// evaluated in, its target bit, whether it is a property hook, and
+/// the file it was declared in.
+#[derive(Clone, Copy)]
+pub(super) struct Subject<'a> {
+    pub(super) scope: Option<ClassId>,
+    pub(super) target: i64,
+    pub(super) hook: bool,
+    pub(super) file: Option<&'a [u8]>,
+}
+
+impl<'a> Subject<'a> {
+    /// A subject that is no property hook.
+    pub(super) fn new(scope: Option<ClassId>, target: i64, file: Option<&'a [u8]>) -> Subject<'a> {
+        Subject {
+            scope,
+            target,
+            hook: false,
+            file,
+        }
+    }
 }
 
 /// php's `attr->filename` for a subject declared in `file`: the file,
@@ -122,9 +150,7 @@ pub(super) fn declared_in(file: &[u8]) -> Option<Vec<u8>> {
 pub(super) fn reflect_attributes(
     req: &mut Request,
     attributes: &[Attribute],
-    scope: Option<ClassId>,
-    target: i64,
-    file: Option<&[u8]>,
+    subject: Subject<'_>,
     name: Option<PhpString>,
     flags: i64,
 ) -> Result<PhpArray, Thrown> {
@@ -162,10 +188,11 @@ pub(super) fn reflect_attributes(
         }
         let kept = AttributeRef {
             attribute: attribute.clone(),
-            scope,
-            target,
+            scope: subject.scope,
+            target: subject.target,
+            hook: subject.hook,
             repeated: repeated.get(at).copied().unwrap_or(false),
-            file: file.map(<[u8]>::to_vec),
+            file: subject.file.map(<[u8]>::to_vec),
         };
         let object = attribute_factory(req, &kept)?;
         out.append(req, object.as_value())?;
@@ -442,6 +469,17 @@ impl ReflectionAttribute {
     /// Cannot apply #[\AllowDynamicProperties] to readonly class R
     /// ```
     ///
+    /// and so is `validate_nodiscard`'s refusal of a property hook:
+    ///
+    /// ```php
+    /// class H { public $p { #[DelayedTargetValidation] #[NoDiscard] get => 1; } }
+    /// try { (new ReflectionProperty("H", "p"))->getHook(PropertyHookType::Get)->getAttributes()[1]->newInstance(); }
+    /// catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// #[\NoDiscard] is not supported for property hooks
+    /// ```
+    ///
     /// The arguments are evaluated and the constructor called under a
     /// site at the attribute's own file and line, which no trace row
     /// shows (`zend_get_attribute_object`'s dummy frame,
@@ -504,6 +542,11 @@ impl ReflectionAttribute {
             )
         {
             return Err(throw(req, "Error", &refused));
+        }
+        if kept.hook
+            && let Some(refused) = hook_attribute_refusal(&looked_up)
+        {
+            return Err(throw(req, "Error", refused));
         }
         if !is_internal(req, class) && flags & IS_REPEATABLE == 0 && kept.repeated {
             return Err(throw(

@@ -97,6 +97,23 @@ pub fn class_attribute_refusal(
     Some(format!("Cannot apply #[\\{declared}] to {word} {class}"))
 }
 
+/// `validate_nodiscard` (`Z/Zend/zend_attributes.c:231`), the one
+/// validator of an internal attribute that reads whether its subject is
+/// a property hook (`CG(context).active_property_info_name`): php's
+/// refusal of the attribute `attribute` names, by its resolved name in
+/// any case, on a hook, none for every other attribute. What the
+/// compiler raises where the hook is declared, and what
+/// `ReflectionAttribute::newInstance` throws for an attribute
+/// `#[\DelayedTargetValidation]` deferred, php's
+/// `zend_attribute.validation_error`; the hook carries no
+/// `ZEND_ACC_NODISCARD` either way.
+#[must_use]
+pub fn hook_attribute_refusal(attribute: &[u8]) -> Option<&'static str> {
+    attribute
+        .eq_ignore_ascii_case(b"NoDiscard")
+        .then_some("#[\\NoDiscard] is not supported for property hooks")
+}
+
 /// php's three member visibilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Visibility {
