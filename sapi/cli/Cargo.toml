@@ -33,7 +33,7 @@ required-features = ["witness-trace"]
 witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 
 [dependencies]
-# The bundle's default set and eleven it turns on: `pcntl` and `posix`,
+# The bundle's default set and twelve it turns on: `pcntl` and `posix`,
 # which php builds for the CLI and which no server host carries (design
 # §7.2, revision 35), `sockets`, php's `--enable-sockets` (revision 36),
 # `bz2`, php's `--with-bz2` (revision 39), `openssl`, php's
@@ -43,10 +43,10 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 # `calendar`, php's `--enable-calendar`, which the oracle is built with
 # (#1163, #1206), `mbstring`, php's `--enable-mbstring`, which the
 # oracle is built with (#1173, #1260), `curl`, php's `--with-curl`,
-# which the oracle is built with (#1238, #1324), and `shmop` and
-# `sysvmsg`, php's `--enable-shmop` and `--enable-sysvmsg`, which the
-# oracle is built with (#1323).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "shmop", "sysvmsg"] }
+# which the oracle is built with (#1238, #1324), and `shmop`, `sysvmsg`
+# and `sysvshm`, php's `--enable-shmop`, `--enable-sysvmsg` and
+# `--enable-sysvshm`, which the oracle is built with (#1323).
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "shmop", "sysvmsg", "sysvshm"] }
 php_sapi = { path = "../../crates/php_sapi" }
 php_proto = { path = "../../crates/php_proto" }
 # The C library in `src/ffi/` alone, for what the standard library does

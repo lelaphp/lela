@@ -90,6 +90,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_shmop::extension,
         #[cfg(feature = "sysvmsg")]
         php_ext_sysvmsg::extension,
+        #[cfg(feature = "sysvshm")]
+        php_ext_sysvshm::extension,
     ]
 }
 

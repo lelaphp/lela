@@ -234,11 +234,12 @@ Options:
 ├── spl
 ├── standard
 ├── sysvmsg
+├── sysvshm
 ├── tokenizer
 ├── uri
 └── zlib
 ```
-<!-- /computed in=aad3d3d50d2afa18a654c5f00c107be82b75465390023f5c21d09981d452d20c out=119d2876606d56bc4883fce9ae0ba71f3d713aa02a7162bc311f2aab5f3d77d3 -->
+<!-- /computed in=6eb85b4df067b70ff345da43209080107266b9db807ee30800017fcaa83731aa out=20d3f7728c732ebbc37f807194f047e66feb625118400f3b7eafe9c4953b05a2 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .
