@@ -1134,6 +1134,13 @@ impl Shared {
             .map(|(_, entry)| entry)
     }
 
+    /// `zend_get_configuration_directive`, what an INI text's `${name}`
+    /// reads first: the string the host's ini text set under `name`,
+    /// whether or not an entry of that name exists.
+    pub(crate) fn directive(&self, name: &[u8]) -> Option<&[u8]> {
+        self.configured(name).and_then(Configured::text)
+    }
+
     /// The value of the constant `name` as the bundle declared it, or as
     /// the engine's own table has it: a value nothing owns, since the
     /// string ones are the engine's interned strings.
@@ -1512,9 +1519,7 @@ impl crate::ini_syntax::Host for Configure<'_> {
     }
 
     fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        self.shared
-            .configured(name)
-            .and_then(|entry| entry.text().map(<[u8]>::to_vec))
+        self.shared.directive(name).map(<[u8]>::to_vec)
     }
 
     fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
