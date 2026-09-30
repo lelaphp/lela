@@ -4420,6 +4420,20 @@ pub(crate) fn legacy_type(value: &Value) -> &'static [u8] {
 /// bool(false)
 /// bool(true)
 /// ```
+///
+/// A float offset's warning may reach a handler that takes the
+/// container's last owner; the table is destroyed and the entry is not
+/// found:
+///
+/// ```php
+/// set_error_handler(function ($no, $str) { global $a; $a = null; echo $str, "\n"; });
+/// $a = [random_int(1, 1)];
+/// var_dump(isset($a[1.0E+42]));
+/// ```
+/// ```expect
+/// The float 1.0E+42 is not representable as an int, cast occurred
+/// bool(false)
+/// ```
 pub(crate) fn isset_dim(
     req: &mut Request,
     array: PhpArray,
@@ -4427,7 +4441,19 @@ pub(crate) fn isset_dim(
     constant: bool,
     empty: bool,
 ) -> Result<bool, Thrown> {
-    let key = isset_offset(req, offset, constant)?;
+    // `GC_TRY_ADDREF(ht)` around a float's warning in
+    // `zend_find_array_dim_slow`: a handler that took the container's
+    // last owner destroys the table, and the entry is then not found.
+    let key = if offset.deref().as_float().is_some() {
+        let held = req.take_hold(array.to_value());
+        let key = isset_offset(req, offset, constant);
+        if req.let_go(held).freed() {
+            return key.map(|_| empty);
+        }
+        key?
+    } else {
+        isset_offset(req, offset, constant)?
+    };
     let found = array.heap().get(key).map(crate::exec::value_of);
     if empty {
         return Ok(match found {
