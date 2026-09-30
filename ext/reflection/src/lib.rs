@@ -6060,21 +6060,34 @@ fn property_string(
     out
 }
 
-/// `format_default_value` over a declared default: `smart_str_append_scalar`
-/// for a scalar, `NULL`, `true`, `false`, the number, or the string in
-/// single quotes with `smart_str_append_escaped`'s escapes; an array as
-/// `[a, b]` or `['k' => v]`; a constant's name as `zend_ast_export`
-/// writes an unevaluated expression, a class constant's class after the
-/// mark compilation left on it:
+/// Whether the compiler folds `expr` to a value: a scalar written out,
+/// or an array of such, which prints as the value, its keys numbered as
+/// the array numbered them; an array of any other element prints as
+/// written.
 ///
 /// ```php
-/// namespace App { function f($a = Bar::BAZ) {} }
-/// namespace { function g($a = N\Bar::BAZ) {} echo (new ReflectionFunction('App\f'))->getParameters()[0], "\n", (new ReflectionFunction('g'))->getParameters()[0], "\n"; }
+/// class A { public $a = [1, "k" => 2, 3]; public $b = [1, 2]; public $c = [FOO, 2 => X]; }
+/// foreach ((new ReflectionClass("A"))->getProperties() as $p) echo $p;
 /// ```
 /// ```expect
-/// Parameter #0 [ <optional> $a = \App\Bar::BAZ ]
-/// Parameter #0 [ <optional> $a = N\Bar::BAZ ]
+/// Property [ public $a = [0 => 1, 'k' => 2, 1 => 3] ]
+/// Property [ public $b = [1, 2] ]
+/// Property [ public $c = [FOO, 2 => X] ]
 /// ```
+fn folded(expr: &ConstExpr) -> bool {
+    match expr {
+        ConstExpr::Null
+        | ConstExpr::Bool(_)
+        | ConstExpr::Long { .. }
+        | ConstExpr::Double(_)
+        | ConstExpr::Str(_) => true,
+        ConstExpr::Array { elements, .. } => elements
+            .iter()
+            .all(|(key, value)| key.as_ref().is_none_or(folded) && folded(value)),
+        _ => false,
+    }
+}
+
 /// `format_default_value` over a default already evaluated
 /// ([`Request::evaluated_default`]): a scalar as `smart_str_append_scalar`
 /// writes it, an enum case `Class::Case`, an array by its keys where it
@@ -6126,6 +6139,21 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
     }
 }
 
+/// `format_default_value` over a declared default: `smart_str_append_scalar`
+/// for a scalar, `NULL`, `true`, `false`, the number, or the string in
+/// single quotes with `smart_str_append_escaped`'s escapes; an array as
+/// `[a, b]` or `['k' => v]`; a constant's name as `zend_ast_export`
+/// writes an unevaluated expression, a class constant's class after the
+/// mark compilation left on it:
+///
+/// ```php
+/// namespace App { function f($a = Bar::BAZ) {} }
+/// namespace { function g($a = N\Bar::BAZ) {} echo (new ReflectionFunction('App\f'))->getParameters()[0], "\n", (new ReflectionFunction('g'))->getParameters()[0], "\n"; }
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = \App\Bar::BAZ ]
+/// Parameter #0 [ <optional> $a = N\Bar::BAZ ]
+/// ```
 fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
     match expr {
         ConstExpr::Null => String::from("NULL"),
@@ -6136,20 +6164,31 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
         ),
         ConstExpr::Str(s) => format!("'{}'", escaped(s)),
+        // An array of scalars written out is the value the compiler folded
+        // it to, whose keys print unless it is a list; any other is the expression,
+        // `zend_ast_export`'s `ZEND_AST_ARRAY`, a key where one is written.
         ConstExpr::Array { elements, .. } => {
             let is_list = elements.iter().all(|(key, _)| key.is_none());
+            let folded = folded(expr);
+            // `nNextFreeElement` over the keys the array gives.
+            let mut next = 0i64;
             let mut out = String::from("[");
             for (i, (key, value)) in elements.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                if !is_list {
+                match key {
+                    Some(ConstExpr::Long { value: n, .. }) => next = next.max(n.saturating_add(1)),
+                    None => next = next.saturating_add(1),
+                    Some(_) => {}
+                }
+                if !is_list && (folded || key.is_some()) {
                     match key {
                         Some(ConstExpr::Str(s)) => {
                             let _ = write!(out, "'{}'", escaped(s));
                         }
                         Some(key) => out.push_str(&default_value_string(req, key)),
-                        None => out.push_str(&i.to_string()),
+                        None => out.push_str(&(next - 1).to_string()),
                     }
                     out.push_str(" => ");
                 }
