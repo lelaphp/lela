@@ -97,39 +97,16 @@ impl Props for DriverProps {
         }))
     }
 
-    /// `driver_report_write`, the value held to its declared `int` first.
-    fn write(req: &mut Request, name: &str, value: &Value) -> Option<Result<(), Thrown>> {
-        if name != "report_mode" {
-            return None;
-        }
-        let value = value.deref();
-        let mode = match value.as_ref() {
-            ValueRef::Int(n) => n,
-            ValueRef::Bool(b) => i64::from(b),
-            ValueRef::Float(f) if f.fract() == 0.0 && f.is_finite() => {
-                php_ext::coerce::float_to_long(f)
-            }
-            ValueRef::Str(s)
-                if std::str::from_utf8(s.as_bytes())
-                    .ok()
-                    .and_then(|t| t.trim().parse::<i64>().ok())
-                    .is_some() =>
-            {
-                std::str::from_utf8(s.as_bytes())
-                    .ok()
-                    .and_then(|t| t.trim().parse::<i64>().ok())
-                    .unwrap_or(0)
-            }
-            _ => {
-                let given = php_ext::coerce::type_name(req, &value);
-                let text = format!(
-                    "Cannot assign {given} to property mysqli_driver::$report_mode of type int"
-                );
-                return Some(Err(throw(req, "TypeError", &text)));
-            }
-        };
+    const WRITABLE: &'static [&'static str] = &["report_mode"];
+
+    /// `driver_report_write`: the `int` the standard handler stored.
+    fn wrote(req: &mut Request, object: PhpObject, _: &str) -> Result<(), Thrown> {
+        let mode = object
+            .prop(req, b"report_mode")
+            .and_then(|v| v.deref().as_int())
+            .unwrap_or(0);
         link::set_report_mode(req, mode);
-        Some(Ok(()))
+        Ok(())
     }
 
     fn free(_: &mut Request, _: PhpObject) {}

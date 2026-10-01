@@ -6,7 +6,7 @@
 #![allow(non_camel_case_types)]
 
 use php_ext::abi::{
-    ClassIterator, Instance, IntoReturn, ObjectHandlers, OrFalse, This, True, Union,
+    ClassIterator, Instance, IntoReturn, ObjectHandlers, OrFalse, Raw, This, True, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
@@ -173,9 +173,16 @@ pub(crate) fn fetch_array(req: &mut Request, on: On, mode: i64) -> Result<Fetche
 pub(crate) fn fetch_object(
     req: &mut Request,
     on: On,
-    class: PhpString,
-    args: Option<PhpArray>,
+    class: Raw<PhpString>,
+    args: Raw<PhpArray>,
+    given: bool,
 ) -> Result<FetchedObject, Thrown> {
+    // `"O|Ch"`: the class by `try_convert_to_string`, whose refusal is the
+    // conversion's `Error` and not a `TypeError` of the parameter, before
+    // the arguments are held.
+    let class = php_ext::coerce::to_string(req, &class.value())?;
+    let args = args.hold(req)?;
+    let args = given.then_some(args);
     let Some(target) = autoload(req, class.as_bytes())? else {
         let given = String::from_utf8_lossy(class.as_bytes()).into_owned();
         return Err(arg_type_error(
@@ -200,17 +207,10 @@ pub(crate) fn fetch_object(
         return Ok(AsIs::new(row));
     };
     let made = new_object(req, target)?;
-    for (key, value) in array.snapshot() {
-        let name = match key {
-            Key::Str(name) => PhpString::new(req, name.as_bytes())?,
-            Key::Int(n) => PhpString::new(req, n.to_string().as_bytes())?,
-        };
-        req.addref(&value);
-        if let Err(thrown) = made.set_prop(req, name, value) {
-            req.release(row);
-            req.release(made.as_value());
-            return Err(thrown);
-        }
+    if let Err(thrown) = set_row(req, made, array) {
+        req.release(row);
+        req.release(made.as_value());
+        return Err(thrown);
     }
     req.release(row);
     let constructor = Name(b"__construct".as_slice().into());
@@ -240,6 +240,57 @@ pub(crate) fn fetch_object(
         None => {}
     }
     Ok(AsIs::new(made.as_value()))
+}
+
+/// The row as `made`'s properties: its table in place of the object's
+/// where the class declares no property and no `__set`
+/// (`zend_symtable_to_proptable`), and otherwise each written through
+/// the class's handler, `zend_merge_properties`.
+fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thrown> {
+    let plain = declares_nothing(req, made.class());
+    let mut table = PhpArray::new(req)?;
+    for (key, value) in row.snapshot() {
+        let name = match key {
+            Key::Str(name) => PhpString::new(req, name.as_bytes())?,
+            Key::Int(n) => PhpString::new(req, n.to_string().as_bytes())?,
+        };
+        req.addref(&value);
+        if plain {
+            table.set(req, Key::Str(name), value)?;
+        } else {
+            made.set_prop(req, name, value)?;
+        }
+    }
+    if plain {
+        made.replace_table(req, table)?;
+    } else {
+        req.release(Value::array(table));
+    }
+    Ok(())
+}
+
+/// `!ce->default_properties_count && !ce->__set`.
+fn declares_nothing(req: &mut Request, class: ClassId) -> bool {
+    let setter = Name(b"__set".as_slice().into());
+    if known_method(req, class, &setter, None).is_some() {
+        return false;
+    }
+    let mut at = Some(class);
+    while let Some(class) = at {
+        let Some(decl) = req.class_decl(class) else {
+            return true;
+        };
+        if decl
+            .properties
+            .iter()
+            .any(|p| p.is_instance && !p.is_virtual)
+        {
+            return false;
+        }
+        let parent = decl.parent.clone();
+        at = parent.and_then(|p| lookup_class(req, &p.0).ok().flatten());
+    }
+    true
 }
 
 /// `mysqli_fetch_all`.
@@ -675,11 +726,17 @@ impl mysqli_result {
     fn fetch_object(
         req: &mut Request,
         this: This<Self>,
-        #[php(default = "stdClass")] class: PhpString,
-        #[php(default = [])] constructor_args: PhpArray,
+        #[php(default = "stdClass")] class: Raw<PhpString>,
+        #[php(default = [])] constructor_args: Raw<PhpArray>,
     ) -> Answer<FetchedObject> {
-        let args = (req.argument_count() > 1).then_some(constructor_args);
-        fetch_object(req, On::method(this.object()), class, args)
+        let given = req.argument_count() > 1;
+        fetch_object(
+            req,
+            On::method(this.object()),
+            class,
+            constructor_args,
+            given,
+        )
     }
 
     #[php(tentative)]

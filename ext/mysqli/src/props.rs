@@ -32,11 +32,15 @@ pub(crate) trait Props: 'static {
         quiet: bool,
     ) -> Result<Option<Value>, Thrown>;
 
-    /// The write function of `name`, which only `report_mode` has; `None`
-    /// for a read-only property.
-    fn write(req: &mut Request, name: &str, value: &Value) -> Option<Result<(), Thrown>> {
-        let _ = (req, name, value);
-        None
+    /// The names with a write function, which only `report_mode` has.
+    const WRITABLE: &'static [&'static str] = &[];
+
+    /// The write function of `name`, served once the standard handler has
+    /// held the value to the declared type and stored it, as
+    /// `mysqli_write_property` verifies a copy before `write_func`.
+    fn wrote(req: &mut Request, object: PhpObject, name: &str) -> Result<(), Thrown> {
+        let _ = (req, object, name);
+        Ok(())
     }
 
     /// `free_obj` past `zend_object_std_dtor`.
@@ -95,12 +99,12 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         let Some(handled) = handled::<P>(name.as_bytes()) else {
             return Std.write_property(req, object, name, value);
         };
-        req.release(Value::string(name));
-        let written = P::write(req, handled, &value);
-        req.release(value);
-        if let Some(written) = written {
-            return written;
+        if P::WRITABLE.contains(&handled) {
+            Std.write_property(req, object, name, value)?;
+            return P::wrote(req, object, handled);
         }
+        req.release(Value::string(name));
+        req.release(value);
         let class = class_name(req, object.class());
         let text = format!("Cannot write read-only property {class}::${handled}");
         Err(throw(req, "Error", &text))

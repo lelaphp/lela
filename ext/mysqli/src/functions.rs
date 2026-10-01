@@ -780,11 +780,11 @@ fn mysqli_fetch_assoc(req: &mut Request, result: Res) -> Answer<Fetched> {
 fn mysqli_fetch_object(
     req: &mut Request,
     result: Res,
-    #[php(default = "stdClass")] class: PhpString,
-    #[php(default = [])] constructor_args: PhpArray,
+    #[php(default = "stdClass")] class: php_ext::abi::Raw<PhpString>,
+    #[php(default = [])] constructor_args: php_ext::abi::Raw<PhpArray>,
 ) -> Answer<FetchedObject> {
-    let args = (req.argument_count() > 2).then_some(constructor_args);
-    result::fetch_object(req, on_result(result), class, args)
+    let given = req.argument_count() > 2;
+    result::fetch_object(req, on_result(result), class, constructor_args, given)
 }
 
 /// `mysqli_fetch_row(mysqli_result $result): array|null|false`.
