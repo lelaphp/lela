@@ -7,10 +7,15 @@
 //! `cgi.*` and `fastcgi.*` entries and the four natives of
 //! `cgi_main.stub.php`; and the built-in server's `cli_server` extension with
 //! its one entry, and its `server_additional_functions`
-//! (`Z/sapi/cli/php_cli_server.c:463-510`). The natives read the
-//! request's headers and its header list, which live below the host face,
-//! so the extension does too and a host names it with
-//! [`EngineBuilder::host_extension`].
+//! (`Z/sapi/cli/php_cli_server.c:463-510`). `dl()` is one of these too:
+//! `ext/standard`'s own functions do not include it, and the CLI, php-cgi
+//! started from a shell and embed each name it first in their
+//! `additional_functions` (`Z/sapi/cli/php_cli.c:450`,
+//! `Z/sapi/cgi/cgi_main.c:1009-1012`, `Z/sapi/embed/php_embed.c:158`), so
+//! under php-fpm, the built-in server and phpdbg it is not declared. The
+//! natives read the request's headers and its header list, which live
+//! below the host face, so the extension does too and a host names it
+//! with [`EngineBuilder::host_extension`].
 //!
 //! [`EngineBuilder::host_extension`]: crate::EngineBuilder::host_extension
 
@@ -26,14 +31,18 @@ use crate::engine::HostValue;
 /// The extension a host loads after the bundle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostExtension {
-    /// `cgi_module_entry`, named `cgi-fcgi`.
-    CgiFcgi,
+    /// `cgi_module_entry`, named `cgi-fcgi`, and, where no server
+    /// started php-cgi, its `additional_functions`, `dl()` under
+    /// `standard`: `main` sets them only when neither the environment nor
+    /// the line made it CGI or `FastCGI` (`Z/sapi/cgi/cgi_main.c:1874`).
+    CgiFcgi { from_shell: bool },
     /// php-fpm's `cgi_module_entry` (`Z/sapi/fpm/fpm/fpm_main.c:1543`),
     /// also named `cgi-fcgi`, with the entries and natives of
     /// `fpm_main.stub.php`.
     FpmFcgi,
     /// php's CLI, which loads no extension of its own and adds its
-    /// `additional_functions` under `standard`, the process title's two.
+    /// `additional_functions` under `standard`: `dl()` and the process
+    /// title's two.
     Cli,
     /// The built-in server's `cli_server_module_entry`, named
     /// `cli_server`, and its natives under `standard`.
@@ -45,7 +54,7 @@ impl HostExtension {
     #[must_use]
     pub fn sapi_name(self) -> &'static str {
         match self {
-            HostExtension::CgiFcgi => "cgi-fcgi",
+            HostExtension::CgiFcgi { .. } => "cgi-fcgi",
             HostExtension::FpmFcgi => "fpm-fcgi",
             HostExtension::Cli => "cli",
             HostExtension::CliServer => "cli-server",
@@ -73,7 +82,7 @@ pub(crate) fn hosted(host: HostExtension) -> Hosted {
         system: true,
     };
     match host {
-        HostExtension::CgiFcgi => Hosted {
+        HostExtension::CgiFcgi { from_shell } => Hosted {
             extension: Some(
                 ExtensionBuilder::default()
                     .functions(vec![
@@ -94,7 +103,11 @@ pub(crate) fn hosted(host: HostExtension) -> Hosted {
                     ])
                     .build("cgi-fcgi"),
             ),
-            additional: Vec::new(),
+            additional: if from_shell {
+                vec![dl::declared()]
+            } else {
+                Vec::new()
+            },
         },
         HostExtension::FpmFcgi => Hosted {
             extension: Some(
@@ -122,6 +135,7 @@ pub(crate) fn hosted(host: HostExtension) -> Hosted {
         HostExtension::Cli => Hosted {
             extension: None,
             additional: vec![
+                dl::declared(),
                 cli_set_process_title::declared(),
                 cli_get_process_title::declared(),
             ],
@@ -422,4 +436,96 @@ fn cli_get_process_title(req: &mut Request) -> Result<Option<PhpString>, Thrown>
         return Ok(None);
     };
     PhpString::new(req, &title).map(Some)
+}
+
+/// `dl(string $extension_filename): bool`, `PHP_FUNCTION(dl)` and
+/// `php_load_extension`'s checks before it opens anything
+/// (`Z/ext/standard/dl.c`): `enable_dl` off is php's warning, as is a
+/// name of `MAXPATHLEN` bytes or more and a name with a `/` in it, since
+/// what `dl()` loads is a file name under `extension_dir`; each answers
+/// `false`. A name that passes is php's `php_dl` without `HAVE_LIBDL`
+/// (`Z/ext/standard/dl.c:261`), its warning, and `false`: this engine
+/// links its extensions at build and has no loader for a C library built
+/// against php's extension API.
+///
+/// ```php
+/// var_dump(dl("/path/to/module"), dl(str_repeat("a", 2000)));
+/// ```
+/// ```expect process
+/// Warning: dl(): Temporary module name should contain only filename in %s on line 2
+///
+/// Warning: dl(): Filename exceeds the maximum allowed length of 1024 characters in %s on line 2
+/// bool(false)
+/// bool(false)
+/// ```
+///
+/// ```php
+/// echo new ReflectionFunction("dl");
+/// ```
+/// ```expect process
+/// Function [ <internal:standard> function dl ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $extension_filename ]
+///   }
+///   - Return [ bool ]
+/// }
+/// ```
+///
+/// php-fpm and phpdbg declare no `additional_functions`:
+///
+/// ```php
+/// var_dump(function_exists("dl"));
+/// ```
+/// ```request fpm
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// bool(false)
+/// ```
+///
+/// ```php
+/// var_dump(function_exists("dl"));
+/// ```
+/// ```request phpdbg
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> bool(false)
+/// [Script ended normally]
+/// prompt>
+/// ```
+#[php_function]
+fn dl(req: &mut Request, extension_filename: PhpString) -> bool {
+    let filename = extension_filename.as_bytes();
+    if !req
+        .ini_get(b"enable_dl")
+        .is_some_and(Request::ini_parse_bool)
+    {
+        crate::api::raising::docref(
+            req,
+            crate::api::raising::Level::Warning,
+            "Dynamically loaded extensions aren't enabled",
+        );
+        return false;
+    }
+    let max = crate::virtual_cwd::MAXPATHLEN;
+    let text = if filename.len() >= max {
+        format!("Filename exceeds the maximum allowed length of {max} characters")
+    } else if filename.contains(&b'/') {
+        String::from("Temporary module name should contain only filename")
+    } else {
+        format!(
+            "Cannot dynamically load {} - dynamic modules are not supported",
+            String::from_utf8_lossy(filename)
+        )
+    };
+    crate::api::raising::docref(req, crate::api::raising::Level::Warning, &text);
+    false
 }

@@ -37,7 +37,6 @@ mod crypt;
 mod csv;
 mod datetime;
 mod dir;
-mod dl;
 mod dns;
 mod exec;
 mod ffi;
@@ -735,7 +734,6 @@ pub fn extension() -> Extension {
             var::serialize::serialize::declared(),
             var::unserialize::unserialize::declared(),
             versioning::version_compare::declared(),
-            dl::dl::declared(),
         ])
         // `PHP_MINIT(basic)`'s order (`Z/ext/standard/basic_functions.c:292`):
         // `register_basic_functions_symbols`, the stub's constants from

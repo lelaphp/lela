@@ -52,8 +52,14 @@ use php_sapi::{
 pub const NAME: &str = "cgi-fcgi";
 
 /// `cgi_module_entry`, which php-cgi hands `php_module_startup` to load
-/// after the bundle: the engine a CGI host serves on is built with it.
-pub const EXTENSION: HostExtension = HostExtension::CgiFcgi;
+/// after the bundle: the engine a CGI host serves on is built with it,
+/// and with `dl()` where a shell started php-cgi (`Z/sapi/cgi/cgi_main.c:1874`).
+#[must_use]
+pub fn extension(origin: Origin) -> HostExtension {
+    HostExtension::CgiFcgi {
+        from_shell: origin == Origin::Shell,
+    }
+}
 
 /// `OPTIONS`, `cgi_main.c:142-163`, row for row.
 const OPTIONS: &[Opt] = &[
@@ -720,9 +726,15 @@ pub fn main() -> ExitCode {
                 .write_all(usage_text(&argv0).as_bytes());
             *exit_code
         }
-        Ask::Version => print(&version(&engine(&options.ini))),
-        Ask::Extensions => print(&php_sapi::modules(&engine(&options.ini))),
-        Ask::Serve(invocation) => serve(&engine(&options.ini), invocation, env, &options.ini),
+        // `-v` and `-m` are read by the pass a shell's line alone is given.
+        Ask::Version => print(&version(&engine(&options.ini, Origin::Shell))),
+        Ask::Extensions => print(&php_sapi::modules(&engine(&options.ini, Origin::Shell))),
+        Ask::Serve(invocation) => serve(
+            &engine(&options.ini, invocation.origin),
+            invocation,
+            env,
+            &options.ini,
+        ),
     };
     php_sapi::exit_code(status)
 }
@@ -734,11 +746,11 @@ fn print(text: &str) -> i32 {
 }
 
 /// A fresh engine of `php_bundle::enabled()`, every extension in startup
-/// order and `php_bundle::Tier` bound, and [`EXTENSION`] after them,
+/// order and `php_bundle::Tier` bound, and [`extension`] after them,
 /// started over the line's `ini` ([`php_sapi::start`]); a file's shebang
 /// line passed over while `cgi.check_shebang_line` is on, as `main` sets
 /// `CG(skip_shebang)` under it (`Z/sapi/cgi/cgi_main.c:2523`).
-fn engine(ini: &[(String, String)]) -> Engine {
+fn engine(ini: &[(String, String)], origin: Origin) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let mut builder = Engine::builder()
         .extensions(&extensions)
@@ -747,7 +759,7 @@ fn engine(ini: &[(String, String)]) -> Engine {
     if enabled(ini, "cgi.check_shebang_line", true) {
         builder = builder.skip_shebang();
     }
-    php_sapi::start(builder, ini, Some(EXTENSION))
+    php_sapi::start(builder, ini, Some(extension(origin)))
 }
 
 #[cfg(test)]
