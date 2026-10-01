@@ -395,7 +395,9 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
 /// `ZEND_HANDLE_EXCEPTION` over one frame, what the loop runs for a
 /// [`Stepped::Threw`]: the frame lands at a `catch` clause or a
 /// `finally` block and it answers `Same`, or it is left and it
-/// answers `Threw` of its caller with the throwable still pending.
+/// answers `Threw` of its caller with the throwable still pending; with
+/// nothing pending, it is left as a return of nothing and it answers
+/// `Popped` of its caller, which goes on past the call.
 /// On the entry frame of the serving, which the unwinder does not
 /// leave, `Threw` of that frame says nothing took it; a tier hands that
 /// frame back with `Flow::Resume` and the loop ends the serving, so one
