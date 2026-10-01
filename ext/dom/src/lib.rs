@@ -426,9 +426,9 @@ fn import_simplexml_common(
         && new_class == ClassType::Modern
         && let Some(doc) = node.doc()
     {
+        let private = private::Private::new(req)?;
         if let Some(d) = dom_mut(req, made) {
-            d.obj
-                .set_private_data(Box::new(private::Private::default()));
+            d.obj.set_private_data(Box::new(private));
         }
         modern::convert_to_modern(req, made, doc);
     }
@@ -1263,7 +1263,7 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
     {
         let cloned = if modern::follows_spec(req, object) {
             if n.kind().is_document() {
-                let mut private = private::Private::default();
+                let mut private = private::Private::new(req)?;
                 let cloned = node::clone_node_modern(&mut private.mapper, n, n.doc(), true);
                 fresh = Some(private);
                 cloned

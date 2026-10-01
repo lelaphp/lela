@@ -16,6 +16,9 @@
 //! carries the tag that frees the fragment with it
 //! (`dom_add_element_ns_hook`).
 
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
+use php_ext::values::Emalloc;
 use php_ext_libxml::ffi::{Kind, Node, NodeObject, Ns, PrivateData};
 
 use crate::document::XMLNS_NS;
@@ -29,19 +32,34 @@ pub(crate) const MATHML_NS: &[u8] = b"http://www.w3.org/1998/Math/MathML";
 /// `DOM_XLINK_NS_URI`.
 pub(crate) const XLINK_NS: &[u8] = b"http://www.w3.org/1999/xlink";
 
+/// `sizeof(php_dom_private_data)` on the pinned 64-bit build: the
+/// header's two pointers, the namespace mapper's table and two
+/// declarations, and `template_fragments` (`Z/ext/dom/private_data.h`).
+const PRIVATE_DATA: usize = 96;
+
 /// `php_dom_private_data`.
-#[derive(Default)]
 pub(crate) struct Private {
     pub(crate) mapper: Mapper,
     /// `template_fragments`: a template element and its contents, in the
     /// order they were made.
     templates: Vec<(Node, Node)>,
+    /// The struct's `emalloc` on the request's heap, given back by the
+    /// header's `dtor` ([`PrivateData::destroy`]).
+    charge: Option<Emalloc>,
 }
 
 impl PrivateData for Private {
     /// `php_dom_libxml_private_data_ns_hook`.
     fn element_freed(&mut self, element: Node) {
         self.remove_template(element);
+    }
+
+    /// `php_dom_private_data_destroy`'s `efree(data)`; the templates'
+    /// contents go with the drop.
+    fn destroy(&mut self, req: &mut Request) {
+        if let Some(charge) = self.charge.take() {
+            charge.free(req);
+        }
     }
 }
 
@@ -55,6 +73,16 @@ impl Drop for Private {
 }
 
 impl Private {
+    /// `php_dom_private_data_create`: `emalloc(sizeof(*private_data))`,
+    /// an empty mapper and no templates; the `Err` is the memory limit.
+    pub(crate) fn new(req: &mut Request) -> Result<Private, Thrown> {
+        Ok(Private {
+            mapper: Mapper::default(),
+            templates: Vec::new(),
+            charge: Some(Emalloc::new(req, PRIVATE_DATA)?),
+        })
+    }
+
     /// `php_dom_retrieve_templated_content`.
     pub(crate) fn template(&self, element: Node) -> Option<Node> {
         self.templates
