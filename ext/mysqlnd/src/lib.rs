@@ -128,7 +128,7 @@ pub fn extension() -> Extension {
                     default: default.map(|d| d.as_bytes().into()),
                     user: matches!(scope, Scope::All),
                     per_dir: matches!(scope, Scope::All | Scope::PerDir),
-                    system: true,
+                    system: !matches!(scope, Scope::PerDir),
                 })
                 .collect(),
         )
