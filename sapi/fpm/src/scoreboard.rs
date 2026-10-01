@@ -180,6 +180,22 @@ pub(crate) struct Scoreboard {
     pub(crate) procs: &'static [Proc],
 }
 
+/// `sizeof(struct fpm_scoreboard_s)` and `sizeof(struct
+/// fpm_scoreboard_proc_s)` on an LP64 target with `HAVE_TIMES`, as the
+/// oracle's: what `fpm_shm_alloc` counts for a pool, which `%zu bytes
+/// have been reserved in SHM` reports. This host lays its slots out in
+/// atomics of its own, so the count is php's, not this layout's.
+const BOARD_BYTES: usize = 144;
+const PROC_BYTES: usize = 3344;
+
+/// `fpm_scoreboard_tick`: `sysconf(_SC_CLK_TCK)`, as `%.0f` prints it.
+pub(crate) fn clock_tick() -> i64 {
+    nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK)
+        .ok()
+        .flatten()
+        .map_or(100, i64::from)
+}
+
 /// `FPM_SCOREBOARD_SPINLOCK_MAX_RETRIES`.
 const MAX_RETRIES: u32 = 50_000;
 
@@ -341,6 +357,12 @@ impl Scoreboard {
         unlock(&b.lock);
     }
 
+    /// What `fpm_scoreboard_init_main` asked `fpm_shm_alloc` for, the
+    /// header and its slots at php's sizes.
+    pub(crate) fn shm_bytes(&self) -> usize {
+        BOARD_BYTES + PROC_BYTES * self.procs.len()
+    }
+
     /// The pool's name as the header carries it.
     pub(crate) fn pool(&self) -> Vec<u8> {
         self.board.pool.get()
@@ -355,6 +377,11 @@ impl Scoreboard {
             .ok()
             .filter(|&at| at < nprocs && self.procs[at].used.load(Ordering::Relaxed) == 0)
             .or_else(|| {
+                crate::zlog!(
+                    Debug @ fpm_scoreboard_proc_alloc:483,
+                    "[pool {}] the proc->free_slot was not free. Let's search",
+                    String::from_utf8_lossy(&self.pool())
+                );
                 self.procs
                     .iter()
                     .position(|p| p.used.load(Ordering::Relaxed) == 0)

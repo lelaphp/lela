@@ -50,6 +50,7 @@ mod worker;
 mod zlog;
 
 use std::io::Write;
+use std::os::fd::AsRawFd as _;
 use std::process::ExitCode;
 
 use php_sapi::getopt::{Getopt, Opt, Taken, opt};
@@ -202,11 +203,16 @@ fn print(text: &str) {
 
 /// php-fpm's `main`.
 pub fn main() -> ExitCode {
-    let _ = nix::sys::signal::sigprocmask(
+    if nix::sys::signal::sigprocmask(
         nix::sys::signal::SigmaskHow::SIG_BLOCK,
         Some(&master::block_set(false)),
         None,
-    );
+    )
+    .is_err()
+    {
+        crate::zlog!(Warning @ main:1594, "Could die in the case of too early reload signal");
+    }
+    crate::zlog!(Debug @ main:1596, "Blocked some signals");
     // SIGPIPE is the standard library's ignored already, as php ignores it
     // in standalone mode so a closed socket does not kill the process.
     let words: Vec<Vec<u8>> = std::env::args_os()
@@ -257,12 +263,22 @@ fn run(ini: &[(String, String)], args: Args) -> u8 {
         Init::ExitOk => return EXIT_OK,
         Init::Error(pipe) => {
             if let Some(pipe) = pipe {
+                crate::zlog!(
+                    Debug @ main:1793,
+                    "Sending \"0\" (error) to parent via fd={}",
+                    pipe.as_raw_fd()
+                );
                 let _ = nix::unistd::write(&pipe, &0i32.to_ne_bytes());
             }
             return EXIT_CONFIG;
         }
     };
     if let Some(pipe) = fpm.send_config_pipe.take() {
+        crate::zlog!(
+            Debug @ main:1806,
+            "Sending \"1\" (OK) to parent via fd={}",
+            pipe.as_raw_fd()
+        );
         let _ = nix::unistd::write(&pipe, &1i32.to_ne_bytes());
     }
     let started = engine.startup_errors().to_owned();

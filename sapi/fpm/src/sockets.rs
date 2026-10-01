@@ -223,6 +223,13 @@ impl Sockets {
                     Domain::Inet,
                     permissions,
                 );
+                if sock.is_some() {
+                    zlog!(
+                        Debug @ fpm_socket_af_inet_socket_by_addr:325,
+                        "Found address for {host_text}, socket opened on {}",
+                        address.ip()
+                    );
+                }
             } else {
                 zlog!(
                     Warning @ fpm_socket_af_inet_socket_by_addr:328,
