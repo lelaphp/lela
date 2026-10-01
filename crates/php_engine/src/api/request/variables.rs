@@ -306,8 +306,8 @@ impl Request {
     /// `$_POST` the body, read by the reader its content type chose, where
     /// the order names it, no header has gone and the method is `POST`;
     /// `$_FILES` what that reader uploaded, or empty; `$_REQUEST` the three
-    /// merged by `request_order`, or `variables_order` where that is
-    /// empty. A host with no request of the web describes none of these,
+    /// merged by `request_order`, or `variables_order` where that has no
+    /// value. A host with no request of the web describes none of these,
     /// and they are empty, as php's CLI has them.
     ///
     /// ```php
@@ -391,9 +391,27 @@ impl Request {
     /// `php_auto_globals_create_request` (`Z/main/php_variables.c:920`):
     /// `$_GET`, `$_POST` and `$_COOKIE` as their tracks hold them, merged
     /// in the order `request_order` names them, or `variables_order`
-    /// where that is empty, each once.
+    /// where that has no value (`NULL`, [`Request::ini_value`]), each
+    /// once; so a `request_order` set empty, by a pool's
+    /// `php_admin_value` or a `.user.ini`, merges none of them.
+    ///
+    /// ```php
+    /// echo json_encode([$_GET, $_REQUEST, ini_get('request_order')]), "\n";
+    /// ```
+    /// ```request fpm
+    /// --ENV--
+    /// PHP_ADMIN_VALUE=request_order=
+    /// --GET--
+    /// a=1
+    /// ```
+    /// ```expect
+    /// X-Powered-By: PHP/8.5.9
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// [{"a":"1"},[],""]
+    /// ```
     fn form_variables(&mut self) -> Result<PhpArray, Thrown> {
-        let order = match self.ini_get(b"request_order").filter(|o| !o.is_empty()) {
+        let order = match self.ini_value(b"request_order") {
             Some(order) => order.to_vec(),
             None => self
                 .ini_get(b"variables_order")

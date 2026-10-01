@@ -99,6 +99,28 @@ impl State {
 /// }
 /// NULL
 /// ```
+///
+/// `filter.default_flags` is read as `OnUpdateFlags` reads it: with no
+/// value the flags are `FILTER_FLAG_NO_ENCODE_QUOTES`, and any value is
+/// its `atoi`, so the empty string is 0 and the quotes are encoded:
+///
+/// ```php
+/// foreach ([[], ['-d', 'filter.default_flags='], ['-d', 'filter.default_flags=128']] as $flags) {
+///     $p = proc_open([PHP_BINARY, '-n', '-d', 'filter.default=full_special_chars', ...$flags, '-r', 'parse_str("a=%27%22%3C", $o); var_dump($o["a"]);'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///     echo stream_get_contents($pipes[1]); proc_close($p);
+/// }
+/// ```
+/// ```expect process
+///
+/// Deprecated: The filter.default ini setting is deprecated in Unknown on line 0
+/// string(6) "'"&lt;"
+///
+/// Deprecated: The filter.default ini setting is deprecated in Unknown on line 0
+/// string(16) "&#039;&quot;&lt;"
+///
+/// Deprecated: The filter.default ini setting is deprecated in Unknown on line 0
+/// string(6) "'"&lt;"
+/// ```
 fn sapi_filter(
     req: &mut Request,
     input: Input,
@@ -131,10 +153,11 @@ fn sapi_filter(
     if value.is_empty() || default == FILTER_UNSAFE_RAW {
         return Ok(Some(raw));
     }
-    let flags = match req.ini_get(b"filter.default_flags") {
-        Some(flags) if !flags.is_empty() => atoi(flags),
-        _ => FILTER_FLAG_NO_ENCODE_QUOTES,
-    };
+    // `OnUpdateFlags`: no value is `FILTER_FLAG_NO_ENCODE_QUOTES`, any
+    // value its `atoi`, so the empty string is 0.
+    let flags = req
+        .ini_value(b"filter.default_flags")
+        .map_or(FILTER_FLAG_NO_ENCODE_QUOTES, atoi);
     let run = Run {
         flags,
         options: None,

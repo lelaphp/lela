@@ -1709,7 +1709,7 @@ fn scanned_file(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>>, T
 /// highlighted as the text it holds, `ソ`'s trail byte no backslash:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/' . uniqid('m') . '.php'; file_put_contents($f, "<?php\necho \"\x83\x74\x83\x5c\"; // \x95\x5c\n");
+/// $f = tempnam(sys_get_temp_dir(), 'm'); file_put_contents($f, "<?php\necho \"\x83\x74\x83\x5c\"; // \x95\x5c\n");
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'zend.multibyte=1', '-d', 'zend.script_encoding=Shift_JIS', '-d', 'internal_encoding=UTF-8', '-r', 'highlight_file($argv[1]);', $f], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// echo stream_get_contents($pipes[1]); proc_close($p); unlink($f);
 /// ```
@@ -1767,7 +1767,7 @@ fn highlight_file(
 /// Under `zend.multibyte` the file is read as a compile reads it:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/' . uniqid('m') . '.php'; file_put_contents($f, "<?php\necho \"\x83\x74\x83\x5c\"; // \x95\x5c\n");
+/// $f = tempnam(sys_get_temp_dir(), 'm'); file_put_contents($f, "<?php\necho \"\x83\x74\x83\x5c\"; // \x95\x5c\n");
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'zend.multibyte=1', '-d', 'zend.script_encoding=Shift_JIS', '-d', 'internal_encoding=UTF-8', '-r', 'echo php_strip_whitespace($argv[1]);', $f], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// echo stream_get_contents($pipes[1]); proc_close($p); unlink($f);
 /// ```
@@ -1815,7 +1815,7 @@ fn captured(req: &mut Request, printed: &[u8]) -> Result<PhpString, Thrown> {
 /// internal encoding:
 ///
 /// ```php
-/// $f = sys_get_temp_dir() . '/' . uniqid('m') . '.php'; file_put_contents($f, "<?php\necho \"\x83\x74\x83\x5c\"; // \x95\x5c\n");
+/// $f = tempnam(sys_get_temp_dir(), 'm'); file_put_contents($f, "<?php\necho \"\x83\x74\x83\x5c\"; // \x95\x5c\n");
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'zend.multibyte=1', '-d', 'zend.script_encoding=Shift_JIS', '-d', 'internal_encoding=Shift_JIS', '-r', 'echo mb_convert_encoding(highlight_string(file_get_contents($argv[1]), true), "UTF-8", "Shift_JIS");', $f], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// echo stream_get_contents($pipes[1]); proc_close($p); unlink($f);
 /// ```
