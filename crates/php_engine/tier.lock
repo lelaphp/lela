@@ -27,6 +27,7 @@ tier::Tier
 tier::TraceRow
 tier::Variable
 tier::backtrace
+tier::below
 tier::call
 tier::caller
 tier::catches

@@ -399,14 +399,31 @@ fn broken(s: &mut Session, here: &At<'_>, checks: &Checks) -> bool {
 }
 
 /// Whether a user frame of the chain from `frame` down catches the
-/// throwable pending.
+/// throwable pending, past the natives between them: a throwable a
+/// callback raised under `array_map` and the program catches is no
+/// uncaught one, and the run goes on to the catch.
+///
+/// ```php
+/// function cb() { throw new Exception("x"); }
+/// try { array_map("cb", [1]); } catch (Exception $e) { echo "caught\n"; }
+/// ```
+/// ```request phpdbg
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> caught
+/// [Script ended normally]
+/// prompt>
+/// ```
 fn caught_anywhere(req: &mut Request, frame: FrameRef) -> bool {
     let mut at = Some(frame);
     while let Some(frame) = at {
         if tier::catches(req, frame) {
             return true;
         }
-        at = tier::caller(req, frame);
+        at = tier::below(req, frame);
     }
     false
 }

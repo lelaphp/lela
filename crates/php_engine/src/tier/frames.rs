@@ -62,6 +62,20 @@ pub fn caller(req: &Request, frame: FrameRef) -> Option<FrameRef> {
     req.vm().at(frame).and_then(|state| state.caller.frame())
 }
 
+/// The next user frame `EX(prev_execute_data)`'s chain reaches from
+/// `frame`, past the frame of any native between the two: the frame
+/// below it on the request's stack, which a native that called back into
+/// PHP code stands over, as `array_map` over its callback; none for the
+/// bottom of the stack. What phpdbg walks for a catch of the throwable
+/// pending before it reports it uncaught, skipping each frame that is no
+/// user code
+/// (`Z/sapi/phpdbg/phpdbg_prompt.c:1672-1684`).
+#[must_use]
+pub fn below(req: &Request, frame: FrameRef) -> Option<FrameRef> {
+    let under = FrameRef(frame.0.checked_sub(1)?);
+    req.vm().at(under).map(|_| under)
+}
+
 /// Where `frame` stands; none for a frame that is not standing.
 #[must_use]
 pub fn position(req: &Request, frame: FrameRef) -> Option<Position> {

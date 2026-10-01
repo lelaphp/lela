@@ -36,8 +36,9 @@ pub use code::{
     user_classes, user_functions,
 };
 pub use frames::{
-    Argument, Aside, Evaluated, Pending, Position, Serves, call, caller, catches, entry, evaluate,
-    exit, exiting, function_exists, oplines, pending, position, restore, serves, set_aside,
+    Argument, Aside, Evaluated, Pending, Position, Serves, below, call, caller, catches, entry,
+    evaluate, exit, exiting, function_exists, oplines, pending, position, restore, serves,
+    set_aside,
 };
 pub(crate) use values::values_shown;
 pub use values::{
