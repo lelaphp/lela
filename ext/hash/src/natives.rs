@@ -8,7 +8,7 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path, Raw, This,
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::value_name;
-use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, while_pending};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{
     Emalloc, FreshString, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
@@ -918,6 +918,26 @@ fn hash_update_stream(
 /// ```expect
 /// bool(true)
 /// ```
+///
+/// `php_stream_context_from_zval(zcontext, 0)` over a given resource is
+/// `zend_fetch_resource_ex`, whose `TypeError` refuses a resource of any
+/// type but `stream-context`; php's body does not stop for it, so the
+/// file is opened with none and hashed while the `TypeError` is pending,
+/// and a file that does not open raises no warning beside it.
+///
+/// ```php
+/// $c = hash_init('md5');
+/// try { var_dump(hash_update_file($c, __FILE__, STDIN)); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(hash_final($c) === md5_file(__FILE__));
+/// try { var_dump(hash_update_file(hash_init('md5'), __DIR__ . '/nope', STDIN)); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(hash_update_file(hash_init('md5'), __FILE__, stream_context_create()));
+/// ```
+/// ```expect
+/// hash_update_file(): supplied resource is not a valid Stream-Context resource
+/// bool(true)
+/// hash_update_file(): supplied resource is not a valid Stream-Context resource
+/// bool(true)
+/// ```
 #[php_function]
 fn hash_update_file(
     req: &mut Request,
@@ -925,11 +945,41 @@ fn hash_update_file(
     filename: Path,
     #[php(default = null)] stream_context: Option<Resource>,
 ) -> Result<bool, Thrown> {
-    // `php_stream_context_from_zval(zcontext, 0)`: the open takes the
-    // default context either way.
-    let _ = stream_context;
     let object = verify(req, context.object(), 1)?;
-    let Some(stream) = req.open_stream(filename.0.as_bytes(), b"rb", false)? else {
+    let given = match stream_context {
+        Some(res) if res.type_name(req) != Some(b"stream-context".as_slice()) => {
+            let text = format!(
+                "{}(): supplied resource is not a valid Stream-Context resource",
+                req.active_function_name()
+            );
+            let refused = throw(req, "TypeError", &text);
+            let path = filename.0.as_bytes();
+            let carried =
+                while_pending(req, &refused, |req| hash_file_into(req, object, path, None));
+            if let Some(Err(fatal)) = carried {
+                return Err(fatal);
+            }
+            return Err(refused);
+        }
+        given => given,
+    };
+    hash_file_into(req, object, filename.0.as_bytes(), given)
+}
+
+/// `hash_update_file`'s open and its read loop under the `stream-context`
+/// resource the body settled on, `None` where php's is `NULL` or none was
+/// given.
+fn hash_file_into(
+    req: &mut Request,
+    object: PhpObject,
+    filename: &[u8],
+    stream_context: Option<Resource>,
+) -> Result<bool, Thrown> {
+    let opened = match stream_context {
+        Some(ctx) => req.with_stream_ctx(Some(ctx), |req| req.open_stream(filename, b"rb", false)),
+        None => req.open_stream(filename, b"rb", false),
+    };
+    let Some(stream) = opened? else {
         return Ok(false);
     };
     let Some(mut running) = take(req, object) else {

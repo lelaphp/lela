@@ -368,6 +368,7 @@ raising::throwing_warnings
 raising::too_few_arguments
 raising::uncaught_at
 raising::warning
+raising::while_pending
 request::BindTo
 request::BodyLimits
 request::Brigade

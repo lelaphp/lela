@@ -167,6 +167,25 @@ pub fn raise_while_pending(req: &mut Request, pending: &Thrown, level: Level, me
     req.while_pending(pending, |req| raise(req, level, message));
 }
 
+/// php's body carrying on past a throwable it left in `EG(exception)`:
+/// `step` is taken while the throwable `pending` carries stands as the
+/// request's pending one, so what php skips or keeps quiet while a
+/// throwable is pending is skipped and kept quiet here, a diagnostic
+/// raised as [`raise_while_pending`] raises one and a stream's `Failed
+/// to open stream` among what `php_stream_display_wrapper_errors` keeps
+/// quiet. `None`, with nothing taken, where `pending` carries a fatal or
+/// an exit, which unwind at once. `pending` is the native's still, to
+/// hand on once the step is done. `hash_update_file`, which opens and
+/// hashes its file after `zend_fetch_resource_ex` threw over its
+/// `$stream_context`, is the witness, in `ext/hash`.
+pub fn while_pending<R>(
+    req: &mut Request,
+    pending: &Thrown,
+    step: impl FnOnce(&mut Request) -> R,
+) -> Option<R> {
+    req.while_pending(pending, step)
+}
+
 /// `zend_error` while php starts, before any request (`zend_startup`,
 /// `php_module_startup`, the `ZEND_INI_STAGE_STARTUP` rules of the ini
 /// entries): the message as given, at `Unknown` on line 0, and displayed
