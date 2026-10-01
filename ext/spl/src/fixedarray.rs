@@ -281,6 +281,17 @@ impl SplFixedArray {
     }
 
     /// `__unserialize(array $data): void`; the witness is the class's.
+    /// The elements laid down at php's size and no property table where
+    /// the data holds no member, so an unserialized array costs what php's
+    /// does:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $u = unserialize(serialize(SplFixedArray::fromArray([1, 2, 3, 4, 5])));
+    /// var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(176)
+    /// ```
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let this = this.object();
         if !with(req, this, |a| a.elements.is_empty())? {
