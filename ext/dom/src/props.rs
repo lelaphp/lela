@@ -13,8 +13,8 @@ use crate::modern::follows_spec;
 use crate::object::Code;
 use crate::{
     Read, attr_value_will_change, children_valid, content_value, deprecated_property, dom_error,
-    invalidate, is_connected, nullable_object, nullable_string, object_for, prop_node,
-    qualified_name, remove_all_children, string, sync_entity_reference,
+    empty_string, extracted, invalidate, is_connected, nullable_object, nullable_string,
+    object_for, prop_node, qualified_name, remove_all_children, string, sync_entity_reference,
 };
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{
@@ -437,8 +437,13 @@ fn string_or_null(req: &mut Request, bytes: Option<&[u8]>) -> Read {
     some(nullable_string(req, bytes)?)
 }
 
+/// php's `ZVAL_STRING` of what libxml has, and `ZVAL_EMPTY_STRING`
+/// where it has nothing.
 fn string_or_empty(req: &mut Request, bytes: Option<Vec<u8>>) -> Read {
-    some(string(req, &bytes.unwrap_or_default())?)
+    match bytes {
+        Some(bytes) => some(string(req, &bytes)?),
+        None => some(empty_string(req)?),
+    }
 }
 
 fn null_read(_req: &mut Request, _object: PhpObject) -> Read {
@@ -1191,7 +1196,7 @@ fn whole_text(req: &mut Request, object: PhpObject) -> Read {
         }
         at = n.next();
     }
-    some(string(req, &out)?)
+    some(extracted(req, &out)?)
 }
 
 /// `dom_processinginstruction_target_read`.

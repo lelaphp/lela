@@ -17,7 +17,7 @@ use crate::element::AdjacentPosition;
 use crate::object::Code;
 use crate::private::{HTML_NS, html_in_html_document, ns_is};
 use crate::props::Prop;
-use crate::{Read, dom_mut, dom_throw, dom_throw_message, fetch, prop_node, string};
+use crate::{Read, dom_mut, dom_throw, dom_throw_message, extracted, fetch, prop_node};
 
 /// `dom_element_html_fragment_serialize` for `innerHTML` (`outer` false:
 /// the element's children) and `outerHTML` (`outer`: the element alone).
@@ -35,7 +35,7 @@ fn fragment_serialize(
         } else {
             crate::html5_serializer::inner(&mut bytes, &templates, node);
         }
-        return string(req, &bytes);
+        return extracted(req, &bytes);
     }
     let nodes: Vec<Node> = if outer {
         vec![node]
@@ -43,7 +43,7 @@ fn fragment_serialize(
         crate::node_list(node.children())
     };
     match crate::xml_serializer::well_formed(req, object, &nodes)? {
-        Some(bytes) => string(req, &bytes),
+        Some(bytes) => extracted(req, &bytes),
         None => Err(dom_throw_message(
             req,
             Code::Syntax,
