@@ -857,10 +857,6 @@ pub fn run(
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     for subset in &subsets {
         let scope = subset.scope(&runner, ask.lane);
-        if let Some(unheld) = runs.unheld(manifest, &scope)? {
-            readings.push(unheld);
-            continue;
-        }
         let served = server::served(&oracle, subset, copy.is_some())?;
         let under = under.serving(served.as_deref());
         let within = copy.as_ref().map(|copy| subset.rooted(copy));

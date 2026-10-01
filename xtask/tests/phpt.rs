@@ -739,7 +739,8 @@ fn planting_engine(scratch: &Scratch) -> PathBuf {
 /// named by a reading that fails, while the subset's own reading is
 /// written beside it. The controls: the head against itself passes, a
 /// binary the tree has moved past gives no verdict, and so does a commit
-/// with no run kept, whose subset is then not run at all.
+/// with no run kept, whose subset still runs and keeps its own reading
+/// (#1435): a runner that runs nothing there fails this.
 #[test]
 fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
     if oracle().is_none() {
@@ -808,19 +809,26 @@ fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
         readings[1].message
     );
 
-    // No run kept at the commit: no verdict, and the subset is not run.
+    // No run kept at the commit: no verdict, and the subset runs anyway,
+    // its own reading kept beside the skip, which carries its counts.
     fs::remove_dir_all(scratch.root.join("target/phpt-runs")).unwrap();
+    written_at(&scratch.engine, SystemTime::now() + Duration::from_mins(1));
     let readings = run(&scratch.engine, Some(&base));
-    assert_eq!(readings.len(), 1, "{readings:#?}");
-    assert_eq!(readings[0].scope, "ext/fixture@against");
-    assert_eq!(readings[0].status, Status::Skip, "{readings:#?}");
-    assert!(
-        readings[0]
-            .message
-            .contains("no run of ext/fixture is kept"),
-        "{}",
-        readings[0].message
-    );
+    let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
+    assert_eq!(scopes, ["ext/fixture", "ext/fixture@against"]);
+    assert_eq!(readings[0].status, Status::Pass, "{readings:#?}");
+    assert_eq!(count(&readings[0], "run"), 2, "{readings:#?}");
+    assert_eq!(readings[1].status, Status::Skip, "{readings:#?}");
+    for words in [
+        "no run of ext/fixture is kept",
+        "the subset ran, and its own reading stands beside this one: ext/fixture: 2 passed",
+    ] {
+        assert!(
+            readings[1].message.contains(words),
+            "{words:?} is not in {}",
+            readings[1].message
+        );
+    }
 }
 
 /// A subset run on a pool of four writes the reading and keeps the run a
