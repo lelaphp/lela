@@ -8,31 +8,68 @@ use php_ext::call::call;
 use php_ext::coerce::callable_checked;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Notifier, Request, Stream};
-use php_ext::values::{PhpString, Resource, Value};
+use php_ext::values::{Emalloc, PhpString, Resource, Value};
 
 use super::Context;
+
+/// `sizeof(php_stream_notifier)` on the pinned 64-bit build: `func`,
+/// `dtor`, `ptr`, `mask` and its padding, `progress` and `progress_max`
+/// (`Z/main/streams/php_stream_context.h:44-50`).
+const NOTIFIER_SIZE: usize = 48;
+
+/// `sizeof(zend_fcall_info_cache)`, the callable's cache
+/// `parse_context_params` `emalloc`s for the notifier's `ptr`: the
+/// function, the calling and called scopes, the object and the closure.
+const FCC_SIZE: usize = 40;
 
 /// `php_stream_notifier` as `stream_context_set_params` makes it: the
 /// callable, and the `progress` and `progress_max` it counts, which
 /// count only once `php_stream_notify_progress_init` set
-/// `PHP_STREAM_NOTIFIER_PROGRESS` in its `mask`.
+/// `PHP_STREAM_NOTIFIER_PROGRESS` in its `mask`; the notifier's own
+/// `ecalloc` and the `zend_fcall_info_cache` php keeps the callable in,
+/// both on the request's heap.
 pub(super) struct Notification {
     pub(super) callback: Value,
     progress: usize,
     progress_max: usize,
     counting: bool,
+    fcc: Emalloc,
+    notifier: Emalloc,
 }
 
 impl Notification {
-    /// `php_stream_notification_alloc` with the callable, one owner the
-    /// notifier's: nothing counted and no bit in the `mask`.
-    pub(super) const fn new(callback: Value) -> Notification {
-        Notification {
+    /// `php_stream_notification_alloc` over the callable, one owner the
+    /// notifier's, whose `zend_fcall_info_cache` `fcc` is: nothing
+    /// counted and no bit in the `mask`. The `Err` is the memory limit,
+    /// and `fcc` is the request's end's then.
+    pub(super) fn new(
+        req: &mut Request,
+        callback: Value,
+        fcc: Emalloc,
+    ) -> Result<Notification, Thrown> {
+        Ok(Notification {
             callback,
             progress: 0,
             progress_max: 0,
             counting: false,
-        }
+            fcc,
+            notifier: Emalloc::new(req, NOTIFIER_SIZE)?,
+        })
+    }
+
+    /// The `emalloc(sizeof(zend_fcall_info_cache))` `parse_context_params`
+    /// makes before it checks the callable.
+    pub(super) fn fcc(req: &mut Request) -> Result<Emalloc, Thrown> {
+        Emalloc::new(req, FCC_SIZE)
+    }
+
+    /// `php_stream_notification_free`: the `dtor`,
+    /// `user_space_stream_notifier_dtor`, letting the callable go and
+    /// `efree`ing its cache, then the notifier `efree`d.
+    pub(super) fn free(self, req: &mut Request) {
+        req.release(self.callback);
+        self.fcc.free(req);
+        self.notifier.free(req);
     }
 }
 
@@ -71,12 +108,12 @@ struct Notice<'a> {
 
 /// The `context`'s notifier, where it has one, read.
 fn notification(req: &Request, ctx: Resource) -> Option<&Notification> {
-    ctx.native::<Context>(req)?.notifier.as_ref()
+    ctx.native::<Context>(req)?.notifier.as_deref()
 }
 
 /// The `context`'s notifier, where it has one, to count into.
 fn notification_mut(req: &mut Request, ctx: Resource) -> Option<&mut Notification> {
-    ctx.native_mut::<Context>(req)?.notifier.as_mut()
+    ctx.native_mut::<Context>(req)?.notifier.as_deref_mut()
 }
 
 /// `user_space_stream_notifier` (`Z/ext/standard/streamsfuncs.c:843`):

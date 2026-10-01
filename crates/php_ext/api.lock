@@ -941,6 +941,7 @@ values::Resource::kind
 values::Resource::native
 values::Resource::native_mut
 values::Resource::new
+values::Resource::sized
 values::Resource::type_name
 values::ResourceType
 values::SmartStr

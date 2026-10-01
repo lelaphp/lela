@@ -1977,6 +1977,22 @@ impl Resource {
         req.new_resource(kind, payload)
     }
 
+    /// [`Resource::new`] with the payload laid inside an allocation of
+    /// `size` bytes, the struct php `emalloc`s and hands
+    /// `zend_register_resource` (`sizeof(php_stream_context)` for a
+    /// `context`), so the request is charged php's size whatever the
+    /// payload's is. A payload that does not fit `size` is an internal
+    /// error, raised as the fatal it is.
+    pub fn sized<T: Any + Send>(
+        req: &mut Request,
+        kind: ResourceType,
+        payload: T,
+        size: usize,
+    ) -> Result<Resource, Thrown> {
+        let allocated = req.heap_mut().resource_sized(kind, payload, size);
+        req.fatal_of(allocated).map(Resource::of)
+    }
+
     /// The resource as a value, `ZVAL_RES`: named, no owner taken.
     #[must_use]
     pub const fn as_value(&self) -> Value {
