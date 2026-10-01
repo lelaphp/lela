@@ -376,8 +376,13 @@ impl Stmt {
         (self.data.field_count > 0 && !result.fields.is_empty()).then(|| result.fields.clone())
     }
 
-    /// `mysqlnd_stmt_store_result`: every row read and held.
+    /// `mysqlnd_stmt_store_result`: every row read and held; a statement
+    /// with no columns has none to hold and passes, as the macro in
+    /// `mysqlnd.h` answers `PASS` before asking the statement.
     pub fn store(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        if self.data.field_count == 0 {
+            return Ok(true);
+        }
         Ok(self.call(req, store_result)?.unwrap_or(false))
     }
 
