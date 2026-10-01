@@ -852,7 +852,9 @@ impl Ops for UserStream {
                 Value::int(i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX)),
                 Value::int(i64::from(timeout.subsec_micros())),
             ],
-            StreamOption::ChunkSize(_) | StreamOption::Sync { .. } => {
+            StreamOption::ChunkSize(_)
+            | StreamOption::Sync { .. }
+            | StreamOption::SuppressErrors(_) => {
                 return OptionAnswer::NotImplemented;
             }
             StreamOption::Liveness => return self.check_liveness(req),

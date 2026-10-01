@@ -433,6 +433,16 @@ pub enum StreamOption {
     /// durable, `fsync(2)` or `fdatasync(2)` of a plain file's fd, which
     /// a pipe refuses. What `fsync()` and `fdatasync()` ask.
     Sync { data_only: bool },
+    /// `PHP_STREAM_FLAG_SUPPRESS_ERRORS` (`Z/main/php_streams.h:187`),
+    /// set for `true` and cleared for `false`: the kind's own notice for
+    /// a read or a write that failed, a socket's `Send of %zu bytes
+    /// failed` and a plain file's `Read of` and `Write of`, is not
+    /// raised, and the caller reports the failure in its own words, as
+    /// `mysqlnd_vio::connect` marks its connection's stream
+    /// (`Z/ext/mysqlnd/mysqlnd_vio.c:288`). The two kinds that raise
+    /// such a notice take it; any other kind has none to silence and
+    /// answers [`OptionAnswer::NotImplemented`].
+    SuppressErrors(bool),
 }
 
 /// What `php_stream_set_option` answers: `PHP_STREAM_OPTION_RETURN_OK`,
