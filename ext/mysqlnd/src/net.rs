@@ -134,7 +134,12 @@ impl Net {
                 timeout,
                 connect: true,
                 persistent: None,
-                socket: SocketOptions::default(),
+                // `post_connect_set_opt`'s `mysqlnd_set_sock_no_delay`
+                // on a TCP stream, set as the socket connects.
+                socket: SocketOptions {
+                    tcp_nodelay: tcp,
+                    ..SocketOptions::default()
+                },
                 context: None,
             },
         )?;
