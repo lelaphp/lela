@@ -11,9 +11,14 @@ description = "The pdo_mysql extension, php-src/ext/pdo_mysql"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade; `pdo`, whose connector face this crate implements, and
+# `mysqlnd`, whose driver it connects through, as `pdo_mysql.c` includes
+# `ext/pdo/php_pdo_driver.h` and `ext/mysqlnd/mysqlnd.h` and requires both
+# (design §4.10). The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+php_ext_pdo = { path = "../pdo" }
+php_ext_mysqlnd = { path = "../mysqlnd" }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
