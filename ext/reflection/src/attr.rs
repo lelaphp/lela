@@ -171,6 +171,9 @@ pub(super) fn reflect_attributes(
         },
         _ => None,
     };
+    if attributes.is_empty() {
+        return Ok(PhpArray::empty());
+    }
     let repeated: Vec<bool> = attributes
         .iter()
         .map(|one| {

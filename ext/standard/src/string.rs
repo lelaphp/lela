@@ -2614,6 +2614,9 @@ fn str_split(
     if length <= 0 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
+    if string.is_empty() {
+        return Ok(PhpArray::empty());
+    }
     let mut array = PhpArray::new(req)?;
     let chunk = usize::try_from(length).unwrap_or(usize::MAX);
     for piece in string.as_bytes().chunks(chunk) {

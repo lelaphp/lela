@@ -331,6 +331,9 @@ impl SplFixedArray {
     #[php(tentative)]
     fn toArray(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let elements = with(req, this.object(), |a| a.elements.clone())?;
+        if elements.is_empty() {
+            return Ok(PhpArray::empty());
+        }
         let mut out = PhpArray::new(req)?;
         for value in elements {
             out.append(req, crate::copied(req, value))?;

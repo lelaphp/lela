@@ -67,11 +67,11 @@ fn fill_errors(
     req: &mut Request,
     errors: &[ValidationError],
 ) -> Result<(PhpArray, Option<&'static str>), Thrown> {
+    if errors.is_empty() {
+        return Ok((PhpArray::empty(), None));
+    }
     let mut out = PhpArray::new(req)?;
     let mut reason = None;
-    if errors.is_empty() {
-        return Ok((out, reason));
-    }
     let Some(class) = lookup_class(req, b"Uri\\WhatWg\\UrlValidationError")? else {
         return Err(fatal(
             req,
@@ -394,7 +394,7 @@ impl InvalidUrlException {
                 req.addref(&errors);
                 errors
             }
-            Passed::Omitted => Value::array(PhpArray::new(req)?),
+            Passed::Omitted => Value::array(PhpArray::empty()),
         };
         if this.prop(req, b"errors").is_some() {
             req.release(errors);

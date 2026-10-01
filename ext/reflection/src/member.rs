@@ -1622,15 +1622,18 @@ impl ReflectionProperty {
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
-        let (class, _, found) = this_declared(req, this.object())?;
-        let scope = found.as_ref().map_or(class, |(scope, _)| *scope);
-        let attributes = found.map_or_else(Vec::new, |(_, decl)| decl.attributes.clone());
+        let (_, _, found) = this_declared(req, this.object())?;
+        // `ref->prop == NULL`, a dynamic property: no attributes, before
+        // the filter is looked at.
+        let Some((scope, decl)) = found else {
+            return Ok(PhpArray::empty());
+        };
         let file = req
             .class_decl(scope)
             .and_then(|decl| super::attr::declared_in(&decl.file.0));
         super::attr::reflect_attributes(
             req,
-            &attributes,
+            &decl.attributes,
             super::attr::Subject::new(Some(scope), super::attr::TARGET_PROPERTY, file.as_deref()),
             name,
             flags,
@@ -1683,11 +1686,15 @@ impl ReflectionProperty {
     /// ```
     fn getHooks(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let (_, name, found) = this_declared(req, this.object())?;
+        let declared: Vec<_> = HookKind::ALL
+            .into_iter()
+            .filter_map(|kind| Some((kind, hook_of(req, found.as_ref(), &name, kind)?)))
+            .collect();
+        if declared.is_empty() {
+            return Ok(PhpArray::empty());
+        }
         let mut hooks = PhpArray::new(req)?;
-        for kind in HookKind::ALL {
-            let Some((scope, decl)) = hook_of(req, found.as_ref(), &name, kind) else {
-                continue;
-            };
+        for (kind, (scope, decl)) in declared {
             let reflector = hook_reflector(req, scope, &decl)?;
             let key = php_ext::values::Key::Str(php_ext::values::PhpString::new(
                 req,

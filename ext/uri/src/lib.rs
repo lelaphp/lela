@@ -583,8 +583,7 @@ fn serialize<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArra
     state.set(req, Key::Str(key), Value::string(uri))?;
     let mut out = PhpArray::new(req)?;
     out.append(req, Value::array(state))?;
-    let properties = PhpArray::new(req)?;
-    out.append(req, Value::array(properties))?;
+    out.append(req, Value::array(PhpArray::empty()))?;
     Ok(out)
 }
 

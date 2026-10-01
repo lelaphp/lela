@@ -128,7 +128,7 @@ fn array_merge_recursive(
 ) -> Result<PhpArray, Thrown> {
     let arrays = arrays.0;
     let Some((first, rest)) = arrays.split_first() else {
-        return PhpArray::new(req);
+        return Ok(PhpArray::empty());
     };
     super::merge_total(req, &arrays)?;
     let mut dest = PhpArray::new(req)?;

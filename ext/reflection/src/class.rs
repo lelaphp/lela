@@ -1475,8 +1475,12 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getInterfaces(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let class = this_class(req, this.object())?;
+        let linked = linked_interfaces(req, class);
+        if linked.is_empty() {
+            return Ok(PhpArray::empty());
+        }
         let mut interfaces = PhpArray::new(req)?;
-        for interface in linked_interfaces(req, class) {
+        for interface in linked {
             let name = class_name_of(req, interface);
             let object = reflection_class_factory(req, interface)?;
             let key = PhpString::new(req, &name)?;
@@ -1502,8 +1506,12 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getInterfaceNames(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let class = this_class(req, this.object())?;
+        let linked = linked_interfaces(req, class);
+        if linked.is_empty() {
+            return Ok(PhpArray::empty());
+        }
         let mut names = PhpArray::new(req)?;
-        for interface in linked_interfaces(req, class) {
+        for interface in linked {
             let name = class_name_of(req, interface);
             let value = string_value(req, &name)?;
             names.append(req, value)?;
@@ -1544,6 +1552,9 @@ impl ReflectionClass {
             .class_decl(class)
             .map(|decl| decl.traits.clone())
             .unwrap_or_default();
+        if traits.is_empty() {
+            return Ok(PhpArray::empty());
+        }
         let mut found = PhpArray::new(req)?;
         for trait_ in traits {
             let Some(at) = lookup_class(req, &trait_.0)? else {
@@ -1574,6 +1585,9 @@ impl ReflectionClass {
             .class_decl(class)
             .map(|decl| decl.traits.clone())
             .unwrap_or_default();
+        if traits.is_empty() {
+            return Ok(PhpArray::empty());
+        }
         let mut names = PhpArray::new(req)?;
         for trait_ in traits {
             let found = lookup_class(req, &trait_.0)?;
@@ -1617,6 +1631,14 @@ impl ReflectionClass {
             .class_decl(class)
             .map(|decl| (decl.traits.clone(), decl.adaptations.clone()))
             .unwrap_or_default();
+        // `ce->trait_aliases`, which every `as` of the class's `use`
+        // lists makes, a visibility's alone among them.
+        if !adaptations
+            .iter()
+            .any(|adaptation| matches!(adaptation, TraitAdaptation::As { .. }))
+        {
+            return Ok(PhpArray::empty());
+        }
         let mut aliases = PhpArray::new(req)?;
         for adaptation in adaptations {
             let TraitAdaptation::As {

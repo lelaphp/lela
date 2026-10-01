@@ -374,6 +374,9 @@ fn mb_str_split(
         return Err(value_error(req, 2, "is too large"));
     }
     let enc = self::encoding(req, encoding, 3)?;
+    if string.is_empty() {
+        return Ok(PhpArray::empty());
+    }
     let mut out = PhpArray::new(req)?;
     let bytes = string.as_bytes();
     let split = usize::try_from(length).unwrap_or(1);

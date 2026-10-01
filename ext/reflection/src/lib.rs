@@ -8175,8 +8175,12 @@ impl ReflectionExtension {
     #[php(tentative)]
     fn getDependencies(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let extension = this_extension(req, this.object())?;
+        let listed = req.extension_dependencies(extension);
+        if listed.is_empty() {
+            return Ok(PhpArray::empty());
+        }
         let mut dependencies = PhpArray::new(req)?;
-        for dependency in req.extension_dependencies(extension) {
+        for dependency in listed {
             let mut relation = String::from(match dependency.kind {
                 DependencyKind::Required => "Required",
                 DependencyKind::Conflicts => "Conflicts",
