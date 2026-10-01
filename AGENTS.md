@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=516c1b9d80c601af66883142d6a97214b409ebcb788f5b4a99960db261673076 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=bf9855bbfe74a359f4303fc92264d7566affafb6f6987ef4fecd638d554e7667 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -107,12 +107,12 @@ third-engine-design.md
 | heap | heap.lock | 354 |  | pass |
 | unit | unit.lock | 106 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 929 | 1500 | pass |
+| api | api.lock | 930 | 1500 | pass |
 | sapi | sapi.lock | 21 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 353 |  | pass |
 
-<!-- /computed in=8d2649155ae5bdfca56fb627d5d117aabb58c259b6160ed162bc35e921a8eb55 out=c273da77f5a407973808cee8ea8cd219d2be392d024ffd98922fe7762e9a5679 -->
+<!-- /computed in=7bf6c9251ab841847384e5ac5d0d8e55ec11786a9fa4085da8fade37490ca583 out=cb75da39a5f326bb5c47b1d1f8a50d6b091df6559116b259fc61df8708380e92 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -218,6 +218,7 @@ Options:
 ├── lexbor
 ├── libxml
 ├── mbstring
+├── mysqlnd
 ├── opcache
 ├── openssl
 ├── pcntl
@@ -242,7 +243,7 @@ Options:
 ├── uri
 └── zlib
 ```
-<!-- /computed in=080849935dc6bfe2437f98d3e6ee1b2eaf268aa740aff9fe1dacb0d6354b7782 out=7b9405d134937ab61d6ac5dc5839e34d45a0bda5530609906911058d0c603fd5 -->
+<!-- /computed in=fc762e75ee2e998f085a0f207a8382f4ff05e1781ec62653408be5fbb8b01a87 out=c2c62479ca1be6f77631cf5d1e22331bec9575496050486938fc4ee8db450b66 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

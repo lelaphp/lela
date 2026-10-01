@@ -60,6 +60,7 @@ linked = [
     "sysvmsg",
     "sysvshm",
     "ftp",
+    "mysqlnd",
 ]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
 spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
@@ -71,7 +72,7 @@ session = ["dep:php_ext_session"]
 pdo = ["dep:php_ext_pdo"]
 dom = ["dep:php_ext_dom"]
 random = ["dep:php_ext_random"]
-pdo_mysql = ["dep:php_ext_pdo_mysql"]
+pdo_mysql = ["dep:php_ext_pdo_mysql", "pdo", "mysqlnd"] # the `php` binary and the phpt lane, as php builds it with --with-pdo-mysql; php_pdo_mysql_int.h includes ext/mysqlnd/mysqlnd.h, and pdo_mysql.c ZEND_MOD_REQUIRED("pdo") (#1366)
 filter = ["dep:php_ext_filter", "pcre"] # config.m4: PHP_ADD_EXTENSION_DEP(filter, pcre)
 tokenizer = ["dep:php_ext_tokenizer"]
 json = ["dep:php_ext_json"]
@@ -100,6 +101,7 @@ sysvsem = ["dep:php_ext_sysvsem"] # the `php` binary and the phpt lane, as php b
 sysvmsg = ["dep:php_ext_sysvmsg"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvmsg (#1323)
 sysvshm = ["dep:php_ext_sysvshm"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvshm (#1323)
 ftp = ["dep:php_ext_ftp", "openssl"] # the `php` binary and the phpt lane, as php builds it with --enable-ftp; ftp_ssl_connect secures its connections through the crypto layer openssl registers (#1323)
+mysqlnd = ["dep:php_ext_mysqlnd"] # turned on by pdo_mysql and mysqli, as php builds mysqlnd only for them; its config9.m4 gives no default (#1345, #1366)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -143,6 +145,7 @@ php_ext_sysvsem = { path = "../../ext/sysvsem", optional = true }
 php_ext_sysvmsg = { path = "../../ext/sysvmsg", optional = true }
 php_ext_sysvshm = { path = "../../ext/sysvshm", optional = true }
 php_ext_ftp = { path = "../../ext/ftp", optional = true }
+php_ext_mysqlnd = { path = "../../ext/mysqlnd", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection
