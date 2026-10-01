@@ -43,7 +43,7 @@ enum State {
 /// it. Nothing of a request's.
 pub(crate) struct Entry {
     socket: Socket,
-    orig_path: Option<Vec<u8>>,
+    orig_path: Option<Box<[u8]>>,
 }
 
 impl Request {
@@ -110,7 +110,7 @@ impl Request {
     /// registers over what the list kept, `r+`, and seeking nowhere.
     fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Stream, Thrown> {
         let mut stream = PhpStream::new(Box::new(entry.socket), b"r+");
-        stream.orig_path = entry.orig_path;
+        stream.orig_path = entry.orig_path.map(super::OrigPath::Persistent);
         stream.flags.no_seek = true;
         let stream = self.stream_alloc_as(stream, true)?;
         self.persistent.push(Held {
@@ -169,7 +169,10 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) {
     stream.flush_owed(req);
     let entry = stream.ops.as_socket().map(|socket| Entry {
         socket: socket.detach(),
-        orig_path: stream.orig_path.take(),
+        orig_path: stream
+            .orig_path
+            .take()
+            .map(|path| path.into_persistent(req)),
     });
     let Some(at) = req
         .persistent

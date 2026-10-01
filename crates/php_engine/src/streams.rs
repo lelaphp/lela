@@ -32,7 +32,7 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
-use php_heap::ResourceType;
+use php_heap::{Block, ResourceType};
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
 use crate::api::request::{
@@ -216,6 +216,14 @@ pub(crate) trait Ops: Send {
     /// runs.
     fn adopt(&mut self, _own: Stream) {}
 
+    /// What the kind `pemalloc`s for its own data before
+    /// `_php_stream_alloc` lays the stream down, on the request's heap at
+    /// php's size and given back by its `close`; nothing for a kind whose
+    /// data is not yet charged. The `Err` is the memory limit's fatal.
+    fn lay_down(&mut self, _req: &mut Request) -> Result<(), Thrown> {
+        Ok(())
+    }
+
     /// Whether the kind has an `ops->write`: a directory and the `data:`
     /// wrapper's stream have none, which a write is php's `Stream is not
     /// writable` for. A kind that takes nothing, as a socket that would
@@ -368,13 +376,12 @@ pub(crate) struct PhpStream {
     ops: Box<dyn Ops>,
     /// `stream->wrapper->wops->label`.
     wrapper: &'static str,
-    /// `stream->mode`, what `php_stream_alloc` was handed, cut to the
-    /// fifteen bytes its `char mode[16]` holds.
-    mode: Vec<u8>,
+    /// `stream->mode`.
+    mode: Mode,
     /// `stream->orig_path`: the path `php_stream_open_wrapper_ex` opened,
     /// after `include_path`, and `None` for a stream no wrapper opened by
     /// path, a directory stream among them.
-    orig_path: Option<Vec<u8>>,
+    orig_path: Option<OrigPath>,
     /// `stream->position`, `-1` for a stream that cannot seek.
     position: i64,
     /// `stream->eof`.
@@ -384,7 +391,7 @@ pub(crate) struct PhpStream {
     /// `stream->flags`.
     flags: Flags,
     /// `stream->readbuf` over `readbuflen`.
-    readbuf: Vec<u8>,
+    readbuf: ReadBuf,
     /// `stream->readpos`.
     readpos: usize,
     /// `stream->writepos`.
@@ -459,6 +466,125 @@ enum Eol {
     Detect,
 }
 
+/// `sizeof(php_stream)` (`Z/main/php_streams.h`), what
+/// `_php_stream_alloc` `pemalloc`s and `_php_stream_free` gives back; the
+/// stream's resource payload is laid inside an allocation of this size.
+const PHP_STREAM_SIZE: usize = 208;
+
+// The payload sits behind the resource payload's one-word table.
+const _: () = assert!(
+    size_of::<Option<PhpStream>>() + 8 <= PHP_STREAM_SIZE,
+    "a stream does not fit the php_stream php allocates"
+);
+
+/// `stream->mode`, php's `char mode[16]`: what `php_stream_alloc` was
+/// handed, cut to the fifteen bytes before its NUL.
+#[derive(Clone, Copy)]
+struct Mode([u8; 16]);
+
+impl Mode {
+    /// `strlcpy(ret->mode, mode, sizeof(ret->mode))`.
+    fn of(mode: &[u8]) -> Mode {
+        let mut held = [0; 16];
+        let len = mode.len().min(15);
+        held[..len].copy_from_slice(&mode[..len]);
+        Mode(held)
+    }
+
+    /// The bytes before the NUL.
+    fn bytes(&self) -> &[u8] {
+        let len = self.0.iter().position(|b| *b == 0).unwrap_or(16);
+        &self.0[..len]
+    }
+}
+
+/// `stream->orig_path`, `pestrdup`'d: on the request's heap, the path
+/// and its NUL, for a stream of the request's, and the process's own for
+/// one the persistent list keeps across requests, as `pestrdup`'s
+/// `persistent` argument picks.
+enum OrigPath {
+    Request(Block),
+    Persistent(Box<[u8]>),
+}
+
+impl OrigPath {
+    /// `estrdup(path)`; the `Err` is the memory limit's fatal.
+    fn request(req: &mut Request, path: &[u8]) -> Result<OrigPath, Thrown> {
+        let block = req.heap_mut().block(path.len() + 1);
+        let mut block = req.fatal_of(block)?;
+        block.bytes_mut()[..path.len()].copy_from_slice(path);
+        Ok(OrigPath::Request(block))
+    }
+
+    /// The path, without the NUL.
+    fn bytes(&self) -> &[u8] {
+        match self {
+            OrigPath::Request(block) => block.bytes().split_last().map_or(&[], |(_, path)| path),
+            OrigPath::Persistent(path) => path,
+        }
+    }
+
+    /// `pefree(stream->orig_path)`.
+    fn free(self, req: &mut Request) {
+        if let OrigPath::Request(block) = self {
+            req.heap_mut().free_block(block);
+        }
+    }
+
+    /// The path as the persistent list keeps it past the request, the
+    /// request's copy given back.
+    fn into_persistent(self, req: &mut Request) -> Box<[u8]> {
+        match self {
+            OrigPath::Request(block) => {
+                let path = Box::from(block.bytes().split_last().map_or(&[][..], |(_, path)| path));
+                req.heap_mut().free_block(block);
+                path
+            }
+            OrigPath::Persistent(path) => path,
+        }
+    }
+}
+
+/// `stream->readbuf` over `readbuflen`: none before the first read,
+/// `perealloc`'d on the request's heap as `_php_stream_fill_read_buffer`
+/// grows it, and `pefree`'d with the stream.
+#[derive(Default)]
+struct ReadBuf(Option<Block>);
+
+impl std::ops::Deref for ReadBuf {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.0.as_ref().map_or(&[], Block::bytes)
+    }
+}
+
+impl std::ops::DerefMut for ReadBuf {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        self.0.as_mut().map_or(&mut [], Block::bytes_mut)
+    }
+}
+
+impl ReadBuf {
+    /// `stream->readbuf = perealloc(stream->readbuf, len)`, the bytes
+    /// kept; the `Err` is the memory limit's fatal.
+    fn resize(&mut self, req: &mut Request, len: usize) -> Result<(), Thrown> {
+        let grown = match self.0.take() {
+            Some(block) => req.heap_mut().block_resize(block, len),
+            None => req.heap_mut().block(len),
+        };
+        self.0 = Some(req.fatal_of(grown)?);
+        Ok(())
+    }
+
+    /// `pefree(stream->readbuf)`.
+    fn free(&mut self, req: &mut Request) {
+        if let Some(block) = self.0.take() {
+            req.heap_mut().free_block(block);
+        }
+    }
+}
+
 impl PhpStream {
     /// `_php_stream_alloc` (`Z/main/streams/streams.c:301`) less the
     /// resource, which [`Request::stream_alloc`] registers: the kind,
@@ -467,13 +593,13 @@ impl PhpStream {
         PhpStream {
             ops,
             wrapper: "",
-            mode: mode[..mode.len().min(15)].to_vec(),
+            mode: Mode::of(mode),
             orig_path: None,
             position: 0,
             eof: false,
             fatal_error: false,
             flags: Flags::default(),
-            readbuf: Vec::new(),
+            readbuf: ReadBuf::default(),
             readpos: 0,
             writepos: 0,
             chunk_size: CHUNK_SIZE,
@@ -513,7 +639,17 @@ impl PhpStream {
 
     /// `stream->orig_path`.
     pub(crate) fn orig_path(&self) -> Option<&[u8]> {
-        self.orig_path.as_deref()
+        self.orig_path.as_ref().map(OrigPath::bytes)
+    }
+
+    /// `stream->orig_path = pestrdup(path, 0)` over the one it held,
+    /// which is given back first.
+    pub(crate) fn set_orig_path(&mut self, req: &mut Request, path: &[u8]) -> Result<(), Thrown> {
+        if let Some(old) = self.orig_path.take() {
+            old.free(req);
+        }
+        self.orig_path = Some(OrigPath::request(req, path)?);
+        Ok(())
     }
 
     /// `php_stream_context_set`'s notifier: the one given in place, the
@@ -567,7 +703,7 @@ impl PhpStream {
     /// the fifteen bytes `char mode[16]` holds.
     pub(crate) fn rewind_as(&mut self, mode: &[u8]) {
         self.position = 0;
-        self.mode = mode[..mode.len().min(15)].to_vec();
+        self.mode = Mode::of(mode);
     }
 
     /// `php_stream_notify_progress_increment(PHP_STREAM_CONTEXT(stream),
@@ -627,7 +763,10 @@ impl PhpStream {
             self.readpos = 0;
         }
         if self.readbuf.len() - self.writepos < self.chunk_size {
-            self.readbuf.resize(self.readbuf.len() + self.chunk_size, 0);
+            let len = self.readbuf.len() + self.chunk_size;
+            if self.readbuf.resize(req, len).is_err() {
+                return false;
+            }
         }
         let Self {
             ops,
@@ -1385,6 +1524,11 @@ impl PhpStream {
                 notifier.release(req);
             }
         }
+        // `pefree(stream->readbuf)` and `pefree(stream->orig_path)`.
+        self.readbuf.free(req);
+        if let Some(path) = self.orig_path.take() {
+            path.free(req);
+        }
         ret
     }
 
@@ -1948,6 +2092,7 @@ pub(crate) fn temporary_file(
     let orig_path = path.as_os_str().as_encoded_bytes().to_vec();
     let mut stream = PhpStream::new(
         Box::new(Stdio {
+            data: None,
             file: Some(file),
             is_seekable: true,
             temp_name: Some(path),
@@ -1957,8 +2102,10 @@ pub(crate) fn temporary_file(
         b"r+b",
     );
     stream.wrapper = PLAIN_FILES;
-    stream.orig_path = Some(orig_path);
-    Ok(Some(req.stream_alloc(stream)?))
+    let stream = req.stream_alloc(stream)?;
+    req.stream_op(stream, |req, s| s.set_orig_path(req, &orig_path))
+        .transpose()?;
+    Ok(Some(stream))
 }
 
 // -------------------------------------------------------- plain files
@@ -1975,6 +2122,10 @@ const PHP_WRAPPER: &str = "PHP";
 /// at close; and for a pipe `popen` opened, `is_process_pipe`, the child
 /// at its other end, whom the close waits for as `pclose(3)` does.
 struct Stdio {
+    /// The `php_stdio_stream_data` php `pemalloc`s, [`STDIO_DATA_SIZE`]
+    /// bytes on the request's heap from [`Ops::lay_down`] to the close,
+    /// standing for the struct whose fields are these.
+    data: Option<Block>,
     file: Option<std::fs::File>,
     is_seekable: bool,
     temp_name: Option<std::path::PathBuf>,
@@ -1982,6 +2133,10 @@ struct Stdio {
     /// Whether the fd blocks, what `stream_set_blocking` last set.
     blocking: bool,
 }
+
+/// `sizeof(php_stdio_stream_data)` (`Z/main/streams/plain_wrapper.c:135`),
+/// what `_php_stream_fopen_from_fd_int` `pemalloc`s for a plain file.
+const STDIO_DATA_SIZE: usize = 200;
 
 /// `php_socket_strerror_s` over `errno`, as the plain files kind's two
 /// notices print it: the number and the text, without the suffix Rust
@@ -2030,6 +2185,13 @@ const EBADF: i32 = 9;
 impl Ops for Stdio {
     fn label(&self) -> &'static str {
         "STDIO"
+    }
+
+    /// `_php_stream_fopen_from_fd_int`'s `self = pemalloc(sizeof(*self))`.
+    fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        let data = req.heap_mut().block(STDIO_DATA_SIZE);
+        self.data = Some(req.fatal_of(data)?);
+        Ok(())
     }
 
     /// `php_stdiop_write` (`Z/main/streams/plain_wrapper.c:374`): one
@@ -2099,8 +2261,12 @@ impl Ops for Stdio {
     /// a process pipe is `pclose(3)`, the pipe closed and the child
     /// waited for, and its answer `WEXITSTATUS` where the child exited
     /// and the wait status as it is where a signal ended it.
-    fn close(&mut self, _req: &mut Request) -> i32 {
+    fn close(&mut self, req: &mut Request) -> i32 {
         drop(self.file.take());
+        // `pefree(data)`, the struct given back as the close ends.
+        if let Some(data) = self.data.take() {
+            req.heap_mut().free_block(data);
+        }
         if let Some(mut child) = self.process.take() {
             use std::os::unix::process::ExitStatusExt;
             return match child.wait() {
@@ -2311,6 +2477,27 @@ fn open_options(mode: &[u8]) -> Option<std::fs::OpenOptions> {
 /// for a fresh open and `-1` with `NO_SEEK` for one that cannot. The
 /// `Err` is what `php_stream_display_wrapper_errors` prints after
 /// `Failed to open stream: `.
+///
+/// The stream costs the request what php's does: the
+/// `php_stdio_stream_data`, the `php_stream` and its resource, and the
+/// path `estrdup`'d as `orig_path` at the open; the read buffer of one
+/// chunk at the first read; all of it but the resource given back at
+/// the close.
+///
+/// ```php
+/// chdir(__DIR__); file_put_contents('plain.txt', str_repeat('x', 100));
+/// $g = fopen('plain.txt', 'rb'); fread($g, 10); fclose($g);
+/// $m = memory_get_usage(); $f = fopen('plain.txt', 'rb'); $a = memory_get_usage() - $m;
+/// $m = memory_get_usage(); $s = fread($f, 10); $b = memory_get_usage() - $m;
+/// $m = memory_get_usage(); fclose($f); $c = memory_get_usage() - $m;
+/// unlink('plain.txt');
+/// var_dump($a, $b, $c);
+/// ```
+/// ```expect
+/// int(496)
+/// int(8232)
+/// int(-8656)
+/// ```
 fn plain_open(req: &mut Request, path: &HostPath, mode: &[u8]) -> Result<PhpStream, String> {
     let Some(options) = open_options(mode) else {
         return Err(format!(
@@ -2348,6 +2535,7 @@ fn plain_open(req: &mut Request, path: &HostPath, mode: &[u8]) -> Result<PhpStre
     };
     let mut stream = PhpStream::new(
         Box::new(Stdio {
+            data: None,
             file: Some(file),
             is_seekable,
             temp_name: None,
@@ -3565,10 +3753,11 @@ impl Request {
         };
         match opened {
             Ok(stream) => {
-                self.stream_op(stream, |_, s| {
+                self.stream_op(stream, |req, s| {
                     s.wrapper = label;
-                    s.orig_path = Some(to_open.clone());
-                });
+                    s.set_orig_path(req, &to_open)
+                })
+                .transpose()?;
                 if options.must_seek {
                     return self.make_seekable(stream, &to_open, options);
                 }
@@ -3716,8 +3905,9 @@ impl Request {
                 stream.free(self);
                 self.stream_op(copy, |req, s| {
                     s.seek(req, 0, Some(Whence::Set));
-                    s.orig_path = Some(path.to_vec());
-                });
+                    s.set_orig_path(req, path)
+                })
+                .transpose()?;
                 return Ok(Some(copy));
             }
             copy.free(self);
@@ -3869,10 +4059,10 @@ impl Request {
             .and_then(|w| w.wrapperdata)
             .or_else(|| s.ops.wrapper_data());
         let stream_type = s.ops.label();
-        let mode = s.mode.clone();
+        let mode = s.mode.bytes().to_vec();
         let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
         let seekable = s.ops.seekable() && !s.flags.no_seek;
-        let uri = s.orig_path.clone();
+        let uri = s.orig_path().map(<[u8]>::to_vec);
         let mut entries = head;
         if let Some(data) = wrapper_data {
             entries.push((b"wrapper_data".to_vec(), MetaValue::Value(data)));
@@ -4042,7 +4232,13 @@ impl Request {
         } else {
             self.stream_type()
         };
-        let res = self.new_resource(kind, Some(stream))?;
+        // The kind's own data first, then the `php_stream` and its
+        // resource, `_php_stream_fopen_from_fd_int`'s order.
+        stream.ops.lay_down(self)?;
+        let allocated = self
+            .heap_mut()
+            .resource_sized(kind, Some(stream), PHP_STREAM_SIZE);
+        let res = self.fatal_of(allocated).map(Resource::of)?;
         if let Some(Some(stream)) = self.resource_native_mut::<Option<PhpStream>>(res.heap()) {
             stream.res = Some(res);
             stream.ops.adopt(Stream::of(res));
@@ -4161,6 +4357,7 @@ impl Request {
         };
         let mut stream = PhpStream::new(
             Box::new(Stdio {
+                data: None,
                 file: Some(file),
                 is_seekable,
                 temp_name: None,

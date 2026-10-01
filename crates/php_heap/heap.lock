@@ -143,6 +143,7 @@ Heap::resource_at
 Heap::resource_close
 Heap::resource_native
 Heap::resource_native_mut
+Heap::resource_sized
 Heap::resource_with
 Heap::resources
 Heap::separate
