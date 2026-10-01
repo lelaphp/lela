@@ -677,6 +677,23 @@ fn header<'a>(headers: &'a [(Vec<u8>, Vec<u8>)], name: &[u8]) -> Option<&'a [u8]
 /// ValueError: The additional headers cannot contain the "To" header
 /// TypeError: Header name cannot be numeric, 1 given
 /// ```
+///
+/// `mail.force_extra_parameters`, any value of it and the empty string
+/// among them, stands in place of the program's parameters, as `mail()`
+/// forces it:
+///
+/// ```php
+/// foreach ([[], ['-d', 'mail.force_extra_parameters=']] as $force) {
+///     $p = proc_open([PHP_BINARY, '-n', '-d', 'sendmail_path="cat >/dev/null; echo sent:"', ...$force, '-r', 'var_dump(mb_send_mail("a@example.com", "s", "m", "", "-fme"));'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///     echo stream_get_contents($pipes[1]); proc_close($p);
+/// }
+/// ```
+/// ```expect process
+/// sent: -fme
+/// bool(true)
+/// sent:
+/// bool(true)
+/// ```
 #[allow(clippy::too_many_lines)] // one C function, kept whole
 #[php_function]
 fn mb_send_mail(
@@ -840,9 +857,10 @@ fn mb_send_mail(
         out.extend_from_slice(b"Content-Transfer-Encoding: ");
         out.extend_from_slice(body_enc.preferred_mime_name().unwrap_or(b"7bit"));
     }
+    // `zend_ini_str_ex`: a value, even the empty one, is forced over
+    // the parameters, as `mail()` forces it.
     let forced = req
-        .ini_get(b"mail.force_extra_parameters")
-        .filter(|f| !f.is_empty())
+        .ini_value(b"mail.force_extra_parameters")
         .map(<[u8]>::to_vec);
     let extra = match forced.or_else(|| additional_params.map(|p| p.0.as_bytes().to_vec())) {
         Some(extra) => Some(php_ext_standard::php_escape_shell_cmd(req, &extra)?),

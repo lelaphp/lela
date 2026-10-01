@@ -485,6 +485,26 @@ pub fn php_mail(
 ///   - Return [ bool ]
 /// }
 /// ```
+///
+/// `mail.force_extra_parameters` read as `zend_ini_str_ex` reads it
+/// ([`Request::ini_value`]): with no value the program's parameters are
+/// handed on, and any value, the empty string among them, stands in
+/// their place.
+///
+/// ```php
+/// foreach ([[], ['-d', 'mail.force_extra_parameters='], ['-d', 'mail.force_extra_parameters=-fforced']] as $force) {
+///     $p = proc_open([PHP_BINARY, '-n', '-d', 'sendmail_path="cat >/dev/null; echo sent:"', ...$force, '-r', 'var_dump(mail("a@example.com", "s", "m", "", "-fme"));'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///     echo stream_get_contents($pipes[1]); proc_close($p);
+/// }
+/// ```
+/// ```expect process
+/// sent: -fme
+/// bool(true)
+/// sent:
+/// bool(true)
+/// sent: -fforced
+/// bool(true)
+/// ```
 #[php_function]
 fn mail(
     req: &mut Request,
@@ -514,9 +534,10 @@ fn mail(
         Passed::Given(Path(extra)) => Some(extra.as_bytes().to_vec()),
         Passed::Omitted => None,
     };
+    // `zend_ini_str_ex`: a value, even the empty one, is forced over
+    // the parameters; no value leaves them.
     let forced = req
-        .ini_get(b"mail.force_extra_parameters")
-        .filter(|forced| !forced.is_empty())
+        .ini_value(b"mail.force_extra_parameters")
         .map(<[u8]>::to_vec);
     let extra = match forced.or(extra) {
         Some(extra) => Some(crate::exec::escape_shell_cmd(req, &extra)?),
