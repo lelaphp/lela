@@ -13,7 +13,7 @@
 
 use php_ext::abi::{Instance, This, Union, Untyped};
 use php_ext::attr::php_class;
-use php_ext::call::{autoload, eval_const_expr, lookup_class};
+use php_ext::call::{autoload, eval_const_expr, eval_declared, lookup_class};
 use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, throw};
@@ -1302,6 +1302,40 @@ impl ReflectionParameter {
     /// int(0)
     /// ```
     ///
+    /// A user function's default is its `RECV_INIT` constant
+    /// (`get_default_from_recv`), so a string is the one the compiler
+    /// interned and an array the unit's; a native's is its stub's text
+    /// evaluated afresh (`zend_get_default_from_internal_arg_info`):
+    ///
+    /// ```php
+    /// function pd($x = 'pdefault', $z = [PHP_INT_SIZE]) {}
+    /// foreach ((new ReflectionFunction('pd'))->getParameters() as $p) debug_zval_dump($p->getDefaultValue());
+    /// debug_zval_dump((new ReflectionParameter(['DateTime', '__construct'], 0))->getDefaultValue());
+    /// ```
+    /// ```expect
+    /// string(8) "pdefault" interned
+    /// array(1) packed refcount(1){
+    ///   [0]=>
+    ///   int(8)
+    /// }
+    /// string(3) "now" refcount(1)
+    /// ```
+    ///
+    /// An array the compiler folded is the unit's, which takes no owner:
+    ///
+    /// ```php
+    /// function pa($y = ['p'], $w = []) {}
+    /// foreach ((new ReflectionFunction('pa'))->getParameters() as $p) debug_zval_dump($p->getDefaultValue());
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// array(1) packed interned {
+    ///   [0]=>
+    ///   string(1) "p" interned
+    /// }
+    /// array(0) interned {
+    /// }
+    /// ```
+    ///
     /// ```php
     /// (new ReflectionParameter("json_encode", 0))->getDefaultValue();
     /// ```
@@ -1314,12 +1348,16 @@ impl ReflectionParameter {
     /// ```
     #[php(tentative)]
     fn getDefaultValue(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
-        let (reference, _, parameter) = this_parameter(req, this.object())?;
+        let (reference, decl, parameter) = this_parameter(req, this.object())?;
         let Some(expr) = parameter_default(&parameter).cloned() else {
             return Err(no_default(req));
         };
         let scope = scope_of(req, &reference.function);
-        eval_const_expr(req, &expr, scope)
+        if super::func::is_internal(&decl) {
+            eval_const_expr(req, &expr, scope)
+        } else {
+            eval_declared(req, &expr, scope)
+        }
     }
 
     /// `ReflectionParameter::isDefaultValueConstant()`: whether the
