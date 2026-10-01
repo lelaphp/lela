@@ -2628,6 +2628,7 @@ impl Request {
     #[allow(clippy::too_many_lines)] // one line per field of the request
     pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
         let cwd = description.cwd.clone();
+        let exit_status = description.exit_status;
         let output = Output::activate(description.web.as_ref());
         let mut resources = Resources::default();
         let (stream_type, pstream_type) = crate::streams::register(&mut resources);
@@ -2666,7 +2667,7 @@ impl Request {
             startup: None,
             last_fatal_error_backtrace: None,
             ending: None,
-            exit_status: 0,
+            exit_status,
             connection: Connection::Normal,
             resources,
             http_globals: variables::HttpGlobals::default(),

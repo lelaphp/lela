@@ -1332,9 +1332,55 @@ fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> 
 /// object(stdClass)#1 (0) {
 /// }
 /// ```
+///
+/// `Z_PARAM_VARIADIC('+')` takes each argument as the call holds it, so
+/// an `UNDEF` one is printed by `php_var_dump`'s `default:` arm: the
+/// value of a call whose frame phpdbg left at `EG(exception_op)` with
+/// nothing pending, which hands its caller nothing.
+///
+/// ```php
+/// function f() {
+///   $q = 1;
+///   return 7;
+/// }
+/// var_dump(f());
+/// ```
+/// ```request phpdbg
+/// register intdiv
+/// b 3
+/// r
+/// intdiv 1
+/// ev 9
+/// c
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Registered intdiv]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:3]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:   $q = 1;
+///  00004:   return 7;
+///  00005: }
+/// prompt>%s
+/// prompt>%s
+/// Fatal error: Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in %SCRATCH%/witness.php:3
+/// Stack trace:
+/// #0 %SCRATCH%/witness.php(3): intdiv(1)
+/// #1 %SCRATCH%/witness.php(6): f()
+/// #2 {main}
+///   thrown in %SCRATCH%/witness.php on line 3
+/// prompt> UNKNOWN:0
+/// [Script ended normally]
+/// prompt>
+/// ```
 #[php_function]
 fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
-    for value in std::iter::once(value).chain(values.0) {
+    for (at, coerced) in (1u32..).zip(std::iter::once(value).chain(values.0)) {
+        let value = req
+            .argument(at)
+            .filter(|passed| passed.tag() == crate::api::values::TypeTag::Undef)
+            .unwrap_or(coerced);
         let mut out = Vec::new();
         dump(req, &mut out, &value, 1);
         req.write(&out);
@@ -1454,6 +1500,9 @@ fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, 
         out.extend_from_slice(
             format!("{common}resource({}) of type ({name})\n", resource.id()).as_bytes(),
         );
+    } else if value.tag() == crate::api::values::TypeTag::Undef {
+        // `php_var_dump`'s `default:` arm.
+        out.extend_from_slice(format!("{common}UNKNOWN:0\n").as_bytes());
     } else {
         out.extend_from_slice(format!("{common}NULL\n").as_bytes());
     }

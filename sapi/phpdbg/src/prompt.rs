@@ -14,7 +14,7 @@ use crate::bp::Kind;
 use crate::cmd::{self, Command, Param};
 use crate::input::{self, Line};
 use crate::out;
-use crate::session::{Context, Origin, Seek, SeekKind, Session, Stop};
+use crate::session::{Context, Execution, Origin, Seek, SeekKind, Session, Stop};
 
 /// Where the prompt stands.
 pub enum Here<'a> {
@@ -27,8 +27,8 @@ pub enum Here<'a> {
     /// executing: php's `PHPDBG_G(ops)` with `EG(current_execute_data)`
     /// `NULL`.
     Held { req: &'a mut Request },
-    /// A request with no program of the context's, standing for one
-    /// command outside a run, with nothing executing.
+    /// A request with no program of the context's, with nothing
+    /// executing: the prompt's where no context is held.
     Idle { req: &'a mut Request },
     /// No request standing.
     Outside,
@@ -64,7 +64,8 @@ impl Here<'_> {
         }
     }
 
-    /// `PHPDBG_G(in_execution)`.
+    /// `PHPDBG_G(in_execution)` with `EG(current_execute_data)` standing:
+    /// a frame the program is stopped in.
     pub fn executing(&self) -> bool {
         matches!(self, Here::Paused { .. })
     }
@@ -72,6 +73,25 @@ impl Here<'_> {
     /// `PHPDBG_G(ops)`: the context is compiled and standing.
     fn compiled(&self) -> bool {
         matches!(self, Here::Paused { .. } | Here::Held { .. })
+    }
+}
+
+/// `PHPDBG_G(in_execution)`: a frame stands, or the session takes
+/// something to be executing where none does.
+fn in_execution(s: &Session, here: &Here<'_>) -> bool {
+    here.executing() || s.execution != Execution::Not
+}
+
+/// Whether the user answered `question` with a yes; the input ending
+/// first ends the session, as php's read bails out quitting.
+fn permitted(s: &mut Session, question: &[u8]) -> bool {
+    match input::ask(question) {
+        input::Answer::Yes => true,
+        input::Answer::No => false,
+        input::Answer::End => {
+            s.stopped = Some(Stop::Quit);
+            false
+        }
     }
 }
 
@@ -148,7 +168,9 @@ pub fn interactive(s: &mut Session, here: &mut Here<'_>) -> Outcome {
                     if here.executing() {
                         return Outcome::Resume;
                     }
-                    out::error(b"Not running");
+                    if !in_execution(s, here) {
+                        out::error(b"Not running");
+                    }
                     return Outcome::NotRunning;
                 }
             }
@@ -177,14 +199,11 @@ pub fn run_queued(s: &mut Session) {
     }
 }
 
-/// One command, the one the idle request stands for.
-pub fn idle_job(s: &mut Session, req: &mut Request) -> Outcome {
-    let Some(command) = s.job.take() else {
-        return Outcome::Resume;
-    };
+/// The command a run left that needs a request standing, served by an
+/// idle request of its own once the run's has ended.
+pub fn idle_job(s: &mut Session, req: &mut Request, command: &Command) {
     let mut here = Here::Idle { req };
-    let _ = execute(s, &mut here, &command);
-    Outcome::Resume
+    let _ = execute(s, &mut here, command);
 }
 
 /// `phpdbg_internal_stack_execute`.
@@ -427,7 +446,35 @@ fn command_name(def: &Def) -> String {
     }
 }
 
-/// `phpdbg_stack_verify`.
+/// Whether an argument is of the kind a letter of a command's spec names.
+type Fits = fn(&Param) -> bool;
+
+/// `phpdbg_stack_verify`: each letter of the command's spec checks the
+/// argument it stands for, and `*` checks none, so `list` with nothing
+/// after it is refused by the count of arguments it needs, not by the
+/// argument missing.
+///
+/// ```php
+/// $a = 1;
+/// echo "end\n";
+/// ```
+/// ```request phpdbg
+/// b 3
+/// r
+/// list
+/// c
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:3]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003: echo "end\n";
+/// prompt> [The command "list" expected at least 1 arguments (*) and received 0]
+/// prompt> end
+/// [Script ended normally]
+/// prompt>
+/// ```
 fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
     let name = command_name(def);
     if def.args.is_empty() {
@@ -450,32 +497,35 @@ fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
             continue;
         }
         current += 1;
-        let (expected, fits): (&str, fn(&Param) -> bool) = match spec {
-            b'i' => ("raw input", |p| matches!(p, Param::Str(_))),
-            b's' => ("string", |p| matches!(p, Param::Str(_))),
-            b'n' => ("number", |p| matches!(p, Param::Num(_))),
-            b'm' => ("method", |p| matches!(p, Param::Method { .. })),
-            b'a' => ("address", |p| matches!(p, Param::Addr(_))),
-            b'f' => ("file:line", |p| matches!(p, Param::File { .. })),
-            b'c' => ("condition", |p| matches!(p, Param::Cond(_))),
-            b'o' => ("opcode", |p| matches!(p, Param::Op(_))),
-            b'b' => ("boolean", |p| matches!(p, Param::Num(_))),
-            _ => ("anything", |_| true),
+        // `*` and a letter php's switch does not name are checked
+        // against nothing: a missing argument ends the loop, and the
+        // count after it answers.
+        let kind: Option<(&str, Fits)> = match spec {
+            b'i' => Some(("raw input", |p| matches!(p, Param::Str(_)))),
+            b's' => Some(("string", |p| matches!(p, Param::Str(_)))),
+            b'n' => Some(("number", |p| matches!(p, Param::Num(_)))),
+            b'm' => Some(("method", |p| matches!(p, Param::Method { .. }))),
+            b'a' => Some(("address", |p| matches!(p, Param::Addr(_)))),
+            b'f' => Some(("file:line", |p| matches!(p, Param::File { .. }))),
+            b'c' => Some(("condition", |p| matches!(p, Param::Cond(_)))),
+            b'o' => Some(("opcode", |p| matches!(p, Param::Op(_)))),
+            b'b' => Some(("boolean", |p| matches!(p, Param::Num(_)))),
+            _ => None,
         };
-        match top {
-            None if !optional => {
+        match (top, kind) {
+            (None, Some((expected, _))) if !optional => {
                 return Err(Some(format!(
                     "The command \"{name}\" expected {expected} and got nothing at parameter {current}"
                 )));
             }
-            None => break,
-            Some(param) if spec != b'*' && !fits(param) => {
+            (None, _) => break,
+            (Some(param), Some((expected, fits))) if !fits(param) => {
                 return Err(Some(format!(
                     "The command \"{name}\" expected {expected} and got {} at parameter {current}",
                     param.kind()
                 )));
             }
-            Some(_) => {}
+            (Some(_), _) => {}
         }
         top = at.next();
         received += 1;
@@ -581,9 +631,56 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
             }
             out::out(b"\n");
         }
-        tier::Called::Rendered | tier::Called::Exited => {}
+        tier::Called::Exited => bailed_out(s),
+        tier::Called::Rendered => {}
     }
     true
+}
+
+/// An `exit` served where nothing was executing: php's loop bailed out
+/// of `phpdbg_execute_ex` with `in_execution` set, so `run` asks before
+/// it restarts what php takes to be executing, and the input ending
+/// before an answer ends the session.
+///
+/// ```php
+/// $a = 1;
+/// $b = 2;
+/// $c = 3;
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// ev exit(3)
+/// r
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> prompt> Do you really want to restart execution? (type y or n): Please enter either y (yes) or n (no):
+/// ```
+///
+/// ```php
+/// $a = 1;
+/// $b = 2;
+/// $c = 3;
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// ev exit(3)
+/// c
+/// r
+/// y
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> prompt> prompt> Do you really want to restart execution? (type y or n): x
+/// [Script ended normally]
+/// prompt>
+/// ```
+fn bailed_out(s: &mut Session) {
+    if s.execution == Execution::Not {
+        s.execution = Execution::BailedOut;
+    }
 }
 
 /// What `zend_get_executed_filename` names where no frame stands.
@@ -618,8 +715,11 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         out::notice(b"Execution context not changed");
         return Ret::Success;
     }
-    if here.executing()
-        && !input::ask(b"Do you really want to stop execution to set a new execution context?")
+    if in_execution(s, here)
+        && !permitted(
+            s,
+            b"Do you really want to stop execution to set a new execution context?",
+        )
     {
         return Ret::Failure;
     }
@@ -643,7 +743,7 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     );
     s.exec = Some(resolved);
     s.stdin_code = None;
-    s.context = if here.executing() {
+    s.context = if in_execution(s, here) {
         Context::Announced
     } else {
         Context::Unannounced
@@ -675,7 +775,10 @@ fn stdin(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         }
     }
     if here.executing()
-        && !input::ask(b"Do you really want to stop execution to set a new execution context?")
+        && !permitted(
+            s,
+            b"Do you really want to stop execution to set a new execution context?",
+        )
     {
         return Ret::Failure;
     }
@@ -716,13 +819,14 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
         return Ret::Success;
     }
     let args = args.filter(|args| !args.is_empty()).map(<[u8]>::to_vec);
-    match here {
-        Here::Paused { .. } => {
-            if input::ask(b"Do you really want to restart execution?") {
-                s.stopped = Some(Stop::Restart(args));
-            }
-            Ret::Success
+    if in_execution(s, here) {
+        if permitted(s, b"Do you really want to restart execution?") {
+            s.stopped = Some(Stop::Restart(args));
         }
+        return Ret::Success;
+    }
+    match here {
+        Here::Paused { .. } => Ret::Success,
         Here::Held { .. } if args.is_none() => {
             begin_run(s);
             Ret::Run
@@ -742,7 +846,7 @@ pub fn begin_run(s: &mut Session) {
     s.handled = None;
     s.stepping = false;
     s.last_line = 0;
-    s.executing = true;
+    s.execution = Execution::Run;
 }
 
 /// `ev` as a word with its raw parameter.
@@ -830,6 +934,9 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
     crate::watch::freeze(s, req);
     s.origin = Origin::Eval;
     let evaluated = crate::session::lend(s, || tier::evaluate(req, under, code));
+    if under == tier::Under::Nothing && tier::exiting(req) {
+        bailed_out(s);
+    }
     s.origin = Origin::Program;
     crate::watch::thaw(s);
     s.stepping |= stepping;
@@ -1391,7 +1498,9 @@ fn info_overview(_: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
 
 /// `PHPDBG_COMMAND(clean)`.
 fn clean(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
-    if here.executing() && !input::ask(b"Do you really want to clean your current environment?") {
+    if in_execution(s, here)
+        && !permitted(s, b"Do you really want to clean your current environment?")
+    {
         return Ret::Success;
     }
     out::out(b"Cleaning Execution Environment\n");

@@ -85,6 +85,12 @@ pub struct RequestDescription {
     pub ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     /// How the program is served.
     pub primary: Primary,
+    /// php's `EG(exit_status)` as the request starts: zero, as
+    /// `init_executor` writes it, but where a host serves one request of
+    /// php's as several of the engine's and hands each the status the
+    /// one before it left, as phpdbg's cycle keeps one request standing
+    /// across its commands (`Z/sapi/phpdbg/phpdbg.c:1578-1619`).
+    pub exit_status: i32,
 }
 
 /// How a host has its program served: wrapped, as `php_execute_script`

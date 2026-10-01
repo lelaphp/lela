@@ -20642,6 +20642,12 @@ fn unwind_from<T: Tier>(
     }
     cleanup_live_vars(req, frame, code, op_num, 0);
     if req.stack_mut().entry() == frame {
+        if !req.is_pending() {
+            // The return of nothing below, from the serving's entry
+            // frame, which the loop's caller pops: the serving is over.
+            req.set_returned(Value::undef());
+            return Ok(Stepped::Done);
+        }
         return Ok(Stepped::Threw(frame));
     }
     let returns_to = req.vm().returns_to(frame);
@@ -20654,6 +20660,15 @@ fn unwind_from<T: Tier>(
     if let Some((at, slot)) = returns_to {
         let garbage = req.take_slot(at, slot);
         req.release(garbage);
+    }
+    if !req.is_pending() {
+        // Nothing to unwind: a tier went on in a frame at its exception
+        // op after what was thrown there was given up, as phpdbg's `ev`
+        // renders it. The helper's return-value slot is `UNDEF` and,
+        // nothing pending, `zend_leave_helper` leaves the frame as a
+        // return of nothing; the caller goes on past its call.
+        req.vm_mut().advance(caller);
+        return Ok(Stepped::Popped(caller));
     }
     Ok(Stepped::Threw(caller))
 }

@@ -490,8 +490,19 @@ impl Request {
                     })
                 })
                 .count();
+        // `EG(class_table)`'s keys: each class under its name and each
+        // alias under its own, the engine's and `class_alias()`'s, and
+        // never the iterator wrapper, which php does not add.
+        let classes = self
+            .shared
+            .class_keys
+            .keys()
+            .filter(|key| key.first() != Some(&0))
+            .count()
+            + self.declared.len()
+            + self.aliases.len();
         [
-            self.shared.classes.len() + self.declared.len(),
+            classes,
             functions,
             self.constant_table().len(),
             self.included_files().len(),
