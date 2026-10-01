@@ -221,7 +221,7 @@ fn workspace_reading(root: &Path, manifest: &Manifest, total: Count) -> Result<R
         "lock_packages",
         u64::try_from(CargoLock::load(root)?.packages())?,
         budget.lock_packages,
-        "Cargo.lock packages",
+        "third-party Cargo.lock packages",
     )?;
     reading.count("new_ceiling", budget.new)?;
 

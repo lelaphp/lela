@@ -11,7 +11,7 @@ use serde::Deserialize;
 /// The workspace lock file.
 pub const FILE: &str = "Cargo.lock";
 
-/// `Cargo.lock`'s package list: name and version.
+/// `Cargo.lock`'s package list: name, version and where it comes from.
 #[derive(Debug, Default, Deserialize)]
 pub struct CargoLock {
     #[serde(default)]
@@ -22,6 +22,10 @@ pub struct CargoLock {
 pub struct Package {
     pub name: String,
     pub version: String,
+    /// The registry or repository a third-party package comes from; a
+    /// workspace crate has none.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 impl CargoLock {
@@ -32,9 +36,11 @@ impl CargoLock {
         toml::from_str(&text).with_context(|| format!("{}", path.display()))
     }
 
-    /// The number of packages: `[budget] lock_packages` measures this.
+    /// The number of third-party packages, those with a `source`:
+    /// `[budget] lock_packages` measures this. A workspace crate is held by
+    /// its `[[crate]]` row and its line ceiling, so it is not counted (#1335).
     pub fn packages(&self) -> usize {
-        self.package.len()
+        self.package.iter().filter(|p| p.source.is_some()).count()
     }
 
     /// The package a crate name refers to; `Cargo.lock` writes `-` where a
