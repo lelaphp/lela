@@ -123,6 +123,12 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
         tier::exit(req);
         return Flow::Resume(frame);
     }
+    // `run`'s `zend_execute` serves nothing while a throwable stands
+    // pending, as one an `ev` that did not compile leaves, and the run
+    // ends in it.
+    if tier::pending(req).is_some() {
+        return Flow::Returned;
+    }
     drive(req, frame)
 }
 

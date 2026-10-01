@@ -42,6 +42,25 @@ enum Element {
     Table,
 }
 
+/// What frees the memory php watches for a watch as the request's
+/// teardown destroys the global symbol table: php reports a watch
+/// removed when `phpdbg_watch_efree` sees what it stood on freed, and
+/// `zend_hash_graceful_reverse_destroy` destroys the variables from the
+/// last back, each counted array a variable holds freed as it goes, its
+/// elements first, then its data, then its table, before the table's
+/// own data goes with every watch still standing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Freed {
+    /// With the innermost counted array on the watch's path: `at` the
+    /// place of each key down to it from the variable's own array, and
+    /// `table` where php watches its table, its count, rather than an
+    /// element in its data.
+    Array { at: Vec<usize>, table: bool },
+    /// With the symbol table's own data: no counted array holds what
+    /// php watches.
+    Table,
+}
+
 /// One watch.
 #[derive(Debug, Clone)]
 struct Watch {
@@ -58,6 +77,10 @@ struct Watch {
     element: Element,
     /// What it held at the last boundary.
     old: Shown,
+    /// Its variable's place in the frame's symbol table.
+    place: usize,
+    /// What frees it at the run's end, as of the last boundary.
+    freed: Freed,
 }
 
 impl Watch {
@@ -160,10 +183,51 @@ fn walk<'a>(root: &'a Shown, path: &[Vec<u8>]) -> Option<&'a Shown> {
     Some(at)
 }
 
-/// What a watch reads now: none where its path reaches nothing.
-fn read(req: &mut Request, watch: &Watch) -> Option<Shown> {
+/// What a watch reads now, and what would free it: none where its path
+/// reaches nothing.
+fn read(req: &mut Request, watch: &Watch) -> Option<(Shown, Freed)> {
     let root = tier::variable(req, watch.frame, &watch.variable, DEPTH)?;
-    walk(&root, &watch.path).cloned()
+    let value = walk(&root, &watch.path).cloned()?;
+    Some((value, freed(&root, &watch.path, watch.element)))
+}
+
+/// [`Freed`] for what php watches down `path` from `root`: the element
+/// in the data of each array the path passes, and the value at its end,
+/// a counted array's table (`WATCH_ON_HASHTABLE`, or the
+/// `WATCH_ON_REFCOUNTED` a zval holding one carries) or a counted
+/// string, which its container frees as it destroys its elements. The
+/// innermost counted one is freed first; an array that is not counted
+/// holds none that is.
+fn freed(root: &Shown, path: &[Vec<u8>], element: Element) -> Freed {
+    let mut at = Vec::new();
+    let mut found = Freed::Table;
+    let mut node = deref(root);
+    for key in path {
+        let Shown::Array {
+            counted, entries, ..
+        } = node
+        else {
+            return found;
+        };
+        if *counted {
+            found = Freed::Array {
+                at: at.clone(),
+                table: false,
+            };
+        }
+        let Some(place) = entries.iter().position(|(k, _)| key_matches(k, key)) else {
+            return found;
+        };
+        at.push(place);
+        node = deref(&entries[place].1);
+    }
+    match node {
+        Shown::Array { counted: true, .. } => Freed::Array { at, table: true },
+        Shown::Str { counted: true, .. } if element == Element::Zval => {
+            Freed::Array { at, table: false }
+        }
+        _ => found,
+    }
 }
 
 fn lossy(bytes: &[u8]) -> String {
@@ -219,6 +283,11 @@ fn add(s: &mut Session, here: &mut Here<'_>, input: &[u8], kind: Kind) {
         out::error(format!("{} is undefined", lossy(input)).as_bytes());
         return;
     };
+    let table = tier::variables(req, frame);
+    let place = table
+        .iter()
+        .position(|row| row.name == variable)
+        .unwrap_or(table.len());
     let named = [b"$".as_slice(), &variable].concat();
     for (path, name) in expand(&root, named, &parts) {
         let Some(old) = walk(&root, &path).cloned() else {
@@ -241,6 +310,7 @@ fn add(s: &mut Session, here: &mut Here<'_>, input: &[u8], kind: Kind) {
         } else {
             Element::Zval
         };
+        let freed = freed(&root, &path, element);
         let watch = Watch {
             id,
             kind,
@@ -250,6 +320,8 @@ fn add(s: &mut Session, here: &mut Here<'_>, input: &[u8], kind: Kind) {
             name,
             element,
             old,
+            place,
+            freed,
         };
         // Only the recursive root announces itself as recursive.
         let root = kind == Kind::Recursive && element == Element::Zval;
@@ -588,10 +660,10 @@ pub fn changed(req: &mut Request) -> bool {
             Some(frozen) => frozen
                 .iter()
                 .find(|(id, _)| *id == watch.id)
-                .map(|(_, held)| held.clone()),
+                .map(|(_, held)| (held.clone(), watch.freed.clone())),
             _ => read(req, &watch),
         };
-        let Some(new) = read else {
+        let Some((new, freed)) = read else {
             out::notice(
                 format!(
                     "{} has been removed, removing watchpoint{}",
@@ -651,6 +723,7 @@ pub fn changed(req: &mut Request) -> bool {
         session::with(|s| {
             if let Some(kept) = s.watches.list.iter_mut().find(|w| w.id == watch.id) {
                 kept.old = new;
+                kept.freed = freed;
             }
         });
     }
@@ -664,7 +737,7 @@ pub fn freeze(s: &mut Session, req: &mut Request) {
         .watches
         .list
         .iter()
-        .filter_map(|watch| read(req, watch).map(|value| (watch.id, value)))
+        .filter_map(|watch| read(req, watch).map(|(value, _)| (watch.id, value)))
         .collect();
     s.watches.frozen.push(held);
 }
@@ -675,13 +748,91 @@ pub fn thaw(s: &mut Session) {
 }
 
 /// The watchpoints left when a run ends, each reported removed as the
-/// request's teardown frees what it watched: the elements of arrays as
-/// the symbol table is destroyed, then the variables themselves.
+/// request's teardown frees what php watches for it ([`Freed`]): those
+/// on counted values as the variables are destroyed from the last back,
+/// each array's after those of what it holds, in the order of its keys,
+/// its data before its table; then those on the symbol table's own data,
+/// in the order of its watched names, each name's in the order they were
+/// added. The names are php's `hti->watches` over the symbol table, one
+/// per variable, which each removal before drops its variable's name
+/// from, and which `phpdbg_unwatch_parent_ht` destroys whole where it
+/// holds one name as a removal comes, whichever: no watch on the table's
+/// own data is reported after that.
+///
+/// ```php
+/// $a = [1, intdiv(4, 2)];
+/// $x = 1;
+/// $x = 2;
+/// echo "end\n";
+/// ```
+/// ```request phpdbg
+/// b 4
+/// r
+/// w a $a
+/// w $x
+/// c
+/// c
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:4]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:4, hits: 1]
+/// >00004: $x = 2;
+///  00005: echo "end\n";
+/// prompt> [Added watchpoint #0 for $a[]]
+/// prompt> [Added watchpoint #1 for $x]
+/// prompt> [Breaking on watchpoint $x]
+/// Old value: 1
+/// New value: 2
+/// >00005: echo "end\n";
+/// prompt> end
+/// [$a[] has been removed, removing watchpoint]
+/// [$x has been removed, removing watchpoint]
+/// [Script ended normally]
+/// prompt>
+/// ```
 pub fn removed_at_end(s: &mut Session) {
     let list = std::mem::take(&mut s.watches.list);
-    let (elements, variables): (Vec<&Watch>, Vec<&Watch>) =
-        list.iter().partition(|watch| !watch.path.is_empty());
-    for watch in elements.iter().rev().chain(variables.iter().rev()) {
+    let (mut arrays, table): (Vec<&Watch>, Vec<&Watch>) = list
+        .iter()
+        .partition(|watch| matches!(watch.freed, Freed::Array { .. }));
+    // A stable sort, so watches on one array keep the order they were
+    // added in.
+    arrays.sort_by(|a, b| match (&a.freed, &b.freed) {
+        (
+            Freed::Array {
+                at: at_a,
+                table: ta,
+            },
+            Freed::Array {
+                at: at_b,
+                table: tb,
+            },
+        ) => b
+            .place
+            .cmp(&a.place)
+            .then_with(|| destroyed_first(at_a, at_b))
+            .then(ta.cmp(tb)),
+        _ => std::cmp::Ordering::Equal,
+    });
+    let mut names: Vec<&[u8]> = Vec::new();
+    for watch in &list {
+        if !names.contains(&watch.variable.as_slice()) {
+            names.push(&watch.variable);
+        }
+    }
+    for watch in &arrays {
+        if names.len() == 1 {
+            names.clear();
+        } else {
+            names.retain(|name| *name != watch.variable.as_slice());
+        }
+    }
+    let table = names
+        .iter()
+        .flat_map(|name| table.iter().filter(move |watch| watch.variable == *name));
+    for watch in arrays.iter().chain(table) {
         out::notice(
             format!(
                 "{} has been removed, removing watchpoint{}",
@@ -694,5 +845,17 @@ pub fn removed_at_end(s: &mut Session) {
             )
             .as_bytes(),
         );
+    }
+}
+
+/// The order `zend_array_destroy` frees two arrays of one variable in,
+/// each named by the places of the keys down to it: an array's elements
+/// are destroyed in the order of its keys, so the arrays under an
+/// element go before those under a later one, and before the array that
+/// holds them.
+fn destroyed_first(a: &[usize], b: &[usize]) -> std::cmp::Ordering {
+    match a.iter().zip(b).find(|(x, y)| x != y) {
+        Some((x, y)) => x.cmp(y),
+        None => b.len().cmp(&a.len()),
     }
 }
