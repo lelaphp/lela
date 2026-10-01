@@ -174,6 +174,15 @@ pub struct Session {
     /// `PHPDBG_G(watchpoint_hit)`: a watch reported since the check that
     /// reads it last cleared it.
     pub watch_hit: bool,
+    /// `phpdbg_fully_started`: a serving has been entered, so the
+    /// execution context's first compile is behind the session, and a
+    /// fatal's log stands at a prompt.
+    pub started: bool,
+    /// The frame a registered call at a paused prompt left its throwable
+    /// in: php's `EX(opline)` at `EG(exception_op)`, so the run goes on
+    /// there by unwinding it, whether or not the throwable is still
+    /// pending by then.
+    pub thrown_into: Option<FrameRef>,
     /// Whose code the loop reaches.
     pub origin: Origin,
 }
@@ -206,6 +215,8 @@ impl Session {
             sources: Vec::new(),
             standing: None,
             watch_hit: false,
+            started: false,
+            thrown_into: None,
             origin: Origin::Program,
         }
     }

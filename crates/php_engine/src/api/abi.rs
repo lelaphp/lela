@@ -307,6 +307,25 @@ pub(crate) type PostStartupHook = fn(&mut Request) -> PostStartup;
 /// What the unit cache tells each extension of a file it holds:
 /// [`ExtensionBuilder::cached`].
 pub(crate) type CachedHook = fn(&mut Request, &[u8]);
+/// The host's log for a fatal: [`ExtensionBuilder::fatal_logged`].
+pub(crate) type FatalLoggedHook = fn(&mut Request) -> AfterLog;
+
+/// How a host left the fatal its log took (`sapi_module.log_message`),
+/// which php's `php_error_cb` calls before it displays the fatal, writes
+/// the status 255 and bails out (`Z/main/main.c:1430-1520`): the log
+/// returned, or bailed out from inside itself, as phpdbg's `quit` at the
+/// prompt it stands at there leaves by `zend_bailout()`
+/// (`Z/sapi/phpdbg/phpdbg_prompt.c:1513`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterLog {
+    /// `php_error_cb` goes on: the fatal displayed, the status 255, and
+    /// the request leaves for the `zend_try` that catches the fatal.
+    Returned,
+    /// The rest of `php_error_cb` is not served: nothing displayed, the
+    /// status as it was, and the request leaves for that `zend_try` all
+    /// the same.
+    BailedOut,
+}
 
 /// An extension's answer as the engine finishes starting up, before it
 /// serves its first request (design §6.3): php's `zend_post_startup_cb`,
@@ -552,6 +571,8 @@ pub struct Extension {
     pub(crate) post_startup: Option<PostStartupHook>,
     /// What [`ExtensionBuilder::cached`] was handed.
     pub(crate) cached: Option<CachedHook>,
+    /// What [`ExtensionBuilder::fatal_logged`] was handed.
+    pub(crate) fatal_logged: Option<FatalLoggedHook>,
     /// What [`ExtensionBuilder::input_filter`] was handed.
     pub(crate) input_filter: Option<InputFilterHook>,
     /// What [`ExtensionBuilder::treat_data`] was handed.
@@ -611,6 +632,7 @@ pub struct ExtensionBuilder {
     admission: Option<AdmissionHook>,
     post_startup: Option<PostStartupHook>,
     cached: Option<CachedHook>,
+    fatal_logged: Option<FatalLoggedHook>,
     input_filter: Option<InputFilterHook>,
     treat_data: Option<TreatDataHook>,
     upload: Option<UploadHook>,
@@ -882,6 +904,21 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The host's log for a fatal, `sapi_module.log_message` as phpdbg's
+    /// `php_sapi_phpdbg_log_message` serves it (`Z/sapi/phpdbg/phpdbg.c:731-770`):
+    /// asked once the host's log has taken a diagnostic of a fatal level,
+    /// with the request standing where the fatal was raised and before
+    /// `php_error_cb` displays it, writes the status and bails out, so
+    /// what the hook serves runs on the frames the fatal left standing.
+    /// Hooks are asked in bundle order until one answers
+    /// [`AfterLog::BailedOut`]. An extension a host declares for itself
+    /// is the one that hands it (ADR-0008, #1348).
+    #[must_use]
+    pub fn fatal_logged(mut self, hook: fn(&mut Request) -> AfterLog) -> ExtensionBuilder {
+        self.fatal_logged = Some(hook);
+        self
+    }
+
     /// The input filter, php's `sapi_module.input_filter` as `ext/filter`'s
     /// `MINIT` registers `php_sapi_filter` (`sapi_register_input_filter`):
     /// each variable php registers from what a host described, a query
@@ -1091,6 +1128,7 @@ impl ExtensionBuilder {
             admission: self.admission,
             post_startup: self.post_startup,
             cached: self.cached,
+            fatal_logged: self.fatal_logged,
             input_filter: self.input_filter,
             treat_data: self.treat_data,
             upload: self.upload,

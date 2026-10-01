@@ -112,7 +112,7 @@ third-engine-design.md
 | tier | tier.lock | 61 |  | pass |
 | harness | xtask.lock | 359 |  | pass |
 
-<!-- /computed in=44eefed59f65059fbc2adbabad5cc8873f9152aacba9843c5bfdba85c449e2e7 out=d05e7c3caa6192785320390a9377ca4f206c2bffebaa81a4d875c02be4513a0c -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -123,7 +123,7 @@ third-engine-design.md
 | lints.no-panic |  | deny_lints | no reading | Internal invariant failures are InternalError fatals with a message, not panics (design §10). |
 | engine.reentry-signature |  | check | no reading | A function in php_engine that calls execute or release takes &mut Request. |
 | api.no-hot |  | deny_pattern | no reading | php_heap::hot is for the handlers; api never re-exports it (design §4.4, §10). |
-| ext.no-private |  | deny_pattern | fail | Only a macro expansion names php_ext::__private; an extension's source never does (design §4.4, revision 34). |
+| ext.no-private |  | deny_pattern | no reading | Only a macro expansion names php_ext::__private; an extension's source never does (design §4.4, revision 34). |
 | api.lock-line |  | on | pass | A new pub item in api needs its api.lock line in the same commit; api holds to [budget] api_items (design §4.4). |
 | xtask.lock-line |  | on | pass | A new pub item in xtask needs its xtask.lock line in the same commit. |
 | ext.pub-beyond-extension |  | on | pass | api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12). |
@@ -132,17 +132,17 @@ third-engine-design.md
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | vocab.harness |  | avoid_from | pass | The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read. |
 | generated.committed |  | generated | pass | ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget. |
-| git.no-verify |  | deny_argv | fail | Commits run the pre-commit hook; --no-verify is not available to agents. |
-| ticket.close |  | deny_argv | fail | A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents. |
+| git.no-verify |  | deny_argv | no reading | Commits run the pre-commit hook; --no-verify is not available to agents. |
+| ticket.close |  | deny_argv | no reading | A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents. |
 | ticket.close-api |  | deny_pattern | no reading | The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. |
-| ticket.reply-unfiled |  | deny_pattern | fail | A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes. |
-| lanes.nightly |  | deny_pattern | fail | Nightly lanes run in CI only; run the per-crate subset. |
-| lanes.builder-subset |  | deny_pattern | fail | A builder runs its crates' subsets, and Zend/tests when it touches php_engine, php_compile, php_syntax or php_heap; the whole lane is the merge check's (specs §6). |
-| computed.force |  | deny_pattern | fail | `computed run --force` discards a hand edit; a person decides that. |
-| harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
-| divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
+| ticket.reply-unfiled |  | deny_pattern | no reading | A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes. |
+| lanes.nightly |  | deny_pattern | no reading | Nightly lanes run in CI only; run the per-crate subset. |
+| lanes.builder-subset |  | deny_pattern | no reading | A builder runs its crates' subsets, and Zend/tests when it touches php_engine, php_compile, php_syntax or php_heap; the whole lane is the merge check's (specs §6). |
+| computed.force |  | deny_pattern | no reading | `computed run --force` discards a hand edit; a person decides that. |
+| harness.self |  | deny | no reading | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
+| divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=94f8bd83a22db5a6cd6aef13c457bf57efaf2af74839db5b20e7c399a7954cf2 out=e344c9be2ccdb333d052e5b8af24046c1402e9d11807c92ab6dfb306536ee60c -->
+<!-- /computed in=9d470d5c6347177e04287cb2107e10306f618c17a69f18642f7d35f84f5fd769 out=defe71bb9d5b79d2aa5ec8b0ee6a4563a4eb5cc4b940cf3e1bc316d817d4598c -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

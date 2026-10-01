@@ -53,6 +53,8 @@ pub fn serve(engine: &Engine) -> i32 {
             prompt::begin_run(&mut s);
         }
         s.plan = Some(plan);
+        s.standing = None;
+        s.thrown_into = None;
         let description = describe(&s, plan);
         session::put(s);
         let observed = engine.serve(description, &mut Sink);
@@ -67,7 +69,48 @@ pub fn serve(engine: &Engine) -> i32 {
 /// After a request: the context marked as one that does not compile
 /// where its held request never reached its first opline, and a run
 /// that ended by itself reported as php reports it; the status where
-/// the request was a run.
+/// the request was a run. A context the compiler refused leaves the
+/// fatal's 255, which php's `EG(exit_status)` keeps for the session.
+///
+/// ```php
+/// function (
+/// ```
+/// ```request phpdbg
+/// q
+/// ```
+/// ```expect exit=255
+/// Parse error: Unclosed '(' in %SCRATCH%/witness.php on line 2
+/// prompt>
+/// ```
+///
+/// What `register` named goes where php's cycle starts its module again,
+/// after a run among them, so a user function registered before the run
+/// is no function after it.
+///
+/// ```php
+/// function foo($a = 0) {
+///   echo "in foo $a\n";
+/// }
+/// foo();
+/// ```
+/// ```request phpdbg
+/// register foo
+/// r
+/// b foo
+/// foo 2
+/// c
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Registered foo]
+/// prompt> in foo 0
+/// [Script ended normally]
+/// prompt> [Breakpoint #0 added at foo]
+/// prompt> [The command "foo" could not be found]
+/// prompt> [Not running]
+/// prompt>
+/// ```
 fn ended(s: &mut Session, plan: Plan, observed: &Observables) -> Option<i32> {
     let reached = s.plan != Some(Plan::Hold);
     s.plan = None;
@@ -77,7 +120,13 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) -> Option<i32> {
     s.stdin_file = None;
     if plan == Plan::Hold && !reached {
         s.context = Context::Refused;
-        return None;
+        return (observed.exit_code != 0).then_some(observed.exit_code);
+    }
+    // php's cycle ends with the request a run, a restart, `clean` or an
+    // `exec` during a run stood in (`phpdbg_clean(1, ...)`): the module
+    // starts again, `PHPDBG_G(registered)` built empty with it.
+    if s.executing || s.stopped == Some(Stop::Clean) {
+        s.registered.clear();
     }
     if !s.executing {
         // php's `EG(exit_status)` outlives the prompt it was set at: a
