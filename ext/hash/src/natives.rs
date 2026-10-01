@@ -558,6 +558,19 @@ pub(crate) type Context = Box<ContextState>;
 /// copy 320
 /// final -384
 /// ```
+///
+/// The first `HashContext` of a request costs what every later one does, its
+/// omitted `$options` no table:
+///
+/// ```php
+/// $m = memory_get_usage(); $a = hash_init('md5'); $b = memory_get_usage();
+/// $c = hash_init('md5');
+/// var_dump($b - $m, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(256)
+/// int(256)
+/// ```
 #[php_function]
 fn hash_init(
     req: &mut Request,
