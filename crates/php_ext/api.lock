@@ -230,6 +230,7 @@ call::clone_with
 call::closure_from_callable
 call::constant
 call::eval_const_expr
+call::eval_declared
 call::fetch_constant
 call::initialize_lazy
 call::instantiate

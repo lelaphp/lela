@@ -1722,6 +1722,23 @@ pub fn eval_const_expr(
     evaluate(req, expr, scope)
 }
 
+/// A declared value as `zend_declare_typed_property` and
+/// `zend_declare_class_constant_ex` keep it (`Z/Zend/zend_API.c:4510`,
+/// `:4852`): a string the declaration wrote is `zval_make_interned_string`'s,
+/// so a slot or a constant copied from it takes no owner; anything else
+/// is [`eval_const_expr`]'s. An attribute's argument and a user enum
+/// case's value php keeps unevaluated and never interns.
+pub fn eval_declared(
+    req: &mut Request,
+    expr: &ConstExpr,
+    scope: Option<ClassId>,
+) -> Result<Value, Thrown> {
+    if let ConstExpr::Str(s) = expr {
+        return Ok(Value::string(req.new_interned(s)?));
+    }
+    eval_const_expr(req, expr, scope)
+}
+
 /// `zend_ast_evaluate_ex`: one node of a constant expression under its
 /// own site ([`Request::evaluate_at`]).
 fn evaluate(req: &mut Request, expr: &ConstExpr, scope: Option<ClassId>) -> Result<Value, Thrown> {

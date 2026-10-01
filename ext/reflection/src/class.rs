@@ -9,7 +9,7 @@
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::{
-    call_named, eval_const_expr, initialize_lazy, known_method, mark_lazy_initialized,
+    call_named, eval_declared, initialize_lazy, known_method, mark_lazy_initialized,
     read_class_prop_silent, update_class_constants, write_static_prop,
 };
 use php_ext::decl::{ClassKind, MethodDecl, Name, TraitAdaptation, Visibility};
@@ -2629,7 +2629,7 @@ impl ReflectionClass {
                     continue;
                 }
                 let value = match &property.default {
-                    Some(expr) => eval_const_expr(req, expr, Some(*at))?,
+                    Some(expr) => eval_declared(req, expr, Some(*at))?,
                     None if property.ty.is_some() => continue,
                     None => Value::null(),
                 };
