@@ -14,7 +14,7 @@ use crate::bp::Kind;
 use crate::cmd::{self, Command, Param};
 use crate::input::{self, Line};
 use crate::out;
-use crate::session::{Context, Seek, SeekKind, Session, Stop};
+use crate::session::{Context, Origin, Seek, SeekKind, Session, Stop};
 
 /// Where the prompt stands.
 pub enum Here<'a> {
@@ -672,13 +672,19 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     ev(s, here, &code)
 }
 
-/// `PHPDBG_COMMAND(ev)`.
+/// `PHPDBG_COMMAND(ev)`: the code evaluated under `PHPDBG_IN_EVAL`, with
+/// the step put off while it runs and set again after where it stood.
 fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
     let Some((req, frame)) = here.standing() else {
         crate::host::idle(s, Command::Eval(code.to_vec()));
         return Ret::Success;
     };
-    match crate::session::lend(s, || tier::evaluate(req, frame, code)) {
+    let stepping = std::mem::take(&mut s.stepping);
+    s.origin = Origin::Eval;
+    let evaluated = crate::session::lend(s, || tier::evaluate(req, frame, code));
+    s.origin = Origin::Program;
+    s.stepping |= stepping;
+    match evaluated {
         Ok(tier::Evaluated::Printed(printed)) => {
             out::write(&printed);
             out::out(b"\n");

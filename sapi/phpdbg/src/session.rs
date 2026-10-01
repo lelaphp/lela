@@ -5,8 +5,8 @@
 //! out of while it runs a prompt and puts back after. What the prompt
 //! itself serves, an `ev` or a registered function, runs with the session
 //! lent back to the cell ([`lend`]), so a native reads and writes it as
-//! php's read `PHPDBG_G` at any time, and with [`Session::in_eval`] set,
-//! which keeps the debugger from stopping there (`PHPDBG_IN_EVAL`).
+//! php's read `PHPDBG_G` at any time, and the debugger drives it as it
+//! drives the program, by [`Session::origin`]'s rules where `ev` serves.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -105,6 +105,18 @@ pub struct Source {
     pub ops: Vec<(Opcode, u32)>,
 }
 
+/// Whose code the loop reaches: the program's, or what `ev` evaluates
+/// for the prompt, `PHPDBG_IN_EVAL` (`Z/sapi/phpdbg/phpdbg_prompt.c:951-975`),
+/// where a breakpoint, a watchpoint and a step still stop, at a prompt
+/// with no listing, and the seek and the report of an uncaught throwable
+/// are not made. A function `register` named is called with no mark of
+/// its own, and is the program's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Program,
+    Eval,
+}
+
 /// Everything the session keeps.
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)] // bits of `PHPDBG_G(flags)` and `PHPDBG_G`, one field each
@@ -162,9 +174,8 @@ pub struct Session {
     /// `PHPDBG_G(watchpoint_hit)`: a watch reported since the check that
     /// reads it last cleared it.
     pub watch_hit: bool,
-    /// `PHPDBG_IN_EVAL`: the prompt has lent the session to what it
-    /// serves, where a safepoint does not stop.
-    pub in_eval: bool,
+    /// Whose code the loop reaches.
+    pub origin: Origin,
 }
 
 impl Session {
@@ -195,7 +206,7 @@ impl Session {
             sources: Vec::new(),
             standing: None,
             watch_hit: false,
-            in_eval: false,
+            origin: Origin::Program,
         }
     }
 }
@@ -225,17 +236,12 @@ pub fn put(session: Session) {
     SESSION.set(Some(session));
 }
 
-/// `f` run with `s` lent back to its cell and flagged `in_eval`, as
-/// `PHPDBG_COMMAND(ev)` sets `PHPDBG_IN_EVAL` around what it evaluates
-/// (`Z/sapi/phpdbg/phpdbg_prompt.c:951-975`); `s` is what the cell holds
-/// after, what `f` left of it.
+/// `f` run with `s` lent back to its cell, for what the prompt serves;
+/// `s` is what the cell holds after, what `f` left of it.
 pub fn lend<R>(s: &mut Session, f: impl FnOnce() -> R) -> R {
-    let mut lent = std::mem::take(s);
-    lent.in_eval = true;
-    put(lent);
+    put(std::mem::take(s));
     let result = f();
-    if let Some(mut back) = take() {
-        back.in_eval = false;
+    if let Some(back) = take() {
         *s = back;
     }
     result

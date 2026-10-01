@@ -16,7 +16,7 @@ use php_sapi::tier::{self, Flow, FrameRef, Opcode, Request, Site, Stepped, Tier}
 use crate::bp::At;
 use crate::out;
 use crate::prompt::{self, Here, Outcome};
-use crate::session::{self, Context, Plan, SeekKind, Session};
+use crate::session::{self, Context, Origin, Plan, SeekKind, Session};
 
 /// The tier the `phpdbg` binary binds.
 #[derive(Debug, Clone, Copy, Default)]
@@ -31,11 +31,41 @@ impl Tier for Debugger {
     }
 }
 
-/// A serving entered at `frame`: the held request's prompt where the
-/// session asked for one, then the loop driven; nothing where the prompt
-/// is serving it, an `ev` or a registered function.
+/// A serving entered at `frame`: the held request's prompt or the idle
+/// request's command where the session asked for one, and the loop
+/// driven over every serving after it, what the prompt serves through
+/// `ev` or a registered function among them, as php's
+/// `phpdbg_execute_ex` runs every op array the request executes. A
+/// registered function is the program's code to the loop: it stops at a
+/// breakpoint with its listing, and goes on from there.
+///
+/// ```php
+/// function foo($a = 0) {
+///   echo "in foo $a\n";
+/// }
+/// foo();
+/// ```
+/// ```request phpdbg
+/// register foo
+/// b foo
+/// foo 7
+/// c
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Registered foo]
+/// prompt> [Breakpoint #0 added at foo]
+/// prompt> [Breakpoint #0 in foo() at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:   echo "in foo $a\n";
+///  00004: }
+///  00005: foo();
+/// prompt> in foo 7
+///
+/// prompt>
+/// ```
 fn entered(req: &mut Request, frame: FrameRef) -> Flow {
-    let Some(plan) = session::with(|s| if s.in_eval { None } else { s.plan }).flatten() else {
+    let Some(plan) = session::with(|s| s.plan).flatten() else {
         return Flow::Continue;
     };
     match plan {
@@ -44,6 +74,7 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             held(req, frame)
         }
         Plan::Idle => {
+            session::with(|s| s.plan = Some(Plan::Run));
             let Some(mut session) = session::take() else {
                 return Flow::Continue;
             };
@@ -226,9 +257,11 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
         function,
         class,
     };
-    // The uncaught throwable, once per throwable.
+    let origin = session::with(|s| s.origin).unwrap_or(Origin::Program);
+    // The uncaught throwable, once per throwable, outside what `ev`
+    // serves.
     let mut stop = false;
-    if let Some(thrown) = &pending {
+    if let Some(thrown) = pending.as_ref().filter(|_| origin == Origin::Program) {
         let handled = session::with(|s| s.handled == Some(thrown.id)).unwrap_or(true);
         if !handled && !caught_anywhere(req, at.frame) {
             session::with(|s| s.handled = Some(thrown.id));
@@ -261,11 +294,15 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
     if tier::exiting(req) {
         return Some(Flow::Resume(at.frame));
     }
-    session::with(|s| s.last_line = line);
     if !stops {
+        session::with(|s| s.last_line = line);
         return None;
     }
-    interactive(req, at.frame, &position.file, shown)
+    let flow = interactive(req, at.frame, &position.file, shown);
+    // `next:`'s `PHPDBG_G(last_line)`, after the prompt, where what an
+    // `ev` there ran has moved it.
+    session::with(|s| s.last_line = line);
+    flow
 }
 
 /// `phpdbg_print_opline`'s oplog: the opline written to the oplog open
@@ -335,7 +372,7 @@ fn decide(req: &mut Request, here: &At<'_>, checks: &Checks) -> bool {
 /// The seek and the step: whether they stop the loop here or let it go
 /// on, none where the checks after them decide.
 fn moved(s: &mut Session, here: &At<'_>, checks: &Checks) -> Option<bool> {
-    if let Some(seek) = &s.seek {
+    if let Some(seek) = s.seek.as_ref().filter(|_| s.origin == Origin::Program) {
         if seek.frame != checks.frame {
             if s.stepping {
                 s.stepping = false;
@@ -428,11 +465,33 @@ fn caught_anywhere(req: &mut Request, frame: FrameRef) -> bool {
     false
 }
 
-/// `DO_INTERACTIVE`: the listing, then the prompt with the throwable
-/// set aside; `Some` where the prompt ended the request.
+/// `DO_INTERACTIVE`: the listing, but where `ev` serves (`list_code`),
+/// then the prompt with the throwable set aside; `Some` where the prompt
+/// ended the request. A breakpoint inside what `ev` serves stops there,
+/// at a prompt with no listing.
+///
+/// ```php
+/// function f() {
+///   echo "in f\n";
+/// }
+/// f();
+/// ```
+/// ```request phpdbg
+/// b f
+/// ev f()
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at f]
+/// prompt> [Breakpoint #0 in f() at %SCRATCH%/witness.php:3, hits: 1]
+/// prompt>
+/// ```
 fn interactive(req: &mut Request, frame: FrameRef, file: &[u8], line: u32) -> Option<Flow> {
     let mut session = session::take()?;
-    crate::list::code(&session, file, line);
+    if session.origin == Origin::Program {
+        crate::list::code(&session, file, line);
+    }
     let aside = tier::set_aside(req);
     let outcome = {
         let mut here = Here::Paused { req, frame };
