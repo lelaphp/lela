@@ -13,6 +13,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
@@ -30,8 +31,9 @@ use crate::api::abi::{
     DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
     Validation,
 };
+use crate::api::call::Function;
 use crate::api::raising::Level;
-use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
+use crate::api::request::{BuildDefs, Ending, ExtensionId, Request, Sink, ini_truth};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
@@ -79,6 +81,39 @@ pub struct RequestDescription {
     /// [`IniOrigin`] says, in the order given: php-fpm's `PHP_VALUE` and
     /// `PHP_ADMIN_VALUE` and the lines of the request's `.user.ini` files.
     pub ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
+    /// How the program is served.
+    pub primary: Primary,
+}
+
+/// How a host has its program served: wrapped, as `php_execute_script`
+/// serves it for every host of php's but one; or bare, as php's phpdbg
+/// serves it, the file compiled with `zend_compile_file` and the op array
+/// handed to `zend_execute` (`Z/sapi/phpdbg/phpdbg_prompt.c:534-563, 866`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Primary {
+    /// `php_execute_script`: `auto_prepend_file` and `auto_append_file`
+    /// around the program, its path expanded and put in
+    /// `EG(included_files)`, and what it leaves uncaught rendered by
+    /// `zend_exception_error` once its handler has had it.
+    #[default]
+    Wrapped,
+    /// `zend_compile_file` and `zend_execute`: the program alone, under
+    /// the name the host gave, in no table of included files, and what
+    /// it leaves uncaught, once its handler has had it, kept for the host
+    /// to render in [`Observables::uncaught`], as `phpdbg_handle_exception`
+    /// renders it.
+    Bare,
+}
+
+/// A throwable the program left uncaught, for a host that renders it:
+/// its class, its `file` and `line`, and what its `__toString` answered,
+/// empty where that threw.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Uncaught {
+    pub class: Vec<u8>,
+    pub file: Vec<u8>,
+    pub line: i64,
+    pub text: Vec<u8>,
 }
 
 /// How a host sets an entry for a request, php-fpm's three ways.
@@ -179,9 +214,8 @@ pub struct WebRequest {
     pub content_type: Option<Vec<u8>>,
     /// `content_length`, as the host was told it.
     pub content_length: i64,
-    /// The body, what `sapi_module.read_post` hands out: the bytes the
-    /// host read, no more than `content_length`.
-    pub body: Vec<u8>,
+    /// The body, what `sapi_module.read_post` hands out.
+    pub body: Body,
     /// The request headers, what `getallheaders()` answers.
     pub headers: Vec<(Vec<u8>, Vec<u8>)>,
     /// `no_headers`: the host writes no header block, and the request
@@ -191,6 +225,24 @@ pub struct WebRequest {
     /// before the request starts: 200, or php-cgi's 404 for a file it
     /// could not open.
     pub response_code: i64,
+}
+
+/// What a host's `sapi_module.read_post` hands out over one request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Body {
+    /// The bytes the host read, no more than `content_length`.
+    Read(Vec<u8>),
+    /// Nothing, and the `E_WARNING` the host's read raises each time it
+    /// is asked, as php-fpm's `sapi_cgi_read_post` raises
+    /// `REQUEST_BODY_FILE: open('%s') failed: %s (%d)` where the file the
+    /// server names does not open (`Z/sapi/fpm/fpm/fpm_main.c:448`).
+    Refused(String),
+}
+
+impl Default for Body {
+    fn default() -> Body {
+        Body::Read(Vec::new())
+    }
 }
 
 /// A request's method, `request_method`, read as `sapi_activate` and
@@ -467,6 +519,9 @@ pub struct Observables {
     pub fatal: Option<String>,
     /// `zend_memory_peak_usage(1)`: the most memory the request held.
     pub memory_peak: usize,
+    /// What the program left uncaught, where the host renders it
+    /// ([`Primary::Bare`]).
+    pub uncaught: Option<Uncaught>,
 }
 
 /// The loop bound to the engine's tier, `execute::<T>` for one `T`.
@@ -540,6 +595,24 @@ pub(crate) struct Shared {
     /// synthesises, which `ce->function_table` has no row for, so no
     /// lookup by name and no rendering finds it.
     pub(crate) trampolines: Vec<MethodDecl>,
+    /// `CG(class_table)`'s keys as startup leaves them
+    /// ([`class_keys`]): what a lookup by name finds among the engine's
+    /// classes in one hash lookup, as `zend_hash_find` does, before the
+    /// request's own rows.
+    pub(crate) class_keys: HashMap<Box<[u8]>, ClassId>,
+    /// Each class's `ce->function_table`, one row per row of `classes`
+    /// ([`function_tables`]): its own methods under their lowered
+    /// names, each the `Function` its row of `methods` is.
+    pub(crate) function_tables: Vec<HashMap<Box<[u8]>, Function>>,
+    /// Each class's `ce->parent`, one row per row of `classes`, resolved
+    /// once as `zend_register_internal_class_ex` links it: a native
+    /// class's parent is a native class.
+    pub(crate) parents: Vec<Option<ClassId>>,
+    /// Each class's placed properties, one row per row of `classes`,
+    /// built at the first read by any request
+    /// ([`Request::placed_properties`]): what the class and its native
+    /// parents declare, which never changes.
+    pub(crate) placed: Vec<OnceLock<crate::api::request::Placed>>,
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
     ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
@@ -553,6 +626,8 @@ pub(crate) struct Shared {
     /// the other constants, so a request that reads the name its host
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
     sapi_names: Vec<(Box<[u8]>, Zval)>,
+    /// The build's facts ([`EngineBuilder::configure`]).
+    pub(crate) build_defs: BuildDefs,
     /// `CG(skip_shebang)` for every file a request compiles, which the
     /// host asked for ([`EngineBuilder::skip_shebang`]).
     pub(crate) shebang: php_compile::Shebang,
@@ -606,6 +681,13 @@ pub(crate) struct Shared {
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
     strings: Mutex<Strings>,
+    /// php's `interned_strings_permanent` as `zend_interned_strings_switch_storage`
+    /// leaves it after `MINIT`: `zend_known_strings`, and the name of
+    /// every class, method, property, class constant and function the
+    /// engine and the bundle declare, interned at startup and frozen, so
+    /// a request asking for one finds it here and allocates nothing
+    /// ([`Shared::permanent`]).
+    names: Strings,
     /// How the engine's startup finished, which the first request's
     /// host finishes ([`Engine::started`]): serving, with what the unit
     /// cache preloaded, or refusing to serve anything.
@@ -762,6 +844,64 @@ fn link_classes(core: &Extension, extensions: &[Extension]) -> LinkedClasses {
         methods,
         trampolines,
     }
+}
+
+/// `CG(class_table)`'s keys at the end of startup: each class under its
+/// lowered name, as `zend_register_internal_class_ex` adds it, then each
+/// stub `@alias` under its own, as `zend_register_class_alias_ex` adds
+/// it after its class. `zend_hash_add` refuses a key the table holds, so
+/// the first row of a name is the one found.
+fn class_keys(classes: &[ClassDecl]) -> HashMap<Box<[u8]>, ClassId> {
+    let mut keys = HashMap::with_capacity(classes.len());
+    let ids = (0u32..).map(ClassId);
+    for (class, decl) in ids.clone().zip(classes) {
+        keys.entry(lowered(&decl.name.0)).or_insert(class);
+    }
+    for (class, decl) in ids.zip(classes) {
+        for alias in &decl.aliases {
+            keys.entry(lowered(&alias.0)).or_insert(class);
+        }
+    }
+    keys
+}
+
+/// Each native class's `ce->function_table` as `zend_register_functions`
+/// fills it: every row of `methods` a class declares, under the lowered
+/// name of its declaration, numbered past the `functions` natives. The
+/// first of a name stays, as `zend_hash_add_ptr` keeps it.
+fn function_tables(
+    classes: &[ClassDecl],
+    methods: &[NativeMethod],
+    functions: usize,
+) -> Vec<HashMap<Box<[u8]>, Function>> {
+    let mut tables: Vec<HashMap<Box<[u8]>, Function>> = vec![HashMap::new(); classes.len()];
+    for (row, method) in (functions..).zip(methods) {
+        let MethodAt::Declared { class, at } = method.at else {
+            continue;
+        };
+        let (Ok(class), Ok(at), Ok(row)) = (
+            usize::try_from(class.0),
+            usize::try_from(at),
+            u32::try_from(row),
+        ) else {
+            continue;
+        };
+        let (Some(table), Some(decl)) = (
+            tables.get_mut(class),
+            classes.get(class).and_then(|decl| decl.methods.get(at)),
+        ) else {
+            continue;
+        };
+        table
+            .entry(lowered(&decl.function.name.0))
+            .or_insert(Function(row));
+    }
+    tables
+}
+
+/// `zend_string_tolower`: the key a name is found under.
+fn lowered(name: &[u8]) -> Box<[u8]> {
+    name.to_ascii_lowercase().into_boxed_slice()
 }
 
 /// `zend_declare_class_constant_ex` over a class another extension
@@ -1104,6 +1244,13 @@ impl Shared {
             },
             stack,
         )
+    }
+
+    /// The permanent string for `bytes`, a name the engine or the bundle
+    /// declared, or `None` for one no declaration made
+    /// (`zend_string_init_interned_request`'s first lookup).
+    pub(crate) fn permanent(&self, bytes: &[u8]) -> Option<php_heap::Str> {
+        self.names.find(bytes)
     }
 
     /// How many strings the engine's table holds, opcache's
@@ -1927,8 +2074,10 @@ pub struct EngineBuilder {
     resume: Loop,
     tier_extension: Option<Extension>,
     host_extension: Option<crate::host_extension::HostExtension>,
+    additional_extension: Option<Extension>,
     host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     shebang: php_compile::Shebang,
+    configure: &'static [&'static str],
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
 }
@@ -1946,6 +2095,16 @@ impl EngineBuilder {
     #[must_use]
     pub fn trace_natives_to(mut self, path: std::path::PathBuf) -> EngineBuilder {
         self.trace_to = Some(path);
+        self
+    }
+
+    /// The `configure` switches that build the bundle the host hands the
+    /// engine, php's spelling one each (`--enable-mbstring`), which
+    /// [`BuildDefs::configure`] renders as `CONFIGURE_COMMAND`; none
+    /// until a host names them.
+    #[must_use]
+    pub fn configure(mut self, switches: &'static [&'static str]) -> EngineBuilder {
+        self.configure = switches;
         self
     }
 
@@ -1990,6 +2149,18 @@ impl EngineBuilder {
     #[must_use]
     pub fn host_extension(mut self, host: crate::host_extension::HostExtension) -> EngineBuilder {
         self.host_extension = Some(host);
+        self
+    }
+
+    /// The extension a host built itself and hands `php_module_startup`
+    /// as its `additional_module`, as phpdbg hands
+    /// `sapi_phpdbg_module_entry` (`Z/sapi/phpdbg/phpdbg.c:682-697`): its
+    /// natives, constants and ini entries, started after the bundle's as
+    /// `zend_sort_modules` leaves them, for a host that declares natives of
+    /// its own (ADR-0008, #1348).
+    #[must_use]
+    pub fn additional_extension(mut self, extension: Extension) -> EngineBuilder {
+        self.additional_extension = Some(extension);
         self
     }
 
@@ -2053,6 +2224,7 @@ impl EngineBuilder {
             extensions.extend(hosted.extension);
             hosted.additional
         });
+        extensions.extend(self.additional_extension);
         sort_modules(&mut extensions);
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
@@ -2113,6 +2285,16 @@ impl EngineBuilder {
             methods,
             trampolines,
         } = link_classes(&core, &extensions);
+        let class_keys = class_keys(&classes);
+        let function_tables = function_tables(&classes, &methods, functions.len());
+        let parents = classes
+            .iter()
+            .map(|decl| {
+                let parent = decl.parent.as_ref()?;
+                class_keys.get(&*lowered(&parent.0)).copied()
+            })
+            .collect();
+        let placed = classes.iter().map(|_| OnceLock::new()).collect();
         // `module_registry`: `Core` first, as `zend_startup` registers it,
         // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
@@ -2121,6 +2303,7 @@ impl EngineBuilder {
             .iter()
             .flat_map(|e| e.constants.iter().cloned())
             .collect();
+        let names = permanent_names(&functions, &classes);
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
@@ -2139,11 +2322,16 @@ impl EngineBuilder {
                 natives,
                 methods,
                 trampolines,
+                class_keys,
+                function_tables,
+                parents,
+                placed,
                 constants,
                 engine_states: Vec::new(),
                 ini,
                 constant_values,
                 sapi_names,
+                build_defs: BuildDefs::of(self.configure),
                 shebang: self.shebang,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
@@ -2158,6 +2346,7 @@ impl EngineBuilder {
                 units,
                 persistent: crate::api::abi::Pool::new(PERSISTENT_ENTRIES),
                 strings: Mutex::new(strings),
+                names,
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
             }),
@@ -2165,6 +2354,127 @@ impl EngineBuilder {
         engine.register_ini(held, self.host_extension);
         engine
     }
+}
+
+/// `ZEND_KNOWN_STRINGS` (`Z/Zend/zend_string.h`): what
+/// `zend_interned_strings_init` interns before any extension starts, the
+/// keys of a backtrace's rows and of a `Throwable`'s properties, `->` and
+/// `::` among them, which `ZSTR_KNOWN` hands out with no allocation.
+const KNOWN_STRINGS: [&str; 88] = [
+    "file",
+    "line",
+    "function",
+    "class",
+    "object",
+    "type",
+    "->",
+    "::",
+    "args",
+    "unknown",
+    "Unknown",
+    "exit",
+    "clone",
+    "eval",
+    "include",
+    "require",
+    "include_once",
+    "require_once",
+    "scalar",
+    "error_reporting",
+    "static",
+    "this",
+    "value",
+    "key",
+    "__invoke",
+    "previous",
+    "code",
+    "message",
+    "severity",
+    "string",
+    "trace",
+    "scheme",
+    "host",
+    "port",
+    "user",
+    "username",
+    "pass",
+    "password",
+    "path",
+    "query",
+    "fragment",
+    "NULL",
+    "boolean",
+    "integer",
+    "double",
+    "array",
+    "resource",
+    "resource (closed)",
+    "name",
+    "argv",
+    "argc",
+    "Array",
+    "bool",
+    "int",
+    "float",
+    "callable",
+    "iterable",
+    "void",
+    "never",
+    "false",
+    "true",
+    "null",
+    "mixed",
+    "Traversable",
+    "self",
+    "parent",
+    "__sleep",
+    "__wakeup",
+    "cases",
+    "from",
+    "tryFrom",
+    "tryfrom",
+    "_SERVER",
+    "_ENV",
+    "_REQUEST",
+    "count",
+    "SensitiveParameter",
+    "[constant expression]",
+    "Deprecated",
+    "since",
+    "get",
+    "set",
+    "8.0",
+    "8.1",
+    "8.2",
+    "8.3",
+    "8.4",
+    "8.5",
+];
+
+/// The names `MINIT` interns permanently as the engine and the bundle
+/// register their declarations (`zend_register_functions`,
+/// `zend_register_internal_class_ex`, `zend_declare_typed_property`,
+/// `zend_declare_class_constant_ex`): every function's, class's,
+/// method's, property's and class constant's name as declared. A name
+/// the table refuses is left to the request that asks for it.
+fn permanent_names(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings {
+    let mut names = Strings::new();
+    for known in KNOWN_STRINGS {
+        let _ = names.intern(known.as_bytes());
+    }
+    let declared = functions
+        .iter()
+        .map(|decl| &decl.name)
+        .chain(classes.iter().flat_map(|decl| {
+            std::iter::once(&decl.name)
+                .chain(decl.methods.iter().map(|method| &method.function.name))
+                .chain(decl.properties.iter().map(|property| &property.name))
+                .chain(decl.constants.iter().map(|constant| &constant.name))
+        }));
+    for name in declared {
+        let _ = names.intern(&name.0);
+    }
+    names
 }
 
 /// `zend_register_constant` at `MINIT`: each constant's value, a string
@@ -2305,11 +2615,20 @@ impl Engine {
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
             host_extension: None,
+            additional_extension: None,
             host_ini: Vec::new(),
             shebang: php_compile::Shebang::Read,
+            configure: &[],
             #[cfg(feature = "witness-trace")]
             trace_to: None,
         }
+    }
+
+    /// The build's facts, php's `main/build-defs.h`: what the host's
+    /// `-v` prints and phpinfo's build rows say.
+    #[must_use]
+    pub fn build_defs(&self) -> &BuildDefs {
+        &self.shared.build_defs
     }
 
     /// `zend_flf_functions` by name, what `Unit::dump` prints a
@@ -2830,10 +3149,11 @@ impl Engine {
     /// program, then `auto_append_file`, each while the one before ran
     /// to its end; whether the program did.
     pub(crate) fn execute_script(&self, req: &mut Request, source: Option<&[u8]>) -> bool {
-        if !auto_file(req, b"auto_prepend_file", self.shared.entry) {
+        let script = req.primary() == Primary::Wrapped;
+        if script && !auto_file(req, b"auto_prepend_file", self.shared.entry) {
             return false;
         }
-        let ran = match self.primary(req, source, true) {
+        let ran = match self.primary(req, source, script) {
             Some(Ok(unit)) => serve_unit(req, &unit, self.shared.entry),
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
@@ -2845,7 +3165,7 @@ impl Engine {
             }
             None => false,
         };
-        ran && auto_file(req, b"auto_append_file", self.shared.entry)
+        ran && (!script || auto_file(req, b"auto_append_file", self.shared.entry))
     }
 
     /// The program compiled: the source the host handed over under the
@@ -3090,6 +3410,7 @@ impl Engine {
                 headers_sent: true,
                 fatal,
                 memory_peak: req.memory_peak(true),
+                uncaught: req.take_kept_uncaught(),
             },
             trace,
         )
@@ -3434,10 +3755,15 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     let exited = req.unwind_exit();
     // What the loop left pending for the user exception handler, served
     // with the main frame left (`zend_execute_scripts`).
-    if req.is_pending()
-        && let Err(fatal) = req.uncaught()
-    {
-        req.end_in(&fatal);
+    if req.is_pending() {
+        match req.primary() {
+            Primary::Wrapped => {
+                if let Err(fatal) = req.uncaught() {
+                    req.end_in(&fatal);
+                }
+            }
+            Primary::Bare => req.keep_uncaught(),
+        }
     }
     !exited && !req.bailing_out() && req.ending().is_none()
 }
@@ -4865,6 +5191,81 @@ mod tests {
         let (body, observables) = files.serve(&Engine::builder().build(), "main.php");
         assert_eq!(body, "end\nd2\nd3\nd1\n");
         assert_eq!(observables.exit_code, 0);
+    }
+
+    /// A program served as php's phpdbg serves one
+    /// ([`Primary::Bare`]): the throwable it leaves uncaught is kept
+    /// for the host, its class, site and `__toString`, and nothing is
+    /// rendered; the handler `set_exception_handler` set has it first,
+    /// and what it takes is not kept; the file is no included file.
+    /// The native a host's own extension declares, for the test below.
+    #[php_macros::php_function]
+    fn host_module_answer() -> i64 {
+        42
+    }
+
+    /// An extension a host built itself starts with the bundle: its natives
+    /// are callable and its name is a loaded extension's, the last one
+    /// `get_loaded_extensions()` lists, as php lists phpdbg's.
+    #[test]
+    fn an_extension_the_host_built_starts_after_the_bundle() {
+        let built = crate::api::abi::ExtensionBuilder::default()
+            .functions(vec![host_module_answer::declared()])
+            .build("phpdbg");
+        let engine = Engine::builder().additional_extension(built).build();
+        let (body, _) = served(
+            &engine,
+            "<?php echo host_module_answer(), ' ', extension_loaded('phpdbg') ? 'loaded' : 'absent', ' '; foreach (get_loaded_extensions() as $last) {} echo $last;",
+        );
+        assert_eq!(body, "42 loaded phpdbg");
+    }
+
+    #[test]
+    fn a_program_served_for_a_host_that_renders_the_uncaught_keeps_it() {
+        let files = Files::new(
+            "primary",
+            &[
+                (
+                    "thrown.php",
+                    "<?php\necho get_included_files() === [] ? \"none\\n\" : \"some\\n\";\nthrow new ErrorException(\"no\");\n",
+                ),
+                (
+                    "handled.php",
+                    "<?php\nset_exception_handler(function ($e) { echo \"took \", $e->getMessage(), \"\\n\"; });\nthrow new Exception(\"x\");\n",
+                ),
+            ],
+        );
+        let serve = |name: &str| {
+            let mut sink = Kept::default();
+            let observables = Engine::builder().build().serve(
+                RequestDescription {
+                    sapi_name: String::from("phpdbg"),
+                    script_name: Some(files.dir.join(name).as_os_str().as_encoded_bytes().to_vec()),
+                    cwd: files.dir.clone(),
+                    primary: Primary::Bare,
+                    ..RequestDescription::default()
+                },
+                &mut sink,
+            );
+            (
+                String::from_utf8_lossy(&sink.body).into_owned(),
+                observables,
+            )
+        };
+        let (body, observables) = serve("thrown.php");
+        assert_eq!(body, "none\n");
+        let uncaught = observables.uncaught.unwrap_or_default();
+        assert_eq!(uncaught.class, b"ErrorException");
+        assert_eq!(uncaught.line, 3);
+        assert!(uncaught.file.ends_with(b"thrown.php"));
+        assert!(
+            uncaught.text.starts_with(b"ErrorException: no in "),
+            "{uncaught:?}"
+        );
+        assert_eq!(observables.exit_code, 255);
+        let (body, observables) = serve("handled.php");
+        assert_eq!(body, "took x\n");
+        assert_eq!(observables.uncaught, None);
     }
 
     /// A file the parser refuses is the `ParseError` the includer may

@@ -15,7 +15,8 @@
 //! frames of a slow request's trace where the child's memory is readable,
 //! which php reads out of it: the child is stopped and its memory asked
 //! for as php asks ([`slowlog`]), and the entry carries the request's
-//! time, pool, pid and program (#1301).
+//! time, pool, pid and program, until the engine's frame chain is one
+//! another process can read (#1384).
 
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
@@ -49,6 +50,7 @@ mod worker;
 mod zlog;
 
 use std::io::Write;
+use std::os::fd::AsRawFd as _;
 use std::process::ExitCode;
 
 use php_sapi::getopt::{Getopt, Opt, Taken, opt};
@@ -189,6 +191,7 @@ fn engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
         .extensions(&extensions)
+        .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
     php_sapi::start(builder, ini, Some(HostExtension::FpmFcgi))
 }
@@ -200,11 +203,16 @@ fn print(text: &str) {
 
 /// php-fpm's `main`.
 pub fn main() -> ExitCode {
-    let _ = nix::sys::signal::sigprocmask(
+    if nix::sys::signal::sigprocmask(
         nix::sys::signal::SigmaskHow::SIG_BLOCK,
         Some(&master::block_set(false)),
         None,
-    );
+    )
+    .is_err()
+    {
+        crate::zlog!(Warning @ main:1594, "Could die in the case of too early reload signal");
+    }
+    crate::zlog!(Debug @ main:1596, "Blocked some signals");
     // SIGPIPE is the standard library's ignored already, as php ignores it
     // in standalone mode so a closed socket does not kill the process.
     let words: Vec<Vec<u8>> = std::env::args_os()
@@ -223,11 +231,7 @@ pub fn main() -> ExitCode {
             EXIT_OK
         }
         Ask::Version => {
-            print(&php_sapi::version(
-                worker::NAME,
-                env!("PHP_BUILD_EPOCH"),
-                &engine(&ini),
-            ));
+            print(&php_sapi::version(worker::NAME, &engine(&ini)));
             EXIT_OK
         }
         Ask::Info => {
@@ -259,12 +263,22 @@ fn run(ini: &[(String, String)], args: Args) -> u8 {
         Init::ExitOk => return EXIT_OK,
         Init::Error(pipe) => {
             if let Some(pipe) = pipe {
+                crate::zlog!(
+                    Debug @ main:1793,
+                    "Sending \"0\" (error) to parent via fd={}",
+                    pipe.as_raw_fd()
+                );
                 let _ = nix::unistd::write(&pipe, &0i32.to_ne_bytes());
             }
             return EXIT_CONFIG;
         }
     };
     if let Some(pipe) = fpm.send_config_pipe.take() {
+        crate::zlog!(
+            Debug @ main:1806,
+            "Sending \"1\" (OK) to parent via fd={}",
+            pipe.as_raw_fd()
+        );
         let _ = nix::unistd::write(&pipe, &1i32.to_ne_bytes());
     }
     let started = engine.startup_errors().to_owned();

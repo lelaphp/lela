@@ -1,0 +1,649 @@
+//! A command line read as phpdbg reads one: its lexer
+//! (`Z/sapi/phpdbg/phpdbg_lexer.l`) and its grammar
+//! (`phpdbg_parser.y`), which cut the line at each `#` into commands and
+//! each command into typed parameters, `ev`, `sh` and `run` taking the
+//! rest of their command raw.
+
+use std::fmt::Write as _;
+
+/// One parameter, `phpdbg_param_t` by its type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Param {
+    /// `STR_PARAM`: a word, a quoted one unescaped.
+    Str(Vec<u8>),
+    /// `NUMERIC_PARAM`: digits as `atoi` reads them, or a truthy or
+    /// falsy word as one or zero.
+    Num(i64),
+    /// `ADDR_PARAM`: `0x` and hex digits.
+    Addr(u64),
+    /// `OP_PARAM`: `ZEND_` and a name.
+    Op(Vec<u8>),
+    /// `FILE_PARAM`: `file:line`.
+    File { name: Vec<u8>, line: i64 },
+    /// `NUMERIC_FILE_PARAM`: `file:#opline`.
+    NumericFile { name: Vec<u8>, line: i64 },
+    /// `METHOD_PARAM`: `class::method`.
+    Method { class: Vec<u8>, name: Vec<u8> },
+    /// `NUMERIC_METHOD_PARAM`: `class::method#opline`.
+    NumericMethod {
+        class: Vec<u8>,
+        name: Vec<u8>,
+        num: i64,
+    },
+    /// `NUMERIC_FUNCTION_PARAM`: `function#opline`.
+    NumericFunction { name: Vec<u8>, num: i64 },
+    /// `COND_PARAM`: `if` and the raw rest.
+    Cond(Vec<u8>),
+}
+
+impl Param {
+    /// `phpdbg_get_param_type`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Param::Str(_) => "string",
+            Param::Num(_) => "numeric",
+            Param::Addr(_) => "address",
+            Param::Method { .. } => "method",
+            Param::NumericFunction { .. } => "function opline",
+            Param::NumericMethod { .. } => "method opline",
+            Param::File { .. } => "file or file opline",
+            Param::Op(_) | Param::NumericFile { .. } | Param::Cond(_) => "unknown",
+        }
+    }
+
+    /// `phpdbg_param_tostring`.
+    pub fn text(&self) -> Vec<u8> {
+        let mut text = String::new();
+        let lossy = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+        let _ = match self {
+            Param::Str(s) | Param::Op(s) | Param::Cond(s) => write!(text, "{}", lossy(s)),
+            Param::Addr(addr) => write!(text, "{addr}"),
+            Param::Num(num) => write!(text, "{num}"),
+            Param::Method { class, name } => write!(text, "{}::{}", lossy(class), lossy(name)),
+            Param::File { name, line } | Param::NumericFile { name, line } => {
+                write!(text, "{}:{line}", lossy(name))
+            }
+            Param::NumericFunction { name, num } => write!(text, "{}#{num}", lossy(name)),
+            Param::NumericMethod { class, name, num } => {
+                write!(text, "{}::{}#{num}", lossy(class), lossy(name))
+            }
+        };
+        text.into_bytes()
+    }
+}
+
+/// One command of a line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// A command by name and its parameters: the first is the name.
+    Params(Vec<Param>),
+    /// `ev` and the raw code after it.
+    Eval(Vec<u8>),
+    /// `sh` and the raw line after it.
+    Shell(Vec<u8>),
+    /// `run` or `r` and what followed, raw, where something did.
+    Run(Option<Vec<u8>>),
+}
+
+/// The lexer's tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Token {
+    Separator,
+    Colon,
+    DColon,
+    Pound,
+    Proto(Vec<u8>),
+    Id(Vec<u8>),
+    Digits(i64),
+    Truthy(i64),
+    Addr(u64),
+    Opcode(Vec<u8>),
+    If,
+    Input(Vec<u8>),
+    Eval,
+    Shell,
+    Run,
+    ReqId,
+}
+
+/// `phpdbg_lexer.l`'s conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    Initial,
+    Normal,
+    PreRaw,
+    Raw,
+}
+
+fn is_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\r' | b'\t')
+}
+
+fn is_end(b: Option<&u8>) -> bool {
+    matches!(b, None | Some(b'\n' | 0))
+}
+
+/// The line cut into tokens.
+fn tokens(line: &[u8]) -> Vec<Token> {
+    let mut out = Vec::new();
+    let mut state = State::Initial;
+    let mut at = 0;
+    while !is_end(line.get(at)) {
+        let rest = &line[at..];
+        let Some(&c) = rest.first() else { break };
+        if is_ws(c) {
+            at += rest.iter().take_while(|b| is_ws(**b)).count();
+            continue;
+        }
+        if c == b'#' && !(state == State::Normal && digits_len(&rest[1..]) > 0) {
+            out.push(Token::Separator);
+            state = State::Initial;
+            at += 1;
+            continue;
+        }
+        if matches!(state, State::PreRaw | State::Normal)
+            && let Some(len) = req_id_len(rest)
+        {
+            out.push(Token::ReqId);
+            at += len;
+            continue;
+        }
+        match state {
+            State::Initial => {
+                if let Some((token, len)) = keyword(rest) {
+                    out.push(token);
+                    at += len;
+                    state = State::PreRaw;
+                } else {
+                    state = State::Normal;
+                }
+            }
+            State::PreRaw => state = State::Raw,
+            State::Raw => {
+                let len = input_len(rest);
+                if len == 0 {
+                    break;
+                }
+                out.push(Token::Input(rest[..len].to_vec()));
+                at += len;
+            }
+            State::Normal => {
+                let (token, len, raw) = normal(rest);
+                if len == 0 {
+                    break;
+                }
+                out.push(token);
+                at += len;
+                if raw {
+                    state = State::Raw;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `ev`, `sh`, `run` or `r` and blanks at the start of a command.
+fn keyword(rest: &[u8]) -> Option<(Token, usize)> {
+    for (word, token) in [
+        (&b"ev"[..], Token::Eval),
+        (b"sh", Token::Shell),
+        (b"run", Token::Run),
+        (b"r", Token::Run),
+    ] {
+        if rest.starts_with(word) && rest.get(word.len()).copied().is_some_and(is_ws) {
+            let blanks = rest[word.len()..].iter().take_while(|b| is_ws(**b)).count();
+            return Some((token, word.len() + blanks));
+        }
+    }
+    None
+}
+
+/// `"-r"{WS}?{DIGITS}`.
+fn req_id_len(rest: &[u8]) -> Option<usize> {
+    let after = rest.strip_prefix(b"-r")?;
+    let blanks = after.iter().take_while(|b| is_ws(**b)).count();
+    let digits = digits_len(&after[blanks..]);
+    (digits > 0).then_some(2 + blanks + digits)
+}
+
+/// `{DIGITS}`, `[-]?[0-9.]+`.
+fn digits_len(rest: &[u8]) -> usize {
+    let sign = usize::from(rest.first() == Some(&b'-'));
+    let body = rest[sign..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit() || **b == b'.')
+        .count();
+    if body == 0 { 0 } else { sign + body }
+}
+
+/// `atoi`.
+fn atoi(text: &[u8]) -> i64 {
+    let (negative, digits) = match text.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        _ => (false, text),
+    };
+    let mut n: i64 = 0;
+    for b in digits.iter().take_while(|b| b.is_ascii_digit()) {
+        n = n.wrapping_mul(10).wrapping_add(i64::from(b - b'0'));
+    }
+    if negative { -n } else { n }
+}
+
+/// `{GENERIC_ID}`'s first alternative, `([^ \r\n\t:#\000"']|":\\")+`.
+fn plain_id_len(rest: &[u8]) -> usize {
+    let mut at = 0;
+    loop {
+        match rest.get(at) {
+            Some(b':') if rest.get(at + 1) == Some(&b'\\') => at += 2,
+            Some(b)
+                if !matches!(
+                    b,
+                    b' ' | b'\r' | b'\n' | b'\t' | b':' | b'#' | 0 | b'"' | b'\''
+                ) =>
+            {
+                at += 1;
+            }
+            _ => return at,
+        }
+    }
+}
+
+/// `{GENERIC_ID}`'s quoted alternatives: the length, and the text
+/// unescaped as `unescape_string` does.
+fn quoted(rest: &[u8]) -> Option<(usize, Vec<u8>)> {
+    let quote = *rest.first()?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let mut text = Vec::new();
+    let mut at = 1;
+    loop {
+        match rest.get(at) {
+            Some(b'\\')
+                if matches!(rest.get(at + 1), Some(b'\\')) || rest.get(at + 1) == Some(&quote) =>
+            {
+                text.push(rest[at + 1]);
+                at += 2;
+            }
+            None | Some(b'\n' | 0 | b'\\') => return None,
+            Some(b) if *b == quote => {
+                return (at > 1).then_some((at + 1, text));
+            }
+            Some(b) => {
+                text.push(*b);
+                at += 1;
+            }
+        }
+    }
+}
+
+/// One token under `NORMAL`, the longest rule winning and the first of
+/// equals: the token, its length, and whether it opens `RAW`.
+fn normal(rest: &[u8]) -> (Token, usize, bool) {
+    if rest.starts_with(b"if") && rest.get(2).copied().is_some_and(is_ws) {
+        let blanks = rest[2..].iter().take_while(|b| is_ws(**b)).count();
+        return (Token::If, 2 + blanks, true);
+    }
+    if rest.first() == Some(&b'#') {
+        return (Token::Pound, 1, false);
+    }
+    if rest.starts_with(b"::") {
+        return (Token::DColon, 2, false);
+    }
+    if rest.first() == Some(&b':') && rest.get(1) != Some(&b'\\') {
+        return (Token::Colon, 1, false);
+    }
+    let plain = plain_id_len(rest);
+    let id = rest
+        .iter()
+        .take_while(|b| !matches!(b, b' ' | b'\r' | b'\n' | b'\t' | b':' | b'#' | 0))
+        .count();
+    if id > 0 && rest[id..].starts_with(b"://") {
+        return (Token::Proto(rest[..id + 3].to_vec()), id + 3, false);
+    }
+    let word_end = |len: usize| {
+        rest.get(len)
+            .is_none_or(|b| matches!(b, b' ' | b'\r' | b'\t' | b'\n' | 0))
+    };
+    for (word, value) in [
+        (&b"yes"[..], 1),
+        (b"on", 1),
+        (b"enabled", 1),
+        (b"true", 1),
+        (b"no", 0),
+        (b"off", 0),
+        (b"disabled", 0),
+        (b"false", 0),
+    ] {
+        if rest.starts_with(word) && word_end(word.len()) && plain <= word.len() {
+            return (Token::Truthy(value), word.len(), false);
+        }
+    }
+    let quoted = quoted(rest);
+    let generic = quoted.as_ref().map_or(plain, |(len, _)| (*len).max(plain));
+    let digits = digits_len(rest);
+    let addr = if rest.starts_with(b"0x") {
+        let hex = rest[2..]
+            .iter()
+            .take_while(|b| b.is_ascii_hexdigit())
+            .count();
+        if hex > 0 { 2 + hex } else { 0 }
+    } else {
+        0
+    };
+    let opcode = if rest.starts_with(b"ZEND_") || rest.starts_with(b"zend_") {
+        let name = rest[5..]
+            .iter()
+            .take_while(|b| b.is_ascii_alphabetic() || **b == b'_')
+            .count();
+        if name > 0 { 5 + name } else { 0 }
+    } else {
+        0
+    };
+    let longest = digits.max(addr).max(opcode).max(generic);
+    if longest == 0 {
+        // `["']`: a quote that closes nothing is a word of its own.
+        return match rest.first() {
+            Some(q @ (b'"' | b'\'')) => (Token::Id(vec![*q]), 1, false),
+            _ => (Token::Id(Vec::new()), 0, false),
+        };
+    }
+    if digits == longest {
+        return (Token::Digits(atoi(&rest[..digits])), digits, false);
+    }
+    if addr == longest {
+        let value = u64::from_str_radix(&String::from_utf8_lossy(&rest[2..addr]), 16).unwrap_or(0);
+        return (Token::Addr(value), addr, false);
+    }
+    if opcode == longest {
+        return (Token::Opcode(rest[..opcode].to_vec()), opcode, false);
+    }
+    match quoted {
+        Some((len, text)) if len >= plain => (Token::Id(text), len, false),
+        _ => (Token::Id(rest[..plain].to_vec()), plain, false),
+    }
+}
+
+/// `{INPUT}`: escapes, quoted runs and anything but a `#`.
+fn input_len(rest: &[u8]) -> usize {
+    let mut at = 0;
+    loop {
+        match rest.get(at) {
+            None | Some(b'\n' | 0 | b'#') => return at,
+            Some(b'\\') if matches!(rest.get(at + 1), Some(b'#' | b'"' | b'\'')) => at += 2,
+            Some(q @ (b'"' | b'\'')) => {
+                let quote = *q;
+                let mut end = at + 1;
+                let closed = loop {
+                    match rest.get(end) {
+                        None | Some(b'\n' | 0) => break false,
+                        Some(b'\\')
+                            if matches!(rest.get(end + 1), Some(b'\\'))
+                                || rest.get(end + 1) == Some(&quote) =>
+                        {
+                            end += 2;
+                        }
+                        Some(b) if *b == quote => break true,
+                        Some(_) => end += 1,
+                    }
+                };
+                if !closed {
+                    return at;
+                }
+                at = end + 1;
+            }
+            Some(_) => at += 1,
+        }
+    }
+}
+
+/// Why a line did not parse: bison's message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Malformed(pub String);
+
+/// The line as its commands, in order.
+pub fn parse(line: &[u8]) -> Result<Vec<Command>, Malformed> {
+    let tokens = tokens(line);
+    let mut commands = Vec::new();
+    for part in tokens.split(|token| *token == Token::Separator) {
+        if part.is_empty() {
+            continue;
+        }
+        commands.push(command(part)?);
+    }
+    Ok(commands)
+}
+
+fn unexpected(token: &Token) -> Malformed {
+    let name = match token {
+        Token::Separator => "# (command separator)",
+        Token::Colon => ": (colon)",
+        Token::DColon => ":: (double colon)",
+        Token::Pound => "# (pound sign followed by digits)",
+        Token::Proto(_) => "protocol (file://)",
+        Token::Id(_) => "identifier (command or function name)",
+        Token::Digits(_) => "digits (numbers)",
+        Token::Truthy(_) => {
+            "truthy or falsy (true, on, yes or enabled / false, off, no or disabled)"
+        }
+        Token::Addr(_) => "address",
+        Token::Opcode(_) => "opcode",
+        Token::If => "if (condition)",
+        Token::Input(_) => "input (input string or data)",
+        Token::Eval => "eval",
+        Token::Shell => "shell",
+        Token::Run => "run",
+        Token::ReqId => "request id (-r %d)",
+    };
+    Malformed(format!("syntax error, unexpected {name}"))
+}
+
+/// One command's tokens: a `full_expression`, `ev`, `sh` or `run` with
+/// its raw rest, or `parameters`.
+fn command(tokens: &[Token]) -> Result<Command, Malformed> {
+    let tokens: Vec<&Token> = tokens.iter().filter(|t| **t != Token::ReqId).collect();
+    match tokens.first() {
+        Some(Token::Eval | Token::Shell) => {
+            let raw = match tokens.get(1) {
+                Some(Token::Input(raw)) => raw.clone(),
+                Some(other) => return Err(unexpected(other)),
+                None => {
+                    return Err(Malformed(String::from(
+                        "syntax error, unexpected end of input",
+                    )));
+                }
+            };
+            if let Some(extra) = tokens.get(2) {
+                return Err(unexpected(extra));
+            }
+            Ok(if tokens[0] == &Token::Eval {
+                Command::Eval(raw)
+            } else {
+                Command::Shell(raw)
+            })
+        }
+        Some(Token::Run) => match tokens.get(1) {
+            None => Ok(Command::Run(None)),
+            Some(Token::Input(raw)) if tokens.len() == 2 => Ok(Command::Run(Some(raw.clone()))),
+            Some(other) => Err(unexpected(other)),
+        },
+        _ => parameters(&tokens).map(Command::Params),
+    }
+}
+
+/// `parameters`: each `parameter` of the grammar in turn, a `T_PROTO`
+/// read as the start of the file name after it, as the grammar joins
+/// the two.
+fn parameters(tokens: &[&Token]) -> Result<Vec<Param>, Malformed> {
+    let mut joined: Vec<Token> = Vec::with_capacity(tokens.len());
+    let mut rest = tokens.iter();
+    while let Some(token) = rest.next() {
+        match token {
+            Token::Proto(proto) => match rest.next() {
+                Some(Token::Id(name)) => joined.push(Token::Id([proto.as_slice(), name].concat())),
+                Some(other) => return Err(unexpected(other)),
+                None => return Err(unexpected(token)),
+            },
+            other => joined.push((*other).clone()),
+        }
+    }
+    let tokens: Vec<&Token> = joined.iter().collect();
+    let mut params = Vec::new();
+    let mut at = 0;
+    while let Some(token) = tokens.get(at) {
+        let next = |n: usize| tokens.get(at + n).copied();
+        let param = match (token, next(1), next(2), next(3), next(4)) {
+            (Token::Id(name), Some(Token::Colon), Some(Token::Digits(line)), _, _) => {
+                at += 3;
+                Param::File {
+                    name: name.clone(),
+                    line: *line,
+                }
+            }
+            (
+                Token::Id(name),
+                Some(Token::Colon),
+                Some(Token::Pound),
+                Some(Token::Digits(line)),
+                _,
+            ) => {
+                at += 4;
+                Param::NumericFile {
+                    name: name.clone(),
+                    line: *line,
+                }
+            }
+            (
+                Token::Id(class),
+                Some(Token::DColon),
+                Some(Token::Id(name)),
+                Some(Token::Pound),
+                Some(Token::Digits(num)),
+            ) => {
+                at += 5;
+                Param::NumericMethod {
+                    class: class.clone(),
+                    name: name.clone(),
+                    num: *num,
+                }
+            }
+            (Token::Id(class), Some(Token::DColon), Some(Token::Id(name)), _, _) => {
+                at += 3;
+                Param::Method {
+                    class: class.clone(),
+                    name: name.clone(),
+                }
+            }
+            (Token::Id(name), Some(Token::Pound), Some(Token::Digits(num)), _, _) => {
+                at += 3;
+                Param::NumericFunction {
+                    name: name.clone(),
+                    num: *num,
+                }
+            }
+            (Token::If, Some(Token::Input(raw)), _, _, _) => {
+                at += 2;
+                Param::Cond(raw.clone())
+            }
+            (Token::Opcode(op), ..) => {
+                at += 1;
+                Param::Op(op.clone())
+            }
+            (Token::Addr(addr), ..) => {
+                at += 1;
+                Param::Addr(*addr)
+            }
+            (Token::Truthy(n) | Token::Digits(n), ..) => {
+                at += 1;
+                Param::Num(*n)
+            }
+            (Token::Id(word), ..) => {
+                at += 1;
+                Param::Str(word.clone())
+            }
+            (other, ..) => return Err(unexpected(other)),
+        };
+        params.push(param);
+    }
+    Ok(params)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(line: &str) -> Vec<Param> {
+        match parse(line.as_bytes()).as_deref() {
+            Ok([Command::Params(params), ..]) => params.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_line_is_cut_at_each_pound_and_ev_takes_its_rest_raw() {
+        assert_eq!(
+            parse(b"ev 1 + 3 # ev 2 ** 3#q\n"),
+            Ok(vec![
+                Command::Eval(b"1 + 3 ".to_vec()),
+                Command::Eval(b"2 ** 3".to_vec()),
+                Command::Params(vec![Param::Str(b"q".to_vec())]),
+            ])
+        );
+        assert_eq!(
+            parse(b"r\n"),
+            Ok(vec![Command::Params(vec![Param::Str(b"r".to_vec())])])
+        );
+        assert_eq!(
+            parse(b"r echo # quit\n"),
+            Ok(vec![
+                Command::Run(Some(b"echo ".to_vec())),
+                Command::Params(vec![Param::Str(b"quit".to_vec())]),
+            ])
+        );
+    }
+
+    #[test]
+    fn the_parameters_are_typed_as_phpdbg_types_them() {
+        assert_eq!(params("b 3"), [Param::Str(b"b".to_vec()), Param::Num(3)]);
+        assert_eq!(
+            params("b breakpoints_002.php:4")[1],
+            Param::File {
+                name: b"breakpoints_002.php".to_vec(),
+                line: 4
+            }
+        );
+        assert_eq!(
+            params("b \\Foo\\Bar::Foo")[1],
+            Param::Method {
+                class: b"\\Foo\\Bar".to_vec(),
+                name: b"Foo".to_vec()
+            }
+        );
+        assert_eq!(params("b ZEND_ECHO")[1], Param::Op(b"ZEND_ECHO".to_vec()));
+        assert_eq!(
+            params("b Foo::bar#0")[1],
+            Param::NumericMethod {
+                class: b"Foo".to_vec(),
+                name: b"bar".to_vec(),
+                num: 0
+            }
+        );
+        assert_eq!(
+            params("b baz#0")[1],
+            Param::NumericFunction {
+                name: b"baz".to_vec(),
+                num: 0
+            }
+        );
+        assert_eq!(
+            params("w r $b")[1..],
+            [Param::Str(b"r".to_vec()), Param::Str(b"$b".to_vec())]
+        );
+        assert_eq!(params("a';")[0], Param::Str(b"a".to_vec()));
+        assert_eq!(
+            params("var_dump \"a\" \"b\"")[1..],
+            [Param::Str(b"a".to_vec()), Param::Str(b"b".to_vec())]
+        );
+    }
+}

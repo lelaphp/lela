@@ -790,7 +790,7 @@ fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<PhpString, 
         }
     };
     let name = req.class_name_bytes(class);
-    PhpString::new(req, &name)
+    req.interned(&name)
 }
 
 /// `strlen(string $string): int`, php's `ZEND_FUNCTION(strlen)`
@@ -1643,8 +1643,8 @@ fn dump_members(
         match object.heap().declared_rows() {
             php_heap::DeclaredRows::Slots => req
                 .placed_properties(class)
-                .into_iter()
-                .map(|(declaring, p)| (p.name.0.to_vec(), declaring, p.visibility, p.ty))
+                .iter()
+                .map(|(declaring, p)| (p.name.0.to_vec(), *declaring, p.visibility, p.ty.clone()))
                 .collect(),
             php_heap::DeclaredRows::Copied => Vec::new(),
         };

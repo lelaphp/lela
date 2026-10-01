@@ -165,6 +165,11 @@ pub(crate) struct Handlers;
 pub(crate) static HANDLERS: Handlers = Handlers;
 
 impl ObjectHandlers for Handlers {
+    /// `struct php_pdo_iterator`: the iterator, its key and the row fetched ahead.
+    fn iterator_size(&self) -> usize {
+        112
+    }
+
     /// `php_pdo_free_statement`: the bound parameters and columns given
     /// back through the callback's `FREE`, the connector's statement dropped,
     /// the fetch style's values and the connection released.

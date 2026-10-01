@@ -37,6 +37,7 @@ fn passwd(pool: &[u8], name: &[u8], level: crate::zlog::Level, sys: bool) -> Opt
         );
         crate::zlog::log(
             level,
+            crate::zlog::Site::at("fpm_unix_get_passwd", 60),
             line.as_bytes(),
             sys.then_some(nix::errno::Errno::last()),
         );
@@ -57,6 +58,7 @@ fn group(pool: &[u8], name: &[u8], level: crate::zlog::Level, sys: bool) -> Opti
         );
         crate::zlog::log(
             level,
+            crate::zlog::Site::at("fpm_unix_get_group", 103),
             line.as_bytes(),
             sys.then_some(nix::errno::Errno::last()),
         );
@@ -92,7 +94,7 @@ fn check_listen_address(config: &PoolConfig, domain: Domain) -> bool {
         return true;
     }
     zlog_sys!(
-        Error,
+        Error @ fpm_unix_check_listen_address:89,
         nix::errno::Errno::last(),
         "[pool {}] cannot bind to UNIX socket '{}' as path is too long (found length: {}, maximal length: {SUN_PATH})",
         String::from_utf8_lossy(&config.name),
@@ -155,7 +157,7 @@ pub(crate) fn set_socket_permissions(
     let group = permissions.gid.map(Gid::from_raw);
     if let Err(e) = nix::unistd::chown(path(socket), owner, group) {
         zlog_sys!(
-            Error,
+            Error @ fpm_unix_set_socket_permissions:330,
             e,
             "[pool {}] failed to chown() the socket '{}'",
             String::from_utf8_lossy(pool),
@@ -209,7 +211,7 @@ pub(crate) fn conf_pool(config: &PoolConfig, run_as_root: bool) -> Option<Creden
         }
         if !run_as_root && (credentials.set_uid == 0 || credentials.set_gid == 0) {
             zlog!(
-                Error,
+                Error @ fpm_unix_conf_wp:395,
                 "[pool {name}] please specify user and group other than root"
             );
             return None;
@@ -217,25 +219,25 @@ pub(crate) fn conf_pool(config: &PoolConfig, run_as_root: bool) -> Option<Creden
     } else {
         if config.user.as_deref().is_some_and(|u| !u.is_empty()) {
             zlog!(
-                Notice,
+                Notice @ fpm_unix_conf_wp:401,
                 "[pool {name}] 'user' directive is ignored when FPM is not running as root"
             );
         }
         if config.group.as_deref().is_some_and(|g| !g.is_empty()) {
             zlog!(
-                Notice,
+                Notice @ fpm_unix_conf_wp:404,
                 "[pool {name}] 'group' directive is ignored when FPM is not running as root"
             );
         }
         if config.chroot.as_deref().is_some_and(|c| !c.is_empty()) {
             zlog!(
-                Notice,
+                Notice @ fpm_unix_conf_wp:407,
                 "[pool {name}] 'chroot' directive is ignored when FPM is not running as root"
             );
         }
         if config.process_priority != 64 {
             zlog!(
-                Notice,
+                Notice @ fpm_unix_conf_wp:410,
                 "[pool {name}] 'process.priority' directive is ignored when FPM is not running as root"
             );
         }
@@ -269,7 +271,7 @@ pub(crate) fn init_child(config: &PoolConfig, credentials: &Credentials) -> bool
         && let Err(e) = set_rlimit(Resource::RLIMIT_NOFILE, config.rlimit_files)
     {
         zlog_sys!(
-            Error,
+            Error @ fpm_unix_init_child:435,
             e,
             "[pool {name}] failed to set rlimit_files for this pool. Please check your system limits or decrease rlimit_files. setrlimit(RLIMIT_NOFILE, {})",
             config.rlimit_files
@@ -279,7 +281,7 @@ pub(crate) fn init_child(config: &PoolConfig, credentials: &Credentials) -> bool
         && let Err(e) = set_rlimit(Resource::RLIMIT_CORE, config.rlimit_core)
     {
         zlog_sys!(
-            Error,
+            Error @ fpm_unix_init_child:445,
             e,
             "[pool {name}] failed to set rlimit_core for this pool. Please check your system limits or decrease rlimit_core. setrlimit(RLIMIT_CORE, {})",
             config.rlimit_core
@@ -289,7 +291,7 @@ pub(crate) fn init_child(config: &PoolConfig, credentials: &Credentials) -> bool
     if is_root && let Some(root) = config.chroot.as_deref().filter(|c| !c.is_empty()) {
         if let Err(e) = nix::unistd::chroot(path(root)) {
             zlog_sys!(
-                Error,
+                Error @ fpm_unix_init_child:451,
                 e,
                 "[pool {name}] failed to chroot({})",
                 String::from_utf8_lossy(root)
@@ -301,7 +303,7 @@ pub(crate) fn init_child(config: &PoolConfig, credentials: &Credentials) -> bool
     if let Some(dir) = config.chdir.as_deref().filter(|c| !c.is_empty()) {
         if let Err(e) = nix::unistd::chdir(path(dir)) {
             zlog_sys!(
-                Error,
+                Error @ fpm_unix_init_child:459,
                 e,
                 "[pool {name}] failed to chdir({})",
                 String::from_utf8_lossy(dir)
@@ -309,12 +311,12 @@ pub(crate) fn init_child(config: &PoolConfig, credentials: &Credentials) -> bool
             return false;
         }
     } else if made_chroot && nix::unistd::chdir("/").is_err() {
-        zlog!(Warning, "[pool {name}] failed to chdir(/)");
+        zlog!(Warning @ fpm_unix_init_child:464, "[pool {name}] failed to chdir(/)");
     }
     if is_root {
         if config.process_priority != 64 && !crate::ffi::set_priority(config.process_priority) {
             zlog_sys!(
-                Error,
+                Error @ fpm_unix_init_child:472,
                 nix::errno::Errno::last(),
                 "[pool {name}] Unable to set priority for this new process"
             );
@@ -324,7 +326,7 @@ pub(crate) fn init_child(config: &PoolConfig, credentials: &Credentials) -> bool
             && let Err(e) = nix::unistd::setgid(Gid::from_raw(credentials.set_gid))
         {
             zlog_sys!(
-                Error,
+                Error @ fpm_unix_init_child:479,
                 e,
                 "[pool {name}] failed to setgid({})",
                 credentials.set_gid
@@ -340,7 +342,7 @@ pub(crate) fn init_child(config: &PoolConfig, credentials: &Credentials) -> bool
             let user = CString::new(user).unwrap_or_default();
             if let Err(e) = crate::ffi::initgroups(&user, credentials.set_gid) {
                 zlog_sys!(
-                    Error,
+                    Error @ fpm_unix_init_child:485,
                     e,
                     "[pool {name}] failed to initgroups({}, {})",
                     String::from_utf8_lossy(config.user.as_deref().unwrap_or_default()),
@@ -350,7 +352,7 @@ pub(crate) fn init_child(config: &PoolConfig, credentials: &Credentials) -> bool
             }
             if let Err(e) = nix::unistd::setuid(Uid::from_raw(credentials.set_uid)) {
                 zlog_sys!(
-                    Error,
+                    Error @ fpm_unix_init_child:489,
                     e,
                     "[pool {name}] failed to setuid({})",
                     credentials.set_uid

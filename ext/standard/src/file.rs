@@ -2676,18 +2676,23 @@ fn get_meta_tags(
     Ok(OrFalse::Value(array))
 }
 
-/// `php_stream_passthru`: what is left of the stream written to the
-/// request's body a chunk at a time, and how many bytes that was.
+/// `_php_stream_passthru` (`Z/main/streams/streams.c`): what is left
+/// of the stream written to the request's body a read of up to 8192
+/// bytes at a time, each read given up once written, as php's
+/// `char buf[8192]` holds one read at a time, and how many bytes that
+/// was.
 fn passthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
     let mut size: i64 = 0;
-    loop {
-        match stream.read(req, 8192)? {
-            Some(chunk) if !chunk.is_empty() => {
-                req.write(chunk.as_bytes());
-                size = size.saturating_add(i64::try_from(chunk.len()).unwrap_or(i64::MAX));
-            }
-            _ => break,
+    while let Some(chunk) = stream.read(req, 8192)? {
+        let written = chunk.len();
+        if written > 0 {
+            req.write(chunk.as_bytes());
         }
+        req.release(Value::string(chunk));
+        if written == 0 {
+            break;
+        }
+        size = size.saturating_add(i64::try_from(written).unwrap_or(i64::MAX));
     }
     Ok(size)
 }
@@ -2708,6 +2713,24 @@ fn passthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
 /// Warning: readfile(%s/nope.txt): Failed to open stream: No such file or directory in %s on line 3
 /// int(8)
 /// bool(false)
+/// ```
+///
+/// A file is written a read at a time, each read given up once
+/// written, so a 2 MiB file raises the peak by no more than a stream's
+/// buffers (through a filter, which php cannot map whole):
+///
+/// ```php
+/// $p = __DIR__ . '/big.txt'; $f = fopen($p, 'w'); for ($i = 0; $i < 512; $i++) fwrite($f, str_repeat("\0", 4096)); fclose($f);
+/// ob_start(fn($b) => '', 4096);
+/// memory_reset_peak_usage(); $at = memory_get_usage();
+/// $n = readfile("php://filter/read=string.toupper/resource=$p");
+/// $rise = memory_get_peak_usage() - $at;
+/// ob_end_clean();
+/// var_dump($n, $rise < 65536);
+/// ```
+/// ```expect
+/// int(2097152)
+/// bool(true)
 /// ```
 #[php_function]
 fn readfile(
@@ -2740,6 +2763,23 @@ fn readfile(
 /// ```expect
 /// cdefint(4)
 /// int(0)
+/// ```
+///
+/// Each read is given up once written, so passing 2 MiB through raises
+/// the peak by no more than a stream's buffers:
+///
+/// ```php
+/// $m = fopen('php://memory', 'w+'); for ($i = 0; $i < 512; $i++) fwrite($m, str_repeat("\0", 4096)); rewind($m);
+/// ob_start(fn($b) => '', 4096);
+/// memory_reset_peak_usage(); $at = memory_get_usage();
+/// $n = fpassthru($m);
+/// $rise = memory_get_peak_usage() - $at;
+/// ob_end_clean();
+/// var_dump($n, $rise < 65536);
+/// ```
+/// ```expect
+/// int(2097152)
+/// bool(true)
 /// ```
 #[php_function]
 pub fn fpassthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {

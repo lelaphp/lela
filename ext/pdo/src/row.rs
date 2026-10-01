@@ -24,7 +24,17 @@ pub(crate) struct Row {
 
 /// `@not-serializable final class PDORow`, as `pdo_stmt.stub.php`
 /// declares it, over the statement it reads and
-/// `pdo_row_object_handlers`.
+/// `pdo_row_object_handlers`. The object is `pdo_row_t`, which
+/// `pdo_stmt_fetch` makes once for the statement's lazy fetches:
+///
+/// ```php
+/// $p = new PDO('sqlite::memory:'); $st = $p->query('select 1 as a, 2 as b'); $st2 = $p->query('select 1 as a, 2 as b');
+/// $w = $st->fetch(PDO::FETCH_LAZY);
+/// $m = memory_get_usage(); $r = $st2->fetch(PDO::FETCH_LAZY); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 64
+/// ```
 #[php_class(final, not_serializable, size = 64, payload = Row, handlers = HANDLERS)]
 pub(crate) struct PDORow;
 

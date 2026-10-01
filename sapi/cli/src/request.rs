@@ -442,6 +442,7 @@ mod tests {
         let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
         let mut builder = Engine::builder()
             .extensions(&extensions)
+            .configure(php_bundle::CONFIGURE)
             .tier::<php_bundle::Tier>();
         for (name, value) in &options.ini {
             builder = builder.ini(name, value);

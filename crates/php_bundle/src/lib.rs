@@ -100,8 +100,73 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_sysvshm::extension,
         #[cfg(feature = "ftp")]
         php_ext_ftp::extension,
+        #[cfg(feature = "xml")]
+        php_ext_xml::extension,
+        #[cfg(feature = "xmlreader")]
+        php_ext_xmlreader::extension,
+        #[cfg(feature = "xmlwriter")]
+        php_ext_xmlwriter::extension,
     ]
 }
+
+/// php's `configure` switches that build the bundle behind the features
+/// that are on, as `CONFIGURE_COMMAND` names them and phpinfo prints
+/// them: each extension php leaves out by default and the bundle carries,
+/// in its `config.m4` spelling (`--enable-mbstring`, `--with-openssl`);
+/// each php builds by default and the bundle leaves out, as its
+/// `--disable` or `--without`, the five no crate holds yet among them;
+/// and nothing for the extensions php always builds. By extension name.
+pub const CONFIGURE: &[&str] = &[
+    #[cfg(feature = "bcmath")]
+    "--enable-bcmath",
+    #[cfg(feature = "bz2")]
+    "--with-bz2",
+    #[cfg(feature = "calendar")]
+    "--enable-calendar",
+    #[cfg(not(feature = "ctype"))]
+    "--disable-ctype",
+    #[cfg(feature = "curl")]
+    "--with-curl",
+    #[cfg(not(feature = "dom"))]
+    "--disable-dom",
+    "--disable-fileinfo",
+    #[cfg(not(feature = "filter"))]
+    "--disable-filter",
+    #[cfg(not(feature = "iconv"))]
+    "--without-iconv",
+    #[cfg(not(feature = "libxml"))]
+    "--without-libxml",
+    #[cfg(feature = "mbstring")]
+    "--enable-mbstring",
+    #[cfg(feature = "openssl")]
+    "--with-openssl",
+    #[cfg(feature = "pcntl")]
+    "--enable-pcntl",
+    #[cfg(not(feature = "pdo"))]
+    "--disable-pdo",
+    #[cfg(feature = "pdo_mysql")]
+    "--with-pdo-mysql",
+    #[cfg(not(feature = "pdo_sqlite"))]
+    "--without-pdo-sqlite",
+    #[cfg(not(feature = "phar"))]
+    "--disable-phar",
+    #[cfg(not(feature = "posix"))]
+    "--disable-posix",
+    #[cfg(not(feature = "session"))]
+    "--disable-session",
+    #[cfg(not(feature = "simplexml"))]
+    "--disable-simplexml",
+    #[cfg(feature = "sockets")]
+    "--enable-sockets",
+    "--without-sqlite3",
+    #[cfg(not(feature = "tokenizer"))]
+    "--disable-tokenizer",
+    "--disable-xml",
+    "--disable-xmlreader",
+    "--disable-xmlwriter",
+    #[cfg(feature = "zlib")]
+    "--with-zlib",
+];
 
 /// The tier, named once (design §4.3 seam 8): the interpreter alone until
 /// the `jit` feature binds the compiled tier. Never in [`enabled()`].
@@ -128,6 +193,7 @@ pub mod test {
         let extensions: Vec<_> = super::enabled().iter().map(|start| start()).collect();
         let mut builder = Engine::builder()
             .extensions(&extensions)
+            .configure(super::CONFIGURE)
             .tier::<super::Tier>();
         for (name, value) in ini {
             builder = builder.ini(name, value);

@@ -9,16 +9,15 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::PhpObject;
 
-use super::header as h;
-use super::sys::{self, PushHeaders, curl_pushheader_bynum};
+use super::sys;
 use super::{Easy, EasyId, Session, arg, bytes_of, c_long};
 use crate::constants as c;
 use crate::multi as callbacks;
 
 /// A multi option number as the library's `CURLMoption`.
-#[allow(clippy::cast_possible_truncation)]
-const fn opt(option: i64) -> c_int {
-    option as c_int
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+const fn opt(option: i64) -> sys::CURLMoption {
+    option as sys::CURLMoption
 }
 
 /// What the push trampoline is handed: the request's link and the
@@ -161,7 +160,7 @@ impl Multi {
     /// `CURLMOPT_PUSHFUNCTION` at `_php_server_push_callback`, its data
     /// the tag.
     pub(crate) fn set_push(&self) -> i64 {
-        let f: sys::PushFn = push;
+        let f: sys::curl_push_callback = push;
         // SAFETY: a live handle and the trampoline.
         let code = unsafe { sys::curl_multi_setopt(self.raw(), opt(c::CURLMOPT_PUSHFUNCTION), f) };
         if code != 0 {
@@ -169,7 +168,7 @@ impl Multi {
         }
         // SAFETY: a live handle and the tag, live while the handle is.
         i64::from(unsafe {
-            sys::curl_multi_setopt(self.raw(), opt(h::CURLMOPT_PUSHDATA), arg(self.0.tag))
+            sys::curl_multi_setopt(self.raw(), sys::CURLMOPT_PUSHDATA, arg(self.0.tag))
         })
     }
 
@@ -186,7 +185,7 @@ extern "C" fn push(
     parent: *mut sys::CURL,
     easy: *mut sys::CURL,
     count: usize,
-    headers: *mut PushHeaders,
+    headers: *mut sys::curl_pushheaders,
     tag: *mut c_void,
 ) -> c_int {
     const DENY: c_int = 1;
@@ -202,7 +201,7 @@ extern "C" fn push(
     let lines: Vec<Vec<u8>> = (0..count)
         .map(|i| {
             // SAFETY: the push's headers, `count` of them.
-            bytes_of(unsafe { curl_pushheader_bynum(headers, i) }).unwrap_or_default()
+            bytes_of(unsafe { sys::curl_pushheader_bynum(headers, i) }).unwrap_or_default()
         })
         .collect();
     // SAFETY: as above; the session field is never written after the tag
@@ -251,8 +250,8 @@ impl Share {
 
     /// `curl_share_setopt(sh->share, option, (long) value)`.
     pub(crate) fn set_long(&self, option: i64, value: i64) -> i64 {
-        #[allow(clippy::cast_possible_truncation)]
-        let option = option as c_int;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let option = option as sys::CURLSHoption;
         // SAFETY: a live share and an option the library reads as a `long`.
         i64::from(unsafe { sys::curl_share_setopt(self.0.raw.as_ptr(), option, c_long(value)) })
     }

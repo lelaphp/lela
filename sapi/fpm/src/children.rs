@@ -33,18 +33,24 @@ fn prepare_pipes(catch: bool) -> Result<Option<[(OwnedFd, OwnedFd); 2]>, ()> {
     if !catch {
         return Ok(None);
     }
-    let pipe = |what: &str| {
-        nix::unistd::pipe().map_err(|e| zlog_sys!(Error, e, "failed to prepare the {what} pipe"))
+    let pipe = |what: &str, line: u32| {
+        nix::unistd::pipe().map_err(|e| {
+            zlog_sys!(
+                Error @ (crate::zlog::Site::at("fpm_stdio_prepare_pipes", line)),
+                e,
+                "failed to prepare the {what} pipe"
+            );
+        })
     };
-    let out = pipe("stdout")?;
-    let err = pipe("stderr")?;
+    let out = pipe("stdout", 295)?;
+    let err = pipe("stderr", 300)?;
     for read in [&out.0, &err.0] {
         let nonblocking = nix::fcntl::fcntl(
             read.as_fd(),
             nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
         );
         if nonblocking.is_err() {
-            zlog_sys!(Error, nix::errno::Errno::last(), "failed to unblock pipes");
+            zlog_sys!(Error @ fpm_stdio_prepare_pipes:307, nix::errno::Errno::last(), "failed to unblock pipes");
             return Err(());
         }
     }
@@ -84,13 +90,13 @@ pub(crate) fn make(
         };
         let Some(slot) = scoreboard.alloc() else {
             zlog!(
-                Error,
+                Error @ fpm_scoreboard_proc_alloc:493,
                 "[pool {}] no free scoreboard slot",
                 String::from_utf8_lossy(&scoreboard.pool())
             );
             return Ok(Made::Failed);
         };
-        zlog!(Debug, "blocking signals before child birth");
+        zlog!(Debug @ fpm_children_make:449, "blocking signals before child birth");
         if sigprocmask(
             SigmaskHow::SIG_BLOCK,
             Some(&crate::master::block_set(true)),
@@ -98,7 +104,7 @@ pub(crate) fn make(
         )
         .is_err()
         {
-            zlog!(Warning, "child may miss signals");
+            zlog!(Warning @ fpm_children_make:451, "child may miss signals");
         }
         match crate::ffi::fork() {
             Ok(ForkResult::Child) => {
@@ -109,14 +115,14 @@ pub(crate) fn make(
                 return Err(Became::Child(pool, slot));
             }
             Err(e) => {
-                zlog!(Debug, "unblocking signals");
+                zlog!(Debug @ fpm_children_make:465, "unblocking signals");
                 crate::master::unblock_all();
-                zlog_sys!(Error, e, "fork() failed");
+                zlog_sys!(Error @ fpm_children_make:467, e, "fork() failed");
                 scoreboard.free(slot);
                 return Ok(Made::Failed);
             }
             Ok(ForkResult::Parent { child }) => {
-                zlog!(Debug, "unblocking signals, child born");
+                zlog!(Debug @ fpm_children_make:473, "unblocking signals, child born");
                 crate::master::unblock_all();
                 let (stdout, stderr) = match pipes {
                     Some([(out_read, _), (err_read, _)]) => (Some(out_read), Some(err_read)),
@@ -151,7 +157,12 @@ pub(crate) fn make(
                     fpm.pools[pool].name(),
                     child.as_raw()
                 );
-                crate::zlog::log(level, line.as_bytes(), None);
+                crate::zlog::log(
+                    level,
+                    crate::zlog::Site::at("fpm_children_make", 479),
+                    line.as_bytes(),
+                    None,
+                );
             }
         }
     }
@@ -162,7 +173,7 @@ pub(crate) fn make(
     {
         fpm.warned = true;
         zlog!(
-            Warning,
+            Warning @ fpm_children_make:487,
             "The maximum number of processes has been reached. Please review your configuration and consider raising 'process.max'"
         );
     }
@@ -225,7 +236,7 @@ pub(crate) fn bury(fpm: &mut Fpm) -> Step {
                 )
             }
             WaitStatus::Stopped(..) => {
-                zlog!(Notice, "child {pid} stopped for tracing");
+                zlog!(Notice @ fpm_children_bury:275, "child {pid} stopped for tracing");
                 if let Some((p, c)) = found
                     && fpm.pools[p].children[c].traced
                 {
@@ -238,12 +249,12 @@ pub(crate) fn bury(fpm: &mut Fpm) -> Step {
         let Some((p, c)) = found else {
             if fpm.parent_pid == 1 {
                 zlog!(
-                    Debug,
+                    Debug @ fpm_children_bury:343,
                     "unknown child ({pid}) exited {how} - most likely an orphan process (master process is the init process)"
                 );
             } else {
                 zlog!(
-                    Warning,
+                    Warning @ fpm_children_bury:345,
                     "unknown child ({pid}) exited {how} - potentially a bug or pre exec child (e.g. s6-notifyoncheck)"
                 );
             }
@@ -264,10 +275,15 @@ pub(crate) fn bury(fpm: &mut Fpm) -> Step {
                 lived.as_secs(),
                 lived.subsec_micros()
             );
-            crate::zlog::log(severity, line.as_bytes(), None);
+            crate::zlog::log(
+                severity,
+                crate::zlog::Site::at("fpm_children_bury", 300),
+                line.as_bytes(),
+                None,
+            );
         } else {
             zlog!(
-                Debug,
+                Debug @ fpm_children_bury:302,
                 "[pool {name}] child {pid} has been killed by the process management after {}.{:06} seconds from start",
                 lived.as_secs(),
                 lived.subsec_micros()
@@ -279,7 +295,7 @@ pub(crate) fn bury(fpm: &mut Fpm) -> Step {
             && fpm.fault(crate::scoreboard::epoch())
         {
             zlog!(
-                Warning,
+                Warning @ fpm_children_bury:329,
                 "failed processes threshold ({} in {} sec) is reached, initiating reload",
                 fpm.global.emergency_restart_threshold,
                 fpm.global.emergency_restart_interval

@@ -34,7 +34,9 @@ use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 
+mod emalloc;
 mod smart_str;
+pub use emalloc::Emalloc;
 pub use smart_str::SmartStr;
 
 /// The type of a value, php's `zend_zval_type_name` set, and the one
@@ -85,6 +87,27 @@ impl PhpString {
     /// php's fatal and ending the native as `zend_mm` bails out.
     pub fn new(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
         req.string(bytes)
+    }
+
+    /// `zend_string_init_interned`: the one interned string for these
+    /// bytes, never refcounted, what php hands out for a name a
+    /// declaration made (`ce->name`, `fptr->common.function_name`,
+    /// `prop_info->name`): the engine's permanent string where the engine
+    /// or the bundle declared the name, which costs the request nothing,
+    /// else the request's own, allocated on its first ask and shared by
+    /// every later one. The `Err` is the memory limit.
+    ///
+    /// ```php
+    /// $r = new ReflectionClass('stdClass');
+    /// $m = memory_get_usage();
+    /// $s = new ReflectionClass('stdClass');
+    /// var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(96)
+    /// ```
+    pub fn interned(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        req.interned(bytes)
     }
 
     /// A string of `len` bytes written in place by `fill`, php's
@@ -1184,6 +1207,25 @@ impl PhpObject {
     /// ```
     pub fn entries(&self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         req.table_entries(*self)
+    }
+
+    /// `zend_std_get_properties_ex` for what it leaves behind: the
+    /// object's property table built where it has none
+    /// (`rebuild_object_properties_internal`), as a class's
+    /// `create_object` builds it for its objects from the start
+    /// (`pdo_dbh_new`), so `memory_get_usage()` counts the table where
+    /// php's does. The `Err` is the memory limit.
+    ///
+    /// ```php
+    /// $r = new ReflectionClass('PDO'); $w = $r->newInstanceWithoutConstructor();
+    /// $m = memory_get_usage(); $p = $r->newInstanceWithoutConstructor(); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 264
+    /// ```
+    pub fn rebuild_properties(&self, req: &mut Request) -> Result<(), Thrown> {
+        let table = req.heap_mut().object_properties(self.heap());
+        req.fatal_of(table).map(|_| ())
     }
 
     /// `reset`, `end`, `next` or `prev` over the internal pointer of the

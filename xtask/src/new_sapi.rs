@@ -6,8 +6,9 @@
 //! permits; its one entry is `main`, which the binary calls; the template
 //! host serves the file its line names on one engine of the bundle's
 //! enabled set, the request description and the sink on the process's
-//! streams, until the host's own replace them; `build.rs` stamps the epoch
-//! its version line renders (`php_sapi::build_date`); a test runs the
+//! streams, until the host's own replace them, with the bundle's
+//! `configure` switches, which its version line and phpinfo read beside
+//! the date the engine stamps (`php_sapi::version`); a test runs the
 //! binary; the lints the manifest denies under `sapi/*` stand at its root.
 //! `sapi/*` is a workspace member by its glob, and the crate joins the
 //! members where the root lists them one by one.
@@ -85,7 +86,6 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -
     };
     for (rel, text) in [
         ("Cargo.toml", cargo_toml(name, &package, &bin)),
-        ("build.rs", build_rs(&bin)),
         ("src/lib.rs", lib_rs(manifest, name, &bin)),
         ("src/main.rs", main_rs(&package, &bin)),
         ("tests/serve.rs", serve_rs(name, &bin)),
@@ -148,28 +148,6 @@ fn cargo_toml(name: &str, package: &str, bin: &str) -> String {
     )
 }
 
-/// `build.rs`: the epoch the version line renders, stamped when
-/// the host's sources change, as php's `__DATE__` moves.
-fn build_rs(bin: &str) -> String {
-    format!(
-        "//! The clock `{bin} -v` carries: php prints `__DATE__ \" \" __TIME__` of the\n\
-         //! compile that last rebuilt the host, so this host stamps the Unix\n\
-         //! seconds into `PHP_BUILD_EPOCH` when this file or its sources change,\n\
-         //! and `php_sapi::build_date` renders them as php's.\n\
-         \n\
-         use std::time::{{SystemTime, UNIX_EPOCH}};\n\
-         \n\
-         fn main() {{\n\
-         \x20   println!(\"cargo:rerun-if-changed=build.rs\");\n\
-         \x20   println!(\"cargo:rerun-if-changed=src\");\n\
-         \x20   let seconds = SystemTime::now()\n\
-         \x20       .duration_since(UNIX_EPOCH)\n\
-         \x20       .map_or(0, |since| since.as_secs());\n\
-         \x20   println!(\"cargo:rustc-env=PHP_BUILD_EPOCH={{seconds}}\");\n\
-         }}\n"
-    )
-}
-
 /// The crate root: the host's name, its `main` and the template's sink.
 pub(crate) fn lib_rs(manifest: &Manifest, name: &str, bin: &str) -> String {
     let lints = lint_attributes(manifest, &format!("sapi/{name}"));
@@ -203,6 +181,7 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str, bin: &str) -> String {
          \x20   let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();\n\
          \x20   let builder = Engine::builder()\n\
          \x20       .extensions(&extensions)\n\
+         \x20       .configure(php_bundle::CONFIGURE)\n\
          \x20       .tier::<php_bundle::Tier>();\n\
          \x20   let engine = php_sapi::start(builder, &[], None);\n\
          \x20   let description = RequestDescription {{\n\

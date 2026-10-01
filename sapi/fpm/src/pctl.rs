@@ -48,10 +48,17 @@ impl Fpm {
                     State::Terminating => false,
                 };
                 if !overridable {
+                    zlog!(
+                        Debug @ fpm_pctl:231,
+                        "not switching to '{}' state, because already in '{}' state",
+                        new_state.name(),
+                        self.state.name()
+                    );
                     return Ok(());
                 }
                 self.signal_sent = None;
                 self.state = new_state;
+                zlog!(Debug @ fpm_pctl:239, "switching to '{}' state", self.state.name());
                 self.action_next()
             }
             Action::Timeout => self.action_next(),
@@ -98,7 +105,7 @@ impl Fpm {
 
     /// `fpm_pctl_exit`.
     fn exit(&mut self) -> Step {
-        zlog!(Notice, "exiting, bye-bye!");
+        zlog!(Notice @ fpm_pctl_exit:69, "exiting, bye-bye!");
         self.unlink_pid();
         self.sockets.unlink_all();
         std::process::exit(0);
@@ -108,11 +115,16 @@ impl Fpm {
     /// listening sockets handed on through `FPM_SOCKETS`, the signals
     /// blocked until the new master handles them.
     fn exec(&mut self) -> Step {
-        let _ = nix::sys::signal::sigprocmask(
+        zlog!(Debug @ fpm_pctl_exec:80, "Blocking some signals before reexec");
+        if nix::sys::signal::sigprocmask(
             nix::sys::signal::SigmaskHow::SIG_BLOCK,
             Some(&crate::master::block_set(false)),
             None,
-        );
+        )
+        .is_err()
+        {
+            zlog!(Warning @ fpm_pctl_exec:82, "concurrent reloads may be unstable");
+        }
         let arg = |i: usize| {
             self.argv.get(i).map_or(String::new(), |a| {
                 format!(", \"{}\"", String::from_utf8_lossy(a))
@@ -125,7 +137,7 @@ impl Fpm {
             .unwrap_or_default();
         let rest: String = (1..=10).map(arg).collect();
         zlog!(
-            Notice,
+            Notice @ fpm_pctl_exec:100,
             "reloading: execvp(\"{first}\", {{\"{first}\"{rest}}})"
         );
         for (name, value) in self.sockets.for_exec() {
@@ -145,7 +157,7 @@ impl Fpm {
         if let Some(program) = argv.first()
             && let Err(e) = nix::unistd::execvp(program, &argv)
         {
-            zlog_sys!(Error, e, "failed to reload: execvp() failed");
+            zlog_sys!(Error @ fpm_pctl_exec:107, e, "failed to reload: execvp() failed");
         }
         std::process::exit(i32::from(crate::master::EXIT_SOFTWARE));
     }
@@ -157,7 +169,7 @@ impl Fpm {
             for child in &pool.children {
                 let sent = kill(Pid::from_raw(child.pid), signal);
                 zlog!(
-                    Debug,
+                    Debug @ fpm_pctl_kill_all:165,
                     "[pool {}] sending signal {} {} to child {}",
                     pool.name(),
                     signal as i32,
@@ -170,7 +182,7 @@ impl Fpm {
             }
         }
         if alive > 0 {
-            zlog!(Debug, "{alive} child(ren) still alive");
+            zlog!(Debug @ fpm_pctl_kill_all:174, "{alive} child(ren) still alive");
         }
     }
 
@@ -259,7 +271,7 @@ pub(crate) fn perform_idle_server_maintenance(fpm: &mut Fpm) -> Step {
         let config = pool.config.clone();
         if pool.pm() == Pm::Ondemand {
             zlog!(
-                Debug,
+                Debug @ fpm_pctl_perform_idle_server_maintenance:382,
                 "[pool {}] currently {active} active children, {idle} spare children",
                 pool.name()
             );
@@ -279,7 +291,7 @@ pub(crate) fn perform_idle_server_maintenance(fpm: &mut Fpm) -> Step {
             continue;
         }
         zlog!(
-            Debug,
+            Debug @ fpm_pctl_perform_idle_server_maintenance:398,
             "[pool {}] currently {active} active children, {idle} spare children, {} running children. Spawning rate {}",
             pool.name(),
             pool.running(),
@@ -295,14 +307,14 @@ pub(crate) fn perform_idle_server_maintenance(fpm: &mut Fpm) -> Step {
         if idle < config.pm_min_spare_servers {
             let running = fpm.pools[p].running();
             if running >= config.pm_max_children {
-                reached_max_children(fpm, p, "pm.max_children");
+                reached_max_children(fpm, p, "pm.max_children", 410);
                 fpm.pools[p].idle_spawn_rate = 1;
                 continue;
             }
             let rate = fpm.pools[p].idle_spawn_rate;
             if rate >= 8 {
                 zlog!(
-                    Warning,
+                    Warning @ fpm_pctl_perform_idle_server_maintenance:418,
                     "[pool {}] seems busy (you may need to increase pm.start_servers, or pm.min/max_spare_servers), spawning {rate} children, there are {idle} idle, and {running} total children",
                     fpm.pools[p].name()
                 );
@@ -311,14 +323,14 @@ pub(crate) fn perform_idle_server_maintenance(fpm: &mut Fpm) -> Step {
                 .min(config.pm_min_spare_servers - idle)
                 .min(config.pm_max_children - running);
             if to_fork <= 0 {
-                reached_max_children(fpm, p, "pm.max_children");
+                reached_max_children(fpm, p, "pm.max_children", 429);
                 fpm.pools[p].idle_spawn_rate = 1;
                 continue;
             }
             fpm.pools[p].warn_max_children = false;
             crate::children::make(fpm, p, true, to_fork, true)?;
             zlog!(
-                Debug,
+                Debug @ fpm_pctl_perform_idle_server_maintenance:446,
                 "[pool {}] {to_fork} child(ren) have been created dynamically",
                 fpm.pools[p].name()
             );
@@ -333,8 +345,10 @@ pub(crate) fn perform_idle_server_maintenance(fpm: &mut Fpm) -> Step {
 }
 
 /// The warning each time a pool first reaches its children's ceiling,
-/// counted into its scoreboard.
-fn reached_max_children(fpm: &mut Fpm, pool: usize, setting: &str) {
+/// counted into its scoreboard, from the call at `line`:
+/// `fpm_pctl_perform_idle_server_maintenance`'s two or
+/// `fpm_pctl_on_socket_accept`'s.
+fn reached_max_children(fpm: &mut Fpm, pool: usize, setting: &str, line: u32) {
     let p = &mut fpm.pools[pool];
     if !p.warn_max_children && p.shared.is_none() {
         if let Some(scoreboard) = p.scoreboard {
@@ -346,8 +360,13 @@ fn reached_max_children(fpm: &mut Fpm, pool: usize, setting: &str) {
                 Board::Inc,
             );
         }
+        let function = if line == 533 {
+            "fpm_pctl_on_socket_accept"
+        } else {
+            "fpm_pctl_perform_idle_server_maintenance"
+        };
         zlog!(
-            Warning,
+            Warning @ (crate::zlog::Site::at(function, line)),
             "[pool {}] server reached {setting} setting ({}), consider raising it",
             p.name(),
             p.config.pm_max_children
@@ -368,7 +387,7 @@ pub(crate) fn is_idle(scoreboard: crate::scoreboard::Scoreboard, slot: usize) ->
 /// its ceiling.
 pub(crate) fn on_socket_accept(fpm: &mut Fpm, pool: usize) -> Step {
     if fpm.pools[pool].running() >= fpm.pools[pool].config.pm_max_children {
-        reached_max_children(fpm, pool, "max_children");
+        reached_max_children(fpm, pool, "max_children", 533);
         return Ok(());
     }
     let Some(scoreboard) = fpm.pools[pool].scoreboard else {
@@ -384,7 +403,7 @@ pub(crate) fn on_socket_accept(fpm: &mut Fpm, pool: usize) -> Step {
     fpm.pools[pool].warn_max_children = false;
     crate::children::make(fpm, pool, true, 1, true)?;
     zlog!(
-        Debug,
+        Debug @ fpm_pctl_on_socket_accept:553,
         "[pool {}] got accept without idle child available .... I forked",
         fpm.pools[pool].name()
     );

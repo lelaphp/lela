@@ -10,10 +10,11 @@
 //! `PHP_SAPI`, which php registers between the last two, is the host's
 //! and so the request's ([`crate::api::request::Request::constant_named`]).
 //!
-//! A value that is a fact of the build is the pinned oracle's, since
-//! the engine answers as that build does: its version, its date and
-//! provider, its install paths, and the `ZEND_VM_KIND` it was compiled
-//! with. A value that is a fact of the host, the system's name and its
+//! A value that is a fact of the build is the pinned oracle's where the
+//! engine answers as that build does: its version, its install paths,
+//! and the `ZEND_VM_KIND` it was compiled with. Its date and provider are
+//! this build's own, from the one stamp every host reads them from
+//! ([`crate::api::request::BuildDefs`]). A value that is a fact of the host, the system's name and its
 //! family, its path limit and `FD_SETSIZE`, is read off the target the
 //! engine is compiled for, which is what php's `configure` reads it off.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
@@ -126,11 +127,13 @@ pub(crate) fn host_names(strings: &mut Strings) -> Vec<(Box<[u8]>, Zval)> {
 /// bool(true)
 /// ```
 ///
-/// The version in its parts, the build and the host:
+/// The version in its parts, the build and the host; the build's date is
+/// this build's, so its shape is what is held, and its provider stands
+/// only where the build named one:
 ///
 /// ```php
 /// var_dump(PHP_MAJOR_VERSION, PHP_MINOR_VERSION, PHP_RELEASE_VERSION, PHP_EXTRA_VERSION, PHP_VERSION_ID, PHP_ZTS, PHP_DEBUG, ZEND_THREAD_SAFE, ZEND_DEBUG_BUILD, ZEND_VM_KIND);
-/// var_dump(PHP_OS, PHP_OS_FAMILY, PHP_MAXPATHLEN, PHP_FD_SETSIZE, PHP_SHLIB_SUFFIX, DEFAULT_INCLUDE_PATH === ini_get('include_path'), PHP_BUILD_PROVIDER, PHP_BUILD_DATE);
+/// var_dump(PHP_OS, PHP_OS_FAMILY, PHP_MAXPATHLEN, PHP_FD_SETSIZE, PHP_SHLIB_SUFFIX, DEFAULT_INCLUDE_PATH === ini_get('include_path'), strlen(PHP_BUILD_DATE));
 /// var_dump(TRUE, FALSE, NULL, defined('TRUE'), constant('NULL'));
 /// ```
 /// ```expect
@@ -150,8 +153,7 @@ pub(crate) fn host_names(strings: &mut Strings) -> Vec<(Box<[u8]>, Zval)> {
 /// int(1024)
 /// string(2) "so"
 /// bool(true)
-/// string(8) "Homebrew"
-/// string(20) "Jul 28 2026 13:06:52"
+/// int(20)
 /// bool(true)
 /// bool(false)
 /// NULL
@@ -240,15 +242,26 @@ pub(crate) mod startup {
     const FALSE: bool = false;
     const NULL: ConstValue = ConstValue::Null;
     // `register_main_symbols` (`Z/main/main_arginfo.h`): the version,
-    // the build and the host, a build's fact the pinned oracle's.
+    // the build and the host.
     const PHP_VERSION: &str = crate::api::request::PHP_VERSION;
     const PHP_MAJOR_VERSION: i64 = 8;
     const PHP_MINOR_VERSION: i64 = 5;
     const PHP_RELEASE_VERSION: i64 = 9;
     const PHP_EXTRA_VERSION: &str = "";
     const PHP_VERSION_ID: i64 = 80509;
-    const PHP_BUILD_DATE: &str = "Jul 28 2026 13:06:52";
-    const PHP_BUILD_PROVIDER: &str = "Homebrew";
+
+    /// `php_build_date`, this build's (`BuildDefs::date`).
+    fn PHP_BUILD_DATE() -> String {
+        crate::api::request::build_date()
+    }
+
+    /// Declared only where the build named a provider, as
+    /// `#if defined(PHP_BUILD_PROVIDER)` declares it.
+    #[cfg(php_build_provider)]
+    const PHP_BUILD_PROVIDER: &str = match crate::api::request::BUILD_PROVIDER {
+        Some(provider) => provider,
+        None => "",
+    };
     const PHP_ZTS: bool = false;
     const PHP_DEBUG: bool = false;
     const PHP_OS: &str = OS;

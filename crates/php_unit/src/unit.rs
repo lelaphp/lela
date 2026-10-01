@@ -261,6 +261,19 @@ pub struct Diagnostic {
     pub message: Box<str>,
 }
 
+impl OpArray {
+    /// The op array as phpdbg's `print` writes it,
+    /// `zend_dump_op_array(op_array, ZEND_DUMP_LINE_NUMBERS, NULL, NULL)`:
+    /// a blank line, `name`, the counts with `args` the declared
+    /// parameters less a variadic one, the file with the line range,
+    /// then each opline opened by `L` and its line, and the `try`/`catch`
+    /// table. `frameless` is as [`Unit::dump`] takes it.
+    #[must_use]
+    pub fn dump_lines(&self, name: &str, args: usize, frameless: &[Name]) -> String {
+        crate::dump::lines(name, args, self, frameless)
+    }
+}
+
 impl Unit {
     /// The op arrays in php's dump format, what `zend_dump_op_array`
     /// prints under `opcache.opt_debug_level=0x10000` and what

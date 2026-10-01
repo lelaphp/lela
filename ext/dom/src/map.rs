@@ -556,6 +556,11 @@ pub(crate) struct MapHandlers;
 pub(crate) static HANDLERS: MapHandlers = MapHandlers;
 
 impl ObjectHandlers for MapHandlers {
+    /// `php_dom_iterator`: the iterator, `curobj`, `index` and the cache tag.
+    fn iterator_size(&self) -> usize {
+        120
+    }
+
     fn read_property(
         &self,
         req: &mut Request,

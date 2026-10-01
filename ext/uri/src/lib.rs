@@ -57,6 +57,16 @@ pub(crate) enum Recomposition {
     NormalizedAscii,
 }
 
+impl Recomposition {
+    /// The read a recomposition of this kind makes of the URI.
+    fn read_as(self) -> ReadAs {
+        match self {
+            Recomposition::RawAscii | Recomposition::RawUnicode => ReadAs::Raw,
+            Recomposition::NormalizedAscii => ReadAs::NormalizedAscii,
+        }
+    }
+}
+
 /// What a parse left: the URI, `None` where the text is not one, and the
 /// errors array where the caller asked for one (`zval *errors`).
 pub(crate) struct Parsed<P> {
@@ -92,8 +102,23 @@ pub(crate) trait UriParser: Sized + Send + 'static {
         silent: bool,
     ) -> Result<Parsed<Self>, Thrown>;
 
-    /// `clone`: a deep copy, `None` where the library could not allocate.
-    fn duplicate(&self) -> Option<Self>;
+    /// `clone`: a deep copy, `None` where the library could not allocate;
+    /// the `Err` is the memory limit's fatal.
+    fn duplicate(&self, req: &mut Request) -> Result<Option<Self>, Thrown>;
+
+    /// What a read in `mode` needs laid down before it, allocated on the
+    /// request's heap: `get_normalized_uri`'s copy, which RFC 3986 makes
+    /// on the first read that is not raw. Nothing by default.
+    fn prepare(&mut self, req: &mut Request, mode: ReadAs) -> Result<(), Thrown> {
+        let _ = (req, mode);
+        Ok(())
+    }
+
+    /// `free`: what the parser holds on the request's heap given back,
+    /// as `php_uri_object_handler_free` frees it.
+    fn free(self, req: &mut Request) {
+        let _ = req;
+    }
 
     /// `to_string`, `None` where the URI cannot be recomposed.
     fn recompose(&mut self, mode: Recomposition, exclude_fragment: bool) -> Option<Vec<u8>>;
@@ -204,7 +229,15 @@ fn to_struct<P: UriParser>(
     let Some(mut uri) = P::parse(req, text, None, false, silent)?.uri else {
         return Ok(None);
     };
-    Ok(components(&mut uri, form).ok())
+    let read = match uri.prepare(req, form) {
+        Ok(()) => components(&mut uri, form).ok(),
+        Err(thrown) => {
+            uri.free(req);
+            return Err(thrown);
+        }
+    };
+    uri.free(req);
+    Ok(read)
 }
 
 /// Each component in `php_uri_parse_to_struct`'s order, the first a
@@ -233,17 +266,26 @@ impl<P> Default for Slot<P> {
 }
 
 /// The class's handler table: `php_uri_object_handler_clone`, the URI
-/// copied into the clone; `free_obj` is the payload's `Drop`.
+/// copied into the clone, and `php_uri_object_handler_free`.
 pub(crate) struct Handlers<P>(PhantomData<fn() -> P>);
 
 impl<P: UriParser> ObjectHandlers for Handlers<P> {
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_uri::<P>)
     }
+
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let uri = object
+            .native_mut::<Slot<P>>(req)
+            .and_then(|slot| slot.0.take());
+        if let Some(uri) = uri {
+            uri.free(req);
+        }
+    }
 }
 
 fn clone_uri<P: UriParser>(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
-    let copy = with_uri::<P, _>(req, object, |_, uri| Ok(uri.duplicate()))?;
+    let copy = with_uri::<P, _>(req, object, |req, uri| uri.duplicate(req))?;
     let Some(copy) = copy else {
         return Err(fatal(req, "InternalError: a URI could not be copied"));
     };
@@ -413,13 +455,18 @@ fn resolve<P: UriParser>(
     }
 }
 
-/// Whatever `f` makes of the receiver's URI.
+/// Whatever `f` makes of the receiver's URI read in `mode`, what the
+/// read needs laid down first ([`UriParser::prepare`]).
 fn read<P: UriParser, T>(
     req: &mut Request,
     this: PhpObject,
+    mode: ReadAs,
     f: impl FnOnce(&mut P) -> T,
 ) -> Result<T, Thrown> {
-    with_uri::<P, _>(req, this, |_, uri| Ok(f(uri)))
+    with_uri::<P, _>(req, this, |req, uri| {
+        uri.prepare(req, mode)?;
+        Ok(f(uri))
+    })
 }
 
 /// One component read, `php_uri_property_read_helper`: a component the
@@ -428,9 +475,10 @@ fn component<P: UriParser, T>(
     req: &mut Request,
     this: PhpObject,
     name: &str,
+    mode: ReadAs,
     f: impl FnOnce(&mut P) -> Read<T>,
 ) -> Result<T, Thrown> {
-    match read::<P, _>(req, this, f)? {
+    match read::<P, _>(req, this, mode, f)? {
         Ok(value) => Ok(value),
         Err(Unreadable) => Err(throw(
             req,
@@ -445,9 +493,10 @@ fn component_string<P: UriParser>(
     req: &mut Request,
     this: PhpObject,
     name: &str,
+    mode: ReadAs,
     f: impl FnOnce(&mut P) -> Read<Option<Vec<u8>>>,
 ) -> Result<Option<PhpString>, Thrown> {
-    let bytes = component::<P, _>(req, this, name, f)?;
+    let bytes = component::<P, _>(req, this, name, mode, f)?;
     bytes.map(|bytes| PhpString::new(req, &bytes)).transpose()
 }
 
@@ -496,7 +545,7 @@ fn recompose<P: UriParser>(
     this: PhpObject,
     mode: Recomposition,
 ) -> Result<PhpString, Thrown> {
-    let bytes = read::<P, _>(req, this, |uri| uri.recompose(mode, false))?;
+    let bytes = read::<P, _>(req, this, mode.read_as(), |uri| uri.recompose(mode, false))?;
     match bytes {
         Some(bytes) => PhpString::new(req, &bytes),
         None => Err(cannot_recompose(req, P::CLASS)),
@@ -513,7 +562,7 @@ fn equals<P: UriParser>(
 ) -> Result<bool, Thrown> {
     let exclude_fragment = mode == UriComparisonMode::ExcludeFragment;
     let side = |req: &mut Request, object| {
-        let bytes = read::<P, _>(req, object, |uri| {
+        let bytes = read::<P, _>(req, object, ReadAs::NormalizedAscii, |uri| {
             uri.recompose(Recomposition::NormalizedAscii, exclude_fragment)
         })?;
         bytes.ok_or_else(|| cannot_recompose(req, P::CLASS))
@@ -603,7 +652,7 @@ fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArr
     }
     let raw = ReadAs::Raw;
     let (scheme, username, password, host, port, path, query, fragment) =
-        read::<P, _>(req, this, |u| {
+        read::<P, _>(req, this, raw, |u| {
             (
                 u.scheme(raw),
                 u.username(raw),

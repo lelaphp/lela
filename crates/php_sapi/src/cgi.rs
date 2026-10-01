@@ -73,7 +73,7 @@ pub fn web(env: &Environment, info: &RequestInfo) -> WebRequest {
         cookies: env.get(b"HTTP_COOKIE").map(<[u8]>::to_vec),
         content_type: info.content_type.clone(),
         content_length: info.content_length,
-        body: Vec::new(),
+        body: crate::Body::default(),
         headers: php_proto::cgi::request_headers(env),
         no_headers: false,
         response_code: info.response_code,

@@ -44,10 +44,12 @@ fn encode(
     encoding: i64,
     level: i64,
 ) -> Result<OrFalse<PhpString>, Thrown> {
-    let status = match Deflate::new(level, encoding, MAX_MEM_LEVEL, DEFAULT_STRATEGY) {
+    let status = match Deflate::new(req, level, encoding, MAX_MEM_LEVEL, DEFAULT_STRATEGY)? {
         Ok(mut stream) => {
             let mut out = vec![0; size_guess(input.len())];
-            let step = stream.deflate(input, &mut out, Flush::Finish);
+            let step = stream.deflate(req, input, &mut out, Flush::Finish);
+            stream.end(req);
+            let step = step?;
             if step.status == Status::StreamEnd {
                 out.truncate(step.written);
                 return Ok(OrFalse::Value(PhpString::new(req, &out)?));
@@ -225,7 +227,12 @@ fn zlib_encode(
 /// is less, and growing by an eighth and one each round; `Z_MEM_ERROR`
 /// once `max` is reached, and a stream still short of its end
 /// `Z_DATA_ERROR`.
-fn inflate_rounds(stream: &mut Inflate, input: &[u8], max: usize) -> Result<Vec<u8>, Status> {
+fn inflate_rounds(
+    req: &mut Request,
+    stream: &mut Inflate,
+    input: &[u8],
+    max: usize,
+) -> Result<Result<Vec<u8>, Status>, Thrown> {
     let mut size = if max != 0 && max < input.len() {
         max
     } else {
@@ -238,7 +245,7 @@ fn inflate_rounds(stream: &mut Inflate, input: &[u8], max: usize) -> Result<Vec<
             Status::MemError
         } else {
             out.resize(size, 0);
-            let step = stream.inflate(&input[read..], &mut out[used..size], Flush::None);
+            let step = stream.inflate(req, &input[read..], &mut out[used..size], Flush::None)?;
             read += step.read;
             used += step.written;
             size += (size >> 3) + 1;
@@ -250,14 +257,14 @@ fn inflate_rounds(stream: &mut Inflate, input: &[u8], max: usize) -> Result<Vec<
             break status;
         }
     };
-    match status {
+    Ok(match status {
         Status::StreamEnd => {
             out.truncate(used);
             Ok(out)
         }
         Status::Ok => Err(Status::DataError),
         other => Err(other),
-    }
+    })
 }
 
 /// `php_zlib_decode`: the input with the NUL php's strings end in, which
@@ -280,14 +287,16 @@ fn decode(
         input.extend_from_slice(data);
         input.push(0);
         loop {
-            let mut stream = match Inflate::new(encoding) {
+            let mut stream = match Inflate::new(req, encoding)? {
                 Ok(stream) => stream,
                 Err(refused) => {
                     status = refused;
                     break;
                 }
             };
-            match inflate_rounds(&mut stream, &input, max) {
+            let inflated = inflate_rounds(req, &mut stream, &input, max);
+            stream.end(req);
+            match inflated? {
                 Ok(out) => return Ok(OrFalse::Value(PhpString::new(req, &out)?)),
                 Err(Status::DataError) if encoding == ENCODING_ANY => encoding = ZLIB_ENCODING_RAW,
                 Err(failed) => {

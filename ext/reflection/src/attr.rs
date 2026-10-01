@@ -310,7 +310,7 @@ impl ReflectionAttribute {
     fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let name = kept.attribute.name.0.to_vec();
-        PhpString::new(req, &name)
+        PhpString::interned(req, &name)
     }
 
     /// `ReflectionAttribute::getTarget()`: `attr->target`, the one

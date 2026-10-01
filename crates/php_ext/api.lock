@@ -154,6 +154,7 @@ abi::ObjectHandlers::get_property_ptr_ptr
 abi::ObjectHandlers::has_dimension
 abi::ObjectHandlers::has_property
 abi::ObjectHandlers::iterator_element
+abi::ObjectHandlers::iterator_size
 abi::ObjectHandlers::method_receiver
 abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension
@@ -368,6 +369,11 @@ request::BindTo
 request::BodyLimits
 request::Brigade
 request::BufferHandler
+request::BuildDefs
+request::BuildDefs::configure
+request::BuildDefs::date
+request::BuildDefs::provider
+request::BuildDefs::system
 request::CacheStatus
 request::CachedFile
 request::Cast
@@ -437,6 +443,7 @@ request::Request::autoload_register
 request::Request::autoload_unregister
 request::Request::backtrace
 request::Request::buffer_handler
+request::Request::build_defs
 request::Request::called_scope
 request::Request::caller_var
 request::Request::captured
@@ -750,6 +757,7 @@ syntax::scanned
 syntax::strip
 test::Capture
 test::Engine
+test::Engine::build_defs
 test::Engine::builder
 test::Engine::command_line
 test::Engine::dispatch
@@ -778,6 +786,15 @@ values::ArrayIter::value
 values::ClassId
 values::ClosureInfo
 values::DeclaredRows
+values::Emalloc
+values::Emalloc::as_mut_ptr
+values::Emalloc::bytes
+values::Emalloc::bytes_mut
+values::Emalloc::free
+values::Emalloc::is_empty
+values::Emalloc::len
+values::Emalloc::new
+values::Emalloc::resize
 values::HashIterator
 values::HashIterator::new
 values::HashIterator::position
@@ -863,6 +880,7 @@ values::PhpObject::props_for
 values::PhpObject::props_held
 values::PhpObject::protect
 values::PhpObject::protect_in
+values::PhpObject::rebuild_properties
 values::PhpObject::replace_table
 values::PhpObject::row
 values::PhpObject::row_place
@@ -887,6 +905,7 @@ values::PhpRef::set
 values::PhpString
 values::PhpString::as_bytes
 values::PhpString::filled
+values::PhpString::interned
 values::PhpString::is_empty
 values::PhpString::is_valid_utf8
 values::PhpString::len

@@ -1275,6 +1275,11 @@ pub(crate) fn unit(
         refused.raised = emit.diagnostics;
         return Err(refused);
     }
+    // `CG(zend_lineno) = last_lineno` before `zend_emit_final_return`
+    // (`Z/Zend/zend_language_scanner.l:622`): the implicit return stands
+    // on the file's last line, where the scanner stopped, and not on
+    // the last statement's.
+    emit.line = lines.max(1);
     let main = emit.finish(options.kind == SourceKind::File, 1, lines.max(1))?;
     let line = emit.line;
     let mut dynamic = Vec::with_capacity(emit.dynamic.len());

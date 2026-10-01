@@ -345,10 +345,10 @@ pub fn usage_text(argv0: &OsStr) -> String {
 }
 
 /// `php_print_version` for this host, [`php_sapi::version`] under its
-/// name and the date its `build.rs` stamps.
+/// name.
 #[must_use]
 pub fn version(engine: &Engine) -> String {
-    php_sapi::version(NAME, env!("PHP_BUILD_EPOCH"), engine)
+    php_sapi::version(NAME, engine)
 }
 
 /// The process's standard streams as php-cgi writes them: the body on
@@ -466,7 +466,7 @@ fn describe(
     };
     let web = WebRequest {
         query,
-        body,
+        body: php_sapi::Body::Read(body),
         no_headers: invocation.head == Head::Quiet,
         response_code,
         ..php_sapi::cgi::web(&env, &info)
@@ -742,6 +742,7 @@ fn engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let mut builder = Engine::builder()
         .extensions(&extensions)
+        .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
     if enabled(ini, "cgi.check_shebang_line", true) {
         builder = builder.skip_shebang();

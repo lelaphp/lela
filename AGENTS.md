@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=bf9855bbfe74a359f4303fc92264d7566affafb6f6987ef4fecd638d554e7667 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=df61d751848120858fca97b328846b1b9c3762e7c943cf0ad8ffde6517aaf9ef out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -99,7 +99,7 @@ third-engine-design.md
 - ADR-0007 (accepted, 2026-09-26): `php_macros` depends on no workspace crate, and `php_engine` depends on it, so Core declares its natives with the same attributes
 - ADR-0008 (accepted, 2026-09-29): Hosts are one crate each under `sapi/`, with `php_sapi` as the facade below them, as ADR-0004 laid extensions out
 
-<!-- /computed in=7f53878e7c368311f86af46ad65f459465c8cacb4af901d56302cfd291616e31 out=1decbce24eec1ffda97c6ed5a80344b357a1f522e076a6e51b3c2f6ddeff4868 -->
+<!-- /computed in=655a09f7bfbd3dbc7dc1544a56c3c031bba71ef703990c5444a5f4f29f4d55b9 out=1decbce24eec1ffda97c6ed5a80344b357a1f522e076a6e51b3c2f6ddeff4868 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
@@ -112,7 +112,7 @@ third-engine-design.md
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 353 |  | pass |
 
-<!-- /computed in=7bf6c9251ab841847384e5ac5d0d8e55ec11786a9fa4085da8fade37490ca583 out=cb75da39a5f326bb5c47b1d1f8a50d6b091df6559116b259fc61df8708380e92 -->
+<!-- /computed in=f135bc180b1e6da4baf5a9cd531916db0dad3bbf265606c20c332fbdccc832a1 out=cb75da39a5f326bb5c47b1d1f8a50d6b091df6559116b259fc61df8708380e92 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -142,7 +142,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=0f2acca9358c9d2f69a03590f776ab43a7ad8f515f881e7d31a8061a37c74508 out=e344c9be2ccdb333d052e5b8af24046c1402e9d11807c92ab6dfb306536ee60c -->
+<!-- /computed in=18c383ac4c6f8fc635c9e19cdfeadcc1f9982e98f26c9c45c589f2fd18b1f8ce out=e344c9be2ccdb333d052e5b8af24046c1402e9d11807c92ab6dfb306536ee60c -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -241,14 +241,18 @@ Options:
 ├── sysvshm
 ├── tokenizer
 ├── uri
+├── xml
+├── xmlreader
+├── xmlwriter
 └── zlib
 ```
-<!-- /computed in=fc762e75ee2e998f085a0f207a8382f4ff05e1781ec62653408be5fbb8b01a87 out=c2c62479ca1be6f77631cf5d1e22331bec9575496050486938fc4ee8db450b66 -->
+<!-- /computed in=029b723bfb9ac5bd2b1873c05a3e24bfbb325fa4021a51dd5a6f5efdb755c6fc out=14cfd808bc406b143c7f09411e02b25fcb2e9a1634b4648d0491c66d14205f5b -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .
 ├── cgi
 ├── cli
-└── fpm
+├── fpm
+└── phpdbg
 ```
-<!-- /computed in=c8a7b3fcbb6a403ba7abf1b232ce6acebcb51647351a19a7d7e64fcae3b3e2ba out=13133fa5fc4724f6c6436169b502ba6a835994124d1e31fcf89f3c5fde41ee69 -->
+<!-- /computed in=d9792c70e043b4549f1ed04bf5ddbc594d3104b27bce7a39b12cc5c2dc6ef79d out=470dec71ee5cf90528ce6b4eef3301fa86defac22de9048c8274b9ca2838028e -->

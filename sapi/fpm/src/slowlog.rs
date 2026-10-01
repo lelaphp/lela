@@ -41,7 +41,7 @@ pub(crate) fn check_timed_out(
         .proc(child.scoreboard_i)
         .map(crate::scoreboard::Proc::view)
     else {
-        zlog!(Notice, "failed to acquire scoreboard");
+        zlog!(Notice @ fpm_request_check_timed_out:232, "failed to acquire scoreboard");
         return;
     };
     if child.slow_logged.is_some_and(|at| at != proc.accepted_us) {
@@ -77,13 +77,13 @@ pub(crate) fn check_timed_out(
         fpm.pools[p].children[c].traced = true;
         crate::ffi::trace::signal(pid);
         zlog!(
-            Warning,
+            Warning @ fpm_request_check_timed_out:268,
             "[pool {name}] child {pid}, script '{script}' (request: {request}) executing too slow ({secs}.{micros:06} sec), logging"
         );
     } else if terminate != 0 && secs >= i64::from(terminate) {
         let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
         zlog!(
-            Warning,
+            Warning @ fpm_request_check_timed_out:279,
             "[pool {name}] child {pid}, script '{script}' (request: {request}) execution timed out ({secs}.{micros:06} sec), terminating"
         );
     }
@@ -105,7 +105,7 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
         );
     }
     let pid = fpm.pools[p].children[c].pid;
-    zlog!(Notice, "about to trace {pid}");
+    zlog!(Notice @ fpm_php_trace:195, "about to trace {pid}");
     let path = fpm.pools[p].config.slowlog.clone().unwrap_or_default();
     // `fopen(slowlog, "a+")`.
     let opened = std::fs::OpenOptions::new()
@@ -122,7 +122,7 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
         }
         Err(e) => {
             crate::zlog_sys!(
-                Error,
+                Error @ fpm_php_trace:200,
                 crate::conf::errno(&e),
                 "unable to open slowlog ({})",
                 String::from_utf8_lossy(&path)
@@ -131,7 +131,7 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
     }
     crate::ffi::trace::resume(pid);
     fpm.pools[p].children[c].traced = false;
-    zlog!(Notice, "finished trace of {pid}");
+    zlog!(Notice @ fpm_php_trace:223, "finished trace of {pid}");
 }
 
 /// `fpm_php_trace_dump`'s head: the time, the pool and the pid, and the

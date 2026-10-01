@@ -244,6 +244,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "curl-sys"
+version = "0.4.90+curl-8.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97799a0d220bfb3361e0fe4936966ff8c4b24d65c3f06dfc70d7b680b44e7897"
+dependencies = [
+ "cc",
+ "libc",
+ "libz-sys",
+ "pkg-config",
+ "vcpkg",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -619,6 +633,9 @@ dependencies = [
  "php_ext_sysvshm",
  "php_ext_tokenizer",
  "php_ext_uri",
+ "php_ext_xml",
+ "php_ext_xmlreader",
+ "php_ext_xmlwriter",
  "php_ext_zlib",
 ]
 
@@ -685,9 +702,9 @@ dependencies = [
 name = "php_ext_curl"
 version = "0.0.0"
 dependencies = [
+ "curl-sys",
  "libc",
  "php_ext",
- "pkg-config",
 ]
 
 [[package]]
@@ -990,6 +1007,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "php_ext_xml"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "php_ext_libxml",
+ "php_ext_standard",
+]
+
+[[package]]
+name = "php_ext_xmlreader"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "php_ext_dom",
+ "php_ext_libxml",
+]
+
+[[package]]
+name = "php_ext_xmlwriter"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "php_ext_libxml",
+]
+
+[[package]]
 name = "php_ext_zlib"
 version = "0.0.0"
 dependencies = [
@@ -1054,6 +1097,15 @@ dependencies = [
  "nix",
  "php_bundle",
  "php_proto",
+ "php_sapi",
+]
+
+[[package]]
+name = "php_sapi_phpdbg"
+version = "0.0.0"
+dependencies = [
+ "php_bundle",
+ "php_ext",
  "php_sapi",
 ]
 

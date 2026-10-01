@@ -13,8 +13,12 @@
 
 mod sys;
 
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::ptr;
+
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
+use php_ext::values::Emalloc;
 
 /// uriparser's `URI_ERROR_*` other than `URI_SUCCESS`, the ones
 /// `uri_parser_rfc3986.c` tells apart named.
@@ -60,137 +64,341 @@ pub(crate) enum Refusal {
     Resolve(Error),
 }
 
-/// One `UriUriA` owning its text (`owner` set), freed with its members.
-/// Boxed, so the struct the library filled never moves.
-pub(crate) struct Uri(Box<sys::UriUriA>);
+/// What uriparser's allocator reaches while one call runs, through the
+/// memory manager's `userData`: the request whose heap php's
+/// `php_uri_parser_rfc3986_memory_manager` allocates from, the
+/// allocations of the URI the call fills, and the memory limit's fatal
+/// where one was refused.
+struct Mm<'a> {
+    req: &'a mut Request,
+    held: &'a mut Vec<Emalloc>,
+    refused: Option<Thrown>,
+}
+
+/// The [`Mm`] a call lent the manager.
+///
+/// # Safety
+///
+/// `manager` is the one [`Uri::call`] built, whose `userData` is the
+/// `Mm` of the call uriparser is in.
+unsafe fn lent<'a>(manager: *mut sys::UriMemoryManager) -> &'a mut Mm<'a> {
+    // SAFETY: the caller's contract: `manager` is the live manager.
+    let data = unsafe { (*manager).userData };
+    // SAFETY: the caller's contract: `userData` names the live `Mm`.
+    unsafe { &mut *data.cast::<Mm<'a>>() }
+}
+
+/// `emalloc(size)` held for the URI, its address; null where the memory
+/// limit refused it, whose fatal the call answers.
+fn allocate(mm: &mut Mm<'_>, size: usize) -> *mut c_void {
+    match Emalloc::new(mm.req, size) {
+        Ok(mut block) => {
+            let at = block.as_mut_ptr();
+            mm.held.push(block);
+            at.cast()
+        }
+        Err(thrown) => {
+            mm.refused = Some(thrown);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Where the allocation at `at` stands among the URI's.
+fn position(mm: &mut Mm<'_>, at: *mut c_void) -> Option<usize> {
+    mm.held
+        .iter_mut()
+        .position(|block| block.as_mut_ptr().cast::<c_void>() == at)
+}
+
+/// `php_uri_parser_rfc3986_memory_manager_malloc`: `emalloc`.
+unsafe extern "C" fn mm_malloc(manager: *mut sys::UriMemoryManager, size: usize) -> *mut c_void {
+    // SAFETY: uriparser hands back the manager the call lent.
+    allocate(unsafe { lent(manager) }, size)
+}
+
+/// `php_uri_parser_rfc3986_memory_manager_calloc`: `ecalloc`, zero as
+/// every [`Emalloc`] is.
+unsafe extern "C" fn mm_calloc(
+    manager: *mut sys::UriMemoryManager,
+    nmemb: usize,
+    size: usize,
+) -> *mut c_void {
+    let Some(len) = nmemb.checked_mul(size) else {
+        return ptr::null_mut();
+    };
+    // SAFETY: as in `mm_malloc`.
+    allocate(unsafe { lent(manager) }, len)
+}
+
+/// `php_uri_parser_rfc3986_memory_manager_realloc`: `erealloc`, the
+/// allocation at `at` grown or cut where it is held, a fresh one where
+/// `at` is null.
+unsafe extern "C" fn mm_realloc(
+    manager: *mut sys::UriMemoryManager,
+    at: *mut c_void,
+    size: usize,
+) -> *mut c_void {
+    // SAFETY: as in `mm_malloc`.
+    let mm = unsafe { lent(manager) };
+    if at.is_null() {
+        return allocate(mm, size);
+    }
+    let Some(index) = position(mm, at) else {
+        return ptr::null_mut();
+    };
+    let block = mm.held.swap_remove(index);
+    match block.resize(mm.req, size) {
+        Ok(mut block) => {
+            let moved = block.as_mut_ptr();
+            mm.held.push(block);
+            moved.cast()
+        }
+        Err(thrown) => {
+            mm.refused = Some(thrown);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `php_uri_parser_rfc3986_memory_manager_reallocarray`:
+/// `safe_erealloc(ptr, nmemb, size, 0)`.
+unsafe extern "C" fn mm_reallocarray(
+    manager: *mut sys::UriMemoryManager,
+    at: *mut c_void,
+    nmemb: usize,
+    size: usize,
+) -> *mut c_void {
+    let Some(len) = nmemb.checked_mul(size) else {
+        return ptr::null_mut();
+    };
+    // SAFETY: the manager uriparser handed this function.
+    unsafe { mm_realloc(manager, at, len) }
+}
+
+/// `php_uri_parser_rfc3986_memory_manager_destroy`: `efree`.
+unsafe extern "C" fn mm_free(manager: *mut sys::UriMemoryManager, at: *mut c_void) {
+    if at.is_null() {
+        return;
+    }
+    // SAFETY: as in `mm_malloc`.
+    let mm = unsafe { lent(manager) };
+    if let Some(index) = position(mm, at) {
+        mm.held.swap_remove(index).free(mm.req);
+    }
+}
+
+/// One `UriUriA` owning its text (`owner` set), boxed so the struct the
+/// library filled never moves, with every allocation uriparser made for
+/// it on the request's heap (design §5.13). Every call that allocates
+/// is made through [`Uri::call`], which lends the manager the request
+/// for that call alone. [`Uri::free`] gives the members back; a URI
+/// dropped without is the request's end's, and uriparser is not called
+/// from `Drop`, since the members are in memory the heap may already
+/// have given back.
+pub(crate) struct Uri {
+    uri: Box<sys::UriUriA>,
+    held: Vec<Emalloc>,
+}
 
 // SAFETY: the URI and every allocation it points at are owned by this
 // value alone and reached only through it.
 unsafe impl Send for Uri {}
 
-impl Drop for Uri {
-    fn drop(&mut self) {
-        // SAFETY: a URI this owns, whose members are not reached after.
-        unsafe { sys::uriFreeUriMembersMmA(&raw mut *self.0, ptr::null_mut()) };
-    }
-}
-
-/// A `UriUriA` the library may have half filled, freed on every path out
-/// of [`Uri::parse`] that does not keep it.
-struct Filling(Box<sys::UriUriA>);
-
-impl Drop for Filling {
-    fn drop(&mut self) {
-        // SAFETY: a URI zeroed or filled by the library, not reached after.
-        unsafe { sys::uriFreeUriMembersMmA(&raw mut *self.0, ptr::null_mut()) };
-    }
-}
-
-impl Filling {
-    fn new() -> Filling {
-        Filling(Box::new(sys::UriUriA::empty()))
-    }
-
-    fn keep(mut self) -> Uri {
-        let uri = std::mem::replace(&mut self.0, Box::new(sys::UriUriA::empty()));
-        Uri(uri)
-    }
-}
-
 impl Uri {
+    /// `UriUriA uri = {0};`.
+    fn empty() -> Uri {
+        Uri {
+            uri: Box::new(sys::UriUriA::empty()),
+            held: Vec::new(),
+        }
+    }
+
+    /// `call` over the URI with php's memory manager, its allocations
+    /// this URI's and on `req`'s heap for the call's length; the `Err`
+    /// is the memory limit's fatal an allocation met.
+    fn call(
+        &mut self,
+        req: &mut Request,
+        call: impl FnOnce(*mut sys::UriUriA, *mut c_void) -> c_int,
+    ) -> Result<c_int, Thrown> {
+        let mut mm = Mm {
+            req,
+            held: &mut self.held,
+            refused: None,
+        };
+        let mut manager = sys::UriMemoryManager {
+            malloc: mm_malloc,
+            calloc: mm_calloc,
+            realloc: mm_realloc,
+            reallocarray: mm_reallocarray,
+            free: mm_free,
+            userData: (&raw mut mm).cast(),
+        };
+        let code = call(&raw mut *self.uri, (&raw mut manager).cast());
+        match mm.refused {
+            Some(thrown) => Err(thrown),
+            None => Ok(code),
+        }
+    }
+
+    /// `uriFreeUriMembersMmA`: the members given back to the request's
+    /// heap.
+    pub(crate) fn free(mut self, req: &mut Request) {
+        // SAFETY: a URI zeroed or filled by the library, not reached after.
+        let _ = self.call(req, |uri, memory| unsafe {
+            sys::uriFreeUriMembersMmA(uri, memory)
+        });
+    }
+
     /// `php_uri_parser_rfc3986_parse_ex` up to its range check:
     /// `uriParseSingleUriExMmA` over `text`, resolved against `base` with
     /// `uriAddBaseUriExMmA` with `URI_RESOLVE_STRICTLY` where there is one, and made
-    /// the owner of its text with `uriMakeOwnerMmA`.
-    pub(crate) fn parse(text: &[u8], base: Option<&Uri>) -> Result<Uri, Refusal> {
-        let mut uri = Filling::new();
+    /// the owner of its text with `uriMakeOwnerMmA`; the outer `Err` is
+    /// the memory limit's fatal.
+    pub(crate) fn parse(
+        req: &mut Request,
+        text: &[u8],
+        base: Option<&Uri>,
+    ) -> Result<Result<Uri, Refusal>, Thrown> {
+        let mut uri = Uri::empty();
         let range = text.as_ptr_range();
         // SAFETY: a zeroed URI, and the live bytes of `text`, which the
         // URI points into until it owns its text below.
-        let code = unsafe {
+        let code = uri.call(req, |uri, memory| unsafe {
             sys::uriParseSingleUriExMmA(
-                &raw mut *uri.0,
+                uri,
                 range.start.cast(),
                 range.end.cast(),
                 ptr::null_mut(),
-                ptr::null_mut(),
+                memory,
             )
-        };
-        Error::check(code).map_err(Refusal::Parse)?;
+        });
+        if let Some(refused) = Uri::failed(req, &mut uri, code, Refusal::Parse)? {
+            return Ok(Err(refused));
+        }
         if let Some(base) = base {
-            let mut resolved = Filling::new();
-            // SAFETY: a zeroed destination, the parsed URI and a live base,
-            // three distinct structs, as the library requires.
-            let code = unsafe {
-                sys::uriAddBaseUriExMmA(
-                    &raw mut *resolved.0,
-                    &raw const *uri.0,
-                    &raw const *base.0,
-                    sys::URI_RESOLVE_STRICTLY,
-                    ptr::null_mut(),
-                )
-            };
-            Error::check(code).map_err(Refusal::Resolve)?;
+            let mut resolved = Uri::empty();
+            let source: *const sys::UriUriA = &raw const *uri.uri;
+            let against: *const sys::UriUriA = &raw const *base.uri;
+            // SAFETY: a zeroed destination, the parsed URI and a live
+            // base, three distinct structs, as the library requires.
+            let code = resolved.call(req, |dest, memory| unsafe {
+                sys::uriAddBaseUriExMmA(dest, source, against, sys::URI_RESOLVE_STRICTLY, memory)
+            });
+            uri.free(req);
+            if let Some(refused) = Uri::failed(req, &mut resolved, code, Refusal::Resolve)? {
+                return Ok(Err(refused));
+            }
             uri = resolved;
         }
         // SAFETY: a URI pointing into `text` and the base, both live; it
         // owns copies of its text from here.
-        let code = unsafe { sys::uriMakeOwnerMmA(&raw mut *uri.0, ptr::null_mut()) };
-        Error::check(code).map_err(Refusal::Parse)?;
-        Ok(uri.keep())
+        let code = uri.call(req, |uri, memory| unsafe {
+            sys::uriMakeOwnerMmA(uri, memory)
+        });
+        if let Some(refused) = Uri::failed(req, &mut uri, code, Refusal::Parse)? {
+            return Ok(Err(refused));
+        }
+        Ok(Ok(uri))
     }
 
-    /// `copy_uri`: `uriCopyUriMmA` into a fresh URI.
-    pub(crate) fn try_clone(&self) -> Result<Uri, Error> {
-        let mut copy = Filling::new();
+    /// A call's refusal, with the URI it was filling freed: the fatal as
+    /// the `Err`, uriparser's error as the `Some`.
+    fn failed(
+        req: &mut Request,
+        uri: &mut Uri,
+        code: Result<c_int, Thrown>,
+        as_refusal: fn(Error) -> Refusal,
+    ) -> Result<Option<Refusal>, Thrown> {
+        let refusal = match code {
+            Ok(code) => match Error::check(code) {
+                Ok(()) => return Ok(None),
+                Err(error) => Ok(Some(as_refusal(error))),
+            },
+            Err(thrown) => Err(thrown),
+        };
+        std::mem::replace(uri, Uri::empty()).free(req);
+        refusal
+    }
+
+    /// `copy_uri`: `uriCopyUriMmA` into a fresh URI; the outer `Err` is
+    /// the memory limit's fatal.
+    pub(crate) fn try_clone(&self, req: &mut Request) -> Result<Result<Uri, Error>, Thrown> {
+        let mut copy = Uri::empty();
+        let source: *const sys::UriUriA = &raw const *self.uri;
         // SAFETY: a zeroed destination and a live source.
-        let code =
-            unsafe { sys::uriCopyUriMmA(&raw mut *copy.0, &raw const *self.0, ptr::null_mut()) };
-        Error::check(code)?;
-        Ok(copy.keep())
+        let code = copy.call(req, |dest, memory| unsafe {
+            sys::uriCopyUriMmA(dest, source, memory)
+        });
+        match code.map(Error::check) {
+            Ok(Ok(())) => Ok(Ok(copy)),
+            Ok(Err(error)) => {
+                copy.free(req);
+                Ok(Err(error))
+            }
+            Err(thrown) => {
+                copy.free(req);
+                Err(thrown)
+            }
+        }
     }
 
     /// `get_normalized_uri`: a copy with every part normalised,
-    /// `uriNormalizeSyntaxExMmA` under the mask `(unsigned int)-1`.
-    pub(crate) fn normalized(&self) -> Result<Uri, Error> {
-        let mut copy = self.try_clone()?;
+    /// `uriNormalizeSyntaxExMmA` under the mask `(unsigned int)-1`; the
+    /// outer `Err` is the memory limit's fatal.
+    pub(crate) fn normalized(&self, req: &mut Request) -> Result<Result<Uri, Error>, Thrown> {
+        let mut copy = match self.try_clone(req)? {
+            Ok(copy) => copy,
+            Err(error) => return Ok(Err(error)),
+        };
         // SAFETY: a URI this owns.
-        let code =
-            unsafe { sys::uriNormalizeSyntaxExMmA(&raw mut *copy.0, u32::MAX, ptr::null_mut()) };
-        Error::check(code)?;
-        Ok(copy)
+        let code = copy.call(req, |uri, memory| unsafe {
+            sys::uriNormalizeSyntaxExMmA(uri, u32::MAX, memory)
+        });
+        match code.map(Error::check) {
+            Ok(Ok(())) => Ok(Ok(copy)),
+            Ok(Err(error)) => {
+                copy.free(req);
+                Ok(Err(error))
+            }
+            Err(thrown) => {
+                copy.free(req);
+                Err(thrown)
+            }
+        }
     }
 
     /// `scheme`, `None` without a text range.
     pub(crate) fn scheme(&self) -> Option<&[u8]> {
-        range(&self.0.scheme)
+        range(&self.uri.scheme)
     }
 
     /// `userInfo`.
     pub(crate) fn user_info(&self) -> Option<&[u8]> {
-        range(&self.0.userInfo)
+        range(&self.uri.userInfo)
     }
 
     /// `hostText`, which excludes the brackets of an IP address.
     pub(crate) fn host_text(&self) -> Option<&[u8]> {
-        range(&self.0.hostText)
+        range(&self.uri.hostText)
     }
 
     /// Whether the host is an IPv6 or an `IPvFuture` address, which php
     /// shows in its brackets.
     pub(crate) fn host_is_ip_literal(&self) -> bool {
-        !self.0.hostData.ip6.is_null() || !self.0.hostData.ipFuture.first.is_null()
+        !self.uri.hostData.ip6.is_null() || !self.uri.hostData.ipFuture.first.is_null()
     }
 
     /// `portText`.
     pub(crate) fn port_text(&self) -> Option<&[u8]> {
-        range(&self.0.portText)
+        range(&self.uri.portText)
     }
 
     /// The path's segments from `pathHead`, empty where it is null.
     pub(crate) fn path_segments(&self) -> Vec<&[u8]> {
         let mut out = Vec::new();
-        let mut at = self.0.pathHead;
+        let mut at = self.uri.pathHead;
         // SAFETY: null or a live segment of this URI, each linking the
         // next or null.
         while let Some(segment) = unsafe { at.as_ref() } {
@@ -202,30 +410,31 @@ impl Uri {
 
     /// `query`, without its `?`.
     pub(crate) fn query(&self) -> Option<&[u8]> {
-        range(&self.0.query)
+        range(&self.uri.query)
     }
 
     /// `fragment`, without its `#`.
     pub(crate) fn fragment(&self) -> Option<&[u8]> {
-        range(&self.0.fragment)
+        range(&self.uri.fragment)
     }
 
     /// `absolutePath`: "/a" rather than "a", for a URI with no host.
     pub(crate) fn is_absolute_path(&self) -> bool {
-        self.0.absolutePath != 0
+        self.uri.absolutePath != 0
     }
 
     /// `uriHasHostA`.
     pub(crate) fn has_host(&self) -> bool {
         // SAFETY: a live URI.
-        unsafe { sys::uriHasHostA(&raw const *self.0) != 0 }
+        unsafe { sys::uriHasHostA(&raw const *self.uri) != 0 }
     }
 
     /// `uriToStringCharsRequiredA` and `uriToStringA`: the URI recomposed.
     pub(crate) fn recompose(&self) -> Result<Vec<u8>, Error> {
         let mut required: c_int = 0;
         // SAFETY: a live URI and a live count.
-        let code = unsafe { sys::uriToStringCharsRequiredA(&raw const *self.0, &raw mut required) };
+        let code =
+            unsafe { sys::uriToStringCharsRequiredA(&raw const *self.uri, &raw mut required) };
         Error::check(code)?;
         let len = usize::try_from(required).map_err(|_| Error::Other)?;
         let mut out = vec![0_u8; len + 1];
@@ -235,7 +444,7 @@ impl Uri {
         let code = unsafe {
             sys::uriToStringA(
                 out.as_mut_ptr().cast(),
-                &raw const *self.0,
+                &raw const *self.uri,
                 max,
                 ptr::null_mut(),
             )
@@ -247,58 +456,89 @@ impl Uri {
 
     fn set(
         &mut self,
+        req: &mut Request,
         value: Option<&[u8]>,
         setter: unsafe extern "C" fn(
             *mut sys::UriUriA,
             *const std::ffi::c_char,
             *const std::ffi::c_char,
-            *mut std::ffi::c_void,
+            *mut c_void,
         ) -> c_int,
-    ) -> Result<(), Error> {
+    ) -> Result<Result<(), Error>, Thrown> {
         let (first, after) = value.map_or((ptr::null(), ptr::null()), |v| {
             let range = v.as_ptr_range();
             (range.start.cast(), range.end.cast())
         });
         // SAFETY: a URI this owns and a live range or two nulls; the
         // setter copies what it keeps.
-        let code = unsafe { setter(&raw mut *self.0, first, after, ptr::null_mut()) };
-        Error::check(code)
+        let code = self.call(req, |uri, memory| unsafe {
+            setter(uri, first, after, memory)
+        })?;
+        Ok(Error::check(code))
     }
 
     /// `uriSetSchemeMmA`; `None` removes the scheme.
-    pub(crate) fn set_scheme(&mut self, value: Option<&[u8]>) -> Result<(), Error> {
-        self.set(value, sys::uriSetSchemeMmA)
+    pub(crate) fn set_scheme(
+        &mut self,
+        req: &mut Request,
+        value: Option<&[u8]>,
+    ) -> Result<Result<(), Error>, Thrown> {
+        self.set(req, value, sys::uriSetSchemeMmA)
     }
 
     /// `uriSetUserInfoMmA`.
-    pub(crate) fn set_user_info(&mut self, value: Option<&[u8]>) -> Result<(), Error> {
-        self.set(value, sys::uriSetUserInfoMmA)
+    pub(crate) fn set_user_info(
+        &mut self,
+        req: &mut Request,
+        value: Option<&[u8]>,
+    ) -> Result<Result<(), Error>, Thrown> {
+        self.set(req, value, sys::uriSetUserInfoMmA)
     }
 
     /// `uriSetHostAutoMmA`: an IP address or a registered name, as the
     /// text reads.
-    pub(crate) fn set_host(&mut self, value: Option<&[u8]>) -> Result<(), Error> {
-        self.set(value, sys::uriSetHostAutoMmA)
+    pub(crate) fn set_host(
+        &mut self,
+        req: &mut Request,
+        value: Option<&[u8]>,
+    ) -> Result<Result<(), Error>, Thrown> {
+        self.set(req, value, sys::uriSetHostAutoMmA)
     }
 
     /// `uriSetPortTextMmA`.
-    pub(crate) fn set_port_text(&mut self, value: Option<&[u8]>) -> Result<(), Error> {
-        self.set(value, sys::uriSetPortTextMmA)
+    pub(crate) fn set_port_text(
+        &mut self,
+        req: &mut Request,
+        value: Option<&[u8]>,
+    ) -> Result<Result<(), Error>, Thrown> {
+        self.set(req, value, sys::uriSetPortTextMmA)
     }
 
     /// `uriSetPathMmA`.
-    pub(crate) fn set_path(&mut self, value: Option<&[u8]>) -> Result<(), Error> {
-        self.set(value, sys::uriSetPathMmA)
+    pub(crate) fn set_path(
+        &mut self,
+        req: &mut Request,
+        value: Option<&[u8]>,
+    ) -> Result<Result<(), Error>, Thrown> {
+        self.set(req, value, sys::uriSetPathMmA)
     }
 
     /// `uriSetQueryMmA`.
-    pub(crate) fn set_query(&mut self, value: Option<&[u8]>) -> Result<(), Error> {
-        self.set(value, sys::uriSetQueryMmA)
+    pub(crate) fn set_query(
+        &mut self,
+        req: &mut Request,
+        value: Option<&[u8]>,
+    ) -> Result<Result<(), Error>, Thrown> {
+        self.set(req, value, sys::uriSetQueryMmA)
     }
 
     /// `uriSetFragmentMmA`.
-    pub(crate) fn set_fragment(&mut self, value: Option<&[u8]>) -> Result<(), Error> {
-        self.set(value, sys::uriSetFragmentMmA)
+    pub(crate) fn set_fragment(
+        &mut self,
+        req: &mut Request,
+        value: Option<&[u8]>,
+    ) -> Result<Result<(), Error>, Thrown> {
+        self.set(req, value, sys::uriSetFragmentMmA)
     }
 }
 

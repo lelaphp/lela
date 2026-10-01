@@ -66,8 +66,9 @@ use crate::api::values::{
     ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::exec::{
-    self, Cached, CallStage, CallState, E_FATAL_ERRORS, ReturnValue, cleanup_live_vars,
-    cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
+    self, Cached, CallStage, CallState, E_FATAL_ERRORS, LAST_CATCH, ReturnValue, cached_class,
+    cleanup_live_vars, cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors,
+    restore_silenced,
 };
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
@@ -6332,7 +6333,7 @@ pub(crate) fn fetch_class_constant<T: Tier>(
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let value = if op.op2_type != OperandKind::Const && name.eq_ignore_ascii_case(b"class") {
         let written = req.class_name_bytes(class);
-        PhpString::new(req, &written).map(Value::string)
+        req.interned(&written).map(Value::string)
     } else {
         req.class_constant(class, &name)
     };
@@ -9827,39 +9828,6 @@ pub(crate) fn instanceof<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `CACHED_PTR(slot)`, else `zend_lookup_class_ex` under
-/// `ZEND_FETCH_CLASS_NO_AUTOLOAD` over the lowered half of the constant
-/// pair at `at` and `CACHE_PTR(slot, ce)` over what it found: the
-/// silent resolution `ZEND_CATCH` and `ZEND_INSTANCEOF` make, and the
-/// lookup half of the throwing one, [`class_operand`]. A name nothing
-/// declares primes nothing — php's `CATCH` writes the null it found and
-/// reads it back as unprimed, and the other three throw before
-/// `CACHE_PTR` — so a class declared after a pass is found by the next.
-///
-/// No slot is [`init_static_method_call`]'s: php primes that one with
-/// the class alone only where `op2` is no constant, and with the class
-/// and the callee together where it is (`CACHE_POLYMORPHIC_PTR`), so it
-/// reads and writes [`Cached::ClassAndCallee`] off the slot itself.
-fn cached_class(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    at: u32,
-    slot: Option<CacheSlot>,
-) -> Option<crate::api::values::ClassId> {
-    if let Some(Cached::Class(class)) = slot.map(|slot| req.cached(frame, slot)) {
-        return Some(class);
-    }
-    let lowered = exec::constant(code, ConstIdx(at.saturating_add(1)));
-    let found = lowered
-        .as_str_bytes()
-        .and_then(|lowered| exec::find_class(req, lowered));
-    if let (Some(slot), Some(class)) = (slot, found) {
-        req.prime(frame, slot, Cached::Class(class));
-    }
-    found
-}
-
 /// `zend_fetch_class_by_name` with `ZEND_FETCH_CLASS_EXCEPTION` over a
 /// class's constant pair: the class the opline's cache slot holds or
 /// [`cached_class`] looks up under the lowered name in the slot after
@@ -10060,7 +10028,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         .class_decl(class)
         .map(|decl| decl.name.0.to_vec())
         .unwrap_or_default();
-    let name = match PhpString::new(req, &name) {
+    let name = match req.interned(&name) {
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -18936,7 +18904,7 @@ fn class_name_into(
     class: crate::api::values::ClassId,
 ) -> Edge {
     let name = req.class_name_bytes(class);
-    let name = match PhpString::new(req, &name) {
+    let name = match req.interned(&name) {
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -20128,11 +20096,6 @@ fn put_argument(req: &mut Request, slot: ArgSlot, value: Value) -> Result<(), Fa
     *placed = value;
     Ok(())
 }
-
-/// `ZEND_LAST_CATCH` (`Z/Zend/zend_compile.h`): the bit beside the cache
-/// slot on the `extended_value` of the last `CATCH` of a `try`, the one
-/// that rethrows rather than jumping to a clause after it.
-const LAST_CATCH: u32 = 1 << 0;
 
 /// `ZEND_THROW` (`Z/Zend/zend_vm_def.h:4777`): the operand made pending,
 /// `zend_throw_exception_object`, with one more owner for the pending

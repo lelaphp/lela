@@ -22,6 +22,7 @@ LiveRange
 MethodBody
 OpArray
 OpArray::dimension_written
+OpArray::dump_lines
 Opcode
 OperandKind
 Opline

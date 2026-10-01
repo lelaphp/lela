@@ -865,6 +865,11 @@ fn out_of_range(req: &mut Request, tail: &str) -> Thrown {
 }
 
 impl ObjectHandlers for Handlers {
+    /// `spl_dllist_it`: the iterator, its traverse pointer, position and flags.
+    fn iterator_size(&self) -> usize {
+        104
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let values = object
             .native_mut::<Llist>(req)

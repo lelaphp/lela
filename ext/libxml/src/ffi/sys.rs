@@ -312,7 +312,7 @@ pub(crate) struct xmlValidCtxt {
     pub(crate) state: *mut c_void,
 }
 
-/// `struct _xmlParserInput`, as far as `col`.
+/// `struct _xmlParserInput`, as far as `consumed`.
 #[repr(C)]
 pub(crate) struct xmlParserInput {
     pub(crate) buf: *mut c_void,
@@ -324,6 +324,7 @@ pub(crate) struct xmlParserInput {
     pub(crate) length: c_int,
     pub(crate) line: c_int,
     pub(crate) col: c_int,
+    pub(crate) consumed: c_ulong,
 }
 
 /// `struct _xmlParserNodeInfoSeq`.
@@ -492,20 +493,44 @@ pub(crate) struct xmlXPathParserContext {
 pub(crate) struct xmlOutputBuffer {
     _opaque: [u8; 0],
 }
-/// `struct _xmlSAXHandler`, as far as `fatalError`: the handlers an error
-/// of a parser reaches when no structured handler is set, which decide
-/// the route php would have printed it by.
+/// `struct _xmlSAXHandler`: the handlers an error of a parser reaches when
+/// no structured handler is set, which decide the route php would have
+/// printed it by, and the SAX2 tail php's expat compatibility layer lays
+/// its own table down with (`php_xml_compat_handlers`).
 #[repr(C)]
 pub(crate) struct xmlSAXHandler {
     pub(crate) callbacks: [*mut c_void; 21],
     pub(crate) warning: *mut c_void,
     pub(crate) error: *mut c_void,
     pub(crate) fatal_error: *mut c_void,
+    pub(crate) getParameterEntity: *mut c_void,
+    pub(crate) cdataBlock: *mut c_void,
+    pub(crate) externalSubset: *mut c_void,
+    pub(crate) initialized: c_uint,
+    pub(crate) private: *mut c_void,
+    pub(crate) startElementNs: *mut c_void,
+    pub(crate) endElementNs: *mut c_void,
+    pub(crate) serror: *mut c_void,
 }
+
+/// `XML_SAX2_MAGIC`.
+pub(crate) const XML_SAX2_MAGIC: c_uint = 0xDEED_BEAF;
+/// `XML_PARSER_CONTENT`, of `xmlParserInputState`.
+pub(crate) const XML_PARSER_CONTENT: c_int = 7;
+/// `XML_PARSE_OLDSAX`.
+pub(crate) const XML_PARSE_OLDSAX: c_int = 1 << 20;
+/// `XML_MAX_DICTIONARY_LIMIT`.
+pub(crate) const XML_MAX_DICTIONARY_LIMIT: usize = 10_000_000;
 
 /// `xmlTextReader`, never read through.
 #[repr(C)]
 pub(crate) struct xmlTextReader {
+    _opaque: [u8; 0],
+}
+
+/// `xmlTextWriter`, never read through.
+#[repr(C)]
+pub(crate) struct xmlTextWriter {
     _opaque: [u8; 0],
 }
 
@@ -966,6 +991,9 @@ unsafe extern "C" {
     pub(crate) fn xmlBuildURI(uri: *const xmlChar, base: *const xmlChar) -> *mut xmlChar;
     pub(crate) fn xmlParseURI(uri: *const c_char) -> *mut xmlURI;
     pub(crate) fn xmlFreeURI(uri: *mut xmlURI);
+    pub(crate) fn xmlCreateURI() -> *mut xmlURI;
+    pub(crate) fn xmlURIEscapeStr(s: *const xmlChar, list: *const xmlChar) -> *mut xmlChar;
+    pub(crate) fn xmlParseURIReference(uri: *mut xmlURI, s: *const c_char) -> c_int;
     pub(crate) fn xmlURIUnescapeString(
         s: *const c_char,
         len: c_int,
@@ -1075,6 +1103,232 @@ unsafe extern "C" {
     pub(crate) fn xmlRelaxNGValidateDoc(ctxt: *mut c_void, doc: *mut xmlDoc) -> c_int;
     pub(crate) fn xmlRelaxNGFree(schema: *mut c_void);
     pub(crate) fn xmlRelaxNGFreeValidCtxt(ctxt: *mut c_void);
+
+    // parser.h, entities.h: the push parser php's xml extension drives
+    pub(crate) fn xmlStopParser(ctxt: *mut xmlParserCtxt);
+    pub(crate) fn xmlCtxtGetLastError(ctx: *mut c_void) -> *mut xmlError;
+    pub(crate) fn xmlGetPredefinedEntity(name: *const xmlChar) -> *mut xmlEntity;
+
+    // xmlreader.h: what php's xmlreader calls beyond the above
+    pub(crate) fn xmlReaderForFile(
+        filename: *const c_char,
+        encoding: *const c_char,
+        options: c_int,
+    ) -> *mut xmlTextReader;
+    pub(crate) fn xmlReaderForIO(
+        ioread: xmlInputReadCallback,
+        ioclose: Option<xmlInputCloseCallback>,
+        ioctx: *mut c_void,
+        url: *const c_char,
+        encoding: *const c_char,
+        options: c_int,
+    ) -> *mut xmlTextReader;
+    pub(crate) fn xmlParserInputBufferCreateMem(
+        mem: *const c_char,
+        size: c_int,
+        enc: c_int,
+    ) -> *mut xmlParserInputBuffer;
+    pub(crate) fn xmlNewTextReader(
+        input: *mut xmlParserInputBuffer,
+        uri: *const c_char,
+    ) -> *mut xmlTextReader;
+    pub(crate) fn xmlTextReaderSetup(
+        reader: *mut xmlTextReader,
+        input: *mut xmlParserInputBuffer,
+        url: *const c_char,
+        encoding: *const c_char,
+        options: c_int,
+    ) -> c_int;
+    pub(crate) fn xmlTextReaderNext(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderExpand(reader: *mut xmlTextReader) -> *mut xmlNode;
+    pub(crate) fn xmlTextReaderReadInnerXml(reader: *mut xmlTextReader) -> *mut xmlChar;
+    pub(crate) fn xmlTextReaderReadOuterXml(reader: *mut xmlTextReader) -> *mut xmlChar;
+    pub(crate) fn xmlTextReaderReadString(reader: *mut xmlTextReader) -> *mut xmlChar;
+    pub(crate) fn xmlTextReaderGetAttributeNo(
+        reader: *mut xmlTextReader,
+        no: c_int,
+    ) -> *mut xmlChar;
+    pub(crate) fn xmlTextReaderGetAttributeNs(
+        reader: *mut xmlTextReader,
+        name: *const xmlChar,
+        ns: *const xmlChar,
+    ) -> *mut xmlChar;
+    pub(crate) fn xmlTextReaderLookupNamespace(
+        reader: *mut xmlTextReader,
+        prefix: *const xmlChar,
+    ) -> *mut xmlChar;
+    pub(crate) fn xmlTextReaderMoveToAttribute(
+        reader: *mut xmlTextReader,
+        name: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextReaderMoveToAttributeNo(reader: *mut xmlTextReader, no: c_int) -> c_int;
+    pub(crate) fn xmlTextReaderMoveToAttributeNs(
+        reader: *mut xmlTextReader,
+        name: *const xmlChar,
+        ns: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextReaderMoveToElement(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderMoveToFirstAttribute(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderMoveToNextAttribute(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderIsValid(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderGetParserProp(reader: *mut xmlTextReader, prop: c_int) -> c_int;
+    pub(crate) fn xmlTextReaderSetParserProp(
+        reader: *mut xmlTextReader,
+        prop: c_int,
+        value: c_int,
+    ) -> c_int;
+    pub(crate) fn xmlTextReaderSchemaValidate(
+        reader: *mut xmlTextReader,
+        xsd: *const c_char,
+    ) -> c_int;
+    pub(crate) fn xmlTextReaderRelaxNGSetSchema(
+        reader: *mut xmlTextReader,
+        schema: *mut c_void,
+    ) -> c_int;
+    pub(crate) fn xmlTextReaderAttributeCount(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderDepth(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderHasAttributes(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderHasValue(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderIsDefault(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderIsEmptyElement(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderConstBaseUri(reader: *mut xmlTextReader) -> *const xmlChar;
+    pub(crate) fn xmlTextReaderConstName(reader: *mut xmlTextReader) -> *const xmlChar;
+    pub(crate) fn xmlTextReaderConstNamespaceUri(reader: *mut xmlTextReader) -> *const xmlChar;
+    pub(crate) fn xmlTextReaderConstPrefix(reader: *mut xmlTextReader) -> *const xmlChar;
+    pub(crate) fn xmlTextReaderConstValue(reader: *mut xmlTextReader) -> *const xmlChar;
+    pub(crate) fn xmlTextReaderConstXmlLang(reader: *mut xmlTextReader) -> *const xmlChar;
+
+    // xmlwriter.h: what php's xmlwriter calls, `const xmlChar *` each
+    // string, `-1` each failure
+    pub(crate) fn xmlNewTextWriter(out: *mut xmlOutputBuffer) -> *mut xmlTextWriter;
+    pub(crate) fn xmlNewTextWriterFilename(
+        uri: *const c_char,
+        compression: c_int,
+    ) -> *mut xmlTextWriter;
+    pub(crate) fn xmlFreeTextWriter(writer: *mut xmlTextWriter);
+    pub(crate) fn xmlTextWriterFlush(writer: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterSetIndent(writer: *mut xmlTextWriter, indent: c_int) -> c_int;
+    pub(crate) fn xmlTextWriterSetIndentString(
+        writer: *mut xmlTextWriter,
+        s: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterStartDocument(
+        w: *mut xmlTextWriter,
+        version: *const c_char,
+        encoding: *const c_char,
+        standalone: *const c_char,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterEndDocument(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterStartComment(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterEndComment(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterWriteComment(
+        w: *mut xmlTextWriter,
+        content: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterStartElement(w: *mut xmlTextWriter, name: *const xmlChar) -> c_int;
+    pub(crate) fn xmlTextWriterStartElementNS(
+        w: *mut xmlTextWriter,
+        prefix: *const xmlChar,
+        name: *const xmlChar,
+        uri: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterEndElement(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterFullEndElement(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterWriteElement(
+        w: *mut xmlTextWriter,
+        name: *const xmlChar,
+        content: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterWriteElementNS(
+        w: *mut xmlTextWriter,
+        prefix: *const xmlChar,
+        name: *const xmlChar,
+        uri: *const xmlChar,
+        content: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterWriteRaw(w: *mut xmlTextWriter, content: *const xmlChar) -> c_int;
+    pub(crate) fn xmlTextWriterWriteString(w: *mut xmlTextWriter, content: *const xmlChar)
+    -> c_int;
+    pub(crate) fn xmlTextWriterStartAttribute(w: *mut xmlTextWriter, name: *const xmlChar)
+    -> c_int;
+    pub(crate) fn xmlTextWriterStartAttributeNS(
+        w: *mut xmlTextWriter,
+        prefix: *const xmlChar,
+        name: *const xmlChar,
+        uri: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterEndAttribute(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterWriteAttribute(
+        w: *mut xmlTextWriter,
+        name: *const xmlChar,
+        content: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterWriteAttributeNS(
+        w: *mut xmlTextWriter,
+        prefix: *const xmlChar,
+        name: *const xmlChar,
+        uri: *const xmlChar,
+        content: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterStartPI(w: *mut xmlTextWriter, target: *const xmlChar) -> c_int;
+    pub(crate) fn xmlTextWriterEndPI(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterWritePI(
+        w: *mut xmlTextWriter,
+        target: *const xmlChar,
+        content: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterStartCDATA(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterEndCDATA(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterWriteCDATA(w: *mut xmlTextWriter, content: *const xmlChar) -> c_int;
+    pub(crate) fn xmlTextWriterStartDTD(
+        w: *mut xmlTextWriter,
+        name: *const xmlChar,
+        pubid: *const xmlChar,
+        sysid: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterEndDTD(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterWriteDTD(
+        w: *mut xmlTextWriter,
+        name: *const xmlChar,
+        pubid: *const xmlChar,
+        sysid: *const xmlChar,
+        subset: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterStartDTDElement(
+        w: *mut xmlTextWriter,
+        name: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterEndDTDElement(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterWriteDTDElement(
+        w: *mut xmlTextWriter,
+        name: *const xmlChar,
+        content: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterStartDTDAttlist(
+        w: *mut xmlTextWriter,
+        name: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterEndDTDAttlist(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterWriteDTDAttlist(
+        w: *mut xmlTextWriter,
+        name: *const xmlChar,
+        content: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterStartDTDEntity(
+        w: *mut xmlTextWriter,
+        pe: c_int,
+        name: *const xmlChar,
+    ) -> c_int;
+    pub(crate) fn xmlTextWriterEndDTDEntity(w: *mut xmlTextWriter) -> c_int;
+    pub(crate) fn xmlTextWriterWriteDTDEntity(
+        w: *mut xmlTextWriter,
+        pe: c_int,
+        name: *const xmlChar,
+        pubid: *const xmlChar,
+        sysid: *const xmlChar,
+        ndataid: *const xmlChar,
+        content: *const xmlChar,
+    ) -> c_int;
 }
 
 #[cfg(test)]
@@ -1106,6 +1360,10 @@ mod tests {
         assert_eq!(size_of::<xmlValidCtxt>(), 112);
         assert_eq!(offset_of!(xmlParserInput, line), 52);
         assert_eq!(offset_of!(xmlParserInput, col), 56);
+        assert_eq!(offset_of!(xmlParserInput, consumed), 64);
+        assert_eq!(offset_of!(xmlSAXHandler, initialized), 216);
+        assert_eq!(offset_of!(xmlSAXHandler, startElementNs), 232);
+        assert_eq!(size_of::<xmlSAXHandler>(), 256);
         assert_eq!(offset_of!(xmlParserCtxt, input), 56);
         assert_eq!(offset_of!(xmlParserCtxt, vctxt), 160);
         assert_eq!(offset_of!(xmlParserCtxt, directory), 280);

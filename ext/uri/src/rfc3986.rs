@@ -7,7 +7,7 @@ use php_ext::abi::{Instance, Static, This};
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString};
+use php_ext::values::{Emalloc, PhpArray, PhpString};
 
 use crate::ffi::{self, Refusal};
 use crate::{
@@ -15,11 +15,39 @@ use crate::{
 };
 
 /// `php_uri_parser_rfc3986_uris`: the URI as parsed or written, and its
-/// normalized copy once a read has asked for it.
-pub(crate) struct Rfc3986 {
+/// normalized copy once a read has asked for it, in the struct
+/// `uriparser_create_uris` `ecalloc`s on the request's heap for them,
+/// and their members in what uriparser allocated through php's memory
+/// manager (design §5.13).
+///
+/// ```php
+/// $w = new Uri\Rfc3986\Uri('https://example.com/a?b#c'); $w->getHost();
+/// $m = memory_get_usage(); $u = new Uri\Rfc3986\Uri('https://example.com/a?b#c'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $h = $u->getHost(); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v = $u->withPath('/x/y'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($u, $v); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $r = Uri\Rfc3986\Uri::parse('../c', new Uri\Rfc3986\Uri('https://example.com/a/b')); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 576
+/// 152
+/// 624
+/// -1312
+/// 544
+/// ```
+pub(crate) struct Rfc3986(Box<Uris>);
+
+/// [`Rfc3986`]'s fields, boxed, so the payload fits the `php_uri_object`
+/// php allocates.
+struct Uris {
     uri: ffi::Uri,
     normalized: Option<ffi::Uri>,
+    /// The struct's own allocation, `sizeof(php_uri_parser_rfc3986_uris)`.
+    allocation: Emalloc,
 }
+
+/// `sizeof(php_uri_parser_rfc3986_uris)`: two `UriUriA` and `normalized_uri_initialized`.
+const URIS: usize = 328;
 
 /// `MAX_LENGTH_OF_LONG` less its sign, the longest `portText` php reads.
 const MAX_PORT_TEXT: usize = 20;
@@ -51,22 +79,22 @@ fn refused(req: &mut Request, invalid: Option<&str>, other: &str) -> Thrown {
 
 impl Rfc3986 {
     /// `get_uri_for_reading`: the URI as parsed for a raw read, its
-    /// normalized copy for any other.
+    /// normalized copy, which [`UriParser::prepare`] made, for any
+    /// other.
     fn reading(&mut self, mode: ReadAs) -> Read<&ffi::Uri> {
         if mode == ReadAs::Raw {
-            return Ok(&self.uri);
+            return Ok(&self.0.uri);
         }
-        if self.normalized.is_none() {
-            self.normalized = Some(self.uri.normalized().map_err(|_| Unreadable)?);
-        }
-        self.normalized.as_ref().ok_or(Unreadable)
+        self.0.normalized.as_ref().ok_or(Unreadable)
     }
 
     /// `get_uri_for_writing`: the URI as parsed, its normalized copy
-    /// dropped, since the write makes it stale.
-    fn writing(&mut self) -> &mut ffi::Uri {
-        self.normalized = None;
-        &mut self.uri
+    /// given back, since the write makes it stale.
+    fn writing(&mut self, req: &mut Request) -> &mut ffi::Uri {
+        if let Some(normalized) = self.0.normalized.take() {
+            normalized.free(req);
+        }
+        &mut self.0.uri
     }
 
     /// `php_uri_parser_rfc3986_userinfo_read`.
@@ -76,16 +104,18 @@ impl Rfc3986 {
 
     /// `php_uri_parser_rfc3986_userinfo_write`.
     fn set_user_info(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.writing().set_user_info(value).map_err(|error| {
-            let invalid = match error {
-                ffi::Error::UserInfoWithoutHost => {
-                    Some("Cannot set a userinfo without having a host")
-                }
-                ffi::Error::Syntax => Some("The specified userinfo is malformed"),
-                _ => None,
-            };
-            refused(req, invalid, "Failed to update the userinfo")
-        })
+        self.writing(req)
+            .set_user_info(req, value)?
+            .map_err(|error| {
+                let invalid = match error {
+                    ffi::Error::UserInfoWithoutHost => {
+                        Some("Cannot set a userinfo without having a host")
+                    }
+                    ffi::Error::Syntax => Some("The specified userinfo is malformed"),
+                    _ => None,
+                };
+                refused(req, invalid, "Failed to update the userinfo")
+            })
     }
 }
 
@@ -104,7 +134,7 @@ impl UriParser for Rfc3986 {
             uri: None,
             errors: None,
         };
-        let uri = match ffi::Uri::parse(text, base.map(|base| &base.uri)) {
+        let uri = match ffi::Uri::parse(req, text, base.map(|base| &base.0.uri))? {
             Ok(uri) => uri,
             Err(_) if silent => return Ok(failed),
             Err(refusal) => {
@@ -128,27 +158,75 @@ impl UriParser for Rfc3986 {
             && !port.is_empty()
             && port_value(port).is_none()
         {
+            uri.free(req);
             if silent {
                 return Ok(failed);
             }
             return Err(refused(req, Some("The port is out of range"), ""));
         }
+        let uris = match Emalloc::new(req, URIS) {
+            Ok(uris) => uris,
+            Err(thrown) => {
+                uri.free(req);
+                return Err(thrown);
+            }
+        };
         Ok(Parsed {
-            uri: Some(Rfc3986 {
+            uri: Some(Rfc3986(Box::new(Uris {
                 uri,
                 normalized: None,
-            }),
+                allocation: uris,
+            }))),
             errors: None,
         })
     }
 
-    /// `php_uri_parser_rfc3986_clone`: the URI copied, the normalized
-    /// copy not, since a write is what follows a clone.
-    fn duplicate(&self) -> Option<Self> {
-        Some(Rfc3986 {
-            uri: self.uri.try_clone().ok()?,
-            normalized: None,
-        })
+    /// `php_uri_parser_rfc3986_clone`: the struct made and the URI copied
+    /// into it, the normalized copy not, since a write is what follows a
+    /// clone.
+    fn duplicate(&self, req: &mut Request) -> Result<Option<Self>, Thrown> {
+        let uris = Emalloc::new(req, URIS)?;
+        match self.0.uri.try_clone(req) {
+            Ok(Ok(uri)) => Ok(Some(Rfc3986(Box::new(Uris {
+                uri,
+                normalized: None,
+                allocation: uris,
+            })))),
+            Ok(Err(_)) => {
+                uris.free(req);
+                Ok(None)
+            }
+            Err(thrown) => {
+                uris.free(req);
+                Err(thrown)
+            }
+        }
+    }
+
+    /// `get_normalized_uri`'s copy, made on the first read that is not
+    /// raw and kept until a write; a copy the library could not make
+    /// leaves the read unreadable.
+    fn prepare(&mut self, req: &mut Request, mode: ReadAs) -> Result<(), Thrown> {
+        if mode == ReadAs::Raw || self.0.normalized.is_some() {
+            return Ok(());
+        }
+        self.0.normalized = self.0.uri.normalized(req)?.ok();
+        Ok(())
+    }
+
+    /// `php_uri_parser_rfc3986_destroy`: both URIs' members and the
+    /// struct given back.
+    fn free(self, req: &mut Request) {
+        let Uris {
+            uri,
+            normalized,
+            allocation,
+        } = *self.0;
+        uri.free(req);
+        if let Some(normalized) = normalized {
+            normalized.free(req);
+        }
+        allocation.free(req);
     }
 
     /// `php_uri_parser_rfc3986_to_string`: the fragment cut at the last
@@ -247,7 +325,7 @@ impl UriParser for Rfc3986 {
     }
 
     fn set_scheme(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.writing().set_scheme(value).map_err(|error| {
+        self.writing(req).set_scheme(req, value)?.map_err(|error| {
             let invalid =
                 (error == ffi::Error::Syntax).then_some("The specified scheme is malformed");
             refused(req, invalid, "Failed to update the scheme")
@@ -255,7 +333,7 @@ impl UriParser for Rfc3986 {
     }
 
     fn set_host(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.writing().set_host(value).map_err(|error| {
+        self.writing(req).set_host(req, value)?.map_err(|error| {
             let invalid = match error {
                 ffi::Error::HostRemovedUnderPort => {
                     Some("Cannot remove the host from a URI that has a port")
@@ -272,8 +350,8 @@ impl UriParser for Rfc3986 {
 
     fn set_port(&mut self, req: &mut Request, value: Option<i64>) -> Result<(), Thrown> {
         let text = value.map(|port| port.to_string().into_bytes());
-        self.writing()
-            .set_port_text(text.as_deref())
+        self.writing(req)
+            .set_port_text(req, text.as_deref())?
             .map_err(|error| {
                 let invalid = match error {
                     ffi::Error::PortWithoutHost => Some("Cannot set a port without having a host"),
@@ -286,7 +364,7 @@ impl UriParser for Rfc3986 {
 
     fn set_path(&mut self, req: &mut Request, value: &[u8]) -> Result<(), Thrown> {
         let value = (!value.is_empty()).then_some(value);
-        self.writing().set_path(value).map_err(|error| {
+        self.writing(req).set_path(req, value)?.map_err(|error| {
             let invalid =
                 (error == ffi::Error::Syntax).then_some("The specified path is malformed");
             refused(req, invalid, "Failed to update the path")
@@ -294,7 +372,7 @@ impl UriParser for Rfc3986 {
     }
 
     fn set_query(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.writing().set_query(value).map_err(|error| {
+        self.writing(req).set_query(req, value)?.map_err(|error| {
             let invalid =
                 (error == ffi::Error::Syntax).then_some("The specified query is malformed");
             refused(req, invalid, "Failed to update the query")
@@ -302,11 +380,13 @@ impl UriParser for Rfc3986 {
     }
 
     fn set_fragment(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.writing().set_fragment(value).map_err(|error| {
-            let invalid =
-                (error == ffi::Error::Syntax).then_some("The specified fragment is malformed");
-            refused(req, invalid, "Failed to update the fragment")
-        })
+        self.writing(req)
+            .set_fragment(req, value)?
+            .map_err(|error| {
+                let invalid =
+                    (error == ffi::Error::Syntax).then_some("The specified fragment is malformed");
+                refused(req, invalid, "Failed to update the fragment")
+            })
     }
 }
 
@@ -386,7 +466,7 @@ impl Uri {
     /// NULL
     /// ```
     fn getScheme(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "scheme", |u| {
+        crate::component_string::<R>(req, this.object(), "scheme", ReadAs::NormalizedAscii, |u| {
             u.scheme(ReadAs::NormalizedAscii)
         })
     }
@@ -400,7 +480,9 @@ impl Uri {
     /// string(5) "HTTPS"
     /// ```
     fn getRawScheme(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "scheme", |u| u.scheme(ReadAs::Raw))
+        crate::component_string::<R>(req, this.object(), "scheme", ReadAs::Raw, |u| {
+            u.scheme(ReadAs::Raw)
+        })
     }
 
     /// `withScheme(?string $scheme): static`.
@@ -481,9 +563,13 @@ impl Uri {
     /// string(0) ""
     /// ```
     fn getUsername(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "username", |u| {
-            u.username(ReadAs::NormalizedAscii)
-        })
+        crate::component_string::<R>(
+            req,
+            this.object(),
+            "username",
+            ReadAs::NormalizedAscii,
+            |u| u.username(ReadAs::NormalizedAscii),
+        )
     }
 
     /// `getRawUsername(): ?string`.
@@ -495,7 +581,9 @@ impl Uri {
     /// string(6) "%75ser"
     /// ```
     fn getRawUsername(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "username", |u| u.username(ReadAs::Raw))
+        crate::component_string::<R>(req, this.object(), "username", ReadAs::Raw, |u| {
+            u.username(ReadAs::Raw)
+        })
     }
 
     /// `getPassword(): ?string`, normalized: the user info after its `:`.
@@ -508,9 +596,13 @@ impl Uri {
     /// string(0) ""
     /// ```
     fn getPassword(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "password", |u| {
-            u.password(ReadAs::NormalizedAscii)
-        })
+        crate::component_string::<R>(
+            req,
+            this.object(),
+            "password",
+            ReadAs::NormalizedAscii,
+            |u| u.password(ReadAs::NormalizedAscii),
+        )
     }
 
     /// `getRawPassword(): ?string`.
@@ -522,7 +614,9 @@ impl Uri {
     /// string(6) "p%61ss"
     /// ```
     fn getRawPassword(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "password", |u| u.password(ReadAs::Raw))
+        crate::component_string::<R>(req, this.object(), "password", ReadAs::Raw, |u| {
+            u.password(ReadAs::Raw)
+        })
     }
 
     /// `getHost(): ?string`, normalized; an IP address in its brackets.
@@ -536,7 +630,7 @@ impl Uri {
     /// NULL
     /// ```
     fn getHost(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "host", |u| {
+        crate::component_string::<R>(req, this.object(), "host", ReadAs::NormalizedAscii, |u| {
             u.host(ReadAs::NormalizedAscii)
         })
     }
@@ -550,7 +644,9 @@ impl Uri {
     /// string(11) "EXAMPLE.com"
     /// ```
     fn getRawHost(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "host", |u| u.host(ReadAs::Raw))
+        crate::component_string::<R>(req, this.object(), "host", ReadAs::Raw, |u| {
+            u.host(ReadAs::Raw)
+        })
     }
 
     /// `withHost(?string $host): static`.
@@ -587,7 +683,9 @@ impl Uri {
     /// NULL
     /// ```
     fn getPort(req: &mut Request, this: This<Self>) -> Result<Option<i64>, Thrown> {
-        crate::component::<R, _>(req, this.object(), "port", |u| u.port(ReadAs::Raw))
+        crate::component::<R, _>(req, this.object(), "port", ReadAs::Raw, |u| {
+            u.port(ReadAs::Raw)
+        })
     }
 
     /// `withPort(?int $port): static`.
@@ -662,7 +760,7 @@ impl Uri {
     /// NULL
     /// ```
     fn getQuery(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "query", |u| {
+        crate::component_string::<R>(req, this.object(), "query", ReadAs::NormalizedAscii, |u| {
             u.query(ReadAs::NormalizedAscii)
         })
     }
@@ -676,7 +774,9 @@ impl Uri {
     /// string(5) "a=%7e"
     /// ```
     fn getRawQuery(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "query", |u| u.query(ReadAs::Raw))
+        crate::component_string::<R>(req, this.object(), "query", ReadAs::Raw, |u| {
+            u.query(ReadAs::Raw)
+        })
     }
 
     /// `withQuery(?string $query): static`.
@@ -709,9 +809,13 @@ impl Uri {
     /// NULL
     /// ```
     fn getFragment(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "fragment", |u| {
-            u.fragment(ReadAs::NormalizedAscii)
-        })
+        crate::component_string::<R>(
+            req,
+            this.object(),
+            "fragment",
+            ReadAs::NormalizedAscii,
+            |u| u.fragment(ReadAs::NormalizedAscii),
+        )
     }
 
     /// `getRawFragment(): ?string`.
@@ -723,7 +827,9 @@ impl Uri {
     /// string(3) "%7e"
     /// ```
     fn getRawFragment(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "fragment", |u| u.fragment(ReadAs::Raw))
+        crate::component_string::<R>(req, this.object(), "fragment", ReadAs::Raw, |u| {
+            u.fragment(ReadAs::Raw)
+        })
     }
 
     /// `withFragment(?string $fragment): static`.
@@ -878,7 +984,7 @@ fn user_info(
     this: This<Uri>,
     mode: ReadAs,
 ) -> Result<Option<PhpString>, Thrown> {
-    let bytes = crate::read::<R, _>(req, this.object(), |u| u.user_info(mode))?;
+    let bytes = crate::read::<R, _>(req, this.object(), mode, |u| u.user_info(mode))?;
     match bytes {
         Ok(bytes) => bytes.map(|bytes| PhpString::new(req, &bytes)).transpose(),
         Err(Unreadable) => Err(throw(
@@ -891,6 +997,6 @@ fn user_info(
 
 /// The path read, a string always.
 fn path(req: &mut Request, this: This<Uri>, mode: ReadAs) -> Result<PhpString, Thrown> {
-    let bytes = crate::component::<R, _>(req, this.object(), "path", |u| u.path(mode))?;
+    let bytes = crate::component::<R, _>(req, this.object(), "path", mode, |u| u.path(mode))?;
     PhpString::new(req, &bytes)
 }

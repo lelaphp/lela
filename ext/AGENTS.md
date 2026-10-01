@@ -50,14 +50,17 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── sysvshm
 ├── tokenizer
 ├── uri
+├── xml
+├── xmlreader
+├── xmlwriter
 └── zlib
 ```
-<!-- /computed in=bf6ec529d56f88fee34914d4e54fe7f3c4b0be63c9c0cd64e42be5cf3ff41ccb out=26885c60ea684f31464896dc08c5797fd63314b34ae29ec3040c3d04fe0ac63e -->
+<!-- /computed in=a4f6e3d5565dde7375bce52dd936b4ae9976ca54b4fdfb7b7a006467f11a06a9 out=895a124007039a84b65c2eabc4cab320b9d74be42a1b8684e217e3a80063b39f -->
 
 <!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
 
 | crate | order | extensions | reading | message |
 |---|---|---|---|---|
-| php_bundle | topological | 33 | pass | 34 workspace dependencies within its edges |
+| php_bundle | topological | 39 | pass | 40 workspace dependencies within its edges |
 
-<!-- /computed in=ac10430af46c0ba35491d0658c3fe6aadf2dbc986ad4f02e06a785531e320d79 out=7b24621d601049f54c12f4dc2c88a82c3b775d3e27a2985d288c258752def651 -->
+<!-- /computed in=831849f9396254479cdbbc6d221b8718b9ff5f75d9414ade112a71ae219e9407 out=c774003f8bf7276f72b0c23c83b2bf79b5797101878e006070d260bfc5e9ab1d -->

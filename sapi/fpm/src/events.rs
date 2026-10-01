@@ -17,20 +17,25 @@ pub(crate) const MECHANISM: &str = "kqueue";
 #[cfg(target_os = "linux")]
 pub(crate) const MECHANISM: &str = "epoll";
 
-/// The master's queue of descriptors, `kfd` or `epollfd`.
+/// The master's queue of descriptors, `kfd` or `epollfd`, and how many
+/// events one wait takes, `nkevents` or `nepollfds`: the `max` that
+/// `fpm_event_init_main` reserved, which `event module triggered %d
+/// events` counts within.
 pub(crate) struct Poller {
     #[cfg(not(target_os = "linux"))]
     kq: nix::sys::event::Kqueue,
     #[cfg(target_os = "linux")]
     ep: nix::sys::epoll::Epoll,
+    capacity: usize,
 }
 
 #[cfg(not(target_os = "linux"))]
 impl Poller {
-    /// `fpm_event_kqueue_init`.
-    pub(crate) fn new() -> nix::Result<Poller> {
+    /// `fpm_event_kqueue_init`: a queue whose waits take `max` events.
+    pub(crate) fn new(max: usize) -> nix::Result<Poller> {
         Ok(Poller {
             kq: nix::sys::event::Kqueue::new()?,
+            capacity: max.max(1),
         })
     }
 
@@ -79,7 +84,7 @@ impl Poller {
                 0,
                 0
             );
-            64
+            self.capacity
         ];
         let timeout = nix::libc::timespec {
             tv_sec: i64::try_from(timeout_ms / 1000).unwrap_or(0) as nix::libc::time_t,
@@ -93,7 +98,7 @@ impl Poller {
                 .collect(),
             Err(nix::errno::Errno::EINTR) => Vec::new(),
             Err(e) => {
-                crate::zlog!(Warning, "kevent() returns {}", e as i32);
+                crate::zlog!(Warning @ fpm_event_kqueue_wait:131, "kevent() returns {}", e as i32);
                 Vec::new()
             }
         }
@@ -102,11 +107,12 @@ impl Poller {
 
 #[cfg(target_os = "linux")]
 impl Poller {
-    /// `fpm_event_epoll_init`.
-    pub(crate) fn new() -> nix::Result<Poller> {
+    /// `fpm_event_epoll_init`: a queue whose waits take `max` events.
+    pub(crate) fn new(max: usize) -> nix::Result<Poller> {
         use nix::sys::epoll::{Epoll, EpollCreateFlags};
         Ok(Poller {
             ep: Epoll::new(EpollCreateFlags::empty())?,
+            capacity: max.max(1),
         })
     }
 
@@ -131,7 +137,7 @@ impl Poller {
     /// `fpm_event_epoll_wait`.
     pub(crate) fn wait(&self, timeout_ms: u64) -> Vec<RawFd> {
         use nix::sys::epoll::{EpollEvent, EpollTimeout};
-        let mut events = [EpollEvent::empty(); 64];
+        let mut events = vec![EpollEvent::empty(); self.capacity];
         let timeout = EpollTimeout::try_from(timeout_ms).unwrap_or(EpollTimeout::NONE);
         match self.ep.wait(&mut events, timeout) {
             Ok(n) => events[..n]
@@ -140,7 +146,7 @@ impl Poller {
                 .collect(),
             Err(nix::errno::Errno::EINTR) => Vec::new(),
             Err(e) => {
-                crate::zlog!(Warning, "epoll_wait() returns {}", e as i32);
+                crate::zlog!(Warning @ fpm_event_epoll_wait:127, "epoll_wait() returns {}", e as i32);
                 Vec::new()
             }
         }

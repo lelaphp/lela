@@ -653,6 +653,19 @@ mod tests {
         );
     }
 
+    /// The implicit final return stands on the file's last line, where
+    /// the scanner stopped (`CG(zend_lineno) = last_lineno`,
+    /// `Z/Zend/zend_language_scanner.l:622`), which phpdbg's `print` and
+    /// its stepping name: `L0003 0001 RETURN int(1)` for a file whose
+    /// last statement is on line 2 and which ends in a newline.
+    #[test]
+    fn the_implicit_return_stands_on_the_file_s_last_line() {
+        let (unit, _strings) = unit_and_strings(b"<?php\necho 1;\n");
+        let lines: Vec<u32> = unit.main.oplines.iter().map(|op| op.lineno).collect();
+        assert_eq!(lines, [2, 3]);
+        assert_eq!((unit.main.line_start, unit.main.line_end), (1, 3));
+    }
+
     /// The dump of one source compiled through [`compile_source`] under
     /// `short_open_tag`, which is the route the lexer is told it by.
     fn dump_under_short_open_tag(source: &[u8], short_open_tag: bool) -> String {
@@ -2010,7 +2023,9 @@ mod tests {
         assert_eq!(unit.main.oplines[0].op1, 2);
         assert_eq!(unit.main.oplines[5].op2, 1);
         let lines: Vec<u32> = unit.main.oplines.iter().map(|op| op.lineno).collect();
-        assert_eq!(lines, vec![2, 3, 2, 2, 2, 2, 2]);
+        // The implicit return on the file's last line, as phpdbg's `print`
+        // of the oracle shows it: `L0004 0006 RETURN int(1)`.
+        assert_eq!(lines, vec![2, 3, 2, 2, 2, 2, 4]);
     }
 
     /// A constant no table here holds was refused until #380 and is now
@@ -4311,7 +4326,7 @@ mod tests {
                 (Opcode::QmAssign, 18),
                 (Opcode::Jmp, 18),
                 (Opcode::Echo, 18),
-                (Opcode::Return, 18),
+                (Opcode::Return, 20),
             ]
         );
     }
