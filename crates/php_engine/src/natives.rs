@@ -2520,7 +2520,7 @@ mod tests {
     /// `zend_mm_init` maps into `real_size` before a request runs a line
     /// (`Z/Zend/zend_alloc.c:2047-2081`), and the oracle answers it too.
     ///
-    /// 313944 is the object store's table, the VM stack's first page,
+    /// 314216 is the object store's table, the VM stack's first page,
     /// the three standard streams, the variables `php_hash_environment`
     /// and the CLI lay down, and what this source's interning
     /// costs, and every byte of it but the streams' and the variables' is php's own
@@ -2542,10 +2542,12 @@ mod tests {
     /// bytes and 2048 hash slots of 4, `HT_SIZE_EX(1024,
     /// HT_SIZE_TO_MASK(1024))` (`Z/Zend/zend_types.h:486-493`) over the
     /// `nTableSize` `zend_interned_strings_activate` sets
-    /// (`Z/Zend/zend_string.c:78-84`, `:346-349`). The 928 left is
+    /// (`Z/Zend/zend_string.c:78-84`, `:346-349`). The 1200 left is
     /// `STDIN`, `STDOUT` and `STDERR`, which `do_cli` opens before a line
-    /// runs: the regular list's first 160 and each stream's resource and
-    /// payload, in this engine's own sizes, which php's are not. The 1632
+    /// runs: the regular list's first 160, each stream's resource, its
+    /// `php_stream` and its `orig_path`, and the `php_stdio_stream_data`
+    /// of the one the test's host hands a file as php's sizes have them,
+    /// the others' kinds in this engine's own sizes, which php's are not. The 1632
     /// after them is `$argv` with its one word, the four empty arrays of
     /// `$_GET`, `$_POST`, `$_COOKIE` and `$_FILES`, and `$_SERVER` with
     /// the CLI's nine rows, laid into `EG(symbol_table)` before a line
@@ -2568,8 +2570,8 @@ mod tests {
         let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
         let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
         assert_eq!(
-            unflagged, "int(313944)\n",
-            "the object store's 8192, the VM stack's first page of 262144, the three standard streams' 928, the environment's 1632, the interned table's 40960 and the two strings in it, 40 and 48"
+            unflagged, "int(314216)\n",
+            "the object store's 8192, the VM stack's first page of 262144, the three standard streams' 1200, the environment's 1632, the interned table's 40960 and the two strings in it, 40 and 48"
         );
         assert_eq!(flagged, "int(2097152)\n");
         assert_eq!(coerced, flagged, "php's Z_PARAM_BOOL coerces 1 to true");
@@ -2632,8 +2634,8 @@ mod tests {
     ///
     /// **The second number is the oracle's; the first is this engine's
     /// own accounting**, for the reason the pin above states at length.
-    /// 2097152 is php's one 2 MiB chunk. 313992 is the object store's
-    /// 8192, the VM stack's first page of 262144, the 928 of the three
+    /// 2097152 is php's one 2 MiB chunk. 314264 is the object store's
+    /// 8192, the VM stack's first page of 262144, the 1200 of the three
     /// standard streams `do_cli` opens, the 1632 of the variables
     /// `php_hash_environment` and the CLI lay down, and what this source's
     /// interning costs the request: the
@@ -2652,8 +2654,8 @@ mod tests {
         );
         assert_eq!(fatal, None);
         assert_eq!(
-            body, "int(313992)\nint(2097152)\n",
-            "the object store's 8192, the VM stack's first page of 262144, the three standard streams' 928, the environment's 1632, the interned table's 40960 and the three strings in it, 48, 40 and 48"
+            body, "int(314264)\nint(2097152)\n",
+            "the object store's 8192, the VM stack's first page of 262144, the three standard streams' 1200, the environment's 1632, the interned table's 40960 and the three strings in it, 48, 40 and 48"
         );
     }
 }

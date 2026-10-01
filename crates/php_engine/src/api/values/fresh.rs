@@ -65,6 +65,23 @@ impl FreshString {
         req.fatal_of(cut).map(FreshString)
     }
 
+    /// `zend_string_extend(s, len, 0)`: grown to `len` bytes, in place
+    /// where the bin or the pages after it allow and moved otherwise, as
+    /// `erealloc` grows it, the bytes written so far kept and the new
+    /// ones zero; the `Err` is the memory limit's fatal, and the string
+    /// is the request's end's.
+    pub fn extend(self, req: &mut Request, len: usize) -> Result<FreshString, Thrown> {
+        let grown = req.heap_mut().string_extend(self.0, len);
+        req.fatal_of(grown).map(FreshString)
+    }
+
+    /// `ZSTR_LEN(s) = len` and its NUL: the length cut where the
+    /// allocation stands, keeping its size, where php hands a string out
+    /// without `zend_string_truncate`.
+    pub fn set_len(&mut self, len: usize) {
+        self.0.set_len(len);
+    }
+
     /// The string handed out, `RETURN_STR(s)`: one owner, the caller's.
     #[must_use]
     pub fn finish(self) -> PhpString {

@@ -265,7 +265,9 @@ impl PhpStream {
             match status {
                 FilterStatus::PassOn => {
                     while let Some(bucket) = inp.pop_front() {
-                        self.buffer_bucket(&bucket);
+                        if !self.buffer_bucket(req, &bucket) {
+                            return false;
+                        }
                     }
                 }
                 FilterStatus::FeedMe => outp.clear(),
@@ -284,19 +286,30 @@ impl PhpStream {
 
     /// One bucket appended to the read buffer, the buffer compacted first
     /// where it has not the room and grown where compacting was not
-    /// enough.
-    fn buffer_bucket(&mut self, bucket: &[u8]) {
+    /// enough; `false` is the memory limit's fatal, rendered.
+    fn buffer_bucket(&mut self, req: &mut Request, bucket: &[u8]) -> bool {
         if !self.readbuf.is_empty() && self.readbuf.len() - self.writepos < bucket.len() {
             self.readbuf.copy_within(self.readpos..self.writepos, 0);
             self.writepos -= self.readpos;
             self.readpos = 0;
         }
+        self.append_read(req, bucket)
+    }
+
+    /// One bucket written after `writepos`, the buffer grown by the
+    /// bucket's length where it has not the room, as php's
+    /// `readbuflen += bucket->buflen` and `perealloc` grow it; `false` is
+    /// the memory limit's fatal, rendered.
+    fn append_read(&mut self, req: &mut Request, bucket: &[u8]) -> bool {
         if self.readbuf.len() - self.writepos < bucket.len() {
             let grown = self.readbuf.len() + bucket.len();
-            self.readbuf.resize(grown, 0);
+            if self.readbuf.resize(req, grown).is_err() {
+                return false;
+            }
         }
         self.readbuf[self.writepos..self.writepos + bucket.len()].copy_from_slice(bucket);
         self.writepos += bucket.len();
+        true
     }
 
     /// `_php_stream_write_filtered` (`Z/main/streams/streams.c:1245`):
@@ -390,13 +403,9 @@ impl PhpStream {
                 self.readpos = 0;
                 self.writepos = 0;
                 while let Some(bucket) = outp.pop_front() {
-                    if self.readbuf.len() - self.writepos < bucket.len() {
-                        let grown = self.readbuf.len() + bucket.len();
-                        self.readbuf.resize(grown, 0);
+                    if !self.append_read(req, &bucket) {
+                        return false;
                     }
-                    self.readbuf[self.writepos..self.writepos + bucket.len()]
-                        .copy_from_slice(&bucket);
-                    self.writepos += bucket.len();
                 }
             }
         }
@@ -444,7 +453,9 @@ impl PhpStream {
                 }
                 if flushed > self.readbuf.len() - self.writepos {
                     let grown = self.writepos + flushed + self.chunk_size;
-                    self.readbuf.resize(grown, 0);
+                    if self.readbuf.resize(req, grown).is_err() {
+                        return false;
+                    }
                 }
                 while let Some(bucket) = inp.pop_front() {
                     self.readbuf[self.writepos..self.writepos + bucket.len()]
@@ -666,7 +677,7 @@ impl Stream {
         if read_write & (FILTER_READ | FILTER_WRITE) == 0 {
             let mode = req
                 .stream_ref(self)
-                .map(|s| s.mode.clone())
+                .map(|s| s.mode.bytes().to_vec())
                 .unwrap_or_default();
             if mode.contains(&b'r') || mode.contains(&b'+') {
                 read_write |= FILTER_READ;

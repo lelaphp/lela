@@ -648,6 +648,15 @@ impl Stream {
         req.stream_read_to_str(self, len)
     }
 
+    /// `php_stream_read(stream, buf, len)` into a buffer the native holds,
+    /// as php's natives read into a `char buf[N]` on their stack: how
+    /// many bytes were had, zero at the end, `None` for the read that
+    /// failed before a byte was had. Nothing is allocated for the bytes.
+    pub fn read_into(self, req: &mut Request, buf: &mut [u8]) -> Option<usize> {
+        req.stream_op(self, |req, stream| stream.read(req, buf))
+            .flatten()
+    }
+
     /// `php_stream_write`: how many bytes the stream took, `None` for
     /// php's `-1` (`fwrite` answers `false`).
     pub fn write(self, req: &mut Request, bytes: &[u8]) -> Option<usize> {
@@ -1685,6 +1694,42 @@ impl OutputSink for Kept {
     }
 }
 
+/// A diagnostic's message as `php_error_cb` is handed it.
+#[derive(Clone, Copy)]
+pub(crate) enum Message<'a> {
+    /// Text the engine formatted, of which `zend_error` makes one string
+    /// of the request's with `zend_vstrpprintf` before any handler reads
+    /// it.
+    Text(&'a str),
+    /// A string of the request's a native raised as it stands,
+    /// `zend_error_zstr_at`'s, which is `trigger_error()`'s message.
+    String(PhpString),
+}
+
+impl Message<'_> {
+    /// What the display and the log write.
+    fn text(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Message::Text(text) => std::borrow::Cow::Borrowed(text),
+            Message::String(s) => String::from_utf8_lossy(s.as_bytes()),
+        }
+    }
+}
+
+/// `PG(last_error_type)`, `last_error_message`, `last_error_file` and
+/// `last_error_lineno`: what `php_error_cb` keeps for `error_get_last()`,
+/// the message and the file one owner each of strings of the request's,
+/// `zend_string_copy`'s, until the next diagnostic, `error_clear_last()`
+/// or the request's end gives them back (`clear_last_error`,
+/// `Z/main/main.c:1307`).
+#[derive(Clone, Copy)]
+struct LastError {
+    level: Level,
+    message: PhpString,
+    file: PhpString,
+    line: u32,
+}
+
 /// A write a debug build stopped: the opline whose `TMP` it was, the
 /// opcode serving it, the temporary's number and what the slot held.
 #[cfg(debug_assertions)]
@@ -1761,7 +1806,7 @@ pub struct Request {
     /// `sapi_send_headers` keeps beside it (`crate::output`).
     output: Output,
     header_callback: Option<Callable>,
-    last_error: Option<(Level, String, Vec<u8>, u32)>,
+    last_error: Option<LastError>,
     /// The diagnostics raised while the engine registers its extensions'
     /// ini entries (`php_during_module_startup()`), held in the order
     /// raised rather than shown, on the one request the engine lays for
@@ -6793,6 +6838,29 @@ impl Request {
         file: &[u8],
         line: u32,
     ) -> bool {
+        self.note_message_in(level, Message::Text(message), file, line)
+    }
+
+    /// [`Request::note_error`] over a string of the request's raised as
+    /// it stands, `zend_error_zstr_at`'s message: the user handler is
+    /// handed it and the last error keeps it, one more owner each, as
+    /// `trigger_error()`'s string is in php.
+    pub(crate) fn note_error_string(&mut self, level: Level, message: PhpString) -> bool {
+        if !self.executing() || self.bailout {
+            return self.note_message_in(level, Message::String(message), b"Unknown", 0);
+        }
+        let line = self.current_line();
+        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        self.note_message_in(level, Message::String(message), &file, line)
+    }
+
+    /// [`Request::note_error_in`] over either form of message: what is
+    /// held, recorded or thrown reads its text, and what the handlers
+    /// are handed is one string of the request's, made once where the
+    /// engine formatted the text, as `zend_error_va_list` makes it.
+    fn note_message_in(&mut self, level: Level, raised: Message, file: &[u8], line: u32) -> bool {
+        let text = raised.text().into_owned();
+        let message = text.as_str();
         if let Some(held) = self.startup.as_mut() {
             held.push((level, message.to_owned()));
             return false;
@@ -6821,25 +6889,49 @@ impl Request {
         if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
-        if self.user_error_handler(level, message, file, line) {
-            return false;
+        // The string the native raised is its caller's; the one made of
+        // the text is this call's, given back once the handlers are done.
+        let (string, made) = match raised {
+            Message::String(string) => (string, false),
+            // The memory limit refusing the message has rendered its
+            // fatal, and the request is ending.
+            Message::Text(text) => match PhpString::new(self, text.as_bytes()) {
+                Ok(string) => (string, true),
+                Err(_) => return false,
+            },
+        };
+        let served = !self.user_error_handler(level, string, file, line);
+        if served {
+            self.error_cb(level, string, message, file, line);
         }
-        self.error_cb(level, message, file, line);
-        true
+        if made {
+            self.release(Value::string(string));
+        }
+        served
     }
 
     /// `php_error_cb` (`Z/main/main.c:1370-1500`): the diagnostic stored,
     /// masked, logged and displayed, with the trace
     /// [`Request::note_error_in`] fetched, if one, under `Stack trace:`.
-    fn error_cb(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
-        if !self.displayed(message, file, line) {
+    fn error_cb(&mut self, level: Level, string: PhpString, message: &str, file: &[u8], line: u32) {
+        if !self.displayed(string, file, line) {
             return;
         }
         let named = String::from_utf8_lossy(file).into_owned();
-        let file = file.to_vec();
         // php stores the diagnostic before it masks it, which is why
-        // `error_get_last()` answers one `error_reporting` hid.
-        self.last_error = Some((level, message.to_owned(), file, line));
+        // `error_get_last()` answers one `error_reporting` hid: the
+        // message with one more owner and the file name the op array's,
+        // `zend_string_copy` of each.
+        self.clear_last_error_strings();
+        if let Ok(file) = self.interned(file) {
+            self.addref(&Value::string(string));
+            self.last_error = Some(LastError {
+                level,
+                message: string,
+                file,
+                line,
+            });
+        }
         // `(EG(error_reporting) & type) || (type & E_CORE)`: a core
         // level is rendered whatever `error_reporting` says.
         let core = matches!(level, Level::CoreError | Level::CoreWarning);
@@ -6962,20 +7054,20 @@ impl Request {
     /// either `ignore_repeated_source` is on or the site is the same
     /// too. A repeat is dropped whole — not stored, not logged, not
     /// displayed — so the one it repeats stays the last error.
-    fn displayed(&self, message: &str, file: &[u8], line: u32) -> bool {
+    fn displayed(&self, message: PhpString, file: &[u8], line: u32) -> bool {
         if !ini_truth(self.ini_get(b"ignore_repeated_errors")) {
             return true;
         }
-        let Some((_, last, last_file, last_line)) = self.last_error.as_ref() else {
+        let Some(last) = self.last_error else {
             return true;
         };
-        if last != message {
+        if last.message.as_bytes() != message.as_bytes() {
             return true;
         }
         if ini_truth(self.ini_get(b"ignore_repeated_source")) {
             return false;
         }
-        *last_line != line || last_file.as_slice() != file
+        last.line != line || last.file.as_bytes() != file
     }
 
     /// `log_errors`, whether a diagnostic reaches the host's log.
@@ -7124,7 +7216,12 @@ impl Request {
             return;
         }
         self.clear_fatal_error_backtrace();
-        self.error_cb(level, message, file, line);
+        // `zend_strpprintf`'s message, handed to `zend_error_cb` and
+        // released after.
+        if let Ok(string) = PhpString::new(self, message.as_bytes()) {
+            self.error_cb(level, string, message, file, line);
+            self.release(Value::string(string));
+        }
         self.end_at_level(level, message, file, line);
     }
 
@@ -17240,18 +17337,18 @@ impl Request {
     /// `error_get_last()`: the last diagnostic as php's four-key array,
     /// its strings the request's.
     pub fn last_error(&mut self) -> Result<Option<PhpArray>, Thrown> {
-        let Some((level, message, file, line)) = self.last_error.clone() else {
+        let Some(last) = self.last_error else {
             return Ok(None);
         };
         let mut array = PhpArray::new(self)?;
+        // `ZVAL_STR_COPY` of the message and the file.
+        self.addref(&Value::string(last.message));
+        self.addref(&Value::string(last.file));
         for (name, value) in [
-            (&b"type"[..], Value::int(level.bit())),
-            (
-                b"message",
-                Value::string(PhpString::new(self, message.as_bytes())?),
-            ),
-            (b"file", Value::string(PhpString::new(self, &file)?)),
-            (b"line", Value::int(i64::from(line))),
+            (&b"type"[..], Value::int(last.level.bit())),
+            (b"message", Value::string(last.message)),
+            (b"file", Value::string(last.file)),
+            (b"line", Value::int(i64::from(last.line))),
         ] {
             let key = Key::Str(PhpString::new(self, name)?);
             array.set(self, key, value)?;
@@ -17268,7 +17365,14 @@ impl Request {
     /// The last error where its level is one of `E_FATAL_ERRORS`, its
     /// message, file and line.
     pub(crate) fn last_fatal(&self) -> Option<(String, Vec<u8>, u32)> {
-        let (level, message, file, line) = self.last_error.clone()?;
+        let LastError {
+            level,
+            message,
+            file,
+            line,
+        } = self.last_error?;
+        let message = String::from_utf8_lossy(message.as_bytes()).into_owned();
+        let file = file.as_bytes().to_vec();
         matches!(
             level,
             Level::Error
@@ -17283,7 +17387,18 @@ impl Request {
 
     /// `error_clear_last()`.
     pub fn clear_last_error(&mut self) {
-        self.last_error = None;
+        self.clear_last_error_strings();
+        self.clear_fatal_error_backtrace();
+    }
+
+    /// `clear_last_error` (`Z/main/main.c:1307`): the message and the
+    /// file given back. php's request end calls it from
+    /// `php_free_request_globals`.
+    pub(crate) fn clear_last_error_strings(&mut self) {
+        if let Some(last) = self.last_error.take() {
+            self.release(Value::string(last.message));
+            self.release(Value::string(last.file));
+        }
     }
 
     /// `error_log()` to the host's log: `php_log_err` with the message
@@ -17462,7 +17577,13 @@ impl Request {
     /// left pending in the diagnostic's place. With a throwable already
     /// pending, php's `zend_call_function` returns before the call and
     /// the diagnostic is dropped, handled by nobody.
-    fn user_error_handler(&mut self, level: Level, message: &str, file: &[u8], line: u32) -> bool {
+    fn user_error_handler(
+        &mut self,
+        level: Level,
+        message: PhpString,
+        file: &[u8],
+        line: u32,
+    ) -> bool {
         if self.error_handler.is_none()
             || self.error_handler_levels & level.bit() == 0
             || matches!(
@@ -17484,10 +17605,13 @@ impl Request {
             return false;
         };
         let arguments = (|| -> Result<[Value; 4], Thrown> {
+            let file = Value::string(PhpString::new(self, file)?);
+            // `ZVAL_STR_COPY(&params[1], message)`.
+            self.addref(&Value::string(message));
             Ok([
                 Value::int(level.bit()),
-                Value::string(PhpString::new(self, message.as_bytes())?),
-                Value::string(PhpString::new(self, file)?),
+                Value::string(message),
+                file,
                 Value::int(i64::from(line)),
             ])
         })();
@@ -20861,6 +20985,20 @@ impl Request {
     /// The memory limit is the fatal that ends the request, recorded
     /// here where `zend_mm` leaves the request, and the `Thrown` that
     /// carries no throwable ends the native.
+    /// `zend_string_init_existing_interned` (`Z/Zend/zend_string.c`):
+    /// the interned string for `bytes` where the engine or this request
+    /// holds one already, and a new string of the request's otherwise.
+    pub(crate) fn existing_interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        if let Some(held) = self
+            .shared
+            .existing_interned(bytes)
+            .or_else(|| self.heap.interned_find(bytes))
+        {
+            return Ok(PhpString::of(held));
+        }
+        self.string(bytes)
+    }
+
     pub(crate) fn string(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
         let allocated = if bytes.len() <= 1 {
             self.heap.intern(bytes)

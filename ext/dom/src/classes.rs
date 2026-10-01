@@ -941,10 +941,10 @@ impl Implementation {
             Some(o) => Some(fetch(req, o.object())?),
             None => None,
         };
-        let mut private = Private::default();
         let Some(document) = Node::new_doc(Some(b"1.0")) else {
             return Err(dom_throw(req, Code::InvalidState));
         };
+        let mut private = Private::new(req)?;
         document.set_doc_string(DocString::Encoding, Some(b"UTF-8"));
         let mut element = None;
         if !qualified_name.is_empty() {
@@ -1015,7 +1015,7 @@ impl Implementation {
         };
         doc.set_doc_string(DocString::Encoding, Some(b"UTF-8"));
         let dtd = Node::create_int_subset(Some(doc), b"html", None, None);
-        let mut private = Private::default();
+        let mut private = Private::new(req)?;
         let html_ns = private.mapper.html(Some(doc));
         let element = |name: &[u8], parent: Node| {
             let e = Node::new_element(Some(doc), html_ns, name, None)?;

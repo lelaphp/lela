@@ -9,8 +9,8 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use php_ext::abi::{
-    Class, CloneObj, Instance, ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead,
-    PropertyTest, Std,
+    Class, CloneObj, Instance, ObjectHandlers, PropertiesFor, PropertyPlace, PropertyPurpose,
+    PropertyRead, PropertyTest, Std,
 };
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, truthy};
@@ -615,14 +615,14 @@ impl ObjectHandlers for DateHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         // `date_object_get_properties_for`'s `default:`, the standard
         // table, for the debug reader and for `get_object_vars()`.
         if matches!(
             purpose,
             PropertyPurpose::Debug | PropertyPurpose::GetObjectVars
         ) {
-            return Ok(None);
+            return Ok(PropertiesFor::Standard);
         }
         let time = object.native::<DateObj>(req).and_then(|d| d.time.clone());
         let fields = match &time {
@@ -632,7 +632,7 @@ impl ObjectHandlers for DateHandlers {
         rows_view(req, object, fields, |req, o| {
             o.native_mut::<DateObj>(req).map(|d| &mut d.rows)
         })
-        .map(Some)
+        .map(PropertiesFor::Rows)
     }
 }
 
@@ -732,14 +732,14 @@ impl ObjectHandlers for TzHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         // `date_object_get_properties_for`'s `default:`, the standard
         // table, for the debug reader and for `get_object_vars()`.
         if matches!(
             purpose,
             PropertyPurpose::Debug | PropertyPurpose::GetObjectVars
         ) {
-            return Ok(None);
+            return Ok(PropertiesFor::Standard);
         }
         let kind = object.native::<TzObj>(req).and_then(|t| t.tz.clone());
         let fields = match &kind {
@@ -749,7 +749,7 @@ impl ObjectHandlers for TzHandlers {
         rows_view(req, object, fields, |req, o| {
             o.native_mut::<TzObj>(req).map(|t| &mut t.rows)
         })
-        .map(Some)
+        .map(PropertiesFor::Rows)
     }
 }
 
@@ -1292,9 +1292,9 @@ impl ObjectHandlers for PeriodHandlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         if purpose == PropertyPurpose::Debug {
-            return Ok(None);
+            return Ok(PropertiesFor::Standard);
         }
         let initialized = object
             .native::<PeriodObj>(req)
@@ -1307,7 +1307,7 @@ impl ObjectHandlers for PeriodHandlers {
         rows_view(req, object, fields, |req, o| {
             o.native_mut::<PeriodObj>(req).map(|p| &mut p.rows)
         })
-        .map(Some)
+        .map(PropertiesFor::Rows)
     }
 }
 

@@ -112,6 +112,16 @@ impl PhpString {
         req.interned(bytes)
     }
 
+    /// `zend_string_init_existing_interned`: the interned string for
+    /// these bytes where the engine or the request holds one already, a
+    /// name or a constant some unit declared, which costs nothing and
+    /// interns nothing new; a new string of the request's otherwise, as
+    /// [`PhpString::new`] makes it. What php's unserializer makes of an
+    /// array's or an object's key. The `Err` is the memory limit.
+    pub fn existing_interned(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        req.existing_interned(bytes)
+    }
+
     /// A string of `len` bytes written in place by `fill`, php's
     /// `zend_string_alloc` and the `memcpy` a native does into
     /// `ZSTR_VAL` after it. The allocation is asked for, and the memory

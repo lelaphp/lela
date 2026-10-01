@@ -101,7 +101,8 @@ fn convert_array(
                 let inner = *inner;
                 match convert_array(req, inner, to, from)? {
                     Some(array) => Value::array(array),
-                    None => Value::array(PhpArray::new(req)?),
+                    // `ZVAL_EMPTY_ARRAY` (`Z/ext/mbstring/mbstring.c:2799`).
+                    None => Value::array(PhpArray::empty()),
                 }
             }
             _ => {
@@ -133,6 +134,25 @@ fn convert_array(
 /// }
 /// string(3) "あ"
 /// mb_convert_encoding(): Argument #3 ($from_encoding) must specify at least one encoding
+/// ```
+///
+/// An array met again inside itself is converted to the process's empty
+/// array after the warning.
+///
+/// ```php
+/// $a = [1, [2]];
+/// $a[1][] = &$a;
+/// debug_zval_dump(mb_convert_encoding($a, 'UTF-8', 'UTF-8')[1]);
+/// ```
+/// ```expect
+/// Warning: mb_convert_encoding(): Cannot convert recursively referenced values in %s on line 4
+/// array(2) packed refcount(1){
+///   [0]=>
+///   int(2)
+///   [1]=>
+///   array(0) interned {
+///   }
+/// }
 /// ```
 #[php_function]
 fn mb_convert_encoding(

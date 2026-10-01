@@ -1316,6 +1316,27 @@ pub enum PropertyPurpose {
     GetObjectVars,
 }
 
+/// What a class's `get_properties_for` answers for one purpose: no slot,
+/// a table of its own, or php's `NULL` table, which no reader may stand
+/// in for with an empty one, since `get_object_vars()`, the `(array)`
+/// cast and `get_mangled_object_vars()` answer the process's empty
+/// array for it (`ZVAL_EMPTY_ARRAY`, `Z/Zend/zend_builtin_functions.c:849`,
+/// `Z/Zend/zend_execute.h:280`) where a table, however empty, is copied
+/// into an array of the request's.
+#[derive(Debug)]
+pub enum PropertiesFor {
+    /// No slot of the class's own, `Std`'s answer: the reader reads
+    /// `get_properties`, as `zend_std_get_properties_for` does.
+    Standard,
+    /// A table the class built for this reader (`*is_temp`), each row
+    /// under the key php's table holds it by.
+    Rows(Vec<(Key, Value)>),
+    /// The slot's `NULL`: no table, which a dumper, an encoder and a
+    /// serializer read as no properties
+    /// (`attributes_sensitive_parameter_value_get_properties_for`).
+    Null,
+}
+
 /// What the `get_debug_info` slot answers: php's `HashTable *` with its
 /// `*is_temp` owner, the caller's, and the throwable a handler raised
 /// while it built the table and left in `EG(exception)`, which
@@ -1392,9 +1413,10 @@ pub trait ClassIterator: Send {
 /// php marks optional answers `None` for php's null: `clone_obj` and
 /// `clone_obj_with` answer the function the slot holds, since `clone`
 /// reads the null before it looks at `__clone` and before it calls
-/// anything; `count_elements`, `get_debug_info`, `get_closure`,
-/// `do_operation` and `get_properties_for` answer the value or `None`
-/// in one call, since their kernels fall back either way.
+/// anything; `count_elements`, `get_debug_info`, `get_closure` and
+/// `do_operation` answer the value or `None` in one call, since
+/// their kernels fall back either way; `get_properties_for` answers a
+/// [`PropertiesFor`], whose slot may answer php's `NULL` table besides.
 pub trait ObjectHandlers: Send + Sync {
     /// `ce->create_object` past `zend_object_alloc`: what the class lays
     /// down with a new object on the request's heap that its payload's
@@ -1922,16 +1944,17 @@ pub trait ObjectHandlers: Send + Sync {
     /// key php's table holds it by, a property's name as a string key
     /// even where it reads as a number and an element a class shows
     /// among its properties as an integer one
-    /// (`spl_fixedarray_object_get_properties_for`); `None` at `Std`,
-    /// php's null slot, so every purpose reads `get_properties`.
+    /// (`spl_fixedarray_object_get_properties_for`);
+    /// [`PropertiesFor::Standard`] at `Std`, php's null slot, so every
+    /// purpose reads `get_properties`.
     fn get_properties_for(
         &self,
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         let _ = (req, object, purpose);
-        Ok(None)
+        Ok(PropertiesFor::Standard)
     }
 
     /// Whether the table's `get_properties` is not

@@ -309,6 +309,13 @@ impl Heap {
         s.truncate(&mut self.mm, len)
     }
 
+    /// `zend_string_extend(s, len, 0)`: the fresh string grown to `len`
+    /// bytes where it stands or moved, as `erealloc` grows it, the new
+    /// bytes zero.
+    pub fn string_extend(&mut self, s: FreshStr, len: usize) -> Result<FreshStr, Fatal> {
+        s.extend(&mut self.mm, len)
+    }
+
     /// `s` with the bytes of `tail` after its own, php's
     /// `zend_string_extend` and the `memcpy` after it: the caller hands
     /// one owner of `s` over and holds one of the string handed back.
@@ -354,6 +361,17 @@ impl Heap {
     #[must_use]
     pub fn interned(&self) -> usize {
         self.interned.count()
+    }
+
+    /// The string for `bytes` the frozen table or this request's
+    /// interned table already holds, php's `zend_interned_string_ht_lookup`
+    /// over `CG(interned_strings)`; nothing is interned.
+    #[must_use]
+    pub fn interned_find(&self, bytes: &[u8]) -> Option<Str> {
+        if let Some(frozen) = string::frozen_string(bytes) {
+            return Some(frozen);
+        }
+        self.interned.find(string::hash_func(bytes), bytes)
     }
 
     /// `zend_string_release`: one owner fewer, and the string is freed

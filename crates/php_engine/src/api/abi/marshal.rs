@@ -161,8 +161,20 @@ pub trait FromArgument: Sized {
     }
 }
 
-/// The default `from_default` takes: a scalar as written, anything else
-/// from the request's store, evaluated there on its first use.
+/// The default `from_default` takes: a scalar as written, a string the
+/// stub writes as the string the engine made of it at startup, anything
+/// else from the request's store, evaluated there on its first use. So
+/// an omitted `string $version = "1.0"` costs the request nothing, as
+/// php's C default does:
+///
+/// ```php
+/// $m = memory_get_usage(); $d = new DOMDocument; unset($d); var_dump(memory_get_usage() - $m);
+/// $m = memory_get_usage(); $x = Dom\XMLDocument::createEmpty(); unset($x); var_dump(memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(0)
+/// int(0)
+/// ```
 fn default_value(
     req: &mut Request,
     expr: &ConstExpr,
@@ -175,6 +187,12 @@ fn default_value(
         ConstExpr::Bool(b) => Some(Value::bool(*b)),
         ConstExpr::Long { value, .. } => Some(Value::int(*value)),
         ConstExpr::Double(f) => Some(Value::float(*f)),
+        // php's C default for an omitted string costs the request
+        // nothing, and neither does the engine's string made at startup.
+        ConstExpr::Str(written) => req
+            .shared
+            .default_string(written)
+            .map(|s| Value::string(crate::api::values::PhpString::of(s))),
         _ => None,
     };
     let key = (req.serving_function().unwrap_or(Function::PASS), position);

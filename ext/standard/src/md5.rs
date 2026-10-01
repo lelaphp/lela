@@ -9,7 +9,7 @@ use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
+use php_ext::values::PhpString;
 
 /// `PHP_MD5_CTX` in php's own layout, `lo, hi, a, b, c, d`, the block
 /// not yet full and the last block's words, which ext/hash's
@@ -294,9 +294,9 @@ fn md5(
 /// The read loop `md5_file` and `sha1_file` share
 /// (`PHP_NAMED_FUNCTION(php_if_md5_file)`, `Z/ext/standard/md5.c`): the
 /// file opened as `php_stream_open_wrapper(arg, "rb", REPORT_ERRORS,
-/// NULL)` opens it, and each read of up to 1024 bytes handed to
-/// `update` and given up before the next, as php's `buf[1024]` holds
-/// one read at a time, so hashing a file holds no more of it than that.
+/// NULL)` opens it, and each read of up to 1024 bytes read into one
+/// buffer on the stack and handed to `update`, as php's `buf[1024]`
+/// holds one read at a time, so hashing a file allocates nothing for it.
 /// `false` after the warning the open left, or where the reads stopped
 /// short of the end.
 pub(super) fn digest_file(
@@ -307,21 +307,9 @@ pub(super) fn digest_file(
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", false)? else {
         return Ok(false);
     };
-    loop {
-        let chunk = match stream.read(req, 1024) {
-            Ok(Some(chunk)) if !chunk.is_empty() => chunk,
-            Ok(Some(chunk)) => {
-                req.release(Value::string(chunk));
-                break;
-            }
-            Ok(None) => break,
-            Err(thrown) => {
-                stream.free(req);
-                return Err(thrown);
-            }
-        };
-        update(chunk.as_bytes());
-        req.release(Value::string(chunk));
+    let mut buf = [0u8; 1024];
+    while let Some(n @ 1..) = stream.read_into(req, &mut buf) {
+        update(&buf[..n]);
     }
     let complete = stream.eof(req);
     stream.free(req);
@@ -364,6 +352,19 @@ pub(super) fn digest_file(
 /// ```expect
 /// string(32) "b2d1236c286a3c0704224fe4105eca49"
 /// bool(true)
+/// ```
+///
+/// Each read goes into one buffer on the stack, so the peak rises by
+/// the stream's own allocations and nothing for the bytes:
+///
+/// ```php
+/// chdir(__DIR__); file_put_contents('peak.bin', str_repeat('x', 2 << 20)); md5_file('peak.bin');
+/// memory_reset_peak_usage(); $m = memory_get_usage(); md5_file('peak.bin');
+/// var_dump(memory_get_peak_usage() - $m);
+/// unlink('peak.bin');
+/// ```
+/// ```expect
+/// int(8688)
 /// ```
 #[php_function]
 fn md5_file(

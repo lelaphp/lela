@@ -1305,11 +1305,42 @@ impl Request {
     /// and `\0C\0p` for a private one, and each value a view whose owner
     /// the native being served holds until it returns, as php's reader
     /// holds the table until `zend_release_properties`. None for a class
-    /// with no hooked property.
+    /// with no hooked property. A lazy object whose initializer throws
+    /// answers no rows and leaves the throwable pending for the reader to
+    /// hand on once it has written what it read, as
+    /// `zend_hooked_object_build_properties` answers `zend_empty_array`
+    /// under `EG(exception)` (`Z/Zend/zend_property_hooks.c:137`).
+    ///
+    /// ```php
+    /// class H { public $a { get => 1; } public $b = 2; }
+    /// $o = (new ReflectionClass(H::class))->newLazyGhost(function ($o) { throw new Exception('init'); });
+    /// try { var_export($o); } catch (Exception $e) { echo "\n", $e->getMessage(), "\n"; }
+    /// try { json_encode($o); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(json_last_error(), $o);
+    /// ```
+    /// ```expect
+    /// \H::__set_state(array(
+    /// ))
+    /// init
+    /// init
+    /// int(0)
+    /// lazy ghost object(H)#3 (0) {
+    /// }
+    /// ```
     pub(crate) fn hooked_properties_for(
         &mut self,
         object: PhpObject,
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+        if !self.class_has_hooks(object.class()) {
+            return Ok(None);
+        }
+        if let Err(thrown) = self.lazy_init(object) {
+            if thrown.exception().is_none() {
+                return Err(thrown);
+            }
+            self.leave_pending(&thrown);
+            return Ok(Some(Vec::new()));
+        }
         let Some(rows) = self.hooked_object_rows(object)? else {
             return Ok(None);
         };

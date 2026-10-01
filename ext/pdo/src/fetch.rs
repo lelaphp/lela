@@ -1354,9 +1354,11 @@ pub(super) fn fetch_all(
     }
     let state = stmt::read(req, object, |s| s.error_code).flatten();
     if state != Some(SqlState::NONE) {
+        // `PDO_HANDLE_STMT_ERR_EX(zval_ptr_dtor(return_value);
+        // RETVAL_EMPTY_ARRAY();)` (`Z/ext/pdo/pdo_stmt.c:1305`).
         req.release(Value::array(out));
         stmt::handle_error(req, object, false)?;
-        return PhpArray::new(req);
+        return Ok(PhpArray::empty());
     }
     Ok(out)
 }

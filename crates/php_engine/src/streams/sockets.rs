@@ -1234,9 +1234,16 @@ impl Request {
         kind.role = role;
         kind.crypto = crypto;
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
-        stream.orig_path = Some(name.to_vec());
         stream.flags.no_seek = true;
+        // `pestrdup(name, persistent_id ? 1 : 0)`.
+        if persistent.is_some() {
+            stream.orig_path = Some(super::OrigPath::Persistent(name.into()));
+        }
         let stream = self.stream_alloc_as(stream, persistent.is_some())?;
+        if persistent.is_none() {
+            self.stream_op(stream, |req, s| s.set_orig_path(req, name))
+                .transpose()?;
+        }
         stream.set_ctx(self, context);
         if role == Role::Peer && connected {
             let connected = self
@@ -1395,11 +1402,14 @@ impl Request {
         kind.is_blocked = blocking;
         kind.crypto = crypto;
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
-        if let Some((name, _)) = found {
-            stream.orig_path = Some(format!("{name}://").into_bytes());
-        }
         stream.flags.no_seek = true;
-        self.stream_alloc(stream)
+        let stream = self.stream_alloc(stream)?;
+        if let Some((name, _)) = found {
+            let path = format!("{name}://").into_bytes();
+            self.stream_op(stream, |req, s| s.set_orig_path(req, &path))
+                .transpose()?;
+        }
+        Ok(stream)
     }
 }
 

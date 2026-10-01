@@ -4,8 +4,8 @@
 //! `pdo_stmt_init` installs on it.
 
 use php_ext::abi::{
-    CloneObj, CloneObjWith, DimensionRead, ObjectHandlers, PropertyPlace, PropertyPurpose,
-    PropertyRead, PropertyTest, Std,
+    CloneObj, CloneObjWith, DimensionRead, ObjectHandlers, PropertiesFor, PropertyPlace,
+    PropertyPurpose, PropertyRead, PropertyTest, Std,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, lookup_class, new_object};
@@ -334,7 +334,9 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
-        let Some(rows) = self.get_properties_for(req, object, PropertyPurpose::Debug)? else {
+        let PropertiesFor::Rows(rows) =
+            self.get_properties_for(req, object, PropertyPurpose::Debug)?
+        else {
             return Ok(None);
         };
         let mut out = PhpArray::new(req)?;
@@ -357,12 +359,12 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(php_ext::values::Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         if purpose != PropertyPurpose::Debug {
-            return Ok(None);
+            return Ok(PropertiesFor::Standard);
         }
         let Some(stmt) = statement(req, object) else {
-            return Ok(None);
+            return Ok(PropertiesFor::Standard);
         };
         // Views, as `get_properties_for` answers them; a column's value is
         // the one this read made, which the request's end frees.
@@ -388,7 +390,7 @@ impl ObjectHandlers for Handlers {
                 None => rows.push((key, value)),
             }
         }
-        Ok(Some(
+        Ok(PropertiesFor::Rows(
             rows.into_iter()
                 .map(|(name, value)| (php_ext::values::Key::Str(name), value))
                 .collect(),

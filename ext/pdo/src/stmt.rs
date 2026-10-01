@@ -5,8 +5,8 @@
 //! the methods that start, bind and describe.
 
 use php_ext::abi::{
-    CloneObj, CloneObjWith, Instance, ObjectHandlers, OrFalse, Passed, PropertyPurpose, Raw, Ref,
-    Std, This, True, Union, Variadic,
+    CloneObj, CloneObjWith, Instance, ObjectHandlers, OrFalse, Passed, PropertiesFor,
+    PropertyPurpose, Raw, Ref, Std, This, True, Union, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::internal_iterator;
@@ -323,9 +323,9 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(php_ext::values::Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         let _ = (req, object, purpose);
-        Ok(None)
+        Ok(PropertiesFor::Standard)
     }
 }
 
@@ -1470,7 +1470,20 @@ impl PDOStatement {
     /// ```
     ///
     /// `ZEND_PARSE_PARAMETERS_START(0, 3)` under the stub's variadic, so
-    /// the body counts, then holds `$mode`.
+    /// the body counts, then holds `$mode`. A fetch that fails gives the
+    /// rows read so far back and answers the process's empty array.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+    /// $s = $db->query('SELECT 1 UNION ALL SELECT abs(-9223372036854775807-1)');
+    /// debug_zval_dump($s->fetchAll());
+    /// var_dump($s->errorInfo()[2]);
+    /// ```
+    /// ```expect
+    /// array(0) interned {
+    /// }
+    /// string(16) "integer overflow"
+    /// ```
     #[php(tentative, arity = manual)]
     fn fetchAll(
         req: &mut Request,

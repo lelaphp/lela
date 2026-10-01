@@ -13,7 +13,7 @@ use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{FreshString, Key, PhpObject, PhpString, Value, ValueRef};
 
 use crate::constants::{ZLIB_ENCODING_DEFLATE, ZLIB_ENCODING_GZIP, ZLIB_ENCODING_RAW};
 use crate::encode::size_guess;
@@ -380,6 +380,28 @@ fn deflate_init(
 /// int(100011)
 /// deflate_add(): Argument #3 ($flush_mode) must be one of ZLIB_NO_FLUSH, ZLIB_PARTIAL_FLUSH, ZLIB_SYNC_FLUSH, ZLIB_FULL_FLUSH, ZLIB_BLOCK, or ZLIB_FINISH
 /// ```
+///
+/// The string zlib writes into is the one handed out, with the size
+/// php's guess asked for however little was written, and one grown by
+/// 64 bytes at a time where the guess is short:
+///
+/// ```php
+/// $in = str_repeat('0123456789abcdef', 4096);
+/// $c = deflate_init(ZLIB_ENCODING_DEFLATE); deflate_add($c, 'warm', ZLIB_FINISH);
+/// memory_reset_peak_usage(); $m = memory_get_usage(); $z = deflate_add($c, $in, ZLIB_FINISH);
+/// var_dump(strlen($z), memory_get_peak_usage() - $m, memory_get_usage() - $m);
+/// $s = deflate_init(ZLIB_ENCODING_RAW, ['level' => 0]); deflate_add($s, 'warm', ZLIB_FINISH);
+/// memory_reset_peak_usage(); $m = memory_get_usage(); $y = deflate_add($s, $in, ZLIB_FINISH);
+/// var_dump(strlen($y), memory_get_peak_usage() - $m, memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(167)
+/// int(69632)
+/// int(69632)
+/// int(65546)
+/// int(69632)
+/// int(69632)
+/// ```
 #[php_function]
 fn deflate_add(
     req: &mut Request,
@@ -398,44 +420,67 @@ fn deflate_add(
     if input.is_empty() && flush != Flush::Finish {
         return Ok(OrFalse::Value(PhpString::new(req, b"")?));
     }
-    let mut out = vec![0; size_guess(input.len()).max(64)];
-    let (mut read, mut used) = (0, 0);
     let Some(mut stream) = context.payload_mut(req)?.0.take() else {
         return Err(throw(req, "Error", "DeflateContext has no stream"));
     };
+    let deflated = deflate_rounds(req, &mut stream, input, flush);
+    context.payload_mut(req)?.0 = Some(stream);
+    match deflated? {
+        Ok(out) => Ok(OrFalse::Value(out)),
+        Err(failed) => {
+            let text = format!("zlib error ({})", failed.message());
+            docref(req, Level::Warning, &text);
+            Ok(OrFalse::False)
+        }
+    }
+}
+
+/// `deflate_add`'s loop: zlib writes into `zend_string_alloc(out_size)`
+/// in place, the string grown by 64 bytes with `zend_string_extend`
+/// while zlib fills it, and handed out with its length set where the
+/// allocation stands (`ZSTR_LEN(out) = ...`), so the string keeps the
+/// size php's guess and its growth asked for. The status that refused is
+/// the inner `Err`, the string given back first.
+fn deflate_rounds(
+    req: &mut Request,
+    stream: &mut Deflate,
+    input: &[u8],
+    flush: Flush,
+) -> Result<Result<PhpString, Status>, Thrown> {
+    let mut out = FreshString::new(req, size_guess(input.len()).max(64))?;
+    let (mut read, mut used) = (0, 0);
     let status = loop {
         if used == out.len() {
-            out.resize(out.len() + 64, 0);
+            let len = out.len() + 64;
+            out = out.extend(req, len)?;
         }
-        let step = match stream.deflate(req, &input[read..], &mut out[used..], flush) {
+        let step = match stream.deflate(req, &input[read..], &mut out.bytes_mut()[used..], flush) {
             Ok(step) => step,
             Err(thrown) => {
-                context.payload_mut(req)?.0 = Some(stream);
+                out.free(req);
                 return Err(thrown);
             }
         };
         read += step.read;
         used += step.written;
         if step.status != Status::Ok || used != out.len() {
-            if step.status == Status::StreamEnd
-                && let Err(thrown) = stream.reset(req)
-            {
-                context.payload_mut(req)?.0 = Some(stream);
-                return Err(thrown);
-            }
             break step.status;
         }
     };
-    context.payload_mut(req)?.0 = Some(stream);
     match status {
         Status::Ok | Status::StreamEnd => {
-            out.truncate(used);
-            Ok(OrFalse::Value(PhpString::new(req, &out)?))
+            if status == Status::StreamEnd
+                && let Err(thrown) = stream.reset(req)
+            {
+                out.free(req);
+                return Err(thrown);
+            }
+            out.set_len(used);
+            Ok(Ok(out.finish()))
         }
         failed => {
-            let text = format!("zlib error ({})", failed.message());
-            docref(req, Level::Warning, &text);
-            Ok(OrFalse::False)
+            out.free(req);
+            Ok(Err(failed))
         }
     }
 }
@@ -505,9 +550,9 @@ fn inflate_init(
     Ok(OrFalse::Value(Instance::of(object)))
 }
 
-/// What one `inflate_add` call came to: the bytes, or php's warning.
+/// What one `inflate_add` call came to: the string, or php's warning.
 enum Inflated {
-    Out(Vec<u8>),
+    Out(PhpString),
     Refused(String),
 }
 
@@ -549,6 +594,29 @@ enum Inflated {
 /// Warning: inflate_add(): Dictionary does not match expected dictionary (incorrect adler32 hash) in %s on line 14
 /// bool(false)
 /// ```
+///
+/// zlib writes into the string handed out, grown by [`CHUNK_SIZE`] while
+/// it fills and cut to what was written:
+///
+/// ```php
+/// $in = str_repeat('0123456789abcdef', 4096);
+/// $stored = gzcompress($in, 0); $packed = gzcompress($in);
+/// $d = inflate_init(ZLIB_ENCODING_DEFLATE); inflate_add($d, gzcompress('warm'));
+/// memory_reset_peak_usage(); $m = memory_get_usage(); $o = inflate_add($d, $stored, ZLIB_FINISH);
+/// var_dump(strlen($stored), strlen($o), memory_get_peak_usage() - $m, memory_get_usage() - $m);
+/// $e = inflate_init(ZLIB_ENCODING_DEFLATE); inflate_add($e, gzcompress('warm'));
+/// memory_reset_peak_usage(); $m = memory_get_usage(); $p = inflate_add($e, $packed, ZLIB_FINISH);
+/// var_dump(strlen($p), memory_get_peak_usage() - $m, memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(65552)
+/// int(65536)
+/// int(69632)
+/// int(69632)
+/// int(65536)
+/// int(102400)
+/// int(102400)
+/// ```
 #[php_function]
 fn inflate_add(
     req: &mut Request,
@@ -575,7 +643,7 @@ fn inflate_add(
             stream.reset(req)?;
         }
         if input.is_empty() && flush != Flush::Finish {
-            Ok(Inflated::Out(Vec::new()))
+            Ok(Inflated::Out(PhpString::new(req, b"")?))
         } else {
             inflate_rounds(req, &mut stream, &mut dictionary, &mut status, input, flush)
         }
@@ -586,7 +654,7 @@ fn inflate_add(
     payload.status = status;
     let inflated = inflated?;
     match inflated {
-        Inflated::Out(out) => Ok(OrFalse::Value(PhpString::new(req, &out)?)),
+        Inflated::Out(out) => Ok(OrFalse::Value(out)),
         Inflated::Refused(text) => {
             docref(req, Level::Warning, &text);
             Ok(OrFalse::False)
@@ -594,7 +662,11 @@ fn inflate_add(
     }
 }
 
-/// `inflate_add`'s loop.
+/// `inflate_add`'s loop: zlib writes into `zend_string_alloc` of the
+/// input's length, at least [`CHUNK_SIZE`], in place, the string grown
+/// by [`CHUNK_SIZE`] with `zend_string_extend` while zlib fills it and
+/// cut to what was written with `zend_string_truncate`. A refusal gives
+/// the string back first, as php's `zend_string_release_ex` does.
 fn inflate_rounds(
     req: &mut Request,
     stream: &mut Inflate,
@@ -603,40 +675,49 @@ fn inflate_rounds(
     input: &[u8],
     flush: Flush,
 ) -> Result<Inflated, Thrown> {
-    let mut out = vec![0; input.len().max(CHUNK_SIZE)];
+    let mut out = FreshString::new(req, input.len().max(CHUNK_SIZE))?;
     let (mut read, mut used) = (0, 0);
     loop {
-        let step = stream.inflate(req, &input[read..], &mut out[used..], flush)?;
+        let step = match stream.inflate(req, &input[read..], &mut out.bytes_mut()[used..], flush) {
+            Ok(step) => step,
+            Err(thrown) => {
+                out.free(req);
+                return Err(thrown);
+            }
+        };
         read += step.read;
         used += step.written;
         *last = step.status;
         let full = used == out.len();
-        match step.status {
+        let refused = match step.status {
             Status::Ok | Status::BufError
                 if full && (step.status == Status::Ok || flush == Flush::Finish) =>
             {
-                out.resize(out.len() + CHUNK_SIZE, 0);
+                let len = out.len() + CHUNK_SIZE;
+                out = out.extend(req, len)?;
+                continue;
             }
             Status::Ok | Status::BufError | Status::StreamEnd => break,
             Status::NeedDict => match dictionary.take() {
-                Some(dict) => {
-                    if stream.set_dictionary(req, &dict)? == Status::DataError {
-                        return Ok(Inflated::Refused(
-                            "Dictionary does not match expected dictionary (incorrect adler32 hash)".into(),
-                        ));
+                Some(dict) => match stream.set_dictionary(req, &dict) {
+                    Ok(Status::DataError) => {
+                        "Dictionary does not match expected dictionary (incorrect adler32 hash)".into()
                     }
-                }
-                None => {
-                    return Ok(Inflated::Refused(
-                        "Inflating this data requires a preset dictionary, please specify it in the options array of inflate_init()".into(),
-                    ));
-                }
+                    Ok(_) => continue,
+                    Err(thrown) => {
+                        out.free(req);
+                        return Err(thrown);
+                    }
+                },
+                None => "Inflating this data requires a preset dictionary, please specify it in the options array of inflate_init()".into(),
             },
-            failed => return Ok(Inflated::Refused(failed.message())),
-        }
+            failed => failed.message(),
+        };
+        out.free(req);
+        return Ok(Inflated::Refused(refused));
     }
-    out.truncate(used);
-    Ok(Inflated::Out(out))
+    let out = out.truncate(req, used)?;
+    Ok(Inflated::Out(out.finish()))
 }
 
 /// `inflate_get_status(InflateContext $context): int`: the last
