@@ -185,6 +185,14 @@ pub struct Session {
     pub thrown_into: Option<FrameRef>,
     /// Whose code the loop reaches.
     pub origin: Origin,
+    /// php's `EG(exit_status)`, which the last write decides and the
+    /// process exits with. The oracle's build is not thread-safe, so its
+    /// executor's globals are built once (`executor_globals_ctor` runs
+    /// again at a module's start under ZTS alone, `Z/Zend/zend.c:1146`)
+    /// and the status outlives the cycles of phpdbg's main loop
+    /// (`Z/sapi/phpdbg/phpdbg.c:1707-1709`); this host serves those
+    /// cycles as requests of the engine's, each started with it.
+    pub exit_status: i32,
 }
 
 impl Session {
@@ -218,6 +226,7 @@ impl Session {
             started: false,
             thrown_into: None,
             origin: Origin::Program,
+            exit_status: 0,
         }
     }
 }

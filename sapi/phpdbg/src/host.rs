@@ -19,7 +19,28 @@ use crate::prompt::{self, Here};
 use crate::session::{self, AfterRun, Context, Plan, Session, Stop};
 use crate::{NAME, input};
 
-/// The session's requests, until it quits; the status of the last.
+/// The session's requests, until it quits; the status the last of them
+/// left, which a request that writes none does not replace, as php's
+/// `EG(exit_status)` stands across the cycles of its main loop.
+///
+/// ```php
+/// if ($argc > 1) {
+///   exit(2);
+/// }
+/// echo "ran\n";
+/// ```
+/// ```request phpdbg
+/// r a
+/// r
+/// q
+/// ```
+/// ```expect exit=2
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Script ended normally]
+/// prompt> ran
+/// [Script ended normally]
+/// prompt>
+/// ```
 pub fn serve(engine: &Engine) -> i32 {
     let mut status = 0;
     loop {
@@ -29,6 +50,7 @@ pub fn serve(engine: &Engine) -> i32 {
         let plan = match s.stopped.take() {
             Some(Stop::Quit) => {
                 s.stopped = Some(Stop::Quit);
+                let status = s.exit_status;
                 session::put(s);
                 return status;
             }
@@ -61,16 +83,18 @@ pub fn serve(engine: &Engine) -> i32 {
         let Some(mut s) = session::take() else {
             return status;
         };
-        status = ended(&mut s, plan, &observed).unwrap_or(status);
+        s.exit_status = observed.exit_code;
+        status = s.exit_status;
+        ended(&mut s, plan, &observed);
         session::put(s);
     }
 }
 
 /// After a request: the context marked as one that does not compile
 /// where its held request never reached its first opline, and a run
-/// that ended by itself reported as php reports it; the status where
-/// the request was a run. A context the compiler refused leaves the
-/// fatal's 255, which php's `EG(exit_status)` keeps for the session.
+/// that ended by itself reported as php reports it; the cycle ended
+/// where the request was a run or `clean` ended it. A context the
+/// compiler refused leaves the fatal's 255 in php's `EG(exit_status)`.
 ///
 /// ```php
 /// function (
@@ -111,7 +135,7 @@ pub fn serve(engine: &Engine) -> i32 {
 /// prompt> [Not running]
 /// prompt>
 /// ```
-fn ended(s: &mut Session, plan: Plan, observed: &Observables) -> Option<i32> {
+fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     let reached = s.plan != Some(Plan::Hold);
     s.plan = None;
     // `run`'s arguments and its stdin are its run's alone; the next is
@@ -120,7 +144,7 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) -> Option<i32> {
     s.stdin_file = None;
     if plan == Plan::Hold && !reached {
         s.context = Context::Refused;
-        return (observed.exit_code != 0).then_some(observed.exit_code);
+        return;
     }
     // php's cycle ends with the request a run, a restart, `clean` or an
     // `exec` during a run stood in (`phpdbg_clean(1, ...)`): the module
@@ -129,9 +153,7 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) -> Option<i32> {
         s.registered.clear();
     }
     if !s.executing {
-        // php's `EG(exit_status)` outlives the prompt it was set at: a
-        // fatal `ev` rendered there is the status the session quits with.
-        return (observed.exit_code != 0).then_some(observed.exit_code);
+        return;
     }
     s.executing = false;
     if let Some(uncaught) = &observed.uncaught {
@@ -167,7 +189,6 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) -> Option<i32> {
             | Stop::RunWith(_),
         ) => {}
     }
-    Some(observed.exit_code)
 }
 
 /// `run`'s arguments, split as php's `run` splits them
@@ -277,6 +298,7 @@ fn describe(s: &Session, plan: Plan) -> RequestDescription {
         source,
         file_handles: Some(FileHandles::new(stdin, stdout, stderr)),
         primary: Primary::Bare,
+        exit_status: s.exit_status,
         ..RequestDescription::default()
     }
 }
