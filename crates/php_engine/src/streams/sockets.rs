@@ -175,6 +175,8 @@ pub(crate) struct Socket {
     timeout: Option<Duration>,
     timeout_event: bool,
     role: Role,
+    /// `PHP_STREAM_FLAG_SUPPRESS_ERRORS`: a failed send raises no notice.
+    suppress_errors: bool,
 }
 
 /// Whether a socket stream is a server's: `PHP_STREAM_FLAG_NO_IO`, which
@@ -201,6 +203,7 @@ impl Socket {
             timeout,
             timeout_event: false,
             role: Role::Peer,
+            suppress_errors: false,
         }
     }
 
@@ -391,7 +394,8 @@ impl Ops for Socket {
 
     /// `php_sockop_write` (`Z/main/streams/xp_socket.c:63`): one
     /// `send(2)`, a socket that does not block answering `0` where it
-    /// would, and php's notice with `errno` where it failed.
+    /// would, and php's notice with `errno` where it failed, unless the
+    /// stream was marked [`StreamOption::SuppressErrors`].
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         if self.crypto_active() {
             return self
@@ -404,6 +408,7 @@ impl Ops for Socket {
         match sock.write(buf) {
             Ok(n) => Some(n),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Some(0),
+            Err(_) if self.suppress_errors => None,
             Err(error) => {
                 let (code, text) = socket_error(&error);
                 let text = format!(
@@ -557,6 +562,10 @@ impl Ops for Socket {
             StreamOption::ReadTimeout(timeout) => {
                 self.timeout = Some(timeout);
                 self.timeout_event = false;
+                OptionAnswer::Ok
+            }
+            StreamOption::SuppressErrors(suppress) => {
+                self.suppress_errors = suppress;
                 OptionAnswer::Ok
             }
             StreamOption::Liveness if self.crypto_active() => {

@@ -116,6 +116,16 @@ impl ExtensionId {
 /// The name `__halt_compiler()` registers its file's offset under.
 const HALT_OFFSET: &[u8] = b"__COMPILER_HALT_OFFSET__";
 
+/// The C library's `P_tmpdir` (`<stdio.h>`), the directory
+/// `php_get_temporary_directory` falls back to where neither
+/// `sys_temp_dir` nor `TMPDIR` names one, as the header spells it:
+/// `/var/tmp/` on macOS, `/tmp` under glibc and musl.
+const P_TMPDIR: &[u8] = if cfg!(target_vendor = "apple") {
+    b"/var/tmp/"
+} else {
+    b"/tmp"
+};
+
 /// `zend_mangle_property_name("__COMPILER_HALT_OFFSET__", file)`: a NUL,
 /// the name, a NUL and the file's, the key one file's halt offset is
 /// registered under.
@@ -423,6 +433,16 @@ pub enum StreamOption {
     /// durable, `fsync(2)` or `fdatasync(2)` of a plain file's fd, which
     /// a pipe refuses. What `fsync()` and `fdatasync()` ask.
     Sync { data_only: bool },
+    /// `PHP_STREAM_FLAG_SUPPRESS_ERRORS` (`Z/main/php_streams.h:187`),
+    /// set for `true` and cleared for `false`: the kind's own notice for
+    /// a read or a write that failed, a socket's `Send of %zu bytes
+    /// failed` and a plain file's `Read of` and `Write of`, is not
+    /// raised, and the caller reports the failure in its own words, as
+    /// `mysqlnd_vio::connect` marks its connection's stream
+    /// (`Z/ext/mysqlnd/mysqlnd_vio.c:288`). The two kinds that raise
+    /// such a notice take it; any other kind has none to silence and
+    /// answers [`OptionAnswer::NotImplemented`].
+    SuppressErrors(bool),
 }
 
 /// What `php_stream_set_option` answers: `PHP_STREAM_OPTION_RETURN_OK`,
@@ -20662,15 +20682,29 @@ impl Request {
     /// answers, and where `tempnam()` falls back to and `tmpfile()` and a
     /// spilling `php://temp` make their files. `sys_temp_dir` where it is
     /// set to more than a lone `/`, else `TMPDIR` from the environment,
-    /// one trailing slash taken off either; else `/tmp`.
+    /// one trailing slash taken off either; else the C library's
+    /// `P_tmpdir` as it stands ([`P_TMPDIR`]), trailing slash and all.
+    ///
+    /// The recipe clears the environment, so no `TMPDIR` reaches php
+    /// and the directory is the platform's own:
+    ///
+    /// ```php
+    /// $t = sys_get_temp_dir();
+    /// var_dump($t === (PHP_OS_FAMILY === 'Darwin' ? '/var/tmp/' : '/tmp'), getenv('TMPDIR'), is_dir($t));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
     #[must_use]
     pub fn temp_dir(&self) -> PathBuf {
         let chosen = self
             .ini_get(b"sys_temp_dir")
             .filter(|dir| !dir.is_empty() && *dir != b"/")
-            .or_else(|| self.env(b"TMPDIR").filter(|dir| !dir.is_empty()));
-        let dir = chosen.map_or(&b"/tmp"[..], |dir| dir.strip_suffix(b"/").unwrap_or(dir));
-        PathBuf::from(std::ffi::OsStr::from_bytes(dir))
+            .or_else(|| self.env(b"TMPDIR").filter(|dir| !dir.is_empty()))
+            .map(|dir| dir.strip_suffix(b"/").unwrap_or(dir));
+        PathBuf::from(std::ffi::OsStr::from_bytes(chosen.unwrap_or(P_TMPDIR)))
     }
 
     /// `umask()` as it stands.

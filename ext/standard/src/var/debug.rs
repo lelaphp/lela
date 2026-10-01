@@ -205,7 +205,28 @@ fn pad(out: &mut Vec<u8>, level: usize) {
     }
 }
 
-// One arm per type, as php's switch has them.
+/// `php_debug_zval_dump` (`Z/ext/standard/var.c:301`), one arm per
+/// type as php's switch has them. An array is held while its rows are
+/// walked, so an element's `__debugInfo` that frees it through another
+/// name (GH-19801) leaves it standing until the walk is done:
+///
+/// ```php
+/// $a = [new class { function __debugInfo() { global $b; $b->a = null; gc_collect_cycles(); return []; } }];
+/// $b = new stdClass; $b->a = &$a;
+/// debug_zval_dump($b);
+/// ```
+/// ```expect
+/// object(stdClass)#2 (1) refcount(2){
+///   ["a"]=>
+///   reference refcount(2) {
+///     array(1) packed refcount(1){
+///       [0]=>
+///       object(class@anonymous)#1 (0) refcount(1){
+///       }
+///     }
+///   }
+/// }
+/// ```
 #[allow(clippy::too_many_lines)]
 fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Result<(), Thrown> {
     // Unguarded in php, held to the thread's floor here.
@@ -235,10 +256,16 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                 out.extend_from_slice(b"*RECURSION*\n");
                 return Ok(());
             }
+            // `GC_ADDREF(myht)` beside the mark (GH-19801): the walk holds
+            // an owner of its own, so an element's `__debugInfo` that gives
+            // up the array's last other owner leaves it standing until the
+            // walk is done; the count printed is the one before it. An
+            // immutable array is held by neither call.
+            let count = value.refcount();
+            req.addref(value);
             array.protect();
             let packed = if array.is_packed() { "packed " } else { "" };
             if value.is_refcounted() {
-                let count = value.refcount();
                 out.extend_from_slice(
                     format!("array({}) {packed}refcount({count}){{\n", array.len()).as_bytes(),
                 );
@@ -264,6 +291,9 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                 }
             }
             array.unprotect();
+            // `GC_DTOR_NO_REF(myht)`: the walk's owner given up, which
+            // frees the array where it was the last.
+            req.release(*value);
             dumped?;
             pad(out, level);
             out.extend_from_slice(b"}\n");
@@ -349,9 +379,15 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                     break;
                 }
             }
-            held.release(req);
+            // What the class's debug table left pending was raised
+            // before any row's, so a row's is chained onto it.
+            let left = held.release(req);
             object.unprotect_in(req, RecursionGuard::Debug);
-            dumped?;
+            match (left, dumped) {
+                (Err(earlier), Err(later)) => return Err(earlier.chain(req, later)),
+                (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => return Err(thrown),
+                (Ok(()), Ok(())) => {}
+            }
             pad(out, level);
             out.extend_from_slice(b"}\n");
         }

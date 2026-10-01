@@ -2098,6 +2098,7 @@ pub(crate) fn temporary_file(
             temp_name: Some(path),
             process: None,
             blocking: true,
+            suppress_errors: false,
         }),
         b"r+b",
     );
@@ -2132,6 +2133,9 @@ struct Stdio {
     process: Option<std::process::Child>,
     /// Whether the fd blocks, what `stream_set_blocking` last set.
     blocking: bool,
+    /// `PHP_STREAM_FLAG_SUPPRESS_ERRORS`: a failed read or write raises
+    /// no notice.
+    suppress_errors: bool,
 }
 
 /// `sizeof(php_stdio_stream_data)` (`Z/main/streams/plain_wrapper.c:135`),
@@ -2195,7 +2199,8 @@ impl Ops for Stdio {
     }
 
     /// `php_stdiop_write` (`Z/main/streams/plain_wrapper.c:374`): one
-    /// `write(2)`, and php's notice with `errno` where it failed; the
+    /// `write(2)`, and php's notice with `errno` where it failed, unless
+    /// the stream was marked [`StreamOption::SuppressErrors`]; the
     /// stat cache cleared after it, since the file's times moved.
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         let written = self.file.as_mut()?.write(buf);
@@ -2204,6 +2209,7 @@ impl Ops for Stdio {
             Ok(n) => Some(n),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Some(0),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => None,
+            Err(_) if self.suppress_errors => None,
             Err(error) => {
                 let text = format!(
                     "{}(): Write of {} bytes failed with {}",
@@ -2219,7 +2225,9 @@ impl Ops for Stdio {
 
     /// `php_stdiop_read` (`Z/main/streams/plain_wrapper.c:421`): one
     /// `read(2)`, eof at zero bytes, and php's notice with `errno` where
-    /// it failed, eof set then too unless the fd was bad, `EBADF`; the
+    /// it failed, unless the stream was marked
+    /// [`StreamOption::SuppressErrors`], eof set then too unless the fd
+    /// was bad, `EBADF`; the
     /// stat cache cleared after it, since the file's atime moved.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
         let read = self.file.as_mut()?.read(buf);
@@ -2233,13 +2241,15 @@ impl Ops for Stdio {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Some(0),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => None,
             Err(error) => {
-                let text = format!(
-                    "{}(): Read of {} bytes failed with {}",
-                    req.active_native(),
-                    buf.len(),
-                    errno(&error)
-                );
-                raise(req, Level::Notice, &text);
+                if !self.suppress_errors {
+                    let text = format!(
+                        "{}(): Read of {} bytes failed with {}",
+                        req.active_native(),
+                        buf.len(),
+                        errno(&error)
+                    );
+                    raise(req, Level::Notice, &text);
+                }
                 if error.raw_os_error() != Some(EBADF) {
                     *eof = true;
                 }
@@ -2409,6 +2419,10 @@ impl Ops for Stdio {
                 _ => OptionAnswer::Err,
             },
             StreamOption::WriteBuffer { .. } => OptionAnswer::Err,
+            StreamOption::SuppressErrors(suppress) => {
+                self.suppress_errors = suppress;
+                OptionAnswer::Ok
+            }
             _ => OptionAnswer::NotImplemented,
         }
     }
@@ -2541,6 +2555,7 @@ fn plain_open(req: &mut Request, path: &HostPath, mode: &[u8]) -> Result<PhpStre
             temp_name: None,
             process: None,
             blocking: true,
+            suppress_errors: false,
         }),
         mode,
     );
@@ -4363,6 +4378,7 @@ impl Request {
                 temp_name: None,
                 process,
                 blocking: true,
+                suppress_errors: false,
             }),
             mode,
         );

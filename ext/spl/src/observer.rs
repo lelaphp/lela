@@ -10,8 +10,7 @@
 use std::collections::HashMap;
 
 use php_ext::abi::{
-    CloneObj, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers, PropertyPurpose, Std,
-    This, Union, Untyped,
+    CloneObj, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers, Std, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_members, new_object};
@@ -1011,7 +1010,7 @@ impl SplObjectStorage {
         let this = this.object();
         let rows = with(req, this, |s| s.live())?;
         let mut out = PhpArray::new(req)?;
-        for (key, value) in this.props_for(req, PropertyPurpose::Debug)? {
+        for (key, value) in crate::std_properties(req, this)? {
             req.addref(&value);
             out.set(req, key, value)?;
         }

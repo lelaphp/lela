@@ -17550,41 +17550,78 @@ pub(crate) fn concat<T: Tier>(
     concat_into(req, frame, code, op)
 }
 
-/// The body `CONCAT` and `FAST_CONCAT` share: php's arm for a left
-/// operand that is a temporary, when both sides are strings and neither
-/// is empty (`Z/Zend/zend_vm_def.h:407-418`, `:3317-3328`), hands the
-/// temporary's owner to [`Request::string_append`], which grows the
-/// string where it stands when that owner is its only one and copies it
-/// otherwise, as `zend_string_extend` and php's alloc arm beside it do;
-/// every other pair is [`binary`] over [`crate::ops::concat`].
+/// The body `CONCAT` and `FAST_CONCAT` share, php's arms for two
+/// strings (`Z/Zend/zend_vm_def.h:382-431`, `:3293-3341`). An empty side
+/// hands the other on only where it is no `CONST`: the compiler's `''`
+/// is joined as any string is, so `$x . ''` is a new string and not
+/// `$x`'s. A left temporary's owner goes to [`Request::string_append`],
+/// which grows the string where it stands when that owner is its only
+/// one and copies it otherwise, as `zend_string_extend` and php's alloc
+/// arm beside it do; any other left side is joined into a new string
+/// ([`crate::ops::join`]). Every other pair, the empty side's included,
+/// is [`crate::ops::concat`] over the two operands as [`binary`] reads
+/// them, whose empty side hands the other on as php's does.
+///
+/// A string an array holds, joined with a constant `''` on either side,
+/// is a string of its own, and so is a variable's; a variable's `''` is
+/// the empty side that hands the other on, and a temporary that was the
+/// string's one owner grows into the joined string where it stands:
+///
+/// ```php
+/// $a = [str_repeat('a', 1)]; $x = str_repeat('xy', 2); $e = '';
+/// debug_zval_dump($a[0] . '', '' . $a[0], $x . '', '' . $x, $x . $e, $e . $x, str_repeat('ab', 2) . '');
+/// ```
+/// ```expect
+/// string(1) "a" refcount(1)
+/// string(1) "a" refcount(1)
+/// string(4) "xyxy" refcount(1)
+/// string(4) "xyxy" refcount(1)
+/// string(4) "xyxy" refcount(3)
+/// string(4) "xyxy" refcount(3)
+/// string(4) "abab" refcount(1)
+/// ```
+///
+/// Each operand is read once, so an undefined variable warns once on
+/// either side:
+///
+/// ```php
+/// echo $u . '|', '|' . $v, "\n";
+/// ```
+/// ```expect
+/// Warning: Undefined variable $u in %s on line 2
+/// |
+/// Warning: Undefined variable $v in %s on line 2
+/// |
+/// ```
 fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) {
-        let left = exec::operand(req, frame, code, op.op1_type, op.op1);
-        let right = exec::operand(req, frame, code, op.op2_type, op.op2);
-        if let (Some(&a), Some(&b)) = (left.as_php_string(), right.as_php_string())
-            && !a.is_empty()
-            && !b.is_empty()
+    // Each operand is read once: a `CV` that is undefined warns where
+    // it is read.
+    let left = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let right = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let computed = match (left.as_php_string(), right.as_php_string()) {
+        (Some(&a), Some(&b))
+            if (op.op1_type == OperandKind::Const || !a.is_empty())
+                && (op.op2_type == OperandKind::Const || !b.is_empty()) =>
         {
-            // The temporary's owner is the append's now, and nothing
-            // releases it again.
-            req.take_slot(frame, exec::temporary_slot(code, op.op1));
-            let joined = req.string_append(a, b);
-            exec::free_operand(req, frame, code, op.op2_type, op.op2);
-            return match joined {
-                Ok(joined) => {
-                    let slot = exec::temporary_slot(code, op.out);
-                    let previous = req.set_slot(frame, slot, Value::string(joined));
-                    req.release(previous);
-                    Ok(advance(req, frame))
-                }
-                Err(thrown) => {
-                    req.leave_pending(&thrown);
-                    Ok(Stepped::Threw(frame))
-                }
-            };
+            if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) {
+                // The temporary's owner is the append's now, and nothing
+                // releases it again.
+                req.take_slot(frame, exec::temporary_slot(code, op.op1));
+                req.string_append(a, b)
+            } else {
+                // A `CV` or a `CONST` is no operand to free.
+                crate::ops::join(req, a, b)
+            }
+            .map(Value::string)
         }
-    }
-    binary(req, frame, code, op, crate::ops::concat)
+        _ => {
+            let computed = crate::ops::concat(req, &left, &right);
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            computed
+        }
+    };
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    computed_into(req, frame, code, op, computed)
 }
 
 /// `ZEND_FAST_CONCAT` (`Z/Zend/zend_vm_def.h:3285`): what an
@@ -19729,6 +19766,20 @@ fn binary(
     let computed = kernel(req, &left, &right);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    computed_into(req, frame, code, op, computed)
+}
+
+/// What a kernel computed, written into the temporary the opline's
+/// `result` field names and the opline advanced past; a kernel that
+/// threw leaves the throwable pending, which is the `Threw` edge the
+/// loop reads.
+fn computed_into(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    computed: Result<Value, Thrown>,
+) -> Edge {
     match computed {
         Ok(value) => {
             let slot = exec::temporary_slot(code, op.out);
@@ -19758,18 +19809,7 @@ fn unary(
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1);
     let computed = kernel(req, &operand);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    match computed {
-        Ok(value) => {
-            let slot = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, slot, value);
-            req.release(previous);
-            Ok(advance(req, frame))
-        }
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
-        }
-    }
+    computed_into(req, frame, code, op, computed)
 }
 
 /// `zend_incdec_typed_ref` (`Z/Zend/zend_execute.c:2230`): the step over

@@ -112,7 +112,22 @@ impl Net {
     }
 
     /// `mysqlnd_vio::connect`: the stream for `scheme` opened, its read
-    /// timeout set, or the error php sets.
+    /// timeout set, or the error php sets. The stream is marked
+    /// `PHP_STREAM_FLAG_SUPPRESS_ERRORS`, so a send the server's close
+    /// broke is the connection's error alone, with no socket notice
+    /// before it:
+    ///
+    /// ```php
+    /// $a = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_ERRMODE => PDO::ERRMODE_WARNING]);
+    /// $b = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+    /// $b->exec('KILL ' . $a->query('SELECT CONNECTION_ID()')->fetchColumn());
+    /// usleep(100000);
+    /// var_dump($a->query("SELECT '" . str_repeat('x', 8 << 20) . "'"));
+    /// ```
+    /// ```expect mysql
+    /// Warning: PDO::query(): SQLSTATE[HY000]: General error: 2006 MySQL server has gone away in %s on line 6
+    /// bool(false)
+    /// ```
     pub(crate) fn connect(
         &mut self,
         req: &mut Request,
@@ -166,6 +181,10 @@ impl Net {
             let size = usize::try_from(self.options.net_read_buffer_size).unwrap_or(usize::MAX);
             stream.set_option(req, StreamOption::ChunkSize(size));
         }
+        // `net_stream->flags |= PHP_STREAM_FLAG_SUPPRESS_ERRORS`: a send
+        // that fails is the connection's error in mysqlnd's words, not
+        // the socket's notice.
+        stream.set_option(req, StreamOption::SuppressErrors(true));
         Ok(true)
     }
 
