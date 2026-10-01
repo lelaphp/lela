@@ -21,10 +21,34 @@ use anyhow::{Context, Result};
 pub struct Lock {
     /// The leading comment lines, kept when the lock is rewritten.
     pub header: Vec<String>,
+    /// Every line, whichever block it stands in: the set a diff compares.
     pub lines: BTreeSet<String>,
-    /// The lines as the file carries them, in the file's own order: what
-    /// `disorder` judges. `lines` is the set a diff compares.
+    /// The body in the file's order: the lines before any `[name]` marker,
+    /// which are every line of a lock without sections, then one block per
+    /// marker (#1369).
+    pub blocks: Vec<Block>,
+}
+
+/// One block of a lock's body.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Block {
+    /// The section a `[name]` marker opens; `None` before the first marker.
+    pub name: Option<String>,
+    pub lines: BTreeSet<String>,
+    /// The lines as the file carries them, in its own order: what
+    /// `disorder` judges.
     pub as_written: Vec<String>,
+}
+
+impl Block {
+    /// A block to render: `lines` under `name`'s marker, or under none.
+    pub fn of(name: Option<&str>, lines: BTreeSet<String>) -> Block {
+        Block {
+            name: name.map(str::to_owned),
+            lines,
+            as_written: Vec::new(),
+        }
+    }
 }
 
 impl Lock {
@@ -36,6 +60,7 @@ impl Lock {
 
     pub fn parse(text: &str) -> Lock {
         let mut lock = Lock::default();
+        let mut block = Block::default();
         let mut in_header = true;
         for line in text.lines() {
             let line = line.trim();
@@ -49,44 +74,66 @@ impl Lock {
                 continue;
             }
             in_header = false;
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                let next = Block::of(Some(name), BTreeSet::new());
+                lock.blocks.push(std::mem::replace(&mut block, next));
+                continue;
+            }
             lock.lines.insert(line.to_owned());
-            lock.as_written.push(line.to_owned());
+            block.lines.insert(line.to_owned());
+            block.as_written.push(line.to_owned());
         }
+        lock.blocks.push(block);
         lock
+    }
+
+    /// The block a `[name]` marker opens, if the file has one.
+    pub fn section(&self, name: &str) -> Option<&Block> {
+        self.blocks.iter().find(|b| b.name.as_deref() == Some(name))
     }
 
     /// Where the file departs from the one order above, said in the words
     /// a reading prints, or `None` when the body is its own rendering.
     pub fn disorder(&self) -> Option<String> {
-        if let Some((written, rendered)) = self
-            .as_written
-            .iter()
-            .zip(&self.lines)
-            .find(|(written, rendered)| written != rendered)
-        {
-            return Some(format!("{written} stands where {rendered} is written"));
+        for block in &self.blocks {
+            if let Some((written, rendered)) = block
+                .as_written
+                .iter()
+                .zip(&block.lines)
+                .find(|(written, rendered)| written != rendered)
+            {
+                return Some(format!("{written} stands where {rendered} is written"));
+            }
         }
-        match self.as_written.len().cmp(&self.lines.len()) {
+        let written: usize = self.blocks.iter().map(|b| b.as_written.len()).sum();
+        match written.cmp(&self.lines.len()) {
             Ordering::Greater => Some(format!(
-                "{} of its {} lines stand twice",
-                self.as_written.len() - self.lines.len(),
-                self.as_written.len()
+                "{} of its {written} lines stand twice",
+                written - self.lines.len(),
             )),
             _ => None,
         }
     }
 
-    /// The file with `lines` in place of the committed ones, header kept.
-    pub fn render(&self, lines: &BTreeSet<String>) -> String {
+    /// The file with `blocks` in place of the committed body, header kept:
+    /// each block's marker, then its lines.
+    pub fn render(&self, blocks: &[Block]) -> String {
         let mut out = String::new();
         for comment in &self.header {
             out.push_str("# ");
             out.push_str(comment);
             out.push('\n');
         }
-        for line in lines {
-            out.push_str(line);
-            out.push('\n');
+        for block in blocks {
+            if let Some(name) = &block.name {
+                out.push('[');
+                out.push_str(name);
+                out.push_str("]\n");
+            }
+            for line in &block.lines {
+                out.push_str(line);
+                out.push('\n');
+            }
         }
         out
     }
@@ -132,9 +179,9 @@ mod tests {
         let lock = Lock::parse("# one\n# two\n\nb::y\na::x\n# not a header\nc\n");
         assert_eq!(lock.header, ["one", "two"]);
         assert_eq!(lock.lines.iter().collect::<Vec<_>>(), ["a::x", "b::y", "c"]);
-        assert_eq!(lock.as_written, ["b::y", "a::x", "c"]);
+        assert_eq!(lock.blocks[0].as_written, ["b::y", "a::x", "c"]);
         let lines: BTreeSet<String> = ["z".to_owned()].into_iter().collect();
-        assert_eq!(lock.render(&lines), "# one\n# two\nz\n");
+        assert_eq!(lock.render(&[Block::of(None, lines)]), "# one\n# two\nz\n");
     }
 
     /// The one order, read both ways (#403): a file `render` would write
@@ -147,7 +194,7 @@ mod tests {
         let sorted = Lock::parse("# a header\nArr::len\nArr::live_from\n");
         assert_eq!(sorted.disorder(), None);
         assert_eq!(
-            sorted.render(&sorted.lines),
+            sorted.render(&sorted.blocks),
             "# a header\nArr::len\nArr::live_from\n"
         );
 

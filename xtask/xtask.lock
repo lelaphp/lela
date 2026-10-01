@@ -110,6 +110,9 @@ manifest::Scripts
 manifest::Scripts::new
 manifest::Seam
 manifest::Seam::named
+manifest::Section
+manifest::Section::name
+manifest::Section::readers
 manifest::Telemetry
 manifest::Week
 manifest::Where

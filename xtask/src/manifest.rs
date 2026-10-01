@@ -294,7 +294,36 @@ pub struct Seam {
     #[serde(default)]
     pub allowlist: bool,
     #[serde(default)]
-    pub sections: Vec<String>,
+    pub sections: Vec<Section>,
+}
+
+/// One section of a sectioned lock (#1369): a name, which the seam's
+/// consumers all read, or a name with the consumers whose imports it holds
+/// alone, `{ name = "kernels", consumers = ["php_jit"] }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Section {
+    Every(String),
+    Only {
+        name: String,
+        consumers: Vec<String>,
+    },
+}
+
+impl Section {
+    pub fn name(&self) -> &str {
+        match self {
+            Section::Every(name) | Section::Only { name, .. } => name,
+        }
+    }
+
+    /// The consumers whose imports the section holds.
+    pub fn readers<'a>(&'a self, seam: &'a Seam) -> &'a [String] {
+        match self {
+            Section::Every(_) => &seam.consumers,
+            Section::Only { consumers, .. } => consumers,
+        }
+    }
 }
 
 impl Seam {

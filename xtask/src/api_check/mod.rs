@@ -11,7 +11,10 @@
 //!   `allowlist`, or a seam with `allowlist = true`) is what the consumers
 //!   `use` from the producer; a rendered lock (`ops.lock`, the seam whose
 //!   producer is a file rather than a crate) is that file's rows, one line
-//!   an opcode. `api.lock` is held under `[budget] api_items`, and its
+//!   an opcode. A seam with `sections` is an import lock diffed per
+//!   `[name]` section, each against the consumers that read it (#1369), and
+//!   an import another lock of the consumer's holds is not this one's.
+//!   `api.lock` is held under `[budget] api_items`, and its
 //!   `__private` lines, where a person has written the row, under
 //!   `api_private_items` instead.
 //! - A crate's workspace dependencies are held to the `[[edge]]` rows whose
@@ -36,12 +39,12 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::manifest::{Edge, Manifest, Seam};
+use crate::manifest::{Edge, Manifest, Seam, Section};
 use crate::reading::{Number, Reading, Status, Store};
 use crate::sources::Standing;
 
 use inventory::{Inventory, Leaf, extension_calls, uses};
-use lock::{Diff, Lock, list};
+use lock::{Block, Diff, Lock, list};
 use workspace::{Crates, Present};
 
 pub(crate) const INSTRUMENT: &str = "api-check";
@@ -144,7 +147,8 @@ fn lock_kind(manifest: &Manifest, seam: &Seam) -> LockKind {
         e.lock.as_deref() == Some(seam.lock.as_str())
             || e.allowlist.as_deref() == Some(seam.lock.as_str())
     });
-    if seam.allowlist || cited {
+    // A section is read by consumers, so a sectioned lock is an import lock.
+    if seam.allowlist || cited || !seam.sections.is_empty() {
         LockKind::Imports
     } else {
         LockKind::Items
@@ -172,7 +176,6 @@ fn seam_reading(
         Ok(reading)
     };
     let mut reading = stamped()?;
-    let home = manifest.lock_home(&seam.lock);
     let skip = |mut reading: Reading, message: String| {
         reading.status = Status::Skip;
         reading.message = message;
@@ -188,7 +191,7 @@ fn seam_reading(
             ),
         );
     }
-    let Some(home) = home else {
+    let Some(home) = manifest.lock_home(&seam.lock) else {
         return skip(
             reading,
             format!("no [[crate]] row or [lock_home] entry names {}", seam.lock),
@@ -197,33 +200,35 @@ fn seam_reading(
     let Some(krate) = crates.named(&home) else {
         return skip(reading, format!("{home} does not exist yet"));
     };
-    if !seam.sections.is_empty() {
-        return skip(
-            reading,
-            format!(
-                "{} is diffed per section ({}); sectioned locks are not measured yet",
-                seam.lock,
-                seam.sections.join(", ")
-            ),
-        );
-    }
-    let generated = match kind {
-        LockKind::Items => inventory.public_items(krate)?,
-        LockKind::Imports => imports(crates, seam)?,
-        LockKind::Rendered => ops::lines(&crates.root().join(&seam.producer))?,
+    let path = krate.dir.join(&seam.lock);
+    let shown = crates.relative(&path).display().to_string();
+    let committed = path.is_file().then(|| Lock::read(&path)).transpose()?;
+    let (blocks, mut problems) = if seam.sections.is_empty() {
+        let lines = match kind {
+            LockKind::Items => inventory.public_items(krate)?,
+            LockKind::Imports => imports(manifest, crates, seam)?
+                .into_values()
+                .flatten()
+                .collect(),
+            LockKind::Rendered => ops::lines(&crates.root().join(&seam.producer))?,
+        };
+        (vec![Block::of(None, lines)], Vec::new())
+    } else {
+        sections(manifest, crates, seam, &shown, committed.as_ref())?
     };
+    let generated: BTreeSet<String> = blocks.iter().flat_map(|b| b.lines.clone()).collect();
     reading
         .numbers
         .insert("items".to_owned(), count(generated.len()));
-    let path = krate.dir.join(&seam.lock);
-    let shown = crates.relative(&path).display().to_string();
     let subject = match kind {
         LockKind::Items => format!("public items of {home}"),
         LockKind::Imports => format!("imports from {}", seam.producer),
         LockKind::Rendered => format!("{} of {}", ops::SUBJECT, seam.producer),
     };
 
-    let mut problems = hold_lock(seam, kind, &path, &shown, &subject, &generated, write)?;
+    problems.extend(hold_lock(
+        seam, kind, &path, &shown, &subject, committed, &blocks, write,
+    )?);
     if write {
         let mut rewritten = stamped()?;
         rewritten.numbers = std::mem::take(&mut reading.numbers);
@@ -267,25 +272,25 @@ fn seam_reading(
     Ok(reading)
 }
 
-/// Diff one lock against its regenerated lines, or rewrite it; what is
-/// wrong with the committed file, as messages.
+/// Diff one lock against its regenerated blocks, or rewrite it; what is
+/// wrong with the committed file, as messages. A block is diffed against
+/// the committed block of its name, a section's against its `[name]`
+/// marker's, and a committed line under a marker the manifest does not
+/// name stands in no section.
+#[allow(clippy::too_many_arguments)]
 fn hold_lock(
     seam: &Seam,
     kind: LockKind,
     path: &Path,
     shown: &str,
     subject: &str,
-    generated: &BTreeSet<String>,
+    committed: Option<Lock>,
+    blocks: &[Block],
     write: bool,
 ) -> Result<Vec<String>> {
-    let committed = if path.is_file() {
-        Some(Lock::read(path)?)
-    } else {
-        None
-    };
     if write {
         let lock = committed.unwrap_or_default();
-        fs::write(path, lock.render(generated))
+        fs::write(path, lock.render(blocks))
             .with_context(|| format!("writing {}", path.display()))?;
         return Ok(Vec::new());
     }
@@ -294,23 +299,52 @@ fn hold_lock(
             "{shown} does not exist; `xtask api-check --write` regenerates it"
         )]);
     };
-    let diff = Diff::between(&committed.lines, generated);
     let mut problems = Vec::new();
-    if !diff.missing.is_empty() {
-        problems.push(format!(
-            "{} {subject} have no line in {shown}: {}",
-            diff.missing.len(),
-            list(&diff.missing, 8)
-        ));
+    for block in blocks {
+        let (at, listed) = match &block.name {
+            None => (String::new(), committed.lines.clone()),
+            Some(name) => (
+                format!(" [{name}]"),
+                committed
+                    .section(name)
+                    .map(|b| b.lines.clone())
+                    .unwrap_or_default(),
+            ),
+        };
+        let diff = Diff::between(&listed, &block.lines);
+        if !diff.missing.is_empty() {
+            problems.push(format!(
+                "{} {subject} have no line in {shown}{at}: {}",
+                diff.missing.len(),
+                list(&diff.missing, 8)
+            ));
+        }
+        // An allowlist may name more than its consumer imports today.
+        if !diff.stale.is_empty() && !seam.allowlist {
+            problems.push(format!(
+                "{} lines of {shown}{at} name no {}: {}",
+                diff.stale.len(),
+                kind.line(),
+                list(&diff.stale, 8)
+            ));
+        }
     }
-    // An allowlist may name more than its consumer imports today.
-    if !diff.stale.is_empty() && !seam.allowlist {
-        problems.push(format!(
-            "{} lines of {shown} name no {}: {}",
-            diff.stale.len(),
-            kind.line(),
-            list(&diff.stale, 8)
-        ));
+    if !seam.sections.is_empty() {
+        let astray: Vec<String> = committed
+            .blocks
+            .iter()
+            .filter(|b| !blocks.iter().any(|g| g.name == b.name))
+            .flat_map(|b| b.as_written.clone())
+            .collect();
+        if !astray.is_empty() {
+            let names: Vec<&str> = seam.sections.iter().map(Section::name).collect();
+            problems.push(format!(
+                "{} lines of {shown} stand in no section of {}: {}",
+                astray.len(),
+                names.join(", "),
+                list(&astray, 8)
+            ));
+        }
     }
     // The one order a lock's lines stand in (`lock`, #403), read off the
     // committed file: what `--write` would rewrite even where every line
@@ -324,12 +358,19 @@ fn hold_lock(
     Ok(problems)
 }
 
-/// The paths the seam's consumers `use` from its producer, as lock lines.
-fn imports(crates: &Crates, seam: &Seam) -> Result<BTreeSet<String>> {
+/// The paths each of the seam's consumers `use` from its producer, as lock
+/// lines, less what the lock of another seam it consumes from the producer
+/// holds (#1369): `php_sapi`'s `tier::*` imports are `tier.lock`'s face, and
+/// so not `sapi.lock`'s. An import neither lists is missing from both.
+fn imports(
+    manifest: &Manifest,
+    crates: &Crates,
+    seam: &Seam,
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut out = BTreeMap::new();
     let Some(producer) = crates.named(&seam.producer) else {
-        return Ok(BTreeSet::new());
+        return Ok(out);
     };
-    let mut out = BTreeSet::new();
     for consumer in crates.iter() {
         if !seam.consumers.iter().any(|c| matches(c, &consumer.name)) {
             continue;
@@ -337,6 +378,21 @@ fn imports(crates: &Crates, seam: &Seam) -> Result<BTreeSet<String>> {
         let Some(dep) = consumer.deps.iter().find(|d| d.name == producer.name) else {
             continue;
         };
+        let mut held = BTreeSet::new();
+        for other in manifest.seams.iter().filter(|o| {
+            o.name != seam.name
+                && o.producer == seam.producer
+                && o.consumers.iter().any(|c| matches(c, &consumer.name))
+        }) {
+            let home = manifest.lock_home(&other.lock);
+            if let Some(krate) = home.and_then(|h| crates.named(&h)) {
+                let path = krate.dir.join(&other.lock);
+                if path.is_file() {
+                    held.extend(Lock::read(&path)?.lines);
+                }
+            }
+        }
+        let lines: &mut BTreeSet<String> = out.entry(consumer.name.clone()).or_default();
         for file in consumer.sources()? {
             for path in uses(&file)? {
                 if path.segs.first() != Some(&dep.alias) || path.segs.len() < 2 {
@@ -346,11 +402,69 @@ fn imports(crates: &Crates, seam: &Seam) -> Result<BTreeSet<String>> {
                 if path.leaf == Leaf::Glob {
                     line.push_str("::*");
                 }
-                out.insert(line);
+                if !held.contains(&line) {
+                    lines.insert(line);
+                }
             }
         }
     }
     Ok(out)
+}
+
+/// A sectioned lock's blocks, one per section in the manifest's order, and
+/// what is wrong with where the committed file places an import (#1369).
+/// Each consumer's import stands in the section the file lists it under
+/// when the consumer reads that section; one the file does not list goes
+/// to the first section the consumer reads, where the diff finds it
+/// missing; one listed only under a section the consumer does not read is
+/// a failure, `kernels` being `php_jit`'s alone. An allowlist keeps every
+/// line it lists in a section the manifest names.
+fn sections(
+    manifest: &Manifest,
+    crates: &Crates,
+    seam: &Seam,
+    shown: &str,
+    committed: Option<&Lock>,
+) -> Result<(Vec<Block>, Vec<String>)> {
+    let listed = |section: &Section| committed.and_then(|l| l.section(section.name()));
+    let mut blocks: Vec<Block> = seam
+        .sections
+        .iter()
+        .map(|section| {
+            let kept = listed(section).filter(|_| seam.allowlist);
+            Block::of(
+                Some(section.name()),
+                kept.map(|b| b.lines.clone()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    let mut problems = Vec::new();
+    for (consumer, imports) in imports(manifest, crates, seam)? {
+        let reads = |section: &Section| section.readers(seam).iter().any(|r| matches(r, &consumer));
+        let Some(first) = seam.sections.iter().position(reads) else {
+            continue;
+        };
+        for line in imports {
+            let under = seam
+                .sections
+                .iter()
+                .position(|s| listed(s).is_some_and(|b| b.lines.contains(&line)));
+            match under {
+                Some(at) if !reads(&seam.sections[at]) => problems.push(format!(
+                    "{consumer} imports {line}, which {shown} lists under [{}], read by {} alone",
+                    seam.sections[at].name(),
+                    seam.sections[at].readers(seam).join(", ")
+                )),
+                Some(at) => {
+                    blocks[at].lines.insert(line);
+                }
+                None => {
+                    blocks[first].lines.insert(line);
+                }
+            }
+        }
+    }
+    Ok((blocks, problems))
 }
 
 // ---------------------------------------------------------------- crates

@@ -18,4 +18,5 @@ built; the instrument reads manifests and sources.
 | `bundle`    | a bundle order that is not topological          | fail |
 | `harness-lock` | a public item of the harness with no line in `xtask.lock`, under the rows #55 proposes | fail |
 | `ops-lock`  | a hand-edited line of `ops.lock`, the lock rendered from `ops.toml` | fail |
+| `tier-face` | a sectioned lock (#1369): php_sapi importing a `tier::*` item `tier.lock`'s `[face]` does not list, which `sapi.lock` does not hold either | fail |
 | `same-name` | two `pub` types of one name in two modules, each listing its own methods alone (#79); read by the unit test beside `Inventory::assoc`, not by `hold` | pass |
