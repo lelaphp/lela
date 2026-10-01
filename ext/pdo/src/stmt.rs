@@ -129,6 +129,9 @@ pub(crate) struct StmtState {
     placeholders: Option<Placeholders>,
     /// `stmt->bound_params`, in the table's order.
     pub(crate) params: Vec<Bound>,
+    /// The statement's own native code and text, for a connector that
+    /// keeps them per statement (`Connector::errors_per_statement`).
+    pub(crate) native_error: Option<(i64, Vec<u8>)>,
     /// `stmt->bound_param_map`: for a rewritten query, each placeholder's
     /// number with the name it was rewritten from or to.
     pub(crate) param_map: Option<Vec<(Key, Vec<u8>)>>,
@@ -182,7 +185,9 @@ impl ObjectHandlers for Handlers {
         for bound in params.into_iter().chain(columns) {
             free_bound(req, driver.as_deref_mut(), bound);
         }
-        drop(driver);
+        if let Some(mut driver) = driver {
+            driver.close(req);
+        }
         target.release(req);
         if let Ahead::Row { value, .. } = ahead {
             req.release(value);
@@ -469,6 +474,13 @@ pub(super) fn attach(req: &mut Request, object: PhpObject, prepared: Prepared) {
     write(req, object, |s| {
         s.slot = Slot::Ready(prepared.statement);
         s.placeholders = Some(prepared.placeholders);
+        if let Some(map) = prepared.parameter_map {
+            s.param_map = Some(
+                map.into_iter()
+                    .map(|(n, name)| (Key::Int(n), name))
+                    .collect(),
+            );
+        }
     });
 }
 
@@ -594,9 +606,18 @@ pub(super) fn dispatch(
 /// `Err(None)` for a failure recorded on the statement and not yet
 /// handled.
 pub(super) fn run(req: &mut Request, object: PhpObject) -> Result<(), Option<Thrown>> {
-    let executed = read(req, object, |s| s.executed).unwrap_or(false);
-    let ran =
-        with_driver(req, object, |req, driver| driver.execute(req, executed)).map_err(Some)?;
+    let (executed, query) = read(req, object, |s| {
+        let query = match &s.active {
+            Active::Sent(sent) => sent.clone(),
+            Active::None | Active::Same => s.query.clone(),
+        };
+        (s.executed, query)
+    })
+    .unwrap_or_default();
+    let ran = with_driver(req, object, |req, driver| {
+        driver.execute(req, executed, &query)
+    })
+    .map_err(Some)?;
     let done = match ran {
         Ok(done) => done,
         Err(failure) => {
@@ -1237,7 +1258,7 @@ impl PDOStatement {
         let made = crate::string(req, state.as_ref().map_or("", SqlState::as_str).as_bytes())?;
         out.append(req, made)?;
         if state != Some(SqlState::NONE) {
-            error::fetch_error(req, dbh, &mut out)?;
+            error::fetch_error(req, dbh, On::Stmt(stmt), &mut out)?;
         }
         while out.len() < 3 {
             out.append(req, Value::null())?;
@@ -1671,8 +1692,11 @@ impl PDOStatement {
         });
         clear_error(req, stmt);
         match on_driver(req, stmt, |req, driver| driver.next_rowset(req))? {
-            Ok(Some(count)) => {
-                set_column_count(req, stmt, count);
+            Ok(Some(done)) => {
+                set_column_count(req, stmt, done.columns);
+                if let Some(rows) = done.rows {
+                    write(req, stmt, |s| s.row_count = rows);
+                }
                 describe_columns(req, stmt)?;
                 Ok(true)
             }

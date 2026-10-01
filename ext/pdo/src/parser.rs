@@ -16,22 +16,14 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpObject, ValueRef};
 
-use crate::connector::{BindKind, OnError, SqlState};
+use crate::connector::{BindKind, Failure, OnError, Rewritten, Scanner, SqlState, Token};
 use crate::dbh::Dbh;
 use crate::error::{self, On};
 use crate::stmt::{self, Bound, BoundKey};
 
-/// What the scanner makes of one stretch of the query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Token {
-    Text,
-    Bind,
-    Position,
-}
-
 /// `default_scanner`: the token at `at` and where it ends; `None` at the
 /// end of the query or at a NUL, re2c's `PDO_PARSER_EOI`.
-fn scan(sql: &[u8], at: usize) -> Option<(Token, usize)> {
+pub(crate) fn scan(sql: &[u8], at: usize) -> Option<(Token, usize)> {
     let first = *sql.get(at).filter(|b| **b != 0)?;
     let byte = |i: usize| sql.get(i).copied().filter(|b| *b != 0);
     let run = |from: usize, pick: &dyn Fn(u8) -> bool| {
@@ -117,6 +109,8 @@ pub(super) fn parse_params(
     dbh: PhpObject,
     sql: &[u8],
 ) -> Result<Parsed, Thrown> {
+    let scanner = crate::dbh::with_connection(req, dbh, |_, conn| Ok(conn.scanner()))?;
+    let scan = scanner.unwrap_or(scan);
     let mut placeholders = Vec::new();
     let (mut named, mut positional) = (false, false);
     let mut at = 0;
@@ -318,4 +312,59 @@ pub(super) fn name_to_position(
         return Ok(true);
     }
     undefined(req)
+}
+
+/// The positional rewrite of `pdo_parse_params`, for a connector that
+/// takes `?` natively: each `:name` (not after a letter or digit) made a
+/// `?`, its number mapped to its name; `None` where there is none; named
+/// and positional together refused with php's `HY093`.
+pub(crate) fn rewrite_named(
+    sql: &[u8],
+    scanner: Option<Scanner>,
+) -> Result<Option<Rewritten>, Failure> {
+    let scan = scanner.unwrap_or(scan);
+    let (mut named, mut positional) = (false, false);
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some((token, end)) = scan(sql, at) {
+        match token {
+            Token::Bind if at > 0 && sql[at - 1].is_ascii_alphanumeric() => {}
+            Token::Bind => {
+                named = true;
+                found.push((at, end));
+            }
+            Token::Position => {
+                positional = true;
+                found.push((at, end));
+            }
+            Token::Text => {}
+        }
+        at = end;
+    }
+    if named && positional {
+        return Err(Failure::raised(
+            SqlState(*b"HY093"),
+            "mixed named and positional parameters",
+        ));
+    }
+    if !named {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(sql.len());
+    let mut map = Vec::with_capacity(found.len());
+    let mut from = 0;
+    for (bindno, (start, end)) in found.into_iter().enumerate() {
+        out.extend_from_slice(&sql[from..start]);
+        out.push(b'?');
+        map.push((
+            i64::try_from(bindno).unwrap_or(i64::MAX),
+            sql[start..end].to_vec(),
+        ));
+        from = end;
+    }
+    out.extend_from_slice(&sql[from..]);
+    Ok(Some(Rewritten {
+        sql: out,
+        parameter_map: map,
+    }))
 }
