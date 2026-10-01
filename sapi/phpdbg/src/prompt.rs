@@ -575,6 +575,12 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
     };
     match crate::session::lend(s, || tier::call(req, under, &lowered, &arguments)) {
         tier::Called::Returned => out::out(b"\n"),
+        tier::Called::Threw => {
+            if let tier::Under::Frame(frame) = under {
+                s.thrown_into = Some(frame);
+            }
+            out::out(b"\n");
+        }
         tier::Called::Rendered | tier::Called::Exited => {}
     }
     true

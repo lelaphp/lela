@@ -54,6 +54,7 @@ pub fn serve(engine: &Engine) -> i32 {
         }
         s.plan = Some(plan);
         s.standing = None;
+        s.thrown_into = None;
         let description = describe(&s, plan);
         session::put(s);
         let observed = engine.serve(description, &mut Sink);

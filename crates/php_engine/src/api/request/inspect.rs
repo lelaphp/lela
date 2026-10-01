@@ -238,7 +238,9 @@ impl Request {
     /// request goes on: no fatal is what it ends in, and its status is
     /// what an `exit` set or what the fatal's `php_error_cb` wrote, 255,
     /// unless the host bailed out of the log first
-    /// ([`crate::api::abi::AfterLog::BailedOut`]).
+    /// ([`crate::api::abi::AfterLog::BailedOut`]). From a frame, what the
+    /// callee left uncaught stays pending, as `zend_call_function` leaves
+    /// `EG(exception)` with a frame executing.
     pub(crate) fn call_by_name(
         &mut self,
         under: Under,
@@ -249,7 +251,11 @@ impl Request {
             Under::Frame(_) => self.call_by_name_here(name, arguments),
             Under::Nothing => self.nothing_executing(|req| {
                 let ending = req.ending.take();
-                let called = req.call_by_name_here(name, arguments);
+                let mut called = req.call_by_name_here(name, arguments);
+                if called == Called::Threw {
+                    let _ = req.exception_error(Level::Error);
+                    called = Called::Rendered;
+                }
                 let rendered = req.ending.is_some();
                 req.ending = ending;
                 if !req.bailing_out() {
@@ -288,9 +294,7 @@ impl Request {
                     return Called::Returned;
                 }
                 self.leave_pending(&thrown);
-                let _ = self.exception_error(Level::Error);
-                self.catch_bailout();
-                Called::Rendered
+                Called::Threw
             }
         }
     }

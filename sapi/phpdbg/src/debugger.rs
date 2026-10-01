@@ -245,11 +245,18 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
         if let Some(stop) = checked(req, &at, &position) {
             return stop;
         }
+        if session::with(|s| s.thrown_into.take_if(|frame| *frame == at.frame).is_some())
+            .unwrap_or(false)
+        {
+            at.unwinding = true;
+            at.raised_line = position.line;
+        }
         let entry = tier::entry(req);
         let next = if at.unwinding {
             if at.frame != entry || tier::catches(req, at.frame) {
                 Next::Unwind
             } else {
+                left_with_nothing_pending(req);
                 Next::HandBack
             }
         } else if at.frame == entry && leaves(position.opcode) {
@@ -283,6 +290,53 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
             Ok(Stepped::Done) => return Flow::Continue,
             Err(fatal) => return Flow::Bail(fatal),
         }
+    }
+}
+
+/// php's `HANDLE_EXCEPTION` over the frame the serving entered, where
+/// nothing it takes is pending: what was thrown into the frame at a
+/// prompt was rendered there by `ev`, and the frame is left as a return
+/// of nothing, which ends the serving. The unwinder does not leave that
+/// frame, and the loop goes on in it where nothing is pending, so the
+/// serving is ended by the unwind exit, which unwinds no further and
+/// leaves the status as `ev` left it.
+///
+/// ```php
+/// $a = 1;
+/// $b = 2;
+/// $c = 3;
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// register intdiv
+/// b 3
+/// r
+/// intdiv 1
+/// ev 9
+/// c
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Registered intdiv]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:3]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003: $b = 2;
+///  00004: $c = 3;
+///  00005: echo "x\n";
+/// prompt>%s
+/// prompt>%s
+/// Fatal error: Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in %SCRATCH%/witness.php:3
+/// Stack trace:
+/// #0 %SCRATCH%/witness.php(3): intdiv(1)
+/// #1 {main}
+///   thrown in %SCRATCH%/witness.php on line 3
+/// prompt> [Script ended normally]
+/// prompt>
+/// ```
+fn left_with_nothing_pending(req: &mut Request) {
+    if tier::pending(req).is_none() && !tier::exiting(req) {
+        tier::exit(req);
     }
 }
 
