@@ -734,12 +734,141 @@ fn planting_engine(scratch: &Scratch) -> PathBuf {
     path
 }
 
+/// The ids `ipcs -a` lists of one kind, `m`, `s` or `q`.
+fn ipcs_ids(kind: &str) -> Vec<String> {
+    let listed = Command::new("ipcs").arg("-a").output().unwrap();
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next()? == kind).then(|| fields.next().map(str::to_owned))?
+        })
+        .collect()
+}
+
+/// A run removes what its own tests leave of System V IPC (#1412): a
+/// shared memory segment, a semaphore set and a message queue a test
+/// creates and leaves are gone after the run, and the reading counts them,
+/// while a segment another process creates while the test runs, `perl`
+/// here, stands. The control: a runner that removes every object new
+/// since the run began with nothing attached removes that one too.
+#[test]
+fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
+    if oracle().is_none() {
+        return;
+    }
+    if Command::new("ipcs").arg("-a").output().is_err() {
+        eprintln!("skipped: no ipcs on this machine");
+        return;
+    }
+    let marks = Tree::new("phpt-sysv-marks").unwrap();
+    let (started, made) = (marks.join("started"), marks.join("made"));
+    let leaves = format!(
+        "--TEST--\nleaves a segment, a semaphore set and a queue\n--FILE--\n<?php\ntouch('{}');\nfor ($i = 0; $i < 500 && !file_exists('{}'); $i++) usleep(10000);\n$m = shmop_open(0, \"c\", 0600, 64);\n$s = sem_get(0, 1);\nsem_acquire($s);\n$q = msg_get_queue(0x5a000000 + getmypid());\nmsg_send($q, 1, \"x\");\necho \"left\";\n--EXPECT--\nleft\n",
+        started.display(),
+        made.display()
+    );
+    let scratch = Scratch::new("sysv", &[("leaves.phpt", &leaves)]);
+    // Another process's segment, made while the test runs: new since the
+    // subset began, nothing attached, and its creator no process of the run.
+    let outside = std::thread::spawn(move || {
+        for _ in 0..500 {
+            if started.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let made_by_perl = Command::new("perl")
+            .args([
+                "-e",
+                "use IPC::SysV qw(IPC_PRIVATE IPC_CREAT); print shmget(IPC_PRIVATE, 64, IPC_CREAT | 0600)",
+            ])
+            .output()
+            .unwrap();
+        fs::write(&made, "").unwrap();
+        String::from_utf8(made_by_perl.stdout).unwrap()
+    });
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    let outside = outside.join().unwrap();
+    let standing = ipcs_ids("m");
+    let _ = Command::new("ipcrm").args(["-m", &outside]).status();
+    assert!(!outside.is_empty(), "perl made no segment");
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "sysv_removed"), 3, "{reading:#?}");
+    assert!(
+        standing.contains(&outside),
+        "the segment perl made, {outside}, was removed: {standing:?}"
+    );
+}
+
+/// Two runs on one machine keep apart on what upstream's conflict keys
+/// name (#1313): a subset whose `CONFLICTS` names `all`, as
+/// `sapi/fpm/tests` does for `FPM\Tester`'s ports, whose every test binds
+/// one fixed port for a while, run twice at once from two workspaces, and
+/// each run passes every test; the waits are on a reading. The control: a
+/// run that holds its keys within itself alone binds the port while the
+/// other run's test holds it, and that test misses.
+#[test]
+fn two_runs_at_once_over_a_fixed_port_each_read_what_a_lone_run_reads() {
+    if oracle().is_none() {
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let binds = |name: &str| {
+        (
+            format!("{name}.phpt"),
+            format!(
+                "--TEST--\n{name}\n--FILE--\n<?php\n$s = @stream_socket_server('tcp://127.0.0.1:{port}', $errno, $errstr);\nif (!$s) {{ echo \"held elsewhere: $errstr\\n\"; exit; }}\nusleep(300000);\necho \"bound\\n\";\n--EXPECT--\nbound\n"
+            ),
+        )
+    };
+    let tests: Vec<(String, String)> = ["one", "two", "three"].map(binds).into();
+    let mut files: Vec<(&str, &str)> = tests
+        .iter()
+        .map(|(f, t)| (f.as_str(), t.as_str()))
+        .collect();
+    files.push(("CONFLICTS", "all\n"));
+    let (first, second) = (
+        Scratch::new("port-one", &files),
+        Scratch::new("port-two", &files),
+    );
+    let readings = std::thread::scope(|scope| {
+        let runs = [&first, &second]
+            .map(|scratch| scope.spawn(move || scratch.run(&registry(""), &scratch.engine)));
+        runs.map(|run| run.join().unwrap())
+    });
+    for reading in &readings {
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+        assert_eq!(count(reading, "passed"), 3, "{reading:#?}");
+    }
+    let waited: i64 = readings
+        .iter()
+        .map(|r| match r.numbers.get("waited") {
+            Some(Number::Int(n)) => *n,
+            _ => 0,
+        })
+        .sum();
+    assert!(waited > 0, "one run waited for the other: {readings:#?}");
+    assert!(
+        readings.iter().any(|r| {
+            let (said, stamp) = r.message.rsplit_once("; ").unwrap();
+            said.contains("waited") && said.contains("conflict key") && stamp.starts_with("run by ")
+        }),
+        "the wait is said before the engine's stamp, which stays last: {readings:#?}"
+    );
+}
+
 /// `--against <commit>` (#664): the run a checkout of the merge base kept
 /// is found by the commit alone, and a test met there that fails here is
 /// named by a reading that fails, while the subset's own reading is
 /// written beside it. The controls: the head against itself passes, a
 /// binary the tree has moved past gives no verdict, and so does a commit
-/// with no run kept, whose subset is then not run at all.
+/// with no run kept, whose subset still runs and keeps its own reading
+/// (#1435): a runner that runs nothing there fails this.
 #[test]
 fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
     if oracle().is_none() {
@@ -808,19 +937,26 @@ fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
         readings[1].message
     );
 
-    // No run kept at the commit: no verdict, and the subset is not run.
+    // No run kept at the commit: no verdict, and the subset runs anyway,
+    // its own reading kept beside the skip, which carries its counts.
     fs::remove_dir_all(scratch.root.join("target/phpt-runs")).unwrap();
+    written_at(&scratch.engine, SystemTime::now() + Duration::from_mins(1));
     let readings = run(&scratch.engine, Some(&base));
-    assert_eq!(readings.len(), 1, "{readings:#?}");
-    assert_eq!(readings[0].scope, "ext/fixture@against");
-    assert_eq!(readings[0].status, Status::Skip, "{readings:#?}");
-    assert!(
-        readings[0]
-            .message
-            .contains("no run of ext/fixture is kept"),
-        "{}",
-        readings[0].message
-    );
+    let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
+    assert_eq!(scopes, ["ext/fixture", "ext/fixture@against"]);
+    assert_eq!(readings[0].status, Status::Pass, "{readings:#?}");
+    assert_eq!(count(&readings[0], "run"), 2, "{readings:#?}");
+    assert_eq!(readings[1].status, Status::Skip, "{readings:#?}");
+    for words in [
+        "no run of ext/fixture is kept",
+        "the subset ran, and its own reading stands beside this one: ext/fixture: 2 passed",
+    ] {
+        assert!(
+            readings[1].message.contains(words),
+            "{words:?} is not in {}",
+            readings[1].message
+        );
+    }
 }
 
 /// A subset run on a pool of four writes the reading and keeps the run a

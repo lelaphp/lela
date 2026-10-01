@@ -54,6 +54,28 @@ pub(crate) struct Entry {
     pub(crate) name: String,
 }
 
+/// What one fence's run of record comes to for coverage: the natives it
+/// entered, or that it never got that far.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Record {
+    /// The run of record served the fence, and entered these.
+    Entered(Vec<Entry>),
+    /// The fence borked before its run of record entered anything: the
+    /// oracle did not run it, its server reset the connection or never
+    /// answered, or the run of record could not serve it (#1426). The bork
+    /// fails the crate in the transport's own words, and what the fence
+    /// would have entered is not known, so its subjects are not read as
+    /// subjects without a witness: a flake of the transport is a failed
+    /// run, not a missing witness.
+    Unserved,
+}
+
+impl Default for Record {
+    fn default() -> Record {
+        Record::Entered(Vec::new())
+    }
+}
+
 impl From<Entered> for Entry {
     fn from(entered: Entered) -> Entry {
         Entry {
@@ -192,8 +214,9 @@ pub(crate) struct Coverage {
 
 impl Coverage {
     /// The subjects, each witnessed where a fence it may be covered by
-    /// entered it, by what each fence's run entered keyed by its id.
-    pub(super) fn subjects(&self, entered: &HashMap<String, Vec<Entry>>) -> Vec<Subject> {
+    /// entered it, by what each fence's run of record came to keyed by its
+    /// id.
+    pub(super) fn subjects(&self, entered: &HashMap<String, Record>) -> Vec<Subject> {
         self.anchored.subjects(&Traced {
             package: &self.package,
             entered,
@@ -205,17 +228,20 @@ impl Coverage {
 /// fence's id, for the crate whose package is `package`.
 pub(super) struct Traced<'a> {
     pub(super) package: &'a str,
-    pub(super) entered: &'a HashMap<String, Vec<Entry>>,
+    pub(super) entered: &'a HashMap<String, Record>,
 }
 
 impl Traced<'_> {
-    /// Whether the fence `id` entered `native` of this crate.
-    fn entered(&self, id: &str, native: &Declared) -> bool {
-        self.entered.get(id).is_some_and(|entered| {
-            entered
+    /// Whether the fence `id` covers `native` of this crate: its run of
+    /// record entered it, or never got far enough to say ([`Record::Unserved`]).
+    fn covers(&self, id: &str, native: &Declared) -> bool {
+        match self.entered.get(id) {
+            Some(Record::Entered(entered)) => entered
                 .iter()
-                .any(|e| e.krate == self.package && native.is(e))
-        })
+                .any(|e| e.krate == self.package && native.is(e)),
+            Some(Record::Unserved) => true,
+            None => false,
+        }
     }
 }
 
@@ -270,7 +296,7 @@ impl Anchored {
                 );
                 subject.witnessed = eligible
                     .into_iter()
-                    .any(|id| traced.entered(id, &native.declared));
+                    .any(|id| traced.covers(id, &native.declared));
                 subject
             })
             .collect()
@@ -678,7 +704,7 @@ mod tests {
         if !anchored.declares() {
             return None;
         }
-        let entered: HashMap<String, Vec<Entry>> = found
+        let entered: HashMap<String, Record> = found
             .witnesses
             .iter()
             .map(|w| {
@@ -687,7 +713,7 @@ mod tests {
                     .filter(|(marker, _)| w.snippet.contains(marker))
                     .flat_map(|(_, natives)| natives.iter().copied().map(Entry::from))
                     .collect();
-                (w.id(), natives)
+                (w.id(), Record::Entered(natives))
             })
             .collect();
         let coverage = Coverage {

@@ -496,6 +496,64 @@ fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
     );
 }
 
+/// A `request fpm` fence whose oracle server resets the connection is a
+/// failed run of the witness, its bork line printing the transport's
+/// error, and never a native without a witness (#1426): the fixture's one
+/// native carries such a fence, and the pin's php-fpm here is a stand-in
+/// that accepts the request and resets it. The control: a runner that
+/// reads the fence as having entered nothing counts the native `missing`.
+#[test]
+fn a_request_fence_whose_server_resets_fails_the_run_and_is_not_a_missing_witness() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = fixture_at("witness", "request-reset");
+    let hosts = Tree::new("witness-reset-host").unwrap();
+    let host = hosts.join("php-fpm");
+    fs::write(
+        &host,
+        "#!/usr/bin/perl\nuse Socket;\nmy ($conf, $port);\nfor my $i (0 .. $#ARGV) { $conf = $ARGV[$i + 1] if $ARGV[$i] eq '-y'; }\nopen(my $f, '<', $conf) or die;\nwhile (<$f>) { $port = $1 if /^listen = 127\\.0\\.0\\.1:(\\d+)/; }\nsocket(my $s, PF_INET, SOCK_STREAM, 0) or die;\nsetsockopt($s, SOL_SOCKET, SO_REUSEADDR, 1);\nbind($s, sockaddr_in($port, inet_aton('127.0.0.1'))) or die;\nlisten($s, 5) or die;\nwhile (accept(my $c, $s)) { my $b; sysread($c, $b, 8); setsockopt($c, SOL_SOCKET, SO_LINGER, pack('ii', 1, 0)); close($c); }\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut manifest = Manifest::load(&root).unwrap();
+    let mut fpm = manifest.pin.sapi.fpm.clone().unwrap_or_default();
+    fpm.path = host;
+    manifest.pin.sapi.fpm = Some(fpm);
+    let readings = witness::run(
+        &root,
+        &manifest,
+        &Registry::default(),
+        &Ask {
+            crates: vec!["ext/pcre".to_owned()],
+            accept: false,
+            staged: false,
+            ..Ask::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    let reading = &readings[0];
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(reading, "failed"), 1, "{reading:#?}");
+    assert_eq!(count(reading, "subjects"), 1, "{reading:#?}");
+    assert_eq!(
+        count(reading, "missing"),
+        0,
+        "a reset is a failed run, not a missing witness: {reading:#?}"
+    );
+    assert!(
+        reading.message.contains("1 of 1 witnesses missed")
+            && !reading.message.contains("without a witness"),
+        "the fence's run failed, and no native is without one: {}",
+        reading.message
+    );
+}
+
 /// A native the build that links the engine compiled out is no subject
 /// (#1068): the `#[cfg]` on the `fn`, on its impl, on its inline `mod`,
 /// on the `mod name;` of its file or as the file's own `#![cfg]` is read

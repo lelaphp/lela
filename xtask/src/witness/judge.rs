@@ -23,7 +23,7 @@
 
 use std::fmt;
 
-use super::anchor::Entry;
+use super::anchor::{Entry, Record};
 use super::fence::{Exit, Served, Witness};
 use super::process::{self, Binary};
 use super::{Ask, Captured, Judged, Judgement, fence};
@@ -51,7 +51,7 @@ fn judged(witness: &Witness, judgement: Judgement, note: impl Into<String>) -> J
 #[derive(Debug, Default)]
 pub(super) struct Kept {
     pub(super) captured: Vec<Captured>,
-    pub(super) entered: Vec<Entry>,
+    pub(super) entered: Record,
 }
 
 /// One witness, end to end: the oracle's run, the status `--accept` may
@@ -99,6 +99,7 @@ pub(super) fn one(
     let oracle_out = match oracle_run {
         Ok(out) => out,
         Err(trouble) => {
+            kept.entered = Record::Unserved;
             return judged(
                 witness,
                 Judgement::Bork,
@@ -107,6 +108,7 @@ pub(super) fn one(
         }
     };
     let Some(status) = oracle_out.exit else {
+        kept.entered = Record::Unserved;
         return judged(
             witness,
             Judgement::Bork,
@@ -140,10 +142,13 @@ pub(super) fn one(
 
     let ran = match serve(oracle, binary, witness, regime) {
         Ok((out, natives)) => {
-            kept.entered = natives;
+            kept.entered = Record::Entered(natives);
             out
         }
-        Err(trouble) => return judged(witness, Judgement::Bork, trouble),
+        Err(trouble) => {
+            kept.entered = Record::Unserved;
+            return judged(witness, Judgement::Bork, trouble);
+        }
     };
     held(
         oracle.pin(),

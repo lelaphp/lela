@@ -2444,6 +2444,94 @@ fn a_verdict_the_merged_branch_carried_is_the_branchs_and_not_the_merges() {
     assert!(out.contains(EXIT_AUTHORED), "{out}");
 }
 
+/// The evidence travels with the commits (#1448): a verdict a branch's
+/// `--accept` captured, and the reading `witness` took over the branch's
+/// commit, stand on main after a merge that also moved the crate, so
+/// `done` over the merge reports no `witness.exit-authored`; the same
+/// reading as a line of the log, where `worktree retire` appends it,
+/// serves as the scope's file does. A verdict typed by hand on another
+/// branch, whose commit nothing measured, is still reported. The control:
+/// a sensor that reads the scope's file alone reports the captured one,
+/// whose stamp is the branch's tree and not the merge's.
+#[test]
+fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_does_not() {
+    let root = scratch("merged-capture");
+    let git = |args: &[&str]| {
+        let unhooked = [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
+        ];
+        sh(&root, &[&unhooked[..], args].concat());
+    };
+    let head = || {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let reported = |base: &str| {
+        let (_, out, err) = xtask(&root, &["done", "--base", base]);
+        let said = format!("{out}{err}");
+        said.lines()
+            .filter(|l| l.contains(EXIT_AUTHORED))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let tail = "\npub fn other() {}\n";
+    lay_down(&root, &format!("{}{tail}", block("exit")));
+    git(&["add", "--", CRATE]);
+    git(&["commit", "-q", "-m", "the fence"]);
+    let base = head();
+
+    // The branch captures the verdict and `witness` measures its commit;
+    // the reading reaches the store's log alone, as a retire leaves it.
+    git(&["checkout", "-q", "-b", "branch"]);
+    write(&root, FILE, &format!("{}{tail}", block("exit=3")));
+    git(&["commit", "-q", "-am", "the branch's accept"]);
+    witness_reading(&root);
+    std::fs::remove_file(root.join("target/harness/witness/ext/ctype.toml")).unwrap();
+    git(&["checkout", "-q", "-"]);
+    write(
+        &root,
+        FILE,
+        &format!("{}{tail}\npub fn mains() {{}}\n", block("exit")),
+    );
+    git(&["commit", "-q", "-am", "main moves the crate on"]);
+    git(&["merge", "-q", "--no-ff", "-m", "merge the branch", "branch"]);
+    let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
+    assert!(
+        merged.contains("exit=3") && merged.contains("mains"),
+        "{merged}"
+    );
+    assert_eq!(reported(&base), Vec::<String>::new());
+
+    // A verdict typed by hand on a second branch, in a commit nothing
+    // measured, merged the same way.
+    git(&["checkout", "-q", "-b", "typed"]);
+    let typed = block("exit=4").replace("native", "another");
+    write(&root, FILE, &format!("{merged}\n{typed}"));
+    git(&["commit", "-q", "-am", "a verdict typed by hand"]);
+    git(&["checkout", "-q", "-"]);
+    git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        "merge the typed one",
+        "typed",
+    ]);
+    let lines = reported(&base);
+    assert!(
+        lines.iter().any(|l| l.contains(FILE)),
+        "the typed verdict is reported: {lines:?}"
+    );
+}
+
 /// The binary over the scratch root, with no stdin.
 fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))

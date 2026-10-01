@@ -518,6 +518,16 @@ pub(super) fn apart(item: &Item, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> A
     Apart { within, keys }
 }
 
+/// What `item` holds among every run on the machine while it runs: its
+/// conflict keys as upstream reads them, `all` among them, and none of the
+/// paths of the run's own copy (the `across` module, #1313).
+pub(super) fn held(item: &Item, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Vec<String> {
+    let Item::Test(test) = item else {
+        return Vec::new();
+    };
+    file::conflicts(&test.file, dirs)
+}
+
 /// How many neighbours one thread judges in sequence: upstream's batch,
 /// the tests a worker is handed when it is ready
 /// (run-tests.php:1537-1541). The batch is `min(32, ceil(tests /

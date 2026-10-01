@@ -116,7 +116,7 @@ use crate::oracle::{Oracle, Pin, Regime, Runner};
 use crate::reading::{Reading, Status, Store, listed};
 use crate::sources;
 use crate::tally::{self, Outcome};
-use anchor::Entry;
+use anchor::Record;
 use fence::Extracted;
 pub(crate) use process::Binary;
 use watch::{Journal, Watch};
@@ -663,7 +663,7 @@ pub(crate) fn judge(
     let mut wall = Duration::ZERO;
     let captured = Mutex::new(Vec::new());
     // What each fence's run through the linked engine entered, by its id.
-    let entered: Mutex<HashMap<String, Vec<Entry>>> = Mutex::new(HashMap::new());
+    let entered: Mutex<HashMap<String, Record>> = Mutex::new(HashMap::new());
     let witnesses = if oracle_absent.is_some() {
         // Coverage is what a fence ran, and neither the linked engine nor
         // the binary needs php: where the attributes declare natives each
@@ -675,7 +675,7 @@ pub(crate) fn judge(
                     entered
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .insert(witness.id(), natives);
+                        .insert(witness.id(), Record::Entered(natives));
                 }
             }
         }

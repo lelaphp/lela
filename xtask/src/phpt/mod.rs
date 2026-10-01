@@ -65,8 +65,11 @@
 //! pool's size. Two tests naming one key in their `--CONFLICTS--`, or in
 //! their directory's `CONFLICTS` file, never run at once, and one naming
 //! `all` runs with nothing beside it (run-tests.php:1341-1372). A test
-//! past the recipe's limit holds up only its batch and the tests it
-//! conflicts with. The verdicts are printed and kept in the
+//! holds its conflict keys among every run on the machine too, since a
+//! port or a server is the machine's and not the run's copy of the tree,
+//! and the reading counts the tests that waited (the `across` module,
+//! #1313). A test past the recipe's limit holds up only its batch and the
+//! tests it conflicts with. The verdicts are printed and kept in the
 //! tests' order whatever order they finish in, so the lines, the reading
 //! and the kept run are the ones a pool of one writes (#938).
 //!
@@ -83,6 +86,13 @@
 //! meet, each in its own copy; within a run a test's three paths are among
 //! its keys, so two tests whose files would stand at one path never run at
 //! once.
+//!
+//! **What a test leaves of System V IPC.** A segment, a semaphore set or
+//! a queue a test creates and leaves outlives its process, and the
+//! kernel's tables are small; after each subset the objects the run's own
+//! processes left are removed, told by the processes the kernel names on
+//! them and never by key, and the reading counts them as `sysv_removed`
+//! (the `sysv` module, #1412).
 //!
 //! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
 //! a crate owns the directories of the corpus its row names, an extension
@@ -118,6 +128,7 @@
 mod adapter;
 pub(crate) mod environment;
 pub(crate) use environment::env_of;
+mod across;
 pub(crate) mod against;
 pub(crate) mod cgi;
 mod fpm;
@@ -129,13 +140,16 @@ pub(crate) mod file;
 pub(crate) mod miss;
 mod redirect;
 pub(crate) mod server;
+mod sysv;
 pub(crate) mod target;
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
@@ -145,7 +159,7 @@ use crate::carried::{BINARY, Carried};
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Oracle, Pin, Runner, Source};
-use crate::reading::{Reading, listed};
+use crate::reading::{Reading, listed, plural};
 use crate::scratch::Tree;
 use crate::sources;
 use crate::tally::{self, Outcome};
@@ -660,8 +674,13 @@ fn held_to(
         ),
         _ => return Ok(()),
     };
-    // Before the stamp of the engine that ran, which stays the message's
-    // last words.
+    told(reading, runner, &words);
+    Ok(())
+}
+
+/// `words` added to the reading's message before the stamp of the engine
+/// that ran, which stays the message's last words.
+fn told(reading: &mut Reading, runner: &Runner, words: &str) {
     let stamp = runner
         .stamp()
         .map(|engine| format!("; run by {engine}"))
@@ -671,7 +690,6 @@ fn held_to(
         .strip_suffix(&stamp)
         .unwrap_or(&reading.message);
     reading.message = format!("{said}; {words}{stamp}");
-    Ok(())
 }
 
 /// Why an extension whose derived directory the pinned tree has not has
@@ -857,15 +875,14 @@ pub fn run(
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     for subset in &subsets {
         let scope = subset.scope(&runner, ask.lane);
-        if let Some(unheld) = runs.unheld(manifest, &scope)? {
-            readings.push(unheld);
-            continue;
-        }
         let served = server::served(&oracle, subset, copy.is_some())?;
         let under = under.serving(served.as_deref());
         let within = copy.as_ref().map(|copy| subset.rooted(copy));
-        let tally = run_subset(&oracle, registry, within.as_ref().unwrap_or(subset), under)?;
+        let ((tally, waited), removed) = swept_around(&oracle, &scope, copy.is_some(), || {
+            run_subset(&oracle, registry, within.as_ref().unwrap_or(subset), under)
+        })?;
         let mut reading = reading(&tally, root, manifest, &source, subset, under)?;
+        around(&mut reading, &runner, removed, waited)?;
         let (target, kept) =
             runs.target_of(&manifest.pin, &subset.scope, (&tally, &runner), ask.lane)?;
         let against = (target.as_ref(), kept);
@@ -904,6 +921,69 @@ pub fn run(
         lane.print("the lane");
     }
     Ok(readings)
+}
+
+/// One subset run by `run`, and where its tests run, what its processes
+/// left of System V IPC removed after it, the line that says so printed:
+/// the objects standing are read before it, and the processes spawned
+/// before it forgotten (the `sysv` module, #1412). The count is none
+/// where nothing was removed, and where the machine could not be read,
+/// which the line printed says.
+fn swept_around<T>(
+    oracle: &Oracle<'_>,
+    scope: &str,
+    runs: bool,
+    run: impl FnOnce() -> Result<T>,
+) -> Result<(T, Option<u64>)> {
+    if !runs {
+        return Ok((run()?, None));
+    }
+    oracle.take_spawned();
+    let before = sysv::Standing::now();
+    let tally = run()?;
+    let swept = before.and_then(|before| sysv::sweep(&before, &oracle.take_spawned()));
+    let removed = match swept {
+        Ok(swept) => {
+            if swept.removed() > 0 || swept.unnamed > 0 {
+                println!("phpt: {scope}: {swept}");
+            }
+            Some(swept.removed() as u64).filter(|n| *n > 0)
+        }
+        Err(why) => {
+            println!("phpt: {scope}: what its tests left of System V IPC is not removed: {why:#}");
+            None
+        }
+    };
+    Ok((tally, removed))
+}
+
+/// What the run around a subset adds to its reading: the System V objects
+/// its tests left and the run removed (the `sysv` module, #1412), and the
+/// tests that waited for a key another run on the machine held, and for
+/// how long, in its numbers and the tail of its message (the `across`
+/// module, #1313); each only where there was any.
+fn around(
+    reading: &mut Reading,
+    runner: &Runner,
+    removed: Option<u64>,
+    waited: across::Waited,
+) -> Result<()> {
+    if let Some(removed) = removed {
+        reading.count("sysv_removed", removed)?;
+    }
+    if waited.tests == 0 {
+        return Ok(());
+    }
+    reading.count("waited", waited.tests)?;
+    reading.count("waited_ms", waited.for_ms)?;
+    let words = format!(
+        "{} test{} waited {:.1}s in all for a conflict key another run held",
+        waited.tests,
+        plural(usize::try_from(waited.tests).unwrap_or(usize::MAX)),
+        Duration::from_millis(waited.for_ms).as_secs_f64()
+    );
+    told(reading, runner, &words);
+    Ok(())
 }
 
 /// A copy of the pinned tree at `source` made for one run (#1183): the
@@ -975,7 +1055,7 @@ pub(crate) fn run_subset(
     registry: &Registry,
     subset: &Subset,
     under: Under<'_>,
-) -> Result<Tally> {
+) -> Result<(Tally, across::Waited)> {
     let Under {
         runner,
         lane,
@@ -984,11 +1064,12 @@ pub(crate) fn run_subset(
         served,
     } = under;
     let tests = subset.tests()?;
+    let unrun = (Tally::found(tests.len()), across::Waited::default());
     let Some(binary) = runner.binary() else {
-        return Ok(Tally::found(tests.len()));
+        return Ok(unrun);
     };
     if oracle_absent.is_some() {
-        return Ok(Tally::found(tests.len()));
+        return Ok(unrun);
     }
     // A digest mismatch refuses the whole run (§4.3), before the first
     // test rather than at its first SKIPIF.
@@ -1013,10 +1094,24 @@ pub(crate) fn run_subset(
         .iter()
         .map(|item| adapter::apart(item, &mut dirs))
         .collect();
+    // What each test holds among every run on the machine beside what the
+    // run holds apart within itself (#1313).
+    let held: Vec<(_, Vec<String>)> = items
+        .iter()
+        .map(|item| (item, adapter::held(item, &mut dirs)))
+        .collect();
     let batch = adapter::batch(&apart, jobs);
-    Tally::judge_apart(&items, jobs, batch, &apart, |item| {
+    let waited = Mutex::new(across::Waited::default());
+    let tally = Tally::judge_apart(&held, jobs, batch, &apart, |(item, keys)| {
+        let (_held, wait) = across::hold(keys)?;
+        waited
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .add(wait);
         adapter.judge(subset, item)
-    })
+    })?;
+    let waited = waited.into_inner().unwrap_or_else(PoisonError::into_inner);
+    Ok((tally, waited))
 }
 
 #[cfg(test)]

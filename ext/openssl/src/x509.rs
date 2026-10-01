@@ -512,13 +512,17 @@ fn time_t(req: &mut Request, time: &Asn1String) -> i64 {
 
 /// `openssl_x509_parse(OpenSSLCertificate|string $certificate, bool`
 /// `$short_names = true): array|false`: the certificate's fields, in
-/// php's keys and order.
+/// php's keys and order. The validity is pinned as whole days and as the
+/// stamps read back from `validFrom` and `validTo`, never as the span in
+/// seconds: `openssl_csr_sign` takes the two stamps one after the other,
+/// so the span is a second longer when the clock ticks between them.
 ///
 /// ```php
 /// $k = openssl_pkey_new(['private_key_bits' => 1024]);
 /// $x = openssl_csr_sign(openssl_csr_new(['commonName' => 'a', 'organizationName' => ['b', 'c']], $k), null, $k, 1, ['digest_alg' => 'sha256'], 7);
 /// $p = openssl_x509_parse($x);
-/// var_dump(array_keys($p), $p['name'], $p['subject'], $p['version'], $p['serialNumber'], $p['serialNumberHex'], $p['signatureTypeSN'], $p['validTo_time_t'] - $p['validFrom_time_t']);
+/// var_dump(array_keys($p), $p['name'], $p['subject'], $p['version'], $p['serialNumber'], $p['serialNumberHex'], $p['signatureTypeSN']);
+/// var_dump(intdiv($p['validTo_time_t'] - $p['validFrom_time_t'], 86400), gmdate('ymdHis\Z', $p['validFrom_time_t']) === $p['validFrom'], gmdate('ymdHis\Z', $p['validTo_time_t']) === $p['validTo']);
 /// var_dump($p['purposes'][1], array_keys($p['extensions']), openssl_x509_parse($x, false)['subject']['commonName'], openssl_x509_parse('nope'));
 /// ```
 /// ```expect
@@ -576,7 +580,9 @@ fn time_t(req: &mut Request, time: &Asn1String) -> i64 {
 /// string(1) "7"
 /// string(2) "07"
 /// string(10) "RSA-SHA256"
-/// int(86400)
+/// int(1)
+/// bool(true)
+/// bool(true)
 /// array(3) {
 ///   [0]=>
 ///   bool(true)

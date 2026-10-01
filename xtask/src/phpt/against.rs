@@ -40,6 +40,12 @@
 //! comparisons', 1 while any is not a pass, so a caller that merges on the
 //! exit merges on a pass alone; the subset's own reading is written
 //! beside it as before and holds what it always held.
+//!
+//! **What a base with no run leaves.** The subset runs whatever the base
+//! keeps, and only the comparison reads `skip`, its message carrying the
+//! subset's own counts: a merge held against a commit nobody ran still
+//! measures the head, and `done` finds every touched subset's reading
+//! fresh (#1435).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -150,25 +156,6 @@ impl Runs {
         })
     }
 
-    /// Before a subset runs: with `--against`, the reading that gives no
-    /// verdict when the commit has no run of it, and then the subset is
-    /// not run, there being nothing to hold it to.
-    pub(crate) fn unheld(&self, manifest: &Manifest, scope: &str) -> Result<Option<Reading>> {
-        let Some(base) = &self.base else {
-            return Ok(None);
-        };
-        match base.run(scope)? {
-            Ok(_) => Ok(None),
-            Err(why) => Ok(Some(held(
-                manifest,
-                &self.root,
-                scope,
-                &base.commit,
-                Err(why),
-            )?)),
-        }
-    }
-
     /// The target of the subset `scope` names after its run, and whether
     /// this run kept it: where the runner's control judged every test,
     /// outside a tier lane, the oracle's verdicts kept under the pin
@@ -215,8 +202,14 @@ impl Runs {
         let Some(base) = &self.base else {
             return Ok(None);
         };
+        // A base with no run kept is a comparison that gives no verdict and
+        // never a subset left unrun: the subset's own reading stands beside
+        // it, and the skip says so with its counts (#1435).
         let diff = match (base.run(scope)?, run) {
-            (Err(why), _) => Err(why),
+            (Err(why), _) => Err(format!(
+                "{why}; the subset ran, and its own reading stands beside this one: {}",
+                subset.message
+            )),
             (Ok(_), _) if moved => {
                 Err("the engine's sources were written while the subset ran".to_owned())
             }

@@ -15,6 +15,20 @@
 //! `--accept` has written, so the line it captured is inside the tree the
 //! reading is over.
 //!
+//! **Evidence that travels with the commits.** A tree hash names one
+//! state of the crate, and a merge makes a state no branch measured: a
+//! line a branch's `--accept` captured reached main beside another
+//! branch's change to the same crate, and the reading over the branch's
+//! tree was no reading over main's (#1448). So a hit the reading over the
+//! tree now does not cover is looked for in the commits that last changed
+//! the file: each hit's block, its line and the lines around it up to a
+//! blank one, as the file stood at a commit whose crate a reading of the
+//! instrument was taken over, the commit's tree hash read from its objects.
+//! The readings are this workspace's store, its file and its log, where
+//! `worktree retire` appends a branch's, and the store of every other
+//! worktree of the clone, where a branch merged before its retire keeps
+//! them. A block typed by hand stands in no commit an instrument measured.
+//!
 //! **Who asks.** The diff judge, which measures a write against the base
 //! and not against the file: a line `--accept` wrote stands in the tree and
 //! not in the base, so the row fires there and this is what answers it. A
@@ -49,6 +63,7 @@
 //! measured. No case of this row can be one that never fires, since what
 //! decides is the evidence and not the shape of the call (#134).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -82,13 +97,137 @@ pub(super) fn captured(
     let Some(krate) = manifest.crate_of(path) else {
         return false;
     };
-    let Ok(Some(reading)) = Store::of_workspace(root).read(instrument, &krate.name) else {
+    let fresh = match (
+        Store::of_workspace(root).read(instrument, &krate.name),
+        git::tree_hash(root, &krate.path()),
+    ) {
+        (Ok(Some(reading)), Ok(tree)) => !reading.tree().is_empty() && reading.tree() == tree,
+        _ => false,
+    };
+    fresh
+        || carried(
+            root,
+            instrument,
+            &krate.name,
+            &krate.path(),
+            regex,
+            written,
+            path,
+        )
+}
+
+/// How many of the commits that last changed a file are looked through for
+/// one the instrument measured: `done` over a merge reaches the merged branch's
+/// commits within a few, and the bound keeps a file with a long history
+/// from costing one `ls-tree` per commit it ever had.
+const COMMITS: usize = 64;
+
+/// Whether every hit in `written` stands, in the block around it, in the
+/// file at `path` as it was at a commit whose sources of the crate at
+/// `under` a reading of `instrument` was taken over, in this workspace's
+/// store or the store of another worktree of the clone (#1448). The
+/// evidence travels with the commits: a line `--accept` captured on a
+/// branch is in the branch's commit, the commit's crate is what the
+/// branch's reading measured, and the reading reaches the track's store at
+/// `worktree retire`, so a merge that also brings other changes to the
+/// crate is still read as the branch's capture, and a block typed by hand
+/// in a commit nothing measured is not. A block is the hit's line and every
+/// line around it up to the nearest blank one, the rustdoc paragraph and
+/// the item under it, so an edit to what the line stands in is a block no
+/// commit carried. Anything this cannot read is no evidence.
+fn carried(
+    root: &Path,
+    instrument: &str,
+    scope: &str,
+    under: &Path,
+    regex: &Regex,
+    written: &str,
+    path: &Path,
+) -> bool {
+    let mut wanted = blocks(regex, written);
+    if wanted.is_empty() {
+        return false;
+    }
+    let (Some(under), Some(file)) = (under.to_str(), path.to_str()) else {
         return false;
     };
-    let Ok(tree) = git::tree_hash(root, &krate.path()) else {
+    let count = COMMITS.to_string();
+    let Ok(log) = git::git(
+        root,
+        &["log", "--format=%H", "-n", &count, "--", file],
+        None,
+    ) else {
         return false;
     };
-    !reading.tree().is_empty() && reading.tree() == tree
+    let mut commits = Vec::new();
+    for commit in log.lines().filter(|c| !c.is_empty()) {
+        let Ok(tree) = git::tracked_hash(root, &[under], Some(commit)) else {
+            return false;
+        };
+        commits.push((commit, tree));
+    }
+    let trees: BTreeSet<String> = commits.iter().map(|(_, tree)| tree.clone()).collect();
+    let mut measured = BTreeSet::new();
+    for store in stores(root) {
+        match store.measured_over(instrument, scope, &trees) {
+            Ok(found) => measured.extend(found),
+            Err(_) => return false,
+        }
+    }
+    for (commit, tree) in &commits {
+        if !measured.contains(tree) {
+            continue;
+        }
+        let Ok(Some(then)) = git::show(root, commit, file) else {
+            continue;
+        };
+        for block in blocks(regex, &then) {
+            wanted.remove(&block);
+        }
+        if wanted.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+/// This workspace's store, then the store of every other worktree of the
+/// clone: a branch merged before its worktree is retired keeps its
+/// readings in its own.
+fn stores(root: &Path) -> Vec<Store> {
+    let mut roots = vec![root.to_path_buf()];
+    for (other, _) in crate::track::worktrees(root).unwrap_or_default() {
+        if !roots.contains(&other) {
+            roots.push(other);
+        }
+    }
+    roots.iter().map(|r| Store::of_workspace(r)).collect()
+}
+
+/// The block around each hit of `regex` in `text`: its line and the lines
+/// on either side up to the nearest blank one.
+fn blocks(regex: &Regex, text: &str) -> BTreeSet<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut starts = Vec::with_capacity(lines.len());
+    let mut at = 0;
+    for line in &lines {
+        starts.push(at);
+        at += line.len() + 1;
+    }
+    let blank = |i: usize| lines[i].trim().is_empty();
+    regex
+        .find_iter(text)
+        .filter_map(|hit| {
+            let line = starts
+                .partition_point(|s| *s <= hit.start())
+                .checked_sub(1)?;
+            let first = (0..line).rev().find(|i| blank(*i)).map_or(0, |i| i + 1);
+            let last = (line + 1..lines.len())
+                .find(|i| blank(*i))
+                .unwrap_or(lines.len());
+            Some(lines[first..last].join("\n"))
+        })
+        .collect()
 }
 
 /// The instrument a row's `unless` names: the first word of the phrase that
@@ -102,7 +241,16 @@ fn instrument_of(unless: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::instrument_of;
+    use super::{blocks, instrument_of};
+
+    #[test]
+    fn a_hits_block_runs_to_the_blank_lines_around_it() {
+        let regex = regex_lite::Regex::new(r"exit=\d+").unwrap();
+        let text = "a\n\n/// x\n/// exit=3\nfn f() {}\n\nb exit=4\n";
+        let found: Vec<String> = blocks(&regex, text).into_iter().collect();
+        assert_eq!(found, ["/// x\n/// exit=3\nfn f() {}", "b exit=4"]);
+        assert!(blocks(&regex, "nothing here").is_empty());
+    }
 
     #[test]
     fn the_instrument_is_the_first_word_that_is_not_cargo_xtask_or_a_flag() {
