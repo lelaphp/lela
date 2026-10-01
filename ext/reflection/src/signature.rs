@@ -21,7 +21,7 @@ use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use super::{
-    State, class_chain, class_name_of, class_named, linked_methods, lookup_function, new_object,
+    class_chain, class_name_of, class_named, linked_methods, lookup_function, new_object,
     parameter_string, reflection_class_factory, required_parameters, set_name, set_string_prop,
     this_name, type_to_string,
 };
@@ -169,16 +169,13 @@ pub(super) fn type_factory(
     let is_only_null = matches!(ty, Type::Null);
     let legacy = legacy && kind == Kind::Named && !is_mixed && !is_only_null;
     let ty = ty.clone();
-    req.state::<State>()
-        .types
-        .insert(object.index(), TypeRef { ty, legacy });
+    super::keep_type(req, object, TypeRef { ty, legacy })?;
     Ok(object)
 }
 
 /// `GET_REFLECTION_OBJECT_PTR` for a type reflector.
 fn this_type(req: &mut Request, this: PhpObject) -> Result<TypeRef, Thrown> {
-    let found = req.state::<State>().types.get(&this.index()).cloned();
-    match found {
+    match super::kept_type(req, this) {
         Some(reference) => Ok(reference),
         None => Err(throw(
             req,
@@ -329,9 +326,7 @@ pub(super) fn parameter_factory(
         offset,
         required: offset < required_parameters(decl),
     };
-    req.state::<State>()
-        .parameters
-        .insert(object.index(), reference);
+    super::keep_parameter(req, object, reference)?;
     Ok(object)
 }
 
@@ -341,8 +336,7 @@ fn this_parameter(
     req: &mut Request,
     this: PhpObject,
 ) -> Result<(ParameterRef, FunctionDecl, Parameter), Thrown> {
-    let found = req.state::<State>().parameters.get(&this.index()).cloned();
-    let Some(reference) = found else {
+    let Some(reference) = super::kept_parameter(req, this) else {
         return Err(throw(
             req,
             "Error",
@@ -740,7 +734,20 @@ pub(super) fn this_function(
     Ok((function, decl))
 }
 
-/// `ReflectionParameter` as the stub declares it.
+/// `ReflectionParameter` as the stub declares it, with the
+/// `parameter_reference` its constructor and
+/// `reflection_parameter_factory` lay down beside it, given back with it:
+///
+/// ```php
+/// function f(int $a) {}
+/// $w = new ReflectionParameter('f', 0);
+/// $m = memory_get_usage(); $r = new ReflectionParameter('f', 0); $n = memory_get_usage(); unset($r);
+/// var_dump($n - $m, memory_get_usage() - $n);
+/// ```
+/// ```expect
+/// int(120)
+/// int(-120)
+/// ```
 #[php_class(implements(crate::Reflector), not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionParameter;
 
@@ -821,10 +828,7 @@ impl ReflectionParameter {
         {
             super::keep_closure(req, this, closure);
         }
-        req.state::<State>()
-            .parameters
-            .insert(this.index(), reference);
-        Ok(())
+        super::keep_parameter(req, this, reference)
     }
 
     /// `ReflectionParameter::__toString()`: `_parameter_string` over the
@@ -1489,8 +1493,21 @@ impl ReflectionType {
     }
 }
 
-/// `ReflectionNamedType` as the stub declares it.
-#[php_class(extends(ReflectionType))]
+/// `ReflectionNamedType` as the stub declares it, with the
+/// `type_reference` `reflection_type_factory` lays down beside it, given
+/// back with it, as beside a union and an intersection type:
+///
+/// ```php
+/// function f(int $a) {}
+/// $p = new ReflectionParameter('f', 0); $w = $p->getType();
+/// $m = memory_get_usage(); $r = $p->getType(); $n = memory_get_usage(); unset($r);
+/// var_dump($n - $m, memory_get_usage() - $n);
+/// ```
+/// ```expect
+/// int(104)
+/// int(-104)
+/// ```
+#[php_class(extends(ReflectionType), size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionNamedType;
 
 #[php_class]
@@ -1544,7 +1561,7 @@ impl ReflectionNamedType {
 }
 
 /// `ReflectionUnionType` as the stub declares it.
-#[php_class(extends(ReflectionType))]
+#[php_class(extends(ReflectionType), size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionUnionType;
 
 #[php_class]
@@ -1643,7 +1660,7 @@ impl ReflectionUnionType {
 }
 
 /// `ReflectionIntersectionType` as the stub declares it.
-#[php_class(extends(ReflectionType))]
+#[php_class(extends(ReflectionType), size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionIntersectionType;
 
 #[php_class]

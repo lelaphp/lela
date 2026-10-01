@@ -63,7 +63,6 @@ mod lazy;
 mod member;
 mod signature;
 
-use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use php_ext::abi::{
@@ -81,19 +80,14 @@ use php_ext::decl::{
 };
 use php_ext::raising::{Thrown, arg_count_error, throw};
 use php_ext::request::{ExtensionId, Request};
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{
+    ClassId, Emalloc, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
+};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
-///
-/// The two tables are php's `intern->ptr` for the reflectors whose
-/// subject is not a name they can look up again, a `ReflectionParameter`
-/// and the four type reflectors, keyed by the object's store index as php
-/// keys them by the object itself (see [`signature`]).
 #[derive(Default)]
 struct State {
-    parameters: HashMap<u32, signature::ParameterRef>,
-    types: HashMap<u32, signature::TypeRef>,
     /// `REFLECTION_G(key)`, the request's secret `getId` hashes a
     /// reference's identity under so no address is shown.
     reference_key: std::hash::RandomState,
@@ -4480,6 +4474,17 @@ pub(crate) struct ReflectedState {
     /// php's `attribute_reference`, which `ReflectionAttribute` keeps
     /// where the other reflectors keep `intern->ce`.
     attribute: Option<attr::AttributeRef>,
+    /// php's `parameter_reference`, the parameter a
+    /// `ReflectionParameter` reflects, whose subject is no name it can
+    /// look up again.
+    parameter: Option<signature::ParameterRef>,
+    /// php's `type_reference`, the type a type reflector reflects.
+    ty: Option<signature::TypeRef>,
+    /// The struct `intern->ptr` points at where php's constructor or
+    /// factory `emalloc`s one beside the `reflection_object`
+    /// ([`Reference`]), held on the request's heap at its size and given
+    /// back in `free_obj`, `reflection_free_objects_storage`.
+    ptr: Option<Emalloc>,
     /// The reference a `ReflectionReference` holds in `intern->obj`,
     /// one owner of it.
     reference: Option<PhpRef>,
@@ -4511,7 +4516,14 @@ impl ObjectHandlers for ReflectorHandlers {
         let Some(reflected) = object.native_mut::<Reflected>(req) else {
             return;
         };
-        let (kept, reference) = (reflected.object.take(), reflected.reference.take());
+        let (kept, reference, ptr) = (
+            reflected.object.take(),
+            reflected.reference.take(),
+            reflected.ptr.take(),
+        );
+        if let Some(ptr) = ptr {
+            ptr.free(req);
+        }
         if let Some(kept) = kept {
             req.release(kept.as_value());
         }
@@ -4644,6 +4656,50 @@ fn keep_closure(req: &mut Request, this: PhpObject, object: PhpObject) {
     }
 }
 
+/// The structs php's reflectors `emalloc` for `intern->ptr`, by
+/// `ref_type`, each at the size the pinned build's `sizeof` gives
+/// (`Z/ext/reflection/php_reflection.c:132-160`).
+#[derive(Clone, Copy)]
+pub(crate) enum Reference {
+    /// `property_reference`: `prop`, `unmangled_name` and
+    /// `cache_slot[3]`.
+    Property,
+    /// `parameter_reference`: `offset`, `required`, `arg_info` and
+    /// `fptr`.
+    Parameter,
+    /// `type_reference`: the `zend_type` and `legacy_behavior`.
+    Type,
+    /// `attribute_reference`: `attributes`, `data`, `scope`,
+    /// `filename` and `target`.
+    Attribute,
+}
+
+impl Reference {
+    /// `sizeof` the struct on the pinned 64-bit build.
+    const fn size(self) -> usize {
+        match self {
+            Reference::Property | Reference::Attribute => 40,
+            Reference::Parameter | Reference::Type => 24,
+        }
+    }
+}
+
+/// `intern->ptr = emalloc(sizeof(...))`: the struct of `kind` laid down
+/// on the request's heap beside the reflector, the one it held before
+/// given back first, as php's constructors free it before they
+/// allocate. The `Err` is the memory limit.
+fn keep_reference(req: &mut Request, this: PhpObject, kind: Reference) -> Result<(), Thrown> {
+    let block = Emalloc::new(req, kind.size())?;
+    let released = match this.native_mut::<Reflected>(req) {
+        Some(reflected) => reflected.ptr.replace(block),
+        None => Some(block),
+    };
+    if let Some(released) = released {
+        released.free(req);
+    }
+    Ok(())
+}
+
 /// `intern->ptr` as `reflection_method_factory` writes it over a hook
 /// (`ReflectionProperty::getHook`), which the method accessors then
 /// find among the property's hooks rather than among its methods.
@@ -4659,11 +4715,55 @@ fn kept_hook(req: &Request, this: PhpObject) -> bool {
 }
 
 /// `intern->ptr` as `reflection_attribute_factory` writes it: the
-/// reference the six `ReflectionAttribute` accessors read.
-fn keep_attribute(req: &mut Request, this: PhpObject, kept: attr::AttributeRef) {
+/// reference the six `ReflectionAttribute` accessors read, in its
+/// `attribute_reference`.
+fn keep_attribute(
+    req: &mut Request,
+    this: PhpObject,
+    kept: attr::AttributeRef,
+) -> Result<(), Thrown> {
+    keep_reference(req, this, Reference::Attribute)?;
     if let Some(reflected) = this.native_mut::<Reflected>(req) {
         reflected.attribute = Some(kept);
     }
+    Ok(())
+}
+
+/// `intern->ptr` as `reflection_parameter_factory` and
+/// `ReflectionParameter::__construct` write it, in its
+/// `parameter_reference`.
+fn keep_parameter(
+    req: &mut Request,
+    this: PhpObject,
+    kept: signature::ParameterRef,
+) -> Result<(), Thrown> {
+    keep_reference(req, this, Reference::Parameter)?;
+    if let Some(reflected) = this.native_mut::<Reflected>(req) {
+        reflected.parameter = Some(kept);
+    }
+    Ok(())
+}
+
+/// The `parameter_reference` a `ReflectionParameter` keeps, none before
+/// anything wrote one.
+fn kept_parameter(req: &Request, this: PhpObject) -> Option<signature::ParameterRef> {
+    this.native::<Reflected>(req)?.parameter.clone()
+}
+
+/// `intern->ptr` as `reflection_type_factory` writes it, in its
+/// `type_reference`.
+fn keep_type(req: &mut Request, this: PhpObject, kept: signature::TypeRef) -> Result<(), Thrown> {
+    keep_reference(req, this, Reference::Type)?;
+    if let Some(reflected) = this.native_mut::<Reflected>(req) {
+        reflected.ty = Some(kept);
+    }
+    Ok(())
+}
+
+/// The `type_reference` a type reflector keeps, none before anything
+/// wrote one.
+fn kept_type(req: &Request, this: PhpObject) -> Option<signature::TypeRef> {
+    this.native::<Reflected>(req)?.ty.clone()
 }
 
 /// `GET_REFLECTION_OBJECT_PTR(attr)`: the reference a

@@ -19,13 +19,13 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, Value
 
 use super::lazy::{Strategy, new_lazy, object_of, reset_as_lazy};
 use super::{
-    answer, attr, class_chain, class_constant_named, class_extension_name, class_is, class_name_of,
-    class_named, class_of, class_string, closure_invoke, constant_value, dynamic_properties,
-    is_closure_invoke, is_constructor, is_internal, keep, kept_closure, kept_object,
-    linked_constants, linked_interfaces, linked_methods, linked_properties, looked_up,
-    lookup_class, method_or_invoke, namespace_end, new_object, property_named,
-    reflection_class_factory, set_name, set_string_prop, string_value, table_method, this_class,
-    user_line,
+    Reference, answer, attr, class_chain, class_constant_named, class_extension_name, class_is,
+    class_name_of, class_named, class_of, class_string, closure_invoke, constant_value,
+    dynamic_properties, is_closure_invoke, is_constructor, is_internal, keep, keep_reference,
+    kept_closure, kept_object, linked_constants, linked_interfaces, linked_methods,
+    linked_properties, looked_up, lookup_class, method_or_invoke, namespace_end, new_object,
+    property_named, reflection_class_factory, set_name, set_string_prop, string_value,
+    table_method, this_class, user_line,
 };
 
 /// The name of the first of `traits` whose function table has `method`,
@@ -122,6 +122,7 @@ fn property_factory(
     set_name(req, object, name)?;
     set_string_prop(req, object, b"class", &scope)?;
     keep(req, object, ce, None);
+    keep_reference(req, object, Reference::Property)?;
     Ok(object)
 }
 
