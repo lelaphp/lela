@@ -167,7 +167,7 @@ impl ObjectHandlers for Handlers {
         let held = (dbh.query_stmt.take(), dbh.stmt_args.take());
         let tracked = dbh.in_txn;
         if let Conn::Open(mut conn) = conn {
-            if conn.in_transaction().unwrap_or(tracked) {
+            if conn.in_transaction(req).unwrap_or(tracked) {
                 let _ = conn.rollback(req);
             }
             if let Some(stmt) = held.0 {
@@ -971,8 +971,8 @@ fn construct_statement(
 /// `pdo_is_in_transaction`: the connector's answer, or PDO's own tracking.
 fn in_txn(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     let tracked = dbh_ref(req, object, |d| d.in_txn).unwrap_or(false);
-    with_connection(req, object, |_, conn| {
-        Ok(conn.in_transaction().unwrap_or(tracked))
+    with_connection(req, object, |req, conn| {
+        Ok(conn.in_transaction(req).unwrap_or(tracked))
     })
 }
 
@@ -1341,7 +1341,8 @@ impl PDO {
         let made = crate::string(req, state.as_ref().map_or("", SqlState::as_str).as_bytes())?;
         out.append(req, made)?;
         if state != Some(SqlState::NONE) {
-            error::fetch_error(req, this, &mut out)?;
+            let on = held.map_or(On::Dbh, On::Stmt);
+            error::fetch_error(req, this, on, &mut out)?;
         }
         while out.len() < 3 {
             out.append(req, Value::null())?;

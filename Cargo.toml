@@ -4,7 +4,7 @@
 # and `crates/php_ext` holds only `api.lock` today.
 [workspace]
 resolver = "3"
-members = ["crates/*", "sapi/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor", "ext/zlib", "ext/pcntl", "ext/posix", "ext/sockets", "ext/phar", "ext/bz2", "ext/uri", "ext/opcache", "ext/bcmath", "ext/simplexml", "ext/calendar", "ext/exif", "ext/shmop", "ext/sysvsem", "ext/sysvmsg", "ext/sysvshm", "ext/ftp", "ext/xml", "ext/xmlreader", "ext/xmlwriter"]
+members = ["crates/*", "sapi/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor", "ext/zlib", "ext/pcntl", "ext/posix", "ext/sockets", "ext/phar", "ext/bz2", "ext/uri", "ext/opcache", "ext/bcmath", "ext/simplexml", "ext/calendar", "ext/exif", "ext/shmop", "ext/sysvsem", "ext/sysvmsg", "ext/sysvshm", "ext/ftp", "ext/xml", "ext/xmlreader", "ext/xmlwriter", "ext/mysqlnd"]
 
 # On macOS the dev profile's default, `split-debuginfo = "unpacked"`, keeps
 # every codegen unit's object in target/debug/deps for its debuginfo, under a
@@ -59,3 +59,5 @@ libz-sys = { version = "1.1", default-features = false, features = ["libc"] }  #
 libbz2-rs-sys = { version = "0.2.5", default-features = false, features = ["rust-allocator"] }  # ext/bz2: libbzip2 ported to Rust, whose bytes are the oracle's libbz2 1.0.8's at every block size and work factor (design §7.2, revision 39; #1116)
 openssl-sys = "0.9"                # ext/openssl: the platform's libcrypto, OpenSSL 3 as the oracle links it, found through pkg-config and never vendored (design §7.2; #1108)
 curl-sys = { version = "0.4.90", default-features = false, features = ["upkeep_7_62_0"] }  # ext/curl: the declarations of the platform's libcurl, the one the oracle links, which ext/curl's build.rs holds it to and never lets it vendor (design §7.2; #1332)
+mysql_common = { version = "0.38", default-features = false }  # ext/mysqlnd: the MySQL wire protocol's packet types and scrambles, no I/O; mysqlnd ported over it, every read and write through the engine's streams (#1345)
+flate2 = { version = "1", default-features = false, features = ["zlib"] }  # ext/mysqlnd: the compressed protocol's envelopes, over the locked libz-sys (#1345)

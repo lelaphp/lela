@@ -1,0 +1,1221 @@
+//! `mysqlnd_connection.c` and `mysqlnd_commands.c`: one connection's
+//! data, `MYSQLND_CONN_DATA`, its state machine and the commands sent
+//! over it, each the C function's steps in the C function's order.
+
+use php_ext::raising::{Level, Thrown, docref, raise};
+use php_ext::request::Request;
+
+use crate::charset::{self, Charset};
+use crate::consts::{
+    ASSEMBLED_PACKET_MAX_SIZE, CloseType, Com, ConnState, NET_CMD_BUFFER_MIN_SIZE, QueryType,
+    ServerOption, client, cr, status, trans_cor, trans_start,
+};
+use crate::error::{ErrorInfo, OUT_OF_SYNC, SERVER_GONE, Upsert};
+use crate::net::{Net, SslPeer};
+use crate::result::Res;
+use crate::stats::{Stat, Stats};
+use crate::wire::RsetHeader;
+
+/// An option `mysql_options` sets, `enum mysqlnd_client_option` with
+/// the value each takes, decoded once where php reads a `char *` as an
+/// `unsigned int` or a string by the option's number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientOption<'a> {
+    ConnectTimeout(u32),
+    Compress,
+    NamedPipe,
+    InitCommand(&'a [u8]),
+    ReadDefaultFile,
+    ReadDefaultGroup,
+    SetCharsetName(&'a [u8]),
+    LocalInfile(bool),
+    Protocol(u32),
+    ReadTimeout(u32),
+    WriteTimeout(u32),
+    SslVerifyServerCert(Option<bool>),
+    LoadDataLocalDir(Option<&'a [u8]>),
+    ConnectAttrReset,
+    ConnectAttrAdd(&'a [u8], &'a [u8]),
+    ConnectAttrDelete(&'a [u8]),
+    ServerPublicKey(Option<&'a [u8]>),
+    ExpiredPasswords(bool),
+    IntAndFloatNative(bool),
+    NetCmdBufferSize(u32),
+    NetReadBufferSize(u32),
+    SslKey(Option<&'a [u8]>),
+    SslCert(Option<&'a [u8]>),
+    SslCa(Option<&'a [u8]>),
+    SslCapath(Option<&'a [u8]>),
+    SslCipher(Option<&'a [u8]>),
+    SslPassphrase(Option<&'a [u8]>),
+    MaxAllowedPacket(u32),
+    AuthProtocol(Option<&'a [u8]>),
+}
+
+/// `MYSQLND_SESSION_OPTIONS`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Options {
+    pub(crate) flags: u32,
+    pub(crate) init_commands: Vec<Vec<u8>>,
+    pub(crate) auth_protocol: Option<Vec<u8>>,
+    /// `connect_attr`, in insertion order with an update kept in place,
+    /// as a `HashTable` keeps it.
+    pub(crate) connect_attr: Vec<(Vec<u8>, Vec<u8>)>,
+    pub(crate) protocol: u32,
+    pub(crate) charset_name: Option<Vec<u8>>,
+    pub(crate) max_allowed_packet: u32,
+    pub(crate) int_and_float_native: bool,
+    pub(crate) local_infile_directory: Option<Vec<u8>>,
+}
+
+/// `MYSQLND_CONN_DATA`.
+#[derive(Default)]
+pub struct ConnData {
+    pub(crate) net: Net,
+    pub(crate) error: ErrorInfo,
+    pub(crate) upsert: Upsert,
+    pub(crate) state: ConnState,
+    pub(crate) stats: Stats,
+    pub(crate) options: Options,
+    pub(crate) persistent: bool,
+    pub(crate) scheme: Option<Vec<u8>>,
+    pub(crate) host_info: Option<Vec<u8>>,
+    pub(crate) server_version: Option<Vec<u8>>,
+    pub(crate) thread_id: u64,
+    pub(crate) protocol_version: u8,
+    pub(crate) server_capabilities: u32,
+    pub(crate) port: u32,
+    pub(crate) charset: Option<&'static Charset>,
+    pub(crate) greet_charset: Option<&'static Charset>,
+    pub(crate) last_message: Option<Vec<u8>>,
+    pub(crate) field_count: u32,
+    pub(crate) last_query_type: QueryType,
+    /// `current_result`: the rows whose column definitions the last query
+    /// read, until `store_result` or `use_result` takes them.
+    pub(crate) current_result: Option<Box<Res>>,
+    /// `authentication_plugin_data`, kept for `change_user`.
+    pub(crate) auth_plugin_data: Vec<u8>,
+}
+
+impl ConnData {
+    /// `mysqlnd_object_factory::get_connection` with `mysqlnd_vio::init`
+    /// and `mysqlnd_pfc::init`: the buffers and the read timeout from
+    /// the `mysqlnd.*` ini, the affected rows `~0`.
+    pub(crate) fn new(req: &Request, persistent: bool) -> ConnData {
+        let ini = |name: &[u8], default: u32| -> u32 {
+            req.ini_get(name)
+                .and_then(|v| std::str::from_utf8(v).ok())
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .map_or(default, |v| {
+                    u32::try_from(v & 0xFFFF_FFFF).unwrap_or(default)
+                })
+        };
+        let mut conn = ConnData {
+            persistent,
+            ..ConnData::default()
+        };
+        conn.upsert.affected_rows_to_error();
+        conn.net.options.net_read_buffer_size = ini(b"mysqlnd.net_read_buffer_size", 32768);
+        conn.net.options.timeout_read = ini(b"mysqlnd.net_read_timeout", 86400);
+        conn.net.cmd_buffer = ini(b"mysqlnd.net_cmd_buffer_size", NET_CMD_BUFFER_MIN_SIZE) as usize;
+        conn
+    }
+
+    /// `mysqlnd_conn_data::set_client_option`, and `set_client_option_2d`
+    /// for the attribute added.
+    pub(crate) fn set_option(&mut self, req: &mut Request, option: ClientOption<'_>) -> bool {
+        let owned = |v: Option<&[u8]>| v.map(<[u8]>::to_vec);
+        let vio = &mut self.net.options;
+        match option {
+            ClientOption::ReadTimeout(s) => vio.timeout_read = s,
+            ClientOption::ConnectTimeout(s) => vio.timeout_connect = s,
+            ClientOption::NetReadBufferSize(n) => vio.net_read_buffer_size = n,
+            ClientOption::SslKey(v) => vio.ssl_key = owned(v),
+            ClientOption::SslCert(v) => vio.ssl_cert = owned(v),
+            ClientOption::SslCa(v) => vio.ssl_ca = owned(v),
+            ClientOption::SslCapath(v) => vio.ssl_capath = owned(v),
+            ClientOption::SslCipher(v) => vio.ssl_cipher = owned(v),
+            ClientOption::SslPassphrase(v) => vio.ssl_passphrase = owned(v),
+            ClientOption::SslVerifyServerCert(v) => {
+                vio.ssl_verify_peer = match v {
+                    Some(true) => SslPeer::Verify,
+                    Some(false) => SslPeer::DontVerify,
+                    None => SslPeer::Default,
+                };
+            }
+            ClientOption::NetCmdBufferSize(n) => {
+                if n < NET_CMD_BUFFER_MIN_SIZE {
+                    return false;
+                }
+                self.net.cmd_buffer = n as usize;
+            }
+            ClientOption::Compress => self.net.use_compression = true,
+            ClientOption::ServerPublicKey(v) => self.net.sha256_server_public_key = owned(v),
+            ClientOption::IntAndFloatNative(on) => self.options.int_and_float_native = on,
+            ClientOption::LocalInfile(on) => {
+                if on {
+                    self.options.flags |= client::LOCAL_FILES;
+                } else {
+                    self.options.flags &= !client::LOCAL_FILES;
+                }
+            }
+            ClientOption::LoadDataLocalDir(dir) => {
+                self.options.local_infile_directory =
+                    dir.filter(|d| !d.is_empty()).map(<[u8]>::to_vec);
+            }
+            ClientOption::InitCommand(command) => self.options.init_commands.push(command.to_vec()),
+            ClientOption::WriteTimeout(_)
+            | ClientOption::ReadDefaultFile
+            | ClientOption::ReadDefaultGroup => {}
+            ClientOption::SetCharsetName(name) => {
+                if charset::by_name(name).is_none() {
+                    self.error
+                        .client(cr::CANT_FIND_CHARSET, "Unknown character set");
+                    return false;
+                }
+                self.options.charset_name = Some(name.to_vec());
+            }
+            ClientOption::NamedPipe => self.options.protocol = 3,
+            ClientOption::Protocol(p) => {
+                if p < 5 {
+                    self.options.protocol = p;
+                }
+            }
+            ClientOption::MaxAllowedPacket(n) => {
+                if n > (1 << 16) {
+                    self.options.max_allowed_packet = n;
+                }
+            }
+            ClientOption::AuthProtocol(v) => self.options.auth_protocol = owned(v),
+            ClientOption::ExpiredPasswords(on) => {
+                if on {
+                    self.options.flags |= client::CAN_HANDLE_EXPIRED_PASSWORDS;
+                } else {
+                    self.options.flags &= !client::CAN_HANDLE_EXPIRED_PASSWORDS;
+                }
+            }
+            ClientOption::ConnectAttrReset => self.options.connect_attr.clear(),
+            ClientOption::ConnectAttrDelete(key) => {
+                self.options.connect_attr.retain(|(k, _)| k != key);
+            }
+            ClientOption::ConnectAttrAdd(key, value) => {
+                match self.options.connect_attr.iter_mut().find(|(k, _)| k == key) {
+                    Some((_, v)) => *v = value.to_vec(),
+                    None => self
+                        .options
+                        .connect_attr
+                        .push((key.to_vec(), value.to_vec())),
+                }
+            }
+        }
+        let _ = req;
+        true
+    }
+
+    // ---- commands
+
+    /// `mysqlnd_protocol::send_command`: refused out of the ready state
+    /// with php's two texts; else the command written, and a write that
+    /// fails warns (unless `silent` or the server is gone) and closes.
+    pub(crate) fn send_command(
+        &mut self,
+        req: &mut Request,
+        command: Com,
+        arg: &[u8],
+        silent: bool,
+    ) -> Result<bool, Thrown> {
+        match self.state {
+            ConnState::Ready => {}
+            ConnState::QuitSent => {
+                self.error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
+                return Ok(false);
+            }
+            _ => {
+                self.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+                return Ok(false);
+            }
+        }
+        self.upsert.affected_rows_to_error();
+        self.error.reset();
+        // `STAT_COM_QUIT + command - 1`.
+        self.stats.inc(com_stat(command));
+        // `php_mysqlnd_cmd_write`.
+        self.net.reset();
+        self.stats.inc(Stat::PacketsSentCmd);
+        let mut payload = Vec::with_capacity(arg.len() + 1);
+        payload.push(command as u8);
+        payload.extend_from_slice(arg);
+        if arg.len() + 1 + crate::net::HEADER_SIZE > self.net.cmd_buffer {
+            self.stats.inc(Stat::CmdBufferTooSmall);
+        }
+        let sent = self
+            .net
+            .send(req, &payload, &mut self.stats, &mut self.error);
+        if sent == 0 {
+            self.state = ConnState::QuitSent;
+            if !silent && self.error.errno != cr::SERVER_GONE_ERROR {
+                raise(
+                    req,
+                    Level::Warning,
+                    &format!(
+                        "Error while sending {} packet. PID={}",
+                        command.text(),
+                        std::process::id()
+                    ),
+                );
+            }
+            self.state = ConnState::QuitSent;
+            self.send_close(req)?;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// `send_command_handle_OK`.
+    pub(crate) fn handle_ok(
+        &mut self,
+        req: &mut Request,
+        ignore_upsert: bool,
+    ) -> Result<bool, Thrown> {
+        let Some(ok) = self.read_ok(req)? else {
+            if self.error.errno != cr::SERVER_GONE_ERROR {
+                self.error.client(cr::MALFORMED_PACKET, "Malformed packet");
+            }
+            return Ok(false);
+        };
+        if let Some(e) = ok.error {
+            e.set_on(&mut self.error);
+            self.upsert.server_status &= !status::MORE_RESULTS_EXISTS;
+            self.upsert.affected_rows_to_error();
+            return Ok(false);
+        }
+        self.last_message = ok.message;
+        if !ignore_upsert {
+            self.upsert.reset();
+            self.upsert.warning_count = ok.warning_count;
+            self.upsert.server_status = ok.server_status;
+            self.upsert.affected_rows = ok.affected_rows;
+            self.upsert.last_insert_id = ok.last_insert_id;
+        }
+        Ok(true)
+    }
+
+    /// `send_command_handle_EOF`.
+    pub(crate) fn handle_eof(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        let Some(eof) = self.read_eof(req)? else {
+            self.error.client(cr::MALFORMED_PACKET, "Malformed packet");
+            return Ok(false);
+        };
+        if let Some(e) = eof.error {
+            e.set_on(&mut self.error);
+            self.upsert.affected_rows_to_error();
+        } else if eof.field_count != crate::wire::EODATA_MARKER {
+            self.error.client(cr::MALFORMED_PACKET, "Malformed packet");
+            docref(
+                req,
+                Level::Warning,
+                &format!(
+                    "EOF packet expected, field count wasn't 0xFE but 0x{:2X}",
+                    eof.field_count
+                ),
+            );
+        }
+        Ok(true)
+    }
+
+    /// `send_command_handle_response`: the OK or EOF read, and php's
+    /// warning where it was malformed.
+    pub(crate) fn handle_response(
+        &mut self,
+        req: &mut Request,
+        eof: bool,
+        silent: bool,
+        command: Com,
+        ignore_upsert: bool,
+    ) -> Result<bool, Thrown> {
+        let ok = if eof {
+            self.handle_eof(req)?
+        } else {
+            self.handle_ok(req, ignore_upsert)?
+        };
+        if !silent && self.error.errno == cr::MALFORMED_PACKET {
+            docref(
+                req,
+                Level::Warning,
+                &format!(
+                    "Error while reading {}'s response packet. PID={}",
+                    command.text(),
+                    std::process::id()
+                ),
+            );
+        }
+        Ok(ok)
+    }
+
+    /// A command and its OK, `mysqlnd_command`'s common shape.
+    fn command_ok(
+        &mut self,
+        req: &mut Request,
+        command: Com,
+        arg: &[u8],
+        silent: bool,
+    ) -> Result<bool, Thrown> {
+        Ok(self.send_command(req, command, arg, silent)?
+            && self.handle_response(req, false, silent, command, true)?)
+    }
+
+    // ---- connecting
+
+    /// `mysqlnd_conn_data::get_scheme`: the stream's scheme for the host,
+    /// `localhost` the unix socket (`/tmp/mysql.sock` where none is
+    /// named), an IPv6 address bracketed, `:3306` or the number asked for
+    /// added where the host carries none; and whether it is a unix socket.
+    fn scheme(host: &[u8], socket: &mut Option<Vec<u8>>, port: u32) -> (Vec<u8>, bool) {
+        if host.eq_ignore_ascii_case(b"localhost") {
+            let path = socket
+                .get_or_insert_with(|| b"/tmp/mysql.sock".to_vec())
+                .clone();
+            let mut s = b"unix://".to_vec();
+            s.extend_from_slice(&path);
+            return (s, true);
+        }
+        let port = if port == 0 { 3306 } else { port };
+        let ipv6 =
+            host.first() != Some(&b'[') && host.iter().filter(|b| **b == b':').nth(1).is_some();
+        if ipv6 {
+            let mut s = b"tcp://[".to_vec();
+            s.extend_from_slice(host);
+            s.extend_from_slice(format!("]:{port}").as_bytes());
+            return (s, false);
+        }
+        let has_port = if host.first() == Some(&b'[') {
+            host.iter()
+                .position(|b| *b == b']')
+                .is_some_and(|at| host.get(at + 1) == Some(&b':'))
+        } else {
+            host.contains(&b':')
+        };
+        let mut s = b"tcp://".to_vec();
+        s.extend_from_slice(host);
+        if !has_port {
+            s.extend_from_slice(format!(":{port}").as_bytes());
+        }
+        (s, false)
+    }
+
+    /// `mysqlnd_conn_data::get_updated_connect_flags`.
+    fn connect_flags(&self, mut flags: u32) -> u32 {
+        flags |= client::MYSQLND_CAPABILITIES;
+        flags |= self.options.flags;
+        if self.net.use_compression {
+            flags |= client::COMPRESS;
+        }
+        if self.net.options.wants_ssl() {
+            flags |= client::SSL;
+        }
+        if !self.options.connect_attr.is_empty() {
+            flags |= client::CONNECT_ATTRS;
+        }
+        flags
+    }
+
+    /// `mysqlnd_conn::connect`'s two attributes, then
+    /// `mysqlnd_conn_data::connect`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn connect(
+        &mut self,
+        req: &mut Request,
+        host: Option<&[u8]>,
+        user: Option<&[u8]>,
+        password: Option<&[u8]>,
+        db: Option<&[u8]>,
+        port: u32,
+        socket: Option<&[u8]>,
+        flags: u32,
+    ) -> Result<bool, Thrown> {
+        self.set_option(
+            req,
+            ClientOption::ConnectAttrAdd(b"_client_name", b"mysqlnd"),
+        );
+        if let Some(host) = host.filter(|h| !h.is_empty()) {
+            self.set_option(req, ClientOption::ConnectAttrAdd(b"_server_host", host));
+        }
+        self.connect_data(req, host, user, password, db, port, socket, flags)
+    }
+
+    /// `mysqlnd_conn_data::connect`.
+    #[allow(clippy::too_many_arguments)]
+    fn connect_data(
+        &mut self,
+        req: &mut Request,
+        host: Option<&[u8]>,
+        user: Option<&[u8]>,
+        password: Option<&[u8]>,
+        db: Option<&[u8]>,
+        port: u32,
+        socket: Option<&[u8]>,
+        mut flags: u32,
+    ) -> Result<bool, Thrown> {
+        let mut reconnect = false;
+        self.error.reset();
+        self.upsert.affected_rows_to_error();
+        if self.state > ConnState::Alloced {
+            if self.state < ConnState::QuitSent {
+                self.stats.inc(Stat::CloseImplicit);
+                reconnect = true;
+                self.send_close(req)?;
+            }
+            self.free_contents(req);
+            self.net.compressed = false;
+            self.net.ssl = false;
+        } else {
+            self.options.max_allowed_packet = ASSEMBLED_PACKET_MAX_SIZE;
+        }
+        let host = host.filter(|h| !h.is_empty()).unwrap_or(b"localhost");
+        let user = user.unwrap_or_default();
+        let password = password.unwrap_or_default();
+        let db = db.filter(|d| !d.is_empty()).unwrap_or_default();
+        if !db.is_empty() {
+            flags |= client::CONNECT_WITH_DB;
+        }
+        let mut socket = socket.map(<[u8]>::to_vec);
+        let (transport, unix) = ConnData::scheme(host, &mut socket, port);
+        let flags = self.connect_flags(flags);
+        // `connect_handshake`.
+        let connected = self.net.connect(req, &transport, &mut self.error)? && {
+            self.net.reset();
+            self.handshake(req, user, password, db, flags)?
+        };
+        if !connected {
+            if self.error.errno == 0 {
+                let via = String::from_utf8_lossy(&transport).into_owned();
+                self.error.client(
+                    cr::CONNECTION_ERROR,
+                    &format!("Unknown error while trying to connect via {via}"),
+                );
+            }
+            self.free_contents(req);
+            self.stats.inc(Stat::ConnectFailure);
+            return Ok(false);
+        }
+        self.state = ConnState::Ready;
+        self.net.compressed = flags & client::COMPRESS != 0;
+        self.scheme = Some(transport);
+        self.port = port;
+        self.host_info = Some(if unix {
+            b"Localhost via UNIX socket".to_vec()
+        } else {
+            let mut info = host.to_vec();
+            info.extend_from_slice(b" via TCP/IP");
+            info
+        });
+        self.error.reset();
+        if !self.execute_init_commands(req)? {
+            if self.error.errno == 0 {
+                self.error.client(
+                    cr::CONNECTION_ERROR,
+                    "Unknown error while trying to connect",
+                );
+            }
+            self.free_contents(req);
+            self.stats.inc(Stat::ConnectFailure);
+            return Ok(false);
+        }
+        self.stats.inc(Stat::ConnectSuccess);
+        self.stats.inc(Stat::OpenedConnections);
+        if reconnect {
+            self.stats.global(Stat::Reconnect, 1);
+        }
+        if self.persistent {
+            self.stats.inc(Stat::PconnectSuccess);
+            self.stats.inc(Stat::OpenedPersistentConnections);
+        }
+        Ok(true)
+    }
+
+    /// `mysqlnd_command::handshake`: the greeting read, the connection's
+    /// facts taken from it, the authentication carried out.
+    fn handshake(
+        &mut self,
+        req: &mut Request,
+        user: &[u8],
+        password: &[u8],
+        db: &[u8],
+        flags: u32,
+    ) -> Result<bool, Thrown> {
+        let Some(greet) = self.read_greet(req)? else {
+            docref(
+                req,
+                Level::Warning,
+                &format!(
+                    "Error while reading greeting packet. PID={}",
+                    std::process::id()
+                ),
+            );
+            self.server_capabilities = 0;
+            return Ok(false);
+        };
+        if let Some(e) = &greet.error {
+            e.set_on(&mut self.error);
+            self.server_capabilities = 0;
+            return Ok(false);
+        }
+        if greet.pre41 {
+            let version = String::from_utf8_lossy(&greet.server_version);
+            let shown: String = version.chars().take(32).collect();
+            self.error.client(
+                cr::NOT_IMPLEMENTED,
+                &format!("Connecting to 3.22, 3.23 & 4.0 is not supported. Server is {shown}"),
+            );
+            self.server_capabilities = 0;
+            return Ok(false);
+        }
+        self.thread_id = u64::from(greet.thread_id);
+        self.protocol_version = greet.protocol_version;
+        self.server_version = Some(greet.server_version.clone());
+        let mut charset_no = u32::from(greet.charset_no);
+        self.greet_charset = charset::by_nr(charset_no);
+        if self.greet_charset.is_none() {
+            charset_no = if self.server_version() >= 50500 {
+                charset::UTF8_MB4_DEFAULT_ID
+            } else {
+                charset::UTF8_MB3_DEFAULT_ID
+            };
+            self.greet_charset = charset::by_nr(charset_no);
+        }
+        self.server_capabilities = greet.server_capabilities;
+        let authenticated = self.connect_run_authentication(
+            req,
+            (user, password, db),
+            &greet.auth_plugin_data,
+            greet.auth_protocol.as_deref(),
+            charset_no,
+            flags,
+        )?;
+        if !authenticated {
+            self.server_capabilities = 0;
+            return Ok(false);
+        }
+        self.upsert.reset();
+        self.upsert.server_status = u32::from(greet.server_status);
+        Ok(true)
+    }
+
+    /// `mysqlnd_conn_data::execute_init_commands`.
+    fn execute_init_commands(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        for command in self.options.init_commands.clone() {
+            self.stats.inc(Stat::InitCommandExecutedCount);
+            if !self.query(req, &command)? {
+                self.stats.inc(Stat::InitCommandFailedCount);
+                return Ok(false);
+            }
+            loop {
+                if self.last_query_type == QueryType::Select
+                    && let Some(mut result) = self.use_unbuffered(req)
+                {
+                    result.free(req, self, true)?;
+                }
+                if !self.next_rowset(req)? {
+                    break;
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    // ---- queries
+
+    /// `mysqlnd_conn_data::query`: sent and its answer read; affected
+    /// rows counted.
+    pub(crate) fn query(&mut self, req: &mut Request, sql: &[u8]) -> Result<bool, Thrown> {
+        if !(self.send_query(req, sql)? && self.reap_query(req)?) {
+            return Ok(false);
+        }
+        if self.last_query_type == QueryType::Upsert && self.upsert.affected_rows != 0 {
+            self.stats
+                .add(Stat::RowsAffectedNormal, self.upsert.affected_rows);
+        }
+        Ok(true)
+    }
+
+    /// `mysqlnd_command::query`.
+    pub(crate) fn send_query(&mut self, req: &mut Request, sql: &[u8]) -> Result<bool, Thrown> {
+        let sent = self.send_command(req, Com::Query, sql, false)?;
+        if sent {
+            self.state = ConnState::QuerySent;
+        }
+        Ok(sent)
+    }
+
+    /// `mysqlnd_command::reap_result`.
+    pub(crate) fn reap_query(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        if self.state <= ConnState::Ready || self.state == ConnState::QuitSent {
+            docref(
+                req,
+                Level::Warning,
+                "Connection not opened, clear or has been closed",
+            );
+            return Ok(false);
+        }
+        self.read_result_set_header(req, None)
+    }
+
+    /// `mysqlnd_query_read_result_set_header`: the first answer to a
+    /// query or a `COM_STMT_EXECUTE`; for a statement (`stmt`) the column
+    /// definitions go to the statement and not to `current_result`.
+    pub(crate) fn read_result_set_header(
+        &mut self,
+        req: &mut Request,
+        stmt: Option<&mut Option<Box<Res>>>,
+    ) -> Result<bool, Thrown> {
+        self.upsert.affected_rows_to_error();
+        let Some(header) = self.read_rset_header(req)? else {
+            if self.error.errno != cr::SERVER_GONE_ERROR
+                && self.error.errno != cr::CLIENT_INTERACTION_TIMEOUT
+            {
+                docref(req, Level::Warning, "Error reading result set's header");
+            }
+            return Ok(false);
+        };
+        match header {
+            RsetHeader::Error(e) => {
+                self.upsert.server_status &= !status::MORE_RESULTS_EXISTS;
+                e.set_on(&mut self.error);
+                self.state = ConnState::Ready;
+                Ok(false)
+            }
+            RsetHeader::LocalInfile(file) => {
+                self.error.errno = 0;
+                self.last_query_type = QueryType::LoadLocal;
+                self.field_count = 0;
+                self.state = ConnState::SendingLoadData;
+                let (ok, warning) = crate::loaddata::handle(req, self, &file)?;
+                self.state = if ok || warning {
+                    ConnState::Ready
+                } else {
+                    ConnState::QuitSent
+                };
+                self.stats.inc(Stat::NonRsetQuery);
+                Ok(ok)
+            }
+            RsetHeader::Upsert {
+                affected_rows,
+                last_insert_id,
+                server_status,
+                warning_count,
+                info,
+            } => {
+                self.error.errno = 0;
+                self.last_query_type = QueryType::Upsert;
+                self.field_count = 0;
+                self.upsert.reset();
+                self.upsert.warning_count = warning_count;
+                self.upsert.server_status = server_status;
+                self.upsert.affected_rows = affected_rows;
+                self.upsert.last_insert_id = last_insert_id;
+                self.last_message = info;
+                self.state = if server_status & status::MORE_RESULTS_EXISTS != 0 {
+                    ConnState::NextResultPending
+                } else {
+                    ConnState::Ready
+                };
+                self.stats.inc(Stat::NonRsetQuery);
+                Ok(true)
+            }
+            RsetHeader::Fields(count) => self.read_fields_header(req, count, stmt),
+        }
+    }
+
+    /// The rows' half of `mysqlnd_query_read_result_set_header`: the
+    /// definitions of `count` columns read into the statement's
+    /// `MYSQLND_RES` or a new `current_result`, then the EOF and its status.
+    fn read_fields_header(
+        &mut self,
+        req: &mut Request,
+        count: u64,
+        mut stmt: Option<&mut Option<Box<Res>>>,
+    ) -> Result<bool, Thrown> {
+        self.error.errno = 0;
+        self.last_message = None;
+        self.stats.inc(Stat::RsetQuery);
+        self.upsert.reset();
+        self.upsert.affected_rows_to_error();
+        self.last_query_type = QueryType::Select;
+        self.state = ConnState::FetchingData;
+        let count = u32::try_from(count).unwrap_or(u32::MAX);
+        self.field_count = count;
+        let mut result = match stmt.as_deref_mut() {
+            None => Box::new(Res::new(count)),
+            Some(held) => match held.take() {
+                Some(res) if res.field_count == count => res,
+                _ => Box::new(Res::new(count)),
+            },
+        };
+        if !result.read_metadata(req, self)? {
+            if let Some(held) = stmt {
+                *held = Some(result);
+            }
+            return Ok(false);
+        }
+        let Some(eof) = self.read_eof(req)? else {
+            if let Some(held) = stmt {
+                *held = None;
+            }
+            return Ok(false);
+        };
+        self.upsert.warning_count = eof.warning_count;
+        self.upsert.server_status = eof.server_status;
+        let counted = if eof.server_status & status::QUERY_NO_GOOD_INDEX_USED != 0 {
+            Some(Stat::BadIndexUsed)
+        } else if eof.server_status & status::QUERY_NO_INDEX_USED != 0 {
+            Some(Stat::NoIndexUsed)
+        } else if eof.server_status & status::QUERY_WAS_SLOW != 0 {
+            Some(Stat::QueryWasSlow)
+        } else {
+            None
+        };
+        if let Some(counted) = counted {
+            self.stats.inc(counted);
+        }
+        match stmt {
+            Some(held) => *held = Some(result),
+            None => self.current_result = Some(result),
+        }
+        Ok(true)
+    }
+
+    /// `mysqlnd_conn_data::more_results`.
+    pub(crate) fn more_rowsets(&self) -> bool {
+        self.upsert.server_status & status::MORE_RESULTS_EXISTS != 0
+    }
+
+    /// `mysqlnd_conn_data::next_result`.
+    pub(crate) fn next_rowset(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        self.error.reset();
+        if self.state != ConnState::NextResultPending {
+            return Ok(false);
+        }
+        self.upsert.affected_rows_to_error();
+        if !self.read_result_set_header(req, None)? {
+            if self.error.errno == 0 {
+                docref(
+                    req,
+                    Level::Warning,
+                    &format!("Serious error. PID={}", std::process::id()),
+                );
+                self.state = ConnState::QuitSent;
+                self.send_close(req)?;
+            }
+            return Ok(false);
+        }
+        if self.last_query_type == QueryType::Upsert && self.upsert.affected_rows != 0 {
+            self.stats
+                .add(Stat::RowsAffectedNormal, self.upsert.affected_rows);
+        }
+        Ok(true)
+    }
+
+    /// `mysqlnd_conn_data::use_result`.
+    pub(crate) fn use_unbuffered(&mut self, req: &mut Request) -> Option<Box<Res>> {
+        let _ = req;
+        self.current_result.as_ref()?;
+        if self.last_query_type != QueryType::Select || self.state != ConnState::FetchingData {
+            self.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+            return None;
+        }
+        self.stats.inc(Stat::UnbufferedSets);
+        let mut result = self.current_result.take()?;
+        result.use_unbuffered(false);
+        Some(result)
+    }
+
+    /// `mysqlnd_conn_data::store_result`.
+    pub(crate) fn store(&mut self, req: &mut Request) -> Result<Option<Box<Res>>, Thrown> {
+        if self.current_result.is_none() {
+            return Ok(None);
+        }
+        if self.last_query_type != QueryType::Select || self.state != ConnState::FetchingData {
+            self.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+            return Ok(None);
+        }
+        self.stats.inc(Stat::BufferedSets);
+        let Some(mut result) = self.current_result.take() else {
+            return Ok(None);
+        };
+        if !result.store(req, self, false)? {
+            return Ok(None);
+        }
+        Ok(Some(result))
+    }
+
+    // ---- the other commands
+
+    /// `mysqlnd_command::init_db`.
+    pub(crate) fn select_db(&mut self, req: &mut Request, db: &[u8]) -> Result<bool, Thrown> {
+        let ok = self.send_command(req, Com::InitDb, db, false)?
+            && self.handle_response(req, false, false, Com::InitDb, true)?;
+        self.upsert.affected_rows_to_error();
+        Ok(ok)
+    }
+
+    /// `mysqlnd_command::ping`.
+    pub(crate) fn ping(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        let ok = self.send_command(req, Com::Ping, &[], true)?
+            && self.handle_response(req, false, true, Com::Ping, true)?;
+        self.upsert.affected_rows_to_error();
+        Ok(ok)
+    }
+
+    /// `mysqlnd_command::statistics`: the server's text.
+    pub(crate) fn statistic(&mut self, req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
+        if !self.send_command(req, Com::Statistics, &[], false)? {
+            return Ok(None);
+        }
+        self.read_stats(req)
+    }
+
+    /// `mysqlnd_conn_data::kill`: killing one's own connection reads no
+    /// answer and closes.
+    pub(crate) fn kill(&mut self, req: &mut Request, pid: u32) -> Result<bool, Thrown> {
+        let read_response = u64::from(pid) != self.thread_id;
+        let sent = self.send_command(req, Com::ProcessKill, &pid.to_le_bytes(), false)?;
+        let ok = sent
+            && (!read_response
+                || self.handle_response(req, false, false, Com::ProcessKill, true)?);
+        if read_response {
+            self.upsert.affected_rows_to_error();
+        } else if sent {
+            self.state = ConnState::QuitSent;
+            self.send_close(req)?;
+        }
+        Ok(ok)
+    }
+
+    /// `mysqlnd_conn_data::set_charset`.
+    pub(crate) fn set_charset(&mut self, req: &mut Request, name: &[u8]) -> Result<bool, Thrown> {
+        let Some(found) = charset::by_name(name) else {
+            self.error
+                .client(cr::CANT_FIND_CHARSET, "Invalid character set was provided");
+            return Ok(false);
+        };
+        let mut sql = b"SET NAMES ".to_vec();
+        sql.extend_from_slice(name);
+        if !self.query(req, &sql)? || self.error.errno != 0 {
+            return Ok(false);
+        }
+        self.charset = Some(found);
+        Ok(true)
+    }
+
+    /// `mysqlnd_command::set_option`.
+    pub(crate) fn set_server_option(
+        &mut self,
+        req: &mut Request,
+        option: ServerOption,
+    ) -> Result<bool, Thrown> {
+        let arg = (option as u16).to_le_bytes();
+        Ok(self.send_command(req, Com::SetOption, &arg, false)?
+            && self.handle_response(req, true, false, Com::SetOption, true)?)
+    }
+
+    /// `mysqlnd_command::debug`: `COM_DEBUG`, answered by an EOF.
+    pub(crate) fn debug(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        Ok(self.send_command(req, Com::Debug, &[], false)?
+            && self.handle_response(req, true, false, Com::Debug, true)?)
+    }
+
+    /// `mysqlnd_command::refresh`.
+    pub(crate) fn refresh(&mut self, req: &mut Request, options: u8) -> Result<bool, Thrown> {
+        self.command_ok(req, Com::Refresh, &[options], false)
+    }
+
+    /// `mysqlnd_conn_data::set_autocommit`.
+    pub(crate) fn autocommit(&mut self, req: &mut Request, on: bool) -> Result<bool, Thrown> {
+        let sql: &[u8] = if on {
+            b"SET AUTOCOMMIT=1"
+        } else {
+            b"SET AUTOCOMMIT=0"
+        };
+        self.query(req, sql)
+    }
+
+    /// `mysqlnd_conn_data::tx_commit_or_rollback`.
+    pub(crate) fn tx_commit_or_rollback(
+        &mut self,
+        req: &mut Request,
+        commit: bool,
+        flags: u32,
+        name: Option<&[u8]>,
+    ) -> Result<bool, Thrown> {
+        let mut options = String::new();
+        let mut word = |w: &str| {
+            if !options.is_empty() {
+                options.push(' ');
+            }
+            options.push_str(w);
+        };
+        if flags & trans_cor::AND_CHAIN != 0 && flags & trans_cor::AND_NO_CHAIN == 0 {
+            word("AND CHAIN");
+        } else if flags & trans_cor::AND_NO_CHAIN != 0 && flags & trans_cor::AND_CHAIN == 0 {
+            word("AND NO CHAIN");
+        }
+        if flags & trans_cor::RELEASE != 0 && flags & trans_cor::NO_RELEASE == 0 {
+            word("RELEASE");
+        } else if flags & trans_cor::NO_RELEASE != 0 && flags & trans_cor::RELEASE == 0 {
+            word("NO RELEASE");
+        }
+        let mut sql = if commit {
+            b"COMMIT".to_vec()
+        } else {
+            b"ROLLBACK".to_vec()
+        };
+        sql.extend_from_slice(&tx_name(req, name));
+        sql.push(b' ');
+        sql.extend_from_slice(options.as_bytes());
+        self.query(req, &sql)
+    }
+
+    /// `mysqlnd_conn_data::tx_begin`.
+    pub(crate) fn tx_begin(
+        &mut self,
+        req: &mut Request,
+        mode: u32,
+        name: Option<&[u8]>,
+    ) -> Result<bool, Thrown> {
+        let mut options = String::new();
+        if mode & trans_start::WITH_CONSISTENT_SNAPSHOT != 0 {
+            options.push_str("WITH CONSISTENT SNAPSHOT");
+        }
+        let mut characteristic = |w: &str| {
+            if !options.is_empty() {
+                options.push_str(", ");
+            }
+            options.push_str(w);
+        };
+        if mode & trans_start::READ_WRITE != 0 {
+            characteristic("READ WRITE");
+        } else if mode & trans_start::READ_ONLY != 0 {
+            characteristic("READ ONLY");
+        }
+        let mut sql = b"START TRANSACTION".to_vec();
+        sql.extend_from_slice(&tx_name(req, name));
+        sql.push(b' ');
+        sql.extend_from_slice(options.as_bytes());
+        let ok = self.query(req, &sql)?;
+        if ok
+            && mode & (trans_start::READ_WRITE | trans_start::READ_ONLY) != 0
+            && self.error.errno == 1064
+        {
+            self.error.client(
+                cr::NOT_IMPLEMENTED,
+                "This server version doesn't support 'READ WRITE' and 'READ ONLY'. Minimum 5.6.5 is required",
+            );
+        }
+        Ok(ok)
+    }
+
+    /// `mysqlnd_conn_data::tx_savepoint` and `tx_savepoint_release`.
+    pub(crate) fn savepoint(
+        &mut self,
+        req: &mut Request,
+        name: Option<&[u8]>,
+        release: bool,
+    ) -> Result<bool, Thrown> {
+        let Some(name) = name else {
+            self.error
+                .client(cr::UNKNOWN_ERROR, "Savepoint name not provided");
+            return Ok(false);
+        };
+        let mut sql = if release {
+            b"RELEASE SAVEPOINT `".to_vec()
+        } else {
+            b"SAVEPOINT `".to_vec()
+        };
+        sql.extend_from_slice(name);
+        sql.push(b'`');
+        self.query(req, &sql)
+    }
+
+    /// `mysqlnd_conn_data::change_user`.
+    pub(crate) fn change_user(
+        &mut self,
+        req: &mut Request,
+        user: Option<&[u8]>,
+        password: Option<&[u8]>,
+        db: Option<&[u8]>,
+        silent: bool,
+    ) -> Result<bool, Thrown> {
+        self.error.reset();
+        self.upsert.affected_rows_to_error();
+        let user = user.unwrap_or_default();
+        let password = password.unwrap_or_default();
+        let db = db.unwrap_or_default();
+        let db = &db[..db.iter().position(|b| *b == 0).unwrap_or(db.len())];
+        let data = self.auth_plugin_data.clone();
+        let protocol = self.options.auth_protocol.clone();
+        self.run_authentication(
+            req,
+            (user, password, db),
+            &data,
+            protocol.as_deref(),
+            0,
+            self.server_capabilities,
+            (silent, true),
+        )
+    }
+
+    /// `mysqlnd_conn_data::escape_string`: quotes doubled under
+    /// `NO_BACKSLASH_ESCAPES`, backslashes added otherwise, by the
+    /// connection's character set.
+    pub(crate) fn escape_string(&self, from: &[u8]) -> Vec<u8> {
+        let fallback = charset::by_nr(charset::UTF8_MB4_DEFAULT_ID);
+        let Some(cset) = self.charset.or(fallback) else {
+            return from.to_vec();
+        };
+        if self.upsert.server_status & status::NO_BACKSLASH_ESCAPES != 0 {
+            charset::escape_quotes(cset, from)
+        } else {
+            charset::escape_slashes(cset, from)
+        }
+    }
+
+    /// `mysqlnd_conn_data::get_server_version`: `major * 10000 + minor *
+    /// 100 + patch`, read with `strtol` from the server's version.
+    pub(crate) fn server_version(&self) -> u64 {
+        let Some(version) = &self.server_version else {
+            return 0;
+        };
+        let mut parts = [0u64; 3];
+        let mut at = 0;
+        for part in &mut parts {
+            let digits = version
+                .get(at..)
+                .unwrap_or_default()
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
+            *part = std::str::from_utf8(version.get(at..at + digits).unwrap_or_default())
+                .ok()
+                .and_then(|d| d.parse().ok())
+                .unwrap_or(0);
+            at += digits + 1;
+        }
+        parts[0] * 10000 + parts[1] * 100 + parts[2]
+    }
+
+    // ---- closing
+
+    /// `mysqlnd_conn_data::send_close`.
+    pub(crate) fn send_close(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        let mut ok = true;
+        if self.state >= ConnState::Ready {
+            self.stats.global(Stat::OpenedConnections, u64::MAX);
+            if self.persistent {
+                self.stats
+                    .global(Stat::OpenedPersistentConnections, u64::MAX);
+            }
+        }
+        match self.state {
+            ConnState::Ready => {
+                if self.net.open() {
+                    ok = self.send_command(req, Com::Quit, &[], true)?;
+                    self.net.close(req);
+                }
+                self.state = ConnState::QuitSent;
+            }
+            ConnState::SendingLoadData
+            | ConnState::NextResultPending
+            | ConnState::QuerySent
+            | ConnState::FetchingData => {
+                self.stats.global(Stat::CloseInMiddle, 1);
+                self.state = ConnState::QuitSent;
+                self.net.close(req);
+            }
+            ConnState::Alloced => {
+                self.state = ConnState::QuitSent;
+                self.net.close(req);
+            }
+            ConnState::QuitSent => self.net.close(req),
+        }
+        Ok(ok)
+    }
+
+    /// `mysqlnd_conn_data::free_contents`.
+    pub(crate) fn free_contents(&mut self, req: &mut Request) {
+        if let Some(mut result) = self.current_result.take() {
+            let _ = result.free(req, self, true);
+        }
+        self.net.close(req);
+        self.scheme = None;
+        self.server_version = None;
+        self.host_info = None;
+        self.auth_plugin_data.clear();
+        self.last_message = None;
+        self.charset = None;
+        self.greet_charset = None;
+    }
+
+    /// `mysqlnd_conn::close`: the close counted by its kind, the close
+    /// sent.
+    pub(crate) fn close(&mut self, req: &mut Request, kind: CloseType) -> Result<bool, Thrown> {
+        if self.state >= ConnState::Ready {
+            self.stats.inc(match kind {
+                CloseType::Explicit => Stat::CloseExplicit,
+                CloseType::Implicit => Stat::CloseImplicit,
+                CloseType::Disconnected => Stat::CloseDisconnect,
+            });
+        }
+        self.send_close(req)
+    }
+
+    /// `mysqlnd_conn_data::sqlstate`.
+    pub(crate) fn sqlstate(&self) -> [u8; 5] {
+        self.error.state()
+    }
+}
+
+/// `STAT_COM_QUIT + command - 1`: the statistic of each command.
+fn com_stat(command: Com) -> Stat {
+    match command {
+        Com::Quit => Stat::ComQuit,
+        Com::InitDb => Stat::ComInitDb,
+        Com::Query => Stat::ComQuery,
+        Com::Refresh => Stat::ComRefresh,
+        Com::Statistics => Stat::ComStatistics,
+        Com::ProcessKill => Stat::ComProcessKill,
+        Com::Debug => Stat::ComDebug,
+        Com::Ping => Stat::ComPing,
+        Com::ChangeUser => Stat::ComChangeUser,
+        Com::StmtPrepare => Stat::ComStmtPrepare,
+        Com::StmtExecute => Stat::ComStmtExecute,
+        Com::StmtSendLongData => Stat::ComStmtSendLongData,
+        Com::StmtClose => Stat::ComStmtClose,
+        Com::StmtReset => Stat::ComStmtReset,
+        Com::SetOption => Stat::ComSetOption,
+        Com::StmtFetch => Stat::ComStmtFetch,
+    }
+}
+
+/// `mysqlnd_escape_string_for_tx_name_in_comment`: ` /*name*/` with the
+/// characters php allows, warning once where it dropped one.
+fn tx_name(req: &mut Request, name: Option<&[u8]>) -> Vec<u8> {
+    let Some(name) = name else {
+        return Vec::new();
+    };
+    let mut out = b" /*".to_vec();
+    let mut warned = false;
+    for &v in name.iter().take_while(|b| **b != 0) {
+        if v.is_ascii_alphanumeric() || matches!(v, b'-' | b'_' | b' ' | b'=') {
+            out.push(v);
+        } else if !warned {
+            docref(
+                req,
+                Level::Warning,
+                "Transaction name has been truncated, since it can only contain the A-Z, a-z, 0-9, \"\\\", \"-\", \"_\", and \"=\" characters",
+            );
+            warned = true;
+        }
+    }
+    out.extend_from_slice(b"*/");
+    out
+}

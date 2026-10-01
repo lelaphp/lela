@@ -641,6 +641,9 @@ pub(crate) fn judge(
     let pinned = &oracle.pin().oracle.path;
     let oracle_absent = if pinned.is_file() {
         oracle.asserted()?;
+        if found.witnesses.iter().any(|w| w.server) {
+            crate::phpt::server::version(oracle, "the witnesses marked mysql")?;
+        }
         None
     } else {
         Some(format!("the pinned php is not at {}", pinned.display()))

@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=df61d751848120858fca97b328846b1b9c3762e7c943cf0ad8ffde6517aaf9ef out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=6610a81b212654bba07c452f834ed954abf44c2e32d7c746d9fe034f227d6a9c out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -107,12 +107,12 @@ third-engine-design.md
 | heap | heap.lock | 365 |  | pass |
 | unit | unit.lock | 107 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 958 | 1500 | pass |
+| api | api.lock | 959 | 1500 | pass |
 | sapi | sapi.lock | 25 |  | pass |
 | tier | tier.lock | 59 |  | pass |
 | harness | xtask.lock | 359 |  | pass |
 
-<!-- /computed in=27a89625f88b980b84bdce336db144b6eecb1bafcb5d334d5437b5199ffd457e out=87392d6a06fbdc7d62bac95628ae3adac5fd1d803aa53da54e7b9c358dc983a5 -->
+<!-- /computed in=e08b388aa24ed90fcef170a33666b52c49225f71dbe38888cde830c956bdc19c out=e3b184e8bec23f6e51ee3691ea36b11351ef03a92699f82f355df65557382b60 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -218,6 +218,7 @@ Options:
 ├── lexbor
 ├── libxml
 ├── mbstring
+├── mysqlnd
 ├── opcache
 ├── openssl
 ├── pcntl
@@ -245,7 +246,7 @@ Options:
 ├── xmlwriter
 └── zlib
 ```
-<!-- /computed in=0b0071bcbdd313336457003bb42a33c5a7f38ca03acdb22f79eac0ada50c1920 out=3d00e40669f0e2220a4ea6115efd73192e4321e121530a4f9cf265d72b677d94 -->
+<!-- /computed in=029b723bfb9ac5bd2b1873c05a3e24bfbb325fa4021a51dd5a6f5efdb755c6fc out=14cfd808bc406b143c7f09411e02b25fcb2e9a1634b4648d0491c66d14205f5b -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

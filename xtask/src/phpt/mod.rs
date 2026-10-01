@@ -128,6 +128,7 @@ mod census;
 pub(crate) mod file;
 pub(crate) mod miss;
 mod redirect;
+pub(crate) mod server;
 pub(crate) mod target;
 
 use std::collections::BTreeMap;
@@ -505,6 +506,17 @@ pub(crate) struct Under<'a> {
     pub oracle_absent: Option<&'a str>,
     /// How many tests run at once.
     pub jobs: NonZeroUsize,
+    /// The `MySQL` server's `SELECT VERSION()`, for a subset that needs
+    /// one (the `server` module); a runner handed such a subset without it
+    /// refuses.
+    pub served: Option<&'a str>,
+}
+
+impl<'a> Under<'a> {
+    /// The same run, with the server that answered for one subset.
+    fn serving(self, served: Option<&'a str>) -> Under<'a> {
+        Under { served, ..self }
+    }
 }
 
 /// The subset's reading: the counts in `numbers`, the failures named in
@@ -563,6 +575,10 @@ pub(crate) fn reading(
         tally.outcome(runner)
     };
     let message = words(&scope, tally, &outcome, subset, uncreated, source, manifest);
+    let message = match under.served {
+        Some(version) => format!("{message}; served by MySQL {version}"),
+        None => message,
+    };
     // Which engine wrote these numbers. The reading's own stamp is the
     // tree's, and one tree had two binaries under it and two readings 37
     // tests apart before this line, with nothing to tell them apart
@@ -825,6 +841,7 @@ pub fn run(
         lane: ask.lane,
         oracle_absent: oracle_absent.as_deref(),
         jobs: ask.jobs.unwrap_or_else(tally::cores),
+        served: None,
     };
     // The run's own copy of the pinned tree, which every subset runs in and
     // which goes when the run does; none where no test will run.
@@ -844,6 +861,8 @@ pub fn run(
             readings.push(unheld);
             continue;
         }
+        let served = server::served(&oracle, subset, copy.is_some())?;
+        let under = under.serving(served.as_deref());
         let within = copy.as_ref().map(|copy| subset.rooted(copy));
         let tally = run_subset(&oracle, registry, within.as_ref().unwrap_or(subset), under)?;
         let mut reading = reading(&tally, root, manifest, &source, subset, under)?;
@@ -962,6 +981,7 @@ pub(crate) fn run_subset(
         lane,
         oracle_absent,
         jobs,
+        served,
     } = under;
     let tests = subset.tests()?;
     let Some(binary) = runner.binary() else {
@@ -973,6 +993,13 @@ pub(crate) fn run_subset(
     // A digest mismatch refuses the whole run (§4.3), before the first
     // test rather than at its first SKIPIF.
     oracle.asserted()?;
+    if served.is_none() && server::needs(subset) {
+        bail!(
+            "{}: refused, not skipped: the subset needs a MySQL server and the run named none; {}",
+            subset.scope,
+            server::START
+        );
+    }
     let control = matches!(runner, Runner::Control(_));
     fpm::place(subset, fpm::host(oracle.pin(), binary, control).as_deref())?;
     let hosts = adapter::Hosts {

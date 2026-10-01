@@ -47,8 +47,9 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 # `--enable-exif` (#1323, #1330), and `ftp`, `shmop`, `sysvsem`,
 # `sysvmsg` and `sysvshm`, php's `--enable-ftp`, `--enable-shmop`,
 # `--enable-sysvsem`, `--enable-sysvmsg` and `--enable-sysvshm`, which
-# the oracle is built with (#1323).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp"] }
+# the oracle is built with (#1323), and `pdo_mysql`, php's
+# `--with-pdo-mysql`, over the `mysqlnd` it turns on (#1345, #1366).
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql"] }
 php_sapi = { path = "../../crates/php_sapi" }
 php_proto = { path = "../../crates/php_proto" }
 # The C library in `src/ffi/` alone, for what the standard library does

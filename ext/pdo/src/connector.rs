@@ -48,6 +48,14 @@ pub trait Connector: Send + Sync {
         &[]
     }
 
+    /// Whether `fetch_err` reads a statement's error from the statement
+    /// itself, as `pdo_mysql_fetch_error_func` reads `S->einfo`, and not
+    /// from the connection, as `pdo_sqlite_fetch_error_func` reads
+    /// `H->einfo` for both.
+    fn errors_per_statement(&self) -> bool {
+        false
+    }
+
     /// `db_handle_factory`: a connection opened from `source`. A
     /// [`Cause::Error`] here is what `pdo_throw_exception` words, the
     /// native code in brackets, since PDO has no connection to record it on
@@ -370,6 +378,10 @@ impl Orientation {
 pub struct Prepared {
     pub statement: Box<dyn Statement>,
     pub placeholders: Placeholders,
+    /// `stmt->bound_param_map` where the connector rewrote the query with
+    /// [`rewrite_named`]: each placeholder's number and the name it stood
+    /// for.
+    pub parameter_map: Option<Vec<(i64, Vec<u8>)>>,
 }
 
 /// What a statement's start leaves: the column count `php_pdo_stmt_set_column_count`
@@ -439,7 +451,8 @@ pub trait Connection: Any + Send {
 
     /// `in_transaction`: `None` is php's null slot, which leaves PDO to
     /// track the transaction itself.
-    fn in_transaction(&self) -> Option<bool> {
+    fn in_transaction(&mut self, req: &mut Request) -> Option<bool> {
+        let _ = req;
         None
     }
 
@@ -471,6 +484,12 @@ pub trait Connection: Any + Send {
         Err(Failure::unsupported())
     }
 
+    /// `scanner`: the connector's own placeholder scanner, which
+    /// `pdo_parse_params` uses in place of `default_scanner`.
+    fn scanner(&self) -> Option<Scanner> {
+        None
+    }
+
     /// `dbh->alloc_own_columns`: whether the columns are described at
     /// the statement's first start rather than at the first fetch.
     fn describes_at_execute(&self) -> bool {
@@ -493,7 +512,15 @@ pub trait Connection: Any + Send {
 /// `pdo_stmt_methods`: a prepared statement.
 pub trait Statement: Any + Send {
     /// `executer`: `executed` is whether the statement ran before.
-    fn execute(&mut self, req: &mut Request, executed: bool) -> Result<Executed, Failure>;
+    /// `query` is `stmt->active_query_string`: the query as PDO rewrote it
+    /// for a connector that emulates prepares, the query as written
+    /// otherwise.
+    fn execute(
+        &mut self,
+        req: &mut Request,
+        executed: bool,
+        query: &[u8],
+    ) -> Result<Executed, Failure>;
 
     /// `fetcher`: whether a row was fetched.
     fn fetch(
@@ -556,8 +583,9 @@ pub trait Statement: Any + Send {
         Err(Failure::unsupported())
     }
 
-    /// `next_rowset`: the next rowset's column count.
-    fn next_rowset(&mut self, req: &mut Request) -> Result<usize, Failure> {
+    /// `next_rowset`: the next rowset's column count, and its row count
+    /// where the connector sets `stmt->row_count`.
+    fn next_rowset(&mut self, req: &mut Request) -> Result<Executed, Failure> {
         let _ = req;
         Err(Failure::unsupported())
     }
@@ -566,6 +594,12 @@ pub trait Statement: Any + Send {
     fn close_cursor(&mut self, req: &mut Request) -> Result<(), Failure> {
         let _ = req;
         Err(Failure::unsupported())
+    }
+
+    /// `dtor`: what the statement holds of the request's or of its
+    /// connection's given back, as the statement is freed.
+    fn close(&mut self, req: &mut Request) {
+        let _ = req;
     }
 }
 
@@ -598,4 +632,153 @@ pub fn with_connection<R>(
     f: impl FnOnce(&mut Request, &mut dyn Connection) -> Result<R, Thrown>,
 ) -> Result<R, Thrown> {
     crate::dbh::with_connection(req, this, f)
+}
+
+/// `PDO_PARSER_TEXT`, `PDO_PARSER_BIND` and `PDO_PARSER_BIND_POS`: what a
+/// scanner makes of one stretch of a query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Token {
+    Text,
+    Bind,
+    Position,
+}
+
+/// `int (*scanner)(pdo_scanner_t *s)`: the token at `at` of the query and
+/// where it ends, `None` at its end or at a NUL, `PDO_PARSER_EOI`.
+pub type Scanner = fn(&[u8], usize) -> Option<(Token, usize)>;
+
+/// `pdo_parse_params` for a connector that takes positional placeholders
+/// natively: each `:name` rewritten to `?`, and the number each stood
+/// for mapped to its name; `None` where the query has no named one; the
+/// mix of the two kinds refused as php refuses it.
+pub fn rewrite_named(sql: &[u8], scanner: Option<Scanner>) -> Result<Option<Rewritten>, Failure> {
+    crate::parser::rewrite_named(sql, scanner)
+}
+
+/// A query [`rewrite_named`] rewrote: the query with `?` in each name's
+/// place, and `stmt->bound_param_map`, each placeholder's number and the
+/// name it stood for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rewritten {
+    pub sql: Vec<u8>,
+    pub parameter_map: Vec<(i64, Vec<u8>)>,
+}
+
+/// `php_pdo_parse_data_source`: each `name=value;` of the DSN found
+/// among `names`, `;;` read as one `;`, the last of a name kept; the
+/// default where the DSN has none.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// var_dump($db->getAttribute(PDO::ATTR_DRIVER_NAME));
+/// ```
+/// ```expect
+/// string(6) "sqlite"
+/// ```
+#[must_use]
+pub fn parse_data_source(dsn: &[u8], names: &[(&str, Option<&[u8]>)]) -> Vec<Option<Vec<u8>>> {
+    let mut out: Vec<Option<Vec<u8>>> = names.iter().map(|(_, d)| d.map(<[u8]>::to_vec)).collect();
+    let len = dsn.len();
+    let mut i = 0;
+    let mut optstart = 0;
+    while i < len {
+        if dsn[i] == 0 {
+            break;
+        }
+        if dsn[i] != b'=' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let valstart = i;
+        let mut semi = None;
+        let mut doubled = false;
+        while i < len {
+            if dsn[i] == 0 {
+                semi = Some(i);
+                i += 1;
+                break;
+            }
+            if dsn[i] == b';' {
+                if i + 1 >= len || dsn[i + 1] != b';' {
+                    semi = Some(i);
+                    i += 1;
+                    break;
+                }
+                doubled = true;
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+        let semi = semi.unwrap_or(i);
+        let name = &dsn[optstart..valstart - 1];
+        if let Some(at) = names.iter().position(|(n, _)| n.as_bytes() == name) {
+            let raw = &dsn[valstart..semi];
+            let value = if doubled {
+                let mut v = Vec::with_capacity(raw.len());
+                let mut k = 0;
+                while k < raw.len() && raw[k] != 0 {
+                    v.push(raw[k]);
+                    k += if raw[k] == b';' { 2 } else { 1 };
+                }
+                v
+            } else {
+                raw.to_vec()
+            };
+            if let Some(slot) = out.get_mut(at) {
+                *slot = Some(value);
+            }
+        }
+        while i < len && dsn[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        optstart = i;
+    }
+    out
+}
+
+/// `pdo_attr_strval`: the option under `attr` as `zval_try_get_string`
+/// reads it, `None` where the array has none.
+pub fn option_string(
+    req: &mut Request,
+    options: Option<PhpArray>,
+    attr: i64,
+) -> Result<Option<Vec<u8>>, Thrown> {
+    match options.and_then(|options| options.get(&Key::Int(attr))) {
+        Some(value) => Ok(Some(
+            php_ext::coerce::to_string(req, &value.deref())?
+                .as_bytes()
+                .to_vec(),
+        )),
+        None => Ok(None),
+    }
+}
+
+/// `pdo_get_bool_param`: `true`, `false` and an integer taken, php's
+/// `TypeError` for the rest.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// try { $db->setAttribute(PDO::ATTR_STRINGIFY_FETCHES, 'yes'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Attribute value must be of type bool for selected attribute, string given
+/// ```
+pub fn bool_attribute(req: &mut Request, value: &Value) -> Result<bool, Thrown> {
+    let value = value.deref();
+    match value.as_ref() {
+        ValueRef::Bool(b) => Ok(b),
+        ValueRef::Int(n) => Ok(n != 0),
+        _ => {
+            let given = value_name(req, &value);
+            Err(throw(
+                req,
+                "TypeError",
+                &format!(
+                    "Attribute value must be of type bool for selected attribute, {given} given"
+                ),
+            ))
+        }
+    }
 }

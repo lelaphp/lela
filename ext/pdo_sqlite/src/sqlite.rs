@@ -265,6 +265,7 @@ impl Connection for Handle {
                         named: true,
                         positional: true,
                     },
+                    parameter_map: None,
                 })
             }
             (Err(_), thrown) => Err(failed(&self.db, thrown)),
@@ -335,7 +336,8 @@ impl Connection for Handle {
     }
 
     /// `pdo_sqlite_in_transaction`: autocommit off.
-    fn in_transaction(&self) -> Option<bool> {
+    fn in_transaction(&mut self, req: &mut Request) -> Option<bool> {
+        let _ = req;
         Some(!self.db.autocommit())
     }
 
@@ -460,7 +462,13 @@ fn replace(req: &mut Request, value: &mut Value, new: Value) {
 
 impl Statement for Stmt {
     /// `pdo_sqlite_stmt_execute`.
-    fn execute(&mut self, req: &mut Request, executed: bool) -> Result<Executed, Failure> {
+    fn execute(
+        &mut self,
+        req: &mut Request,
+        executed: bool,
+        query: &[u8],
+    ) -> Result<Executed, Failure> {
+        let _ = query;
         if executed && !self.done {
             self.reset(req)?;
         }

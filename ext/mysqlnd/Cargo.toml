@@ -1,0 +1,25 @@
+# ext/mysqlnd: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_mysqlnd"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The mysqlnd extension, php-src/ext/mysqlnd"
+
+[lints]
+workspace = true
+
+# The facade, and the wire protocol's packet types and scrambles from
+# `mysql_common`, which does no I/O: every read and write is the engine's
+# streams', as php's mysqlnd's are `php_stream`'s (#1345). The engine is out
+# of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+mysql_common = { workspace = true }
+flate2 = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }

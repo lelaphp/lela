@@ -46,6 +46,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_libxml::extension,
         #[cfg(feature = "dom")]
         php_ext_dom::extension,
+        #[cfg(feature = "mysqlnd")]
+        php_ext_mysqlnd::extension,
         #[cfg(feature = "pdo_mysql")]
         php_ext_pdo_mysql::extension,
         #[cfg(feature = "filter")]

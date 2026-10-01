@@ -55,6 +55,11 @@
 //! threads (harness-design.md §8, revision 61; #1062). What the oracle
 //! does is not moved by it, so it is no part of the divergence key.
 //!
+//! A `mysql` says the snippet needs the `MySQL` server the recipe's
+//! `PDO_MYSQL_TEST_DSN` names (`ci/mysql/compose.yaml`): a crate whose
+//! fences carry it is refused, not judged, where the server does not
+//! answer, as `phpt` refuses a `MySQL` subset (#1366).
+//!
 //! The scan is textual, as `vocab`'s is, not a parse. A doc line is one
 //! beginning `///` or `//!` with one leading space dropped from its body; a
 //! block ends at the first item line, which is a line at indentation zero
@@ -162,6 +167,8 @@ pub struct Witness {
     pub wall: Option<Duration>,
     /// What serves the snippet beside the oracle.
     pub served: Served,
+    /// `mysql`: the snippet needs the `MySQL` server.
+    pub server: bool,
     /// The `request` fence's body: the `.phpt` sections of a CGI-shaped
     /// test (`--GET--`, `--POST--`, `--POST_RAW--`, `--COOKIE--`) the CGI
     /// host is handed, read by the phpt lane's one translation of them.
@@ -377,7 +384,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             file,
             opened,
             format!(
-                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `wall=<duration>`, `regime=<name>` and `process`, and the ini a regime carries is the pin's"
+                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `wall=<duration>`, `regime=<name>`, `process` and `mysql`, and the ini a regime carries is the pin's"
             ),
         ));
     }
@@ -412,6 +419,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             } else {
                 attributes.served
             },
+            server: attributes.server,
             request,
         },
         after,
@@ -485,6 +493,8 @@ struct Attributes {
     regime: Option<String>,
     /// `process`: served by the binary.
     served: Served,
+    /// `mysql`: the snippet needs the `MySQL` server.
+    server: bool,
     /// Attributes this grammar has no meaning for, in the order written.
     unknown: Vec<String>,
 }
@@ -499,6 +509,8 @@ impl Attributes {
                 out.exit = Exit::Bare;
             } else if word == "process" {
                 out.served = Served::Binary;
+            } else if word == "mysql" {
+                out.server = true;
             } else if let Some(status) = word.strip_prefix("exit=") {
                 match status.parse() {
                     Ok(status) => out.exit = Exit::Pinned(status),
@@ -789,6 +801,18 @@ mod tests {
             pinned("/// ```expect exit process", 255),
             "/// ```expect exit=255 process"
         );
+    }
+
+    /// A `mysql` fence needs the server and is keyed as the same fence
+    /// without it (#1366).
+    #[test]
+    fn a_mysql_fence_needs_the_server_under_the_same_key() {
+        let marked = php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect mysql\n/// 1\n/// ```\n");
+        let plain = php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\n");
+        assert!(marked.problems.is_empty(), "{:#?}", marked.problems);
+        assert!(marked.witnesses[0].server);
+        assert!(!plain.witnesses[0].server);
+        assert_eq!(marked.witnesses[0].id(), plain.witnesses[0].id());
     }
 
     /// A `request` fence between the two is the request a CGI host serves

@@ -232,20 +232,35 @@ pub(super) fn raise_impl(
     Err(throw_pdo(req, &message, code, Some(info)))
 }
 
-/// `dbh->methods->fetch_err` over what the connection recorded:
-/// the native code and text appended to `info` where there is one.
+/// `dbh->methods->fetch_err` over what the connector recorded: the
+/// native code and text appended to `info` where there is one, the
+/// statement's own for a connector that keeps one per statement.
 pub(super) fn fetch_error(
     req: &mut Request,
     dbh: PhpObject,
+    on: On,
     info: &mut PhpArray,
 ) -> Result<(), Thrown> {
-    let recorded = dbh.native::<Dbh>(req).and_then(|h| h.native_error.clone());
+    let recorded = match on {
+        On::Stmt(stmt) if per_statement(req, dbh) => stmt
+            .native::<Stmt>(req)
+            .and_then(|s| s.native_error.clone()),
+        _ => dbh.native::<Dbh>(req).and_then(|h| h.native_error.clone()),
+    };
     if let Some((code, message)) = recorded {
         info.append(req, Value::int(code))?;
         let text = crate::string(req, &message)?;
         info.append(req, text)?;
     }
     Ok(())
+}
+
+/// Whether the connection's connector keeps a statement's error on the
+/// statement.
+fn per_statement(req: &Request, dbh: PhpObject) -> bool {
+    dbh.native::<Dbh>(req)
+        .and_then(|h| h.driver)
+        .is_some_and(crate::connector::Connector::errors_per_statement)
 }
 
 /// `pdo_handle_error(dbh, stmt)`: nothing under `ERRMODE_SILENT`;
@@ -268,7 +283,7 @@ pub(super) fn handle(
     let mut info = PhpArray::new(req)?;
     let text = crate::string(req, state.as_str().as_bytes())?;
     info.append(req, text)?;
-    fetch_error(req, dbh, &mut info)?;
+    fetch_error(req, dbh, on, &mut info)?;
     let code = info
         .get(&php_ext::values::Key::Int(1))
         .and_then(|v| v.as_int())
@@ -333,8 +348,18 @@ pub(super) fn record(
     match cause {
         Cause::Error(error) => {
             set_state(req, dbh, on, error.state);
-            if let Some(h) = dbh.native_mut::<Dbh>(req) {
-                h.native_error = (error.code != 0).then_some((error.code, error.message));
+            let native = (error.code != 0).then_some((error.code, error.message));
+            match on {
+                On::Stmt(stmt) if per_statement(req, dbh) => {
+                    if let Some(s) = stmt.native_mut::<Stmt>(req) {
+                        s.native_error = native;
+                    }
+                }
+                _ => {
+                    if let Some(h) = dbh.native_mut::<Dbh>(req) {
+                        h.native_error = native;
+                    }
+                }
             }
             Ok(())
         }
