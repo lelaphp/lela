@@ -254,7 +254,12 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
         line,
         uncaught_here,
     };
-    let stops = stop || session::with(|s| decide(s, req, &here, &checks)).unwrap_or(false);
+    let stops = stop || decide(req, &here, &checks);
+    // A report that ran PHP code, a header callback, ended the request
+    // where a prompt inside it quit.
+    if tier::exiting(req) {
+        return Some(Flow::Resume(at.frame));
+    }
     session::with(|s| s.last_line = line);
     if !stops {
         return None;
@@ -310,21 +315,38 @@ struct Checks {
 }
 
 /// The seek, the step, the watchpoints and the breakpoints, in `phpdbg_execute_ex`'s
-/// order (`phpdbg_prompt.c:1713-1788`): whether the loop stops here.
-fn decide(s: &mut Session, req: &mut Request, here: &At<'_>, checks: &Checks) -> bool {
+/// order (`phpdbg_prompt.c:1713-1788`): whether the loop stops here. The
+/// watchpoints are checked with the session in its cell, since their
+/// report writes through the request's output and may run PHP code the
+/// debugger stops in.
+fn decide(req: &mut Request, here: &At<'_>, checks: &Checks) -> bool {
+    match session::with(|s| moved(s, here, checks)) {
+        Some(Some(stops)) => return stops,
+        Some(None) => {}
+        None => return false,
+    }
+    if crate::watch::changed(req) {
+        return true;
+    }
+    session::with(|s| broken(s, here, checks)).unwrap_or(false)
+}
+
+/// The seek and the step: whether they stop the loop here or let it go
+/// on, none where the checks after them decide.
+fn moved(s: &mut Session, here: &At<'_>, checks: &Checks) -> Option<bool> {
     if let Some(seek) = &s.seek {
         if seek.frame != checks.frame {
             if s.stepping {
                 s.stepping = false;
-                return true;
+                return Some(true);
             }
-            return false;
+            return Some(false);
         }
         let reached = seek.oplines.contains(&here.opline) || checks.uncaught_here;
         match seek.kind {
             SeekKind::Until => {
                 if !reached {
-                    return false;
+                    return Some(false);
                 }
                 s.seek = None;
             }
@@ -332,11 +354,11 @@ fn decide(s: &mut Session, req: &mut Request, here: &At<'_>, checks: &Checks) ->
                 if reached {
                     s.seek = None;
                 }
-                return false;
+                return Some(false);
             }
             SeekKind::Leave => {
                 if !reached {
-                    return false;
+                    return Some(false);
                 }
                 s.seek = None;
                 out::notice(
@@ -347,17 +369,19 @@ fn decide(s: &mut Session, req: &mut Request, here: &At<'_>, checks: &Checks) ->
                     )
                     .as_bytes(),
                 );
-                return true;
+                return Some(true);
             }
         }
     }
     if s.stepping && checks.line != s.last_line {
         s.stepping = false;
-        return true;
+        return Some(true);
     }
-    if crate::watch::changed(s, req) {
-        return true;
-    }
+    None
+}
+
+/// The breakpoints: whether one stops the loop here.
+fn broken(s: &mut Session, here: &At<'_>, checks: &Checks) -> bool {
     if s.breaks.has_pending() {
         s.breaks.resolve_pending(here.file);
     }

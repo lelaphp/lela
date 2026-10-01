@@ -157,6 +157,9 @@ pub struct Session {
     /// The frame the loop is stepping, the nearest user frame to a native
     /// it calls, which `phpdbg_break_next` reads.
     pub standing: Option<FrameRef>,
+    /// `PHPDBG_G(watchpoint_hit)`: a watch reported since the check that
+    /// reads it last cleared it.
+    pub watch_hit: bool,
 }
 
 impl Session {
@@ -186,6 +189,7 @@ impl Session {
             oplogs: Vec::new(),
             sources: Vec::new(),
             standing: None,
+            watch_hit: false,
         }
     }
 }

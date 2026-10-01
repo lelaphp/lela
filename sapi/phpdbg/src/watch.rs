@@ -14,7 +14,7 @@ use crate::cmd::Param;
 use crate::info::flat;
 use crate::out;
 use crate::prompt::{Here, Ret};
-use crate::session::Session;
+use crate::session::{self, Session};
 
 /// How deep a watched value is copied.
 const DEPTH: u32 = 16;
@@ -332,31 +332,57 @@ fn zval_differs(old: &Shown, new: &Shown) -> bool {
     }
 }
 
-/// `phpdbg_print_watch_diff` for a zval.
-fn report_zval(name: &[u8], old: &Shown, new: &Shown) {
+/// Whether the report must stop: what it wrote ran PHP code, a header
+/// callback, that ended the request, `quit` at a prompt inside it.
+fn ended(req: &mut Request) -> bool {
+    tier::exiting(req) || session::with(|s| s.stopped.is_some()).unwrap_or(true)
+}
+
+/// `phpdbg_print_watch_diff` for a zval: the labels to phpdbg's own
+/// stream, the values through the request's output as
+/// `zend_print_flat_zval_r` writes them with `zend_write`, so the first
+/// byte sends the headers and a header callback runs, under the
+/// debugger, before the rest is written; `false` where that ended the
+/// request.
+fn report_zval(req: &mut Request, name: &[u8], old: &Shown, new: &Shown) -> bool {
     out::notice(format!("Breaking on watchpoint {}", lossy(name)).as_bytes());
     if old.counted() {
         out::writeln(b"Old value inaccessible or destroyed");
     } else {
         out::out(b"Old value: ");
-        out::out(&flat(old));
+        out::interruptible(|| req.write(&flat(old)));
+        if ended(req) {
+            return false;
+        }
         out::out(b"\n");
     }
     let reference = matches!(new, Shown::Reference { .. });
     out::out(format!("New value{}: ", if reference { " (reference)" } else { "" }).as_bytes());
-    out::out(&flat(new));
+    out::interruptible(|| req.write(&flat(new)));
+    if ended(req) {
+        return false;
+    }
     out::out(b"\n");
+    true
 }
 
-/// `phpdbg_print_watch_diff` for a string changed in place.
-fn report_str(name: &[u8], old: &[u8], new: &[u8]) {
+/// `phpdbg_print_watch_diff` for a string changed in place, its bytes
+/// written with `zend_write` as the zval's are.
+fn report_str(req: &mut Request, name: &[u8], old: &[u8], new: &[u8]) -> bool {
     out::notice(format!("Breaking on watchpoint {}", lossy(name)).as_bytes());
     out::out(b"Old value: ");
-    out::out(old);
+    out::interruptible(|| req.write(old));
+    if ended(req) {
+        return false;
+    }
     out::out(b"\n");
     out::out(b"New value: ");
-    out::out(new);
+    out::interruptible(|| req.write(new));
+    if ended(req) {
+        return false;
+    }
     out::out(b"\n");
+    true
 }
 
 /// A string reached through the same references and the same string,
@@ -376,12 +402,31 @@ fn str_changed<'a>(old: &'a Shown, new: &'a Shown) -> Option<(&'a [u8], &'a [u8]
     }
 }
 
+/// The copy the session holds of watch `id` now: what a check the report
+/// re-entered left there, or none where it is gone.
+fn held(id: u32) -> Option<Shown> {
+    session::with(|s| {
+        s.watches
+            .list
+            .iter()
+            .find(|watch| watch.id == id)
+            .map(|watch| watch.old.clone())
+    })
+    .flatten()
+}
+
 /// `phpdbg_print_changed_zvals`: every watch read again and compared
-/// with what it held, each change reported; whether any was.
-pub fn changed(s: &mut Session, req: &mut Request) -> bool {
-    let mut hit = false;
-    let mut keep = Vec::with_capacity(s.watches.list.len());
-    for mut watch in std::mem::take(&mut s.watches.list) {
+/// with what it held, each change reported and then kept as what it
+/// holds; whether any was, `PHPDBG_G(watchpoint_hit)` read and cleared.
+/// The session stands in its cell throughout, so a header callback a
+/// report's first byte runs is checked by the debugger too, and finds
+/// the same change, as php's does; the hit it takes is cleared before
+/// this check reads it.
+pub fn changed(req: &mut Request) -> bool {
+    let Some(list) = session::with(|s| s.watches.list.clone()) else {
+        return false;
+    };
+    for watch in list {
         let Some(new) = read(req, &watch) else {
             out::notice(
                 format!(
@@ -395,18 +440,22 @@ pub fn changed(s: &mut Session, req: &mut Request) -> bool {
                 )
                 .as_bytes(),
             );
+            session::with(|s| s.watches.list.retain(|w| w.id != watch.id));
             continue;
         };
-        match watch.kind {
+        let Some(old) = held(watch.id) else {
+            continue;
+        };
+        let reported = match watch.kind {
             Kind::Array => {
                 let count = |v: &Shown| match deref(v) {
                     Shown::Array { len, .. } => Some(*len),
                     _ => None,
                 };
-                if let (Some(old), Some(new)) = (count(&watch.old), count(&new))
+                if let (Some(old), Some(new)) = (count(&old), count(&new))
                     && old != new
                 {
-                    hit = true;
+                    session::with(|s| s.watch_hit = true);
                     out::notice(
                         format!("Breaking on watchpoint {}", lossy(&watch.name)).as_bytes(),
                     );
@@ -417,22 +466,30 @@ pub fn changed(s: &mut Session, req: &mut Request) -> bool {
                     };
                     out::writeln(message.as_bytes());
                 }
+                true
             }
             Kind::Simple | Kind::Recursive => {
-                if zval_differs(&watch.old, &new) {
-                    hit = true;
-                    report_zval(&watch.name, &watch.old, &new);
-                } else if let Some((old, now)) = str_changed(&watch.old, &new) {
-                    hit = true;
-                    report_str(&watch.name, old, now);
+                if zval_differs(&old, &new) {
+                    session::with(|s| s.watch_hit = true);
+                    report_zval(req, &watch.name, &old, &new)
+                } else if let Some((was, now)) = str_changed(&old, &new) {
+                    session::with(|s| s.watch_hit = true);
+                    report_str(req, &watch.name, was, now)
+                } else {
+                    true
                 }
             }
+        };
+        if !reported {
+            return false;
         }
-        watch.old = new;
-        keep.push(watch);
+        session::with(|s| {
+            if let Some(kept) = s.watches.list.iter_mut().find(|w| w.id == watch.id) {
+                kept.old = new;
+            }
+        });
     }
-    s.watches.list = keep;
-    hit
+    session::with(|s| std::mem::take(&mut s.watch_hit)).unwrap_or(false)
 }
 
 /// The watchpoints left when a run ends, each reported removed as the

@@ -81,3 +81,28 @@ fn a_step_stops_at_the_next_line_and_the_end_of_input_quits() {
         )
     );
 }
+
+/// A watchpoint's report writes the values through the program's
+/// output, so its first byte sends the headers and the header callback
+/// runs under the debugger, which stops in it on the same change before
+/// the report goes on (`sapi/phpdbg/tests/gh15210_002.phpt`).
+#[test]
+fn a_watch_report_sends_the_headers_and_the_callback_is_debugged() {
+    let (out, _) = debugged(
+        "watch",
+        "<?php\nheader_register_callback(function() { echo \"sent\";});\n$a = [0];\n$a[0] = 1;\n",
+        "b 4\nr\nw $a[0]\nc\nc\nq\n",
+    );
+    let report = "prompt> [Breaking on watchpoint $a[0]]\n\
+                  Old value: [Breaking on watchpoint $a[0]]\n\
+                  Old value: 0\n\
+                  New value: 1\n\
+                  >00002: header_register_callback(function() { echo \"sent\";});\n \
+                  00003: $a = [0];\n \
+                  00004: $a[0] = 1;\n\
+                  prompt> sent0\n\
+                  New value: 1\n\
+                  \n\
+                  [$a[0] has been removed, removing watchpoint]\n";
+    assert!(out.contains(report), "{out}");
+}

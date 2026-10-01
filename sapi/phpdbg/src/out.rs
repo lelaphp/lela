@@ -12,6 +12,26 @@ use php_sapi::{Aborted, OutputSink, ResponseHead};
 thread_local! {
     /// `PHPDBG_G(last_was_newline)`.
     static LAST_WAS_NEWLINE: Cell<bool> = const { Cell::new(true) };
+    /// A write of the debugger's own through the program's output is
+    /// under way, [`interruptible`].
+    static INTERRUPTIBLE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `f`, a write of the debugger's own that goes through the program's
+/// output, run so that what it still sends once a prompt inside it quit
+/// is dropped: php's `quit` bails out of the write it interrupted
+/// (`zend_bailout`), which never finishes.
+pub fn interruptible(f: impl FnOnce()) {
+    let outer = INTERRUPTIBLE.replace(true);
+    f();
+    INTERRUPTIBLE.set(outer);
+}
+
+/// Whether the program's bytes are dropped: inside an interruptible
+/// write, after the session quit.
+fn dropped() -> bool {
+    INTERRUPTIBLE.get()
+        && crate::session::with(|s| s.stopped == Some(crate::session::Stop::Quit)).unwrap_or(false)
 }
 
 /// The bytes to stdout as they are.
@@ -79,7 +99,7 @@ pub struct Sink;
 
 impl OutputSink for Sink {
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
-        if !bytes.is_empty() {
+        if !bytes.is_empty() && !dropped() {
             raw(bytes);
             LAST_WAS_NEWLINE.set(bytes.last() == Some(&b'\n'));
         }
