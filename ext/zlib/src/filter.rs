@@ -25,10 +25,10 @@ struct Inflating {
     stream: Option<Inflate>,
 }
 
-/// `zlib.deflate`: the stream, and `finished`, whether no flush is
-/// pending since the last bucket.
+/// `zlib.deflate`: the stream, `None` once the filter's `dtor` ended it,
+/// and `finished`, whether no flush is pending since the last bucket.
 struct Deflating {
-    stream: Deflate,
+    stream: Option<Deflate>,
     finished: bool,
 }
 
@@ -58,10 +58,12 @@ impl StreamFilter for Inflating {
                     break;
                 };
                 let desired = (bucket.len() - bin).min(BUFFER);
-                let step = stream.inflate(&bucket[bin..bin + desired], &mut out, flush);
+                let step = stream.inflate(req, &bucket[bin..bin + desired], &mut out, flush)?;
                 match step.status {
                     Status::StreamEnd => {
-                        self.stream = None;
+                        if let Some(stream) = self.stream.take() {
+                            stream.end(req);
+                        }
                         exit = FilterStatus::PassOn;
                     }
                     Status::Ok | Status::BufError => {}
@@ -83,7 +85,7 @@ impl StreamFilter for Inflating {
             && let Some(stream) = self.stream.as_mut()
         {
             loop {
-                let step = stream.inflate(&[], &mut out, Flush::Finish);
+                let step = stream.inflate(req, &[], &mut out, Flush::Finish)?;
                 if step.written > 0 {
                     output.push_back(out[..step.written].to_vec());
                     exit = FilterStatus::PassOn;
@@ -98,19 +100,31 @@ impl StreamFilter for Inflating {
         }
         Ok(exit)
     }
+
+    /// `php_zlib_inflate_dtor`: `inflateEnd` where the stream has not
+    /// reached its end, the state given back.
+    fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        if let Some(stream) = self.stream.take() {
+            stream.end(req);
+        }
+        Ok(())
+    }
 }
 
 impl StreamFilter for Deflating {
     /// `php_zlib_deflate_filter`.
     fn filter(
         &mut self,
-        _req: &mut Request,
+        req: &mut Request,
         _stream: Stream,
         input: &mut Brigade,
         output: &mut Brigade,
         consumed: Option<&mut usize>,
         flags: FilterFlags,
     ) -> Result<FilterStatus, Thrown> {
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(FilterStatus::ErrFatal);
+        };
         let mode = match flags {
             FilterFlags::FlushClose => Flush::Full,
             FilterFlags::FlushInc => Flush::Sync,
@@ -124,9 +138,7 @@ impl StreamFilter for Deflating {
             while bin < bucket.len() {
                 let desired = (bucket.len() - bin).min(BUFFER);
                 self.finished = mode != Flush::None;
-                let step = self
-                    .stream
-                    .deflate(&bucket[bin..bin + desired], &mut out, mode);
+                let step = stream.deflate(req, &bucket[bin..bin + desired], &mut out, mode)?;
                 if step.status != Status::Ok {
                     return Ok(FilterStatus::ErrFatal);
                 }
@@ -142,7 +154,7 @@ impl StreamFilter for Deflating {
         if close || (flags == FilterFlags::FlushInc && !self.finished) {
             let last = if close { Flush::Finish } else { Flush::Sync };
             loop {
-                let step = self.stream.deflate(&[], &mut out, last);
+                let step = stream.deflate(req, &[], &mut out, last)?;
                 self.finished = true;
                 if step.written > 0 {
                     output.push_back(out[..step.written].to_vec());
@@ -158,6 +170,14 @@ impl StreamFilter for Deflating {
         }
         Ok(exit)
     }
+
+    /// `php_zlib_deflate_dtor`: `deflateEnd`, the state given back.
+    fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        if let Some(stream) = self.stream.take() {
+            stream.end(req);
+        }
+        Ok(())
+    }
 }
 
 /// A parameter of an array or object `filterparams`,
@@ -165,8 +185,11 @@ impl StreamFilter for Deflating {
 fn param(req: &mut Request, params: &Value, name: &[u8]) -> Result<Option<Value>, Thrown> {
     match params.as_ref() {
         ValueRef::Array(array) => {
+            // A key for the lookup alone, given back once it is made.
             let key = PhpString::new(req, name)?;
-            Ok(array.get(&Key::Str(key)).map(|value| value.deref()))
+            let found = array.get(&Key::Str(key)).map(|value| value.deref());
+            req.release(Value::string(key));
+            Ok(found)
         }
         ValueRef::Object(object) => {
             let object = *object;
@@ -249,7 +272,7 @@ pub(crate) fn factory(
                 docref(req, Level::Warning, &text);
             }
         }
-        return Ok(Inflate::new(window).ok().map(|stream| {
+        return Ok(Inflate::new(req, window)?.ok().map(|stream| {
             Box::new(Inflating {
                 stream: Some(stream),
             }) as Box<dyn StreamFilter>
@@ -300,10 +323,12 @@ pub(crate) fn factory(
             }
         }
     }
-    Ok(Deflate::new(level, window, memory, 0).ok().map(|stream| {
-        Box::new(Deflating {
-            stream,
-            finished: true,
-        }) as Box<dyn StreamFilter>
-    }))
+    Ok(Deflate::new(req, level, window, memory, 0)?
+        .ok()
+        .map(|stream| {
+            Box::new(Deflating {
+                stream: Some(stream),
+                finished: true,
+            }) as Box<dyn StreamFilter>
+        }))
 }

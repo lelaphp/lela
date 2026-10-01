@@ -12,7 +12,7 @@ use php_ext::attr::php_class;
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::Node;
 
 use crate::object::{Code, Dom, Extra};
@@ -118,9 +118,124 @@ pub(crate) struct TokenSet {
     capacity: usize,
     cached: Option<Vec<u8>>,
     tag: u64,
+    held: Held,
+}
+
+/// What php's `token_set` and `cached_string` hold on the request's
+/// heap for a [`TokenSet`], kept to the set's shape by
+/// [`TokenSet::settle`] (design §5.13): the table's data, `HT_SIZE` of a
+/// mixed table of its capacity, forty bytes a bucket; each token the
+/// parse made, as `zend_string_init` allocates it, where a token `add`,
+/// `toggle` or `replace` was handed is the caller's string, one more
+/// owner and no allocation; and `cached_string`'s `estrdup`.
+///
+/// ```php
+/// $d = Dom\HTMLDocument::createFromString('<p class="a b">x</p><p class="c">y</p>', LIBXML_NOERROR);
+/// $w = $d->body->firstChild->classList; $e = $d->body->lastChild;
+/// $m = memory_get_usage(); $t = $e->classList; echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $t->add('dd', 'eee'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $t->remove('c'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($t); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 528
+/// 0
+/// -32
+/// 0
+/// ```
+#[derive(Default)]
+struct Held {
+    data: Option<Emalloc>,
+    /// A bucket's string where the parse made it, by bucket.
+    tokens: Vec<Option<Emalloc>>,
+    cached: Option<Emalloc>,
+    /// Strings a change gave up, to go back at the next settle.
+    dropped: Vec<Emalloc>,
+    /// Whether the buckets were parsed since the last settle.
+    parsed: bool,
+}
+
+/// `_ZSTR_STRUCT_SIZE(len)`: a `zend_string`'s header, the bytes and the
+/// NUL.
+fn string_size(len: usize) -> usize {
+    24 + len + 1
+}
+
+/// `slot` fitted to `want` bytes, none for `None`, what it held given
+/// back or resized; the `Err` is the memory limit's fatal.
+fn fit(req: &mut Request, slot: &mut Option<Emalloc>, want: Option<usize>) -> Result<(), Thrown> {
+    *slot = match (slot.take(), want) {
+        (None, None) => None,
+        (Some(held), None) => {
+            held.free(req);
+            None
+        }
+        (None, Some(len)) => Some(Emalloc::new(req, len)?),
+        (Some(held), Some(len)) if held.len() == len => Some(held),
+        (Some(held), Some(len)) => Some(held.resize(req, len)?),
+    };
+    Ok(())
 }
 
 impl TokenSet {
+    /// The set's allocations brought to its shape: the table's data
+    /// where it has had a bucket, a string per token and the cached
+    /// value's copy.
+    fn settle(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        const BUCKET: usize = 40;
+        for token in std::mem::take(&mut self.held.dropped) {
+            token.free(req);
+        }
+        if std::mem::take(&mut self.held.parsed) {
+            for token in std::mem::take(&mut self.held.tokens).into_iter().flatten() {
+                token.free(req);
+            }
+            for bucket in &self.buckets {
+                let token = match bucket {
+                    Some(token) => Some(Emalloc::new(req, string_size(token.len()))?),
+                    None => None,
+                };
+                self.held.tokens.push(token);
+            }
+        }
+        self.held.tokens.resize_with(self.buckets.len(), || None);
+        for (at, bucket) in self.buckets.iter().enumerate() {
+            if bucket.is_none() {
+                fit(req, &mut self.held.tokens[at], None)?;
+            }
+        }
+        let data =
+            (self.capacity != 0 || !self.buckets.is_empty()).then(|| self.capacity.max(8) * BUCKET);
+        fit(req, &mut self.held.data, data)?;
+        let cached = self.cached.as_ref().map(|value| value.len() + 1);
+        fit(req, &mut self.held.cached, cached)
+    }
+
+    /// The bucket at `at` given `token`, `zend_hash_set_bucket_key` or
+    /// the bucket emptied: the string it held is given up.
+    fn rename(&mut self, at: usize, token: Option<Vec<u8>>) {
+        self.buckets[at] = token;
+        if let Some(held) = self.held.tokens.get_mut(at).and_then(Option::take) {
+            self.held.dropped.push(held);
+        }
+    }
+
+    /// Everything the set holds on the request's heap given back,
+    /// `zend_hash_destroy` and `efree(intern->cached_string)`.
+    fn release(&mut self, req: &mut Request) {
+        let held = std::mem::take(&mut self.held);
+        for block in held
+            .tokens
+            .into_iter()
+            .flatten()
+            .chain(held.dropped)
+            .chain(held.data)
+            .chain(held.cached)
+        {
+            block.free(req);
+        }
+    }
+
     /// The tokens, in order.
     fn live(&self) -> impl Iterator<Item = &Vec<u8>> {
         self.buckets.iter().flatten()
@@ -140,7 +255,17 @@ impl TokenSet {
         if self.buckets.len() >= self.capacity.max(8) {
             let live = self.live().count();
             if self.buckets.len() > live + (live >> 5) {
-                self.buckets.retain(Option::is_some);
+                self.held.tokens.resize_with(self.buckets.len(), || None);
+                let held = std::mem::take(&mut self.held.tokens);
+                for (bucket, token) in std::mem::take(&mut self.buckets).into_iter().zip(held) {
+                    match bucket {
+                        Some(bucket) => {
+                            self.buckets.push(Some(bucket));
+                            self.held.tokens.push(token);
+                        }
+                        None => self.held.dropped.extend(token),
+                    }
+                }
             } else {
                 self.capacity = self.capacity.max(8) * 2;
             }
@@ -169,6 +294,7 @@ impl TokenSet {
         }
         self.cached = value;
         self.tag += 1;
+        self.held.parsed = true;
     }
 }
 
@@ -193,18 +319,40 @@ fn with_set<R>(
     f: impl FnOnce(&mut TokenSet) -> R,
 ) -> Option<R> {
     let value = element(req, object).and_then(class_value);
-    let Some(Dom {
-        extra: Extra::TokenList(set),
-        ..
-    }) = dom_mut(req, object)
-    else {
-        return None;
-    };
+    let mut set = taken(req, object)?;
     // `xmlStrEqual` treats null and the empty string alike.
     if value.as_deref().unwrap_or_default() != set.cached.as_deref().unwrap_or_default() {
         set.parse(value);
     }
-    Some(f(set))
+    let out = f(&mut set);
+    put(req, object, set);
+    Some(out)
+}
+
+/// The set taken out of its object for a change the request's heap sees.
+fn taken(req: &mut Request, object: PhpObject) -> Option<TokenSet> {
+    match dom_mut(req, object) {
+        Some(Dom {
+            extra: Extra::TokenList(set),
+            ..
+        }) => Some(std::mem::take(&mut **set)),
+        _ => None,
+    }
+}
+
+/// The set put back once its allocations are brought to its shape; the
+/// memory limit's fatal is recorded on the request, which it ends.
+fn put(req: &mut Request, object: PhpObject, mut set: TokenSet) {
+    let _ = set.settle(req);
+    if let Some(Dom {
+        extra: Extra::TokenList(slot),
+        ..
+    }) = dom_mut(req, object)
+    {
+        **slot = set;
+    } else {
+        set.release(req);
+    }
 }
 
 /// The tokens, the set brought up to date.
@@ -220,19 +368,16 @@ fn update(req: &mut Request, object: PhpObject) {
         return;
     };
     let has_attr = elem.has_ns_prop(b"class", None).is_some();
-    if let Some(Dom {
-        extra: Extra::TokenList(set),
-        ..
-    }) = dom_mut(req, object)
-    {
-        set.tag += 1;
-        if !has_attr && set.live().next().is_none() {
-            return;
-        }
+    let Some(mut set) = taken(req, object) else {
+        return;
+    };
+    set.tag += 1;
+    if has_attr || set.live().next().is_some() {
         let value = set.live().cloned().collect::<Vec<_>>().join(&b' ');
         elem.set_ns_prop(None, b"class", &value);
         set.cached = Some(value);
     }
+    put(req, object, set);
 }
 
 /// `dom_token_list_ctor`: a token list over `element_object`'s element.
@@ -273,11 +418,12 @@ pub(crate) fn create(req: &mut Request, element_object: PhpObject) -> Result<Val
         if let Some(n) = node {
             d.obj.attach(n, shared);
         }
-        let mut set = TokenSet::default();
-        set.parse(node.and_then(class_value));
-        set.tag = 0;
-        d.extra = Extra::TokenList(Box::new(set));
+        d.extra = Extra::TokenList(Box::default());
     }
+    let mut set = TokenSet::default();
+    set.parse(node.and_then(class_value));
+    set.tag = 0;
+    put(req, object, set);
     Ok(object.as_value())
 }
 
@@ -480,6 +626,22 @@ pub(crate) struct TokenListHandlers;
 pub(crate) static HANDLERS: TokenListHandlers = TokenListHandlers;
 
 impl ObjectHandlers for TokenListHandlers {
+    /// `dom_token_list_free_obj`: the set's table and strings and the
+    /// cached value given back.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        if let Some(mut set) = taken(req, object) {
+            set.release(req);
+        }
+        if let Some(d) = dom_mut(req, object) {
+            d.extra = Extra::None;
+        }
+    }
+
+    /// `dom_token_list_it`: the iterator, its position and the cache tag.
+    fn iterator_size(&self) -> usize {
+        104
+    }
+
     fn read_property(
         &self,
         req: &mut Request,
@@ -596,12 +758,6 @@ impl ObjectHandlers for TokenListHandlers {
         let (pos, tag) =
             with_set(req, object, |set| (set.valid_from(0), set.tag)).unwrap_or_default();
         Ok(Some(Box::new(TokenIter { pos, index: 0, tag })))
-    }
-
-    fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        if let Some(d) = dom_mut(req, object) {
-            d.extra = Extra::None;
-        }
     }
 }
 
@@ -779,7 +935,7 @@ impl TokenList {
         let answer = match at {
             Some(_) if force == Some(true) => return Ok(true),
             None if force == Some(false) => return Ok(false),
-            Some(at) => with_set(req, this, |set| set.buckets[at] = None).map(|()| false),
+            Some(at) => with_set(req, this, |set| set.rename(at, None)).map(|()| false),
             None => with_set(req, this, |set| set.add(token)).map(|()| true),
         };
         update(req, this);
@@ -804,7 +960,7 @@ impl TokenList {
         let replaced = with_set(req, this, |set| {
             let at = set.find(token)?;
             let present = set.find(&fresh).is_some_and(|other| other != at);
-            set.buckets[at] = (!present).then_some(fresh);
+            set.rename(at, (!present).then_some(fresh));
             Some(())
         })
         .flatten();

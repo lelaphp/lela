@@ -780,6 +780,25 @@ fn parse_ini_string(
 /// bool(false)
 /// parse_ini_file(): Argument #1 ($filename) must not be empty
 /// ```
+///
+/// The file is held whole while it is parsed, as `zend_stream_fixup`
+/// reads it into one buffer, and no read is kept beside it, so the peak
+/// rises by the file's size and less than a read more:
+///
+/// ```php
+/// $p = __DIR__ . '/big.ini'; file_put_contents($p, str_repeat("; a comment filling a line\n", 16384) . "k = v\n");
+/// memory_reset_peak_usage(); $at = memory_get_usage();
+/// $a = parse_ini_file($p);
+/// $over = memory_get_peak_usage() - $at - filesize($p);
+/// var_dump($a, $over > 0 && $over < 8192);
+/// ```
+/// ```expect
+/// array(1) {
+///   ["k"]=>
+///   string(1) "v"
+/// }
+/// bool(true)
+/// ```
 #[php_function]
 fn parse_ini_file(
     req: &mut Request,
@@ -794,16 +813,13 @@ fn parse_ini_file(
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", true)? else {
         return Ok(OrFalse::False);
     };
-    let mut bytes = Vec::new();
-    loop {
-        match stream.read(req, 8192)? {
-            Some(chunk) if !chunk.is_empty() => bytes.extend_from_slice(chunk.as_bytes()),
-            _ => break,
-        }
-    }
+    let bytes = stream.copy_to_mem(req, None);
     stream.free(req);
+    let bytes = bytes?;
     let name = filename.as_bytes().to_vec();
-    parse_ini(req, &bytes, &name, sections, mode)
+    let parsed = parse_ini(req, bytes.as_bytes(), &name, sections, mode);
+    req.release(Value::string(bytes));
+    parsed
 }
 
 /// `getservbyname(string $service, string $protocol): int|false`,

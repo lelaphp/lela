@@ -546,6 +546,19 @@ impl Strings {
     pub fn count(&self) -> usize {
         self.table.count()
     }
+
+    /// The string for these bytes if this table or the frozen one holds
+    /// it, php's `zend_interned_string_ht_lookup` over
+    /// `interned_strings_permanent`, which `zend_string_init_interned_request`
+    /// asks before it interns into the request's own table
+    /// (`Z/Zend/zend_string.c:297-327`).
+    #[must_use]
+    pub fn find(&self, bytes: &[u8]) -> Option<Str> {
+        if let Some(frozen) = frozen_string(bytes) {
+            return Some(frozen);
+        }
+        self.table.find(hash_func(bytes), bytes)
+    }
 }
 
 impl Intern for Strings {
@@ -595,6 +608,12 @@ impl Drop for Strings {
 // are the zvals of the units the engine published, which are read and
 // never written; moving the table moves that sole ownership.
 unsafe impl Send for Strings {}
+
+// SAFETY: a shared table is only read: `find` and `count` take `&self`
+// and read the slots and the strings' bytes, each string hashed before
+// `Permanent::add` published it, so no read writes; growing the table
+// takes `&mut self`, which excludes every reader.
+unsafe impl Sync for Strings {}
 
 impl std::fmt::Debug for Strings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -705,7 +724,7 @@ const REQUEST_TABLE_SIZE: u32 = 1024;
 /// var_dump(memory_get_usage());
 /// ```
 /// ```expect exit=0
-/// int(463408)
+/// int(464240)
 /// ```
 pub(crate) struct Table {
     /// The `HashTable`, laid down by the first add; `None` is a request

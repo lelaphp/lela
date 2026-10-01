@@ -6332,7 +6332,7 @@ pub(crate) fn fetch_class_constant<T: Tier>(
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let value = if op.op2_type != OperandKind::Const && name.eq_ignore_ascii_case(b"class") {
         let written = req.class_name_bytes(class);
-        PhpString::new(req, &written).map(Value::string)
+        req.interned(&written).map(Value::string)
     } else {
         req.class_constant(class, &name)
     };
@@ -10060,7 +10060,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         .class_decl(class)
         .map(|decl| decl.name.0.to_vec())
         .unwrap_or_default();
-    let name = match PhpString::new(req, &name) {
+    let name = match req.interned(&name) {
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -18936,7 +18936,7 @@ fn class_name_into(
     class: crate::api::values::ClassId,
 ) -> Edge {
     let name = req.class_name_bytes(class);
-    let name = match PhpString::new(req, &name) {
+    let name = match req.interned(&name) {
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };

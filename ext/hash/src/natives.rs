@@ -10,7 +10,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::value_name;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::algos::{self, ALGOS, Algo, Options, Refusal, State};
 
@@ -172,7 +172,7 @@ fn finalized(req: &mut Request, position: u32) -> Thrown {
 fn verify(req: &mut Request, object: PhpObject, position: u32) -> Result<PhpObject, Thrown> {
     if object
         .native::<Context>(req)
-        .is_some_and(|c| c.state.is_some())
+        .is_some_and(|c| c.running.is_some())
     {
         Ok(object)
     } else {
@@ -420,14 +420,47 @@ fn hash_hmac_file(
 }
 
 /// php's `php_hashcontext_object` beside the object: the algorithm,
-/// the hash state (`None` once finalised), the options and the
-/// HMAC key.
+/// the running state (`None` once finalised), the options and the
+/// HMAC key, `ecalloc(1, ops->block_size)` as php holds it.
 #[derive(Default)]
 pub(crate) struct ContextState {
     algo: Option<&'static Algo>,
-    state: Option<Box<dyn State>>,
+    running: Option<Running>,
     flags: Flags,
-    key: Option<Vec<u8>>,
+    key: Option<Emalloc>,
+}
+
+impl ContextState {
+    /// `php_hashcontext_dtor`: the state's allocation and the key given
+    /// back, the key zeroed first as `ZEND_SECURE_ZERO` zeroes it.
+    fn free(&mut self, req: &mut Request) {
+        if let Some(running) = self.running.take() {
+            running.allocation.free(req);
+        }
+        if let Some(mut key) = self.key.take() {
+            key.bytes_mut().fill(0);
+            key.free(req);
+        }
+    }
+}
+
+/// `hash->context`: the algorithm's state, in the allocation
+/// `php_hash_alloc_context` makes for it, `ops->context_size` and the
+/// alignment php leaves room for, so a `HashContext` counts what php's does
+/// (design §5.13).
+pub(crate) struct Running {
+    state: Box<dyn State>,
+    allocation: Emalloc,
+}
+
+impl Running {
+    /// `php_hash_alloc_context(ops)` for `state`.
+    fn new(req: &mut Request, algo: &Algo, state: Box<dyn State>) -> Result<Running, Thrown> {
+        Ok(Running {
+            state,
+            allocation: Emalloc::new(req, algo.context)?,
+        })
+    }
 }
 
 /// The payload: `php_hashcontext_object`'s fields, boxed, inside the `sizeof` php
@@ -465,6 +498,29 @@ pub(crate) type Context = Box<ContextState>;
 /// hash_init(): Argument #3 ($key) must not be empty when HMAC is requested
 /// hash_init(): Argument #1 ($algo) must be a valid hashing algorithm
 /// ```
+///
+/// A `HashContext` is `php_hashcontext_object`, the state in the
+/// allocation `php_hash_alloc_context` makes for the algorithm, and an
+/// HMAC key `ecalloc`ed at the block's size; a copy takes a key of its
+/// own whether or not HMAC is asked for, and the final gives both back:
+///
+/// ```php
+/// $warm = hash_init('md5');
+/// $m = memory_get_usage(); $c = hash_init('md5'); echo 'md5 ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $s = hash_init('sha3-512'); echo 'sha3-512 ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $x = hash_init('xxh3'); echo 'xxh3 ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $h = hash_init('md5', HASH_HMAC, 'k'); echo 'hmac ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $d = hash_copy($warm); echo 'copy ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); hash_final($d); hash_final($h); echo 'final ', memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// md5 288
+/// sha3-512 320
+/// xxh3 992
+/// hmac 320
+/// copy 320
+/// final -384
+/// ```
 #[php_function]
 fn hash_init(
     req: &mut Request,
@@ -494,7 +550,11 @@ fn hash_init(
         }
     }
     let mut state = (algo.init)(req, options)?;
-    let mut kept = None;
+    let Some(class) = lookup_class(req, b"HashContext")? else {
+        return Err(throw(req, "Error", "Class \"HashContext\" not found"));
+    };
+    let object = new_object(req, class)?;
+    let allocation = Emalloc::new(req, algo.context)?;
     if flags.hmac() {
         let mut k = if key.len() > algo.block {
             state.update(&key);
@@ -505,34 +565,32 @@ fn hash_init(
             key
         };
         k.resize(algo.block, 0);
-        let k: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
-        state.update(&k);
-        kept = Some(k);
+        let mut kept = Emalloc::new(req, algo.block)?;
+        for (at, b) in kept.bytes_mut().iter_mut().zip(&k) {
+            *at = b ^ 0x36;
+        }
+        state.update(kept.bytes());
+        if let Some(context) = object.native_mut::<Context>(req) {
+            context.key = Some(kept);
+        }
     }
-    let Some(class) = lookup_class(req, b"HashContext")? else {
-        return Err(throw(req, "Error", "Class \"HashContext\" not found"));
-    };
-    let object = new_object(req, class)?;
     if let Some(context) = object.native_mut::<Context>(req) {
-        **context = ContextState {
-            algo: Some(algo),
-            state: Some(state),
-            flags,
-            key: kept,
-        };
+        context.algo = Some(algo);
+        context.running = Some(Running { state, allocation });
+        context.flags = flags;
     }
     Ok(Instance::of(object))
 }
 
-/// The hash state, taken out for the length of a call, and put
+/// The running state, taken out for the length of a call, and put
 /// back.
-fn take(req: &mut Request, object: PhpObject) -> Option<Box<dyn State>> {
-    object.native_mut::<Context>(req)?.state.take()
+fn take(req: &mut Request, object: PhpObject) -> Option<Running> {
+    object.native_mut::<Context>(req)?.running.take()
 }
 
-fn put(req: &mut Request, object: PhpObject, state: Box<dyn State>) {
+fn put(req: &mut Request, object: PhpObject, running: Running) {
     if let Some(context) = object.native_mut::<Context>(req) {
-        context.state = Some(state);
+        context.running = Some(running);
     }
 }
 
@@ -555,11 +613,11 @@ fn hash_update(
     data: PhpString,
 ) -> Result<True, Thrown> {
     let object = verify(req, context.object(), 1)?;
-    let Some(mut state) = take(req, object) else {
+    let Some(mut running) = take(req, object) else {
         return Err(finalized(req, 1));
     };
-    state.update(data.as_bytes());
-    put(req, object, state);
+    running.state.update(data.as_bytes());
+    put(req, object, running);
     Ok(True)
 }
 
@@ -611,7 +669,7 @@ fn hash_update_stream(
     // `$length`: a negative one reads to the end, as php's loop does.
     let mut left = usize::try_from(length).ok();
     let object = verify(req, context.object(), 1)?;
-    let Some(mut state) = take(req, object) else {
+    let Some(mut running) = take(req, object) else {
         return Err(finalized(req, 1));
     };
     let mut read = 0usize;
@@ -621,15 +679,15 @@ fn hash_update_stream(
             Ok(Some(chunk)) if !chunk.is_empty() => chunk,
             Ok(_) => break,
             Err(thrown) => {
-                put(req, object, state);
+                put(req, object, running);
                 return Err(thrown);
             }
         };
-        state.update(chunk.as_bytes());
+        running.state.update(chunk.as_bytes());
         left = left.map(|left| left.saturating_sub(chunk.len()));
         read += chunk.len();
     }
-    put(req, object, state);
+    put(req, object, running);
     Ok(i64::try_from(read).unwrap_or(i64::MAX))
 }
 
@@ -661,12 +719,12 @@ fn hash_update_file(
     let Some(stream) = req.open_stream(filename.0.as_bytes(), b"rb", false)? else {
         return Ok(false);
     };
-    let Some(mut state) = take(req, object) else {
+    let Some(mut running) = take(req, object) else {
         stream.free(req);
         return Err(finalized(req, 1));
     };
-    let read = pump(req, stream, state.as_mut());
-    put(req, object, state);
+    let read = pump(req, stream, running.state.as_mut());
+    put(req, object, running);
     read
 }
 
@@ -690,32 +748,40 @@ fn hash_final(
     #[php(default = false)] binary: bool,
 ) -> Result<PhpString, Thrown> {
     let object = verify(req, context.object(), 1)?;
-    let taken = object
-        .native_mut::<Context>(req)
-        .map(|c| (c.algo, c.state.take(), c.key.take()));
-    let Some((Some(algo), Some(mut state), key)) = taken else {
+    // The key is php's to give back here only under HMAC; a copy's
+    // key without it stays with the object until it is freed.
+    let taken = object.native_mut::<Context>(req).map(|c| {
+        let key = if c.flags.hmac() { c.key.take() } else { None };
+        (c.algo, c.running.take(), key)
+    });
+    let Some((Some(algo), Some(mut running), key)) = taken else {
         return Err(finalized(req, 1));
     };
-    let mut digest = state.finish();
-    if let Some(key) = key {
-        digest = digest_of(req, algo, &[&outer(&key), &digest])?;
+    let mut digest = running.state.finish();
+    running.allocation.free(req);
+    if let Some(mut key) = key {
+        digest = digest_of(req, algo, &[&outer(key.bytes()), &digest])?;
+        key.bytes_mut().fill(0);
+        key.free(req);
     }
     digest_value(req, &digest, binary)
 }
 
 /// `php_hashcontext_clone`: a fresh object with the members copied and
-/// the state and key forked; a finalised state is php's
+/// the state forked into an allocation of its own, and a key `ecalloc`ed
+/// whether or not the original holds one, as php's clone does, the
+/// original's copied in where it does; a finalised state is php's
 /// `ValueError`.
 fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let forked = object.native::<Context>(req).map(|c| {
         (
             c.algo,
-            c.state.as_ref().map(|s| s.fork()),
+            c.running.as_ref().map(|r| r.state.fork()),
             c.flags,
-            c.key.clone(),
+            c.key.as_ref().map(|key| key.bytes().to_vec()),
         )
     });
-    let Some((algo, Some(state), flags, key)) = forked else {
+    let Some((Some(algo), Some(state), flags, key)) = forked else {
         return Err(throw(
             req,
             "ValueError",
@@ -728,13 +794,16 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         req.addref(&value);
         copy.set_prop(req, name, value)?;
     }
+    let running = Running::new(req, algo, state)?;
+    let mut kept = Emalloc::new(req, algo.block)?;
+    if let Some(key) = key {
+        kept.bytes_mut().copy_from_slice(&key);
+    }
     if let Some(context) = copy.native_mut::<Context>(req) {
-        **context = ContextState {
-            algo,
-            state: Some(state),
-            flags,
-            key,
-        };
+        context.algo = Some(algo);
+        context.running = Some(running);
+        context.flags = flags;
+        context.key = Some(kept);
     }
     Ok(copy)
 }
@@ -1167,7 +1236,7 @@ fn int_of(value: Option<Value>) -> Option<i64> {
 pub(crate) struct HashContext;
 
 /// `php_hashcontext_handlers`: `clone_obj` is `php_hashcontext_clone`,
-/// and `free_obj` has nothing of the heap's to give back.
+/// and `free_obj` `php_hashcontext_free`.
 pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
@@ -1175,6 +1244,17 @@ pub(crate) static HANDLERS: Handlers = Handlers;
 impl ObjectHandlers for Handlers {
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_context)
+    }
+
+    /// `php_hashcontext_free`: the state's allocation and the key given
+    /// back.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let context = object
+            .native_mut::<Context>(req)
+            .map(|context| std::mem::take(&mut **context));
+        if let Some(mut context) = context {
+            context.free(req);
+        }
     }
 }
 
@@ -1287,11 +1367,11 @@ impl HashContext {
                 "HashContext with HASH_HMAC option cannot be serialized",
             ));
         }
-        let Some(mut state) = take(req, this) else {
+        let Some(mut running) = take(req, this) else {
             return Err(cannot(req));
         };
-        let fields = algos::serialize(req, state.as_mut());
-        put(req, this, state);
+        let fields = algos::serialize(req, running.state.as_mut());
+        put(req, this, running);
         let fields = fields?;
         let mut out = PhpArray::new(req)?;
         let algo_name = PhpString::new(req, name.as_bytes())?;
@@ -1333,7 +1413,7 @@ impl HashContext {
         let this = this.object();
         if this
             .native::<Context>(req)
-            .is_some_and(|c| c.state.is_some())
+            .is_some_and(|c| c.running.is_some())
         {
             return Err(throw(
                 req,
@@ -1391,8 +1471,9 @@ impl HashContext {
                 ),
             ));
         }
+        let running = Running::new(req, algo, state)?;
         if let Some(context) = this.native_mut::<Context>(req) {
-            context.state = Some(state);
+            context.running = Some(running);
             context.flags = flags;
         }
         for (key, value) in members.snapshot() {

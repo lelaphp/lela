@@ -4721,10 +4721,29 @@ impl Request {
         self.qualified_name(function, None)
     }
 
-    /// An interned string of this request's heap, never refcounted, for
-    /// a name the engine holds as bytes; the `Err` is the memory limit
-    /// refusing the intern.
+    /// An interned string, never refcounted, for a name the engine holds
+    /// as bytes, as `zend_string_init_interned_request` answers it: the
+    /// engine's permanent one where a declaration made the name
+    /// ([`crate::engine::Shared::permanent`]), which costs the request
+    /// nothing, else this request's heap's; the `Err` is the memory
+    /// limit refusing the intern.
+    ///
+    /// A class's and a method's names are `ce->name` and
+    /// `function_name`, so only the array of names is counted:
+    ///
+    /// ```php
+    /// $o = new ArrayObject; $i = new ArrayIterator;
+    /// $m = memory_get_usage();
+    /// $a = get_class($o); $b = $o::class; $c = get_parent_class($i); $d = get_class_methods('Countable');
+    /// var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(216)
+    /// ```
     pub(crate) fn interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        if let Some(permanent) = self.shared.permanent(bytes) {
+            return Ok(PhpString::of(permanent));
+        }
         let interned = self.heap.intern(bytes);
         self.fatal_of(interned).map(PhpString::of)
     }
@@ -5347,6 +5366,25 @@ impl Request {
     /// string(30) "class@anonymous->b()
     /// #1 {main}"
     /// ```
+    ///
+    /// Each row's file, function, class and `->` are the interned strings
+    /// php's rows share, `ZVAL_STR_COPY` of the op array's file name and
+    /// the function's, and its keys `ZSTR_KNOWN`'s, so each frame costs
+    /// what php's does whatever the path's length, and only the
+    /// `Exception`'s own `file`, which `zend_default_exception_new`
+    /// copies, grows with it:
+    ///
+    /// ```php
+    /// function f($a) { return new Exception('x'); }
+    /// function h($a) { return f($a); }
+    /// class C { function m($a) { return h($a); } static function s($a) { return (new C)->m($a); } }
+    /// $w = C::s(1); $v = f(1);
+    /// $a = memory_get_usage(); $e = C::s(1); $b = memory_get_usage(); $g = f(1); $c = memory_get_usage();
+    /// echo ($b - $a) - ($c - $b), "\n";
+    /// ```
+    /// ```expect
+    /// 1776
+    /// ```
     fn render_trace(&mut self, links: Vec<TraceRow>, options: i64) -> Result<PhpArray, Thrown> {
         let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
         let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
@@ -5355,26 +5393,28 @@ impl Request {
         for (traced, this, scope, arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
             if let Some((file, line)) = site {
-                let file = Value::string(PhpString::new(self, &file)?);
+                // `ZVAL_STR_COPY(&tmp, filename)`: the op array's file
+                // name, one more owner of the interned string.
+                let file = Value::string(self.interned(&file)?);
                 self.set_string_key(&mut row, b"file", file)?;
                 self.set_string_key(&mut row, b"line", Value::int(line))?;
             }
             match traced {
                 Traced::Function(function) => {
                     let name = self.declared_name(function);
-                    let name = Value::string(PhpString::new(self, name.as_bytes())?);
+                    let name = Value::string(self.interned(name.as_bytes())?);
                     self.set_string_key(&mut row, b"function", name)?;
                     if let Some(class) = self.method_class(function).or(scope) {
                         // `ce->name` whole: an anonymous class's with its NUL and site.
                         let class = self.class_name_bytes(class);
-                        let class = Value::string(PhpString::new(self, &class)?);
+                        let class = Value::string(self.interned(&class)?);
                         self.set_string_key(&mut row, b"class", class)?;
                         if provide_object && let Some(this) = this {
                             self.addref(&this.as_value());
                             self.set_string_key(&mut row, b"object", this.as_value())?;
                         }
                         let join: &[u8] = if this.is_some() { b"->" } else { b"::" };
-                        let join = Value::string(PhpString::new(self, join)?);
+                        let join = Value::string(self.interned(join)?);
                         self.set_string_key(&mut row, b"type", join)?;
                     }
                     if !ignore_arguments {
@@ -5393,7 +5433,7 @@ impl Request {
                         args.append(self, file)?;
                         self.set_string_key(&mut row, b"args", Value::array(args))?;
                     }
-                    let name = Value::string(PhpString::new(self, kind.name().as_bytes())?);
+                    let name = Value::string(self.interned(kind.name().as_bytes())?);
                     self.set_string_key(&mut row, b"function", name)?;
                 }
             }
@@ -5931,7 +5971,8 @@ impl Request {
         name: &[u8],
         value: Value,
     ) -> Result<(), Thrown> {
-        let key = Key::Str(PhpString::new(self, name)?);
+        // `ZSTR_KNOWN(ZEND_STR_FILE)` and its kin.
+        let key = Key::Str(self.interned(name)?);
         row.set(self, key, value)
     }
 
@@ -7305,9 +7346,32 @@ impl Request {
         class: ClassId,
         payload: T,
     ) -> Result<PhpObject, Thrown> {
+        let custom = self.object_custom(class);
+        self.new_object_custom(class, payload, custom)
+    }
+
+    /// [`Request::new_object_with`] for an object php `emalloc`s whole at
+    /// `size` bytes rather than at its class's `zend_object_alloc`: an
+    /// iterator the engine's wrapper stands for, whose struct is the
+    /// `get_iterator` that made it's ([`crate::interfaces`]).
+    pub(crate) fn new_object_sized<T: std::any::Any + Send>(
+        &mut self,
+        class: ClassId,
+        payload: T,
+        size: usize,
+    ) -> Result<PhpObject, Thrown> {
+        const HEADER: usize = 40;
+        self.new_object_custom(class, payload, size.saturating_sub(HEADER))
+    }
+
+    fn new_object_custom<T: std::any::Any + Send>(
+        &mut self,
+        class: ClassId,
+        payload: T,
+        custom: usize,
+    ) -> Result<PhpObject, Thrown> {
         let slots = self.class_slots(class);
         let defaults = self.property_defaults(class)?;
-        let custom = self.object_custom(class);
         let allocated = self.heap.object_with(class.0, slots, custom, payload);
         let object = match self.fatal_of(allocated).map(PhpObject::of) {
             Ok(object) => object,

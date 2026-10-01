@@ -278,6 +278,11 @@ fn entries_of(req: &Request, map: PhpObject) -> Option<PhpArray> {
 }
 
 impl ObjectHandlers for WeakMapHandlers {
+    /// `zend_weakmap_iterator`: the iterator and its `ht_iter`.
+    fn iterator_size(&self) -> usize {
+        96
+    }
+
     /// `zend_weakmap_get_properties_for`, php's slot, which the debug
     /// info serves here.
     fn properties_overloaded(&self) -> bool {

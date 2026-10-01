@@ -628,6 +628,8 @@ pub(crate) struct AddrInfo {
     pub(crate) protocol: i32,
     pub(crate) canonname: Option<Vec<u8>>,
     pub(crate) addr: Addr,
+    /// `ai_addrlen`: the bytes of the address `getaddrinfo` answered.
+    pub(crate) addrlen: usize,
 }
 
 /// The list `getaddrinfo` answers, freed when this drops.
@@ -696,6 +698,7 @@ pub(crate) fn getaddrinfo(
             protocol: ai.ai_protocol,
             canonname,
             addr: decode(&ss),
+            addrlen: len,
         });
         cur = ai.ai_next.cast_const();
     }

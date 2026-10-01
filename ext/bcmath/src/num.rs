@@ -106,6 +106,20 @@ pub(crate) enum Rounding {
 }
 
 impl Num {
+    /// What `_bc_new_num_nonzeroed_ex_internal` asks `pemalloc` for a
+    /// number of this shape: `sizeof(bc_struct)`, thirty-two bytes, and
+    /// the digits, rounded down to `ZEND_MM_ALIGNMENT` after seven are
+    /// added (`libbcmath/src/init.c`); `None` for zero, which
+    /// `bc_str2num` and `bc_long2num` answer with `BCG(_zero_)` and
+    /// allocate nothing for.
+    pub(crate) fn storage(&self) -> Option<usize> {
+        const BC_STRUCT: usize = 32;
+        if self.is_zero() && self.len == 1 && self.scale == 0 {
+            return None;
+        }
+        Some((BC_STRUCT + 7 + self.len + self.scale) & !7)
+    }
+
     /// `bc_new_num`: zeros, `len` of them before the point and `scale`
     /// after, signed `Plus`.
     fn zeros(len: usize, scale: usize) -> Num {

@@ -16,7 +16,7 @@ use php_ext::coerce::{BinaryOp, Exponent, float_format, to_string, value_name};
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, arg_null_deprecated, arg_type_error, deprecated, fatal, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::num;
 use crate::{Decimal, INT_MAX, RoundingMode, value_error};
@@ -35,8 +35,35 @@ const EXPAND_SCALE: usize = 10;
 /// object.
 #[derive(Default)]
 pub(crate) struct SlotState {
-    held: Option<Decimal>,
+    held: Option<Held>,
     kept: Option<Kept>,
+}
+
+/// `intern->num` and `intern->scale`: the number, and the `bc_num`
+/// php allocates for it on the request's heap ([`crate::num::Num::storage`]),
+/// `None` where php's is shared: `BCG(_zero_)`, or the original's that
+/// `bcmath_number_clone` takes one more reference to (design §5.13).
+///
+/// ```php
+/// $w = new BcMath\Number('1');
+/// $m = memory_get_usage(); $a = new BcMath\Number('1'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = new BcMath\Number('0.000'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $c = new BcMath\Number(str_repeat('9', 40) . '.5'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $d = $a->add(2); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $e = clone $a; echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($e, $d); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 104
+/// 64
+/// 144
+/// 104
+/// 64
+/// -168
+/// ```
+struct Held {
+    decimal: Decimal,
+    storage: Option<Emalloc>,
 }
 
 /// The payload: `bcmath_number_obj_t` keeps its number behind pointers,
@@ -45,8 +72,8 @@ pub(crate) struct SlotState {
 pub(crate) type Slot = Box<SlotState>;
 
 /// What a `BcMath\Number` keeps for the readers of its properties: the
-/// rendering (`intern->value`) and the two property names, each with
-/// the one owner the object holds.
+/// rendering (`intern->value`), with the one owner the object holds, and
+/// the two property names, php's `ZSTR_KNOWN` strings, interned.
 #[derive(Clone, Copy)]
 struct Kept {
     value: PhpString,
@@ -146,8 +173,7 @@ impl Number {
             Union::B(value) => Decimal::from_long(value),
         };
         check_full_scale(req, &decimal, 1)?;
-        set(req, this.object(), decimal);
-        Ok(())
+        set(req, this.object(), decimal)
     }
 
     /// `add(Number|string|int $num, ?int $scale = null): Number`: at the
@@ -557,10 +583,7 @@ impl Number {
             return Err(readonly(req, "value"));
         }
         match Decimal::parse(&text).filter(|decimal| decimal.scale <= INT_MAX) {
-            Some(decimal) => {
-                set(req, this.object(), decimal);
-                Ok(())
-            }
+            Some(decimal) => set(req, this.object(), decimal),
             None => Err(invalid_serialization(req)),
         }
     }
@@ -587,7 +610,11 @@ fn readonly(req: &mut Request, name: &str) -> Thrown {
 /// The number an object holds, `None` before it is set or on an object
 /// of another class.
 fn held_of(req: &Request, object: PhpObject) -> Option<Decimal> {
-    object.native::<Slot>(req)?.held.clone()
+    object
+        .native::<Slot>(req)?
+        .held
+        .as_ref()
+        .map(|held| held.decimal.clone())
 }
 
 /// The number the receiver holds, or the `InternalError` of a method
@@ -602,13 +629,25 @@ fn held(req: &mut Request, object: PhpObject) -> Result<Decimal, Thrown> {
     }
 }
 
-/// Lay `decimal` into the object, the old rendering given up.
-fn set(req: &mut Request, object: PhpObject, decimal: Decimal) {
-    let kept = object.native_mut::<Slot>(req).and_then(|slot| {
-        slot.held = Some(decimal);
-        slot.kept.take()
-    });
+/// Lay `decimal` into the object in the `bc_num` php allocates for it,
+/// the old rendering given up; the `Err` is the memory limit's fatal.
+fn set(req: &mut Request, object: PhpObject, decimal: Decimal) -> Result<(), Thrown> {
+    let storage = match decimal.num.storage() {
+        Some(len) => Some(Emalloc::new(req, len)?),
+        None => None,
+    };
+    let (kept, old) = object
+        .native_mut::<Slot>(req)
+        .map(|slot| {
+            let old = slot.held.replace(Held { decimal, storage });
+            (slot.kept.take(), old)
+        })
+        .unwrap_or_default();
     release_kept(req, kept);
+    if let Some(storage) = old.and_then(|old| old.storage) {
+        storage.free(req);
+    }
+    Ok(())
 }
 
 /// Give up what an object kept for its readers.
@@ -626,21 +665,35 @@ fn made(req: &mut Request, decimal: Decimal) -> Result<Instance<Number>, Thrown>
         return Err(fatal(req, "InternalError: BcMath\\Number is not linked"));
     };
     let object = new_object(req, class)?;
-    set(req, object, decimal);
+    set(req, object, decimal)?;
     Ok(Instance::of(object))
 }
 
 /// What the object keeps for its readers, made on the first read:
 /// `bcmath_number_value_to_str` and the two names.
+///
+/// ```php
+/// $w = new BcMath\Number('1'); serialize($w);
+/// $n = new BcMath\Number('1');
+/// $m = memory_get_usage(); $s = serialize($n); $v = $n->value; echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 112
+/// ```
 fn kept(req: &mut Request, object: PhpObject) -> Result<Kept, Thrown> {
     if let Some(kept) = object.native::<Slot>(req).and_then(|slot| slot.kept) {
         return Ok(kept);
     }
     let decimal = held(req, object)?;
+    // `bc_num2str_ex` is `zend_string_alloc`, a string of its own even
+    // of one digit.
+    let rendered = decimal.render();
     let kept = Kept {
-        value: PhpString::new(req, &decimal.render())?,
-        value_name: PhpString::new(req, b"value")?,
-        scale_name: PhpString::new(req, b"scale")?,
+        value: PhpString::filled(req, rendered.len(), |bytes| {
+            bytes.copy_from_slice(&rendered);
+        })?,
+        value_name: PhpString::interned(req, b"value")?,
+        scale_name: PhpString::interned(req, b"scale")?,
     };
     if let Some(slot) = object.native_mut::<Slot>(req) {
         slot.kept = Some(kept);
@@ -767,7 +820,7 @@ fn long_weak(req: &mut Request, f: f64) -> Option<i64> {
 fn operator_operand(req: &mut Request, value: &Value) -> Result<Option<Decimal>, Unreadable> {
     let value = value.deref();
     Ok(Some(match value.as_ref() {
-        ValueRef::Object(object) => match object.native::<Slot>(req).and_then(|s| s.held.clone()) {
+        ValueRef::Object(object) => match held_of(req, *object) {
             Some(decimal) => decimal,
             None => return Ok(None),
         },
@@ -996,11 +1049,17 @@ fn is_virtual(name: &[u8]) -> bool {
 }
 
 impl ObjectHandlers for Handlers {
+    /// `bcmath_number_free`: the number's `bc_num` and the kept
+    /// rendering given back.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let kept = object
+        let (kept, held) = object
             .native_mut::<Slot>(req)
-            .and_then(|slot| slot.kept.take());
+            .map(|slot| (slot.kept.take(), slot.held.take()))
+            .unwrap_or_default();
         release_kept(req, kept);
+        if let Some(storage) = held.and_then(|held| held.storage) {
+            storage.free(req);
+        }
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
@@ -1356,7 +1415,10 @@ impl ObjectHandlers for Handlers {
 /// ```
 fn clone_number(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let slot = Box::new(SlotState {
-        held: held_of(req, object),
+        held: held_of(req, object).map(|decimal| Held {
+            decimal,
+            storage: None,
+        }),
         kept: None,
     });
     clone_with(req, &object, slot)

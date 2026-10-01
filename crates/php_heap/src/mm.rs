@@ -59,6 +59,22 @@ const PAGE_MAP_LEN: usize = PAGES as usize / 64;
 const BINS: usize = 30;
 /// `ZEND_MM_MAX_SMALL_SIZE`: above this an allocation is a `run` of pages.
 const MAX_SMALL_SIZE: usize = 3072;
+/// `ZEND_MM_MIN_USEABLE_BIN_SIZE` under `ZEND_MM_HEAP_PROTECTION`, which
+/// the oracle's build has: two pointers, the free slot's next pointer
+/// and its shadow, so an allocation of fewer bytes is sixteen and bin 0
+/// is never handed out (`Z/Zend/zend_alloc.c:153`). A crc32 state is
+/// four bytes php `ecalloc`s, and counts sixteen:
+///
+/// ```php
+/// $a = hash_init('crc32b');
+/// $m = memory_get_usage();
+/// $b = hash_init('crc32b');
+/// var_dump(memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(112)
+/// ```
+const MIN_USEABLE_BIN_SIZE: usize = 16;
 /// `ZEND_MM_MAX_LARGE_SIZE`: above this an allocation is huge.
 const MAX_LARGE_SIZE: usize = CHUNK_SIZE - PAGE_SIZE * FIRST_PAGE as usize;
 /// php's default `memory_limit` before any ini is read
@@ -328,8 +344,10 @@ impl Mm {
     }
 
     /// `_emalloc`: `size` usable bytes, from the bin its size falls in,
-    /// from a `run` of pages, or from a huge block of its own.
+    /// sixteen at least as `zend_mm_alloc_heap` raises it, from a `run`
+    /// of pages, or from a huge block of its own.
     pub(crate) fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+        let size = size.max(MIN_USEABLE_BIN_SIZE);
         if size <= MAX_SMALL_SIZE {
             self.alloc_small(size_to_bin(size))
         } else if size <= MAX_LARGE_SIZE {
@@ -378,6 +396,7 @@ impl Mm {
             // this heap is a huge block.
             return unsafe { self.realloc_huge(at, copy, size) };
         }
+        let size = size.max(MIN_USEABLE_BIN_SIZE);
         let chunk = chunk_of(at);
         let page_num = offset / PAGE_SIZE;
         // SAFETY: `at` is live in this heap, so the chunk it sits in is

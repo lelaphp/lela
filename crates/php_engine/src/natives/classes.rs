@@ -53,10 +53,11 @@ fn object_or_class_name(req: &mut Request, given: Value, position: u32) -> Resul
     Err(arg_type_error(req, position, &tail))
 }
 
-/// The declared name of a class as a string of the request's.
+/// `ce->name`: the declared name of a class, the interned string php
+/// keeps on the class entry ([`Request::interned`]).
 fn class_name(req: &mut Request, class: ClassId) -> Result<PhpString, Thrown> {
     let name = req.class_name_bytes(class);
-    PhpString::new(req, &name)
+    req.interned(&name)
 }
 
 /// `get_called_class(): string`, php's `ZEND_FUNCTION(get_called_class)`
@@ -687,7 +688,8 @@ fn get_class_methods(
         .collect();
     let mut array = PhpArray::new(req)?;
     for name in names {
-        let name = Value::string(PhpString::new(req, &name)?);
+        // `ZVAL_STR_COPY(&method_name, mptr->common.function_name)`.
+        let name = Value::string(req.interned(&name)?);
         array.append(req, name)?;
     }
     Ok(array)
@@ -1117,7 +1119,8 @@ fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<PhpArray, Thrown> 
         .collect();
     let mut array = PhpArray::new(req)?;
     for name in names {
-        let name = Value::string(PhpString::new(req, &name)?);
+        // `copy_class_or_interface_name`: `ce->name`, or the alias's key.
+        let name = Value::string(req.interned(&name)?);
         array.append(req, name)?;
     }
     Ok(array)

@@ -285,16 +285,13 @@ impl Funcs {
             }
             Funcs::Places(_) => crate::api::call::call_method(req, &data, b"current", &[]),
             Funcs::User => {
-                if let Some(kept) = wrapper
-                    .native::<ObjectIterator>(req)
-                    .and_then(|it| it.value)
-                {
+                if let Some(kept) = wrapper.native::<Wrapped>(req).and_then(|it| it.value) {
                     req.addref(&kept);
                     return Ok(kept);
                 }
                 let value = crate::api::call::call_method(req, &data, b"current", &[])?;
                 req.addref(&value);
-                if let Some(it) = wrapper.native_mut::<ObjectIterator>(req) {
+                if let Some(it) = wrapper.native_mut::<Wrapped>(req) {
                     it.value = Some(value);
                 }
                 Ok(value)
@@ -352,7 +349,7 @@ impl Funcs {
 /// last given up, before a step that moves the walk.
 pub(crate) fn invalidate_current(req: &mut Request, wrapper: PhpObject) {
     if let Some(kept) = wrapper
-        .native_mut::<ObjectIterator>(req)
+        .native_mut::<Wrapped>(req)
         .and_then(|it| it.value.take())
     {
         req.release(kept);
@@ -371,10 +368,10 @@ fn class_step<R>(
 ) -> Option<R> {
     let Walk { wrapper, data } = it;
     let mut iter = wrapper
-        .native_mut::<ObjectIterator>(req)
+        .native_mut::<Wrapped>(req)
         .and_then(|it| it.class.take())?;
     let answered = step(iter.as_mut(), req, data);
-    if let Some(it) = wrapper.native_mut::<ObjectIterator>(req) {
+    if let Some(it) = wrapper.native_mut::<Wrapped>(req) {
         it.class = Some(iter);
     }
     Some(answered)
@@ -392,14 +389,12 @@ struct Walk {
 
 /// How many steps past its rewind an `Element` walk stands.
 fn position(req: &Request, wrapper: PhpObject) -> usize {
-    wrapper
-        .native::<ObjectIterator>(req)
-        .map_or(0, |it| it.position)
+    wrapper.native::<Wrapped>(req).map_or(0, |it| it.position)
 }
 
 /// The `Element` walk's position set.
 fn set_position(req: &mut Request, wrapper: PhpObject, at: usize) {
-    if let Some(it) = wrapper.native_mut::<ObjectIterator>(req) {
+    if let Some(it) = wrapper.native_mut::<Wrapped>(req) {
         it.position = at;
     }
 }
@@ -460,6 +455,45 @@ pub(crate) struct ObjectIterator {
     value: Option<Value>,
 }
 
+/// The wrapper's payload: the [`ObjectIterator`] boxed, so the object is
+/// the size of the struct php's `get_iterator` `emalloc`s for its kind
+/// ([`iterator_size`]) and the state fits inside it (design §5.13).
+pub(crate) type Wrapped = Box<ObjectIterator>;
+
+/// `sizeof` what php's `get_iterator` `emalloc`s for an iterator served
+/// by `funcs` over `data`: `zend_user_iterator`, 112 bytes, for an
+/// `Iterator`'s methods (`zend_user_it_get_iterator`); the bare
+/// `zend_object_iterator`, 88, for a `Generator`
+/// (`zend_generator_get_iterator`); and for a class that walks its
+/// objects in C, the struct its handlers name
+/// ([`ObjectHandlers::iterator_size`]).
+///
+/// ```php
+/// function g() { yield 1; }
+/// class I implements Iterator { function current(): mixed { return 1; } function key(): mixed { return 0; }
+///     function next(): void {} function rewind(): void {} function valid(): bool { return false; } }
+/// $a = new ArrayIterator([]); $i = new I; $gen = g(); $w = [new IteratorIterator($a), new IteratorIterator($i), new IteratorIterator($gen)];
+/// $m = memory_get_usage(); $x = new IteratorIterator($a); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $y = new IteratorIterator($i); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $z = new IteratorIterator($gen); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 288
+/// 304
+/// 288
+/// ```
+fn iterator_size(req: &Request, funcs: Funcs, data: PhpObject) -> usize {
+    const ZEND_USER_ITERATOR: usize = 112;
+    const ZEND_OBJECT_ITERATOR: usize = 88;
+    match funcs {
+        Funcs::User => ZEND_USER_ITERATOR,
+        Funcs::Generator => ZEND_OBJECT_ITERATOR,
+        Funcs::Places(_) | Funcs::Element | Funcs::Class => {
+            req.object_handlers(data.heap()).iterator_size()
+        }
+    }
+}
+
 /// `iterator_object_handlers` (`Z/Zend/zend_iterators.c:28`):
 /// `iter_wrapper_free` is `funcs->dtor`, which for both tables gives back
 /// the object walked, `iter_wrapper_dtor` serves nothing,
@@ -473,7 +507,7 @@ impl ObjectHandlers for WrapperHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         invalidate_current(req, object);
         let (held, class_iter) = object
-            .native_mut::<ObjectIterator>(req)
+            .native_mut::<Wrapped>(req)
             .map(|it| (it.data.take(), it.class.take()))
             .unwrap_or_default();
         if let (Some(held), Some(mut class_iter)) = (held, class_iter) {
@@ -489,7 +523,7 @@ impl ObjectHandlers for WrapperHandlers {
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(it) = object.native::<ObjectIterator>(req) {
+        if let Some(it) = object.native::<Wrapped>(req) {
             if let Some(held) = it.data {
                 visit(held.as_value());
             }
@@ -519,7 +553,7 @@ pub(crate) fn iterator_wrapper(builder: ExtensionBuilder) -> ExtensionBuilder {
         decl,
         Vec::new(),
         &WRAPPER,
-        crate::api::abi::new_payload::<ObjectIterator>(),
+        crate::api::abi::new_payload::<Wrapped>(),
     )
 }
 
@@ -527,7 +561,7 @@ pub(crate) fn iterator_wrapper(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// is in `FE_FETCH_*`: whether `object` is an iterator's wrapper, php's
 /// comparison of the object's handler table, here of its payload's type.
 pub(crate) fn is_iterator_wrapper(req: &Request, object: PhpObject) -> bool {
-    object.native::<ObjectIterator>(req).is_some()
+    object.native::<Wrapped>(req).is_some()
 }
 
 /// `ce->get_iterator(ce, object, by_ref)` over a `Traversable` object
@@ -589,17 +623,19 @@ fn wrap(
     data: PhpObject,
     class_iter: Option<Box<dyn ClassIterator>>,
 ) -> Result<PhpObject, Thrown> {
+    let size = iterator_size(req, funcs, data);
     let wrapper = match req.class_named(ITERATOR_WRAPPER) {
-        Some(class) => req.new_object_with(
+        Some(class) => req.new_object_sized(
             class,
-            ObjectIterator {
+            Box::new(ObjectIterator {
                 funcs,
                 data: Some(data),
                 index: None,
                 position: 0,
                 class: class_iter,
                 value: None,
-            },
+            }),
+            size,
         ),
         None => Err(crate::api::raising::fatal(
             req,
@@ -744,7 +780,7 @@ pub(crate) fn reset(
 /// index moved on as `++iter->index` moves it, and whether this is a
 /// fetch past the first, which moves the walk forward first.
 fn step(req: &mut Request, wrapper: PhpObject) -> Option<(Funcs, PhpObject, bool)> {
-    let it = wrapper.native_mut::<ObjectIterator>(req)?;
+    let it = wrapper.native_mut::<Wrapped>(req)?;
     let data = it.data?;
     let fetched = it.index;
     it.index = Some(fetched.map_or(0, |index| index.saturating_add(1)));
@@ -753,7 +789,7 @@ fn step(req: &mut Request, wrapper: PhpObject) -> Option<(Funcs, PhpObject, bool
 
 /// The table and the object walked of the iterator `wrapper` holds.
 fn walked(req: &Request, wrapper: PhpObject) -> Option<(Funcs, PhpObject)> {
-    let it = wrapper.native::<ObjectIterator>(req)?;
+    let it = wrapper.native::<Wrapped>(req)?;
     it.data.map(|data| (it.funcs, data))
 }
 
@@ -1067,16 +1103,33 @@ fn internal_walked(req: &Request, iterator: PhpObject) -> Option<PhpObject> {
 /// `zend_create_internal_iterator_zval`: the class's own iterator over
 /// `object`, where it has one, made first, as php makes it, then the
 /// `InternalIterator` holding it; a class walked by index is held itself.
+/// The `InternalIterator` is `zend_internal_iterator`, `emalloc`'d whole,
+/// and the iterator is the struct the class's `get_iterator` makes
+/// ([`ObjectHandlers::iterator_size`]):
+///
+/// ```php
+/// $per = new DatePeriod(new DateTime('2020-01-01'), new DateInterval('P1D'), 2); $w3 = $per->getIterator();
+/// $f = SplFixedArray::fromArray([1, 2]); $w4 = $f->getIterator();
+/// $wm = new WeakMap; $w5 = $wm->getIterator();
+/// $m = memory_get_usage(); $a = $f->getIterator(); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = $wm->getIterator(); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($a, $b); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 176
+/// 176
+/// -352
+/// ```
 pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+    const ZEND_INTERNAL_ITERATOR: usize = 72;
     let Some(class) = req.class_named(b"internaliterator") else {
         return Err(crate::api::raising::fatal(
             req,
             "InternalError: InternalIterator is not declared",
         ));
     };
-    let own = req
-        .object_handlers(object.heap())
-        .get_iterator(req, object, false)?;
+    let handlers = req.object_handlers(object.heap());
+    let own = handlers.get_iterator(req, object, false)?;
     req.addref(&object.as_value());
     let (state, held) = match own {
         Some(own) => {
@@ -1091,11 +1144,15 @@ pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<
         }
         None => (Internal::Elements { object, index: 0 }, object),
     };
+    // `zend_internal_iterator_create`: `emalloc(sizeof(zend_internal_iterator))`
+    // whole; and for a walk by index the iterator php's `get_iterator`
+    // makes, which the class's handlers size, beside it.
+    let by_index = matches!(state, Internal::Elements { .. });
     let iterator = req
-        .new_object(class)
+        .new_object_sized(class, state, ZEND_INTERNAL_ITERATOR)
         .inspect_err(|_| req.release(held.as_value()))?;
-    if let Some(it) = iterator.native_mut::<Internal>(req) {
-        *it = state;
+    if by_index {
+        req.lay_beside_sized(iterator, handlers.iterator_size())?;
     }
     Ok(iterator)
 }

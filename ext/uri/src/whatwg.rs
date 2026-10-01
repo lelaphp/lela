@@ -209,8 +209,8 @@ impl UriParser for WhatWg {
         })
     }
 
-    fn duplicate(&self) -> Option<Self> {
-        self.0.try_clone().map(WhatWg)
+    fn duplicate(&self, _req: &mut Request) -> Result<Option<Self>, Thrown> {
+        Ok(self.0.try_clone().map(WhatWg))
     }
 
     /// `php_uri_parser_whatwg_to_string`.
@@ -653,9 +653,13 @@ impl Url {
     /// string(5) "https"
     /// ```
     fn getScheme(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        let scheme = crate::component_string::<W>(req, this.object(), "scheme", |u| {
-            u.scheme(ReadAs::NormalizedAscii)
-        })?;
+        let scheme = crate::component_string::<W>(
+            req,
+            this.object(),
+            "scheme",
+            ReadAs::NormalizedAscii,
+            |u| u.scheme(ReadAs::NormalizedAscii),
+        )?;
         match scheme {
             Some(scheme) => Ok(scheme),
             None => PhpString::new(req, b""),
@@ -693,9 +697,13 @@ impl Url {
     /// NULL
     /// ```
     fn getUsername(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<W>(req, this.object(), "username", |u| {
-            u.username(ReadAs::NormalizedAscii)
-        })
+        crate::component_string::<W>(
+            req,
+            this.object(),
+            "username",
+            ReadAs::NormalizedAscii,
+            |u| u.username(ReadAs::NormalizedAscii),
+        )
     }
 
     /// `withUsername(?string $username): static`.
@@ -726,9 +734,13 @@ impl Url {
     /// string(0) ""
     /// ```
     fn getPassword(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<W>(req, this.object(), "password", |u| {
-            u.password(ReadAs::NormalizedAscii)
-        })
+        crate::component_string::<W>(
+            req,
+            this.object(),
+            "password",
+            ReadAs::NormalizedAscii,
+            |u| u.password(ReadAs::NormalizedAscii),
+        )
     }
 
     /// `withPassword(#[\SensitiveParameter] ?string $password): static`.
@@ -762,7 +774,7 @@ impl Url {
     /// NULL
     /// ```
     fn getAsciiHost(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<W>(req, this.object(), "host", |u| {
+        crate::component_string::<W>(req, this.object(), "host", ReadAs::NormalizedAscii, |u| {
             u.host(ReadAs::NormalizedAscii)
         })
     }
@@ -777,7 +789,7 @@ impl Url {
     /// string(5) "[::1]"
     /// ```
     fn getUnicodeHost(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<W>(req, this.object(), "host", |u| {
+        crate::component_string::<W>(req, this.object(), "host", ReadAs::NormalizedUnicode, |u| {
             u.host(ReadAs::NormalizedUnicode)
         })
     }
@@ -811,7 +823,9 @@ impl Url {
     /// int(8443)
     /// ```
     fn getPort(req: &mut Request, this: This<Self>) -> Result<Option<i64>, Thrown> {
-        crate::component::<W, _>(req, this.object(), "port", |u| u.port(ReadAs::Raw))
+        crate::component::<W, _>(req, this.object(), "port", ReadAs::Raw, |u| {
+            u.port(ReadAs::Raw)
+        })
     }
 
     /// `withPort(?int $port): static`.
@@ -840,9 +854,10 @@ impl Url {
     /// string(1) "x"
     /// ```
     fn getPath(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        let path = crate::component::<W, _>(req, this.object(), "path", |u| {
-            u.path(ReadAs::NormalizedAscii)
-        })?;
+        let path =
+            crate::component::<W, _>(req, this.object(), "path", ReadAs::NormalizedAscii, |u| {
+                u.path(ReadAs::NormalizedAscii)
+            })?;
         PhpString::new(req, &path)
     }
 
@@ -870,7 +885,7 @@ impl Url {
     /// NULL
     /// ```
     fn getQuery(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<W>(req, this.object(), "query", |u| {
+        crate::component_string::<W>(req, this.object(), "query", ReadAs::NormalizedAscii, |u| {
             u.query(ReadAs::NormalizedAscii)
         })
     }
@@ -903,9 +918,13 @@ impl Url {
     /// NULL
     /// ```
     fn getFragment(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
-        crate::component_string::<W>(req, this.object(), "fragment", |u| {
-            u.fragment(ReadAs::NormalizedUnicode)
-        })
+        crate::component_string::<W>(
+            req,
+            this.object(),
+            "fragment",
+            ReadAs::NormalizedUnicode,
+            |u| u.fragment(ReadAs::NormalizedUnicode),
+        )
     }
 
     /// `withFragment(?string $fragment): static`.

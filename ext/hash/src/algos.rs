@@ -102,13 +102,29 @@ pub(crate) type Init = fn(&mut Request, Options) -> Result<Box<dyn State>, Throw
 pub(crate) struct Options(pub(crate) Option<PhpArray>);
 
 impl Options {
-    /// `zend_hash_str_find_deref(args, name)`.
+    /// `zend_hash_str_find_deref(args, name)`: the name is a key for
+    /// the lookup alone, given back once it is made, as php's
+    /// `zend_hash_str_find` allocates none.
+    ///
+    /// ```php
+    /// $a = hash_init('murmur3a', options: ['seed' => 1]);
+    /// $m = memory_get_usage();
+    /// $b = hash_init('murmur3a', options: ['seed' => 1]);
+    /// $n = memory_get_usage();
+    /// unset($b);
+    /// var_dump(memory_get_usage() - $n + ($n - $m));
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     pub(crate) fn get(self, req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown> {
         let Some(options) = self.0 else {
             return Ok(None);
         };
         let key = PhpString::new(req, name)?;
-        Ok(options.get(&Key::Str(key)).map(|value| value.deref()))
+        let found = options.get(&Key::Str(key)).map(|value| value.deref());
+        req.release(Value::string(key));
+        Ok(found)
     }
 
     /// The `seed` option as `PHP_MURMUR3AInit` and `PHP_XXH32Init` read
@@ -137,6 +153,10 @@ pub(crate) struct Algo {
     pub(crate) label: &'static str,
     pub(crate) digest: usize,
     pub(crate) block: usize,
+    /// What `php_hash_alloc_context` `ecalloc`s for the state:
+    /// `ops->context_size`, with `ops->context_align` beside it where
+    /// php aligns the state (xxh3's 64).
+    pub(crate) context: usize,
     pub(crate) crypto: bool,
     /// The magic `__serialize` writes the state under, which
     /// `__unserialize` asks for; `None` for an algorithm php cannot
@@ -157,12 +177,20 @@ fn plain<T: State + Default + 'static>(
 /// `PHP_HASH_SERIALIZE_MAGIC_SPEC`.
 const MAGIC: i64 = 2;
 
-const fn algo(name: &'static str, digest: usize, block: usize, crypto: bool, init: Init) -> Algo {
+const fn algo(
+    name: &'static str,
+    digest: usize,
+    block: usize,
+    context: usize,
+    crypto: bool,
+    init: Init,
+) -> Algo {
     Algo {
         name,
         label: name,
         digest,
         block,
+        context,
         crypto,
         magic: Some(MAGIC),
         init,
@@ -172,75 +200,75 @@ const fn algo(name: &'static str, digest: usize, block: usize, crypto: bool, ini
 /// The algorithms in php's order, which `hash_algos()` lists.
 #[rustfmt::skip]
 pub(crate) static ALGOS: [Algo; 60] = [
-    algo("md2", 16, 16, true, plain::<md::Md2>),
-    algo("md4", 16, 64, true, plain::<md::Md4>),
-    algo("md5", 16, 64, true, plain::<md::Md5>),
-    algo("sha1", 20, 64, true, plain::<md::Sha1>),
-    algo("sha224", 28, 64, true, plain::<md::Sha224>),
-    algo("sha256", 32, 64, true, plain::<md::Sha256>),
-    algo("sha384", 48, 128, true, plain::<sha::Sha384>),
-    algo("sha512/224", 28, 128, true, plain::<sha::Sha512t224>),
-    algo("sha512/256", 32, 128, true, plain::<sha::Sha512t256>),
-    algo("sha512", 64, 128, true, plain::<sha::Sha512Full>),
-    keccak("sha3-224", 28, plain::<sha::Sha3<28>>),
-    keccak("sha3-256", 32, plain::<sha::Sha3<32>>),
-    keccak("sha3-384", 48, plain::<sha::Sha3<48>>),
-    keccak("sha3-512", 64, plain::<sha::Sha3<64>>),
-    algo("ripemd128", 16, 64, true, plain::<md::Ripemd<4>>),
-    algo("ripemd160", 20, 64, true, plain::<md::Ripemd<5>>),
-    algo("ripemd256", 32, 64, true, plain::<md::Ripemd<8>>),
-    algo("ripemd320", 40, 64, true, plain::<md::Ripemd<10>>),
-    algo("whirlpool", 64, 64, true, plain::<whirlpool::Whirlpool>),
-    algo("tiger128,3", 16, 64, true, plain::<tiger::Tiger<0, 16>>),
-    algo("tiger160,3", 20, 64, true, plain::<tiger::Tiger<0, 20>>),
-    algo("tiger192,3", 24, 64, true, plain::<tiger::Tiger<0, 24>>),
-    algo("tiger128,4", 16, 64, true, plain::<tiger::Tiger<1, 16>>),
-    algo("tiger160,4", 20, 64, true, plain::<tiger::Tiger<1, 20>>),
-    algo("tiger192,4", 24, 64, true, plain::<tiger::Tiger<1, 24>>),
-    algo("snefru", 32, 32, true, plain::<snefru::Snefru>),
-    Algo { label: "snefru", ..algo("snefru256", 32, 32, true, plain::<snefru::Snefru>) },
-    algo("gost", 32, 32, true, plain::<gost::Gost<false>>),
-    algo("gost-crypto", 32, 32, true, plain::<gost::Gost<true>>),
-    algo("adler32", 4, 4, false, plain::<checksum::Adler32>),
-    algo("crc32", 4, 4, false, plain::<checksum::Crc<Bzip2>>),
-    algo("crc32b", 4, 4, false, plain::<checksum::Crc<Ieee>>),
-    algo("crc32c", 4, 4, false, plain::<checksum::Crc<Castagnoli>>),
-    algo("fnv132", 4, 4, false, plain::<checksum::Fnv32<false>>),
-    algo("fnv1a32", 4, 4, false, plain::<checksum::Fnv32<true>>),
-    algo("fnv164", 8, 4, false, plain::<checksum::Fnv64<false>>),
-    algo("fnv1a64", 8, 4, false, plain::<checksum::Fnv64<true>>),
-    algo("joaat", 4, 4, false, plain::<checksum::Joaat>),
-    algo("murmur3a", 4, 4, false, murmur::Murmur3a::init),
-    algo("murmur3c", 16, 4, false, murmur::Murmur3c::init),
-    algo("murmur3f", 16, 8, false, murmur::Murmur3f::init),
-    algo("xxh32", 4, 4, false, xxhash::Xxh32::init),
-    algo("xxh64", 8, 8, false, xxhash::Xxh64::init),
-    Algo { magic: None, ..algo("xxh3", 8, 8, false, xxhash::Xxh3::init_64) },
-    Algo { magic: None, ..algo("xxh128", 16, 8, false, xxhash::Xxh3::init_128) },
-    algo("haval128,3", 16, 128, true, plain::<haval::Haval<3, 128>>),
-    algo("haval160,3", 20, 128, true, plain::<haval::Haval<3, 160>>),
-    algo("haval192,3", 24, 128, true, plain::<haval::Haval<3, 192>>),
-    algo("haval224,3", 28, 128, true, plain::<haval::Haval<3, 224>>),
-    algo("haval256,3", 32, 128, true, plain::<haval::Haval<3, 256>>),
-    algo("haval128,4", 16, 128, true, plain::<haval::Haval<4, 128>>),
-    algo("haval160,4", 20, 128, true, plain::<haval::Haval<4, 160>>),
-    algo("haval192,4", 24, 128, true, plain::<haval::Haval<4, 192>>),
-    algo("haval224,4", 28, 128, true, plain::<haval::Haval<4, 224>>),
-    algo("haval256,4", 32, 128, true, plain::<haval::Haval<4, 256>>),
-    algo("haval128,5", 16, 128, true, plain::<haval::Haval<5, 128>>),
-    algo("haval160,5", 20, 128, true, plain::<haval::Haval<5, 160>>),
-    algo("haval192,5", 24, 128, true, plain::<haval::Haval<5, 192>>),
-    algo("haval224,5", 28, 128, true, plain::<haval::Haval<5, 224>>),
-    algo("haval256,5", 32, 128, true, plain::<haval::Haval<5, 256>>),
+    algo("md2", 16, 16, 81, true, plain::<md::Md2>),
+    algo("md4", 16, 64, 88, true, plain::<md::Md4>),
+    algo("md5", 16, 64, 152, true, plain::<md::Md5>),
+    algo("sha1", 20, 64, 92, true, plain::<md::Sha1>),
+    algo("sha224", 28, 64, 104, true, plain::<md::Sha224>),
+    algo("sha256", 32, 64, 104, true, plain::<md::Sha256>),
+    algo("sha384", 48, 128, 208, true, plain::<sha::Sha384>),
+    algo("sha512/224", 28, 128, 208, true, plain::<sha::Sha512t224>),
+    algo("sha512/256", 32, 128, 208, true, plain::<sha::Sha512t256>),
+    algo("sha512", 64, 128, 208, true, plain::<sha::Sha512Full>),
+    keccak("sha3-224", 28, 224, plain::<sha::Sha3<28>>),
+    keccak("sha3-256", 32, 224, plain::<sha::Sha3<32>>),
+    keccak("sha3-384", 48, 224, plain::<sha::Sha3<48>>),
+    keccak("sha3-512", 64, 224, plain::<sha::Sha3<64>>),
+    algo("ripemd128", 16, 64, 88, true, plain::<md::Ripemd<4>>),
+    algo("ripemd160", 20, 64, 92, true, plain::<md::Ripemd<5>>),
+    algo("ripemd256", 32, 64, 104, true, plain::<md::Ripemd<8>>),
+    algo("ripemd320", 40, 64, 112, true, plain::<md::Ripemd<10>>),
+    algo("whirlpool", 64, 64, 168, true, plain::<whirlpool::Whirlpool>),
+    algo("tiger128,3", 16, 64, 104, true, plain::<tiger::Tiger<0, 16>>),
+    algo("tiger160,3", 20, 64, 104, true, plain::<tiger::Tiger<0, 20>>),
+    algo("tiger192,3", 24, 64, 104, true, plain::<tiger::Tiger<0, 24>>),
+    algo("tiger128,4", 16, 64, 104, true, plain::<tiger::Tiger<1, 16>>),
+    algo("tiger160,4", 20, 64, 104, true, plain::<tiger::Tiger<1, 20>>),
+    algo("tiger192,4", 24, 64, 104, true, plain::<tiger::Tiger<1, 24>>),
+    algo("snefru", 32, 32, 108, true, plain::<snefru::Snefru>),
+    Algo { label: "snefru", ..algo("snefru256", 32, 32, 108, true, plain::<snefru::Snefru>) },
+    algo("gost", 32, 32, 120, true, plain::<gost::Gost<false>>),
+    algo("gost-crypto", 32, 32, 120, true, plain::<gost::Gost<true>>),
+    algo("adler32", 4, 4, 4, false, plain::<checksum::Adler32>),
+    algo("crc32", 4, 4, 4, false, plain::<checksum::Crc<Bzip2>>),
+    algo("crc32b", 4, 4, 4, false, plain::<checksum::Crc<Ieee>>),
+    algo("crc32c", 4, 4, 4, false, plain::<checksum::Crc<Castagnoli>>),
+    algo("fnv132", 4, 4, 4, false, plain::<checksum::Fnv32<false>>),
+    algo("fnv1a32", 4, 4, 4, false, plain::<checksum::Fnv32<true>>),
+    algo("fnv164", 8, 4, 8, false, plain::<checksum::Fnv64<false>>),
+    algo("fnv1a64", 8, 4, 8, false, plain::<checksum::Fnv64<true>>),
+    algo("joaat", 4, 4, 4, false, plain::<checksum::Joaat>),
+    algo("murmur3a", 4, 4, 12, false, murmur::Murmur3a::init),
+    algo("murmur3c", 16, 4, 36, false, murmur::Murmur3c::init),
+    algo("murmur3f", 16, 8, 40, false, murmur::Murmur3f::init),
+    algo("xxh32", 4, 4, 48, false, xxhash::Xxh32::init),
+    algo("xxh64", 8, 8, 88, false, xxhash::Xxh64::init),
+    Algo { magic: None, ..algo("xxh3", 8, 8, 896, false, xxhash::Xxh3::init_64) },
+    Algo { magic: None, ..algo("xxh128", 16, 8, 896, false, xxhash::Xxh3::init_128) },
+    algo("haval128,3", 16, 128, 184, true, plain::<haval::Haval<3, 128>>),
+    algo("haval160,3", 20, 128, 184, true, plain::<haval::Haval<3, 160>>),
+    algo("haval192,3", 24, 128, 184, true, plain::<haval::Haval<3, 192>>),
+    algo("haval224,3", 28, 128, 184, true, plain::<haval::Haval<3, 224>>),
+    algo("haval256,3", 32, 128, 184, true, plain::<haval::Haval<3, 256>>),
+    algo("haval128,4", 16, 128, 184, true, plain::<haval::Haval<4, 128>>),
+    algo("haval160,4", 20, 128, 184, true, plain::<haval::Haval<4, 160>>),
+    algo("haval192,4", 24, 128, 184, true, plain::<haval::Haval<4, 192>>),
+    algo("haval224,4", 28, 128, 184, true, plain::<haval::Haval<4, 224>>),
+    algo("haval256,4", 32, 128, 184, true, plain::<haval::Haval<4, 256>>),
+    algo("haval128,5", 16, 128, 184, true, plain::<haval::Haval<5, 128>>),
+    algo("haval160,5", 20, 128, 184, true, plain::<haval::Haval<5, 160>>),
+    algo("haval192,5", 24, 128, 184, true, plain::<haval::Haval<5, 192>>),
+    algo("haval224,5", 28, 128, 184, true, plain::<haval::Haval<5, 224>>),
+    algo("haval256,5", 32, 128, 184, true, plain::<haval::Haval<5, 256>>),
 ];
 
 /// `DECLARE_SHA3_OPS`: the block is the sponge's rate, and the state
 /// is XKCP's `Keccak_HashInstance` under magic 100, the 64-bit
 /// lane-complemented build (`hash_sha3.c:258-300`).
-const fn keccak(name: &'static str, digest: usize, init: Init) -> Algo {
+const fn keccak(name: &'static str, digest: usize, context: usize, init: Init) -> Algo {
     Algo {
         magic: Some(100),
-        ..algo(name, digest, 200 - 2 * digest, true, init)
+        ..algo(name, digest, 200 - 2 * digest, context, true, init)
     }
 }
 

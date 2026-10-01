@@ -154,6 +154,7 @@ abi::ObjectHandlers::get_property_ptr_ptr
 abi::ObjectHandlers::has_dimension
 abi::ObjectHandlers::has_property
 abi::ObjectHandlers::iterator_element
+abi::ObjectHandlers::iterator_size
 abi::ObjectHandlers::method_receiver
 abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension
@@ -777,6 +778,15 @@ values::ArrayIter::value
 values::ClassId
 values::ClosureInfo
 values::DeclaredRows
+values::Emalloc
+values::Emalloc::as_mut_ptr
+values::Emalloc::bytes
+values::Emalloc::bytes_mut
+values::Emalloc::free
+values::Emalloc::is_empty
+values::Emalloc::len
+values::Emalloc::new
+values::Emalloc::resize
 values::HashIterator
 values::HashIterator::new
 values::HashIterator::position
@@ -862,6 +872,7 @@ values::PhpObject::props_for
 values::PhpObject::props_held
 values::PhpObject::protect
 values::PhpObject::protect_in
+values::PhpObject::rebuild_properties
 values::PhpObject::replace_table
 values::PhpObject::row
 values::PhpObject::row_place
@@ -886,6 +897,7 @@ values::PhpRef::set
 values::PhpString
 values::PhpString::as_bytes
 values::PhpString::filled
+values::PhpString::interned
 values::PhpString::is_empty
 values::PhpString::is_valid_utf8
 values::PhpString::len

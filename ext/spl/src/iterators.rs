@@ -26,7 +26,7 @@ use php_ext::coerce::{coerce_param, to_string, truthy};
 use php_ext::decl::{Name, Type};
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw, throwing_warnings};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pcre::Regex;
 
 use crate::array::ArrayIterator;
@@ -223,8 +223,96 @@ pub(crate) struct RecItState {
     flags: i64,
     max_depth: i64,
     in_iteration: bool,
-    prefix: Option<[Vec<u8>; 6]>,
-    postfix: Vec<u8>,
+    /// `object->iterators`: the `spl_sub_iterator` array php allocates
+    /// for the levels on the request's heap ([`fit_iterators`]).
+    iterators: Option<Emalloc>,
+    tree: Option<Tree>,
+}
+
+/// `sizeof(spl_sub_iterator)`: an iterator, its object, its class, its
+/// state and the two methods php looks up once.
+const SUB_ITERATOR: usize = 56;
+
+/// `object->iterators` fitted to the levels standing, as php sizes it:
+/// `emalloc`'d for the root, `erealloc`'d as a child is entered and as
+/// the walk is cut back to its root, untouched as a child is left, and
+/// given back with the last level
+/// (`spl_RecursiveIteratorIterator_free_iterators`).
+///
+/// ```php
+/// $i = new RecursiveArrayIterator([[[1]]]); $w = new RecursiveIteratorIterator($i);
+/// $m = memory_get_usage(); $r = new RecursiveIteratorIterator($i); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 344
+/// ```
+fn fit_iterators(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    let (levels, held) = object
+        .native_mut::<RecIt>(req)
+        .map(|it| (it.levels.len(), it.iterators.take()))
+        .unwrap_or_default();
+    let bytes = levels * SUB_ITERATOR;
+    let fitted = match held {
+        Some(held) if bytes == 0 => {
+            held.free(req);
+            None
+        }
+        None if bytes == 0 => None,
+        None => Some(Emalloc::new(req, bytes)?),
+        Some(held) if held.len() == bytes => Some(held),
+        Some(held) => Some(held.resize(req, bytes)?),
+    };
+    if let Some(it) = object.native_mut::<RecIt>(req) {
+        it.iterators = fitted;
+    }
+    Ok(())
+}
+
+/// `prefix[6]` and `postfix[1]`: the strings a `RecursiveTreeIterator`
+/// draws with, each with the one owner the object holds, as php's
+/// `zend_string *` fields hold theirs: the constructor's
+/// `ZSTR_INIT_LITERAL`s, strings of their own, and the empty string,
+/// and what `setPrefixPart` and `setPostfix` were handed, one more
+/// owner of it (design §5.13).
+///
+/// ```php
+/// $i = new RecursiveArrayIterator([]); $w = new RecursiveTreeIterator($i);
+/// $m = memory_get_usage(); $t = new RecursiveTreeIterator($i); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $t->setPrefixPart(RecursiveTreeIterator::PREFIX_LEFT, 'x'); $t->setPostfix('<>'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($t); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 832
+/// 0
+/// -832
+/// ```
+#[derive(Clone, Copy)]
+struct Tree {
+    prefix: [PhpString; 6],
+    postfix: PhpString,
+}
+
+impl Tree {
+    /// The constructor's: `""`, `"| "`, `"  "`, `"|-"`, `"\\-"`, `""`,
+    /// and the empty postfix.
+    fn new(req: &mut Request) -> Result<Tree, Thrown> {
+        let mut prefix = [PhpString::new(req, b"")?; 6];
+        for (part, text) in [(1, &b"| "[..]), (2, b"  "), (3, b"|-"), (4, b"\\-")] {
+            prefix[part] = PhpString::filled(req, text.len(), |bytes| bytes.copy_from_slice(text))?;
+        }
+        Ok(Tree {
+            prefix,
+            postfix: PhpString::new(req, b"")?,
+        })
+    }
+
+    /// Each string's owner given up, as `spl_RecursiveIteratorIterator_free_storage`
+    /// releases them.
+    fn release(self, req: &mut Request) {
+        for text in self.prefix.into_iter().chain([self.postfix]) {
+            req.release(Value::string(text));
+        }
+    }
 }
 
 /// The payload: `spl_recursive_it_object`'s fields, boxed, inside the `sizeof` php
@@ -2238,17 +2326,11 @@ impl RecursiveTreeIterator {
         let built = rec_construct(req, this, caching, mode, flags);
         req.release(caching.as_value());
         built?;
-        rec(req, this, |it| {
-            it.prefix = Some([
-                Vec::new(),
-                b"| ".to_vec(),
-                b"  ".to_vec(),
-                b"|-".to_vec(),
-                b"\\-".to_vec(),
-                Vec::new(),
-            ]);
-            it.postfix = Vec::new();
-        })
+        let tree = Tree::new(req)?;
+        if let Some(old) = rec(req, this, |it| it.tree.replace(tree))? {
+            old.release(req);
+        }
+        Ok(())
     }
 
     /// `key(): mixed`: the key drawn with the prefix, or as it is under
@@ -2283,7 +2365,7 @@ impl RecursiveTreeIterator {
         req.release(key);
         let mut out = tree_prefix(req, this)?;
         out.extend(text);
-        out.extend(rec(req, this, |it| it.postfix.clone())?);
+        out.extend(postfix(req, this)?);
         crate::string_value(req, &out)
     }
 
@@ -2300,7 +2382,7 @@ impl RecursiveTreeIterator {
         };
         let mut out = tree_prefix(req, this)?;
         out.extend(entry);
-        out.extend(rec(req, this, |it| it.postfix.clone())?);
+        out.extend(postfix(req, this)?);
         crate::string_value(req, &out)
     }
 
@@ -2315,8 +2397,14 @@ impl RecursiveTreeIterator {
     /// `setPostfix(string $postfix): void`.
     #[php(tentative)]
     fn setPostfix(req: &mut Request, this: This<Self>, postfix: PhpString) -> Result<(), Thrown> {
-        let postfix = postfix.as_bytes().to_vec();
-        rec(req, this.object(), |it| it.postfix = postfix)
+        req.addref(&Value::string(postfix));
+        let old = rec(req, this.object(), |it| {
+            it.tree
+                .as_mut()
+                .map(|tree| std::mem::replace(&mut tree.postfix, postfix))
+        })?;
+        req.release(Value::string(old.unwrap_or(postfix)));
+        Ok(())
     }
 
     /// `setPrefixPart(int $part, string $value): void`.
@@ -2327,7 +2415,6 @@ impl RecursiveTreeIterator {
         part: i64,
         value: PhpString,
     ) -> Result<(), Thrown> {
-        let value = value.as_bytes().to_vec();
         let Some(part) = usize::try_from(part)
             .ok()
             .filter(|p| i64::try_from(*p).is_ok_and(|p| p <= Self::PREFIX_RIGHT))
@@ -2338,11 +2425,14 @@ impl RecursiveTreeIterator {
                 "be a RecursiveTreeIterator::PREFIX_* constant",
             ));
         };
-        rec(req, this.object(), |it| {
-            if let Some(prefix) = it.prefix.as_mut() {
-                prefix[part] = value;
-            }
-        })
+        req.addref(&Value::string(value));
+        let old = rec(req, this.object(), |it| {
+            it.tree
+                .as_mut()
+                .map(|tree| std::mem::replace(&mut tree.prefix[part], value))
+        })?;
+        req.release(Value::string(old.unwrap_or(value)));
+        Ok(())
     }
 
     /// `getEntry(): string`.
@@ -2360,7 +2450,7 @@ impl RecursiveTreeIterator {
     #[php(tentative)]
     fn getPostfix(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let this = rec_checked(req, this.object())?;
-        let postfix = rec(req, this, |it| it.postfix.clone())?;
+        let postfix = postfix(req, this)?;
         PhpString::new(req, &postfix)
     }
 }
@@ -3316,6 +3406,7 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                     )?;
                     let level = Level::new(req, object)?;
                     rec(req, this, |it| it.levels.push(level))?;
+                    fit_iterators(req, this)?;
                     level.sub.rewind(req)?;
                     if let Err(thrown) = hook(req, this, b"beginchildren", b"beginChildren") {
                         caught(req, this, thrown)?;
@@ -3360,6 +3451,7 @@ fn rec_rewind(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         }
         hook(req, this, b"endchildren", b"endChildren")?;
     }
+    fit_iterators(req, this)?;
     set_state(req, this, State::Start)?;
     if let Some(root) = top(req, this)? {
         root.sub.rewind(req)?;
@@ -3392,6 +3484,12 @@ impl ObjectHandlers for RecHandlers {
     /// destructor left, the deepest level first.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         release_levels(req, object);
+        let tree = object
+            .native_mut::<RecIt>(req)
+            .and_then(|it| it.tree.take());
+        if let Some(tree) = tree {
+            tree.release(req);
+        }
     }
 
     /// `spl_RecursiveIteratorIterator_dtor`: the class's `__destruct`,
@@ -3544,6 +3642,7 @@ fn release_levels(req: &mut Request, object: PhpObject) {
     for level in levels.into_iter().rev() {
         level.release(req);
     }
+    let _ = fit_iterators(req, object);
 }
 
 /// `spl_recursive_it_iterator`, whose functions are the methods' own
@@ -3582,6 +3681,7 @@ impl ClassIterator for RecWalk {
         for level in levels.into_iter().rev() {
             level.release(req);
         }
+        let _ = fit_iterators(req, object);
     }
 }
 
@@ -3637,13 +3737,16 @@ fn rec_construct(
     for level in old {
         level.release(req);
     }
+    fit_iterators(req, this)?;
     Ok(())
 }
 
 /// `spl_recursive_tree_iterator_get_prefix`.
 fn tree_prefix(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, Thrown> {
-    let (levels, prefix) = rec(req, this, |it| (it.levels.clone(), it.prefix.clone()))?;
-    let prefix = prefix.unwrap_or_default();
+    let (levels, tree) = rec(req, this, |it| (it.levels.clone(), it.tree))?;
+    let prefix: [Vec<u8>; 6] = tree.map_or_else(Default::default, |tree| {
+        tree.prefix.map(|part| part.as_bytes().to_vec())
+    });
     let mut out = prefix[0].clone();
     let last = levels.len().saturating_sub(1);
     for (at, level) in levels.iter().enumerate() {
@@ -3660,6 +3763,15 @@ fn tree_prefix(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, Thrown> {
     }
     out.extend_from_slice(&prefix[5]);
     Ok(out)
+}
+
+/// `spl_recursive_tree_iterator_get_postfix`'s bytes.
+fn postfix(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, Thrown> {
+    rec(req, this, |it| {
+        it.tree
+            .map(|tree| tree.postfix.as_bytes().to_vec())
+            .unwrap_or_default()
+    })
 }
 
 /// `spl_recursive_tree_iterator_get_entry`: the element as a string,

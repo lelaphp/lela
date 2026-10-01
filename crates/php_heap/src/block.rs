@@ -48,6 +48,14 @@ impl Block {
         unsafe { std::slice::from_raw_parts(self.at.as_ptr(), self.len) }
     }
 
+    /// The first byte's address, for a C library that holds the block
+    /// and writes it through its own pointer; making it makes no
+    /// reference to the bytes.
+    #[must_use]
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.at.as_ptr()
+    }
+
     /// The bytes, to write.
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         // SAFETY: as `bytes`, and the borrow of `self` is the one writer.

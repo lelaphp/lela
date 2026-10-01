@@ -534,7 +534,7 @@ impl ReflectionProperty {
     #[php(tentative)]
     fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let (_, name, _) = this_declared(req, this.object())?;
-        PhpString::new(req, &name)
+        PhpString::interned(req, &name)
     }
 
     /// `ReflectionProperty::getMangledName()`: `prop->name`, the key the
@@ -1919,7 +1919,7 @@ impl ReflectionClassConstant {
     #[php(tentative)]
     fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let (name, _, _) = this_constant(req, this.object())?;
-        PhpString::new(req, &name)
+        PhpString::interned(req, &name)
     }
 
     /// `ReflectionClassConstant::getValue()`: the constant expression
@@ -2253,7 +2253,7 @@ impl ReflectionConstant {
     /// ```
     fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let name = this_global_constant(req, this.object())?;
-        PhpString::new(req, &name)
+        PhpString::interned(req, &name)
     }
 
     /// `ReflectionConstant::getNamespaceName()`: the name before the last

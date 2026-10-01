@@ -879,7 +879,7 @@ impl ReflectionFunctionAbstract {
     fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let (_, decl) = this_function(req, this.object())?;
         let name = decl.name.0.to_vec();
-        PhpString::new(req, &name)
+        PhpString::interned(req, &name)
     }
 
     /// `ReflectionFunctionAbstract::getNamespaceName()`: the name before
