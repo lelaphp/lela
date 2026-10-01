@@ -1,7 +1,8 @@
 //! What phpdbg writes, and the program's output beside it
 //! (`Z/sapi/phpdbg/phpdbg_out.c`): one stream, stdout, and one fact about
 //! it, whether the last byte written was a newline, which a notice or an
-//! error reads to start on a line of its own. The program's output comes
+//! error reads to start on a line of its own; an op array's listing goes
+//! to stderr, where `zend_dump_op_array` writes it. The program's output comes
 //! through [`Sink`] as `php_sapi_phpdbg_ub_write` sends it, `P_STDOUT`.
 
 use std::cell::Cell;
@@ -44,6 +45,14 @@ fn raw(bytes: &[u8]) {
 /// `phpdbg_out`: the bytes as they are, the newline fact untouched.
 pub fn out(bytes: &[u8]) {
     raw(bytes);
+}
+
+/// `zend_dump_op_array`'s listing, which it writes to stderr
+/// (`Z/Zend/Optimizer/zend_dump.c`), the newline fact untouched.
+pub fn dump(bytes: &[u8]) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(bytes);
+    let _ = stderr.flush();
 }
 
 /// `phpdbg_write`, `P_WRITE`: the bytes, and the fact read off their last.
