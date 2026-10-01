@@ -427,7 +427,35 @@ fn command_name(def: &Def) -> String {
     }
 }
 
-/// `phpdbg_stack_verify`.
+/// Whether an argument is of the kind a letter of a command's spec names.
+type Fits = fn(&Param) -> bool;
+
+/// `phpdbg_stack_verify`: each letter of the command's spec checks the
+/// argument it stands for, and `*` checks none, so `list` with nothing
+/// after it is refused by the count of arguments it needs, not by the
+/// argument missing.
+///
+/// ```php
+/// $a = 1;
+/// echo "end\n";
+/// ```
+/// ```request phpdbg
+/// b 3
+/// r
+/// list
+/// c
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:3]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003: echo "end\n";
+/// prompt> [The command "list" expected at least 1 arguments (*) and received 0]
+/// prompt> end
+/// [Script ended normally]
+/// prompt>
+/// ```
 fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
     let name = command_name(def);
     if def.args.is_empty() {
@@ -450,32 +478,35 @@ fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
             continue;
         }
         current += 1;
-        let (expected, fits): (&str, fn(&Param) -> bool) = match spec {
-            b'i' => ("raw input", |p| matches!(p, Param::Str(_))),
-            b's' => ("string", |p| matches!(p, Param::Str(_))),
-            b'n' => ("number", |p| matches!(p, Param::Num(_))),
-            b'm' => ("method", |p| matches!(p, Param::Method { .. })),
-            b'a' => ("address", |p| matches!(p, Param::Addr(_))),
-            b'f' => ("file:line", |p| matches!(p, Param::File { .. })),
-            b'c' => ("condition", |p| matches!(p, Param::Cond(_))),
-            b'o' => ("opcode", |p| matches!(p, Param::Op(_))),
-            b'b' => ("boolean", |p| matches!(p, Param::Num(_))),
-            _ => ("anything", |_| true),
+        // `*` and a letter php's switch does not name are checked
+        // against nothing: a missing argument ends the loop, and the
+        // count after it answers.
+        let kind: Option<(&str, Fits)> = match spec {
+            b'i' => Some(("raw input", |p| matches!(p, Param::Str(_)))),
+            b's' => Some(("string", |p| matches!(p, Param::Str(_)))),
+            b'n' => Some(("number", |p| matches!(p, Param::Num(_)))),
+            b'm' => Some(("method", |p| matches!(p, Param::Method { .. }))),
+            b'a' => Some(("address", |p| matches!(p, Param::Addr(_)))),
+            b'f' => Some(("file:line", |p| matches!(p, Param::File { .. }))),
+            b'c' => Some(("condition", |p| matches!(p, Param::Cond(_)))),
+            b'o' => Some(("opcode", |p| matches!(p, Param::Op(_)))),
+            b'b' => Some(("boolean", |p| matches!(p, Param::Num(_)))),
+            _ => None,
         };
-        match top {
-            None if !optional => {
+        match (top, kind) {
+            (None, Some((expected, _))) if !optional => {
                 return Err(Some(format!(
                     "The command \"{name}\" expected {expected} and got nothing at parameter {current}"
                 )));
             }
-            None => break,
-            Some(param) if spec != b'*' && !fits(param) => {
+            (None, _) => break,
+            (Some(param), Some((expected, fits))) if !fits(param) => {
                 return Err(Some(format!(
                     "The command \"{name}\" expected {expected} and got {} at parameter {current}",
                     param.kind()
                 )));
             }
-            Some(_) => {}
+            (Some(_), _) => {}
         }
         top = at.next();
         received += 1;

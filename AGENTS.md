@@ -104,15 +104,15 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 368 |  | pass |
+| heap | heap.lock | 372 |  | pass |
 | unit | unit.lock | 107 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 959 | 1500 | pass |
+| api | api.lock | 966 | 1500 | pass |
 | sapi | sapi.lock | 25 |  | pass |
 | tier | tier.lock | 61 |  | pass |
 | harness | xtask.lock | 359 |  | pass |
 
-<!-- /computed -->
+<!-- /computed in=5da94c4a6ac11aa63f64b87e10cec2372f7efb80314de708314224615df8eb29 out=a997cdb3fd946dead5fef65ab46bd4eed5407bf1ea8bb963c1f690344f3d0e0a -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -127,7 +127,7 @@ third-engine-design.md
 | api.lock-line |  | on | pass | A new pub item in api needs its api.lock line in the same commit; api holds to [budget] api_items (design §4.4). |
 | xtask.lock-line |  | on | pass | A new pub item in xtask needs its xtask.lock line in the same commit. |
 | ext.pub-beyond-extension |  | on | pass | api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12). |
-| witness.exit-authored |  | deny_pattern | fail | exit= in a witness is captured by `xtask witness --accept`, never authored. |
+| witness.exit-authored |  | deny_pattern | no reading | exit= in a witness is captured by `xtask witness --accept`, never authored. |
 | witness.coverage |  | check | pass | A kernel or a native without a witness fails CI (design §8). |
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | vocab.harness |  | avoid_from | pass | The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read. |
@@ -142,7 +142,7 @@ third-engine-design.md
 | harness.self |  | deny | no reading | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=9d470d5c6347177e04287cb2107e10306f618c17a69f18642f7d35f84f5fd769 out=defe71bb9d5b79d2aa5ec8b0ee6a4563a4eb5cc4b940cf3e1bc316d817d4598c -->
+<!-- /computed in=94f8bd83a22db5a6cd6aef13c457bf57efaf2af74839db5b20e7c399a7954cf2 out=5a7f6b9fe4838cfff8dc9bf6c60f0cb1f6baca065901b815264d86f191371dbd -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
