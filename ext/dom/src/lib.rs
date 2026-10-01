@@ -699,6 +699,32 @@ fn object_for(req: &mut Request, node: Node, context: Option<PhpObject>) -> Resu
     instantiate(req, class, node, context)
 }
 
+/// `php_dom_create_object` as `xml_common.h` exports it (`PHP_DOM_EXPORT`)
+/// to the extensions that include that header, `php_xmlreader.c`'s
+/// `expand` through `DOM_RET_OBJ`: the object standing for `node`, one more
+/// owner of it where one exists, a fresh one of the node's class sharing
+/// `context`'s document otherwise (design §4.10).
+///
+/// ```php
+/// $r = XMLReader::fromString('<r><a x="1">t</a></r>'); $r->read(); $r->read();
+/// $n = $r->expand(); var_dump(get_class($n), $n->ownerDocument);
+/// $d = new DOMDocument; $d->appendChild($d->createElement('b'));
+/// $m = $r->expand($d->documentElement); var_dump($d->saveXML($m), $m->ownerDocument === $d);
+/// ```
+/// ```expect
+/// string(10) "DOMElement"
+/// NULL
+/// string(14) "<a x="1">t</a>"
+/// bool(true)
+/// ```
+pub fn create_object(
+    req: &mut Request,
+    node: Node,
+    context: Option<PhpObject>,
+) -> Result<Value, Thrown> {
+    object_for(req, node, context)
+}
+
 /// `php_dom_create_nullable_object`.
 fn nullable_object(
     req: &mut Request,

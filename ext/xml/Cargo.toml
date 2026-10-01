@@ -1,0 +1,27 @@
+# ext/xml: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_xml"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The xml extension, php-src/ext/xml"
+
+[lints]
+workspace = true
+
+# The facade, and libxml. The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+# libxml2 through `ext/libxml`'s surface, as php's xml includes
+# `php_libxml.h` (`ZEND_MOD_REQUIRED("libxml")`, design §4.10); no `src/ffi/`
+# of its own (§7.2).
+php_ext_libxml = { path = "../libxml" }
+# `html.h`'s `php_next_utf8_char`, which `xml.c` includes to decode a
+# target encoding's characters (design §4.10).
+php_ext_standard = { path = "../standard" }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }

@@ -36,7 +36,7 @@ pub enum Parsed {
 }
 
 /// `php_libxml_sanitize_parse_ctxt_options`.
-fn sanitize(ctxt: &mut sys::xmlParserCtxt) {
+pub(super) fn sanitize(ctxt: &mut sys::xmlParserCtxt) {
     ctxt.loadsubset = 0;
     ctxt.validate = 0;
     ctxt.pedantic = 0;

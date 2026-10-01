@@ -98,6 +98,12 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_sysvshm::extension,
         #[cfg(feature = "ftp")]
         php_ext_ftp::extension,
+        #[cfg(feature = "xml")]
+        php_ext_xml::extension,
+        #[cfg(feature = "xmlreader")]
+        php_ext_xmlreader::extension,
+        #[cfg(feature = "xmlwriter")]
+        php_ext_xmlwriter::extension,
     ]
 }
 

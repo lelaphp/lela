@@ -326,6 +326,20 @@ fn contains_nul_escape(path: &[u8]) -> bool {
 /// Warning: DOMDocument::save(): URI must not contain percent-encoded NUL bytes in %s on line 16
 /// bool(false)
 /// ```
+///
+/// The stream is libxml's, so `fclose()` refuses it
+/// (`PHP_STREAM_FLAG_NO_FCLOSE`):
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/libxml_no_fclose.xml';
+/// $w = new XMLWriter; $w->openUri($f); $r = get_resources();
+/// var_dump(fclose(end($r))); unset($w); unlink($f);
+/// ```
+/// ```expect
+///
+/// Warning: fclose(): cannot close the provided stream, as it must not be manually closed in %s on line 4
+/// bool(false)
+/// ```
 fn open(
     req: &mut Request,
     filename: &[u8],
@@ -363,5 +377,10 @@ fn open(
         Some(context) => context,
         None => php_ext_standard::default_stream_ctx(req)?,
     };
-    req.with_stream_ctx(Some(context), |req| req.open_stream(&path, mode, false))
+    let opened = req.with_stream_ctx(Some(context), |req| req.open_stream(&path, mode, false))?;
+    // "Prevent from closing this by fclose()": the stream is libxml's.
+    if let Some(stream) = opened {
+        stream.forbid_fclose(req);
+    }
+    Ok(opened)
 }

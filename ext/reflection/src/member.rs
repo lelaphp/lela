@@ -694,11 +694,13 @@ impl ReflectionProperty {
     /// var_dump((new ReflectionProperty('DOMNode', 'nodeType'))->getValue($d->documentElement));
     /// var_dump((new ReflectionProperty('DOMNode', 'textContent'))->getValue($d->documentElement));
     /// var_dump((new ReflectionProperty('DOMDocument', 'documentElement'))->getValue($d)->nodeName);
+    /// var_dump((new ReflectionProperty('XMLReader', 'nodeType'))->getValue(new XMLReader));
     /// ```
     /// ```expect
     /// int(1)
     /// string(1) "t"
     /// string(1) "r"
+    /// int(0)
     /// ```
     #[php(tentative)]
     fn getValue(

@@ -240,9 +240,12 @@ Options:
 ├── sysvshm
 ├── tokenizer
 ├── uri
+├── xml
+├── xmlreader
+├── xmlwriter
 └── zlib
 ```
-<!-- /computed in=080849935dc6bfe2437f98d3e6ee1b2eaf268aa740aff9fe1dacb0d6354b7782 out=7b9405d134937ab61d6ac5dc5839e34d45a0bda5530609906911058d0c603fd5 -->
+<!-- /computed in=0b0071bcbdd313336457003bb42a33c5a7f38ca03acdb22f79eac0ada50c1920 out=3d00e40669f0e2220a4ea6115efd73192e4321e121530a4f9cf265d72b677d94 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

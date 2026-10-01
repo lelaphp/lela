@@ -79,7 +79,7 @@ impl EntityLoader {
 }
 
 /// The request the running call lends, and the call's own `Io`.
-fn lent() -> Option<(*mut Call, *mut Io)> {
+pub(super) fn lent() -> Option<(*mut Call, *mut Io)> {
     let call = Call::current()?;
     // SAFETY: the running record, live while it runs.
     let io = unsafe { (*call).io };
@@ -88,7 +88,7 @@ fn lent() -> Option<(*mut Call, *mut Io)> {
 
 /// # Safety
 /// `io` is the running call's `Io`.
-unsafe fn request<'a>(io: *mut Io) -> &'a mut Request {
+pub(super) unsafe fn request<'a>(io: *mut Io) -> &'a mut Request {
     // SAFETY: the caller's contract.
     let req = unsafe { (*io).req };
     // SAFETY: the request is lent for the call and nothing else borrows
@@ -102,7 +102,7 @@ unsafe fn request<'a>(io: *mut Io) -> &'a mut Request {
 ///
 /// # Safety
 /// `io` is the running call's `Io`.
-unsafe fn keep(io: *mut Io, thrown: Thrown) {
+pub(super) unsafe fn keep(io: *mut Io, thrown: Thrown) {
     // SAFETY: the caller's contract.
     let slot = unsafe { &mut (*io).thrown };
     if slot.is_none() {
@@ -116,7 +116,7 @@ unsafe fn keep(io: *mut Io, thrown: Thrown) {
 ///
 /// # Safety
 /// `call` is the running record and `io` its `Io`.
-unsafe fn flush(call: *mut Call, io: *mut Io) {
+pub(super) unsafe fn flush(call: *mut Call, io: *mut Io) {
     let mut chain = Vec::new();
     let mut at = call;
     while !at.is_null() {
@@ -141,7 +141,7 @@ unsafe fn flush(call: *mut Call, io: *mut Io) {
 /// `f` served as php code is served from inside a libxml call: libxml's
 /// per-thread handler, its data and the creators cleared, so what the code
 /// parses is a call of its own, and put back after.
-fn suspended<R>(f: impl FnOnce() -> R) -> R {
+pub(super) fn suspended<R>(f: impl FnOnce() -> R) -> R {
     // SAFETY: the address of this thread's handler.
     let handler_at = unsafe { sys::__xmlStructuredError() };
     // SAFETY: the thread's own global, read by copy.
@@ -491,7 +491,11 @@ unsafe extern "C" fn output_buffer(
 }
 
 /// `php_libxml_streams_IO_read`: `php_stream_read` into libxml's buffer.
-unsafe extern "C" fn stream_read(context: *mut c_void, buffer: *mut c_char, len: c_int) -> c_int {
+pub(super) unsafe extern "C" fn stream_read(
+    context: *mut c_void,
+    buffer: *mut c_char,
+    len: c_int,
+) -> c_int {
     let Some((_, io)) = lent() else {
         return -1;
     };
@@ -520,11 +524,16 @@ unsafe extern "C" fn stream_read(context: *mut c_void, buffer: *mut c_char, len:
 }
 
 /// `php_libxml_streams_IO_write`: `php_stream_write` of libxml's bytes.
-unsafe extern "C" fn stream_write(
+pub(super) unsafe extern "C" fn stream_write(
     context: *mut c_void,
     buffer: *const c_char,
     len: c_int,
 ) -> c_int {
+    // `_php_stream_write` of nothing writes nothing and answers `0`,
+    // lent a request or not.
+    if len == 0 {
+        return 0;
+    }
     let Some((_, io)) = lent() else {
         return -1;
     };
@@ -541,6 +550,29 @@ unsafe extern "C" fn stream_write(
         .write(req, bytes)
         .and_then(|w| c_int::try_from(w).ok())
         .unwrap_or(-1)
+}
+
+/// A stream a reader or an emitter borrows (`XMLReader::fromStream`,
+/// `XMLWriter::toStream`) boxed for libxml's callbacks, one more owner of
+/// its resource taken, as `Z_ADDREF_P(stream_zv)` takes it, so the stream
+/// outlives the program's own name for it.
+pub(super) fn lend(req: &mut Request, stream: Stream) -> *mut c_void {
+    req.addref(&stream.as_value());
+    Box::into_raw(Box::new(stream)).cast::<c_void>()
+}
+
+/// The close of a stream [`lend`] boxed: the owner it took given back,
+/// `zend_list_delete`, and nothing closed. Outside a call that lends a
+/// request the owner stays for the request's end.
+pub(super) unsafe extern "C" fn stream_release(context: *mut c_void) -> c_int {
+    // SAFETY: the box `lend` handed libxml, released once, here.
+    let stream = *unsafe { Box::from_raw(context.cast::<Stream>()) };
+    if let Some((_, io)) = lent() {
+        // SAFETY: the running call's `Io`.
+        let req = unsafe { request(io) };
+        req.release(stream.as_value());
+    }
+    0
 }
 
 /// `php_libxml_streams_IO_close`: `php_stream_close`, and the box given
@@ -582,6 +614,30 @@ impl Uri {
         // SAFETY: the URI, freed once.
         unsafe { sys::xmlFreeURI(parsed) };
         Some(Parsed { scheme })
+    }
+
+    /// `xmlURIEscapeStr(source, ":")` read by `xmlParseURIReference` into a
+    /// fresh `xmlCreateURI`: whether it names a scheme.
+    pub(crate) fn escaped_has_scheme(source: &[u8]) -> bool {
+        let text = cstr(source);
+        // SAFETY: no argument; a fresh URI, or null.
+        let uri = unsafe { sys::xmlCreateURI() };
+        if uri.is_null() {
+            return false;
+        }
+        // SAFETY: a NUL-terminated string and list, escaped into a new one.
+        let escaped = unsafe { sys::xmlURIEscapeStr(text.as_ptr(), c":".as_ptr().cast()) };
+        if !escaped.is_null() {
+            // SAFETY: a live URI and the NUL-terminated escaped string.
+            unsafe { sys::xmlParseURIReference(uri, escaped.cast()) };
+            // SAFETY: the escaped string, freed once.
+            unsafe { Alloc::free(escaped.cast()) };
+        }
+        // SAFETY: a live URI.
+        let scheme = !unsafe { (*uri).scheme }.is_null();
+        // SAFETY: the URI, freed once.
+        unsafe { sys::xmlFreeURI(uri) };
+        scheme
     }
 
     /// `xmlURIUnescapeString(uri, 0, NULL)`: every `%XX` decoded.
