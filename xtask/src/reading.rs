@@ -6,7 +6,7 @@
 //! reading. The clock a reading's `at` is taken from, and the calendar that
 //! reads it back, live here too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -526,6 +526,51 @@ impl Store {
                 && found.get(&key).is_none_or(later)
             {
                 found.insert(key, reading);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Which of `trees` a reading of `instrument` over `scope` was taken
+    /// over, whatever its status or recipe: the scope's file, then every
+    /// line of the log, where a retired worktree's readings are. What
+    /// `permit`'s `unless` reads as evidence that an instrument measured a
+    /// commit's content, by the tree hash a commit's objects give
+    /// ([`crate::git::tracked_hash`], #1448). An empty hash names no
+    /// content and is never found.
+    pub(crate) fn measured_over(
+        &self,
+        instrument: &str,
+        scope: &str,
+        trees: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>> {
+        const TREE: &str = "\"tree\":\"";
+        let mut found = BTreeSet::new();
+        if let Some(reading) = self.read(instrument, scope).ok().flatten()
+            && !reading.tree.is_empty()
+            && trees.contains(&reading.tree)
+        {
+            found.insert(reading.tree);
+        }
+        let path = self.root.join(LOG);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+            Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+        };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let Some(at) = line.rfind(TREE) else {
+                continue;
+            };
+            let tree = line[at + TREE.len()..].split('"').next().unwrap_or("");
+            if tree.is_empty() || !trees.contains(tree) || found.contains(tree) {
+                continue;
+            }
+            if let Ok(reading) = Reading::from_json(line)
+                && reading.instrument == instrument
+                && reading.scope == scope
+            {
+                found.insert(reading.tree);
             }
         }
         Ok(found)
