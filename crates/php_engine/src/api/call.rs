@@ -1758,6 +1758,9 @@ fn evaluate_node(
         ConstExpr::Long { value: n, .. } => Ok(Value::int(*n)),
         ConstExpr::Double(f) => Ok(Value::float(*f)),
         ConstExpr::Str(s) => Ok(Value::string(PhpString::new(req, s)?)),
+        // The unit's constant array as it stands, which takes no owner,
+        // as `ZVAL_COPY` takes none of an `IS_ARRAY_IMMUTABLE`.
+        ConstExpr::ImmutableArray(array) => Ok(Value::of_zval(array.value())),
         // `zend_get_constant_ex` under the node's `attr`, which words a
         // `CONST_DEPRECATED` constant's deprecation after it found it.
         ConstExpr::Constant { name, .. } => {

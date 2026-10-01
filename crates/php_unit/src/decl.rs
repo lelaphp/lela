@@ -475,11 +475,18 @@ pub enum ConstExpr {
         line: u32,
     },
     /// `[key => value, ...]`, php's `ZEND_AST_ARRAY`, whose line is its
-    /// first element's (`zend_ast_create_list`).
+    /// first element's (`zend_ast_create_list`): an array some key or
+    /// value of which is still to evaluate, or a native's, which no
+    /// unit holds.
     Array {
         elements: Vec<(Option<ConstExpr>, ConstExpr)>,
         line: u32,
     },
+    /// An array of a program's declaration whose every key and value
+    /// the compiler folded (`zend_try_ct_eval_array`): the unit's
+    /// immutable array, which php's table of defaults holds as a value
+    /// and not as a tree, and which raises nothing where it is read.
+    ImmutableArray(ImmutableArray),
     /// `...value` inside an array, php's `ZEND_AST_UNPACK`: the value
     /// of an element with no key, whose array or `Traversable` is
     /// spread into the array being built, under the array's line.
@@ -605,11 +612,55 @@ impl ConstExpr {
             | ConstExpr::Long { .. }
             | ConstExpr::Double(_)
             | ConstExpr::Str(_)
+            | ConstExpr::ImmutableArray(_)
             | ConstExpr::Unpack(_)
             | ConstExpr::Conditional { .. }
             | ConstExpr::Closure { .. }
             | ConstExpr::ScopeClass => None,
         }
+    }
+}
+
+/// An array a declaration of the unit holds as a value: one constant
+/// array laid down where the unit's strings are
+/// ([`php_heap::Intern::constant_array`]), as an op array's constant
+/// table holds one, immutable and shared by every request that reads
+/// the declaration (design §5.3). It is what opcache leaves in php's
+/// table of defaults, so a slot, a static or a constant copied from it
+/// takes no owner.
+#[derive(Debug, Clone, Copy)]
+pub struct ImmutableArray(php_heap::Zval);
+
+impl ImmutableArray {
+    /// `value` where it is an immutable array, none where it is any
+    /// other value.
+    #[must_use]
+    pub fn new(value: php_heap::Zval) -> Option<ImmutableArray> {
+        value
+            .as_arr()
+            .filter(php_heap::Arr::is_immutable)
+            .map(|_| ImmutableArray(value))
+    }
+
+    /// The array as the zval that names it, no owner taken.
+    #[must_use]
+    pub const fn value(self) -> php_heap::Zval {
+        self.0
+    }
+
+    /// Whether the array holds no element.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.0.as_arr().is_none_or(|array| array.is_empty())
+    }
+}
+
+/// Two arrays are the same declaration where `zend_is_identical` finds
+/// them so ([`php_heap::identical_constants`]), whichever unit laid
+/// either down: what a trait's default is compared to its user's by.
+impl PartialEq for ImmutableArray {
+    fn eq(&self, other: &ImmutableArray) -> bool {
+        php_heap::identical_constants(self.0, other.0)
     }
 }
 
