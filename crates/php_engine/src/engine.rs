@@ -81,6 +81,39 @@ pub struct RequestDescription {
     /// [`IniOrigin`] says, in the order given: php-fpm's `PHP_VALUE` and
     /// `PHP_ADMIN_VALUE` and the lines of the request's `.user.ini` files.
     pub ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
+    /// How the program is served.
+    pub primary: Primary,
+}
+
+/// How a host has its program served: wrapped, as `php_execute_script`
+/// serves it for every host of php's but one; or bare, as php's phpdbg
+/// serves it, the file compiled with `zend_compile_file` and the op array
+/// handed to `zend_execute` (`Z/sapi/phpdbg/phpdbg_prompt.c:534-563, 866`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Primary {
+    /// `php_execute_script`: `auto_prepend_file` and `auto_append_file`
+    /// around the program, its path expanded and put in
+    /// `EG(included_files)`, and what it leaves uncaught rendered by
+    /// `zend_exception_error` once its handler has had it.
+    #[default]
+    Wrapped,
+    /// `zend_compile_file` and `zend_execute`: the program alone, under
+    /// the name the host gave, in no table of included files, and what
+    /// it leaves uncaught, once its handler has had it, kept for the host
+    /// to render in [`Observables::uncaught`], as `phpdbg_handle_exception`
+    /// renders it.
+    Bare,
+}
+
+/// A throwable the program left uncaught, for a host that renders it:
+/// its class, its `file` and `line`, and what its `__toString` answered,
+/// empty where that threw.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Uncaught {
+    pub class: Vec<u8>,
+    pub file: Vec<u8>,
+    pub line: i64,
+    pub text: Vec<u8>,
 }
 
 /// How a host sets an entry for a request, php-fpm's three ways.
@@ -469,6 +502,9 @@ pub struct Observables {
     pub fatal: Option<String>,
     /// `zend_memory_peak_usage(1)`: the most memory the request held.
     pub memory_peak: usize,
+    /// What the program left uncaught, where the host renders it
+    /// ([`Primary::Bare`]).
+    pub uncaught: Option<Uncaught>,
 }
 
 /// The loop bound to the engine's tier, `execute::<T>` for one `T`.
@@ -2021,6 +2057,7 @@ pub struct EngineBuilder {
     resume: Loop,
     tier_extension: Option<Extension>,
     host_extension: Option<crate::host_extension::HostExtension>,
+    additional_extension: Option<Extension>,
     host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     shebang: php_compile::Shebang,
     configure: &'static [&'static str],
@@ -2098,6 +2135,18 @@ impl EngineBuilder {
         self
     }
 
+    /// The extension a host built itself and hands `php_module_startup`
+    /// as its `additional_module`, as phpdbg hands
+    /// `sapi_phpdbg_module_entry` (`Z/sapi/phpdbg/phpdbg.c:682-697`): its
+    /// natives, constants and ini entries, started after the bundle's as
+    /// `zend_sort_modules` leaves them, for a host that declares natives of
+    /// its own (ADR-0008, #1348).
+    #[must_use]
+    pub fn additional_extension(mut self, extension: Extension) -> EngineBuilder {
+        self.additional_extension = Some(extension);
+        self
+    }
+
     /// One entry as a host sets it after startup, php-fpm's pool
     /// `php_value` and `php_admin_value` (`fpm_php_apply_defines_ex`):
     /// the value as given, not read again by the INI grammar, through the
@@ -2158,6 +2207,7 @@ impl EngineBuilder {
             extensions.extend(hosted.extension);
             hosted.additional
         });
+        extensions.extend(self.additional_extension);
         sort_modules(&mut extensions);
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
@@ -2548,6 +2598,7 @@ impl Engine {
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
             host_extension: None,
+            additional_extension: None,
             host_ini: Vec::new(),
             shebang: php_compile::Shebang::Read,
             configure: &[],
@@ -3081,10 +3132,11 @@ impl Engine {
     /// program, then `auto_append_file`, each while the one before ran
     /// to its end; whether the program did.
     pub(crate) fn execute_script(&self, req: &mut Request, source: Option<&[u8]>) -> bool {
-        if !auto_file(req, b"auto_prepend_file", self.shared.entry) {
+        let script = req.primary() == Primary::Wrapped;
+        if script && !auto_file(req, b"auto_prepend_file", self.shared.entry) {
             return false;
         }
-        let ran = match self.primary(req, source, true) {
+        let ran = match self.primary(req, source, script) {
             Some(Ok(unit)) => serve_unit(req, &unit, self.shared.entry),
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
@@ -3096,7 +3148,7 @@ impl Engine {
             }
             None => false,
         };
-        ran && auto_file(req, b"auto_append_file", self.shared.entry)
+        ran && (!script || auto_file(req, b"auto_append_file", self.shared.entry))
     }
 
     /// The program compiled: the source the host handed over under the
@@ -3341,6 +3393,7 @@ impl Engine {
                 headers_sent: true,
                 fatal,
                 memory_peak: req.memory_peak(true),
+                uncaught: req.take_kept_uncaught(),
             },
             trace,
         )
@@ -3685,10 +3738,15 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     let exited = req.unwind_exit();
     // What the loop left pending for the user exception handler, served
     // with the main frame left (`zend_execute_scripts`).
-    if req.is_pending()
-        && let Err(fatal) = req.uncaught()
-    {
-        req.end_in(&fatal);
+    if req.is_pending() {
+        match req.primary() {
+            Primary::Wrapped => {
+                if let Err(fatal) = req.uncaught() {
+                    req.end_in(&fatal);
+                }
+            }
+            Primary::Bare => req.keep_uncaught(),
+        }
     }
     !exited && !req.bailing_out() && req.ending().is_none()
 }
@@ -5116,6 +5174,81 @@ mod tests {
         let (body, observables) = files.serve(&Engine::builder().build(), "main.php");
         assert_eq!(body, "end\nd2\nd3\nd1\n");
         assert_eq!(observables.exit_code, 0);
+    }
+
+    /// A program served as php's phpdbg serves one
+    /// ([`Primary::Bare`]): the throwable it leaves uncaught is kept
+    /// for the host, its class, site and `__toString`, and nothing is
+    /// rendered; the handler `set_exception_handler` set has it first,
+    /// and what it takes is not kept; the file is no included file.
+    /// The native a host's own extension declares, for the test below.
+    #[php_macros::php_function]
+    fn host_module_answer() -> i64 {
+        42
+    }
+
+    /// An extension a host built itself starts with the bundle: its natives
+    /// are callable and its name is a loaded extension's, the last one
+    /// `get_loaded_extensions()` lists, as php lists phpdbg's.
+    #[test]
+    fn an_extension_the_host_built_starts_after_the_bundle() {
+        let built = crate::api::abi::ExtensionBuilder::default()
+            .functions(vec![host_module_answer::declared()])
+            .build("phpdbg");
+        let engine = Engine::builder().additional_extension(built).build();
+        let (body, _) = served(
+            &engine,
+            "<?php echo host_module_answer(), ' ', extension_loaded('phpdbg') ? 'loaded' : 'absent', ' '; foreach (get_loaded_extensions() as $last) {} echo $last;",
+        );
+        assert_eq!(body, "42 loaded phpdbg");
+    }
+
+    #[test]
+    fn a_program_served_for_a_host_that_renders_the_uncaught_keeps_it() {
+        let files = Files::new(
+            "primary",
+            &[
+                (
+                    "thrown.php",
+                    "<?php\necho get_included_files() === [] ? \"none\\n\" : \"some\\n\";\nthrow new ErrorException(\"no\");\n",
+                ),
+                (
+                    "handled.php",
+                    "<?php\nset_exception_handler(function ($e) { echo \"took \", $e->getMessage(), \"\\n\"; });\nthrow new Exception(\"x\");\n",
+                ),
+            ],
+        );
+        let serve = |name: &str| {
+            let mut sink = Kept::default();
+            let observables = Engine::builder().build().serve(
+                RequestDescription {
+                    sapi_name: String::from("phpdbg"),
+                    script_name: Some(files.dir.join(name).as_os_str().as_encoded_bytes().to_vec()),
+                    cwd: files.dir.clone(),
+                    primary: Primary::Bare,
+                    ..RequestDescription::default()
+                },
+                &mut sink,
+            );
+            (
+                String::from_utf8_lossy(&sink.body).into_owned(),
+                observables,
+            )
+        };
+        let (body, observables) = serve("thrown.php");
+        assert_eq!(body, "none\n");
+        let uncaught = observables.uncaught.unwrap_or_default();
+        assert_eq!(uncaught.class, b"ErrorException");
+        assert_eq!(uncaught.line, 3);
+        assert!(uncaught.file.ends_with(b"thrown.php"));
+        assert!(
+            uncaught.text.starts_with(b"ErrorException: no in "),
+            "{uncaught:?}"
+        );
+        assert_eq!(observables.exit_code, 255);
+        let (body, observables) = serve("handled.php");
+        assert_eq!(body, "took x\n");
+        assert_eq!(observables.uncaught, None);
     }
 
     /// A file the parser refuses is the `ParseError` the includer may

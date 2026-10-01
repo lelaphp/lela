@@ -201,6 +201,17 @@ fn num_args(decl: &FunctionDecl) -> usize {
     decl.parameters.iter().filter(|p| !p.variadic).count()
 }
 
+/// The two shapes of `zend_dump_op_array` this crate prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// opcache's `before optimizer` dump: `ZEND_DUMP_LIVE_RANGES`, the
+    /// message, and the return line of the zeroed `zend_func_info`.
+    BeforeOptimizer,
+    /// phpdbg's, `ZEND_DUMP_LINE_NUMBERS` alone: each opline opened by
+    /// `L` and its line, and no message, return line or live ranges.
+    LineNumbers,
+}
+
 /// `zend_dump_op_array` with `ZEND_DUMP_LIVE_RANGES` and the message
 /// `before optimizer`: a blank line, the name, the counts, the message,
 /// the file with the line range, and the return line the zeroed
@@ -208,6 +219,25 @@ fn num_args(decl: &FunctionDecl) -> usize {
 /// inferred anything; then the oplines, the live-range table and the
 /// `try`/`catch` table.
 fn op_array(out: &mut String, name: &str, args: usize, body: &OpArray, frameless: &[Name]) {
+    shaped(out, Shape::BeforeOptimizer, (name, args), body, frameless);
+}
+
+/// `zend_dump_op_array(op_array, ZEND_DUMP_LINE_NUMBERS, NULL, NULL)`,
+/// what phpdbg's `print` writes for a user function.
+pub(crate) fn lines(name: &str, args: usize, body: &OpArray, frameless: &[Name]) -> String {
+    let mut out = String::new();
+    shaped(&mut out, Shape::LineNumbers, (name, args), body, frameless);
+    out
+}
+
+/// One op array in `shape`.
+fn shaped(
+    out: &mut String,
+    shape: Shape,
+    (name, args): (&str, usize),
+    body: &OpArray,
+    frameless: &[Name],
+) {
     let _ = writeln!(
         out,
         "\n{name}:\n     ; (lines={}, args={args}, vars={}, tmps={})",
@@ -215,7 +245,9 @@ fn op_array(out: &mut String, name: &str, args: usize, body: &OpArray, frameless
         body.num_cvs,
         body.num_tmps
     );
-    let _ = writeln!(out, "     ; (before optimizer)");
+    if shape == Shape::BeforeOptimizer {
+        let _ = writeln!(out, "     ; (before optimizer)");
+    }
     let _ = writeln!(
         out,
         "     ; {}:{}-{}",
@@ -223,13 +255,18 @@ fn op_array(out: &mut String, name: &str, args: usize, body: &OpArray, frameless
         body.line_start,
         body.line_end
     );
-    let _ = writeln!(out, "     ; return  [] RANGE[0..0]");
+    if shape == Shape::BeforeOptimizer {
+        let _ = writeln!(out, "     ; return  [] RANGE[0..0]");
+    }
     for (at, op) in body.oplines.iter().enumerate() {
+        if shape == Shape::LineNumbers {
+            let _ = write!(out, "L{:04} ", op.lineno);
+        }
         let _ = write!(out, "{at:04} ");
         opline(out, body, op, frameless);
         out.push('\n');
     }
-    if !body.live_ranges.is_empty() {
+    if shape == Shape::BeforeOptimizer && !body.live_ranges.is_empty() {
         let _ = writeln!(out, "LIVE RANGES:");
         for range in &body.live_ranges {
             let _ = writeln!(

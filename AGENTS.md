@@ -99,7 +99,7 @@ third-engine-design.md
 - ADR-0007 (accepted, 2026-09-26): `php_macros` depends on no workspace crate, and `php_engine` depends on it, so Core declares its natives with the same attributes
 - ADR-0008 (accepted, 2026-09-29): Hosts are one crate each under `sapi/`, with `php_sapi` as the facade below them, as ADR-0004 laid extensions out
 
-<!-- /computed in=7f53878e7c368311f86af46ad65f459465c8cacb4af901d56302cfd291616e31 out=1decbce24eec1ffda97c6ed5a80344b357a1f522e076a6e51b3c2f6ddeff4868 -->
+<!-- /computed in=655a09f7bfbd3dbc7dc1544a56c3c031bba71ef703990c5444a5f4f29f4d55b9 out=1decbce24eec1ffda97c6ed5a80344b357a1f522e076a6e51b3c2f6ddeff4868 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
@@ -112,7 +112,7 @@ third-engine-design.md
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 353 |  | pass |
 
-<!-- /computed in=1a1e600c26abeb8cb9e5851ab48cd20471725a411f0bf14b0dc53e4210e767bb out=ae6470861bf4d43b348422d4f1cd3a08d87ce2e9df8e83b523349f4471185515 -->
+<!-- /computed in=75fe707e9ad11e34bf0a1e20931acfb787e7548faf42b613794b7258d6f3b06f out=ae6470861bf4d43b348422d4f1cd3a08d87ce2e9df8e83b523349f4471185515 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -248,6 +248,7 @@ Options:
 .
 ├── cgi
 ├── cli
-└── fpm
+├── fpm
+└── phpdbg
 ```
-<!-- /computed in=c8a7b3fcbb6a403ba7abf1b232ce6acebcb51647351a19a7d7e64fcae3b3e2ba out=13133fa5fc4724f6c6436169b502ba6a835994124d1e31fcf89f3c5fde41ee69 -->
+<!-- /computed in=d9792c70e043b4549f1ed04bf5ddbc594d3104b27bce7a39b12cc5c2dc6ef79d out=470dec71ee5cf90528ce6b4eef3301fa86defac22de9048c8274b9ca2838028e -->

@@ -41,7 +41,11 @@
 //! pins what php-cgi writes, its head and its body (#1197). A `request fpm`
 //! fence is the same request handed to a php-fpm as `FastCGI` records, the
 //! oracle's pinned php-fpm and the engine's `php-fpm` each over a pool of
-//! one child, for the natives php-fpm's own module declares (#1291).
+//! one child, for the natives php-fpm's own module declares (#1291). A
+//! `request phpdbg` fence hands the snippet to phpdbg as a `--PHPDBG--`
+//! test is handed (`-qIb -f`), the pinned phpdbg for the oracle and the
+//! engine's `phpdbg` for the engine, the fence's body the commands the
+//! prompt reads, for the natives phpdbg's own module declares (#1348).
 //!
 //! A `process` says the snippet changes the process it runs in: it forks,
 //! sends or takes a signal, or sets the process's ids, session or limits.
@@ -73,6 +77,9 @@ const STDERR: &str = "stderr";
 const REQUEST: &str = "request";
 /// The word after `request` that hands the request to a php-fpm.
 const FPM: &str = "fpm";
+/// The word after `request` that hands the program to phpdbg, the fence's
+/// body the commands its prompt reads.
+const PHPDBG: &str = "phpdbg";
 
 /// What the `exit` attribute of an `expect` fence says.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -116,6 +123,10 @@ pub enum Served {
     /// The engine's `php-fpm` built the same way, beside php-fpm for the
     /// oracle: the fence is `request fpm` (#1291).
     Fpm,
+    /// The engine's `phpdbg` built the same way, beside phpdbg for the
+    /// oracle: the fence is `request phpdbg`, its body the commands the
+    /// prompt reads (#1348).
+    Phpdbg,
 }
 
 /// One witness: the program, what it prints, and where it stands.
@@ -172,8 +183,10 @@ impl Witness {
         if let Some(request) = &self.request {
             program = format!("{request}\n{program}");
         }
-        if self.served == Served::Fpm {
-            program = format!("{FPM}\n{program}");
+        match self.served {
+            Served::Fpm => program = format!("{FPM}\n{program}"),
+            Served::Phpdbg => program = format!("{PHPDBG}\n{program}"),
+            _ => {}
         }
         format!("witness:{}", git::blob_id(program.as_bytes()))
     }
@@ -329,11 +342,12 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
         {
             None => {}
             Some(FPM) => host = Served::Fpm,
+            Some(PHPDBG) => host = Served::Phpdbg,
             Some(_) => {
                 return Err(Problem::at(
                     file,
                     at,
-                    "a request fence names `fpm` after `request` or nothing",
+                    "a request fence names `fpm` or `phpdbg` after `request`, or nothing",
                 ));
             }
         }
@@ -812,6 +826,9 @@ mod tests {
         assert_eq!(fpm.witnesses[0].served, Served::Fpm);
         assert_ne!(fpm.witnesses[0].id(), cgi.witnesses[0].id());
         assert_eq!(other.problems.len(), 1, "{other:#?}");
+        let phpdbg = block("request phpdbg");
+        assert_eq!(phpdbg.witnesses[0].served, Served::Phpdbg);
+        assert_ne!(phpdbg.witnesses[0].id(), fpm.witnesses[0].id());
     }
 
     #[test]

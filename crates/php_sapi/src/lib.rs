@@ -11,7 +11,8 @@
 //! description and the response's head written, which php's CGI and its
 //! `FastCGI` process manager both do; [`ini`], the line's `-d` entries as
 //! `php_ini_builder` reads them; and [`start`], `php_module_startup` over
-//! them, with what a host prints before it serves anything.
+//! them, with what a host prints before it serves anything. [`tier`] is
+//! the tier face beside the host face, for the debugging host (#1308).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -33,8 +34,25 @@ use std::process::ExitCode;
 pub use php_engine::{
     Aborted, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder, FileHandles,
     HostExtension, HostValue, IniEvent, IniOrigin, IniValue, Method, Observables, OutputSink,
-    PHP_VERSION, ProcessTitle, RequestDescription, ResponseHead, Routed, WebRequest,
+    PHP_VERSION, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed, Uncaught,
+    WebRequest,
 };
+
+/// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host
+/// that binds a tier of its own, the debugging host, implements `Tier`
+/// with and reads between the steps it drives, re-exported as the host
+/// face is, so no host names `php_engine`.
+pub mod tier {
+    pub use php_engine::tier::{
+        Argument, Aside, Class, Code, Evaluated, Fatal, Flow, FrameRef, Identity, Key, Named,
+        Opcode, Pending, Position, Request, SafepointIdx, Serves, Shape, Shown, Site, Stepped,
+        Tier, TraceRow, Variable, backtrace, call, caller, catches, class_named, entry, evaluate,
+        exit, exiting, frame_code, function_exists, function_named, included_files, last_error,
+        literals, method_named, oplines, pending, position, restore, serves, set_aside, step,
+        superglobals, table_sizes, unwind, user_classes, user_constants, user_functions, variable,
+        variables,
+    };
+}
 
 /// `php_module_startup` for a host: `builder`, which carries the host's
 /// extensions and tier, with the host's own extension after them where it

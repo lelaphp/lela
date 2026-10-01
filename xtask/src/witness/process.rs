@@ -66,6 +66,13 @@ const FPM: Host = Host {
     binary: "php-fpm-witness",
 };
 
+/// `sapi/phpdbg`'s, which serves a fence with a `request phpdbg`
+/// (#1348).
+const PHPDBG: Host = Host {
+    package: "php_sapi_phpdbg",
+    binary: "phpdbg-witness",
+};
+
 /// The variable the binaries read the trace file's path from
 /// (`php_sapi::start`).
 const TRACE: &str = "PHP_WITNESS_TRACE";
@@ -78,6 +85,7 @@ pub(crate) struct Binary {
     cli: OnceLock<Result<PathBuf, String>>,
     cgi: OnceLock<Result<PathBuf, String>>,
     fpm: OnceLock<Result<PathBuf, String>>,
+    phpdbg: OnceLock<Result<PathBuf, String>>,
 }
 
 impl Binary {
@@ -88,6 +96,7 @@ impl Binary {
             cli: OnceLock::new(),
             cgi: OnceLock::new(),
             fpm: OnceLock::new(),
+            phpdbg: OnceLock::new(),
         }
     }
 
@@ -166,6 +175,45 @@ impl Binary {
         let text = fs::read_to_string(&trace).unwrap_or_default();
         Ok((observed, text.lines().filter_map(Entry::parse).collect()))
     }
+
+    /// `snippet` handed to `sapi/phpdbg`'s binary with `commands` on its
+    /// prompt, as [`Binary::serve_cgi`] serves one by php-cgi; with the
+    /// natives it entered.
+    pub(super) fn serve_phpdbg(
+        &self,
+        oracle: &Oracle<'_>,
+        snippet: &str,
+        commands: &str,
+    ) -> Result<(Observation, Vec<Entry>)> {
+        let binary = built(&self.phpdbg, &self.root, PHPDBG)?;
+        let traces = Tree::new("witness-trace")?;
+        let trace = traces.join("entered");
+        let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
+        let observed = served_as_phpdbg(oracle, binary, snippet, commands, &env)?;
+        let text = fs::read_to_string(&trace).unwrap_or_default();
+        Ok((observed, text.lines().filter_map(Entry::parse).collect()))
+    }
+}
+
+/// `snippet` handed to the debugger host `host` as run-tests.php hands a
+/// `--PHPDBG--` test's program (`-qIb -f`), `commands` and a newline on
+/// its stdin for the prompt to read, under the recipe. What the oracle and
+/// the engine are each held to for a fence with a `request phpdbg`.
+pub(crate) fn served_as_phpdbg(
+    oracle: &Oracle<'_>,
+    host: &Path,
+    snippet: &str,
+    commands: &str,
+    env: &[(String, std::ffi::OsString)],
+) -> Result<Observation> {
+    let flags = crate::phpt::phpdbg::FLAGS.map(String::from);
+    let stdin = format!("{commands}\n");
+    oracle.run_under(&Invocation {
+        flags: &flags,
+        env,
+        stdin: Stdin::Pipe(stdin.as_bytes()),
+        ..Invocation::new(host, Program::Snippet(snippet))
+    })
 }
 
 /// `snippet` served as a request of the web by the CGI host `host`: the

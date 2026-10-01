@@ -633,6 +633,24 @@ fn a_test_of_sapi_fpm_finds_the_process_manager() {
     assert_eq!(skipped, [("found.phpt", Judgement::Skip)], "{tally:#?}");
 }
 
+/// The fixture at `xtask/fixtures/phpt/phpdbg` (#1304): a `--PHPDBG--`
+/// test whose `SKIPIF` skips it outside the debugger and whose program
+/// prints the SAPI and its arguments, which passes only where the runner
+/// hands it to a phpdbg with its commands on stdin and its `--ARGS--`
+/// after `--`, and runs its `SKIPIF` through a phpdbg too, so a control
+/// that skips it where the pin names a phpdbg fails here. The oracle
+/// stands in for the engine, so the phpdbg is the one `[sapi]` pins.
+#[test]
+fn a_phpdbg_test_runs_through_the_debugger() {
+    if oracle().is_none() || manifest().pin.sapi.phpdbg.is_none() {
+        return;
+    }
+    let (_tree, subset) = fixture_subset("phpdbg");
+    let tally = run(&subset, &registry(""));
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Pass, "{note}");
+}
+
 #[test]
 fn the_test_s_own_ini_reaches_the_run() {
     if oracle().is_none() {

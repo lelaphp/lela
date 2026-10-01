@@ -896,6 +896,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "php_sapi_phpdbg"
+version = "0.0.0"
+dependencies = [
+ "php_bundle",
+ "php_ext",
+ "php_sapi",
+]
+
+[[package]]
 name = "php_syntax"
 version = "0.0.0"
 dependencies = [

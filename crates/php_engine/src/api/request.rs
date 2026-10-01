@@ -65,6 +65,7 @@ mod execution;
 mod hold;
 pub(crate) use hold::Hold;
 mod hooks;
+mod inspect;
 mod lazy;
 mod linking;
 mod load_file;
@@ -1713,6 +1714,8 @@ struct TickFunction {
 pub struct Request {
     pub(crate) shared: Arc<Shared>,
     description: RequestDescription,
+    /// What the program left uncaught, kept for a host that renders it.
+    kept_uncaught: Option<crate::engine::Uncaught>,
     /// The natives the request has entered, in order, where the witness
     /// runner asked for them (harness §4.5 condition 2, revision 58);
     /// `None` records nothing. The field exists in a build with the
@@ -2301,6 +2304,10 @@ enum Traced {
         kind: IncludeKind,
         file: Option<Vec<u8>>,
     },
+    /// A code frame no `INCLUDE_OR_EVAL` pushed that stands over user
+    /// code, which php names `unknown` (`ZEND_STR_UNKNOWN`): what a
+    /// host's evaluation in a frame is ([`crate::tier::evaluate`]).
+    Unknown,
 }
 
 /// One link of php's `prev_execute_data` chain as this engine holds it:
@@ -2554,6 +2561,7 @@ impl Request {
             #[cfg(feature = "witness-trace")]
             trace: None,
             description,
+            kept_uncaught: None,
             heap,
             stack,
             vm: Vm::default(),
@@ -5447,6 +5455,10 @@ impl Request {
                     let name = Value::string(self.interned(kind.name().as_bytes())?);
                     self.set_string_key(&mut row, b"function", name)?;
                 }
+                Traced::Unknown => {
+                    let name = Value::string(PhpString::new(self, b"unknown")?);
+                    self.set_string_key(&mut row, b"function", name)?;
+                }
             }
             trace.append(self, Value::array(row))?;
         }
@@ -5729,6 +5741,20 @@ impl Request {
                         // makes no row (`zend_trace_to_string` closes
                         // every trace with `{main}`).
                         let Some(kind) = including(at) else {
+                            // `zend_fetch_debug_backtrace`'s default arm:
+                            // a dummy frame is skipped where it holds no
+                            // file and line, and named `unknown` where
+                            // it stands over user code.
+                            if site.is_some() {
+                                rows.push((
+                                    Traced::Unknown,
+                                    None,
+                                    None,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    site,
+                                ));
+                            }
                             continue;
                         };
                         // `build_filename_arg`: an `eval` names no file.
