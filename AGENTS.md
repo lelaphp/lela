@@ -104,15 +104,15 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 354 |  | pass |
-| unit | unit.lock | 106 |  | pass |
+| heap | heap.lock | 357 |  | pass |
+| unit | unit.lock | 107 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 930 | 1500 | pass |
-| sapi | sapi.lock | 21 |  | pass |
+| api | api.lock | 950 | 1500 | pass |
+| sapi | sapi.lock | 81 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 353 |  | pass |
 
-<!-- /computed in=f135bc180b1e6da4baf5a9cd531916db0dad3bbf265606c20c332fbdccc832a1 out=cb75da39a5f326bb5c47b1d1f8a50d6b091df6559116b259fc61df8708380e92 -->
+<!-- /computed in=d5c6370d9b18073fc396fb9889660005408bbe23d5ddd3d27c0fd14d00cc688e out=c6266fca98793613a26824af108604c56176b582665056e317e8bf2525e8af1e -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -218,6 +218,7 @@ Options:
 ├── lexbor
 ├── libxml
 ├── mbstring
+├── mysqli
 ├── mysqlnd
 ├── opcache
 ├── openssl
@@ -246,7 +247,7 @@ Options:
 ├── xmlwriter
 └── zlib
 ```
-<!-- /computed in=029b723bfb9ac5bd2b1873c05a3e24bfbb325fa4021a51dd5a6f5efdb755c6fc out=14cfd808bc406b143c7f09411e02b25fcb2e9a1634b4648d0491c66d14205f5b -->
+<!-- /computed in=2014347006ec25e95e32adce9d33940117df139324982f20522d1ef24937333b out=fa1e0031c44f48d89ab6d93bf78741fd77c547afa820775e4766a45ff85e1c49 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

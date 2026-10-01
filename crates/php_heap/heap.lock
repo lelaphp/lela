@@ -348,6 +348,7 @@ process::gid
 process::groups
 process::uid
 reset_lc_ctype_locale
+select_fds
 set_fd_blocking
 set_sockopt
 shift_left

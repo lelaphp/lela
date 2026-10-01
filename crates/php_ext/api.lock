@@ -717,6 +717,7 @@ request::Zone::date
 request::Zone::midnight
 request::Zone::of
 request::Zone::offset
+request::select
 request::take_signals
 syntax::Diagnostic
 syntax::Diagnostic::new
