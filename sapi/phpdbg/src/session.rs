@@ -26,8 +26,10 @@ pub enum Plan {
     Hold,
     /// `run`: the program served under the debugger.
     Run,
-    /// A request with no program of the execution context, for one
-    /// command outside a run that needs one standing.
+    /// A request with no program of the execution context's: where
+    /// there is none to hold, or the compiler refused it, the prompt's,
+    /// standing across its commands as php's one request does; or the
+    /// one command a run left that needs a request standing.
     Idle,
 }
 
@@ -46,8 +48,8 @@ pub enum Stop {
     Clean,
     /// `exec`: another execution context.
     Exec,
-    /// A command outside any request that needs one: served by a request
-    /// of its own.
+    /// A command a run left that needs a request standing: served by a
+    /// request of its own.
     Idle,
 }
 
@@ -158,7 +160,7 @@ pub struct Session {
     pub after_run: AfterRun,
     /// Where the execution context stands with the compiler.
     pub context: Context,
-    /// The command an idle request stands for.
+    /// The command a run left that an idle request is served for.
     pub job: Option<Command>,
     /// `PHPDBG_G(prompt)[0]`: the prompt's text, shown with a space after.
     pub prompt: Vec<u8>,

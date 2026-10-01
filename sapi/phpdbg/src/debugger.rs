@@ -83,9 +83,13 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             let Some(mut session) = session::take() else {
                 return Flow::Continue;
             };
-            let outcome = prompt::idle_job(&mut session, req);
+            match session.job.take() {
+                Some(command) => prompt::idle_job(&mut session, req, &command),
+                None => {
+                    let _ = prompted(&mut session, req, |req| Here::Idle { req });
+                }
+            }
             session::put(session);
-            let _ = outcome;
             tier::exit(req);
             Flow::Resume(frame)
         }
@@ -112,13 +116,7 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
         }
     }
     session.executing = false;
-    let outcome = loop {
-        let mut here = Here::Held { req: &mut *req };
-        let outcome = prompt::interactive(&mut session, &mut here);
-        if outcome != Outcome::NotRunning {
-            break outcome;
-        }
-    };
+    let outcome = prompted(&mut session, req, |req| Here::Held { req });
     let stopped = session.stopped.is_some();
     session::put(session);
     if stopped || outcome == Outcome::Stopped {
@@ -126,6 +124,40 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
         return Flow::Resume(frame);
     }
     drive(req, frame)
+}
+
+/// The prompt where nothing is executing, stood at again after a
+/// command that goes on with a program none is running, until one ends
+/// the request or, in the held request, `run` goes on in it. With no
+/// execution context to hold, or one the compiler refused, the idle
+/// request stands across the prompt's commands as php's one request
+/// does, so what one `ev` leaves the next finds.
+///
+/// ```php
+/// function (
+/// ```
+/// ```request phpdbg
+/// ev $y = 2
+/// ev $y
+/// q
+/// ```
+/// ```expect exit=255
+/// Parse error: Unclosed '(' in %SCRATCH%/witness.php on line 2
+/// prompt> 2
+/// prompt> 2
+/// prompt>
+/// ```
+fn prompted(
+    session: &mut Session,
+    req: &mut Request,
+    here: for<'r> fn(&'r mut Request) -> Here<'r>,
+) -> Outcome {
+    loop {
+        let outcome = prompt::interactive(session, &mut here(req));
+        if outcome != Outcome::NotRunning {
+            return outcome;
+        }
+    }
 }
 
 /// What the loop does with the opline at hand.
@@ -221,7 +253,7 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
     }
     let mut here = match standing {
         Some((frame, _)) => Here::Paused { req, frame },
-        None if session.exec.is_some() => Here::Held { req },
+        None if session.exec.is_some() && session.context != Context::Refused => Here::Held { req },
         None => Here::Idle { req },
     };
     let outcome = prompt::interactive(&mut session, &mut here);

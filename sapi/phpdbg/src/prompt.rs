@@ -27,8 +27,8 @@ pub enum Here<'a> {
     /// executing: php's `PHPDBG_G(ops)` with `EG(current_execute_data)`
     /// `NULL`.
     Held { req: &'a mut Request },
-    /// A request with no program of the context's, standing for one
-    /// command outside a run, with nothing executing.
+    /// A request with no program of the context's, with nothing
+    /// executing: the prompt's where no context is held.
     Idle { req: &'a mut Request },
     /// No request standing.
     Outside,
@@ -177,14 +177,11 @@ pub fn run_queued(s: &mut Session) {
     }
 }
 
-/// One command, the one the idle request stands for.
-pub fn idle_job(s: &mut Session, req: &mut Request) -> Outcome {
-    let Some(command) = s.job.take() else {
-        return Outcome::Resume;
-    };
+/// The command a run left that needs a request standing, served by an
+/// idle request of its own once the run's has ended.
+pub fn idle_job(s: &mut Session, req: &mut Request, command: &Command) {
     let mut here = Here::Idle { req };
-    let _ = execute(s, &mut here, &command);
-    Outcome::Resume
+    let _ = execute(s, &mut here, command);
 }
 
 /// `phpdbg_internal_stack_execute`.

@@ -4,9 +4,8 @@
 //! same cycle as requests of the engine's. The context is served held at
 //! its first opline for the prompt before `run`, and `run` goes on in
 //! that request; a run ends with its request, and the next is held again.
-//! A command outside any request that needs one standing, `ev` with no
-//! context, is served a request of its own with no program of the
-//! context's.
+//! Where there is no context to hold, a request with no program of the
+//! context's stands across the prompt's commands instead.
 
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
@@ -15,7 +14,7 @@ use php_sapi::{Engine, FileHandles, Observables, Primary, RequestDescription};
 
 use crate::cmd::Command;
 use crate::out::{self, Sink};
-use crate::prompt::{self, Here};
+use crate::prompt;
 use crate::session::{self, AfterRun, Context, Plan, Session, Stop};
 use crate::{NAME, input};
 
@@ -58,18 +57,16 @@ pub fn serve(engine: &Engine) -> i32 {
                 if let Some(args) = args {
                     set_arguments(&mut s, &args);
                 }
-                Some(Plan::Run)
+                Plan::Run
             }
-            Some(Stop::Idle) => Some(Plan::Idle),
+            Some(Stop::Idle) => Plan::Idle,
             Some(Stop::Clean | Stop::Exec) | None => {
-                (s.exec.is_some() && s.context != Context::Refused).then_some(Plan::Hold)
+                if s.exec.is_some() && s.context != Context::Refused {
+                    Plan::Hold
+                } else {
+                    Plan::Idle
+                }
             }
-        };
-        let Some(plan) = plan else {
-            let mut here = Here::Outside;
-            prompt::interactive(&mut s, &mut here);
-            session::put(s);
-            continue;
         };
         if plan == Plan::Run {
             prompt::begin_run(&mut s);
@@ -303,8 +300,8 @@ fn describe(s: &Session, plan: Plan) -> RequestDescription {
     }
 }
 
-/// A command outside any request that needs one standing: served by a
-/// request of its own, after the prompt that asked for it has ended.
+/// A command a run left that needs a request standing: served by a
+/// request of its own, after the run's has ended.
 pub fn idle(s: &mut Session, command: Command) {
     s.job = Some(command);
     s.stopped = Some(Stop::Idle);
