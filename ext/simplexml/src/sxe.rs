@@ -5,8 +5,8 @@
 //! the Rust of its C function.
 
 use php_ext::abi::{
-    ClassIterator, CloneObj, DimensionRead, ObjectHandlers, PropertyPlace, PropertyPurpose,
-    PropertyRead, PropertyTest, Std,
+    ClassIterator, CloneObj, DimensionRead, ObjectHandlers, PropertiesFor, PropertyPlace,
+    PropertyPurpose, PropertyRead, PropertyTest, Std,
 };
 use php_ext::call::{call_method, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name};
@@ -1572,11 +1572,11 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         if purpose == PropertyPurpose::Debug {
-            return Ok(None);
+            return Ok(PropertiesFor::Standard);
         }
-        Ok(Some(properties(req, object)?.snapshot()))
+        Ok(PropertiesFor::Rows(properties(req, object)?.snapshot()))
     }
 
     fn properties_overloaded(&self) -> bool {

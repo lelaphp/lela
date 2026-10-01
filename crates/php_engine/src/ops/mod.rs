@@ -14,7 +14,7 @@ use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_pre
 
 use php_unit::decl::Visibility;
 
-use crate::api::abi::PropertyPurpose;
+use crate::api::abi::{PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{Level, Thrown, deprecated, raise, throw, warning};
 use crate::api::request::Request;
@@ -763,8 +763,11 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
             // under a class that answers no table of its own: a lazy
             // object is cast as it stands.
             let rows = match table.get_properties_for(req, o, PropertyPurpose::ArrayCast)? {
-                Some(rows) => rows,
-                None => named_rows(req.properties_no_lazy_init(o)?),
+                PropertiesFor::Rows(rows) => rows,
+                PropertiesFor::Standard => named_rows(req.properties_no_lazy_init(o)?),
+                // `zend_get_properties_for` answering `NULL`:
+                // `ZVAL_EMPTY_ARRAY` (`Z/Zend/zend_execute.h:280`).
+                PropertiesFor::Null => return Ok(PhpArray::empty()),
             };
             mangled_array(req, o, rows)
         }
@@ -1562,16 +1565,20 @@ pub(crate) fn properties_answered(
     // `get_properties` answers is the members, whose names the slot
     // carries unmangled here.
     let rows = match table.get_properties_for(req, object, purpose)? {
-        Some(rows) => return Ok((rows, true)),
+        PropertiesFor::Rows(rows) => return Ok((rows, true)),
+        // php's `NULL` table, which every reader here walks as none.
+        PropertiesFor::Null => return Ok((Vec::new(), true)),
         // `zend_std_get_properties_for`'s `num_hooked_props` arm for the
         // readers that run hooks.
-        None if matches!(purpose, PropertyPurpose::Json | PropertyPurpose::VarExport) => {
+        PropertiesFor::Standard
+            if matches!(purpose, PropertyPurpose::Json | PropertyPurpose::VarExport) =>
+        {
             if let Some(rows) = req.hooked_properties_for(object)? {
                 return Ok((named_rows(rows), false));
             }
             table.get_properties(req, object)?
         }
-        None => match purpose {
+        PropertiesFor::Standard => match purpose {
             // `zend_std_get_properties_for`: the debug table of a lazy
             // object and the `(array)` cast read what stands without
             // initialising it, and so does a serialization the object

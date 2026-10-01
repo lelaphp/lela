@@ -8,7 +8,8 @@
 //! [`Handlers::iterator_element`].
 
 use php_ext::abi::{
-    CloneObj, DimensionRead, Instance, ObjectHandlers, PropertyPurpose, Std, This, True, Untyped,
+    CloneObj, DimensionRead, Instance, ObjectHandlers, PropertiesFor, PropertyPurpose, Std, This,
+    True, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
@@ -856,11 +857,11 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         // php asserts no serializer asks, the class having `__serialize`;
         // what reads the table under that purpose reads the object's own.
         if purpose == PropertyPurpose::Serialize {
-            return Ok(None);
+            return Ok(PropertiesFor::Standard);
         }
         // "The array elements are not *real properties*": what
         // `get_object_vars()` reads is the object's own table alone, a
@@ -872,7 +873,7 @@ impl ObjectHandlers for Handlers {
         };
         let props = crate::std_properties(req, object)?;
         if elements.is_empty() && props.is_empty() {
-            return Ok(None);
+            return Ok(PropertiesFor::Standard);
         }
         // Each element under its integer index
         // (`zend_hash_next_index_insert`), then each property under its
@@ -883,7 +884,7 @@ impl ObjectHandlers for Handlers {
             out.push((Key::Int(i64::try_from(at).unwrap_or(i64::MAX)), value));
         }
         out.extend(props);
-        Ok(Some(out))
+        Ok(PropertiesFor::Rows(out))
     }
 
     fn get_debug_info(
@@ -892,7 +893,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
     ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         let rows = self.get_properties_for(req, object, PropertyPurpose::Debug)?;
-        let Some(rows) = rows else {
+        let PropertiesFor::Rows(rows) = rows else {
             return Ok(None);
         };
         let mut out = PhpArray::new(req)?;

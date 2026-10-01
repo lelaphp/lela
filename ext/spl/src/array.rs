@@ -22,7 +22,8 @@ use std::cmp::Ordering;
 
 use php_ext::abi::{
     Callable, CloneObj, CurrentPlace, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers,
-    PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw, Std, This, True, Union,
+    PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw, Std, This,
+    True, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
@@ -2203,18 +2204,18 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         if flags(req, object)? & ArrayObject::STD_PROP_LIST != 0
             || !matches!(
                 purpose,
                 PropertyPurpose::ArrayCast | PropertyPurpose::VarExport | PropertyPurpose::Json
             )
         {
-            return Ok(None);
+            return Ok(PropertiesFor::Standard);
         }
         // Views, as `get_properties_for`'s rows are, each under the key the
         // storage holds it by.
-        Ok(Some(table(req, object)?.every_row(req)?))
+        Ok(PropertiesFor::Rows(table(req, object)?.every_row(req)?))
     }
 }
 

@@ -170,6 +170,7 @@ abi::Passed
 abi::Path
 abi::Pool
 abi::PostStartup
+abi::PropertiesFor
 abi::PropertyPlace
 abi::PropertyPurpose
 abi::PropertyRead

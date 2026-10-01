@@ -16,7 +16,7 @@ use php_unit::decl::Attribute as AttributeDecl;
 
 use php_unit::Level;
 
-use crate::api::abi::{ObjectHandlers, PropertyPurpose, This};
+use crate::api::abi::{ObjectHandlers, PropertiesFor, PropertyPurpose, This};
 use crate::api::call::{Function, eval_const_expr, instantiate_named};
 use crate::api::raising::{Thrown, raise, throw};
 use crate::api::request::Request;
@@ -404,14 +404,38 @@ impl ObjectHandlers for SensitiveValueHandlers {
     /// array(0) {
     /// }
     /// ```
+    ///
+    /// No table for any purpose, so `get_object_vars()` and the cast
+    /// answer the process's empty array and cost nothing, where
+    /// `get_mangled_object_vars()` reads the property table itself.
+    ///
+    /// ```php
+    /// $v = new SensitiveParameterValue(1);
+    /// $m = memory_get_usage();
+    /// $a = get_object_vars($v);
+    /// $b = (array) $v;
+    /// var_dump(memory_get_usage() - $m);
+    /// debug_zval_dump($a, $b, get_mangled_object_vars($v));
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// array(0) interned {
+    /// }
+    /// array(0) interned {
+    /// }
+    /// array(1) refcount(1){
+    ///   ["%0SensitiveParameterValue%0value"]=>
+    ///   int(1)
+    /// }
+    /// ```
     fn get_properties_for(
         &self,
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(crate::api::values::Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         let _ = (req, object, purpose);
-        Ok(Some(Vec::new()))
+        Ok(PropertiesFor::Null)
     }
 }
 

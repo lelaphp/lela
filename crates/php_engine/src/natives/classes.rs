@@ -9,7 +9,9 @@
 use php_macros::php_function;
 use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
 
-use crate::api::abi::{OrFalse, Passed, PropertyPurpose, PropertyTest, Raw, Union, Untyped};
+use crate::api::abi::{
+    OrFalse, Passed, PropertiesFor, PropertyPurpose, PropertyTest, Raw, Union, Untyped,
+};
 use crate::api::raising::{Thrown, arg_type_error, deprecated, throw, warning};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
@@ -475,8 +477,11 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
     // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)`: a
     // class that answers the purpose itself hands back its table.
     let table = req.object_handlers(object.heap());
-    if let Some(rows) = table.get_properties_for(req, object, PropertyPurpose::GetObjectVars)? {
-        return answered_vars(req, class, rows);
+    match table.get_properties_for(req, object, PropertyPurpose::GetObjectVars)? {
+        PropertiesFor::Rows(rows) => return answered_vars(req, class, rows),
+        // No table: `RETURN_EMPTY_ARRAY` (`Z/Zend/zend_builtin_functions.c:849`).
+        PropertiesFor::Null => return Ok(PhpArray::empty()),
+        PropertiesFor::Standard => {}
     }
     // Over a class with a hooked property it is the table its hooks
     // answer, each row one owner of its own.

@@ -5,8 +5,8 @@
 //! the methods that start, bind and describe.
 
 use php_ext::abi::{
-    CloneObj, CloneObjWith, Instance, ObjectHandlers, OrFalse, Passed, PropertyPurpose, Raw, Ref,
-    Std, This, True, Union, Variadic,
+    CloneObj, CloneObjWith, Instance, ObjectHandlers, OrFalse, Passed, PropertiesFor,
+    PropertyPurpose, Raw, Ref, Std, This, True, Union, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::internal_iterator;
@@ -318,9 +318,9 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(php_ext::values::Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         let _ = (req, object, purpose);
-        Ok(None)
+        Ok(PropertiesFor::Standard)
     }
 }
 
