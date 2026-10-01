@@ -63,7 +63,79 @@ pub(crate) struct SlotState {
 /// ```
 struct Held {
     decimal: Decimal,
-    storage: Option<Emalloc>,
+    storage: Storage,
+}
+
+/// The `bc_num` a number holds on the request's heap: none where php's
+/// is `BCG(_zero_)`, which no number allocates; its own, `n_refs` one;
+/// or one the original and its clones share, which `bcmath_number_clone`
+/// takes one more reference to (`bc_copy_num`), held in the request's
+/// [`Shared`] table under its count and given back when the last holder
+/// goes (`bc_free_num`).
+enum Storage {
+    Zero,
+    Own(Emalloc),
+    Shared(u32),
+}
+
+/// One `bc_num` more than one number holds, and php's `n_refs`.
+struct SharedNum {
+    storage: Emalloc,
+    refs: u32,
+}
+
+/// bcmath's request state: the `bc_num`s numbers share, by a key the
+/// holders name, and the next key. Built at request start and dropped
+/// after it, private to this crate (ADR-0005); what it holds at the end
+/// is the request's to release with its heap.
+#[derive(Default)]
+pub(crate) struct Shared {
+    nums: std::collections::HashMap<u32, SharedNum>,
+    next: u32,
+}
+
+impl Storage {
+    /// `bc_copy_num`: one more holder of what this one holds, an own
+    /// allocation moved into the request's table first.
+    fn copy(&mut self, req: &mut Request) -> Storage {
+        match std::mem::replace(self, Storage::Zero) {
+            Storage::Zero => Storage::Zero,
+            Storage::Own(storage) => {
+                let shared = req.state::<Shared>();
+                let key = shared.next;
+                shared.next = shared.next.wrapping_add(1);
+                shared.nums.insert(key, SharedNum { storage, refs: 2 });
+                *self = Storage::Shared(key);
+                Storage::Shared(key)
+            }
+            Storage::Shared(key) => {
+                if let Some(held) = req.state::<Shared>().nums.get_mut(&key) {
+                    held.refs += 1;
+                }
+                *self = Storage::Shared(key);
+                Storage::Shared(key)
+            }
+        }
+    }
+
+    /// `bc_free_num`: this holder gone, the allocation given back where
+    /// it was the last.
+    fn free(self, req: &mut Request) {
+        match self {
+            Storage::Zero => {}
+            Storage::Own(storage) => storage.free(req),
+            Storage::Shared(key) => {
+                let nums = &mut req.state::<Shared>().nums;
+                let last = nums.get_mut(&key).is_some_and(|held| {
+                    held.refs -= 1;
+                    held.refs == 0
+                });
+                if last && let Some(held) = nums.remove(&key) {
+                    held.storage.free(req);
+                }
+            }
+        }
+    }
 }
 
 /// The payload: `bcmath_number_obj_t` keeps its number behind pointers,
@@ -631,8 +703,8 @@ fn held(req: &mut Request, object: PhpObject) -> Result<Decimal, Thrown> {
 /// the old rendering given up; the `Err` is the memory limit's fatal.
 fn set(req: &mut Request, object: PhpObject, decimal: Decimal) -> Result<(), Thrown> {
     let storage = match decimal.num.storage() {
-        Some(len) => Some(Emalloc::new(req, len)?),
-        None => None,
+        Some(len) => Storage::Own(Emalloc::new(req, len)?),
+        None => Storage::Zero,
     };
     let (kept, old) = object
         .native_mut::<Slot>(req)
@@ -642,8 +714,8 @@ fn set(req: &mut Request, object: PhpObject, decimal: Decimal) -> Result<(), Thr
         })
         .unwrap_or_default();
     release_kept(req, kept);
-    if let Some(storage) = old.and_then(|old| old.storage) {
-        storage.free(req);
+    if let Some(old) = old {
+        old.storage.free(req);
     }
     Ok(())
 }
@@ -1055,8 +1127,8 @@ impl ObjectHandlers for Handlers {
             .map(|slot| (slot.kept.take(), slot.held.take()))
             .unwrap_or_default();
         release_kept(req, kept);
-        if let Some(storage) = held.and_then(|held| held.storage) {
-            storage.free(req);
+        if let Some(held) = held {
+            held.storage.free(req);
         }
     }
 
@@ -1398,7 +1470,21 @@ impl ObjectHandlers for Handlers {
     }
 }
 
-/// `bcmath_number_clone`: a fresh number holding the same.
+/// `bcmath_number_clone`: a fresh number holding the same `bc_num`, one
+/// more reference to it, and the same rendering, so the allocation goes
+/// back when the last of the original and its clones does:
+///
+/// ```php
+/// $a = new BcMath\Number('1.5');
+/// $m = memory_get_usage(); $c = clone $a; $n = memory_get_usage(); unset($a); $o = memory_get_usage(); unset($c);
+/// var_dump($n - $m, $o - $n, memory_get_usage() - $o);
+/// ```
+/// ```expect
+/// int(64)
+/// int(-64)
+/// int(-104)
+/// ```
+///
 ///
 /// ```php
 /// $n = new BcMath\Number('1.5');
@@ -1412,12 +1498,36 @@ impl ObjectHandlers for Handlers {
 /// int(1)
 /// ```
 fn clone_number(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
-    let slot = Box::new(SlotState {
-        held: held_of(req, object).map(|decimal| Held {
-            decimal,
-            storage: None,
-        }),
-        kept: None,
+    let taken = object.native_mut::<Slot>(req).map(|slot| {
+        let held = slot.held.as_mut().map(|held| {
+            let storage = std::mem::replace(&mut held.storage, Storage::Zero);
+            (held.decimal.clone(), storage)
+        });
+        (held, slot.kept)
     });
-    clone_with(req, &object, slot)
+    let Some((held, kept)) = taken else {
+        return clone_with(req, &object, Slot::default());
+    };
+    // `bc_copy_num(original->num)`: the clone one more holder of the
+    // original's `bc_num`.
+    let held = held.map(|(decimal, mut storage)| {
+        let copied = storage.copy(req);
+        if let Some(original) = object
+            .native_mut::<Slot>(req)
+            .and_then(|slot| slot.held.as_mut())
+        {
+            original.storage = storage;
+        }
+        Held {
+            decimal,
+            storage: copied,
+        }
+    });
+    // `zend_string_copy(original->value)`: the rendering shared.
+    if let Some(kept) = kept {
+        for text in [kept.value, kept.value_name, kept.scale_name] {
+            req.addref(&Value::string(text));
+        }
+    }
+    clone_with(req, &object, Box::new(SlotState { held, kept }))
 }

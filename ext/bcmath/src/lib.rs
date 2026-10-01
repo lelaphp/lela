@@ -74,6 +74,7 @@ pub fn extension() -> Extension {
             bcround::declared(),
         ])
         .class::<number::Number>()
+        .request_state::<number::Shared>()
         .ini(vec![IniDecl {
             name: Name(SCALE.into()),
             default: Some(b"0".as_slice().into()),
