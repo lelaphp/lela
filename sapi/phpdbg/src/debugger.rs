@@ -32,9 +32,10 @@ impl Tier for Debugger {
 }
 
 /// A serving entered at `frame`: the held request's prompt where the
-/// session asked for one, then the loop driven.
+/// session asked for one, then the loop driven; nothing where the prompt
+/// is serving it, an `ev` or a registered function.
 fn entered(req: &mut Request, frame: FrameRef) -> Flow {
-    let Some(plan) = session::with(|s| s.plan).flatten() else {
+    let Some(plan) = session::with(|s| if s.in_eval { None } else { s.plan }).flatten() else {
         return Flow::Continue;
     };
     match plan {

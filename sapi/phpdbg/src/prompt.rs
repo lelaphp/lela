@@ -502,7 +502,7 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
         crate::host::idle(s, Command::Params(params.to_vec()));
         return true;
     };
-    tier::call(req, &lowered, &arguments);
+    crate::session::lend(s, || tier::call(req, &lowered, &arguments));
     out::out(b"\n");
     true
 }
@@ -678,7 +678,7 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
         crate::host::idle(s, Command::Eval(code.to_vec()));
         return Ret::Success;
     };
-    match tier::evaluate(req, frame, code) {
+    match crate::session::lend(s, || tier::evaluate(req, frame, code)) {
         Ok(tier::Evaluated::Printed(printed)) => {
             out::write(&printed);
             out::out(b"\n");
