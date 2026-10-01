@@ -840,7 +840,20 @@ fn clamp_splice(num_in: i64, offset: i64, length: i64) -> (i64, i64) {
 /// (`Z/ext/standard/array.c:3909`): the elements from `$offset` for
 /// `$length`, clamped as `array_splice` clamps, string keys kept and
 /// integer keys renumbered unless `$preserve_keys`; an offset past the
-/// end, or a length that leaves nothing, is the empty array.
+/// end, or a length that leaves nothing, is the process's empty array,
+/// `RETURN_EMPTY_ARRAY`, which costs nothing.
+///
+/// ```php
+/// $m = memory_get_usage();
+/// $a = array_slice([1], 1); $b = array_slice([1, 2], 0, -2);
+/// var_dump(memory_get_usage() - $m);
+/// debug_zval_dump($a);
+/// ```
+/// ```expect
+/// int(0)
+/// array(0) interned {
+/// }
+/// ```
 ///
 /// ```php
 /// $a = ["a" => 1, 5 => 2, 3, "b" => 4, 7 => 5];
@@ -885,11 +898,11 @@ fn array_slice(
     let (input, preserve) = (array, preserve_keys);
     let num_in = i64::try_from(input.len()).unwrap_or(i64::MAX);
     if offset > num_in {
-        return PhpArray::new(req);
+        return Ok(PhpArray::empty());
     }
     let (start, taken) = clamp_splice(num_in, offset, length.unwrap_or(num_in));
     if taken <= 0 {
-        return PhpArray::new(req);
+        return Ok(PhpArray::empty());
     }
     let mut out = PhpArray::new(req)?;
     let rows = input.snapshot_refs();

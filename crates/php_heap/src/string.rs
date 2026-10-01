@@ -74,6 +74,69 @@ pub(crate) const INTERNED: u32 = gc::IMMUTABLE;
 /// which relives the request boundary.
 const PERMANENT: u32 = INTERNED | gc::PERSISTENT | gc::PERMANENT;
 
+/// A request string fresh from `zend_string_alloc(len, 0)`, before it
+/// is handed out: one owner, the holder's, and nothing else naming it,
+/// so its bytes are written in place as a native writes `ZSTR_VAL` and
+/// cut down as `zend_string_truncate` cuts them. Neither `Copy` nor
+/// `Clone`, so the bytes are written through one name; [`FreshStr::finish`] makes it
+/// the string it is from then on.
+#[derive(Debug)]
+pub struct FreshStr(pub(crate) Str);
+
+impl FreshStr {
+    /// The length in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the length is zero.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The bytes, to write: `ZSTR_VAL(s)` for its length.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        let len = self.0.len();
+        // SAFETY: the bytes sit right after the header, inside the
+        // allocation, and this value is the string's one name, so the
+        // borrow of `self` is the one access to them.
+        let val = unsafe { self.0.0.as_ptr().cast::<u8>().add(HEADER) };
+        // SAFETY: `len` bytes were laid down there, zero or written.
+        unsafe { std::slice::from_raw_parts_mut(val, len) }
+    }
+
+    /// The string, handed out: one owner, the caller's.
+    #[must_use]
+    pub fn finish(self) -> Str {
+        self.0
+    }
+
+    /// `zend_string_truncate(s, len, 0)` over `mm`: the allocation
+    /// `erealloc`ed to a string of `len` bytes, in place where the size
+    /// stays in its bin and moved where it falls to a smaller one, the
+    /// length set, the NUL after it written and the hash forgotten. A
+    /// `len` past the string's is its own length.
+    pub(crate) fn truncate(self, mm: &mut Mm, len: usize) -> Result<FreshStr, Fatal> {
+        let len = len.min(self.len());
+        // SAFETY: this is the string's one name and the request's own
+        // allocation, its header and first `len` bytes initialised.
+        let at = unsafe { mm.realloc(self.0.address(), HEADER + len, Str::allocation_size(len)) }?;
+        let header = at.cast::<StrHeader>();
+        // SAFETY: the header moved with the bytes, and nothing else names
+        // the allocation.
+        unsafe { (*header.as_ptr()).len = len };
+        let s = Str(header);
+        s.forget_hash();
+        // SAFETY: the byte after the `len` is inside the allocation.
+        let end = unsafe { at.as_ptr().add(HEADER + len) };
+        // SAFETY: `end` is the allocation's NUL, php's, written once.
+        unsafe { end.write(0) };
+        Ok(FreshStr(s))
+    }
+}
+
 /// One string: php's `zend_string *`.
 ///
 /// Naming a string does not keep it alive, exactly as php's pointer does
@@ -934,6 +997,34 @@ pub(crate) fn free_persistent(s: Str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `zend_string_alloc` then `zend_string_truncate`: the bytes written
+    /// in place survive the cut, the NUL follows them, and the heap
+    /// counts the smaller bin the string moved to; a cut that stays in
+    /// the bin keeps the allocation where it stands.
+    #[test]
+    fn a_fresh_string_is_written_in_place_and_cut_to_its_bin() {
+        let _alone = crate::serial::alone();
+        let mut heap = crate::Heap::new();
+        let base = heap.memory_usage(false);
+        let Ok(mut fresh) = heap.string_fresh(2103) else {
+            return;
+        };
+        fresh.bytes_mut()[..5].copy_from_slice(b"hello");
+        assert_eq!(heap.memory_usage(false) - base, 2560);
+        let Ok(cut) = heap.string_truncate(fresh, 5) else {
+            return;
+        };
+        assert_eq!(heap.memory_usage(false) - base, 32);
+        let Ok(same) = heap.string_truncate(cut, 3) else {
+            return;
+        };
+        let s = same.finish();
+        assert_eq!(s.bytes(), b"hel");
+        assert_eq!(heap.memory_usage(false) - base, 32);
+        heap.release_string(s);
+        assert_eq!(heap.memory_usage(false), base);
+    }
 
     #[test]
     fn interning_the_same_bytes_twice_gives_one_string() {

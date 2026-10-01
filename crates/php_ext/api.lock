@@ -794,6 +794,14 @@ values::Emalloc::is_empty
 values::Emalloc::len
 values::Emalloc::new
 values::Emalloc::resize
+values::FreshString
+values::FreshString::bytes_mut
+values::FreshString::finish
+values::FreshString::free
+values::FreshString::is_empty
+values::FreshString::len
+values::FreshString::new
+values::FreshString::truncate
 values::HashIterator
 values::HashIterator::new
 values::HashIterator::position
@@ -819,6 +827,8 @@ values::PhpArray::cursor_key
 values::PhpArray::cursor_next
 values::PhpArray::cursor_prev
 values::PhpArray::cursor_reset
+values::PhpArray::empty
+values::PhpArray::find
 values::PhpArray::get
 values::PhpArray::is_empty
 values::PhpArray::is_list

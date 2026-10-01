@@ -216,7 +216,7 @@ fn table(req: &mut Request, value: &Value, option: &str) -> Result<PhpArray, Thr
 
 /// A key php requires of an option's array, `must have key "name"`.
 fn key(req: &mut Request, table: PhpArray, name: &str) -> Result<Value, Thrown> {
-    match find(req, table, name)? {
+    match find(table, name) {
         Some(value) => Ok(value),
         None => Err(arg_value_error(req, 4, &format!("have key \"{name}\""))),
     }
@@ -258,7 +258,7 @@ fn mcast(
 ) -> Result<Set, Thrown> {
     let object = socket.object();
     let table = table(req, value, "MCAST_LEAVE_GROUP")?;
-    let Some(group) = find(req, table, "group")? else {
+    let Some(group) = find(table, "group") else {
         return Err(throw(
             req,
             "ValueError",
@@ -270,7 +270,7 @@ fn mcast(
     let Some(group) = inet46_addr(req, object, family, group.as_bytes())? else {
         return Ok(Set::Done(false));
     };
-    let index = match find(req, table, "interface")? {
+    let index = match find(table, "interface") {
         Some(value) => match if_index(req, &value)? {
             Some(index) => index,
             None => return Ok(Set::Done(false)),

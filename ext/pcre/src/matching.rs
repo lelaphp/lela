@@ -205,12 +205,12 @@ fn insert(
     value: Value,
     unmatched: bool,
 ) -> Result<(), Thrown> {
-    if let Some(name) = name {
+    if let Some(name) = name
+        && (!unmatched || into.find(name).is_none())
+    {
         let key = Key::Str(PhpString::new(req, name)?);
-        if !unmatched || !into.contains(&key) {
-            req.addref(&value);
-            into.set(req, key, value)?;
-        }
+        req.addref(&value);
+        into.set(req, key, value)?;
     }
     into.append(req, value)
 }

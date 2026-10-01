@@ -583,8 +583,7 @@ fn serialize<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArra
     state.set(req, Key::Str(key), Value::string(uri))?;
     let mut out = PhpArray::new(req)?;
     out.append(req, Value::array(state))?;
-    let properties = PhpArray::new(req)?;
-    out.append(req, Value::array(properties))?;
+    out.append(req, Value::array(PhpArray::empty()))?;
     Ok(out)
 }
 
@@ -600,8 +599,7 @@ fn unserialize<P: UriParser>(
         let first = readonly(req, P::CLASS);
         return Err(throw_chained(req, first, "Exception", &invalid));
     }
-    let key = PhpString::new(req, URI_FIELD)?;
-    let Some(text) = serialized_uri(data, key) else {
+    let Some(text) = serialized_uri(data) else {
         return Err(throw(req, "Exception", &invalid));
     };
     let parsed = P::parse(req, &text, None, false, true)?;
@@ -625,7 +623,7 @@ fn unserialize<P: UriParser>(
 /// The `uri` string of `[["uri" => ...], [...]]`, checked as
 /// `uri_unserialize` checks it before the parse: two elements, the first
 /// an array of the one string.
-fn serialized_uri(data: PhpArray, key: PhpString) -> Option<Vec<u8>> {
+fn serialized_uri(data: PhpArray) -> Option<Vec<u8>> {
     if data.len() != 2 {
         return None;
     }
@@ -634,7 +632,7 @@ fn serialized_uri(data: PhpArray, key: PhpString) -> Option<Vec<u8>> {
     if state.len() != 1 {
         return None;
     }
-    let uri = state.get(&Key::Str(key))?;
+    let uri = state.find(URI_FIELD)?;
     uri.as_str_bytes().map(<[u8]>::to_vec)
 }
 

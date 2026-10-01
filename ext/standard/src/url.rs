@@ -122,9 +122,8 @@ fn get_headers(
         return Ok(OrFalse::False);
     };
     let meta = stream.meta_data(req)?;
-    let wrapper_data = Key::Str(PhpString::new(req, b"wrapper_data")?);
     let lines = meta
-        .get(&wrapper_data)
+        .find(b"wrapper_data")
         .and_then(|value| value.deref().as_array().copied());
     let Some(lines) = lines else {
         stream.free(req);
@@ -160,9 +159,9 @@ fn add_header(
     while line.get(start).is_some_and(u8::is_ascii_whitespace) {
         start += 1;
     }
-    let name = Key::Str(PhpString::new(req, &line[..at])?);
     let value = Value::string(PhpString::new(req, &line[start..])?);
-    let Some(previous) = headers.get(&name) else {
+    let Some(previous) = headers.find(&line[..at]) else {
+        let name = Key::Str(PhpString::new(req, &line[..at])?);
         return headers.set(req, name, value);
     };
     if let Some(list) = previous.as_array() {
@@ -173,6 +172,7 @@ fn add_header(
     req.addref(&previous);
     list.append(req, previous)?;
     list.append(req, value)?;
+    let name = Key::Str(PhpString::new(req, &line[..at])?);
     headers.set(req, name, Value::array(list))
 }
 

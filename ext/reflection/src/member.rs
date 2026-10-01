@@ -24,10 +24,11 @@ use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use super::lazy::{lazy_compatible, object_of};
 use super::signature::type_factory;
 use super::{
-    asked_class, attr, class_const_string, class_constant_named, class_name_of, class_named,
-    class_of, const_string, constant_key, dynamic_properties, effective_prop, held_to, keep,
-    kept_class, namespace_end, property_named, property_string, reflection_class_factory, set_name,
-    set_string_prop, string_value, this_class_constant, this_name, this_property,
+    Reference, asked_class, attr, class_const_string, class_constant_named, class_name_of,
+    class_named, class_of, const_string, constant_key, dynamic_properties, effective_prop, held_to,
+    keep, keep_reference, kept_class, namespace_end, property_named, property_string,
+    reflection_class_factory, set_name, set_string_prop, string_value, this_class_constant,
+    this_name, this_property,
 };
 
 // ----------------------------------------------- ReflectionProperty
@@ -355,7 +356,19 @@ impl Reflection {
     }
 }
 
-/// `ReflectionProperty` as the stub declares it.
+/// `ReflectionProperty` as the stub declares it. Its constructor and
+/// `reflection_property_factory` lay a `property_reference` down beside
+/// it, given back with it:
+///
+/// ```php
+/// $w = new ReflectionProperty('Exception', 'message');
+/// $m = memory_get_usage(); $r = new ReflectionProperty('Exception', 'message'); $n = memory_get_usage(); unset($r);
+/// var_dump($n - $m, memory_get_usage() - $n);
+/// ```
+/// ```expect
+/// int(152)
+/// int(-152)
+/// ```
 #[php_class(implements(crate::Reflector), not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionProperty;
 
@@ -474,9 +487,10 @@ impl ReflectionProperty {
         set_name(req, this, &name)?;
         set_string_prop(req, this, b"class", &declaring)?;
         // `intern->ce = ce`: the class asked about, which `getValue`
-        // holds its argument to, where `$class` is the declaring one.
+        // holds its argument to, where `$class` is the declaring one;
+        // `intern->ptr` its `property_reference`.
         keep(req, this, class, None);
-        Ok(())
+        keep_reference(req, this, Reference::Property)
     }
 
     /// `ReflectionProperty::__toString()`: `_property_string` over the
@@ -1624,15 +1638,18 @@ impl ReflectionProperty {
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
-        let (class, _, found) = this_declared(req, this.object())?;
-        let scope = found.as_ref().map_or(class, |(scope, _)| *scope);
-        let attributes = found.map_or_else(Vec::new, |(_, decl)| decl.attributes.clone());
+        let (_, _, found) = this_declared(req, this.object())?;
+        // `ref->prop == NULL`, a dynamic property: no attributes, before
+        // the filter is looked at.
+        let Some((scope, decl)) = found else {
+            return Ok(PhpArray::empty());
+        };
         let file = req
             .class_decl(scope)
             .and_then(|decl| super::attr::declared_in(&decl.file.0));
         super::attr::reflect_attributes(
             req,
-            &attributes,
+            &decl.attributes,
             super::attr::Subject::new(Some(scope), super::attr::TARGET_PROPERTY, file.as_deref()),
             name,
             flags,
@@ -1685,11 +1702,15 @@ impl ReflectionProperty {
     /// ```
     fn getHooks(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let (_, name, found) = this_declared(req, this.object())?;
+        let declared: Vec<_> = HookKind::ALL
+            .into_iter()
+            .filter_map(|kind| Some((kind, hook_of(req, found.as_ref(), &name, kind)?)))
+            .collect();
+        if declared.is_empty() {
+            return Ok(PhpArray::empty());
+        }
         let mut hooks = PhpArray::new(req)?;
-        for kind in HookKind::ALL {
-            let Some((scope, decl)) = hook_of(req, found.as_ref(), &name, kind) else {
-                continue;
-            };
+        for (kind, (scope, decl)) in declared {
             let reflector = hook_reflector(req, scope, &decl)?;
             let key = php_ext::values::Key::Str(php_ext::values::PhpString::new(
                 req,

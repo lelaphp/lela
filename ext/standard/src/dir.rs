@@ -640,6 +640,9 @@ fn glob(
         Err(php_glob::PHP_GLOB_NOMATCH) => Vec::new(),
         Err(_) => return Ok(OrFalse::False),
     };
+    if paths.is_empty() {
+        return Ok(OrFalse::Value(PhpArray::empty()));
+    }
     let only_dirs = flags & i64::from(php_glob::PHP_GLOB_ONLYDIR) != 0;
     let mut array = PhpArray::new(req)?;
     let mut basedir_limit = false;

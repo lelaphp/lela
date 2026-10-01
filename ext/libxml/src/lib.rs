@@ -764,7 +764,9 @@ fn libxml_get_last_error(req: &mut Request) -> Result<OrFalse<Instance<LibXMLErr
 /// ```
 #[php_function]
 fn libxml_get_errors(req: &mut Request) -> Result<PhpArray, Thrown> {
-    let list = req.state::<State>().errors.clone().unwrap_or_default();
+    let Some(list) = req.state::<State>().errors.clone() else {
+        return Ok(PhpArray::empty());
+    };
     let mut out = PhpArray::new(req)?;
     for error in &list {
         let object = error_object(req, error)?;

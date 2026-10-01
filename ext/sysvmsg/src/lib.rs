@@ -534,8 +534,7 @@ fn msg_set_queue(
         ("msg_perm.mode", &mut changes.mode),
         ("msg_qbytes", &mut changes.qbytes),
     ] {
-        let key = Key::Str(PhpString::new(req, key.as_bytes())?);
-        if let Some(item) = data.get(&key) {
+        if let Some(item) = data.find(key.as_bytes()) {
             *slot = Some(to_long(req, &item.deref())?);
         }
     }

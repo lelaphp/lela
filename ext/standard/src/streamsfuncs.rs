@@ -247,16 +247,11 @@ pub fn stream_ctx_option(
     else {
         return Ok(None);
     };
-    let key = PhpString::new(req, wrapper)?;
-    let found = options.get(&Key::Str(key)).map(|v| v.deref());
-    req.release(Value::string(key));
+    let found = options.find(wrapper).map(|v| v.deref());
     let Some(level) = found.as_ref().and_then(Value::as_array).copied() else {
         return Ok(None);
     };
-    let key = PhpString::new(req, option)?;
-    let found = level.get(&Key::Str(key)).map(|v| v.deref());
-    req.release(Value::string(key));
-    Ok(found)
+    Ok(level.find(option).map(|v| v.deref()))
 }
 
 /// `Z_PARAM_RESOURCE` then `decode_context_param`
@@ -350,15 +345,14 @@ fn unset_in(
     wrapper: &[u8],
     option: &[u8],
 ) -> Result<(), Thrown> {
-    let name = PhpString::new(req, wrapper)?;
     let found = options
-        .get(&Key::Str(name))
+        .find(wrapper)
         .map(|v| v.deref())
         .and_then(|v| v.as_array().copied());
     let Some(mut category) = found else {
-        req.release(Value::string(name));
         return Ok(());
     };
+    let name = PhpString::new(req, wrapper)?;
     options.separate(req)?;
     req.addref(&Value::array(category));
     category.separate(req)?;
@@ -380,8 +374,8 @@ fn put_option(
 ) -> Result<(), Thrown> {
     let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
     options.separate(req)?;
-    let wrapper_key = Key::Str(PhpString::new(req, &c_string(wrapper))?);
-    let existing = options.get(&wrapper_key).map(|v| v.deref());
+    let wrapper = c_string(wrapper);
+    let existing = options.find(&wrapper).map(|v| v.deref());
     let mut category = match existing.as_ref().and_then(Value::as_array) {
         Some(array) => {
             let array = *array;
@@ -395,6 +389,7 @@ fn put_option(
     req.addref(&value);
     let option_key = Key::Str(PhpString::new(req, &c_string(option))?);
     category.set(req, option_key, value)?;
+    let wrapper_key = Key::Str(PhpString::new(req, &wrapper)?);
     options.set(req, wrapper_key, Value::array(category))
 }
 
@@ -430,8 +425,7 @@ fn parse_options(req: &mut Request, res: Resource, options: PhpArray) -> Result<
 /// replaces the one there; `options` an array of options, php's
 /// `Invalid stream/context parameter` otherwise.
 fn parse_params(req: &mut Request, res: Resource, params: PhpArray) -> Result<(), Thrown> {
-    let notification = Key::Str(PhpString::new(req, b"notification")?);
-    if let Some(callback) = params.get(&notification) {
+    if let Some(callback) = params.find(b"notification") {
         if let Err(why) = callable_checked(req, &callback) {
             return Err(arg_type_error(
                 req,
@@ -449,8 +443,7 @@ fn parse_params(req: &mut Request, res: Resource, params: PhpArray) -> Result<()
             req.release(old.callback);
         }
     }
-    let options = Key::Str(PhpString::new(req, b"options")?);
-    if let Some(options) = params.get(&options) {
+    if let Some(options) = params.find(b"options") {
         let options = options.deref();
         let Some(options) = options.as_array() else {
             return Err(throw(req, "TypeError", "Invalid stream/context parameter"));

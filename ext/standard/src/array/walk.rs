@@ -525,6 +525,9 @@ fn array_filter(
     #[php(default = null)] callback: Option<Callable>,
     #[php(default = 0)] mode: i64,
 ) -> Result<PhpArray, Thrown> {
+    if array.is_empty() {
+        return Ok(PhpArray::empty());
+    }
     let mut out = PhpArray::new(req)?;
     for (key, operand) in array.snapshot_refs() {
         let keep = match &callback {

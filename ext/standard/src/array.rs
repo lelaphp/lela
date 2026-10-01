@@ -232,8 +232,7 @@ fn key_copy(req: &mut Request, key: &Key) -> Key {
 fn array_merge(req: &mut Request, arrays: Variadic<PhpArray>) -> Result<Raw<PhpArray>, Thrown> {
     let arrays = arrays.0;
     if arrays.is_empty() {
-        let empty = Value::array(PhpArray::new(req)?);
-        return returned(req, empty);
+        return returned(req, Value::array(PhpArray::empty()));
     }
     merge_total(req, &arrays)?;
     if let [first, second] = arrays[..] {

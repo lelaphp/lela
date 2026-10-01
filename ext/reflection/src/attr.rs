@@ -171,6 +171,9 @@ pub(super) fn reflect_attributes(
         },
         _ => None,
     };
+    if attributes.is_empty() {
+        return Ok(PhpArray::empty());
+    }
     let repeated: Vec<bool> = attributes
         .iter()
         .map(|one| {
@@ -235,7 +238,7 @@ fn attribute_factory(req: &mut Request, kept: &AttributeRef) -> Result<PhpObject
     let object = new_object(req, class)?;
     let name = kept.attribute.name.0.to_vec();
     set_name(req, object, &name)?;
-    keep_attribute(req, object, kept.clone());
+    keep_attribute(req, object, kept.clone())?;
     Ok(object)
 }
 
@@ -284,7 +287,21 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
 /// with the attribute's arguments, the named ones by their names, as
 /// `object_init_with_constructor` serves them
 /// ([`instantiate_named`]).
-/// `ReflectionAttribute` as the stub declares it.
+/// `ReflectionAttribute` as the stub declares it, with the
+/// `attribute_reference` `reflection_attribute_factory` lays down beside
+/// it, given back with it:
+///
+/// ```php
+/// #[Attribute] class A {}
+/// #[A] function f() {}
+/// $rf = new ReflectionFunction('f'); $w = $rf->getAttributes()[0];
+/// $m = memory_get_usage(); $r = $rf->getAttributes()[0]; $n = memory_get_usage(); unset($r);
+/// var_dump($n - $m, memory_get_usage() - $n);
+/// ```
+/// ```expect
+/// int(136)
+/// int(-136)
+/// ```
 #[php_class(implements(crate::Reflector), not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionAttribute;
 

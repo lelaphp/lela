@@ -413,11 +413,12 @@ pub(crate) fn create(req: &mut Request, element_object: PhpObject) -> Result<Val
     let object = php_ext::call::new_object(req, class)?;
     let node = crate::node_of(req, element_object);
     let shared = crate::shared_doc(req, element_object);
+    if let Some(mut obj) = crate::libxml_half(req, object)
+        && let Some(n) = node
+    {
+        obj.attach(req, n, shared);
+    }
     if let Some(d) = dom_mut(req, object) {
-        d.obj.set_object(object);
-        if let Some(n) = node {
-            d.obj.attach(n, shared);
-        }
         d.extra = Extra::TokenList(Box::default());
     }
     let mut set = TokenSet::default();
@@ -635,6 +636,7 @@ impl ObjectHandlers for TokenListHandlers {
         if let Some(d) = dom_mut(req, object) {
             d.extra = Extra::None;
         }
+        crate::release_libxml(req, object);
     }
 
     /// `dom_token_list_it`: the iterator, its position and the cache tag.

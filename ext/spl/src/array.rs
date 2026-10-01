@@ -942,7 +942,18 @@ impl ArrayIterator {
 
     /// `ArrayIterator::__construct(array|object $array = [], int $flags = 0)`:
     /// nothing for a call with no argument, then php's `|Al` in order; the
-    /// witness is the class's.
+    /// witness is the class's. The first iterator of a request costs what
+    /// every later one does:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $a = new ArrayIterator([]); $b = memory_get_usage();
+    /// $c = new ArrayIterator([]);
+    /// var_dump($b - $m, memory_get_usage() - $b);
+    /// ```
+    /// ```expect
+    /// int(216)
+    /// int(216)
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,

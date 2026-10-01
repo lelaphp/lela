@@ -253,8 +253,9 @@ fn timed_out(req: &mut Request) {
 /// Whether the stream's last read ran out of time, its `timed_out`.
 fn ran_out(req: &mut Request, stream: Stream) -> Result<bool, Thrown> {
     let meta = stream.meta_data(req)?;
-    let key = Key::Str(PhpString::new(req, b"timed_out")?);
-    let answer = meta.get(&key).is_some_and(|v| v.as_bool() == Some(true));
+    let answer = meta
+        .find(b"timed_out")
+        .is_some_and(|v| v.as_bool() == Some(true));
     req.release(Value::array(meta));
     Ok(answer)
 }

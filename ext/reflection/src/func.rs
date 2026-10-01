@@ -961,6 +961,9 @@ impl ReflectionFunctionAbstract {
     #[php(tentative)]
     fn getParameters(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let (function, decl) = this_function(req, this.object())?;
+        if decl.parameters.is_empty() {
+            return Ok(PhpArray::empty());
+        }
         let mut parameters = PhpArray::new(req)?;
         for offset in 0..decl.parameters.len() {
             let object = parameter_factory(req, &function, &decl, offset)?;
@@ -1106,11 +1109,15 @@ impl ReflectionFunctionAbstract {
             // internal trampoline, which holds no static variables.
             FunctionRef::Invoke(_) => None,
         };
-        let mut statics = PhpArray::new(req)?;
         let Some(callable) = callable else {
-            return Ok(statics);
+            return Ok(PhpArray::empty());
         };
-        for (name, value) in bound_variables(req, &callable)? {
+        let bound = bound_variables(req, &callable)?;
+        if bound.is_empty() {
+            return Ok(PhpArray::empty());
+        }
+        let mut statics = PhpArray::new(req)?;
+        for (name, value) in bound {
             // `zval_add_ref`: a reference the table alone holds is copied
             // out of, so a `static` read after its call is its value.
             let value = if value.as_php_ref().is_some() && value.refcount() == 1 {

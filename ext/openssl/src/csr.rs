@@ -325,7 +325,7 @@ fn openssl_csr_new(
     #[php(default = null)] extra_attributes: Option<PhpArray>,
 ) -> Result<Union<Instance<OpenSSLCertificateSigningRequest>, bool>, Thrown> {
     finish(req, move |req| {
-        let Some(settings) = parse(req, options)? else {
+        let Some(settings) = parse(req, options) else {
             return Ok(Union::B(false));
         };
         let given = private_key
@@ -648,7 +648,7 @@ fn openssl_csr_sign(
             );
             return Ok(OrFalse::False);
         }
-        let Some(settings) = parse(req, options)? else {
+        let Some(settings) = parse(req, options) else {
             return Ok(OrFalse::False);
         };
         let Some(public) = signed_key(req, &csr) else {

@@ -696,22 +696,22 @@ fn named(req: &mut Request, out: &mut Value, name: &[u8], fetched: Value) -> Res
     let Some(mut array) = out.as_array().copied() else {
         return Ok(());
     };
+    let stored = if let Some(current) = array.find(name) {
+        let mut list = if let Some(list) = current.as_array().copied() {
+            list
+        } else {
+            let mut list = PhpArray::new(req)?;
+            req.addref(&current);
+            list.append(req, current)?;
+            list
+        };
+        list.append(req, fetched)?;
+        Value::array(list)
+    } else {
+        fetched
+    };
     let key = Key::Str(PhpString::new(req, name)?);
-    match array.get(&key) {
-        Some(current) => {
-            let mut list = if let Some(list) = current.as_array().copied() {
-                list
-            } else {
-                let mut list = PhpArray::new(req)?;
-                req.addref(&current);
-                list.append(req, current)?;
-                list
-            };
-            list.append(req, fetched)?;
-            array.set(req, key, Value::array(list))?;
-        }
-        None => array.set(req, key, fetched)?,
-    }
+    array.set(req, key, stored)?;
     *out = Value::array(array);
     Ok(())
 }

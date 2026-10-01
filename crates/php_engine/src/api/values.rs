@@ -35,8 +35,10 @@ use crate::api::raising::Thrown;
 use crate::api::request::Request;
 
 mod emalloc;
+mod fresh;
 mod smart_str;
 pub use emalloc::Emalloc;
+pub use fresh::FreshString;
 pub use smart_str::SmartStr;
 
 /// The type of a value, php's `zend_zval_type_name` set, and the one
@@ -324,6 +326,38 @@ impl PhpArray {
         req.array()
     }
 
+    /// `RETURN_EMPTY_ARRAY`, `ZVAL_EMPTY_ARRAY`: the process's one
+    /// immutable empty array, php's `zend_empty_array`, which costs the
+    /// request nothing and is what a native answers where php's body
+    /// answers an array with nothing in it. No owner is counted on it;
+    /// a write separates it into an array of the request's own, as it
+    /// separates any immutable array, so a native that will fill an
+    /// array builds it with [`PhpArray::new`].
+    ///
+    /// ```php
+    /// $m = memory_get_usage();
+    /// $a = array_slice([1], 1);
+    /// var_dump(memory_get_usage() - $m);
+    /// debug_zval_dump($a);
+    /// $a[] = 1;
+    /// var_dump($a, array_slice([1], 1));
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// array(0) interned {
+    /// }
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// array(0) {
+    /// }
+    /// ```
+    #[must_use]
+    pub fn empty() -> PhpArray {
+        PhpArray(Arr::empty())
+    }
+
     /// `array_init_size(size)`, `zend_new_array(size)`: an empty array
     /// sized for `size` elements, the size held to
     /// `zend_hash_check_size`, whose `Possible integer overflow in memory
@@ -418,6 +452,28 @@ impl PhpArray {
     #[must_use]
     pub fn get(&self, key: &Key) -> Option<Value> {
         self.0.get(key.heap()).map(Value::of_zval)
+    }
+
+    /// The value under the string key of these bytes, a view of it:
+    /// php's `zend_hash_str_find`, which hashes the bytes and walks the
+    /// chain and so allocates nothing, where a [`Key::Str`] would be a
+    /// request string made for the lookup alone. The bytes are the key
+    /// as written, an option's or a field's name; `"1"` finds the
+    /// string key `"1"`, which no array holds, as php's does.
+    ///
+    /// ```php
+    /// $s = serialize([1]);
+    /// unserialize($s, ['max_depth' => 4, 'allowed_classes' => false]);
+    /// $m = memory_get_usage();
+    /// unserialize($s, ['max_depth' => 4, 'allowed_classes' => false]);
+    /// var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
+    #[must_use]
+    pub fn find(&self, name: &[u8]) -> Option<Value> {
+        self.0.str_find(name).map(Value::of_zval)
     }
 
     /// Whether `key` is present, `array_key_exists`.

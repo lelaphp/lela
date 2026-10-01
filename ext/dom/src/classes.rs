@@ -316,7 +316,7 @@ impl DOMImplementation {
         if let (Some(dtd), Some(object)) = (doctype, value.as_object().copied())
             && let Some(shared) = crate::shared_doc(req, object)
         {
-            dtd.share_document(shared);
+            dtd.share_document(req, shared);
         }
         returned(req, value)
     }
