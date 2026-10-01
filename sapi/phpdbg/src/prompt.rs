@@ -985,6 +985,51 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// prompt> [Script ended normally]
 /// prompt>
 /// ```
+///
+/// A fatal raised inside what it serves bails out to its `zend_catch`,
+/// which writes the status 0: the request goes on and the next `ev` is
+/// served. Where nothing was executing, the bailout passed the
+/// `phpdbg_execute_ex` that set `in_execution`, so `run` asks before it
+/// restarts.
+///
+/// ```php
+/// $a = 1;
+/// $b = 2;
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// ev ini_set("memory_limit","2M")
+/// ev str_repeat("x", 4<<20)
+/// ev 5
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> 128M
+/// prompt>%s
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in eval()'d code on line 1
+/// prompt> 5
+/// prompt>
+/// ```
+///
+/// ```php
+/// $a = 1;
+/// $b = 2;
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// ev ini_set("memory_limit","2M")
+/// ev str_repeat("x", 4<<20)
+/// r
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> 128M
+/// prompt>%s
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in eval()'d code on line 1
+/// prompt> Do you really want to restart execution? (type y or n): Please enter either y (yes) or n (no):
+/// ```
 fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
     let Some((req, under)) = here.serving() else {
         crate::host::idle(s, Command::Eval(code.to_vec()));
@@ -994,25 +1039,29 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
     crate::watch::freeze(s, req);
     s.origin = Origin::Eval;
     let evaluated = crate::session::lend(s, || tier::evaluate(req, under, code));
-    if under == tier::Under::Nothing && tier::exiting(req) {
+    // An exit or a fatal served where nothing was executing bailed out of
+    // the `phpdbg_execute_ex` that `zend_execute` entered.
+    if under == tier::Under::Nothing
+        && (tier::exiting(req) || evaluated == tier::Evaluated::BailedOut)
+    {
         bailed_out(s);
     }
     s.origin = Origin::Program;
     crate::watch::thaw(s);
     s.stepping |= stepping;
     match evaluated {
-        Ok(tier::Evaluated::Printed(printed)) => {
+        tier::Evaluated::Printed(printed) => {
             out::write(&printed);
             out::out(b"\n");
         }
         // The compiler threw with the frame executing, which
         // `zend_throw_exception_internal` leaves at `EG(exception_op)`.
-        Ok(tier::Evaluated::NotCompiled) => {
+        tier::Evaluated::NotCompiled => {
             if let tier::Under::Frame(frame) = under {
                 s.thrown_into = Some(frame);
             }
         }
-        Ok(tier::Evaluated::Rendered) | Err(_) => {}
+        tier::Evaluated::Rendered | tier::Evaluated::BailedOut => {}
     }
     Ret::Success
 }

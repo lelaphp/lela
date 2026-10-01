@@ -6,7 +6,7 @@
 //! [`step`](super::step), and none names a thing the engine does not
 //! already hold for a diagnostic or a backtrace.
 
-use php_heap::{Fatal, FrameRef};
+use php_heap::FrameRef;
 use php_unit::{CacheSlot, Opcode};
 
 use crate::api::request::{Raised, Request};
@@ -274,6 +274,10 @@ pub enum Evaluated {
     /// `ParseError` or `CompileError` the compiler threw is left pending,
     /// unrendered, for what is served next to find.
     NotCompiled,
+    /// A fatal bailed out of what it served, rendered where it was
+    /// raised, and the evaluation caught it as `ev`'s `zend_catch` does:
+    /// the request goes on with the status 0.
+    BailedOut,
 }
 
 /// What code a tier has the engine serve on its own account stands on.
@@ -292,8 +296,9 @@ pub enum Under {
 
 /// `code` evaluated as phpdbg's `ev` evaluates it, `return code;`
 /// compiled as the `eval()'d code` and served by the engine's loop on
-/// what `under` names; the `Err` is a fatal, which ends the request.
-pub fn evaluate(req: &mut Request, under: Under, code: &[u8]) -> Result<Evaluated, Fatal> {
+/// what `under` names; a fatal it raises is caught, as `ev`'s
+/// `zend_catch` catches it.
+pub fn evaluate(req: &mut Request, under: Under, code: &[u8]) -> Evaluated {
     req.evaluate_in(under, code)
 }
 

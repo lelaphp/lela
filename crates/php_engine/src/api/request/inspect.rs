@@ -53,18 +53,30 @@ impl Request {
     /// request going on either way. Code that does not compile renders
     /// nothing, `zend_eval_stringl`'s `FAILURE`, which `ev` renders
     /// nothing after, and what the compiler threw stays pending, so the
-    /// next evaluation renders it. A fatal is the `Err`, and ends the
-    /// request.
-    pub(crate) fn evaluate_in(&mut self, under: Under, code: &[u8]) -> Result<Evaluated, Fatal> {
+    /// next evaluation renders it. A fatal, the compiler's among them,
+    /// is caught by `ev`'s `zend_catch`
+    /// (`Z/sapi/phpdbg/phpdbg_prompt.c:962-972`), which writes the status
+    /// 0, and the request goes on as it stood, with the ending it had.
+    pub(crate) fn evaluate_in(&mut self, under: Under, code: &[u8]) -> Evaluated {
         // `zend_execute` serves nothing while something is pending
         // (`Z/Zend/zend_vm_execute.h:121953`), so phpdbg's `ev` finds it
         // still pending after `zend_eval_stringl` and renders it.
         if self.is_pending() {
-            return Ok(self.evaluation_uncaught());
+            return self.evaluation_uncaught();
         }
-        match under {
+        let ending = self.ending.take();
+        let served = match under {
             Under::Frame(frame) => self.evaluate_over(Some(frame), code),
             Under::Nothing => self.nothing_executing(|req| req.evaluate_over(None, code)),
+        };
+        self.ending = ending;
+        match served {
+            Ok(evaluated) if !self.bailing_out() => evaluated,
+            _ => {
+                self.catch_bailout();
+                self.exit_status = 0;
+                Evaluated::BailedOut
+            }
         }
     }
 
