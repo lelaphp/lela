@@ -1585,7 +1585,10 @@ enum IoBuf<'a> {
 /// to the `context`'s store; how many were.
 fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
     let shown = c_str(cafile);
-    let Ok(Some(stream)) = req.open_stream(cafile, b"rb", false) else {
+    // `php_stream_open_wrapper(cafile, "rb", 0, NULL)`: options 0, so a
+    // file that is not there warns only as the line below does.
+    let opening = php_ext::request::Opening::default();
+    let Ok(Some(stream)) = req.open_stream_with(cafile, b"rb", opening) else {
         raise(
             req,
             Level::Warning,
