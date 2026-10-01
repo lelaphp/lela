@@ -772,6 +772,26 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// prompt>
 /// ```
 ///
+/// An `exit` it serves leaves the status 0, as `ev`'s `zend_catch`
+/// writes it, and stays pending, so the next `ev` serves nothing:
+/// `zend_execute` refuses to start with something pending, and what is
+/// pending is rendered, which for an exit is nothing.
+///
+/// ```php
+/// $a = 1;
+/// ```
+/// ```request phpdbg
+/// ev exit(3)
+/// ev 4
+/// ev 5
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> prompt> prompt> 5
+/// prompt>
+/// ```
+///
 /// Where `log_errors` logs it, the log is `php_sapi_phpdbg_log_message`'s,
 /// through `phpdbg_error`, and under `PHPDBG_IN_EVAL` nothing follows.
 ///

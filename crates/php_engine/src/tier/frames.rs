@@ -246,12 +246,18 @@ pub fn set_aside(req: &mut Request) -> Aside {
     Aside(req.take_raised())
 }
 
-/// What was set aside put back; what the request had pending meanwhile
-/// is given up for it.
+/// What was set aside put back, and what the request had pending
+/// meanwhile given up for it, as `DO_INTERACTIVE` puts back the
+/// throwable it cleared (`Z/sapi/phpdbg/phpdbg_prompt.c:1596-1623`);
+/// where nothing was set aside, what the tier's own serving left pending
+/// stays, as php's prompt leaves `EG(exception)` where it found none.
 // Taking the receipt by value is the point: what was set aside is put
 // back once.
 #[allow(clippy::needless_pass_by_value)]
 pub fn restore(req: &mut Request, aside: Aside) {
+    if aside.0.is_none() {
+        return;
+    }
     if let Some(Raised::Throwable(object)) = req.take_raised() {
         req.release(object.as_value());
     }
