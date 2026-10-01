@@ -13065,10 +13065,12 @@ impl Emit<'_> {
         Ok(Where::Returned(out))
     }
 
-    /// `zend_compile_binary_op`: the value where
-    /// `zend_try_ct_eval_binary_op` folds the operator over two constants,
-    /// and the opcode into a temporary where it does not
-    /// (`zend_emit_op_tmp`).
+    /// `zend_compile_binary_op`: both sides compiled, left then right,
+    /// the value where `zend_try_ct_eval_binary_op` folds the operator
+    /// over the two constants they compiled to, and the opcode into a
+    /// temporary where it does not (`zend_emit_op_tmp`). Each side is
+    /// walked once, by its compile, so a chain of `n` operators is `n`
+    /// compiles deep and no deeper, as php's is.
     fn binary(
         &mut self,
         op: BinaryOp,
@@ -13084,15 +13086,14 @@ impl Emit<'_> {
         if bitwise(op) {
             return self.bitwise(op, left, right);
         }
-        if let (Some(a), Some(b)) = (self.constant_of(left)?, self.constant_of(right)?)
+        let left = self.expr(left)?;
+        let right = self.expr(right)?;
+        if let (Where::Constant(a), Where::Constant(b)) = (left, right)
             && let Some(folded) = fold(op, a, b)
         {
             return Ok(Where::Constant(folded));
         }
-        let opcode = Self::opcode_of(op);
-        let left = self.expr(left)?;
-        let right = self.expr(right)?;
-        Ok(self.emit_binary(opcode, left, right, 0))
+        Ok(self.emit_binary(Self::opcode_of(op), left, right, 0))
     }
 
     /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm: both sides
@@ -13114,7 +13115,7 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_binary_op`'s `ZEND_BW_OR`, `ZEND_BW_XOR` and
-    /// `ZEND_BW_AND` arms: both sides folded where
+    /// `ZEND_BW_AND` arms: both sides compiled, then folded where
     /// [`Self::bitwise_fold`] folds them, and otherwise the opcode into
     /// a temporary. The three are `SPEC(COMMUTATIVE)`, so `pass_two`
     /// may put the constant second ([`swap_commutative`]).
@@ -13124,13 +13125,13 @@ impl Emit<'_> {
         left: tree::Expr,
         right: tree::Expr,
     ) -> Result<Where, CompileError> {
-        if let (Some(a), Some(b)) = (self.constant_of(left)?, self.constant_of(right)?)
+        let left = self.expr(left)?;
+        let right = self.expr(right)?;
+        if let (Where::Constant(a), Where::Constant(b)) = (left, right)
             && let Some(folded) = self.bitwise_fold(op, a, b)?
         {
             return Ok(Where::Constant(folded));
         }
-        let left = self.expr(left)?;
-        let right = self.expr(right)?;
         Ok(self.emit_binary(Self::opcode_of(op), left, right, 0))
     }
 
@@ -13417,12 +13418,12 @@ impl Emit<'_> {
     /// that multiplication where the operand is not a constant.
     fn unary(&mut self, minus: bool, operand: tree::Expr) -> Result<Where, CompileError> {
         let sign = Zval::long(if minus { -1 } else { 1 });
-        if let Some(value) = self.constant_of(operand)?
+        let operand = self.expr(operand)?;
+        if let Where::Constant(value) = operand
             && let Some(folded) = fold(BinaryOp::Mul, value, sign)
         {
             return Ok(Where::Constant(folded));
         }
-        let operand = self.expr(operand)?;
         Ok(self.emit_binary(Opcode::Mul, operand, Where::Constant(sign), 0))
     }
 
@@ -13436,12 +13437,12 @@ impl Emit<'_> {
     /// `!1` and `!""` are bools in the op array and `!1.5` is the
     /// opline over `float(1.5)`, as the oracle's dump has it.
     fn bool_not(&mut self, operand: tree::Expr) -> Result<Where, CompileError> {
-        if let Some(value) = self.constant_of(operand)?
+        let operand = self.expr(operand)?;
+        if let Where::Constant(value) = operand
             && value.as_double().is_none()
         {
             return Ok(Where::Constant(Zval::bool(!truth(value))));
         }
-        let operand = self.expr(operand)?;
         Ok(self.emit_unary(Opcode::BoolNot, operand, 0))
     }
 
@@ -13474,12 +13475,12 @@ impl Emit<'_> {
     /// bool(true)
     /// ```
     fn bw_not(&mut self, operand: tree::Expr) -> Result<Where, CompileError> {
-        if let Some(value) = self.constant_of(operand)?
+        let operand = self.expr(operand)?;
+        if let Where::Constant(value) = operand
             && let Some(folded) = self.bw_not_fold(value)?
         {
             return Ok(Where::Constant(folded));
         }
-        let operand = self.expr(operand)?;
         Ok(self.emit_unary(Opcode::BwNot, operand, 0))
     }
 
