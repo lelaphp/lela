@@ -648,6 +648,15 @@ impl Stream {
         req.stream_read_to_str(self, len)
     }
 
+    /// `php_stream_read(stream, buf, len)` into a buffer the native holds,
+    /// as php's natives read into a `char buf[N]` on their stack: how
+    /// many bytes were had, zero at the end, `None` for the read that
+    /// failed before a byte was had. Nothing is allocated for the bytes.
+    pub fn read_into(self, req: &mut Request, buf: &mut [u8]) -> Option<usize> {
+        req.stream_op(self, |req, stream| stream.read(req, buf))
+            .flatten()
+    }
+
     /// `php_stream_write`: how many bytes the stream took, `None` for
     /// php's `-1` (`fwrite` answers `false`).
     pub fn write(self, req: &mut Request, bytes: &[u8]) -> Option<usize> {

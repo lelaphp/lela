@@ -253,18 +253,14 @@ fn open(req: &mut Request, path: &[u8], position: u32) -> Result<Option<Stream>,
 
 /// The loop of 1024-byte `php_stream_read`s into `state`, and the
 /// close: `false` for the read that failed, php's `n < 0`.
-fn pump(req: &mut Request, stream: Stream, state: &mut dyn State) -> Result<bool, Thrown> {
+fn pump(req: &mut Request, stream: Stream, state: &mut dyn State) -> bool {
+    // php's loop reads into one `char buf[1024]` on its stack.
+    let mut buf = [0u8; 1024];
     let read = loop {
-        // Each read is given back once the state has it, as php's loop
-        // reads into one `char buf[1024]`.
-        match stream.read(req, 1024) {
-            Ok(Some(chunk)) if !chunk.is_empty() => {
-                state.update(chunk.as_bytes());
-                req.release(Value::string(chunk));
-            }
-            Ok(Some(_)) => break Ok(true),
-            Ok(None) => break Ok(false),
-            Err(thrown) => break Err(thrown),
+        match stream.read_into(req, &mut buf) {
+            Some(0) => break true,
+            Some(n) => state.update(&buf[..n]),
+            None => break false,
         }
     };
     stream.free(req);
@@ -354,7 +350,7 @@ fn hash_file(
             return Err(thrown);
         }
     };
-    if !pump(req, stream, state.as_mut())? {
+    if !pump(req, stream, state.as_mut()) {
         return Ok(OrFalse::False);
     }
     let digest = state.finish();
@@ -448,7 +444,7 @@ fn hash_hmac_file(
     let k = hmac_key(req, algo, key.as_bytes())?;
     let mut state = (algo.init)(req, Options::default())?;
     state.update(&k);
-    if !pump(req, stream, state.as_mut())? {
+    if !pump(req, stream, state.as_mut()) {
         return Ok(OrFalse::False);
     }
     let inner = state.finish();
@@ -739,20 +735,16 @@ fn hash_update_stream(
         return Err(finalized(req, 1));
     };
     let mut read = 0usize;
+    // php's loop reads into one `char buf[1024]` on its stack.
+    let mut buf = [0u8; 1024];
     while left != Some(0) {
         let want = left.map_or(1024, |left| left.min(1024));
-        let chunk = match stream.read(req, want) {
-            Ok(Some(chunk)) if !chunk.is_empty() => chunk,
-            Ok(_) => break,
-            Err(thrown) => {
-                put(req, object, running);
-                return Err(thrown);
-            }
+        let Some(n @ 1..) = stream.read_into(req, &mut buf[..want]) else {
+            break;
         };
-        running.state.update(chunk.as_bytes());
-        left = left.map(|left| left.saturating_sub(chunk.len()));
-        read += chunk.len();
-        req.release(Value::string(chunk));
+        running.state.update(&buf[..n]);
+        left = left.map(|left| left.saturating_sub(n));
+        read += n;
     }
     put(req, object, running);
     Ok(i64::try_from(read).unwrap_or(i64::MAX))
@@ -808,7 +800,7 @@ fn hash_update_file(
     };
     let read = pump(req, stream, running.state.as_mut());
     put(req, object, running);
-    read
+    Ok(read)
 }
 
 /// `hash_final(HashContext $context, bool $binary = false): string`:

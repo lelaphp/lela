@@ -662,6 +662,7 @@ request::Stream::orig_path
 request::Stream::pclose
 request::Stream::read
 request::Stream::read_dir
+request::Stream::read_into
 request::Stream::recvfrom
 request::Stream::resource
 request::Stream::rewind_as
