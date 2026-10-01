@@ -1422,7 +1422,26 @@ fn help(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     Ret::Success
 }
 
-/// `PHPDBG_COMMAND(register)`.
+/// `PHPDBG_COMMAND(register)`: the name looked up in the function table
+/// of the request standing, which with none standing is served a request
+/// of its own, as `ev` is there, where php's `EG(function_table)` holds
+/// the internal functions between its requests: here, a context the
+/// compiler refused.
+///
+/// ```php
+/// function (
+/// ```
+/// ```request phpdbg
+/// register intdiv
+/// intdiv 7 2
+/// q
+/// ```
+/// ```expect exit=255
+/// Parse error: Unclosed '(' in %SCRATCH%/witness.php on line 2
+/// prompt> [Registered intdiv]
+/// prompt>%s
+/// prompt>
+/// ```
 fn register(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Str(name)) = params.first() else {
         return Ret::Failure;
@@ -1434,10 +1453,17 @@ fn register(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         );
         return Ret::Success;
     }
-    let exists = here
-        .request()
-        .is_some_and(|req| tier::function_exists(req, &lowered));
-    if exists {
+    let Some(req) = here.request() else {
+        crate::host::idle(
+            s,
+            Command::Params(vec![
+                Param::Str(b"register".to_vec()),
+                Param::Str(name.clone()),
+            ]),
+        );
+        return Ret::Success;
+    };
+    if tier::function_exists(req, &lowered) {
         out::notice(format!("Registered {}", lossy(&lowered)).as_bytes());
         s.registered.push(lowered);
     } else {
