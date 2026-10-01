@@ -158,6 +158,15 @@ impl Request {
         self.virtual_file_ex(&cwd, path, Resolve::FilePath)
     }
 
+    /// `php_check_specific_open_basedir(basedir, path) == 0`: whether
+    /// `path`, expanded and resolved to its deepest part that exists,
+    /// lies under `basedir` (`.` the working directory), which warns of
+    /// nothing. What mysqlnd's `LOAD DATA LOCAL INFILE` holds a file to
+    /// its local infile directory with (`mysqlnd_loaddata.c`).
+    pub fn within_basedir(&mut self, basedir: &[u8], path: &[u8]) -> bool {
+        self.within(basedir, path)
+    }
+
     /// `php_check_specific_open_basedir(basedir, path)`
     /// (`Z/main/fopen_wrappers.c:142`): the path expanded and resolved to
     /// its deepest part that exists, a broken link at its end read once,

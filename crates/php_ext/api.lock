@@ -605,6 +605,7 @@ request::Request::virtual_file_ex
 request::Request::with_fake_scope
 request::Request::with_fiber_switch_blocked
 request::Request::with_stream_ctx
+request::Request::within_basedir
 request::Request::wrapper_log_error
 request::Request::wrapper_op
 request::Request::wrapper_register
