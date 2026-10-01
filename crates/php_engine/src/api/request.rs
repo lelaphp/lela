@@ -116,6 +116,16 @@ impl ExtensionId {
 /// The name `__halt_compiler()` registers its file's offset under.
 const HALT_OFFSET: &[u8] = b"__COMPILER_HALT_OFFSET__";
 
+/// The C library's `P_tmpdir` (`<stdio.h>`), the directory
+/// `php_get_temporary_directory` falls back to where neither
+/// `sys_temp_dir` nor `TMPDIR` names one, as the header spells it:
+/// `/var/tmp/` on macOS, `/tmp` under glibc and musl.
+const P_TMPDIR: &[u8] = if cfg!(target_vendor = "apple") {
+    b"/var/tmp/"
+} else {
+    b"/tmp"
+};
+
 /// `zend_mangle_property_name("__COMPILER_HALT_OFFSET__", file)`: a NUL,
 /// the name, a NUL and the file's, the key one file's halt offset is
 /// registered under.
@@ -20648,15 +20658,29 @@ impl Request {
     /// answers, and where `tempnam()` falls back to and `tmpfile()` and a
     /// spilling `php://temp` make their files. `sys_temp_dir` where it is
     /// set to more than a lone `/`, else `TMPDIR` from the environment,
-    /// one trailing slash taken off either; else `/tmp`.
+    /// one trailing slash taken off either; else the C library's
+    /// `P_tmpdir` as it stands ([`P_TMPDIR`]), trailing slash and all.
+    ///
+    /// The recipe clears the environment, so no `TMPDIR` reaches php
+    /// and the directory is the platform's own:
+    ///
+    /// ```php
+    /// $t = sys_get_temp_dir();
+    /// var_dump($t === (PHP_OS_FAMILY === 'Darwin' ? '/var/tmp/' : '/tmp'), getenv('TMPDIR'), is_dir($t));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
     #[must_use]
     pub fn temp_dir(&self) -> PathBuf {
         let chosen = self
             .ini_get(b"sys_temp_dir")
             .filter(|dir| !dir.is_empty() && *dir != b"/")
-            .or_else(|| self.env(b"TMPDIR").filter(|dir| !dir.is_empty()));
-        let dir = chosen.map_or(&b"/tmp"[..], |dir| dir.strip_suffix(b"/").unwrap_or(dir));
-        PathBuf::from(std::ffi::OsStr::from_bytes(dir))
+            .or_else(|| self.env(b"TMPDIR").filter(|dir| !dir.is_empty()))
+            .map(|dir| dir.strip_suffix(b"/").unwrap_or(dir));
+        PathBuf::from(std::ffi::OsStr::from_bytes(chosen.unwrap_or(P_TMPDIR)))
     }
 
     /// `umask()` as it stands.
