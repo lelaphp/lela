@@ -230,7 +230,8 @@ fn mb_parse_str(
     let (variables, detected) =
         encoding_handler(req, string.as_bytes(), &separators, to, &from_list, true);
     for (name, value) in variables {
-        let value = new_string(req, &value)?;
+        // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`.
+        let value = crate::text::cut_string(req, &value)?;
         req.register_variable(into, &name, Value::string(value))?;
     }
     req.state::<State>().identified = detected;

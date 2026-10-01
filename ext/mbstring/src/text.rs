@@ -122,6 +122,34 @@ pub(crate) fn substr_slow(
     out.into_vec()
 }
 
+/// What `mb_get_substr` answers, as php makes it: bytes cut from the
+/// input, `zend_empty_string` or `zend_string_init_fast`, so nothing and
+/// one byte are the process's interned strings; or the codepoints
+/// decoded and encoded back into the string `mb_convert_buf` allocates.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Substr {
+    Cut(Vec<u8>),
+    Encoded(Vec<u8>),
+}
+
+impl Substr {
+    /// The bytes, whichever way php made them.
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Substr::Cut(b) | Substr::Encoded(b) => b,
+        }
+    }
+
+    /// The string php hands out: a cut through [`cut_string`], an
+    /// encoding through [`new_string`].
+    pub(crate) fn into_string(self, req: &mut Request) -> Result<PhpString, Thrown> {
+        match self {
+            Substr::Cut(b) => cut_string(req, &b),
+            Substr::Encoded(b) => new_string(req, &b),
+        }
+    }
+}
+
 /// `mb_get_substr`: a fixed-width encoding cut by bytes, the rest
 /// decoded.
 pub(crate) fn substr(
@@ -130,21 +158,21 @@ pub(crate) fn substr(
     len: usize,
     enc: Encoding,
     sub: Substitute,
-) -> Vec<u8> {
+) -> Substr {
     if len == 0 || (from >= input.len() && enc.no() != ENCODING_SJIS_MAC) {
-        return Vec::new();
+        return Substr::Cut(Vec::new());
     }
     let width = char_len(enc);
     if width != 0 {
         let from = from.saturating_mul(width);
         let len = len.saturating_mul(width);
         if from >= input.len() {
-            return Vec::new();
+            return Substr::Cut(Vec::new());
         }
         let rest = &input[from..];
-        return rest[..len.min(rest.len())].to_vec();
+        return Substr::Cut(rest[..len.min(rest.len())].to_vec());
     }
-    substr_slow(input, from, len, enc, sub)
+    Substr::Encoded(substr_slow(input, from, len, enc, sub))
 }
 
 /// What a search can miss by, `MBFL_ERROR_NOT_FOUND` and
@@ -311,8 +339,17 @@ fn int(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// A string of these bytes.
+/// A string of these bytes allocated as its own, `zend_string_init`,
+/// `RETVAL_STRINGL` and what `mb_convert_buf` answers: nothing and one
+/// byte are strings of the request's too, as every converter's are.
 pub(crate) fn new_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+    PhpString::filled(req, bytes.len(), |b| b.copy_from_slice(bytes))
+}
+
+/// A string of these bytes as `zend_string_init_fast` and
+/// `ZVAL_STRINGL_FAST` make it: nothing and one byte are the process's
+/// interned strings, what php's cuts and `ZSTR_CHAR` answer.
+pub(crate) fn cut_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
     PhpString::new(req, bytes)
 }
 
@@ -623,7 +660,7 @@ fn strstr_variant(
     } else {
         substr(h, at, UNTIL_END, enc, sub)
     };
-    Ok(OrFalse::Value(new_string(req, &part)?))
+    Ok(OrFalse::Value(part.into_string(req)?))
 }
 
 /// `mb_strstr(string $haystack, string $needle, bool $before_needle = false, ?string $encoding = null): string|false`.
@@ -831,8 +868,7 @@ fn mb_substr(
         Some(_) => 0,
     };
     let sub = substitute(req);
-    let out = substr(string.as_bytes(), from, len, enc, sub);
-    new_string(req, &out)
+    substr(string.as_bytes(), from, len, enc, sub).into_string(req)
 }
 
 /// `mb_strcut(string $string, int $start, ?int $length = null, ?string $encoding = null): string`.
@@ -868,7 +904,7 @@ fn mb_strcut(
         len = ((total - from) + len).max(0);
     }
     if from > total || len == 0 {
-        return new_string(req, b"");
+        return cut_string(req, b"");
     }
     let (from, len) = (
         usize::try_from(from).unwrap_or(0),
@@ -907,9 +943,9 @@ fn mb_strcut(
         };
         bytes[start..end].to_vec()
     } else {
-        strcut(bytes, enc, from, len)
+        return new_string(req, &strcut(bytes, enc, from, len));
     };
-    new_string(req, &out)
+    cut_string(req, &out)
 }
 
 /// `character_width`: two for an East Asian wide codepoint.
@@ -962,6 +998,14 @@ fn mb_strwidth(
     Ok(int(strwidth(string.as_bytes(), enc)))
 }
 
+/// What `mb_trim_string` answers: the input or the marker itself,
+/// `zend_string_copy`, or a part of the input made as [`Substr`] says.
+enum Trimmed {
+    Input,
+    Marker,
+    Part(Substr),
+}
+
 /// `mb_trim_string`: the codepoints from `from` that fit in `width`,
 /// the marker appended where the string was cut.
 fn trim_string(
@@ -971,7 +1015,7 @@ fn trim_string(
     from: usize,
     width: usize,
     sub: Substitute,
-) -> Vec<u8> {
+) -> Trimmed {
     let mut remaining = width;
     let mut to_skip = from;
     let mut bad = false;
@@ -995,16 +1039,18 @@ fn trim_string(
     });
     if !too_wide {
         return if bad {
-            substr_slow(input, from, UNTIL_END, enc, sub)
+            Trimmed::Part(Substr::Encoded(substr_slow(
+                input, from, UNTIL_END, enc, sub,
+            )))
         } else if from == 0 {
-            input.to_vec()
+            Trimmed::Input
         } else {
-            substr(input, from, UNTIL_END, enc, sub)
+            Trimmed::Part(substr(input, from, UNTIL_END, enc, sub))
         };
     }
     let marker_width = strwidth(marker, enc);
     if width <= marker_width {
-        return marker.to_vec();
+        return Trimmed::Marker;
     }
     let mut width = width - marker_width;
     let mut out = Encoder::new(enc, width, sub.char, sub.raw_mode());
@@ -1027,7 +1073,7 @@ fn trim_string(
         true
     });
     out.append(marker);
-    out.into_vec()
+    Trimmed::Part(Substr::Encoded(out.into_vec()))
 }
 
 /// `mb_strimwidth(string $string, int $start, int $width, string $trim_marker = "", ?string $encoding = null): string`.
@@ -1078,7 +1124,7 @@ fn mb_strimwidth(
         width += int(strwidth(bytes, enc));
         if from > 0 {
             let trimmed = substr(bytes, 0, usize::try_from(from).unwrap_or(0), enc, sub);
-            width -= int(strwidth(&trimmed, enc));
+            width -= int(strwidth(&trimmed.into_bytes(), enc));
         }
         if width < 0 {
             return Err(value_error(req, 3, "is out of range"));
@@ -1088,11 +1134,11 @@ fn mb_strimwidth(
         usize::try_from(from).unwrap_or(0),
         usize::try_from(width).unwrap_or(0),
     );
-    let out = trim_string(bytes, trim_marker.as_bytes(), enc, from, width, sub);
-    if out == bytes {
-        return Ok(same(req, string));
+    match trim_string(bytes, trim_marker.as_bytes(), enc, from, width, sub) {
+        Trimmed::Input => Ok(same(req, string)),
+        Trimmed::Marker => Ok(same(req, trim_marker)),
+        Trimmed::Part(part) => part.into_string(req),
     }
-    new_string(req, &out)
 }
 
 /// `php_mb_ulcfirst`: the first codepoint in `mode`, the rest as given.
@@ -1105,13 +1151,13 @@ fn ulcfirst(
     let enc = self::encoding(req, encoding, 2)?;
     let sub = substitute(req);
     let bytes = string.as_bytes();
-    let first = substr(bytes, 0, 1, enc, sub);
+    let first = substr(bytes, 0, 1, enc, sub).into_bytes();
     let head = case::convert(mode, &first, enc, enc, sub);
     if first == head {
         return Ok(same(req, string));
     }
     let mut out = head;
-    out.extend(substr(bytes, 1, UNTIL_END, enc, sub));
+    out.extend(substr(bytes, 1, UNTIL_END, enc, sub).into_bytes());
     new_string(req, &out)
 }
 
@@ -1231,14 +1277,14 @@ fn do_trim(
         return Ok(same(req, string));
     }
     let sub = substitute(req);
-    let out = substr(
+    substr(
         string.as_bytes(),
         left,
         total.saturating_sub(right + left),
         enc,
         sub,
-    );
-    new_string(req, &out)
+    )
+    .into_string(req)
 }
 
 /// `mb_trim(string $string, ?string $characters = null, ?string $encoding = null): string`.
@@ -1380,8 +1426,9 @@ fn mb_chr(
         return Ok(OrFalse::False);
     };
     if is_utf8(enc) {
+        // `ZSTR_CHAR(cp)` below 0x80, `zend_string_alloc` above.
         return match char::from_u32(cp) {
-            Some(c) => Ok(OrFalse::Value(new_string(
+            Some(c) => Ok(OrFalse::Value(cut_string(
                 req,
                 c.encode_utf8(&mut [0; 4]).as_bytes(),
             )?)),
@@ -1454,7 +1501,7 @@ fn mb_str_pad(
         for _ in 0..n / pad_length {
             out.extend_from_slice(pad);
         }
-        out.extend(substr(pad, 0, n % pad_length, enc, sub));
+        out.extend(substr(pad, 0, n % pad_length, enc, sub).into_bytes());
         Some(out)
     };
     let (Some(mut out), Some(tail)) = (piece(left), piece(right)) else {

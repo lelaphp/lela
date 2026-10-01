@@ -11,7 +11,7 @@ use crate::tables::{
     MBFL_ZEN2HAN_HIRAGANA, MBFL_ZEN2HAN_KATAKANA, MBFL_ZEN2HAN_NUMERIC, MBFL_ZENKAKU_HIRA2KATA,
     MBFL_ZENKAKU_KATA2HIRA, RARE_CODEPOINT_BITVEC,
 };
-use crate::text::{decode_runs, new_string, same, substitute, value_error};
+use crate::text::{decode_runs, new_string, substitute, value_error};
 use php_ext::abi::{OrFalse, Passed, Ref, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, pending};
@@ -153,6 +153,28 @@ fn convert_array(
 ///   array(0) interned {
 ///   }
 /// }
+/// ```
+///
+/// The answer is the string `mb_fast_convert` allocates, so one byte
+/// and nothing are strings of the request's, 32 bytes each, where a cut
+/// (`mb_substr` over a fixed-width encoding) and `mb_chr` below 0x80 are
+/// the process's interned ones.
+///
+/// ```php
+/// $w = mb_convert_encoding('x', 'UTF-8', 'UTF-8'); unset($w);
+/// $m = memory_get_usage(); $s = mb_convert_encoding('x', 'UTF-8', 'UTF-8'); $e = mb_convert_encoding('', 'UTF-16LE', 'UTF-8');
+/// var_dump(memory_get_usage() - $m); debug_zval_dump(mb_convert_encoding(['x'], 'UTF-8', 'UTF-8'), $s, $e, mb_substr('xy', 1, 1, 'ASCII'), mb_chr(0x41));
+/// ```
+/// ```expect
+/// int(64)
+/// array(1) packed refcount(1){
+///   [0]=>
+///   string(1) "x" refcount(1)
+/// }
+/// string(1) "x" refcount(2)
+/// string(0) "" refcount(2)
+/// string(1) "y" interned
+/// string(1) "A" interned
 /// ```
 #[php_function]
 fn mb_convert_encoding(
@@ -1226,8 +1248,5 @@ fn mb_decode_numericentity(
     let map = conversion_map(req, map)?;
     let sub = substitute(req);
     let out = entity_decode(string.as_bytes(), enc, &map, sub);
-    if out == string.as_bytes() {
-        return Ok(same(req, string));
-    }
     new_string(req, &out)
 }
