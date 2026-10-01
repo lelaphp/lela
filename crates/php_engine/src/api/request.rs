@@ -2140,6 +2140,13 @@ pub struct Request {
     /// ending that reads it: nothing is displayed and the status is not
     /// written.
     left_in_log: bool,
+    /// `PG(in_error_log)`: an entry is being logged, from `php_log_err`'s
+    /// start to its end, the host's log and what it runs inside it
+    /// included, so what that raises is not logged again
+    /// (`Z/main/main.c:928`). A host that bails out of its log leaves it
+    /// set until the next request starts, as php's `longjmp` passes the
+    /// write that clears it.
+    in_error_log: bool,
     /// Whether a diagnostic is displayed past the `php_output` layer,
     /// `php_output_direct`, as php displays what it raises while the
     /// engine starts ([`crate::api::raising::startup`]).
@@ -2742,6 +2749,7 @@ impl Request {
             raised: None,
             bailout: false,
             left_in_log: false,
+            in_error_log: false,
             display_direct: false,
             phase: Phase::Startup,
             shutdown_walk_ended: false,
@@ -6552,7 +6560,8 @@ impl Request {
     /// log where no file is named, where it names `syslog`, or where the
     /// file cannot be opened. The stamp is `d-M-Y H:i:s e` in the
     /// request's default zone ([`Request::log_stamp`]). Whether the
-    /// host's log took it.
+    /// host's log took it; nothing, and `false`, while an entry is being
+    /// logged already, `PG(in_error_log)`'s guard against re-entry.
     ///
     /// ```php
     /// $f = sys_get_temp_dir() . "/witness-log-" . getmypid();
@@ -6569,7 +6578,44 @@ impl Request {
     /// [%d-%s-%d %d:%d:%d UTC] two
     /// lines
     /// ```
+    ///
+    /// phpdbg's prompt inside a fatal's log is inside the guard, so the
+    /// warnings what `ev` serves there raises are not logged:
+    ///
+    /// ```php
+    /// ini_set("log_errors", "1"); ini_set("display_errors", "0"); ini_set("memory_limit", "2M");
+    /// $s = str_repeat("x", 4 << 20);
+    /// echo "after\n";
+    /// ```
+    /// ```request phpdbg
+    /// r
+    /// ev $s
+    /// ev $nope
+    /// c
+    /// q
+    /// ```
+    /// ```expect exit=255
+    /// [Successful compilation of %SCRATCH%/witness.php]
+    /// prompt> [PHP Fatal error:  Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %SCRATCH%/witness.php on line 3]
+    /// >00003: $s = str_repeat("x", 4 << 20);
+    ///  00004: echo "after\n";
+    /// prompt>%s
+    /// prompt>%s
+    /// prompt> [Script ended normally]
+    /// prompt>
+    /// ```
     fn log_err(&mut self, entry: &[u8]) -> bool {
+        if self.in_error_log {
+            return false;
+        }
+        self.in_error_log = true;
+        let took = self.log_err_guarded(entry);
+        self.in_error_log = false;
+        took
+    }
+
+    /// [`Request::log_err`] inside its guard.
+    fn log_err_guarded(&mut self, entry: &[u8]) -> bool {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
         let named = self.ini_get(b"error_log").unwrap_or_default();
@@ -6988,12 +7034,17 @@ impl Request {
         let trace = self.stack_trace_after_the_site();
         if self.log_errors() {
             let text = format!("PHP {name}:  {message} in {named} on line {line}{trace}");
-            if self.log_err(text.as_bytes())
-                && fatal_errors(level)
-                && self.fatal_logged() == AfterLog::BailedOut
-            {
-                self.left_in_log = true;
-                return;
+            if self.log_err(text.as_bytes()) && fatal_errors(level) {
+                // What follows a fatal in the host's log is still inside
+                // `sapi_module.log_message`, so inside `php_log_err`'s
+                // guard: a diagnostic it raises is not logged.
+                self.in_error_log = true;
+                let after = self.fatal_logged();
+                if after == AfterLog::BailedOut {
+                    self.left_in_log = true;
+                    return;
+                }
+                self.in_error_log = false;
             }
         }
         let display = self.display_errors();
