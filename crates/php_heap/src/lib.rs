@@ -363,6 +363,17 @@ impl Heap {
         self.interned.count()
     }
 
+    /// The string for `bytes` the frozen table or this request's
+    /// interned table already holds, php's `zend_interned_string_ht_lookup`
+    /// over `CG(interned_strings)`; nothing is interned.
+    #[must_use]
+    pub fn interned_find(&self, bytes: &[u8]) -> Option<Str> {
+        if let Some(frozen) = string::frozen_string(bytes) {
+            return Some(frozen);
+        }
+        self.interned.find(string::hash_func(bytes), bytes)
+    }
+
     /// `zend_string_release`: one owner fewer, and the string is freed
     /// when the last gives it up. An interned string is never freed.
     pub fn release_string(&mut self, s: Str) {

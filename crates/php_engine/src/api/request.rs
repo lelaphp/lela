@@ -20976,6 +20976,20 @@ impl Request {
     /// The memory limit is the fatal that ends the request, recorded
     /// here where `zend_mm` leaves the request, and the `Thrown` that
     /// carries no throwable ends the native.
+    /// `zend_string_init_existing_interned` (`Z/Zend/zend_string.c`):
+    /// the interned string for `bytes` where the engine or this request
+    /// holds one already, and a new string of the request's otherwise.
+    pub(crate) fn existing_interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        if let Some(held) = self
+            .shared
+            .existing_interned(bytes)
+            .or_else(|| self.heap.interned_find(bytes))
+        {
+            return Ok(PhpString::of(held));
+        }
+        self.string(bytes)
+    }
+
     pub(crate) fn string(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
         let allocated = if bytes.len() <= 1 {
             self.heap.intern(bytes)

@@ -1253,6 +1253,21 @@ impl Shared {
         self.names.find(bytes)
     }
 
+    /// The engine's string for `bytes` where a declaration or a published
+    /// unit's constant made one, php's lookup over
+    /// `interned_strings_permanent`, or opcache's shared table, in
+    /// `zend_string_init_existing_interned`; nothing is interned.
+    pub(crate) fn existing_interned(&self, bytes: &[u8]) -> Option<php_heap::Str> {
+        if let Some(name) = self.names.find(bytes) {
+            return Some(name);
+        }
+        let strings = match self.strings.lock() {
+            Ok(strings) => strings,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        strings.find(bytes)
+    }
+
     /// How many strings the engine's table holds, opcache's
     /// `interned_strings_usage.number_of_strings`.
     pub(crate) fn interned_strings(&self) -> usize {
