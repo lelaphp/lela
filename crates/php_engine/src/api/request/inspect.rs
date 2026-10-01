@@ -554,9 +554,13 @@ impl Request {
 
     /// `PG(last_error_message)`, `last_error_file` and `last_error_lineno`.
     pub(crate) fn last_error_row(&self) -> Option<(Vec<u8>, Vec<u8>, u32)> {
-        self.last_error
-            .as_ref()
-            .map(|(_, message, file, line)| (message.clone().into_bytes(), file.clone(), *line))
+        self.last_error.map(|last| {
+            (
+                last.message.as_bytes().to_vec(),
+                last.file.as_bytes().to_vec(),
+                last.line,
+            )
+        })
     }
 }
 
