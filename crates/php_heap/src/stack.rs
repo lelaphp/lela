@@ -508,6 +508,42 @@ impl Page {
     }
 }
 
+/// The frames of a stack and its entry slots, set aside by
+/// [`VmStack::set_aside`] and put back by [`VmStack::put_back`].
+#[derive(Debug)]
+#[must_use = "the frames are put back by VmStack::put_back, which takes this"]
+pub struct FramesAside {
+    frames: Vec<Frame>,
+    entries: Vec<FrameRef>,
+}
+
+impl VmStack {
+    /// The stack's frames and entry slots set aside, its pages kept with
+    /// the room the frames hold: what is pushed next lands above them on
+    /// the same page, as a frame pushed with no `execute_data` standing
+    /// lands on php's one VM stack, and is numbered from the bottom.
+    pub fn set_aside(&mut self) -> FramesAside {
+        FramesAside {
+            frames: std::mem::take(&mut self.frames),
+            entries: std::mem::take(&mut self.entries),
+        }
+    }
+
+    /// What [`VmStack::set_aside`] took put back, over every frame
+    /// pushed since popped; a frame still standing is let go first,
+    /// newest first, so the room is the set-aside frames' again.
+    // Taking the receipt by value is the point: what was set aside is
+    // put back once.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn put_back(&mut self, heap: &mut Heap, aside: FramesAside) {
+        while !self.frames.is_empty() {
+            self.pop_frame(heap);
+        }
+        self.frames = aside.frames;
+        self.entries = aside.entries;
+    }
+}
+
 /// What [`VmStack::push_entry`] hands back, and what
 /// [`VmStack::pop_entry`] takes: one serving's claim on the entry slot.
 #[derive(Debug)]

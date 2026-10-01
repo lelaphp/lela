@@ -80,7 +80,9 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) -> Option<i32> {
         return None;
     }
     if !s.executing {
-        return None;
+        // php's `EG(exit_status)` outlives the prompt it was set at: a
+        // fatal `ev` rendered there is the status the session quits with.
+        return (observed.exit_code != 0).then_some(observed.exit_code);
     }
     s.executing = false;
     if let Some(uncaught) = &observed.uncaught {

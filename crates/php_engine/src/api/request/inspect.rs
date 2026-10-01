@@ -11,12 +11,12 @@ use std::fmt::Write as _;
 
 use php_unit::decl::ClassKind;
 
-use super::Request;
+use super::{Request, Symbol};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{ClassId, PhpObject, PhpString, Value};
-use crate::exec;
-use crate::tier::{Class, Code, Evaluated, Named, Shape};
+use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
+use crate::exec::{self, TableId};
+use crate::tier::{Called, Class, Code, Evaluated, Named, Shape, Under};
 
 impl Request {
     /// The VM stack the request runs on, read.
@@ -45,12 +45,24 @@ impl Request {
 
     /// phpdbg's `ev` (`Z/sapi/phpdbg/phpdbg_prompt.c:922`) over
     /// `zend_eval_stringl(code, &retval, "eval()'d code")`: `return code;`
-    /// compiled as an `eval` under that name and served in `frame`'s
-    /// scope by the loop bound to the engine, then what it returned as
-    /// `print_r` renders it, or what it left uncaught rendered as
-    /// `zend_exception_error` renders it at `E_ERROR`, the request going
-    /// on either way. A fatal is the `Err`, and ends the request.
-    pub(crate) fn evaluate_in(&mut self, frame: FrameRef, code: &[u8]) -> Result<Evaluated, Fatal> {
+    /// compiled as an `eval` under that name and served by the loop bound
+    /// to the engine, in a frame's scope or, with nothing executing, at
+    /// the top of the request ([`Request::nothing_executing`]); then what
+    /// it returned as `print_r` renders it, or what it left uncaught
+    /// rendered as `zend_exception_error` renders it at `E_ERROR`, the
+    /// request going on either way. A fatal is the `Err`, and ends the
+    /// request.
+    pub(crate) fn evaluate_in(&mut self, under: Under, code: &[u8]) -> Result<Evaluated, Fatal> {
+        match under {
+            Under::Frame(frame) => self.evaluate_over(Some(frame), code),
+            Under::Nothing => self.nothing_executing(|req| req.evaluate_over(None, code)),
+        }
+    }
+
+    /// The evaluation itself, in `scope`'s frame as a nested code frame
+    /// is, or, with none, on a frame of its own over the global table as
+    /// `zend_execute` serves an op array with no frame standing.
+    fn evaluate_over(&mut self, scope: Option<FrameRef>, code: &[u8]) -> Result<Evaluated, Fatal> {
         const NAME: &[u8] = b"eval()'d code";
         let source = [&b"return "[..], code, b";"].concat();
         let shared = Arc::clone(&self.shared);
@@ -66,7 +78,10 @@ impl Request {
             return Ok(self.evaluation_uncaught());
         }
         let standing = self.vm.frames().len();
-        let callee = self.push_code_frame(unit, frame, None)?;
+        let callee = match scope {
+            Some(frame) => self.push_code_frame(unit, frame, None)?,
+            None => self.push_frame(unit)?,
+        };
         let reenter = self.shared.reenter;
         let served = reenter(self, callee);
         // `zend_leave_helper`'s arm for a nested code frame: its CVs
@@ -86,18 +101,79 @@ impl Request {
         Ok(Evaluated::Printed(printed))
     }
 
+    /// `f` served with the request executing nothing, as php's
+    /// `EG(current_execute_data)` is `NULL` before `zend_execute` begins
+    /// the program: the frames the request stands on set aside, their
+    /// engine half with them, so what `f` serves is the whole chain,
+    /// names no active file but its own and traces to `{main}`, and is
+    /// pushed above their room on the same page as php pushes it on its
+    /// one VM stack. What a frame set aside was lent is its own while
+    /// it is off the chain, as a fiber's switch leaves it
+    /// ([`Request::switch_execution`]). The global table's names that
+    /// stand in a frame's CV are taken back into the table first, as
+    /// `zend_detach_symbol_table` takes them, since a name binds a CV by
+    /// the frame's number on the stack; those frames are attached again
+    /// after, the lowest first, and what `f` left in the table is theirs.
+    pub(crate) fn nothing_executing<R>(&mut self, f: impl FnOnce(&mut Request) -> R) -> R {
+        let bound = self.unbind_globals();
+        self.own_lent_receivers();
+        let frames = self.stack.set_aside();
+        let vm = std::mem::take(&mut self.vm);
+        let served = f(self);
+        self.vm = vm;
+        self.stack.put_back(&mut self.heap, frames);
+        for frame in bound {
+            self.attach_symbol_table(frame);
+        }
+        served
+    }
+
+    /// Every name of the global table that stands in a frame's CV, its
+    /// value moved into the table where the CV holds one and the name
+    /// deleted where it holds none, `zend_detach_symbol_table`'s rule;
+    /// the frames they stood in, the lowest first.
+    fn unbind_globals(&mut self) -> Vec<FrameRef> {
+        let bound: Vec<(Vec<u8>, FrameRef, u32)> = self
+            .tables
+            .get(TableId::GLOBAL.0 as usize)
+            .map(|table| {
+                table
+                    .entries
+                    .iter()
+                    .filter_map(|(name, symbol)| match symbol {
+                        Symbol::Indirect(frame, slot) => Some((name.clone(), *frame, *slot)),
+                        Symbol::Value(_) | Symbol::Held(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut frames: Vec<FrameRef> = Vec::new();
+        for (name, frame, slot) in bound {
+            let value = self.take_slot(frame, slot);
+            if value.tag() == TypeTag::Undef {
+                self.symbol_del(TableId::GLOBAL, &name);
+            } else {
+                self.symbol_update(TableId::GLOBAL, name, value);
+            }
+            if !frames.contains(&frame) {
+                frames.push(frame);
+            }
+        }
+        frames.sort_by_key(|frame| frame.0);
+        frames
+    }
+
     /// What an evaluation left pending, rendered uncaught with
-    /// `E_DONT_BAIL` as phpdbg's `zend_try` around it leaves the request
-    /// going on.
+    /// `E_DONT_BAIL`, so the request goes on with the status
+    /// `php_error_cb` gave it, 255, as php's `ev` leaves it.
     fn evaluation_uncaught(&mut self) -> Evaluated {
         if self.pending().is_none() {
-            // An exit, which php's `zend_try` catches too.
+            // An exit, which php's `zend_try` catches.
             self.raised = None;
             return Evaluated::Rendered;
         }
         let _ = self.exception_error(Level::Error);
         self.catch_bailout();
-        self.exit_status = 0;
         Evaluated::Rendered
     }
 
@@ -138,27 +214,72 @@ impl Request {
         called
     }
 
-    /// A host's call of a function by name ([`crate::tier::call`]).
-    pub(crate) fn call_by_name(&mut self, name: &[u8], arguments: &[crate::tier::Argument]) {
+    /// A host's call of a function by name ([`crate::tier::call`]): from
+    /// the frame standing, or with nothing executing, where
+    /// `zend_call_function` renders what the callee left uncaught itself
+    /// as a fatal, `zend_throw_exception_internal` with no frame
+    /// ([`Request::thrown_without_frame`]), and leaves as a fatal the
+    /// callee raised and an `exit` leave. That is caught where the host
+    /// asked, as phpdbg's prompt catches it in its `zend_try`, and the
+    /// request goes on: no fatal is what it ends in, and its status is
+    /// what an `exit` set or, after a fatal, what it was before, as php's
+    /// is where the prompt that `php_sapi_phpdbg_log_message` stands at
+    /// for the fatal's log is quit: `php_error_cb` writes 255 only once
+    /// the log returns.
+    pub(crate) fn call_by_name(
+        &mut self,
+        under: Under,
+        name: &[u8],
+        arguments: &[crate::tier::Argument],
+    ) -> Called {
+        match under {
+            Under::Frame(_) => self.call_by_name_here(name, arguments),
+            Under::Nothing => self.nothing_executing(|req| {
+                let status = req.exit_status;
+                let ending = req.ending.take();
+                let called = req.call_by_name_here(name, arguments);
+                let rendered = req.ending.is_some();
+                req.ending = ending;
+                if !req.bailing_out() {
+                    return called;
+                }
+                req.catch_bailout();
+                if rendered {
+                    req.exit_status = status;
+                    Called::Rendered
+                } else {
+                    Called::Exited
+                }
+            }),
+        }
+    }
+
+    /// The call from wherever the request stands.
+    fn call_by_name_here(&mut self, name: &[u8], arguments: &[crate::tier::Argument]) -> Called {
         let mut values = Vec::with_capacity(arguments.len());
         for argument in arguments {
             let value = match argument {
                 crate::tier::Argument::Int(n) => Value::int(*n),
                 crate::tier::Argument::Str(bytes) => match PhpString::new(self, bytes) {
                     Ok(string) => Value::string(string),
-                    Err(_) => return,
+                    Err(_) => return Called::Returned,
                 },
             };
             values.push(value);
         }
         match self.call_named(name, &values) {
-            Ok(returned) => self.release(returned),
+            Ok(returned) => {
+                self.release(returned);
+                Called::Returned
+            }
             Err(thrown) => {
-                if thrown.exception().is_some() {
-                    self.leave_pending(&thrown);
-                    let _ = self.exception_error(Level::Error);
-                    self.catch_bailout();
+                if thrown.exception().is_none() {
+                    return Called::Returned;
                 }
+                self.leave_pending(&thrown);
+                let _ = self.exception_error(Level::Error);
+                self.catch_bailout();
+                Called::Rendered
             }
         }
     }

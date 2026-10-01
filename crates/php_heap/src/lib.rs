@@ -78,7 +78,7 @@ pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};
 pub use sort::zend_sort;
-pub use stack::{EntryGuard, Frame, FrameRef, Slot, VmStack};
+pub use stack::{EntryGuard, Frame, FrameRef, FramesAside, Slot, VmStack};
 pub use string::{FreshStr, Intern, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 

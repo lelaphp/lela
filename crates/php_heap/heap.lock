@@ -60,6 +60,7 @@ Frame::set
 Frame::slot
 Frame::slot_ptr
 FrameRef
+FramesAside
 FreshStr
 FreshStr::bytes_mut
 FreshStr::finish
@@ -285,7 +286,9 @@ VmStack::pop_entry
 VmStack::pop_frame
 VmStack::push_entry
 VmStack::push_frame
+VmStack::put_back
 VmStack::resume_frame
+VmStack::set_aside
 Zval
 Zval::UNDEF
 Zval::array

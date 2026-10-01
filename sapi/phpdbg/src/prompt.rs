@@ -14,7 +14,7 @@ use crate::bp::Kind;
 use crate::cmd::{self, Command, Param};
 use crate::input::{self, Line};
 use crate::out;
-use crate::session::{Context, Seek, SeekKind, Session, Stop};
+use crate::session::{Context, Origin, Seek, SeekKind, Session, Stop};
 
 /// Where the prompt stands.
 pub enum Here<'a> {
@@ -45,6 +45,20 @@ impl Here<'_> {
         match self {
             Here::Paused { req, frame } | Here::Held { req, frame } | Here::Idle { req, frame } => {
                 Some((&mut **req, *frame))
+            }
+            Here::Outside => None,
+        }
+    }
+
+    /// The request the prompt has serve code of its own, an `ev` or a
+    /// registered function, and what that code stands on: the frame a
+    /// run stopped in, or nothing, as php's `EG(current_execute_data)` is
+    /// `NULL` at a prompt no run stands under.
+    fn serving(&mut self) -> Option<(&mut Request, tier::Under)> {
+        match self {
+            Here::Paused { req, frame } => Some((&mut **req, tier::Under::Frame(*frame))),
+            Here::Held { req, .. } | Here::Idle { req, .. } => {
+                Some((&mut **req, tier::Under::Nothing))
             }
             Here::Outside => None,
         }
@@ -472,7 +486,37 @@ fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
 
 /// `phpdbg_call_register`: a line whose first word is a registered
 /// function calls it with the rest as its arguments, then writes a
-/// newline.
+/// newline, but where the call ended in a fatal or an `exit`: with
+/// nothing executing, what it leaves uncaught is rendered as a fatal.
+/// Where `log_errors` logs that fatal, `php_sapi_phpdbg_log_message`
+/// writes it and, outside `ev`, follows it with the listing where the
+/// request stands, `[no active file]` where nothing does, and a prompt
+/// (`Z/sapi/phpdbg/phpdbg.c:731-770`). That prompt reads what this one
+/// would and answers it alike, so the prompt goes on here.
+///
+/// ```php
+/// $a = 1;
+/// ```
+/// ```request phpdbg
+/// ev ini_set("display_errors", 0)
+/// ev ini_set("log_errors", 1)
+/// register intdiv
+/// intdiv 1
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> 1
+/// prompt> 0
+/// prompt> [Registered intdiv]
+/// prompt> [PHP Fatal error:  Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in [no active file]:0
+/// Stack trace:
+/// #0 [internal function]: intdiv(1)
+/// #1 {main}
+///   thrown in [no active file] on line 0]
+/// [Could not find information about included file...]
+/// prompt>
+/// ```
 fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bool {
     let Some((Param::Str(name), rest)) = params.split_first() else {
         return false;
@@ -498,14 +542,28 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
             Param::Addr(_) => None,
         })
         .collect();
-    let Some((req, _)) = here.standing() else {
+    let Some((req, under)) = here.serving() else {
         crate::host::idle(s, Command::Params(params.to_vec()));
         return true;
     };
-    crate::session::lend(s, || tier::call(req, &lowered, &arguments));
-    out::out(b"\n");
+    let logged = out::logged();
+    match crate::session::lend(s, || tier::call(req, under, &lowered, &arguments)) {
+        tier::Called::Returned => out::out(b"\n"),
+        tier::Called::Rendered if s.origin == Origin::Program && out::logged() != logged => {
+            let (file, line) = match under {
+                tier::Under::Frame(frame) => tier::position(req, frame)
+                    .map_or((Vec::new(), 0), |position| (position.file, position.line)),
+                tier::Under::Nothing => (NO_ACTIVE_FILE.to_vec(), 0),
+            };
+            crate::list::code(s, &file, line);
+        }
+        tier::Called::Rendered | tier::Called::Exited => {}
+    }
     true
 }
+
+/// What `zend_get_executed_filename` names where no frame stands.
+const NO_ACTIVE_FILE: &[u8] = b"[no active file]";
 
 // ------------------------------------------------------------ commands
 
@@ -672,13 +730,64 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     ev(s, here, &code)
 }
 
-/// `PHPDBG_COMMAND(ev)`.
+/// `PHPDBG_COMMAND(ev)`: the code evaluated under `PHPDBG_IN_EVAL`, with
+/// the step put off while it runs and set again after where it stood. At
+/// the held prompt nothing stands under it, so what it leaves uncaught
+/// traces to `{main}`, and the status is the 255 `php_error_cb` wrote;
+/// the `%s` is the space after the prompt, which no doc line keeps.
+///
+/// ```php
+/// $a = 1;
+/// ```
+/// ```request phpdbg
+/// ev intdiv(1)
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt>%s
+/// Fatal error: Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in eval()'d code:1
+/// Stack trace:
+/// #0 eval()'d code(1): intdiv(1)
+/// #1 {main}
+///   thrown in eval()'d code on line 1
+/// prompt>
+/// ```
+///
+/// Where `log_errors` logs it, the log is `php_sapi_phpdbg_log_message`'s,
+/// through `phpdbg_error`, and under `PHPDBG_IN_EVAL` nothing follows.
+///
+/// ```php
+/// $a = 1;
+/// ```
+/// ```request phpdbg
+/// ev ini_set("display_errors", 0)
+/// ev ini_set("log_errors", 1)
+/// ev intdiv(1)
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> 1
+/// prompt> 0
+/// prompt> [PHP Fatal error:  Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in eval()'d code:1
+/// Stack trace:
+/// #0 eval()'d code(1): intdiv(1)
+/// #1 {main}
+///   thrown in eval()'d code on line 1]
+/// prompt>
+/// ```
 fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
-    let Some((req, frame)) = here.standing() else {
+    let Some((req, under)) = here.serving() else {
         crate::host::idle(s, Command::Eval(code.to_vec()));
         return Ret::Success;
     };
-    match crate::session::lend(s, || tier::evaluate(req, frame, code)) {
+    let stepping = std::mem::take(&mut s.stepping);
+    s.origin = Origin::Eval;
+    let evaluated = crate::session::lend(s, || tier::evaluate(req, under, code));
+    s.origin = Origin::Program;
+    s.stepping |= stepping;
+    match evaluated {
         Ok(tier::Evaluated::Printed(printed)) => {
             out::write(&printed);
             out::out(b"\n");
@@ -1033,7 +1142,24 @@ fn print_stack(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     Ret::Success
 }
 
-/// `PHPDBG_COMMAND(break)`.
+/// `PHPDBG_COMMAND(break)`. With nothing named, the line standing, which
+/// at the held prompt, where nothing does, is `[no active file]`'s line
+/// zero, pending.
+///
+/// ```php
+/// $a = 1;
+/// ```
+/// ```request phpdbg
+/// b
+/// b
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Pending breakpoint #0 added at [no active file]:0]
+/// prompt> [Breakpoint at [no active file]:0 exists]
+/// prompt>
+/// ```
 fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let executing = here.executing();
     let current = here
@@ -1044,10 +1170,7 @@ fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     match params.first() {
         None => match (&s.exec, current) {
             (Some(_), Some((file, line))) => s.breaks.set_file(Some(file), &[], i64::from(line)),
-            (Some(exec), None) => {
-                let exec = exec.clone();
-                s.breaks.set_file(Some(exec), &[], 0);
-            }
+            (Some(_), None) => crate::host::file_break(s, NO_ACTIVE_FILE, 0),
             (None, _) => out::error(b"Execution context not set!"),
         },
         Some(Param::Num(line)) => match &s.exec {
