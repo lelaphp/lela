@@ -56,6 +56,13 @@ jobs:
         run: |
           sudo locale-gen de_DE de_DE.UTF-8 fr_FR fr_FR.UTF-8 tr_TR is_IS is_IS.UTF-8
           sudo localedef -c --no-warnings=ascii -i ja_JP -f SHIFT_JIS ja_JP.SJIS
+      # The MySQL server the witnesses marked `mysql` and the mysqli and
+      # pdo_mysql suites run against, started here as on the pin machine,
+      # as Mitchell ruled on #1345: `--wait` returns once its healthcheck
+      # passes, and a witness or a subset that needs it is refused, not
+      # skipped, where it does not answer (#1366).
+      - name: the MySQL server of ci/mysql/compose.yaml
+        run: docker compose -f ci/mysql/compose.yaml up -d --wait
       # Each instrument exits 1 on a failing reading, which fails the job;
       # the readings it wrote are uploaded either way.
       - run: cargo fmt --check
