@@ -57,6 +57,7 @@ pub(crate) fn init_final(fpm: &Fpm) {
 
 /// `fpm_stdio_save_original_stderr`.
 pub(crate) fn save_original_stderr(fpm: &mut Fpm) -> bool {
+    zlog!(Debug @ fpm_stdio_save_original_stderr:81, "saving original STDERR fd: dup()");
     match nix::unistd::dup(std::io::stderr()) {
         Ok(fd) => {
             fpm.stderr_original = Some(fd);
@@ -78,6 +79,7 @@ pub(crate) fn restore_original_stderr(fpm: &mut Fpm, close: bool) {
     let Some(original) = &fpm.stderr_original else {
         return;
     };
+    zlog!(Debug @ fpm_stdio_restore_original_stderr:95, "restoring original STDERR fd: dup2()");
     if let Err(e) = nix::unistd::dup2_stderr(original) {
         zlog_sys!(
             Error @ fpm_stdio_restore_original_stderr:97,

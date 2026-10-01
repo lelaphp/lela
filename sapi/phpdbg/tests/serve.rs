@@ -106,3 +106,27 @@ fn a_watch_report_sends_the_headers_and_the_callback_is_debugged() {
                   [$a[0] has been removed, removing watchpoint]\n";
     assert!(out.contains(report), "{out}");
 }
+
+#[test]
+fn a_native_the_prompt_serves_reads_the_session() {
+    let (out, file) = debugged(
+        "lent",
+        "<?php\nfunction f() {\n  echo \"in f\\n\";\n}\nf();\necho \"done\\n\";\n",
+        "register phpdbg_prompt\nphpdbg_prompt y>\nev phpdbg_break_function(\"f\")\nr\nq\n",
+    );
+    assert_eq!(
+        out,
+        format!(
+            "[Successful compilation of {file}]\n\
+             prompt> [Registered phpdbg_prompt]\n\
+             prompt> \n\
+             y> [Breakpoint #0 added at f]\n\
+             \n\
+             y> [Breakpoint #0 in f() at {file}:3, hits: 1]\n\
+             >00003:   echo \"in f\\n\";\n \
+             00004: }}\n \
+             00005: f();\n\
+             y> "
+        )
+    );
+}

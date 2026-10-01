@@ -43,5 +43,5 @@ php_sapi = { path = "../../crates/php_sapi" }
 # The process manager's system calls, safe where `nix` wraps them, and
 # `libc` in `src/ffi/` alone for the fork, the signal handlers, the
 # shared memory and the rest `nix` leaves unsafe (ADR-0008).
-nix = { workspace = true, features = ["process", "signal", "resource", "fs", "socket", "net", "poll", "event", "user", "time", "syslog"] }
+nix = { workspace = true, features = ["process", "signal", "resource", "fs", "socket", "net", "poll", "event", "user", "time", "syslog", "feature"] }
 libc = { workspace = true }

@@ -48,10 +48,17 @@ impl Fpm {
                     State::Terminating => false,
                 };
                 if !overridable {
+                    zlog!(
+                        Debug @ fpm_pctl:231,
+                        "not switching to '{}' state, because already in '{}' state",
+                        new_state.name(),
+                        self.state.name()
+                    );
                     return Ok(());
                 }
                 self.signal_sent = None;
                 self.state = new_state;
+                zlog!(Debug @ fpm_pctl:239, "switching to '{}' state", self.state.name());
                 self.action_next()
             }
             Action::Timeout => self.action_next(),
@@ -108,11 +115,16 @@ impl Fpm {
     /// listening sockets handed on through `FPM_SOCKETS`, the signals
     /// blocked until the new master handles them.
     fn exec(&mut self) -> Step {
-        let _ = nix::sys::signal::sigprocmask(
+        zlog!(Debug @ fpm_pctl_exec:80, "Blocking some signals before reexec");
+        if nix::sys::signal::sigprocmask(
             nix::sys::signal::SigmaskHow::SIG_BLOCK,
             Some(&crate::master::block_set(false)),
             None,
-        );
+        )
+        .is_err()
+        {
+            zlog!(Warning @ fpm_pctl_exec:82, "concurrent reloads may be unstable");
+        }
         let arg = |i: usize| {
             self.argv.get(i).map_or(String::new(), |a| {
                 format!(", \"{}\"", String::from_utf8_lossy(a))

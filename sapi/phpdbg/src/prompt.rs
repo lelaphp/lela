@@ -502,7 +502,7 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
         crate::host::idle(s, Command::Params(params.to_vec()));
         return true;
     };
-    tier::call(req, &lowered, &arguments);
+    crate::session::lend(s, || tier::call(req, &lowered, &arguments));
     out::out(b"\n");
     true
 }
@@ -678,7 +678,7 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
         crate::host::idle(s, Command::Eval(code.to_vec()));
         return Ret::Success;
     };
-    match tier::evaluate(req, frame, code) {
+    match crate::session::lend(s, || tier::evaluate(req, frame, code)) {
         Ok(tier::Evaluated::Printed(printed)) => {
             out::write(&printed);
             out::out(b"\n");
@@ -820,15 +820,51 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let main = main_frame(req, entry);
     if let Some(code) = tier::frame_code(req, main) {
         out::notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
-        out::out(&code.dump);
+        out::dump(&code.dump);
     }
     Ret::Success
 }
 
-/// The bottom frame of the chain from `frame`: the main op array's.
+/// The bottom frame of the chain from `frame`, past any native between
+/// two of its frames: the main op array's, `PHPDBG_G(ops)`, which `print
+/// exec` names while the run stands in a callback `array_map` called.
+///
+/// ```php
+/// function cb($x) {
+///   return $x;
+/// }
+/// array_map("cb", [1]);
+/// ```
+/// ```request phpdbg
+/// b cb
+/// r
+/// print exec
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at cb]
+/// prompt> [Breakpoint #0 in cb() at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:   return $x;
+///  00004: }
+///  00005: array_map("cb", [1]);
+/// prompt> [Context %SCRATCH%/witness.php (5 ops)]
+/// prompt>
+/// ```
+/// ```stderr
+///
+/// $_main:
+///      ; (lines=5, args=0, vars=0, tmps=1)
+///      ; %SCRATCH%/witness.php:1-5
+/// L0005 0000 INIT_FCALL 2 112 string("array_map")
+/// L0005 0001 SEND_VAL string("cb") 1
+/// L0005 0002 SEND_VAL array(...) 2
+/// L0005 0003 DO_ICALL
+/// L0005 0004 RETURN int(1)
+/// ```
 fn main_frame(req: &Request, frame: FrameRef) -> FrameRef {
     let mut at = frame;
-    while let Some(below) = tier::caller(req, at) {
+    while let Some(below) = tier::below(req, at) {
         at = below;
     }
     at
@@ -893,7 +929,7 @@ fn print_class(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// `phpdbg_print_function_helper`.
 fn print_function(code: &tier::Code) {
     if code.user {
-        out::out(&code.dump);
+        out::dump(&code.dump);
         return;
     }
     let line = match &code.class {

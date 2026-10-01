@@ -47,6 +47,18 @@ pub(crate) enum State {
     Finishing,
 }
 
+impl State {
+    /// `fpm_state_names`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            State::Normal => "normal",
+            State::Reloading => "reloading",
+            State::Terminating => "terminating",
+            State::Finishing => "finishing",
+        }
+    }
+}
+
 /// One child the master made, `struct fpm_child_s`.
 pub(crate) struct Child {
     pub(crate) pid: i32,
@@ -517,12 +529,23 @@ impl Fpm {
             }
             Ok(nix::unistd::ForkResult::Parent { .. }) => {
                 drop(write);
+                zlog!(
+                    Debug @ fpm_unix_init_main:643,
+                    "The calling process is waiting for the master process to ping via fd={}",
+                    read.as_raw_fd()
+                );
                 let mut fds = [nix::poll::PollFd::new(
                     read.as_fd(),
                     nix::poll::PollFlags::POLLIN,
                 )];
-                let ready =
-                    nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(10_000u16)).unwrap_or(0);
+                let ready = match nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(10_000u16))
+                {
+                    Ok(ready) => ready,
+                    Err(e) => {
+                        zlog_sys!(Error @ fpm_unix_init_main:646, e, "failed to select");
+                        std::process::exit(i32::from(EXIT_SOFTWARE));
+                    }
+                };
                 if ready == 0 {
                     zlog!(
                         Error @ fpm_unix_init_main:671,
@@ -538,9 +561,20 @@ impl Fpm {
                         std::process::exit(i32::from(EXIT_SOFTWARE));
                     }
                     Ok(_) if i32::from_ne_bytes(value) == 1 => {
+                        zlog!(
+                            Debug @ fpm_unix_init_main:662,
+                            "I received a valid acknowledge from the master process, I can exit without error"
+                        );
                         std::process::exit(i32::from(EXIT_OK))
                     }
-                    _ => std::process::exit(i32::from(EXIT_SOFTWARE)),
+                    Ok(_) => {
+                        zlog!(Debug @ fpm_unix_init_main:666, "The master process returned an error !");
+                        std::process::exit(i32::from(EXIT_SOFTWARE))
+                    }
+                    Err(e) => {
+                        zlog_sys!(Error @ fpm_unix_init_main:653, conf::errno(&e), "failed to read from pipe");
+                        std::process::exit(i32::from(EXIT_SOFTWARE))
+                    }
                 }
             }
         }
@@ -549,6 +583,7 @@ impl Fpm {
     /// `fpm_scoreboard_init_main`: each pool's scoreboard mapped, a
     /// status pool's pointing at the one it shows.
     fn scoreboard_init_main(&mut self) -> bool {
+        zlog!(Debug @ fpm_scoreboard_init_main:38, "got clock tick '{}'", crate::scoreboard::clock_tick());
         for pool in &mut self.pools {
             let Ok(nprocs) = usize::try_from(pool.config.pm_max_children) else {
                 zlog!(
@@ -621,6 +656,7 @@ impl Fpm {
         }
         self.signal_read = Some(read);
         self.signal_write = Some(write);
+        zlog!(Debug @ fpm_signals_init_main:219, "Unblocking all signals");
         unblock_all();
         true
     }
@@ -663,10 +699,23 @@ impl Fpm {
         true
     }
 
-    /// `fpm_event_init_main`: the event module made.
+    /// `fpm_event_init_main`: the event module made, reserving one event
+    /// for the signal pipe and two for each child of a pool that catches
+    /// its workers' output.
     fn event_init_main(&mut self) -> bool {
-        if let Ok(poller) = Poller::new() {
+        let max = 1 + self
+            .pools
+            .iter()
+            .filter(|p| p.config.catch_workers_output && p.config.pm_max_children > 0)
+            .map(|p| p.config.pm_max_children * 2)
+            .sum::<i32>();
+        if let Ok(poller) = Poller::new(usize::try_from(max).unwrap_or(1)) {
             self.poller = Some(poller);
+            zlog!(
+                Debug @ fpm_event_init_main:345,
+                "event module is {} and {max} fds have been reserved",
+                crate::events::MECHANISM
+            );
             true
         } else {
             zlog!(
@@ -825,6 +874,11 @@ impl Fpm {
         }
         if self.heartbeat > 0 {
             self.heartbeat = self.heartbeat.max(crate::pctl::MIN_HEARTBEAT);
+            zlog!(
+                Debug @ fpm_pctl_heartbeat:478,
+                "heartbeat have been set up with a timeout of {}ms",
+                self.heartbeat
+            );
             self.add_timer(
                 Timer::Heartbeat,
                 u64::try_from(self.heartbeat).unwrap_or(1000),
@@ -833,6 +887,13 @@ impl Fpm {
         }
         if !err {
             self.add_timer(Timer::Maintenance, crate::pctl::MAINTENANCE_HEARTBEAT, true);
+            let reserved: usize = self
+                .pools
+                .iter()
+                .filter_map(|p| p.scoreboard)
+                .map(|s| s.shm_bytes())
+                .sum();
+            zlog!(Debug @ fpm_event_loop:373, "{reserved} bytes have been reserved in SHM");
             zlog!(Notice @ fpm_event_loop:374, "ready to handle connections");
         }
         loop {
@@ -849,6 +910,7 @@ impl Fpm {
                 .as_ref()
                 .map(|p| p.wait(timeout))
                 .unwrap_or_default();
+            let triggered = ready.len();
             for fd in ready {
                 let Some(&(_, what)) = self.watched.iter().find(|(had, _)| *had == fd) else {
                     continue;
@@ -858,6 +920,9 @@ impl Fpm {
                     Watched::Output { pid, stdout } => crate::stdio::child_said(self, pid, stdout),
                     Watched::Ondemand(pool) => crate::pctl::on_socket_accept(self, pool)?,
                 }
+            }
+            if triggered > 0 {
+                zlog!(Debug @ fpm_event_loop:426, "event module triggered {triggered} events");
             }
             let mut at = 0;
             while at < self.timers.len() {
@@ -917,19 +982,31 @@ impl Fpm {
                 }
             }
             match byte[0] {
-                b'C' => self.add_timer(Timer::Bury, 0, false),
-                b'I' | b'T' => {
-                    // `case 'I'` and `case 'T'`, SIGINT's and SIGTERM's.
-                    let line = if byte[0] == b'I' { 91 } else { 96 };
-                    zlog!(Notice @ (crate::zlog::Site::at("fpm_got_signal", line)), "Terminating ...");
+                b'C' => {
+                    zlog!(Debug @ fpm_got_signal:81, "received SIGCHLD");
+                    self.add_timer(Timer::Bury, 0, false);
+                }
+                b'I' => {
+                    zlog!(Debug @ fpm_got_signal:90, "received SIGINT");
+                    zlog!(Notice @ fpm_got_signal:91, "Terminating ...");
+                    self.pctl(State::Terminating, crate::pctl::Action::Set)?;
+                }
+                b'T' => {
+                    zlog!(Debug @ fpm_got_signal:95, "received SIGTERM");
+                    zlog!(Notice @ fpm_got_signal:96, "Terminating ...");
                     self.pctl(State::Terminating, crate::pctl::Action::Set)?;
                 }
                 b'Q' => {
+                    zlog!(Debug @ fpm_got_signal:100, "received SIGQUIT");
                     zlog!(Notice @ fpm_got_signal:101, "Finishing ...");
                     self.pctl(State::Finishing, crate::pctl::Action::Set)?;
                 }
-                b'1' => crate::stdio::reopen_logs(self),
+                b'1' => {
+                    zlog!(Debug @ fpm_got_signal:105, "received SIGUSR1");
+                    crate::stdio::reopen_logs(self);
+                }
                 b'2' => {
+                    zlog!(Debug @ fpm_got_signal:130, "received SIGUSR2");
                     zlog!(Notice @ fpm_got_signal:131, "Reloading in progress ...");
                     self.pctl(State::Reloading, crate::pctl::Action::Set)?;
                 }
