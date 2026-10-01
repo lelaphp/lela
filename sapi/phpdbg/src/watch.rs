@@ -30,6 +30,18 @@ enum Kind {
     Array,
 }
 
+/// Where php's registered watch element stands: on the zval, or on the
+/// table of the array it holds (`PHPDBG_WATCH_ARRAY`), as a `watch
+/// array`'s does and a recursive watch's over an array does, which
+/// `phpdbg_create_recursive_watchpoint` recurses into at once and
+/// registers the child it made on the table of (`$a[]`) in place of
+/// the root on the variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Element {
+    Zval,
+    Table,
+}
+
 /// One watch.
 #[derive(Debug, Clone)]
 struct Watch {
@@ -42,8 +54,20 @@ struct Watch {
     path: Vec<Vec<u8>>,
     /// The name it is reported under, `$a[0]`, `$a[]`.
     name: Vec<u8>,
+    /// Where php's element for it, the one announced and listed, stands.
+    element: Element,
     /// What it held at the last boundary.
     old: Shown,
+}
+
+impl Watch {
+    /// The name it was added and is listed under.
+    fn listed(&self) -> Vec<u8> {
+        match (self.kind, self.element) {
+            (Kind::Recursive, Element::Table) => [self.name.as_slice(), b"[]"].concat(),
+            _ => self.name.clone(),
+        }
+    }
 }
 
 /// The watchpoints of the session.
@@ -211,27 +235,33 @@ fn add(s: &mut Session, here: &mut Here<'_>, input: &[u8], kind: Kind) {
         };
         let id = s.watches.next;
         s.watches.next += 1;
-        out::notice(
-            format!(
-                "Added{} watchpoint #{id} for {}",
-                if kind == Kind::Recursive {
-                    " recursive"
-                } else {
-                    ""
-                },
-                lossy(&name)
-            )
-            .as_bytes(),
-        );
-        s.watches.list.push(Watch {
+        let over_table = matches!(deref(&old), Shown::Array { .. } | Shown::Object { .. });
+        let element = if kind == Kind::Array || (kind == Kind::Recursive && over_table) {
+            Element::Table
+        } else {
+            Element::Zval
+        };
+        let watch = Watch {
             id,
             kind,
             frame,
             variable: variable.clone(),
             path,
             name,
+            element,
             old,
-        });
+        };
+        // Only the recursive root announces itself as recursive.
+        let root = kind == Kind::Recursive && element == Element::Zval;
+        out::notice(
+            format!(
+                "Added{} watchpoint #{id} for {}",
+                if root { " recursive" } else { "" },
+                lossy(&watch.listed())
+            )
+            .as_bytes(),
+        );
+        s.watches.list.push(watch);
     }
 }
 
@@ -286,11 +316,10 @@ pub fn list(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
         out::writeln(
             format!(
                 "{} ({}, {})",
-                lossy(&watch.name),
-                if watch.kind == Kind::Array {
-                    "array"
-                } else {
-                    "variable"
+                lossy(&watch.listed()),
+                match watch.element {
+                    Element::Table => "array",
+                    Element::Zval => "variable",
                 },
                 if watch.kind == Kind::Recursive {
                     "recursive"
@@ -393,6 +422,119 @@ fn report_str(req: &mut Request, name: &[u8], old: &[u8], new: &[u8]) -> bool {
     true
 }
 
+/// A key as php names an element by it.
+fn key_text(key: &Key) -> Vec<u8> {
+    match key {
+        Key::Int(n) => n.to_string().into_bytes(),
+        Key::Str(s) => s.clone(),
+    }
+}
+
+/// What a recursive watch reports over the value at `name`, by
+/// `phpdbg_watch.c`'s elements under its root: the zval at `name`
+/// changed, as a simple watch reports it, after which its children are
+/// made again over what it holds now; else, over the same array, the
+/// table's element `name[]`, each key appended since announced from the
+/// last back (`Element 2 has been added to watchpoint`) and a changed
+/// count reported, then each element that stands in both, named
+/// `name[key]`, by the same rules. `false` where a report ended the
+/// request.
+///
+/// ```php
+/// $a = [1, [2, intdiv(6, 2)]];
+/// $a[1][1] = 9;
+/// $a[] = 4;
+/// echo "end\n";
+/// ```
+/// ```request phpdbg
+/// b 3
+/// r
+/// w r $a
+/// c
+/// c
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:3]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003: $a[1][1] = 9;
+///  00004: $a[] = 4;
+///  00005: echo "end\n";
+/// prompt> [Added watchpoint #0 for $a[]]
+/// prompt> [Breaking on watchpoint $a[1][1]]
+/// Old value: 3
+/// New value: 9
+/// >00004: $a[] = 4;
+///  00005: echo "end\n";
+/// prompt> [Element 2 has been added to watchpoint]
+/// [Breaking on watchpoint $a[]]
+/// 1 elements were added to the array
+/// >00005: echo "end\n";
+/// prompt> [$a has been removed, removing watchpoint recursively]
+/// ```
+fn recursive_report(req: &mut Request, name: &[u8], old: &Shown, new: &Shown) -> bool {
+    if zval_differs(old, new) {
+        session::with(|s| s.watch_hit = true);
+        return report_zval(req, name, old, new);
+    }
+    if let Some((was, now)) = str_changed(old, new) {
+        session::with(|s| s.watch_hit = true);
+        return report_str(req, name, was, now);
+    }
+    let (
+        Shown::Array {
+            len: was,
+            entries: before,
+            ..
+        },
+        Shown::Array {
+            len: now,
+            entries: after,
+            ..
+        },
+    ) = (deref(old), deref(new))
+    else {
+        return true;
+    };
+    let added = after
+        .iter()
+        .rev()
+        .take_while(|(key, _)| !before.iter().any(|(held, _)| held == key));
+    for (key, _) in added {
+        session::with(|s| s.watch_hit = true);
+        out::notice(
+            [
+                &b"Element "[..],
+                &key_text(key),
+                b" has been added to watchpoint",
+            ]
+            .concat()
+            .as_slice(),
+        );
+    }
+    if was != now {
+        session::with(|s| s.watch_hit = true);
+        out::notice(format!("Breaking on watchpoint {}[]", lossy(name)).as_bytes());
+        let message = if was > now {
+            format!("{} elements were removed from the array", was - now)
+        } else {
+            format!("{} elements were added to the array", now - was)
+        };
+        out::writeln(message.as_bytes());
+    }
+    for (key, value) in after {
+        let Some((_, held)) = before.iter().find(|(held, _)| held == key) else {
+            continue;
+        };
+        let element = [name, b"[", &key_text(key), b"]"].concat();
+        if !recursive_report(req, &element, held, value) {
+            return false;
+        }
+    }
+    true
+}
+
 /// A string reached through the same references and the same string,
 /// its bytes changed: the `WATCH_ON_STR` php keeps beside the zval's.
 fn str_changed<'a>(old: &'a Shown, new: &'a Shown) -> Option<(&'a [u8], &'a [u8])> {
@@ -490,7 +632,8 @@ pub fn changed(req: &mut Request) -> bool {
                 }
                 true
             }
-            Kind::Simple | Kind::Recursive => {
+            Kind::Recursive => recursive_report(req, &watch.name, &old, &new),
+            Kind::Simple => {
                 if zval_differs(&old, &new) {
                     session::with(|s| s.watch_hit = true);
                     report_zval(req, &watch.name, &old, &new)
