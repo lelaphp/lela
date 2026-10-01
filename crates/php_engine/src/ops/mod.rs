@@ -2568,21 +2568,28 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
         req.release(Value::string(b));
         return Ok(Value::string(a));
     }
-    if a.len() > ZSTR_MAX_LEN - b.len() {
-        req.release(Value::string(a));
-        req.release(Value::string(b));
-        return Err(throw(req, "Error", "String size overflow"));
-    }
-    // `zend_string_alloc(ZSTR_LEN(op1) + ZSTR_LEN(op2))` and the two
-    // `memcpy` into it; then the two operands' strings are given up.
-    let joined = PhpString::filled(req, a.len() + b.len(), |bytes| {
-        let (head, tail) = bytes.split_at_mut(a.len());
-        head.copy_from_slice(a.as_bytes());
-        tail.copy_from_slice(b.as_bytes());
-    });
+    let joined = join(req, a, b);
     req.release(Value::string(a));
     req.release(Value::string(b));
     Ok(Value::string(joined?))
+}
+
+/// A new string of `a`'s bytes and then `b`'s,
+/// `zend_string_alloc(ZSTR_LEN(op1) + ZSTR_LEN(op2))` and the two
+/// `memcpy` into it, whichever side is empty: what [`concat`] makes of
+/// two non-empty sides and what `ZEND_CONCAT`'s alloc arm makes of any
+/// pair it does not hand on (`Z/Zend/zend_vm_def.h:419-430`). Neither
+/// side's owner is given up. A length past `ZSTR_MAX_LEN` is php's
+/// `Error`, `String size overflow`.
+pub(crate) fn join(req: &mut Request, a: PhpString, b: PhpString) -> Result<PhpString, Thrown> {
+    if a.len() > ZSTR_MAX_LEN - b.len() {
+        return Err(throw(req, "Error", "String size overflow"));
+    }
+    PhpString::filled(req, a.len() + b.len(), |bytes| {
+        let (head, tail) = bytes.split_at_mut(a.len());
+        head.copy_from_slice(a.as_bytes());
+        tail.copy_from_slice(b.as_bytes());
+    })
 }
 
 /// One side of `concat_function` as a string, `zval_get_string_func`,
