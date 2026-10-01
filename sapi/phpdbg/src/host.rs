@@ -146,38 +146,45 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     // php's cycle ends with the request a run, a restart, `clean` or an
     // `exec` during a run stood in (`phpdbg_clean(1, ...)`): the module
     // starts again, `PHPDBG_G(registered)` built empty with it.
-    if s.execution != Execution::Not || s.stopped == Some(Stop::Clean) {
+    let cycle_ended = s.execution != Execution::Not || s.stopped == Some(Stop::Clean);
+    if cycle_ended {
         s.registered.clear();
     }
-    if s.execution == Execution::Not {
-        return;
+    let execution = std::mem::replace(&mut s.execution, Execution::Not);
+    if execution != Execution::Not {
+        if let Some(uncaught) = &observed.uncaught {
+            out::error(
+                format!(
+                    "Uncaught {} in {} on line {}",
+                    String::from_utf8_lossy(&uncaught.class),
+                    String::from_utf8_lossy(&uncaught.file),
+                    uncaught.line
+                )
+                .as_bytes(),
+            );
+            out::writeln(&uncaught.text);
+        }
+        crate::watch::removed_at_end(s);
     }
-    s.execution = Execution::Not;
-    if let Some(uncaught) = &observed.uncaught {
-        out::error(
-            format!(
-                "Uncaught {} in {} on line {}",
-                String::from_utf8_lossy(&uncaught.class),
-                String::from_utf8_lossy(&uncaught.file),
-                uncaught.line
-            )
-            .as_bytes(),
-        );
-        out::writeln(&uncaught.text);
-    }
-    crate::watch::removed_at_end(s);
     match s.stopped {
-        None => {
+        None if execution == Execution::Run => {
             prompt::run_queued(s);
             if s.stopped != Some(Stop::Quit) {
-                out::notice(b"Script ended normally");
-                input::forget();
+                cycle_notice();
             }
             if s.after_run == AfterRun::Quit {
                 s.stopped = Some(Stop::Quit);
             }
         }
-        Some(
+        // `clean`, or `exec` where php takes something to be executing,
+        // at a prompt no run stands under: the cycle ends with the run
+        // flag clear, so the module's shutdown writes its notice, which
+        // a run that `clean` or `exec` stopped does not reach.
+        Some(Stop::Clean | Stop::Exec) if cycle_ended && execution != Execution::Run => {
+            cycle_notice();
+        }
+        None
+        | Some(
             Stop::Quit
             | Stop::Idle
             | Stop::Clean
@@ -186,6 +193,40 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
             | Stop::RunWith(_),
         ) => {}
     }
+}
+
+/// What `PHP_MSHUTDOWN_FUNCTION(phpdbg)` writes where the cycle ends and
+/// php is not quitting (`Z/sapi/phpdbg/phpdbg.c:172-180`), with the last
+/// line it kept to repeat let go. `clean` at the held prompt ends the
+/// cycle so, and what `register` named goes with it.
+///
+/// ```php
+/// function foo($a = 0) {
+///   echo "in foo $a\n";
+/// }
+/// foo();
+/// ```
+/// ```request phpdbg
+/// register intdiv
+/// clean
+/// intdiv 1
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Registered intdiv]
+/// prompt> Cleaning Execution Environment
+/// Classes    %d
+/// Functions  %d
+/// Constants  %d
+/// Includes   0
+/// [Script ended normally]
+/// prompt> [The command "intdiv" could not be found]
+/// prompt>
+/// ```
+fn cycle_notice() {
+    out::notice(b"Script ended normally");
+    input::forget();
 }
 
 /// `run`'s arguments, split as php's `run` splits them
