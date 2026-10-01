@@ -664,18 +664,14 @@ pub(super) fn initialize_from_hash(
     object: PhpObject,
     hash: PhpArray,
 ) -> Result<bool, Thrown> {
-    let find = |req: &mut Request, name: &[u8]| -> Result<Option<Value>, Thrown> {
-        let key = Key::Str(PhpString::new(req, name)?);
-        Ok(hash.get(&key).map(|v| v.deref()))
-    };
-    let Some(date) = find(req, b"date")?.and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec)) else {
+    let find = |name: &[u8]| hash.find(name).map(|v| v.deref());
+    let Some(date) = find(b"date").and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec)) else {
         return Ok(false);
     };
-    let Some(zone_type) = find(req, b"timezone_type")?.and_then(|v| v.as_int()) else {
+    let Some(zone_type) = find(b"timezone_type").and_then(|v| v.as_int()) else {
         return Ok(false);
     };
-    let Some(zone) = find(req, b"timezone")?.and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-    else {
+    let Some(zone) = find(b"timezone").and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec)) else {
         return Ok(false);
     };
     let init = Init {

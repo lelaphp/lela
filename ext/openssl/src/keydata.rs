@@ -10,11 +10,10 @@
 
 use std::ffi::CStr;
 
-use php_ext::raising::{Level, Thrown, docref};
+use php_ext::raising::{Level, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, ValueRef};
 
-use crate::config::field;
 use crate::decode::c_string;
 use crate::ffi::key::{Bn, EcGroup, EcPoint, KeyContext, ParamSet, Params};
 use crate::ffi::{self, KeyKind, PKey};
@@ -28,24 +27,19 @@ pub(crate) type Made = Option<(PKey, bool)>;
 
 /// `OPENSSL_PKEY_SET_BN(data, name)`: the member as a number where it is
 /// a string, no number otherwise.
-fn number(req: &mut Request, data: PhpArray, name: &[u8]) -> Result<Option<Bn>, Thrown> {
-    Ok(match field(req, data, name)? {
-        Some(value) => match value.as_ref() {
-            ValueRef::Str(s) => Bn::from_bytes(s.as_bytes()),
-            _ => None,
-        },
-        None => None,
-    })
+fn number(data: PhpArray, name: &[u8]) -> Option<Bn> {
+    match data.find(name)?.as_ref() {
+        ValueRef::Str(s) => Bn::from_bytes(s.as_bytes()),
+        _ => None,
+    }
 }
 
 /// A member that is a non-empty string, as its bytes.
-fn octets(req: &mut Request, data: PhpArray, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
-    Ok(
-        field(req, data, name)?.and_then(|value| match value.as_ref() {
-            ValueRef::Str(s) if !s.is_empty() => Some(s.as_bytes().to_vec()),
-            _ => None,
-        }),
-    )
+fn octets(data: PhpArray, name: &[u8]) -> Option<Vec<u8>> {
+    match data.find(name)?.as_ref() {
+        ValueRef::Str(s) if !s.is_empty() => Some(s.as_bytes().to_vec()),
+        _ => None,
+    }
 }
 
 /// `EVP_PKEY_fromdata` of a built set in a new `EVP_PKEY_CTX` of the kind.
@@ -64,7 +58,7 @@ fn generate_over(params: &PKey) -> Option<PKey> {
 
 /// `php_openssl_pkey_init_rsa`: `n` and `d`, and each of `e`, `p`, `q`,
 /// `dmp1`, `dmq1` and `iqmp` given.
-pub(crate) fn rsa(req: &mut Request, data: PhpArray) -> Result<Option<PKey>, Thrown> {
+pub(crate) fn rsa(req: &mut Request, data: PhpArray) -> Option<PKey> {
     let names: [(&[u8], &'static CStr); 8] = [
         (b"n", c"n"),
         (b"e", c"e"),
@@ -77,7 +71,7 @@ pub(crate) fn rsa(req: &mut Request, data: PhpArray) -> Result<Option<PKey>, Thr
     ];
     let mut numbers = Vec::new();
     for (member, name) in names {
-        numbers.push((name, number(req, data, member)?));
+        numbers.push((name, number(data, member)));
     }
     let key = (|| {
         let _ctx = KeyContext::of_kind(KeyKind::Rsa)?;
@@ -95,7 +89,7 @@ pub(crate) fn rsa(req: &mut Request, data: PhpArray) -> Result<Option<PKey>, Thr
         from_data(KeyKind::Rsa, params.build())
     })();
     store_errors(req);
-    Ok(key)
+    key
 }
 
 /// `php_openssl_pkey_init_dsa` and `php_openssl_pkey_init_dh`: `p` and
@@ -103,12 +97,12 @@ pub(crate) fn rsa(req: &mut Request, data: PhpArray) -> Result<Option<PKey>, Thr
 /// making the key itself and their absence a key generated over the
 /// parameters. DH derives a missing `pub_key` from `priv_key`; DSA takes
 /// `priv_key` only beside `pub_key`.
-pub(crate) fn ffc(req: &mut Request, kind: KeyKind, data: PhpArray) -> Result<Made, Thrown> {
-    let p = number(req, data, b"p")?;
-    let q = number(req, data, b"q")?;
-    let g = number(req, data, b"g")?;
-    let private = number(req, data, b"priv_key")?;
-    let mut public = number(req, data, b"pub_key")?;
+pub(crate) fn ffc(req: &mut Request, kind: KeyKind, data: PhpArray) -> Made {
+    let p = number(data, b"p");
+    let q = number(data, b"q");
+    let g = number(data, b"g");
+    let private = number(data, b"priv_key");
+    let mut public = number(data, b"pub_key");
     let dsa = kind == KeyKind::Dsa;
     let made = (|| {
         let _ctx = KeyContext::of_kind(kind)?;
@@ -153,7 +147,7 @@ pub(crate) fn ffc(req: &mut Request, kind: KeyKind, data: PhpArray) -> Result<Ma
         generate_over(&params_key).map(|key| (key, true))
     })();
     store_errors(req);
-    Ok(made)
+    made
 }
 
 /// The members of an `ec` entry: a curve's name, or a prime curve's
@@ -175,22 +169,22 @@ struct EcData {
 }
 
 impl EcData {
-    fn read(req: &mut Request, data: PhpArray) -> Result<EcData, Thrown> {
-        Ok(EcData {
-            curve: octets(req, data, b"curve_name")?,
-            prime: number(req, data, b"p")?,
-            coeff_a: number(req, data, b"a")?,
-            coeff_b: number(req, data, b"b")?,
-            order: number(req, data, b"order")?,
-            g_x: number(req, data, b"g_x")?,
-            g_y: number(req, data, b"g_y")?,
-            cofactor: number(req, data, b"cofactor")?,
-            generator: octets(req, data, b"generator")?,
-            seed: octets(req, data, b"seed")?,
-            private: number(req, data, b"d")?,
-            pub_x: number(req, data, b"x")?,
-            pub_y: number(req, data, b"y")?,
-        })
+    fn read(data: PhpArray) -> EcData {
+        EcData {
+            curve: octets(data, b"curve_name"),
+            prime: number(data, b"p"),
+            coeff_a: number(data, b"a"),
+            coeff_b: number(data, b"b"),
+            order: number(data, b"order"),
+            g_x: number(data, b"g_x"),
+            g_y: number(data, b"g_y"),
+            cofactor: number(data, b"cofactor"),
+            generator: octets(data, b"generator"),
+            seed: octets(data, b"seed"),
+            private: number(data, b"d"),
+            pub_x: number(data, b"x"),
+            pub_y: number(data, b"y"),
+        }
     }
 
     /// `d`, or `x` and `y`: the key itself is given.
@@ -358,8 +352,8 @@ fn build_ec(
 /// `a`, `b`, `order`, generator (encoded or as `g_x` and `g_y`), `seed`
 /// and `cofactor`; then `d`, or `x` and `y`, making the key itself, and
 /// their absence a key generated on the curve.
-pub(crate) fn ec(req: &mut Request, data: PhpArray) -> Result<Made, Thrown> {
-    let ec = EcData::read(req, data)?;
+pub(crate) fn ec(req: &mut Request, data: PhpArray) -> Made {
+    let ec = EcData::read(data);
     let mut warning = None;
     let (mut g_buf, mut q_buf) = (None, None);
     let made = build_ec(&ec, &mut g_buf, &mut q_buf, &mut warning);
@@ -367,17 +361,17 @@ pub(crate) fn ec(req: &mut Request, data: PhpArray) -> Result<Made, Thrown> {
         docref(req, Level::Warning, &text);
     }
     store_errors(req);
-    Ok(made)
+    made
 }
 
 /// `php_openssl_pkey_object_curve_25519_448`: `priv_key` and `pub_key`
 /// making the key where either member is there at all, and a key
 /// generated where neither is.
-pub(crate) fn curve(req: &mut Request, kind: KeyKind, data: PhpArray) -> Result<Made, Thrown> {
-    let private = octets(req, data, b"priv_key")?;
-    let public = octets(req, data, b"pub_key")?;
-    let has_private = field(req, data, b"priv_key")?.is_some();
-    let has_public = field(req, data, b"pub_key")?.is_some();
+pub(crate) fn curve(req: &mut Request, kind: KeyKind, data: PhpArray) -> Made {
+    let private = octets(data, b"priv_key");
+    let public = octets(data, b"pub_key");
+    let has_private = data.find(b"priv_key").is_some();
+    let has_public = data.find(b"pub_key").is_some();
     let made = (|| {
         let mut params = Params::new()?;
         if let Some(bytes) = &private
@@ -402,15 +396,12 @@ pub(crate) fn curve(req: &mut Request, kind: KeyKind, data: PhpArray) -> Result<
         ctx.keygen(false).map(|key| (key, true))
     })();
     store_errors(req);
-    Ok(made)
+    made
 }
 
 /// The array under one of `openssl_pkey_new`'s key-kind entries, the
 /// first that is an array in php's order of them.
-pub(crate) fn entry(
-    req: &mut Request,
-    options: PhpArray,
-) -> Result<Option<(KeyKind, PhpArray)>, Thrown> {
+pub(crate) fn entry(options: PhpArray) -> Option<(KeyKind, PhpArray)> {
     let kinds: [(&[u8], KeyKind); 8] = [
         (b"rsa", KeyKind::Rsa),
         (b"dsa", KeyKind::Dsa),
@@ -422,11 +413,11 @@ pub(crate) fn entry(
         (b"ed448", KeyKind::Ed448),
     ];
     for (name, kind) in kinds {
-        if let Some(value) = field(req, options, name)?
+        if let Some(value) = options.find(name)
             && let ValueRef::Array(data) = value.as_ref()
         {
-            return Ok(Some((kind, *data)));
+            return Some((kind, *data));
         }
     }
-    Ok(None)
+    None
 }

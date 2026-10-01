@@ -8,7 +8,6 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
-use crate::config::field;
 use crate::decode::{
     Arg, CertParam, Origin, c_string, cert_from_param, cert_stack, check_path, finish, raised,
 };
@@ -63,11 +62,13 @@ fn prepare(
         }
         None => None,
     };
-    let name = field(req, options, b"friendly_name")?.and_then(|value| match value.as_ref() {
-        ValueRef::Str(s) => Some(c_string(s.as_bytes())),
-        _ => None,
-    });
-    let extra = match field(req, options, b"extracerts")? {
+    let name = options
+        .find(b"friendly_name")
+        .and_then(|value| match value.as_ref() {
+            ValueRef::Str(s) => Some(c_string(s.as_bytes())),
+            _ => None,
+        });
+    let extra = match options.find(b"extracerts") {
         Some(value) => match cert_stack(req, &value, Arg::new(5, "options"), Some("extracerts"))? {
             Some(stack) => Some(stack),
             None => return Ok(None),

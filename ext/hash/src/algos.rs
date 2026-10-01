@@ -102,9 +102,7 @@ pub(crate) type Init = fn(&mut Request, Options) -> Result<Box<dyn State>, Throw
 pub(crate) struct Options(pub(crate) Option<PhpArray>);
 
 impl Options {
-    /// `zend_hash_str_find_deref(args, name)`: the name is a key for
-    /// the lookup alone, given back once it is made, as php's
-    /// `zend_hash_str_find` allocates none.
+    /// `zend_hash_str_find_deref(args, name)`, which allocates nothing.
     ///
     /// ```php
     /// $a = hash_init('murmur3a', options: ['seed' => 1]);
@@ -117,31 +115,25 @@ impl Options {
     /// ```expect
     /// int(0)
     /// ```
-    pub(crate) fn get(self, req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown> {
-        let Some(options) = self.0 else {
-            return Ok(None);
-        };
-        let key = PhpString::new(req, name)?;
-        let found = options.get(&Key::Str(key)).map(|value| value.deref());
-        req.release(Value::string(key));
-        Ok(found)
+    pub(crate) fn get(self, name: &[u8]) -> Option<Value> {
+        self.0?.find(name).map(|value| value.deref())
     }
 
     /// The `seed` option as `PHP_MURMUR3AInit` and `PHP_XXH32Init` read
     /// it: an int, or the deprecation and zero.
-    pub(crate) fn seed(self, req: &mut Request) -> Result<u64, Thrown> {
-        let Some(value) = self.get(req, b"seed")? else {
-            return Ok(0);
+    pub(crate) fn seed(self, req: &mut Request) -> u64 {
+        let Some(value) = self.get(b"seed") else {
+            return 0;
         };
         if let ValueRef::Int(n) = value.as_ref() {
-            return Ok(n.cast_unsigned());
+            return n.cast_unsigned();
         }
         docref(
             req,
             Level::Deprecated,
             "Passing a seed of a type other than int is deprecated because it is the same as setting the seed to 0",
         );
-        Ok(0)
+        0
     }
 }
 

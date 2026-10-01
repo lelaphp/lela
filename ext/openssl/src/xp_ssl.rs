@@ -22,7 +22,7 @@ use php_ext::call::call;
 use php_ext::coerce::{callable_checked, callable_name, to_long, to_string, truthy};
 use php_ext::raising::{Level, Thrown, docref, raise, throw};
 use php_ext::request::{Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, XportFactory};
-use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, Resource, Value, ValueRef};
 use php_ext_standard::{UriParser, stream_ctx_option, stream_ctx_set_option};
 
 use crate::decode::{Origin, check_path};
@@ -1594,16 +1594,10 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
         return 0;
     };
     let remote = stream.meta_data(req).is_ok_and(|meta| {
-        let key = PhpString::new(req, b"wrapper_type");
-        let found = key.as_ref().ok().and_then(|key| {
-            meta.get(&Key::Str(*key)).and_then(|v| {
-                v.as_php_string()
-                    .map(|s| matches!(s.as_bytes(), b"http" | b"ftp"))
-            })
+        let found = meta.find(b"wrapper_type").and_then(|v| {
+            v.as_php_string()
+                .map(|s| matches!(s.as_bytes(), b"http" | b"ftp"))
         });
-        if let Ok(key) = key {
-            req.release(Value::string(key));
-        }
         req.release(Value::array(meta));
         found.unwrap_or(false)
     });

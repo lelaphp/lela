@@ -438,30 +438,19 @@ fn timezone_location_get(
 }
 
 /// `php_date_timezone_initialize_from_hash`.
-fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<TzKind>, Thrown> {
-    let find = |req: &mut Request, name: &[u8]| -> Result<Option<Value>, Thrown> {
-        let key = Key::Str(PhpString::new(req, name)?);
-        Ok(hash.get(&key).map(|v| v.deref()))
-    };
-    let Some(zone_type) = find(req, b"timezone_type")? else {
-        return Ok(None);
-    };
-    let Some(zone) = find(req, b"timezone")? else {
-        return Ok(None);
-    };
-    let Some(zone_type) = zone_type.as_int() else {
-        return Ok(None);
-    };
+fn from_hash(hash: PhpArray) -> Option<TzKind> {
+    let find = |name: &[u8]| hash.find(name).map(|v| v.deref());
+    let zone_type = find(b"timezone_type")?;
+    let zone = find(b"timezone")?;
+    let zone_type = zone_type.as_int()?;
     if !(i64::from(ZONETYPE_OFFSET)..=i64::from(ZONETYPE_ID)).contains(&zone_type) {
-        return Ok(None);
+        return None;
     }
-    let Some(text) = zone.as_str_bytes() else {
-        return Ok(None);
-    };
+    let text = zone.as_str_bytes()?;
     if text.contains(&0) {
-        return Ok(None);
+        return None;
     }
-    Ok(initialize(text).ok())
+    initialize(text).ok()
 }
 
 /// `class DateTimeZone`: its fourteen groups, the values of
@@ -686,7 +675,7 @@ impl DateTimeZone {
     /// ```
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let (object, hash) = (this.object(), data);
-        let Some(kind) = from_hash(req, hash)? else {
+        let Some(kind) = from_hash(hash) else {
             return Err(throw(
                 req,
                 "Error",
@@ -721,9 +710,9 @@ impl DateTimeZone {
             req.addref(&value);
             hash.set(req, Key::Str(name), value)?;
         }
-        let kind = from_hash(req, hash);
+        let kind = from_hash(hash);
         req.release(Value::array(hash));
-        match kind? {
+        match kind {
             Some(kind) => {
                 set_zone(req, object, kind);
                 Ok(())
@@ -762,23 +751,15 @@ impl DateTimeZone {
         let hash = array;
         let class = class_id(req, "DateTimeZone")?;
         let object = new_object(req, class)?;
-        match from_hash(req, hash) {
-            Ok(Some(kind)) => {
-                set_zone(req, object, kind);
-                Ok(Instance::of(object))
-            }
-            Ok(None) => {
-                req.release(object.as_value());
-                Err(throw(
-                    req,
-                    "Error",
-                    "Invalid serialization data for DateTimeZone object",
-                ))
-            }
-            Err(thrown) => {
-                req.release(object.as_value());
-                Err(thrown)
-            }
-        }
+        let Some(kind) = from_hash(hash) else {
+            req.release(object.as_value());
+            return Err(throw(
+                req,
+                "Error",
+                "Invalid serialization data for DateTimeZone object",
+            ));
+        };
+        set_zone(req, object, kind);
+        Ok(Instance::of(object))
     }
 }

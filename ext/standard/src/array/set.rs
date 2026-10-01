@@ -672,7 +672,7 @@ fn array_diff(
     };
     if first.is_empty() {
         check_rest(req)?;
-        return PhpArray::new(req);
+        return Ok(PhpArray::empty());
     }
     if first.len() == 1 {
         let (_, value) = first.snapshot_refs()[0].clone();
@@ -692,7 +692,7 @@ fn array_diff(
             }
         }
         if found {
-            return PhpArray::new(req);
+            return Ok(PhpArray::empty());
         }
         req.addref(&Value::array(first));
         return Ok(first);

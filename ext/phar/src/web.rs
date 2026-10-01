@@ -5,7 +5,7 @@
 use php_ext::abi::Callable;
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{PhpArray, PhpString, Value};
 
 use crate::archive::{ArchiveId, archives, lossy};
 use crate::entry::{self, Dir, Found};
@@ -247,16 +247,10 @@ fn bailout(req: &mut Request) -> Thrown {
 }
 
 /// A string row of `$_SERVER` as it stands, made or not.
-fn server_row(req: &mut Request, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
-    let Some(server) = req.made_superglobal(b"_SERVER") else {
-        return Ok(None);
-    };
-    let key = PhpString::new(req, name)?;
-    let found = server
-        .get(&Key::Str(key))
-        .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec));
-    req.release(Value::string(key));
-    Ok(found)
+fn server_row(req: &mut Request, name: &[u8]) -> Option<Vec<u8>> {
+    req.made_superglobal(b"_SERVER")?
+        .find(name)
+        .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
 }
 
 /// A row of `$_SERVER` replaced, what it held kept under `kept`.
@@ -290,7 +284,7 @@ fn mung_server_vars(
     let mut url = b"phar://".to_vec();
     url.extend_from_slice(fname);
     url.extend_from_slice(entry);
-    if let Some(info) = server_row(req, b"PATH_INFO")?
+    if let Some(info) = server_row(req, b"PATH_INFO")
         && info.len() > entry.len()
         && info.starts_with(entry)
     {
@@ -303,7 +297,7 @@ fn mung_server_vars(
             &info[entry.len()..end],
         )?;
     }
-    if let Some(translated) = server_row(req, b"PATH_TRANSLATED")? {
+    if let Some(translated) = server_row(req, b"PATH_TRANSLATED") {
         swap_server(
             req,
             b"PATH_TRANSLATED",
@@ -322,7 +316,7 @@ fn mung_server_vars(
         (MUNG_PHP_SELF, b"PHP_SELF", b"PHAR_PHP_SELF"),
     ] {
         if mung & bit != 0
-            && let Some(old) = server_row(req, name)?
+            && let Some(old) = server_row(req, name)
             && old.len() > basename.len()
             && old.starts_with(basename)
         {
@@ -330,12 +324,12 @@ fn mung_server_vars(
         }
     }
     if mung & MUNG_SCRIPT_NAME != 0
-        && let Some(old) = server_row(req, b"SCRIPT_NAME")?
+        && let Some(old) = server_row(req, b"SCRIPT_NAME")
     {
         swap_server(req, b"SCRIPT_NAME", b"PHAR_SCRIPT_NAME", &old, entry)?;
     }
     if mung & MUNG_SCRIPT_FILENAME != 0
-        && let Some(old) = server_row(req, b"SCRIPT_FILENAME")?
+        && let Some(old) = server_row(req, b"SCRIPT_FILENAME")
     {
         swap_server(req, b"SCRIPT_FILENAME", b"PHAR_SCRIPT_FILENAME", &old, &url)?;
     }
@@ -492,7 +486,7 @@ pub(crate) fn web_phar(
         .rposition(|b| *b == b'/')
         .map_or(fname.as_slice(), |at| &fname[at + 1..])
         .to_vec();
-    let Some(located) = locate(req, &basename)? else {
+    let Some(located) = locate(req, &basename) else {
         return Ok(());
     };
     let Located {
@@ -629,40 +623,34 @@ struct Located {
 /// The entry the request's path names past the archive's own name: from
 /// `SCRIPT_NAME` and `PATH_INFO` under CGI's hosts, from the request URI
 /// under any other; `None` where the path does not name the archive.
-fn locate(req: &mut Request, basename: &[u8]) -> Result<Option<Located>, Thrown> {
+fn locate(req: &mut Request, basename: &[u8]) -> Option<Located> {
     let cgi = matches!(
         req.sapi_name(),
         "cgi-fcgi" | "fpm-fcgi" | "cgi" | "litespeed"
     );
     if !cgi {
         let path_info = req.request_uri().unwrap_or_default().to_vec();
-        let Some(at) = crate::path::find(&path_info, basename) else {
-            return Ok(None);
-        };
+        let at = crate::path::find(&path_info, basename)?;
         let end = at + basename.len();
-        return Ok(Some(Located {
+        return Some(Located {
             entry: path_info[end..].to_vec(),
             pt: path_info[..end].to_vec(),
             path_info,
             not_cgi: true,
-        }));
+        });
     }
     if req.made_superglobal(b"_SERVER").is_some() {
-        let Some(script_name) = server_row(req, b"SCRIPT_NAME")? else {
-            return Ok(None);
-        };
-        if crate::path::find(&script_name, basename).is_none() {
-            return Ok(None);
-        }
-        let entry = server_row(req, b"PATH_INFO")?.unwrap_or_default();
+        let script_name = server_row(req, b"SCRIPT_NAME")?;
+        crate::path::find(&script_name, basename)?;
+        let entry = server_row(req, b"PATH_INFO").unwrap_or_default();
         let mut path_info = script_name.clone();
         path_info.extend_from_slice(&entry);
-        return Ok(Some(Located {
+        return Some(Located {
             entry,
             path_info,
             pt: script_name,
             not_cgi: false,
-        }));
+        });
     }
     let env = |req: &Request, name: &[u8]| {
         req.env_pairs()
@@ -670,21 +658,17 @@ fn locate(req: &mut Request, basename: &[u8]) -> Result<Option<Located>, Thrown>
             .find(|(had, _)| had == name)
             .map(|(_, value)| value.clone())
     };
-    let Some(testit) = env(req, b"SCRIPT_NAME") else {
-        return Ok(None);
-    };
-    let Some(at) = crate::path::find(&testit, basename) else {
-        return Ok(None);
-    };
+    let testit = env(req, b"SCRIPT_NAME")?;
+    let at = crate::path::find(&testit, basename)?;
     let entry = env(req, b"PATH_INFO").unwrap_or_default();
     let mut path_info = testit.clone();
     path_info.extend_from_slice(&entry);
-    Ok(Some(Located {
+    Some(Located {
         entry,
         path_info,
         pt: testit[..(at + basename.len()).min(testit.len())].to_vec(),
         not_cgi: false,
-    }))
+    })
 }
 
 /// The type an entry is answered as: the `$mimeTypes` override for its
@@ -693,31 +677,27 @@ fn locate(req: &mut Request, basename: &[u8]) -> Result<Option<Located>, Thrown>
 fn mime_of(req: &mut Request, entry: &[u8], mimes: PhpArray) -> Result<(Vec<u8>, Mime), Thrown> {
     if !mimes.is_empty()
         && let Some(dot) = entry.iter().rposition(|b| *b == b'.')
+        && let Some(value) = mimes.find(&entry[dot + 1..])
     {
-        let ext = PhpString::new(req, &entry[dot + 1..])?;
-        let found = mimes.get(&Key::Str(ext));
-        req.release(Value::string(ext));
-        if let Some(value) = found {
-            if let Some(code) = value.as_int() {
-                return match code {
-                    0 => Ok((Vec::new(), Mime::Php)),
-                    1 => Ok((Vec::new(), Mime::Phps)),
-                    _ => Err(throw(
-                        req,
-                        "PharException",
-                        "Unknown mime type specifier used, only Phar::PHP, Phar::PHPS and a mime type string are allowed",
-                    )),
-                };
-            }
-            if let Some(mime) = value.as_str_bytes() {
-                return Ok((mime.to_vec(), Mime::Other));
-            }
-            return Err(throw(
-                req,
-                "PharException",
-                "Unknown mime type specifier used (not a string or int), only Phar::PHP, Phar::PHPS and a mime type string are allowed",
-            ));
+        if let Some(code) = value.as_int() {
+            return match code {
+                0 => Ok((Vec::new(), Mime::Php)),
+                1 => Ok((Vec::new(), Mime::Phps)),
+                _ => Err(throw(
+                    req,
+                    "PharException",
+                    "Unknown mime type specifier used, only Phar::PHP, Phar::PHPS and a mime type string are allowed",
+                )),
+            };
         }
+        if let Some(mime) = value.as_str_bytes() {
+            return Ok((mime.to_vec(), Mime::Other));
+        }
+        return Err(throw(
+            req,
+            "PharException",
+            "Unknown mime type specifier used (not a string or int), only Phar::PHP, Phar::PHPS and a mime type string are allowed",
+        ));
     }
     Ok(file_type(entry))
 }

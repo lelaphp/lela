@@ -8,7 +8,7 @@ use php_ext::call::new_object;
 use php_ext::coerce::{to_double, to_long, to_string};
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::datetime::restore_properties;
 use crate::ffi::{self, RelTime, Time, UNSET};
@@ -200,9 +200,8 @@ fn date_interval_format(
 }
 
 /// A hash row by name, dereferenced.
-fn find(req: &mut Request, hash: PhpArray, name: &[u8]) -> Result<Option<Value>, Thrown> {
-    let key = Key::Str(PhpString::new(req, name)?);
-    Ok(hash.get(&key).map(|v| v.deref()))
+fn find(hash: PhpArray, name: &[u8]) -> Option<Value> {
+    hash.find(name).map(|v| v.deref())
 }
 
 /// Whether a value's type is at most `IS_STRING`, what the hash readers
@@ -259,7 +258,7 @@ fn a64i(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
 /// ```
 fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(), Thrown> {
     if let Some(text) =
-        find(req, hash, b"date_string")?.and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
+        find(hash, b"date_string").and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     {
         let (t, errors) = Time::strtotime(&text);
         if let Some(e) = errors.errors.first() {
@@ -289,7 +288,7 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
     }
     let mut diff = RelTime::default();
     let long_field = |req: &mut Request, name: &[u8], default: i64| -> Result<i64, Thrown> {
-        match find(req, hash, name)? {
+        match find(hash, name) {
             Some(v) if scalar(&v) => to_long(req, &v),
             _ => Ok(default),
         }
@@ -302,7 +301,7 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
     diff.s = long_field(req, b"s", -1)?;
     // `zend_dval_to_lval(zval_get_double(f) * 1000000.0)`: past the
     // long's range, php's warning and the modular long.
-    if let Some(f) = find(req, hash, b"f")? {
+    if let Some(f) = find(hash, b"f") {
         let us = to_double(req, &f)? * 1_000_000.0;
         diff.us = to_long(req, &Value::float(us))?;
     }
@@ -313,7 +312,7 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
         diff.first_last_day_of = long_field(req, b"first_last_day_of", -1)? as i32;
         diff.invert = long_field(req, b"invert", 0)? as i32;
     }
-    diff.days = match find(req, hash, b"days")? {
+    diff.days = match find(hash, b"days") {
         Some(v) if matches!(v.as_ref(), ValueRef::Bool(false)) => UNSET,
         Some(v) if scalar(&v) => a64i(req, &v)?,
         _ => -1,
@@ -324,11 +323,11 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
         diff.have_weekday_relative = long_field(req, b"have_weekday_relative", 0)? as u32;
         diff.have_special_relative = long_field(req, b"have_special_relative", 0)? as u32;
     }
-    diff.special_amount = match find(req, hash, b"special_amount")? {
+    diff.special_amount = match find(hash, b"special_amount") {
         Some(v) if scalar(&v) => a64i(req, &v)?,
         _ => -1,
     };
-    let civil = match find(req, hash, b"civil_or_wall")? {
+    let civil = match find(hash, b"civil_or_wall") {
         Some(v) => to_long(req, &v)?,
         None => CIVIL,
     };

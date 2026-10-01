@@ -37,6 +37,7 @@ use std::alloc::Layout;
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 
 use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
@@ -207,8 +208,13 @@ impl Allocate for System {
 /// writes a jump table, then the immutable bit, after which no owner is
 /// counted and no write reaches it. Its keys are persistent interned
 /// strings and its values scalars, so freeing it releases nothing;
-/// [`free_persistent_array`] gives its two allocations back.
+/// [`free_persistent_array`] gives its two allocations back. No entries
+/// is the process's [`Arr::empty`], as `zend_try_ct_eval_array` answers
+/// `ZVAL_EMPTY_ARRAY` for `[]`.
 pub(crate) fn persistent_array(entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+    if entries.is_empty() {
+        return Ok(Arr::empty());
+    }
     let size = check_size(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
     let at = System.alloc(HEADER)?;
     // SAFETY: the allocation is the header's size and nothing else
@@ -289,7 +295,12 @@ pub(crate) fn index_del(a: Arr, index: i64) -> Option<Zval> {
 }
 
 /// `pefree` over a [`persistent_array`]: the data, then the header.
+/// The process's empty array, which a home hands out for a constant
+/// array of no entries, is no home's to free.
 pub(crate) fn free_persistent_array(a: Arr) {
+    if a.is_same(Arr::empty()) {
+        return;
+    }
     if let Some(data) = a.data_addr() {
         // SAFETY: the data was `System`'s and nothing in it is owned.
         unsafe { System.free(data) };
@@ -462,6 +473,22 @@ pub struct Arr(NonNull<ArrHeader>);
 // and written by none. The refcount `Cell` is what keeps it off `Sync`.
 unsafe impl Send for Arr {}
 
+/// The process's empty array, php's `zend_empty_array`
+/// (`Z/Zend/zend_hash.c:260-271`): a header and no data, uninitialised
+/// with `HT_MIN_MASK` and `HT_MIN_SIZE`, `nNextFreeElement` at
+/// `ZEND_LONG_MIN`, and `GC_IMMUTABLE`, laid down once for the life of
+/// the process beside the frozen strings and never freed.
+struct FrozenEmpty(Arr);
+
+// SAFETY: the array is written once, before the `OnceLock` in
+// [`Arr::empty`] publishes it, and is immutable afterwards: every write
+// to a table separates an immutable one first (`SEPARATE_ARRAY`), and
+// its owners are not counted, so every thread reads it with nothing
+// taken, as every thread reads php's.
+unsafe impl Sync for FrozenEmpty {}
+// SAFETY: see the `Sync` above.
+unsafe impl Send for FrozenEmpty {}
+
 impl Arr {
     fn header(&self) -> &ArrHeader {
         // SAFETY: an `Arr` names an array `init` laid down, live while
@@ -519,6 +546,31 @@ impl Arr {
             });
         }
         Arr(header)
+    }
+
+    /// `ZVAL_EMPTY_ARRAY`: the process's one immutable empty array,
+    /// php's `zend_empty_array`, which costs a request nothing and is
+    /// what php answers wherever an array has nothing in it
+    /// (`RETURN_EMPTY_ARRAY`). No owner is counted on it, and a write
+    /// separates it as it separates any immutable array, into a table
+    /// of the request's own.
+    #[must_use]
+    pub fn empty() -> Arr {
+        static EMPTY: OnceLock<FrozenEmpty> = OnceLock::new();
+        EMPTY
+            .get_or_init(|| {
+                // The header for the life of the process: leaked, as
+                // php's is a `static const` in the binary.
+                let at = NonNull::from(Box::leak(Box::new(
+                    std::mem::MaybeUninit::<ArrHeader>::uninit(),
+                )));
+                // SAFETY: the allocation is a header's size and alignment
+                // and nothing else holds it.
+                let a = unsafe { Arr::init(at.cast(), MIN_SIZE) };
+                a.header().gc.add_flags(gc::IMMUTABLE);
+                FrozenEmpty(a)
+            })
+            .0
     }
 
     /// `zend_hash_num_elements`, `count()`.
@@ -870,21 +922,37 @@ impl Arr {
     /// comparing the bytes, since the caller holds no string to be the
     /// same as.
     pub(crate) fn find_bytes(self, h: u64, bytes: &[u8]) -> Option<Str> {
+        let idx = self.find_bucket_bytes(h, bytes)?;
+        self.read_bucket(idx).key
+    }
+
+    /// `zend_hash_str_find_bucket`: the bucket of the string key whose
+    /// hash is `h` and whose bytes are `bytes`, none in a packed or an
+    /// uninitialised table, whose two hash slots name no bucket.
+    fn find_bucket_bytes(self, h: u64, bytes: &[u8]) -> Option<u32> {
         if self.is_uninitialized() || self.is_packed() {
             return None;
         }
         let mut idx = self.read_hash((h as u32) | self.mask());
         while idx != INVALID {
             let b = self.read_bucket(idx);
-            if b.h == h
-                && let Some(k) = b.key
-                && k.bytes() == bytes
-            {
-                return Some(k);
+            if b.h == h && b.key.is_some_and(|k| k.bytes() == bytes) {
+                return Some(idx);
             }
             idx = b.val.next();
         }
         None
+    }
+
+    /// `zend_hash_str_find(ht, str, len)` (`Z/Zend/zend_hash.c`): the
+    /// value under the string key of these bytes, copied, no owner
+    /// taken, found by the bytes' hash and a walk of its chain, so the
+    /// lookup allocates nothing. The bytes are a key as written: no
+    /// integer is read out of them, as `zend_symtable_str_find` would.
+    #[must_use]
+    pub fn str_find(&self, bytes: &[u8]) -> Option<Zval> {
+        let idx = self.find_bucket_bytes(crate::string::hash_func(bytes), bytes)?;
+        Some(self.read_bucket(idx).val)
     }
 
     /// `zend_hash_index_find_bucket`: the bucket of an integer key. The
@@ -1483,8 +1551,12 @@ impl crate::Heap {
     }
 
     /// The request's half of [`crate::Intern::constant_array`]: the
-    /// entries written in order, then `IS_ARRAY_IMMUTABLE`.
+    /// entries written in order, then `IS_ARRAY_IMMUTABLE`; no entries,
+    /// the process's [`Arr::empty`].
     pub(crate) fn array_constant(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+        if entries.is_empty() {
+            return Ok(Arr::empty());
+        }
         let a = self.array_sized(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
         for (key, z) in entries {
             match *key {
@@ -2415,6 +2487,32 @@ mod tests {
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)
         }
+    }
+
+    /// `zend_empty_array`: one array for the process, immutable, empty
+    /// and uninitialised, what either home answers for a constant array
+    /// of no entries, which no home frees, and which a write separates
+    /// into a table of the request's own.
+    #[test]
+    fn the_empty_array_is_the_process_s_one_and_a_write_separates_it() {
+        let _alone = alone();
+        let e = Arr::empty();
+        assert!(e.is_same(Arr::empty()));
+        assert!(e.is_immutable() && e.is_empty() && e.is_uninitialized());
+        assert_eq!(e.next_free(), i64::MIN);
+        assert!(!Zval::array(e).is_refcounted());
+        let mut strings = crate::Strings::new();
+        assert!(strings.constant_array(&[]).is_ok_and(|a| a.is_same(e)));
+        drop(strings);
+        let mut nothing = Nothing::new();
+        assert!(nothing.heap.constant_array(&[]).is_ok_and(|a| a.is_same(e)));
+        let before = nothing.heap.memory_usage(false);
+        let Ok(copy) = nothing.heap.separate(e) else {
+            return;
+        };
+        assert!(!copy.is_same(e) && !copy.is_immutable());
+        assert_eq!(nothing.heap.memory_usage(false) - before, HEADER);
+        assert!(e.is_empty() && e.is_immutable());
     }
 
     /// `SEPARATE_ARRAY` over an immutable array, the constant array a

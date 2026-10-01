@@ -22,7 +22,7 @@
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf};
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::request::{Cast, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use crate::api::values::{ClassId, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 /// `struct php_user_stream_wrapper` less the scheme, which is the row's:
 /// the class every instance is of, and `wrapper.is_url`.
@@ -652,8 +652,7 @@ fn statbuf_from_array(req: &mut Request, array: PhpArray) -> Result<StatBuf, Thr
     ];
     let mut sb = [0; 13];
     for (field, name) in sb.iter_mut().zip(NAMES) {
-        let key = Key::Str(PhpString::new(req, name)?);
-        if let Some(value) = array.get(&key) {
+        if let Some(value) = array.find(name) {
             *field = crate::api::coerce::to_long(req, &value.deref())?;
         }
     }

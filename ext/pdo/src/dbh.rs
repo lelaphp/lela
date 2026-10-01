@@ -12,7 +12,7 @@ use php_ext::coerce::value_name;
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, argument_error, deprecated, pending, throw, throwing_warnings};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::connector::{
     BindType, Cause, Connection, Connector, Failure, OnError, Source, SqlState,
@@ -122,6 +122,10 @@ pub(crate) struct DbhState {
     query_stmt: Option<PhpObject>,
     /// `dbh->alloc_own_columns`.
     pub(crate) describes_at_execute: bool,
+    /// `dbh->data_source`, `username` and `password`, the copies the
+    /// constructor `pestrdup`s, on the request's heap for a connection
+    /// that is not persistent, given back in `dbh_free`.
+    copies: Vec<Emalloc>,
 }
 
 impl DbhState {
@@ -159,6 +163,7 @@ impl ObjectHandlers for Handlers {
             return;
         };
         let conn = std::mem::take(&mut dbh.conn);
+        let copies = std::mem::take(&mut dbh.copies);
         let held = (dbh.query_stmt.take(), dbh.stmt_args.take());
         let tracked = dbh.in_txn;
         if let Conn::Open(mut conn) = conn {
@@ -174,6 +179,9 @@ impl ObjectHandlers for Handlers {
         }
         if let Some(args) = held.1 {
             req.release(Value::array(args));
+        }
+        for copy in copies {
+            copy.free(req);
         }
     }
 
@@ -471,6 +479,13 @@ fn open(
     let auto_commit = crate::connector::option_long(req, options, PDO::ATTR_AUTOCOMMIT, 1)?;
     let mode = crate::connector::option_long(req, options, PDO::ATTR_ERRMODE, 2)?;
     let _ = auto_commit;
+    // `pestrdup(colon + 1)`, and the credentials where given.
+    let mut copies = Vec::new();
+    if !persistent {
+        for copied in [Some(dsn), username, password].into_iter().flatten() {
+            copies.push(Emalloc::new(req, copied.len() + 1)?);
+        }
+    }
     dbh_mut(req, object, |d| {
         **d = DbhState {
             persistent,
@@ -479,6 +494,7 @@ fn open(
                 1 => OnError::Warn,
                 _ => OnError::Throw,
             },
+            copies,
             ..DbhState::fresh()
         };
     });
@@ -488,6 +504,7 @@ fn open(
             username,
             password,
             options,
+            persistent,
         };
         let conn = match driver.open(req, &source) {
             Ok(conn) => conn,
@@ -1119,6 +1136,22 @@ impl PDO {
     /// PDOException: could not find driver
     /// PDOException: SQLSTATE[HY000] [14] unable to open database file
     /// MyPDO object is uninitialized
+    /// ```
+    ///
+    /// The DSN's and the credentials' copies, `pestrdup`, and what the
+    /// connector's factory allocates, `pdo_sqlite_db_handle` here, are
+    /// the request's, and go back with the object:
+    ///
+    /// ```php
+    /// $w = new PDO('sqlite::memory:'); unset($w);
+    /// $m = memory_get_usage(); $p = new PDO('sqlite::memory:'); $n = memory_get_usage(); unset($p);
+    /// $o = memory_get_usage(); $q = new PDO('sqlite::memory:', 'user', 'secret'); $r = memory_get_usage();
+    /// var_dump($n - $m, memory_get_usage() - $n - ($r - $o), $r - $o);
+    /// ```
+    /// ```expect
+    /// int(376)
+    /// int(-376)
+    /// int(408)
     /// ```
     fn __construct(
         req: &mut Request,

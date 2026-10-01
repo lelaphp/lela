@@ -169,14 +169,7 @@ impl Options {
     /// ```
     fn find(&self, req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown> {
         match self.0.as_ref() {
-            ValueRef::Array(array) => {
-                // A key for the lookup alone, given back once it is made,
-                // as `zend_hash_str_find` allocates none.
-                let key = PhpString::new(req, name)?;
-                let found = array.get(&Key::Str(key)).map(|value| value.deref());
-                req.release(Value::string(key));
-                Ok(found)
-            }
+            ValueRef::Array(array) => Ok(array.find(name).map(|value| value.deref())),
             ValueRef::Object(object) => {
                 let object = *object;
                 Ok(object

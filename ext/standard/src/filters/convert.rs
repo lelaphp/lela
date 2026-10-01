@@ -15,7 +15,7 @@
 use php_ext::coerce::{to_long, to_string, truthy};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{PhpArray, Value};
 
 /// `php_conv_err_t` less `PHP_CONV_ERR_SUCCESS`, the `Ok`, and the three
 /// no converter here answers.
@@ -572,11 +572,8 @@ impl Conv {
 }
 
 /// One entry of the parameter array, `zend_hash_str_find`.
-fn option(req: &mut Request, options: PhpArray, name: &[u8]) -> Result<Option<Value>, Thrown> {
-    let key = PhpString::new(req, name)?;
-    let found = options.get(&Key::Str(key)).map(|v| v.deref());
-    req.release(Value::string(key));
-    Ok(found)
+fn option(options: PhpArray, name: &[u8]) -> Option<Value> {
+    options.find(name).map(|v| v.deref())
 }
 
 /// `GET_STR_PROP`: the entry as a string, `zval_get_tmp_string`.
@@ -585,7 +582,7 @@ fn string_option(
     options: PhpArray,
     name: &[u8],
 ) -> Result<Option<Vec<u8>>, Thrown> {
-    let Some(value) = option(req, options, name)? else {
+    let Some(value) = option(options, name) else {
         return Ok(None);
     };
     let text = to_string(req, &value)?;
@@ -597,7 +594,7 @@ fn string_option(
 /// `GET_UINT_PROP`: the entry as a long, a negative one zero, cut to
 /// php's `unsigned int`.
 fn uint_option(req: &mut Request, options: PhpArray, name: &[u8]) -> Result<u32, Thrown> {
-    let Some(value) = option(req, options, name)? else {
+    let Some(value) = option(options, name) else {
         return Ok(0);
     };
     let long = to_long(req, &value)?;
@@ -605,11 +602,8 @@ fn uint_option(req: &mut Request, options: PhpArray, name: &[u8]) -> Result<u32,
 }
 
 /// `GET_BOOL_PROP`.
-fn bool_option(req: &mut Request, options: PhpArray, name: &[u8]) -> Result<bool, Thrown> {
-    match option(req, options, name)? {
-        Some(value) => Ok(truthy(req, &value)),
-        None => Ok(false),
-    }
+fn bool_option(req: &mut Request, options: PhpArray, name: &[u8]) -> bool {
+    option(options, name).is_some_and(|value| truthy(req, &value))
 }
 
 /// `line-break-chars` and `line-length` as the two encoders read them: no
@@ -654,8 +648,8 @@ fn conv_open(
         let (lbchars, line_len) = line_options(req, options)?;
         let mut opts = QprintOpts::default();
         if let Some(options) = options {
-            opts.binary = bool_option(req, options, b"binary")?;
-            opts.force_encode_first = bool_option(req, options, b"force-encode-first")?;
+            opts.binary = bool_option(req, options, b"binary");
+            opts.force_encode_first = bool_option(req, options, b"force-encode-first");
         }
         let line_len = if lbchars.is_some() { line_len } else { 0 };
         Conv::QprintEncode(QprintEncode {

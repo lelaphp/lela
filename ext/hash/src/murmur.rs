@@ -73,9 +73,9 @@ pub(crate) struct Murmur3a {
 
 impl Murmur3a {
     /// `PHP_MURMUR3AInit`.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::unnecessary_wraps)] // `Init`'s signature
     pub(crate) fn init(req: &mut Request, options: Options) -> Result<Box<dyn State>, Thrown> {
-        let seed = options.seed(req)? as u32;
+        let seed = options.seed(req) as u32;
         Ok(Box::new(Murmur3a {
             h: seed,
             carry: 0,
@@ -161,9 +161,9 @@ pub(crate) struct Murmur3c {
 
 impl Murmur3c {
     /// `PHP_MURMUR3CInit`.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::unnecessary_wraps)] // `Init`'s signature
     pub(crate) fn init(req: &mut Request, options: Options) -> Result<Box<dyn State>, Thrown> {
-        let seed = options.seed(req)? as u32;
+        let seed = options.seed(req) as u32;
         Ok(Box::new(Murmur3c {
             h: [seed; 4],
             carry: [0; 4],
@@ -275,8 +275,9 @@ pub(crate) struct Murmur3f {
 
 impl Murmur3f {
     /// `PHP_MURMUR3FInit`.
+    #[allow(clippy::unnecessary_wraps)] // `Init`'s signature
     pub(crate) fn init(req: &mut Request, options: Options) -> Result<Box<dyn State>, Thrown> {
-        let seed = options.seed(req)?;
+        let seed = options.seed(req);
         Ok(Box::new(Murmur3f {
             h: [seed; 2],
             carry: [0; 2],

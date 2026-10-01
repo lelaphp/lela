@@ -263,12 +263,10 @@ fn stream_select(
         let ready = emulate_read_fd_set(req, &read, array)?;
         if ready > 0 {
             if w_array.is_some() {
-                let empty = PhpArray::new(req)?;
-                write.set(req, Some(empty))?;
+                write.set(req, Some(PhpArray::empty()))?;
             }
             if e_array.is_some() {
-                let empty = PhpArray::new(req)?;
-                except.set(req, Some(empty))?;
+                except.set(req, Some(PhpArray::empty()))?;
             }
             return Ok(OrFalse::Value(i64::try_from(ready).unwrap_or(i64::MAX)));
         }

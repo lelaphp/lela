@@ -270,7 +270,7 @@ impl Conv {
             if self.failed() {
                 break;
             }
-            match find(req, array, name)? {
+            match find(array, name) {
                 Some(value) => {
                     self.keys.push((*name).to_owned());
                     let done = read(self, req, name, &value);
@@ -297,7 +297,7 @@ impl Conv {
         let Some(array) = self.table(container) else {
             return Ok(None);
         };
-        let family = match find(req, array, "family")? {
+        let family = match find(array, "family") {
             Some(value) if !matches!(value.as_ref(), ValueRef::Null) => {
                 let family = self.under("family", |c| c.int(req, &value))?;
                 if self.failed() {
@@ -542,7 +542,7 @@ impl Conv {
             return Ok(());
         };
         let data_len = if entry == Ancillary::Rights {
-            let Some(data) = find(req, array, "data")? else {
+            let Some(data) = find(array, "data") else {
                 self.fail("cmsghdr should have a 'data' element here");
                 return Ok(());
             };
@@ -894,15 +894,8 @@ pub(crate) struct Recv {
 }
 
 /// `zend_hash_str_find(ht, name)`, dereferenced.
-pub(crate) fn find(
-    req: &mut Request,
-    array: PhpArray,
-    name: &str,
-) -> Result<Option<Value>, Thrown> {
-    let key = PhpString::new(req, name.as_bytes())?;
-    let found = array.get(&Key::Str(key)).map(|v| v.deref());
-    req.release(Value::string(key));
-    Ok(found)
+pub(crate) fn find(array: PhpArray, name: &str) -> Option<Value> {
+    array.find(name.as_bytes()).map(|v| v.deref())
 }
 
 /// `add_assoc_*`: one more entry under a string key.

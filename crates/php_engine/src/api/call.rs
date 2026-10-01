@@ -1843,12 +1843,28 @@ fn evaluate_node(
 }
 
 /// `zend_ast_evaluate`'s `ZEND_AST_ARRAY` arm: each element in written
-/// order, a `...` spread into the array under the array's own line.
+/// order, a `...` spread into the array under the array's own line; no
+/// element at all the process's empty array, so a native's omitted `[]`
+/// costs the request no table, as php's C default costs none:
+///
+/// ```php
+/// $m = memory_get_usage(); $h = hash('md5', ''); $b = memory_get_usage();
+/// $i = hash('md5', ' ');
+/// var_dump($b - $m, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(64)
+/// int(64)
+/// ```
 fn array_node(
     req: &mut Request,
     elements: &[(Option<ConstExpr>, ConstExpr)],
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
+    // `if (!list->children) ZVAL_EMPTY_ARRAY(result)`.
+    if elements.is_empty() {
+        return Ok(Value::array(crate::api::values::PhpArray::empty()));
+    }
     let mut array = crate::api::values::PhpArray::new(req)?;
     for (key, value) in elements {
         if let ConstExpr::Unpack(inner) = value {
@@ -1904,6 +1920,19 @@ fn array_node(
 /// Parameter #0 [ <optional> string $class = SplFileObject::class ]
 /// Cannot use "parent" when current class scope has no parent
 /// ```
+///
+/// A native's omitted default of a class's name is that name, so the
+/// first `ArrayObject` of a request costs what php's does:
+///
+/// ```php
+/// $m = memory_get_usage(); $a = new ArrayObject(); $b = memory_get_usage();
+/// $c = new ArrayObject();
+/// var_dump($b - $m, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(216)
+/// int(216)
+/// ```
 fn class_name_node(
     req: &mut Request,
     class: &[u8],
@@ -1933,7 +1962,10 @@ fn class_name_node(
     } else {
         class.to_vec()
     };
-    Ok(Value::string(PhpString::new(req, &name)?))
+    // `ZVAL_STR_COPY(result, ce->name)`: the class's interned name, which
+    // for a class the engine or the bundle declared costs the request
+    // nothing.
+    Ok(Value::string(req.interned(&name)?))
 }
 
 /// `_IS_BOOL`, the type code a `(bool)` cast carries.

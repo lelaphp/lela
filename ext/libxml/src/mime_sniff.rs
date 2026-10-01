@@ -7,7 +7,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Key, PhpString, Value, ValueRef};
+use php_ext::values::{Value, ValueRef};
 
 /// <https://fetch.spec.whatwg.org/#http-tab-or-space>.
 const fn is_http_tab_or_space(c: u8) -> bool {
@@ -169,9 +169,8 @@ pub fn sniff_charset_from_stream(
     stream: Stream,
 ) -> Result<Option<Vec<u8>>, Thrown> {
     let meta = stream.meta_data(req)?;
-    let key = Key::Str(PhpString::new(req, b"wrapper_data")?);
     let headers = meta
-        .get(&key)
+        .find(b"wrapper_data")
         .and_then(|data| data.deref().as_array().copied());
     let lines = headers
         .map(|headers| headers.snapshot())

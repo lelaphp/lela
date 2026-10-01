@@ -6,7 +6,7 @@
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
-use php_ext::values::{Key, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Value, ValueRef};
 
 use crate::encode::MAX_MEM_LEVEL;
 use crate::ffi::{Deflate, Flush, Inflate, Status};
@@ -184,13 +184,7 @@ impl StreamFilter for Deflating {
 /// `zend_hash_str_find_ind(HASH_OF(filterparams), name)`.
 fn param(req: &mut Request, params: &Value, name: &[u8]) -> Result<Option<Value>, Thrown> {
     match params.as_ref() {
-        ValueRef::Array(array) => {
-            // A key for the lookup alone, given back once it is made.
-            let key = PhpString::new(req, name)?;
-            let found = array.get(&Key::Str(key)).map(|value| value.deref());
-            req.release(Value::string(key));
-            Ok(found)
-        }
+        ValueRef::Array(array) => Ok(array.find(name).map(|value| value.deref())),
         ValueRef::Object(object) => {
             let object = *object;
             Ok(object

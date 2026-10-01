@@ -768,7 +768,7 @@ pub(crate) fn replace_children(
         return Ok(());
     };
     if pre_insert_valid(req, this, parent, node, None, parent.doc())? {
-        crate::remove_all_children(parent);
+        crate::remove_all_children(req, parent);
         pre_insert(req, this, node, parent, None)?;
     } else {
         cleanup(node);

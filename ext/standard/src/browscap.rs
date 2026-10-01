@@ -377,10 +377,9 @@ fn get_browser(
         agent.as_bytes().to_vec()
     } else {
         {
-            let key = Key::Str(PhpString::new(req, b"HTTP_USER_AGENT")?);
             let found = req
                 .superglobal(b"_SERVER")
-                .and_then(|server| server.get(&key))
+                .and_then(|server| server.find(b"HTTP_USER_AGENT"))
                 .and_then(|value| value.deref().as_str_bytes().map(<[u8]>::to_vec));
             let Some(found) = found else {
                 docref(

@@ -7,7 +7,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{internal_iterator, new_object};
 use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::classes::{DateTimeInterface, Iterator, IteratorAggregate};
 use crate::datetime::restore_properties;
@@ -304,10 +304,7 @@ pub(super) fn iterator_element(
 /// read, a `null` date leaving the field as it was, and nothing rolled
 /// back where a later one is refused; `false` for the refusal.
 fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Result<bool, Thrown> {
-    let find = |req: &mut Request, name: &[u8]| -> Result<Option<Value>, Thrown> {
-        let key = Key::Str(PhpString::new(req, name)?);
-        Ok(hash.get(&key).map(|v| v.deref()))
-    };
+    let find = |name: &[u8]| hash.find(name).map(|v| v.deref());
     // A date field: `Ok(None)` for `null`, `Err(())` for a refusal.
     let date_of =
         |req: &mut Request, v: &Value| -> Result<Result<Option<(Time, ClassId)>, ()>, Thrown> {
@@ -323,7 +320,7 @@ fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Resul
                 None => Ok(Err(())),
             }
         };
-    let Some(start) = find(req, b"start")? else {
+    let Some(start) = find(b"start") else {
         return Ok(false);
     };
     match date_of(req, &start)? {
@@ -335,7 +332,7 @@ fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Resul
         Err(()) => return Ok(false),
     }
     for (name, current) in [(&b"end"[..], false), (b"current", true)] {
-        let Some(value) = find(req, name)? else {
+        let Some(value) = find(name) else {
             return Ok(false);
         };
         match date_of(req, &value)? {
@@ -346,7 +343,7 @@ fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Resul
             Err(()) => return Ok(false),
         }
     }
-    let Some(interval) = find(req, b"interval")? else {
+    let Some(interval) = find(b"interval") else {
         return Ok(false);
     };
     let interval_class = class_id(req, "DateInterval")?;
@@ -359,18 +356,18 @@ fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Resul
         return Ok(false);
     };
     period.interval = Some(diff);
-    let Some(recurrences) = find(req, b"recurrences")?
+    let Some(recurrences) = find(b"recurrences")
         .and_then(|v| v.as_int())
         .filter(|n| (0..=i64::from(i32::MAX)).contains(n))
     else {
         return Ok(false);
     };
     period.recurrences = recurrences;
-    let Some(include_start) = find(req, b"include_start_date")?.and_then(|v| v.as_bool()) else {
+    let Some(include_start) = find(b"include_start_date").and_then(|v| v.as_bool()) else {
         return Ok(false);
     };
     period.include_start_date = include_start;
-    let Some(include_end) = find(req, b"include_end_date")?.and_then(|v| v.as_bool()) else {
+    let Some(include_end) = find(b"include_end_date").and_then(|v| v.as_bool()) else {
         return Ok(false);
     };
     period.include_end_date = include_end;

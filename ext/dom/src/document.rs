@@ -354,25 +354,24 @@ fn finish_loading(req: &mut Request, this: PhpObject, doc: Option<Node>) -> bool
     let Some(doc) = doc else {
         return false;
     };
-    if let Some(d) = dom_mut(req, this) {
-        d.obj.set_object(this);
+    if let Some(mut obj) = crate::libxml_half(req, this) {
         let mut class_type = php_ext_libxml::ffi::ClassType::Legacy;
         let mut modification = 0;
         let mut props = None;
-        if d.obj.is_bound() {
-            class_type = d.obj.class_type();
-            modification = d.obj.modification();
-            d.obj.decrement_node_ptr();
-            props = d.obj.take_props();
-            d.obj.decrement_doc_ref();
+        if obj.is_bound() {
+            class_type = obj.class_type();
+            modification = obj.modification();
+            obj.decrement_node_ptr(req);
+            props = obj.take_props();
+            obj.decrement_doc_ref(req);
         }
-        d.obj.adopt_document(doc);
-        d.obj.put_props(props);
-        d.obj.set_class_type(class_type);
-        d.obj.take_node(doc);
+        obj.adopt_document(req, doc);
+        obj.put_props(props);
+        obj.set_class_type(class_type);
+        obj.take_node(req, doc);
         if modification != 0 {
-            d.obj.set_modification(modification);
-            d.obj.invalidate();
+            obj.set_modification(modification);
+            obj.invalidate();
         }
     }
     true
@@ -600,7 +599,7 @@ pub(crate) fn elements_by_tag_name_ns(
 /// object standing for a node under an `xi:include` let go of before
 /// libxml2 clones the include's nodes and frees the originals, so such an
 /// object answers `Invalid State Error` rather than reading freed memory.
-fn strip_xinclude_references(doc: Node) {
+fn strip_xinclude_references(req: &mut Request, doc: Node) {
     const XINCLUDE_NS: &[u8] = b"http://www.w3.org/2001/XInclude";
     const XINCLUDE_OLD_NS: &[u8] = b"http://www.w3.org/2003/XInclude";
     let mut current = doc.children();
@@ -612,7 +611,7 @@ fn strip_xinclude_references(doc: Node) {
                 .and_then(Ns::href)
                 .is_some_and(|h| h == XINCLUDE_NS || h == XINCLUDE_OLD_NS)
         {
-            strip_references(node);
+            strip_references(req, node);
         }
         current = crate::next_in_tree_order(node, doc);
     }
@@ -620,26 +619,26 @@ fn strip_xinclude_references(doc: Node) {
 
 /// `dom_xinclude_strip_references`: the node, its attributes and every
 /// node below it unregistered from the objects standing for them.
-fn strip_references(base: Node) {
-    let strip_attributes = |element: Node| {
+fn strip_references(req: &mut Request, base: Node) {
+    let strip_attributes = |req: &mut Request, element: Node| {
         let mut attr = element.properties();
         while let Some(a) = attr {
-            a.free_resource();
+            a.free_resource(req);
             let mut child = a.children();
             while let Some(c) = child {
-                c.free_resource();
+                c.free_resource(req);
                 child = c.next();
             }
             attr = a.next();
         }
     };
-    base.free_resource();
-    strip_attributes(base);
+    base.free_resource(req);
+    strip_attributes(req, base);
     let mut current = base.children();
     while let Some(node) = current {
-        node.free_resource();
+        node.free_resource(req);
         if node.kind() == Kind::Element {
-            strip_attributes(node);
+            strip_attributes(req, node);
         }
         current = crate::next_in_tree_order(node, base);
     }
@@ -1102,7 +1101,7 @@ fn adopt_node(
 /// count of substitutions, `-1` for a failure.
 fn run_xinclude(req: &mut Request, this: PhpObject, flags: i32) -> Result<i32, Thrown> {
     let doc = fetch(req, this)?;
-    strip_xinclude_references(doc);
+    strip_xinclude_references(req, doc);
     let (err, raised, thrown) = Parser::xinclude(req, doc, flags);
     let settled = Errors::settle(req, raised, thrown);
     invalidate(req, this);
@@ -1237,11 +1236,10 @@ impl DOMDocument {
         if !encoding.is_empty() {
             doc.set_doc_string(DocString::Encoding, Some(encoding.as_bytes()));
         }
-        if let Some(d) = dom_mut(req, this) {
-            d.obj.set_object(this);
-            d.obj.release();
-            d.obj.adopt_document(doc);
-            d.obj.take_node(doc);
+        if let Some(mut obj) = crate::libxml_half(req, this) {
+            obj.release(req);
+            obj.adopt_document(req, doc);
+            obj.take_node(req, doc);
         }
         Ok(())
     }

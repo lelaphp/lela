@@ -12,7 +12,7 @@ use php_ext::raising::{Level, Thrown, docref, raise};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request, StartHandler,
 };
-use php_ext::values::{Key, PhpString, ValueRef};
+use php_ext::values::{PhpString, ValueRef};
 
 use crate::State;
 use crate::encode::{DEFAULT_STRATEGY, MAX_MEM_LEVEL, size_guess};
@@ -137,10 +137,9 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
     if globals(req).coding != Coding::None {
         return Ok(globals(req).coding);
     }
-    let key = PhpString::new(req, b"HTTP_ACCEPT_ENCODING")?;
     let found = req
         .superglobal(b"_SERVER")
-        .and_then(|server| server.get(&Key::Str(key)));
+        .and_then(|server| server.find(b"HTTP_ACCEPT_ENCODING"));
     if let Some(value) = found {
         let text = to_string(req, &value)?;
         let text = text.as_bytes();

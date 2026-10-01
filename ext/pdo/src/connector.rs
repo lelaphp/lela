@@ -56,14 +56,17 @@ pub trait Connector: Send + Sync {
 }
 
 /// What a connector's factory opens from: the DSN after the connector's
-/// prefix, the credentials, and the options array the constructor was
-/// given, `dbh->data_source`, `username`, `password` and
-/// `driver_options`.
+/// prefix, the credentials, the options array the constructor was
+/// given, and whether the connection was asked to persist,
+/// `dbh->data_source`, `username`, `password`, `driver_options` and
+/// `dbh->is_persistent`, which a factory's `pecalloc`s read: what it
+/// allocates for a connection that is not persistent is the request's.
 pub struct Source<'a> {
     pub dsn: &'a [u8],
     pub username: Option<&'a [u8]>,
     pub password: Option<&'a [u8]>,
     pub options: Option<PhpArray>,
+    pub persistent: bool,
 }
 
 /// `pdo_attr_lval`: the option under the attribute number `attr`, as

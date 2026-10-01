@@ -383,7 +383,7 @@ fn value_or_null(req: &mut Request, value: Option<Value>) -> Value {
 #[php_function]
 fn array_values(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
     if array.is_empty() {
-        return PhpArray::new(req);
+        return Ok(PhpArray::empty());
     }
     if array.is_list() && array.next_free() == i64::try_from(array.len()).unwrap_or(i64::MAX) {
         req.addref(&Value::array(array));
@@ -599,7 +599,7 @@ fn array_fill(
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
     if count == 0 {
-        return PhpArray::new(req);
+        return Ok(PhpArray::empty());
     }
     if count > i64::from(i32::MAX) {
         return Err(throw(
@@ -849,6 +849,9 @@ fn array_chunk(
     if size < 1 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
+    if input.is_empty() {
+        return Ok(PhpArray::empty());
+    }
     let size = usize::try_from(size).unwrap_or(usize::MAX);
     let mut out = PhpArray::new(req)?;
     let mut chunk: Option<PhpArray> = None;
@@ -910,6 +913,9 @@ fn array_combine(req: &mut Request, keys: PhpArray, values: PhpArray) -> Result<
             "ValueError",
             "array_combine(): Argument #1 ($keys) and argument #2 ($values) must have the same number of elements",
         ));
+    }
+    if keys.is_empty() {
+        return Ok(PhpArray::empty());
     }
     let mut out = PhpArray::new(req)?;
     for ((_, key), (_, value)) in keys.snapshot_refs().into_iter().zip(values.snapshot_refs()) {

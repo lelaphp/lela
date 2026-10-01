@@ -7,7 +7,7 @@
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
-use php_ext::values::{Key, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Value, ValueRef};
 
 use crate::ffi::{Action, Code, Compress, Decompress};
 
@@ -188,10 +188,7 @@ impl StreamFilter for Compressing {
 /// `zend_hash_str_find_ind(HASH_OF(filterparams), name)`.
 fn param(req: &mut Request, params: &Value, name: &[u8]) -> Result<Option<Value>, Thrown> {
     match params.as_ref() {
-        ValueRef::Array(array) => {
-            let key = PhpString::new(req, name)?;
-            Ok(array.get(&Key::Str(key)).map(|value| value.deref()))
-        }
+        ValueRef::Array(array) => Ok(array.find(name).map(|value| value.deref())),
         ValueRef::Object(object) => {
             let object = *object;
             Ok(object

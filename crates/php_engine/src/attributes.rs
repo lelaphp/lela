@@ -672,9 +672,9 @@ impl SensitiveParameterValue {
     }
 
     /// `SensitiveParameterValue::__debugInfo(): array`, empty.
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(this: This<Self>) -> PhpArray {
         let _ = this;
-        PhpArray::new(req)
+        PhpArray::empty()
     }
 }
 
