@@ -827,9 +827,11 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
         return Ret::Success;
     };
     let stepping = std::mem::take(&mut s.stepping);
+    crate::watch::freeze(s, req);
     s.origin = Origin::Eval;
     let evaluated = crate::session::lend(s, || tier::evaluate(req, under, code));
     s.origin = Origin::Program;
+    crate::watch::thaw(s);
     s.stepping |= stepping;
     match evaluated {
         Ok(tier::Evaluated::Printed(printed)) => {

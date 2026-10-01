@@ -228,10 +228,10 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
     let stopped = session.stopped.is_some();
     session::put(session);
     if stopped || outcome == Outcome::Stopped {
-        AfterLog::BailedOut
-    } else {
-        AfterLog::Returned
+        return AfterLog::BailedOut;
     }
+    let _ = crate::watch::changed(req);
+    AfterLog::Returned
 }
 
 /// The loop itself.
@@ -603,7 +603,45 @@ fn caught_anywhere(req: &mut Request, frame: FrameRef) -> bool {
 
 /// `DO_INTERACTIVE`: the listing, but where `ev` serves (`list_code`),
 /// then the prompt with the throwable set aside; `Some` where the prompt
-/// ended the request. A breakpoint inside what `ev` serves stops there,
+/// ended the request. Where it goes on, the watches are compared as
+/// `phpdbg_interactive` ends (`phpdbg_print_changed_zvals`,
+/// `Z/sapi/phpdbg/phpdbg_prompt.c:1582`), and what changed is reported
+/// without a stop, as what `ev` wrote to a variable it reached through
+/// the frame's table, which the evaluation has given back by then.
+///
+/// ```php
+/// function f() {
+///   echo "in f\n";
+/// }
+/// $x = 1;
+/// f();
+/// echo "end\n";
+/// ```
+/// ```request phpdbg
+/// b 6
+/// r
+/// w $x
+/// ev $x = 5
+/// c
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:6]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:6, hits: 1]
+/// >00006: f();
+///  00007: echo "end\n";
+/// prompt> [Added watchpoint #0 for $x]
+/// prompt> 5
+/// prompt> [Breaking on watchpoint $x]
+/// Old value: 1
+/// New value: 5
+/// in f
+/// end
+/// [$x has been removed, removing watchpoint]
+/// [Script ended normally]
+/// prompt>
+/// ``` A breakpoint inside what `ev` serves stops there,
 /// at a prompt with no listing.
 ///
 /// ```php
@@ -635,6 +673,9 @@ fn interactive(req: &mut Request, frame: FrameRef, file: &[u8], line: u32) -> Op
     };
     let stopped = session.stopped.is_some();
     session::put(session);
+    if !stopped && outcome != Outcome::Stopped {
+        let _ = crate::watch::changed(req);
+    }
     tier::restore(req, aside);
     if stopped || outcome == Outcome::Stopped {
         tier::exit(req);

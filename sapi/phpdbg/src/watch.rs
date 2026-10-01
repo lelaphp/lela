@@ -14,7 +14,7 @@ use crate::cmd::Param;
 use crate::info::flat;
 use crate::out;
 use crate::prompt::{Here, Ret};
-use crate::session::{self, Session};
+use crate::session::{self, Origin, Session};
 
 /// How deep a watched value is copied.
 const DEPTH: u32 = 16;
@@ -51,6 +51,12 @@ struct Watch {
 pub struct Watches {
     list: Vec<Watch>,
     next: u32,
+    /// For each `ev` under way, the innermost last, what each watch read
+    /// as it began: the place php watches, which the evaluation reaches
+    /// through the copy of its variable `zend_attach_symbol_table` made,
+    /// written back only as it ends, and through a separated copy of an
+    /// array it writes into.
+    frozen: Vec<Vec<(u32, Shown)>>,
 }
 
 /// A path as written after its variable: each key, `None` for an empty
@@ -425,11 +431,25 @@ fn held(id: u32) -> Option<Shown> {
 /// the same change, as php's does; the hit it takes is cleared before
 /// this check reads it.
 pub fn changed(req: &mut Request) -> bool {
-    let Some(list) = session::with(|s| s.watches.list.clone()) else {
+    let Some((list, frozen)) = session::with(|s| {
+        let frozen = (s.origin == Origin::Eval)
+            .then(|| s.watches.frozen.last().cloned())
+            .flatten();
+        (s.watches.list.clone(), frozen)
+    }) else {
         return false;
     };
     for watch in list {
-        let Some(new) = read(req, &watch) else {
+        // Inside what `ev` evaluates, a watch reads what it read as the
+        // evaluation began.
+        let read = match &frozen {
+            Some(frozen) => frozen
+                .iter()
+                .find(|(id, _)| *id == watch.id)
+                .map(|(_, held)| held.clone()),
+            _ => read(req, &watch),
+        };
+        let Some(new) = read else {
             out::notice(
                 format!(
                     "{} has been removed, removing watchpoint{}",
@@ -492,6 +512,23 @@ pub fn changed(req: &mut Request) -> bool {
         });
     }
     session::with(|s| std::mem::take(&mut s.watch_hit)).unwrap_or(false)
+}
+
+/// What each watch reads as an `ev` begins, kept for the length of the
+/// evaluation.
+pub fn freeze(s: &mut Session, req: &mut Request) {
+    let held = s
+        .watches
+        .list
+        .iter()
+        .filter_map(|watch| read(req, watch).map(|value| (watch.id, value)))
+        .collect();
+    s.watches.frozen.push(held);
+}
+
+/// The evaluation over: what [`freeze`] kept for it let go.
+pub fn thaw(s: &mut Session) {
+    s.watches.frozen.pop();
 }
 
 /// The watchpoints left when a run ends, each reported removed as the
