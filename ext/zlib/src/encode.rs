@@ -8,7 +8,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Emalloc, FreshString, PhpString};
 
 use crate::constants::{ZLIB_ENCODING_DEFLATE, ZLIB_ENCODING_GZIP, ZLIB_ENCODING_RAW};
 use crate::ffi::{Deflate, Flush, Inflate, Status};
@@ -35,9 +35,10 @@ pub(crate) fn size_guess(len: usize) -> usize {
     ((len as f64) * 1.015) as usize + 10 + 8 + 4 + 1
 }
 
-/// `php_zlib_encode`: one `deflate(Z_FINISH)` into a buffer of
-/// [`size_guess`], and php's warning with zlib's text where the init or
-/// the deflate did not end the stream.
+/// `php_zlib_encode`: one `deflate(Z_FINISH)` straight into a string
+/// of [`size_guess`] bytes (`zend_string_alloc`), cut to what zlib wrote
+/// (`zend_string_truncate`), and php's warning with zlib's text where the
+/// init or the deflate did not end the stream, the string given back.
 fn encode(
     req: &mut Request,
     input: &[u8],
@@ -46,15 +47,29 @@ fn encode(
 ) -> Result<OrFalse<PhpString>, Thrown> {
     let status = match Deflate::new(req, level, encoding, MAX_MEM_LEVEL, DEFAULT_STRATEGY)? {
         Ok(mut stream) => {
-            let mut out = vec![0; size_guess(input.len())];
-            let step = stream.deflate(req, input, &mut out, Flush::Finish);
+            let mut out = match FreshString::new(req, size_guess(input.len())) {
+                Ok(out) => out,
+                Err(thrown) => {
+                    stream.end(req);
+                    return Err(thrown);
+                }
+            };
+            let step = stream.deflate(req, input, out.bytes_mut(), Flush::Finish);
             stream.end(req);
-            let step = step?;
-            if step.status == Status::StreamEnd {
-                out.truncate(step.written);
-                return Ok(OrFalse::Value(PhpString::new(req, &out)?));
+            match step {
+                Ok(step) if step.status == Status::StreamEnd => {
+                    let out = out.truncate(req, step.written)?;
+                    return Ok(OrFalse::Value(out.finish()));
+                }
+                Ok(step) => {
+                    out.free(req);
+                    step.status
+                }
+                Err(thrown) => {
+                    out.free(req);
+                    return Err(thrown);
+                }
             }
-            step.status
         }
         Err(status) => status,
     };
@@ -86,7 +101,22 @@ fn checked(
 
 /// `gzcompress(string $data, int $level = -1, int $encoding =
 /// ZLIB_ENCODING_DEFLATE): string|false`. The bytes are the linked
-/// zlib's, the oracle's at every level.
+/// zlib's, the oracle's at every level, written into the string
+/// `php_zlib_encode` allocates at its guess and cut to them, so the peak
+/// holds the guess beside zlib's state:
+///
+/// ```php
+/// $in = str_repeat("abcdefghij", 205); $w = gzcompress($in); $w = gzcompress('x');
+/// memory_reset_peak_usage(); $m = memory_get_usage(); $c = gzcompress($in);
+/// $p = memory_get_peak_usage() - $m; $u = memory_get_usage() - $m;
+/// memory_reset_peak_usage(); $m = memory_get_usage(); $x = gzcompress('x');
+/// var_dump($p, $u, memory_get_peak_usage() - $m);
+/// ```
+/// ```expect
+/// int(403968)
+/// int(64)
+/// int(401464)
+/// ```
 ///
 /// ```php
 /// $d = str_repeat("The quick brown fox jumps over the lazy dog. 0123456789\n", 40) . implode(',', range(1, 500));
@@ -227,25 +257,49 @@ fn zlib_encode(
 /// is less, and growing by an eighth and one each round; `Z_MEM_ERROR`
 /// once `max` is reached, and a stream still short of its end
 /// `Z_DATA_ERROR`.
+///
+/// The buffer is php's: `erealloc`ed on the request's heap each round,
+/// cut to what was used and its NUL at the stream's end, and handed back
+/// with the length it holds for the caller to copy into its string
+/// (`RETVAL_STRINGL`) and free; given back here where the stream did not
+/// end.
 fn inflate_rounds(
     req: &mut Request,
     stream: &mut Inflate,
     input: &[u8],
     max: usize,
-) -> Result<Result<Vec<u8>, Status>, Thrown> {
+) -> Result<Result<(Emalloc, usize), Status>, Thrown> {
     let mut size = if max != 0 && max < input.len() {
         max
     } else {
         input.len()
     };
-    let mut out: Vec<u8> = Vec::new();
+    let mut buffer: Option<Emalloc> = None;
     let (mut read, mut used, mut round) = (0usize, 0usize, 0u32);
     let status = loop {
         let status = if max != 0 && max <= used {
             Status::MemError
         } else {
-            out.resize(size, 0);
-            let step = stream.inflate(req, &input[read..], &mut out[used..size], Flush::None)?;
+            let grown = match buffer.take() {
+                Some(held) => held.resize(req, size)?,
+                None => Emalloc::new(req, size)?,
+            };
+            let held = buffer.insert(grown);
+            let step = stream.inflate(
+                req,
+                &input[read..],
+                &mut held.bytes_mut()[used..size],
+                Flush::None,
+            );
+            let step = match step {
+                Ok(step) => step,
+                Err(thrown) => {
+                    if let Some(held) = buffer.take() {
+                        held.free(req);
+                    }
+                    return Err(thrown);
+                }
+            };
             read += step.read;
             used += step.written;
             size += (size >> 3) + 1;
@@ -257,14 +311,18 @@ fn inflate_rounds(
             break status;
         }
     };
-    Ok(match status {
-        Status::StreamEnd => {
-            out.truncate(used);
-            Ok(out)
-        }
-        Status::Ok => Err(Status::DataError),
-        other => Err(other),
-    })
+    if status == Status::StreamEnd
+        && let Some(held) = buffer.take()
+    {
+        return Ok(Ok((held.resize(req, used + 1)?, used)));
+    }
+    if let Some(held) = buffer.take() {
+        held.free(req);
+    }
+    Ok(Err(match status {
+        Status::Ok => Status::DataError,
+        other => other,
+    }))
 }
 
 /// `php_zlib_decode`: the input with the NUL php's strings end in, which
@@ -297,7 +355,11 @@ fn decode(
             let inflated = inflate_rounds(req, &mut stream, &input, max);
             stream.end(req);
             match inflated? {
-                Ok(out) => return Ok(OrFalse::Value(PhpString::new(req, &out)?)),
+                Ok((buffer, len)) => {
+                    let out = PhpString::new(req, &buffer.bytes()[..len]);
+                    buffer.free(req);
+                    return Ok(OrFalse::Value(out?));
+                }
                 Err(Status::DataError) if encoding == ENCODING_ANY => encoding = ZLIB_ENCODING_RAW,
                 Err(failed) => {
                     status = failed;
@@ -310,7 +372,19 @@ fn decode(
     Ok(OrFalse::False)
 }
 
-/// `gzuncompress(string $data, int $max_length = 0): string|false`.
+/// `gzuncompress(string $data, int $max_length = 0): string|false`. The
+/// rounds' buffer is `erealloc`ed on the request's heap and the string
+/// copied out of it before it is freed, as php's is:
+///
+/// ```php
+/// $c = gzcompress(str_repeat("abcdefghij", 205)); $w = gzuncompress($c); unset($w);
+/// memory_reset_peak_usage(); $m = memory_get_usage(); $u = gzuncompress($c);
+/// var_dump(memory_get_peak_usage() - $m, memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(43520)
+/// int(2560)
+/// ```
 ///
 /// ```php
 /// $c = gzcompress(str_repeat('abc', 100));

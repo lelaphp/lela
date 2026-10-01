@@ -79,7 +79,7 @@ pub use reference::Ref;
 pub use resource::{Res, ResourceType};
 pub use sort::zend_sort;
 pub use stack::{EntryGuard, Frame, FrameRef, Slot, VmStack};
-pub use string::{Intern, Str, Strings};
+pub use string::{FreshStr, Intern, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
 /// The per-request heap (design §5.13): the allocator every string,
@@ -293,6 +293,20 @@ impl Heap {
         // SAFETY: the allocation is exactly the size `init_with` asks for
         // and nothing else holds it.
         Ok(unsafe { Str::init_with(at, len, 0, fill) })
+    }
+
+    /// `zend_string_alloc(len, 0)`: a string of `len` zero bytes the
+    /// caller writes in place and cuts down before handing it out
+    /// ([`FreshStr`]); the limit is met before it exists.
+    pub fn string_fresh(&mut self, len: usize) -> Result<FreshStr, Fatal> {
+        self.string_with(len, |_| {}).map(FreshStr)
+    }
+
+    /// `zend_string_truncate(s, len, 0)`: the fresh string cut to `len`
+    /// bytes where it stands or moved to the smaller bin, as `erealloc`
+    /// cuts it.
+    pub fn string_truncate(&mut self, s: FreshStr, len: usize) -> Result<FreshStr, Fatal> {
+        s.truncate(&mut self.mm, len)
     }
 
     /// `s` with the bytes of `tail` after its own, php's

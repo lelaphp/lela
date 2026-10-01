@@ -60,6 +60,11 @@ Frame::set
 Frame::slot
 Frame::slot_ptr
 FrameRef
+FreshStr
+FreshStr::bytes_mut
+FreshStr::finish
+FreshStr::is_empty
+FreshStr::len
 GcStatus
 Heap
 Heap::addref
@@ -143,7 +148,9 @@ Heap::set_memory_limit
 Heap::stored
 Heap::string
 Heap::string_append
+Heap::string_fresh
 Heap::string_safe_alloc
+Heap::string_truncate
 Heap::string_with
 Heap::take_freed_use
 Heap::unpin
