@@ -39,7 +39,7 @@ use crate::api::request::{
     Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notifier,
     OptionAnswer, Request, Stream, StreamOption, Whence,
 };
-use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
+use crate::api::values::{ClassId, FreshString, Key, PhpArray, PhpString, Resource, Value};
 use crate::wrapper::TemporaryCheck;
 
 mod filters;
@@ -1241,32 +1241,60 @@ impl PhpStream {
     }
 
     /// `_php_stream_copy_to_mem` (`Z/main/streams/streams.c:1569`): up
-    /// to `maxlen` bytes, `None` for all of them. A bound under four
-    /// chunks reads into a string of that size until it is full or the
-    /// stream is at eof; anything else reads into a buffer sized from
-    /// `php_stream_stat`'s size past the position and a chunk over,
-    /// grown a chunk at a time while a quarter chunk of room is left,
-    /// until a read gives nothing.
-    pub(crate) fn copy_to_mem(&mut self, req: &mut Request, maxlen: Option<usize>) -> Vec<u8> {
+    /// to `maxlen` bytes, `None` for all of them, read into the string
+    /// php allocates first, so `memory_get_peak_usage()` sees php's
+    /// sizes. A bound under four chunks reads into a string of that size
+    /// until it is full or the stream is at eof, cut down only where
+    /// less than half of it was read; anything else reads into a string
+    /// sized from `php_stream_stat`'s size past the position and a chunk
+    /// over, extended a chunk at a time while a quarter chunk of room is
+    /// left, until a read gives nothing, and cut to what was read. `None`
+    /// is php's `NULL`, nothing read, which the string is freed for; the
+    /// `Err` is the memory limit's fatal.
+    ///
+    /// ```php
+    /// $p = __DIR__ . '/big.txt'; $w = fopen($p, 'w'); fwrite($w, str_repeat('x', 442 * 1024)); fclose($w);
+    /// $s = file_get_contents($p); unset($s);
+    /// memory_reset_peak_usage(); $m = memory_get_usage(); $s = file_get_contents($p);
+    /// echo memory_get_peak_usage() - $m - filesize($p), ' ', memory_get_usage() - $m - filesize($p), "\n";
+    /// $f = fopen($p, 'r'); $t = stream_get_contents($f, 40000); fclose($f); echo strlen($t), "\n";
+    /// unlink($p);
+    /// ```
+    /// ```expect
+    /// 10816 2080
+    /// 40000
+    /// ```
+    pub(crate) fn copy_to_mem(
+        &mut self,
+        req: &mut Request,
+        maxlen: Option<usize>,
+    ) -> Result<Option<PhpString>, Thrown> {
         if maxlen == Some(0) {
-            return Vec::new();
+            return Ok(None);
         }
-        let mut out = Vec::new();
         if let Some(max) = maxlen
             && max < 4 * CHUNK_SIZE
         {
-            out.resize(max, 0);
+            let mut out = FreshString::new(req, max)?;
             let mut len = 0;
             while len < max && !self.eof(req) {
-                match self.read(req, &mut out[len..]) {
+                match self.read(req, &mut out.bytes_mut()[len..]) {
                     Some(n) if n > 0 => len += n,
                     _ => break,
                 }
             }
-            out.truncate(len);
-            return out;
+            if len == 0 {
+                out.free(req);
+                return Ok(None);
+            }
+            out.set_len(len);
+            // "Only truncate if the savings are large enough".
+            if len < max / 2 {
+                out = out.truncate(req, len)?;
+            }
+            return Ok(Some(out.finish()));
         }
-        let size = self.ops.stat(req).map_or(0, |sb| sb[7]);
+        let size = self.stat(req).map_or(0, |sb| sb[7]);
         let mut buflen = if size > 0 {
             usize::try_from((size - self.position).max(0)).unwrap_or(0) + CHUNK_SIZE
         } else {
@@ -1275,10 +1303,10 @@ impl PhpStream {
         if let Some(max) = maxlen {
             buflen = buflen.min(max);
         }
-        out.resize(buflen, 0);
+        let mut out = FreshString::new(req, buflen)?;
         let min_room = CHUNK_SIZE / 4;
         let mut len = 0;
-        while let Some(n) = self.read(req, &mut out[len..buflen]) {
+        while let Some(n) = self.read(req, &mut out.bytes_mut()[len..buflen]) {
             if n == 0 {
                 break;
             }
@@ -1291,11 +1319,14 @@ impl PhpStream {
                     Some(max) if buflen + CHUNK_SIZE > max => max,
                     _ => buflen + CHUNK_SIZE,
                 };
-                out.resize(buflen, 0);
+                out = out.extend(req, buflen)?;
             }
         }
-        out.truncate(len);
-        out
+        if len == 0 {
+            out.free(req);
+            return Ok(None);
+        }
+        Ok(Some(out.truncate(req, len)?.finish()))
     }
 
     /// `_php_stream_stat` (`Z/main/streams/streams.c:888`): the
@@ -4288,25 +4319,36 @@ impl Request {
     /// `php_stream_read_to_str` (`Z/main/streams/streams.c:822`): a
     /// string of `len` asked for first, so a length past the memory
     /// limit is php's fatal before a byte is read, then one read into
-    /// it and the string cut to what was read; `None` is the read that
-    /// failed.
+    /// it, its length set to what was read and the string cut down only
+    /// where that is less than half of `len`; `None` is the read that
+    /// failed, the string freed.
+    ///
+    /// ```php
+    /// $p = __DIR__ . '/r.txt'; $w = fopen($p, 'w'); fwrite($w, str_repeat('x', 70000)); fclose($w);
+    /// $f = fopen($p, 'r'); $s = fread($f, 100000); unset($s); fclose($f);
+    /// $f = fopen($p, 'r'); memory_reset_peak_usage(); $m = memory_get_usage(); $s = fread($f, 100000);
+    /// echo memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, ' ', strlen($s), "\n";
+    /// $t = fread($f, 100000); var_dump($t); fclose($f); unlink($p);
+    /// ```
+    /// ```expect
+    /// 110592 110624 70000
+    /// string(0) ""
+    /// ```
     pub(crate) fn stream_read_to_str(
         &mut self,
         stream: Stream,
         len: usize,
     ) -> Result<Option<PhpString>, Thrown> {
-        if len > self.heap_memory_limit() {
-            let asked = self.string_with(len, |_| {})?;
-            self.release(Value::string(asked));
-        }
-        let mut buf = vec![0u8; len];
-        let Some(read) = self.stream_op(stream, |req, s| s.read(req, &mut buf)) else {
+        let mut out = FreshString::new(self, len)?;
+        let Some(Some(read)) = self.stream_op(stream, |req, s| s.read(req, out.bytes_mut())) else {
+            out.free(self);
             return Ok(None);
         };
-        match read {
-            Some(n) => Ok(Some(PhpString::new(self, &buf[..n])?)),
-            None => Ok(None),
+        out.set_len(read);
+        if read < len / 2 {
+            out = out.truncate(self, read)?;
         }
+        Ok(Some(out.finish()))
     }
 }
 

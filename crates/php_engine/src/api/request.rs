@@ -749,10 +749,13 @@ impl Stream {
         req: &mut Request,
         maxlen: Option<usize>,
     ) -> Result<PhpString, Thrown> {
-        let bytes = req
-            .stream_op(self, |req, stream| stream.copy_to_mem(req, maxlen))
-            .unwrap_or_default();
-        PhpString::new(req, &bytes)
+        match req.stream_op(self, |req, stream| stream.copy_to_mem(req, maxlen)) {
+            Some(Ok(Some(read))) => Ok(read),
+            Some(Err(thrown)) => Err(thrown),
+            // php's `NULL`, nothing read, which its callers answer as
+            // `ZSTR_EMPTY_ALLOC()`.
+            Some(Ok(None)) | None => PhpString::new(req, b""),
+        }
     }
 
     /// `php_stream_stat`, as `php_fstat` lays it out: `dev`, `ino`,
