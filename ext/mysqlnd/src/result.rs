@@ -104,6 +104,7 @@ impl Res {
             eof: true,
             row_count: 0,
         };
+        self.binary = true;
     }
 
     /// `mysqlnd_res::free_result_buffers`: the rows and the column definitions
@@ -244,7 +245,7 @@ impl Res {
             eof: false,
             row_count: 0,
         };
-        self.lengths = vec![0; self.field_count as usize];
+        self.lengths = Vec::new();
     }
 
     /// `mysqlnd_res::store_result` with `store_result_fetch_data`: every
@@ -362,7 +363,12 @@ impl Res {
             Rows::Buffered { rows, current, .. } if *current > 0 && *current <= rows.len() => {
                 Some(&self.lengths)
             }
-            Rows::Unbuffered { .. } if !self.binary => Some(&self.lengths),
+            // `mysqlnd_result_unbuffered::fetch_lengths`, which a
+            // statement's rows have none of: once a row was read or the
+            // end was.
+            Rows::Unbuffered { eof, .. } if !self.binary && (*eof || !self.lengths.is_empty()) => {
+                Some(&self.lengths)
+            }
             _ => None,
         }
     }

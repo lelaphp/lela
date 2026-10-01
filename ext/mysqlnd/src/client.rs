@@ -577,13 +577,12 @@ impl ResultSet {
         let mut array = php_ext::values::PhpArray::new(req)?;
         for (i, value) in row.into_iter().enumerate() {
             let field = self.res.fields.get(i);
-            let num = flags & fetch::NUM != 0;
-            if num {
-                array.set(
-                    req,
-                    php_ext::values::Key::Int(i64::try_from(i).unwrap_or(i64::MAX)),
-                    value,
-                )?;
+            // `zend_hash_index_add` for the number: a column a numeric
+            // name put at the same index first keeps it.
+            let at = php_ext::values::Key::Int(i64::try_from(i).unwrap_or(i64::MAX));
+            if flags & fetch::NUM != 0 && !array.contains(&at) {
+                req.addref(&value);
+                array.set(req, at, value)?;
             }
             if flags & fetch::ASSOC != 0 {
                 let key = match field.and_then(|f| f.num_key) {
@@ -593,11 +592,8 @@ impl ResultSet {
                         field.map(|f| f.name.as_slice()).unwrap_or_default(),
                     )?),
                 };
-                if num {
-                    req.addref(&value);
-                }
                 array.set(req, key, value)?;
-            } else if !num {
+            } else {
                 req.release(value);
             }
         }
