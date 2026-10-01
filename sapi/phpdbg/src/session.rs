@@ -70,6 +70,24 @@ pub enum SeekKind {
     Leave,
 }
 
+/// `PHPDBG_G(in_execution)` where no frame stands to say it, and whether
+/// a run stands under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Execution {
+    /// Nothing: `in_execution` is clear.
+    Not,
+    /// `run` has begun the program, which stands until its request ends.
+    Run,
+    /// No run stands, but `in_execution` is set: an `exit` served at a
+    /// prompt where nothing was executing bailed out of
+    /// `phpdbg_execute_ex`, which set it on entry, past the return that
+    /// puts it back (`Z/sapi/phpdbg/phpdbg_prompt.c:1626-1660, 1814`), so
+    /// php asks before `run` restarts, `clean` cleans or `exec` replaces
+    /// what it takes to be executing, and a command that goes on with the
+    /// program is not refused as not running.
+    BailedOut,
+}
+
 /// What follows a run's end: the prompt, or, under `-rr`, the end of
 /// the session (`quit_immediately`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,8 +161,8 @@ pub struct Session {
     pub plan: Option<Plan>,
     /// Why the request was ended early, when it was.
     pub stopped: Option<Stop>,
-    /// `PHPDBG_G(in_execution)`: a run is standing.
-    pub executing: bool,
+    /// What php's phpdbg takes to be executing.
+    pub execution: Execution,
     /// `PHPDBG_IS_STEPPING`.
     pub stepping: bool,
     /// `PHPDBG_G(last_line)`.
@@ -211,7 +229,7 @@ impl Session {
             registered: Vec::new(),
             plan: None,
             stopped: None,
-            executing: false,
+            execution: Execution::Not,
             stepping: false,
             last_line: 0,
             seek: None,

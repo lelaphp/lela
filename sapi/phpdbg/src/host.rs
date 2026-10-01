@@ -15,7 +15,7 @@ use php_sapi::{Engine, FileHandles, Observables, Primary, RequestDescription};
 use crate::cmd::Command;
 use crate::out::{self, Sink};
 use crate::prompt;
-use crate::session::{self, AfterRun, Context, Plan, Session, Stop};
+use crate::session::{self, AfterRun, Context, Execution, Plan, Session, Stop};
 use crate::{NAME, input};
 
 /// The session's requests, until it quits; the status the last of them
@@ -146,13 +146,13 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     // php's cycle ends with the request a run, a restart, `clean` or an
     // `exec` during a run stood in (`phpdbg_clean(1, ...)`): the module
     // starts again, `PHPDBG_G(registered)` built empty with it.
-    if s.executing || s.stopped == Some(Stop::Clean) {
+    if s.execution != Execution::Not || s.stopped == Some(Stop::Clean) {
         s.registered.clear();
     }
-    if !s.executing {
+    if s.execution == Execution::Not {
         return;
     }
-    s.executing = false;
+    s.execution = Execution::Not;
     if let Some(uncaught) = &observed.uncaught {
         out::error(
             format!(

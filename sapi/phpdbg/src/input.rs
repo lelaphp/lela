@@ -64,20 +64,30 @@ pub fn remembered(line: &[u8]) -> Vec<u8> {
     trimmed
 }
 
+/// What a question was answered with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    Yes,
+    No,
+    /// Stdin ended first: `phpdbg_consume_stdin_line` sets
+    /// `PHPDBG_IS_QUITTING` and bails out.
+    End,
+}
+
 /// `phpdbg_ask_user_permission`: the question, then lines until one is
-/// `y` or `n` alone; the end of input is a no.
-pub fn ask(question: &[u8]) -> bool {
+/// `y` or `n` alone, or the input ends.
+pub fn ask(question: &[u8]) -> Answer {
     out::out(question);
     out::out(b" (type y or n): ");
     loop {
         let Line::Read(line) = consume_line() else {
-            return false;
+            return Answer::End;
         };
         let answer = line.strip_suffix(b"\n").unwrap_or(&line);
         let answer = answer.strip_suffix(b"\r").unwrap_or(answer);
         match answer {
-            b"y" => return true,
-            b"n" => return false,
+            b"y" => return Answer::Yes,
+            b"n" => return Answer::No,
             _ => out::out(b"Please enter either y (yes) or n (no): "),
         }
     }

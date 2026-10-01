@@ -17,7 +17,7 @@ use php_sapi::tier::{self, Flow, FrameRef, Opcode, Request, Site, Stepped, Tier}
 use crate::bp::At;
 use crate::out;
 use crate::prompt::{self, Here, Outcome};
-use crate::session::{self, AfterRun, Context, Origin, Plan, SeekKind, Session};
+use crate::session::{self, AfterRun, Context, Execution, Origin, Plan, SeekKind, Session};
 
 /// The tier the `phpdbg` binary binds.
 #[derive(Debug, Clone, Copy, Default)]
@@ -115,7 +115,7 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
             out::notice(&message);
         }
     }
-    session.executing = false;
+    session.execution = Execution::Not;
     let outcome = prompted(&mut session, req, |req| Here::Held { req });
     let stopped = session.stopped.is_some();
     session::put(session);
@@ -239,7 +239,7 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
     }
     let standing = session
         .standing
-        .filter(|_| session.executing)
+        .filter(|_| session.execution == Execution::Run)
         .and_then(|frame| tier::position(req, frame).map(|position| (frame, position)));
     let (file, line) = standing
         .as_ref()
