@@ -117,6 +117,7 @@ fn run(subset: &Subset, registry: &Registry) -> Tally {
         lane: None,
         oracle_absent: None,
         jobs: crate::tally::cores(),
+        served: None,
     };
     run_subset(&oracle, registry, subset, under).unwrap()
 }
@@ -251,6 +252,7 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
         lane: None,
         oracle_absent: None,
         jobs: crate::tally::cores(),
+        served: None,
     };
     let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
     assert_eq!(tally.judged.len(), 3, "{tally:#?}");
@@ -336,6 +338,7 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
         lane: None,
         oracle_absent: None,
         jobs: crate::tally::cores(),
+        served: None,
     };
     let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
     let went: Vec<(&str, Judgement)> = tally
@@ -903,6 +906,7 @@ fn a_pinned_php_not_on_this_machine_runs_nothing_and_asserts_no_digest() {
         lane: None,
         oracle_absent: Some(&why),
         jobs: crate::tally::cores(),
+        served: None,
     };
     let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
     assert!(tally.judged.is_empty(), "{tally:#?}");
@@ -1283,6 +1287,7 @@ fn run_on(subset: &Subset, jobs: usize, limit_s: u64) -> Tally {
         lane: None,
         oracle_absent: None,
         jobs: NonZeroUsize::new(jobs).unwrap(),
+        served: None,
     };
     run_subset(&oracle, &registry(""), subset, under).unwrap()
 }
@@ -1479,4 +1484,60 @@ fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
         assert!(pid > 0, "{name}: the child never started");
         assert!(!stands(pid), "{name}: the child {pid} outlived its run");
     }
+}
+
+/// The fixture at `xtask/fixtures/phpt/mysql` (#1366): a subset of a `MySQL`
+/// suite whose server does not answer is refused, by the probe that asks
+/// the server and by the runner handed it with no server named, and never
+/// read as the skips its tests would make; where the pinned recipe's server
+/// answers, the fixture passes under it.
+#[test]
+fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
+    if oracle().is_none() {
+        return;
+    }
+    let tree = Tree::new("phpt-judge-mysql").unwrap();
+    let tests = tree.join("ext/pdo_mysql/tests");
+    copy(&fixture("mysql"), &tests);
+    let subset = Subset {
+        scope: "ext/pdo_mysql".to_owned(),
+        dirs: vec![Dir {
+            under: PathBuf::from("ext/pdo_mysql/tests"),
+            dir: tests,
+        }],
+        root: tree.path().to_path_buf(),
+    };
+    assert!(server::needs(&subset));
+    let mut down = manifest();
+    down.pin.recipe.env.insert(
+        "PDO_MYSQL_TEST_DSN".to_owned(),
+        "mysql:host=127.0.0.1;port=1;dbname=test".to_owned(),
+    );
+    let refused = server::version(&down.pin.oracle(), &subset.scope).unwrap_err();
+    assert!(
+        refused.to_string().contains("refused, not skipped"),
+        "{refused:#}"
+    );
+    let binary = oracle().unwrap();
+    let runner = Runner::Engine(binary);
+    let under = Under {
+        runner: &runner,
+        lane: None,
+        oracle_absent: None,
+        jobs: crate::tally::cores(),
+        served: None,
+    };
+    let unserved = run_subset(&down.pin.oracle(), &registry(""), &subset, under);
+    assert!(unserved.is_err(), "{unserved:#?}");
+    let manifest = manifest();
+    let oracle = manifest.pin.oracle();
+    let Ok(version) = server::version(&oracle, &subset.scope) else {
+        return;
+    };
+    let under = Under {
+        served: Some(&version),
+        ..under
+    };
+    let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
+    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
 }
