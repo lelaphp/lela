@@ -309,6 +309,13 @@ impl Heap {
         s.truncate(&mut self.mm, len)
     }
 
+    /// `zend_string_extend(s, len, 0)`: the fresh string grown to `len`
+    /// bytes where it stands or moved, as `erealloc` grows it, the new
+    /// bytes zero.
+    pub fn string_extend(&mut self, s: FreshStr, len: usize) -> Result<FreshStr, Fatal> {
+        s.extend(&mut self.mm, len)
+    }
+
     /// `s` with the bytes of `tail` after its own, php's
     /// `zend_string_extend` and the `memcpy` after it: the caller hands
     /// one owner of `s` over and holds one of the string handed back.

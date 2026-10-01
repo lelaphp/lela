@@ -797,11 +797,13 @@ values::Emalloc::new
 values::Emalloc::resize
 values::FreshString
 values::FreshString::bytes_mut
+values::FreshString::extend
 values::FreshString::finish
 values::FreshString::free
 values::FreshString::is_empty
 values::FreshString::len
 values::FreshString::new
+values::FreshString::set_len
 values::FreshString::truncate
 values::HashIterator
 values::HashIterator::new

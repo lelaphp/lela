@@ -113,6 +113,52 @@ impl FreshStr {
         self.0
     }
 
+    /// `ZSTR_LEN(s) = len` and the NUL after it: the length cut where
+    /// the allocation stands, which keeps its size and its bin, as
+    /// php's `deflate_add` hands its string out. A `len` past the
+    /// string's is its own length.
+    pub fn set_len(&mut self, len: usize) {
+        let len = len.min(self.len());
+        let header = self.0.0;
+        // SAFETY: this is the string's one name, so the header is
+        // written through it alone.
+        unsafe { (*header.as_ptr()).len = len };
+        self.0.forget_hash();
+        // SAFETY: the byte after `len` is inside the allocation, which
+        // holds at least the old length and its NUL.
+        let end = unsafe { header.as_ptr().cast::<u8>().add(HEADER + len) };
+        // SAFETY: `end` is the allocation's NUL, written once.
+        unsafe { end.write(0) };
+    }
+
+    /// `zend_string_extend(s, len, 0)` over `mm`: the allocation
+    /// `erealloc`ed to a string of `len` bytes, grown where it stands
+    /// where its bin or its pages allow and moved otherwise, the bytes
+    /// written so far kept and the new ones zero, the NUL after them
+    /// written and the hash forgotten. A `len` under the string's is its
+    /// own length.
+    pub(crate) fn extend(self, mm: &mut Mm, len: usize) -> Result<FreshStr, Fatal> {
+        let old = self.len();
+        let len = len.max(old);
+        // SAFETY: this is the string's one name and the request's own
+        // allocation, its header and first `old` bytes initialised.
+        let at = unsafe { mm.realloc(self.0.address(), HEADER + old, Str::allocation_size(len)) }?;
+        let header = at.cast::<StrHeader>();
+        // SAFETY: the header moved with the bytes, and nothing else names
+        // the allocation.
+        unsafe { (*header.as_ptr()).len = len };
+        let s = Str(header);
+        s.forget_hash();
+        // SAFETY: the allocation holds the header and `len` bytes, so
+        // the byte after the old ones is inside it.
+        let grown = unsafe { at.as_ptr().add(HEADER + old) };
+        // SAFETY: from `grown` on the allocation holds the new bytes and
+        // the NUL, zeroed so every byte the holder may read is
+        // initialised.
+        unsafe { grown.write_bytes(0, len - old + 1) };
+        Ok(FreshStr(s))
+    }
+
     /// `zend_string_truncate(s, len, 0)` over `mm`: the allocation
     /// `erealloc`ed to a string of `len` bytes, in place where the size
     /// stays in its bin and moved where it falls to a smaller one, the
@@ -1022,6 +1068,32 @@ mod tests {
         let s = same.finish();
         assert_eq!(s.bytes(), b"hel");
         assert_eq!(heap.memory_usage(false) - base, 32);
+        heap.release_string(s);
+        assert_eq!(heap.memory_usage(false), base);
+    }
+
+    /// `zend_string_extend` then `ZSTR_LEN(s) = len`: the bytes written
+    /// survive the growth into the larger bin and the new ones are zero;
+    /// a length set where the allocation stands keeps its bin.
+    #[test]
+    fn a_fresh_string_grows_in_place_and_keeps_its_bin_under_a_shorter_length() {
+        let _alone = crate::serial::alone();
+        let mut heap = crate::Heap::new();
+        let base = heap.memory_usage(false);
+        let Ok(mut fresh) = heap.string_fresh(5) else {
+            return;
+        };
+        fresh.bytes_mut().copy_from_slice(b"hello");
+        assert_eq!(heap.memory_usage(false) - base, 32);
+        let Ok(mut grown) = heap.string_extend(fresh, 40) else {
+            return;
+        };
+        assert_eq!(heap.memory_usage(false) - base, 80);
+        assert_eq!(&grown.bytes_mut()[..7], b"hello\0\0");
+        grown.set_len(3);
+        let s = grown.finish();
+        assert_eq!(s.bytes(), b"hel");
+        assert_eq!(heap.memory_usage(false) - base, 80);
         heap.release_string(s);
         assert_eq!(heap.memory_usage(false), base);
     }

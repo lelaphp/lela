@@ -65,6 +65,7 @@ FreshStr::bytes_mut
 FreshStr::finish
 FreshStr::is_empty
 FreshStr::len
+FreshStr::set_len
 GcStatus
 Heap
 Heap::addref
@@ -148,6 +149,7 @@ Heap::set_memory_limit
 Heap::stored
 Heap::string
 Heap::string_append
+Heap::string_extend
 Heap::string_fresh
 Heap::string_safe_alloc
 Heap::string_truncate
