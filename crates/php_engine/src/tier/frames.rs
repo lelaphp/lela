@@ -266,11 +266,25 @@ pub enum Evaluated {
     Rendered,
 }
 
-/// `code` evaluated in `frame`'s scope as phpdbg's `ev` evaluates it,
-/// `return code;` compiled as the `eval()'d code` and served by the
-/// engine's loop; the `Err` is a fatal, which ends the request.
-pub fn evaluate(req: &mut Request, frame: FrameRef, code: &[u8]) -> Result<Evaluated, Fatal> {
-    req.evaluate_in(frame, code)
+/// What code a tier has the engine serve on its own account stands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Under {
+    /// The frame the tier stopped in, the request's innermost: evaluated
+    /// code shares its scope, and a function is called from it.
+    Frame(FrameRef),
+    /// No frame: the request's frames set aside while the code is
+    /// served, as php's `EG(current_execute_data)` is `NULL` before
+    /// `zend_execute` has begun the program. Evaluated code runs in the
+    /// global scope, what it raises names no active file but its own,
+    /// and a trace of it ends at `{main}`.
+    Nothing,
+}
+
+/// `code` evaluated as phpdbg's `ev` evaluates it, `return code;`
+/// compiled as the `eval()'d code` and served by the engine's loop on
+/// what `under` names; the `Err` is a fatal, which ends the request.
+pub fn evaluate(req: &mut Request, under: Under, code: &[u8]) -> Result<Evaluated, Fatal> {
+    req.evaluate_in(under, code)
 }
 
 /// An argument a host passes a function by name.
@@ -286,12 +300,27 @@ pub fn function_exists(req: &Request, name: &[u8]) -> bool {
     crate::api::call::lookup_function(req, name).is_some()
 }
 
-/// The function named `name` called with `arguments` as
-/// `zend_call_known_function` calls it, what it returns given up; a
-/// throwable it leaves is rendered uncaught with `E_DONT_BAIL`; a fatal
-/// it raised is the request's, which ends with it.
-pub fn call(req: &mut Request, name: &[u8], arguments: &[Argument]) {
-    req.call_by_name(name, arguments);
+/// How a call a tier made ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Called {
+    /// It returned, or raised a fatal, which is the request's.
+    Returned,
+    /// What it left uncaught was rendered as `zend_exception_error`
+    /// renders it at `E_ERROR`, or the fatal it raised was, and the
+    /// fatal was caught where the tier asked, as php's `zend_try` there
+    /// catches it.
+    Rendered,
+    /// It called `exit`, with nothing executing, which was caught where
+    /// the tier asked.
+    Exited,
+}
+
+/// The function named `name` called with `arguments` on what `under`
+/// names, as `zend_call_known_function` calls it, what it returns given
+/// up; a throwable it leaves is rendered uncaught with `E_DONT_BAIL`; a
+/// fatal it raised is the request's, which ends with it.
+pub fn call(req: &mut Request, under: Under, name: &[u8], arguments: &[Argument]) -> Called {
+    req.call_by_name(under, name, arguments)
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ Uncaught
 WebRequest
 tier::Argument
 tier::Aside
+tier::Called
 tier::Class
 tier::Code
 tier::Evaluated
@@ -47,6 +48,7 @@ tier::Site
 tier::Stepped
 tier::Tier
 tier::TraceRow
+tier::Under
 tier::Variable
 tier::backtrace
 tier::below
