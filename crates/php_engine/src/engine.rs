@@ -214,9 +214,8 @@ pub struct WebRequest {
     pub content_type: Option<Vec<u8>>,
     /// `content_length`, as the host was told it.
     pub content_length: i64,
-    /// The body, what `sapi_module.read_post` hands out: the bytes the
-    /// host read, no more than `content_length`.
-    pub body: Vec<u8>,
+    /// The body, what `sapi_module.read_post` hands out.
+    pub body: Body,
     /// The request headers, what `getallheaders()` answers.
     pub headers: Vec<(Vec<u8>, Vec<u8>)>,
     /// `no_headers`: the host writes no header block, and the request
@@ -226,6 +225,24 @@ pub struct WebRequest {
     /// before the request starts: 200, or php-cgi's 404 for a file it
     /// could not open.
     pub response_code: i64,
+}
+
+/// What a host's `sapi_module.read_post` hands out over one request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Body {
+    /// The bytes the host read, no more than `content_length`.
+    Read(Vec<u8>),
+    /// Nothing, and the `E_WARNING` the host's read raises each time it
+    /// is asked, as php-fpm's `sapi_cgi_read_post` raises
+    /// `REQUEST_BODY_FILE: open('%s') failed: %s (%d)` where the file the
+    /// server names does not open (`Z/sapi/fpm/fpm/fpm_main.c:448`).
+    Refused(String),
+}
+
+impl Default for Body {
+    fn default() -> Body {
+        Body::Read(Vec::new())
+    }
 }
 
 /// A request's method, `request_method`, read as `sapi_activate` and

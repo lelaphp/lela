@@ -16,7 +16,7 @@ use super::Request;
 use super::variables::BodyLimits;
 use crate::api::raising::{Level, Thrown, docref, throw};
 use crate::api::values::PhpArray;
-use crate::engine::Method;
+use crate::engine::{Body, Method};
 use crate::wrapper::TemporaryCheck;
 
 /// `SAPI_POST_BLOCK_SIZE` (`Z/main/SAPI.h:28`): what the form reader
@@ -243,13 +243,19 @@ impl Request {
     }
 
     /// `sapi_module.read_post`: up to `max` bytes of the body the host
-    /// read, past what it has handed out, `SG(read_post_bytes)` moved on.
+    /// read, past what it has handed out, `SG(read_post_bytes)` moved on;
+    /// nothing, and the host's warning raised, where it could not read
+    /// the body.
     pub(crate) fn read_post(&mut self, max: usize) -> Vec<u8> {
-        let body = self
-            .description
-            .web
-            .as_ref()
-            .map_or(&[][..], |web| web.body.as_slice());
+        let body = match self.description.web.as_ref().map(|web| &web.body) {
+            Some(Body::Read(body)) => body.as_slice(),
+            Some(Body::Refused(warning)) => {
+                let warning = warning.clone();
+                crate::api::raising::warning(self, &warning);
+                return Vec::new();
+            }
+            None => &[][..],
+        };
         let from = self.post.read.min(body.len());
         let to = from.saturating_add(max).min(body.len());
         let block = body[from..to].to_vec();

@@ -32,10 +32,10 @@ use std::io::Write;
 use std::process::ExitCode;
 
 pub use php_engine::{
-    Aborted, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder, FileHandles,
-    HostExtension, HostValue, IniEvent, IniOrigin, IniValue, Method, Observables, OutputSink,
-    PHP_VERSION, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed, Uncaught,
-    WebRequest,
+    Aborted, Body, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
+    FileHandles, HostExtension, HostValue, IniEvent, IniOrigin, IniValue, Method, Observables,
+    OutputSink, PHP_VERSION, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,
+    Uncaught, WebRequest,
 };
 
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host

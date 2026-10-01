@@ -414,7 +414,7 @@ fn describe(site: &Site, client: &Client, is_static: bool) -> RequestDescription
             content_length: request.content.as_ref().map_or(0, |content| {
                 i64::try_from(content.len()).unwrap_or(i64::MAX)
             }),
-            body: request.content.clone().unwrap_or_default(),
+            body: php_sapi::Body::Read(request.content.clone().unwrap_or_default()),
             headers: request.original.clone(),
             no_headers: false,
             response_code: 200,

@@ -61,7 +61,7 @@ mod wrapper;
 pub use api::request::{BuildDefs, PHP_VERSION};
 pub use command_line::{CommandLine, EachLine};
 pub use engine::{
-    Aborted, Dispatched, Engine, EngineBuilder, FileHandles, HostValue, IniOrigin, Method,
+    Aborted, Body, Dispatched, Engine, EngineBuilder, FileHandles, HostValue, IniOrigin, Method,
     Observables, OutputSink, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,
     Uncaught, WebRequest,
 };

@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
 use php_sapi::{
-    Aborted, Engine, HostExtension, HostValue, IniEvent, IniOrigin, OutputSink, RequestDescription,
-    ResponseHead, WebRequest,
+    Aborted, Body, Engine, HostExtension, HostValue, IniEvent, IniOrigin, OutputSink,
+    RequestDescription, ResponseHead, WebRequest,
 };
 
 use crate::access::AccessLog;
@@ -1089,7 +1089,7 @@ impl Worker {
                     .map(|(k, v)| (k, v, IniOrigin::PerDir)),
             );
         }
-        let mut body = Vec::new();
+        let mut body = Body::default();
         if info.content_length > 0 {
             body = read_body(env, info.content_length, wire);
         }
@@ -1161,8 +1161,28 @@ fn text_of(value: &php_sapi::IniValue) -> Vec<u8> {
 
 /// `sapi_cgi_read_post`: the body, up to its length, from
 /// `REQUEST_BODY_FILE` where the server names one and otherwise from
-/// the request's `FCGI_STDIN` records.
-fn read_body(env: &Environment, length: i64, wire: &Arc<Mutex<Wire>>) -> Vec<u8> {
+/// the request's `FCGI_STDIN` records; a file that does not open is
+/// refused with php's warning, which the request raises where php reads
+/// the body.
+///
+/// ```php
+/// var_dump(file_get_contents("php://input"), error_get_last()["message"]);
+/// ```
+/// ```request fpm
+/// --ENV--
+/// REQUEST_BODY_FILE=/nonexistent/body
+/// --POST--
+/// a=1
+/// ```
+/// ```expect
+/// Content-type: text/html; charset=UTF-8
+///
+///
+/// Warning: REQUEST_BODY_FILE: open('/nonexistent/body') failed: No such file or directory (2) in Unknown on line 0
+/// string(0) ""
+/// string(82) "REQUEST_BODY_FILE: open('/nonexistent/body') failed: No such file or directory (2)"
+/// ```
+fn read_body(env: &Environment, length: i64, wire: &Arc<Mutex<Wire>>) -> Body {
     let length = usize::try_from(length).unwrap_or(0);
     let mut body = vec![0u8; length];
     let mut read = 0;
@@ -1177,17 +1197,16 @@ fn read_body(env: &Environment, length: i64, wire: &Arc<Mutex<Wire>>) -> Vec<u8>
                 }
             }
             Err(e) => {
-                zlog!(
-                    Warning @ sapi_cgi_log_message:631,
+                return Body::Refused(format!(
                     "REQUEST_BODY_FILE: open('{}') failed: {} ({})",
                     String::from_utf8_lossy(file),
                     crate::conf::errno(&e).desc(),
                     crate::conf::errno(&e) as i32
-                );
+                ));
             }
         }
         body.truncate(read);
-        return body;
+        return Body::Read(body);
     }
     let mut guard = wire
         .lock()
@@ -1208,5 +1227,5 @@ fn read_body(env: &Environment, length: i64, wire: &Arc<Mutex<Wire>>) -> Vec<u8>
         }
     }
     body.truncate(read);
-    body
+    Body::Read(body)
 }
