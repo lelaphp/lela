@@ -2223,7 +2223,7 @@ impl ObjectHandlers for Handlers {
 /// the private name `storage` of `ArrayObject` or `ArrayIterator`.
 fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (key, value) in object.props_for(req, PropertyPurpose::Debug)? {
+    for (key, value) in crate::std_properties(req, object)? {
         req.addref(&value);
         let key = crate::owned_key(req, &key);
         out.set(req, key, value)?;

@@ -8,7 +8,7 @@
 //! body serves a heap and a queue where the two differ only by the
 //! payload's kind, so a queue's method is the heap's `implementation =`.
 
-use php_ext::abi::{CloneObj, ExtensionBuilder, ObjectHandlers, PropertyPurpose, Std, This, True};
+use php_ext::abi::{CloneObj, ExtensionBuilder, ObjectHandlers, Std, This, True};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::{compare, to_long};
@@ -897,7 +897,7 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
         (h.queue, h.flags, h.corrupted, h.elements.clone())
     })?;
     let mut out = PhpArray::new(req)?;
-    for (key, value) in object.props_for(req, PropertyPurpose::Debug)? {
+    for (key, value) in crate::std_properties(req, object)? {
         req.addref(&value);
         out.set(req, key, value)?;
     }

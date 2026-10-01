@@ -349,9 +349,15 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                     break;
                 }
             }
-            held.release(req);
+            // What the class's debug table left pending was raised
+            // before any row's, so a row's is chained onto it.
+            let left = held.release(req);
             object.unprotect_in(req, RecursionGuard::Debug);
-            dumped?;
+            match (left, dumped) {
+                (Err(earlier), Err(later)) => return Err(earlier.chain(req, later)),
+                (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => return Err(thrown),
+                (Ok(()), Ok(())) => {}
+            }
             pad(out, level);
             out.extend_from_slice(b"}\n");
         }

@@ -8,9 +8,7 @@
 //! each element off as the walk passes it, and `SplQueue` and
 //! `SplStack` freeze the direction (`SPL_DLLIST_IT_FIX`).
 
-use php_ext::abi::{
-    ClassIterator, CloneObj, ExtensionBuilder, ObjectHandlers, PropertyPurpose, This, Untyped,
-};
+use php_ext::abi::{ClassIterator, CloneObj, ExtensionBuilder, ObjectHandlers, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
@@ -1003,7 +1001,7 @@ fn clone_list(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown>
 fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     let (flags, values) = with(req, object, |l| (l.flags, l.values()))?;
     let mut out = PhpArray::new(req)?;
-    for (key, value) in object.props_for(req, PropertyPurpose::Debug)? {
+    for (key, value) in crate::std_properties(req, object)? {
         req.addref(&value);
         out.set(req, key, value)?;
     }

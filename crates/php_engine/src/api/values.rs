@@ -852,14 +852,28 @@ impl ArrayIter {
 
 /// The table `zend_get_properties_for` hands a reader, held until
 /// `zend_release_properties`: [`PhpObject::props_held`]'s rows, each one
-/// more owner of its value where the class built the table for the
-/// reader, views of the object's own rows otherwise.
+/// more owner of its value where the class built the rows for the
+/// reader, views of the class's debug table while it is held, and views
+/// of the object's own rows otherwise.
 #[derive(Debug)]
 #[must_use = "the rows are held until they are released"]
 pub struct HeldProperties {
     rows: Vec<(Key, HeldRow)>,
-    owned: bool,
+    held: Held,
     count: usize,
+}
+
+/// What [`HeldProperties`] gives back at its release, php's `*is_temp`
+/// table and what `zend_release_properties` does to it.
+#[derive(Debug)]
+enum Held {
+    /// The object's own table: nothing taken.
+    Own,
+    /// Rows the class built: one owner of each row's value.
+    Rows,
+    /// The class's debug table, one owner of the table, and what the
+    /// class left pending while it built it.
+    Table(PhpArray, Option<Thrown>),
 }
 
 /// One row of [`HeldProperties`] as `zend_hash` walks it: a value, or
@@ -890,12 +904,24 @@ impl HeldProperties {
     }
 
     /// `zend_release_properties`: the owners the rows held given back.
-    pub fn release(self, req: &mut Request) {
-        if self.owned {
-            for (_, row) in self.rows {
-                if let HeldRow::Value(value) = row {
-                    req.release(value);
+    /// The `Err` is what the class's `get_debug_info` left pending while
+    /// it built the table, handed on once the rows have been read, as
+    /// `php_var_dump` and `php_debug_zval_dump` leave `EG(exception)`
+    /// standing after the dump (`Z/ext/standard/var.c:184`).
+    pub fn release(self, req: &mut Request) -> Result<(), Thrown> {
+        match self.held {
+            Held::Own => Ok(()),
+            Held::Rows => {
+                for (_, row) in self.rows {
+                    if let HeldRow::Value(value) = row {
+                        req.release(value);
+                    }
                 }
+                Ok(())
+            }
+            Held::Table(table, thrown) => {
+                req.release(Value::array(table));
+                thrown.map_or(Ok(()), Err)
             }
         }
     }
@@ -1189,9 +1215,9 @@ impl PhpObject {
     /// table a class shows in place of its properties, with one owner,
     /// the caller's, which is php's `*is_temp` one and is released once
     /// the rows have been read. `None` for a class that shows its
-    /// members, which [`PhpObject::props_for`] answers under the same
-    /// purpose; a dumper asks this first and that second, so a typed
-    /// property nothing has written still shows as one. The throwable
+    /// members. [`PhpObject::props_held`] under the same purpose asks
+    /// this first and reads the members where it answers none, so a
+    /// typed property nothing has written still shows as one. The throwable
     /// the class left pending while it built the table rides beside it,
     /// for the dumper to hand on after the rows are printed.
     pub fn debug_info(
@@ -1210,7 +1236,10 @@ impl PhpObject {
     /// class answers for the purpose, under the keys its table holds
     /// them by, an integer one among them. Views, no owner taken, and a
     /// mangled name is interned as php's is; the `Err` is the memory
-    /// limit refusing the intern.
+    /// limit refusing the intern. Under [`PropertyPurpose::Debug`] a
+    /// class may answer a table of its own, which no view outlives, so
+    /// that purpose is read through [`PhpObject::props_held`] and is an
+    /// `InternalError` here where the class answers one.
     pub fn props_for(
         &self,
         req: &mut Request,
@@ -1228,27 +1257,71 @@ impl PhpObject {
     /// it, so an element that is the object itself counts while the
     /// reader prints its refcount; the object's own table, which php
     /// hands out with `GC_TRY_ADDREF` on the table alone, takes none.
+    /// Under [`PropertyPurpose::Debug`] the class's `get_debug_info` is
+    /// asked first, as `zend_std_get_properties_for` asks it
+    /// (`Z/Zend/zend_object_handlers.c:2179`), and the table it answers
+    /// is held whole, its rows views of it, so a value it alone holds
+    /// prints one owner.
+    ///
+    /// ```php
+    /// class D { public int $u; public $a = 1; public function __debugInfo(): array { return ['shown' => str_repeat('s', 2)]; } }
+    /// class M { public int $u; public $a = 1; }
+    /// debug_zval_dump(new ArrayObject(range(1, 1)), new D, new M, new DateTime('2020-01-01', new DateTimeZone('UTC')));
+    /// ```
+    /// ```expect
+    /// object(ArrayObject)#1 (1) refcount(1){
+    ///   ["storage":"ArrayObject":private]=>
+    ///   array(1) packed refcount(2){
+    ///     [0]=>
+    ///     int(1)
+    ///   }
+    /// }
+    /// object(D)#2 (1) refcount(1){
+    ///   ["shown"]=>
+    ///   string(2) "ss" refcount(1)
+    /// }
+    /// object(M)#3 (1) refcount(1){
+    ///   ["u"]=>
+    ///   uninitialized(int)
+    ///   ["a"]=>
+    ///   int(1)
+    /// }
+    /// object(DateTime)#4 (3) refcount(1){
+    ///   ["date"]=>
+    ///   string(26) "2020-01-01 00:00:00.000000" refcount(1)
+    ///   ["timezone_type"]=>
+    ///   int(3)
+    ///   ["timezone"]=>
+    ///   string(3) "UTC" refcount(1)
+    /// }
+    /// ```
     pub fn props_held(
         &self,
         req: &mut Request,
         purpose: PropertyPurpose,
     ) -> Result<HeldProperties, Thrown> {
-        let (rows, owned) = crate::ops::properties_answered(req, *self, purpose)?;
-        if owned {
-            for (_, value) in &rows {
-                req.addref(value);
+        use crate::ops::Answered;
+        let (rows, held) = match crate::ops::properties_answered(req, *self, purpose)? {
+            Answered::Own(rows) if purpose == PropertyPurpose::Debug => {
+                let (rows, count) = crate::ops::debug_rows(req, *self, rows)?;
+                let held = Held::Own;
+                return Ok(HeldProperties { rows, held, count });
             }
-        }
-        if purpose == PropertyPurpose::Debug && !owned {
-            let (rows, count) = crate::ops::debug_rows(req, *self, rows)?;
-            return Ok(HeldProperties { rows, owned, count });
-        }
+            Answered::Own(rows) => (rows, Held::Own),
+            Answered::Built(rows) => {
+                for (_, value) in &rows {
+                    req.addref(value);
+                }
+                (rows, Held::Rows)
+            }
+            Answered::Debug(info) => (info.table.snapshot(), Held::Table(info.table, info.thrown)),
+        };
         let count = rows.len();
         let rows = rows
             .into_iter()
             .map(|(key, value)| (key, HeldRow::Value(value)))
             .collect();
-        Ok(HeldProperties { rows, owned, count })
+        Ok(HeldProperties { rows, held, count })
     }
 
     /// The object's property table as `get_properties` holds it,

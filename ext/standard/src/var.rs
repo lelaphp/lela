@@ -17,7 +17,7 @@ use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpString, RecursionGuard, Value};
+use php_ext::values::{HeldRow, Key, PhpString, RecursionGuard, Value};
 
 pub(crate) mod debug;
 pub(crate) mod serialize;
@@ -767,27 +767,28 @@ pub(super) fn render(
         }
         // `zend_get_properties_for(struc, ZEND_PROP_PURPOSE_DEBUG)`: the
         // table a class shows in place of its properties, which is what
-        // `__debugInfo` and a `Closure` show, and the members otherwise.
-        // The table has one owner and is given up once its rows are
-        // rendered, php's `zend_release_properties`.
-        let own = object.debug_info(req)?;
-        let rows: Vec<(Key, Value)> = match &own {
-            Some(own) => own.table.snapshot(),
-            None => object.props_for(req, PropertyPurpose::Debug)?,
-        };
+        // `__debugInfo` and a `Closure` show, and the members otherwise,
+        // held until its rows are rendered, php's
+        // `zend_release_properties`. A typed property nothing has
+        // written is no row of php's walk (`ZEND_HASH_FOREACH_KEY_VAL_IND`).
+        let held = object.props_held(req, PropertyPurpose::Debug)?;
+        let rows: Vec<(Key, Value)> = held
+            .rows()
+            .iter()
+            .filter_map(|(key, row)| match row {
+                HeldRow::Value(value) => Some((key.clone(), *value)),
+                HeldRow::Uninitialized(_) => None,
+            })
+            .collect();
         object.protect_in(req, RecursionGuard::Debug);
         let rendered = hash(req, out, &rows, indent, true);
         object.unprotect_in(req, RecursionGuard::Debug);
-        let Some(own) = own else {
-            return rendered;
-        };
-        req.release(Value::array(own.table));
         // What the table left pending was raised before any row's, so a
         // row's is chained onto it.
-        return match (own.thrown, rendered) {
-            (Some(earlier), Err(later)) => Err(earlier.chain(req, later)),
-            (Some(earlier), Ok(())) => Err(earlier),
-            (None, rendered) => rendered,
+        return match (held.release(req), rendered) {
+            (Err(earlier), Err(later)) => Err(earlier.chain(req, later)),
+            (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => Err(thrown),
+            (Ok(()), Ok(())) => Ok(()),
         };
     }
     // `zval_get_string_func`, whose string is the caller's to release:

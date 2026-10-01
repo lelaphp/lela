@@ -1548,51 +1548,76 @@ pub(crate) fn properties_for(
     object: PhpObject,
     purpose: PropertyPurpose,
 ) -> Result<Vec<(Key, Value)>, Thrown> {
-    properties_answered(req, object, purpose).map(|(rows, _)| rows)
+    match properties_answered(req, object, purpose)? {
+        Answered::Own(rows) | Answered::Built(rows) => Ok(rows),
+        // A table of the class's own dies with its one owner, so no view
+        // of it outlives this call; the reader that holds it is
+        // `PhpObject::props_held`.
+        Answered::Debug(info) => {
+            req.release(Value::array(info.table));
+            Err(crate::api::raising::fatal(
+                req,
+                "InternalError: a class's debug table is read held, through props_held",
+            ))
+        }
+    }
 }
 
-/// [`properties_for`], and whether the rows are a table the class built
-/// for the reader (`get_properties_for` answering, php's `*is_temp`)
-/// rather than the object's own.
+/// What `zend_get_properties_for` hands one reader: the table and its
+/// `*is_temp`, as three shapes of owner.
+pub(crate) enum Answered {
+    /// The object's own table, views of its rows.
+    Own(Vec<(Key, Value)>),
+    /// Rows the class's `get_properties_for` built for the reader
+    /// (`*is_temp`), views of values the object holds elsewhere.
+    Built(Vec<(Key, Value)>),
+    /// Under [`PropertyPurpose::Debug`], the table the class's
+    /// `get_debug_info` answers in place of its properties, one owner
+    /// the caller's, and what it left pending while it built it.
+    Debug(crate::api::abi::DebugInfo),
+}
+
+/// [`properties_for`] as the shape of its owner: the class's
+/// `get_properties_for` first, then `zend_std_get_properties_for`
+/// (`Z/Zend/zend_object_handlers.c:2173`), which under
+/// [`PropertyPurpose::Debug`] serves the class's `get_debug_info` and
+/// the object's own table only where that answers none.
 pub(crate) fn properties_answered(
     req: &mut Request,
     object: PhpObject,
     purpose: PropertyPurpose,
-) -> Result<(Vec<(Key, Value)>, bool), Thrown> {
+) -> Result<Answered, Thrown> {
     let table = req.object_handlers(object.heap());
     // What `get_properties_for` answers is the table php hands back as
     // it stands, whose names are already what a reader shows; what
     // `get_properties` answers is the members, whose names the slot
     // carries unmangled here.
     let rows = match table.get_properties_for(req, object, purpose)? {
-        PropertiesFor::Rows(rows) => return Ok((rows, true)),
+        PropertiesFor::Rows(rows) => return Ok(Answered::Built(rows)),
         // php's `NULL` table, which every reader here walks as none.
-        PropertiesFor::Null => return Ok((Vec::new(), true)),
+        PropertiesFor::Null => return Ok(Answered::Built(Vec::new())),
         // `zend_std_get_properties_for`'s `num_hooked_props` arm for the
         // readers that run hooks.
         PropertiesFor::Standard
             if matches!(purpose, PropertyPurpose::Json | PropertyPurpose::VarExport) =>
         {
             if let Some(rows) = req.hooked_properties_for(object)? {
-                return Ok((named_rows(rows), false));
+                return Ok(Answered::Own(named_rows(rows)));
             }
             table.get_properties(req, object)?
         }
         PropertiesFor::Standard => match purpose {
-            // `zend_std_get_properties_for`: the debug table of a lazy
-            // object and the `(array)` cast read what stands without
-            // initialising it, and so does a serialization the object
-            // was made to skip it for; every other reader initialises.
-            PropertyPurpose::Debug => {
-                // `zend_lazy_object_debug_info`: a table of its own, the
-                // instance under `instance` with one more owner
-                // (`*is_temp = 1`).
-                if let Some(instance) = req.lazy_instance(object.heap()) {
-                    let name = req.interned(b"instance")?;
-                    return Ok((vec![(Key::Str(name), instance.as_value())], true));
-                }
-                req.properties_no_lazy_init(object)?
-            }
+            // `zend_std_get_properties_for`'s `get_debug_info`: what
+            // `__debugInfo` returns, a forwarding proxy's instance, or a
+            // table of the class's own; where it answers none, the
+            // debug table of a lazy object reads what stands without
+            // initialising it, as the `(array)` cast does and a
+            // serialization the object was made to skip it for; every
+            // other reader initialises.
+            PropertyPurpose::Debug => match table.get_debug_info(req, object)? {
+                Some(info) => return Ok(Answered::Debug(info)),
+                None => req.properties_no_lazy_init(object)?,
+            },
             PropertyPurpose::ArrayCast => req.properties_no_lazy_init(object)?,
             PropertyPurpose::Serialize if req.lazy_skips_serialize(object.heap()) => {
                 req.properties_no_lazy_init(object)?
@@ -1613,7 +1638,7 @@ pub(crate) fn properties_answered(
         };
         out.push((Key::Str(name), entry));
     }
-    Ok((out, false))
+    Ok(Answered::Own(out))
 }
 
 /// The object's own debug table as `php_debug_zval_dump` walks it
