@@ -416,7 +416,7 @@ producer = "php_engine"
 consumers = ["php_jit", "php_sapi"]   # the face section is the one statement of the Tier face; kernels stay php_jit's (#1350)
 lock = "tier.lock"
 allowlist = true
-sections = ["face", "kernels"]
+sections = ["face", { name = "kernels", consumers = ["php_jit"] }]
 adr = "0006"
 [[seam]]
 name = "harness"                          # revision 16: xtask's public items are the instruments and the data; nothing in the workspace imports it
