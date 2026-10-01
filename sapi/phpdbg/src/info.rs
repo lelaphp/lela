@@ -22,8 +22,8 @@ pub fn breaks(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
 /// `PHPDBG_INFO(files)`.
 pub fn files(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let files = here
-        .standing()
-        .map_or_else(Vec::new, |(req, _)| tier::included_files(req));
+        .request()
+        .map_or_else(Vec::new, |req| tier::included_files(req));
     out::notice(format!("Included files: {}", files.len()).as_bytes());
     for file in files {
         out::writeln(format!("File: {}", lossy(&file)).as_bytes());
@@ -43,8 +43,8 @@ fn class_word(shape: tier::Shape) -> &'static str {
 /// `PHPDBG_INFO(classes)`.
 pub fn classes(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let classes = here
-        .standing()
-        .map_or_else(Vec::new, |(req, _)| tier::user_classes(req));
+        .request()
+        .map_or_else(Vec::new, |req| tier::user_classes(req));
     out::notice(format!("User Classes ({})", classes.len()).as_bytes());
     for class in classes {
         out::writeln(
@@ -75,8 +75,8 @@ pub fn classes(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 /// `PHPDBG_INFO(funcs)`.
 pub fn funcs(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let functions = here
-        .standing()
-        .map_or_else(Vec::new, |(req, _)| tier::user_functions(req));
+        .request()
+        .map_or_else(Vec::new, |req| tier::user_functions(req));
     out::notice(format!("User Functions ({})", functions.len()).as_bytes());
     for function in functions {
         out::write(format!("|-------- {}", lossy(&function.name)).as_bytes());
@@ -89,7 +89,7 @@ pub fn funcs(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 
 /// `PHPDBG_INFO(error)`.
 pub fn error(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
-    match here.standing().and_then(|(req, _)| tier::last_error(req)) {
+    match here.request().and_then(|req| tier::last_error(req)) {
         Some((message, file, line)) => out::writeln(
             format!(
                 "Last error: {} at {} line {line}",
@@ -213,9 +213,7 @@ pub fn globals(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 
 /// `PHPDBG_INFO(constants)`.
 pub fn constants(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
-    let rows = here
-        .standing()
-        .map_or_else(Vec::new, |(req, _)| tier::user_constants(req));
+    let rows = here.request().map_or_else(Vec::new, tier::user_constants);
     out::notice(format!("User-defined constants ({})", rows.len()).as_bytes());
     if !rows.is_empty() {
         out::out(b"Address            Refs    Type      Constant\n");

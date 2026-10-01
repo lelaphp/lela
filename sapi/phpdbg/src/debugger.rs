@@ -11,12 +11,13 @@
 //! as the loop ends it. Everywhere else the tier answers `Continue` and
 //! the program runs at the interpreter's speed.
 
+use php_ext::abi::AfterLog;
 use php_sapi::tier::{self, Flow, FrameRef, Opcode, Request, Site, Stepped, Tier};
 
 use crate::bp::At;
 use crate::out;
 use crate::prompt::{self, Here, Outcome};
-use crate::session::{self, Context, Origin, Plan, SeekKind, Session};
+use crate::session::{self, AfterRun, Context, Origin, Plan, SeekKind, Session};
 
 /// The tier the `phpdbg` binary binds.
 #[derive(Debug, Clone, Copy, Default)]
@@ -65,7 +66,11 @@ impl Tier for Debugger {
 /// prompt>
 /// ```
 fn entered(req: &mut Request, frame: FrameRef) -> Flow {
-    let Some(plan) = session::with(|s| s.plan).flatten() else {
+    let Some(plan) = session::with(|s| {
+        s.started = true;
+        s.plan
+    })
+    .flatten() else {
         return Flow::Continue;
     };
     match plan {
@@ -78,7 +83,7 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             let Some(mut session) = session::take() else {
                 return Flow::Continue;
             };
-            let outcome = prompt::idle_job(&mut session, req, frame);
+            let outcome = prompt::idle_job(&mut session, req);
             session::put(session);
             let _ = outcome;
             tier::exit(req);
@@ -107,9 +112,12 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
         }
     }
     session.executing = false;
-    let outcome = {
-        let mut here = Here::Held { req, frame };
-        prompt::interactive(&mut session, &mut here)
+    let outcome = loop {
+        let mut here = Here::Held { req: &mut *req };
+        let outcome = prompt::interactive(&mut session, &mut here);
+        if outcome != Outcome::NotRunning {
+            break outcome;
+        }
     };
     let stopped = session.stopped.is_some();
     session::put(session);
@@ -144,12 +152,86 @@ struct Standing {
 
 /// `phpdbg_execute_ex`'s loop over the serving entered at `frame`, the
 /// frame an outer serving was stepping put back as the session's once it
-/// ends.
+/// ends; where it ends in a fatal, the frames it stood on stand until the
+/// fatal is rendered, and so does the frame it was stepping, which the
+/// log's prompt stands in ([`fatal_logged`]).
 fn drive(req: &mut Request, frame: FrameRef) -> Flow {
     let outer = session::with(|s| s.standing).flatten();
     let flow = stepped(req, frame);
-    session::with(|s| s.standing = outer);
+    if !matches!(flow, Flow::Bail(_)) {
+        session::with(|s| s.standing = outer);
+    }
     flow
+}
+
+/// What `php_sapi_phpdbg_log_message` does once it has written a fatal's
+/// entry (`Z/sapi/phpdbg/phpdbg.c:731-770`), outside what `ev` serves and
+/// other than under `-rr`: the listing where the request stands, the frame the
+/// loop was stepping or `[no active file]` where nothing is executing,
+/// then, once the execution context's first compile is behind the
+/// session, a prompt there until a command goes on, after which the fatal
+/// ends the run; a prompt that stopped, `quit` among them, bails out of
+/// the log before php's `php_error_cb` writes the status.
+///
+/// ```php
+/// ini_set("memory_limit", "2M");
+/// $s = str_repeat("x", 4 << 20);
+/// echo "after\n";
+/// ```
+/// ```request phpdbg
+/// ev ini_set("display_errors", 0)
+/// ev ini_set("log_errors", 1)
+/// r
+/// ev 1
+/// c
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> 1
+/// prompt> 0
+/// prompt> [PHP Fatal error:  Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %SCRATCH%/witness.php on line 3]
+/// >00003: $s = str_repeat("x", 4 << 20);
+///  00004: echo "after\n";
+/// prompt> 1
+/// prompt> [Script ended normally]
+/// prompt>
+/// ```
+pub fn fatal_logged(req: &mut Request) -> AfterLog {
+    let Some(mut session) = session::take() else {
+        return AfterLog::Returned;
+    };
+    if session.origin == Origin::Eval || session.after_run == AfterRun::Quit {
+        session::put(session);
+        return AfterLog::Returned;
+    }
+    let standing = session
+        .standing
+        .filter(|_| session.executing)
+        .and_then(|frame| tier::position(req, frame).map(|position| (frame, position)));
+    let (file, line) = standing
+        .as_ref()
+        .map_or((prompt::NO_ACTIVE_FILE, 0), |(_, position)| {
+            (position.file.as_slice(), position.line)
+        });
+    crate::list::code(&session, file, line);
+    if !session.started {
+        session::put(session);
+        return AfterLog::Returned;
+    }
+    let mut here = match standing {
+        Some((frame, _)) => Here::Paused { req, frame },
+        None if session.exec.is_some() => Here::Held { req },
+        None => Here::Idle { req },
+    };
+    let outcome = prompt::interactive(&mut session, &mut here);
+    let stopped = session.stopped.is_some();
+    session::put(session);
+    if stopped || outcome == Outcome::Stopped {
+        return AfterLog::BailedOut;
+    }
+    let _ = crate::watch::changed(req);
+    AfterLog::Returned
 }
 
 /// The loop itself.
@@ -172,11 +254,18 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
         if let Some(stop) = checked(req, &at, &position) {
             return stop;
         }
+        if session::with(|s| s.thrown_into.take_if(|frame| *frame == at.frame).is_some())
+            .unwrap_or(false)
+        {
+            at.unwinding = true;
+            at.raised_line = position.line;
+        }
         let entry = tier::entry(req);
         let next = if at.unwinding {
             if at.frame != entry || tier::catches(req, at.frame) {
                 Next::Unwind
             } else {
+                left_with_nothing_pending(req);
                 Next::HandBack
             }
         } else if at.frame == entry && leaves(position.opcode) {
@@ -210,6 +299,53 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
             Ok(Stepped::Done) => return Flow::Continue,
             Err(fatal) => return Flow::Bail(fatal),
         }
+    }
+}
+
+/// php's `HANDLE_EXCEPTION` over the frame the serving entered, where
+/// nothing it takes is pending: what was thrown into the frame at a
+/// prompt was rendered there by `ev`, and the frame is left as a return
+/// of nothing, which ends the serving. The unwinder does not leave that
+/// frame, and the loop goes on in it where nothing is pending, so the
+/// serving is ended by the unwind exit, which unwinds no further and
+/// leaves the status as `ev` left it.
+///
+/// ```php
+/// $a = 1;
+/// $b = 2;
+/// $c = 3;
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// register intdiv
+/// b 3
+/// r
+/// intdiv 1
+/// ev 9
+/// c
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Registered intdiv]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:3]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003: $b = 2;
+///  00004: $c = 3;
+///  00005: echo "x\n";
+/// prompt>%s
+/// prompt>%s
+/// Fatal error: Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in %SCRATCH%/witness.php:3
+/// Stack trace:
+/// #0 %SCRATCH%/witness.php(3): intdiv(1)
+/// #1 {main}
+///   thrown in %SCRATCH%/witness.php on line 3
+/// prompt> [Script ended normally]
+/// prompt>
+/// ```
+fn left_with_nothing_pending(req: &mut Request) {
+    if tier::pending(req).is_none() && !tier::exiting(req) {
+        tier::exit(req);
     }
 }
 
@@ -467,7 +603,45 @@ fn caught_anywhere(req: &mut Request, frame: FrameRef) -> bool {
 
 /// `DO_INTERACTIVE`: the listing, but where `ev` serves (`list_code`),
 /// then the prompt with the throwable set aside; `Some` where the prompt
-/// ended the request. A breakpoint inside what `ev` serves stops there,
+/// ended the request. Where it goes on, the watches are compared as
+/// `phpdbg_interactive` ends (`phpdbg_print_changed_zvals`,
+/// `Z/sapi/phpdbg/phpdbg_prompt.c:1582`), and what changed is reported
+/// without a stop, as what `ev` wrote to a variable it reached through
+/// the frame's table, which the evaluation has given back by then.
+///
+/// ```php
+/// function f() {
+///   echo "in f\n";
+/// }
+/// $x = 1;
+/// f();
+/// echo "end\n";
+/// ```
+/// ```request phpdbg
+/// b 6
+/// r
+/// w $x
+/// ev $x = 5
+/// c
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:6]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:6, hits: 1]
+/// >00006: f();
+///  00007: echo "end\n";
+/// prompt> [Added watchpoint #0 for $x]
+/// prompt> 5
+/// prompt> [Breaking on watchpoint $x]
+/// Old value: 1
+/// New value: 5
+/// in f
+/// end
+/// [$x has been removed, removing watchpoint]
+/// [Script ended normally]
+/// prompt>
+/// ``` A breakpoint inside what `ev` serves stops there,
 /// at a prompt with no listing.
 ///
 /// ```php
@@ -499,6 +673,9 @@ fn interactive(req: &mut Request, frame: FrameRef, file: &[u8], line: u32) -> Op
     };
     let stopped = session.stopped.is_some();
     session::put(session);
+    if !stopped && outcome != Outcome::Stopped {
+        let _ = crate::watch::changed(req);
+    }
     tier::restore(req, aside);
     if stopped || outcome == Outcome::Stopped {
         tier::exit(req);

@@ -53,6 +53,12 @@ impl Request {
     /// request going on either way. A fatal is the `Err`, and ends the
     /// request.
     pub(crate) fn evaluate_in(&mut self, under: Under, code: &[u8]) -> Result<Evaluated, Fatal> {
+        // `zend_execute` serves nothing while something is pending
+        // (`Z/Zend/zend_vm_execute.h:121953`), so phpdbg's `ev` finds it
+        // still pending after `zend_eval_stringl` and renders it.
+        if self.is_pending() {
+            return Ok(self.evaluation_uncaught());
+        }
         match under {
             Under::Frame(frame) => self.evaluate_over(Some(frame), code),
             Under::Nothing => self.nothing_executing(|req| req.evaluate_over(None, code)),
@@ -92,6 +98,13 @@ impl Request {
             self.leave_frame(top);
         }
         served?;
+        if self.unwind_exit() {
+            // phpdbg's loop bails out at the unwind exit, and `ev`'s
+            // `zend_catch` writes the status 0 and leaves the exit
+            // pending, which the next evaluation renders.
+            self.exit_status = 0;
+            return Ok(Evaluated::Rendered);
+        }
         if self.is_pending() {
             return Ok(self.evaluation_uncaught());
         }
@@ -163,12 +176,13 @@ impl Request {
         frames
     }
 
-    /// What an evaluation left pending, rendered uncaught with
+    /// What stands pending after an evaluation, rendered uncaught with
     /// `E_DONT_BAIL`, so the request goes on with the status
-    /// `php_error_cb` gave it, 255, as php's `ev` leaves it.
+    /// `php_error_cb` gave it, 255, as php's `ev` leaves it; an exit is
+    /// given up and rendered as nothing, `zend_exception_error`'s
+    /// "nothing more to do".
     fn evaluation_uncaught(&mut self) -> Evaluated {
         if self.pending().is_none() {
-            // An exit, which php's `zend_try` catches.
             self.raised = None;
             return Evaluated::Rendered;
         }
@@ -222,10 +236,11 @@ impl Request {
     /// callee raised and an `exit` leave. That is caught where the host
     /// asked, as phpdbg's prompt catches it in its `zend_try`, and the
     /// request goes on: no fatal is what it ends in, and its status is
-    /// what an `exit` set or, after a fatal, what it was before, as php's
-    /// is where the prompt that `php_sapi_phpdbg_log_message` stands at
-    /// for the fatal's log is quit: `php_error_cb` writes 255 only once
-    /// the log returns.
+    /// what an `exit` set or what the fatal's `php_error_cb` wrote, 255,
+    /// unless the host bailed out of the log first
+    /// ([`crate::api::abi::AfterLog::BailedOut`]). From a frame, what the
+    /// callee left uncaught stays pending, as `zend_call_function` leaves
+    /// `EG(exception)` with a frame executing.
     pub(crate) fn call_by_name(
         &mut self,
         under: Under,
@@ -235,9 +250,12 @@ impl Request {
         match under {
             Under::Frame(_) => self.call_by_name_here(name, arguments),
             Under::Nothing => self.nothing_executing(|req| {
-                let status = req.exit_status;
                 let ending = req.ending.take();
-                let called = req.call_by_name_here(name, arguments);
+                let mut called = req.call_by_name_here(name, arguments);
+                if called == Called::Threw {
+                    let _ = req.exception_error(Level::Error);
+                    called = Called::Rendered;
+                }
                 let rendered = req.ending.is_some();
                 req.ending = ending;
                 if !req.bailing_out() {
@@ -245,7 +263,6 @@ impl Request {
                 }
                 req.catch_bailout();
                 if rendered {
-                    req.exit_status = status;
                     Called::Rendered
                 } else {
                     Called::Exited
@@ -277,9 +294,7 @@ impl Request {
                     return Called::Returned;
                 }
                 self.leave_pending(&thrown);
-                let _ = self.exception_error(Level::Error);
-                self.catch_bailout();
-                Called::Rendered
+                Called::Threw
             }
         }
     }

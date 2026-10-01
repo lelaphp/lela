@@ -23,30 +23,32 @@ pub enum Here<'a> {
         req: &'a mut Request,
         frame: FrameRef,
     },
-    /// The execution context compiled, standing at its first opline
-    /// before `run`.
-    Held {
-        req: &'a mut Request,
-        frame: FrameRef,
-    },
+    /// The execution context compiled before `run`, with nothing
+    /// executing: php's `PHPDBG_G(ops)` with `EG(current_execute_data)`
+    /// `NULL`.
+    Held { req: &'a mut Request },
     /// A request with no program of the context's, standing for one
-    /// command outside a run.
-    Idle {
-        req: &'a mut Request,
-        frame: FrameRef,
-    },
+    /// command outside a run, with nothing executing.
+    Idle { req: &'a mut Request },
     /// No request standing.
     Outside,
 }
 
 impl Here<'_> {
-    /// The request and the frame the prompt stands in, where one stands.
+    /// The request the prompt stands in, where one stands.
+    pub fn request(&mut self) -> Option<&mut Request> {
+        match self {
+            Here::Paused { req, .. } | Here::Held { req } | Here::Idle { req } => Some(&mut **req),
+            Here::Outside => None,
+        }
+    }
+
+    /// The request and the frame a run stopped in, `EG(current_execute_data)`,
+    /// where one is executing.
     pub fn standing(&mut self) -> Option<(&mut Request, FrameRef)> {
         match self {
-            Here::Paused { req, frame } | Here::Held { req, frame } | Here::Idle { req, frame } => {
-                Some((&mut **req, *frame))
-            }
-            Here::Outside => None,
+            Here::Paused { req, frame } => Some((&mut **req, *frame)),
+            Here::Held { .. } | Here::Idle { .. } | Here::Outside => None,
         }
     }
 
@@ -57,9 +59,7 @@ impl Here<'_> {
     fn serving(&mut self) -> Option<(&mut Request, tier::Under)> {
         match self {
             Here::Paused { req, frame } => Some((&mut **req, tier::Under::Frame(*frame))),
-            Here::Held { req, .. } | Here::Idle { req, .. } => {
-                Some((&mut **req, tier::Under::Nothing))
-            }
+            Here::Held { req } | Here::Idle { req } => Some((&mut **req, tier::Under::Nothing)),
             Here::Outside => None,
         }
     }
@@ -80,6 +80,11 @@ impl Here<'_> {
 pub enum Outcome {
     /// The program goes on.
     Resume,
+    /// A command that goes on with the program where none is running:
+    /// `[Not running]` written and `PHPDBG_NEXT` answered, which the
+    /// prompt php stands at inside its log leaves by, and every other
+    /// prompt stands at again.
+    NotRunning,
     /// The request ends: the session's `stopped` says why.
     Stopped,
 }
@@ -144,7 +149,7 @@ pub fn interactive(s: &mut Session, here: &mut Here<'_>) -> Outcome {
                         return Outcome::Resume;
                     }
                     out::error(b"Not running");
-                    break;
+                    return Outcome::NotRunning;
                 }
             }
         }
@@ -173,11 +178,11 @@ pub fn run_queued(s: &mut Session) {
 }
 
 /// One command, the one the idle request stands for.
-pub fn idle_job(s: &mut Session, req: &mut Request, frame: FrameRef) -> Outcome {
+pub fn idle_job(s: &mut Session, req: &mut Request) -> Outcome {
     let Some(command) = s.job.take() else {
         return Outcome::Resume;
     };
-    let mut here = Here::Idle { req, frame };
+    let mut here = Here::Idle { req };
     let _ = execute(s, &mut here, &command);
     Outcome::Resume
 }
@@ -489,10 +494,32 @@ fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
 /// newline, but where the call ended in a fatal or an `exit`: with
 /// nothing executing, what it leaves uncaught is rendered as a fatal.
 /// Where `log_errors` logs that fatal, `php_sapi_phpdbg_log_message`
-/// writes it and, outside `ev`, follows it with the listing where the
-/// request stands, `[no active file]` where nothing does, and a prompt
-/// (`Z/sapi/phpdbg/phpdbg.c:731-770`). That prompt reads what this one
-/// would and answers it alike, so the prompt goes on here.
+/// writes it and follows it with the listing where the request stands,
+/// `[no active file]` where nothing does, and a prompt
+/// ([`crate::debugger::fatal_logged`]). The status is the 255
+/// `php_error_cb` writes after the log, which a `quit` at that prompt
+/// bails out before, and which the display regime, logging nothing,
+/// writes at once.
+///
+/// ```php
+/// $a = 1;
+/// ```
+/// ```request phpdbg
+/// register intdiv
+/// intdiv 1
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Registered intdiv]
+/// prompt>%s
+/// Fatal error: Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in [no active file]:0
+/// Stack trace:
+/// #0 [internal function]: intdiv(1)
+/// #1 {main}
+///   thrown in [no active file] on line 0
+/// prompt>
+/// ```
 ///
 /// ```php
 /// $a = 1;
@@ -546,16 +573,13 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
         crate::host::idle(s, Command::Params(params.to_vec()));
         return true;
     };
-    let logged = out::logged();
     match crate::session::lend(s, || tier::call(req, under, &lowered, &arguments)) {
         tier::Called::Returned => out::out(b"\n"),
-        tier::Called::Rendered if s.origin == Origin::Program && out::logged() != logged => {
-            let (file, line) = match under {
-                tier::Under::Frame(frame) => tier::position(req, frame)
-                    .map_or((Vec::new(), 0), |position| (position.file, position.line)),
-                tier::Under::Nothing => (NO_ACTIVE_FILE.to_vec(), 0),
-            };
-            crate::list::code(s, &file, line);
+        tier::Called::Threw => {
+            if let tier::Under::Frame(frame) = under {
+                s.thrown_into = Some(frame);
+            }
+            out::out(b"\n");
         }
         tier::Called::Rendered | tier::Called::Exited => {}
     }
@@ -563,7 +587,7 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
 }
 
 /// What `zend_get_executed_filename` names where no frame stands.
-const NO_ACTIVE_FILE: &[u8] = b"[no active file]";
+pub const NO_ACTIVE_FILE: &[u8] = b"[no active file]";
 
 // ------------------------------------------------------------ commands
 
@@ -754,6 +778,26 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// prompt>
 /// ```
 ///
+/// An `exit` it serves leaves the status 0, as `ev`'s `zend_catch`
+/// writes it, and stays pending, so the next `ev` serves nothing:
+/// `zend_execute` refuses to start with something pending, and what is
+/// pending is rendered, which for an exit is nothing.
+///
+/// ```php
+/// $a = 1;
+/// ```
+/// ```request phpdbg
+/// ev exit(3)
+/// ev 4
+/// ev 5
+/// q
+/// ```
+/// ```expect exit=0
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> prompt> prompt> 5
+/// prompt>
+/// ```
+///
 /// Where `log_errors` logs it, the log is `php_sapi_phpdbg_log_message`'s,
 /// through `phpdbg_error`, and under `PHPDBG_IN_EVAL` nothing follows.
 ///
@@ -783,9 +827,11 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
         return Ret::Success;
     };
     let stepping = std::mem::take(&mut s.stepping);
+    crate::watch::freeze(s, req);
     s.origin = Origin::Eval;
     let evaluated = crate::session::lend(s, || tier::evaluate(req, under, code));
     s.origin = Origin::Program;
+    crate::watch::thaw(s);
     s.stepping |= stepping;
     match evaluated {
         Ok(tier::Evaluated::Printed(printed)) => {
@@ -922,7 +968,7 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         out::error(b"No execution context set");
         return Ret::Success;
     };
-    let Some((req, _)) = here.standing() else {
+    let Some(req) = here.request() else {
         return Ret::Success;
     };
     let entry = tier::entry(req);
@@ -1008,9 +1054,7 @@ fn print_class(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Str(name)) = params.first() else {
         return Ret::Failure;
     };
-    let class = here
-        .standing()
-        .and_then(|(req, _)| tier::class_named(req, name));
+    let class = here.request().and_then(|req| tier::class_named(req, name));
     let Some(class) = class else {
         out::error(format!("The class {} could not be found", lossy(name)).as_bytes());
         return Ret::Success;
@@ -1053,7 +1097,7 @@ fn print_method(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Method { class, name }) = params.first() else {
         return Ret::Failure;
     };
-    let found = here.standing().map_or(tier::Named::NoClass, |(req, _)| {
+    let found = here.request().map_or(tier::Named::NoClass, |req| {
         tier::method_named(req, class, name)
     });
     match found {
@@ -1089,7 +1133,7 @@ fn print_func(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Str(name)) = params.first() else {
         return Ret::Failure;
     };
-    let found = here.standing().map_or(tier::Named::NoFunction, |(req, _)| {
+    let found = here.request().map_or(tier::Named::NoFunction, |req| {
         tier::function_named(req, name)
     });
     match found {
@@ -1211,8 +1255,8 @@ fn opline_break(
 ) {
     let id = s.breaks.next_id();
     let opline = u32::try_from(num).unwrap_or(u32::MAX);
-    let found = match here.standing() {
-        Some((req, _)) => match class {
+    let found = match here.request() {
+        Some(req) => match class {
             Some(class) => tier::method_named(req, class, name),
             None => tier::function_named(req, name),
         },
@@ -1351,9 +1395,8 @@ fn clean(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         return Ret::Success;
     }
     out::out(b"Cleaning Execution Environment\n");
-    let [classes, functions, constants, includes] = here
-        .standing()
-        .map_or([0; 4], |(req, _)| tier::table_sizes(req));
+    let [classes, functions, constants, includes] =
+        here.request().map_or([0; 4], |req| tier::table_sizes(req));
     out::writeln(format!("Classes    {classes}").as_bytes());
     out::writeln(format!("Functions  {functions}").as_bytes());
     out::writeln(format!("Constants  {constants}").as_bytes());
@@ -1381,7 +1424,26 @@ fn help(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     Ret::Success
 }
 
-/// `PHPDBG_COMMAND(register)`.
+/// `PHPDBG_COMMAND(register)`: the name looked up in the function table
+/// of the request standing, which with none standing is served a request
+/// of its own, as `ev` is there, where php's `EG(function_table)` holds
+/// the internal functions between its requests: here, a context the
+/// compiler refused.
+///
+/// ```php
+/// function (
+/// ```
+/// ```request phpdbg
+/// register intdiv
+/// intdiv 7 2
+/// q
+/// ```
+/// ```expect exit=255
+/// Parse error: Unclosed '(' in %SCRATCH%/witness.php on line 2
+/// prompt> [Registered intdiv]
+/// prompt>%s
+/// prompt>
+/// ```
 fn register(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Str(name)) = params.first() else {
         return Ret::Failure;
@@ -1393,10 +1455,17 @@ fn register(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         );
         return Ret::Success;
     }
-    let exists = here
-        .standing()
-        .is_some_and(|(req, _)| tier::function_exists(req, &lowered));
-    if exists {
+    let Some(req) = here.request() else {
+        crate::host::idle(
+            s,
+            Command::Params(vec![
+                Param::Str(b"register".to_vec()),
+                Param::Str(name.clone()),
+            ]),
+        );
+        return Ret::Success;
+    };
+    if tier::function_exists(req, &lowered) {
         out::notice(format!("Registered {}", lossy(&lowered)).as_bytes());
         s.registered.push(lowered);
     } else {

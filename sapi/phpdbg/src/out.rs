@@ -16,14 +16,6 @@ thread_local! {
     /// A write of the debugger's own through the program's output is
     /// under way, [`interruptible`].
     static INTERRUPTIBLE: Cell<bool> = const { Cell::new(false) };
-    /// How many entries the log has taken.
-    static LOGGED: Cell<u64> = const { Cell::new(0) };
-}
-
-/// How many entries the log has taken: what tells whether a call's
-/// fatal reached `php_sapi_phpdbg_log_message`, which `log_errors` says.
-pub fn logged() -> u64 {
-    LOGGED.get()
 }
 
 /// `f`, a write of the debugger's own that goes through the program's
@@ -130,9 +122,9 @@ impl OutputSink for Sink {
     fn send_headers(&mut self, _head: &ResponseHead) {}
 
     /// `php_sapi_phpdbg_log_message`: the entry through `phpdbg_error`
-    /// (`Z/sapi/phpdbg/phpdbg.c:731-770`).
+    /// (`Z/sapi/phpdbg/phpdbg.c:731-770`); what follows a fatal's is
+    /// [`crate::debugger::fatal_logged`].
     fn log(&mut self, entry: &[u8]) {
-        LOGGED.set(LOGGED.get() + 1);
         error(entry);
     }
 

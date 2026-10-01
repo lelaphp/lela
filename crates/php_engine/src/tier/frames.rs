@@ -246,12 +246,18 @@ pub fn set_aside(req: &mut Request) -> Aside {
     Aside(req.take_raised())
 }
 
-/// What was set aside put back; what the request had pending meanwhile
-/// is given up for it.
+/// What was set aside put back, and what the request had pending
+/// meanwhile given up for it, as `DO_INTERACTIVE` puts back the
+/// throwable it cleared (`Z/sapi/phpdbg/phpdbg_prompt.c:1596-1623`);
+/// where nothing was set aside, what the tier's own serving left pending
+/// stays, as php's prompt leaves `EG(exception)` where it found none.
 // Taking the receipt by value is the point: what was set aside is put
 // back once.
 #[allow(clippy::needless_pass_by_value)]
 pub fn restore(req: &mut Request, aside: Aside) {
+    if aside.0.is_none() {
+        return;
+    }
     if let Some(Raised::Throwable(object)) = req.take_raised() {
         req.release(object.as_value());
     }
@@ -305,6 +311,12 @@ pub fn function_exists(req: &Request, name: &[u8]) -> bool {
 pub enum Called {
     /// It returned, or raised a fatal, which is the request's.
     Returned,
+    /// Made from a frame, it left a throwable uncaught, which stays
+    /// pending on the request as `zend_call_function` leaves
+    /// `EG(exception)` with a frame executing; that frame stands where
+    /// php's `zend_throw_exception_internal` leaves it, at
+    /// `EG(exception_op)`, so it unwinds when the tier goes on in it.
+    Threw,
     /// What it left uncaught was rendered as `zend_exception_error`
     /// renders it at `E_ERROR`, or the fatal it raised was, and the
     /// fatal was caught where the tier asked, as php's `zend_try` there
@@ -317,8 +329,9 @@ pub enum Called {
 
 /// The function named `name` called with `arguments` on what `under`
 /// names, as `zend_call_known_function` calls it, what it returns given
-/// up; a throwable it leaves is rendered uncaught with `E_DONT_BAIL`; a
-/// fatal it raised is the request's, which ends with it.
+/// up; a throwable it leaves stays pending from a frame and is rendered
+/// uncaught with nothing executing; a fatal it raised is the request's,
+/// which ends with it.
 pub fn call(req: &mut Request, under: Under, name: &[u8], arguments: &[Argument]) -> Called {
     req.call_by_name(under, name, arguments)
 }
