@@ -5787,9 +5787,15 @@ echo f(1), C::s(), $o->m(1), $o->p;
         // array does not, since one reads `precision` and the other
         // warns, an `(int)` of a double past the long's range does not,
         // no cast over a NAN does, and there is no `(object)` arm.
-        let (unit, _strings) = unit_and_strings(
+        let (unit, mut strings) = unit_and_strings(
             b"<?php\nclass C { const B = (bool)\"a\"; const I = (int)\"12abc\"; const F = (float)\"1e3\"; const S = (string)true; const A = (array)1; }\n",
         );
+        let array = strings
+            .constant_array(&[(php_heap::Key::Long(0), php_heap::Zval::long(1))])
+            .map(php_heap::Zval::array)
+            .ok()
+            .and_then(php_unit::decl::ImmutableArray::new)
+            .map_or(ConstExpr::Null, ConstExpr::ImmutableArray);
         assert_eq!(
             unit.classes[0]
                 .constants
@@ -5801,10 +5807,7 @@ echo f(1), C::s(), $o->m(1), $o->p;
                 ConstExpr::long(12),
                 ConstExpr::Double(1000.0),
                 ConstExpr::Str(b"1".as_slice().into()),
-                ConstExpr::Array {
-                    elements: vec![(Some(ConstExpr::long(0)), ConstExpr::long(1))],
-                    line: 2,
-                },
+                array,
             ]
         );
     }

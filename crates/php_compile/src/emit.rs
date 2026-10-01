@@ -103,8 +103,8 @@ use php_heap::{
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
     ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind,
-    MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, TraitAdaptation,
-    TraitMethodRef, Type, Visibility,
+    ImmutableArray, MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl,
+    TraitAdaptation, TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody,
@@ -483,6 +483,9 @@ pub(crate) struct Emit<'a> {
     /// How the constant expression [`Self::const_expr`] builds is
     /// evaluated, php's `allow_dynamic` ([`Evaluation`]).
     const_evaluation: Evaluation,
+    /// Whether [`Self::persistent`] substitutes a persistent constant,
+    /// which it does but over a parameter's default ([`Substitution`]).
+    substitution: Substitution,
     constants: Vec<Zval>,
     /// [`OpArray::const_exprs`]: the constant expressions a constant of
     /// kind `IS_CONSTANT_AST` indexes, in the order they were added.
@@ -1070,13 +1073,7 @@ fn valid_default(ty: &Type, default: &mut ConstExpr) -> Result<(), ZvalType> {
         ConstExpr::Long { .. } => ZvalType::Long,
         ConstExpr::Double(_) => ZvalType::Double,
         ConstExpr::Str(_) => ZvalType::String,
-        ConstExpr::Array { elements, .. }
-            if elements
-                .iter()
-                .all(|(key, value)| key.as_ref().is_none_or(is_literal) && is_literal(value)) =>
-        {
-            ZvalType::Array
-        }
+        ConstExpr::ImmutableArray(_) => ZvalType::Array,
         _ => return Ok(()),
     };
     if ty.contains_code(kind as u8) {
@@ -1104,25 +1101,13 @@ fn zval_type_name(kind: ZvalType) -> &'static str {
 }
 
 /// The `ConstExpr` a folded constant is, which a declaration carries in
-/// the written form `zend_eval_const_expr` left it; `None` for a value
-/// no constant expression of the unit format holds. An array is the
-/// keys and values it folded to, each key written out, since a
-/// `ConstExpr` carries no zval and `(array)` folds to one, at the `line`
-/// of the expression that folded.
-fn folded_const_expr(folded: Zval, line: u32) -> Option<ConstExpr> {
-    if let Some(array) = folded.as_arr() {
-        let mut items = Vec::with_capacity(array.len());
-        for (key, held) in &array {
-            let key = match key {
-                Key::Long(n) => ConstExpr::long(n),
-                Key::Str(s) => ConstExpr::Str(s.bytes().into()),
-            };
-            items.push((Some(key), folded_const_expr(held, line)?));
-        }
-        return Some(ConstExpr::Array {
-            elements: items,
-            line,
-        });
+/// the form `zend_eval_const_expr` left it; `None` for a value no
+/// constant expression of the unit format holds. An array is the
+/// constant array it folded to, laid down where the unit's strings are,
+/// which is where every array this compiler folds is laid.
+fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
+    if folded.as_arr().is_some() {
+        return ImmutableArray::new(folded).map(ConstExpr::ImmutableArray);
     }
     Some(match folded.kind() {
         ZvalType::Null => ConstExpr::Null,
@@ -1133,23 +1118,6 @@ fn folded_const_expr(folded: Zval, line: u32) -> Option<ConstExpr> {
         ZvalType::String => ConstExpr::Str(folded.as_str()?.bytes().into()),
         _ => return None,
     })
-}
-
-/// Whether a constant expression is a value `zend_const_expr_to_zval`
-/// folded, which a typed default is checked against where it is
-/// written, and not a name still to evaluate (`Z_CONSTANT`).
-fn is_literal(expr: &ConstExpr) -> bool {
-    match expr {
-        ConstExpr::Null
-        | ConstExpr::Bool(_)
-        | ConstExpr::Long { .. }
-        | ConstExpr::Double(_)
-        | ConstExpr::Str(_) => true,
-        ConstExpr::Array { elements, .. } => elements
-            .iter()
-            .all(|(key, value)| key.as_ref().is_none_or(is_literal) && is_literal(value)),
-        _ => false,
-    }
 }
 
 /// `zend_dirname` (`Z/Zend/zend_compile.c:2176`) on a path that is no
@@ -1229,6 +1197,7 @@ pub(crate) fn unit(
         memo: memo::Memo::default(),
         znodes: Vec::new(),
         const_evaluation: Evaluation::Once,
+        substitution: Substitution::Persistent,
         constants: Vec::new(),
         const_exprs: Vec::new(),
         vars: Vec::new(),
@@ -4288,7 +4257,8 @@ impl Emit<'_> {
             let cv = self.parameter_cv(parameter, number)?;
             self.parameter_refused(parameter, variadic_seen, is_ctor)?;
             variadic_seen = parameter.variadic;
-            let mut folded = self.parameter_default(parameter)?;
+            let mut folded =
+                self.without_persistent_substitution(|this| this.parameter_default(parameter))?;
             let promoted_target = if parameter.promote.is_some() {
                 attributes::TARGET_PROPERTY
             } else {
@@ -4326,18 +4296,7 @@ impl Emit<'_> {
                     out: cv,
                     ..Opline::default()
                 });
-                let written = parameter
-                    .default
-                    .map(|expr| self.dynamic_const_expr(expr))
-                    .transpose()?;
-                // `zend_is_valid_default_value` converted an int under
-                // a type with `float` and no `int` where it stood.
-                match (written, folded.kind()) {
-                    (Some(ConstExpr::Long { value: n, .. }), ZvalType::Double) => {
-                        Some(ConstExpr::Double(double_of(Zval::long(n))))
-                    }
-                    (written, _) => written,
-                }
+                self.declared_default(parameter, folded)?
             } else {
                 self.push(Opline {
                     opcode: if parameter.variadic {
@@ -4430,6 +4389,45 @@ impl Emit<'_> {
             ),
         );
         Ok((Some(Type::Nullable(Box::new(ty))), true))
+    }
+
+    /// The default a parameter's declaration keeps beside its
+    /// `RECV_INIT` constant `folded`, which is the default php keeps:
+    /// an array it folded to is the declaration's too, and anything else
+    /// is the expression as written, compiled as `zend_compile_params`
+    /// compiles it.
+    fn declared_default(
+        &mut self,
+        parameter: &walk::Parameter,
+        folded: Zval,
+    ) -> Result<Option<ConstExpr>, CompileError> {
+        if let Some(array) = ImmutableArray::new(folded) {
+            return Ok(Some(ConstExpr::ImmutableArray(array)));
+        }
+        let written = self.without_persistent_substitution(|this| {
+            parameter
+                .default
+                .map(|expr| this.dynamic_const_expr(expr))
+                .transpose()
+        })?;
+        // `zend_is_valid_default_value` converted an int under a type
+        // with `float` and no `int` where it stood.
+        Ok(match (written, folded.kind()) {
+            (Some(ConstExpr::Long { value: n, .. }), ZvalType::Double) => {
+                Some(ConstExpr::Double(double_of(Zval::long(n))))
+            }
+            (written, _) => written,
+        })
+    }
+
+    /// `f` under php's `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`
+    /// ([`Substitution::NoPersistent`]), which `zend_compile_params` sets
+    /// over a parameter's default and restores after it.
+    fn without_persistent_substitution<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::replace(&mut self.substitution, Substitution::NoPersistent);
+        let done = f(self);
+        self.substitution = outer;
+        done
     }
 
     /// A parameter's default as `zend_compile_params` folds it, under
@@ -7048,9 +7046,14 @@ impl Emit<'_> {
             // fallback the engine's fetch makes. It moves
             // `CG(zend_lineno)` to the name's line, which the opline
             // after the walk is emitted at.
+            // `zend_eval_const_expr`'s `ZEND_AST_CONST` arm comes first:
+            // the three special names and a persistent constant
+            // `zend_try_ct_eval_const` substitutes
+            // ([`Self::named_constant`]), which a parameter's default
+            // does not ([`Substitution::NoPersistent`]).
             tree::Expr::NameRef(token) => {
-                if let Some(value) = self.constant_name(token) {
-                    return self.folded(value, line);
+                if let Some(value) = self.named_constant(token)? {
+                    return self.folded(value);
                 }
                 self.line = line;
                 let written = self.text(token).to_vec();
@@ -7068,7 +7071,7 @@ impl Emit<'_> {
                     return Ok(ConstExpr::ScopeClass);
                 }
                 let folded = self.magic_node(id)?;
-                self.folded(folded, line)
+                self.folded(folded)
             }
             // `zend_compile_const_expr_class_const`: the class named as
             // written, resolved in the namespace, and the constant's
@@ -7145,7 +7148,7 @@ impl Emit<'_> {
                 // it (`zend_compile_const_expr_class_name`).
                 Scoped::ClassName { class } => {
                     if let Some(folded) = self.resolved_class_name(class)? {
-                        return self.folded(folded, line);
+                        return self.folded(folded);
                     }
                     let ClassSpec::Name(token) = class else {
                         return Err(self.compile_error(
@@ -7173,9 +7176,11 @@ impl Emit<'_> {
                     })
                 }
             },
-            // `ZEND_AST_ARRAY` in a constant expression stays the tree
-            // it was written as, each element's key and value, and a
-            // `...` its `ZEND_AST_UNPACK` with no key; a `&` is what
+            // `ZEND_AST_ARRAY` in a constant expression is the unit's
+            // constant array where every key and value folded
+            // ([`Self::folded_array`]), and otherwise stays the tree it
+            // was written as, each element's key and value, and a `...`
+            // its `ZEND_AST_UNPACK` with no key; a `&` is what
             // `zend_is_allowed_in_const_expr` refuses.
             tree::Expr::ArrayExpr(id) => {
                 let elements = self.elements_of(&tree[id].array_elements.clone())?;
@@ -7206,6 +7211,9 @@ impl Emit<'_> {
                         }
                     });
                 }
+                if let Some(array) = self.folded_array(&items)? {
+                    return Ok(ConstExpr::ImmutableArray(array));
+                }
                 Ok(ConstExpr::Array {
                     elements: items,
                     line,
@@ -7219,7 +7227,7 @@ impl Emit<'_> {
             // expression of its own.
             tree::Expr::UnaryExpr(id) => {
                 if let Some(folded) = self.eval_const(expr)? {
-                    return self.folded(folded, line);
+                    return self.folded(folded);
                 }
                 let node = &tree[id];
                 let operand = self.required(node.operand, "a unary operator")?;
@@ -7239,7 +7247,7 @@ impl Emit<'_> {
             }
             tree::Expr::BinaryExpr(id) => {
                 if let Some(folded) = self.eval_const(expr)? {
-                    return self.folded(folded, line);
+                    return self.folded(folded);
                 }
                 let node = &tree[id];
                 let left = node.lhs;
@@ -7273,7 +7281,7 @@ impl Emit<'_> {
             // `zend_eval_const_expr` folds it and kept otherwise.
             tree::Expr::TernaryExpr(id) => {
                 if let Some(folded) = self.eval_const(expr)? {
-                    return self.folded(folded, line);
+                    return self.folded(folded);
                 }
                 let node = &tree[id];
                 let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
@@ -7300,7 +7308,7 @@ impl Emit<'_> {
                     return Err(self.compile_error("Cannot use [] for reading"));
                 };
                 if let Some(folded) = self.eval_const(expr)? {
-                    return self.folded(folded, line);
+                    return self.folded(folded);
                 }
                 Ok(ConstExpr::Dim {
                     container: Box::new(self.const_expr(base)?),
@@ -7354,7 +7362,7 @@ impl Emit<'_> {
                     );
                 }
                 if let Some(folded) = self.eval_const(expr)? {
-                    return self.folded(folded, line);
+                    return self.folded(folded);
                 }
                 let operand = self.required(operand, "a cast")?;
                 Ok(ConstExpr::Cast {
@@ -7397,16 +7405,70 @@ impl Emit<'_> {
             // the unit the evaluation has no way to name, and a node php's
             // walk refuses that folds to nothing.
             _ => match self.eval_const(expr)? {
-                Some(folded) => self.folded(folded, line),
+                Some(folded) => self.folded(folded),
                 None => Err(self.fatal("a constant expression this compiler cannot read yet")),
             },
         }
     }
 
+    /// `zend_try_ct_eval_array` over the elements [`Self::const_expr`]
+    /// kept for an array: where every key and value is a value, the one
+    /// constant array laid down where the unit's strings are
+    /// ([`Self::lay_array`]), its keys written as php writes them, which
+    /// php's table of defaults holds as a value; nothing where an
+    /// element is still to evaluate or a key leaves the array to the
+    /// request.
+    fn folded_array(
+        &mut self,
+        items: &[(Option<ConstExpr>, ConstExpr)],
+    ) -> Result<Option<ImmutableArray>, CompileError> {
+        let mut folded = Vec::with_capacity(items.len());
+        for (key, value) in items {
+            if let ConstExpr::Unpack(inner) = value {
+                let Some(inner) = self.value_of(inner)? else {
+                    return Ok(None);
+                };
+                folded.push(FoldedElement::Unpack(inner));
+                continue;
+            }
+            let key = match key {
+                Some(key) => match self.value_of(key)? {
+                    Some(key) => Some(key),
+                    None => return Ok(None),
+                },
+                None => None,
+            };
+            let Some(value) = self.value_of(value)? else {
+                return Ok(None);
+            };
+            folded.push(FoldedElement::Pair(key, value));
+        }
+        let Some(entries) = self.keyed_entries(folded)? else {
+            return Ok(None);
+        };
+        let array = self.lay_array(&entries)?;
+        Ok(ImmutableArray::new(array))
+    }
+
+    /// The value a folded constant expression stands for, a string
+    /// interned where the unit's strings are; none for one still to
+    /// evaluate.
+    fn value_of(&mut self, expr: &ConstExpr) -> Result<Option<Zval>, CompileError> {
+        Ok(Some(match expr {
+            ConstExpr::Null => Zval::null(),
+            ConstExpr::Bool(b) => Zval::bool(*b),
+            ConstExpr::Long { value, .. } => Zval::long(*value),
+            ConstExpr::Double(d) => Zval::double(*d),
+            ConstExpr::Str(bytes) => self.string(bytes)?,
+            ConstExpr::ImmutableArray(array) => array.value(),
+            _ => return Ok(None),
+        }))
+    }
+
     /// A value `zend_eval_const_expr` folded, as the constant expression
-    /// a declaration keeps, at the `line` of the expression that folded.
-    fn folded(&self, folded: Zval, line: u32) -> Result<ConstExpr, CompileError> {
-        folded_const_expr(folded, line)
+    /// a declaration keeps.
+    fn folded(&self, folded: Zval) -> Result<ConstExpr, CompileError> {
+        folded_const_expr(folded)
             .ok_or_else(|| self.fatal("a constant expression this compiler cannot read yet"))
     }
 
@@ -7750,7 +7812,7 @@ impl Emit<'_> {
     /// which its walk allows and this does not read.
     fn const_refused(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
         match self.constant_expr(expr) {
-            Ok(folded) => self.folded(folded, expr.line(self.parsed)),
+            Ok(folded) => self.folded(folded),
             Err(refused) if unread(&refused) => Err(refused),
             Err(refused) if refused.level == Level::CompileError => Err(refused),
             Err(_) => Err(self.compile_error("Constant expression contains invalid operations")),
@@ -7963,7 +8025,7 @@ impl Emit<'_> {
         let attributes = self.member_attributes(&written, attributes::TARGET_CONST, 0, first)?;
         // The value `ZEND_DECLARE_ATTRIBUTED_CONST` evaluates, which a
         // value the compiler could not fold is the tree of.
-        let Some(value) = unevaluated.or_else(|| folded_const_expr(value, first)) else {
+        let Some(value) = unevaluated.or_else(|| folded_const_expr(value)) else {
             return Err(
                 self.fatal("InternalError: an attributed `const` whose value folded to no scalar")
             );
@@ -14972,13 +15034,8 @@ impl Emit<'_> {
         &mut self,
         elements: &[NodeId<tree::ArrayElement>],
     ) -> Result<Option<Vec<(Key, Zval)>>, CompileError> {
-        /// One element folded, before its key is written.
-        enum Fold {
-            Pair(Option<Zval>, Zval),
-            Unpack(Zval),
-        }
         let elements = self.elements_of(elements)?;
-        let mut folded: Vec<Fold> = Vec::with_capacity(elements.len());
+        let mut folded: Vec<FoldedElement> = Vec::with_capacity(elements.len());
         for element in elements {
             let (key, value) = match element {
                 Element::Value { key, value } => (key, value),
@@ -14987,7 +15044,7 @@ impl Emit<'_> {
                     let Some(value) = self.eval_const(value)? else {
                         return Ok(None);
                     };
-                    folded.push(Fold::Unpack(value));
+                    folded.push(FoldedElement::Unpack(value));
                     continue;
                 }
             };
@@ -15001,13 +15058,23 @@ impl Emit<'_> {
             let Some(value) = self.eval_const(value)? else {
                 return Ok(None);
             };
-            folded.push(Fold::Pair(key, value));
+            folded.push(FoldedElement::Pair(key, value));
         }
+        self.keyed_entries(folded)
+    }
+
+    /// `zend_try_ct_eval_array`'s second pass over elements whose every
+    /// key and value folded: each key written as php writes it, a `...`
+    /// spread, and nothing where a key leaves the array to the request.
+    fn keyed_entries(
+        &self,
+        folded: Vec<FoldedElement>,
+    ) -> Result<Option<Vec<(Key, Zval)>>, CompileError> {
         let mut entries: Vec<(Key, Zval)> = Vec::with_capacity(folded.len());
         let mut next_free = i64::MIN;
         for element in folded {
             let (key, value) = match element {
-                Fold::Unpack(value) => {
+                FoldedElement::Unpack(value) => {
                     let Some(array) = value.as_arr() else {
                         return Err(self.compile_error(format!(
                             "Only arrays and Traversables can be unpacked, {} given",
@@ -15026,7 +15093,7 @@ impl Emit<'_> {
                     }
                     continue;
                 }
-                Fold::Pair(key, value) => (key, value),
+                FoldedElement::Pair(key, value) => (key, value),
             };
             let key = match key {
                 None => match next_index(&entries, next_free) {
@@ -17933,6 +18000,48 @@ fn unread(refused: &CompileError) -> bool {
     refused.level == Level::Parse && refused.message.ends_with("this compiler cannot read yet")
 }
 
+/// Which constants php's compiler substitutes where they are named,
+/// `CG(compiler_options)`'s bits over `zend_try_ct_eval_const`.
+///
+/// A parameter's default keeps the constant it names, and every other
+/// constant expression is the persistent constant's value, an
+/// attribute's argument among them:
+///
+/// ```php
+/// function f($a = -PHP_INT_MAX, $b = [PHP_INT_SIZE], $c = PHP_INT_SIZE) {}
+/// foreach ((new ReflectionFunction('f'))->getParameters() as $p) echo $p, "\n";
+/// #[Attribute] class At { function __construct(public $v) {} }
+/// #[At([PHP_INT_SIZE, PHP_EOL])] class B {}
+/// echo (new ReflectionClass('B'))->getAttributes()[0];
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = -PHP_INT_MAX ]
+/// Parameter #1 [ <optional> $b = [PHP_INT_SIZE] ]
+/// Parameter #2 [ <optional> $c = PHP_INT_SIZE ]
+/// Attribute [ At ] {
+///   - Arguments [1] {
+///     Argument #0 [ [8, '\n'] ]
+///   }
+/// }
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Substitution {
+    /// A persistent constant is its value where it is named, as php
+    /// compiles every constant expression but a parameter's default.
+    Persistent,
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`, which
+    /// `zend_compile_params` sets while it compiles a parameter's
+    /// default, so the default keeps the constant it names.
+    NoPersistent,
+}
+
+/// One element of an array whose key and value folded, before its key
+/// is written ([`Emit::keyed_entries`]).
+enum FoldedElement {
+    Pair(Option<Zval>, Zval),
+    Unpack(Zval),
+}
+
 /// `nNextFreeElement` over the entries a constant array folded so far:
 /// one past the largest integer key, 0 before any, and none where the
 /// next index is taken past `ZEND_LONG_MAX`, which leaves the array to
@@ -18065,6 +18174,9 @@ impl Emit<'_> {
     /// declared value that is no scalar is not folded, as php folds none
     /// whose value is not yet evaluated.
     pub(crate) fn persistent(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
+        if self.substitution == Substitution::NoPersistent {
+            return Ok(None);
+        }
         let mut at = 0;
         while name.get(at) == Some(&b'\\') {
             at += 1;
@@ -18668,6 +18780,7 @@ mod tests {
             memo: memo::Memo::default(),
             znodes: Vec::new(),
             const_evaluation: Evaluation::Once,
+            substitution: Substitution::Persistent,
             constants: Vec::new(),
             const_exprs: Vec::new(),
             vars: Vec::new(),
