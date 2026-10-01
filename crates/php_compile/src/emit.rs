@@ -483,6 +483,9 @@ pub(crate) struct Emit<'a> {
     /// How the constant expression [`Self::const_expr`] builds is
     /// evaluated, php's `allow_dynamic` ([`Evaluation`]).
     const_evaluation: Evaluation,
+    /// Whether [`Self::persistent`] substitutes a persistent constant,
+    /// which it does but over a parameter's default ([`Substitution`]).
+    substitution: Substitution,
     constants: Vec<Zval>,
     /// [`OpArray::const_exprs`]: the constant expressions a constant of
     /// kind `IS_CONSTANT_AST` indexes, in the order they were added.
@@ -1229,6 +1232,7 @@ pub(crate) fn unit(
         memo: memo::Memo::default(),
         znodes: Vec::new(),
         const_evaluation: Evaluation::Once,
+        substitution: Substitution::Persistent,
         constants: Vec::new(),
         const_exprs: Vec::new(),
         vars: Vec::new(),
@@ -4288,7 +4292,8 @@ impl Emit<'_> {
             let cv = self.parameter_cv(parameter, number)?;
             self.parameter_refused(parameter, variadic_seen, is_ctor)?;
             variadic_seen = parameter.variadic;
-            let mut folded = self.parameter_default(parameter)?;
+            let mut folded =
+                self.without_persistent_substitution(|this| this.parameter_default(parameter))?;
             let promoted_target = if parameter.promote.is_some() {
                 attributes::TARGET_PROPERTY
             } else {
@@ -4326,18 +4331,7 @@ impl Emit<'_> {
                     out: cv,
                     ..Opline::default()
                 });
-                let written = parameter
-                    .default
-                    .map(|expr| self.dynamic_const_expr(expr))
-                    .transpose()?;
-                // `zend_is_valid_default_value` converted an int under
-                // a type with `float` and no `int` where it stood.
-                match (written, folded.kind()) {
-                    (Some(ConstExpr::Long { value: n, .. }), ZvalType::Double) => {
-                        Some(ConstExpr::Double(double_of(Zval::long(n))))
-                    }
-                    (written, _) => written,
-                }
+                self.declared_default(parameter, folded)?
             } else {
                 self.push(Opline {
                     opcode: if parameter.variadic {
@@ -4430,6 +4424,40 @@ impl Emit<'_> {
             ),
         );
         Ok((Some(Type::Nullable(Box::new(ty))), true))
+    }
+
+    /// The default a parameter's declaration keeps beside its
+    /// `RECV_INIT` constant `folded`: the expression as written,
+    /// compiled as `zend_compile_params` compiles it.
+    fn declared_default(
+        &mut self,
+        parameter: &walk::Parameter,
+        folded: Zval,
+    ) -> Result<Option<ConstExpr>, CompileError> {
+        let written = self.without_persistent_substitution(|this| {
+            parameter
+                .default
+                .map(|expr| this.dynamic_const_expr(expr))
+                .transpose()
+        })?;
+        // `zend_is_valid_default_value` converted an int under a type
+        // with `float` and no `int` where it stood.
+        Ok(match (written, folded.kind()) {
+            (Some(ConstExpr::Long { value: n, .. }), ZvalType::Double) => {
+                Some(ConstExpr::Double(double_of(Zval::long(n))))
+            }
+            (written, _) => written,
+        })
+    }
+
+    /// `f` under php's `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`
+    /// ([`Substitution::NoPersistent`]), which `zend_compile_params` sets
+    /// over a parameter's default and restores after it.
+    fn without_persistent_substitution<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::replace(&mut self.substitution, Substitution::NoPersistent);
+        let done = f(self);
+        self.substitution = outer;
+        done
     }
 
     /// A parameter's default as `zend_compile_params` folds it, under
@@ -7048,8 +7076,13 @@ impl Emit<'_> {
             // fallback the engine's fetch makes. It moves
             // `CG(zend_lineno)` to the name's line, which the opline
             // after the walk is emitted at.
+            // `zend_eval_const_expr`'s `ZEND_AST_CONST` arm comes first:
+            // the three special names and a persistent constant
+            // `zend_try_ct_eval_const` substitutes
+            // ([`Self::named_constant`]), which a parameter's default
+            // does not ([`Substitution::NoPersistent`]).
             tree::Expr::NameRef(token) => {
-                if let Some(value) = self.constant_name(token) {
+                if let Some(value) = self.named_constant(token)? {
                     return self.folded(value, line);
                 }
                 self.line = line;
@@ -17933,6 +17966,41 @@ fn unread(refused: &CompileError) -> bool {
     refused.level == Level::Parse && refused.message.ends_with("this compiler cannot read yet")
 }
 
+/// Which constants php's compiler substitutes where they are named,
+/// `CG(compiler_options)`'s bits over `zend_try_ct_eval_const`.
+///
+/// A parameter's default keeps the constant it names, and every other
+/// constant expression is the persistent constant's value, an
+/// attribute's argument among them:
+///
+/// ```php
+/// function f($a = -PHP_INT_MAX, $b = [PHP_INT_SIZE], $c = PHP_INT_SIZE) {}
+/// foreach ((new ReflectionFunction('f'))->getParameters() as $p) echo $p, "\n";
+/// #[Attribute] class At { function __construct(public $v) {} }
+/// #[At([PHP_INT_SIZE, PHP_EOL])] class B {}
+/// echo (new ReflectionClass('B'))->getAttributes()[0];
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = -PHP_INT_MAX ]
+/// Parameter #1 [ <optional> $b = [PHP_INT_SIZE] ]
+/// Parameter #2 [ <optional> $c = PHP_INT_SIZE ]
+/// Attribute [ At ] {
+///   - Arguments [1] {
+///     Argument #0 [ [8, '\n'] ]
+///   }
+/// }
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Substitution {
+    /// A persistent constant is its value where it is named, as php
+    /// compiles every constant expression but a parameter's default.
+    Persistent,
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`, which
+    /// `zend_compile_params` sets while it compiles a parameter's
+    /// default, so the default keeps the constant it names.
+    NoPersistent,
+}
+
 /// `nNextFreeElement` over the entries a constant array folded so far:
 /// one past the largest integer key, 0 before any, and none where the
 /// next index is taken past `ZEND_LONG_MAX`, which leaves the array to
@@ -18065,6 +18133,9 @@ impl Emit<'_> {
     /// declared value that is no scalar is not folded, as php folds none
     /// whose value is not yet evaluated.
     pub(crate) fn persistent(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
+        if self.substitution == Substitution::NoPersistent {
+            return Ok(None);
+        }
         let mut at = 0;
         while name.get(at) == Some(&b'\\') {
             at += 1;
@@ -18668,6 +18739,7 @@ mod tests {
             memo: memo::Memo::default(),
             znodes: Vec::new(),
             const_evaluation: Evaluation::Once,
+            substitution: Substitution::Persistent,
             constants: Vec::new(),
             const_exprs: Vec::new(),
             vars: Vec::new(),
