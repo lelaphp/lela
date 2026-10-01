@@ -97,6 +97,15 @@ impl Res {
         }
     }
 
+    /// `result->unbuf` made with `eof_reached` set: rows that are only
+    /// column definitions, as `mysqlnd_stmt_result_metadata` makes them.
+    pub(crate) fn metadata_only(&mut self) {
+        self.rows = Rows::Unbuffered {
+            eof: true,
+            row_count: 0,
+        };
+    }
+
     /// `mysqlnd_res::free_result_buffers`: the rows and the column definitions
     /// dropped, the column count kept.
     pub(crate) fn free_buffers(&mut self) {

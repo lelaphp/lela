@@ -370,6 +370,137 @@ impl Mysqlnd {
             .flatten()
     }
 
+    /// The connection's error kept across `f` and put back after it, the
+    /// list `f` grew dropped: what mysqli does where it closes a statement
+    /// or turns multi statements off after a failure it has reported
+    /// (`MYSQLND_ERROR_INFO error_info = *conn->error_info; ...;
+    /// *conn->error_info = error_info`).
+    pub fn keeping_error<R>(self, req: &mut Request, f: impl FnOnce(&mut Request) -> R) -> R {
+        let kept = self.0.with(req, |_, conn| conn.error.clone());
+        let answered = f(req);
+        if let Some(kept) = kept {
+            let _ = self.0.with(req, |_, conn| conn.error = kept);
+        }
+        answered
+    }
+
+    /// `mysqlnd_restart_psession`: a persistent connection taken up by the
+    /// next link, counted as reused, its last message forgotten.
+    pub fn restart_psession(self, req: &mut Request) {
+        let _ = self.0.with(req, |_, conn| {
+            conn.stats.inc(crate::stats::Stat::ConnectReused);
+            conn.last_message = None;
+        });
+    }
+
+    /// `mysqlnd_end_psession`: what the next link must not see of a
+    /// persistent connection given back, its pending rows and its last
+    /// message, dropped.
+    pub fn end_psession(self, req: &mut Request) -> Result<(), Thrown> {
+        self.call(req, |req, conn| {
+            if let Some(mut result) = conn.current_result.take() {
+                result.free(req, conn, true)?;
+            }
+            conn.last_message = None;
+            Ok(())
+        })
+        .map(|_| ())
+    }
+
+    /// `mysqlnd_poll`: the connections of `read` and `error` waited on for
+    /// `timeout`, each list cut to those whose stream came ready. A
+    /// connection of `read` with no query sent is taken out of it first
+    /// and answered beside the count, php's `dont_poll`. The count is
+    /// `None` for php's `FAIL`: nothing left to wait on, or a `select(2)`
+    /// that failed, each warned.
+    pub fn poll(
+        req: &mut Request,
+        mut read: Option<&mut Vec<Mysqlnd>>,
+        error: Option<&mut Vec<Mysqlnd>>,
+        timeout: std::time::Duration,
+    ) -> (Option<usize>, Vec<Mysqlnd>) {
+        use crate::consts::ConnState;
+        use php_ext::raising::{Level, docref};
+        use php_ext::request::Cast;
+        let mut dont_poll = Vec::new();
+        if let Some(read) = read.as_deref_mut() {
+            read.retain(|conn| {
+                let state = conn
+                    .0
+                    .with(req, |_, c| c.state)
+                    .unwrap_or(ConnState::Alloced);
+                let idle = state <= ConnState::Ready || state == ConnState::QuitSent;
+                if idle {
+                    dont_poll.push(*conn);
+                }
+                !idle
+            });
+        }
+        // `mysqlnd_stream_array_to_fd_set`: each connection's fd, cast for
+        // select without the buffered-data warning.
+        let fds_of = |req: &mut Request, conns: &[Mysqlnd]| -> Vec<(Mysqlnd, std::os::fd::RawFd)> {
+            conns
+                .iter()
+                .filter_map(|conn| {
+                    let stream = conn.stream(req)?;
+                    let fd = stream.cast(req, Cast::Select, false)?;
+                    Some((*conn, fd))
+                })
+                .collect()
+        };
+        let read_fds = read.as_deref().map(|r| fds_of(req, r)).unwrap_or_default();
+        let error_fds = error.as_deref().map(|e| fds_of(req, e)).unwrap_or_default();
+        if read_fds.is_empty() && error_fds.is_empty() {
+            let text = if read.is_some() && !dont_poll.is_empty() {
+                "All arrays passed are clear"
+            } else {
+                "No stream arrays were passed"
+            };
+            docref(req, Level::Warning, text);
+            return (None, dont_poll);
+        }
+        let mut sets = [
+            read_fds.iter().map(|(_, fd)| *fd).collect::<Vec<_>>(),
+            Vec::new(),
+            error_fds.iter().map(|(_, fd)| *fd).collect::<Vec<_>>(),
+        ];
+        let [r, w, e] = &mut sets;
+        let ready = match php_ext::request::select([r, w, e], Some(timeout)) {
+            Ok(ready) => ready,
+            Err(failed) => {
+                let max = read_fds
+                    .iter()
+                    .chain(&error_fds)
+                    .map(|(_, fd)| *fd)
+                    .max()
+                    .unwrap_or(0);
+                let text = format!(
+                    "Unable to select [{}]: {} (max_fd={max})",
+                    failed.raw_os_error().unwrap_or(0),
+                    req.os_error_text(failed.raw_os_error().unwrap_or(0))
+                );
+                docref(req, Level::Warning, &text);
+                return (None, dont_poll);
+            }
+        };
+        // `mysqlnd_stream_array_from_fd_set`.
+        if let Some(read) = read {
+            read.retain(|conn| {
+                read_fds
+                    .iter()
+                    .any(|(c, fd)| c == conn && sets[0].contains(fd))
+            });
+        }
+        if let Some(error) = error {
+            error.retain(|conn| {
+                error_fds
+                    .iter()
+                    .any(|(c, fd)| c == conn && sets[2].contains(fd))
+            });
+        }
+        (Some(ready), dont_poll)
+    }
+
     /// The connection's stream, for what selects on it.
     pub fn stream(self, req: &mut Request) -> Option<php_ext::request::Stream> {
         self.0.with(req, |_, conn| conn.net.stream()).flatten()
@@ -408,6 +539,12 @@ impl ResultSet {
         ResultSet { res, conn }
     }
 
+    /// `result->conn`: the connection the rows are read over.
+    #[must_use]
+    pub fn connection(&self) -> Mysqlnd {
+        self.conn
+    }
+
     /// `mysqlnd_fetch_row`'s values: the next row.
     pub fn fetch(&mut self, req: &mut Request) -> Result<Fetched, Thrown> {
         let res = &mut self.res;
@@ -426,8 +563,12 @@ impl ResultSet {
     /// `mysqlnd_res::fetch_into`: the next row as an array keyed as
     /// `flags` (`MYSQLND_FETCH_ASSOC`, `_NUM` or both) asks, a numeric
     /// column name an integer key; `null` past the last, `false` where
-    /// the fetch failed.
+    /// the fetch failed. The connection's error is emptied first.
     pub fn fetch_into(&mut self, req: &mut Request, flags: u32) -> Result<Value, Thrown> {
+        // "We clean the error here because in unbuffered mode we could
+        // receive a new error and therefore consumers of this method are
+        // checking for errors."
+        let _ = self.conn.0.with(req, |_, conn| conn.error.reset());
         let row = match self.fetch(req)? {
             Fetched::Row(row) => row,
             Fetched::Done => return Ok(Value::null()),
