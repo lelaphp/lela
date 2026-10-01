@@ -110,8 +110,18 @@ struct Standing {
     raised_line: u32,
 }
 
-/// `phpdbg_execute_ex`'s loop over the serving entered at `frame`.
+/// `phpdbg_execute_ex`'s loop over the serving entered at `frame`, the
+/// frame an outer serving was stepping put back as the session's once it
+/// ends.
 fn drive(req: &mut Request, frame: FrameRef) -> Flow {
+    let outer = session::with(|s| s.standing).flatten();
+    let flow = stepped(req, frame);
+    session::with(|s| s.standing = outer);
+    flow
+}
+
+/// The loop itself.
+fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
     let mut at = Standing {
         frame,
         unwinding: false,
@@ -142,6 +152,7 @@ fn drive(req: &mut Request, frame: FrameRef) -> Flow {
         } else {
             Next::Step
         };
+        session::with(|s| s.standing = Some(at.frame));
         let stepped = match next {
             Next::HandBack => return Flow::Resume(at.frame),
             Next::Unwind => tier::unwind(req, at.frame),
@@ -234,6 +245,9 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
             stop = true;
         }
     }
+    if !at.unwinding {
+        logged(req, at.frame, position, &serves);
+    }
     let uncaught_here = pending.is_some() && !tier::catches(req, at.frame);
     let checks = Checks {
         frame: at.frame.0,
@@ -246,6 +260,44 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
         return None;
     }
     interactive(req, at.frame, &position.file, shown)
+}
+
+/// `phpdbg_print_opline`'s oplog: the opline written to the oplog open
+/// last, where one is; and the file whose code the loop reached first at
+/// this opline kept among the session's sources, as `phpdbg_compile_file`
+/// keeps what it compiles.
+fn logged(req: &mut Request, frame: FrameRef, position: &tier::Position, serves: &tier::Serves) {
+    let (function, class) = match serves {
+        tier::Serves::Code => (None, None),
+        tier::Serves::Function { name, class } => (Some(name.clone()), class.clone()),
+    };
+    let fresh = function.is_none()
+        && position.opline == 0
+        && session::with(|s| !s.sources.iter().any(|source| source.file == position.file))
+            .unwrap_or(false);
+    let code = if fresh {
+        tier::frame_code(req, frame)
+    } else {
+        None
+    };
+    session::with(|s| {
+        if let Some(code) = code {
+            s.sources.push(session::Source {
+                file: position.file.clone(),
+                ops: code.ops,
+            });
+        }
+        if let Some(log) = s.oplogs.last_mut() {
+            log.push(session::Logged {
+                file: position.file.clone(),
+                function,
+                class,
+                opline: position.opline,
+                opcode: position.opcode,
+                line: position.line,
+            });
+        }
+    });
 }
 
 /// What the checks read off the loop.

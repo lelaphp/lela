@@ -29,6 +29,15 @@ pub enum Kind {
     },
     /// `PHPDBG_BREAK_FILE_OPLINE`.
     FileOpline { file: Vec<u8>, opline: u32 },
+    /// `PHPDBG_BREAK_OPLINE`: one opline of one op array, which php keys
+    /// by the opline's address and prints as that number, `address` here.
+    Opline {
+        file: Vec<u8>,
+        function: Option<Vec<u8>>,
+        class: Option<Vec<u8>>,
+        opline: u32,
+        address: u64,
+    },
     /// `PHPDBG_BREAK_OPCODE`: every opline of an opcode, by php's name.
     Opcode { name: Vec<u8> },
 }
@@ -221,6 +230,36 @@ impl Breakpoints {
         out::notice(format!("Breakpoint #{id} added at {}", lossy(name)).as_bytes());
     }
 
+    /// `phpdbg_set_breakpoint_opline_ex`: the opline `opline` of the op
+    /// array `at` names (its file, function and class), numbered as php
+    /// numbers it by address.
+    pub fn set_opline(&mut self, at: &At<'_>, opline: u32) {
+        let address = address(at, opline);
+        if self.has(|k| matches!(k, Kind::Opline { address: a, .. } if *a == address)) {
+            out::error(format!("Breakpoint exists for opline #{address}").as_bytes());
+            return;
+        }
+        let id = self.next_id();
+        self.push(
+            id,
+            Kind::Opline {
+                file: at.file.to_vec(),
+                function: at.function.map(<[u8]>::to_vec),
+                class: at.class.map(<[u8]>::to_vec),
+                opline,
+                address,
+            },
+        );
+        out::notice(format!("Breakpoint #{id} added at #{address}").as_bytes());
+    }
+
+    /// `phpdbg_clear()`'s `zend_hash_clean` of every table but the
+    /// opcodes', the count left as it stands.
+    pub fn clean(&mut self) {
+        self.list
+            .retain(|brake| matches!(brake.kind, Kind::Opcode { .. }));
+    }
+
     /// `phpdbg_delete_breakpoint`.
     pub fn delete(&mut self, id: i64) {
         match self.list.iter().position(|brake| i64::from(brake.id) == id) {
@@ -273,6 +312,7 @@ impl Breakpoints {
                     Kind::FileOpline { file, opline } => {
                         at.function.is_none() && file == at.file && *opline == at.opline
                     }
+                    Kind::Opline { address, .. } => *address == self::address(at, at.opline),
                     _ => false,
                 })
             })
@@ -325,6 +365,9 @@ impl Breakpoints {
             Kind::FileOpline { opline, .. } => {
                 format!("Breakpoint #{id} in #{opline} at {file}:{line}, hits: {hits}")
             }
+            Kind::Opline { address, .. } => {
+                format!("Breakpoint #{id} in #{address} at {file}:{line}, hits: {hits}")
+            }
             Kind::Opcode { name } => {
                 format!(
                     "Breakpoint #{id} in {} at {file}:{line}, hits: {hits}",
@@ -360,7 +403,10 @@ impl Breakpoints {
         let oplines = count(&|k| {
             matches!(
                 k,
-                Kind::FunctionOpline { .. } | Kind::MethodOpline { .. } | Kind::FileOpline { .. }
+                Kind::FunctionOpline { .. }
+                    | Kind::MethodOpline { .. }
+                    | Kind::FileOpline { .. }
+                    | Kind::Opline { .. }
             )
         });
         let file_oplines = count(&|k| matches!(k, Kind::FileOpline { .. }));
@@ -387,7 +433,7 @@ impl Breakpoints {
     /// separator and its title before a table with rows.
     pub fn print(&self) {
         const SEPARATE: &[u8] = b"------------------------------------------------\n";
-        let tables: [(&str, Row); 8] = [
+        let tables: [(&str, Row); 9] = [
             ("File Breakpoints", |k| match k {
                 Kind::File { file, line } => Some(format!("{}:{line}", lossy(file))),
                 _ => None,
@@ -402,6 +448,10 @@ impl Breakpoints {
             }),
             ("Method Breakpoints", |k| match k {
                 Kind::Method { class, name } => Some(format!("{}::{}", lossy(class), lossy(name))),
+                _ => None,
+            }),
+            ("Opline Breakpoints", |k| match k {
+                Kind::Opline { address, .. } => Some(format!("#{address}")),
                 _ => None,
             }),
             ("File opline Breakpoints", |k| match k {
@@ -478,4 +528,25 @@ impl Breakpoints {
             },
         );
     }
+}
+
+/// The number php prints for an opline, its address: here one read off
+/// the op array's file, function and class and the opline's number, the
+/// same for the same opline and apart for two.
+fn address(at: &At<'_>, opline: u32) -> u64 {
+    // FNV-1a over the four, as a pointer is one number per opline.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let parts = [
+        at.file,
+        at.function.unwrap_or_default(),
+        at.class.unwrap_or_default(),
+        &opline.to_le_bytes(),
+    ];
+    for part in parts {
+        for byte in part.iter().chain(b"\0") {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    hash >> 1
 }

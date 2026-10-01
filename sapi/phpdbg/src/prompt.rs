@@ -16,9 +16,6 @@ use crate::input::{self, Line};
 use crate::out;
 use crate::session::{Context, Seek, SeekKind, Session, Stop};
 
-/// php's default prompt, `PHPDBG_DEFAULT_PROMPT` and a space.
-const PROMPT: &[u8] = b"prompt> ";
-
 /// Where the prompt stands.
 pub enum Here<'a> {
     /// A run stopped between two handlers, at `frame`.
@@ -93,7 +90,8 @@ pub fn interactive(s: &mut Session, here: &mut Here<'_>) -> Outcome {
             return Outcome::Stopped;
         }
         let commands = if s.queued.is_empty() {
-            match input::read_input(PROMPT) {
+            let prompt = [s.prompt.as_slice(), b" "].concat();
+            match input::read_input(&prompt) {
                 Line::End => {
                     s.stopped = Some(Stop::Quit);
                     return Outcome::Stopped;

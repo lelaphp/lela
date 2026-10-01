@@ -11,6 +11,8 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use php_sapi::tier::{FrameRef, Opcode};
+
 use crate::bp::Breakpoints;
 use crate::cmd::Command;
 use crate::watch::Watches;
@@ -82,6 +84,26 @@ pub enum Context {
     Refused,
 }
 
+/// One opline the loop reached while an oplog was open
+/// (`phpdbg_oplog_entry`): the op array's file, function and scope, and
+/// the opline's number, opcode and line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Logged {
+    pub file: Vec<u8>,
+    pub function: Option<Vec<u8>>,
+    pub class: Option<Vec<u8>>,
+    pub opline: u32,
+    pub opcode: Opcode,
+    pub line: u32,
+}
+
+/// A file the session saw compiled, and its code's oplines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub file: Vec<u8>,
+    pub ops: Vec<(Opcode, u32)>,
+}
+
 /// Everything the session keeps.
 #[derive(Debug)]
 pub struct Session {
@@ -124,6 +146,17 @@ pub struct Session {
     pub context: Context,
     /// The command an idle request stands for.
     pub job: Option<Command>,
+    /// `PHPDBG_G(prompt)[0]`: the prompt's text, shown with a space after.
+    pub prompt: Vec<u8>,
+    /// `PHPDBG_G(oplog_list)`: each oplog `phpdbg_start_oplog` opened and
+    /// no `phpdbg_end_oplog` closed yet, the last the one written to.
+    pub oplogs: Vec<Vec<Logged>>,
+    /// `PHPDBG_G(file_sources)`: each file whose code the loop reached, in
+    /// that order, with its oplines, as `phpdbg_get_executable` walks them.
+    pub sources: Vec<Source>,
+    /// The frame the loop is stepping, the nearest user frame to a native
+    /// it calls, which `phpdbg_break_next` reads.
+    pub standing: Option<FrameRef>,
 }
 
 impl Session {
@@ -149,6 +182,10 @@ impl Session {
             after_run: AfterRun::Prompt,
             context: Context::Unannounced,
             job: None,
+            prompt: b"prompt>".to_vec(),
+            oplogs: Vec::new(),
+            sources: Vec::new(),
+            standing: None,
         }
     }
 }

@@ -23,6 +23,7 @@ mod host;
 mod info;
 mod input;
 mod list;
+mod natives;
 mod out;
 mod prompt;
 mod session;
@@ -142,6 +143,7 @@ pub fn main() -> ExitCode {
     let builder = Engine::builder()
         .extensions(&extensions)
         .tier::<debugger::Debugger>()
+        .additional_extension(natives::extension())
         .skip_shebang();
     let engine = php_sapi::start(builder, &line.ini, None);
 
