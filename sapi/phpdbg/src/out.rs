@@ -16,6 +16,14 @@ thread_local! {
     /// A write of the debugger's own through the program's output is
     /// under way, [`interruptible`].
     static INTERRUPTIBLE: Cell<bool> = const { Cell::new(false) };
+    /// How many entries the log has taken.
+    static LOGGED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many entries the log has taken: what tells whether a call's
+/// fatal reached `php_sapi_phpdbg_log_message`, which `log_errors` says.
+pub fn logged() -> u64 {
+    LOGGED.get()
 }
 
 /// `f`, a write of the debugger's own that goes through the program's
@@ -101,8 +109,8 @@ pub fn line_read() {
 }
 
 /// The program's output, `P_STDOUT`: the bytes, the newline fact read off
-/// their last; the header block nowhere, the log and the error stream on
-/// stderr.
+/// their last; the header block nowhere, the error stream on stderr, and
+/// the log as `php_sapi_phpdbg_log_message` writes it.
 #[derive(Debug, Default)]
 pub struct Sink;
 
@@ -121,10 +129,11 @@ impl OutputSink for Sink {
 
     fn send_headers(&mut self, _head: &ResponseHead) {}
 
+    /// `php_sapi_phpdbg_log_message`: the entry through `phpdbg_error`
+    /// (`Z/sapi/phpdbg/phpdbg.c:731-770`).
     fn log(&mut self, entry: &[u8]) {
-        let mut stderr = std::io::stderr().lock();
-        let _ = stderr.write_all(entry);
-        let _ = stderr.write_all(b"\n");
+        LOGGED.set(LOGGED.get() + 1);
+        error(entry);
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {

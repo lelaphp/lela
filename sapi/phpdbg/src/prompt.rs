@@ -486,9 +486,37 @@ fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
 
 /// `phpdbg_call_register`: a line whose first word is a registered
 /// function calls it with the rest as its arguments, then writes a
-/// newline, but where the call bailed out: with nothing executing, what
-/// it leaves uncaught is rendered as a fatal, which bails out, as an
-/// `exit` does.
+/// newline, but where the call ended in a fatal or an `exit`: with
+/// nothing executing, what it leaves uncaught is rendered as a fatal.
+/// Where `log_errors` logs that fatal, `php_sapi_phpdbg_log_message`
+/// writes it and, outside `ev`, follows it with the listing where the
+/// request stands, `[no active file]` where nothing does, and a prompt
+/// (`Z/sapi/phpdbg/phpdbg.c:731-770`). That prompt reads what this one
+/// would and answers it alike, so the prompt goes on here.
+///
+/// ```php
+/// $a = 1;
+/// ```
+/// ```request phpdbg
+/// ev ini_set("display_errors", 0)
+/// ev ini_set("log_errors", 1)
+/// register intdiv
+/// intdiv 1
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> 1
+/// prompt> 0
+/// prompt> [Registered intdiv]
+/// prompt> [PHP Fatal error:  Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in [no active file]:0
+/// Stack trace:
+/// #0 [internal function]: intdiv(1)
+/// #1 {main}
+///   thrown in [no active file] on line 0]
+/// [Could not find information about included file...]
+/// prompt>
+/// ```
 fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bool {
     let Some((Param::Str(name), rest)) = params.split_first() else {
         return false;
@@ -518,8 +546,17 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
         crate::host::idle(s, Command::Params(params.to_vec()));
         return true;
     };
+    let logged = out::logged();
     match crate::session::lend(s, || tier::call(req, under, &lowered, &arguments)) {
         tier::Called::Returned => out::out(b"\n"),
+        tier::Called::Rendered if s.origin == Origin::Program && out::logged() != logged => {
+            let (file, line) = match under {
+                tier::Under::Frame(frame) => tier::position(req, frame)
+                    .map_or((Vec::new(), 0), |position| (position.file, position.line)),
+                tier::Under::Nothing => (NO_ACTIVE_FILE.to_vec(), 0),
+            };
+            crate::list::code(s, &file, line);
+        }
         tier::Called::Rendered | tier::Called::Exited => {}
     }
     true
@@ -714,6 +751,30 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// #0 eval()'d code(1): intdiv(1)
 /// #1 {main}
 ///   thrown in eval()'d code on line 1
+/// prompt>
+/// ```
+///
+/// Where `log_errors` logs it, the log is `php_sapi_phpdbg_log_message`'s,
+/// through `phpdbg_error`, and under `PHPDBG_IN_EVAL` nothing follows.
+///
+/// ```php
+/// $a = 1;
+/// ```
+/// ```request phpdbg
+/// ev ini_set("display_errors", 0)
+/// ev ini_set("log_errors", 1)
+/// ev intdiv(1)
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> 1
+/// prompt> 0
+/// prompt> [PHP Fatal error:  Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in eval()'d code:1
+/// Stack trace:
+/// #0 eval()'d code(1): intdiv(1)
+/// #1 {main}
+///   thrown in eval()'d code on line 1]
 /// prompt>
 /// ```
 fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
