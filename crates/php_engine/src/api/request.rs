@@ -5391,6 +5391,29 @@ impl Request {
     /// ```expect
     /// 1776
     /// ```
+    ///
+    /// A frame of a function called with no arguments has the process's
+    /// empty array as its `args`, `debug_backtrace_get_args`'s
+    /// `ZVAL_EMPTY_ARRAY`, so it costs no table:
+    ///
+    /// ```php
+    /// function g() { return new Exception; }
+    /// function h() { return g(); }
+    /// function k($a) { return new Exception; }
+    /// function l() { return k(1); }
+    /// $w = h(); $v = l();
+    /// $a = memory_get_usage(); $e = h(); $b = memory_get_usage(); $f = l(); $c = memory_get_usage();
+    /// var_dump($e->getTrace()[0]['args'], ($c - $b) - ($b - $a));
+    /// function z() { debug_zval_dump(debug_backtrace()[0]['args']); }
+    /// z();
+    /// ```
+    /// ```expect
+    /// array(0) {
+    /// }
+    /// int(216)
+    /// array(0) interned {
+    /// }
+    /// ```
     fn render_trace(&mut self, links: Vec<TraceRow>, options: i64) -> Result<PhpArray, Thrown> {
         let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
         let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
@@ -5461,7 +5484,13 @@ impl Request {
         named: Vec<(PhpString, Value)>,
     ) -> Result<PhpArray, Thrown> {
         let sensitive = self.sensitive_parameters(function);
-        let mut args = PhpArray::new(self)?;
+        // `ZVAL_EMPTY_ARRAY` for a call with no arguments, which a named
+        // extra one then separates.
+        let mut args = if arguments.is_empty() {
+            PhpArray::empty()
+        } else {
+            PhpArray::new(self)?
+        };
         for (at, argument) in arguments.into_iter().enumerate() {
             let argument = argument.deref();
             let argument = if sensitive.at(at) {

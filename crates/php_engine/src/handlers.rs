@@ -3761,7 +3761,19 @@ pub(crate) fn recv_variadic<T: Tier>(
     let first = op.op1;
     let at = usize::try_from(first.saturating_sub(1)).unwrap_or(usize::MAX);
     let count = req.vm().at(frame).map_or(0, |state| state.extra_args.len());
-    let collected = match req.array_sized(u32::try_from(count).unwrap_or(u32::MAX), true) {
+    let named = req
+        .vm()
+        .at(frame)
+        .map(|state| state.extra_named.clone())
+        .unwrap_or_default();
+    // `ZVAL_EMPTY_ARRAY(params)` where nothing is collected; an extra
+    // named argument is php's `SEPARATE_ARRAY` of it, a table of its own.
+    let collected = if count == 0 && named.is_empty() {
+        Ok(PhpArray::empty())
+    } else {
+        req.array_sized(u32::try_from(count).unwrap_or(u32::MAX), true)
+    };
+    let collected = match collected {
         Ok(collected) => collected,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -3799,11 +3811,6 @@ pub(crate) fn recv_variadic<T: Tier>(
     // declared type under the number php's `arg_num` stands at once
     // the loop above has walked past the last positional one.
     let number = first.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
-    let named = req
-        .vm()
-        .at(frame)
-        .map(|state| state.extra_named.clone())
-        .unwrap_or_default();
     for (name, argument) in named {
         let argument = match verified_arg(req, frame, number, at, &argument) {
             Ok(None) => argument,
@@ -18737,6 +18744,24 @@ pub(crate) fn defined<T: Tier>(
 /// array(0) {
 /// }
 /// ```
+///
+/// With nothing to copy the temporary is the process's empty array,
+/// `zend_empty_array`, which costs nothing:
+///
+/// ```php
+/// function f() { return func_get_args(); }
+/// function g($a) { return array_slice(func_get_args(), 1); }
+/// $m = memory_get_usage(); $a = f(); $b = g(1);
+/// var_dump(memory_get_usage() - $m);
+/// debug_zval_dump($a, $b);
+/// ```
+/// ```expect
+/// int(0)
+/// array(0) interned {
+/// }
+/// array(0) interned {
+/// }
+/// ```
 pub(crate) fn func_get_args<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -18753,6 +18778,9 @@ pub(crate) fn func_get_args<T: Tier>(
     };
     let arguments = req.frame_arguments(frame);
     let copied = (|| -> Result<PhpArray, Thrown> {
+        if arguments.len() <= skip {
+            return Ok(PhpArray::empty());
+        }
         let mut array = PhpArray::new(req)?;
         for argument in arguments.into_iter().skip(skip) {
             let value = argument.deref();

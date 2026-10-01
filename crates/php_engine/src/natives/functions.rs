@@ -166,6 +166,9 @@ fn func_get_args(req: &mut Request) -> Result<PhpArray, Thrown> {
         "func_get_args",
         "cannot be called from the global scope",
     )?;
+    if arguments.is_empty() {
+        return Ok(PhpArray::empty());
+    }
     let mut array = PhpArray::new(req)?;
     for argument in arguments {
         let value = argument.deref();

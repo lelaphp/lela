@@ -259,8 +259,13 @@ pub(crate) fn hand_to_magic(req: &mut Request, function: Function) -> Result<Fun
         return Ok(function);
     };
     let name = PhpString::new(req, &name.0)?;
-    let mut packed = PhpArray::new(req)?;
     let (arguments, named) = req.take_serving_arguments();
+    // `ZVAL_EMPTY_ARRAY(call_args)` for a call with none.
+    let mut packed = if arguments.is_empty() && named.is_empty() {
+        PhpArray::empty()
+    } else {
+        PhpArray::new(req)?
+    };
     for argument in arguments {
         packed.append(req, argument)?;
     }
@@ -339,7 +344,11 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Value, Thrown> {
         .collect();
     let named = req.named_arguments();
     let name = Value::string(PhpString::new(req, &name.0)?);
-    let mut packed = PhpArray::new(req)?;
+    let mut packed = if passed.is_empty() && named.is_empty() {
+        PhpArray::empty()
+    } else {
+        PhpArray::new(req)?
+    };
     for argument in passed {
         req.addref(&argument);
         packed.append(req, argument)?;

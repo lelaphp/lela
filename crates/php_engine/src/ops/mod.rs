@@ -694,7 +694,7 @@ pub(crate) fn cast(req: &mut Request, value: &Value, to: CastTo) -> Result<Value
 /// `zend_cast_zval_to_array` (`Z/Zend/zend_execute.h:250`) under the
 /// `Z_TYPE_P(expr) == IS_ARRAY` arm of `ZEND_CAST` above it: an array
 /// is itself with one more owner (`ZVAL_COPY_VALUE`, `Z_ADDREF_P`);
-/// `null` is the empty array; a scalar, a resource and a `Closure` are
+/// `null` is the process's empty array (`ZVAL_EMPTY_ARRAY`); a scalar, a resource and a `Closure` are
 /// the one-element array holding it at `0` with one more owner, a NAN
 /// warning on the way (`zend_nan_coerced_to_type_warning`); and any
 /// other object is its properties as `zend_get_properties_for` under
@@ -752,7 +752,7 @@ pub(crate) fn cast(req: &mut Request, value: &Value, to: CastTo) -> Result<Value
 pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
     let value = value.deref();
     match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null => PhpArray::new(req),
+        ValueRef::Undef | ValueRef::Null => Ok(PhpArray::empty()),
         ValueRef::Array(a) => {
             req.addref(&value);
             Ok(*a)

@@ -324,6 +324,38 @@ impl PhpArray {
         req.array()
     }
 
+    /// `RETURN_EMPTY_ARRAY`, `ZVAL_EMPTY_ARRAY`: the process's one
+    /// immutable empty array, php's `zend_empty_array`, which costs the
+    /// request nothing and is what a native answers where php's body
+    /// answers an array with nothing in it. No owner is counted on it;
+    /// a write separates it into an array of the request's own, as it
+    /// separates any immutable array, so a native that will fill an
+    /// array builds it with [`PhpArray::new`].
+    ///
+    /// ```php
+    /// $m = memory_get_usage();
+    /// $a = array_slice([1], 1);
+    /// var_dump(memory_get_usage() - $m);
+    /// debug_zval_dump($a);
+    /// $a[] = 1;
+    /// var_dump($a, array_slice([1], 1));
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// array(0) interned {
+    /// }
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// array(0) {
+    /// }
+    /// ```
+    #[must_use]
+    pub fn empty() -> PhpArray {
+        PhpArray(Arr::empty())
+    }
+
     /// `array_init_size(size)`, `zend_new_array(size)`: an empty array
     /// sized for `size` elements, the size held to
     /// `zend_hash_check_size`, whose `Possible integer overflow in memory

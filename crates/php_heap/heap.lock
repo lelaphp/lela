@@ -4,6 +4,7 @@ Arr::addref
 Arr::backward
 Arr::contains
 Arr::declared_rows
+Arr::empty
 Arr::end
 Arr::entry_at
 Arr::forward
