@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"php -n run-tests.php -r list","description":"Run upstream's runner with a flag before it"}}

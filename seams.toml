@@ -611,7 +611,7 @@ text = "A session that closed a ticket names what it found and did not do in a t
 [[rule]]
 id = "lanes.nightly"
 tool = "Bash"
-deny_pattern = '(?m)xtask (-- )?(phpt|bench)\b[^|;&]*--(full|jit)|(\A|[|;&]\s*|\bphp[0-9.]*\s+)\S*run-tests\.php|compile-identity --corpus'   # the flag wherever it stands in the call, and upstream's runner where it is run (first in the call, after a separator, or under php), never where it is cited, a message's line included (#790)
+deny_pattern = '(?m)xtask (-- )?(phpt|bench)\b[^|;&]*--(full|jit)|(\A|[|;&]\s*)"?(\S*\bphp[0-9.]*|\$\{?\w+\}?)"?(\s+[^|;&\s]+)*?\s+\S*run-tests\.php|(\A|[|;&]\s*)\S*run-tests\.php|compile-identity --corpus'   # the flag wherever it stands in the call, and upstream's runner where it is run (first in the call, after a separator, or under php), never where it is cited, a message's line included (#790)
 text = "Nightly lanes run in CI only; run the per-crate subset."
 
 [[rule]]
