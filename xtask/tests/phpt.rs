@@ -801,6 +801,67 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     );
 }
 
+/// Two runs on one machine keep apart on what upstream's conflict keys
+/// name (#1313): a subset whose `CONFLICTS` names `all`, as
+/// `sapi/fpm/tests` does for `FPM\Tester`'s ports, whose every test binds
+/// one fixed port for a while, run twice at once from two workspaces, and
+/// each run passes every test; the waits are on a reading. The control: a
+/// run that holds its keys within itself alone binds the port while the
+/// other run's test holds it, and that test misses.
+#[test]
+fn two_runs_at_once_over_a_fixed_port_each_read_what_a_lone_run_reads() {
+    if oracle().is_none() {
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let binds = |name: &str| {
+        (
+            format!("{name}.phpt"),
+            format!(
+                "--TEST--\n{name}\n--FILE--\n<?php\n$s = @stream_socket_server('tcp://127.0.0.1:{port}', $errno, $errstr);\nif (!$s) {{ echo \"held elsewhere: $errstr\\n\"; exit; }}\nusleep(300000);\necho \"bound\\n\";\n--EXPECT--\nbound\n"
+            ),
+        )
+    };
+    let tests: Vec<(String, String)> = ["one", "two", "three"].map(binds).into();
+    let mut files: Vec<(&str, &str)> = tests
+        .iter()
+        .map(|(f, t)| (f.as_str(), t.as_str()))
+        .collect();
+    files.push(("CONFLICTS", "all\n"));
+    let (first, second) = (
+        Scratch::new("port-one", &files),
+        Scratch::new("port-two", &files),
+    );
+    let readings = std::thread::scope(|scope| {
+        let runs = [&first, &second]
+            .map(|scratch| scope.spawn(move || scratch.run(&registry(""), &scratch.engine)));
+        runs.map(|run| run.join().unwrap())
+    });
+    for reading in &readings {
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+        assert_eq!(count(reading, "passed"), 3, "{reading:#?}");
+    }
+    let waited: i64 = readings
+        .iter()
+        .map(|r| match r.numbers.get("waited") {
+            Some(Number::Int(n)) => *n,
+            _ => 0,
+        })
+        .sum();
+    assert!(waited > 0, "one run waited for the other: {readings:#?}");
+    assert!(
+        readings.iter().any(|r| {
+            let (said, stamp) = r.message.rsplit_once("; ").unwrap();
+            said.contains("waited") && said.contains("conflict key") && stamp.starts_with("run by ")
+        }),
+        "the wait is said before the engine's stamp, which stays last: {readings:#?}"
+    );
+}
+
 /// `--against <commit>` (#664): the run a checkout of the merge base kept
 /// is found by the commit alone, and a test met there that fails here is
 /// named by a reading that fails, while the subset's own reading is

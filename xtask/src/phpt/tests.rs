@@ -119,7 +119,7 @@ fn run(subset: &Subset, registry: &Registry) -> Tally {
         jobs: crate::tally::cores(),
         served: None,
     };
-    run_subset(&oracle, registry, subset, under).unwrap()
+    run_subset(&oracle, registry, subset, under).unwrap().0
 }
 
 fn only(tally: &Tally) -> (Judgement, String) {
@@ -254,7 +254,9 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
         jobs: crate::tally::cores(),
         served: None,
     };
-    let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
+    let tally = run_subset(&oracle, &registry(""), &subset, under)
+        .unwrap()
+        .0;
     assert_eq!(tally.judged.len(), 3, "{tally:#?}");
     assert!(
         tally.judged.iter().all(|j| j.judgement == Judgement::Pass),
@@ -340,7 +342,9 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
         jobs: crate::tally::cores(),
         served: None,
     };
-    let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
+    let tally = run_subset(&oracle, &registry(""), &subset, under)
+        .unwrap()
+        .0;
     let went: Vec<(&str, Judgement)> = tally
         .judged
         .iter()
@@ -926,7 +930,9 @@ fn a_pinned_php_not_on_this_machine_runs_nothing_and_asserts_no_digest() {
         jobs: crate::tally::cores(),
         served: None,
     };
-    let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
+    let tally = run_subset(&oracle, &registry(""), &subset, under)
+        .unwrap()
+        .0;
     assert!(tally.judged.is_empty(), "{tally:#?}");
     assert_eq!(tally.found, 1);
     assert_eq!(manifest.pin.digests_asserted(), 0);
@@ -1307,7 +1313,7 @@ fn run_on(subset: &Subset, jobs: usize, limit_s: u64) -> Tally {
         jobs: NonZeroUsize::new(jobs).unwrap(),
         served: None,
     };
-    run_subset(&oracle, &registry(""), subset, under).unwrap()
+    run_subset(&oracle, &registry(""), subset, under).unwrap().0
 }
 
 /// The span each program of the fixture wrote beside itself, in seconds,
@@ -1556,6 +1562,8 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
         served: Some(&version),
         ..under
     };
-    let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
+    let tally = run_subset(&oracle, &registry(""), &subset, under)
+        .unwrap()
+        .0;
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
 }
