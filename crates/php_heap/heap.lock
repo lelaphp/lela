@@ -75,6 +75,7 @@ Heap::array_add_new
 Heap::array_append
 Heap::array_del
 Heap::array_dup
+Heap::array_extend
 Heap::array_lookup
 Heap::array_mixed
 Heap::array_next_entry
@@ -126,6 +127,7 @@ Heap::object_clone_members_into
 Heap::object_clone_with
 Heap::object_properties
 Heap::object_properties_copy
+Heap::object_properties_extend
 Heap::object_property_table
 Heap::object_set_properties
 Heap::object_set_slot

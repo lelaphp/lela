@@ -1550,6 +1550,60 @@ impl crate::Heap {
         Ok(a)
     }
 
+    /// `zend_hash_extend(a, size, HT_IS_PACKED(a))`: room for `size`
+    /// elements made at once, where php makes it before it writes a
+    /// known number of them. An uninitialised table is laid down at
+    /// `size` checked as `zend_hash_check_size` checks it, a hash; a
+    /// packed one grows in place as `perealloc2` grows it; a hash moves
+    /// to a table of that size and is rehashed. A table already that
+    /// large is left as it stands. The table has one owner.
+    pub fn array_extend(&mut self, a: Arr, size: u32) -> Result<(), Fatal> {
+        if size == 0 {
+            return Ok(());
+        }
+        if a.is_uninitialized() {
+            if size > a.table_size() {
+                a.header().table_size.set(check_size(size)?);
+            }
+            return a.real_init_mixed(&mut self.tables());
+        }
+        if size <= a.table_size() {
+            return Ok(());
+        }
+        let grown = check_size(size)?;
+        let mut tables = self.tables();
+        let old = a.data_addr();
+        if a.is_packed() {
+            let used_bytes = Arr::hash_size(MIN_MASK) + a.num_used() as usize * SLOT;
+            let new = match old {
+                // SAFETY: the data is this allocator's, its first
+                // `used_bytes` are the hash and the used slots, and the
+                // header is its only name, replaced below.
+                Some(old) => unsafe { tables.realloc(old, used_bytes, Arr::packed_size(grown)) }?,
+                None => tables.alloc(Arr::packed_size(grown))?,
+            };
+            a.set_data_addr(new);
+            a.header().table_size.set(grown);
+            return Ok(());
+        }
+        let new = tables.alloc(Arr::data_size(grown))?;
+        let used = a.num_used();
+        let buckets: Vec<Bucket> = (0..used).map(|i| a.read_bucket(i)).collect();
+        a.header().table_size.set(grown);
+        a.header().table_mask.set(Arr::size_to_mask(grown));
+        a.set_data_addr(new);
+        for (i, b) in buckets.into_iter().enumerate() {
+            a.write_bucket(i as u32, b);
+        }
+        if let Some(old) = old {
+            // SAFETY: the old data was this heap's and its buckets are
+            // copied.
+            unsafe { tables.free(old) };
+        }
+        a.rehash(tables.iterators());
+        Ok(())
+    }
+
     /// `zend_new_array(size)` then `zend_hash_real_init_packed`: the
     /// header and the packed slots laid down at once, so a table php
     /// real-inits and leaves empty holds its slots and reads `packed` to

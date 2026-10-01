@@ -1489,6 +1489,25 @@ impl State<'_> {
     /// Warning: unserialize(): Error at offset 0 of %d bytes in %s on line 3
     /// bool(false)
     /// ```
+    ///
+    /// An object with no `__unserialize()` has its properties read into
+    /// `Z_OBJPROP_P`, the table `rebuild_object_properties` lays down at
+    /// the class's declared slots, grown by `zend_hash_extend` for the
+    /// elements before one is read (`Z/ext/standard/var_unserializer.re:824-829`):
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties] class Q { public $a = 1; }
+    /// class N { public $a, $b, $c, $d, $e, $f, $g, $h, $i; }
+    /// #[AllowDynamicProperties] class E {}
+    /// $q = serialize(new Q); $n = serialize(new N); $nine = 'O:1:"Q":9:{s:1:"a";i:1;s:1:"b";i:1;s:1:"c";i:1;s:1:"d";i:1;s:1:"e";i:1;s:1:"f";i:1;s:1:"g";i:1;s:1:"h";i:1;s:1:"i";i:1;}';
+    /// foreach ([$q, $n, 'O:1:"E":0:{}', $nine] as $s) { $w = unserialize($s); unset($w); $m = memory_get_usage(); $u = unserialize($s); echo memory_get_usage() - $m, "\n"; unset($u); }
+    /// ```
+    /// ```expect
+    /// 432
+    /// 1528
+    /// 96
+    /// 752
+    /// ```
     // php's rule is one block; its checks stay in its order.
     #[allow(clippy::too_many_lines)]
     fn object(
@@ -1628,6 +1647,11 @@ impl State<'_> {
             return Ok(self.finish());
         }
         let has_wakeup = !incomplete && has_method(req, class, b"__wakeup");
+        // `Z_OBJPROP_P(rval)` and `zend_hash_extend` over it: the table
+        // laid down at the declared slots and grown for the elements
+        // before one is read. `elements` is held to half the bytes left
+        // above, far inside `HT_MAX_SIZE`.
+        object.extend_properties(req, u32::try_from(elements).unwrap_or(u32::MAX))?;
         if !self.object_properties(req, object, elements)? {
             if has_wakeup {
                 object.mark_destructor_called();

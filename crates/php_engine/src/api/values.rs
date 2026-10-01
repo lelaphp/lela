@@ -1299,6 +1299,17 @@ impl PhpObject {
         req.fatal_of(table).map(|_| ())
     }
 
+    /// `zend_hash_extend(Z_OBJPROP_P(obj), count + extra, ...)`: the
+    /// property table built as [`PhpObject::rebuild_properties`] builds
+    /// it and grown at once to hold `extra` rows past the declared and
+    /// dynamic ones it holds, what a native that is about to write a
+    /// known number of properties does first, php's unserializer among
+    /// them. The `Err` is the memory limit.
+    pub fn extend_properties(&self, req: &mut Request, extra: u32) -> Result<(), Thrown> {
+        let table = req.heap_mut().object_properties_extend(self.heap(), extra);
+        req.fatal_of(table).map(|_| ())
+    }
+
     /// `reset`, `end`, `next` or `prev` over the internal pointer of the
     /// object's property table as `zend_std_get_properties` holds it, the
     /// table `get_ht_for_iap` hands the pointer natives
