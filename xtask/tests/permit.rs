@@ -2607,4 +2607,9 @@ fn the_nightly_rule_denies_the_runner_where_it_is_run_and_not_a_message_line() {
     assert_eq!(rule("deny-first.json"), denied);
     assert_eq!(rule("deny-separator.json"), denied);
     assert_eq!(rule("deny.json"), denied);
+    // Flags before the runner, or a binary named by a variable, still run
+    // it; reading its source does not (#1446).
+    assert_eq!(rule("deny-flags.json"), denied);
+    assert_eq!(rule("deny-variable.json"), denied);
+    assert_eq!(rule("allow-read.json"), None);
 }
