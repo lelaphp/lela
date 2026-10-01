@@ -4889,27 +4889,30 @@ impl Request {
         }
     }
 
-    /// `zend_error` with `EG(exception)` set: what `raise` raises meets
-    /// the throwable `pending` carries standing in php's slot, and the
-    /// slot is given back after, so the `Thrown` stays the one owner. A
-    /// user error handler is handed nothing then, since
-    /// `zend_call_function` returns at once while a throwable is pending
-    /// (`Z/Zend/zend_execute_API.c:822`), and the built-in handler
-    /// renders the diagnostic where no handler stands. A fatal or an
-    /// exit raises nothing: php's `zend_bailout` left before the raise.
-    pub(crate) fn while_pending(&mut self, pending: &Thrown, raise: impl FnOnce(&mut Request)) {
-        let Some(object) = pending.exception().copied() else {
-            return;
-        };
+    /// A step of php's body with `EG(exception)` set: `step` meets the
+    /// throwable `pending` carries standing in php's slot, and the slot
+    /// is given back after, so the `Thrown` stays the one owner. A user
+    /// error handler is handed nothing then, since `zend_call_function`
+    /// returns at once while a throwable is pending
+    /// (`Z/Zend/zend_execute_API.c:822`), the built-in handler renders a
+    /// diagnostic where no handler stands, and a stream's wrapper errors
+    /// are kept quiet. A fatal or an exit runs nothing and answers
+    /// `None`: php's `zend_bailout` left before the step.
+    pub(crate) fn while_pending<R>(
+        &mut self,
+        pending: &Thrown,
+        step: impl FnOnce(&mut Request) -> R,
+    ) -> Option<R> {
+        let object = pending.exception().copied()?;
         if self.raised.is_some() || self.bailout {
-            raise(self);
-            return;
+            return Some(step(self));
         }
         self.raised = Some(Raised::Throwable(object));
-        raise(self);
+        let answer = step(self);
         if self.raised == Some(Raised::Throwable(object)) {
             self.raised = None;
         }
+        Some(answer)
     }
 
     /// `zend_throw_exception_internal`'s chain
@@ -16635,6 +16638,17 @@ impl Request {
     #[must_use]
     pub fn content_type(&self) -> ContentType {
         self.output.content_type()
+    }
+
+    /// `php_output_handler_hook(PHP_OUTPUT_HANDLER_HOOK_GET_FLAGS)`: the
+    /// flags of the buffer handler the stack is serving, `OG(running)`'s
+    /// `PHP_OUTPUT_HANDLER_*` bits as `ob_get_status()` reports them, and
+    /// `None` while it serves none. What tells a native served as a
+    /// handler from the same native called outside one, as
+    /// `mb_output_handler` tells them apart before it adds a header.
+    #[must_use]
+    pub fn running_handler_flags(&self) -> Option<i64> {
+        self.output.running_flags().map(i64::from)
     }
 
     /// `header()`, `sapi_header_op` under `SAPI_HEADER_ADD` or

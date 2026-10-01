@@ -630,9 +630,28 @@ fn intern(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
     Err(throw(req, "Error", &format!("Couldn't fetch {name}")))
 }
 
-/// A string value of `bytes`, one owner the caller's.
+/// php's `ZVAL_STRING`: a new string of `bytes`, one owner the
+/// caller's, `zend_string_init` whatever its length, so never the
+/// interned empty or one-byte string [`PhpString::new`] answers with.
+/// What ext/dom's readers and natives hand out for libxml's bytes.
 fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+    let made = PhpString::filled(req, bytes.len(), |out| out.copy_from_slice(bytes))?;
+    Ok(Value::string(made))
+}
+
+/// php's `ZVAL_EMPTY_STRING`: the interned empty string, where a body
+/// answers nothing found with it rather than with a string it made.
+fn empty_string(req: &mut Request) -> Result<Value, Thrown> {
+    Ok(Value::string(PhpString::new(req, b"")?))
+}
+
+/// php's `smart_str_extract`: the interned empty string where nothing
+/// was appended, and the buffer's own new string otherwise.
+fn extracted(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
+    if bytes.is_empty() {
+        return empty_string(req);
+    }
+    string(req, bytes)
 }
 
 /// A body's value returned under its declared type `T`, as php returns
@@ -877,6 +896,75 @@ fn unset_property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<(
 /// }
 /// Invalid State Error
 /// ```
+///
+/// `(object value omitted)` is one string, made before the walk with
+/// `ZSTR_INIT_LITERAL` and shared by every row that shows an object, one
+/// owner apiece (`object_str`, `:514-541`), and each reader's string is
+/// the one its php body makes: `ZVAL_STRING` of libxml's bytes, never
+/// the interned one-byte or empty string, and `ZVAL_EMPTY_STRING` where
+/// there is nothing, as for `className` and `id` with no attribute.
+///
+/// ```php
+/// $doc = new DOMDocument(); debug_zval_dump($doc->createElement('x'));
+/// ```
+/// ```expect
+/// object(DOMElement)#2 (27) refcount(1){
+///   ["tagName"]=>
+///   string(1) "x" refcount(1)
+///   ["className"]=>
+///   string(0) "" interned
+///   ["id"]=>
+///   string(0) "" interned
+///   ["schemaTypeInfo"]=>
+///   NULL
+///   ["firstElementChild"]=>
+///   NULL
+///   ["lastElementChild"]=>
+///   NULL
+///   ["childElementCount"]=>
+///   int(0)
+///   ["previousElementSibling"]=>
+///   NULL
+///   ["nextElementSibling"]=>
+///   NULL
+///   ["nodeName"]=>
+///   string(1) "x" refcount(1)
+///   ["nodeValue"]=>
+///   string(0) "" refcount(1)
+///   ["nodeType"]=>
+///   int(1)
+///   ["parentNode"]=>
+///   NULL
+///   ["parentElement"]=>
+///   NULL
+///   ["childNodes"]=>
+///   string(22) "(object value omitted)" refcount(3)
+///   ["firstChild"]=>
+///   NULL
+///   ["lastChild"]=>
+///   NULL
+///   ["previousSibling"]=>
+///   NULL
+///   ["nextSibling"]=>
+///   NULL
+///   ["attributes"]=>
+///   string(22) "(object value omitted)" refcount(3)
+///   ["isConnected"]=>
+///   bool(false)
+///   ["ownerDocument"]=>
+///   string(22) "(object value omitted)" refcount(3)
+///   ["namespaceURI"]=>
+///   NULL
+///   ["prefix"]=>
+///   string(0) "" interned
+///   ["localName"]=>
+///   string(1) "x" refcount(1)
+///   ["baseURI"]=>
+///   NULL
+///   ["textContent"]=>
+///   string(0) "" refcount(1)
+/// }
+/// ```
 fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>, Thrown> {
     if matches!(Std.get_method(req, object, b"__debuginfo"), Ok(Some(_))) {
         return Std.get_debug_info(req, object);
@@ -891,6 +979,7 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
         return Ok(Some(out.into()));
     };
     let mut pending: Option<Thrown> = None;
+    let omitted = string(req, b"(object value omitted)")?;
     req.state::<State>().suppress_warnings = true;
     for prop in table.iter().flat_map(|t| t.iter()) {
         // A reader that fails is left out, as `dom_get_debug_info_helper`
@@ -906,6 +995,7 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
                 };
                 if thrown.exception().is_none() {
                     req.state::<State>().suppress_warnings = false;
+                    req.release(omitted);
                     req.release(Value::array(out));
                     return Err(thrown);
                 }
@@ -915,13 +1005,15 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
         };
         let shown = if read.as_object().is_some() {
             req.release(read);
-            string(req, b"(object value omitted)")?
+            req.addref(&omitted);
+            omitted
         } else {
             read
         };
         let key = Key::Str(PhpString::new(req, prop.name)?);
         out.set(req, key, shown)?;
     }
+    req.release(omitted);
     req.state::<State>().suppress_warnings = false;
     Ok(Some(DebugInfo {
         table: out,
@@ -1036,17 +1128,22 @@ fn is_connected(node: Node) -> bool {
     false
 }
 
-/// `php_dom_get_content_into_zval`.
+/// `php_dom_get_content_into_zval`: a new string of the content, an
+/// attribute's value as `RETVAL_STRING_FAST` makes it, so an empty or
+/// one-byte value is the interned string, and the interned empty string
+/// or `null` where there is none.
 fn content_value(req: &mut Request, node: Node, null_on_failure: bool) -> Result<Value, Thrown> {
     let content = match node.kind() {
         Kind::Text | Kind::CData | Kind::Pi | Kind::Comment => node.content(),
-        Kind::Attribute => Some(node.attr_value()),
+        Kind::Attribute => {
+            return Ok(Value::string(PhpString::new(req, &node.attr_value())?));
+        }
         _ => node.get_content(),
     };
     match content {
         Some(bytes) => string(req, &bytes),
         None if null_on_failure => Ok(Value::null()),
-        None => string(req, b""),
+        None => empty_string(req),
     }
 }
 

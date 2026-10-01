@@ -14,7 +14,7 @@ use crate::object::Code;
 use crate::private::{HTML_NS, SVG_NS, ns_is};
 use crate::props::Prop;
 use crate::token_list::strip_and_collapse;
-use crate::{Read, dom_error_message, nullable_object, prop_node, string};
+use crate::{Read, dom_error_message, empty_string, nullable_object, prop_node, string};
 
 /// `dom_modern_document_implementation_read`: one `Dom\Implementation` per
 /// document, kept in the declared `$implementation` slot.
@@ -200,14 +200,21 @@ fn is_svg_root(root: Node) -> bool {
 fn title(req: &mut Request, object: PhpObject) -> Read {
     let doc = prop_node(req, object)?;
     let Some(root) = doc.root() else {
-        return Ok(Some(string(req, b"")?));
+        return Ok(Some(empty_string(req)?));
     };
     let title = if is_svg_root(root) {
         svg_title_element(root)
     } else {
         title_element(doc)
     };
+    // `dom_get_child_text_content` is a `smart_str_extract`, the
+    // interned empty string where the title has no text, which
+    // `dom_strip_and_collapse_ascii_whitespace` hands back as it stands,
+    // and a new string it collapses in place otherwise.
     let value = title.map(child_text_content).unwrap_or_default();
+    if value.is_empty() {
+        return Ok(Some(empty_string(req)?));
+    }
     Ok(Some(string(req, &strip_and_collapse(&value))?))
 }
 

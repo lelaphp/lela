@@ -15,9 +15,9 @@ use crate::node::DOMNode;
 use crate::object::{Code, Extra};
 use crate::private::{HTML_NS, html_in_html_document};
 use crate::{
-    check_qname, dom, dom_error, dom_mut, dom_throw, fetch, get_ns, intern, invalidate,
-    mark_ids_modified, node_list_unlink, nullable_object, object_for, resolve_prefix_conflict,
-    returned, set_attribute_id, strict, string, validate_and_extract,
+    check_qname, dom, dom_error, dom_mut, dom_throw, empty_string, fetch, get_ns, intern,
+    invalidate, mark_ids_modified, node_list_unlink, nullable_object, object_for,
+    resolve_prefix_conflict, returned, set_attribute_id, strict, string, validate_and_extract,
 };
 
 /// What a qualified name finds on an element for the legacy classes: an
@@ -927,7 +927,7 @@ impl DOMElement {
         let value = match value {
             Some(v) => string(req, &v)?,
             None if modern => Value::null(),
-            None => string(req, b"")?,
+            None => empty_string(req)?,
         };
         returned(req, value)
     }
@@ -999,7 +999,7 @@ impl DOMElement {
         let value = match attribute_ns(modern, elem, uri, localName.as_bytes()) {
             Some(v) => string(req, &v)?,
             None if modern => Value::null(),
-            None => string(req, b"")?,
+            None => empty_string(req)?,
         };
         returned(req, value)
     }
