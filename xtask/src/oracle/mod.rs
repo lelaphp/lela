@@ -25,15 +25,15 @@
 pub(crate) mod expect;
 pub(crate) mod linked;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -489,6 +489,7 @@ impl Pin {
         Oracle {
             pin: self,
             digest: OnceLock::new(),
+            spawned: Spawned::default(),
         }
     }
 
@@ -820,6 +821,29 @@ pub struct Oracle<'a> {
     /// What the one assertion found, kept so a mismatch refuses every
     /// later run the same way rather than hashing again.
     digest: OnceLock<Result<(), String>>,
+    /// Every process a program of the run was spawned as.
+    spawned: Spawned,
+}
+
+/// The processes the programs of one run were spawned as, each the leader
+/// of its group, kept until a lane takes them: the one record of which
+/// processes are the run's, which is how what they left of System V IPC
+/// is told from what any other process on the machine holds (#1412).
+#[derive(Debug, Default)]
+pub(crate) struct Spawned(Mutex<BTreeSet<u32>>);
+
+impl Spawned {
+    fn add(&self, pid: u32) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(pid);
+    }
+
+    /// The processes spawned since the last take, and none kept after.
+    fn take(&self) -> BTreeSet<u32> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
 }
 
 impl<'a> Oracle<'a> {
@@ -827,6 +851,13 @@ impl<'a> Oracle<'a> {
     /// runs.
     pub fn pin(&self) -> &'a Pin {
         self.pin
+    }
+
+    /// The processes this run's programs were spawned as since the last
+    /// call: each program's own, the leader of its group, and not what it
+    /// forked.
+    pub(crate) fn take_spawned(&self) -> BTreeSet<u32> {
+        self.spawned.take()
     }
 
     /// Run `program` under the pinned binary and the recipe, with
@@ -895,6 +926,7 @@ impl<'a> Oracle<'a> {
         // pipe ends only when its last writer closes it.
         drop(cmd);
         let mut child = spawned.with_context(|| format!("running {}", call.binary.display()))?;
+        self.spawned.add(child.id());
         let group = Group::of(&child)?;
         let feeding = fed(call.stdin, &mut child);
         let limit = Duration::from_secs(recipe.limits.timeout_s);

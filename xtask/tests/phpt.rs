@@ -734,6 +734,73 @@ fn planting_engine(scratch: &Scratch) -> PathBuf {
     path
 }
 
+/// The ids `ipcs -a` lists of one kind, `m`, `s` or `q`.
+fn ipcs_ids(kind: &str) -> Vec<String> {
+    let listed = Command::new("ipcs").arg("-a").output().unwrap();
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next()? == kind).then(|| fields.next().map(str::to_owned))?
+        })
+        .collect()
+}
+
+/// A run removes what its own tests leave of System V IPC (#1412): a
+/// shared memory segment, a semaphore set and a message queue a test
+/// creates and leaves are gone after the run, and the reading counts them,
+/// while a segment another process creates while the test runs, `perl`
+/// here, stands. The control: a runner that removes every object new
+/// since the run began with nothing attached removes that one too.
+#[test]
+fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
+    if oracle().is_none() {
+        return;
+    }
+    if Command::new("ipcs").arg("-a").output().is_err() {
+        eprintln!("skipped: no ipcs on this machine");
+        return;
+    }
+    let marks = Tree::new("phpt-sysv-marks").unwrap();
+    let (started, made) = (marks.join("started"), marks.join("made"));
+    let leaves = format!(
+        "--TEST--\nleaves a segment, a semaphore set and a queue\n--FILE--\n<?php\ntouch('{}');\nfor ($i = 0; $i < 500 && !file_exists('{}'); $i++) usleep(10000);\n$m = shmop_open(0, \"c\", 0600, 64);\n$s = sem_get(0, 1);\nsem_acquire($s);\n$q = msg_get_queue(0x5a000000 + getmypid());\nmsg_send($q, 1, \"x\");\necho \"left\";\n--EXPECT--\nleft\n",
+        started.display(),
+        made.display()
+    );
+    let scratch = Scratch::new("sysv", &[("leaves.phpt", &leaves)]);
+    // Another process's segment, made while the test runs: new since the
+    // subset began, nothing attached, and its creator no process of the run.
+    let outside = std::thread::spawn(move || {
+        for _ in 0..500 {
+            if started.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let made_by_perl = Command::new("perl")
+            .args([
+                "-e",
+                "use IPC::SysV qw(IPC_PRIVATE IPC_CREAT); print shmget(IPC_PRIVATE, 64, IPC_CREAT | 0600)",
+            ])
+            .output()
+            .unwrap();
+        fs::write(&made, "").unwrap();
+        String::from_utf8(made_by_perl.stdout).unwrap()
+    });
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    let outside = outside.join().unwrap();
+    let standing = ipcs_ids("m");
+    let _ = Command::new("ipcrm").args(["-m", &outside]).status();
+    assert!(!outside.is_empty(), "perl made no segment");
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "sysv_removed"), 3, "{reading:#?}");
+    assert!(
+        standing.contains(&outside),
+        "the segment perl made, {outside}, was removed: {standing:?}"
+    );
+}
+
 /// `--against <commit>` (#664): the run a checkout of the merge base kept
 /// is found by the commit alone, and a test met there that fails here is
 /// named by a reading that fails, while the subset's own reading is

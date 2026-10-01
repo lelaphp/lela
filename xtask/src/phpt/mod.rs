@@ -84,6 +84,13 @@
 //! its keys, so two tests whose files would stand at one path never run at
 //! once.
 //!
+//! **What a test leaves of System V IPC.** A segment, a semaphore set or
+//! a queue a test creates and leaves outlives its process, and the
+//! kernel's tables are small; after each subset the objects the run's own
+//! processes left are removed, told by the processes the kernel names on
+//! them and never by key, and the reading counts them as `sysv_removed`
+//! (the `sysv` module, #1412).
+//!
 //! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
 //! a crate owns the directories of the corpus its row names, an extension
 //! owns `ext/<name>/tests` by the design, and a crate that owns none is
@@ -129,6 +136,7 @@ pub(crate) mod file;
 pub(crate) mod miss;
 mod redirect;
 pub(crate) mod server;
+mod sysv;
 pub(crate) mod target;
 
 use std::collections::BTreeMap;
@@ -860,8 +868,13 @@ pub fn run(
         let served = server::served(&oracle, subset, copy.is_some())?;
         let under = under.serving(served.as_deref());
         let within = copy.as_ref().map(|copy| subset.rooted(copy));
-        let tally = run_subset(&oracle, registry, within.as_ref().unwrap_or(subset), under)?;
+        let (tally, removed) = swept_around(&oracle, &scope, copy.is_some(), || {
+            run_subset(&oracle, registry, within.as_ref().unwrap_or(subset), under)
+        })?;
         let mut reading = reading(&tally, root, manifest, &source, subset, under)?;
+        if let Some(removed) = removed {
+            reading.count("sysv_removed", removed)?;
+        }
         let (target, kept) =
             runs.target_of(&manifest.pin, &subset.scope, (&tally, &runner), ask.lane)?;
         let against = (target.as_ref(), kept);
@@ -900,6 +913,40 @@ pub fn run(
         lane.print("the lane");
     }
     Ok(readings)
+}
+
+/// One subset run by `run`, and where its tests run, what its processes
+/// left of System V IPC removed after it, the line that says so printed:
+/// the objects standing are read before it, and the processes spawned
+/// before it forgotten (the `sysv` module, #1412). The count is none
+/// where nothing was removed, and where the machine could not be read,
+/// which the line printed says.
+fn swept_around(
+    oracle: &Oracle<'_>,
+    scope: &str,
+    runs: bool,
+    run: impl FnOnce() -> Result<Tally>,
+) -> Result<(Tally, Option<u64>)> {
+    if !runs {
+        return Ok((run()?, None));
+    }
+    oracle.take_spawned();
+    let before = sysv::Standing::now();
+    let tally = run()?;
+    let swept = before.and_then(|before| sysv::sweep(&before, &oracle.take_spawned()));
+    let removed = match swept {
+        Ok(swept) => {
+            if swept.removed() > 0 || swept.unnamed > 0 {
+                println!("phpt: {scope}: {swept}");
+            }
+            Some(swept.removed() as u64).filter(|n| *n > 0)
+        }
+        Err(why) => {
+            println!("phpt: {scope}: what its tests left of System V IPC is not removed: {why:#}");
+            None
+        }
+    };
+    Ok((tally, removed))
 }
 
 /// A copy of the pinned tree at `source` made for one run (#1183): the
