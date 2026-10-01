@@ -71,7 +71,7 @@ pub(super) fn open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened
         let _ = s.ops.write(req, &data);
         let mut at = 0;
         let _ = s.ops.seek(req, 0, Some(Whence::Set), &mut at);
-        s.mode = mode[..mode.len().min(15)].to_vec();
+        s.mode = super::Mode::of(mode);
     });
     Ok(Ok(stream))
 }

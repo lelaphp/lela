@@ -343,6 +343,19 @@ fn set_character_set(req: &mut Request, object: PhpObject, value: &Value) -> Res
 /// `final class Dom\HTMLDocument extends Dom\Document`: the HTML5
 /// parser's factories of `html_document.c`, php's HTML serialiser, and
 /// `DOMDocument`'s XML savers.
+///
+/// A document costs what php's does, its `php_dom_private_data` among it,
+/// and its unset gives all of it back:
+///
+/// ```php
+/// $w = Dom\HTMLDocument::createEmpty(); unset($w);
+/// $m = memory_get_usage(); $d = Dom\HTMLDocument::createEmpty(); var_dump(memory_get_usage() - $m);
+/// $m = memory_get_usage(); unset($d); var_dump(memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(264)
+/// int(-264)
+/// ```
 #[php_class(
     namespace(Dom),
     final,

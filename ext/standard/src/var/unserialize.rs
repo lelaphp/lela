@@ -1444,7 +1444,10 @@ impl State<'_> {
             elements -= 1;
             let key = match self.key(req) {
                 Some(Scalar::Long(n)) => Key::Int(n),
-                Some(Scalar::Str(bytes)) => Key::from_string(PhpString::new(req, &bytes)?),
+                // A key is `zend_string_init_existing_interned`'s.
+                Some(Scalar::Str(bytes)) => {
+                    Key::from_string(PhpString::existing_interned(req, &bytes)?)
+                }
                 _ => return Ok(false),
             };
             // The key's own owner is the var hash's, whose slots name it
@@ -1797,6 +1800,23 @@ impl State<'_> {
         done
     }
 
+    /// `process_nested_object_data`: each key read as
+    /// `zend_string_init_existing_interned` reads it, so a property name
+    /// a unit already holds is that string and costs nothing, and a
+    /// dynamic property costs what writing it does:
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties] class P {}
+    /// $o = new P; $o->dyn = 5; $s = serialize($o); $w = unserialize($s);
+    /// $m = memory_get_usage(); $u = unserialize($s); var_dump(memory_get_usage() - $m);
+    /// $m = memory_get_usage(); $n = new P; $n->dyn = 5; var_dump(memory_get_usage() - $m);
+    /// $m = memory_get_usage(); $a = unserialize('a:1:{s:3:"dyn";i:5;}'); var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(416)
+    /// int(416)
+    /// int(376)
+    /// ```
     fn object_body(
         &mut self,
         req: &mut Request,
@@ -1810,7 +1830,9 @@ impl State<'_> {
                 Some(Scalar::Long(n)) => n.to_string().into_bytes(),
                 _ => return Ok(false),
             };
-            let name = PhpString::new(req, &key)?;
+            // A key is `zend_string_init_existing_interned`'s, so a name
+            // a unit already holds costs nothing.
+            let name = PhpString::existing_interned(req, &key)?;
             self.hash.dtors.push(Dtor::Kept(Value::string(name)));
             if let Some(old) = object.prop(req, &key) {
                 req.addref(&old);

@@ -1127,7 +1127,7 @@ fn clone_node_of(req: &mut Request, this: PhpObject, recursive: bool) -> Result<
     let is_document = n.kind().is_document();
     if follows_spec(req, this) {
         if is_document {
-            let mut private = Private::default();
+            let mut private = Private::new(req)?;
             let Some(node) = clone_node_modern(&mut private.mapper, n, n.doc(), recursive) else {
                 return Ok(Value::bool(false));
             };

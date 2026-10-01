@@ -513,18 +513,23 @@ impl Mm {
     /// slow path. So a string grown by appends past 2 MiB is copied only
     /// where the machine has mapped something after it, as php's is.
     ///
-    /// A block grown where it stands never stands beside its copy, so
-    /// the real peak moves by what the block gained and no more:
+    /// The real usage moves by what the block gained whether it grew
+    /// where it stands or moved. The real peak moves by that alone while
+    /// the machine lets the block grow where it stands, and by one copy
+    /// of the block more where it does not, which is the machine's
+    /// mapping at that moment, in php's process as in this one (#1410);
+    /// so the fence holds the peak to that bound and no number:
     ///
     /// ```php
     /// $s = str_repeat('x', 3000000); $t = str_repeat('y', 10000); memory_reset_peak_usage(); $r = memory_get_usage(true);
     /// for ($i = 0; $i < 100; $i++) { $s .= $t; }
-    /// var_dump(strlen($s), memory_get_usage(true) - $r, memory_get_peak_usage(true) - $r);
+    /// $grown = memory_get_usage(true) - $r;
+    /// var_dump(strlen($s), $grown, memory_get_peak_usage(true) - $r <= $grown + strlen($s));
     /// ```
     /// ```expect
     /// int(4000000)
     /// int(999424)
-    /// int(999424)
+    /// bool(true)
     /// ```
     ///
     /// # Safety

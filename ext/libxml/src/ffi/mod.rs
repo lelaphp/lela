@@ -807,6 +807,14 @@ pub trait PrivateData: std::any::Any {
     /// ([`NodeObject::add_ns_tag`]) is being freed by
     /// `php_libxml_node_free`.
     fn element_freed(&mut self, element: Node);
+
+    /// The header's `dtor` with the request at hand: what the data holds
+    /// of the request's heap given back, as php's `efree`s it, before the
+    /// data is dropped. Data dropped with no request at hand leaves that
+    /// to the request's end.
+    fn destroy(&mut self, req: &mut Request) {
+        let _ = req;
+    }
 }
 
 /// `php_libxml_ref_obj`, with the `emalloc(sizeof(php_libxml_ref_obj))`
@@ -1797,7 +1805,13 @@ unsafe fn decrement_doc_ref_directly(d: *mut DocRef, req: Option<&mut Request>) 
     r.refcount -= 1;
     let left = r.refcount;
     if left == 0 {
-        drop(r.private.take());
+        let mut req = req;
+        if let Some(mut private) = r.private.take() {
+            if let Some(req) = req.as_deref_mut() {
+                private.destroy(req);
+            }
+            drop(private);
+        }
         if !r.doc.is_null() {
             // SAFETY: the document this reference owned, freed once.
             unsafe { sys::xmlFreeDoc(r.doc) };

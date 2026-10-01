@@ -15,7 +15,7 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
-use php_ext::raising::{Level, Thrown, call_stack_end, docref, throw, warning};
+use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpString, RecursionGuard, Value};
 
@@ -993,10 +993,15 @@ fn var_export(
     let returned = r#return;
     let mut out = Vec::new();
     export(req, &mut out, &value, 1)?;
+    // What a reader of an object's properties left pending, a lazy
+    // object's initializer that threw, is thrown once what was read is
+    // written, as php's `EG(exception)` is after `PHPWRITE`.
     if returned {
+        pending(req)?;
         return PhpString::new(req, &out).map(Some);
     }
     req.write(&out);
+    pending(req)?;
     Ok(None)
 }
 
@@ -1092,7 +1097,13 @@ fn export_object(
         return Ok(());
     }
     object.protect_in(req, RecursionGuard::Export);
-    let rows = object.props_for(req, PropertyPurpose::VarExport);
+    let rows = match object.props_for(req, PropertyPurpose::VarExport) {
+        Ok(rows) => rows,
+        Err(thrown) => {
+            object.unprotect_in(req, RecursionGuard::Export);
+            return Err(thrown);
+        }
+    };
     let Some(decl) = req.class_decl(object.class()) else {
         object.unprotect_in(req, RecursionGuard::Export);
         return Ok(());
@@ -1121,7 +1132,7 @@ fn export_object(
     }
     let mut written = Ok(());
     if !is_enum {
-        for (key, element) in rows? {
+        for (key, element) in rows {
             out.extend(std::iter::repeat_n(b' ', level + 2));
             // `php_object_element_export`: a name quoted, unmangled; an
             // integer key as it stands.

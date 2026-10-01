@@ -400,13 +400,34 @@ impl Heap {
         payload: T,
     ) -> Result<Res, Fatal> {
         let table = payload_of::<T>();
+        let size = payload_offset(table) + table.layout.size();
+        self.resource_sized(kind, payload, size)
+    }
+
+    /// [`Heap::resource_with`] with the payload laid inside an
+    /// allocation of `size` bytes, the struct php `emalloc`s for the
+    /// resource (`sizeof(php_stream)` for a stream), so the request is
+    /// charged php's size whatever the Rust payload's is; a payload that
+    /// does not fit it, behind the table's word, is an internal error.
+    pub fn resource_sized<T: Any + Send>(
+        &mut self,
+        kind: ResourceType,
+        payload: T,
+        size: usize,
+    ) -> Result<Res, Fatal> {
+        let table = payload_of::<T>();
         if table.layout.align() > 8 {
             return Err(Fatal::Error(format!(
                 "InternalError: a native payload aligned to {} cannot sit on the request heap",
                 table.layout.align()
             )));
         }
-        let size = payload_offset(table) + table.layout.size();
+        if payload_offset(table) + table.layout.size() > size {
+            return Err(Fatal::Error(format!(
+                "InternalError: a native payload of {} bytes does not fit the {size} php allocates",
+                table.layout.size()
+            )));
+        }
         let at = self.mm.alloc(size)?.cast::<PayloadBox>();
         // SAFETY: the allocation holds the table at its start and nothing
         // else holds it.

@@ -170,6 +170,7 @@ abi::Passed
 abi::Path
 abi::Pool
 abi::PostStartup
+abi::PropertiesFor
 abi::PropertyPlace
 abi::PropertyPurpose
 abi::PropertyRead
@@ -662,6 +663,7 @@ request::Stream::orig_path
 request::Stream::pclose
 request::Stream::read
 request::Stream::read_dir
+request::Stream::read_into
 request::Stream::recvfrom
 request::Stream::resource
 request::Stream::rewind_as
@@ -797,11 +799,13 @@ values::Emalloc::new
 values::Emalloc::resize
 values::FreshString
 values::FreshString::bytes_mut
+values::FreshString::extend
 values::FreshString::finish
 values::FreshString::free
 values::FreshString::is_empty
 values::FreshString::len
 values::FreshString::new
+values::FreshString::set_len
 values::FreshString::truncate
 values::HashIterator
 values::HashIterator::new
@@ -914,6 +918,7 @@ values::PhpRef::separate_array
 values::PhpRef::set
 values::PhpString
 values::PhpString::as_bytes
+values::PhpString::existing_interned
 values::PhpString::filled
 values::PhpString::interned
 values::PhpString::is_empty

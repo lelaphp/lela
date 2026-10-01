@@ -66,6 +66,7 @@ FreshStr::bytes_mut
 FreshStr::finish
 FreshStr::is_empty
 FreshStr::len
+FreshStr::set_len
 GcStatus
 Heap
 Heap::addref
@@ -97,6 +98,7 @@ Heap::gc_startup
 Heap::gc_status
 Heap::in_memory_limit_error
 Heap::interned
+Heap::interned_find
 Heap::iterator_add
 Heap::iterator_del
 Heap::iterator_lead
@@ -142,6 +144,7 @@ Heap::resource_at
 Heap::resource_close
 Heap::resource_native
 Heap::resource_native_mut
+Heap::resource_sized
 Heap::resource_with
 Heap::resources
 Heap::separate
@@ -149,6 +152,7 @@ Heap::set_memory_limit
 Heap::stored
 Heap::string
 Heap::string_append
+Heap::string_extend
 Heap::string_fresh
 Heap::string_safe_alloc
 Heap::string_truncate

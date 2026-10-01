@@ -15,7 +15,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, warning};
-use php_ext::request::Request;
+use php_ext::request::{Request, StreamOption};
 use php_ext::syntax::Scanning;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -552,6 +552,25 @@ fn get_include_path(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
 ///   string(1) "f"
 /// }
 /// ```
+///
+/// The message is kept on the request's heap until the next diagnostic
+/// replaces it or `error_clear_last()` gives it back: `trigger_error()`'s
+/// own string with one more owner, and a new string of the engine's
+/// text.
+///
+/// ```php
+/// @trigger_error('warm', E_USER_NOTICE);
+/// $m = memory_get_usage(); @trigger_error(str_repeat('x', 100), E_USER_NOTICE); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); @trigger_error('y', E_USER_NOTICE); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $x = @$undefined; echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); error_clear_last(); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 160
+/// -160
+/// 56
+/// -56
+/// ```
 #[php_function]
 fn error_get_last(req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
     req.last_error()
@@ -813,6 +832,15 @@ fn parse_ini_file(
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", true)? else {
         return Ok(OrFalse::False);
     };
+    // `php_stream_open_for_zend_ex`: "Disable buffering to avoid double
+    // buffering between PHP and Zend streams."
+    stream.set_option(
+        req,
+        StreamOption::ReadBuffer {
+            buffered: false,
+            size: 0,
+        },
+    );
     let bytes = stream.copy_to_mem(req, None);
     stream.free(req);
     let bytes = bytes?;

@@ -197,6 +197,9 @@ fn operand_value(req: &mut Request, this: PhpObject, operand: Operand) -> Result
         Operand::Str(s) => string(req, &s),
         Operand::Bool(b) => Ok(Value::bool(b)),
         Operand::Number(n) => Ok(Value::float(n)),
+        // `ZVAL_EMPTY_ARRAY` for a node set with no node
+        // (`Z/ext/dom/xpath_callbacks.c:367`).
+        Operand::Nodes(items) if items.is_empty() => Ok(Value::array(PhpArray::empty())),
         Operand::Nodes(items) => {
             let mut array = PhpArray::new(req)?;
             for item in items {
@@ -399,33 +402,48 @@ fn eval(
         answer
     };
     match answer {
-        Answer::NodeSet(items) => {
-            let mut array = PhpArray::new(req)?;
-            for item in items {
-                if modern && matches!(item, Item::Namespace { .. }) {
-                    req.release(Value::array(array));
-                    return Err(crate::dom_throw_message(
-                        req,
-                        Code::NotSupported,
-                        "The namespace axis is not well-defined in the living DOM specification. \
-                         Use Dom\\Element::getInScopeNamespaces() or Dom\\Element::getDescendantNamespaces() instead.",
-                    ));
-                }
-                let v = item_object(req, this, item)?;
-                array.append(req, v)?;
-            }
-            let class = if modern {
-                "Dom\\NodeList"
-            } else {
-                "DOMNodeList"
-            };
-            crate::node_set(req, class, array)
-        }
+        Answer::NodeSet(items) => node_list(req, this, items, modern),
         Answer::Bool(b) => Ok(Value::bool(b)),
         Answer::Number(n) => Ok(Value::float(n)),
         Answer::Str(s) => string(req, &s),
         Answer::Other => Ok(Value::null()),
     }
+}
+
+/// The node list `php_xpath_eval` hands back for a node set: one object
+/// per node, and the process's empty array under the list for a set with
+/// no node (`ZVAL_EMPTY_ARRAY`, `Z/ext/dom/xpath.c:385`). A modern
+/// document refuses the namespace axis.
+fn node_list(
+    req: &mut Request,
+    this: PhpObject,
+    items: Vec<Item>,
+    modern: bool,
+) -> Result<Value, Thrown> {
+    let mut array = if items.is_empty() {
+        PhpArray::empty()
+    } else {
+        PhpArray::new(req)?
+    };
+    for item in items {
+        if modern && matches!(item, Item::Namespace { .. }) {
+            req.release(Value::array(array));
+            return Err(crate::dom_throw_message(
+                req,
+                Code::NotSupported,
+                "The namespace axis is not well-defined in the living DOM specification. \
+                 Use Dom\\Element::getInScopeNamespaces() or Dom\\Element::getDescendantNamespaces() instead.",
+            ));
+        }
+        let v = item_object(req, this, item)?;
+        array.append(req, v)?;
+    }
+    let class = if modern {
+        "Dom\\NodeList"
+    } else {
+        "DOMNodeList"
+    };
+    crate::node_set(req, class, array)
 }
 
 /// One callable the registration read, with the value it came from, one
@@ -615,6 +633,29 @@ impl DOMXPath {
     /// Warning: Dom\XPath::query(): Invalid expression in %s on line %d
     /// Error: Could not evaluate XPath expression
     /// 9
+    /// ```
+    ///
+    /// A node set with no node is the process's empty array, under the
+    /// list and as a callback's argument.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<a><b/></a>');
+    /// $x = new DOMXPath($d);
+    /// $l = $x->query('//c');
+    /// $m = memory_get_usage();
+    /// $k = $x->query('//c');
+    /// var_dump(memory_get_usage() - $m, $k->length);
+    /// $x->registerNamespace('php', 'http://php.net/xpath');
+    /// $x->registerPhpFunctions();
+    /// function f($nodes) { debug_zval_dump($nodes); return 1; }
+    /// $x->evaluate('php:function("f", //c)');
+    /// ```
+    /// ```expect
+    /// int(160)
+    /// int(0)
+    /// array(0) interned {
+    /// }
     /// ```
     #[php(tentative)]
     fn query(

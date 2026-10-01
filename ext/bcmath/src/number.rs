@@ -7,8 +7,8 @@
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    CloneObj, Instance, ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
-    Raw, Std, This, Union,
+    CloneObj, Instance, ObjectHandlers, PropertiesFor, PropertyPlace, PropertyPurpose,
+    PropertyRead, PropertyTest, Raw, Std, This, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{clone_with, known_method, lookup_class, new_object};
@@ -1422,11 +1422,11 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         _: PropertyPurpose,
-    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
+    ) -> Result<PropertiesFor, Thrown> {
         let kept = kept(req, object)?;
         let scale = held(req, object)?.scale;
         let scale = Value::int(i64::try_from(scale).unwrap_or(i64::MAX));
-        Ok(Some(vec![
+        Ok(PropertiesFor::Rows(vec![
             (Key::Str(kept.value_name), Value::string(kept.value)),
             (Key::Str(kept.scale_name), scale),
         ]))
@@ -1451,9 +1451,10 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
-        let rows = self
-            .get_properties_for(req, object, PropertyPurpose::Debug)?
-            .unwrap_or_default();
+        let rows = match self.get_properties_for(req, object, PropertyPurpose::Debug)? {
+            PropertiesFor::Rows(rows) => rows,
+            PropertiesFor::Standard | PropertiesFor::Null => Vec::new(),
+        };
         let mut table = PhpArray::new(req)?;
         for (key, value) in rows {
             if let Key::Str(name) = &key {

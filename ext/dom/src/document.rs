@@ -2395,6 +2395,19 @@ impl Document {
 
 /// `final class Dom\XMLDocument extends Dom\Document`: the factories of
 /// `xml_document.c`, and `DOMDocument`'s savers and validators.
+///
+/// A document costs what php's does, its `php_dom_private_data` among it,
+/// and its unset gives all of it back:
+///
+/// ```php
+/// $w = Dom\XMLDocument::createEmpty(); unset($w);
+/// $m = memory_get_usage(); $d = Dom\XMLDocument::createEmpty(); var_dump(memory_get_usage() - $m);
+/// $m = memory_get_usage(); unset($d); var_dump(memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(264)
+/// int(-264)
+/// ```
 #[php_class(
     namespace(Dom),
     final,

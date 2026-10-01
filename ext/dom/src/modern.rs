@@ -56,12 +56,13 @@ pub(crate) fn document_object(
 ) -> Result<PhpObject, Thrown> {
     let class = crate::class(req, class)?;
     let object = php_ext::call::new_object(req, class)?;
+    let private = Private::new(req)?;
     if let Some(mut obj) = crate::libxml_half(req, object) {
         obj.adopt_document(req, doc);
         obj.take_node(req, doc);
         obj.set_class_type(ClassType::Modern);
         obj.set_document_handlers(&crate::xml_serializer::MODERN);
-        obj.set_private_data(Box::new(Private::default()));
+        obj.set_private_data(Box::new(private));
     }
     Ok(object)
 }
