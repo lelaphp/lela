@@ -369,6 +369,11 @@ request::BindTo
 request::BodyLimits
 request::Brigade
 request::BufferHandler
+request::BuildDefs
+request::BuildDefs::configure
+request::BuildDefs::date
+request::BuildDefs::provider
+request::BuildDefs::system
 request::CacheStatus
 request::CachedFile
 request::Cast
@@ -438,6 +443,7 @@ request::Request::autoload_register
 request::Request::autoload_unregister
 request::Request::backtrace
 request::Request::buffer_handler
+request::Request::build_defs
 request::Request::called_scope
 request::Request::caller_var
 request::Request::captured
@@ -750,6 +756,7 @@ syntax::scanned
 syntax::strip
 test::Capture
 test::Engine
+test::Engine::build_defs
 test::Engine::builder
 test::Engine::command_line
 test::Engine::dispatch

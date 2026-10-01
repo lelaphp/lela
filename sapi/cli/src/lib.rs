@@ -72,11 +72,10 @@ pub(crate) fn process_title() -> Option<ProcessTitle> {
 }
 
 /// `php_print_version` for this host, [`php_sapi::version`] under its
-/// name and the date this crate's `build.rs` stamps as `__DATE__ " "
-/// __TIME__` stamps php's.
+/// name.
 #[must_use]
 pub fn version(engine: &Engine) -> String {
-    php_sapi::version(NAME, env!("PHP_BUILD_EPOCH"), engine)
+    php_sapi::version(NAME, engine)
 }
 
 /// php's CLI `main`: the command line read, what it asks for served on
@@ -180,6 +179,7 @@ fn engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
         .extensions(&extensions)
+        .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .skip_shebang();
     php_sapi::start(builder, ini, Some(php_sapi::HostExtension::Cli))
@@ -194,6 +194,7 @@ fn server_engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
         .extensions(&extensions)
+        .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .skip_shebang()
         .ini("html_errors", "1")

@@ -19,14 +19,20 @@
 //! and reads back only a unit that carries it, so a unit another build
 //! wrote is never read (design §6.3), as php's `zend_system_id` keeps one
 //! build's file cache from another's.
+//!
+//! And the build's facts, php's `main/build-defs.h` and `php_build_date`,
+//! each stamped here once for every host, every constant and phpinfo to
+//! read ([`build_defs`]).
 
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
+    build_defs();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let spec = root.join("../../ops.toml");
     let bodies = root.join("src/handlers.rs");
@@ -59,6 +65,42 @@ fn main() {
             println!("cargo:warning={e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// The build's facts as `configure` and `main.c` fix php's: the Unix
+/// seconds `php_build_date` renders, `SOURCE_DATE_EPOCH`'s where it is
+/// set so that a reproducible build stays one and the moment this file
+/// ran otherwise, which is when the engine's sources last changed, as
+/// `__DATE__` moves when `main.c` is compiled again; the target triple the
+/// engine is built for, `PHP_BUILD_SYSTEM` (never the building host's
+/// `uname -a`, which would carry its name into the binary); and
+/// `PHP_BUILD_PROVIDER` only where the environment names one, as
+/// `configure` defines it only then (`Z/main/main_arginfo.h:13`), the
+/// cfg `php_build_provider` saying whether it does.
+fn build_defs() {
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    println!("cargo:rerun-if-env-changed=PHP_BUILD_PROVIDER");
+    println!("cargo::rustc-check-cfg=cfg(php_build_provider)");
+    let epoch = env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|seconds| seconds.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs())
+        });
+    println!("cargo:rustc-env=PHP_BUILD_EPOCH={epoch}");
+    println!(
+        "cargo:rustc-env=PHP_BUILD_SYSTEM={}",
+        env::var("TARGET").unwrap_or_default()
+    );
+    if let Some(provider) = env::var("PHP_BUILD_PROVIDER")
+        .ok()
+        .filter(|provider| !provider.is_empty())
+    {
+        println!("cargo:rustc-env=PHP_BUILD_PROVIDER={provider}");
+        println!("cargo:rustc-cfg=php_build_provider");
     }
 }
 

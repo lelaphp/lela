@@ -48,7 +48,7 @@ fn heartbeat(fpm: &mut Fpm, seconds: i32) {
 pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
     if fpm.pools.is_empty() {
         zlog!(
-            Error,
+            Error @ fpm_conf_process_all_pools:844,
             "No pool defined. at least one pool section must be specified in config file"
         );
         return false;
@@ -64,7 +64,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
             let prefix = c.prefix.clone().unwrap_or_default();
             if !is_dir(&prefix) {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:855,
                     "[pool {name}] the prefix '{}' does not exist or is not a directory",
                     String::from_utf8_lossy(&prefix)
                 );
@@ -73,14 +73,14 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
         }
         if c.user.is_none() && nix::unistd::Uid::effective().is_root() && !fpm.run_as_root {
             zlog!(
-                Alert,
+                Alert @ fpm_conf_process_all_pools:862,
                 "[pool {name}] 'user' directive has not been specified when running as a root without --allow-to-run-as-root"
             );
             return false;
         }
         let c = &mut fpm.pools[i].config;
         let Some(address) = c.listen_address.clone().filter(|a| !a.is_empty()) else {
-            zlog!(Alert, "[pool {name}] no listen address have been defined!");
+            zlog!(Alert @ fpm_conf_process_all_pools:874, "[pool {name}] no listen address have been defined!");
             return false;
         };
         let domain = domain_of(&address);
@@ -97,21 +97,21 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
         let c = &mut fpm.pools[i].config;
         if c.process_priority != 64 && !(-19..=20).contains(&c.process_priority) {
             zlog!(
-                Error,
+                Error @ fpm_conf_process_all_pools:879,
                 "[pool {name}] process.priority must be included into [-19,20]"
             );
             return false;
         }
         let Some(pm) = c.pm else {
             zlog!(
-                Alert,
+                Alert @ fpm_conf_process_all_pools:885,
                 "[pool {name}] the process manager is missing (static, dynamic or ondemand)"
             );
             return false;
         };
         if c.pm_max_children < 1 {
             zlog!(
-                Alert,
+                Alert @ fpm_conf_process_all_pools:891,
                 "[pool {name}] pm.max_children must be a positive value"
             );
             return false;
@@ -125,28 +125,28 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
                 );
                 if min <= 0 {
                     zlog!(
-                        Alert,
+                        Alert @ fpm_conf_process_all_pools:900,
                         "[pool {name}] pm.min_spare_servers({min}) must be a positive value"
                     );
                     return false;
                 }
                 if max <= 0 {
                     zlog!(
-                        Alert,
+                        Alert @ fpm_conf_process_all_pools:905,
                         "[pool {name}] pm.max_spare_servers({max}) must be a positive value"
                     );
                     return false;
                 }
                 if min > children || max > children {
                     zlog!(
-                        Alert,
+                        Alert @ fpm_conf_process_all_pools:911,
                         "[pool {name}] pm.min_spare_servers({min}) and pm.max_spare_servers({max}) cannot be greater than pm.max_children({children})"
                     );
                     return false;
                 }
                 if max < min {
                     zlog!(
-                        Alert,
+                        Alert @ fpm_conf_process_all_pools:916,
                         "[pool {name}] pm.max_spare_servers({max}) must not be less than pm.min_spare_servers({min})"
                     );
                     return false;
@@ -154,13 +154,13 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
                 if c.pm_start_servers <= 0 {
                     c.pm_start_servers = min + (max - min) / 2;
                     zlog!(
-                        Notice,
+                        Notice @ fpm_conf_process_all_pools:922,
                         "[pool {name}] pm.start_servers is not set. It's been set to {}.",
                         c.pm_start_servers
                     );
                 } else if c.pm_start_servers < min || c.pm_start_servers > max {
                     zlog!(
-                        Alert,
+                        Alert @ fpm_conf_process_all_pools:925,
                         "[pool {name}] pm.start_servers({}) must not be less than pm.min_spare_servers({min}) and not greater than pm.max_spare_servers({max})",
                         c.pm_start_servers
                     );
@@ -168,7 +168,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
                 }
                 if c.pm_max_spawn_rate < 1 {
                     zlog!(
-                        Alert,
+                        Alert @ fpm_conf_process_all_pools:930,
                         "[pool {name}] pm.max_spawn_rate must be a positive value"
                     );
                     return false;
@@ -177,7 +177,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
             Pm::Ondemand => {
                 if c.pm_process_idle_timeout < 1 {
                     zlog!(
-                        Alert,
+                        Alert @ fpm_conf_process_all_pools:942,
                         "[pool {name}] pm.process_idle_timeout({}s) must be greater than 0s",
                         c.pm_process_idle_timeout
                     );
@@ -185,7 +185,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
                 }
                 if c.listen_backlog < conf::BACKLOG_DEFAULT {
                     zlog!(
-                        Warning,
+                        Warning @ fpm_conf_process_all_pools:947,
                         "[pool {name}] listen.backlog({}) was too low for the ondemand process manager. I updated it for you to {}.",
                         c.listen_backlog,
                         conf::BACKLOG_DEFAULT
@@ -222,21 +222,21 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
             let shown = String::from_utf8_lossy(&status).into_owned();
             if status[0] != b'/' {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:967,
                     "[pool {name}] the status path '{shown}' must start with a '/'"
                 );
                 return false;
             }
             if c.pm_status_listen.is_none() && !is_shared && status.len() < 2 {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:972,
                     "[pool {name}] the status path '{shown}' is not long enough"
                 );
                 return false;
             }
             if !path_chars(&status) {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:978,
                     "[pool {name}] the status path '{shown}' must contain only the following characters '[alphanum]/_-.~'"
                 );
                 return false;
@@ -246,21 +246,21 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
             let shown = String::from_utf8_lossy(&ping).into_owned();
             if ping[0] != b'/' {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:990,
                     "[pool {name}] the ping path '{shown}' must start with a '/'"
                 );
                 return false;
             }
             if ping.len() < 2 {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:995,
                     "[pool {name}] the ping path '{shown}' is not long enough"
                 );
                 return false;
             }
             if !path_chars(&ping) {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:1001,
                     "[pool {name}] the ping path '{shown}' must contain only the following characters '[alphanum]/_-.~'"
                 );
                 return false;
@@ -269,7 +269,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
                 None => c.ping_response = Some(b"pong".to_vec()),
                 Some(response) if response.is_empty() => {
                     zlog!(
-                        Error,
+                        Error @ fpm_conf_process_all_pools:1010,
                         "[pool {name}] the ping response page '{}' is not long enough",
                         String::from_utf8_lossy(response)
                     );
@@ -305,7 +305,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
         if slowlog_timeout != 0 {
             if !has_slowlog {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:1042,
                     "[pool {name}] 'slowlog' must be specified for use with 'request_slowlog_timeout'"
                 );
                 return false;
@@ -319,7 +319,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
                     .open(conf::path(&slowlog))
                 {
                     zlog_sys!(
-                        Error,
+                        Error @ fpm_conf_process_all_pools:1062,
                         conf::errno(&e),
                         "Unable to create or open slowlog({})",
                         String::from_utf8_lossy(&slowlog)
@@ -329,7 +329,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
             }
             if terminate != 0 && slowlog_timeout > terminate {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:1071,
                     "[pool {name}] 'request_slowlog_timeout' ({slowlog_timeout}) can't be greater than 'request_terminate_timeout' ({terminate})"
                 );
                 return false;
@@ -339,14 +339,14 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
         if c.request_slowlog_trace_depth != 0 {
             if !has_slowlog {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:1080,
                     "[pool {name}] 'slowlog' must be specified for use with 'request_slowlog_trace_depth'"
                 );
                 return false;
             }
             if c.request_slowlog_trace_depth <= 0 {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:1093,
                     "[pool {name}] 'request_slowlog_trace_depth' ({}) must be a positive value",
                     c.request_slowlog_trace_depth
                 );
@@ -363,14 +363,14 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
             let shown = String::from_utf8_lossy(&chroot).into_owned();
             if chroot[0] != b'/' {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:1106,
                     "[pool {name}] the chroot path '{shown}' must start with a '/'"
                 );
                 return false;
             }
             if !is_dir(&chroot) {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:1111,
                     "[pool {name}] the chroot path '{shown}' does not exist or is not a directory"
                 );
                 return false;
@@ -382,7 +382,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
             let shown = String::from_utf8_lossy(&chdir).into_owned();
             if chdir[0] != b'/' {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:1122,
                     "[pool {name}] the chdir path '{shown}' must start with a '/'"
                 );
                 return false;
@@ -393,7 +393,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
                 within.extend_from_slice(&chdir);
                 if !is_dir(&within) {
                     zlog!(
-                        Error,
+                        Error @ fpm_conf_process_all_pools:1132,
                         "[pool {name}] the chdir path '{shown}' within the chroot path '{}' ('{}') does not exist or is not a directory",
                         String::from_utf8_lossy(chroot),
                         String::from_utf8_lossy(&within)
@@ -402,7 +402,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
                 }
             } else if !is_dir(&chdir) {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:1140,
                     "[pool {name}] the chdir path '{shown}' does not exist or is not a directory"
                 );
                 return false;
@@ -474,7 +474,7 @@ pub(crate) fn process_all(fpm: &mut Fpm) -> bool {
             );
             if x.as_deref().is_some_and(|x| !x.is_empty()) && x == y {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_process_all_pools:1230,
                     "[pool {}] unable to set listen address as it's already used in another pool '{}'",
                     fpm.pools[b].name(),
                     fpm.pools[a].name()

@@ -27,7 +27,7 @@ pub(crate) fn init_main() -> bool {
         Ok(null) => OwnedFd::from(null),
         Err(e) => {
             zlog_sys!(
-                Error,
+                Error @ fpm_stdio_init_main:32,
                 conf::errno(&e),
                 "failed to init stdio: open(\"/dev/null\")"
             );
@@ -35,7 +35,7 @@ pub(crate) fn init_main() -> bool {
         }
     };
     if let Err(e) = nix::unistd::dup2_stdin(&null).and_then(|()| nix::unistd::dup2_stdout(&null)) {
-        zlog_sys!(Error, e, "failed to init stdio: dup2()");
+        zlog_sys!(Error @ fpm_stdio_init_main:37, e, "failed to init stdio: dup2()");
         return false;
     }
     true
@@ -64,7 +64,7 @@ pub(crate) fn save_original_stderr(fpm: &mut Fpm) -> bool {
         }
         Err(e) => {
             zlog_sys!(
-                Error,
+                Error @ fpm_stdio_save_original_stderr:84,
                 e,
                 "failed to save original STDERR fd, access.log records may appear in error_log: dup()"
             );
@@ -80,7 +80,7 @@ pub(crate) fn restore_original_stderr(fpm: &mut Fpm, close: bool) {
     };
     if let Err(e) = nix::unistd::dup2_stderr(original) {
         zlog_sys!(
-            Error,
+            Error @ fpm_stdio_restore_original_stderr:97,
             e,
             "failed to restore original STDERR fd, access.log records may appear in error_log: dup2()"
         );
@@ -100,7 +100,7 @@ pub(crate) fn redirect_stderr_to_error_log(fpm: &Fpm) {
             && let Err(e) = nix::unistd::dup2_stderr(file.as_fd())
         {
             zlog_sys!(
-                Error,
+                Error @ fpm_stdio_redirect_stderr_to_error_log:117,
                 e,
                 "failed to tie stderr fd with error_log fd: dup2()"
             );
@@ -145,7 +145,7 @@ pub(crate) fn open_error_log(fpm: &mut Fpm, reopen: bool) -> bool {
         Ok(file) => OwnedFd::from(file),
         Err(e) => {
             zlog_sys!(
-                Error,
+                Error @ fpm_stdio_open_error_log:386,
                 conf::errno(&e),
                 "failed to open error_log ({})",
                 String::from_utf8_lossy(&error_log)
@@ -205,13 +205,13 @@ fn facility(n: i32) -> nix::syslog::Facility {
 pub(crate) fn reopen_logs(fpm: &mut Fpm) {
     restore_original_stderr(fpm, false);
     if open_error_log(fpm, true) {
-        zlog!(Notice, "error log file re-opened");
+        zlog!(Notice @ fpm_got_signal:112, "error log file re-opened");
     } else {
-        zlog!(Error, "unable to re-opened error log file");
+        zlog!(Error @ fpm_got_signal:114, "unable to re-opened error log file");
     }
     match crate::access::open(fpm, true) {
-        0 => zlog!(Notice, "access log file re-opened"),
-        -1 => zlog!(Error, "unable to re-opened access log file"),
+        0 => zlog!(Notice @ fpm_got_signal:119, "access log file re-opened"),
+        -1 => zlog!(Error @ fpm_got_signal:121, "unable to re-opened access log file"),
         _ => {}
     }
     redirect_stderr_to_error_log(fpm);
@@ -389,7 +389,7 @@ fn said(
     }
     if errored {
         zlog_sys!(
-            Error,
+            Error @ fpm_stdio_child_said:271,
             nix::errno::Errno::last(),
             "unable to read what child {pid} said into {what}"
         );

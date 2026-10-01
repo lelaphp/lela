@@ -93,7 +93,7 @@ impl Poller {
                 .collect(),
             Err(nix::errno::Errno::EINTR) => Vec::new(),
             Err(e) => {
-                crate::zlog!(Warning, "kevent() returns {}", e as i32);
+                crate::zlog!(Warning @ fpm_event_kqueue_wait:131, "kevent() returns {}", e as i32);
                 Vec::new()
             }
         }
@@ -140,7 +140,7 @@ impl Poller {
                 .collect(),
             Err(nix::errno::Errno::EINTR) => Vec::new(),
             Err(e) => {
-                crate::zlog!(Warning, "epoll_wait() returns {}", e as i32);
+                crate::zlog!(Warning @ fpm_event_epoll_wait:127, "epoll_wait() returns {}", e as i32);
                 Vec::new()
             }
         }

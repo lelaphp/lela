@@ -31,9 +31,9 @@ use std::io::Write;
 use std::process::ExitCode;
 
 pub use php_engine::{
-    Aborted, CommandLine, Dispatched, EachLine, Engine, EngineBuilder, FileHandles, HostExtension,
-    HostValue, IniEvent, IniOrigin, IniValue, Method, Observables, OutputSink, PHP_VERSION,
-    ProcessTitle, RequestDescription, ResponseHead, Routed, WebRequest,
+    Aborted, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder, FileHandles,
+    HostExtension, HostValue, IniEvent, IniOrigin, IniValue, Method, Observables, OutputSink,
+    PHP_VERSION, ProcessTitle, RequestDescription, ResponseHead, Routed, WebRequest,
 };
 
 /// `php_module_startup` for a host: `builder`, which carries the host's
@@ -107,35 +107,23 @@ pub fn modules(engine: &Engine) -> String {
     text
 }
 
-/// The date a host's version line carries, php's `__DATE__ " " __TIME__`
-/// of the compile that last rebuilt the host (`Z/main/main.c`), as `Jul
-/// 28 2026 13:06:52`, the day padded with a space as `__DATE__` pads it:
-/// rendered in UTC from `epoch`, the Unix seconds each host's `build.rs`
-/// stamps when its sources change, which is when php's `__DATE__` moves.
-/// The civil date is [`php_proto::http::civil`].
-#[must_use]
-pub fn build_date(epoch: &str) -> String {
-    let at = php_proto::http::civil(epoch.parse().unwrap_or(0));
-    let name = php_proto::http::MONTHS
-        .get(usize::try_from(at.month).unwrap_or(1) - 1)
-        .copied()
-        .unwrap_or("Jan");
-    format!(
-        "{name} {:>2} {} {:02}:{:02}:{:02}",
-        at.day, at.year, at.hour, at.minute, at.second
-    )
-}
-
 /// `php_get_version` (`Z/main/main.c:128`), what each host's `-v`
-/// prints: the head line with the host's name and the date `built`
-/// carries, php's copyright line, and `get_zend_version`, the engine's
-/// line and one for each Zend extension loaded; php starts its
-/// extensions before it answers `-v`, so the engine is built first.
+/// prints: the head line with the host's name and the build's date, php's
+/// copyright line, `Built by` and the provider where the build named one,
+/// and `get_zend_version`, the engine's line and one for each Zend
+/// extension loaded; php starts its extensions before it answers `-v`, so
+/// the engine is built first. The date and the provider are the engine's
+/// [`BuildDefs`], which `PHP_BUILD_DATE` and phpinfo read too.
 #[must_use]
-pub fn version(name: &str, built: &str, engine: &Engine) -> String {
+pub fn version(name: &str, engine: &Engine) -> String {
+    let defs = engine.build_defs();
+    let provider = defs
+        .provider()
+        .map(|provider| format!("Built by {provider}\n"))
+        .unwrap_or_default();
     format!(
-        "PHP {PHP_VERSION} ({name}) (built: {}) (NTS)\nCopyright (c) The PHP Group\n{}",
-        build_date(built),
+        "PHP {PHP_VERSION} ({name}) (built: {}) (NTS)\nCopyright (c) The PHP Group\n{provider}{}",
+        defs.date(),
         engine.zend_version_info()
     )
 }
@@ -144,16 +132,4 @@ pub fn version(name: &str, built: &str, engine: &Engine) -> String {
 #[must_use]
 pub fn exit_code(status: i32) -> ExitCode {
     ExitCode::from(u8::try_from(status & 0xff).unwrap_or(255))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::build_date;
-
-    #[test]
-    fn the_build_date_is_phps_date_and_time_in_utc() {
-        assert_eq!(build_date("0"), "Jan  1 1970 00:00:00");
-        assert_eq!(build_date("1785243412"), "Jul 28 2026 12:56:52");
-        assert_eq!(build_date("951782400"), "Feb 29 2000 00:00:00");
-    }
 }

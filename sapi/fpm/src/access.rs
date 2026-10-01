@@ -32,7 +32,7 @@ pub(crate) fn open(fpm: &mut Fpm, reopen: bool) -> i32 {
             Ok(file) => OwnedFd::from(file),
             Err(e) => {
                 zlog_sys!(
-                    Error,
+                    Error @ fpm_log_open:43,
                     crate::conf::errno(&e),
                     "failed to open access log ({})",
                     String::from_utf8_lossy(&log)
@@ -40,7 +40,7 @@ pub(crate) fn open(fpm: &mut Fpm, reopen: bool) -> i32 {
                 return -1;
             }
         };
-        zlog!(Debug, "open access log ({})", String::from_utf8_lossy(&log));
+        zlog!(Debug @ fpm_log_open:46, "open access log ({})", String::from_utf8_lossy(&log));
         if reopen {
             if let Some(old) = &mut fpm.pools[p].access_log {
                 let _ = nix::unistd::dup2(std::os::fd::AsFd::as_fd(&file), old);
@@ -159,9 +159,9 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
             token = false;
             let m = modifier.clone();
             let m_is = |word: &str| m.eq_ignore_ascii_case(word.as_bytes());
-            let warn_modifier = |allowed: &str| {
+            let warn_modifier = |allowed: &str, line: u32| {
                 zlog!(
-                    Warning,
+                    Warning @ (crate::zlog::Site::at("fpm_log_write", line)),
                     "only {allowed} are allowed as a modifier for %{} ('{}')",
                     char::from(c),
                     String::from_utf8_lossy(&m)
@@ -175,7 +175,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                 }
                 b'C' => {
                     if !(m.is_empty() || m_is("total") || m_is("user") || m_is("system")) {
-                        warn_modifier("'total', 'user' or 'system'");
+                        warn_modifier("'total', 'user' or 'system'", 190);
                         return false;
                     }
                     modifier.clear();
@@ -199,6 +199,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                     } else {
                         warn_modifier(
                             "'seconds', 'milli', 'milliseconds', 'micro' or 'microseconds'",
+                            224,
                         );
                         return false;
                     };
@@ -210,7 +211,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                 b'e' => {
                     if m.is_empty() {
                         zlog!(
-                            Warning,
+                            Warning @ fpm_log_write:232,
                             "the name of the environment variable must be set between embraces for %{}",
                             char::from(c)
                         );
@@ -256,7 +257,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                     } else if m_is("megabytes") || m_is("mega") {
                         (memory / 1024 / 1024).to_string()
                     } else {
-                        warn_modifier("'bytes', 'kilo', 'kilobytes', 'mega' or 'megabytes'");
+                        warn_modifier("'bytes', 'kilo', 'kilobytes', 'mega' or 'megabytes'", 281);
                         return false;
                     };
                     modifier.clear();
@@ -277,7 +278,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                 b'o' => {
                     if m.is_empty() {
                         zlog!(
-                            Warning,
+                            Warning @ fpm_log_write:295,
                             "the name of the header must be set between embraces for %{}",
                             char::from(c)
                         );
@@ -385,13 +386,13 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
                     }
                     s = end;
                     if s + 1 >= format.len() {
-                        zlog!(Warning, "missing closing embrace in the access.format");
+                        zlog!(Warning @ fpm_log_write:432, "missing closing embrace in the access.format");
                         return false;
                     }
                 }
                 _ => {
                     zlog!(
-                        Warning,
+                        Warning @ fpm_log_write:439,
                         "Invalid token in the access.format (%{})",
                         char::from(c)
                     );
@@ -400,7 +401,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
             }
             if format.get(s) != Some(&b'}') && !modifier.is_empty() {
                 zlog!(
-                    Warning,
+                    Warning @ fpm_log_write:444,
                     "embrace is not allowed for modifier %{}",
                     char::from(c)
                 );
@@ -409,7 +410,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
             s += 1;
             if over(stream) {
                 zlog!(
-                    Notice,
+                    Notice @ fpm_log_write:450,
                     "the log buffer is over the configured limit. The access log request has been truncated."
                 );
                 break;
@@ -418,7 +419,7 @@ fn run(format: &[u8], request: Option<&Request<'_>>, stream: &mut Option<&mut St
         }
         if over(stream) {
             zlog!(
-                Notice,
+                Notice @ fpm_log_write:457,
                 "the log buffer is over the configured limit. The access log request has been truncated."
             );
             break;

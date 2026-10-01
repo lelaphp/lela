@@ -183,7 +183,12 @@ impl OutputSink for Response {
     /// `sapi_cgi_log_message`: `PHP message: ` and the entry, through the
     /// child's log.
     fn log(&mut self, entry: &[u8]) {
-        crate::zlog::msg(Level::Notice, b"PHP message: ", entry);
+        crate::zlog::msg(
+            Level::Notice,
+            crate::zlog::Site::at("sapi_cgi_log_message", 631),
+            b"PHP message: ",
+            entry,
+        );
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
@@ -262,14 +267,14 @@ fn allowed_clients(list: Option<&[u8]>) -> Option<Vec<IpAddr>> {
         {
             Some(ip) => allowed.push(ip),
             None => zlog!(
-                Error,
+                Error @ (crate::zlog::Site::FCGI),
                 "Wrong IP address '{}' in listen.allowed_clients",
                 String::from_utf8_lossy(word)
             ),
         }
     }
     if allowed.is_empty() {
-        zlog!(Error, "There are no allowed addresses");
+        zlog!(Error @ (crate::zlog::Site::FCGI), "There are no allowed addresses");
     }
     Some(allowed)
 }
@@ -335,7 +340,7 @@ pub(crate) fn init(
     started: &str,
 ) -> Worker {
     let failed = |name: &str| -> ! {
-        zlog!(Error, "[pool {name}] child failed to initialize");
+        zlog!(Error @ fpm_child_init:202, "[pool {name}] child failed to initialize");
         std::process::exit(i32::from(EXIT_SOFTWARE));
     };
     let name = fpm.pools[pool].name();
@@ -360,7 +365,7 @@ pub(crate) fn init(
         (Some(path), Some(response)) => Some((path.clone(), response.clone())),
         (Some(path), None) => {
             zlog!(
-                Error,
+                Error @ fpm_status_init_child:37,
                 "[pool {name}] ping is set ({}) but ping.response is not set.",
                 String::from_utf8_lossy(path)
             );
@@ -374,7 +379,7 @@ pub(crate) fn init(
     fpm.close_signal_pipe();
     if crate::ffi::child_soft_quit(listening.as_raw_fd()).is_err() {
         zlog_sys!(
-            Error,
+            Error @ fpm_signals_init_child:248,
             nix::errno::Errno::last(),
             "failed to init child signals: sigaction()"
         );
@@ -437,6 +442,7 @@ fn build(ini: &[(String, String)], config: &PoolConfig, started: &str) -> Engine
     let mut builder = php_sapi::prepare(
         Engine::builder()
             .extensions(&extensions)
+            .configure(php_bundle::CONFIGURE)
             .tier::<php_bundle::Tier>(),
         ini,
         Some(HostExtension::FpmFcgi),
@@ -455,14 +461,14 @@ fn build(ini: &[(String, String)], config: &PoolConfig, started: &str) -> Engine
         .strip_prefix(started)
         .unwrap_or_default();
     let _ = std::io::stderr().write_all(own.as_bytes());
-    for (kind, values) in [
-        ("php_value", &config.php_values),
-        ("php_admin_value", &config.php_admin_values),
+    for (kind, values, line) in [
+        ("php_value", &config.php_values, 110),
+        ("php_admin_value", &config.php_admin_values, 119),
     ] {
         for (name, _) in values {
             if name.as_slice() != b"extension" && engine.ini_get(name).is_none() {
                 zlog!(
-                    Error,
+                    Error @ (crate::zlog::Site::at("fpm_php_apply_defines", line)),
                     "Unable to set {kind} '{}'",
                     String::from_utf8_lossy(name)
                 );
@@ -534,7 +540,7 @@ impl Worker {
             };
             if !allowed(self.allowed.as_deref(), peer) {
                 zlog!(
-                    Error,
+                    Error @ (crate::zlog::Site::FCGI),
                     "Connection disallowed: IP address '{}' has been dropped.",
                     client_ip(peer).unwrap_or_default()
                 );
@@ -772,7 +778,7 @@ impl Worker {
                     Ok(_) => Program::File(path.clone()),
                     Err(e) => {
                         zlog!(
-                            Error,
+                            Error @ main:1881,
                             "Unable to open primary script: {} ({})",
                             String::from_utf8_lossy(path),
                             crate::conf::errno(&e).desc()
@@ -788,7 +794,7 @@ impl Worker {
                 Program::Refused(403, b"Access denied.\n")
             }
         } else {
-            zlog!(Debug, "Primary script unknown");
+            zlog!(Debug @ main:1858, "Primary script unknown");
             Program::Refused(404, b"File not found.\n")
         };
         let mut response = Response {
@@ -893,7 +899,7 @@ impl Worker {
             .any(|ext| path.len() > ext.len() && path.ends_with(ext));
         if !allowed {
             zlog!(
-                Notice,
+                Notice @ fpm_php_limit_extensions:252,
                 "Access to the script '{}' has been denied (see security.limit_extensions)",
                 String::from_utf8_lossy(path)
             );
@@ -951,18 +957,18 @@ impl Worker {
                     (text_of(&key), value.as_ref().map(text_of))
                 } else {
                     zlog!(
-                        Error,
+                        Error @ fastcgi_ini_parser:1404,
                         "Passing INI directive through FastCGI: only classic entries are allowed"
                     );
                     continue;
                 };
                 if key.is_empty() {
-                    zlog!(Error, "Passing INI directive through FastCGI: empty key");
+                    zlog!(Error @ fastcgi_ini_parser:1411, "Passing INI directive through FastCGI: empty key");
                     continue;
                 }
                 let Some(value) = value else {
                     zlog!(
-                        Error,
+                        Error @ fastcgi_ini_parser:1420,
                         "Passing INI directive through FastCGI: empty value for key '{}'",
                         String::from_utf8_lossy(&key)
                     );
@@ -970,7 +976,7 @@ impl Worker {
                 };
                 if key.as_slice() != b"extension" && self.engine.ini_get(&key).is_none() {
                     zlog!(
-                        Error,
+                        Error @ fastcgi_ini_parser:1428,
                         "Passing INI directive through FastCGI: unable to set '{}'",
                         String::from_utf8_lossy(&key)
                     );
@@ -1172,7 +1178,7 @@ fn read_body(env: &Environment, length: i64, wire: &Arc<Mutex<Wire>>) -> Vec<u8>
             }
             Err(e) => {
                 zlog!(
-                    Warning,
+                    Warning @ sapi_cgi_log_message:631,
                     "REQUEST_BODY_FILE: open('{}') failed: {} ({})",
                     String::from_utf8_lossy(file),
                     crate::conf::errno(&e).desc(),

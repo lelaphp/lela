@@ -33,7 +33,7 @@ use crate::api::abi::{
 };
 use crate::api::call::Function;
 use crate::api::raising::Level;
-use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
+use crate::api::request::{BuildDefs, Ending, ExtensionId, Request, Sink, ini_truth};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
@@ -573,6 +573,8 @@ pub(crate) struct Shared {
     /// the other constants, so a request that reads the name its host
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
     sapi_names: Vec<(Box<[u8]>, Zval)>,
+    /// The build's facts ([`EngineBuilder::configure`]).
+    pub(crate) build_defs: BuildDefs,
     /// `CG(skip_shebang)` for every file a request compiles, which the
     /// host asked for ([`EngineBuilder::skip_shebang`]).
     pub(crate) shebang: php_compile::Shebang,
@@ -2021,6 +2023,7 @@ pub struct EngineBuilder {
     host_extension: Option<crate::host_extension::HostExtension>,
     host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     shebang: php_compile::Shebang,
+    configure: &'static [&'static str],
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
 }
@@ -2038,6 +2041,16 @@ impl EngineBuilder {
     #[must_use]
     pub fn trace_natives_to(mut self, path: std::path::PathBuf) -> EngineBuilder {
         self.trace_to = Some(path);
+        self
+    }
+
+    /// The `configure` switches that build the bundle the host hands the
+    /// engine, php's spelling one each (`--enable-mbstring`), which
+    /// [`BuildDefs::configure`] renders as `CONFIGURE_COMMAND`; none
+    /// until a host names them.
+    #[must_use]
+    pub fn configure(mut self, switches: &'static [&'static str]) -> EngineBuilder {
+        self.configure = switches;
         self
     }
 
@@ -2251,6 +2264,7 @@ impl EngineBuilder {
                 ini,
                 constant_values,
                 sapi_names,
+                build_defs: BuildDefs::of(self.configure),
                 shebang: self.shebang,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
@@ -2536,9 +2550,17 @@ impl Engine {
             host_extension: None,
             host_ini: Vec::new(),
             shebang: php_compile::Shebang::Read,
+            configure: &[],
             #[cfg(feature = "witness-trace")]
             trace_to: None,
         }
+    }
+
+    /// The build's facts, php's `main/build-defs.h`: what the host's
+    /// `-v` prints and phpinfo's build rows say.
+    #[must_use]
+    pub fn build_defs(&self) -> &BuildDefs {
+        &self.shared.build_defs
     }
 
     /// `zend_flf_functions` by name, what `Unit::dump` prints a
