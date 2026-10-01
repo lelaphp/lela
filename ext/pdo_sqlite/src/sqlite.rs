@@ -6,7 +6,7 @@
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpString, Value, ValueRef};
 use php_ext_pdo::connector::{
     BindEvent, BindKind, BindType, Binding, Column, Connection, Connector, Executed, Failure,
     OnError, Orientation, Placeholders, Prepared, Source, SqlError, SqlState, Statement,
@@ -100,6 +100,35 @@ impl Connector for Driver {
     /// `make_filename_safe` makes it, opened with the bits the options
     /// give, the busy timeout set.
     fn open(&self, req: &mut Request, source: &Source<'_>) -> Result<Box<dyn Connection>, Failure> {
+        // `H = pecalloc(1, sizeof(pdo_sqlite_db_handle), dbh->is_persistent)`,
+        // first, and given back by the closer whatever the open does.
+        let allocation = if source.persistent {
+            None
+        } else {
+            Some(Emalloc::new(req, DB_HANDLE)?)
+        };
+        match open_db(req, source) {
+            Ok(db) => Ok(Box::new(Handle {
+                db,
+                registrations: Vec::new(),
+                transaction_mode: 0,
+                allocation,
+            })),
+            Err(failure) => {
+                if let Some(allocation) = allocation {
+                    allocation.free(req);
+                }
+                Err(failure)
+            }
+        }
+    }
+}
+
+/// The rest of `pdo_sqlite_handle_factory`: the file made safe as
+/// `make_filename_safe` makes it, opened with the bits the options give,
+/// the busy timeout set.
+fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Db, Failure> {
+    {
         let Some(filename) = safe_filename(req, Some(source.dsn)) else {
             let shown = String::from_utf8_lossy(source.dsn).into_owned();
             return Err(Failure::from(throw(
@@ -135,11 +164,7 @@ impl Connector for Driver {
             None => 60,
         };
         db.busy_timeout(timeout.saturating_mul(1000));
-        Ok(Box::new(Handle {
-            db,
-            registrations: Vec::new(),
-            transaction_mode: 0,
-        }))
+        Ok(db)
     }
 }
 
@@ -188,7 +213,17 @@ pub(crate) struct Handle {
     pub(crate) db: Db,
     pub(crate) registrations: Vec<Registration>,
     transaction_mode: i64,
+    /// The `pdo_sqlite_db_handle` the factory `pecalloc`s for the
+    /// connection, on the request's heap where the connection is not
+    /// persistent, given back by the closer, `sqlite_handle_closer`'s
+    /// `pefree(H)`.
+    allocation: Option<Emalloc>,
 }
+
+/// `sizeof(pdo_sqlite_db_handle)` on the pinned 64-bit build: `db`,
+/// `einfo`, `funcs`, `collations`, `authorizer_fcc` and
+/// `transaction_mode` (`Z/ext/pdo_sqlite/php_pdo_sqlite_int.h:48-55`).
+const DB_HANDLE: usize = 96;
 
 impl Handle {
     /// A statement served for its effect under the request, the failure
@@ -381,6 +416,9 @@ impl Connection for Handle {
             for handler in self.db.unregister(registration) {
                 handler.release(req);
             }
+        }
+        if let Some(allocation) = self.allocation.take() {
+            allocation.free(req);
         }
     }
 }
