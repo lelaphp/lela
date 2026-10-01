@@ -111,3 +111,50 @@ pub fn frame_code(req: &Request, frame: FrameRef) -> Option<Code> {
 pub fn table_sizes(req: &Request) -> [usize; 4] {
     req.table_sizes()
 }
+
+#[cfg(test)]
+mod tests {
+    //! `clean`'s class count as `EG(class_table)` holds it.
+
+    use std::cell::Cell;
+
+    use php_heap::FrameRef;
+
+    use crate::api::request::Request;
+    use crate::engine::Engine;
+    use crate::test::Capture;
+    use crate::tier::{Flow, Site, Tier};
+
+    thread_local! {
+        /// The class count read at the entry of the last function called.
+        static COUNTED: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    struct Counter;
+
+    impl Tier for Counter {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+            if site == Site::Entry && frame != crate::tier::entry(req) {
+                COUNTED.set(Some(super::table_sizes(req)[0]));
+            }
+            Flow::Continue
+        }
+    }
+
+    /// Every key of the table is counted, an alias's among them, the
+    /// engine's (`Dom\DOMException`'s kind) and `class_alias()`'s, and
+    /// the iterator wrapper php never adds is not: the count is what
+    /// `get_declared_classes()`, `get_declared_interfaces()` and
+    /// `get_declared_traits()` list together.
+    #[test]
+    fn the_class_count_is_the_class_tables_keys() {
+        COUNTED.set(None);
+        let engine = Engine::builder().tier::<Counter>().build();
+        let served = engine.serve_capture(
+            "<?php\nclass A {}\ninterface I {}\ntrait T {}\nclass_alias('A', 'B');\nclass_alias('A', 'C');\nfunction n(...$a) { return func_num_args(); }\nfunction probe() {}\necho n(...get_declared_classes(), ...get_declared_interfaces(), ...get_declared_traits());\nprobe();\n",
+            Capture::default(),
+        );
+        let listed = String::from_utf8_lossy(&served.stdout).into_owned();
+        assert_eq!(COUNTED.get().map(|n| n.to_string()), Some(listed));
+    }
+}
