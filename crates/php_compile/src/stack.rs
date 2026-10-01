@@ -389,6 +389,41 @@ mod tests {
         assert_eq!(wider.limit, 0x10_0000 + 64 * 1024 * doubled);
     }
 
+    /// `Zend/tests/generators/bug71441.phpt`'s sum, two thousand `+`
+    /// deep, and the same sum as a constant's initialiser, compile under
+    /// detect on a thread of the shell's default 8 MiB in the
+    /// unoptimised build the tests and the phpt lane use, which lays each
+    /// frame's locals side by side; php's own compile spends less than a
+    /// tenth of that per nesting. The guard on the frame the compiler
+    /// spends per nesting (#1434).
+    #[test]
+    fn a_two_thousand_term_sum_compiles_on_an_eight_mib_thread() {
+        let sums = [
+            format!("<?php\n$a = 1;\n$y = $a + {} $a;", "1 +".repeat(2000)),
+            format!("<?php\nconst Y = 1{};", " + 1".repeat(2000)),
+        ];
+        let Ok(spawned) = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let options = crate::Options {
+                    stack: StackLimit::init(0, 0),
+                    ..crate::Options::default()
+                };
+                let mut strings = php_heap::Strings::new();
+                sums.iter()
+                    .map(|source| {
+                        crate::compile_source(source.as_bytes(), &options, &mut strings)
+                            .err()
+                            .map(|refused| refused.message)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        else {
+            return;
+        };
+        assert_eq!(spawned.join().ok(), Some(vec![None, None]));
+    }
+
     /// `limit`'s two clamps.
     #[test]
     fn a_size_past_the_address_and_a_reservation_past_memory_clamp() {

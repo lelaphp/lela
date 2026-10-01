@@ -10421,237 +10421,343 @@ impl Emit<'_> {
     }
 
     /// [`Self::expr`]'s body over one node, php's `zend_compile_expr_inner`.
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// Every compile of a nested expression passes through this frame
+    /// once per level, as php's passes through `zend_compile_expr_inner`,
+    /// so it holds the dispatch and nothing else: each arm is one call
+    /// whose answer is this function's, and what an arm reads of its
+    /// node is read in that call's frame. An arm that read its node here
+    /// would add its locals to every level of every nesting, which an
+    /// unoptimised build lays out side by side rather than overlapping.
     fn expr_node(&mut self, expr: tree::Expr, fetch: Fetch) -> Result<Where, CompileError> {
         let line = expr.line(self.parsed);
         self.line = line;
         self.check_stack()?;
         let tree = &self.parsed.tree;
         match expr {
-            tree::Expr::ParenExpr(id) => match tree[id].inner {
-                Some(inner) => self.expr(inner),
-                None => Err(self.unread("an expression inside parentheses")),
-            },
+            tree::Expr::ParenExpr(id) => self.paren_expr(id),
             tree::Expr::MagicConstExpr(id) => self.magic(id),
-            tree::Expr::LiteralExpr(_) | tree::Expr::NowdocExpr(_) => {
-                Ok(Where::Constant(self.constant_expr(expr)?))
-            }
-            // `zend_compile_const`: `true`, `false` and `null` are the
-            // values `zend_try_ct_eval_const` substitutes whatever their
-            // case, and every other name is a constant fetched by the
-            // name as written.
-            tree::Expr::NameRef(token) => {
-                if let Some(value) = self.constant_name(token) {
-                    return Ok(Where::Constant(value));
-                }
-                let name = self.text(token).to_vec();
-                self.const_fetch(&name)
-            }
-            tree::Expr::InterpolatedStringExpr(id) => {
-                let parts = tree[id].parts.clone();
-                self.encaps(&parts, Holder::DoubleQuoted(&self.parsed.tree[id]), line)
-            }
-            tree::Expr::HeredocExpr(id) => {
-                let parts = tree[id].parts.clone();
-                self.encaps(&parts, Holder::Heredoc(&self.parsed.tree[id]), line)
-            }
+            tree::Expr::LiteralExpr(_) | tree::Expr::NowdocExpr(_) => self.literal_expr(expr),
+            tree::Expr::NameRef(token) => self.name_expr(token),
+            tree::Expr::InterpolatedStringExpr(id) => self.double_quoted_expr(id, line),
+            tree::Expr::HeredocExpr(id) => self.heredoc_expr(id, line),
             tree::Expr::ShellExecExpr(id) => self.shell_exec(id, line),
-            // `zend_compile_simple_var` through `zend_try_compile_cv`: the
-            // variable is its CV, and no opline reads it into anything;
-            // `$this` under `BP_VAR_R` is `FETCH_THIS` into a temporary,
-            // and an auto-global `FETCH_R (global)` over its name.
-            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => {
-                    self.cv_fetched(&name, Fetch::Read);
-                    Ok(Where::Cv(self.lookup_cv(&name)))
-                }
-                SimpleVar::This => Ok(self.fetch_this(OperandKind::Tmp)),
-                SimpleVar::Auto(global) => self.fetch_by_name(global.name(), Symbols::Global),
-                SimpleVar::Globals => Ok(self.fetch_globals(OperandKind::Tmp)),
-            },
+            tree::Expr::SimpleVarExpr(id) => self.simple_var_expr(id, line),
             tree::Expr::VarVarExpr(id) => {
-                let inner = self.required(tree[id].inner, "a variable")?;
-                self.var_var(inner)
+                self.operand_of(tree[id].inner, "a variable", Self::var_var)
             }
             tree::Expr::DynamicVarExpr(id) => {
-                let inner = self.required(tree[id].inner, "a variable")?;
-                self.var_var(inner)
+                self.operand_of(tree[id].inner, "a variable", Self::var_var)
             }
-            tree::Expr::ArrayExpr(id) => {
-                let elements = tree[id].array_elements.clone();
-                self.array(&elements)
-            }
+            tree::Expr::ArrayExpr(id) => self.array_expr(id),
             tree::Expr::ListExpr(_) => {
                 Err(self.compile_error("Cannot use list() as standalone expression"))
             }
-            tree::Expr::UnaryExpr(id) => {
-                let node = &tree[id];
-                let operand = self.required(node.operand, "a unary operator")?;
-                match node.op.map(|op| self.kind(op)) {
-                    Some(SyntaxKind::MINUS) => self.unary(true, operand),
-                    Some(SyntaxKind::PLUS) => self.unary(false, operand),
-                    Some(SyntaxKind::BANG) => self.bool_not(operand),
-                    Some(SyntaxKind::TILDE) => self.bw_not(operand),
-                    _ => Err(self.unread("a unary operator")),
-                }
-            }
-            tree::Expr::PrefixIncDecExpr(id) => {
-                let node = &tree[id];
-                let up = node.op.map(|op| self.kind(op)) == Some(SyntaxKind::PLUS_PLUS);
-                let target = self.required(node.operand, if up { "a `++`" } else { "a `--`" })?;
-                self.step(target, up, true)
-            }
-            tree::Expr::PostfixIncDecExpr(id) => {
-                let node = &tree[id];
-                let up = node.op.map(|op| self.kind(op)) == Some(SyntaxKind::PLUS_PLUS);
-                self.step(node.operand, up, false)
-            }
-            tree::Expr::CastExpr(id) => {
-                let node = &tree[id];
-                let to = self.cast_to(node.op, line)?;
-                let operand = self.required(node.operand, "a cast")?;
-                self.cast(to, operand)
-            }
+            tree::Expr::UnaryExpr(id) => self.unary_expr(id),
+            tree::Expr::PrefixIncDecExpr(id) => self.prefix_expr(id),
+            tree::Expr::PostfixIncDecExpr(id) => self.postfix_expr(id),
+            tree::Expr::CastExpr(id) => self.cast_expr(id, line),
             tree::Expr::ErrorSuppressExpr(id) => {
-                let operand = self.required(tree[id].operand, "an `@`")?;
-                self.silence(operand)
+                self.operand_of(tree[id].operand, "an `@`", Self::silence)
             }
-            // `clone` and `exit` are the calls php's parser makes of
-            // them, `\clone` and `\exit` in the function table: `clone
-            // $o` one argument, and `clone(...)` its argument list as
-            // written, 8.5's `clone($o, ['p' => 1])` among them, which
-            // `zend_compile_func_clone` leaves to the function.
-            tree::Expr::CloneExpr(id) => {
-                let node = &tree[id];
-                let arguments = match (node.operand, node.args) {
-                    (Some(operand), _) => Args::of(&[operand], self.line_of(operand)),
-                    (None, Some(args)) => self.arguments(args, line)?,
-                    (None, None) => return Err(self.unread("a `clone`")),
-                };
-                self.call(b"\\clone", &arguments, Fetch::Read)
-            }
-            tree::Expr::ExitExpr(id) => {
-                let arguments = match tree[id].args {
-                    Some(args) => self.arguments(args, line)?,
-                    None => Args::of(&[], line),
-                };
-                self.call(b"\\exit", &arguments, Fetch::Read)
-            }
+            tree::Expr::CloneExpr(id) => self.clone_expr(id, line),
+            tree::Expr::ExitExpr(id) => self.exit_expr(id, line),
             tree::Expr::PrintExpr(id) => {
-                let operand = self.required(tree[id].operand, "a `print`")?;
-                self.print(operand)
+                self.operand_of(tree[id].operand, "a `print`", Self::print)
             }
             tree::Expr::ThrowExpr(id) => {
-                let operand = self.required(tree[id].operand, "a `throw`")?;
-                self.throw(operand)
+                self.operand_of(tree[id].operand, "a `throw`", Self::throw)
             }
-            tree::Expr::BinaryExpr(id) => {
-                let node = &tree[id];
-                let left = node.lhs;
-                let right = self.required(node.rhs, "a binary operator")?;
-                match node.op.map(|op| self.kind(op)) {
-                    Some(SyntaxKind::AMP_AMP | SyntaxKind::AND_KW) => {
-                        self.short_circuiting(false, left, right)
-                    }
-                    Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => {
-                        self.short_circuiting(true, left, right)
-                    }
-                    Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce(left, right),
-                    Some(SyntaxKind::PIPE_GT) => self.pipe(left, right),
-                    Some(kind) => match binary_op(kind) {
-                        Some(op) => self.binary(op, left, right),
-                        None => Err(self.unread("a binary operator")),
-                    },
-                    None => Err(self.unread("a binary operator")),
-                }
-            }
-            tree::Expr::InstanceofExpr(id) => {
-                let node = &tree[id];
-                let Some(class) = node.rhs.map(|rhs| self.class_spec(rhs)) else {
-                    return Err(self.unread("an `instanceof`"));
-                };
-                self.instance_of(node.lhs, class)
-            }
+            tree::Expr::BinaryExpr(id) => self.binary_expr(id),
+            tree::Expr::InstanceofExpr(id) => self.instanceof_expr(id),
             tree::Expr::AssignExpr(id) => self.assignment(id, line),
-            tree::Expr::TernaryExpr(id) => {
-                let node = &tree[id];
-                let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
-                self.conditional(cond, then, otherwise)
-            }
-            tree::Expr::MatchExpr(id) => {
-                let node = &tree[id];
-                let subject = self.required(node.subject, "a `match`")?;
-                let arms = node.match_arms.clone();
-                self.r#match(subject, &arms)
-            }
-            tree::Expr::NewExpr(id) => {
-                let node = &tree[id];
-                if let Some(anon) = node.anon {
-                    let args = tree[anon].args;
-                    let class = ClassRef::Fetched(self.anonymous_class(anon)?);
-                    let arguments = match args {
-                        Some(args) => self.arguments(args, line)?,
-                        None => Args::of(&[], line),
-                    };
-                    return self.new_of(&class, &arguments, line);
-                }
-                let Some(class) = node.ctor.map(|ctor| self.class_spec(ctor)) else {
-                    return Err(self.unread("a `new`"));
-                };
-                let arguments = match node.args {
-                    Some(args) => self.arguments(args, line)?,
-                    None => Args::of(&[], line),
-                };
-                self.new_expression(class, &arguments)
-            }
+            tree::Expr::TernaryExpr(id) => self.ternary_expr(id),
+            tree::Expr::MatchExpr(id) => self.match_expr(id),
+            tree::Expr::NewExpr(id) => self.new_expr(id, line),
             tree::Expr::YieldExpr(id) => self.yield_expr(id),
             tree::Expr::YieldFromExpr(id) => self.yield_from(id),
-            tree::Expr::IncludeExpr(id) => {
-                let node = &tree[id];
-                let kind = match node.op.map(|op| self.kind(op)) {
-                    Some(SyntaxKind::INCLUDE_KW) => IncludeKind::Include,
-                    Some(SyntaxKind::INCLUDE_ONCE_KW) => IncludeKind::IncludeOnce,
-                    Some(SyntaxKind::REQUIRE_KW) => IncludeKind::Require,
-                    Some(SyntaxKind::REQUIRE_ONCE_KW) => IncludeKind::RequireOnce,
-                    _ => return Err(self.unread("an `include`")),
-                };
-                let path = self.required(node.operand, "an `include`")?;
-                self.include_or_eval(kind, path)
-            }
-            tree::Expr::IssetExpr(id) => {
-                let targets = tree[id].targets.clone();
-                let Some((&first, rest)) = targets.split_first() else {
-                    return Err(self.unread("an `isset`"));
-                };
-                let mut held = self.isset_or_empty(first, false)?;
-                for &target in rest {
-                    held = self.short_circuit_from(false, held, |emit| {
-                        emit.isset_or_empty(target, false)
-                    })?;
-                }
-                Ok(held)
-            }
+            tree::Expr::IncludeExpr(id) => self.include_expr(id),
+            tree::Expr::IssetExpr(id) => self.isset_expr(id),
             tree::Expr::EmptyExpr(id) => {
-                let target = self.required(tree[id].target, "an `empty`")?;
-                self.isset_or_empty(target, true)
+                self.operand_of(tree[id].target, "an `empty`", |emit, target| {
+                    emit.isset_or_empty(target, true)
+                })
             }
             tree::Expr::EvalExpr(id) => {
-                let code = self.required(tree[id].code, "an `eval`")?;
-                self.include_or_eval(IncludeKind::Eval, code)
+                self.operand_of(tree[id].code, "an `eval`", |emit, code| {
+                    emit.include_or_eval(IncludeKind::Eval, code)
+                })
             }
             tree::Expr::CallExpr(id) => self.call_of(id, line, fetch),
             tree::Expr::MemberAccessExpr(_) => self.prop(expr),
-            tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
-                Scoped::Constant { class, name } => self.class_const(class, &name),
-                Scoped::Property { class, name } => self.static_prop(class, &name),
-                Scoped::ClassName { class } => self.class_name_of(class),
-            },
+            tree::Expr::ScopedAccessExpr(id) => self.scoped_expr(id, line),
             tree::Expr::SubscriptExpr(_) => self.dim_read(expr),
-            tree::Expr::ClosureExpr(_) | tree::Expr::ArrowFnExpr(_) => {
-                let closure = self.walk_closure(expr, line)?;
-                self.closure(&closure)
-            }
+            tree::Expr::ClosureExpr(_) | tree::Expr::ArrowFnExpr(_) => self.closure_of(expr, line),
         }
+    }
+
+    /// A node's one operand, which the grammar requires and recovery
+    /// may have left out, refused as `what` where it did, and compiled
+    /// by `compile` where it stands.
+    fn operand_of(
+        &mut self,
+        operand: Option<tree::Expr>,
+        what: &str,
+        compile: fn(&mut Self, tree::Expr) -> Result<Where, CompileError>,
+    ) -> Result<Where, CompileError> {
+        let operand = self.required(operand, what)?;
+        compile(self, operand)
+    }
+
+    /// `'(' expr ')'`, which php's grammar drops: the inner node.
+    fn paren_expr(&mut self, id: NodeId<tree::ParenExpr>) -> Result<Where, CompileError> {
+        match self.parsed.tree[id].inner {
+            Some(inner) => self.expr(inner),
+            None => Err(self.unread("an expression inside parentheses")),
+        }
+    }
+
+    /// `ZEND_AST_ZVAL`: a number, a string or a nowdoc as written.
+    fn literal_expr(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
+        Ok(Where::Constant(self.constant_expr(expr)?))
+    }
+
+    /// `zend_compile_const`: `true`, `false` and `null` are the values
+    /// `zend_try_ct_eval_const` substitutes whatever their case, and
+    /// every other name is a constant fetched by the name as written.
+    fn name_expr(&mut self, token: TokenId) -> Result<Where, CompileError> {
+        if let Some(value) = self.constant_name(token) {
+            return Ok(Where::Constant(value));
+        }
+        let name = self.text(token).to_vec();
+        self.const_fetch(&name)
+    }
+
+    /// `ZEND_AST_ENCAPS_LIST` written between double quotes.
+    fn double_quoted_expr(
+        &mut self,
+        id: NodeId<tree::InterpolatedStringExpr>,
+        line: u32,
+    ) -> Result<Where, CompileError> {
+        let parts = self.parsed.tree[id].parts.clone();
+        self.encaps(&parts, Holder::DoubleQuoted(&self.parsed.tree[id]), line)
+    }
+
+    /// `ZEND_AST_ENCAPS_LIST` written as a heredoc.
+    fn heredoc_expr(
+        &mut self,
+        id: NodeId<tree::HeredocExpr>,
+        line: u32,
+    ) -> Result<Where, CompileError> {
+        let parts = self.parsed.tree[id].parts.clone();
+        self.encaps(&parts, Holder::Heredoc(&self.parsed.tree[id]), line)
+    }
+
+    /// `zend_compile_simple_var` through `zend_try_compile_cv`: the
+    /// variable is its CV, and no opline reads it into anything; `$this`
+    /// under `BP_VAR_R` is `FETCH_THIS` into a temporary, and an
+    /// auto-global `FETCH_R (global)` over its name.
+    fn simple_var_expr(
+        &mut self,
+        id: NodeId<tree::SimpleVarExpr>,
+        line: u32,
+    ) -> Result<Where, CompileError> {
+        match self.simple_var_of(id, line)? {
+            SimpleVar::Cv(name) => {
+                self.cv_fetched(&name, Fetch::Read);
+                Ok(Where::Cv(self.lookup_cv(&name)))
+            }
+            SimpleVar::This => Ok(self.fetch_this(OperandKind::Tmp)),
+            SimpleVar::Auto(global) => self.fetch_by_name(global.name(), Symbols::Global),
+            SimpleVar::Globals => Ok(self.fetch_globals(OperandKind::Tmp)),
+        }
+    }
+
+    /// `ZEND_AST_ARRAY` read as a value.
+    fn array_expr(&mut self, id: NodeId<tree::ArrayExpr>) -> Result<Where, CompileError> {
+        let elements = self.parsed.tree[id].array_elements.clone();
+        self.array(&elements)
+    }
+
+    /// `ZEND_AST_UNARY_MINUS`, `ZEND_AST_UNARY_PLUS` and
+    /// `ZEND_AST_UNARY_OP`, each to its compile.
+    fn unary_expr(&mut self, id: NodeId<tree::UnaryExpr>) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let operand = self.required(node.operand, "a unary operator")?;
+        match node.op.map(|op| self.kind(op)) {
+            Some(SyntaxKind::MINUS) => self.unary(true, operand),
+            Some(SyntaxKind::PLUS) => self.unary(false, operand),
+            Some(SyntaxKind::BANG) => self.bool_not(operand),
+            Some(SyntaxKind::TILDE) => self.bw_not(operand),
+            _ => Err(self.unread("a unary operator")),
+        }
+    }
+
+    /// `ZEND_AST_PRE_INC` and `ZEND_AST_PRE_DEC`.
+    fn prefix_expr(&mut self, id: NodeId<tree::PrefixIncDecExpr>) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let up = node.op.map(|op| self.kind(op)) == Some(SyntaxKind::PLUS_PLUS);
+        let target = self.required(node.operand, if up { "a `++`" } else { "a `--`" })?;
+        self.step(target, up, true)
+    }
+
+    /// `ZEND_AST_POST_INC` and `ZEND_AST_POST_DEC`.
+    fn postfix_expr(&mut self, id: NodeId<tree::PostfixIncDecExpr>) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let up = node.op.map(|op| self.kind(op)) == Some(SyntaxKind::PLUS_PLUS);
+        self.step(node.operand, up, false)
+    }
+
+    /// `ZEND_AST_CAST`.
+    fn cast_expr(&mut self, id: NodeId<tree::CastExpr>, line: u32) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let to = self.cast_to(node.op, line)?;
+        let operand = self.required(node.operand, "a cast")?;
+        self.cast(to, operand)
+    }
+
+    /// `clone`, the call php's parser makes of it, `\clone` in the
+    /// function table: `clone $o` one argument, and `clone(...)` its
+    /// argument list as written, 8.5's `clone($o, ['p' => 1])` among
+    /// them, which `zend_compile_func_clone` leaves to the function.
+    fn clone_expr(
+        &mut self,
+        id: NodeId<tree::CloneExpr>,
+        line: u32,
+    ) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let arguments = match (node.operand, node.args) {
+            (Some(operand), _) => Args::of(&[operand], self.line_of(operand)),
+            (None, Some(args)) => self.arguments(args, line)?,
+            (None, None) => return Err(self.unread("a `clone`")),
+        };
+        self.call(b"\\clone", &arguments, Fetch::Read)
+    }
+
+    /// `exit`, the call php's parser makes of it, `\exit` in the
+    /// function table.
+    fn exit_expr(&mut self, id: NodeId<tree::ExitExpr>, line: u32) -> Result<Where, CompileError> {
+        let arguments = match self.parsed.tree[id].args {
+            Some(args) => self.arguments(args, line)?,
+            None => Args::of(&[], line),
+        };
+        self.call(b"\\exit", &arguments, Fetch::Read)
+    }
+
+    /// `ZEND_AST_AND`, `ZEND_AST_OR`, `ZEND_AST_COALESCE`, the pipe and
+    /// `ZEND_AST_BINARY_OP`, each to its compile.
+    fn binary_expr(&mut self, id: NodeId<tree::BinaryExpr>) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let left = node.lhs;
+        let right = self.required(node.rhs, "a binary operator")?;
+        match node.op.map(|op| self.kind(op)) {
+            Some(SyntaxKind::AMP_AMP | SyntaxKind::AND_KW) => {
+                self.short_circuiting(false, left, right)
+            }
+            Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => {
+                self.short_circuiting(true, left, right)
+            }
+            Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce(left, right),
+            Some(SyntaxKind::PIPE_GT) => self.pipe(left, right),
+            Some(kind) => match binary_op(kind) {
+                Some(op) => self.binary(op, left, right),
+                None => Err(self.unread("a binary operator")),
+            },
+            None => Err(self.unread("a binary operator")),
+        }
+    }
+
+    /// `ZEND_AST_INSTANCEOF`.
+    fn instanceof_expr(&mut self, id: NodeId<tree::InstanceofExpr>) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let Some(class) = node.rhs.map(|rhs| self.class_spec(rhs)) else {
+            return Err(self.unread("an `instanceof`"));
+        };
+        self.instance_of(node.lhs, class)
+    }
+
+    /// `ZEND_AST_CONDITIONAL`.
+    fn ternary_expr(&mut self, id: NodeId<tree::TernaryExpr>) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        self.conditional(node.cond, node.then, node.else_branch)
+    }
+
+    /// `ZEND_AST_MATCH`.
+    fn match_expr(&mut self, id: NodeId<tree::MatchExpr>) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let subject = self.required(node.subject, "a `match`")?;
+        let arms = node.match_arms.clone();
+        self.r#match(subject, &arms)
+    }
+
+    /// `ZEND_AST_NEW`, over a class named or an anonymous one.
+    fn new_expr(&mut self, id: NodeId<tree::NewExpr>, line: u32) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        if let Some(anon) = node.anon {
+            let args = self.parsed.tree[anon].args;
+            let class = ClassRef::Fetched(self.anonymous_class(anon)?);
+            let arguments = match args {
+                Some(args) => self.arguments(args, line)?,
+                None => Args::of(&[], line),
+            };
+            return self.new_of(&class, &arguments, line);
+        }
+        let Some(class) = node.ctor.map(|ctor| self.class_spec(ctor)) else {
+            return Err(self.unread("a `new`"));
+        };
+        let arguments = match node.args {
+            Some(args) => self.arguments(args, line)?,
+            None => Args::of(&[], line),
+        };
+        self.new_expression(class, &arguments)
+    }
+
+    /// `ZEND_AST_INCLUDE_OR_EVAL` written as one of the four includes.
+    fn include_expr(&mut self, id: NodeId<tree::IncludeExpr>) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let kind = match node.op.map(|op| self.kind(op)) {
+            Some(SyntaxKind::INCLUDE_KW) => IncludeKind::Include,
+            Some(SyntaxKind::INCLUDE_ONCE_KW) => IncludeKind::IncludeOnce,
+            Some(SyntaxKind::REQUIRE_KW) => IncludeKind::Require,
+            Some(SyntaxKind::REQUIRE_ONCE_KW) => IncludeKind::RequireOnce,
+            _ => return Err(self.unread("an `include`")),
+        };
+        let path = self.required(node.operand, "an `include`")?;
+        self.include_or_eval(kind, path)
+    }
+
+    /// `ZEND_AST_ISSET` over each target, `&&` between them.
+    fn isset_expr(&mut self, id: NodeId<tree::IssetExpr>) -> Result<Where, CompileError> {
+        let targets = self.parsed.tree[id].targets.clone();
+        let Some((&first, rest)) = targets.split_first() else {
+            return Err(self.unread("an `isset`"));
+        };
+        let mut held = self.isset_or_empty(first, false)?;
+        for &target in rest {
+            held =
+                self.short_circuit_from(false, held, |emit| emit.isset_or_empty(target, false))?;
+        }
+        Ok(held)
+    }
+
+    /// `ZEND_AST_CLASS_CONST`, `ZEND_AST_STATIC_PROP` and
+    /// `ZEND_AST_CLASS_NAME`, which the tree writes as one `::`.
+    fn scoped_expr(
+        &mut self,
+        id: NodeId<tree::ScopedAccessExpr>,
+        line: u32,
+    ) -> Result<Where, CompileError> {
+        match self.scoped_of(id, line)? {
+            Scoped::Constant { class, name } => self.class_const(class, &name),
+            Scoped::Property { class, name } => self.static_prop(class, &name),
+            Scoped::ClassName { class } => self.class_name_of(class),
+        }
+    }
+
+    /// `ZEND_AST_CLOSURE` and `ZEND_AST_ARROW_FUNC`.
+    fn closure_of(&mut self, expr: tree::Expr, line: u32) -> Result<Where, CompileError> {
+        let closure = self.walk_closure(expr, line)?;
+        self.closure(&closure)
     }
 
     /// `__LINE__` and its kin, php's `ZEND_AST_MAGIC_CONST` with the
@@ -13066,28 +13172,43 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_binary_op`: both sides compiled, left then right,
-    /// the value where `zend_try_ct_eval_binary_op` folds the operator
-    /// over the two constants they compiled to, and the opcode into a
-    /// temporary where it does not (`zend_emit_op_tmp`). Each side is
-    /// walked once, by its compile, so a chain of `n` operators is `n`
-    /// compiles deep and no deeper, as php's is.
+    /// and the operator over what they compiled to
+    /// ([`Self::binary_operands`]). Each side is walked once, by its
+    /// compile, so a chain of `n` operators is `n` compiles deep and no
+    /// deeper, as php's is, and this frame, which a left-nested chain
+    /// stands in once per operator, holds the two compiles and nothing
+    /// else.
     fn binary(
         &mut self,
         op: BinaryOp,
         left: tree::Expr,
         right: tree::Expr,
     ) -> Result<Where, CompileError> {
+        let left = self.expr(left)?;
+        let right = self.expr(right)?;
+        self.binary_operands(op, left, right)
+    }
+
+    /// The rest of `zend_compile_binary_op` over its two compiled sides:
+    /// the `ZEND_CONCAT`, comparison and bitwise arms each to its own,
+    /// the value where `zend_try_ct_eval_binary_op` folds the arithmetic
+    /// over two constants, and the opcode into a temporary where it
+    /// does not (`zend_emit_op_tmp`).
+    fn binary_operands(
+        &mut self,
+        op: BinaryOp,
+        left: Where,
+        right: Where,
+    ) -> Result<Where, CompileError> {
         if op == BinaryOp::Concat {
             return self.concat(left, right);
         }
         if compares(op) {
-            return self.comparison(op, left, right);
+            return Ok(self.comparison(op, left, right));
         }
         if bitwise(op) {
             return self.bitwise(op, left, right);
         }
-        let left = self.expr(left)?;
-        let right = self.expr(right)?;
         if let (Where::Constant(a), Where::Constant(b)) = (left, right)
             && let Some(folded) = fold(op, a, b)
         {
@@ -13096,14 +13217,13 @@ impl Emit<'_> {
         Ok(self.emit_binary(Self::opcode_of(op), left, right, 0))
     }
 
-    /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm: both sides
-    /// compiled, the fold over two constants, and otherwise each constant
-    /// side converted to a string where it stands and `CONCAT` into a
-    /// temporary. php converts before it emits, so what the opline reads
-    /// is the string and never the number it was written as.
-    fn concat(&mut self, left: tree::Expr, right: tree::Expr) -> Result<Where, CompileError> {
-        let left = self.expr(left)?;
-        let right = self.expr(right)?;
+    /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm over the two
+    /// compiled sides: the fold over two constants, and otherwise each
+    /// constant side converted to a string where it stands and `CONCAT`
+    /// into a temporary. php converts before it emits, so what the
+    /// opline reads is the string and never the number it was written
+    /// as.
+    fn concat(&mut self, left: Where, right: Where) -> Result<Where, CompileError> {
         if let (Where::Constant(a), Where::Constant(b)) = (left, right)
             && let Some(folded) = self.concat_fold(a, b)?
         {
@@ -13115,18 +13235,11 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_binary_op`'s `ZEND_BW_OR`, `ZEND_BW_XOR` and
-    /// `ZEND_BW_AND` arms: both sides compiled, then folded where
+    /// `ZEND_BW_AND` arms over the two compiled sides: folded where
     /// [`Self::bitwise_fold`] folds them, and otherwise the opcode into
     /// a temporary. The three are `SPEC(COMMUTATIVE)`, so `pass_two`
     /// may put the constant second ([`swap_commutative`]).
-    fn bitwise(
-        &mut self,
-        op: BinaryOp,
-        left: tree::Expr,
-        right: tree::Expr,
-    ) -> Result<Where, CompileError> {
-        let left = self.expr(left)?;
-        let right = self.expr(right)?;
+    fn bitwise(&mut self, op: BinaryOp, left: Where, right: Where) -> Result<Where, CompileError> {
         if let (Where::Constant(a), Where::Constant(b)) = (left, right)
             && let Some(folded) = self.bitwise_fold(op, a, b)?
         {
@@ -13165,33 +13278,26 @@ impl Emit<'_> {
         Ok(Some(Zval::long(bitwise_longs(op, a, b))))
     }
 
-    /// `zend_compile_binary_op`'s comparison arms and `zend_compile_greater`:
-    /// both sides compiled, the fold over two constants, which
+    /// `zend_compile_binary_op`'s comparison arms and `zend_compile_greater`
+    /// over the two compiled sides: the fold over two constants, which
     /// `zend_binary_op_produces_error` never refuses for a comparison; a
     /// `===` or `!==` against a constant null, false or true as the
     /// `TYPE_CHECK` php emits in its place, `$a === null` being
     /// `is_null($a)`; and otherwise the opcode into a temporary, `>` and
     /// `>=` as `IS_SMALLER` and `IS_SMALLER_OR_EQUAL` with the operands
     /// swapped, which is the one shape php has for them.
-    fn comparison(
-        &mut self,
-        op: BinaryOp,
-        left: tree::Expr,
-        right: tree::Expr,
-    ) -> Result<Where, CompileError> {
-        let left = self.expr(left)?;
-        let right = self.expr(right)?;
+    fn comparison(&mut self, op: BinaryOp, left: Where, right: Where) -> Where {
         if let (Where::Constant(a), Where::Constant(b)) = (left, right) {
-            return Ok(Where::Constant(self.compare_fold(op, a, b)));
+            return Where::Constant(self.compare_fold(op, a, b));
         }
         if let Some((operand, mask)) = type_check(op, left, right) {
-            return Ok(self.emit_unary(Opcode::TypeCheck, operand, mask));
+            return self.emit_unary(Opcode::TypeCheck, operand, mask);
         }
-        Ok(match op {
+        match op {
             BinaryOp::Greater => self.emit_binary(Opcode::IsSmaller, right, left, 0),
             BinaryOp::GreaterOrEqual => self.emit_binary(Opcode::IsSmallerOrEqual, right, left, 0),
             _ => self.emit_binary(Self::opcode_of(op), left, right, 0),
-        })
+        }
     }
 
     /// `zend_try_ct_eval_binary_op` over `is_smaller_function` and its
@@ -14270,7 +14376,11 @@ impl Emit<'_> {
     /// ```expect
     /// done
     /// ```
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// Like [`Self::expr_node`], every fold of a nested expression passes
+    /// through this frame once per level, as php's passes through
+    /// `zend_eval_const_expr`, so it holds the dispatch and nothing else:
+    /// each arm is one call whose answer is this function's.
     pub(crate) fn constant_expr(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
         // `zend_eval_const_expr` checks the stack and leaves
         // `CG(zend_lineno)` where it stands: the fold emits no opline,
@@ -14281,71 +14391,17 @@ impl Emit<'_> {
         // `zend_eval_const_expr` has no `ZEND_AST_ZNODE` arm: a value the
         // compiler holds folds nothing.
         if self.znode(expr).is_some() {
-            return Err(self.fatal("a value the compiler holds is no constant expression"));
+            return self.no_constant("a value the compiler holds is no constant expression");
         }
-        let tree = &self.parsed.tree;
+        let eval_const_expr = self.fold == Fold::EvalConstExpr;
         match expr {
-            tree::Expr::ParenExpr(id) => match tree[id].inner {
-                Some(inner) => self.constant_expr(inner),
-                None => Err(self.unread("an expression inside parentheses")),
-            },
-            tree::Expr::LiteralExpr(id) => {
-                let node = &tree[id];
-                let Some(token) = node.value else {
-                    return Err(self.unread("a literal"));
-                };
-                match TokenValue::of(self.parsed, Holder::Scalar(node), token) {
-                    Some(TokenValue::Int(n)) => Ok(Zval::long(n)),
-                    Some(TokenValue::Float(f)) => Ok(Zval::double(f)),
-                    Some(TokenValue::Bytes(bytes)) => self.string(&bytes),
-                    None => Err(self.unread("a literal")),
-                }
-            }
+            tree::Expr::ParenExpr(id) => self.paren_constant(id),
+            tree::Expr::LiteralExpr(id) => self.literal_constant(id),
             tree::Expr::MagicConstExpr(id) => self.magic_node(id),
-            tree::Expr::NowdocExpr(id) => {
-                let node = &tree[id];
-                let mut bytes = Vec::new();
-                for token in &node.text {
-                    if let Some(TokenValue::Bytes(text)) =
-                        TokenValue::of(self.parsed, Holder::Nowdoc(node), *token)
-                    {
-                        bytes.extend(text);
-                    }
-                }
-                self.string(&bytes)
-            }
-            tree::Expr::NameRef(token) => self
-                .named_constant(token)?
-                .ok_or_else(|| self.fatal("a constant this compiler cannot read yet")),
-            // A `"…"` or a heredoc with nothing interpolated is one
-            // string php's parser folded before the compiler saw it;
-            // one with a variable in it is `ZEND_AST_ENCAPS_LIST`, whose
-            // oplines no fold replaces and `zend_eval_const_expr` leaves
-            // standing uncompiled, its `default` arm. Only the folded
-            // kind is compiled here, which lays no opline down: compiling
-            // the other left its oplines behind once for every fold that
-            // asked, each result a temporary written and never read.
-            // Its line is the parser's and no compile's, so the compile
-            // that reads it leaves `CG(zend_lineno)` where it stood.
+            tree::Expr::NowdocExpr(id) => self.nowdoc_constant(id),
+            tree::Expr::NameRef(token) => self.name_constant(token),
             tree::Expr::InterpolatedStringExpr(_) | tree::Expr::HeredocExpr(_) => {
-                let parts: &[tree::StringPart] = match expr {
-                    tree::Expr::InterpolatedStringExpr(id) => &tree[id].parts,
-                    tree::Expr::HeredocExpr(id) => &tree[id].parts,
-                    _ => &[],
-                };
-                if parts
-                    .iter()
-                    .any(|part| !matches!(part, tree::StringPart::LiteralStringPart(_)))
-                {
-                    return Err(self.fatal("an interpolated string is no constant expression"));
-                }
-                let line = self.line;
-                let value = self.expr(expr);
-                self.line = line;
-                match value? {
-                    Where::Constant(value) => Ok(value),
-                    _ => Err(self.fatal("an interpolated string is no constant expression")),
-                }
+                self.string_constant(expr)
             }
             // `zend_eval_const_expr` has no `ZEND_AST_SHELL_EXEC` case,
             // so the node stands and [`Self::expr`] compiles it. The
@@ -14353,143 +14409,30 @@ impl Emit<'_> {
             // a declaration keeps ([`Self::const_expr`]) is refused in
             // php's own words by [`Self::const_refused`].
             tree::Expr::ShellExecExpr(_) => {
-                Err(self.fatal("a backtick operator is no constant expression"))
+                self.no_constant("a backtick operator is no constant expression")
             }
-            // `zend_try_ct_eval_unary_pm`: php folds unary `-` and `+` as
-            // the multiplication by -1 and by 1 it would otherwise emit.
-            // The `ZEND_AST_UNARY_OP` arm of `zend_eval_const_expr` folds
-            // the operand first, then `zend_try_ct_eval_unary_op`, which
-            // `zend_unary_op_produces_error` refuses over a double for
-            // `ZEND_BOOL_NOT`, since it warns casting a NAN, so `!1.5` is
-            // the opline php leaves standing and never the bool; the
-            // `ZEND_BW_NOT` arm refuses `null`, `false`, `true` and a
-            // double the long conversion would lose something of, and
-            // folds a string as it stands.
-            tree::Expr::UnaryExpr(id) => {
-                let node = &tree[id];
-                let operand = self.required(node.operand, "a unary operator")?;
-                match node.op.map(|op| self.kind(op)) {
-                    Some(kind @ (SyntaxKind::MINUS | SyntaxKind::PLUS)) => {
-                        let value = self.constant_expr(operand)?;
-                        fold(
-                            BinaryOp::Mul,
-                            value,
-                            Zval::long(if kind == SyntaxKind::MINUS { -1 } else { 1 }),
-                        )
-                        .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
-                    }
-                    Some(SyntaxKind::BANG) => {
-                        let value = self.constant_expr(operand)?;
-                        if value.as_double().is_some() {
-                            return Err(self.fatal("a `!` over a float is left to its opcode"));
-                        }
-                        Ok(Zval::bool(!truth(value)))
-                    }
-                    Some(SyntaxKind::TILDE) => {
-                        let value = self.constant_expr(operand)?;
-                        self.bw_not_fold(value)?.ok_or_else(|| {
-                            self.fatal("a `~` over this constant is left to its opcode")
-                        })
-                    }
-                    _ => Err(self.unread("a unary operator")),
-                }
-            }
+            tree::Expr::UnaryExpr(id) => self.unary_constant(id),
             // `zend_compile_cast` folds nothing, which [`Self::cast`]
             // copies: under a compile the cast is its opline, a `TMP`,
             // and no fold over it happens, so `-(float)"0"` is the `CAST`
             // and the `MUL` over it.
-            tree::Expr::CastExpr(_) if self.fold == Fold::Compile => {
-                Err(self.fatal("a cast compiled is its opline"))
-            }
-            // `zend_eval_const_expr`'s `ZEND_AST_CAST` arm: the operand
-            // folded, then `zend_try_ct_eval_cast` over it. `(unset)` is
-            // refused where it stands, as php's grammar puts it.
-            tree::Expr::CastExpr(id) => {
-                let node = &tree[id];
-                let to = self.cast_to(node.op, line)?;
-                let operand = self.required(node.operand, "a cast")?;
-                let value = self.constant_expr(operand)?;
-                self.cast_fold(to, value)?
-                    .ok_or_else(|| self.fatal("a cast this compiler cannot fold"))
-            }
-            tree::Expr::BinaryExpr(id) => {
-                let node = &tree[id];
-                let left = node.lhs;
-                let right = self.required(node.rhs, "a binary operator")?;
-                match node.op.map(|op| self.kind(op)) {
-                    // `zend_eval_const_expr`'s `ZEND_AST_AND` and
-                    // `ZEND_AST_OR` arm (`Z/Zend/zend_compile.c:12116`).
-                    Some(SyntaxKind::AMP_AMP | SyntaxKind::AND_KW) => {
-                        self.short_circuit_fold(false, left, right)
-                    }
-                    Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => {
-                        self.short_circuit_fold(true, left, right)
-                    }
-                    // `zend_compile_coalesce` emits two oplines whatever
-                    // stands on either side; `zend_eval_const_expr`'s
-                    // `ZEND_AST_COALESCE` arm folds a left side that
-                    // folds, to itself where it is not `null` and to the
-                    // right side's fold where it is.
-                    Some(SyntaxKind::QUESTION_QUESTION) if self.fold == Fold::EvalConstExpr => {
-                        let value = self.constant_expr(left)?;
-                        if value.kind() == ZvalType::Null {
-                            return self.constant_expr(right);
-                        }
-                        Ok(value)
-                    }
-                    Some(SyntaxKind::QUESTION_QUESTION) => {
-                        Err(self.fatal("a `??` is no constant expression"))
-                    }
-                    Some(kind) => match binary_op(kind) {
-                        Some(op) => self.binary_constant(op, left, right),
-                        None => Err(self.unread("a binary operator")),
-                    },
-                    None => Err(self.unread("a binary operator")),
-                }
-            }
-            tree::Expr::ArrayExpr(id) => {
-                let elements = tree[id].array_elements.clone();
-                self.constant_array(&elements)?
-                    .ok_or_else(|| self.fatal("an array expression that is no constant"))
-            }
+            tree::Expr::CastExpr(id) if eval_const_expr => self.cast_constant(id, line),
+            tree::Expr::CastExpr(_) => self.no_constant("a cast compiled is its opline"),
+            tree::Expr::BinaryExpr(id) => self.operator_constant(id),
+            tree::Expr::ArrayExpr(id) => self.array_constant(id),
             tree::Expr::ListExpr(_) => {
                 Err(self.compile_error("Cannot use list() as standalone expression"))
             }
             // `zend_is_allowed_in_const_expr` allows `ZEND_AST_CALL`
             // for the first-class callable alone, `f(...)`, which folds
             // to nothing and is kept as the tree
-            // ([`Self::const_callable`]); the arguments are read before
-            // the callee.
-            tree::Expr::CallExpr(_) if self.fold == Fold::EvalConstExpr => {
-                Err(self.fatal("a call is no constant expression"))
+            // ([`Self::const_callable`]).
+            tree::Expr::CallExpr(_) if eval_const_expr => {
+                self.no_constant("a call is no constant expression")
             }
-            tree::Expr::CallExpr(id) => {
-                let node = &tree[id];
-                let (callee, args) = (node.callee, node.args);
-                let arguments = self.arguments(args, line)?;
-                if let Args::CallableConvert = arguments {
-                    return Err(self.fatal("a first-class callable folds to no constant"));
-                }
-                let Some(arguments) = arguments.positional() else {
-                    return Err(walk::unread(
-                        line,
-                        "a named argument in a constant expression",
-                    ));
-                };
-                let tree::Expr::NameRef(name) = self.peel(callee) else {
-                    return Err(self.fatal("a call is no constant expression"));
-                };
-                let name = self.text(name).to_vec();
-                let (resolved, runtime) = self.function_name(&name);
-                let folded = if runtime {
-                    None
-                } else {
-                    self.special_constant(&resolved.to_ascii_lowercase(), &arguments)?
-                };
-                folded.ok_or_else(|| self.fatal("a call this compiler cannot fold"))
-            }
-            tree::Expr::CloneExpr(_) | tree::Expr::ExitExpr(_) => {
-                Err(self.fatal("a call is no constant expression"))
+            tree::Expr::CallExpr(id) => self.call_constant(id, line),
+            tree::Expr::CloneExpr(_) | tree::Expr::ExitExpr(_) | tree::Expr::NewExpr(_) => {
+                self.no_constant("a call is no constant expression")
             }
             tree::Expr::SimpleVarExpr(_)
             | tree::Expr::VarVarExpr(_)
@@ -14497,101 +14440,326 @@ impl Emit<'_> {
             | tree::Expr::AssignExpr(_)
             | tree::Expr::PrefixIncDecExpr(_)
             | tree::Expr::PostfixIncDecExpr(_) => {
-                Err(self.fatal("a variable is no constant expression"))
+                self.no_constant("a variable is no constant expression")
             }
             // `zend_eval_const_expr` folds no property fetch, and
             // `zend_compile_prop` emits its fetch.
             tree::Expr::MemberAccessExpr(_) => {
-                Err(self.fatal("a property fetch is read as the program serves"))
+                self.no_constant("a property fetch is read as the program serves")
             }
             // `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
             // ([`Self::dimension_fold`]); `zend_compile_dim` folds
             // nothing.
-            tree::Expr::SubscriptExpr(id) if self.fold == Fold::EvalConstExpr => {
-                let node = &tree[id];
-                let (base, index) = (node.base, node.index);
-                self.dimension_fold(base, index)
-            }
+            tree::Expr::SubscriptExpr(id) if eval_const_expr => self.subscript_constant(id),
             tree::Expr::SubscriptExpr(_) => {
-                Err(self.fatal("a dimension is read as the program serves"))
+                self.no_constant("a dimension is read as the program serves")
             }
-            // `zend_try_ct_eval_class_const` folds nothing under
-            // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, which opcache
-            // sets, but a constant of the class being compiled, so any
-            // other is fetched as the program serves; a class's property
-            // is a variable; and a class's name folds where
-            // `zend_try_compile_const_expr_resolve_class_name` answers.
-            tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
-                Scoped::Constant {
-                    class: ClassSpec::Name(token),
-                    name,
-                } => {
-                    let folded = match self.folded_name(&name)? {
-                        Some(name) => self.active_class_constant(token, &name)?,
-                        None => None,
-                    };
-                    folded.ok_or_else(|| self.fatal("a class constant is fetched at run time"))
-                }
-                Scoped::Constant { .. } => {
-                    Err(self.fatal("a class constant is fetched at run time"))
-                }
-                Scoped::Property { .. } => Err(self.fatal("a variable is no constant expression")),
-                Scoped::ClassName { class } => match self.resolved_class_name(class)? {
-                    Some(value) => Ok(value),
-                    None => Err(self.fatal("a class name is fetched at run time")),
-                },
-            },
-            tree::Expr::MatchExpr(_) => Err(self.fatal("a match is no constant expression")),
+            tree::Expr::ScopedAccessExpr(id) => self.scoped_constant(id, line),
+            tree::Expr::MatchExpr(_) => self.no_constant("a match is no constant expression"),
             tree::Expr::ErrorSuppressExpr(_) => {
-                Err(self.fatal("a silenced expression is no constant expression"))
+                self.no_constant("a silenced expression is no constant expression")
             }
-            tree::Expr::NewExpr(_) => Err(self.fatal("a call is no constant expression")),
             tree::Expr::InstanceofExpr(_) => {
-                Err(self.fatal("an instanceof is no constant expression"))
+                self.no_constant("an instanceof is no constant expression")
             }
-            // `zend_eval_const_expr`'s `ZEND_AST_CONDITIONAL` arm: the
-            // condition folded, then the branch `zend_is_true` picks
-            // folded in its place, the condition itself for `a ?: b`;
             // `zend_compile_conditional` folds nothing.
-            tree::Expr::TernaryExpr(id) if self.fold == Fold::EvalConstExpr => {
-                let node = &tree[id];
-                let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
-                let otherwise = self.required(otherwise, "a conditional")?;
-                let value = self.constant_expr(cond)?;
-                if value.as_double().is_some_and(f64::is_nan) {
-                    self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
-                }
-                match (truth(value), then) {
-                    (true, None) => Ok(value),
-                    (true, Some(then)) => self.constant_expr(then),
-                    (false, _) => self.constant_expr(otherwise),
-                }
-            }
+            tree::Expr::TernaryExpr(id) if eval_const_expr => self.ternary_constant(id),
             tree::Expr::TernaryExpr(_) => {
-                Err(self.fatal("a conditional is folded by no compile of it"))
+                self.no_constant("a conditional is folded by no compile of it")
             }
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing, and
             // `zend_compile_include_or_eval` emits its opline the same
             // way for a file and for an `eval`;
             // `zend_compile_isset_or_empty` emits one over the CV.
-            tree::Expr::ThrowExpr(_) => Err(self.fatal("a `throw` is no constant expression")),
-            tree::Expr::IncludeExpr(_) => Err(self.fatal("an `include` is no constant expression")),
+            tree::Expr::ThrowExpr(_) => self.no_constant("a `throw` is no constant expression"),
+            tree::Expr::IncludeExpr(_) => {
+                self.no_constant("an `include` is no constant expression")
+            }
             tree::Expr::IssetExpr(_) | tree::Expr::EmptyExpr(_) => {
-                Err(self.fatal("an `isset` is no constant expression"))
+                self.no_constant("an `isset` is no constant expression")
             }
             tree::Expr::ClosureExpr(_) | tree::Expr::ArrowFnExpr(_) => {
-                Err(self.fatal("a closure is no constant expression"))
+                self.no_constant("a closure is no constant expression")
             }
             // `zend_compile_print` emits its `ECHO` whatever stands
             // around it, so a `print` folds to nothing.
-            tree::Expr::PrintExpr(_) => Err(self.fatal("a `print` is no constant expression")),
-            tree::Expr::EvalExpr(_) => Err(self.fatal("an `eval` is no constant expression")),
+            tree::Expr::PrintExpr(_) => self.no_constant("a `print` is no constant expression"),
+            tree::Expr::EvalExpr(_) => self.no_constant("an `eval` is no constant expression"),
             // `zend_compile_yield` emits its opline whatever stands
             // around it.
             tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
-                Err(self.fatal("a `yield` is no constant expression"))
+                self.no_constant("a `yield` is no constant expression")
             }
+        }
+    }
+
+    /// A node [`Self::constant_expr`] folds to nothing, refused as `why`.
+    fn no_constant(&self, why: &str) -> Result<Zval, CompileError> {
+        Err(self.fatal(why))
+    }
+
+    /// `'(' expr ')'`, which php's grammar drops: the inner node folded.
+    fn paren_constant(&mut self, id: NodeId<tree::ParenExpr>) -> Result<Zval, CompileError> {
+        match self.parsed.tree[id].inner {
+            Some(inner) => self.constant_expr(inner),
+            None => Err(self.unread("an expression inside parentheses")),
+        }
+    }
+
+    /// `ZEND_AST_ZVAL` written as a number or a quoted string.
+    fn literal_constant(&mut self, id: NodeId<tree::LiteralExpr>) -> Result<Zval, CompileError> {
+        let node = &self.parsed.tree[id];
+        let Some(token) = node.value else {
+            return Err(self.unread("a literal"));
+        };
+        match TokenValue::of(self.parsed, Holder::Scalar(node), token) {
+            Some(TokenValue::Int(n)) => Ok(Zval::long(n)),
+            Some(TokenValue::Float(f)) => Ok(Zval::double(f)),
+            Some(TokenValue::Bytes(bytes)) => self.string(&bytes),
+            None => Err(self.unread("a literal")),
+        }
+    }
+
+    /// `ZEND_AST_ZVAL` written as a nowdoc.
+    fn nowdoc_constant(&mut self, id: NodeId<tree::NowdocExpr>) -> Result<Zval, CompileError> {
+        let node = &self.parsed.tree[id];
+        let mut bytes = Vec::new();
+        for token in &node.text {
+            if let Some(TokenValue::Bytes(text)) =
+                TokenValue::of(self.parsed, Holder::Nowdoc(node), *token)
+            {
+                bytes.extend(text);
+            }
+        }
+        self.string(&bytes)
+    }
+
+    /// `ZEND_AST_CONST`: what [`Self::named_constant`] substitutes.
+    fn name_constant(&mut self, token: TokenId) -> Result<Zval, CompileError> {
+        self.named_constant(token)?
+            .ok_or_else(|| self.fatal("a constant this compiler cannot read yet"))
+    }
+
+    /// A `"…"` or a heredoc with nothing interpolated is one string
+    /// php's parser folded before the compiler saw it; one with a
+    /// variable in it is `ZEND_AST_ENCAPS_LIST`, whose oplines no fold
+    /// replaces and `zend_eval_const_expr` leaves standing uncompiled,
+    /// its `default` arm. Only the folded kind is compiled here, which
+    /// lays no opline down: compiling the other left its oplines behind
+    /// once for every fold that asked, each a temporary written and
+    /// never read. Its line is the parser's and no compile's, so the
+    /// compile that reads it leaves `CG(zend_lineno)` where it stood.
+    fn string_constant(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
+        let tree = &self.parsed.tree;
+        let parts: &[tree::StringPart] = match expr {
+            tree::Expr::InterpolatedStringExpr(id) => &tree[id].parts,
+            tree::Expr::HeredocExpr(id) => &tree[id].parts,
+            _ => &[],
+        };
+        if parts
+            .iter()
+            .any(|part| !matches!(part, tree::StringPart::LiteralStringPart(_)))
+        {
+            return Err(self.fatal("an interpolated string is no constant expression"));
+        }
+        let line = self.line;
+        let value = self.expr(expr);
+        self.line = line;
+        match value? {
+            Where::Constant(value) => Ok(value),
+            _ => Err(self.fatal("an interpolated string is no constant expression")),
+        }
+    }
+
+    /// `zend_try_ct_eval_unary_pm`: php folds unary `-` and `+` as the
+    /// multiplication by -1 and by 1 it would otherwise emit. The
+    /// `ZEND_AST_UNARY_OP` arm of `zend_eval_const_expr` folds the
+    /// operand first, then `zend_try_ct_eval_unary_op`, which
+    /// `zend_unary_op_produces_error` refuses over a double for
+    /// `ZEND_BOOL_NOT`, since it warns casting a NAN, so `!1.5` is the
+    /// opline php leaves standing and never the bool; the `ZEND_BW_NOT`
+    /// arm refuses `null`, `false`, `true` and a double the long
+    /// conversion would lose something of, and folds a string as it
+    /// stands.
+    fn unary_constant(&mut self, id: NodeId<tree::UnaryExpr>) -> Result<Zval, CompileError> {
+        let node = &self.parsed.tree[id];
+        let operand = self.required(node.operand, "a unary operator")?;
+        match node.op.map(|op| self.kind(op)) {
+            Some(kind @ (SyntaxKind::MINUS | SyntaxKind::PLUS)) => {
+                let value = self.constant_expr(operand)?;
+                fold(
+                    BinaryOp::Mul,
+                    value,
+                    Zval::long(if kind == SyntaxKind::MINUS { -1 } else { 1 }),
+                )
+                .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
+            }
+            Some(SyntaxKind::BANG) => {
+                let value = self.constant_expr(operand)?;
+                if value.as_double().is_some() {
+                    return Err(self.fatal("a `!` over a float is left to its opcode"));
+                }
+                Ok(Zval::bool(!truth(value)))
+            }
+            Some(SyntaxKind::TILDE) => {
+                let value = self.constant_expr(operand)?;
+                self.bw_not_fold(value)?
+                    .ok_or_else(|| self.fatal("a `~` over this constant is left to its opcode"))
+            }
+            _ => Err(self.unread("a unary operator")),
+        }
+    }
+
+    /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm: the operand folded,
+    /// then `zend_try_ct_eval_cast` over it. `(unset)` is refused where
+    /// it stands, as php's grammar puts it.
+    fn cast_constant(
+        &mut self,
+        id: NodeId<tree::CastExpr>,
+        line: u32,
+    ) -> Result<Zval, CompileError> {
+        let node = &self.parsed.tree[id];
+        let to = self.cast_to(node.op, line)?;
+        let operand = self.required(node.operand, "a cast")?;
+        let value = self.constant_expr(operand)?;
+        self.cast_fold(to, value)?
+            .ok_or_else(|| self.fatal("a cast this compiler cannot fold"))
+    }
+
+    /// `zend_eval_const_expr`'s `ZEND_AST_AND`, `ZEND_AST_OR`,
+    /// `ZEND_AST_COALESCE` and `ZEND_AST_BINARY_OP` arms.
+    fn operator_constant(&mut self, id: NodeId<tree::BinaryExpr>) -> Result<Zval, CompileError> {
+        let node = &self.parsed.tree[id];
+        let left = node.lhs;
+        let right = self.required(node.rhs, "a binary operator")?;
+        match node.op.map(|op| self.kind(op)) {
+            // `Z/Zend/zend_compile.c:12116`.
+            Some(SyntaxKind::AMP_AMP | SyntaxKind::AND_KW) => {
+                self.short_circuit_fold(false, left, right)
+            }
+            Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => {
+                self.short_circuit_fold(true, left, right)
+            }
+            // `zend_compile_coalesce` emits two oplines whatever stands
+            // on either side; `zend_eval_const_expr`'s
+            // `ZEND_AST_COALESCE` arm folds a left side that folds, to
+            // itself where it is not `null` and to the right side's fold
+            // where it is.
+            Some(SyntaxKind::QUESTION_QUESTION) if self.fold == Fold::EvalConstExpr => {
+                let value = self.constant_expr(left)?;
+                if value.kind() == ZvalType::Null {
+                    return self.constant_expr(right);
+                }
+                Ok(value)
+            }
+            Some(SyntaxKind::QUESTION_QUESTION) => {
+                Err(self.fatal("a `??` is no constant expression"))
+            }
+            Some(kind) => match binary_op(kind) {
+                Some(op) => self.binary_constant(op, left, right),
+                None => Err(self.unread("a binary operator")),
+            },
+            None => Err(self.unread("a binary operator")),
+        }
+    }
+
+    /// `ZEND_AST_ARRAY` whose every element folds.
+    fn array_constant(&mut self, id: NodeId<tree::ArrayExpr>) -> Result<Zval, CompileError> {
+        let elements = self.parsed.tree[id].array_elements.clone();
+        self.constant_array(&elements)?
+            .ok_or_else(|| self.fatal("an array expression that is no constant"))
+    }
+
+    /// A call of a name in [`crate::special`]'s table over constants
+    /// (`zend_try_compile_special_func`), the arguments read before the
+    /// callee.
+    fn call_constant(
+        &mut self,
+        id: NodeId<tree::CallExpr>,
+        line: u32,
+    ) -> Result<Zval, CompileError> {
+        let node = &self.parsed.tree[id];
+        let (callee, args) = (node.callee, node.args);
+        let arguments = self.arguments(args, line)?;
+        if let Args::CallableConvert = arguments {
+            return Err(self.fatal("a first-class callable folds to no constant"));
+        }
+        let Some(arguments) = arguments.positional() else {
+            return Err(walk::unread(
+                line,
+                "a named argument in a constant expression",
+            ));
+        };
+        let tree::Expr::NameRef(name) = self.peel(callee) else {
+            return Err(self.fatal("a call is no constant expression"));
+        };
+        let name = self.text(name).to_vec();
+        let (resolved, runtime) = self.function_name(&name);
+        let folded = if runtime {
+            None
+        } else {
+            self.special_constant(&resolved.to_ascii_lowercase(), &arguments)?
+        };
+        folded.ok_or_else(|| self.fatal("a call this compiler cannot fold"))
+    }
+
+    /// `zend_eval_const_expr`'s `ZEND_AST_DIM` arm.
+    fn subscript_constant(
+        &mut self,
+        id: NodeId<tree::SubscriptExpr>,
+    ) -> Result<Zval, CompileError> {
+        let node = &self.parsed.tree[id];
+        let (base, index) = (node.base, node.index);
+        self.dimension_fold(base, index)
+    }
+
+    /// `zend_try_ct_eval_class_const` folds nothing under
+    /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, which opcache sets, but a
+    /// constant of the class being compiled, so any other is fetched as
+    /// the program serves; a class's property is a variable; and a
+    /// class's name folds where
+    /// `zend_try_compile_const_expr_resolve_class_name` answers.
+    fn scoped_constant(
+        &mut self,
+        id: NodeId<tree::ScopedAccessExpr>,
+        line: u32,
+    ) -> Result<Zval, CompileError> {
+        match self.scoped_of(id, line)? {
+            Scoped::Constant {
+                class: ClassSpec::Name(token),
+                name,
+            } => {
+                let folded = match self.folded_name(&name)? {
+                    Some(name) => self.active_class_constant(token, &name)?,
+                    None => None,
+                };
+                folded.ok_or_else(|| self.fatal("a class constant is fetched at run time"))
+            }
+            Scoped::Constant { .. } => Err(self.fatal("a class constant is fetched at run time")),
+            Scoped::Property { .. } => Err(self.fatal("a variable is no constant expression")),
+            Scoped::ClassName { class } => match self.resolved_class_name(class)? {
+                Some(value) => Ok(value),
+                None => Err(self.fatal("a class name is fetched at run time")),
+            },
+        }
+    }
+
+    /// `zend_eval_const_expr`'s `ZEND_AST_CONDITIONAL` arm: the condition
+    /// folded, then the branch `zend_is_true` picks folded in its place,
+    /// the condition itself for `a ?: b`.
+    fn ternary_constant(&mut self, id: NodeId<tree::TernaryExpr>) -> Result<Zval, CompileError> {
+        let node = &self.parsed.tree[id];
+        let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
+        let otherwise = self.required(otherwise, "a conditional")?;
+        let value = self.constant_expr(cond)?;
+        if value.as_double().is_some_and(f64::is_nan) {
+            self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
+        }
+        match (truth(value), then) {
+            (true, None) => Ok(value),
+            (true, Some(then)) => self.constant_expr(then),
+            (false, _) => self.constant_expr(otherwise),
         }
     }
 
@@ -14609,6 +14777,18 @@ impl Emit<'_> {
     ) -> Result<Zval, CompileError> {
         let left = self.constant_expr(left)?;
         let right = self.constant_expr(right)?;
+        self.constant_operands(op, left, right)
+    }
+
+    /// The fold of [`Self::binary_constant`] over its two folded sides,
+    /// out of the frame a left-nested chain stands in once per
+    /// operator.
+    fn constant_operands(
+        &mut self,
+        op: BinaryOp,
+        left: Zval,
+        right: Zval,
+    ) -> Result<Zval, CompileError> {
         if op == BinaryOp::Concat {
             return self
                 .concat_fold(left, right)?
