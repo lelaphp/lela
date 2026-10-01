@@ -2581,4 +2581,26 @@ fn the_builder_subset_rule_denies_the_lane_in_a_ticketed_checkout_alone() {
     assert_eq!(rule(ticketed.path(), "allow-zend.json"), None);
     assert_eq!(rule(main.path(), "allow-main.json"), None);
     assert_eq!(rule(ticketed.path(), "allow-main.json"), denied);
+    // A heredoc message whose subject cites the instrument runs nothing:
+    // `\A` anchors the line-start alternative at the call's start (#790).
+    assert_eq!(rule(ticketed.path(), "allow-heredoc.json"), None);
+}
+
+/// `lanes.nightly`'s heredoc fixtures (#790): a commit whose message has a
+/// line opening `run-tests.php:2950)` cites upstream's runner and runs
+/// nothing, so it passes; the runner first in the call, or after a
+/// separator, is still denied, and so are the fixture's lane runs.
+#[test]
+fn the_nightly_rule_denies_the_runner_where_it_is_run_and_not_a_message_line() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let dir = fixtures().join("rules/lanes.nightly");
+    let rule = |file: &str| {
+        let judged = judge(&manifest, workspace(), &call(&dir.join(file))).unwrap();
+        judged.denial().map(|f| f.rule.clone())
+    };
+    let denied = Some("lanes.nightly".to_owned());
+    assert_eq!(rule("allow-heredoc.json"), None);
+    assert_eq!(rule("deny-first.json"), denied);
+    assert_eq!(rule("deny-separator.json"), denied);
+    assert_eq!(rule("deny.json"), denied);
 }

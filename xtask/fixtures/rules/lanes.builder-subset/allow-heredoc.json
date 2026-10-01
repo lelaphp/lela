@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git commit -F - -- xtask/src/phpt/mod.rs <<'EOF'\nxtask phpt: the unread fixture is read before the subset runs\n\nThe subset reads its fixture first, so a missing one is named.\nEOF","description":"Commit with a message whose subject cites the instrument"}}

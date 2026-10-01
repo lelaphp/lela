@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git commit -F - -- xtask/src/phpt/mod.rs <<'EOF'\nxtask oracle: the streams merged where upstream merges them\n\nUpstream's runner merges stderr into stdout before the compare,\nrun-tests.php:2950) as the reading's expectation reads it.\nEOF","description":"Commit with a message that cites upstream's runner"}}
