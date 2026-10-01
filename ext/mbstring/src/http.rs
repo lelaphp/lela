@@ -310,6 +310,20 @@ fn mb_http_input(
 /// a?
 /// string(1) "x"
 /// ```
+///
+/// Called outside any handler, the `START` arm adds the `Content-Type`
+/// with its charset through `sapi_add_header`, whose own refusal is
+/// php's warning once the body has started.
+///
+/// ```php
+/// echo "a\n"; var_dump(mb_output_handler('x', PHP_OUTPUT_HANDLER_START));
+/// ```
+/// ```expect
+/// a
+///
+/// Warning: Cannot modify header information - headers already sent by (output started at %s:2) in %s on line 2
+/// string(1) "x"
+/// ```
 #[php_function]
 fn mb_output_handler(
     req: &mut Request,
@@ -323,24 +337,21 @@ fn mb_output_handler(
     if encoding == Encoding::pass() {
         return Ok(crate::text::same(req, string));
     }
-    if status & HANDLER_START != 0 {
-        let convert = match req.content_type() {
-            ContentType::Held(mimetype) => {
-                let pattern = req
-                    .ini_get(b"mbstring.http_output_conv_mimetypes")
-                    .unwrap_or_default()
-                    .to_vec();
-                match conv_mimetypes(req, &pattern) {
-                    Ok(Some(regex)) => regex.is_match(req, &mimetype),
-                    _ => false,
-                }
-            }
-            ContentType::Default => true,
-            ContentType::Unset => false,
-        };
-        if convert {
-            req.state::<State>().outconv = Some(0);
+    if status & HANDLER_START != 0
+        && let Some(mimetype) = start_mimetype(req)
+    {
+        // `php_output_handler_hook(PHP_OUTPUT_HANDLER_HOOK_GET_FLAGS)`
+        // answers while a handler is being served, which adds no header.
+        if let Some(charset) = encoding.preferred_mime_name()
+            && req.running_handler_flags().is_none()
+        {
+            let mut line = b"Content-Type: ".to_vec();
+            line.extend_from_slice(&mimetype);
+            line.extend_from_slice(b"; charset=");
+            line.extend_from_slice(charset);
+            req.header_add(&line, true, 0);
         }
+        req.state::<State>().outconv = Some(0);
     }
     let Some(mut state) = req.state::<State>().outconv else {
         return Ok(crate::text::same(req, string));
@@ -359,4 +370,31 @@ fn mb_output_handler(
     st.illegal_chars += u64::from(errors);
     st.outconv = if last { None } else { Some(state) };
     new_string(req, &bytes)
+}
+
+/// The mimetype `mb_output_handler`'s `START` arm converts under, and
+/// `None` where it converts nothing: a held one `mbstring.http_output_conv_mimetypes`
+/// matches, cut at its `;`, or `default_mimetype` while the default is
+/// still to be sent (`SG(default_mimetype)`, `text/html` where unset).
+fn start_mimetype(req: &mut Request) -> Option<Vec<u8>> {
+    match req.content_type() {
+        ContentType::Held(held) => {
+            let pattern = req
+                .ini_get(b"mbstring.http_output_conv_mimetypes")
+                .unwrap_or_default()
+                .to_vec();
+            match conv_mimetypes(req, &pattern) {
+                Ok(Some(regex)) if regex.is_match(req, &held) => {
+                    let end = held.iter().position(|b| *b == b';').unwrap_or(held.len());
+                    Some(held[..end].to_vec())
+                }
+                _ => None,
+            }
+        }
+        ContentType::Default => Some(
+            req.ini_get(b"default_mimetype")
+                .map_or_else(|| b"text/html".to_vec(), <[u8]>::to_vec),
+        ),
+        ContentType::Unset => None,
+    }
 }

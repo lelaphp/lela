@@ -570,6 +570,7 @@ request::Request::response_code
 request::Request::restore_error_handler
 request::Request::restore_exception_handler
 request::Request::return_value_used
+request::Request::running_handler_flags
 request::Request::sapi_name
 request::Request::scope
 request::Request::script_name

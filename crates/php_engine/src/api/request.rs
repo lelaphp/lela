@@ -16636,6 +16636,17 @@ impl Request {
         self.output.content_type()
     }
 
+    /// `php_output_handler_hook(PHP_OUTPUT_HANDLER_HOOK_GET_FLAGS)`: the
+    /// flags of the buffer handler the stack is serving, `OG(running)`'s
+    /// `PHP_OUTPUT_HANDLER_*` bits as `ob_get_status()` reports them, and
+    /// `None` while it serves none. What tells a native served as a
+    /// handler from the same native called outside one, as
+    /// `mb_output_handler` tells them apart before it adds a header.
+    #[must_use]
+    pub fn running_handler_flags(&self) -> Option<i64> {
+        self.output.running_flags().map(i64::from)
+    }
+
     /// `header()`, `sapi_header_op` under `SAPI_HEADER_ADD` or
     /// `SAPI_HEADER_REPLACE` (`crate::output`): the line taken, replacing
     /// the lines of its name when `replace` is set, with `response_code`

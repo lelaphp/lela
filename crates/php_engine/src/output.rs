@@ -259,6 +259,13 @@ impl Output {
         }
     }
 
+    /// `OG(running)->flags`, while a handler is being served.
+    pub(crate) fn running_flags(&self) -> Option<u32> {
+        self.running
+            .and_then(|at| self.handlers.get(at))
+            .map(|handler| handler.flags)
+    }
+
     /// `SG(sapi_headers).headers`, in order.
     pub(crate) fn headers(&self) -> &[Vec<u8>] {
         &self.headers
