@@ -1,0 +1,33 @@
+# The MySQL server the mysqli and pdo_mysql suites run against, as Mitchell
+# ruled on #1345: one service on mysql:8.4, a floating tag that follows the
+# LTS line's patches, on 127.0.0.1:3306, root with an empty password and a
+# `test` database, the defaults both suites read when no env is set
+# (ext/mysqli/tests/connect.inc, ext/pdo_mysql/tests/inc/config.inc).
+#
+# The pin machine and the Linux runner both start it the same way, so the
+# oracle's verdict does not depend on the machine that took the reading:
+#
+#   docker compose -f ci/mysql/compose.yaml up -d --wait
+#
+# `--wait` returns once the healthcheck passes. The image's first start runs
+# its initialisation on a server with networking off, so the TCP ping below
+# answers only once the real server is listening, and a run never starts
+# against a cold one. `xtask phpt` records the server's `SELECT VERSION()`
+# with a reading of these suites, so a shift in the oracle's verdict can be
+# traced to an image bump, and refuses the run when nothing answers (#1366).
+name: dax-php-mysql
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: test
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "--protocol=tcp", "-h", "127.0.0.1", "-uroot", "--silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
