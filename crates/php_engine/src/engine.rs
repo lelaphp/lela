@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
-use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
+use php_unit::decl::{
+    ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
+};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
@@ -688,6 +690,12 @@ pub(crate) struct Shared {
     /// a request asking for one finds it here and allocates nothing
     /// ([`Shared::permanent`]).
     names: Strings,
+    /// The string a native's parameter defaults to where its stub writes
+    /// a string, made once at startup and immutable after: an omitted
+    /// argument is php's C default, which costs the request nothing, and
+    /// so does this ([`Shared::default_string`]). Kept apart from
+    /// [`Shared::permanent`], since php interns none of them.
+    default_strings: Strings,
     /// How the engine's startup finished, which the first request's
     /// host finishes ([`Engine::started`]): serving, with what the unit
     /// cache preloaded, or refusing to serve anything.
@@ -1251,6 +1259,13 @@ impl Shared {
     /// (`zend_string_init_interned_request`'s first lookup).
     pub(crate) fn permanent(&self, bytes: &[u8]) -> Option<php_heap::Str> {
         self.names.find(bytes)
+    }
+
+    /// The string a native's parameter defaults to where its stub writes
+    /// the string `bytes`, made at startup; `None` for bytes no default
+    /// writes.
+    pub(crate) fn default_string(&self, bytes: &[u8]) -> Option<php_heap::Str> {
+        self.default_strings.find(bytes)
     }
 
     /// The engine's string for `bytes` where a declaration or a published
@@ -2319,6 +2334,7 @@ impl EngineBuilder {
             .flat_map(|e| e.constants.iter().cloned())
             .collect();
         let names = permanent_names(&functions, &classes);
+        let default_strings = default_strings(&functions, &classes);
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
@@ -2362,6 +2378,7 @@ impl EngineBuilder {
                 persistent: crate::api::abi::Pool::new(PERSISTENT_ENTRIES),
                 strings: Mutex::new(strings),
                 names,
+                default_strings,
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
             }),
@@ -2472,6 +2489,25 @@ const KNOWN_STRINGS: [&str; 88] = [
 /// `zend_declare_class_constant_ex`): every function's, class's,
 /// method's, property's and class constant's name as declared. A name
 /// the table refuses is left to the request that asks for it.
+/// The strings the bundle's natives default a parameter to,
+/// made once for [`Shared::default_string`].
+fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings {
+    let mut strings = Strings::new();
+    let declared = functions.iter().chain(
+        classes
+            .iter()
+            .flat_map(|decl| decl.methods.iter().map(|method| &method.function)),
+    );
+    for function in declared {
+        for parameter in &function.parameters {
+            if let ParameterDefault::Expr(ConstExpr::Str(written)) = &parameter.default {
+                let _ = strings.intern(written);
+            }
+        }
+    }
+    strings
+}
+
 fn permanent_names(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings {
     let mut names = Strings::new();
     for known in KNOWN_STRINGS {
