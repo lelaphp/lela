@@ -208,6 +208,9 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
                 continue;
             }
             let mut reading = Reading::for_scope(instrument, "php_heap", &manifest, &root).unwrap();
+            if xtask::reading::UNDER_RECIPE.contains(&instrument) {
+                reading = reading.under(&manifest.pin);
+            }
             reading.status = Status::Pass;
             reading.message = "php_heap: measured".to_owned();
             store.record(&[reading]).unwrap();

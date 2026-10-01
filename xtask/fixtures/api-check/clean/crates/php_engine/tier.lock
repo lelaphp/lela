@@ -1,0 +1,3 @@
+# tier.lock: what php_jit imports from php_engine. No consumer exists here.
+[face]
+[kernels]

@@ -383,7 +383,8 @@ fn held(
     commit: &str,
     diff: Result<Diff, String>,
 ) -> Result<Reading> {
-    let reading = Reading::for_scope(INSTRUMENT, &format!("{scope}{SCOPE}"), manifest, root)?;
+    let reading = Reading::for_scope(INSTRUMENT, &format!("{scope}{SCOPE}"), manifest, root)?
+        .under(&manifest.pin);
     compared(reading, commit, diff)
 }
 

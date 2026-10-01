@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use xtask::api_check;
-use xtask::manifest::{LockCeiling, Manifest, OneOrMany, Rule, Seam};
+use xtask::manifest::{LockCeiling, Manifest, OneOrMany, Rule, Seam, Section};
 use xtask::reading::{Reading, Status};
 use xtask::scratch::Tree;
 
@@ -306,9 +306,9 @@ fn a_bundle_order_that_is_not_topological_fails() {
 }
 
 /// The tracked workspace: every seam whose lock has no home present yet,
-/// that is generated from a file the harness renders no lock from, or
-/// that is diffed per section, is a skip, and the harness itself is
-/// within its edges.
+/// or that is generated from a file the harness renders no lock from, is
+/// a skip, `tier.lock`, diffed per section, among those measured (#1369);
+/// and the harness itself is within its edges.
 #[test]
 fn the_workspace_today_has_no_failing_reading() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -319,12 +319,12 @@ fn the_workspace_today_has_no_failing_reading() {
         .collect();
     assert!(failed.is_empty(), "{}", failed.join("\n"));
     assert_eq!(of(&readings, "xtask").status, Status::Pass);
+    assert_eq!(of(&readings, "tier").status, Status::Pass);
     let unmeasured = manifest
         .seams
         .iter()
         .filter(|seam| {
             (seam.generated && seam.producer != "ops.toml")
-                || !seam.sections.is_empty()
                 || manifest
                     .lock_home(&seam.lock)
                     .and_then(|home| manifest.crate_named(&home))
@@ -479,4 +479,86 @@ fn the_harness_lock_is_current_over_the_tracked_workspace() {
         .map(|r| format!("{}: {}", r.scope, r.message))
         .collect();
     assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// A sectioned lock is measured per section (#1369, #1350's ruling):
+/// `tier.lock`'s face holds the `tier::*` items `php_sapi` imports, and
+/// `sapi.lock` does not. The `tier-face` fixture's `php_sapi` imports
+/// `tier::Site`, which neither lock lists, so the `tier` reading fails
+/// naming it under `[face]`, and `sapi` names it too, the one import no
+/// lock holds; `tier::Tier`, which the face lists, is not `sapi.lock`'s.
+#[test]
+fn a_tier_face_item_the_lock_does_not_list_fails_the_tier_reading() {
+    let readings = readings("tier-face");
+    let tier = of(&readings, "tier");
+    assert_eq!(tier.status, Status::Fail, "{}", tier.message);
+    assert!(
+        tier.message.contains(
+            "1 imports from php_engine have no line in crates/php_engine/tier.lock [face]: tier::Site"
+        ),
+        "{}",
+        tier.message
+    );
+    let sapi = of(&readings, "sapi");
+    assert_eq!(sapi.status, Status::Fail, "{}", sapi.message);
+    assert!(
+        sapi.message.contains("tier::Site") && !sapi.message.contains("tier::Tier"),
+        "{}",
+        sapi.message
+    );
+}
+
+/// The positive control and the section a consumer does not read: with
+/// `tier::Site` under `[face]` both readings pass; under `[kernels]`, when
+/// the manifest gives that section to `php_jit` alone, `php_sapi`'s import of
+/// it fails the `tier` reading.
+#[test]
+fn each_section_is_held_against_the_consumers_that_read_it() {
+    let root = Tree::new("api-check-tier-face").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    let from = fixture("tier-face");
+    for file in [
+        "crates/php_engine/Cargo.toml",
+        "crates/php_engine/src/lib.rs",
+        "crates/php_engine/src/tier.rs",
+        "crates/php_engine/sapi.lock",
+        "crates/php_sapi/Cargo.toml",
+        "crates/php_sapi/src/lib.rs",
+    ] {
+        fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+        fs::copy(from.join(file), root.join(file)).unwrap();
+    }
+    let lock = root.join("crates/php_engine/tier.lock");
+    let mut manifest = Manifest::load(workspace()).unwrap();
+
+    fs::write(&lock, "[face]\ntier::Site\ntier::Tier\n[kernels]\n").unwrap();
+    let readings = api_check::hold(&manifest, &root, false).unwrap();
+    for scope in ["tier", "sapi"] {
+        let reading = of(&readings, scope);
+        assert_eq!(reading.status, Status::Pass, "{scope}: {}", reading.message);
+    }
+
+    let tier = manifest
+        .seams
+        .iter_mut()
+        .find(|s| s.name == "tier")
+        .unwrap();
+    tier.sections = vec![
+        Section::Every("face".to_owned()),
+        Section::Only {
+            name: "kernels".to_owned(),
+            consumers: vec!["php_jit".to_owned()],
+        },
+    ];
+    fs::write(&lock, "[face]\ntier::Tier\n[kernels]\ntier::Site\n").unwrap();
+    let readings = api_check::hold(&manifest, &root, false).unwrap();
+    let tier = of(&readings, "tier");
+    assert_eq!(tier.status, Status::Fail, "{}", tier.message);
+    assert!(
+        tier.message.contains(
+            "php_sapi imports tier::Site, which crates/php_engine/tier.lock lists under [kernels], read by php_jit alone"
+        ),
+        "{}",
+        tier.message
+    );
 }

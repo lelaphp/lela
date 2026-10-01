@@ -214,7 +214,7 @@ impl Standing {
             .iter()
             .filter_map(|scope| Some((scope.clone(), index.hash(&manifest.scope_path(scope)?))))
             .collect();
-        let mut standing = store.latest_over(instrument, &trees)?;
+        let mut standing = store.latest_over(instrument, &trees, manifest.pin.digest())?;
         standing.retain(|_, reading| reading.status == Status::Pass);
         if let Some(path) = harness
             && standing.remove("xtask").is_some()

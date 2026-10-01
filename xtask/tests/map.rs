@@ -21,6 +21,55 @@ fn read(path: &str) -> String {
     std::fs::read_to_string(workspace().join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
+/// A file with regions as the index holds it, `git show :<path>`, never the
+/// working copy: another session's `SessionStart` hook or pre-commit
+/// rewrites a region in place while these tests run, and a read in the
+/// middle of that write saw a bare closer that no commit held (#1322).
+fn staged(root: &Path, path: &str) -> String {
+    let out = Command::new("git")
+        .args(["show", &format!(":{path}")])
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|e| panic!("git show :{path}: {e}"));
+    assert!(
+        out.status.success(),
+        "git show :{path}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+/// The map as committed, which a render in flight does not tear.
+fn map() -> String {
+    staged(workspace(), "AGENTS.md")
+}
+
+/// The reader is the index and not the disk: a scratch repository stages a
+/// rendered map, then its working copy is caught half-way through a render,
+/// the closer written and the body not yet, and what the tests read is the
+/// staged map (#1322).
+#[test]
+fn the_map_is_read_from_the_index_and_not_from_a_render_in_flight() {
+    let root = Tree::new("map-staged").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    let rendered = "# map\n\n<!-- computed exec cmd=\"ls\" inputs=x name=x | do not edit; run computed -->\nx\n<!-- /computed in=1 out=2 -->\n";
+    std::fs::write(root.join("AGENTS.md"), rendered).unwrap();
+    let add = Command::new("git")
+        .args(["add", "--", "AGENTS.md"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{add:?}");
+    std::fs::write(
+        root.join("AGENTS.md"),
+        "# map\n\n<!-- computed exec cmd=\"ls\" inputs=x name=x | do not edit; run computed -->\n<!-- /computed -->\n",
+    )
+    .unwrap();
+    let read = staged(&root, "AGENTS.md");
+    assert_eq!(read, rendered);
+    assert!(read.lines().all(|l| l != "<!-- /computed -->"), "{read}");
+}
+
 /// The opener of a region by name, if the file has one.
 fn opener<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     text.lines()
@@ -49,7 +98,7 @@ fn prose(map: &str) -> usize {
 
 #[test]
 fn the_map_is_under_100_written_lines_with_the_six_regions_of_the_design() {
-    let map = read("AGENTS.md");
+    let map = map();
     let lines = prose(&map);
     assert!(
         lines <= 100,
@@ -95,7 +144,7 @@ fn the_map_is_under_100_written_lines_with_the_six_regions_of_the_design() {
 /// line past the ceiling fails (harness §5, ledger 12).
 #[test]
 fn the_ceiling_counts_what_a_person_wrote_and_not_what_a_region_rendered() {
-    let map = read("AGENTS.md");
+    let map = map();
     let written = prose(&map);
     assert!(written < map.lines().count(), "the map has regions");
 
@@ -128,7 +177,7 @@ fn region<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
 /// the map's widest, and a line of it stays under 200 characters.
 #[test]
 fn every_help_line_of_the_instruments_region_is_under_200_characters() {
-    let map = read("AGENTS.md");
+    let map = map();
     let lines = region(&map, "instruments");
     assert!(lines.len() > 10, "the region renders `xtask --help`");
     let widest = lines.iter().max_by_key(|l| l.len()).unwrap();
@@ -141,14 +190,14 @@ fn every_help_line_of_the_instruments_region_is_under_200_characters() {
 
 #[test]
 fn ext_and_data_have_their_regions() {
-    let ext = read("ext/AGENTS.md");
+    let ext = staged(workspace(), "ext/AGENTS.md");
     assert!(opener(&ext, "extensions").is_some(), "{ext}");
     let bundle = opener(&ext, "bundle-order").unwrap();
     assert!(bundle.contains("status --section bundle"), "{bundle}");
     for rule in ["extension()", "Capture", "php-src/ext/"] {
         assert!(ext.contains(rule), "the template rules name {rule}");
     }
-    let data = read("data/INDEX.md");
+    let data = staged(workspace(), "data/INDEX.md");
     assert!(opener(&data, "files").is_some(), "{data}");
     for text in [&ext, &data] {
         assert!(text.lines().all(|l| l != "<!-- /computed -->"), "rendered");
@@ -303,7 +352,12 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
     let cap = block_cap();
     assert!(cap > MARGIN * 2, "a cap of {cap} leaves room for a block");
 
-    let (map, _) = session_blocks(workspace());
+    // The map as the hook hands it, from a scratch workspace holding the
+    // staged map, so a render in flight here is not what is measured.
+    let root = Tree::new("map-cap").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    std::fs::write(root.join("AGENTS.md"), map()).unwrap();
+    let (map, _) = session_blocks(&root);
     assert!(
         map.starts_with("# dax-php\n"),
         "{}",
@@ -313,8 +367,6 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
         panic!("{why}");
     }
 
-    let root = Tree::new("map-cap").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
     let padding = "a line a person wrote, one more of them\n".repeat(cap / 40 + 1);
     std::fs::write(root.join("AGENTS.md"), format!("{map}{padding}")).unwrap();
     let (padded, facts) = session_blocks(&root);

@@ -336,7 +336,8 @@ fn died(
         } else {
             "before it reached this crate".to_owned()
         };
-        let mut reading = under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule);
+        let mut reading =
+            under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule).under(&manifest.pin);
         reading.status = Status::Fail;
         reading.message = format!(
             "{name}: the witness run died on {signal} {when}; nothing it judged of this crate was written, and this reading stands for the run"

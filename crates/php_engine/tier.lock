@@ -1,4 +1,5 @@
 # tier.lock: what php_jit imports from php_engine, and the face php_sapi re-exports for the debugging host (design §4.5, §5.8 revision 51; jit-design.md §2, §2.4 revision 8; ADR-0006), in two sections, face and kernels. Diffed per section by api-check once it measures sectioned locks; php_jit does not exist yet, so the face holds the items month one has laid down and the debugging host reads, and the kernels section is empty.
+[face]
 api::request::Interrupt
 api::request::Interrupt::raised
 api::request::Request::interrupt
@@ -58,3 +59,4 @@ tier::user_constants
 tier::user_functions
 tier::variable
 tier::variables
+[kernels]

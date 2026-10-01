@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"ls; ./run-tests.php","description":"Run upstream's runner after a separator"}}

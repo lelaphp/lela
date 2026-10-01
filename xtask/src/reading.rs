@@ -18,6 +18,7 @@ use toml::value::{Datetime, Offset, Time};
 
 use crate::git::Stamp;
 use crate::manifest::{Crate, Manifest};
+use crate::oracle::Pin;
 use crate::sources;
 
 /// Where the store lives, relative to the workspace root.
@@ -72,7 +73,15 @@ pub struct Reading {
     /// none, and for a reading written before this field existed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub groups: BTreeMap<String, Number>,
+    /// The [`Pin::digest`] of the oracle pin the run was taken under, for
+    /// an instrument of [`UNDER_RECIPE`]; `None` for every other (#1387).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
 }
+
+/// The instruments whose runs are taken under the oracle's recipe: a
+/// reading of one is fresh only under the pin it records (#1387).
+pub const UNDER_RECIPE: [&str; 3] = ["witness", "phpt", "crosscheck"];
 
 impl Reading {
     /// A reading of `instrument` over a crate, stamped over the crate's
@@ -152,6 +161,7 @@ impl Reading {
                 .unwrap_or_else(|_| unreachable!("{EPOCH} is a datetime")),
             session: String::new(),
             groups: BTreeMap::new(),
+            recipe: None,
         }
     }
 }
@@ -164,10 +174,20 @@ impl Reading {
 
     /// Whether the reading was taken over the content `hash` names: the
     /// scope's [`crate::git::tree_hash`] now, `done`'s question, or the
-    /// index's hash of it, pre-commit's (#1143). The one statement of
-    /// fresh (harness-design.md §4.2, §4.5 condition 1).
-    pub fn fresh_for(&self, hash: &str) -> bool {
+    /// index's hash of it, pre-commit's (#1143); and, for an instrument of
+    /// [`UNDER_RECIPE`], under the pin whose [`Pin::digest`] is `pin` (#1387).
+    /// The one statement of fresh (harness-design.md §4.2, §4.5 condition 1).
+    pub fn fresh_for(&self, hash: &str, pin: &str) -> bool {
         self.tree == hash
+            && (!UNDER_RECIPE.contains(&self.instrument.as_str())
+                || self.recipe.as_deref() == Some(pin))
+    }
+
+    /// The reading as taken under `pin`'s recipe.
+    #[must_use]
+    pub fn under(mut self, pin: &Pin) -> Reading {
+        self.recipe = Some(pin.digest().to_owned());
+        self
     }
 
     /// Record one count under `key`.
@@ -435,13 +455,14 @@ impl Store {
         &self,
         instrument: &str,
         trees: &BTreeMap<String, String>,
+        pin: &str,
     ) -> Result<BTreeMap<String, Reading>> {
         let sought: Vec<(String, String, String)> = trees
             .iter()
             .map(|(scope, tree)| (instrument.to_owned(), scope.clone(), tree.clone()))
             .collect();
         Ok(self
-            .latest_over_each(&sought)?
+            .latest_over_each(&sought, pin)?
             .into_iter()
             .map(|((_, scope), reading)| (scope, reading))
             .collect())
@@ -456,6 +477,7 @@ impl Store {
     pub(crate) fn latest_over_each(
         &self,
         sought: &[(String, String, String)],
+        pin: &str,
     ) -> Result<BTreeMap<(String, String), Reading>> {
         const TREE: &str = "\"tree\":\"";
         let mut found = BTreeMap::new();
@@ -464,7 +486,7 @@ impl Store {
             // A file that is no reading is no reading over the tree, and
             // the log is asked instead, as for a stale one (#1235).
             match self.read(instrument, scope).ok().flatten() {
-                Some(reading) if reading.fresh_for(tree) => {
+                Some(reading) if reading.fresh_for(tree, pin) => {
                     found.insert((instrument.clone(), scope.clone()), reading);
                 }
                 _ => by_tree
@@ -499,7 +521,7 @@ impl Store {
             };
             let key = (reading.instrument.clone(), reading.scope.clone());
             let later = |held: &Reading| reading.at.to_string() >= held.at.to_string();
-            if reading.fresh_for(tree)
+            if reading.fresh_for(tree, pin)
                 && wanted.contains(&(key.0.as_str(), key.1.as_str()))
                 && found.get(&key).is_none_or(later)
             {

@@ -108,11 +108,11 @@ third-engine-design.md
 | unit | unit.lock | 107 |  | pass |
 | ops | ops.lock | 209 |  | pass |
 | api | api.lock | 948 | 1500 | pass |
-| sapi | sapi.lock | 81 |  | pass |
-| tier | tier.lock |  |  | skip |
-| harness | xtask.lock | 353 |  | pass |
+| sapi | sapi.lock | 25 |  | pass |
+| tier | tier.lock | 59 |  | pass |
+| harness | xtask.lock | 359 |  | pass |
 
-<!-- /computed in=7b2d9b6de4dd49590afa042fa34654c31cc7cfd84e11c4d6fcb04a9dd366b461 out=012da41e176b3644efb1750ac35a029ec1ea3bdd0f86c7b06e3d350112d53e1b -->
+<!-- /computed in=9a92121f0493d3a70b3e4f78595eea2585159a1e36142573c6bf0cec0601aced out=d88e37a1968215cd08572b515a07b59d675bd04982807b876d22e32c9e0c3251 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -142,7 +142,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=18c383ac4c6f8fc635c9e19cdfeadcc1f9982e98f26c9c45c589f2fd18b1f8ce out=e344c9be2ccdb333d052e5b8af24046c1402e9d11807c92ab6dfb306536ee60c -->
+<!-- /computed in=94f8bd83a22db5a6cd6aef13c457bf57efaf2af74839db5b20e7c399a7954cf2 out=e344c9be2ccdb333d052e5b8af24046c1402e9d11807c92ab6dfb306536ee60c -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

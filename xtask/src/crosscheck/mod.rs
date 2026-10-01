@@ -492,8 +492,9 @@ fn said(observed: &Observation) -> String {
 /// oracle may still render or refuse.
 fn reading_of(root: &Path, manifest: &Manifest, name: &str, column: Column) -> Result<Reading> {
     let scope = column.scope(name);
-    match manifest.crate_named(&Column::Re.scope(name)) {
-        Some(krate) => Reading::stamped_over(INSTRUMENT, &scope, root, &krate.path()),
-        None => Reading::stamped_over(INSTRUMENT, &scope, root, Path::new(".")),
-    }
+    let path = manifest
+        .crate_named(&Column::Re.scope(name))
+        .map(crate::manifest::Crate::path);
+    let path = path.as_deref().unwrap_or(Path::new("."));
+    Ok(Reading::stamped_over(INSTRUMENT, &scope, root, path)?.under(&manifest.pin))
 }
