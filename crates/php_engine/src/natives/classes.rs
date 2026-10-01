@@ -534,8 +534,9 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
 /// a declared property that is not public or that `scope` may not see;
 /// a plain one is keyed as a symbol table keys it. The rows are views,
 /// and each kept one takes its own owner. The witness is `DatePeriod`'s,
-/// whose seven fields php adds to the table, and `DateInterval`'s,
-/// which answers its fields for every reader.
+/// whose seven fields php adds to the table; a `DateTime`, whose class
+/// hands this reader the standard table, and a `DateInterval`, whose
+/// class sets only `get_properties`, are read as the object's own.
 ///
 /// ```php
 /// class P extends DatePeriod { public $own = 1; protected $prot = 2; }

@@ -919,29 +919,13 @@ impl ObjectHandlers for IntervalHandlers {
         if has_debug_info(req, object) {
             return Std.get_debug_info(req, object);
         }
-        let rows = interval_table(req, object)?;
+        write_fields(req, object)?;
+        let rows = std_rows(req, object)?;
         rows_array(req, &rows, Vec::new(), false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
         true
-    }
-
-    fn get_properties_for(
-        &self,
-        req: &mut Request,
-        object: PhpObject,
-        purpose: PropertyPurpose,
-    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
-        if purpose == PropertyPurpose::Debug {
-            return Ok(None);
-        }
-        Ok(Some(
-            interval_table(req, object)?
-                .into_iter()
-                .map(|(name, value)| (Key::Str(name), value))
-                .collect(),
-        ))
     }
 
     /// `date_object_get_properties_interval`, the class's
@@ -988,22 +972,64 @@ impl ObjectHandlers for IntervalHandlers {
     /// int(11)
     /// foo y m d h i s f invert days from_string bar
     /// ```
+    ///
+    /// php sets no `get_properties_for` on the class, so every reader
+    /// reads this table as `zend_std_get_properties_for` hands it on, the
+    /// object's own, where a declared slot is `IS_INDIRECT`: over a
+    /// subclass, `get_object_vars()` refuses a protected or private
+    /// declared row from outside and names it unmangled from inside, and
+    /// `foreach` sees what `get_object_vars()` sees.
+    ///
+    /// ```php
+    /// class I extends DateInterval { public $y = 'mine'; protected $p = 1; private $q = 2;
+    ///     function inside() { return array_keys(get_object_vars($this)); } }
+    /// $i = new I('P2Y');
+    /// var_dump(get_object_vars($i));
+    /// echo implode(' ', $i->inside()), "\n";
+    /// $keys = []; foreach ($i as $k => $v) { $keys[] = $k; } echo implode(' ', $keys), "\n";
+    /// ```
+    /// ```expect
+    /// array(10) {
+    ///   ["y"]=>
+    ///   int(2)
+    ///   ["m"]=>
+    ///   int(0)
+    ///   ["d"]=>
+    ///   int(0)
+    ///   ["h"]=>
+    ///   int(0)
+    ///   ["i"]=>
+    ///   int(0)
+    ///   ["s"]=>
+    ///   int(0)
+    ///   ["f"]=>
+    ///   float(0)
+    ///   ["invert"]=>
+    ///   int(0)
+    ///   ["days"]=>
+    ///   bool(false)
+    ///   ["from_string"]=>
+    ///   bool(false)
+    /// }
+    /// y p q m d h i s f invert days from_string
+    /// y m d h i s f invert days from_string
+    /// ```
     fn get_properties(
         &self,
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Vec<(PhpString, Value)>, Thrown> {
-        interval_table(req, object)
+        write_fields(req, object)?;
+        Std.get_properties(req, object)
     }
 }
 
-/// `date_object_get_properties_interval`: `date_interval_object_to_hash`
-/// writes each field into the object's own table with
+/// `date_interval_object_to_hash`, as `date_object_get_properties_interval`
+/// calls it: each field written into the object's own table with
 /// `zend_hash_str_update`, a row it holds replaced where it stands and a
 /// new one appended, so the table's internal pointer stays where it
-/// stood; then the table's rows, views, each declared name mangled as a
-/// reader keys it.
-fn interval_table(req: &mut Request, object: PhpObject) -> Result<Vec<(PhpString, Value)>, Thrown> {
+/// stood.
+fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     for (name, value) in interval_rows(req, object)? {
         let name = match PhpString::new(req, name) {
             Ok(name) => name,
@@ -1016,7 +1042,7 @@ fn interval_table(req: &mut Request, object: PhpObject) -> Result<Vec<(PhpString
         req.release(Value::string(name));
         written?;
     }
-    std_rows(req, object)
+    Ok(())
 }
 
 /// The interval's fields, none for one no constructor set.
