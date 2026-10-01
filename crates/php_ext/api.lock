@@ -14,6 +14,7 @@ __private::native_function
 __private::parameter
 __private::property
 abi::Admission
+abi::AfterLog
 abi::Cache
 abi::Cache::get_or_build
 abi::Cache::new
@@ -68,6 +69,7 @@ abi::ExtensionBuilder::constants_with
 abi::ExtensionBuilder::dependencies
 abi::ExtensionBuilder::encodings
 abi::ExtensionBuilder::engine_state
+abi::ExtensionBuilder::fatal_logged
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::info
 abi::ExtensionBuilder::ini

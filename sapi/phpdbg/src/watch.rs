@@ -174,9 +174,11 @@ fn expand(root: &Shown, name: Vec<u8>, parts: &[Option<Vec<u8>>]) -> Vec<(Vec<Ve
 }
 
 /// A watch set on every path `input` names in the frame the prompt
-/// stands in, as `phpdbg_watchpoint_parse_symtables` sets them.
+/// stands in, as `phpdbg_watchpoint_parse_symtables` sets them; none
+/// where nothing is executing, `phpdbg_rebuild_symtable`'s refusal.
 fn add(s: &mut Session, here: &mut Here<'_>, input: &[u8], kind: Kind) {
     let Some((req, frame)) = here.standing() else {
+        out::error(b"No active op array!");
         return;
     };
     let Some((variable, parts)) = parse(input) else {

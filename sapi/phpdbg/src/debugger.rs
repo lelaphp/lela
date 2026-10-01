@@ -11,12 +11,13 @@
 //! as the loop ends it. Everywhere else the tier answers `Continue` and
 //! the program runs at the interpreter's speed.
 
+use php_ext::abi::AfterLog;
 use php_sapi::tier::{self, Flow, FrameRef, Opcode, Request, Site, Stepped, Tier};
 
 use crate::bp::At;
 use crate::out;
 use crate::prompt::{self, Here, Outcome};
-use crate::session::{self, Context, Origin, Plan, SeekKind, Session};
+use crate::session::{self, AfterRun, Context, Origin, Plan, SeekKind, Session};
 
 /// The tier the `phpdbg` binary binds.
 #[derive(Debug, Clone, Copy, Default)]
@@ -78,7 +79,7 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             let Some(mut session) = session::take() else {
                 return Flow::Continue;
             };
-            let outcome = prompt::idle_job(&mut session, req, frame);
+            let outcome = prompt::idle_job(&mut session, req);
             session::put(session);
             let _ = outcome;
             tier::exit(req);
@@ -107,9 +108,12 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
         }
     }
     session.executing = false;
-    let outcome = {
-        let mut here = Here::Held { req, frame };
-        prompt::interactive(&mut session, &mut here)
+    let outcome = loop {
+        let mut here = Here::Held { req: &mut *req };
+        let outcome = prompt::interactive(&mut session, &mut here);
+        if outcome != Outcome::NotRunning {
+            break outcome;
+        }
     };
     let stopped = session.stopped.is_some();
     session::put(session);
@@ -144,12 +148,81 @@ struct Standing {
 
 /// `phpdbg_execute_ex`'s loop over the serving entered at `frame`, the
 /// frame an outer serving was stepping put back as the session's once it
-/// ends.
+/// ends; where it ends in a fatal, the frames it stood on stand until the
+/// fatal is rendered, and so does the frame it was stepping, which the
+/// log's prompt stands in ([`fatal_logged`]).
 fn drive(req: &mut Request, frame: FrameRef) -> Flow {
     let outer = session::with(|s| s.standing).flatten();
     let flow = stepped(req, frame);
-    session::with(|s| s.standing = outer);
+    if !matches!(flow, Flow::Bail(_)) {
+        session::with(|s| s.standing = outer);
+    }
     flow
+}
+
+/// What `php_sapi_phpdbg_log_message` does once it has written a fatal's
+/// entry (`Z/sapi/phpdbg/phpdbg.c:731-770`), outside what `ev` serves and
+/// other than under `-rr`: the listing where the request stands, the frame the
+/// loop was stepping or `[no active file]` where nothing is executing,
+/// then a prompt there until a command goes on, after which the fatal
+/// ends the run; a prompt that stopped, `quit` among them, bails out of
+/// the log before php's `php_error_cb` writes the status.
+///
+/// ```php
+/// ini_set("memory_limit", "2M");
+/// $s = str_repeat("x", 4 << 20);
+/// echo "after\n";
+/// ```
+/// ```request phpdbg
+/// ev ini_set("display_errors", 0)
+/// ev ini_set("log_errors", 1)
+/// r
+/// ev 1
+/// c
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> 1
+/// prompt> 0
+/// prompt> [PHP Fatal error:  Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %SCRATCH%/witness.php on line 3]
+/// >00003: $s = str_repeat("x", 4 << 20);
+///  00004: echo "after\n";
+/// prompt> 1
+/// prompt> [Script ended normally]
+/// prompt>
+/// ```
+pub fn fatal_logged(req: &mut Request) -> AfterLog {
+    let Some(mut session) = session::take() else {
+        return AfterLog::Returned;
+    };
+    if session.origin == Origin::Eval || session.after_run == AfterRun::Quit {
+        session::put(session);
+        return AfterLog::Returned;
+    }
+    let standing = session
+        .standing
+        .filter(|_| session.executing)
+        .and_then(|frame| tier::position(req, frame).map(|position| (frame, position)));
+    let mut here = if let Some((frame, position)) = standing {
+        crate::list::code(&session, &position.file, position.line);
+        Here::Paused { req, frame }
+    } else {
+        crate::list::code(&session, prompt::NO_ACTIVE_FILE, 0);
+        if session.exec.is_some() {
+            Here::Held { req }
+        } else {
+            Here::Idle { req }
+        }
+    };
+    let outcome = prompt::interactive(&mut session, &mut here);
+    let stopped = session.stopped.is_some();
+    session::put(session);
+    if stopped || outcome == Outcome::Stopped {
+        AfterLog::BailedOut
+    } else {
+        AfterLog::Returned
+    }
 }
 
 /// The loop itself.

@@ -53,6 +53,7 @@ pub fn serve(engine: &Engine) -> i32 {
             prompt::begin_run(&mut s);
         }
         s.plan = Some(plan);
+        s.standing = None;
         let description = describe(&s, plan);
         session::put(s);
         let observed = engine.serve(description, &mut Sink);

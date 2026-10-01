@@ -66,6 +66,7 @@ pub fn extension() -> Extension {
             phpdbg_get_executable::declared(),
         ])
         .constants(constants::declared())
+        .fatal_logged(crate::debugger::fatal_logged)
         .build(crate::NAME)
 }
 

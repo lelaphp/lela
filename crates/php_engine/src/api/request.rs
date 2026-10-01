@@ -28,7 +28,7 @@ use php_unit::decl::{
 use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
-    Callable, Dependency, DimensionRead, Extension, IniStage, IniVerdict, NativeNew,
+    AfterLog, Callable, Dependency, DimensionRead, Extension, IniStage, IniVerdict, NativeNew,
     ObjectHandlers, OnModify, PropertyRead, PropertyTest, Std, ZendExtension,
 };
 use crate::api::call::{Function, Target};
@@ -2053,6 +2053,11 @@ pub struct Request {
     /// what its callback left reads the fatal, and a second fatal raised
     /// on the way is not rendered.
     bailout: bool,
+    /// The host bailed out from inside the log it took a fatal into
+    /// ([`AfterLog::BailedOut`]), between `php_error_cb`'s log and the
+    /// ending that reads it: nothing is displayed and the status is not
+    /// written.
+    left_in_log: bool,
     /// Whether a diagnostic is displayed past the `php_output` layer,
     /// `php_output_direct`, as php displays what it raises while the
     /// engine starts ([`crate::api::raising::startup`]).
@@ -2653,6 +2658,7 @@ impl Request {
             fibers: crate::fiber::Fibers::default(),
             raised: None,
             bailout: false,
+            left_in_log: false,
             display_direct: false,
             phase: Phase::Startup,
             shutdown_walk_ended: false,
@@ -6462,7 +6468,8 @@ impl Request {
     /// lie within `0777`, `0644` where they do not, and written as `[<stamp>] <entry>\n`; the host's
     /// log where no file is named, where it names `syslog`, or where the
     /// file cannot be opened. The stamp is `d-M-Y H:i:s e` in the
-    /// request's default zone ([`Request::log_stamp`]).
+    /// request's default zone ([`Request::log_stamp`]). Whether the
+    /// host's log took it.
     ///
     /// ```php
     /// $f = sys_get_temp_dir() . "/witness-log-" . getmypid();
@@ -6479,13 +6486,13 @@ impl Request {
     /// [%d-%s-%d %d:%d:%d UTC] two
     /// lines
     /// ```
-    fn log_err(&mut self, entry: &[u8]) {
+    fn log_err(&mut self, entry: &[u8]) -> bool {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
         let named = self.ini_get(b"error_log").unwrap_or_default();
         if named.is_empty() || named == b"syslog" {
             self.sink.get().log(entry);
-            return;
+            return true;
         }
         let path = self.cwd().join(std::ffi::OsStr::from_bytes(named));
         let mode =
@@ -6501,7 +6508,7 @@ impl Request {
             .open(path);
         let Ok(mut file) = opened else {
             self.sink.get().log(entry);
-            return;
+            return true;
         };
         let stamp = self.log_stamp(std::time::SystemTime::now());
         let mut line = Vec::with_capacity(entry.len() + 32);
@@ -6511,6 +6518,7 @@ impl Request {
         line.extend_from_slice(entry);
         line.push(b'\n');
         let _ = file.write_all(&line);
+        false
     }
 
     /// `php_format_date("d-M-Y H:i:s e", now, 1)`: through the
@@ -6850,7 +6858,13 @@ impl Request {
         let trace = self.stack_trace_after_the_site();
         if self.log_errors() {
             let text = format!("PHP {name}:  {message} in {named} on line {line}{trace}");
-            self.log_err(text.as_bytes());
+            if self.log_err(text.as_bytes())
+                && fatal_errors(level)
+                && self.fatal_logged() == AfterLog::BailedOut
+            {
+                self.left_in_log = true;
+                return;
+            }
         }
         let display = self.display_errors();
         if display == Display::Off {
@@ -7169,11 +7183,17 @@ impl Request {
     /// destructors when the fatal came returns without freeing.
     fn end_at_level(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
         self.heap.gc_protect(true);
-        self.exit_status = 255;
+        // A host that bailed out from inside its log left before
+        // `php_error_cb` wrote the status or the header.
+        let left_in_log = std::mem::take(&mut self.left_in_log);
+        if !left_in_log {
+            self.exit_status = 255;
+        }
         // `php_error_cb`'s arm for what it cannot recover from
         // (`Z/main/main.c:1517`): with nothing displayed, a response not
         // yet committed at 200 answers `HTTP/1.0 500 Internal Server Error`.
-        if self.display_errors() == Display::Off
+        if !left_in_log
+            && self.display_errors() == Display::Off
             && !self.output.headers_sent()
             && self.output.response_code() == 200
         {
@@ -17289,7 +17309,7 @@ impl Request {
     /// `error_log()` to the host's log: `php_log_err` with the message
     /// as given, one entry.
     pub fn error_log(&mut self, message: &[u8]) {
-        self.log_err(message);
+        let _ = self.log_err(message);
     }
 
     /// `EG(error_reporting)` as it stands: what `error_reporting()`
@@ -19731,6 +19751,23 @@ impl Request {
                 self.leave_pending(&thrown);
             }
         }
+    }
+
+    /// Each extension's hook for a fatal the host's log took, in bundle
+    /// order, until one bailed out of the log
+    /// ([`ExtensionBuilder::fatal_logged`]).
+    ///
+    /// [`ExtensionBuilder::fatal_logged`]: crate::api::abi::ExtensionBuilder::fatal_logged
+    fn fatal_logged(&mut self) -> AfterLog {
+        let shared = Arc::clone(&self.shared);
+        for extension in &shared.extensions {
+            if let Some(hook) = extension.fatal_logged
+                && hook(self) == AfterLog::BailedOut
+            {
+                return AfterLog::BailedOut;
+            }
+        }
+        AfterLog::Returned
     }
 
     /// This request's interrupt (design §5.8): what the loop tests at a
