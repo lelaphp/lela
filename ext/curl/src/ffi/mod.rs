@@ -1,5 +1,5 @@
 //! The binding of the platform's libcurl (design §7.2, `unsafe.homes`'
-//! `ext/*/src/ffi/`), declared in [`sys`]: the calls `interface.c`, `multi.c`, `share.c` and
+//! `ext/*/src/ffi/`), declared by `curl-sys` through [`sys`]: the calls `interface.c`, `multi.c`, `share.c` and
 //! `curl_file.c` make and nothing beside them, over the platform's
 //! library the oracle links.
 //!
@@ -32,7 +32,7 @@ mod easy;
 mod multi;
 mod sys;
 
-use std::ffi::{CStr, CString, c_char, c_int, c_long, c_void};
+use std::ffi::{CStr, CString, c_char, c_long, c_void};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
@@ -45,29 +45,11 @@ use php_ext::values::Value;
 pub(crate) use easy::{Easy, EasyId, Hook, Info};
 pub(crate) use multi::{Multi, Share};
 
-/// `CURL_ERROR_SIZE`.
-const ERROR_SIZE: usize = 256;
+use sys::CURL_ERROR_SIZE as ERROR_SIZE;
 
-/// The numbers of `curl.h` php sets or reads and does not register as
-/// constants.
-mod header {
-    pub(super) const CURLOPT_ERRORBUFFER: i64 = 10010;
-    /// `CURLOPT_PROGRESSDATA`, which `CURLOPT_XFERINFODATA` names too.
-    pub(super) const CURLOPT_PROGRESSDATA: i64 = 10057;
-    pub(super) const CURLOPT_FNMATCH_DATA: i64 = 10202;
-    pub(super) const CURLOPT_DEBUGDATA: i64 = 10095;
-    pub(super) const CURLOPT_PREREQDATA: i64 = 10313;
-    pub(super) const CURLOPT_SSH_HOSTKEYDATA: i64 = 10317;
-    pub(super) const CURLOPT_POSTFIELDSIZE: i64 = 60;
-    pub(super) const CURLOPT_COPYPOSTFIELDS: i64 = 10165;
-    pub(super) const CURLOPT_MIMEPOST: i64 = 10269;
-    pub(super) const CURLMOPT_PUSHDATA: i64 = 10015;
-    pub(super) const CURLINFO_STRING: i64 = 0x10_0000;
-    pub(super) const CURLINFO_LONG: i64 = 0x20_0000;
-    pub(super) const CURLINFO_DOUBLE: i64 = 0x30_0000;
-    pub(super) const CURLINFO_SLIST: i64 = 0x40_0000;
-    pub(super) const CURLINFO_OFF_T: i64 = 0x60_0000;
-    pub(super) const CURLINFO_TYPEMASK: i64 = 0xf0_0000;
+/// A `CURLcode` as the `int` php keeps it in, `ch->err.no`.
+const fn code(rc: sys::CURLcode) -> i32 {
+    rc.cast_signed()
 }
 
 /// A C string of the bytes up to the first NUL, as php hands `ZSTR_VAL`
@@ -353,7 +335,7 @@ fn lines_of(list: *mut sys::curl_slist) -> Vec<Vec<u8>> {
 
 /// `curl_easy_strerror`.
 pub(crate) fn strerror(code: i64) -> Option<Vec<u8>> {
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let code = code as sys::CURLcode;
     // SAFETY: any number; the library answers a static string.
     bytes_of(unsafe { sys::curl_easy_strerror(code) })
@@ -369,7 +351,7 @@ pub(crate) fn multi_strerror(code: i64) -> Option<Vec<u8>> {
 
 /// `curl_share_strerror`.
 pub(crate) fn share_strerror(code: i64) -> Option<Vec<u8>> {
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let code = code as sys::CURLSHcode;
     // SAFETY: as above.
     bytes_of(unsafe { sys::curl_share_strerror(code) })
@@ -398,13 +380,10 @@ pub(crate) struct Version {
     pub(crate) brotli_version: Option<Vec<u8>>,
 }
 
-/// `CURLVERSION_NOW` at the headers php is built against, `CURLVERSION_TWELFTH`.
-const VERSION_NOW: c_int = 11;
-
 #[allow(clippy::useless_conversion)]
 pub(crate) fn version() -> Option<Version> {
     // SAFETY: the library answers a static structure, or null.
-    let data = unsafe { sys::curl_version_info(VERSION_NOW) };
+    let data = unsafe { sys::curl_version_info(sys::CURLVERSION_NOW) };
     // SAFETY: a static structure the library filled, or null.
     let data = unsafe { data.as_ref() }?;
     let mut protocols = Vec::new();

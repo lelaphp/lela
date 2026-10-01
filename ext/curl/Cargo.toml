@@ -16,11 +16,10 @@ workspace = true
 php_ext = { path = "../../crates/php_ext" }
 # `fdopen` over a stream's fd for `CURLOPT_STDERR`, in `src/ffi/` alone.
 libc = { workspace = true }
-
-# libcurl is the platform's, the library the oracle links, declared in
-# `src/ffi/sys.rs` and found by `build.rs` (design §7.2, #1324).
-[build-dependencies]
-pkg-config = { workspace = true }
+# libcurl's declarations, re-exported by `src/ffi/sys.rs` and called in
+# `src/ffi/` alone; the library is the platform's, the one the oracle
+# links, which `build.rs` holds curl-sys to (design §7.2, #1332).
+curl-sys = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
