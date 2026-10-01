@@ -222,10 +222,9 @@ impl Request {
     /// callee raised and an `exit` leave. That is caught where the host
     /// asked, as phpdbg's prompt catches it in its `zend_try`, and the
     /// request goes on: no fatal is what it ends in, and its status is
-    /// what an `exit` set or, after a fatal, what it was before, as php's
-    /// is where the prompt that `php_sapi_phpdbg_log_message` stands at
-    /// for the fatal's log is quit: `php_error_cb` writes 255 only once
-    /// the log returns.
+    /// what an `exit` set or what the fatal's `php_error_cb` wrote, 255,
+    /// unless the host bailed out of the log first
+    /// ([`crate::api::abi::AfterLog::BailedOut`]).
     pub(crate) fn call_by_name(
         &mut self,
         under: Under,
@@ -235,7 +234,6 @@ impl Request {
         match under {
             Under::Frame(_) => self.call_by_name_here(name, arguments),
             Under::Nothing => self.nothing_executing(|req| {
-                let status = req.exit_status;
                 let ending = req.ending.take();
                 let called = req.call_by_name_here(name, arguments);
                 let rendered = req.ending.is_some();
@@ -245,7 +243,6 @@ impl Request {
                 }
                 req.catch_bailout();
                 if rendered {
-                    req.exit_status = status;
                     Called::Rendered
                 } else {
                     Called::Exited

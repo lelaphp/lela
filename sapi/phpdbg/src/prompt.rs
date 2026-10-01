@@ -496,7 +496,30 @@ fn verify(def: &Def, params: &[Param]) -> Result<(), Option<String>> {
 /// Where `log_errors` logs that fatal, `php_sapi_phpdbg_log_message`
 /// writes it and follows it with the listing where the request stands,
 /// `[no active file]` where nothing does, and a prompt
-/// ([`crate::debugger::fatal_logged`]).
+/// ([`crate::debugger::fatal_logged`]). The status is the 255
+/// `php_error_cb` writes after the log, which a `quit` at that prompt
+/// bails out before, and which the display regime, logging nothing,
+/// writes at once.
+///
+/// ```php
+/// $a = 1;
+/// ```
+/// ```request phpdbg
+/// register intdiv
+/// intdiv 1
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Registered intdiv]
+/// prompt>%s
+/// Fatal error: Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in [no active file]:0
+/// Stack trace:
+/// #0 [internal function]: intdiv(1)
+/// #1 {main}
+///   thrown in [no active file] on line 0
+/// prompt>
+/// ```
 ///
 /// ```php
 /// $a = 1;
