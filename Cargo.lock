@@ -610,6 +610,7 @@ dependencies = [
  "php_ext_lexbor",
  "php_ext_libxml",
  "php_ext_mbstring",
+ "php_ext_mysqli",
  "php_ext_mysqlnd",
  "php_ext_opcache",
  "php_ext_openssl",
@@ -804,6 +805,14 @@ dependencies = [
  "php_ext_pcre",
  "php_ext_standard",
  "pkg-config",
+]
+
+[[package]]
+name = "php_ext_mysqli"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "php_ext_mysqlnd",
 ]
 
 [[package]]

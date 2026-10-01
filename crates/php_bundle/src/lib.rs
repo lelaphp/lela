@@ -106,6 +106,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_xmlreader::extension,
         #[cfg(feature = "xmlwriter")]
         php_ext_xmlwriter::extension,
+        #[cfg(feature = "mysqli")]
+        php_ext_mysqli::extension,
     ]
 }
 
@@ -144,6 +146,8 @@ pub const CONFIGURE: &[&str] = &[
     "--enable-pcntl",
     #[cfg(not(feature = "pdo"))]
     "--disable-pdo",
+    #[cfg(feature = "mysqli")]
+    "--with-mysqli",
     #[cfg(feature = "pdo_mysql")]
     "--with-pdo-mysql",
     #[cfg(not(feature = "pdo_sqlite"))]

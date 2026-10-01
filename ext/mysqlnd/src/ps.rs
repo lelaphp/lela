@@ -66,6 +66,8 @@ pub struct StmtStatus {
     pub field_count: u32,
     pub parameter_count: u32,
     pub state: StmtState,
+    /// `stmt_id`, the server's number for the statement.
+    pub id: u32,
 }
 
 /// `MYSQLND_PARAM_BIND`: the value and the type it is sent as, and
@@ -374,8 +376,13 @@ impl Stmt {
         (self.data.field_count > 0 && !result.fields.is_empty()).then(|| result.fields.clone())
     }
 
-    /// `mysqlnd_stmt_store_result`: every row read and held.
+    /// `mysqlnd_stmt_store_result`: every row read and held; a statement
+    /// with no columns has none to hold and passes, as the macro in
+    /// `mysqlnd.h` answers `PASS` before asking the statement.
     pub fn store(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        if self.data.field_count == 0 {
+            return Ok(true);
+        }
         Ok(self.call(req, store_result)?.unwrap_or(false))
     }
 
@@ -443,6 +450,7 @@ impl Stmt {
             field_count: s.field_count,
             parameter_count: s.parameter_count,
             state: s.state,
+            id: s.stmt_id,
         }
     }
 
@@ -521,6 +529,43 @@ impl Stmt {
             StmtAttr::CursorType => Some(u64::from(self.data.cursor == CursorType::ReadOnly)),
             StmtAttr::PrefetchRows => None,
         }
+    }
+
+    /// `stmt->data->conn`: the connection the statement runs over.
+    #[must_use]
+    pub fn connection(&self) -> Mysqlnd {
+        self.conn
+    }
+
+    /// `mysqlnd_stmt_result_metadata`: a set of rows with the statement's
+    /// columns and no rows, read to its end, over the statement's
+    /// connection; `None` where the statement has no columns.
+    pub fn described(&self, req: &mut Request) -> Option<ResultSet> {
+        let fields = self.fields()?;
+        let mut res = Box::new(Res::new(self.data.field_count));
+        res.fields = fields;
+        res.metadata_only();
+        Some(ResultSet::of(res, self.conn.acquire(req)))
+    }
+
+    /// mysqli's `close_stmt_and_copy_errors`: the statement closed, and
+    /// its error, which the close clears, put on the connection in place
+    /// of the connection's, with the connection's affected rows kept.
+    pub fn close_into_connection(self, req: &mut Request) -> Result<bool, Thrown> {
+        let error = self.data.error.clone();
+        let conn = self.conn;
+        let affected = conn
+            .handle()
+            .with(req, |_, c| c.upsert.affected_rows)
+            .unwrap_or(u64::MAX);
+        let held = conn.acquire(req);
+        let closed = self.close(req, false);
+        let _ = held.handle().with(req, |_, c| {
+            c.error = error;
+            c.upsert.affected_rows = affected;
+        });
+        held.release(req);
+        closed
     }
 
     /// `mysqlnd_stmt_close`: `dtor`, the close counted by how it came,
