@@ -266,81 +266,12 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
     AfterLog::Returned
 }
 
-/// The loop itself.
-fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
-    let mut at = Standing {
-        frame,
-        unwinding: false,
-        raised_line: 0,
-    };
-    loop {
-        let Some(position) = tier::position(req, at.frame) else {
-            return Flow::Resume(at.frame);
-        };
-        if tier::exiting(req) {
-            return Flow::Resume(at.frame);
-        }
-        if at.unwinding {
-            at.raised_line = position.line;
-        }
-        if let Some(stop) = checked(req, &at, &position) {
-            return stop;
-        }
-        if session::with(|s| s.thrown_into.take_if(|frame| *frame == at.frame).is_some())
-            .unwrap_or(false)
-        {
-            at.unwinding = true;
-            at.raised_line = position.line;
-        }
-        let entry = tier::entry(req);
-        let next = if at.unwinding {
-            if at.frame != entry || tier::catches(req, at.frame) {
-                Next::Unwind
-            } else {
-                left_with_nothing_pending(req);
-                Next::HandBack
-            }
-        } else if at.frame == entry && leaves(position.opcode) {
-            Next::HandBack
-        } else {
-            Next::Step
-        };
-        session::with(|s| s.standing = Some(at.frame));
-        let stepped = match next {
-            Next::HandBack => return Flow::Resume(at.frame),
-            Next::Unwind => tier::unwind(req, at.frame),
-            Next::Step => tier::step(req, at.frame),
-        };
-        match stepped {
-            Ok(
-                Stepped::Same(frame)
-                | Stepped::Pushed(frame)
-                | Stepped::Popped(frame)
-                | Stepped::Moved(frame),
-            ) => {
-                at.frame = frame;
-                at.unwinding = false;
-            }
-            Ok(Stepped::Threw(frame)) => {
-                if matches!(next, Next::Unwind) && frame == at.frame && frame == entry {
-                    return Flow::Resume(frame);
-                }
-                at.frame = frame;
-                at.unwinding = true;
-            }
-            Ok(Stepped::Done) => return Flow::Continue,
-            Err(fatal) => return Flow::Bail(fatal),
-        }
-    }
-}
-
-/// php's `HANDLE_EXCEPTION` over the frame the serving entered, where
-/// nothing it takes is pending: what was thrown into the frame at a
-/// prompt was rendered there by `ev`, and the frame is left as a return
-/// of nothing, which ends the serving. The unwinder does not leave that
-/// frame, and the loop goes on in it where nothing is pending, so the
-/// serving is ended by the unwind exit, which unwinds no further and
-/// leaves the status as `ev` left it.
+/// The loop itself. php's `HANDLE_EXCEPTION` over a frame where nothing
+/// it takes is pending, what was thrown into the frame at a prompt having
+/// been rendered there by `ev`, leaves the frame as a return of nothing:
+/// a nested frame's caller goes on past the call, and the frame the
+/// serving entered ends the serving, handed back with `Flow::Returned`,
+/// the status as `ev` left it.
 ///
 /// ```php
 /// $a = 1;
@@ -375,9 +306,73 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
 /// prompt> [Script ended normally]
 /// prompt>
 /// ```
-fn left_with_nothing_pending(req: &mut Request) {
-    if tier::pending(req).is_none() && !tier::exiting(req) {
-        tier::exit(req);
+fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
+    let mut at = Standing {
+        frame,
+        unwinding: false,
+        raised_line: 0,
+    };
+    loop {
+        let Some(position) = tier::position(req, at.frame) else {
+            return Flow::Resume(at.frame);
+        };
+        if tier::exiting(req) {
+            return Flow::Resume(at.frame);
+        }
+        if at.unwinding {
+            at.raised_line = position.line;
+        }
+        if let Some(stop) = checked(req, &at, &position) {
+            return stop;
+        }
+        if session::with(|s| s.thrown_into.take_if(|frame| *frame == at.frame).is_some())
+            .unwrap_or(false)
+        {
+            at.unwinding = true;
+            at.raised_line = position.line;
+        }
+        let entry = tier::entry(req);
+        // The unwinder leaves every frame but the serving's entry with
+        // what it takes, and the entry too where nothing is pending, as a
+        // return of nothing; a throwable the entry does not catch is the
+        // loop's to end the serving with.
+        let next = if at.unwinding {
+            if at.frame != entry || tier::catches(req, at.frame) || tier::pending(req).is_none() {
+                Next::Unwind
+            } else {
+                Next::HandBack
+            }
+        } else if at.frame == entry && leaves(position.opcode) {
+            Next::HandBack
+        } else {
+            Next::Step
+        };
+        session::with(|s| s.standing = Some(at.frame));
+        let stepped = match next {
+            Next::HandBack => return Flow::Resume(at.frame),
+            Next::Unwind => tier::unwind(req, at.frame),
+            Next::Step => tier::step(req, at.frame),
+        };
+        match stepped {
+            Ok(
+                Stepped::Same(frame)
+                | Stepped::Pushed(frame)
+                | Stepped::Popped(frame)
+                | Stepped::Moved(frame),
+            ) => {
+                at.frame = frame;
+                at.unwinding = false;
+            }
+            Ok(Stepped::Threw(frame)) => {
+                if matches!(next, Next::Unwind) && frame == at.frame && frame == entry {
+                    return Flow::Resume(frame);
+                }
+                at.frame = frame;
+                at.unwinding = true;
+            }
+            Ok(Stepped::Done) => return Flow::Returned,
+            Err(fatal) => return Flow::Bail(fatal),
+        }
     }
 }
 

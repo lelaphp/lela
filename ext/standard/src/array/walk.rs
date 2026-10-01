@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use php_ext::abi::{Callable, Passed, Raw, Ref, True, Variadic};
+use php_ext::abi::{Callable, FromArgument, Passed, Raw, Ref, True, Variadic};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
@@ -727,16 +727,71 @@ fn array_map(
     callback: Option<Callable>,
     array: PhpArray,
     arrays: Variadic<PhpArray>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Raw<PhpArray>, Thrown> {
+    let mapped = mapped(req, callback, array, arrays)?;
+    Raw::from_value(req, mapped.map_or(Value::null(), Value::array))
+}
+
+/// `array_map`'s arrays mapped, none where the callback returned nothing
+/// (`Z_ISUNDEF(result)`), which php answers with `NULL` once the array it
+/// was building is given up: a callback frame phpdbg left at
+/// `EG(exception_op)` with nothing pending returns so.
+///
+///
+/// ```php
+/// function cb($x) {
+///   $q = 1;
+///   return 7;
+/// }
+/// var_dump(array_map("cb", [1]));
+/// echo "end\n";
+/// ```
+/// ```request phpdbg
+/// register intdiv
+/// b 3
+/// r
+/// intdiv 1
+/// ev 9
+/// c
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Registered intdiv]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:3]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:   $q = 1;
+///  00004:   return 7;
+///  00005: }
+/// prompt>%s
+/// prompt>%s
+/// Fatal error: Uncaught ArgumentCountError: intdiv() expects exactly 2 arguments, 1 given in %SCRATCH%/witness.php:3
+/// Stack trace:
+/// #0 %SCRATCH%/witness.php(3): intdiv(1)
+/// #1 [internal function]: cb(1)
+/// #2 %SCRATCH%/witness.php(6): array_map('cb', Array)
+/// #3 {main}
+///   thrown in %SCRATCH%/witness.php on line 3
+/// prompt> NULL
+/// end
+/// [Script ended normally]
+/// prompt>
+/// ```
+fn mapped(
+    req: &mut Request,
+    callback: Option<Callable>,
+    array: PhpArray,
+    arrays: Variadic<PhpArray>,
+) -> Result<Option<PhpArray>, Thrown> {
     let arrays: Vec<PhpArray> = std::iter::once(array).chain(arrays.0).collect();
     if let [input] = arrays[..] {
         let Some(callback) = callback else {
             req.addref(&Value::array(input));
-            return Ok(input);
+            return Ok(Some(input));
         };
         if input.is_empty() {
             req.addref(&Value::array(input));
-            return Ok(input);
+            return Ok(Some(input));
         }
         let mut out = PhpArray::new(req)?;
         for (key, operand) in input.snapshot_refs() {
@@ -747,10 +802,14 @@ fn array_map(
                     return Err(thrown);
                 }
             };
+            if matches!(answer.as_ref(), ValueRef::Undef) {
+                req.release(out.to_value());
+                return Ok(None);
+            }
             let key = key_copy(req, &key);
             out.set(req, key, answer)?;
         }
-        return Ok(out);
+        return Ok(Some(out));
     }
     let columns: Vec<Vec<Value>> = arrays
         .iter()
@@ -773,6 +832,10 @@ fn array_map(
                 Value::array(tuple)
             }
             Some(callback) => match call(req, callback, &row) {
+                Ok(answer) if matches!(answer.as_ref(), ValueRef::Undef) => {
+                    req.release(out.to_value());
+                    return Ok(None);
+                }
                 Ok(answer) => answer,
                 Err(thrown) => {
                     req.release(out.to_value());
@@ -782,5 +845,5 @@ fn array_map(
         };
         out.append(req, element)?;
     }
-    Ok(out)
+    Ok(Some(out))
 }

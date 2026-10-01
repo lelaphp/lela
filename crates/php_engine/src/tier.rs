@@ -83,6 +83,12 @@ pub enum Flow {
     /// The tier served code; the loop continues in this frame after the
     /// interrupt and pending-throwable tests.
     Resume(FrameRef),
+    /// The tier ran the serving's entry frame to its end: the serving is
+    /// over and its return value is set. `execute` takes it as
+    /// [`Stepped::Done`], as php's compiled code returns `ZEND_VM_RETURN`
+    /// to `execute_ex` for a `ZEND_CALL_TOP` frame (`zend_jit_ir.c:2104`;
+    /// `jit-design.md` §2.2, revision 10).
+    Returned,
     /// A fatal was raised inside tier code.
     Bail(Fatal),
 }
@@ -170,7 +176,7 @@ pub(crate) fn continued(flow: Flow) -> Result<(), Fatal> {
     match flow {
         Flow::Continue => Ok(()),
         Flow::Bail(fatal) => Err(fatal),
-        Flow::Resume(_) => Err(Fatal::Error(String::from(
+        Flow::Resume(_) | Flow::Returned => Err(Fatal::Error(String::from(
             "InternalError: a tier served code and this loop has no resumption for it yet",
         ))),
     }
@@ -187,6 +193,7 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
     let at = match flow {
         Flow::Continue => return Ok(Stepped::Same(frame)),
         Flow::Bail(fatal) => return Err(fatal),
+        Flow::Returned => return Ok(Stepped::Done),
         Flow::Resume(at) => at,
     };
     if interrupt::check(req)? || req.is_pending() {
@@ -397,7 +404,9 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
 /// `finally` block and it answers `Same`, or it is left and it
 /// answers `Threw` of its caller with the throwable still pending; with
 /// nothing pending, it is left as a return of nothing and it answers
-/// `Popped` of its caller, which goes on past the call.
+/// `Popped` of its caller, which goes on past the call, or `Done` where
+/// it is the serving's entry frame, its return value `UNDEF`, which a
+/// tier hands back with `Flow::Returned`.
 /// On the entry frame of the serving, which the unwinder does not
 /// leave, `Threw` of that frame says nothing took it; a tier hands that
 /// frame back with `Flow::Resume` and the loop ends the serving, so one

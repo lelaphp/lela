@@ -20602,6 +20602,12 @@ fn unwind_from<T: Tier>(
     }
     cleanup_live_vars(req, frame, code, op_num, 0);
     if req.stack_mut().entry() == frame {
+        if !req.is_pending() {
+            // The return of nothing below, from the serving's entry
+            // frame, which the loop's caller pops: the serving is over.
+            req.set_returned(Value::undef());
+            return Ok(Stepped::Done);
+        }
         return Ok(Stepped::Threw(frame));
     }
     let returns_to = req.vm().returns_to(frame);
