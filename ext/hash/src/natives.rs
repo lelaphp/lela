@@ -255,8 +255,13 @@ fn open(req: &mut Request, path: &[u8], position: u32) -> Result<Option<Stream>,
 /// close: `false` for the read that failed, php's `n < 0`.
 fn pump(req: &mut Request, stream: Stream, state: &mut dyn State) -> Result<bool, Thrown> {
     let read = loop {
+        // Each read is given back once the state has it, as php's loop
+        // reads into one `char buf[1024]`.
         match stream.read(req, 1024) {
-            Ok(Some(chunk)) if !chunk.is_empty() => state.update(chunk.as_bytes()),
+            Ok(Some(chunk)) if !chunk.is_empty() => {
+                state.update(chunk.as_bytes());
+                req.release(Value::string(chunk));
+            }
             Ok(Some(_)) => break Ok(true),
             Ok(None) => break Ok(false),
             Err(thrown) => break Err(thrown),
@@ -313,6 +318,22 @@ fn hash(
 /// bool(true)
 /// bool(false)
 /// hash_file(): Argument #1 ($algo) must not contain any null bytes
+/// ```
+///
+/// Each read is given back once the state has it, as php reads into one
+/// `char buf[1024]`, so hashing a 2 MiB file raises the peak by a
+/// stream's buffers and no more:
+///
+/// ```php
+/// $p = __DIR__ . '/peak.bin'; file_put_contents($p, str_repeat('x', 2 << 20));
+/// memory_reset_peak_usage(); $m = memory_get_usage();
+/// hash_file('md5', $p);
+/// $rise = memory_get_peak_usage() - $m;
+/// unlink($p);
+/// var_dump($rise < 16384);
+/// ```
+/// ```expect
+/// bool(true)
 /// ```
 #[php_function]
 fn hash_file(
@@ -395,6 +416,22 @@ fn hash_hmac(
 /// string(64) "5031fe3d989c6d1537a013fa6e739da23463fdaec3b70137d828e36ace221bd0"
 /// bool(false)
 /// hash_hmac_file(): Argument #2 ($filename) must not contain any null bytes
+/// ```
+///
+/// Each read is given back once the state has it, as php reads into one
+/// `char buf[1024]`, so hashing a 2 MiB file raises the peak by a
+/// stream's buffers and no more:
+///
+/// ```php
+/// $p = __DIR__ . '/peak.bin'; file_put_contents($p, str_repeat('x', 2 << 20));
+/// memory_reset_peak_usage(); $m = memory_get_usage();
+/// hash_hmac_file('md5', $p, 'k');
+/// $rise = memory_get_peak_usage() - $m;
+/// unlink($p);
+/// var_dump($rise < 16384);
+/// ```
+/// ```expect
+/// bool(true)
 /// ```
 #[php_function]
 fn hash_hmac_file(
@@ -659,6 +696,22 @@ fn hash_update(
 ///   - Return [ int ]
 /// }
 /// ```
+///
+/// Each read is given back once the state has it, as php reads into one
+/// `char buf[1024]`, so hashing a 2 MiB file raises the peak by a
+/// stream's buffers and no more:
+///
+/// ```php
+/// $p = __DIR__ . '/peak.bin'; file_put_contents($p, str_repeat('x', 2 << 20)); $c = hash_init('md5'); $f = fopen($p, 'rb');
+/// memory_reset_peak_usage(); $m = memory_get_usage();
+/// hash_update_stream($c, $f);
+/// $rise = memory_get_peak_usage() - $m;
+/// unlink($p);
+/// var_dump($rise < 16384);
+/// ```
+/// ```expect
+/// bool(true)
+/// ```
 #[php_function]
 fn hash_update_stream(
     req: &mut Request,
@@ -686,6 +739,7 @@ fn hash_update_stream(
         running.state.update(chunk.as_bytes());
         left = left.map(|left| left.saturating_sub(chunk.len()));
         read += chunk.len();
+        req.release(Value::string(chunk));
     }
     put(req, object, running);
     Ok(i64::try_from(read).unwrap_or(i64::MAX))
@@ -704,6 +758,22 @@ fn hash_update_stream(
 /// bool(true)
 /// string(40) "a9993e364706816aba3e25717850c26c9cd0d89d"
 /// bool(false)
+/// ```
+///
+/// Each read is given back once the state has it, as php reads into one
+/// `char buf[1024]`, so hashing a 2 MiB file raises the peak by a
+/// stream's buffers and no more:
+///
+/// ```php
+/// $p = __DIR__ . '/peak.bin'; file_put_contents($p, str_repeat('x', 2 << 20)); $c = hash_init('md5');
+/// memory_reset_peak_usage(); $m = memory_get_usage();
+/// hash_update_file($c, $p);
+/// $rise = memory_get_peak_usage() - $m;
+/// unlink($p);
+/// var_dump($rise < 16384);
+/// ```
+/// ```expect
+/// bool(true)
 /// ```
 #[php_function]
 fn hash_update_file(
