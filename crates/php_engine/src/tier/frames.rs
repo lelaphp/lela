@@ -270,6 +270,10 @@ pub fn restore(req: &mut Request, aside: Aside) {
 pub enum Evaluated {
     Printed(Vec<u8>),
     Rendered,
+    /// `zend_eval_stringl`'s `FAILURE`: the code did not compile, and the
+    /// `ParseError` or `CompileError` the compiler threw is left pending,
+    /// unrendered, for what is served next to find.
+    NotCompiled,
 }
 
 /// What code a tier has the engine serve on its own account stands on.

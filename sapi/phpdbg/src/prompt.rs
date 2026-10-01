@@ -925,6 +925,66 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 ///   thrown in eval()'d code on line 1]
 /// prompt>
 /// ```
+///
+/// Code that does not compile writes nothing: `zend_eval_stringl`
+/// answers `FAILURE` with the `ParseError` left pending, which the next
+/// `ev`, serving nothing while it stands, renders; `run` serves nothing
+/// either and reports it uncaught.
+///
+/// ```php
+/// $a = 1;
+/// $b = 2;
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// ev 1 +
+/// ev 2
+/// ev 1 +
+/// r
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> prompt>%s
+/// Parse error: syntax error, unexpected token ";" in eval()'d code on line 1
+/// prompt> prompt> [Uncaught ParseError in eval()'d code on line 1]
+/// ParseError: syntax error, unexpected token ";" in eval()'d code:1
+/// Stack trace:
+/// #0 {main}
+/// [Script ended normally]
+/// prompt>
+/// ```
+///
+/// Thrown with a frame executing, it leaves the frame at its exception
+/// op, so the run goes on from there with nothing pending and the frame
+/// returns nothing.
+///
+/// ```php
+/// $a = 1;
+/// $b = 2;
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// b 3
+/// r
+/// ev 1 +
+/// ev 2
+/// ev 3
+/// c
+/// q
+/// ```
+/// ```expect exit=255
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:3]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003: $b = 2;
+///  00004: echo "x\n";
+/// prompt> prompt>%s
+/// Parse error: syntax error, unexpected token ";" in eval()'d code on line 1
+/// prompt> 3
+/// prompt> [Script ended normally]
+/// prompt>
+/// ```
 fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
     let Some((req, under)) = here.serving() else {
         crate::host::idle(s, Command::Eval(code.to_vec()));
@@ -944,6 +1004,13 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
         Ok(tier::Evaluated::Printed(printed)) => {
             out::write(&printed);
             out::out(b"\n");
+        }
+        // The compiler threw with the frame executing, which
+        // `zend_throw_exception_internal` leaves at `EG(exception_op)`.
+        Ok(tier::Evaluated::NotCompiled) => {
+            if let tier::Under::Frame(frame) = under {
+                s.thrown_into = Some(frame);
+            }
         }
         Ok(tier::Evaluated::Rendered) | Err(_) => {}
     }

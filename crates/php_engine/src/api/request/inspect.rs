@@ -50,7 +50,10 @@ impl Request {
     /// the top of the request ([`Request::nothing_executing`]); then what
     /// it returned as `print_r` renders it, or what it left uncaught
     /// rendered as `zend_exception_error` renders it at `E_ERROR`, the
-    /// request going on either way. A fatal is the `Err`, and ends the
+    /// request going on either way. Code that does not compile renders
+    /// nothing, `zend_eval_stringl`'s `FAILURE`, which `ev` renders
+    /// nothing after, and what the compiler threw stays pending, so the
+    /// next evaluation renders it. A fatal is the `Err`, and ends the
     /// request.
     pub(crate) fn evaluate_in(&mut self, under: Under, code: &[u8]) -> Result<Evaluated, Fatal> {
         // `zend_execute` serves nothing while something is pending
@@ -77,7 +80,7 @@ impl Request {
             Err(refused) => {
                 let thrown = self.refused_include(&refused, NAME, SourceKind::Eval);
                 self.leave_pending(&thrown);
-                return Ok(self.evaluation_uncaught());
+                return Ok(Evaluated::NotCompiled);
             }
         };
         if !crate::engine::note_compiled(self, &unit, SourceKind::Eval) {
