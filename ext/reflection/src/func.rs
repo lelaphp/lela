@@ -97,7 +97,7 @@ fn this_method(
 /// Whether the function is php's `ZEND_INTERNAL_FUNCTION`: a native,
 /// whose declaration names no file, as `_function_string` reads it for
 /// `<internal`.
-fn is_internal(decl: &FunctionDecl) -> bool {
+pub(super) fn is_internal(decl: &FunctionDecl) -> bool {
     decl.file.0.is_empty()
 }
 

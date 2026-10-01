@@ -54,6 +54,10 @@ decl::FunctionDecl
 decl::HookKind
 decl::HookKind::ALL
 decl::HookKind::name
+decl::ImmutableArray
+decl::ImmutableArray::is_empty
+decl::ImmutableArray::new
+decl::ImmutableArray::value
 decl::IniDecl
 decl::MethodDecl
 decl::Name
