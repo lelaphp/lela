@@ -729,7 +729,7 @@ impl SplObjectStorage {
         if data.is_empty() {
             return Ok(());
         }
-        let mut reader = php_ext_standard::Unserializer::new(req, &data);
+        let mut reader = php_ext_standard::Unserializer::new(req, &data)?;
         let mut replaced = Vec::new();
         let read = read_storage(req, this, &mut reader, &data, &mut replaced);
         let finished = reader.finish(req);

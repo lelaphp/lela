@@ -653,7 +653,7 @@ impl SplDoublyLinkedList {
         while let Some(old) = with(req, this, |l| l.pop())? {
             req.release(old);
         }
-        let mut reader = php_ext_standard::Unserializer::new(req, &data);
+        let mut reader = php_ext_standard::Unserializer::new(req, &data)?;
         let read = read_list(req, this, &mut reader, &data);
         let finished = reader.finish(req);
         let broke_at = read?;
