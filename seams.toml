@@ -619,7 +619,7 @@ id = "lanes.builder-subset"
 tool = "Bash"
 where = "ticketed"   # grammar: where, a builder's worktree (branch.<b>.ticket); main's checkout, where the merge check runs the lane, records none (#1145, #1149)
 deny_pattern = '(?m)(\A\s*|[|;&(]\s*|cargo\s+|-p\s+|--package\s+|/)xtask\s+(--\s+)?phpt\b'   # the instrument where it is run (first in the call, after a separator, under cargo or a path), never where it is cited, a message's line included (#790)
-unless_pattern = '--subset\b'   # grammar: unless_pattern, the command around the hit names its subset
+unless_pattern = '--subset\b|xtask\s+(--\s+)?phpt\s+(--help|-h)\b'   # grammar: unless_pattern, the command around the hit names its subset, or asks the instrument for its options, which runs no lane (#1424)
 text = "A builder runs its crates' subsets, and Zend/tests when it touches php_engine, php_compile, php_syntax or php_heap; the whole lane is the merge check's (specs §6)."
 
 [[rule]]
