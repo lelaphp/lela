@@ -225,8 +225,8 @@ impl PhpStream {
     /// round, and `PSFS_ERR_FATAL` breaks the stream. `false` is a read
     /// that failed before a byte was had, or the break.
     pub(super) fn fill_filtered(&mut self, req: &mut Request, size: usize) -> bool {
-        let to_read_now = size.min(self.chunk_size);
-        let mut chunk = vec![0u8; self.chunk_size];
+        let to_read_now = size.min(self.chunk_size());
+        let mut chunk = vec![0u8; self.chunk_size()];
         let mut inp = Brigade::new();
         let mut outp = Brigade::new();
         while !self.eof && self.writepos - self.readpos < to_read_now {
@@ -303,7 +303,11 @@ impl PhpStream {
     fn append_read(&mut self, req: &mut Request, bucket: &[u8]) -> bool {
         if self.readbuf.len() - self.writepos < bucket.len() {
             let grown = self.readbuf.len() + bucket.len();
-            if self.readbuf.resize(req, grown).is_err() {
+            if self
+                .readbuf
+                .resize(req, grown, self.flags.persistent)
+                .is_err()
+            {
                 return false;
             }
         }
@@ -452,8 +456,12 @@ impl PhpStream {
                     self.readpos = 0;
                 }
                 if flushed > self.readbuf.len() - self.writepos {
-                    let grown = self.writepos + flushed + self.chunk_size;
-                    if self.readbuf.resize(req, grown).is_err() {
+                    let grown = self.writepos + flushed + self.chunk_size();
+                    if self
+                        .readbuf
+                        .resize(req, grown, self.flags.persistent)
+                        .is_err()
+                    {
                         return false;
                     }
                 }

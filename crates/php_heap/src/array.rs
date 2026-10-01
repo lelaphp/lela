@@ -140,10 +140,11 @@ impl Allocate for Mm {
     }
 }
 
-/// The system allocator, for a constant array: each allocation carries
+/// The system allocator, php's `pemalloc(size, 1)`, for a constant
+/// array and a persistent resource's payload: each allocation carries
 /// its size in a sixteen-byte prefix, since `free` is handed the
 /// address alone as `pefree` is.
-struct System;
+pub(crate) struct System;
 
 /// The prefix a [`System`] allocation carries.
 const PREFIX: usize = 16;

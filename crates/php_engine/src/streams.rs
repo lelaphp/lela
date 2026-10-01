@@ -396,8 +396,10 @@ pub(crate) struct PhpStream {
     readpos: usize,
     /// `stream->writepos`.
     writepos: usize,
-    /// `stream->chunk_size`.
-    chunk_size: usize,
+    /// `stream->chunk_size`, which `stream_set_chunk_size` holds to
+    /// `INT_MAX`; four bytes, so the stream stays inside the
+    /// `php_stream` php allocates ([`PhpStream::chunk_size`]).
+    chunk_size: u32,
     /// `stream->res`, which a filter is handed as its stream.
     res: Option<Resource>,
     /// `stream->readfilters`, the chain every read of the kind passes
@@ -451,6 +453,9 @@ struct Flags {
     no_fclose: bool,
     /// `PHP_STREAM_FLAG_DETECT_EOL` and `PHP_STREAM_FLAG_EOL_MAC`.
     eol: Eol,
+    /// `stream->is_persistent`: what php allocates for the stream,
+    /// `pemalloc`'d persistent, is no request's to count.
+    persistent: bool,
 }
 
 /// What ends a line for `php_stream_locate_eol`: `\n`, php's default,
@@ -546,46 +551,75 @@ impl OrigPath {
 }
 
 /// `stream->readbuf` over `readbuflen`: none before the first read,
-/// `perealloc`'d on the request's heap as `_php_stream_fill_read_buffer`
-/// grows it, and `pefree`'d with the stream.
+/// `perealloc`'d as `_php_stream_fill_read_buffer` grows it, and
+/// `pefree`'d with the stream: on the request's heap, or for a
+/// persistent stream on the system allocator, which no request counts.
 #[derive(Default)]
-struct ReadBuf(Option<Block>);
+enum ReadBuf {
+    #[default]
+    None,
+    Request(Block),
+    Persistent(Box<[u8]>),
+}
 
 impl std::ops::Deref for ReadBuf {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        self.0.as_ref().map_or(&[], Block::bytes)
+        match self {
+            ReadBuf::None => &[],
+            ReadBuf::Request(block) => block.bytes(),
+            ReadBuf::Persistent(bytes) => bytes,
+        }
     }
 }
 
 impl std::ops::DerefMut for ReadBuf {
     fn deref_mut(&mut self) -> &mut [u8] {
-        self.0.as_mut().map_or(&mut [], Block::bytes_mut)
+        match self {
+            ReadBuf::None => &mut [],
+            ReadBuf::Request(block) => block.bytes_mut(),
+            ReadBuf::Persistent(bytes) => bytes,
+        }
     }
 }
 
 impl ReadBuf {
-    /// `stream->readbuf = perealloc(stream->readbuf, len)`, the bytes
-    /// kept; the `Err` is the memory limit's fatal.
-    fn resize(&mut self, req: &mut Request, len: usize) -> Result<(), Thrown> {
-        let grown = match self.0.take() {
-            Some(block) => req.heap_mut().block_resize(block, len),
-            None => req.heap_mut().block(len),
+    /// `stream->readbuf = perealloc(stream->readbuf, len, persistent)`,
+    /// the bytes kept; the `Err` is the memory limit's fatal.
+    fn resize(&mut self, req: &mut Request, len: usize, persistent: bool) -> Result<(), Thrown> {
+        let grown = match std::mem::take(self) {
+            ReadBuf::Persistent(bytes) => {
+                let mut bytes = bytes.into_vec();
+                bytes.resize(len, 0);
+                *self = ReadBuf::Persistent(bytes.into_boxed_slice());
+                return Ok(());
+            }
+            ReadBuf::None if persistent => {
+                *self = ReadBuf::Persistent(vec![0; len].into_boxed_slice());
+                return Ok(());
+            }
+            ReadBuf::Request(block) => req.heap_mut().block_resize(block, len),
+            ReadBuf::None => req.heap_mut().block(len),
         };
-        self.0 = Some(req.fatal_of(grown)?);
+        *self = ReadBuf::Request(req.fatal_of(grown)?);
         Ok(())
     }
 
     /// `pefree(stream->readbuf)`.
     fn free(&mut self, req: &mut Request) {
-        if let Some(block) = self.0.take() {
+        if let ReadBuf::Request(block) = std::mem::take(self) {
             req.heap_mut().free_block(block);
         }
     }
 }
 
 impl PhpStream {
+    /// `stream->chunk_size`.
+    fn chunk_size(&self) -> usize {
+        self.chunk_size as usize
+    }
+
     /// `_php_stream_alloc` (`Z/main/streams/streams.c:301`) less the
     /// resource, which [`Request::stream_alloc`] registers: the kind,
     /// its `stream->mode`, the chunk size, and nothing read or written.
@@ -602,7 +636,7 @@ impl PhpStream {
             readbuf: ReadBuf::default(),
             readpos: 0,
             writepos: 0,
-            chunk_size: CHUNK_SIZE,
+            chunk_size: u32::try_from(CHUNK_SIZE).unwrap_or(u32::MAX),
             res: None,
             readfilters: Vec::new(),
             writefilters: Vec::new(),
@@ -757,14 +791,18 @@ impl PhpStream {
         if self.writepos - self.readpos >= size {
             return true;
         }
-        if !self.readbuf.is_empty() && self.readbuf.len() - self.writepos < self.chunk_size {
+        if !self.readbuf.is_empty() && self.readbuf.len() - self.writepos < self.chunk_size() {
             self.readbuf.copy_within(self.readpos..self.writepos, 0);
             self.writepos -= self.readpos;
             self.readpos = 0;
         }
-        if self.readbuf.len() - self.writepos < self.chunk_size {
-            let len = self.readbuf.len() + self.chunk_size;
-            if self.readbuf.resize(req, len).is_err() {
+        if self.readbuf.len() - self.writepos < self.chunk_size() {
+            let len = self.readbuf.len() + self.chunk_size();
+            if self
+                .readbuf
+                .resize(req, len, self.flags.persistent)
+                .is_err()
+            {
                 return false;
             }
         }
@@ -809,7 +847,7 @@ impl PhpStream {
             if size == 0 {
                 break;
             }
-            let direct = self.flags.no_buffer || self.chunk_size == 1;
+            let direct = self.flags.no_buffer || self.chunk_size() == 1;
             let toread = if self.readfilters.is_empty() && direct {
                 let Self {
                     ops,
@@ -927,7 +965,7 @@ impl PhpStream {
         // A user-space stream is handed a chunk at a time, since what it
         // is handed is a string of the request's (GH-13071).
         let chunk = if self.ops.is_userspace() {
-            self.chunk_size.max(1)
+            self.chunk_size().max(1)
         } else {
             usize::MAX
         };
@@ -1067,7 +1105,7 @@ impl PhpStream {
         };
         let mut buffered_len = self.writepos - self.readpos;
         while found.is_none() && buffered_len < maxlen {
-            let to_read_now = (maxlen - buffered_len).min(self.chunk_size);
+            let to_read_now = (maxlen - buffered_len).min(self.chunk_size());
             if !self.fill_read_buffer(req, buffered_len + to_read_now) && self.fatal_error {
                 return None;
             }
@@ -1202,8 +1240,8 @@ impl PhpStream {
                 break;
             } else {
                 let toread = match maxlen {
-                    None => self.chunk_size,
-                    Some(_) => (left - 1).min(self.chunk_size),
+                    None => self.chunk_size(),
+                    Some(_) => (left - 1).min(self.chunk_size()),
                 };
                 // php gives up on a failed fill only where a filter set
                 // `fatal_error`, dropping what the line held (GH-13264).
@@ -1362,7 +1400,8 @@ impl PhpStream {
         }
         match option {
             StreamOption::ChunkSize(size) => {
-                OptionAnswer::Previous(std::mem::replace(&mut self.chunk_size, size))
+                let size = u32::try_from(size).unwrap_or(u32::MAX);
+                OptionAnswer::Previous(std::mem::replace(&mut self.chunk_size, size) as usize)
             }
             StreamOption::ReadBuffer { buffered, .. } => {
                 self.set_read_buffer(buffered);
@@ -1455,7 +1494,7 @@ impl PhpStream {
                 .as_socket()
                 .map_or(0, |socket| socket.crypto_pending());
             if pending > 0 {
-                let chunk = self.chunk_size;
+                let chunk = self.chunk_size();
                 self.fill_read_buffer(req, pending.min(chunk));
             }
         }
@@ -1673,10 +1712,83 @@ const S_IFREG: i64 = 0o100_000;
 /// `php://stdin` through [`HostFd`] under a host that handed no fd 0,
 /// since nothing in the engine reads a body lazily yet (#544).
 struct Memory {
-    data: Vec<u8>,
+    data: MemBytes,
     fpos: usize,
     mode: TempMode,
     label: &'static str,
+    /// The `php_stream_memory_data` php `emalloc`s, [`MEMORY_DATA_SIZE`]
+    /// bytes on the request's heap from [`Ops::lay_down`] to the close;
+    /// none for `php://input` and a host's standard input, which php
+    /// reads through kinds of their own.
+    own: Option<Block>,
+}
+
+/// `sizeof(php_stream_memory_data)` on the pinned 64-bit build: `data`,
+/// `fpos` and `mode` (`Z/main/streams/memory.c:37-41`).
+const MEMORY_DATA_SIZE: usize = 24;
+
+/// `ms->data`, a memory stream's bytes as php holds them.
+enum MemBytes {
+    /// `ZSTR_EMPTY_ALLOC()`: nothing written, nothing allocated.
+    Empty,
+    /// A string of the request's as long as the bytes,
+    /// `zend_string_realloc`ed by a write past its end and
+    /// `zend_string_truncate`d by a shorter `ftruncate`.
+    Own(php_heap::FreshStr),
+    /// What the host handed the request, `php://input`'s body and a
+    /// host's standard input, which php keeps in streams of their own
+    /// and never in a memory stream's data.
+    Host(Vec<u8>),
+}
+
+impl MemBytes {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            MemBytes::Empty => &[],
+            MemBytes::Own(s) => s.bytes(),
+            MemBytes::Host(bytes) => bytes,
+        }
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        match self {
+            MemBytes::Empty => &mut [],
+            MemBytes::Own(s) => s.bytes_mut(),
+            MemBytes::Host(bytes) => bytes,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.bytes().len()
+    }
+
+    /// The bytes made `len` long, the new ones zero:
+    /// `zend_string_realloc` past the length, which allocates where the
+    /// bytes were the empty string, and `zend_string_truncate` under it.
+    /// The `Err` is the memory limit's fatal, the bytes the request's
+    /// end's then.
+    fn resize(&mut self, req: &mut Request, len: usize) -> Result<(), Thrown> {
+        let resized = match std::mem::replace(self, MemBytes::Empty) {
+            MemBytes::Empty if len == 0 => return Ok(()),
+            MemBytes::Empty => req.heap_mut().string_fresh(len),
+            MemBytes::Own(s) if len >= s.len() => req.heap_mut().string_extend(s, len),
+            MemBytes::Own(s) => req.heap_mut().string_truncate(s, len),
+            MemBytes::Host(mut bytes) => {
+                bytes.resize(len, 0);
+                *self = MemBytes::Host(bytes);
+                return Ok(());
+            }
+        };
+        *self = MemBytes::Own(req.fatal_of(resized)?);
+        Ok(())
+    }
+
+    /// `zend_string_release(ms->data)`.
+    fn release(&mut self, req: &mut Request) {
+        if let MemBytes::Own(s) = std::mem::replace(self, MemBytes::Empty) {
+            req.heap_mut().release_string(s.finish());
+        }
+    }
 }
 
 impl Ops for Memory {
@@ -1684,20 +1796,52 @@ impl Ops for Memory {
         self.label
     }
 
+    /// `_php_stream_memory_create`'s `self = emalloc(sizeof(*self))`;
+    /// the bytes are a string of the request's from the first write on.
+    ///
+    /// ```php
+    /// $w = fopen('php://memory', 'w+'); fwrite($w, 'x'); fclose($w); unset($w);
+    /// $m = memory_get_usage(); $f = fopen('php://memory', 'w+'); echo memory_get_usage() - $m, "\n";
+    /// fwrite($f, str_repeat('x', 1000)); echo memory_get_usage() - $m, "\n";
+    /// ftruncate($f, 10); echo memory_get_usage() - $m, "\n";
+    /// fclose($f); unset($f); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 296
+    /// 1608
+    /// 368
+    /// 32
+    /// ```
+    fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        if matches!(self.data, MemBytes::Host(_)) {
+            return Ok(());
+        }
+        let own = req.heap_mut().block(MEMORY_DATA_SIZE);
+        self.own = Some(req.fatal_of(own)?);
+        Ok(())
+    }
+
     /// `php_stream_memory_write` (`Z/main/streams/memory.c:44`): `-1` on
     /// a read-only stream; an append stream writes at the end; a write
-    /// past the end zero-fills the gap a seek left.
-    fn write(&mut self, _req: &mut Request, buf: &[u8]) -> Option<usize> {
+    /// past the end reallocates the bytes to reach it and zero-fills the
+    /// gap a seek left. A reallocation past the memory limit is the
+    /// heap's fatal, kept for the native.
+    fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         if self.mode == TempMode::ReadOnly {
             return None;
         }
         if self.mode == TempMode::Append {
             self.fpos = self.data.len();
         }
-        if self.fpos + buf.len() > self.data.len() {
-            self.data.resize(self.fpos + buf.len(), 0);
+        if self.fpos + buf.len() > self.data.len()
+            && let Err(thrown) = self.data.resize(req, self.fpos + buf.len())
+        {
+            if req.stream_thrown.is_none() {
+                req.stream_thrown = Some(thrown);
+            }
+            return None;
         }
-        self.data[self.fpos..self.fpos + buf.len()].copy_from_slice(buf);
+        self.data.bytes_mut()[self.fpos..self.fpos + buf.len()].copy_from_slice(buf);
         self.fpos += buf.len();
         Some(buf.len())
     }
@@ -1705,20 +1849,27 @@ impl Ops for Memory {
     /// `php_stream_memory_read` (`Z/main/streams/memory.c:75`): eof and
     /// nothing at or past the end, else up to what is left.
     fn read(&mut self, _req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        if self.fpos >= self.data.len() {
+        let data = self.data.bytes();
+        if self.fpos >= data.len() {
             *eof = true;
             return Some(0);
         }
-        let count = buf.len().min(self.data.len() - self.fpos);
-        buf[..count].copy_from_slice(&self.data[self.fpos..self.fpos + count]);
+        let count = buf.len().min(data.len() - self.fpos);
+        buf[..count].copy_from_slice(&data[self.fpos..self.fpos + count]);
         self.fpos += count;
         Some(count)
     }
 
     /// `php_stream_memory_close` (`Z/main/streams/memory.c:97`): the
-    /// bytes released.
-    fn close(&mut self, _req: &mut Request) -> i32 {
-        self.data = Vec::new();
+    /// bytes released, then the struct `efree`d.
+    fn close(&mut self, req: &mut Request) -> i32 {
+        self.data.release(req);
+        if let MemBytes::Host(_) = self.data {
+            self.data = MemBytes::Empty;
+        }
+        if let Some(own) = self.own.take() {
+            req.heap_mut().free_block(own);
+        }
         0
     }
 
@@ -1776,33 +1927,26 @@ impl Ops for Memory {
 
     /// `php_stream_memory_set_option`'s `PHP_STREAM_OPTION_TRUNCATE_API`
     /// (`Z/main/streams/memory.c:193`): refused on a read-only stream;
-    /// a shorter size cuts the bytes and pulls the position back to it,
-    /// a longer one zero-fills. The bytes are php's `zend_string`, which
-    /// `zend_string_realloc` grows, so a size past the memory limit is
-    /// the heap's fatal for that string, asked of the request's heap as
-    /// `php_stream_get_line` asks it, and kept for the native.
+    /// a shorter size cuts the bytes with `zend_string_truncate` and
+    /// pulls the position back to it, a longer one
+    /// `zend_string_realloc`s and zero-fills, so a size past the memory
+    /// limit is the heap's fatal for that string, kept for the native.
     fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
         if self.mode == TempMode::ReadOnly {
             return Some(false);
         }
-        if size > self.data.len() && size > req.heap_memory_limit() {
-            match req.string_with(size, |_| {}) {
-                Ok(asked) => req.release(Value::string(asked)),
-                Err(thrown) => {
-                    if req.stream_thrown.is_none() {
-                        req.stream_thrown = Some(thrown);
-                    }
-                    return Some(false);
-                }
+        if let Err(thrown) = self.data.resize(req, size) {
+            if req.stream_thrown.is_none() {
+                req.stream_thrown = Some(thrown);
             }
+            return Some(false);
         }
-        self.data.resize(size, 0);
         self.fpos = self.fpos.min(size);
         Some(true)
     }
 
     fn memory_buffer(&self) -> Option<&[u8]> {
-        (self.label == "MEMORY").then_some(self.data.as_slice())
+        (self.label == "MEMORY").then_some(self.data.bytes())
     }
 }
 
@@ -1875,9 +2019,10 @@ pub(crate) fn of_extension(ops: Box<dyn crate::api::request::StreamOps>, mode: &
 fn memory(mode: TempMode) -> PhpStream {
     let mut stream = PhpStream::new(
         Box::new(Memory {
-            data: Vec::new(),
+            data: MemBytes::Empty,
             fpos: 0,
             mode,
+            own: None,
             label: "MEMORY",
         }),
         mode.as_mode(),
@@ -1885,6 +2030,11 @@ fn memory(mode: TempMode) -> PhpStream {
     stream.flags.no_buffer = true;
     stream
 }
+
+/// `sizeof(php_stream_temp_data)` on the pinned 64-bit build:
+/// `innerstream`, `smax`, `mode` and its padding, the `meta` zval and
+/// `tmpdir` (`Z/main/streams/memory.c:325-331`).
+const TEMP_DATA_SIZE: usize = 48;
 
 /// `PHP_STREAM_MAX_MEM` (`Z/main/php_memory_streams.h:27`): what a
 /// `php://temp` holds in memory before it spills to a file.
@@ -1897,6 +2047,9 @@ const PHP_STREAM_MAX_MEM: usize = 2 * 1024 * 1024;
 /// bytes it keeps in memory before the spill.
 struct Temp {
     inner: Option<Stream>,
+    /// The `php_stream_temp_data` php `ecalloc`s, [`TEMP_DATA_SIZE`]
+    /// bytes on the request's heap from [`Ops::lay_down`] to the close.
+    own: Option<Block>,
     smax: usize,
     /// `stream->ops->label`: `TEMP`, or `RFC2397` for what the `data:`
     /// wrapper opened, which swaps in `php_stream_rfc2397_ops`.
@@ -1968,6 +2121,26 @@ impl Ops for Temp {
         self.inner = Some(inner);
     }
 
+    /// `_php_stream_temp_create_ex`'s `self = ecalloc(1, sizeof(*self))`,
+    /// beside the memory stream it encloses.
+    ///
+    /// ```php
+    /// $w = fopen('php://temp', 'w+'); fwrite($w, 'x'); fclose($w); unset($w);
+    /// $m = memory_get_usage(); $f = fopen('php://temp', 'w+'); echo memory_get_usage() - $m, "\n";
+    /// fwrite($f, str_repeat('x', 1000)); echo memory_get_usage() - $m, "\n";
+    /// fclose($f); unset($f); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 760
+    /// 2072
+    /// 192
+    /// ```
+    fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        let own = req.heap_mut().block(TEMP_DATA_SIZE);
+        self.own = Some(req.fatal_of(own)?);
+        Ok(())
+    }
+
     /// `php_stream_temp_write` (`Z/main/streams/memory.c:350`): the spill
     /// where the write would reach `smax`, then the inner stream
     /// written; a spill that could not make its file writes nothing.
@@ -1998,6 +2171,9 @@ impl Ops for Temp {
     fn close(&mut self, req: &mut Request) -> i32 {
         if let Some(inner) = self.inner.take() {
             inner.free(req);
+        }
+        if let Some(own) = self.own.take() {
+            req.heap_mut().free_block(own);
         }
         0
     }
@@ -2985,10 +3161,11 @@ fn php_open(
             }
             PhpStream::new(
                 Box::new(Memory {
-                    data: req.input_bytes(),
+                    data: MemBytes::Host(req.input_bytes()),
                     fpos: 0,
                     mode: TempMode::ReadOnly,
                     label: "Input",
+                    own: None,
                 }),
                 b"rb",
             )
@@ -3008,10 +3185,11 @@ fn php_open(
         b"stdin" | b"stdout" | b"stderr" => {
             let kind = match lower.as_slice() {
                 b"stdin" => HostFd::Stdin(Memory {
-                    data: Vec::new(),
+                    data: MemBytes::Host(Vec::new()),
                     fpos: 0,
                     mode: TempMode::ReadOnly,
                     label: "STDIO",
+                    own: None,
                 }),
                 b"stdout" => HostFd::Stdout(host_label(req, Standard::Stdout)),
                 _ => HostFd::Stderr(host_label(req, Standard::Stderr)),
@@ -3316,6 +3494,7 @@ fn temp_stream(
 ) -> Result<Stream, Thrown> {
     let kind = Temp {
         inner: None,
+        own: None,
         smax,
         label,
         meta,
@@ -4264,11 +4443,18 @@ impl Request {
             self.stream_type()
         };
         // The kind's own data first, then the `php_stream` and its
-        // resource, `_php_stream_fopen_from_fd_int`'s order.
-        stream.ops.lay_down(self)?;
-        let allocated = self
-            .heap_mut()
-            .resource_sized(kind, Some(stream), PHP_STREAM_SIZE);
+        // resource, `_php_stream_fopen_from_fd_int`'s order; a
+        // persistent stream's is `pemalloc`'d persistent, off the
+        // request's count.
+        stream.flags.persistent = persistent;
+        let allocated = if persistent {
+            self.heap_mut()
+                .resource_persistent(kind, Some(stream), PHP_STREAM_SIZE)
+        } else {
+            stream.ops.lay_down(self)?;
+            self.heap_mut()
+                .resource_sized(kind, Some(stream), PHP_STREAM_SIZE)
+        };
         let res = self.fatal_of(allocated).map(Resource::of)?;
         if let Some(Some(stream)) = self.resource_native_mut::<Option<PhpStream>>(res.heap()) {
             stream.res = Some(res);

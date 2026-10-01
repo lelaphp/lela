@@ -108,6 +108,21 @@ impl Request {
     /// `entry` under a fresh resource of the `persistent stream` type,
     /// held under `key`: the stream `php_stream_from_persistent_id`
     /// registers over what the list kept, `r+`, and seeking nowhere.
+    ///
+    /// A persistent stream's `php_stream`, its socket's data and its read
+    /// buffer are `pemalloc`'d persistent, so a request counts its
+    /// resource alone:
+    ///
+    /// ```php
+    /// $s = stream_socket_server('tcp://127.0.0.1:0'); [$host, $port] = explode(':', stream_socket_get_name($s, false));
+    /// $m = memory_get_usage(); $p = pfsockopen($host, $port); echo memory_get_usage() - $m, "\n";
+    /// $a = stream_socket_accept($s); fwrite($a, "hi\n"); usleep(20000);
+    /// $m = memory_get_usage(); $l = fgets($p); echo memory_get_usage() - $m, ' ', $l;
+    /// ```
+    /// ```expect
+    /// 32
+    /// 32 hi
+    /// ```
     fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Stream, Thrown> {
         let mut stream = PhpStream::new(Box::new(entry.socket), b"r+");
         stream.orig_path = entry.orig_path.map(super::OrigPath::Persistent);

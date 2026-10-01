@@ -44,7 +44,9 @@ use std::any::Any;
 use std::cell::Cell;
 use std::ptr::NonNull;
 
-use crate::array::{Arr, Key, free_table_header, index_add_new, index_del, table_header};
+use crate::array::{
+    Allocate, Arr, Key, System, free_table_header, index_add_new, index_del, table_header,
+};
 use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
@@ -69,10 +71,23 @@ pub(crate) struct ResHeader {
     id: i64,
     /// `type`: the engine's number, or `-1` once closed.
     kind: Cell<i32>,
-    _pad: u32,
+    /// Which allocator `ptr` came from, in the word php's struct pads.
+    home: Home,
     /// `ptr`: the payload allocation, none for a resource of no payload
     /// and none once closed.
     ptr: Cell<Option<NonNull<PayloadBox>>>,
+}
+
+/// Where a resource's payload was allocated: the request's heap, which
+/// `memory_get_usage()` counts and the request's end takes back whole,
+/// or the system allocator, for what php `pemalloc`s persistent (a
+/// persistent stream's `php_stream`), which no request counts and whose
+/// drop gives it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+enum Home {
+    Request,
+    Persistent,
 }
 
 /// What sits at `ptr`: the payload's table, then the payload itself at
@@ -136,6 +151,7 @@ impl Res {
         id: i64,
         kind: ResourceType,
         ptr: Option<NonNull<PayloadBox>>,
+        home: Home,
     ) -> Res {
         let header: NonNull<ResHeader> = at.cast();
         // SAFETY: the caller's allocation is the header and nothing else
@@ -145,7 +161,7 @@ impl Res {
                 gc: Refcounted::new(ZvalType::Resource, gc::NOT_COLLECTABLE),
                 id,
                 kind: Cell::new(i32::try_from(kind.0).unwrap_or(i32::MAX)),
-                _pad: 0,
+                home,
                 ptr: Cell::new(ptr),
             });
         }
@@ -367,7 +383,8 @@ impl std::fmt::Debug for RegularList {
 impl Res {
     /// Drop the payload once, and never again: `ptr` is taken off the
     /// header first, so the sweep and the destructor cannot both drop
-    /// it. The allocation's bytes are the caller's to give back.
+    /// it. A payload of the request's heap leaves its bytes to the
+    /// caller to give back; a persistent one's go back here, `pefree`.
     fn drop_payload(self) -> Option<NonNull<PayloadBox>> {
         let at = self.header().ptr.take()?;
         // SAFETY: `ptr` was written by `resource_with` from a live
@@ -377,7 +394,15 @@ impl Res {
         // address, has not been dropped, since `ptr` still named it, and
         // nothing reads it after this.
         unsafe { (table.drop)(payload_addr(at, table)) };
-        Some(at)
+        match self.header().home {
+            Home::Request => Some(at),
+            Home::Persistent => {
+                // SAFETY: the allocation came from `System` in
+                // `resource_persistent` and its payload is dropped.
+                unsafe { System.free(at.cast()) };
+                None
+            }
+        }
     }
 }
 
@@ -386,7 +411,7 @@ impl Heap {
     /// a resource of `kind` with no payload, one owner, in the list
     /// under the id [`Res::id`] reads.
     pub fn resource(&mut self, kind: ResourceType) -> Result<Res, Fatal> {
-        self.resource_alloc(kind, None)
+        self.resource_alloc(kind, None, Home::Request)
     }
 
     /// The same resource carrying `payload` as its `ptr` (design §5.5):
@@ -415,6 +440,29 @@ impl Heap {
         payload: T,
         size: usize,
     ) -> Result<Res, Fatal> {
+        self.resource_in(kind, payload, size, Home::Request)
+    }
+
+    /// [`Heap::resource_sized`] for what php `pemalloc`s persistent: the
+    /// thirty-two bytes of the resource on the request's heap, in its
+    /// list, and the payload's `size` on the system allocator, which no
+    /// request counts, given back when the payload is dropped.
+    pub fn resource_persistent<T: Any + Send>(
+        &mut self,
+        kind: ResourceType,
+        payload: T,
+        size: usize,
+    ) -> Result<Res, Fatal> {
+        self.resource_in(kind, payload, size, Home::Persistent)
+    }
+
+    fn resource_in<T: Any + Send>(
+        &mut self,
+        kind: ResourceType,
+        payload: T,
+        size: usize,
+        home: Home,
+    ) -> Result<Res, Fatal> {
         let table = payload_of::<T>();
         if table.layout.align() > 8 {
             return Err(Fatal::Error(format!(
@@ -428,22 +476,31 @@ impl Heap {
                 table.layout.size()
             )));
         }
-        let at = self.mm.alloc(size)?.cast::<PayloadBox>();
+        let at = match home {
+            Home::Request => self.mm.alloc(size)?,
+            Home::Persistent => System.alloc(size)?,
+        }
+        .cast::<PayloadBox>();
         // SAFETY: the allocation holds the table at its start and nothing
         // else holds it.
         unsafe { at.as_ptr().write(PayloadBox { table }) };
         // SAFETY: the allocation was sized to hold the payload at this
         // offset, which nothing has written.
         unsafe { payload_addr(at, table).cast::<T>().as_ptr().write(payload) };
-        match self.resource_alloc(kind, Some(at)) {
+        match self.resource_alloc(kind, Some(at), home) {
             Ok(r) => Ok(r),
             Err(fatal) => {
                 // SAFETY: the payload was written just above and nothing
                 // names it.
                 unsafe { (table.drop)(payload_addr(at, table)) };
-                // SAFETY: the allocation came from this heap and its
-                // payload is dropped.
-                unsafe { self.mm.free(at.cast()) };
+                match home {
+                    // SAFETY: the allocation came from this heap and its
+                    // payload is dropped.
+                    Home::Request => unsafe { self.mm.free(at.cast()) },
+                    // SAFETY: the allocation came from `System` and its
+                    // payload is dropped.
+                    Home::Persistent => unsafe { System.free(at.cast()) },
+                }
                 Err(fatal)
             }
         }
@@ -458,12 +515,13 @@ impl Heap {
         &mut self,
         kind: ResourceType,
         ptr: Option<NonNull<PayloadBox>>,
+        home: Home,
     ) -> Result<Res, Fatal> {
         let id = self.resources.next_id()?;
         let at = self.mm.alloc(size_of::<ResHeader>())?;
         // SAFETY: the allocation is exactly the header's size and nothing
         // else holds it.
-        let r = unsafe { Res::init(at, id, kind, ptr) };
+        let r = unsafe { Res::init(at, id, kind, ptr, home) };
         if let Err(fatal) = self.resources.add(&mut self.mm, id, r) {
             // SAFETY: the header was laid down just above and nothing
             // names it.

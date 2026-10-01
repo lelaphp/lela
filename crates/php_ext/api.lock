@@ -386,6 +386,7 @@ request::Crypto
 request::Crypto::accepted
 request::Crypto::active
 request::Crypto::alive
+request::Crypto::allocations
 request::Crypto::connected
 request::Crypto::enable
 request::Crypto::meta

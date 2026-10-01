@@ -96,6 +96,12 @@ impl FreshStr {
         self.0.is_empty()
     }
 
+    /// The bytes, `ZSTR_VAL(s)` for its length.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.0.bytes()
+    }
+
     /// The bytes, to write: `ZSTR_VAL(s)` for its length.
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         let len = self.0.len();

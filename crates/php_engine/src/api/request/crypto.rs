@@ -209,4 +209,12 @@ pub trait Crypto: Any + Send {
     /// `php_openssl_tcp_sockop_accept` makes it of what the listener's
     /// holds; the engine asks it [`Crypto::connected`] next.
     fn accepted(&self) -> Box<dyn Crypto>;
+
+    /// What the `transport`'s factory `emalloc`s for the socket in
+    /// place of `php_netstream_data_t`, each allocation's size in php's
+    /// order, the struct first (`sizeof(php_openssl_netstream_data_t)`,
+    /// then its `url_name`), which the engine lays down on the request's
+    /// heap with the stream and gives back at its close, so
+    /// `memory_get_usage()` counts what php's does.
+    fn allocations(&self) -> Vec<usize>;
 }

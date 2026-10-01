@@ -62,6 +62,7 @@ Frame::slot_ptr
 FrameRef
 FramesAside
 FreshStr
+FreshStr::bytes
 FreshStr::bytes_mut
 FreshStr::finish
 FreshStr::is_empty
@@ -147,6 +148,7 @@ Heap::resource_at
 Heap::resource_close
 Heap::resource_native
 Heap::resource_native_mut
+Heap::resource_persistent
 Heap::resource_sized
 Heap::resource_with
 Heap::resources

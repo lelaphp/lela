@@ -1885,6 +1885,35 @@ impl Crypto for Layer {
         Ok(Ok(()))
     }
 
+    /// `sizeof(php_openssl_netstream_data_t)` on the pinned 64-bit
+    /// build, the `php_netstream_data_t` it opens with, `ssl_handle` and
+    /// `ctx`, the connect timeout, the four flags and the method, the
+    /// renegotiation bucket, the SNI certificates and their count,
+    /// `alpn_ctx`, `url_name` and its bit field
+    /// (`Z/ext/openssl/xp_ssl.c:185-203`); then `url_name`'s
+    /// `pestrndup`, the host and its NUL.
+    ///
+    /// ```php
+    /// $s = stream_socket_server('tcp://127.0.0.1:0'); $name = stream_socket_get_name($s, false);
+    /// $c = stream_socket_client("tcp://$name"); $a = stream_socket_accept($s); fclose($c); fclose($a); unset($c, $a);
+    /// $m = memory_get_usage(); $c = stream_socket_client("tcp://$name"); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $a = stream_socket_accept($s); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); fclose($c); fclose($a); unset($c, $a); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 616
+    /// 416
+    /// -872
+    /// ```
+    fn allocations(&self) -> Vec<usize> {
+        const NETSTREAM_DATA_SIZE: usize = 136;
+        let mut sizes = vec![NETSTREAM_DATA_SIZE];
+        if let Some(name) = &self.url_name {
+            sizes.push(name.len() + 1);
+        }
+        sizes
+    }
+
     /// `php_openssl_tcp_sockop_accept`'s client: nothing of the listener's
     /// but its `enable_on_connect` and its method, without the client bit.
     fn accepted(&self) -> Box<dyn Crypto> {
