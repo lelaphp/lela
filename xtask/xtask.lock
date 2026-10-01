@@ -137,6 +137,7 @@ oracle::Oracle::run
 oracle::Oracle::run_under
 oracle::PROMISE_VARIABLE
 oracle::Pin
+oracle::Pin::digest
 oracle::Pin::digests_asserted
 oracle::Pin::load
 oracle::Pin::on_this_machine
@@ -223,6 +224,7 @@ reading::Reading::new
 reading::Reading::stamped_over
 reading::Reading::to_json
 reading::Reading::tree
+reading::Reading::under
 reading::Status
 reading::Status::as_str
 reading::Store
@@ -236,6 +238,7 @@ reading::Store::readings
 reading::Store::record
 reading::Store::record_measurement
 reading::Store::root
+reading::UNDER_RECIPE
 reading::epoch_seconds
 reading::now
 run

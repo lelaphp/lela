@@ -323,6 +323,7 @@ pub fn judge(
             krate,
             lock_home.as_deref(),
             &carried,
+            manifest.pin.digest(),
             &mut unmet,
         )?;
     }
@@ -337,7 +338,7 @@ pub fn judge(
         &mut notes,
     )?;
     if let Some(ticket) = ticket {
-        boxes(root, store, ticket, &mut unmet)?;
+        boxes(root, store, manifest.pin.digest(), ticket, &mut unmet)?;
     }
 
     Ok(Verdict {
@@ -357,13 +358,19 @@ pub fn judge(
 /// still matches (the rule at the top of this module); a
 /// missing or stale one says what to run, and a failing one carries the
 /// instrument's message, which names each unticked box.
-fn boxes(root: &Path, store: &Store, ticket: Ticket, unmet: &mut Vec<String>) -> Result<()> {
+fn boxes(
+    root: &Path,
+    store: &Store,
+    pin: &str,
+    ticket: Ticket,
+    unmet: &mut Vec<String>,
+) -> Result<()> {
     const READ: &str = "run `cargo xtask ticket read`";
     let Some(reading) = store.read(ticket::INSTRUMENT, &ticket::scope(ticket))? else {
         unmet.push(format!("ticket: no reading for {ticket}; {READ}"));
         return Ok(());
     };
-    if !reading.fresh_for(&git::tree_hash(root, Path::new(ticket::STAMPED_OVER))?) {
+    if !reading.fresh_for(&git::tree_hash(root, Path::new(ticket::STAMPED_OVER))?, pin) {
         unmet.push(format!(
             "ticket: the reading for {ticket} is stale; the tree changed since it was read; {READ}"
         ));
@@ -512,6 +519,7 @@ fn fresh_readings(
     krate: &Crate,
     lock_home: Option<&str>,
     carried: &Carried,
+    pin: &str,
     unmet: &mut Vec<String>,
 ) -> Result<()> {
     let tree = git::tree_hash(root, &krate.path())?;
@@ -530,19 +538,25 @@ fn fresh_readings(
     }
     let stale: Vec<(String, String, String)> = read
         .iter()
-        .filter(|(_, reading)| !reading.fresh_for(&tree))
+        .filter(|(_, reading)| !reading.fresh_for(&tree, pin))
         .map(|((instrument, scope), _)| (instrument.clone(), scope.clone(), tree.clone()))
         .collect();
-    read.extend(store.latest_over_each(&stale)?);
+    read.extend(store.latest_over_each(&stale, pin)?);
     for instrument in instruments_of(krate, lock_home, carried) {
         for scope in scopes_of(instrument, name) {
             let Some(reading) = read.remove(&(instrument.to_owned(), scope.clone())) else {
                 unmet.push(format!("{instrument}: no reading for {scope}"));
                 continue;
             };
-            if !reading.fresh_for(&tree) {
+            if !reading.fresh_for(&tree, pin) {
+                // Over the tree now, a reading is stale for its recipe alone.
+                let changed = if reading.tree() == tree {
+                    "oracle.toml"
+                } else {
+                    name
+                };
                 unmet.push(format!(
-                    "{instrument}: the reading for {scope} is stale; {name} changed since it was taken"
+                    "{instrument}: the reading for {scope} is stale; {changed} changed since it was taken"
                 ));
                 continue;
             }
@@ -617,7 +631,7 @@ fn locks(
             }
             continue;
         };
-        let fresh = reading.fresh_for(&git::tree_hash(root, &dir)?);
+        let fresh = reading.fresh_for(&git::tree_hash(root, &dir)?, manifest.pin.digest());
         match reading.status {
             Status::Fail if fresh => unmet.push(format!(
                 "{shown}: {}{}",

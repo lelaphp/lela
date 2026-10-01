@@ -489,7 +489,8 @@ fn run_in(
         }
         // The reading of a crate no witness runs for: the harness's, or
         // one not yet created, which carries no stamp.
-        let mut unrun = under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule);
+        let mut unrun =
+            under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule).under(&manifest.pin);
         if krate.name == crate::done::HARNESS {
             // The harness measures the engine and carries no witness of its
             // own; `done` asks it for none either (§4.5).
@@ -509,7 +510,8 @@ fn run_in(
             // witness reading and a pass over sources never seen would
             // say the crate was measured when it was not.
             Err(unread) => {
-                let mut failed = under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule);
+                let mut failed = under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule)
+                    .under(&manifest.pin);
                 failed.status = Status::Fail;
                 failed.message = format!("{}: {unread:#}", krate.name);
                 readings.push(failed);
@@ -551,7 +553,7 @@ fn run_in(
                 tally.witnesses.judged.len()
             );
         }
-        let judged = reading(&tally, root, krate, rule)?;
+        let judged = reading(&tally, root, krate, rule)?.under(&manifest.pin);
         if let Some(journal) = journal {
             journal.judged(&judged)?;
         }
@@ -772,7 +774,7 @@ pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
 }
 
 /// Every crate that exists less those whose `witness` reading passes and
-/// was taken over the crate's tree now, `done`'s fresh: what the merge
+/// was taken over the crate's tree now under the pin now, `done`'s fresh: what the merge
 /// check measures after pre-commit measured the staged crates (#1312).
 fn unmeasured(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<String>> {
     let mut left = Vec::new();
@@ -780,7 +782,7 @@ fn unmeasured(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<Str
         let tree = crate::git::tree_hash(root, &krate.path())?;
         let stands = store
             .read(INSTRUMENT, &krate.name)?
-            .is_some_and(|r| r.status == Status::Pass && r.fresh_for(&tree));
+            .is_some_and(|r| r.status == Status::Pass && r.fresh_for(&tree, manifest.pin.digest()));
         if !stands {
             left.push(krate.name.clone());
         }

@@ -651,14 +651,10 @@ fn a_linux_build_and_a_darwin_one_each_count_their_own_natives() {
     }
 }
 
-/// `--unmeasured` leaves out a crate whose pass was taken over its tree
-/// now and measures it again once one byte of it moves: what the merge
-/// check runs after pre-commit measured the staged crates (#1312).
-#[test]
-fn unmeasured_leaves_out_a_crate_with_a_pass_over_its_tree_now() {
+/// A repository whose one commit holds an `xtask` crate of one line.
+fn committed_xtask(name: &str) -> Tree {
     use crate::git::git;
-    use crate::reading::{Reading, Status, Store};
-    let dir = Tree::new("witness-unmeasured").unwrap();
+    let dir = Tree::new(name).unwrap();
     fs::create_dir_all(dir.join("xtask/src")).unwrap();
     fs::write(dir.join("xtask/Cargo.toml"), "[package]\n").unwrap();
     fs::write(dir.join("xtask/src/lib.rs"), "a\n").unwrap();
@@ -678,6 +674,16 @@ fn unmeasured_leaves_out_a_crate_with_a_pass_over_its_tree_now() {
     ]
     .concat();
     git(&dir, &commit, None).unwrap();
+    dir
+}
+
+/// `--unmeasured` leaves out a crate whose pass was taken over its tree
+/// now and measures it again once one byte of it moves: what the merge
+/// check runs after pre-commit measured the staged crates (#1312).
+#[test]
+fn unmeasured_leaves_out_a_crate_with_a_pass_over_its_tree_now() {
+    use crate::reading::{Reading, Status, Store};
+    let dir = committed_xtask("witness-unmeasured");
     let manifest = manifest();
     let store = Store::at(dir.join("target/harness"));
     assert_eq!(
@@ -688,6 +694,13 @@ fn unmeasured_leaves_out_a_crate_with_a_pass_over_its_tree_now() {
     let krate = manifest.crate_named("xtask").unwrap();
     let mut reading = Reading::for_crate(super::INSTRUMENT, krate, &dir).unwrap();
     reading.status = Status::Pass;
+    store.record(&[reading.clone()]).unwrap();
+    assert_eq!(
+        super::unmeasured(&dir, &manifest, &store).unwrap(),
+        ["xtask"],
+        "a witness reading that records no pin is taken under no recipe this run knows"
+    );
+    let reading = reading.under(&manifest.pin);
     store.record(&[reading]).unwrap();
     assert!(
         super::unmeasured(&dir, &manifest, &store)
@@ -696,6 +709,55 @@ fn unmeasured_leaves_out_a_crate_with_a_pass_over_its_tree_now() {
     );
 
     fs::write(dir.join("xtask/src/lib.rs"), "b\n").unwrap();
+    assert_eq!(
+        super::unmeasured(&dir, &manifest, &store).unwrap(),
+        ["xtask"]
+    );
+}
+
+/// A witness reading is taken under the oracle's recipe, so a change to
+/// `oracle.toml`'s `[recipe.env]` stales it as a change to its crate's tree
+/// does (#1387): 84a55f66 added two variables there, an absolute
+/// `memory_get_usage()` moved with them, and `--unmeasured` ran nothing.
+/// The fixture's entry is laid under the tracked pin's `[recipe.env]`; the
+/// reading taken under the pin without it is stale under the pin with it,
+/// and a comment added to the pin stales nothing.
+#[test]
+fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
+    use crate::oracle::Pin;
+    use crate::reading::{Reading, Status, Store};
+    let dir = committed_xtask("witness-unmeasured-recipe");
+    let mut manifest = manifest();
+    let store = Store::at(dir.join("target/harness"));
+    let krate = manifest.crate_named("xtask").unwrap();
+    let mut reading = Reading::for_crate(super::INSTRUMENT, krate, &dir).unwrap();
+    reading.status = Status::Pass;
+    let reading = reading.under(&manifest.pin);
+    store.record(std::slice::from_ref(&reading)).unwrap();
+    assert!(
+        super::unmeasured(&dir, &manifest, &store)
+            .unwrap()
+            .is_empty()
+    );
+
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tracked = fs::read_to_string(workspace.join("../oracle.toml")).unwrap();
+    let commented = Pin::parse(&format!("# a person's note\n{tracked}")).unwrap();
+    assert_eq!(
+        commented.digest(),
+        manifest.pin.digest(),
+        "a comment is no value"
+    );
+    let entry = fs::read_to_string(workspace.join("fixtures/witness/recipe-env/env.toml")).unwrap();
+    let changed = tracked.replacen("[recipe.env]\n", &format!("[recipe.env]\n{entry}"), 1);
+    assert_ne!(changed, tracked, "the pin has a [recipe.env]");
+    let tree = crate::git::tree_hash(&dir, &krate.path()).unwrap();
+    manifest.pin = Pin::parse(&changed).unwrap();
+    assert!(reading.fresh_for(&tree, reading.recipe.as_deref().unwrap()));
+    assert!(
+        !reading.fresh_for(&tree, manifest.pin.digest()),
+        "the store keeps a reading taken before the change fresh after it"
+    );
     assert_eq!(
         super::unmeasured(&dir, &manifest, &store).unwrap(),
         ["xtask"]

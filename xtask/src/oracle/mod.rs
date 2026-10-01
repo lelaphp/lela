@@ -172,6 +172,9 @@ pub struct Pin {
     /// value of the file.
     #[serde(skip)]
     asserted: Asserted,
+    /// [`Pin::digest`]: set by [`Pin::parse`], not a value of the file.
+    #[serde(skip)]
+    digest: String,
 }
 
 /// `[sapi]`: the binaries upstream's run-tests.php finds beside `php` for
@@ -422,7 +425,19 @@ impl Pin {
     /// Parse the pin's text and hold it to the grammar. The pin is as the
     /// file says it, blind to this machine; `load` consults the machine.
     pub fn parse(text: &str) -> Result<Pin> {
-        Ok(toml::from_str(text)?)
+        let mut pin: Pin = toml::from_str(text)?;
+        pin.digest =
+            crate::git::blob_id(toml::from_str::<toml::Table>(text)?.to_string().as_bytes());
+        Ok(pin)
+    }
+
+    /// The digest of the pin's values, every section's and none of its
+    /// comments: what a reading taken under the oracle's recipe records, so
+    /// a change to the recipe, its environment or the binary stales it as
+    /// a change to its crate's tree does (#1387). Computed here and nowhere
+    /// else.
+    pub fn digest(&self) -> &str {
+        &self.digest
     }
 
     /// The pin with the tree [`TREE_VARIABLE`] names on this machine:

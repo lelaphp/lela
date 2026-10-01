@@ -570,7 +570,7 @@ pub(crate) fn reading(
     // Stamped through the manifest's scope mapping: the crate whose subset
     // it is, so `done` can tell a stale reading from a fresh one.
     let mut reading = tally.reading(
-        Reading::for_scope(INSTRUMENT, &scope, manifest, root)?,
+        Reading::for_scope(INSTRUMENT, &scope, manifest, root)?.under(&manifest.pin),
         &outcome,
         message,
     )?;

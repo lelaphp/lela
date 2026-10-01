@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use xtask::divergence::Registry;
 use xtask::done::{self, FRESH, Verdict};
 use xtask::manifest::Manifest;
-use xtask::reading::{Reading, Status, Store};
+use xtask::reading::{Reading, Status, Store, UNDER_RECIPE};
 use xtask::scratch::Tree;
 use xtask::track::Base;
 
@@ -204,6 +204,9 @@ fn fresh(root: &Path, instrument: &str, scope: &str) -> Reading {
         }
         None => Reading::for_scope(instrument, scope, &manifest, root).unwrap(),
     };
+    if UNDER_RECIPE.contains(&instrument) {
+        reading = reading.under(&manifest.pin);
+    }
     reading.status = Status::Pass;
     reading.message = format!("{scope}: measured");
     reading.commit = "0000000".into();
@@ -637,6 +640,9 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
         } else {
             Reading::for_crate(instrument, krate, &root).unwrap()
         };
+        if UNDER_RECIPE.contains(&instrument) {
+            reading = reading.under(&manifest.pin);
+        }
         reading.status = Status::Pass;
         reading.message = "measured".into();
         store.record(std::slice::from_ref(&reading)).unwrap();
@@ -657,6 +663,42 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
         .collect();
     let asked: Vec<&str> = asked_of("ext/pcre").iter().map(|(i, _)| *i).collect();
     assert_eq!(stale, asked, "{verdict:#?}");
+}
+
+/// A reading taken under the oracle's recipe is stale once the pin's values
+/// move, as one taken over a crate is once its tree does (#1387): an entry
+/// laid under `oracle.toml`'s `[recipe.env]` stales the touched crate's
+/// `witness`, `phpt` and `crosscheck` readings and nothing else, each
+/// naming the pin as what changed.
+#[test]
+fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
+    let root = scratch("recipe");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    record_asked(&Store::of_workspace(&root), &root, "ext/pcre");
+    assert!(judge(&root).met(), "{:#?}", judge(&root));
+
+    let pin = root.join("oracle.toml");
+    let entry = read("xtask/fixtures/witness/recipe-env/env.toml");
+    let text = std::fs::read_to_string(&pin).unwrap();
+    let changed = text.replacen("[recipe.env]\n", &format!("[recipe.env]\n{entry}"), 1);
+    assert_ne!(changed, text, "the pin has a [recipe.env]");
+    std::fs::write(&pin, changed).unwrap();
+    let verdict = judge(&root);
+    let mut stale: Vec<&str> = verdict
+        .unmet
+        .iter()
+        .filter(|l| l.ends_with("is stale; oracle.toml changed since it was taken"))
+        .map(|l| l.split(':').next().unwrap())
+        .collect();
+    stale.dedup();
+    let mut under: Vec<&str> = asked_of("ext/pcre")
+        .iter()
+        .map(|(i, _)| *i)
+        .filter(|i| UNDER_RECIPE.contains(i))
+        .collect();
+    under.dedup();
+    assert_eq!(stale, under, "{verdict:#?}");
+    assert!(!under.is_empty());
 }
 
 #[test]
