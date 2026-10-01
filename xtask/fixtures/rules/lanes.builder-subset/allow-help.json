@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask phpt --help 2>&1 | grep -E \"^\\s+--\" | head -20","description":"Read the phpt instrument's options"}}

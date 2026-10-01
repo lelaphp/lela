@@ -2584,6 +2584,10 @@ fn the_builder_subset_rule_denies_the_lane_in_a_ticketed_checkout_alone() {
     // A heredoc message whose subject cites the instrument runs nothing:
     // `\A` anchors the line-start alternative at the call's start (#790).
     assert_eq!(rule(ticketed.path(), "allow-heredoc.json"), None);
+    // Reading the instrument's options runs no lane, and the exception is
+    // the instrument's own flag, not a later `-h` (#1424).
+    assert_eq!(rule(ticketed.path(), "allow-help.json"), None);
+    assert_eq!(rule(ticketed.path(), "deny-help-elsewhere.json"), denied);
 }
 
 /// `lanes.nightly`'s heredoc fixtures (#790): a commit whose message has a
