@@ -251,15 +251,15 @@ impl Fpm {
             if fpm.test_successful {
                 return Init::ExitOk;
             }
-            zlog!(Error, "FPM initialization failed");
+            zlog!(Error @ fpm_init:72, "FPM initialization failed");
             return Init::Error(fpm.send_config_pipe.take());
         }
         if !fpm.write_pid() {
-            zlog!(Error, "FPM initialization failed");
+            zlog!(Error @ fpm_init:78, "FPM initialization failed");
             return Init::Error(fpm.send_config_pipe.take());
         }
         crate::stdio::init_final(&fpm);
-        zlog!(Notice, "fpm is running, pid {}", fpm.parent_pid);
+        zlog!(Notice @ fpm_init:83, "fpm is running, pid {}", fpm.parent_pid);
         Init::Continue(Box::new(fpm))
     }
 
@@ -275,7 +275,7 @@ impl Fpm {
             && !conf::is_dir(prefix)
         {
             zlog!(
-                Error,
+                Error @ fpm_conf_init_main:1824,
                 "the global prefix '{}' does not exist or is not a directory",
                 String::from_utf8_lossy(prefix)
             );
@@ -284,7 +284,7 @@ impl Fpm {
         self.config_path = config.unwrap_or_else(|| conf::default_config(self.prefix.as_deref()));
         let Some(parsed) = conf::read(engine, &self.config_path, self.prefix.as_deref()) else {
             zlog!(
-                Error,
+                Error @ fpm_conf_init_main:1859,
                 "failed to load configuration file '{}'",
                 String::from_utf8_lossy(&self.config_path)
             );
@@ -313,7 +313,7 @@ impl Fpm {
             })
             .collect();
         if !self.post_process(daemonize) {
-            zlog!(Error, "failed to post process the configuration");
+            zlog!(Error @ fpm_conf_init_main:1864, "failed to post process the configuration");
             return false;
         }
         if test > 0 {
@@ -336,7 +336,7 @@ impl Fpm {
                 );
             }
             zlog!(
-                Notice,
+                Notice @ fpm_conf_init_main:1878,
                 "configuration file {} test is successful",
                 String::from_utf8_lossy(&self.config_path)
             );
@@ -362,7 +362,7 @@ impl Fpm {
         }
         if self.global.log_limit < i32::try_from(crate::zlog::MIN_LIMIT).unwrap_or(512) {
             zlog!(
-                Error,
+                Error @ fpm_conf_post_process:1293,
                 "log_limit must be greater than {}",
                 crate::zlog::MIN_LIMIT
             );
@@ -371,12 +371,12 @@ impl Fpm {
         crate::zlog::set_limit(usize::try_from(self.global.log_limit).unwrap_or(1024));
         crate::zlog::set_buffering(self.global.log_buffering);
         if self.global.process_max < 0 {
-            zlog!(Error, "process_max can't be negative");
+            zlog!(Error @ fpm_conf_post_process:1300, "process_max can't be negative");
             return false;
         }
         let priority = self.global.process_priority;
         if priority != 64 && !(-19..=20).contains(&priority) {
-            zlog!(Error, "process.priority must be included into [-19,20]");
+            zlog!(Error @ fpm_conf_post_process:1305, "process.priority must be included into [-19,20]");
             return false;
         }
         if self.global.error_log.is_none() {
@@ -403,7 +403,7 @@ impl Fpm {
             && !mechanism.eq_ignore_ascii_case(crate::events::MECHANISM.as_bytes())
         {
             zlog!(
-                Error,
+                Error @ fpm_event_pre_init:298,
                 "event mechanism '{}' is not available on this system",
                 String::from_utf8_lossy(mechanism)
             );
@@ -425,7 +425,7 @@ impl Fpm {
             }
             if !crate::access::check(format) {
                 zlog!(
-                    Error,
+                    Error @ fpm_conf_post_process:1359,
                     "[pool {}] wrong format for access.format '{}'",
                     pool.name(),
                     String::from_utf8_lossy(format)
@@ -445,7 +445,7 @@ impl Fpm {
                 crate::unix::set_rlimit(Resource::RLIMIT_NOFILE, self.global.rlimit_files)
         {
             zlog_sys!(
-                Error,
+                Error @ fpm_unix_init_main:578,
                 e,
                 "failed to set rlimit_files for this pool. Please check your system limits or decrease rlimit_files. setrlimit(RLIMIT_NOFILE, {})",
                 self.global.rlimit_files
@@ -456,7 +456,7 @@ impl Fpm {
             && let Err(e) = crate::unix::set_rlimit(Resource::RLIMIT_CORE, self.global.rlimit_core)
         {
             zlog_sys!(
-                Error,
+                Error @ fpm_unix_init_main:589,
                 e,
                 "failed to set rlimit_core for this pool. Please check your system limits or decrease rlimit_core. setrlimit(RLIMIT_CORE, {})",
                 self.global.rlimit_core
@@ -471,7 +471,7 @@ impl Fpm {
             if nix::unistd::Uid::effective().is_root() {
                 if !crate::ffi::set_priority(self.global.process_priority) {
                     zlog_sys!(
-                        Error,
+                        Error @ fpm_unix_init_main:687,
                         nix::errno::Errno::last(),
                         "Unable to set priority for the master process"
                     );
@@ -479,7 +479,7 @@ impl Fpm {
                 }
             } else {
                 zlog!(
-                    Notice,
+                    Notice @ fpm_unix_init_main:691,
                     "'process.priority' directive is ignored when FPM is not running as root"
                 );
             }
@@ -501,13 +501,13 @@ impl Fpm {
         let (read, write) = match nix::unistd::pipe() {
             Ok(pair) => pair,
             Err(e) => {
-                zlog_sys!(Error, e, "failed to create pipe");
+                zlog_sys!(Error @ fpm_unix_init_main:613, e, "failed to create pipe");
                 return false;
             }
         };
         match crate::ffi::fork() {
             Err(e) => {
-                zlog_sys!(Error, e, "failed to daemonize");
+                zlog_sys!(Error @ fpm_unix_init_main:622, e, "failed to daemonize");
                 false
             }
             Ok(nix::unistd::ForkResult::Child) => {
@@ -525,7 +525,7 @@ impl Fpm {
                     nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(10_000u16)).unwrap_or(0);
                 if ready == 0 {
                     zlog!(
-                        Error,
+                        Error @ fpm_unix_init_main:671,
                         "the master process didn't send back its status (via the pipe to the calling process)"
                     );
                     std::process::exit(i32::from(EXIT_SOFTWARE));
@@ -534,7 +534,7 @@ impl Fpm {
                 let mut value = [0u8; 4];
                 match file.read(&mut value) {
                     Ok(0) => {
-                        zlog!(Error, "no data have been read from pipe");
+                        zlog!(Error @ fpm_unix_init_main:658, "no data have been read from pipe");
                         std::process::exit(i32::from(EXIT_SOFTWARE));
                     }
                     Ok(_) if i32::from_ne_bytes(value) == 1 => {
@@ -552,7 +552,7 @@ impl Fpm {
         for pool in &mut self.pools {
             let Ok(nprocs) = usize::try_from(pool.config.pm_max_children) else {
                 zlog!(
-                    Error,
+                    Error @ fpm_scoreboard_init_main:47,
                     "[pool {}] Unable to create scoreboard SHM because max_client is not set",
                     pool.name()
                 );
@@ -560,7 +560,7 @@ impl Fpm {
             };
             if nprocs < 1 {
                 zlog!(
-                    Error,
+                    Error @ fpm_scoreboard_init_main:47,
                     "[pool {}] Unable to create scoreboard SHM because max_client is not set",
                     pool.name()
                 );
@@ -568,7 +568,7 @@ impl Fpm {
             }
             let Some(scoreboard) = Scoreboard::new(&pool.config.name, pool.pm(), nprocs) else {
                 zlog_sys!(
-                    Error,
+                    Error @ fpm_shm_alloc:32,
                     nix::errno::Errno::last(),
                     "unable to allocate {} bytes in shared memory",
                     nprocs
@@ -592,7 +592,7 @@ impl Fpm {
         ) {
             Ok(pair) => pair,
             Err(e) => {
-                zlog_sys!(Error, e, "failed to init signals: socketpair()");
+                zlog_sys!(Error @ fpm_signals_init_main:190, e, "failed to init signals: socketpair()");
                 return false;
             }
         };
@@ -600,7 +600,7 @@ impl Fpm {
             use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
             if fcntl(end.as_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).is_err() {
                 zlog_sys!(
-                    Error,
+                    Error @ fpm_signals_init_main:195,
                     nix::errno::Errno::last(),
                     "failed to init signals: fd_set_blocked()"
                 );
@@ -608,7 +608,7 @@ impl Fpm {
             }
             if fcntl(end.as_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).is_err() {
                 zlog_sys!(
-                    Error,
+                    Error @ fpm_signals_init_main:200,
                     nix::errno::Errno::last(),
                     "failed to init signals: fcntl(F_SETFD, FD_CLOEXEC)"
                 );
@@ -616,7 +616,7 @@ impl Fpm {
             }
         }
         if let Err(e) = crate::ffi::master_signals(write.as_raw_fd(), self.parent_pid) {
-            zlog_sys!(Error, e, "failed to init signals: sigaction()");
+            zlog_sys!(Error @ fpm_signals_init_main:215, e, "failed to init signals: sigaction()");
             return false;
         }
         self.signal_read = Some(read);
@@ -670,7 +670,7 @@ impl Fpm {
             true
         } else {
             zlog!(
-                Error,
+                Error @ fpm_event_init_main:341,
                 "Unable to initialize the event module {}",
                 crate::events::MECHANISM
             );
@@ -695,7 +695,7 @@ impl Fpm {
             Ok(file) => file,
             Err(e) => {
                 zlog_sys!(
-                    Error,
+                    Error @ fpm_conf_write_pid:1261,
                     conf::errno(&e),
                     "Unable to create the PID file ({}).",
                     String::from_utf8_lossy(pid_file)
@@ -705,7 +705,7 @@ impl Fpm {
         };
         if let Err(e) = std::io::Write::write_all(&mut file, self.parent_pid.to_string().as_bytes())
         {
-            zlog_sys!(Error, conf::errno(&e), "Unable to write to the PID file.");
+            zlog_sys!(Error @ fpm_conf_write_pid:1268, conf::errno(&e), "Unable to write to the PID file.");
             return false;
         }
         true
@@ -717,7 +717,7 @@ impl Fpm {
             && let Err(e) = std::fs::remove_file(conf::path(pid_file))
         {
             zlog_sys!(
-                Error,
+                Error @ fpm_conf_unlink_pid:1242,
                 conf::errno(&e),
                 "Unable to remove the PID file ({}).",
                 String::from_utf8_lossy(pid_file)
@@ -743,7 +743,7 @@ impl Fpm {
             return;
         };
         if poller.add(borrowed, edge).is_err() {
-            zlog!(Error, "kevent: unable to add event");
+            zlog!(Error @ fpm_event_kqueue_add:167, "kevent: unable to add event");
             return;
         }
         self.watched.retain(|(had, _)| *had != fd);
@@ -833,7 +833,7 @@ impl Fpm {
         }
         if !err {
             self.add_timer(Timer::Maintenance, crate::pctl::MAINTENANCE_HEARTBEAT, true);
-            zlog!(Notice, "ready to handle connections");
+            zlog!(Notice @ fpm_event_loop:374, "ready to handle connections");
         }
         loop {
             let now = Instant::now();
@@ -912,23 +912,25 @@ impl Fpm {
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(nix::errno::Errno::EAGAIN) | Ok(_) => return Ok(()),
                 Err(e) => {
-                    zlog_sys!(Error, e, "unable to read from the signal pipe");
+                    zlog_sys!(Error @ fpm_got_signal:74, e, "unable to read from the signal pipe");
                     return Ok(());
                 }
             }
             match byte[0] {
                 b'C' => self.add_timer(Timer::Bury, 0, false),
                 b'I' | b'T' => {
-                    zlog!(Notice, "Terminating ...");
+                    // `case 'I'` and `case 'T'`, SIGINT's and SIGTERM's.
+                    let line = if byte[0] == b'I' { 91 } else { 96 };
+                    zlog!(Notice @ (crate::zlog::Site::at("fpm_got_signal", line)), "Terminating ...");
                     self.pctl(State::Terminating, crate::pctl::Action::Set)?;
                 }
                 b'Q' => {
-                    zlog!(Notice, "Finishing ...");
+                    zlog!(Notice @ fpm_got_signal:101, "Finishing ...");
                     self.pctl(State::Finishing, crate::pctl::Action::Set)?;
                 }
                 b'1' => crate::stdio::reopen_logs(self),
                 b'2' => {
-                    zlog!(Notice, "Reloading in progress ...");
+                    zlog!(Notice @ fpm_got_signal:131, "Reloading in progress ...");
                     self.pctl(State::Reloading, crate::pctl::Action::Set)?;
                 }
                 _ => {}

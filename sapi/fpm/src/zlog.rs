@@ -48,6 +48,46 @@ impl Level {
     }
 }
 
+/// Where in php-src a `zlog` call stands, `__func__` and `__LINE__`,
+/// which `zlog_buf_prefix` names before the message at `log_level =
+/// debug`: the C function and the line the call's closing parenthesis is
+/// on, as clang expands `__LINE__` in a call written over several lines.
+/// A stream no `zlog_msg` named a site for names C's `(null)` and line 0,
+/// and `fpm_fcgi_log`'s `vzlog("", 0, …)` an empty name and line 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Site {
+    function: Option<&'static str>,
+    line: u32,
+}
+
+impl Site {
+    /// The call in `function` whose `)` is on `line`.
+    pub(crate) const fn at(function: &'static str, line: u32) -> Site {
+        Site {
+            function: Some(function),
+            line,
+        }
+    }
+
+    /// `fpm_fcgi_log`: what `fastcgi.c` logs, through `vzlog("", 0, …)`.
+    pub(crate) const FCGI: Site = Site::at("", 0);
+
+    /// A stream's while nothing named one, `stream->function == NULL`.
+    const UNNAMED: Site = Site {
+        function: None,
+        line: 0,
+    };
+
+    /// `%s(), line %d: `, a NULL name as C's `printf` writes it.
+    fn named(self) -> String {
+        format!(
+            "{}(), line {}: ",
+            self.function.unwrap_or("(null)"),
+            self.line
+        )
+    }
+}
+
 /// `MAX_BUF_LENGTH`: the most one `zlog` line holds.
 const MAX_BUF_LENGTH: usize = 2048;
 /// `ZLOG_DEFAULT_LIMIT`.
@@ -168,21 +208,31 @@ fn print_time(level: Level) -> Vec<u8> {
 }
 
 /// `zlog_buf_prefix`: the line's head, `[LEVEL] ` under syslog, the time
-/// and `LEVEL: ` otherwise, a child's without the time.
-fn prefix(state: &State, level: Level, syslog: bool) -> Vec<u8> {
+/// and `LEVEL: ` otherwise, a child's without the time; at `log_level =
+/// debug` the call's site after the level, and the master's pid before
+/// it.
+fn prefix(state: &State, level: Level, site: Site, syslog: bool) -> Vec<u8> {
+    let debug = state.level == Level::Debug;
     if syslog {
-        return format!("[{}] ", level.name()).into_bytes();
+        let at = if debug { site.named() } else { String::new() };
+        return format!("[{}] {at}", level.name()).into_bytes();
     }
     let mut out = if state.is_child {
         Vec::new()
     } else {
         print_time(state.level)
     };
-    if state.level == Level::Debug && !state.is_child {
-        out.extend_from_slice(format!("{}: pid {}, ", level.name(), std::process::id()).as_bytes());
-    } else {
-        out.extend_from_slice(format!("{}: ", level.name()).as_bytes());
-    }
+    let head = match (debug, state.is_child) {
+        (true, false) => format!(
+            "{}: pid {}, {}",
+            level.name(),
+            std::process::id(),
+            site.named()
+        ),
+        (true, true) => format!("{}: {}", level.name(), site.named()),
+        (false, _) => format!("{}: ", level.name()),
+    };
+    out.extend_from_slice(head.as_bytes());
     out
 }
 
@@ -206,9 +256,9 @@ fn write_target(target: &Target, bytes: &[u8]) {
     }
 }
 
-/// `vzlog`: one message at `level`, with `errno`'s text after it for a
-/// `ZLOG_SYSERROR`.
-pub(crate) fn log(level: Level, message: &[u8], errno: Option<Errno>) {
+/// `vzlog`: one message at `level` from the call at `site`, with
+/// `errno`'s text after it for a `ZLOG_SYSERROR`.
+pub(crate) fn log(level: Level, site: Site, message: &[u8], errno: Option<Errno>) {
     let external = state().external;
     if let Some(external) = external {
         let mut buf = message.to_vec();
@@ -217,15 +267,15 @@ pub(crate) fn log(level: Level, message: &[u8], errno: Option<Errno>) {
         }
         external(level, &buf);
     }
-    log_line(&state(), level, message, errno);
+    log_line(&state(), level, site, message, errno);
 }
 
-fn log_line(state: &State, level: Level, message: &[u8], errno: Option<Errno>) {
+fn log_line(state: &State, level: Level, site: Site, message: &[u8], errno: Option<Errno>) {
     if level < state.level {
         return;
     }
     let syslog = matches!(state.target, Target::Syslog);
-    let mut buf = prefix(state, level, syslog);
+    let mut buf = prefix(state, level, site, syslog);
     let mut truncated = buf.len() > MAX_BUF_LENGTH - 1;
     if !truncated {
         buf.extend_from_slice(message);
@@ -254,26 +304,45 @@ fn log_line(state: &State, level: Level, message: &[u8], errno: Option<Errno>) {
     }
 }
 
-/// `zlog` with the message formatted, `ZLOG_SYSERROR` where `errno` is
-/// given.
+/// `zlog` with the message formatted, from the call `@ function:line`
+/// names in php-src, or `@ (site)` where the site is chosen as the program
+/// runs.
 #[macro_export]
 macro_rules! zlog {
-    ($level:ident, $($arg:tt)*) => {
-        $crate::zlog::log($crate::zlog::Level::$level, format!($($arg)*).as_bytes(), None)
+    ($level:ident @ $function:ident : $line:literal, $($arg:tt)*) => {
+        $crate::zlog::log(
+            $crate::zlog::Level::$level,
+            $crate::zlog::Site::at(stringify!($function), $line),
+            format!($($arg)*).as_bytes(),
+            None,
+        )
+    };
+    ($level:ident @ ($site:expr), $($arg:tt)*) => {
+        $crate::zlog::log($crate::zlog::Level::$level, $site, format!($($arg)*).as_bytes(), None)
     };
 }
 
 /// `zlog(ZLOG_SYSERROR, …)`: the message and the last error's text.
 #[macro_export]
 macro_rules! zlog_sys {
-    ($level:ident, $errno:expr, $($arg:tt)*) => {
-        $crate::zlog::log($crate::zlog::Level::$level, format!($($arg)*).as_bytes(), Some($errno))
+    ($level:ident @ $function:ident : $line:literal, $errno:expr, $($arg:tt)*) => {
+        $crate::zlog::log(
+            $crate::zlog::Level::$level,
+            $crate::zlog::Site::at(stringify!($function), $line),
+            format!($($arg)*).as_bytes(),
+            Some($errno),
+        )
+    };
+    ($level:ident @ ($site:expr), $errno:expr, $($arg:tt)*) => {
+        $crate::zlog::log($crate::zlog::Level::$level, $site, format!($($arg)*).as_bytes(), Some($errno))
     };
 }
 
-/// `zlog_msg_ex`: `prefix` and `message` as one message of a stream.
-pub(crate) fn msg(level: Level, prefix: &[u8], message: &[u8]) {
+/// `zlog_msg_ex`: `prefix` and `message` as one message of a stream, from
+/// the call at `site`.
+pub(crate) fn msg(level: Level, site: Site, prefix: &[u8], message: &[u8]) {
     let mut stream = Stream::new(level, prefix.len() + message.len(), Dest::Log, false);
+    stream.site = site;
     stream.prefix();
     stream.str(prefix);
     stream.str(message);
@@ -296,6 +365,8 @@ enum Dest {
 #[allow(clippy::struct_excessive_bools)] // `struct zlog_stream`'s bit fields
 pub(crate) struct Stream {
     level: Level,
+    /// `function` and `line`: the call the stream's lines name.
+    site: Site,
     use_syslog: bool,
     use_fd: bool,
     dest: Dest,
@@ -338,6 +409,7 @@ impl Stream {
         let to_stderr_only = matches!(dest, Dest::Log) && !matches!(state.target, Target::File(_));
         let mut stream = Stream {
             level,
+            site: Site::UNNAMED,
             use_syslog,
             use_fd,
             dest,
@@ -482,7 +554,7 @@ impl Stream {
             return 0;
         }
         let state = state();
-        let head = prefix(&state, self.level, self.use_syslog);
+        let head = prefix(&state, self.level, self.site, self.use_syslog);
         let limit = state.limit;
         drop(state);
         if self.use_buffer {
@@ -773,5 +845,76 @@ impl Stream {
     /// `zlog_stream_is_over_limit`.
     pub(crate) fn is_over_limit(&self) -> bool {
         self.over_limit
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Level, Site, State, Target, prefix};
+
+    fn state(level: Level, is_child: bool) -> State {
+        State {
+            target: Target::Stderr,
+            target_is_stderr: false,
+            level,
+            limit: super::DEFAULT_LIMIT,
+            buffering: true,
+            launched: false,
+            is_child,
+            external: None,
+        }
+    }
+
+    /// The head without the master's `[time] `, which is the clock's.
+    fn head(state: &State, level: Level, site: Site, syslog: bool) -> String {
+        let text = String::from_utf8_lossy(&prefix(state, level, site, syslog)).into_owned();
+        text.split_once("] ")
+            .filter(|_| !state.is_child && !syslog)
+            .map_or(text.clone(), |(_, rest)| rest.to_owned())
+    }
+
+    #[test]
+    fn a_debug_line_names_the_call_as_zlog_buf_prefix_does() {
+        let at = Site::at("fpm_init", 83);
+        let pid = std::process::id();
+        let master = state(Level::Debug, false);
+        assert_eq!(
+            head(&master, Level::Notice, at, false),
+            format!("NOTICE: pid {pid}, fpm_init(), line 83: ")
+        );
+        let child = state(Level::Debug, true);
+        assert_eq!(
+            head(&child, Level::Warning, at, false),
+            "WARNING: fpm_init(), line 83: "
+        );
+        assert_eq!(
+            head(&master, Level::Debug, at, true),
+            "[DEBUG] fpm_init(), line 83: "
+        );
+        assert_eq!(
+            head(&master, Level::Error, Site::FCGI, false),
+            format!("ERROR: pid {pid}, (), line 0: ")
+        );
+        assert_eq!(
+            head(&master, Level::Warning, Site::UNNAMED, false),
+            format!("WARNING: pid {pid}, (null)(), line 0: ")
+        );
+    }
+
+    #[test]
+    fn above_debug_the_site_is_not_named() {
+        let at = Site::at("fpm_init", 83);
+        assert_eq!(
+            head(&state(Level::Notice, false), Level::Notice, at, false),
+            "NOTICE: "
+        );
+        assert_eq!(
+            head(&state(Level::Notice, true), Level::Error, at, false),
+            "ERROR: "
+        );
+        assert_eq!(
+            head(&state(Level::Notice, false), Level::Alert, at, true),
+            "[ALERT] "
+        );
     }
 }

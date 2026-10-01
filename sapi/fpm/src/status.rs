@@ -121,7 +121,7 @@ pub(crate) fn status(board: &BoardView, keys: &[Vec<u8>], head_only: bool) -> Pa
     let mut headers = vec![EXPIRES.to_vec(), CACHE_CONTROL.to_vec()];
     if board.idle < 0 || board.active < 0 {
         crate::zlog!(
-            Error,
+            Error @ fpm_status_handle_request:188,
             "[pool {}] invalid status values",
             String::from_utf8_lossy(&board.pool)
         );

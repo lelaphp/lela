@@ -96,7 +96,7 @@ impl Sockets {
                 let key = pair[..eq.min(255)].to_vec();
                 let fd = atoi(&pair[eq + 1..]);
                 zlog!(
-                    Notice,
+                    Notice @ fpm_sockets_init_main:485,
                     "using inherited socket fd={fd}, \"{}\"",
                     String::from_utf8_lossy(&key)
                 );
@@ -163,7 +163,7 @@ impl Sockets {
         let port = atoi(port_str);
         if !(1..=65535).contains(&port) {
             zlog!(
-                Error,
+                Error @ fpm_socket_af_inet_listening_socket:365,
                 "invalid port value '{}'",
                 String::from_utf8_lossy(port_str)
             );
@@ -185,7 +185,7 @@ impl Sockets {
             return sock;
         }
         zlog!(
-            Notice,
+            Notice @ fpm_socket_af_inet_listening_socket:386,
             "Failed implicitly binding to ::, retrying with 0.0.0.0"
         );
         self.by_addr(name, address, b"0.0.0.0", port, backlog, permissions)
@@ -208,7 +208,7 @@ impl Sockets {
         let found: Vec<std::net::SocketAddr> = match (host_text.as_str(), port).to_socket_addrs() {
             Ok(found) => found.collect(),
             Err(e) => {
-                zlog!(Error, "getaddrinfo: {}", gai_text(&e));
+                zlog!(Error @ fpm_socket_af_inet_socket_by_addr:317, "getaddrinfo: {}", gai_text(&e));
                 return None;
             }
         };
@@ -225,7 +225,7 @@ impl Sockets {
                 );
             } else {
                 zlog!(
-                    Warning,
+                    Warning @ fpm_socket_af_inet_socket_by_addr:328,
                     "Found multiple addresses for {host_text}, {} ignored",
                     address.ip()
                 );
@@ -247,7 +247,7 @@ impl Sockets {
         let cut = &address[..address.len().min(SUN_PATH - 1)];
         if address.len() >= SUN_PATH {
             zlog!(
-                Warning,
+                Warning @ fpm_socket_af_unix_listening_socket:416,
                 "[pool {}] cannot bind to UNIX socket '{}' as path is too long (found length: {}, maximal length: {SUN_PATH}), trying cut socket path instead '{}'",
                 String::from_utf8_lossy(name),
                 String::from_utf8_lossy(address),
@@ -377,19 +377,19 @@ fn new_listening(
     let sock = match socket(family, SockType::Stream, SockFlag::empty(), None) {
         Ok(sock) => sock,
         Err(e) => {
-            zlog_sys!(Error, e, "failed to create new listening socket: socket()");
+            zlog_sys!(Error @ fpm_sockets_new_listening_socket:214, e, "failed to create new listening socket: socket()");
             return None;
         }
     };
     if setsockopt(&sock, sockopt::ReuseAddr, &true).is_err() {
-        zlog!(Warning, "failed to change socket attribute");
+        zlog!(Warning @ fpm_sockets_new_listening_socket:219, "failed to change socket attribute");
     }
     let path = address.key();
     let mut saved_umask = None;
     if domain == Domain::Unix {
         if std::os::unix::net::UnixStream::connect(OsStr::from_bytes(&path)).is_ok() {
             zlog!(
-                Error,
+                Error @ fpm_sockets_new_listening_socket:224,
                 "Another FPM instance seems to already listen on {}",
                 String::from_utf8_lossy(&path)
             );
@@ -407,7 +407,7 @@ fn new_listening(
     };
     if let Err(e) = bound {
         zlog_sys!(
-            Error,
+            Error @ fpm_sockets_new_listening_socket:233,
             e,
             "unable to bind listening socket for address '{}'",
             String::from_utf8_lossy(listen_address)
@@ -426,7 +426,7 @@ fn new_listening(
     let backlog = Backlog::new(backlog).unwrap_or(Backlog::MAXCONN);
     if let Err(e) = listen(&sock, backlog) {
         zlog_sys!(
-            Error,
+            Error @ fpm_sockets_new_listening_socket:253,
             e,
             "failed to listen to address '{}'",
             String::from_utf8_lossy(listen_address)

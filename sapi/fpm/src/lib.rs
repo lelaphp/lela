@@ -15,7 +15,8 @@
 //! frames of a slow request's trace where the child's memory is readable,
 //! which php reads out of it: the child is stopped and its memory asked
 //! for as php asks ([`slowlog`]), and the entry carries the request's
-//! time, pool, pid and program (#1301).
+//! time, pool, pid and program, until the engine's frame chain is one
+//! another process can read (#1384).
 
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).

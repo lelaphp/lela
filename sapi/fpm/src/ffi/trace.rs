@@ -14,7 +14,7 @@ use crate::zlog;
 #[cfg(target_os = "macos")]
 pub(crate) fn signal(pid: i32) -> bool {
     if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGSTOP) {
-        crate::zlog_sys!(Error, e, "failed to send SIGSTOP to {pid}");
+        crate::zlog_sys!(Error @ fpm_trace_signal:47, e, "failed to send SIGSTOP to {pid}");
         return false;
     }
     true
@@ -65,7 +65,7 @@ pub(crate) fn ready(pid: i32) -> bool {
     } else {
         ""
     };
-    zlog!(Error, "task_for_pid() failed: {text} ({kr}){hint}");
+    zlog!(Error @ fpm_trace_ready:65, "task_for_pid() failed: {text} ({kr}){hint}");
     false
 }
 
@@ -79,7 +79,7 @@ pub(crate) fn close(_pid: i32) -> bool {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn signal(pid: i32) -> bool {
     if let Err(e) = nix::sys::ptrace::attach(Pid::from_raw(pid)) {
-        crate::zlog_sys!(Error, e, "failed to ptrace(ATTACH) child {pid}");
+        crate::zlog_sys!(Error @ fpm_trace_signal:30, e, "failed to ptrace(ATTACH) child {pid}");
         return false;
     }
     true
@@ -95,7 +95,7 @@ pub(crate) fn ready(_pid: i32) -> bool {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn close(pid: i32) -> bool {
     if let Err(e) = nix::sys::ptrace::detach(Pid::from_raw(pid), None) {
-        crate::zlog_sys!(Error, e, "failed to ptrace(DETACH) child {pid}");
+        crate::zlog_sys!(Error @ fpm_trace_close:47, e, "failed to ptrace(DETACH) child {pid}");
         return false;
     }
     true
