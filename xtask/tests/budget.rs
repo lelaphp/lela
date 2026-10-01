@@ -83,12 +83,12 @@ fn the_tracked_workspace_passes_with_the_manifests_numbers() {
             "{key}"
         );
     }
-    // The count is `Cargo.lock`'s `[[package]]` tables, as `cargo tree`
-    // would count the default build's packages.
+    // The count is `Cargo.lock`'s third-party `[[package]]` tables, those
+    // with a `source` (#1335).
     let packages = std::fs::read_to_string(workspace().join("Cargo.lock"))
         .unwrap()
         .lines()
-        .filter(|l| *l == "[[package]]")
+        .filter(|l| l.starts_with("source = "))
         .count();
     assert_eq!(
         ws.numbers["lock_packages"],
@@ -346,4 +346,52 @@ fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
     let heap = store.read("budget", "php_heap").unwrap().unwrap();
     assert_eq!(heap.status, Status::Fail);
     let _ = std::fs::remove_dir_all(fixture.join("target"));
+}
+
+/// `lock_packages` counts third-party packages, those with a `source`, and
+/// never the workspace's own crates (#1335). The fixture's lock holds 161
+/// of the first beside 200 of the second and fails one over its ceiling of
+/// 160; the same 200 crates beside 88 third-party packages pass.
+#[test]
+fn lock_packages_counts_the_third_party_packages_and_not_the_workspaces_crates() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/budget/lock-packages");
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(&fixture)
+        .arg("budget")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let _ = std::fs::remove_dir_all(fixture.join("target"));
+    assert!(!out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("third-party Cargo.lock packages: 161 over the ceiling of 160"),
+        "{stdout}"
+    );
+
+    let root = scratch("lock-packages");
+    common::scratch_workspace(workspace(), &root).unwrap();
+    let lock = std::fs::read_to_string(fixture.join("Cargo.lock")).unwrap();
+    let mut third_party = 0;
+    let kept: Vec<&str> = lock
+        .split("\n\n")
+        .filter(|table| {
+            if !table.contains("source = ") {
+                return true;
+            }
+            third_party += 1;
+            third_party <= 88
+        })
+        .collect();
+    std::fs::write(root.join("Cargo.lock"), kept.join("\n\n")).unwrap();
+    let mut manifest = Manifest::load(&root).unwrap();
+    manifest.budget.lock_packages = 160;
+    let readings = budget::run(&root, &manifest).unwrap();
+    let ws = workspace_reading(&readings);
+    assert_eq!(ws.numbers["lock_packages"], 88.into(), "{ws:#?}");
+    assert!(
+        !ws.message.contains("Cargo.lock packages"),
+        "200 workspace crates beside 88 third-party packages pass: {}",
+        ws.message
+    );
 }
