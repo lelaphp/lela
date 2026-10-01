@@ -187,8 +187,7 @@ ini = ["session.use_only_cookies=0", "session.use_trans_sid=1"]
 # opcache makes a unit's literal arrays immutable, as this engine's units are
 # by design (principle 3). A witness that pins GC roots or refcounts over a
 # copied literal names this regime, so it agrees exactly. Under the plain
-# recipe it differs, and a divergence row covers that (#770, interim until
-# the design question is settled).
+# recipe it differs, and a divergence row covers that (#770, settled on #917).
 ini = ["opcache.enable_cli=1"]
 
 [sapi]
