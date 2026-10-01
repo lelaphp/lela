@@ -372,10 +372,11 @@ impl PhpArray {
     /// sized for `size` elements, the size held to
     /// `zend_hash_check_size`, whose `Possible integer overflow in memory
     /// allocation` fatal ends the request past `HT_MAX_SIZE` before any
-    /// element is written, and laid down as `layout` says: packed, or a
-    /// hash from the start, `zend_hash_real_init_mixed`, which
+    /// element is written, and laid down at once as `layout` says,
+    /// `zend_hash_real_init_packed` or `zend_hash_real_init_mixed`, which
     /// `debug_zval_dump` tells apart. The elements' memory is asked for
-    /// at the first write.
+    /// here, so a table php real-inits and leaves empty costs what php's
+    /// does.
     ///
     /// ```php
     /// var_dump(count(array_fill(5, 3, 'x')));
@@ -415,7 +416,11 @@ impl PhpArray {
     /// }
     /// ```
     pub fn sized(req: &mut Request, size: u32, layout: Layout) -> Result<PhpArray, Thrown> {
-        req.array_sized(size, layout == Layout::Packed)
+        let laid = match layout {
+            Layout::Packed => req.heap_mut().array_packed(size),
+            Layout::Hash => req.heap_mut().array_mixed(size),
+        };
+        req.fatal_of(laid).map(PhpArray::of)
     }
 
     /// The face over a heap array the engine already holds.

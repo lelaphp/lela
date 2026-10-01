@@ -1550,6 +1550,16 @@ impl crate::Heap {
         Ok(a)
     }
 
+    /// `zend_new_array(size)` then `zend_hash_real_init_packed`: the
+    /// header and the packed slots laid down at once, so a table php
+    /// real-inits and leaves empty holds its slots and reads `packed` to
+    /// `debug_zval_dump`, and the first write grows nothing.
+    pub fn array_packed(&mut self, size: u32) -> Result<Arr, Fatal> {
+        let a = self.array_sized(size)?;
+        a.real_init_packed(&mut self.tables())?;
+        Ok(a)
+    }
+
     /// The request's half of [`crate::Intern::constant_array`]: the
     /// entries written in order, then `IS_ARRAY_IMMUTABLE`; no entries,
     /// the process's [`Arr::empty`].
