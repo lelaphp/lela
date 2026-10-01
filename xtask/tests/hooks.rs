@@ -106,10 +106,12 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
              if [ -f '{refuse}' ] && [ \"$(cat '{refuse}')\" = \"$1 $2\" ]; then exit 1; fi\n\
              if [ \"$1 $2\" = 'xtask regions' ]; then shift 2; exec '{xtask}' --root \"$PWD\" regions \"$@\"; fi\n\
              if [ \"$1 $2\" = 'xtask api-check' ]; then sleep 1; fi\n\
+             if [ \"$1 $2\" = 'xtask test' ]; then git show :AGENTS.md > '{tested}' 2>&1; fi\n\
              printf 'ran %s\\n' \"$*\"\n\
              exit 0\n",
             log = dir.join("cargo.log").display(),
             refuse = dir.join("refuse").display(),
+            tested = dir.join("tested-AGENTS.md").display(),
             xtask = env!("CARGO_BIN_EXE_xtask"),
         ),
     );
@@ -260,13 +262,14 @@ impl Scratch {
 
 /// The instruments that only read the tree first, `fmt` and then at once
 /// `api-check`, `budget`, `unsafe-audit`, `vocab` and `permit --diff`;
-/// then `clippy` and `test`, then `witness` and `crosscheck` at once
-/// (#1252), crosscheck on the staged extensions alone (#1312); then
-/// `xtask regions` over the five region files and not the gitignored
-/// local one, which reaches `computed run`; the region file `computed`
-/// rewrote is re-staged, so the commit carries it and the tree is clean
-/// after, and `computed check` over the five holds the commit to a
-/// rendering.
+/// then `xtask regions` over the five region files and not the gitignored
+/// local one, which reaches `computed run`, and `computed check` over the
+/// five; then `clippy` and `test`, then `witness` and `crosscheck` at once
+/// (#1252), crosscheck on the staged extensions alone (#1312). The region
+/// file `computed` rewrote is re-staged before `test` runs, so the map
+/// tests read the map the commit carries from the index (#1416): a hook
+/// that renders after `test` hands it the map before the render and fails
+/// here. The commit carries the rendered file and the tree is clean after.
 #[test]
 fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     let scratch = scratch("rendered", &Computed::Rendered);
@@ -289,18 +292,24 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     let building = ["xtask witness --staged", "xtask crosscheck --staged"];
     let mut calls = scratch.calls("cargo");
     calls[1..6].sort_unstable();
-    calls[8..10].sort_unstable();
+    calls[9..11].sort_unstable();
+    let rendering = format!("xtask regions {regions}");
     let mut expected: Vec<String> = ["fmt --check"]
         .into_iter()
         .chain(reading)
+        .chain([rendering.as_str()])
         .chain(["xtask clippy --staged", "xtask test --staged"])
         .chain(building)
         .map(str::to_owned)
         .collect();
     expected[1..6].sort_unstable();
-    expected[8..10].sort_unstable();
-    expected.push(format!("xtask regions {regions}"));
+    expected[9..11].sort_unstable();
     assert_eq!(calls, expected);
+    let tested = fs::read_to_string(scratch.dir.join("tested-AGENTS.md")).unwrap();
+    assert!(
+        tested.ends_with("rendered\n"),
+        "`xtask test` read the map from the index before the render: {tested}"
+    );
     let printed: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("ran ")).collect();
     assert_eq!(printed[1..6], reading, "{out}");
     assert_eq!(printed[8..], building, "{out}");

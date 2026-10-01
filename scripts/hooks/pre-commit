@@ -17,8 +17,10 @@
 # a touched one to it (#269);
 # `permit --diff` judges every staged file as the Write of
 # its staged content and refuses the commit with the rule id on a denial
-# (the harness's own files are a note: a person commits those). Last,
-# `computed run` on the region files, always, since a staged change under
+# (the harness's own files are a note: a person commits those). Between
+# the two groups and before clippy and test, `computed run` on the region
+# files, always, so the map tests read the map the commit carries (#1416),
+# and since a staged change under
 # a crate makes a region stale without staging its file, through `xtask
 # regions`, which reads computed's exit once
 # for every caller and refuses a broken marker, a missing computed and an
@@ -137,13 +139,12 @@ if [ "$status" != 0 ]; then
     echo "pre-commit: refused before clippy, test and witness ran; they measure the commit once what is above is fixed" >&2
     exit "$status"
 fi
-step $X clippy --staged
-step $X test --staged
-spawn $X witness --staged
-spawn $X crosscheck --staged
-gather
-rm -rf "$at_once"
-
+# The regions next, rendered and re-staged before anything that reads
+# them runs (#1416): xtask's map tests read the map from the index, `git
+# show :AGENTS.md`, so a commit that changes a region's inputs (a crate
+# under ext/, a lock line, a rule) is tested against the map it will
+# carry and not the one before the render. After the group above, whose
+# readings the seams and rules regions render.
 regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md harness-design.md'
 # shellcheck disable=SC2086
 if rendered=$($X regions $regions); then
@@ -160,4 +161,11 @@ if ! computed check $regions >/dev/null 2>&1; then
     computed check $regions 2>&1 >&2 | grep -Ev ' fresh$' >&2
     status=1
 fi
+step $X clippy --staged
+step $X test --staged
+spawn $X witness --staged
+spawn $X crosscheck --staged
+gather
+rm -rf "$at_once"
+
 exit "$status"
