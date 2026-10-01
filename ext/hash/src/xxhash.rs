@@ -81,9 +81,9 @@ pub(crate) struct Xxh32 {
 
 impl Xxh32 {
     /// `PHP_XXH32Init`: `XXH32_reset` at the seed.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::unnecessary_wraps)] // `Init`'s signature
     pub(crate) fn init(req: &mut Request, options: Options) -> Result<Box<dyn State>, Thrown> {
-        let seed = options.seed(req)? as u32;
+        let seed = options.seed(req) as u32;
         Ok(Box::new(Xxh32 {
             total_len_32: 0,
             large_len: 0,
@@ -224,8 +224,9 @@ pub(crate) struct Xxh64 {
 
 impl Xxh64 {
     /// `PHP_XXH64Init`: `XXH64_reset` at the seed.
+    #[allow(clippy::unnecessary_wraps)] // `Init`'s signature
     pub(crate) fn init(req: &mut Request, options: Options) -> Result<Box<dyn State>, Thrown> {
-        let seed = options.seed(req)?;
+        let seed = options.seed(req);
         Ok(Box::new(Xxh64 {
             total_len: 0,
             v: [
@@ -402,8 +403,8 @@ impl Xxh3 {
     /// with a warning.
     fn init(req: &mut Request, options: Options, width: Width) -> Result<Box<dyn State>, Thrown> {
         let name = width.name();
-        let seed = options.get(req, b"seed")?;
-        let secret = options.get(req, b"secret")?;
+        let seed = options.get(b"seed");
+        let secret = options.get(b"secret");
         if seed.is_some() && secret.is_some() {
             return Err(throw(
                 req,

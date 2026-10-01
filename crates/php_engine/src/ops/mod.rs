@@ -299,8 +299,7 @@ pub(crate) fn in_array(
         ValueRef::Int(n) if strict => return Ok(table.contains(&Key::Int(n))),
         _ if strict => return Ok(false),
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => {
-            let empty = PhpString::new(req, b"")?;
-            return Ok(table.contains(&Key::Str(empty)));
+            return Ok(table.find(b"").is_some());
         }
         _ => {}
     }

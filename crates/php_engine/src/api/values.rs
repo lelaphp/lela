@@ -420,6 +420,28 @@ impl PhpArray {
         self.0.get(key.heap()).map(Value::of_zval)
     }
 
+    /// The value under the string key of these bytes, a view of it:
+    /// php's `zend_hash_str_find`, which hashes the bytes and walks the
+    /// chain and so allocates nothing, where a [`Key::Str`] would be a
+    /// request string made for the lookup alone. The bytes are the key
+    /// as written, an option's or a field's name; `"1"` finds the
+    /// string key `"1"`, which no array holds, as php's does.
+    ///
+    /// ```php
+    /// $s = serialize([1]);
+    /// unserialize($s, ['max_depth' => 4, 'allowed_classes' => false]);
+    /// $m = memory_get_usage();
+    /// unserialize($s, ['max_depth' => 4, 'allowed_classes' => false]);
+    /// var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
+    #[must_use]
+    pub fn find(&self, name: &[u8]) -> Option<Value> {
+        self.0.str_find(name).map(Value::of_zval)
+    }
+
     /// Whether `key` is present, `array_key_exists`.
     #[must_use]
     pub fn contains(&self, key: &Key) -> bool {

@@ -976,13 +976,9 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
         return invalid(req);
     }
     crate::load_members(req, this, &Value::array(props))?;
-    let flags_key = PhpString::new(req, b"flags")?;
-    let elements_key = PhpString::new(req, b"heap_elements")?;
-    let flags = state
-        .get(&Key::Str(flags_key))
-        .and_then(|f| f.deref().as_int());
+    let flags = state.find(b"flags").and_then(|f| f.deref().as_int());
     let elements = state
-        .get(&Key::Str(elements_key))
+        .find(b"heap_elements")
         .and_then(|e| e.deref().as_array().copied());
     let (Some(mut flags), Some(elements)) = (flags, elements) else {
         return invalid(req);
@@ -996,17 +992,12 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
         return invalid(req);
     }
     with(req, this, |h| h.flags = flags)?;
-    let data_key = PhpString::new(req, b"data")?;
-    let priority_key = PhpString::new(req, b"priority")?;
     for (_, value) in elements.snapshot() {
         let elem = if queue {
             let Some(pair) = value.as_array().copied().filter(|p| p.len() == 2) else {
                 return invalid(req);
             };
-            let (Some(d), Some(p)) = (
-                pair.get(&Key::Str(data_key)),
-                pair.get(&Key::Str(priority_key)),
-            ) else {
+            let (Some(d), Some(p)) = (pair.find(b"data"), pair.find(b"priority")) else {
                 return invalid(req);
             };
             (crate::copied(req, d), crate::copied(req, p))

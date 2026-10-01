@@ -403,8 +403,7 @@ pub(crate) fn name_entries(
             continue;
         };
         let text = Value::string(PhpString::new(req, &text)?);
-        let label_key = Key::Str(PhpString::new(req, &label)?);
-        let found = inner.get(&label_key);
+        let found = inner.find(&label);
         match found.as_ref().map(Value::as_ref) {
             Some(ValueRef::Array(list)) => {
                 let mut list = *list;
@@ -420,6 +419,7 @@ pub(crate) fn name_entries(
                 let mut list = PhpArray::new(req)?;
                 list.append(req, first)?;
                 list.append(req, text)?;
+                let label_key = Key::Str(PhpString::new(req, &label)?);
                 inner.set(req, label_key, Value::array(list))?;
             }
             Some(_) => {}

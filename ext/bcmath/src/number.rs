@@ -570,12 +570,10 @@ impl Number {
     /// Cannot modify readonly property BcMath\Number::$value
     /// ```
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
-        let key = PhpString::new(req, b"value")?;
         let text = data
-            .get(&Key::Str(key))
+            .find(b"value")
             .and_then(|value| value.deref().as_str_bytes().map(<[u8]>::to_vec))
             .filter(|text| !text.is_empty());
-        req.release(Value::string(key));
         let Some(text) = text else {
             return Err(invalid_serialization(req));
         };

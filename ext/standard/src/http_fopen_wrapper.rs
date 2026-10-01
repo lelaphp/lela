@@ -20,7 +20,7 @@ use php_ext::request::{
     Handshake, Opening, OptionAnswer, Request, Stream, StreamOption, StreamWrapper, Xport,
     XportFailure,
 };
-use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
 use php_ext_uri::UriStruct;
 
 use crate::State;
@@ -1425,8 +1425,10 @@ fn out(
 /// prints as `unread_bytes`.
 fn unread_bytes(req: &mut Request, stream: Stream) -> Result<usize, Thrown> {
     let meta = stream.meta_data(req)?;
-    let key = Key::Str(PhpString::new(req, b"unread_bytes")?);
-    let unread = meta.get(&key).and_then(|v| v.as_int()).unwrap_or(0);
+    let unread = meta
+        .find(b"unread_bytes")
+        .and_then(|v| v.as_int())
+        .unwrap_or(0);
     req.release(Value::array(meta));
     Ok(usize::try_from(unread).unwrap_or(0))
 }

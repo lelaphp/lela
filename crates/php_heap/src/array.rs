@@ -870,21 +870,37 @@ impl Arr {
     /// comparing the bytes, since the caller holds no string to be the
     /// same as.
     pub(crate) fn find_bytes(self, h: u64, bytes: &[u8]) -> Option<Str> {
+        let idx = self.find_bucket_bytes(h, bytes)?;
+        self.read_bucket(idx).key
+    }
+
+    /// `zend_hash_str_find_bucket`: the bucket of the string key whose
+    /// hash is `h` and whose bytes are `bytes`, none in a packed or an
+    /// uninitialised table, whose two hash slots name no bucket.
+    fn find_bucket_bytes(self, h: u64, bytes: &[u8]) -> Option<u32> {
         if self.is_uninitialized() || self.is_packed() {
             return None;
         }
         let mut idx = self.read_hash((h as u32) | self.mask());
         while idx != INVALID {
             let b = self.read_bucket(idx);
-            if b.h == h
-                && let Some(k) = b.key
-                && k.bytes() == bytes
-            {
-                return Some(k);
+            if b.h == h && b.key.is_some_and(|k| k.bytes() == bytes) {
+                return Some(idx);
             }
             idx = b.val.next();
         }
         None
+    }
+
+    /// `zend_hash_str_find(ht, str, len)` (`Z/Zend/zend_hash.c`): the
+    /// value under the string key of these bytes, copied, no owner
+    /// taken, found by the bytes' hash and a walk of its chain, so the
+    /// lookup allocates nothing. The bytes are a key as written: no
+    /// integer is read out of them, as `zend_symtable_str_find` would.
+    #[must_use]
+    pub fn str_find(&self, bytes: &[u8]) -> Option<Zval> {
+        let idx = self.find_bucket_bytes(crate::string::hash_func(bytes), bytes)?;
+        Some(self.read_bucket(idx).val)
     }
 
     /// `zend_hash_index_find_bucket`: the bucket of an integer key. The

@@ -26,6 +26,7 @@ Arr::reset
 Arr::set_declared_rows
 Arr::set_has_empty_ind
 Arr::set_next_free
+Arr::str_find
 Arr::table_size
 Arr::unprotect
 Arr::value_ref

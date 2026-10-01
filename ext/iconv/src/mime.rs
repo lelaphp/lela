@@ -607,9 +607,8 @@ fn decode(input: &[u8], enc: &[u8], mode: Mode) -> Result<(Header, usize), Error
 }
 
 /// One of the encoder's preferences, `zend_hash_str_find_deref`.
-fn preference(req: &mut Request, prefs: PhpArray, name: &[u8]) -> Result<Option<Value>, Thrown> {
-    let key = Key::Str(PhpString::new(req, name)?);
-    Ok(prefs.get(&key).map(|value| value.deref()))
+fn preference(prefs: PhpArray, name: &[u8]) -> Option<Value> {
+    prefs.find(name).map(|value| value.deref())
 }
 
 /// `iconv_mime_encode(string $field_name, string $field_value, array $options = []): string|false`,
@@ -654,7 +653,7 @@ fn iconv_mime_encode(
     let mut in_charset = encoding(req, Kind::Internal);
     let mut out_charset = in_charset.clone();
     let (mut max, mut lf, mut scheme) = (76i64, b"\r\n".to_vec(), Scheme::Base64);
-    if let Some(given) = preference(req, options, b"scheme")?
+    if let Some(given) = preference(options, b"scheme")
         && let Some(&letter) = given.as_str_bytes().and_then(<[u8]>::first)
     {
         match letter {
@@ -667,7 +666,7 @@ fn iconv_mime_encode(
         (&b"input-charset"[..], &mut in_charset),
         (b"output-charset", &mut out_charset),
     ] {
-        let given = preference(req, options, key)?;
+        let given = preference(options, key);
         if let Some(bytes) = given.as_ref().and_then(Value::as_str_bytes) {
             if bytes.len() >= MAX_NAME {
                 too_long(req);
@@ -678,10 +677,10 @@ fn iconv_mime_encode(
             }
         }
     }
-    if let Some(given) = preference(req, options, b"line-length")? {
+    if let Some(given) = preference(options, b"line-length") {
         max = to_long(req, &given)?;
     }
-    if let Some(given) = preference(req, options, b"line-break-chars")? {
+    if let Some(given) = preference(options, b"line-break-chars") {
         lf = to_string(req, &given)?.as_bytes().to_vec();
     }
     // `(size_t) line_len`.

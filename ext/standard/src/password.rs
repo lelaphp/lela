@@ -139,8 +139,7 @@ fn option_long(
     let Some(options) = options else {
         return Ok(None);
     };
-    let key = Key::Str(PhpString::new(req, name)?);
-    match options.get(&key) {
+    match options.find(name) {
         Some(value) => Ok(Some(to_long(req, &value)?)),
         None => Ok(None),
     }
@@ -155,15 +154,14 @@ fn make_salt(
     options: Option<PhpArray>,
     length: usize,
 ) -> Result<Vec<u8>, Thrown> {
-    if let Some(options) = options {
-        let key = Key::Str(PhpString::new(req, b"salt")?);
-        if options.contains(&key) {
-            docref(
-                req,
-                Level::Warning,
-                "The \"salt\" option has been ignored, since providing a custom salt is no longer supported",
-            );
-        }
+    if let Some(options) = options
+        && options.find(b"salt").is_some()
+    {
+        docref(
+            req,
+            Level::Warning,
+            "The \"salt\" option has been ignored, since providing a custom salt is no longer supported",
+        );
     }
     let mut buffer = vec![0u8; length * 3 / 4 + 1];
     if !crate::ffi::random_bytes(&mut buffer) {

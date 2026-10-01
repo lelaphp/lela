@@ -812,6 +812,7 @@ values::PhpArray::cursor_key
 values::PhpArray::cursor_next
 values::PhpArray::cursor_prev
 values::PhpArray::cursor_reset
+values::PhpArray::find
 values::PhpArray::get
 values::PhpArray::is_empty
 values::PhpArray::is_list

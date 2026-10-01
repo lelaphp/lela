@@ -515,9 +515,8 @@ pub(crate) fn wrapper() -> StreamWrapper {
 /// `stream->mode`, as `stream_get_meta_data` reads it out.
 fn stream_mode(req: &mut Request, stream: Stream) -> Result<Vec<u8>, Thrown> {
     let meta = stream.meta_data(req)?;
-    let key = Key::Str(PhpString::new(req, b"mode")?);
     let mode = meta
-        .get(&key)
+        .find(b"mode")
         .and_then(|v| v.deref().as_str_bytes().map(<[u8]>::to_vec))
         .unwrap_or_default();
     req.release(Value::array(meta));

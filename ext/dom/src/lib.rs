@@ -631,15 +631,6 @@ fn intern(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
     Err(throw(req, "Error", &format!("Couldn't fetch {name}")))
 }
 
-/// `zend_hash_str_find_deref(array, name)`: a view of the element, no
-/// owner taken.
-fn array_get(req: &mut Request, array: PhpArray, name: &[u8]) -> Result<Option<Value>, Thrown> {
-    let key = PhpString::new(req, name)?;
-    let found = array.get(&Key::Str(key)).map(|v| v.deref());
-    req.release(Value::string(key));
-    Ok(found)
-}
-
 /// A string value of `bytes`, one owner the caller's.
 fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
     Ok(Value::string(PhpString::new(req, bytes)?))

@@ -6,9 +6,9 @@
 
 use std::ffi::{CStr, CString, c_int};
 
-use php_ext::raising::{Level, Thrown, docref};
+use php_ext::raising::{Level, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{PhpArray, Value, ValueRef};
 
 use crate::constants::{
     OPENSSL_KEYTYPE_DH, OPENSSL_KEYTYPE_DSA, OPENSSL_KEYTYPE_EC, OPENSSL_KEYTYPE_ED448,
@@ -42,49 +42,32 @@ pub(crate) fn as_int(n: i64) -> c_int {
     i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
-/// `zend_hash_str_find(Z_ARRVAL_P(args), name)`: the entry as it is, a
-/// reference not followed.
-pub(crate) fn field(
-    req: &mut Request,
-    array: PhpArray,
-    name: &[u8],
-) -> Result<Option<Value>, Thrown> {
-    let key = PhpString::new(req, name)?;
-    Ok(array.get(&Key::Str(key)))
-}
-
 /// The `$options` of a native that parses a configuration, `a!`: each
 /// entry read as `SET_OPTIONAL_STRING_ARG` and `SET_OPTIONAL_LONG_ARG`
 /// read it, of its own type or not at all.
 struct Options(Option<PhpArray>);
 
 impl Options {
-    /// The entry under `name`, as it is.
-    fn entry(&self, req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown> {
-        match self.0 {
-            Some(array) => field(req, array, name),
-            None => Ok(None),
-        }
+    /// The entry under `name`, as it is, a reference not followed:
+    /// `zend_hash_str_find(Z_ARRVAL_P(args), name)`.
+    fn entry(&self, name: &[u8]) -> Option<Value> {
+        self.0.and_then(|array| array.find(name))
     }
 
     /// A string entry, as C reads it.
-    fn string(&self, req: &mut Request, name: &[u8]) -> Result<Option<CString>, Thrown> {
-        Ok(self
-            .entry(req, name)?
-            .and_then(|value| match value.as_ref() {
-                ValueRef::Str(s) => Some(c_string(s.as_bytes())),
-                _ => None,
-            }))
+    fn string(&self, name: &[u8]) -> Option<CString> {
+        self.entry(name).and_then(|value| match value.as_ref() {
+            ValueRef::Str(s) => Some(c_string(s.as_bytes())),
+            _ => None,
+        })
     }
 
     /// An integer entry.
-    fn long(&self, req: &mut Request, name: &[u8]) -> Result<Option<i64>, Thrown> {
-        Ok(self
-            .entry(req, name)?
-            .and_then(|value| match value.as_ref() {
-                ValueRef::Int(n) => Some(n),
-                _ => None,
-            }))
+    fn long(&self, name: &[u8]) -> Option<i64> {
+        self.entry(name).and_then(|value| match value.as_ref() {
+            ValueRef::Int(n) => Some(n),
+            _ => None,
+        })
     }
 }
 
@@ -174,37 +157,32 @@ pub(crate) struct Settings {
 /// Warning: openssl_csr_new(): Error loading extensions_section section nope of /opt/homebrew/etc/openssl@3/openssl.cnf in %s on line 8
 /// bool(false)
 /// ```
-pub(crate) fn parse(
-    req: &mut Request,
-    options: Option<PhpArray>,
-) -> Result<Option<Settings>, Thrown> {
+pub(crate) fn parse(req: &mut Request, options: Option<PhpArray>) -> Option<Settings> {
     let options = Options(options);
-    let Some((file, section, conf)) = load(req, &options)? else {
-        return Ok(None);
-    };
+    let (file, section, conf) = load(req, &options)?;
     let setting =
         |conf: &Conf, name: &CStr| conf.string(Some(&section), name).map(|v| c_string(&v));
-    let digest_name = match options.string(req, b"digest_alg")? {
+    let digest_name = match options.string(b"digest_alg") {
         Some(name) => Some(name),
         None => setting(&conf, c"default_md"),
     };
-    let extensions = match options.string(req, b"x509_extensions")? {
+    let extensions = match options.string(b"x509_extensions") {
         Some(name) => Some(name),
         None => setting(&conf, c"x509_extensions"),
     };
-    let request_extensions = match options.string(req, b"req_extensions")? {
+    let request_extensions = match options.string(b"req_extensions") {
         Some(name) => Some(name),
         None => setting(&conf, c"req_extensions"),
     };
-    let bits = match options.long(req, b"private_key_bits")? {
+    let bits = match options.long(b"private_key_bits") {
         Some(bits) => as_int(bits),
         None => c_int::try_from(conf.number(Some(&section), c"default_bits")).unwrap_or(0),
     };
     let key_type = options
-        .long(req, b"private_key_type")?
+        .long(b"private_key_type")
         .map_or(Some(KeyKind::Rsa), |n| kind_of(i64::from(as_int(n))));
 
-    let encrypt = if let Some(value) = options.entry(req, b"encrypt_key")? {
+    let encrypt = if let Some(value) = options.entry(b"encrypt_key") {
         matches!(value.as_ref(), ValueRef::Bool(true))
     } else {
         let said = conf
@@ -214,14 +192,14 @@ pub(crate) fn parse(
     };
 
     let mut cipher = None;
-    if encrypt && let Some(algo) = options.long(req, b"encrypt_key_cipher")? {
+    if encrypt && let Some(algo) = options.long(b"encrypt_key_cipher") {
         let Some(found) = cipher_of(algo) else {
             docref(
                 req,
                 Level::Warning,
                 "Unknown cipher algorithm for private key",
             );
-            return Ok(None);
+            return None;
         };
         cipher = Some(found);
     }
@@ -234,11 +212,11 @@ pub(crate) fn parse(
         "extensions_section",
         extensions.as_deref(),
     ) {
-        return Ok(None);
+        return None;
     }
 
     let mut curve = 0;
-    if let Some(name) = options.string(req, b"curve_name")? {
+    if let Some(name) = options.string(b"curve_name") {
         curve = ffi::short_name_nid(&name);
         if curve == 0 {
             let text = format!(
@@ -246,20 +224,20 @@ pub(crate) fn parse(
                 String::from_utf8_lossy(name.as_bytes())
             );
             docref(req, Level::Warning, &text);
-            return Ok(None);
+            return None;
         }
     }
 
     if !string_mask(req, &conf, &section) {
-        return Ok(None);
+        return None;
     }
 
     let label = "request_extensions_section";
     if !syntax_check(req, &conf, &file, label, request_extensions.as_deref()) {
-        return Ok(None);
+        return None;
     }
 
-    Ok(Some(Settings {
+    Some(Settings {
         conf,
         section,
         digest,
@@ -270,32 +248,30 @@ pub(crate) fn parse(
         encrypt,
         cipher,
         curve,
-    }))
+    })
 }
 
 /// The configuration file `config` names, or the default one, read
 /// after the default one is, under the section `config_section_name`
 /// names, with its OIDs made; `None` where it does not read, or after
 /// php's warning where an OID cannot be made.
-fn load(req: &mut Request, options: &Options) -> Result<Option<(CString, CString, Conf)>, Thrown> {
-    let file = match options.string(req, b"config")? {
+fn load(req: &mut Request, options: &Options) -> Option<(CString, CString, Conf)> {
+    let file = match options.string(b"config") {
         Some(file) => file,
         None => c_string(&default_file()),
     };
     let section = options
-        .string(req, b"config_section_name")?
+        .string(b"config_section_name")
         .unwrap_or_else(|| c"req".to_owned());
     let default = c_string(&default_file());
     if !Conf::new().is_some_and(|mut global| global.load(&default)) {
         store_errors(req);
     }
-    let Some(mut conf) = Conf::new() else {
-        return Ok(None);
-    };
+    let mut conf = Conf::new()?;
     if !conf.load(&file) || !load_oids(req, &conf) {
-        return Ok(None);
+        return None;
     }
-    Ok(Some((file, section, conf)))
+    Some((file, section, conf))
 }
 
 /// The request's digest: `EVP_md_null()` for `null`, looked up nowhere;

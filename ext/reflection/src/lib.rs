@@ -5407,10 +5407,7 @@ fn const_string(req: &mut Request, name: &[u8], indent: &str) -> String {
 /// at startup carries and one a running program defined does not,
 /// which is `get_defined_constants()`'s own list here.
 fn constant_is_persistent(req: &mut Request, name: &[u8]) -> bool {
-    let Ok(key) = PhpString::new(req, name) else {
-        return true;
-    };
-    let defined = req.constants().map(|table| table.contains(&Key::Str(key)));
+    let defined = req.constants().map(|table| table.find(name).is_some());
     !defined.unwrap_or(false)
 }
 
@@ -8477,7 +8474,7 @@ impl ReflectionReference {
     ) -> Result<Option<Instance<ReflectionReference>>, Thrown> {
         let key = match key {
             Union::A(n) => Key::Int(n),
-            Union::B(name) => Key::Str(PhpString::new(req, name.as_bytes())?),
+            Union::B(name) => Key::Str(name),
         };
         let Some(item) = array.get(&key) else {
             return Err(throw(req, "ReflectionException", "Array key not found"));

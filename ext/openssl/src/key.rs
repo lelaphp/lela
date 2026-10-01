@@ -352,20 +352,20 @@ fn openssl_pkey_new(
     #[php(default = null)] options: Option<PhpArray>,
 ) -> Result<OrFalse<Instance<OpenSSLAsymmetricKey>>, Thrown> {
     if let Some(array) = options
-        && let Some((kind, data)) = keydata::entry(req, array)?
+        && let Some((kind, data)) = keydata::entry(array)
     {
         let made = match kind {
-            KeyKind::Rsa => keydata::rsa(req, data)?.map(|key| (key, true)),
-            KeyKind::Dsa | KeyKind::Dh => keydata::ffc(req, kind, data)?,
-            KeyKind::Ec => keydata::ec(req, data)?,
-            _ => keydata::curve(req, kind, data)?,
+            KeyKind::Rsa => keydata::rsa(req, data).map(|key| (key, true)),
+            KeyKind::Dsa | KeyKind::Dh => keydata::ffc(req, kind, data),
+            KeyKind::Ec => keydata::ec(req, data),
+            _ => keydata::curve(req, kind, data),
         };
         return Ok(match made {
             Some((key, private)) => OrFalse::Value(object_of(req, key, private)?),
             None => OrFalse::False,
         });
     }
-    let Some(settings) = config::parse(req, options)? else {
+    let Some(settings) = config::parse(req, options) else {
         return Ok(OrFalse::False);
     };
     let Some(key) = settings.generate(req) else {
@@ -449,7 +449,7 @@ fn openssl_pkey_export_to_file(
         let Some(path) = check_path(req, output_filename.0.as_bytes(), origin, false) else {
             return Ok(false);
         };
-        let Some(settings) = config::parse(req, options)? else {
+        let Some(settings) = config::parse(req, options) else {
             return Ok(false);
         };
         let Some(out) = Bio::file(&path, c"w") else {
@@ -510,7 +510,7 @@ fn openssl_pkey_export(
             }
             return Ok(false);
         };
-        let Some(settings) = config::parse(req, options)? else {
+        let Some(settings) = config::parse(req, options) else {
             return Ok(false);
         };
         let Some(out) = Bio::memory() else {

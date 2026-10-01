@@ -749,7 +749,7 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
         });
     };
     let mut allowed = Allowed::Every;
-    if let Some(classes) = options.get(&Key::Str(PhpString::new(req, b"allowed_classes")?)) {
+    if let Some(classes) = options.find(b"allowed_classes") {
         let classes = classes.deref();
         match classes.as_ref() {
             ValueRef::Bool(true) => {}
@@ -799,7 +799,7 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
         }
     }
     let mut depth = None;
-    if let Some(max) = options.get(&Key::Str(PhpString::new(req, b"max_depth")?)) {
+    if let Some(max) = options.find(b"max_depth") {
         let max = max.deref();
         let Some(n) = max.as_int() else {
             let name = value_name(req, &max);

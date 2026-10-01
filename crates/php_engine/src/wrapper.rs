@@ -28,7 +28,6 @@ use std::time::{Duration, SystemTime};
 
 use crate::api::raising::{Level, Thrown, docref, warning};
 use crate::api::request::{Request, UrlStat, WrapperOp};
-use crate::api::values::{Key, PhpString};
 use crate::streams::{Located, StatBuf, stat_buf, strerror};
 
 /// `S_IFMT` and `S_IFLNK`: the file type bits of `st_mode`, and a
@@ -284,9 +283,8 @@ impl Request {
                         // there.
                         let mut sb = [0; 13];
                         for (field, name) in sb.iter_mut().zip(STAT_NAMES) {
-                            let key = Key::Str(PhpString::new(self, name)?);
                             *field = array
-                                .get(&key)
+                                .find(name)
                                 .and_then(|value| value.deref().as_int())
                                 .unwrap_or(0);
                         }
