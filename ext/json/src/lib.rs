@@ -35,7 +35,7 @@ mod encode;
 
 use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::raising::{Thrown, arg_value_error, new_throwable, throw_value};
+use php_ext::raising::{Thrown, arg_value_error, new_throwable, pending, throw_value};
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value};
 
@@ -344,11 +344,15 @@ fn json_encode(
     if flags & JSON_THROW_ON_ERROR == 0 || partial {
         set_error(req, encoder.error_code);
         if encoder.error_code != JSON_ERROR_NONE && !partial {
+            pending(req)?;
             return Ok(OrFalse::False);
         }
     } else if encoder.error_code != JSON_ERROR_NONE {
         return Err(throw_json(req, encoder.error_code));
     }
+    // What a reader of an object's properties left pending, a lazy
+    // object's initializer that threw, is thrown once the encoder is done.
+    pending(req)?;
     Ok(OrFalse::Value(PhpString::new(req, &buffer)?))
 }
 
