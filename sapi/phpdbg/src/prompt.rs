@@ -213,7 +213,7 @@ fn execute(s: &mut Session, here: &mut Here<'_>, command: &Command) -> Ret {
         Command::Run(args) => run(s, here, args.as_deref()),
         Command::Shell(_) => Ret::Success,
         Command::Params(params) => {
-            let resolved = resolve(ROOT, None, params).and_then(|(def, rest)| {
+            let resolved = resolve(&ROOT, None, params).and_then(|(def, rest)| {
                 verify(def, rest)?;
                 Ok((def, rest))
             });
@@ -241,7 +241,10 @@ struct Def {
     alias: Option<u8>,
     args: &'static str,
     subs: &'static [Def],
-    parent: Option<&'static str>,
+    /// A sub-command's `parent`: the row of `phpdbg_prompt_commands` its
+    /// table points at, which is not its own command's row but a fixed
+    /// one each table names, and which its errors name it by.
+    parent: Option<&'static Def>,
     handler: Handler,
 }
 
@@ -257,7 +260,7 @@ const fn def(name: &'static str, alias: Option<u8>, args: &'static str, handler:
 }
 
 const fn sub(
-    parent: &'static str,
+    parent: &'static Def,
     name: &'static str,
     alias: Option<u8>,
     args: &'static str,
@@ -269,6 +272,23 @@ const fn sub(
         args,
         subs: &[],
         parent: Some(parent),
+        handler,
+    }
+}
+
+/// A row of `phpdbg_watch_commands`.
+const fn watch_row(
+    name: &'static str,
+    alias: Option<u8>,
+    args: &'static str,
+    handler: Handler,
+) -> Def {
+    Def {
+        name,
+        alias,
+        args,
+        subs: ROOT.split_at(24).1,
+        parent: None,
         handler,
     }
 }
@@ -291,7 +311,7 @@ const fn with_subs(
 }
 
 /// `phpdbg_prompt_commands`.
-static ROOT: &[Def] = &[
+static ROOT: [Def; 27] = [
     def("exec", Some(b'e'), "s", exec),
     def("stdin", None, "s", stdin),
     def("step", Some(b's'), "", step),
@@ -321,56 +341,62 @@ static ROOT: &[Def] = &[
     def("next", Some(b'n'), "", next),
 ];
 
-/// `phpdbg_print_commands`.
+/// `phpdbg_print_commands`, whose parent is php's row 8, `leave`
+/// (`Z/sapi/phpdbg/phpdbg_print.c:29`).
 static PRINT: &[Def] = &[
-    sub("print", "exec", Some(b'e'), "", print_exec),
-    sub("print", "opline", Some(b'o'), "", print_opline),
-    sub("print", "class", Some(b'c'), "s", print_class),
-    sub("print", "method", Some(b'm'), "m", print_method),
-    sub("print", "func", Some(b'f'), "s", print_func),
-    sub("print", "stack", Some(b's'), "", print_stack),
+    sub(&ROOT[8], "exec", Some(b'e'), "", print_exec),
+    sub(&ROOT[8], "opline", Some(b'o'), "", print_opline),
+    sub(&ROOT[8], "class", Some(b'c'), "s", print_class),
+    sub(&ROOT[8], "method", Some(b'm'), "m", print_method),
+    sub(&ROOT[8], "func", Some(b'f'), "s", print_func),
+    sub(&ROOT[8], "stack", Some(b's'), "", print_stack),
 ];
 
-/// `phpdbg_break_commands`.
+/// `phpdbg_break_commands`, whose parent is php's row 9, `generator`
+/// (`Z/sapi/phpdbg/phpdbg_break.c:29`).
 static BREAK: &[Def] = &[
-    sub("break", "at", Some(b'@'), "*c", unsupported),
-    sub("break", "del", Some(b'~'), "n", break_del),
+    sub(&ROOT[9], "at", Some(b'@'), "*c", unsupported),
+    sub(&ROOT[9], "del", Some(b'~'), "n", break_del),
 ];
 
-/// `phpdbg_list_commands`.
+/// `phpdbg_list_commands`, whose parent is php's row 12, `back`
+/// (`Z/sapi/phpdbg/phpdbg_list.c:37`).
 static LIST: &[Def] = &[
-    sub("list", "lines", Some(b'l'), "l", list),
-    sub("list", "class", Some(b'c'), "s", unsupported),
-    sub("list", "method", Some(b'm'), "m", unsupported),
-    sub("list", "func", Some(b'f'), "s", unsupported),
+    sub(&ROOT[12], "lines", Some(b'l'), "l", list),
+    sub(&ROOT[12], "class", Some(b'c'), "s", unsupported),
+    sub(&ROOT[12], "method", Some(b'm'), "m", unsupported),
+    sub(&ROOT[12], "func", Some(b'f'), "s", unsupported),
 ];
 
-/// `phpdbg_info_commands`.
+/// `phpdbg_info_commands`, whose parent is php's row 13, `frame`
+/// (`Z/sapi/phpdbg/phpdbg_info.c:29`).
 static INFO: &[Def] = &[
-    sub("info", "break", Some(b'b'), "", crate::info::breaks),
-    sub("info", "files", Some(b'F'), "", crate::info::files),
-    sub("info", "classes", Some(b'c'), "", crate::info::classes),
-    sub("info", "funcs", Some(b'f'), "", crate::info::funcs),
-    sub("info", "error", Some(b'e'), "", crate::info::error),
-    sub("info", "constants", Some(b'd'), "", crate::info::constants),
-    sub("info", "vars", Some(b'v'), "", crate::info::vars),
-    sub("info", "globals", Some(b'g'), "", crate::info::globals),
-    sub("info", "literal", Some(b'l'), "", crate::info::literal),
-    sub("info", "memory", Some(b'm'), "", unsupported),
+    sub(&ROOT[13], "break", Some(b'b'), "", crate::info::breaks),
+    sub(&ROOT[13], "files", Some(b'F'), "", crate::info::files),
+    sub(&ROOT[13], "classes", Some(b'c'), "", crate::info::classes),
+    sub(&ROOT[13], "funcs", Some(b'f'), "", crate::info::funcs),
+    sub(&ROOT[13], "error", Some(b'e'), "", crate::info::error),
+    sub(
+        &ROOT[13],
+        "constants",
+        Some(b'd'),
+        "",
+        crate::info::constants,
+    ),
+    sub(&ROOT[13], "vars", Some(b'v'), "", crate::info::vars),
+    sub(&ROOT[13], "globals", Some(b'g'), "", crate::info::globals),
+    sub(&ROOT[13], "literal", Some(b'l'), "", crate::info::literal),
+    sub(&ROOT[13], "memory", Some(b'm'), "", unsupported),
 ];
 
-/// `phpdbg_watch_commands`.
+/// `phpdbg_watch_commands` (`Z/sapi/phpdbg/phpdbg_watch.c:124-129`):
+/// `PHPDBG_COMMAND_D_EX` names no parent, so an error names the row
+/// alone, and the row php's line passes where the others pass a parent
+/// is its sub-commands, `phpdbg_prompt_commands` from row 24, `quit`, on.
 static WATCH: &[Def] = &[
-    sub("watch", "array", Some(b'a'), "s", crate::watch::array),
-    sub("watch", "delete", Some(b'd'), "n", crate::watch::delete),
-    sub(
-        "watch",
-        "recursive",
-        Some(b'r'),
-        "s",
-        crate::watch::recursive,
-    ),
-    sub("watch", "list", Some(b'l'), "", crate::watch::list),
+    watch_row("array", Some(b'a'), "s", crate::watch::array),
+    watch_row("delete", Some(b'd'), "n", crate::watch::delete),
+    watch_row("recursive", Some(b'r'), "s", crate::watch::recursive),
 ];
 
 /// `phpdbg_stack_resolve`: the command the first parameter names, and
@@ -438,10 +464,35 @@ fn resolve<'p>(
     }
 }
 
-/// `phpdbg_command_name`.
+/// `phpdbg_command_name`: a sub-command under the row its table names
+/// as its parent, `back` for `list`'s, and a watch row alone.
+///
+/// ```php
+/// $a = 1;
+/// echo "end\n";
+/// ```
+/// ```request phpdbg
+/// b 3
+/// r
+/// l f
+/// w a
+/// c
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at %SCRATCH%/witness.php:3]
+/// prompt> [Breakpoint #0 at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003: echo "end\n";
+/// prompt> [The command "back func" expected string and got nothing at parameter 1]
+/// prompt> [The command "array" expected string and got nothing at parameter 1]
+/// prompt> end
+/// [Script ended normally]
+/// prompt>
+/// ```
 fn command_name(def: &Def) -> String {
     match def.parent {
-        Some(parent) => format!("{parent} {}", def.name),
+        Some(parent) => format!("{} {}", parent.name, def.name),
         None => def.name.to_owned(),
     }
 }
