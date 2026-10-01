@@ -1,7 +1,8 @@
 //! The three calls on a host fd the engine's streams layer makes that
 //! Rust's `std` has no answer for (design §4.1, `unsafe.homes`): `poll(2)`
 //! of one fd with a timeout, which `php_pollfd_for` is and which a
-//! socket's timed read and `accept` wait on, and `fcntl(2)`'s
+//! socket's timed read and `accept` wait on, and of many, which
+//! `php_select` is for `mysqlnd_poll`; and `fcntl(2)`'s
 //! `O_NONBLOCK`, which `PHP_STREAM_OPTION_BLOCKING` sets on a pipe; and
 //! `recv(2)` under `MSG_PEEK`, which `STREAM_PEEK` asks of any socket;
 //! and `fsync(2)` and `fdatasync(2)`, which `fsync()` asks of a file;
@@ -56,6 +57,51 @@ pub fn poll_fd(
         0 => Ok(false),
         _ => Ok(true),
     }
+}
+
+/// `select(2)` over the three sets `php_select` hands it (`Z/main/php_network.h:83`),
+/// made of one `poll(2)`: each set cut to the fds that came ready within
+/// `timeout`, `None` to wait for ever — read for `POLLIN`, with the
+/// `POLLERR` and `POLLHUP` that `select` reports as readable, write for
+/// `POLLOUT`, except for `POLLPRI` — and the count `select` answers, one
+/// per fd for each set it stays in. The `Err` is the `errno` of a `-1`,
+/// `EINTR` among them.
+pub fn select_fds(sets: [&mut Vec<RawFd>; 3], timeout: Option<Duration>) -> std::io::Result<usize> {
+    const WANT: [libc::c_short; 3] = [
+        libc::POLLIN | libc::POLLERR | libc::POLLHUP,
+        libc::POLLOUT,
+        libc::POLLPRI,
+    ];
+    let mut polled: Vec<libc::pollfd> = Vec::new();
+    for (set, want) in sets.iter().zip(WANT) {
+        for fd in set.iter() {
+            match polled.iter_mut().find(|p| p.fd == *fd) {
+                Some(p) => p.events |= want,
+                None => polled.push(libc::pollfd {
+                    fd: *fd,
+                    events: want,
+                    revents: 0,
+                }),
+            }
+        }
+    }
+    let ms = timeout.map_or(-1, |t| {
+        let whole = t.as_millis() + u128::from(t.subsec_nanos() % 1_000_000 != 0);
+        i32::try_from(whole).unwrap_or(i32::MAX)
+    });
+    let count = libc::nfds_t::try_from(polled.len()).unwrap_or(libc::nfds_t::MAX);
+    // SAFETY: `polled` is `count` live `pollfd`s, which the call reads and
+    // whose `revents` it writes.
+    let n = unsafe { libc::poll(polled.as_mut_ptr(), count, ms) };
+    if n == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut ready = 0;
+    for (set, want) in sets.into_iter().zip(WANT) {
+        set.retain(|fd| polled.iter().any(|p| p.fd == *fd && p.revents & want != 0));
+        ready += set.len();
+    }
+    Ok(ready)
 }
 
 /// `PHP_STREAM_OPTION_BLOCKING` as `php_stdiop_set_option` answers it

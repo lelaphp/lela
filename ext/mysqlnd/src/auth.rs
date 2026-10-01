@@ -650,22 +650,20 @@ fn native(req: &mut Request, name: &[u8]) -> Result<Option<Callable>, Thrown> {
     Ok(callable.ok())
 }
 
-/// `php_stream_open_wrapper(fname, "rb")` and `php_stream_copy_to_mem`,
-/// through `file_get_contents`.
+/// `php_stream_open_wrapper(fname, "rb", REPORT_ERRORS, NULL)` and
+/// `php_stream_copy_to_mem`: a file that does not open warns in the name
+/// of the native being served, as mysqlnd's open does.
 fn read_file(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
-    let Some(read) = native(req, b"file_get_contents")? else {
+    let opening = php_ext::request::Opening {
+        warn: true,
+        ..php_ext::request::Opening::default()
+    };
+    let Some(stream) = req.open_stream_with(path, b"rb", opening)? else {
         return Ok(None);
     };
-    let path = Value::string(PhpString::new(req, path)?);
-    let got = php_ext::call::call(req, &read, std::slice::from_ref(&path));
-    req.release(path);
-    let got = got?;
-    let out = match got.as_ref() {
-        ValueRef::Str(s) => Some(s.as_bytes().to_vec()),
-        _ => None,
-    };
-    req.release(got);
-    Ok(out)
+    let read = stream.copy_to_mem(req, None);
+    stream.free(req);
+    Ok(Some(read?.as_bytes().to_vec()))
 }
 
 /// `EVP_PKEY_size`: the key's modulus in bytes, through

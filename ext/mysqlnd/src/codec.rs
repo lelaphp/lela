@@ -258,12 +258,14 @@ fn fetch(
             Some(b) => Value::string(PhpString::new(req, datetime(field, &b).as_bytes())?),
             None => return Ok(None),
         },
+        // `ps_fetch_bit`: an over-read is warned once, by `variable`.
         FieldType::Bit => match variable(req, p) {
             Some(b) if b.len() <= 8 => long(from_1_to_8_bytes(field, &b), req)?,
-            _ => {
+            Some(_) => {
                 over_read(req);
                 return Ok(None);
             }
+            None => return Ok(None),
         },
         _ => match variable(req, p) {
             Some(b) => Value::string(PhpString::new(req, &b)?),

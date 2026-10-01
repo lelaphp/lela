@@ -1600,6 +1600,20 @@ impl AsRef<AtomicBool> for State {
 /// extension holds no atomic (ADR-0005).
 pub use crate::signal::{Receiving, SIGNAL_POST, Siginfo, take_signals};
 
+/// `php_select` (`Z/main/php_network.h:83`) over the host fds streams
+/// were cast to with [`Cast::Select`]: the read, write and except sets
+/// each cut to the fds that came ready within `timeout`, `None` to wait
+/// for ever, and the count `select(2)` answers, one per fd for each set
+/// it stays in; the `Err` is the `errno` of a failed call, `EINTR` among
+/// them. What `mysqlnd_poll` waits on its connections' streams with, as
+/// `stream_select` waits on the streams it is handed.
+pub fn select(
+    sets: [&mut Vec<std::os::fd::RawFd>; 3],
+    timeout: Option<std::time::Duration>,
+) -> std::io::Result<usize> {
+    php_heap::select_fds(sets, timeout)
+}
+
 /// Why [`Request::resolve_path`] found no file: the last attempt's
 /// reason, or the throwable a wrapper's `url_stat` raised.
 #[derive(Debug)]
