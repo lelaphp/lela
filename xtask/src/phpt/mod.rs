@@ -124,7 +124,7 @@ mod census;
 pub(crate) mod file;
 pub(crate) mod miss;
 mod redirect;
-mod server;
+pub(crate) mod server;
 pub(crate) mod target;
 
 use std::collections::BTreeMap;
