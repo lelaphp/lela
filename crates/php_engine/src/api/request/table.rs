@@ -434,14 +434,14 @@ impl Request {
     /// protected property, `\0C\0p` for a private one `C` declared, and
     /// the name itself for a public one, interned as php's are.
     pub(crate) fn slot_names(&mut self, class: ClassId) -> Result<Vec<php_heap::Str>, Thrown> {
-        let placed = self.placed_properties(class);
+        let placed = self.placed_properties(class).to_vec();
         let mut names = Vec::with_capacity(placed.len());
-        for (declaring, property) in placed {
+        for (declaring, property) in &placed {
             let prefix: Vec<u8> = match property.visibility {
                 Visibility::Public => Vec::new(),
                 Visibility::Protected => b"\0*\0".to_vec(),
                 Visibility::Private => self
-                    .class_decl(declaring)
+                    .class_decl(*declaring)
                     .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat())
                     .unwrap_or_default(),
             };

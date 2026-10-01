@@ -541,16 +541,23 @@ impl Request {
     }
 
     fn evaluate_defaults(&mut self, class: ClassId) -> Result<(), Thrown> {
-        let rows = self.placed_properties(class);
         let done = self
             .class_data
             .get(&class)
             .map_or(0, |data| data.defaults.len());
-        for (declaring, property) in rows.into_iter().skip(done) {
+        // The rows not yet evaluated, which is none once the class's
+        // defaults stood.
+        let rows: Vec<(ClassId, php_unit::decl::PropertyDecl)> = self
+            .placed_properties(class)
+            .iter()
+            .skip(done)
+            .cloned()
+            .collect();
+        for (declaring, property) in &rows {
             let value = match &property.default {
                 Some(expr) => {
-                    let value = crate::api::call::eval_const_expr(self, expr, Some(declaring))?;
-                    Some(self.strictly_held(value, &property, declaring)?)
+                    let value = crate::api::call::eval_const_expr(self, expr, Some(*declaring))?;
+                    Some(self.strictly_held(value, property, *declaring)?)
                 }
                 None if property.ty.is_some() => None,
                 None => Some(Value::null()),

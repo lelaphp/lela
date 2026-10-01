@@ -78,6 +78,115 @@ impl<T> Default for Stacked<T> {
     }
 }
 
+/// A row's key in `EG(class_table)`: the lowered name `zend_hash_add`
+/// files it under, none for a row no name finds.
+pub(crate) trait Key {
+    fn key(&self) -> Option<Box<[u8]>>;
+}
+
+/// Where each key of a table stands: the row, counted as
+/// [`Stacked::get`] counts it.
+type Keys = HashMap<Box<[u8]>, usize>;
+
+/// The keys of `rows`, the first row of a key kept, as `zend_hash_add`
+/// refuses a key the table holds.
+fn keys_of<T: Key>(rows: &[T], from: usize) -> Keys {
+    let mut keys = Keys::with_capacity(rows.len());
+    for (at, row) in (from..).zip(rows) {
+        if let Some(key) = row.key() {
+            keys.entry(key).or_insert(at);
+        }
+    }
+    keys
+}
+
+/// The preload's rows of a keyed table with their keys, shared by every
+/// request as the rows are.
+pub(crate) struct Rows<T> {
+    rows: Arc<[T]>,
+    keys: Arc<Keys>,
+}
+
+impl<T: Key> Rows<T> {
+    fn of(rows: Vec<T>) -> Rows<T> {
+        let keys = Arc::new(keys_of(&rows, 0));
+        Rows {
+            rows: rows.into(),
+            keys,
+        }
+    }
+}
+
+/// A [`Stacked`] table of `EG(class_table)` found by key in one hash lookup,
+/// as `zend_hash_find` finds a bucket, as well as by row: each row
+/// under its [`Key`], the preload's keys shared with the preload's rows
+/// and the request's own dropped with its own.
+pub(crate) struct Keyed<T> {
+    rows: Stacked<T>,
+    preloaded: Arc<Keys>,
+    own: Keys,
+}
+
+impl<T: Key> Keyed<T> {
+    /// A table whose first rows are the preload's.
+    fn over(preloaded: &Rows<T>) -> Keyed<T> {
+        Keyed {
+            rows: Stacked::over(Arc::clone(&preloaded.rows)),
+            preloaded: Arc::clone(&preloaded.keys),
+            own: Keys::new(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(crate) fn get(&self, at: usize) -> Option<&T> {
+        self.rows.get(at)
+    }
+
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
+        self.rows.iter()
+    }
+
+    /// The row filed under the lowered `key`, and where it stands.
+    pub(crate) fn find(&self, key: &[u8]) -> Option<(usize, &T)> {
+        let at = *self.preloaded.get(key).or_else(|| self.own.get(key))?;
+        Some((at, self.rows.get(at)?))
+    }
+
+    pub(crate) fn push(&mut self, row: T) {
+        if let Some(key) = row.key() {
+            self.own.entry(key).or_insert(self.rows.len());
+        }
+        self.rows.push(row);
+    }
+
+    /// The request's own rows, taken out with their keys.
+    fn take_own(&mut self) -> Vec<T> {
+        self.own.clear();
+        self.rows.take_own()
+    }
+}
+
+impl<T: Key> Default for Keyed<T> {
+    fn default() -> Keyed<T> {
+        Keyed::over(&Rows::of(Vec::new()))
+    }
+}
+
+impl Key for Alias {
+    fn key(&self) -> Option<Box<[u8]>> {
+        Some(self.1.clone().into_boxed_slice())
+    }
+}
+
+impl Key for Declared {
+    fn key(&self) -> Option<Box<[u8]>> {
+        Some(self.decl()?.name.0.to_ascii_lowercase().into_boxed_slice())
+    }
+}
+
 /// An alias row of the table of classes: the bucket it stands in, the
 /// lowered name, and the class it names.
 pub(crate) type Alias = (Bucket, Vec<u8>, ClassId);
@@ -142,8 +251,8 @@ impl Buckets {
 /// preload's request and read by every request after; nothing in it
 /// changes but the scripts' hit counters.
 pub(crate) struct Preloaded {
-    pub(crate) classes: Arc<[Declared]>,
-    pub(crate) aliases: Arc<[Alias]>,
+    pub(crate) classes: Rows<Declared>,
+    pub(crate) aliases: Rows<Alias>,
     pub(crate) functions: Arc<[UserFunction]>,
     pub(crate) enum_functions: Arc<[(ClassId, EnumMethod)]>,
     /// `ping_auto_globals_mask`: the superglobals the preloaded code
@@ -474,8 +583,8 @@ impl Request {
             .map(|((path, unit, size), order)| Arc::new(Held::preloaded(unit, path, size, order)))
             .collect();
         Some(Preloaded {
-            classes: self.declared.take_own().into(),
-            aliases: self.aliases.take_own().into(),
+            classes: Rows::of(self.declared.take_own()),
+            aliases: Rows::of(self.aliases.take_own()),
             functions: self.user_functions.take_own().into(),
             enum_functions: self.enum_functions.take_own().into(),
             arms,
@@ -540,7 +649,13 @@ impl Request {
                     };
                     renumbered.push((*old, class_id(natives + self.declared.len())));
                     let place = self.buckets.take();
-                    self.declared.push(Declared { place, ..declared });
+                    // Renumbered, so the placed rows are built again
+                    // under the new numbers.
+                    self.declared.push(Declared {
+                        place,
+                        placed: std::sync::OnceLock::new(),
+                        ..declared
+                    });
                 }
                 Row::Alias(alias, old) => {
                     let class = renumbered
@@ -651,8 +766,8 @@ fn class_id(at: usize) -> ClassId {
 /// The four tables a request starts from: the preload's rows where the
 /// engine preloaded, and none where it did not.
 pub(crate) struct Tables {
-    pub(crate) classes: Stacked<Declared>,
-    pub(crate) aliases: Stacked<Alias>,
+    pub(crate) classes: Keyed<Declared>,
+    pub(crate) aliases: Keyed<Alias>,
     pub(crate) functions: Stacked<UserFunction>,
     pub(crate) enum_functions: Stacked<(ClassId, EnumMethod)>,
 }
@@ -661,14 +776,14 @@ impl Tables {
     pub(crate) fn of(preloaded: Option<&Preloaded>) -> Tables {
         match preloaded {
             Some(preloaded) => Tables {
-                classes: Stacked::over(Arc::clone(&preloaded.classes)),
-                aliases: Stacked::over(Arc::clone(&preloaded.aliases)),
+                classes: Keyed::over(&preloaded.classes),
+                aliases: Keyed::over(&preloaded.aliases),
                 functions: Stacked::over(Arc::clone(&preloaded.functions)),
                 enum_functions: Stacked::over(Arc::clone(&preloaded.enum_functions)),
             },
             None => Tables {
-                classes: Stacked::default(),
-                aliases: Stacked::default(),
+                classes: Keyed::default(),
+                aliases: Keyed::default(),
                 functions: Stacked::default(),
                 enum_functions: Stacked::default(),
             },

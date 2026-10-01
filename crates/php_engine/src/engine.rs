@@ -13,6 +13,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
@@ -30,6 +31,7 @@ use crate::api::abi::{
     DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
     Validation,
 };
+use crate::api::call::Function;
 use crate::api::raising::Level;
 use crate::api::request::{Ending, ExtensionId, Request, Sink, ini_truth};
 use crate::api::values::{ClassId, Value};
@@ -540,6 +542,24 @@ pub(crate) struct Shared {
     /// synthesises, which `ce->function_table` has no row for, so no
     /// lookup by name and no rendering finds it.
     pub(crate) trampolines: Vec<MethodDecl>,
+    /// `CG(class_table)`'s keys as startup leaves them
+    /// ([`class_keys`]): what a lookup by name finds among the engine's
+    /// classes in one hash lookup, as `zend_hash_find` does, before the
+    /// request's own rows.
+    pub(crate) class_keys: HashMap<Box<[u8]>, ClassId>,
+    /// Each class's `ce->function_table`, one row per row of `classes`
+    /// ([`function_tables`]): its own methods under their lowered
+    /// names, each the `Function` its row of `methods` is.
+    pub(crate) function_tables: Vec<HashMap<Box<[u8]>, Function>>,
+    /// Each class's `ce->parent`, one row per row of `classes`, resolved
+    /// once as `zend_register_internal_class_ex` links it: a native
+    /// class's parent is a native class.
+    pub(crate) parents: Vec<Option<ClassId>>,
+    /// Each class's placed properties, one row per row of `classes`,
+    /// built at the first read by any request
+    /// ([`Request::placed_properties`]): what the class and its native
+    /// parents declare, which never changes.
+    pub(crate) placed: Vec<OnceLock<crate::api::request::Placed>>,
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
     ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
@@ -769,6 +789,64 @@ fn link_classes(core: &Extension, extensions: &[Extension]) -> LinkedClasses {
         methods,
         trampolines,
     }
+}
+
+/// `CG(class_table)`'s keys at the end of startup: each class under its
+/// lowered name, as `zend_register_internal_class_ex` adds it, then each
+/// stub `@alias` under its own, as `zend_register_class_alias_ex` adds
+/// it after its class. `zend_hash_add` refuses a key the table holds, so
+/// the first row of a name is the one found.
+fn class_keys(classes: &[ClassDecl]) -> HashMap<Box<[u8]>, ClassId> {
+    let mut keys = HashMap::with_capacity(classes.len());
+    let ids = (0u32..).map(ClassId);
+    for (class, decl) in ids.clone().zip(classes) {
+        keys.entry(lowered(&decl.name.0)).or_insert(class);
+    }
+    for (class, decl) in ids.zip(classes) {
+        for alias in &decl.aliases {
+            keys.entry(lowered(&alias.0)).or_insert(class);
+        }
+    }
+    keys
+}
+
+/// Each native class's `ce->function_table` as `zend_register_functions`
+/// fills it: every row of `methods` a class declares, under the lowered
+/// name of its declaration, numbered past the `functions` natives. The
+/// first of a name stays, as `zend_hash_add_ptr` keeps it.
+fn function_tables(
+    classes: &[ClassDecl],
+    methods: &[NativeMethod],
+    functions: usize,
+) -> Vec<HashMap<Box<[u8]>, Function>> {
+    let mut tables: Vec<HashMap<Box<[u8]>, Function>> = vec![HashMap::new(); classes.len()];
+    for (row, method) in (functions..).zip(methods) {
+        let MethodAt::Declared { class, at } = method.at else {
+            continue;
+        };
+        let (Ok(class), Ok(at), Ok(row)) = (
+            usize::try_from(class.0),
+            usize::try_from(at),
+            u32::try_from(row),
+        ) else {
+            continue;
+        };
+        let (Some(table), Some(decl)) = (
+            tables.get_mut(class),
+            classes.get(class).and_then(|decl| decl.methods.get(at)),
+        ) else {
+            continue;
+        };
+        table
+            .entry(lowered(&decl.function.name.0))
+            .or_insert(Function(row));
+    }
+    tables
+}
+
+/// `zend_string_tolower`: the key a name is found under.
+fn lowered(name: &[u8]) -> Box<[u8]> {
+    name.to_ascii_lowercase().into_boxed_slice()
 }
 
 /// `zend_declare_class_constant_ex` over a class another extension
@@ -2127,6 +2205,16 @@ impl EngineBuilder {
             methods,
             trampolines,
         } = link_classes(&core, &extensions);
+        let class_keys = class_keys(&classes);
+        let function_tables = function_tables(&classes, &methods, functions.len());
+        let parents = classes
+            .iter()
+            .map(|decl| {
+                let parent = decl.parent.as_ref()?;
+                class_keys.get(&*lowered(&parent.0)).copied()
+            })
+            .collect();
+        let placed = classes.iter().map(|_| OnceLock::new()).collect();
         // `module_registry`: `Core` first, as `zend_startup` registers it,
         // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
@@ -2154,6 +2242,10 @@ impl EngineBuilder {
                 natives,
                 methods,
                 trampolines,
+                class_keys,
+                function_tables,
+                parents,
+                placed,
                 constants,
                 engine_states: Vec::new(),
                 ini,

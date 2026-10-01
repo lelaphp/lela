@@ -1246,7 +1246,7 @@ impl Request {
         }
         let object = self.lazy_init(object)?;
         let keys = self.hooked_object_keys(class);
-        let placed = self.placed_properties(class);
+        let placed = self.placed_properties(class).to_vec();
         let mut rows = Vec::with_capacity(keys.len());
         for (name, declaring, visibility) in keys {
             let interned = self.interned(&name)?;
