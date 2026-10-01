@@ -10,7 +10,9 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::value_name;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{
+    Emalloc, FreshString, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
+};
 
 use crate::algos::{self, ALGOS, Algo, Options, Refusal, State};
 
@@ -204,6 +206,50 @@ fn hex(digest: &[u8]) -> Vec<u8> {
 }
 
 /// The digest as a native answers it: raw, or its hex.
+/// The one-shot hashes' ending, `php_hash_do_hash`'s and
+/// `php_hash_do_hash_hmac`'s: `digest`, laid into
+/// `zend_string_alloc(ops->digest_size)` (`raw`, or a fresh one where
+/// the caller allocated none) while the state's allocation stands, it and
+/// what `held` names given back, then the digest itself, or its hex
+/// string with the digest given back (`Z/ext/hash/hash.c`).
+fn rendered(
+    req: &mut Request,
+    raw: Option<FreshString>,
+    held: [Option<Emalloc>; 2],
+    digest: &[u8],
+    binary: bool,
+) -> Result<PhpString, Thrown> {
+    let raw = match raw {
+        Some(raw) => Ok(raw),
+        None => FreshString::new(req, digest.len()),
+    };
+    let raw = raw.map(|mut raw| {
+        raw.bytes_mut().copy_from_slice(digest);
+        raw
+    });
+    for held in held.into_iter().flatten() {
+        held.free(req);
+    }
+    let raw = raw?;
+    if binary {
+        return Ok(raw.finish());
+    }
+    let hexed = PhpString::new(req, &hex(digest));
+    raw.free(req);
+    hexed
+}
+
+/// `php_hash_alloc_context(ops)`, the state's allocation a one-shot
+/// hash holds while it runs; `stream`, opened before it, is given back
+/// where the memory limit refuses it.
+fn context(req: &mut Request, algo: &Algo, stream: Option<Stream>) -> Result<Emalloc, Thrown> {
+    Emalloc::new(req, algo.context).inspect_err(|_| {
+        if let Some(stream) = stream {
+            stream.free(req);
+        }
+    })
+}
+
 fn digest_value(req: &mut Request, digest: &[u8], binary: bool) -> Result<PhpString, Thrown> {
     let bytes = if binary { digest.to_vec() } else { hex(digest) };
     PhpString::new(req, &bytes)
@@ -284,6 +330,23 @@ fn pump(req: &mut Request, stream: Stream, state: &mut dyn State) -> bool {
 /// hash(): Argument #1 ($algo) must be a valid hashing algorithm
 /// hash() expects at least 2 arguments, 1 given
 /// ```
+///
+/// The state `php_hash_alloc_context` allocates stands while the data is
+/// hashed and the digest's string is laid down, then the state goes
+/// and the hex string is made of the digest:
+///
+/// ```php
+/// memory_reset_peak_usage(); $m = memory_get_usage(); $h = hash('md5', 'abc');
+/// var_dump(memory_get_peak_usage() - $m, memory_get_usage() - $m);
+/// memory_reset_peak_usage(); $m = memory_get_usage(); $b = hash('sha256', 'abc', true);
+/// var_dump(memory_get_peak_usage() - $m, memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(208)
+/// int(64)
+/// int(176)
+/// int(64)
+/// ```
 #[php_function]
 fn hash(
     req: &mut Request,
@@ -293,10 +356,17 @@ fn hash(
     #[php(default = [])] options: PhpArray,
 ) -> Result<PhpString, Thrown> {
     let algo = fetch(req, algo.as_bytes(), false)?;
-    let mut state = (algo.init)(req, Options(Some(options)))?;
+    let held = context(req, algo, None)?;
+    let mut state = match (algo.init)(req, Options(Some(options))) {
+        Ok(state) => state,
+        Err(thrown) => {
+            held.free(req);
+            return Err(thrown);
+        }
+    };
     state.update(data.as_bytes());
     let digest = state.finish();
-    digest_value(req, &digest, binary)
+    rendered(req, None, [Some(held), None], &digest, binary)
 }
 
 /// `hash_file(string $algo, string $filename, bool $binary = false, array $options = []): string|false`.
@@ -331,6 +401,19 @@ fn hash(
 /// ```expect
 /// bool(true)
 /// ```
+///
+/// With the stream php opens, the peak is its allocations and the
+/// state's:
+///
+/// ```php
+/// chdir(__DIR__); file_put_contents('peak.bin', str_repeat('x', 2 << 20)); hash_file('md5', 'peak.bin');
+/// memory_reset_peak_usage(); $m = memory_get_usage(); hash_file('md5', 'peak.bin');
+/// var_dump(memory_get_peak_usage() - $m);
+/// unlink('peak.bin');
+/// ```
+/// ```expect
+/// int(8848)
+/// ```
 #[php_function]
 fn hash_file(
     req: &mut Request,
@@ -343,18 +426,21 @@ fn hash_file(
     let Some(stream) = open(req, filename.as_bytes(), 1)? else {
         return Ok(OrFalse::False);
     };
+    let held = context(req, algo, Some(stream))?;
     let mut state = match (algo.init)(req, Options(Some(options))) {
         Ok(state) => state,
         Err(thrown) => {
             stream.free(req);
+            held.free(req);
             return Err(thrown);
         }
     };
     if !pump(req, stream, state.as_mut()) {
+        held.free(req);
         return Ok(OrFalse::False);
     }
     let digest = state.finish();
-    digest_value(req, &digest, binary).map(OrFalse::Value)
+    rendered(req, None, [Some(held), None], &digest, binary).map(OrFalse::Value)
 }
 
 /// `hash_hmac(string $algo, string $data, string $key, bool $binary = false): string`.
@@ -393,9 +479,43 @@ fn hash_hmac(
     #[php(default = false)] binary: bool,
 ) -> Result<PhpString, Thrown> {
     let algo = fetch(req, algo.as_bytes(), true)?;
+    let (held, raw) = hmac_held(req, algo, None)?;
     let k = hmac_key(req, algo, key.as_bytes())?;
     let digest = hmac(req, algo, &k, data.as_bytes())?;
-    digest_value(req, &digest, binary)
+    rendered(req, Some(raw), held, &digest, binary)
+}
+
+/// `php_hash_do_hash_hmac`'s allocations before the key is prepared: the
+/// state's allocation, `K = emalloc(ops->block_size)` and the digest's string;
+/// `stream`, opened before them, is given back where the memory limit
+/// refuses one.
+fn hmac_held(
+    req: &mut Request,
+    algo: &Algo,
+    stream: Option<Stream>,
+) -> Result<([Option<Emalloc>; 2], FreshString), Thrown> {
+    let held = context(req, algo, stream)?;
+    let k = match Emalloc::new(req, algo.block) {
+        Ok(k) => k,
+        Err(thrown) => {
+            held.free(req);
+            if let Some(stream) = stream {
+                stream.free(req);
+            }
+            return Err(thrown);
+        }
+    };
+    match FreshString::new(req, algo.digest) {
+        Ok(raw) => Ok(([Some(held), Some(k)], raw)),
+        Err(thrown) => {
+            held.free(req);
+            k.free(req);
+            if let Some(stream) = stream {
+                stream.free(req);
+            }
+            Err(thrown)
+        }
+    }
 }
 
 /// `hash_hmac_file(string $algo, string $filename, string $key, bool $binary = false): string|false`.
@@ -429,6 +549,19 @@ fn hash_hmac(
 /// ```expect
 /// bool(true)
 /// ```
+///
+/// The stream, then the state, the key's block and the digest's
+/// string, as `php_hash_do_hash_hmac` allocates them:
+///
+/// ```php
+/// chdir(__DIR__); file_put_contents('peak.bin', str_repeat('x', 2 << 20)); hash_hmac_file('md5', 'peak.bin', 'key');
+/// memory_reset_peak_usage(); $m = memory_get_usage(); hash_hmac_file('md5', 'peak.bin', 'key');
+/// var_dump(memory_get_peak_usage() - $m);
+/// unlink('peak.bin');
+/// ```
+/// ```expect
+/// int(8960)
+/// ```
 #[php_function]
 fn hash_hmac_file(
     req: &mut Request,
@@ -441,15 +574,20 @@ fn hash_hmac_file(
     let Some(stream) = open(req, filename.as_bytes(), 2)? else {
         return Ok(OrFalse::False);
     };
+    let (held, raw) = hmac_held(req, algo, Some(stream))?;
     let k = hmac_key(req, algo, key.as_bytes())?;
     let mut state = (algo.init)(req, Options::default())?;
     state.update(&k);
     if !pump(req, stream, state.as_mut()) {
+        for held in held.into_iter().flatten() {
+            held.free(req);
+        }
+        raw.free(req);
         return Ok(OrFalse::False);
     }
     let inner = state.finish();
     let digest = digest_of(req, algo, &[&outer(&k), &inner])?;
-    digest_value(req, &digest, binary).map(OrFalse::Value)
+    rendered(req, Some(raw), held, &digest, binary).map(OrFalse::Value)
 }
 
 /// php's `php_hashcontext_object` beside the object: the algorithm,
