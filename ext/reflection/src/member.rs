@@ -11,7 +11,7 @@
 use php_ext::abi::{Instance, OrFalse, Passed, PropertyRead, PropertyTest, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::{
-    constant, eval_const_expr, property_hook, property_is_virtual, read_class_prop_silent,
+    constant, eval_declared, property_hook, property_is_virtual, read_class_prop_silent,
     read_static_prop, skip_lazy_initialization, write_static_prop,
 };
 use php_ext::decl::{
@@ -1609,7 +1609,7 @@ impl ReflectionProperty {
     fn getDefaultValue(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let (_, name, found) = this_declared(req, this.object())?;
         match default_of(req, &name, found) {
-            Default::Written(expr, scope) => eval_const_expr(req, &expr, Some(scope)),
+            Default::Written(expr, scope) => eval_declared(req, &expr, Some(scope)),
             Default::ImplicitNull => Ok(Value::null()),
             Default::Absent => {
                 deprecated(

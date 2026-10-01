@@ -149,9 +149,10 @@ fn label_bytes(val: &Scalar) -> Vec<u8> {
 /// section's own array from its header on.
 pub(super) fn assemble(
     req: &mut Request,
+    into: PhpArray,
     events: Vec<Event>,
     sections: bool,
-) -> Result<Value, Thrown> {
+) -> Result<(), Thrown> {
     let mut top = Table::new();
     let mut active: Option<usize> = None;
     for event in events {
@@ -178,21 +179,27 @@ pub(super) fn assemble(
             },
         }
     }
-    to_value(req, top)
+    fill(req, into, top)
 }
 
-/// The table as a php array.
-fn to_value(req: &mut Request, table: Table) -> Result<Value, Thrown> {
-    let mut array = PhpArray::new(req)?;
+/// The table written into `array`. Every name and string value is a
+/// string of the request's however short, as the scanner's
+/// `zend_ini_copy_value` makes each token's with `zend_string_init` and
+/// the callbacks keep it.
+fn fill(req: &mut Request, mut array: PhpArray, table: Table) -> Result<(), Thrown> {
     for (slot, node) in table.entries {
         let key = match slot {
             Slot::Int(n) => Key::Int(n),
-            Slot::Str(s) => Key::Str(PhpString::new(req, &s)?),
+            Slot::Str(s) => Key::Str(token(req, &s)?),
         };
         let value = match node {
-            Node::Table(inner) => to_value(req, inner)?,
+            Node::Table(inner) => {
+                let nested = PhpArray::new(req)?;
+                fill(req, nested, inner).inspect_err(|_| req.release(Value::array(nested)))?;
+                Value::array(nested)
+            }
             Node::Leaf(val) => match val {
-                Scalar::Str(s) => Value::string(PhpString::new(req, &s)?),
+                Scalar::Str(s) => Value::string(token(req, &s)?),
                 Scalar::Bool(b) => Value::bool(b),
                 Scalar::Null => Value::null(),
                 Scalar::Long(n) => Value::int(n),
@@ -201,5 +208,12 @@ fn to_value(req: &mut Request, table: Table) -> Result<Value, Thrown> {
         };
         array.set(req, key, value)?;
     }
-    Ok(Value::array(array))
+    Ok(())
+}
+
+/// `zend_ini_copy_value`'s `zend_string_init(str, len, ZEND_SYSTEM_INI)`
+/// for a request's parse: no interned string for the empty one or one of
+/// a byte.
+fn token(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+    PhpString::filled(req, bytes.len(), |b| b.copy_from_slice(bytes))
 }

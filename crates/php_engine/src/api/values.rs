@@ -372,10 +372,11 @@ impl PhpArray {
     /// sized for `size` elements, the size held to
     /// `zend_hash_check_size`, whose `Possible integer overflow in memory
     /// allocation` fatal ends the request past `HT_MAX_SIZE` before any
-    /// element is written, and laid down as `layout` says: packed, or a
-    /// hash from the start, `zend_hash_real_init_mixed`, which
+    /// element is written, and laid down at once as `layout` says,
+    /// `zend_hash_real_init_packed` or `zend_hash_real_init_mixed`, which
     /// `debug_zval_dump` tells apart. The elements' memory is asked for
-    /// at the first write.
+    /// here, so a table php real-inits and leaves empty costs what php's
+    /// does.
     ///
     /// ```php
     /// var_dump(count(array_fill(5, 3, 'x')));
@@ -415,7 +416,11 @@ impl PhpArray {
     /// }
     /// ```
     pub fn sized(req: &mut Request, size: u32, layout: Layout) -> Result<PhpArray, Thrown> {
-        req.array_sized(size, layout == Layout::Packed)
+        let laid = match layout {
+            Layout::Packed => req.heap_mut().array_packed(size),
+            Layout::Hash => req.heap_mut().array_mixed(size),
+        };
+        req.fatal_of(laid).map(PhpArray::of)
     }
 
     /// The face over a heap array the engine already holds.
@@ -1367,6 +1372,17 @@ impl PhpObject {
         req.fatal_of(table).map(|_| ())
     }
 
+    /// `zend_hash_extend(Z_OBJPROP_P(obj), count + extra, ...)`: the
+    /// property table built as [`PhpObject::rebuild_properties`] builds
+    /// it and grown at once to hold `extra` rows past the declared and
+    /// dynamic ones it holds, what a native that is about to write a
+    /// known number of properties does first, php's unserializer among
+    /// them. The `Err` is the memory limit.
+    pub fn extend_properties(&self, req: &mut Request, extra: u32) -> Result<(), Thrown> {
+        let table = req.heap_mut().object_properties_extend(self.heap(), extra);
+        req.fatal_of(table).map(|_| ())
+    }
+
     /// `reset`, `end`, `next` or `prev` over the internal pointer of the
     /// object's property table as `zend_std_get_properties` holds it, the
     /// table `get_ht_for_iap` hands the pointer natives
@@ -2032,6 +2048,22 @@ impl Resource {
         payload: T,
     ) -> Result<Resource, Thrown> {
         req.new_resource(kind, payload)
+    }
+
+    /// [`Resource::new`] with the payload laid inside an allocation of
+    /// `size` bytes, the struct php `emalloc`s and hands
+    /// `zend_register_resource` (`sizeof(php_stream_context)` for a
+    /// `context`), so the request is charged php's size whatever the
+    /// payload's is. A payload that does not fit `size` is an internal
+    /// error, raised as the fatal it is.
+    pub fn sized<T: Any + Send>(
+        req: &mut Request,
+        kind: ResourceType,
+        payload: T,
+        size: usize,
+    ) -> Result<Resource, Thrown> {
+        let allocated = req.heap_mut().resource_sized(kind, payload, size);
+        req.fatal_of(allocated).map(Resource::of)
     }
 
     /// The resource as a value, `ZVAL_RES`: named, no owner taken.

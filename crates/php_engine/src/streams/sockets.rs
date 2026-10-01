@@ -24,7 +24,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::time::{Duration, Instant};
 
-use php_heap::{Readiness, SockOpt};
+use php_heap::{Block, Readiness, SockOpt};
 
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
@@ -36,6 +36,11 @@ use crate::api::values::{PhpString, Resource};
 
 /// `STREAM_OOB` and `STREAM_PEEK`, the bits of `stream_socket_sendto`'s
 /// and `stream_socket_recvfrom`'s `$flags`.
+/// `sizeof(php_netstream_data_t)` on the pinned 64-bit build: the
+/// socket, `is_blocked` and `timeout_event` and their padding, the
+/// `timeout` timeval and `ownsize` (`Z/main/php_network.h:319-325`).
+const NETSTREAM_DATA_SIZE: usize = 32;
+
 const STREAM_OOB: i64 = 1;
 const STREAM_PEEK: i64 = 2;
 
@@ -166,6 +171,12 @@ impl Sock {
 /// the socket closes, and `PHP_STREAM_CONTEXT(stream)`, whose owner is the
 /// stream's, to lend the layer.
 pub(crate) struct Socket {
+    /// The `php_netstream_data_t` php `pemalloc`s, [`NETSTREAM_DATA_SIZE`]
+    /// bytes, or what a registered `transport`'s factory allocates in its
+    /// place ([`Crypto::allocations`]), on the request's heap from
+    /// [`Ops::lay_down`] to the close; none for a persistent stream's,
+    /// which php allocates persistent.
+    data: Vec<Block>,
     crypto: Option<Box<dyn Crypto>>,
     context: Option<Resource>,
     own: Option<Stream>,
@@ -194,6 +205,7 @@ enum Role {
 impl Socket {
     fn new(sock: Option<Sock>, label: &'static str, timeout: Option<Duration>) -> Socket {
         Socket {
+            data: Vec::new(),
             crypto: None,
             context: None,
             own: None,
@@ -493,10 +505,38 @@ impl Ops for Socket {
     /// `php_sockop_close`: `closesocket`, which the drop is, after the
     /// crypto layer's own close, `SSL_shutdown` and free, which its drop
     /// is.
-    fn close(&mut self, _req: &mut Request) -> i32 {
+    fn close(&mut self, req: &mut Request) -> i32 {
         self.crypto = None;
         self.sock = None;
+        for data in std::mem::take(&mut self.data) {
+            req.heap_mut().free_block(data);
+        }
         0
+    }
+
+    /// `php_stream_generic_socket_factory`'s
+    /// `sock = pemalloc(sizeof(php_netstream_data_t), 0)`, or what a
+    /// registered `transport`'s factory allocates in its place.
+    ///
+    /// ```php
+    /// [$x, $y] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0); fclose($x); fclose($y); unset($x, $y);
+    /// $m = memory_get_usage(); [$x, $y] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0); echo memory_get_usage() - $m, "\n";
+    /// fclose($x); fclose($y); unset($x, $y); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 576
+    /// 32
+    /// ```
+    fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        let sizes = self
+            .crypto
+            .as_ref()
+            .map_or_else(|| vec![NETSTREAM_DATA_SIZE], |layer| layer.allocations());
+        for size in sizes {
+            let data = req.heap_mut().block(size);
+            self.data.push(req.fatal_of(data)?);
+        }
+        Ok(())
     }
 
     fn as_socket(&mut self) -> Option<&mut Socket> {

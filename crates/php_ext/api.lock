@@ -232,6 +232,7 @@ call::clone_with
 call::closure_from_callable
 call::constant
 call::eval_const_expr
+call::eval_declared
 call::fetch_constant
 call::initialize_lazy
 call::instantiate
@@ -387,6 +388,7 @@ request::Crypto
 request::Crypto::accepted
 request::Crypto::active
 request::Crypto::alive
+request::Crypto::allocations
 request::Crypto::connected
 request::Crypto::enable
 request::Crypto::meta
@@ -875,6 +877,7 @@ values::PhpObject::closure_bound
 values::PhpObject::debug_info
 values::PhpObject::declared_rows
 values::PhpObject::entries
+values::PhpObject::extend_properties
 values::PhpObject::handlers
 values::PhpObject::index
 values::PhpObject::instance_of
@@ -942,6 +945,7 @@ values::Resource::kind
 values::Resource::native
 values::Resource::native_mut
 values::Resource::new
+values::Resource::sized
 values::Resource::type_name
 values::ResourceType
 values::SmartStr

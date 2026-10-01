@@ -372,7 +372,7 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<PhpArray, Throw
     for statics in [false, true] {
         for (declaring, property) in rows.iter().filter(|(_, p)| p.is_instance != statics) {
             let value = match &property.default {
-                Some(expr) => crate::api::call::eval_const_expr(req, expr, Some(*declaring))?,
+                Some(expr) => crate::api::call::eval_declared(req, expr, Some(*declaring))?,
                 None => Value::null(),
             };
             let key = Key::Str(PhpString::new(req, &property.name.0)?);

@@ -918,6 +918,19 @@ fn hash_update_stream(
 /// ```expect
 /// bool(true)
 /// ```
+///
+/// No `$stream_context` is `php_stream_context_from_zval(NULL, 0)`, which
+/// lays `FG(default_context)` down where the call is the request's first
+/// opener, and it stays the request's:
+///
+/// ```php
+/// $c = hash_init('md5'); memory_reset_peak_usage(); $m = memory_get_usage(); hash_update_file($c, '/dev/null'); echo memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); hash_update_file($c, '/dev/null'); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 8808 152
+/// 0
+/// ```
 #[php_function]
 fn hash_update_file(
     req: &mut Request,
@@ -925,9 +938,12 @@ fn hash_update_file(
     filename: Path,
     #[php(default = null)] stream_context: Option<Resource>,
 ) -> Result<bool, Thrown> {
-    // `php_stream_context_from_zval(zcontext, 0)`: the open takes the
-    // default context either way.
-    let _ = stream_context;
+    // `php_stream_context_from_zval(zcontext, 0)`: one given is the
+    // open's, and none lays `FG(default_context)` down where no opener
+    // of the request has yet.
+    if stream_context.is_none() {
+        php_ext_standard::default_stream_ctx(req)?;
+    }
     let object = verify(req, context.object(), 1)?;
     let Some(stream) = req.open_stream(filename.0.as_bytes(), b"rb", false)? else {
         return Ok(false);

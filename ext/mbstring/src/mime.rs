@@ -353,6 +353,9 @@ fn mb_encode_mimeheader(
         newline.as_bytes(),
         indent,
     ) {
+        // `zend_empty_string` for an empty input, before anything is
+        // encoded.
+        Some(_) if string.is_empty() => crate::text::cut_string(req, b""),
         Some(out) => new_string(req, &out),
         None => Ok(same(req, string)),
     }

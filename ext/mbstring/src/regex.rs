@@ -705,6 +705,7 @@ fn replace(
     };
     let subject = string.as_bytes();
     let mut out = Vec::with_capacity(subject.len());
+    let mut matched = false;
     let mut pos = 0usize;
     let limits = limits(req);
     loop {
@@ -725,6 +726,7 @@ fn replace(
             out.extend_from_slice(subject.get(pos..).unwrap_or_default());
             break;
         }
+        matched = true;
         let g = region.groups();
         let (beg0, end0) = g.first().copied().unwrap_or((0, 0));
         let beg0 = usize::try_from(beg0).unwrap_or(pos);
@@ -775,7 +777,15 @@ fn replace(
             pos += 1;
         }
     }
-    Ok(Some(OrFalse::Value(new_string(req, &out)?)))
+    // `smart_str_extract`: a buffer nothing was appended to, no match
+    // over an empty subject, is `ZSTR_EMPTY_ALLOC()`; one a match or the
+    // tail started is the request's, though it holds nothing.
+    let answer = if matched || !out.is_empty() {
+        new_string(req, &out)?
+    } else {
+        crate::text::cut_string(req, b"")?
+    };
+    Ok(Some(OrFalse::Value(answer)))
 }
 
 /// `mb_ereg_replace(string $pattern, string $replacement, string $string, ?string $options = null): string|false|null`.

@@ -769,10 +769,13 @@ impl Stream {
         req: &mut Request,
         maxlen: Option<usize>,
     ) -> Result<PhpString, Thrown> {
-        let bytes = req
-            .stream_op(self, |req, stream| stream.copy_to_mem(req, maxlen))
-            .unwrap_or_default();
-        PhpString::new(req, &bytes)
+        match req.stream_op(self, |req, stream| stream.copy_to_mem(req, maxlen)) {
+            Some(Ok(Some(read))) => Ok(read),
+            Some(Err(thrown)) => Err(thrown),
+            // php's `NULL`, nothing read, which its callers answer as
+            // `ZSTR_EMPTY_ALLOC()`.
+            Some(Ok(None)) | None => PhpString::new(req, b""),
+        }
     }
 
     /// `php_stream_stat`, as `php_fstat` lays it out: `dev`, `ino`,
@@ -8788,7 +8791,7 @@ impl Request {
         };
         let value = match property.default.as_ref() {
             Some(expr) => {
-                let value = crate::api::call::eval_const_expr(self, expr, Some(declaring))?;
+                let value = crate::api::call::eval_declared(self, expr, Some(declaring))?;
                 self.strictly_held(value, &property, declaring)?
             }
             None if property.ty.is_some() => Value::undef(),
@@ -21063,6 +21066,37 @@ impl Request {
         &mut self.heap
     }
 
+    /// `zend_string_init_existing_interned` (`Z/Zend/zend_string.c`):
+    /// the interned string for `bytes` where the engine or this request
+    /// holds one already, and a new string of the request's otherwise.
+    pub(crate) fn existing_interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        match self.interned_held(bytes) {
+            Some(held) => Ok(held),
+            None => self.string(bytes),
+        }
+    }
+
+    /// `zend_new_interned_string`, what `zval_make_interned_string`
+    /// makes of a declared value: the interned string for `bytes` where
+    /// the engine or this request holds one already, a string a unit's
+    /// compilation interned among them, and one interned into the
+    /// request's otherwise, as [`Request::interned`] interns it.
+    pub(crate) fn new_interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        match self.interned_held(bytes) {
+            Some(held) => Ok(held),
+            None => self.interned(bytes),
+        }
+    }
+
+    /// The interned string for `bytes` the engine's table or this
+    /// request's holds, `zend_interned_string_ht_lookup` over both.
+    fn interned_held(&self, bytes: &[u8]) -> Option<PhpString> {
+        self.shared
+            .existing_interned(bytes)
+            .or_else(|| self.heap.interned_find(bytes))
+            .map(PhpString::of)
+    }
+
     /// A string of `bytes` out of this request's heap, what
     /// [`PhpString::new`] is: php's `ZVAL_STRINGL_FAST`, the process's
     /// interned string for the empty string and a string of one byte
@@ -21070,20 +21104,6 @@ impl Request {
     /// The memory limit is the fatal that ends the request, recorded
     /// here where `zend_mm` leaves the request, and the `Thrown` that
     /// carries no throwable ends the native.
-    /// `zend_string_init_existing_interned` (`Z/Zend/zend_string.c`):
-    /// the interned string for `bytes` where the engine or this request
-    /// holds one already, and a new string of the request's otherwise.
-    pub(crate) fn existing_interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        if let Some(held) = self
-            .shared
-            .existing_interned(bytes)
-            .or_else(|| self.heap.interned_find(bytes))
-        {
-            return Ok(PhpString::of(held));
-        }
-        self.string(bytes)
-    }
-
     pub(crate) fn string(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
         let allocated = if bytes.len() <= 1 {
             self.heap.intern(bytes)

@@ -15,9 +15,9 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, warning};
-use php_ext::request::{Request, StreamOption};
+use php_ext::request::{Request, Stream, StreamOption};
 use php_ext::syntax::Scanning;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpString, Value, ValueRef};
 
 use constants::{CONNECTION_ABORTED, INI_PERDIR, INI_SYSTEM, INI_USER};
 pub(crate) use constants::{INI_SCANNER_NORMAL, INI_SCANNER_RAW, INI_SCANNER_TYPED};
@@ -598,11 +598,14 @@ fn error_clear_last(req: &mut Request) {
 }
 
 /// `zend_parse_ini_string`/`zend_parse_ini_file` and the callback's
-/// array: `false` after the warning for a `$scanner_mode` that is none of
-/// the three or for a syntax error, which `ini_error` writes with the
-/// file's name, `Unknown` for a string, and the line the scanner was on.
+/// array, `into`, which the native `array_init`ed before the parse and
+/// which is the answer: `false` after the warning for a `$scanner_mode`
+/// that is none of the three or for a syntax error, which `ini_error`
+/// writes with the file's name, `Unknown` for a string, and the line the
+/// scanner was on, the array destroyed.
 fn parse_ini(
     req: &mut Request,
+    into: PhpArray,
     bytes: &[u8],
     file: &[u8],
     sections: bool,
@@ -610,21 +613,22 @@ fn parse_ini(
 ) -> Result<OrFalse<PhpArray>, Thrown> {
     let Some(scanner) = crate::ini::scanner(mode) else {
         warning(req, "Invalid scanner mode");
+        req.release(Value::array(into));
         return Ok(OrFalse::False);
     };
-    match php_ext::syntax::parse_ini(req, bytes, scanner)? {
-        Ok(events) => Ok(
-            match crate::ini::assemble(req, events, sections)?.as_array() {
-                Some(array) => OrFalse::Value(*array),
-                None => OrFalse::False,
-            },
-        ),
+    let parsed = php_ext::syntax::parse_ini(req, bytes, scanner).and_then(|parsed| match parsed {
+        Ok(events) => crate::ini::assemble(req, into, events, sections).map(|()| true),
         Err((message, line)) => {
             let file = String::from_utf8_lossy(file);
             warning(req, &format!("{message} in {file} on line {line}\n"));
-            Ok(OrFalse::False)
+            Ok(false)
         }
+    });
+    if matches!(parsed, Ok(true)) {
+        return Ok(OrFalse::Value(into));
     }
+    req.release(Value::array(into));
+    parsed.map(|_| OrFalse::False)
 }
 
 /// The string's entries, the string read to its first NUL, as
@@ -757,7 +761,8 @@ fn parse_ini_string(
 ) -> Result<OrFalse<PhpArray>, Thrown> {
     let (text, sections, mode) = (ini_string, process_sections, scanner_mode);
     let bytes = c_string(text.as_bytes()).to_vec();
-    parse_ini(req, &bytes, b"Unknown", sections, mode)
+    let into = PhpArray::new(req)?;
+    parse_ini(req, into, &bytes, b"Unknown", sections, mode)
 }
 
 /// The file's entries, the file opened on the include path as
@@ -800,23 +805,30 @@ fn parse_ini_string(
 /// parse_ini_file(): Argument #1 ($filename) must not be empty
 /// ```
 ///
-/// The file is held whole while it is parsed, as `zend_stream_fixup`
-/// reads it into one buffer, and no read is kept beside it, so the peak
-/// rises by the file's size and less than a read more:
+/// The file is held whole while it is parsed, in the buffer
+/// `zend_stream_fixup` `emalloc`s at its size and `ZEND_MMAP_AHEAD`, with
+/// the stream open and its opened path held until `zend_destroy_file_handle`
+/// after the parse, and no read buffer beside it; every name
+/// and value is a string of the request's. A path of `tempnam`'s fixed
+/// length keeps the opened path's size the same under both runs:
 ///
 /// ```php
-/// $p = __DIR__ . '/big.ini'; file_put_contents($p, str_repeat("; a comment filling a line\n", 16384) . "k = v\n");
-/// memory_reset_peak_usage(); $at = memory_get_usage();
-/// $a = parse_ini_file($p);
-/// $over = memory_get_peak_usage() - $at - filesize($p);
-/// var_dump($a, $over > 0 && $over < 8192);
+/// $p = tempnam(sys_get_temp_dir(), 'ini'); file_put_contents($p, str_repeat("; a comment filling a line\n", 16384) . "k = v\n");
+/// $a = parse_ini_file($p); unset($a);
+/// memory_reset_peak_usage(); $at = memory_get_usage(); $a = parse_ini_file($p);
+/// echo memory_get_peak_usage() - $at - filesize($p), ' ', memory_get_usage() - $at, "\n";
+/// file_put_contents($p, "k = v\n"); $a = parse_ini_file($p); unset($a);
+/// memory_reset_peak_usage(); $at = memory_get_usage(); $a = parse_ini_file($p);
+/// echo memory_get_peak_usage() - $at, ' ', memory_get_usage() - $at, "\n";
+/// var_dump($a); unlink($p);
 /// ```
 /// ```expect
+/// 5114 472
+/// 1064 440
 /// array(1) {
 ///   ["k"]=>
 ///   string(1) "v"
 /// }
-/// bool(true)
 /// ```
 #[php_function]
 fn parse_ini_file(
@@ -829,25 +841,167 @@ fn parse_ini_file(
     if filename.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
-    let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", true)? else {
-        return Ok(OrFalse::False);
-    };
-    // `php_stream_open_for_zend_ex`: "Disable buffering to avoid double
-    // buffering between PHP and Zend streams."
-    stream.set_option(
-        req,
-        StreamOption::ReadBuffer {
-            buffered: false,
-            size: 0,
-        },
-    );
-    let bytes = stream.copy_to_mem(req, None);
-    stream.free(req);
-    let bytes = bytes?;
+    let into = PhpArray::new(req)?;
     let name = filename.as_bytes().to_vec();
-    let parsed = parse_ini(req, bytes.as_bytes(), &name, sections, mode);
-    req.release(Value::string(bytes));
+    let mut fh = match FileHandle::open(req, &name) {
+        Ok(Some(fh)) => fh,
+        Ok(None) => {
+            req.release(Value::array(into));
+            return Ok(OrFalse::False);
+        }
+        Err(thrown) => {
+            req.release(Value::array(into));
+            return Err(thrown);
+        }
+    };
+    let parsed = match fh.fixup(req) {
+        Ok(Some(len)) => {
+            let bytes = fh.buf.as_ref().map_or(&[][..], |buf| &buf.bytes()[..len]);
+            parse_ini(req, into, bytes, &name, sections, mode)
+        }
+        Ok(None) => {
+            req.release(Value::array(into));
+            Ok(OrFalse::False)
+        }
+        Err(thrown) => {
+            req.release(Value::array(into));
+            Err(thrown)
+        }
+    };
+    fh.destroy(req);
     parsed
+}
+
+/// `ZEND_MMAP_AHEAD`: the zero bytes `zend_stream_fixup` keeps past what
+/// it read, for the scanner's look-ahead.
+const ZEND_MMAP_AHEAD: usize = 32;
+
+/// `zend_file_handle` as `php_stream_open_for_zend_ex` leaves it for the
+/// ini scanner: the stream, its read buffer off; the `*opened_path` the
+/// plain wrapper set, the real path `zend_resolve_path` resolved, as a
+/// string of the request's; and the buffer `zend_stream_fixup` reads it
+/// into, until [`FileHandle::destroy`].
+struct FileHandle {
+    stream: Stream,
+    opened: Option<PhpString>,
+    buf: Option<Emalloc>,
+}
+
+impl FileHandle {
+    /// `zend_stream_open` under `USE_PATH | REPORT_ERRORS |
+    /// STREAM_OPEN_FOR_INCLUDE`; `None` for the open that failed and
+    /// warned.
+    fn open(req: &mut Request, path: &[u8]) -> Result<Option<FileHandle>, Thrown> {
+        let Some(stream) = req.open_stream(path, b"rb", true)? else {
+            return Ok(None);
+        };
+        // "Disable buffering to avoid double buffering between PHP and
+        // Zend streams."
+        stream.set_option(
+            req,
+            StreamOption::ReadBuffer {
+                buffered: false,
+                size: 0,
+            },
+        );
+        let opened = opened_path(req, path).inspect_err(|_| stream.free(req))?;
+        Ok(Some(FileHandle {
+            stream,
+            opened,
+            buf: None,
+        }))
+    }
+
+    /// `zend_stream_fixup` (`Z/Zend/zend_stream.c:131-210`): the whole
+    /// stream read into the buffer php `emalloc`s, `ZEND_MMAP_AHEAD` past
+    /// the size `php_zend_stream_fsizer` stats, or, where it stats none,
+    /// four kilobytes doubled as each fills and widened by the look-ahead
+    /// where less of it is left; how much was read, `None` for a read
+    /// that failed, the buffer freed.
+    fn fixup(&mut self, req: &mut Request) -> Result<Option<usize>, Thrown> {
+        let stream = self.stream;
+        let file_size = stream
+            .stat(req)
+            .map_or(0, |sb| usize::try_from(sb[7]).unwrap_or(0));
+        let (mut buf, len) = if file_size > 0 {
+            let mut buf = Emalloc::new(req, file_size.saturating_add(ZEND_MMAP_AHEAD))?;
+            let mut size = 0;
+            loop {
+                match stream.read_into(req, &mut buf.bytes_mut()[size..file_size]) {
+                    Some(0) => break,
+                    Some(n) => size += n,
+                    None => {
+                        buf.free(req);
+                        return Ok(None);
+                    }
+                }
+            }
+            (buf, size)
+        } else {
+            let (mut size, mut remain) = (0, 4 * 1024);
+            let mut buf = Emalloc::new(req, remain)?;
+            loop {
+                match stream.read_into(req, &mut buf.bytes_mut()[size..size + remain]) {
+                    Some(0) => break,
+                    Some(n) => {
+                        size += n;
+                        remain -= n;
+                        if remain == 0 {
+                            buf = buf.resize(req, size.saturating_mul(2))?;
+                            remain = size;
+                        }
+                    }
+                    None => {
+                        buf.free(req);
+                        return Ok(None);
+                    }
+                }
+            }
+            if size > 0 && remain < ZEND_MMAP_AHEAD {
+                buf = buf.resize(req, size.saturating_add(ZEND_MMAP_AHEAD))?;
+            }
+            (buf, size)
+        };
+        if len == 0 {
+            buf = buf.resize(req, ZEND_MMAP_AHEAD)?;
+        }
+        self.buf = Some(buf);
+        Ok(Some(len))
+    }
+
+    /// `zend_destroy_file_handle`: the stream closed, the opened path
+    /// given up, then the buffer freed.
+    fn destroy(self, req: &mut Request) {
+        self.stream.free(req);
+        if let Some(opened) = self.opened {
+            req.release(Value::string(opened));
+        }
+        if let Some(buf) = self.buf {
+            buf.free(req);
+        }
+    }
+}
+
+/// The `*opened_path` the plain wrapper's opener sets for a file opened
+/// for the engine's scanner (`_php_stream_fopen`, under the
+/// `STREAM_ASSUME_REALPATH` `zend_resolve_path` gave it): the real path
+/// as a string of the request's; none for a path a wrapper's scheme
+/// names.
+fn opened_path(req: &mut Request, path: &[u8]) -> Result<Option<PhpString>, Thrown> {
+    if path.windows(3).any(|w| w == b"://") {
+        return Ok(None);
+    }
+    let cwd = if path.first() == Some(&b'/') {
+        Vec::new()
+    } else {
+        req.cwd().as_os_str().as_bytes().to_vec()
+    };
+    match req.virtual_file_ex(&cwd, path, php_ext::request::Resolve::RealPath) {
+        Some(real) => Ok(Some(PhpString::filled(req, real.len(), |b| {
+            b.copy_from_slice(&real);
+        })?)),
+        None => Ok(None),
+    }
 }
 
 /// `getservbyname(string $service, string $protocol): int|false`,

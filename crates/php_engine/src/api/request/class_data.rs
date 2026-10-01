@@ -394,7 +394,7 @@ impl Request {
             self.addref(&value);
             return Ok(value);
         }
-        let evaluated = crate::api::call::eval_const_expr(self, &constant.value, Some(declaring))?;
+        let evaluated = crate::api::call::eval_declared(self, &constant.value, Some(declaring))?;
         let value = match &constant.ty {
             Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
                 crate::ops::verify_class_constant_type(self, evaluated, ty, declaring, name)?
@@ -492,6 +492,35 @@ impl Request {
     /// The default properties table of `class` once the class is
     /// updated, each slot's value with one more owner the object's, as
     /// `_object_properties_init` copies the table (`ZVAL_COPY_PROP`).
+    /// A string the declaration wrote is the interned one
+    /// `zend_declare_typed_property` made of it ([`eval_declared`]), so
+    /// the slot takes no owner and costs the object nothing, and a
+    /// `static` property, a class constant and the readers of the
+    /// default table read the same string.
+    ///
+    /// [`eval_declared`]: crate::api::call::eval_declared
+    ///
+    /// ```php
+    /// $a = 'mine'; debug_zval_dump($a);
+    /// class C { public $own = 'mine'; } $c = new C; debug_zval_dump($c); debug_zval_dump($c->own);
+    /// function f($x = 'dflt') { debug_zval_dump($x); } f();
+    /// class M { public $a = 'a long default'; public static $s = 'stat'; const K = 'kconst'; } $m = memory_get_usage(); $o = new M; var_dump(memory_get_usage() - $m);
+    /// debug_zval_dump(M::$s, M::K, get_class_vars('M')['a'], (new ReflectionProperty('M', 'a'))->getDefaultValue());
+    /// ```
+    /// ```expect
+    /// string(4) "mine" interned
+    /// object(C)#1 (1) refcount(2){
+    ///   ["own"]=>
+    ///   string(4) "mine" interned
+    /// }
+    /// string(4) "mine" interned
+    /// string(4) "dflt" interned
+    /// int(56)
+    /// string(4) "stat" interned
+    /// string(6) "kconst" interned
+    /// string(14) "a long default" interned
+    /// string(14) "a long default" interned
+    /// ```
     pub(super) fn default_properties(
         &mut self,
         class: ClassId,
@@ -556,7 +585,7 @@ impl Request {
         for (declaring, property) in &rows {
             let value = match &property.default {
                 Some(expr) => {
-                    let value = crate::api::call::eval_const_expr(self, expr, Some(*declaring))?;
+                    let value = crate::api::call::eval_declared(self, expr, Some(*declaring))?;
                     Some(self.strictly_held(value, property, *declaring)?)
                 }
                 None if property.ty.is_some() => None,

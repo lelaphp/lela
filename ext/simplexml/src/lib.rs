@@ -38,7 +38,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw,
 };
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, Layout, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
     Answer, ClassType, Exported, Item, Kind, Name, Node, Parser, Returned, Scope, Source, XPath,
 };
@@ -411,6 +411,26 @@ impl SimpleXMLElement {
     /// int(1)
     /// NULL
     /// ```
+    ///
+    /// The answer is `array_init_size` at the node set's size and
+    /// `zend_hash_real_init_packed` before a node is added, so a set with
+    /// no node is a packed table laid down, and nine nodes write into the
+    /// sixteen slots taken from the start.
+    ///
+    /// ```php
+    /// $x = simplexml_load_string('<a><b/></a>'); $r = $x->xpath('//c'); unset($r);
+    /// $m = memory_get_usage(); $r = $x->xpath('//c'); var_dump(memory_get_usage() - $m); debug_zval_dump($r);
+    /// $y = simplexml_load_string('<a>' . str_repeat('<b/>', 9) . '</a>'); $r = $y->xpath('//b'); unset($r);
+    /// memory_reset_peak_usage(); $m = memory_get_usage(); $r = $y->xpath('//b');
+    /// var_dump(memory_get_peak_usage() - $m, memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(216)
+    /// array(0) packed refcount(2){
+    /// }
+    /// int(2032)
+    /// int(2032)
+    /// ```
     #[php(tentative)]
     fn xpath(req: &mut Request, this: This<Self>, expression: PhpString) -> Result<Found, Thrown> {
         let this = this.object();
@@ -455,7 +475,8 @@ impl SimpleXMLElement {
                 return Ok(Some(OrFalse::False));
             }
         };
-        let mut out = PhpArray::new(req)?;
+        let size = u32::try_from(items.len()).unwrap_or(u32::MAX);
+        let mut out = PhpArray::sized(req, size, Layout::Packed)?;
         for item in items {
             let Item::Node(n) = item else { continue };
             let (target, walk, ns) = match n.kind() {

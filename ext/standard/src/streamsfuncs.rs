@@ -110,11 +110,17 @@ pub(crate) struct Contexts {
 
 pub(crate) mod notifier;
 
-/// `php_stream_context`: its options array and its notifier.
+/// `php_stream_context`: its options array and its notifier, which php
+/// `ecalloc`s apart from it when `notification` is set.
 struct Context {
     options: Option<PhpArray>,
-    notifier: Option<notifier::Notification>,
+    notifier: Option<Box<notifier::Notification>>,
 }
+
+/// `sizeof(php_stream_context)` on the pinned 64-bit build: the
+/// notifier's pointer, the `options` zval and the resource's pointer
+/// (`Z/main/streams/php_stream_context.h:52-56`).
+const CONTEXT_SIZE: usize = 32;
 
 /// `PHP_STREAM_COPY_ALL` as `stream_get_contents` spells it, `-1`.
 const COPY_ALL: i64 = -1;
@@ -126,11 +132,11 @@ fn context_dtor(req: &mut Request, res: Resource) {
         .native_mut::<Context>(req)
         .map(|context| (context.options.take(), context.notifier.take()));
     if let Some((options, notifier)) = taken {
+        if let Some(notifier) = notifier {
+            notifier.free(req);
+        }
         if let Some(options) = options {
             req.release(Value::array(options));
-        }
-        if let Some(notifier) = notifier {
-            req.release(notifier.callback);
         }
     }
 }
@@ -148,17 +154,35 @@ fn context_type(req: &mut Request) -> ResourceType {
 }
 
 /// `php_stream_context_alloc`: a `context` with an empty options array,
-/// a resource of its own with one owner, the caller's.
+/// a resource of its own with one owner, the caller's, in php's order:
+/// the struct, its `options`, then the resource, each at php's size. A
+/// request's first `fopen()` lays `FG(default_context)` down with its
+/// stream.
+///
+/// ```php
+/// $m = memory_get_usage(); $f = fopen('/dev/null', 'r'); echo memory_get_usage() - $m, "\n"; fclose($f); unset($f);
+/// $c = stream_context_create(); unset($c);
+/// $m = memory_get_usage(); $c = stream_context_create(); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); stream_context_set_params($c, ['notification' => 'strlen']); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($c); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 616
+/// 120
+/// 88
+/// -208
+/// ```
 fn context_alloc(req: &mut Request) -> Result<Resource, Thrown> {
     let kind = context_type(req);
     let options = PhpArray::new(req)?;
-    Resource::new(
+    Resource::sized(
         req,
         kind,
         Context {
             options: Some(options),
             notifier: None,
         },
+        CONTEXT_SIZE,
     )
 }
 
@@ -426,7 +450,17 @@ fn parse_options(req: &mut Request, res: Resource, options: PhpArray) -> Result<
 /// `Invalid stream/context parameter` otherwise.
 fn parse_params(req: &mut Request, res: Resource, params: PhpArray) -> Result<(), Thrown> {
     if let Some(callback) = params.find(b"notification") {
+        // The notifier there is freed first, so a callable refused below
+        // leaves the context with none.
+        let old = res
+            .native_mut::<Context>(req)
+            .and_then(|context| context.notifier.take());
+        if let Some(old) = old {
+            old.free(req);
+        }
+        let fcc = notifier::Notification::fcc(req)?;
         if let Err(why) = callable_checked(req, &callback) {
+            fcc.free(req);
             return Err(arg_type_error(
                 req,
                 1,
@@ -434,13 +468,11 @@ fn parse_params(req: &mut Request, res: Resource, params: PhpArray) -> Result<()
             ));
         }
         req.addref(&callback);
-        let old = res.native_mut::<Context>(req).and_then(|context| {
-            context
-                .notifier
-                .replace(notifier::Notification::new(callback))
-        });
-        if let Some(old) = old {
-            req.release(old.callback);
+        let made = Box::new(notifier::Notification::new(req, callback, fcc)?);
+        if let Some(context) = res.native_mut::<Context>(req) {
+            context.notifier = Some(made);
+        } else {
+            made.free(req);
         }
     }
     if let Some(options) = params.find(b"options") {

@@ -755,19 +755,53 @@ impl Heap {
     /// `IS_INDIRECT` per declared slot there; those slots are read off
     /// the object here, and the table holds the dynamic properties
     /// alone until a separation copies them in
-    /// ([`Heap::object_properties_copy`]). A declared slot empty as the
-    /// table is built marks it
+    /// ([`Heap::object_properties_copy`]). It is laid down at php's
+    /// size, `zend_new_array(default_properties_count)` and, where the
+    /// class declares a slot, `zend_hash_real_init_mixed`, so
+    /// `memory_get_usage()` counts the rows php's holds for the slots. A
+    /// declared slot empty as the table is built marks it
     /// `HASH_FLAG_HAS_EMPTY_IND`, as php's rebuild does. The table is
     /// the object's, one owner.
+    ///
+    /// ```php
+    /// class Q { public $a = 1; } class N { public $a, $b, $c, $d, $e, $f, $g, $h, $i; } class E {}
+    /// foreach ([new Q, new N, new E] as $o) { $m = memory_get_usage(); foreach ($o as $v) {} echo memory_get_usage() - $m, "\n"; }
+    /// ```
+    /// ```expect
+    /// 376
+    /// 696
+    /// 56
+    /// ```
     pub fn object_properties(&mut self, o: Obj) -> Result<Arr, Fatal> {
         if let Some(table) = o.properties() {
             return Ok(table);
         }
-        let table = self.array()?;
+        let table = match o.slots() {
+            0 => self.array()?,
+            slots => self.array_mixed(slots)?,
+        };
         if (0..o.slots()).any(|i| o.slot(i).is_undef()) {
             table.set_has_empty_ind(true);
         }
         o.header().properties.set(Some(table));
+        Ok(table)
+    }
+
+    /// `zend_hash_extend(Z_OBJPROP_P(o), count + extra, ...)`: the
+    /// object's table, laid down as [`Heap::object_properties`] lays
+    /// it, made room in at once for `extra` rows past the ones php's
+    /// holds, an `IS_INDIRECT` per declared slot and the dynamic rows,
+    /// what php's unserializer does before it reads an object's
+    /// properties (`Z/ext/standard/var_unserializer.re:824-829`).
+    pub fn object_properties_extend(&mut self, o: Obj, extra: u32) -> Result<Arr, Fatal> {
+        let table = self.object_properties(o)?;
+        let held = match table.declared_rows() {
+            DeclaredRows::Slots => o.slots(),
+            DeclaredRows::Copied => 0,
+        };
+        let rows = u32::try_from(table.len()).unwrap_or(u32::MAX);
+        let size = held.saturating_add(rows).saturating_add(extra);
+        self.array_extend(table, size)?;
         Ok(table)
     }
 
