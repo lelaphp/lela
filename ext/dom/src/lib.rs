@@ -59,7 +59,7 @@ use php_ext::raising::{
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
-    ClassType, DocProps, Exported, Kind, Name, Node, Ns, SharedDoc, XML_ATTRIBUTE_ID,
+    Borrowed, ClassType, DocProps, Exported, Kind, Name, Node, Ns, SharedDoc, XML_ATTRIBUTE_ID,
 };
 
 use document::{XML_NS, XMLNS_NS};
@@ -419,9 +419,8 @@ fn import_simplexml_common(
     let base = class(req, name)?;
     let class = mapped(&exported.props(), base);
     let made = new_object(req, class)?;
-    if let Some(d) = dom_mut(req, made) {
-        d.obj.set_object(made);
-        d.obj.attach(node, exported.document());
+    if let Some(mut obj) = libxml_half(req, made) {
+        obj.attach(req, node, exported.document());
     }
     if old != ClassType::Modern
         && new_class == ClassType::Modern
@@ -712,22 +711,39 @@ fn instantiate(
 ) -> Result<Value, Thrown> {
     let object = new_object(req, class)?;
     let shared = parent.and_then(|p| shared_doc(req, p));
-    if let Some(d) = dom_mut(req, object) {
-        d.obj.set_object(object);
-        d.obj.attach(node, shared);
+    if let Some(mut obj) = libxml_half(req, object) {
+        obj.attach(req, node, shared);
     }
     Ok(object.as_value())
+}
+
+/// `dom_objects_free_storage`'s libxml half, past each class's own:
+/// the node and the document let go of, what they free of the request's
+/// heap given back, before the payload goes.
+pub(crate) fn release_libxml(req: &mut Request, object: PhpObject) {
+    if let Some(mut obj) = dom_mut(req, object).map(|d| d.obj.borrow()) {
+        obj.release(req);
+    }
+}
+
+/// The object's libxml half, named as the object it is the half of and
+/// borrowed for a call that takes the request beside it
+/// ([`php_ext_libxml::ffi::NodeObject::borrow`]).
+pub(crate) fn libxml_half(req: &mut Request, object: PhpObject) -> Option<Borrowed> {
+    dom_mut(req, object).map(|d| {
+        d.obj.set_object(object);
+        d.obj.borrow()
+    })
 }
 
 /// A constructor's bind: the node the object stood for let go of, and
 /// `node` taken, `php_libxml_increment_node_ptr` with no document.
 fn rebind(req: &mut Request, object: PhpObject, node: Node) {
-    if let Some(d) = dom_mut(req, object) {
-        d.obj.set_object(object);
-        if d.obj.is_bound() {
-            d.obj.decrement_resource();
+    if let Some(mut obj) = libxml_half(req, object) {
+        if obj.is_bound() {
+            obj.decrement_resource(req);
         }
-        d.obj.attach(node, None);
+        obj.attach(req, node, None);
     }
 }
 
@@ -1035,10 +1051,10 @@ fn node_list_unlink(first: Option<Node>) {
 }
 
 /// `dom_remove_all_children`.
-fn remove_all_children(node: Node) {
+fn remove_all_children(req: &mut Request, node: Node) {
     if node.children().is_some() {
         node_list_unlink(node.children());
-        Node::free_list(node.children());
+        Node::free_list(req, node.children());
         node.set_children(None);
         node.set_last(None);
     }
@@ -1089,29 +1105,29 @@ fn hierarchy_ok(parent: Node, child: Node) -> bool {
 
 /// `dom_set_document_ref_pointers`: every object standing for a node of
 /// the subtree that counts no document counts `document`.
-fn set_document_ref_pointers(node: Node, document: Option<SharedDoc>) {
+fn set_document_ref_pointers(req: &mut Request, node: Node, document: Option<SharedDoc>) {
     let Some(document) = document else {
         return;
     };
-    let single = |n: Node| -> bool {
-        if !n.share_document(document) {
+    let single = |req: &mut Request, n: Node| -> bool {
+        if !n.share_document(req, document) {
             return false;
         }
         if n.kind() == Kind::Element {
             let mut attr = n.properties();
             while let Some(a) = attr {
-                set_document_ref_pointers_attr(a, document);
+                set_document_ref_pointers_attr(req, a, document);
                 attr = a.next();
             }
         }
         true
     };
-    if !single(node) {
+    if !single(req, node) {
         return;
     }
     let mut at = node.children();
     while let Some(n) = at {
-        if !single(n) {
+        if !single(req, n) {
             break;
         }
         at = next_in_tree_order(n, node);
@@ -1119,11 +1135,11 @@ fn set_document_ref_pointers(node: Node, document: Option<SharedDoc>) {
 }
 
 /// `dom_set_document_ref_pointers_attr`.
-fn set_document_ref_pointers_attr(attr: Node, document: SharedDoc) {
-    attr.share_document(document);
+fn set_document_ref_pointers_attr(req: &mut Request, attr: Node, document: SharedDoc) {
+    attr.share_document(req, document);
     let mut child = attr.children();
     while let Some(c) = child {
-        c.share_document(document);
+        c.share_document(req, document);
         child = c.next();
     }
 }
@@ -1206,7 +1222,8 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
                 ns.and_then(Ns::prefix).as_deref(),
             )
         {
-            payload.obj.attach(cloned, shared_doc(req, object));
+            let shared = shared_doc(req, object);
+            payload.obj.attach(req, cloned, shared);
         }
         let clone = object.clone_with(req, payload)?;
         if let Some(d) = dom_mut(req, clone) {
@@ -1239,7 +1256,7 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
             } else {
                 None
             };
-            payload.obj.attach(cloned, shared);
+            payload.obj.attach(req, cloned, shared);
             copied = Some((n, cloned));
         }
     }
@@ -1485,20 +1502,20 @@ fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> bool {
         node.undict(old, doc);
         undict_subtree(node, old, doc);
         if let Some(shared) = crate::shared_doc(req, doc_obj) {
-            let transfer = |n: Node| {
-                n.transfer_document(shared);
+            let transfer = |req: &mut Request, n: Node| {
+                n.transfer_document(req, shared);
                 if n.kind() == Kind::Element {
                     let mut attr = n.properties();
                     while let Some(a) = attr {
-                        a.transfer_document(shared);
+                        a.transfer_document(req, shared);
                         attr = a.next();
                     }
                 }
             };
-            transfer(node);
+            transfer(req, node);
             let mut at = node.children();
             while let Some(n) = at {
-                transfer(n);
+                transfer(req, n);
                 at = crate::next_in_tree_order(n, node);
             }
         }

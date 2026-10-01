@@ -200,8 +200,11 @@ impl ObjectHandlers for NodeHandlers {
             Extra::NamespaceParent(p) => Some(p),
             _ => None,
         });
+        // `dom_object_namespace_node_free_storage`: the parent given up
+        // first, then `dom_objects_free_storage`.
         if let Some(parent) = parent {
             req.release(parent.as_value());
         }
+        crate::release_libxml(req, object);
     }
 }

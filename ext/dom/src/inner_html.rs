@@ -269,7 +269,7 @@ fn set_inner_html(req: &mut Request, object: PhpObject, value: &Value) -> Result
         context = contents;
     }
     crate::invalidate(req, object);
-    crate::remove_all_children(context);
+    crate::remove_all_children(req, context);
     crate::parent::pre_insert(req, object, fragment, context, None)?;
     Ok(())
 }

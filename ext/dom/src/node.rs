@@ -145,7 +145,8 @@ pub(crate) fn replace_child(
     }
     if new_child.doc().is_none() && parent.doc().is_some() {
         new_child.set_tree_doc(parent.doc());
-        set_document_ref_pointers(new_child, shared_doc(req, this));
+        let shared = shared_doc(req, this);
+        set_document_ref_pointers(req, new_child, shared);
     }
     if new_child.kind() == Kind::Fragment {
         let prev = old_child.prev();
@@ -869,7 +870,8 @@ fn append_child(req: &mut Request, this: PhpObject, child: PhpObject) -> Result<
     }
     if child.doc().is_none() && parent.doc().is_some() {
         child.set_tree_doc(parent.doc());
-        set_document_ref_pointers(child, shared_doc(req, this));
+        let shared = shared_doc(req, this);
+        set_document_ref_pointers(req, child, shared);
     }
     if child.parent().is_some() {
         child.unlink();
@@ -894,7 +896,7 @@ fn append_child(req: &mut Request, this: PhpObject, child: PhpObject) -> Result<
                 && old != child
             {
                 old.unlink();
-                old.free_resource();
+                old.free_resource(req);
             }
             let added = parent.add_child(child);
             if let Some(a) = added {
@@ -973,7 +975,8 @@ fn insert_before(
     };
     if child.doc().is_none() && parent.doc().is_some() {
         child.set_tree_doc(parent.doc());
-        set_document_ref_pointers(child, shared_doc(req, this));
+        let shared = shared_doc(req, this);
+        set_document_ref_pointers(req, child, shared);
     }
     invalidate(req, this);
     let new_child = if let Some(refp) = refp {
@@ -1004,7 +1007,7 @@ fn insert_before(
                     return object_for(req, child, Some(this));
                 }
                 old.unlink();
-                old.free_resource();
+                old.free_resource(req);
             }
             match refp.add_prev_sibling(child) {
                 Some(n) => Some(n),
@@ -1062,7 +1065,7 @@ fn insert_before(
                     return object_for(req, child, Some(this));
                 }
                 old.unlink();
-                old.free_resource();
+                old.free_resource(req);
             }
             match parent.add_child(child) {
                 Some(n) => Some(n),

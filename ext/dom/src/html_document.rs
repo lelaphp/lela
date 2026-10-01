@@ -120,7 +120,7 @@ fn set_body(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), T
         crate::adopt(req, object, fresh, doc);
         current.replace_with(fresh);
         if current.object().is_none() {
-            current.free_resource();
+            current.free_resource(req);
         }
         return Ok(());
     }
@@ -212,8 +212,8 @@ fn title(req: &mut Request, object: PhpObject) -> Read {
 }
 
 /// `dom_string_replace_all`.
-fn replace_all(doc: Node, element: Node, value: &[u8]) {
-    crate::remove_all_children(element);
+fn replace_all(req: &mut Request, doc: Node, element: Node, value: &[u8]) {
+    crate::remove_all_children(req, element);
     if let Some(text) = Node::new_text(Some(doc), value) {
         element.add_child(text);
     }
@@ -251,7 +251,7 @@ fn set_title(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), 
                 element
             }
         };
-        replace_all(doc, element, &bytes);
+        replace_all(req, doc, element, &bytes);
     } else if ns_is(root, HTML_NS) {
         let title = title_element(doc);
         let head = html_child(doc, is_head);
@@ -269,7 +269,7 @@ fn set_title(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), 
                 element
             }
         };
-        replace_all(doc, element, &bytes);
+        replace_all(req, doc, element, &bytes);
     }
     Ok(())
 }

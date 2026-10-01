@@ -188,9 +188,11 @@ fn derives(req: &mut Request, class: ClassId, base: ClassId) -> bool {
 fn adopt(req: &mut Request, object: PhpObject, doc: Node, ns: Option<Ns>) {
     if let Some(s) = sxe_mut(req, object) {
         s.ns = ns;
-        s.obj.adopt_document(doc);
+    }
+    if let Some(mut obj) = sxe::libxml_half(req, object) {
+        obj.adopt_document(req, doc);
         if let Some(root) = doc.root() {
-            s.obj.hold_node(root);
+            obj.hold_node(req, root);
         }
     }
 }
@@ -341,9 +343,9 @@ fn simplexml_import_dom(
         return Ok(None);
     };
     let made = new_object(req, class)?;
-    if let Some(s) = sxe_mut(req, made) {
-        s.obj.share(exported.document(), doc);
-        s.obj.hold_node(target);
+    if let Some(mut obj) = sxe::libxml_half(req, made) {
+        obj.share(req, exported.document(), doc);
+        obj.hold_node(req, target);
     }
     Ok(Some(Instance::of(made)))
 }
@@ -753,11 +755,13 @@ impl SimpleXMLElement {
         let Some(doc) = parse(req, source, options)? else {
             return Err(throw(req, "Exception", "String could not be parsed as XML"));
         };
-        let released = sxe_mut(req, this).and_then(|s| {
+        if let Some(s) = sxe_mut(req, this) {
             s.xpath = None;
-            s.obj.decrement_resource();
-            s.current.take()
-        });
+        }
+        if let Some(mut obj) = sxe::libxml_half(req, this) {
+            obj.decrement_resource(req);
+        }
+        let released = sxe_mut(req, this).and_then(|s| s.current.take());
         if let Some(old) = released {
             req.release(old.as_value());
         }

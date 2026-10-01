@@ -738,6 +738,7 @@ impl ObjectHandlers for MapHandlers {
                 req.release(Value::array(array));
             }
         }
+        crate::release_libxml(req, object);
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {

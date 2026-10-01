@@ -560,10 +560,9 @@ impl DOMXPath {
             old.callbacks.release(req);
         }
         let shared = crate::shared_doc(req, doc_obj);
-        if let Some(d) = dom_mut(req, this) {
-            d.obj.set_object(this);
-            d.obj.decrement_doc_ref();
-            d.obj.share(shared, doc);
+        if let Some(mut obj) = crate::libxml_half(req, this) {
+            obj.decrement_doc_ref(req);
+            obj.share(req, shared, doc);
         }
         let state = XPathState {
             ctx,
@@ -961,10 +960,13 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         None
     }
 
+    /// `dom_xpath_objects_free_storage`: `xmlXPathFreeContext`, then the
+    /// document let go of.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         if let Some(state) = take(req, object) {
             state.callbacks.release(req);
         }
+        crate::release_libxml(req, object);
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {

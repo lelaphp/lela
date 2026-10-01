@@ -122,7 +122,7 @@ fn namespace_node(req: &mut Request, this: PhpObject, elem: Node, ns: Ns) -> Res
 fn set_attribute_modern(req: &mut Request, this: PhpObject, elem: Node, name: &[u8], value: &[u8]) {
     if let Some(attr) = crate::map::attribute_node(elem, name) {
         crate::attr_value_will_change(req, this, attr);
-        crate::remove_all_children(attr);
+        crate::remove_all_children(req, attr);
         if let Some(text) = Node::new_text(attr.doc(), value) {
             attr.add_child(text);
         }
@@ -634,7 +634,7 @@ fn set_attribute_node(
         && elem.doc().is_some()
         && let Some(shared) = crate::shared_doc(req, this)
     {
-        crate::set_document_ref_pointers_attr(attr, shared);
+        crate::set_document_ref_pointers_attr(req, attr, shared);
     }
     elem.add_child(attr);
     if modern {
@@ -1720,6 +1720,24 @@ impl DOMElement {
 /// p urn:p c
 /// q urn:q c
 /// <r xmlns:p="urn:p" p:i="k">t<c xmlns:q="urn:q"/></r>
+/// ```
+///
+/// An element's object is `dom_objects_new`'s, with the
+/// `php_libxml_node_ptr` `php_libxml_increment_node_ptr` lays beside it
+/// for its node, given back with it:
+///
+/// ```php
+/// $d = Dom\HTMLDocument::createFromString('<p>a</p><div>b</div>', LIBXML_NOERROR);
+/// $w = $d->body->firstChild;
+/// $m = memory_get_usage(); $t = $d->body->lastChild; $n = memory_get_usage(); unset($t); $o = memory_get_usage();
+/// var_dump($n - $m, $o - $n);
+/// $x = new DOMDocument; $x->loadXML('<r><a/><b/></r>'); $w = $x->documentElement->firstChild;
+/// $m = memory_get_usage(); $u = $x->documentElement->lastChild; var_dump(memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(120)
+/// int(-120)
+/// int(88)
 /// ```
 #[php_class(
     namespace(Dom),

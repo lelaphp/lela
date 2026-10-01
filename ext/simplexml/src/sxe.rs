@@ -13,7 +13,7 @@ use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw, throw_chained};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
-use php_ext_libxml::ffi::{Kind, Node, NodeObject, XPath};
+use php_ext_libxml::ffi::{Borrowed, Kind, Node, NodeObject, XPath};
 
 /// `SXE_ITER`: what an object walks from the node it holds, matched
 /// exhaustively wherever php switches on `iter.type`.
@@ -82,6 +82,12 @@ pub(crate) fn sxe(req: &Request, object: PhpObject) -> Option<&Sxe> {
 /// The payload of `object`, to write.
 pub(crate) fn sxe_mut(req: &mut Request, object: PhpObject) -> Option<&mut Sxe> {
     object.native_mut::<Sxe>(req)
+}
+
+/// The object's libxml half borrowed for a call that takes the request
+/// beside it ([`NodeObject::borrow`]).
+pub(crate) fn libxml_half(req: &mut Request, object: PhpObject) -> Option<Borrowed> {
+    sxe_mut(req, object).map(|s| s.obj.borrow())
 }
 
 /// What a walk reads off one object: its node, walk and namespace, copied
@@ -301,11 +307,13 @@ pub(crate) fn wrap(
 ) -> Result<PhpObject, Thrown> {
     let shared = sxe(req, of).and_then(|s| s.obj.shared_doc());
     let made = new_object(req, of.class())?;
-    if let Some(s) = sxe_mut(req, made) {
+    if let Some(mut obj) = libxml_half(req, made) {
         if let (Some(shared), Some(doc)) = (shared, node.doc()) {
-            s.obj.share(Some(shared), doc);
+            obj.share(req, Some(shared), doc);
         }
-        s.obj.hold_node(node);
+        obj.hold_node(req, node);
+    }
+    if let Some(s) = sxe_mut(req, made) {
         s.walk = walk;
         s.ns = ns;
     }
@@ -314,10 +322,10 @@ pub(crate) fn wrap(
 
 /// `sxe_unlink_node`: `node` taken out of its tree, and freed where no
 /// object holds it.
-fn unlink(node: Node) {
+fn unlink(req: &mut Request, node: Node) {
     node.unlink();
     if !node.is_named() {
-        node.free_resource();
+        node.free_resource(req);
     }
 }
 
@@ -708,7 +716,7 @@ fn prop_dim_write(
     if hits.count == 1 {
         if let (Some(n), Some(text)) = (hits.found, &text) {
             while let Some(child) = n.children() {
-                unlink(child);
+                unlink(req, child);
             }
             set_text(n, text);
         }
@@ -850,7 +858,7 @@ fn prop_dim_delete(
             Member::Append => None,
         };
         if let Some(a) = found {
-            unlink(a);
+            unlink(req, a);
         }
         return Ok(());
     }
@@ -862,7 +870,7 @@ fn prop_dim_delete(
                 Some(node)
             };
             if let Some(n) = view.by_offset(*i, from).0 {
-                unlink(n);
+                unlink(req, n);
             }
         }
         Member::Name(name) => {
@@ -870,7 +878,7 @@ fn prop_dim_delete(
             while let Some(n) = at {
                 at = n.next();
                 if n.kind() != Kind::Text && n.name() == *name && view.matches_ns(n) {
-                    unlink(n);
+                    unlink(req, n);
                 }
             }
         }
@@ -1314,23 +1322,25 @@ fn clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
         .and_then(Node::parent)
         .is_some_and(|p| p.kind().is_document());
     let made = new_object(req, object.class())?;
-    let Some(s) = sxe_mut(req, made) else {
+    let Some(mut obj) = libxml_half(req, made) else {
         return Ok(made);
     };
     let doc = if root {
         let copy = doc.and_then(|d| d.copy_doc(true));
         if let Some(c) = copy {
-            s.obj.adopt_document(c);
+            obj.adopt_document(req, c);
         }
         copy
     } else {
         if let (Some(shared), Some(d)) = (shared, doc) {
-            s.obj.share(Some(shared), d);
+            obj.share(req, Some(shared), d);
         }
         doc
     };
-    s.walk = view.walk;
-    s.ns = view.ns;
+    if let Some(s) = sxe_mut(req, made) {
+        s.walk = view.walk;
+        s.ns = view.ns;
+    }
     let node = view.node.and_then(|n| {
         if root {
             doc.and_then(Node::root)
@@ -1339,7 +1349,7 @@ fn clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
         }
     });
     if let Some(n) = node {
-        s.obj.hold_node(n);
+        obj.hold_node(req, n);
     }
     Ok(made)
 }
@@ -1366,6 +1376,14 @@ impl ObjectHandlers for Handlers {
         }
         if let Some(p) = properties {
             req.release(Value::array(p));
+        }
+        // `sxe_object_free_iterxpath`, then
+        // `php_libxml_node_decrement_resource`.
+        if let Some(s) = sxe_mut(req, object) {
+            s.xpath = None;
+        }
+        if let Some(mut obj) = libxml_half(req, object) {
+            obj.release(req);
         }
     }
 

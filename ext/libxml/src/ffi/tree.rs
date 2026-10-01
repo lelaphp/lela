@@ -8,6 +8,8 @@
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
 
+use php_ext::request::Request;
+
 use super::{Alloc, Library, NodeObject, SharedDoc, Tree, cstr, sys};
 
 /// A NUL-terminated copy or null, for a C argument php passes as `NULL`.
@@ -513,15 +515,15 @@ impl Node {
     }
 
     /// `php_libxml_node_free_resource`.
-    pub fn free_resource(self) {
+    pub fn free_resource(self, req: &mut Request) {
         // SAFETY: a live node nothing names any more.
-        unsafe { Tree::free_resource(self.raw()) };
+        unsafe { Tree::free_resource(self.raw(), Some(req)) };
     }
 
     /// `php_libxml_node_free_list` over the node's children.
-    pub fn free_list(first: Option<Node>) {
+    pub fn free_list(req: &mut Request, first: Option<Node>) {
         // SAFETY: a live list nothing else frees.
-        unsafe { Tree::free_list(first.map_or(ptr::null_mut(), Node::raw)) };
+        unsafe { Tree::free_list(first.map_or(ptr::null_mut(), Node::raw), Some(req)) };
     }
 
     /// `xmlReconciliateNs(doc, node)`.
@@ -1466,47 +1468,47 @@ impl NodeObject {
     /// `php_dom_instantiate_object_helper`'s libxml half: the document
     /// counted (shared with `shared` where one is given) where the node has
     /// one, and the node's proxy taken.
-    pub fn attach(&mut self, node: Node, shared: Option<SharedDoc>) {
+    pub fn attach(&mut self, req: &mut Request, node: Node, shared: Option<SharedDoc>) {
         if let Some(doc) = node.doc() {
             // SAFETY: `shared` was read off a live object's reference in the
             // same native call, and `doc` is the live node's document.
-            unsafe { self.increment_doc_ref_shared(shared, doc.raw().cast()) };
+            unsafe { self.increment_doc_ref_shared(req, shared, doc.raw().cast()) };
         }
         // SAFETY: a live node, and this is the half of the object standing
         // for it.
-        unsafe { self.increment_node_ptr(node.raw(), true) };
+        unsafe { self.increment_node_ptr(req, node.raw(), true) };
     }
 
     /// `intern->document = NULL; php_libxml_increment_doc_ref(intern, doc)`:
     /// a first reference to a document nothing counts yet, as a document
     /// object takes the tree it just parsed or made.
-    pub fn adopt_document(&mut self, doc: Node) {
+    pub fn adopt_document(&mut self, req: &mut Request, doc: Node) {
         // SAFETY: `doc` is a live document no reference counts yet.
-        unsafe { self.increment_doc_ref(doc.raw().cast()) };
+        unsafe { self.increment_doc_ref(req, doc.raw().cast()) };
     }
 
     /// `intern->document = docobj->document;
     /// php_libxml_increment_doc_ref(intern, doc)`: one more owner of the
     /// document another object counts, as `DOMXPath` takes its
     /// document's, and a first reference to `doc` where there is none.
-    pub fn share(&mut self, shared: Option<SharedDoc>, doc: Node) {
+    pub fn share(&mut self, req: &mut Request, shared: Option<SharedDoc>, doc: Node) {
         // SAFETY: `shared` was read off a live object's reference in the
         // same native call, and `doc` is a live document.
-        unsafe { self.increment_doc_ref_shared(shared, doc.raw().cast()) };
+        unsafe { self.increment_doc_ref_shared(req, shared, doc.raw().cast()) };
     }
 
     /// `php_libxml_increment_node_ptr(intern, node, intern)`.
-    pub fn take_node(&mut self, node: Node) {
+    pub fn take_node(&mut self, req: &mut Request, node: Node) {
         // SAFETY: a live node the object will stand for.
-        unsafe { self.increment_node_ptr(node.raw(), true) };
+        unsafe { self.increment_node_ptr(req, node.raw(), true) };
     }
 
     /// `php_libxml_increment_node_ptr(intern, node, NULL)`: the node counted
     /// and nothing named as the object that stands for it, as simplexml
     /// holds its nodes, so dom still answers a node of its own for one.
-    pub fn hold_node(&mut self, node: Node) {
+    pub fn hold_node(&mut self, req: &mut Request, node: Node) {
         // SAFETY: a live node, and no object named.
-        unsafe { self.increment_node_ptr(node.raw(), false) };
+        unsafe { self.increment_node_ptr(req, node.raw(), false) };
     }
 }
 
@@ -1514,7 +1516,7 @@ impl Node {
     /// `dom_set_document_ref_obj_single`: the object standing for the node,
     /// where one counts no document, counting `document`; `false` where one
     /// counts another already.
-    pub fn share_document(self, document: SharedDoc) -> bool {
+    pub fn share_document(self, req: &mut Request, document: SharedDoc) -> bool {
         let Some(mut wrapper) = self.wrapper() else {
             return true;
         };
@@ -1523,15 +1525,15 @@ impl Node {
         }
         // SAFETY: `document` is counted by the live object the caller read
         // it off, and this object counts none.
-        unsafe { wrapper.increment_doc_ref_shared(Some(document), ptr::null_mut()) };
+        unsafe { wrapper.increment_doc_ref_shared(req, Some(document), ptr::null_mut()) };
         true
     }
 
     /// `php_dom_transfer_document_ref_single_node`.
-    pub fn transfer_document(self, document: SharedDoc) {
+    pub fn transfer_document(self, req: &mut Request, document: SharedDoc) {
         if let Some(mut wrapper) = self.wrapper() {
             // SAFETY: as above.
-            unsafe { wrapper.transfer_document(document) };
+            unsafe { wrapper.transfer_document(req, document) };
         }
     }
 }

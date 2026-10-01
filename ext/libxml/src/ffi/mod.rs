@@ -65,7 +65,7 @@ use std::ptr::{self, NonNull};
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpObject};
+use php_ext::values::{ClassId, Emalloc, PhpObject};
 
 /// What libxml allocated: its strings read and copied, and its
 /// allocations given back.
@@ -794,7 +794,8 @@ pub trait PrivateData: std::any::Any {
     fn element_freed(&mut self, element: Node);
 }
 
-/// `php_libxml_ref_obj`.
+/// `php_libxml_ref_obj`, with the `emalloc(sizeof(php_libxml_ref_obj))`
+/// php makes for it held on the request's heap ([`REF_OBJ`]).
 struct DocRef {
     doc: *mut sys::xmlDoc,
     refcount: u32,
@@ -806,15 +807,46 @@ struct DocRef {
     private: Option<Box<dyn PrivateData>>,
     /// `handlers`: `None` is `php_libxml_default_document_handlers`.
     handlers: Option<&'static dyn crate::DocumentHandlers>,
+    /// The struct's allocation on the request's heap, given back where
+    /// php's `efree(document)` gives it back.
+    charge: Option<Emalloc>,
+}
+
+/// `sizeof(php_libxml_ref_obj)` on the pinned 64-bit build: `ptr`,
+/// `doc_props`, `cache_tag`, `private_data`, `handlers`, `refcount` and
+/// the two eight-bit fields (`Z/ext/libxml/php_libxml.h:110-119`).
+const REF_OBJ: usize = 48;
+
+/// `sizeof(php_libxml_node_ptr)`: `node`, `refcount` and `_private`
+/// (`Z/ext/libxml/php_libxml.h:121-125`).
+const NODE_PTR: usize = 24;
+
+/// `emalloc(size)` for one of the structs php's libxml glue allocates
+/// on the request's heap; none where the memory limit refused it, whose
+/// fatal the request records, as php's `emalloc` bails out.
+fn charge(req: &mut Request, size: usize) -> Option<Emalloc> {
+    Emalloc::new(req, size).ok()
+}
+
+/// `efree` of such a struct's allocation, where a request is at hand:
+/// one freed where none is, a payload dropped past its `free_obj`, is
+/// the request's end's, as the heap's release takes it.
+fn give_back(req: Option<&mut Request>, charge: Option<Emalloc>) {
+    if let (Some(req), Some(charge)) = (req, charge) {
+        charge.free(req);
+    }
 }
 
 /// `php_libxml_node_ptr`: what a node's `_private` names while an object
-/// stands for it.
+/// stands for it, with php's `emalloc(sizeof(php_libxml_node_ptr))` held
+/// on the request's heap ([`NODE_PTR`]).
 struct NodePtr {
     node: *mut sys::xmlNode,
     refcount: u32,
     /// php's `_private`: the object's libxml half.
     wrapper: *mut Wrapper,
+    /// The struct's allocation on the request's heap.
+    charge: Option<Emalloc>,
 }
 
 /// The fields of `php_libxml_node_object`, laid down apart from the
@@ -847,8 +879,11 @@ impl Default for NodeObject {
 }
 
 impl Drop for NodeObject {
+    /// What a `free_obj` left: the object's node and document let go of
+    /// with no request at hand, so what they free of the request's heap
+    /// is the request's end's to release.
     fn drop(&mut self) {
-        self.release();
+        self.release_in(None);
         // SAFETY: the allocation `default` leaked; after `release` no
         // proxy names it, so this is its one owner.
         drop(unsafe { Box::from_raw(self.0.as_ptr()) });
@@ -858,6 +893,16 @@ impl Drop for NodeObject {
 impl NodeObject {
     fn w(&self) -> *mut Wrapper {
         self.0.as_ptr()
+    }
+
+    /// The libxml half borrowed off the payload that owns it, for a call
+    /// that takes the request beside it, which the payload's own borrow
+    /// would hold: the same half, freeing nothing when it goes. The borrow
+    /// is used and dropped within the native call that took it, before
+    /// anything can free the object, as [`Node::wrapper`]'s is.
+    #[must_use]
+    pub fn borrow(&self) -> Borrowed {
+        Borrowed(std::mem::ManuallyDrop::new(NodeObject(self.0)))
     }
 
     /// The object this is the half of, which the node's proxy hands back
@@ -910,6 +955,7 @@ impl NodeObject {
     /// that stands for it or will.
     pub(crate) unsafe fn increment_node_ptr(
         &mut self,
+        req: &mut Request,
         node: *mut sys::xmlNode,
         claim: bool,
     ) -> u32 {
@@ -925,7 +971,7 @@ impl NodeObject {
                 // SAFETY: as above.
                 return unsafe { (*current).refcount };
             }
-            self.decrement_node_ptr();
+            self.decrement_node_ptr(req);
         }
         // SAFETY: the caller's contract: a live node.
         let private = unsafe { (*node).private }.cast::<NodePtr>();
@@ -935,6 +981,7 @@ impl NodeObject {
                 node,
                 refcount: 1,
                 wrapper: named,
+                charge: charge(req, NODE_PTR),
             }));
             // SAFETY: the wrapper this owns.
             unsafe { (*w).node = proxy };
@@ -955,7 +1002,11 @@ impl NodeObject {
 
     /// `php_libxml_decrement_node_ptr`: the proxy counted once less, and
     /// this object naming none after (`object->node = NULL`).
-    pub fn decrement_node_ptr(&mut self) -> u32 {
+    pub fn decrement_node_ptr(&mut self, req: &mut Request) -> u32 {
+        self.decrement_node_ptr_in(Some(req))
+    }
+
+    fn decrement_node_ptr_in(&mut self, req: Option<&mut Request>) -> u32 {
         let w = self.w();
         // SAFETY: the wrapper this owns.
         let proxy = unsafe { (*w).node };
@@ -963,7 +1014,7 @@ impl NodeObject {
             return 0;
         }
         // SAFETY: a proxy the wrapper names is live.
-        let left = unsafe { decrement_node_ptr_ref(proxy) };
+        let left = unsafe { decrement_node_ptr_ref(proxy, req) };
         // SAFETY: the wrapper this owns.
         unsafe { (*w).node = ptr::null_mut() };
         left
@@ -975,7 +1026,11 @@ impl NodeObject {
     /// # Safety
     /// `doc` is null or a live document no other `php_libxml_ref_obj`
     /// owns where this holds none.
-    pub(crate) unsafe fn increment_doc_ref(&mut self, doc: *mut sys::xmlDoc) -> u32 {
+    pub(crate) unsafe fn increment_doc_ref(
+        &mut self,
+        req: &mut Request,
+        doc: *mut sys::xmlDoc,
+    ) -> u32 {
         let w = self.w();
         // SAFETY: the wrapper this owns.
         let current = unsafe { (*w).document };
@@ -997,6 +1052,7 @@ impl NodeObject {
             quirks: Quirks::NoQuirks,
             private: None,
             handlers: None,
+            charge: charge(req, REF_OBJ),
         }));
         // SAFETY: the wrapper this owns.
         unsafe { (*w).document = d };
@@ -1022,6 +1078,7 @@ impl NodeObject {
     /// other one where `shared` is given, and `doc` is null or live.
     pub(crate) unsafe fn increment_doc_ref_shared(
         &mut self,
+        req: &mut Request,
         shared: Option<SharedDoc>,
         doc: *mut sys::xmlDoc,
     ) -> u32 {
@@ -1030,7 +1087,7 @@ impl NodeObject {
             unsafe { (*self.w()).document = handle.0.as_ptr() };
         }
         // SAFETY: the caller's contract.
-        unsafe { self.increment_doc_ref(doc) }
+        unsafe { self.increment_doc_ref(req, doc) }
     }
 
     /// `php_dom_transfer_document_ref_single_node`: `to` counted once more
@@ -1039,16 +1096,20 @@ impl NodeObject {
     ///
     /// # Safety
     /// `to` is a document some live object counts.
-    pub unsafe fn transfer_document(&mut self, to: SharedDoc) {
+    pub unsafe fn transfer_document(&mut self, req: &mut Request, to: SharedDoc) {
         // SAFETY: the caller's contract.
         unsafe { (*to.0.as_ptr()).refcount += 1 };
-        self.decrement_doc_ref();
+        self.decrement_doc_ref(req);
         // SAFETY: the wrapper this owns.
         unsafe { (*self.w()).document = to.0.as_ptr() };
     }
 
     /// `php_libxml_decrement_doc_ref`.
-    pub fn decrement_doc_ref(&mut self) -> u32 {
+    pub fn decrement_doc_ref(&mut self, req: &mut Request) -> u32 {
+        self.decrement_doc_ref_in(Some(req))
+    }
+
+    fn decrement_doc_ref_in(&mut self, req: Option<&mut Request>) -> u32 {
         let w = self.w();
         // SAFETY: the wrapper this owns.
         let d = unsafe { (*w).document };
@@ -1058,23 +1119,27 @@ impl NodeObject {
         // SAFETY: as above.
         unsafe { (*w).document = ptr::null_mut() };
         // SAFETY: a document the wrapper counted is live.
-        unsafe { decrement_doc_ref_directly(d) }
+        unsafe { decrement_doc_ref_directly(d, req) }
     }
 
     /// `php_libxml_node_decrement_resource`: the node let go of, freed
     /// with its subtree where nothing else holds it and it hangs from no
     /// parent, and the document let go of after.
-    pub fn decrement_resource(&mut self) {
+    pub fn decrement_resource(&mut self, req: &mut Request) {
+        self.decrement_resource_in(Some(req));
+    }
+
+    fn decrement_resource_in(&mut self, mut req: Option<&mut Request>) {
         let w = self.w();
         // SAFETY: the wrapper this owns.
         let proxy = unsafe { (*w).node };
         if !proxy.is_null() {
             // SAFETY: a proxy the wrapper names is live.
             let node = unsafe { (*proxy).node };
-            let left = self.decrement_node_ptr();
+            let left = self.decrement_node_ptr_in(req.as_deref_mut());
             if left == 0 {
                 // SAFETY: the node is live or null, and nothing names it.
-                unsafe { Tree::free_resource(node) };
+                unsafe { Tree::free_resource(node, req.as_deref_mut()) };
             } else {
                 // SAFETY: the proxy outlives this decrement since others
                 // still count it.
@@ -1084,22 +1149,26 @@ impl NodeObject {
                 }
             }
         }
-        self.decrement_doc_ref();
+        self.decrement_doc_ref_in(req);
     }
 
     /// `dom_objects_free_storage`'s libxml half: a document object lets
     /// go of its node and its document, any other node object of its
     /// resource. Idempotent, as the `ptr = NULL` after it makes php's.
-    pub fn release(&mut self) {
+    pub fn release(&mut self, req: &mut Request) {
+        self.release_in(Some(req));
+    }
+
+    fn release_in(&mut self, mut req: Option<&mut Request>) {
         let node = self.node();
         if !node.is_null() {
             // SAFETY: a live node the proxy names.
             let kind = unsafe { (*node).type_ };
             if kind == sys::XML_DOCUMENT_NODE || kind == sys::XML_HTML_DOCUMENT_NODE {
-                self.decrement_node_ptr();
-                self.decrement_doc_ref();
+                self.decrement_node_ptr_in(req.as_deref_mut());
+                self.decrement_doc_ref_in(req.as_deref_mut());
             } else {
-                self.decrement_resource();
+                self.decrement_resource_in(req.as_deref_mut());
             }
         }
         let w = self.w();
@@ -1109,7 +1178,7 @@ impl NodeObject {
         }
         // A wrapper with no node may still count a document: a
         // `DOMNodeList` holds its document this way.
-        self.decrement_doc_ref();
+        self.decrement_doc_ref_in(req);
     }
 
     /// The document this counts, `intern->document->ptr`, null where it
@@ -1469,7 +1538,7 @@ impl Tree {
     ///
     /// # Safety
     /// `node` is null or the first of a live list nothing else frees.
-    pub(crate) unsafe fn free_list(node: *mut sys::xmlNode) {
+    pub(crate) unsafe fn free_list(node: *mut sys::xmlNode, mut req: Option<&mut Request>) {
         let mut cur = node;
         while !cur.is_null() {
             // SAFETY: a live node of the list.
@@ -1508,7 +1577,7 @@ impl Tree {
                         unsafe { sys::xmlRemoveID(n.doc, cur.cast()) };
                     }
                     // SAFETY: the attribute's value list.
-                    unsafe { Tree::free_list(n.children) };
+                    unsafe { Tree::free_list(n.children, req.as_deref_mut()) };
                 }
                 sys::XML_ATTRIBUTE_DECL
                 | sys::XML_DTD_NODE
@@ -1516,20 +1585,20 @@ impl Tree {
                 | sys::XML_NAMESPACE_DECL
                 | sys::XML_TEXT_NODE => {
                     // SAFETY: the node's children.
-                    unsafe { Tree::free_list(n.children) };
+                    unsafe { Tree::free_list(n.children, req.as_deref_mut()) };
                 }
                 _ => {
                     // SAFETY: the node's children and attributes.
-                    unsafe { Tree::free_list(n.children) };
+                    unsafe { Tree::free_list(n.children, req.as_deref_mut()) };
                     // SAFETY: as above.
-                    unsafe { Tree::free_list(n.properties.cast()) };
+                    unsafe { Tree::free_list(n.properties.cast(), req.as_deref_mut()) };
                 }
             }
             let next = n.next;
             // SAFETY: a live node, unlinked, unregistered and freed once.
             unsafe { sys::xmlUnlinkNode(cur) };
             // SAFETY: as above.
-            unsafe { unregister_node(cur) };
+            unsafe { unregister_node(cur, req.as_deref_mut()) };
             // SAFETY: as above.
             unsafe { node_free(cur) };
             cur = next;
@@ -1541,7 +1610,7 @@ impl Tree {
     ///
     /// # Safety
     /// `node` is null or live.
-    pub(crate) unsafe fn free_resource(node: *mut sys::xmlNode) {
+    pub(crate) unsafe fn free_resource(node: *mut sys::xmlNode, mut req: Option<&mut Request>) {
         if node.is_null() {
             return;
         }
@@ -1551,7 +1620,7 @@ impl Tree {
             sys::XML_DOCUMENT_NODE | sys::XML_HTML_DOCUMENT_NODE => {}
             sys::XML_ENTITY_REF_NODE => {
                 // SAFETY: a live node.
-                unsafe { unregister_node(node) };
+                unsafe { unregister_node(node, req.as_deref_mut()) };
                 if n.parent.is_null() {
                     // SAFETY: an unlinked reference, whose children are the
                     // declaration's and not its own.
@@ -1561,18 +1630,18 @@ impl Tree {
             _ => {
                 if n.parent.is_null() || n.type_ == sys::XML_NAMESPACE_DECL {
                     // SAFETY: the subtree the node owns.
-                    unsafe { Tree::free_list(n.children) };
+                    unsafe { Tree::free_list(n.children, req.as_deref_mut()) };
                     if n.type_ == sys::XML_ELEMENT_NODE {
                         // SAFETY: as above.
-                        unsafe { Tree::free_list(n.properties.cast()) };
+                        unsafe { Tree::free_list(n.properties.cast(), req.as_deref_mut()) };
                     }
                     // SAFETY: a live node.
-                    unsafe { unregister_node(node) };
+                    unsafe { unregister_node(node, req.as_deref_mut()) };
                     // SAFETY: as above, freed once.
                     unsafe { node_free(node) };
                 } else {
                     // SAFETY: a live node.
-                    unsafe { unregister_node(node) };
+                    unsafe { unregister_node(node, req) };
                 }
             }
         }
@@ -1681,7 +1750,7 @@ impl Tree {
 ///
 /// # Safety
 /// `proxy` is a live proxy.
-unsafe fn decrement_node_ptr_ref(proxy: *mut NodePtr) -> u32 {
+unsafe fn decrement_node_ptr_ref(proxy: *mut NodePtr, req: Option<&mut Request>) -> u32 {
     // SAFETY: the caller's contract.
     let p = unsafe { &mut *proxy };
     p.refcount -= 1;
@@ -1695,6 +1764,7 @@ unsafe fn decrement_node_ptr_ref(proxy: *mut NodePtr) -> u32 {
             // SAFETY: a wrapper a proxy names is owned by a live object.
             unsafe { (*p.wrapper).node = ptr::null_mut() };
         }
+        give_back(req, p.charge.take());
         // SAFETY: the allocation `increment_node_ptr` leaked; its last
         // count, and nothing names it any more.
         drop(unsafe { Box::from_raw(proxy) });
@@ -1706,7 +1776,7 @@ unsafe fn decrement_node_ptr_ref(proxy: *mut NodePtr) -> u32 {
 ///
 /// # Safety
 /// `d` is a live document reference.
-unsafe fn decrement_doc_ref_directly(d: *mut DocRef) -> u32 {
+unsafe fn decrement_doc_ref_directly(d: *mut DocRef, req: Option<&mut Request>) -> u32 {
     // SAFETY: the caller's contract.
     let r = unsafe { &mut *d };
     r.refcount -= 1;
@@ -1717,6 +1787,7 @@ unsafe fn decrement_doc_ref_directly(d: *mut DocRef) -> u32 {
             // SAFETY: the document this reference owned, freed once.
             unsafe { sys::xmlFreeDoc(r.doc) };
         }
+        give_back(req, r.charge.take());
         // SAFETY: the allocation `increment_doc_ref` leaked, its last count.
         drop(unsafe { Box::from_raw(d) });
     }
@@ -1746,7 +1817,7 @@ unsafe fn doc_wrapper(node: *mut sys::xmlNode) -> *mut Wrapper {
 ///
 /// # Safety
 /// `node` is live.
-unsafe fn unregister_node(node: *mut sys::xmlNode) {
+unsafe fn unregister_node(node: *mut sys::xmlNode, mut req: Option<&mut Request>) {
     // SAFETY: the caller's contract.
     let proxy = unsafe { (*node).private }.cast::<NodePtr>();
     if proxy.is_null() {
@@ -1769,8 +1840,8 @@ unsafe fn unregister_node(node: *mut sys::xmlNode) {
     // is forgotten after so the owner's is the one that frees it.
     let mut borrowed =
         std::mem::ManuallyDrop::new(NodeObject(unsafe { NonNull::new_unchecked(wrapper) }));
-    borrowed.decrement_node_ptr();
-    borrowed.decrement_doc_ref();
+    borrowed.decrement_node_ptr_in(req.as_deref_mut());
+    borrowed.decrement_doc_ref_in(req);
 }
 
 /// `LIBXML_NS_TAG_HOOK`: the low bit of a namespace's `_private` that

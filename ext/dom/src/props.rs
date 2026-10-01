@@ -402,7 +402,7 @@ fn set_substituted_node_value(
 ) -> Result<(), Thrown> {
     let node = prop_node(req, object)?;
     invalidate(req, object);
-    remove_all_children(node);
+    remove_all_children(req, node);
     set_content_len(req, node, &written_bytes(value));
     Ok(())
 }
@@ -530,7 +530,7 @@ fn set_node_value(req: &mut Request, object: PhpObject, value: &Value) -> Result
     match node.kind() {
         Kind::Attribute => {
             attr_value_will_change(req, object, node);
-            remove_all_children(node);
+            remove_all_children(req, node);
             if follows_spec(req, object) {
                 if let Some(text) = Node::new_text_len(None, &bytes) {
                     node.add_child(text);
@@ -540,7 +540,7 @@ fn set_node_value(req: &mut Request, object: PhpObject, value: &Value) -> Result
             }
         }
         Kind::Element => {
-            remove_all_children(node);
+            remove_all_children(req, node);
             set_content_len(req, node, &bytes);
         }
         Kind::Text | Kind::Comment | Kind::CData | Kind::Pi => set_content_len(req, node, &bytes),
@@ -1047,7 +1047,7 @@ fn set_text_content(req: &mut Request, object: PhpObject, value: &Value) -> Resu
         node.kind(),
         Kind::Fragment | Kind::Element | Kind::Attribute
     ) {
-        remove_all_children(node);
+        remove_all_children(req, node);
         if let Some(text) = Node::new_text_len(node.doc(), &bytes) {
             node.add_child(text);
         }
@@ -1270,7 +1270,7 @@ fn attr_value(req: &mut Request, object: PhpObject) -> Read {
 fn set_attr_value(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
     let node = prop_node(req, object)?;
     attr_value_will_change(req, object, node);
-    remove_all_children(node);
+    remove_all_children(req, node);
     let bytes = written_bytes(value);
     if follows_spec(req, object) {
         if let Some(text) = Node::new_text_len(node.doc(), &bytes) {
