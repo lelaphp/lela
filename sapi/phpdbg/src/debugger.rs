@@ -66,7 +66,11 @@ impl Tier for Debugger {
 /// prompt>
 /// ```
 fn entered(req: &mut Request, frame: FrameRef) -> Flow {
-    let Some(plan) = session::with(|s| s.plan).flatten() else {
+    let Some(plan) = session::with(|s| {
+        s.started = true;
+        s.plan
+    })
+    .flatten() else {
         return Flow::Continue;
     };
     match plan {
@@ -164,7 +168,8 @@ fn drive(req: &mut Request, frame: FrameRef) -> Flow {
 /// entry (`Z/sapi/phpdbg/phpdbg.c:731-770`), outside what `ev` serves and
 /// other than under `-rr`: the listing where the request stands, the frame the
 /// loop was stepping or `[no active file]` where nothing is executing,
-/// then a prompt there until a command goes on, after which the fatal
+/// then, once the execution context's first compile is behind the
+/// session, a prompt there until a command goes on, after which the fatal
 /// ends the run; a prompt that stopped, `quit` among them, bails out of
 /// the log before php's `php_error_cb` writes the status.
 ///
@@ -204,16 +209,20 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
         .standing
         .filter(|_| session.executing)
         .and_then(|frame| tier::position(req, frame).map(|position| (frame, position)));
-    let mut here = if let Some((frame, position)) = standing {
-        crate::list::code(&session, &position.file, position.line);
-        Here::Paused { req, frame }
-    } else {
-        crate::list::code(&session, prompt::NO_ACTIVE_FILE, 0);
-        if session.exec.is_some() {
-            Here::Held { req }
-        } else {
-            Here::Idle { req }
-        }
+    let (file, line) = standing
+        .as_ref()
+        .map_or((prompt::NO_ACTIVE_FILE, 0), |(_, position)| {
+            (position.file.as_slice(), position.line)
+        });
+    crate::list::code(&session, file, line);
+    if !session.started {
+        session::put(session);
+        return AfterLog::Returned;
+    }
+    let mut here = match standing {
+        Some((frame, _)) => Here::Paused { req, frame },
+        None if session.exec.is_some() => Here::Held { req },
+        None => Here::Idle { req },
     };
     let outcome = prompt::interactive(&mut session, &mut here);
     let stopped = session.stopped.is_some();

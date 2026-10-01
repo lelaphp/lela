@@ -69,7 +69,19 @@ pub fn serve(engine: &Engine) -> i32 {
 /// After a request: the context marked as one that does not compile
 /// where its held request never reached its first opline, and a run
 /// that ended by itself reported as php reports it; the status where
-/// the request was a run.
+/// the request was a run. A context the compiler refused leaves the
+/// fatal's 255, which php's `EG(exit_status)` keeps for the session.
+///
+/// ```php
+/// function (
+/// ```
+/// ```request phpdbg
+/// q
+/// ```
+/// ```expect exit=255
+/// Parse error: Unclosed '(' in %SCRATCH%/witness.php on line 2
+/// prompt>
+/// ```
 fn ended(s: &mut Session, plan: Plan, observed: &Observables) -> Option<i32> {
     let reached = s.plan != Some(Plan::Hold);
     s.plan = None;
@@ -79,7 +91,7 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) -> Option<i32> {
     s.stdin_file = None;
     if plan == Plan::Hold && !reached {
         s.context = Context::Refused;
-        return None;
+        return (observed.exit_code != 0).then_some(observed.exit_code);
     }
     if !s.executing {
         // php's `EG(exit_status)` outlives the prompt it was set at: a
