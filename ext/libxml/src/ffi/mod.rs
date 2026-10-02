@@ -183,6 +183,24 @@ impl Library {
 
 // ---- errors: `php_libxml_structured_error_handler` and its siblings
 
+unsafe extern "C" {
+    fn php_libxml_generic_push(saved: *mut *mut c_void, saved_ctx: *mut *mut c_void);
+    fn php_libxml_generic_pop(saved: *mut c_void, saved_ctx: *mut c_void);
+}
+
+/// `php_libxml_error_handler` past `generic.c`: what libxml2 wrote straight
+/// through `xmlGenericError`, joined to the capture running on this thread
+/// as the generic handler's errors are.
+#[unsafe(no_mangle)]
+extern "C" fn php_libxml_generic_text(text: *const c_char, len: usize) {
+    if text.is_null() {
+        return;
+    }
+    // SAFETY: `generic.c` hands `len` bytes of a live string.
+    let bytes = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), len) };
+    Raised::generic(bytes);
+}
+
 /// How php would have printed one error with internal errors off, which
 /// is decided by the handler libxml reached, not by the error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -779,7 +797,13 @@ impl Call {
         // SAFETY: `call` outlives the call, and the handler is taken off
         // again before it is dropped.
         unsafe { sys::xmlSetStructuredErrorFunc((&raw mut call).cast(), Some(collect)) };
+        let (mut generic, mut generic_ctx) = (ptr::null_mut(), ptr::null_mut());
+        // SAFETY: two slots of this frame; php's generic handler set on this
+        // thread, taken off again below.
+        unsafe { php_libxml_generic_push(&raw mut generic, &raw mut generic_ctx) };
         let answered = f();
+        // SAFETY: the handler and context the push replaced.
+        unsafe { php_libxml_generic_pop(generic, generic_ctx) };
         // SAFETY: the handler and context that were set before.
         unsafe { sys::xmlSetStructuredErrorFunc(saved_context, saved_handler) };
         if let Some(routing) = call.routing {
