@@ -50,10 +50,13 @@ pub(crate) enum Command {
         /// stdin head instead.
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
-        /// Every divergence row with its reason whole, as `docs/divergence.md`
-        /// shows the registry. Without it the section is the counts and the
-        /// `open` rows alone, their reasons cut to the message width, which
-        /// is what the local facts render.
+        /// Every row. Without it, what the local facts render: the
+        /// divergence section is the counts and the `open` rows alone, their
+        /// reasons cut to the message width, and `budget`, `phpt`, `witness`
+        /// and `mutants` render the rows a session acts on and count the
+        /// passing rest in one line. With it, every divergence row with its
+        /// reason whole, as `docs/divergence.md` shows the registry, and
+        /// every row of the other four.
         #[arg(long)]
         uncut: bool,
         /// Print AGENTS.md and .claude/harness.local.md for the function

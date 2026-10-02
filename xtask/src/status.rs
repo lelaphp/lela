@@ -134,8 +134,82 @@ pub fn render(
             serde_json::to_string_pretty(&rows.iter().map(Row::json).collect::<Result<Vec<_>>>()?)?
         }
         Format::Md if rows.is_empty() => format!("{NO_READING}\n"),
-        Format::Md => table(columns, &rows),
+        Format::Md => match settled_rows(section).filter(|_| !uncut) {
+            Some((name, settled)) => folded(columns, rows, name, settled),
+            None => table(columns, &rows),
+        },
     })
+}
+
+/// The sections that grow by a row per crate, each with its name on the
+/// command line and what its settled rows are, in the words of the line
+/// that counts them (#1608). Each is a section of the local facts, which
+/// the engine caps as one block (§5, #64), and a row per crate is a block
+/// that outgrows the cap as the crates land; so without `--uncut` the rows
+/// a session acts on are rendered, and the settled are one line.
+fn settled_rows(section: Section) -> Option<(&'static str, &'static str)> {
+    match section {
+        Section::Budget => Some((
+            "budget",
+            "crates pass, each with more than a tenth of its ceiling to spare",
+        )),
+        Section::Phpt => Some(("phpt", "subsets pass, none below the target it is held to")),
+        Section::Witness => Some(("witness", "crates pass")),
+        Section::Mutants => Some(("mutants", "crates pass")),
+        _ => None,
+    }
+}
+
+/// A budget row within a tenth of its ceiling is rendered whatever its
+/// reading says: it is the crate the next commit pushes over.
+const NEAR_CEILING: f64 = 0.9;
+
+/// Whether a row is settled: its reading passes, no comparison folded
+/// into it by [`compared`] fails, and a budget row has more than a tenth of
+/// its ceiling to spare. A row with no reading, a skip, a crate not yet
+/// created and a failure are never settled.
+fn settled(row: &Row) -> bool {
+    let passes = row
+        .reading
+        .as_ref()
+        .is_some_and(|r| r.status == reading::Status::Pass);
+    let compared_clean = COMPARISONS.iter().all(|scope| {
+        let key = scope.trim_start_matches('@');
+        !row.fact(key).starts_with(reading::Status::Fail.as_str())
+    });
+    let lines = row
+        .reading
+        .as_ref()
+        .and_then(|r| r.numbers.get("lines"))
+        .map(|n| n.as_f64());
+    let ceiling = row.facts.get("ceiling").and_then(Value::as_f64);
+    let spare = match (lines, ceiling) {
+        (Some(lines), Some(ceiling)) => lines < ceiling * NEAR_CEILING,
+        _ => true,
+    };
+    passes && compared_clean && spare
+}
+
+/// The rows a session acts on as a table, then one line counting the
+/// settled rows left out and naming the command that renders every row,
+/// so the section grows by the rows that need a look and not by the
+/// crates that landed. A section with every row settled is the line alone.
+fn folded(columns: Columns, rows: Vec<Row>, name: &str, what: &str) -> String {
+    let (settled, shown): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(settled);
+    if settled.is_empty() {
+        return table(columns, &shown);
+    }
+    let (mut out, more) = if shown.is_empty() {
+        (String::new(), "")
+    } else {
+        (table(columns, &shown) + "\n", " more")
+    };
+    let _ = writeln!(
+        out,
+        "{}{more} {what}; every row: `cargo xtask status --section {name} --uncut`.",
+        settled.len()
+    );
+    out
 }
 
 /// The `session_id` of the hook's stdin head, the JSON every hook event
