@@ -40,7 +40,7 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 # from the CLI's objects (`PHP_BINARY_OBJS`, `Z/sapi/phpdbg/config.m4`),
 # so the oracle's phpdbg loads every extension its CLI does (#1450). The
 # test `the_bundle_is_the_clis` holds the two lists equal.
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap"] }
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap", "gd"] }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its natives are declared with, as an extension declares its own
 # (ADR-0008, #1348).

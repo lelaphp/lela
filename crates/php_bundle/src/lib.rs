@@ -128,6 +128,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_tidy::extension,
         #[cfg(feature = "soap")]
         php_ext_soap::extension,
+        #[cfg(feature = "gd")]
+        php_ext_gd::extension,
     ]
 }
 
@@ -157,6 +159,10 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-fileinfo",
     #[cfg(not(feature = "filter"))]
     "--disable-filter",
+    #[cfg(feature = "gd")]
+    "--enable-gd",
+    #[cfg(feature = "gd")]
+    "--with-external-gd",
     #[cfg(not(feature = "iconv"))]
     "--without-iconv",
     #[cfg(not(feature = "libxml"))]
