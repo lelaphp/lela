@@ -11,6 +11,7 @@ use php_ext::coerce::numeric_string;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{self, Level, Thrown, docref};
 use php_ext::request::Request;
+use php_ext::values::{PhpString, Value};
 
 use crate::{Format, Module, State, headers_sent, sent_error, shown, started_error};
 
@@ -543,4 +544,23 @@ pub(super) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// ```
 pub(super) fn alter(req: &mut Request, name: &[u8], value: &[u8]) -> Result<bool, Thrown> {
     Ok(req.ini_set(name, value)?.is_some())
+}
+
+/// [`alter`] over a request string the caller holds,
+/// `zend_alter_ini_entry`'s: the entry that takes it is one more owner,
+/// and the caller's own owner stays the caller's.
+pub(super) fn alter_string(
+    req: &mut Request,
+    name: &[u8],
+    value: PhpString,
+) -> Result<bool, Thrown> {
+    Ok(req.ini_set_string(name, value)?.is_some())
+}
+
+/// [`alter_string`] over a string made for it and released after,
+/// `zend_long_to_str`'s or `zval_get_string`'s.
+pub(super) fn alter_made(req: &mut Request, name: &[u8], value: PhpString) -> Result<bool, Thrown> {
+    let set = req.ini_set_string(name, value);
+    req.release(Value::string(value));
+    Ok(set?.is_some())
 }

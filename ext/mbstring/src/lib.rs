@@ -284,6 +284,16 @@ fn display_ini_entries(req: &mut Request) {
 /// string(3) "uni"
 /// mb_language(): Argument #1 ($language) must be a valid language, "nope" given
 /// ```
+///
+/// The entry keeps the string it is handed (`Z/ext/mbstring/mbstring.c:1216`):
+///
+/// ```php
+/// ini_set('from', 'x');
+/// $v = str_repeat('j', 2); $v[1] = 'a'; $m = memory_get_usage(); mb_language($v); unset($v); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 0
+/// ```
 #[php_function]
 fn mb_language(
     req: &mut Request,
@@ -293,10 +303,7 @@ fn mb_language(
         let current = settings(req).language;
         return Ok(Union::A(new_string(req, current.name())?));
     };
-    if req
-        .ini_set(b"mbstring.language", name.as_bytes())?
-        .is_none()
-    {
+    if req.ini_set_string(b"mbstring.language", name)?.is_none() {
         let name = String::from_utf8_lossy(name.as_bytes()).into_owned();
         return Err(value_error(
             req,

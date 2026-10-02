@@ -809,7 +809,7 @@ fn iconv_set_encoding(
     };
     // The entry's rule ([`on_modify`]) raises its deprecation.
     Ok(req
-        .ini_set(kind.entry().as_bytes(), encoding.as_bytes())?
+        .ini_set_string(kind.entry().as_bytes(), encoding)?
         .is_some())
 }
 
