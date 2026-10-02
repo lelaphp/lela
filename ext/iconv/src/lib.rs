@@ -155,6 +155,7 @@ pub fn extension() -> Extension {
             name: "ob_iconv_handler",
             conflicts: &["ob_iconv_handler", "mb_output_handler"],
             handler: ob_iconv_handler,
+            init: None,
         })
         .info(info)
         .request_state::<State>()

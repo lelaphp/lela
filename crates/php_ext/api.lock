@@ -385,6 +385,7 @@ request::BindTo
 request::BodyLimits
 request::Brigade
 request::BufferHandler
+request::BufferInit
 request::BuildDefs
 request::BuildDefs::configure
 request::BuildDefs::date

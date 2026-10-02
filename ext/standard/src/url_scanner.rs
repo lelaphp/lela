@@ -686,11 +686,13 @@ const OUTPUT_REWRITER: BufferHandler = BufferHandler {
     name: "URL-Rewriter",
     conflicts: &[],
     handler: output_handler,
+    init: None,
 };
 const SESSION_REWRITER: BufferHandler = BufferHandler {
     name: "URL-Rewriter",
     conflicts: &[],
     handler: session_handler,
+    init: None,
 };
 
 /// `php_url_scanner_add_var_impl`: the pair, raw-URL-encoded where
