@@ -114,6 +114,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_fileinfo::extension,
         #[cfg(feature = "dba")]
         php_ext_dba::extension,
+        #[cfg(feature = "zip")]
+        php_ext_zip::extension,
     ]
 }
 
@@ -177,6 +179,8 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-xml",
     "--disable-xmlreader",
     "--disable-xmlwriter",
+    #[cfg(feature = "zip")]
+    "--with-zip",
     #[cfg(feature = "zlib")]
     "--with-zlib",
 ];

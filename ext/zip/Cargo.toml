@@ -1,0 +1,40 @@
+# ext/zip: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_zip"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The zip extension, php-src/ext/zip"
+
+[lints]
+workspace = true
+
+# The facade; `standard`, whose `php_glob`, `php_basename` and
+# `php_stream_context_get_option` `php_zip.c` and `zip_stream.c` call; and
+# `pcre`, whose compiled-pattern cache `addPattern` matches with, as php's
+# `ZEND_MOD_REQUIRED("pcre")` (design §4.10). The engine is out of reach
+# (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+php_ext_standard = { path = "../standard" }
+php_ext_pcre = { path = "../pcre" }
+# libzip's behaviour re-derived over the pure-Rust zip crate, no `src/ffi/`
+# (design §7.2, revision 70; #1515): the zip crate reads, the codecs and
+# ciphers it reads with write.
+zip = { workspace = true }
+flate2 = { workspace = true }
+bzip2 = { workspace = true }
+lzma-rust2 = { workspace = true }
+ruzstd = { workspace = true }
+aes = { workspace = true }
+hmac = { workspace = true }
+pbkdf2 = { workspace = true }
+sha1 = { workspace = true }
+crc32fast = { workspace = true }
+getrandom = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }

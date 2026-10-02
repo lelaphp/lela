@@ -68,6 +68,7 @@ linked = [
     "sqlite3",
     "fileinfo",
     "dba",
+    "zip",
 ]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
 spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
@@ -116,6 +117,7 @@ mysqli = ["dep:php_ext_mysqli", "spl", "mysqlnd"] # the `php` binary and the php
 sqlite3 = ["dep:php_ext_sqlite3"] # sqlite3.c over the libsqlite3 ext/pdo_sqlite binds (#1501); php requires no module of it, so pdo_sqlite is the crate's edge and not this feature's
 fileinfo = ["dep:php_ext_fileinfo"] # php's default ./configure builds it (#1166, #1451)
 dba = ["dep:php_ext_dba"] # the `php` binary and the phpt lane, as php builds it with --enable-dba (#1166, #1451)
+zip = ["dep:php_ext_zip", "pcre", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-zip; php_zip.c ZEND_MOD_REQUIRED("pcre"), and php_glob and the stream context through standard (design §7.2, revision 70; #1515)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -167,6 +169,7 @@ php_ext_mysqli = { path = "../../ext/mysqli", optional = true }
 php_ext_sqlite3 = { path = "../../ext/sqlite3", optional = true }
 php_ext_fileinfo = { path = "../../ext/fileinfo", optional = true }
 php_ext_dba = { path = "../../ext/dba", optional = true }
+php_ext_zip = { path = "../../ext/zip", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection
