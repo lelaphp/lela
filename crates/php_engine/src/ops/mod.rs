@@ -73,12 +73,13 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
     }
 }
 
-/// `zend_std_cast_object_tostring` (`Z/Zend/zend_object_handlers.c:2558`)
-/// under `zval_get_string`: the class's `__toString` served on the
-/// object with no arguments, and what it returned when that is a
-/// string, the caller's to own as the method's return was. A class
-/// with no `__toString` is php's `Error` naming the class, thrown by
-/// `zval_get_string_func` once the handler failed; a `__toString` that
+/// `zval_get_string_func` over an object: its class's `cast_object`
+/// slot asked for a string, `zend_std_cast_object_tostring`
+/// (`Z/Zend/zend_object_handlers.c:2558`) at `Std`, the class's
+/// `__toString` served on the object with no arguments, and what it
+/// returned when that is a string, the caller's to own as the method's
+/// return was. A class whose slot fails, one with no `__toString` at
+/// `Std`, is php's `Error` naming the class; a `__toString` that
 /// returned something else is the handler's own `Error`, unless the
 /// method left a throwable pending, which stands as it is. A user
 /// `__toString` is declared `: string` by the compiler and coerces its
@@ -111,24 +112,28 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
 ///   - Return [ bool ]
 /// }
 /// ```
+///
+/// A class whose own slot casts, as `GMP`'s `gmp_cast_object` does,
+/// is read through it, and so is an argument a string parameter holds
+/// under the weak rule.
+///
+/// ```php
+/// echo gmp_init(-42), "|", strlen(gmp_pow(2, 70)), "\n";
+/// ```
+/// ```expect
+/// -42|22
+/// ```
 pub(crate) fn object_to_string(
     req: &mut Request,
     object: crate::api::values::PhpObject,
 ) -> Result<PhpString, Thrown> {
     let class = object.class();
-    if req.method_named(class, b"__tostring").is_some() {
-        let returned = crate::api::call::call_method(req, &object, b"__toString", &[])?;
-        let returned = req.unwrap_reference(returned);
+    let table = req.object_handlers(object.heap());
+    if let Some(returned) = table.cast_object(req, object, TypeTag::String)? {
         if let Some(text) = returned.as_php_string() {
             return Ok(*text);
         }
         req.release(returned);
-        let name = req.class_name(class);
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!("Method {name}::__toString() must return a string value"),
-        ));
     }
     let name = req.class_name(class);
     Err(throw_error(
@@ -2502,8 +2507,30 @@ pub(crate) fn bitwise_and(req: &mut Request, left: &Value, right: &Value) -> Res
 /// #0 {main}
 ///   thrown in %s on line 6
 /// ```
+///
+/// An object is asked first through its `do_operation` slot with no
+/// right operand, `ZEND_TRY_UNARY_OBJECT_OPERATION(ZEND_BW_NOT)`, and
+/// is the `TypeError` where the slot does not answer.
+///
+/// ```php
+/// var_dump(~gmp_init(42));
+/// try { ~new stdClass; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// object(GMP)#2 (1) {
+///   ["num"]=>
+///   string(3) "-43"
+/// }
+/// Cannot perform bitwise not on stdClass
+/// ```
 pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     let value = value.deref();
+    if let ValueRef::Object(o) = value.as_ref() {
+        let table = req.object_handlers(o.heap());
+        if let Some(result) = table.do_operation(req, BinaryOp::BitwiseNot, &value, None)? {
+            return Ok(result);
+        }
+    }
     if let Some(n) = value.as_int() {
         return Ok(Value::int(!n));
     }

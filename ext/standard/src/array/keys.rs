@@ -18,7 +18,7 @@ use php_ext::raising::{
     throw_error, warning,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, Layout, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Layout, PhpArray, PhpString, TypeTag, Value, ValueRef};
 
 use super::sort::key_value;
 use super::{copied, key_copy, returned};
@@ -1219,9 +1219,19 @@ fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Value>, Th
 
 /// `array_sum(array $array): int|float`, php's `php_array_binop` over
 /// `add_function` (`Z/ext/standard/array.c:6443`): the elements added
-/// from `0` in order; an array, an object and a resource are php's
+/// from `0` in order; an object its class's `cast_object` to a number,
+/// as `GMP`'s is; an array, any other object and a resource are php's
 /// warning, the resource adding its id, and a string that is not numeric
 /// adds zero behind the same warning.
+///
+/// ```php
+/// var_dump(array_sum([gmp_init(PHP_INT_MAX - 1), 1]), array_product([gmp_init(3), 2.5]));
+/// ```
+/// ```expect
+/// int(9223372036854775807)
+/// float(7.5)
+/// ```
+///
 ///
 /// ```php
 /// var_dump(array_sum([1, 2.5, "3", true, null]), array_sum([]), array_sum([PHP_INT_MAX, 1]));
@@ -1278,6 +1288,18 @@ fn binop(
         let element = element.deref();
         let operand = match element.as_ref() {
             ValueRef::Array(_) | ValueRef::Object(_) => {
+                // "For objects we try to cast them to a numeric type":
+                // the class's `cast_object` slot asked for `_IS_NUMBER`.
+                if let Some(object) = element.as_object().copied() {
+                    let handlers = object.handlers(req);
+                    let number = handlers.cast_object(req, object, TypeTag::Number)?;
+                    if let Some(number) =
+                        number.filter(|n| n.as_int().is_some() || n.as_float().is_some())
+                    {
+                        total = binary_op(req, op, &total, &number)?;
+                        continue;
+                    }
+                }
                 let type_name = match element.as_object() {
                     Some(object) => req
                         .class_decl(object.class())

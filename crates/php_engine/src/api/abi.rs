@@ -2077,7 +2077,23 @@ pub trait ObjectHandlers: Send + Sync {
     fn write_overloaded(&self) -> bool {
         false
     }
+
+    /// `ce->unserialize` of an internal class that sets its own, as
+    /// `GMP`'s `gmp_unserialize` is: what `object_custom` hands the
+    /// payload of a `C:` record, over an object it made of the class.
+    /// `None` at `Std`, php's null slot, which leaves the class to
+    /// `zend_user_unserialize` where it implements `Serializable` and to
+    /// php's warning where it does not
+    /// ([`crate::api::call::class_unserialize`]).
+    fn unserialize(&self) -> Option<ClassUnserialize> {
+        None
+    }
 }
+
+/// The `ce->unserialize` slot: the payload of a `C:` record read into
+/// an object of the class. The `Err` is php's `FAILURE` with the
+/// throwable it raised, which fails the `unserialize()` around it.
+pub type ClassUnserialize = fn(&mut Request, PhpObject, &[u8]) -> Result<(), Thrown>;
 
 /// `std_object_handlers`: every slot its default, the table a user
 /// class and a native class that declares none are reached through.

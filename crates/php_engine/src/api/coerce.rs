@@ -20,7 +20,9 @@ use crate::api::raising::{Thrown, arg_type_error};
 use crate::api::request::{Deprecations, Request};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
-/// php's binary operators as `zend_binary_op` names them.
+/// php's binary operators as `zend_binary_op` names them, and the one
+/// unary operator an object's `do_operation` is asked for besides,
+/// `ZEND_BW_NOT`, with no right operand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
     Add,
@@ -35,6 +37,7 @@ pub enum BinaryOp {
     BitwiseXor,
     ShiftLeft,
     ShiftRight,
+    BitwiseNot,
 }
 
 /// `zend_is_true`, the kernel [`crate::ops::is_true`] through the face:
@@ -436,7 +439,7 @@ pub fn compare(req: &mut Request, a: &Value, b: &Value) -> Result<Ordering, Thro
 /// `ZEND_POW` or `ZEND_CONCAT` calls (`add_function`, `pow_function`,
 /// `concat_function` of `Zend/zend_operators.c`), with its conversions,
 /// its warnings and its throws, so a native that applies an operator
-/// applies php's.
+/// applies php's. [`BinaryOp::BitwiseNot`] reads `lhs` alone.
 pub fn binary_op(
     req: &mut Request,
     op: BinaryOp,
@@ -456,8 +459,19 @@ pub fn binary_op(
         BinaryOp::BitwiseXor => crate::ops::bitwise_xor,
         BinaryOp::ShiftLeft => crate::ops::shift_left,
         BinaryOp::ShiftRight => crate::ops::shift_right,
+        BinaryOp::BitwiseNot => return crate::ops::bitwise_not(req, lhs),
     };
     kernel(req, lhs, rhs)
+}
+
+/// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`): whether
+/// the call being served was made under `declare(strict_types=1)`, the
+/// regime [`coerce_param`] holds an argument under, for a native that
+/// parses an argument by hand as php's `gmp_zend_parse_arg_into_mpz`
+/// does, with `zend_parse_arg_long_weak` only under the weak one.
+#[must_use]
+pub fn strict_types(req: &Request) -> bool {
+    req.strict_types()
 }
 
 /// Hold the argument at `position` to `ty` as `zend_parse_parameters`
@@ -1009,10 +1023,12 @@ pub(crate) fn scalar_type_hint(
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
                 return Ok(Some(Value::string(crate::ops::to_string(req, &value)?)));
             }
-            // `cast_object(zobj, &obj, IS_STRING)`, which for a class
-            // with no `__toString` fails without a word.
+            // `cast_object(zobj, &obj, IS_STRING)`, the class's own
+            // slot, which at `Std` fails without a word for a class with
+            // no `__toString`.
             ValueRef::Object(object) => {
-                if let Some(text) = req.cast_object(*object, TypeTag::String)? {
+                let table = req.object_handlers(object.heap());
+                if let Some(text) = table.cast_object(req, *object, TypeTag::String)? {
                     return Ok(Some(text));
                 }
             }

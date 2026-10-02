@@ -1,0 +1,33 @@
+# ext/gmp: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_gmp"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The gmp extension, php-src/ext/gmp"
+links = "gmp"
+
+[lints]
+workspace = true
+
+# The facade, and `standard`, whose `php_var.h` unserializer `gmp.c`
+# reads a `C:` record's payload through (design §4.10). The engine is out
+# of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+php_ext_standard = { path = "../standard" }
+# `getentropy` for the seed `gmp_init_random` takes from
+# `php_random_bytes_silent`, in `src/ffi/` alone (`unsafe.homes`).
+libc = { workspace = true }
+
+# libgmp is the library the pinned keg links, found through pkg-config
+# and never vendored; its calls are declared by hand in `src/ffi/`, no
+# bindgen (design §7.2, revision 72; #1540).
+[build-dependencies]
+pkg-config = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }
