@@ -1111,7 +1111,8 @@ fn calc_of(op: BinaryOp) -> Option<Calc> {
         | BinaryOp::BitwiseOr
         | BinaryOp::BitwiseXor
         | BinaryOp::ShiftLeft
-        | BinaryOp::ShiftRight => return None,
+        | BinaryOp::ShiftRight
+        | BinaryOp::BitwiseNot => return None,
     })
 }
 

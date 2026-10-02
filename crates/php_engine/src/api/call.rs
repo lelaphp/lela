@@ -1120,13 +1120,16 @@ fn attribute_object_at(
 /// `ce->unserialize(rval, ce, buf, buf_len, data)` over an object
 /// `object_init_ex` made of the class: the class's unserializer handed
 /// the payload of a `C:` record, `true` once it has read it. The
-/// unserializer is the one php registers on the class entry:
-/// `zend_implement_serializable` gives a class that implements
-/// `Serializable`, and every class that inherits from one, php's
-/// `zend_user_unserialize`, which serves the object's `unserialize()`
-/// with the payload as a string. `false` is the class with none, whose
-/// payload `object_custom` warns of and skips; the `Err` is what
-/// `unserialize()` threw.
+/// unserializer is the one php registers on the class entry: an
+/// internal class's own, its handlers' [`ObjectHandlers::unserialize`]
+/// (`gmp_unserialize`); otherwise `zend_implement_serializable` gives a
+/// class that implements `Serializable`, and every class that inherits
+/// from one, php's `zend_user_unserialize`, which serves the object's
+/// `unserialize()` with the payload as a string. `false` is the class
+/// with none, whose payload `object_custom` warns of and skips; the
+/// `Err` is what the unserializer threw.
+///
+/// [`ObjectHandlers::unserialize`]: crate::api::abi::ObjectHandlers::unserialize
 ///
 /// ```php
 /// class S implements Serializable {
@@ -1159,6 +1162,10 @@ pub fn class_unserialize(
     object: PhpObject,
     data: &[u8],
 ) -> Result<bool, Thrown> {
+    if let Some(unserialize) = object.handlers(req).unserialize() {
+        unserialize(req, object, data)?;
+        return Ok(true);
+    }
     let serializable = req
         .class_named(b"serializable")
         .is_some_and(|interface| req.instance_of(object.class(), interface));

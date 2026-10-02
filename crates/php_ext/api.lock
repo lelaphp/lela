@@ -34,6 +34,7 @@ abi::ClassIterator::release
 abi::ClassIterator::rewind
 abi::ClassIterator::valid
 abi::ClassRef
+abi::ClassUnserialize
 abi::CloneObj
 abi::CloneObjWith
 abi::ConstArray
@@ -162,6 +163,7 @@ abi::ObjectHandlers::method_receiver
 abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
+abi::ObjectHandlers::unserialize
 abi::ObjectHandlers::unset_dimension
 abi::ObjectHandlers::unset_property
 abi::ObjectHandlers::write_dimension
@@ -282,6 +284,7 @@ coerce::is_type
 coerce::key_of
 coerce::loose_eq
 coerce::numeric_string
+coerce::strict_types
 coerce::to_array
 coerce::to_callable
 coerce::to_double
