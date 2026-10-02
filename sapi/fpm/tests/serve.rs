@@ -2,7 +2,8 @@
 //! handed to it as `FastCGI` records under php-fpm's name.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -15,13 +16,13 @@ fn tree(name: &str) -> PathBuf {
     dir
 }
 
-/// A configuration of one static child on `port`.
-fn conf(dir: &Path, port: u16) -> PathBuf {
+/// A configuration of one static child listening at `listen`.
+fn conf(dir: &Path, listen: &str) -> PathBuf {
     let path = dir.join("php-fpm.conf");
     std::fs::write(
         &path,
         format!(
-            "[global]\nerror_log = {}\n[www]\nlisten = 127.0.0.1:{port}\npm = static\npm.max_children = 1\n",
+            "[global]\nerror_log = {}\n[www]\nlisten = {listen}\npm = static\npm.max_children = 1\n",
             dir.join("fpm.log").display()
         ),
     )
@@ -29,10 +30,19 @@ fn conf(dir: &Path, port: u16) -> PathBuf {
     path
 }
 
+/// Where a pool in `dir` listens: a socket in the test's own directory,
+/// which no other process names, so nothing else can listen there before
+/// the master does (#1474). A loopback port found free and let go was
+/// anyone's until the master bound it, and a request sent there reached
+/// whatever took it.
+fn socket(dir: &Path) -> PathBuf {
+    dir.join("fpm.sock")
+}
+
 #[test]
 fn a_configuration_test_says_the_file_is_sound() {
     let dir = tree("test");
-    let path = conf(&dir, 9);
+    let path = conf(&dir, "127.0.0.1:9");
     let out = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
         .args(["-n", "-t", "-y"])
         .arg(&path)
@@ -57,7 +67,7 @@ fn record(kind: u8, content: &[u8]) -> Vec<u8> {
 }
 
 /// What request 1 writes on `FCGI_STDOUT`, read off `stream` to its end.
-fn response(stream: TcpStream, script: &Path) -> Vec<u8> {
+fn response(stream: UnixStream, script: &Path) -> Vec<u8> {
     let script = script.display().to_string();
     request(
         stream,
@@ -71,7 +81,7 @@ fn response(stream: TcpStream, script: &Path) -> Vec<u8> {
 
 /// What request 1 with `pairs` as its parameters writes on
 /// `FCGI_STDOUT`, read off `stream` to its end.
-fn request(mut stream: TcpStream, pairs: &[(&str, &str)]) -> Vec<u8> {
+fn request(mut stream: UnixStream, pairs: &[(&str, &str)]) -> Vec<u8> {
     let mut params = Vec::new();
     for &(name, value) in pairs {
         params.push(u8::try_from(name.len()).unwrap());
@@ -105,11 +115,11 @@ fn request(mut stream: TcpStream, pairs: &[(&str, &str)]) -> Vec<u8> {
     }
 }
 
-/// A connection to the pool on `port`, tried for ten seconds from
-/// `started`.
-fn connect(port: u16, started: Instant) -> Option<TcpStream> {
+/// A connection to the pool listening at `socket`, tried for ten seconds
+/// from `started`.
+fn connect(socket: &Path, started: Instant) -> Option<UnixStream> {
     loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
+        match UnixStream::connect(socket) {
             Ok(stream) => return Some(stream),
             Err(_) if started.elapsed() < Duration::from_secs(10) => {
                 std::thread::sleep(Duration::from_millis(20));
@@ -122,12 +132,8 @@ fn connect(port: u16, started: Instant) -> Option<TcpStream> {
 #[test]
 fn a_request_is_served_by_a_child_under_the_host_s_name() {
     let dir = tree("serve");
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let path = conf(&dir, port);
+    let socket = socket(&dir);
+    let path = conf(&dir, &socket.display().to_string());
     let script = dir.join("index.php");
     std::fs::write(&script, "<?php echo PHP_SAPI, ' ', $_GET['q'];").unwrap();
     let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
@@ -139,7 +145,7 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
         .spawn()
         .unwrap();
     let started = Instant::now();
-    let body = connect(port, started)
+    let body = connect(&socket, started)
         .map(|s| response(s, &script))
         .unwrap_or_default();
     let _ = Command::new("kill")
@@ -248,18 +254,15 @@ fn a_static_pool_at_debug_sent_sigquit_writes_the_oracle_s_lines() {
 #[test]
 fn a_request_body_file_that_does_not_open_is_a_warning_the_pool_logs() {
     let dir = tree("body-file");
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let socket = socket(&dir);
     let path = dir.join("php-fpm.conf");
     let log = dir.join("fpm.log");
     std::fs::write(
         &path,
         format!(
-            "[global]\nerror_log = {}\n[www]\nlisten = 127.0.0.1:{port}\npm = static\npm.max_children = 1\ncatch_workers_output = yes\nphp_admin_flag[log_errors] = on\n",
-            log.display()
+            "[global]\nerror_log = {}\n[www]\nlisten = {}\npm = static\npm.max_children = 1\ncatch_workers_output = yes\nphp_admin_flag[log_errors] = on\n",
+            log.display(),
+            socket.display()
         ),
     )
     .unwrap();
@@ -275,7 +278,7 @@ fn a_request_body_file_that_does_not_open_is_a_warning_the_pool_logs() {
         .unwrap();
     let script = script.display().to_string();
     let missing = dir.join("missing").display().to_string();
-    let body = connect(port, Instant::now())
+    let body = connect(&socket, Instant::now())
         .map(|s| {
             request(
                 s,

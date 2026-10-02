@@ -500,7 +500,8 @@ fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
 /// failed run of the witness, its bork line printing the transport's
 /// error, and never a native without a witness (#1426): the fixture's one
 /// native carries such a fence, and the pin's php-fpm here is a stand-in
-/// that accepts the request and resets it. The control: a runner that
+/// that accepts the request on the socket the configuration names and
+/// drops it unanswered, as a reset leaves it. The control: a runner that
 /// reads the fence as having entered nothing counts the native `missing`.
 #[test]
 fn a_request_fence_whose_server_resets_fails_the_run_and_is_not_a_missing_witness() {
@@ -512,7 +513,7 @@ fn a_request_fence_whose_server_resets_fails_the_run_and_is_not_a_missing_witnes
     let host = hosts.join("php-fpm");
     fs::write(
         &host,
-        "#!/usr/bin/perl\nuse Socket;\nmy ($conf, $port);\nfor my $i (0 .. $#ARGV) { $conf = $ARGV[$i + 1] if $ARGV[$i] eq '-y'; }\nopen(my $f, '<', $conf) or die;\nwhile (<$f>) { $port = $1 if /^listen = 127\\.0\\.0\\.1:(\\d+)/; }\nsocket(my $s, PF_INET, SOCK_STREAM, 0) or die;\nsetsockopt($s, SOL_SOCKET, SO_REUSEADDR, 1);\nbind($s, sockaddr_in($port, inet_aton('127.0.0.1'))) or die;\nlisten($s, 5) or die;\nwhile (accept(my $c, $s)) { my $b; sysread($c, $b, 8); setsockopt($c, SOL_SOCKET, SO_LINGER, pack('ii', 1, 0)); close($c); }\n",
+        "#!/usr/bin/perl\nuse Socket;\nmy ($conf, $path);\nfor my $i (0 .. $#ARGV) { $conf = $ARGV[$i + 1] if $ARGV[$i] eq '-y'; }\nopen(my $f, '<', $conf) or die;\nwhile (<$f>) { $path = $1 if /^listen = (\\S+)/; }\nsocket(my $s, PF_UNIX, SOCK_STREAM, 0) or die;\nbind($s, sockaddr_un($path)) or die;\nlisten($s, 5) or die;\nwhile (accept(my $c, $s)) { my $b; sysread($c, $b, 8); close($c); }\n",
     )
     .unwrap();
     #[cfg(unix)]
