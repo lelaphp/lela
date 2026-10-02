@@ -26,6 +26,9 @@ pub struct Code {
     /// `num_args`, and one more for a variadic: how many `RECV*` oplines
     /// open the op array.
     pub params: u32,
+    /// `last_var`: how many compiled variables the op array names; zero
+    /// for a native.
+    pub vars: u32,
     /// The op array as phpdbg's `print` writes it, and each function
     /// its body declares after it (`dynamic_func_defs`), as
     /// `phpdbg_print_function_helper` writes them; empty for a native.

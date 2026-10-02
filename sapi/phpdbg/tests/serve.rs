@@ -386,3 +386,75 @@ fn a_cycle_starts_the_breakpoints_over_and_carries_them() {
         )
     );
 }
+
+/// The overview with each table's size cut to `N`: the engine's tables
+/// hold what its bundle loads, which is not the oracle's build.
+fn counts_cut(out: &str) -> String {
+    out.lines()
+        .map(|line| {
+            match ["Classes    ", "Functions  ", "Constants  "]
+                .iter()
+                .find(|label| line.starts_with(**label))
+            {
+                Some(label) => format!("{label}N"),
+                None => line.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `info` with no sub-command writes the execution context's overview:
+/// in the init file, before the context is compiled; at the prompt the
+/// compile left, with the main op array's sizes; and at a breakpoint,
+/// executing, with what the last handler answered (the pinned phpdbg's
+/// bytes for `phpdbg -qb -n -i<file>`, the table sizes aside).
+#[test]
+fn info_writes_the_execution_context_overview() {
+    let overview = |file: &str, sizes: Option<&str>, executing: &str| {
+        let compiled = if sizes.is_some() { "yes" } else { "no" };
+        let sizes = sizes.unwrap_or_default();
+        format!(
+            "Execution Context Information\n\
+             \n\
+             Readline   no\n\
+             Libedit    yes\n\
+             Exec       {file}\n\
+             Compiled   {compiled}\n\
+             Stepping   off\n\
+             Quietness  on\n\
+             {sizes}\
+             {executing}\
+             Classes    N\n\
+             Functions  N\n\
+             Constants  N\n\
+             Included   0"
+        )
+    };
+    let (out, file, _) = initialized(
+        "info",
+        &["-qb", "-n"],
+        "info\n",
+        "<?php\n$a = 1;\nfunction f($x) { $y = $x; return $y; }\nf(1);\n",
+        "info\nb f\nr\ninfo\nq\n",
+    );
+    let sizes = Some("Opcodes    5\nVariables  0\n");
+    assert_eq!(
+        counts_cut(&out),
+        format!(
+            "{}\n\
+             [Successful compilation of {file}]\n\
+             prompt> {}\n\
+             prompt> [Breakpoint #0 added at f]\n\
+             prompt> [Breakpoint #0 in f() at {file}:3, hits: 1]\n\
+             >00003: function f($x) {{ $y = $x; return $y; }}\n \
+             00004: f(1);\n \
+             00005: \n\
+             prompt> {}\n\
+             prompt> ",
+            overview(&file, None, "Executing  no\n"),
+            overview(&file, sizes, "Executing  no\n"),
+            overview(&file, sizes, "Executing  yes\nVM Return  1\n"),
+        )
+    );
+}

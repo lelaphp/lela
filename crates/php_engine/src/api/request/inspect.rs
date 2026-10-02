@@ -347,6 +347,7 @@ impl Request {
                 lines: (0, 0),
                 ops: Vec::new(),
                 params: u32::try_from(decl.parameters.len()).unwrap_or(u32::MAX),
+                vars: 0,
                 dump: Vec::new(),
             });
         };
@@ -369,6 +370,7 @@ impl Request {
             lines: (body.line_start, body.line_end),
             ops: ops_of(body),
             params: u32::try_from(decl.parameters.len()).unwrap_or(u32::MAX),
+            vars: body.num_cvs,
         })
     }
 
@@ -492,6 +494,7 @@ impl Request {
             lines: (body.line_start, body.line_end),
             ops: ops_of(body),
             params: 0,
+            vars: body.num_cvs,
         })
     }
 

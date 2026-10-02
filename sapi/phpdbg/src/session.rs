@@ -172,6 +172,11 @@ pub struct Session {
     pub stepping: bool,
     /// `PHPDBG_G(last_line)`.
     pub last_line: u32,
+    /// `PHPDBG_G(vmret)`: what the last handler the loop ran answered,
+    /// which a cycle starts at zero.
+    pub vmret: i32,
+    /// `PHPDBG_IS_QUIET`, which `-v` clears.
+    pub quiet: bool,
     pub seek: Option<Seek>,
     /// `PHPDBG_G(handled_exception)`: the handle of the throwable the
     /// session last stopped on as uncaught.
@@ -249,6 +254,8 @@ impl Session {
             execution: Execution::Not,
             stepping: false,
             last_line: 0,
+            vmret: 0,
+            quiet: true,
             seek: None,
             handled: None,
             queued: Vec::new(),

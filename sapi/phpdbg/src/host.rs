@@ -208,6 +208,7 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
         out::set_colours(s.line_colours);
         s.carried = s.breaks.export();
         s.breaks = crate::bp::Breakpoints::default();
+        s.vmret = 0;
     }
 }
 

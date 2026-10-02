@@ -89,6 +89,8 @@ struct Line {
     init_default: bool,
     /// `-b`: colours off.
     boring: bool,
+    /// `-v`: quietness off.
+    verbose: bool,
     exec: Option<Vec<u8>>,
     args: Vec<Vec<u8>>,
 }
@@ -119,6 +121,7 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
                     b's' => line.stdin_delimiter = Some(value),
                     b'I' => line.init_default = false,
                     b'b' => line.boring = true,
+                    b'v' => line.verbose = true,
                     b'i' => line.init_file = (!value.is_empty()).then_some(value),
                     _ => {}
                 }
@@ -165,6 +168,7 @@ pub fn main() -> ExitCode {
         ));
     }
     session.init_files = init::files(line.init_file.as_deref(), line.init_default);
+    session.quiet = !line.verbose;
     if line.boring {
         session.line_colours = out::Colours::Off;
     }

@@ -1725,8 +1725,85 @@ fn list(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     Ret::Success
 }
 
-/// `PHPDBG_COMMAND(info)` with no sub-command.
-fn info_overview(_: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
+/// `PHPDBG_COMMAND(info)` with no sub-command: the execution context's
+/// overview (`Z/sapi/phpdbg/phpdbg_prompt.c:1070-1109`), the build's
+/// line editor as the oracle's (libedit, no readline), the main op
+/// array's sizes where it is compiled, and the tables' sizes as the
+/// engine holds them.
+///
+/// ```php
+/// function f() {}
+/// $a = 1;
+/// f();
+/// ```
+/// ```request phpdbg
+/// b f
+/// r
+/// info
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at f]
+/// prompt> [Breakpoint #0 in f() at %SCRATCH%/witness.php:2, hits: 1]
+/// >00002: function f() {}
+///  00003: $a = 1;
+///  00004: f();
+/// prompt> Execution Context Information
+///
+/// Readline   no
+/// Libedit    yes
+/// Exec       %SCRATCH%/witness.php
+/// Compiled   yes
+/// Stepping   off
+/// Quietness  on
+/// Opcodes    4
+/// Variables  0
+/// Executing  yes
+/// VM Return  1
+/// Classes    %d
+/// Functions  %d
+/// Constants  %d
+/// Included   0
+/// prompt>
+/// ```
+fn info_overview(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
+    out::out(b"Execution Context Information\n\n");
+    out::writeln(b"Readline   no");
+    out::writeln(b"Libedit    yes");
+    let exec = s
+        .exec
+        .as_deref()
+        .map_or_else(|| String::from("none"), lossy);
+    out::writeln(format!("Exec       {exec}").as_bytes());
+    let main = if here.compiled() {
+        here.request().and_then(|req| {
+            let entry = tier::entry(req);
+            tier::frame_code(req, main_frame(req, entry))
+        })
+    } else {
+        None
+    };
+    let on = |on: bool| if on { "on" } else { "off" };
+    let yes = |yes: bool| if yes { "yes" } else { "no" };
+    out::writeln(format!("Compiled   {}", yes(main.is_some())).as_bytes());
+    out::writeln(format!("Stepping   {}", on(s.stepping)).as_bytes());
+    out::writeln(format!("Quietness  {}", on(s.quiet)).as_bytes());
+    if let Some(main) = &main {
+        out::writeln(format!("Opcodes    {}", main.ops.len()).as_bytes());
+        out::writeln(format!("Variables  {}", main.vars.saturating_sub(1)).as_bytes());
+    }
+    let executing = in_execution(s, here);
+    out::writeln(format!("Executing  {}", yes(executing)).as_bytes());
+    if executing {
+        out::writeln(format!("VM Return  {}", s.vmret).as_bytes());
+    }
+    let [classes, functions, constants, included] =
+        here.request().map_or([0; 4], |req| tier::table_sizes(req));
+    out::writeln(format!("Classes    {classes}").as_bytes());
+    out::writeln(format!("Functions  {functions}").as_bytes());
+    out::writeln(format!("Constants  {constants}").as_bytes());
+    out::writeln(format!("Included   {included}").as_bytes());
     Ret::Success
 }
 
