@@ -7190,7 +7190,19 @@ impl Request {
         }
         // "Always clear the last backtrace."
         self.clear_fatal_error_backtrace();
-        if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
+        // "Report about uncaught exception in case of fatal errors": the
+        // pending throwable rendered as a warning and given up, and no
+        // trace is fetched for the fatal (`Z/Zend/zend.c:1503-1526`). An
+        // object in the slot that is no `Throwable`, which no PHP code
+        // leaves there, stays where it is.
+        if let Some(Raised::Throwable(pending)) = self.raised {
+            let throwable = self
+                .class_named(b"Throwable")
+                .is_some_and(|throwable| self.instance_of(pending.class(), throwable));
+            if throwable && fatal_errors(level) {
+                let _ = self.exception_error(Level::Warning);
+            }
+        } else if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
         // The string the native raised is its caller's; the one made of
