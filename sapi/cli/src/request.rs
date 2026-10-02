@@ -192,6 +192,20 @@ pub fn serve(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 
     }
 }
 
+/// `PHP_CLI_MODE_STANDARD` with `interactive` (`php_cli.c:945-950`):
+/// the file a bare word or `-f` named opened first and not served, as
+/// `do_repeat` opens it, then `cli_shell_callbacks.cli_shell_run()` in
+/// the request ([`CommandLine::Shell`]); the exit code.
+pub fn shell(engine: &Engine, file: Option<&Path>, arguments: &[OsString]) -> i32 {
+    let description = match describe(file, arguments, false) {
+        Ok(description) => description,
+        Err(code) => return code,
+    };
+    engine
+        .command_line(description, CommandLine::Shell, &mut Process)
+        .exit_code
+}
+
 /// `PHP_CLI_MODE_PROCESS_STDIN` (`php_cli.c:996-1034`): `-B`, `-R` or
 /// `-F`, and `-E` over stdin's lines, the file `-F` named opened first,
 /// as `do_repeat` opens it; the exit code.
@@ -404,7 +418,7 @@ mod tests {
 
     fn parse(words: &[&str]) -> Result<Options, Refused> {
         let argv: Vec<OsString> = words.iter().map(OsString::from).collect();
-        Options::parse(&argv)
+        Options::parse(&argv, &|_| false)
     }
 
     /// One sink over both streams, in the order the request wrote them.
