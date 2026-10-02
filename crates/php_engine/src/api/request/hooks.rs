@@ -942,15 +942,16 @@ fn trampoline_call(
     if given != wanted {
         let class = scope.map(|scope| req.class_name(scope)).unwrap_or_default();
         let shown = String::from_utf8_lossy(&name).into_owned();
-        return Err(crate::api::raising::throw(
-            req,
-            "ArgumentCountError",
-            &format!(
-                "{class}::${shown}::{}() expects exactly {wanted} argument{}, {given} given",
-                kind.name(),
-                if wanted == 1 { "" } else { "s" }
-            ),
-        ));
+        // The member string `get_active_function_or_method_name` makes
+        // stands across the printed throw.
+        let member = format!("{class}::${shown}::{}", kind.name());
+        let message = format!(
+            "{member}() expects exactly {wanted} argument{}, {given} given",
+            if wanted == 1 { "" } else { "s" }
+        );
+        return Err(crate::api::raising::under_name(req, Some(&member), |req| {
+            crate::api::raising::throw_error(req, "ArgumentCountError", &message)
+        }));
     }
     let Some(this) = req.this() else {
         return Err(crate::api::raising::throw_error(

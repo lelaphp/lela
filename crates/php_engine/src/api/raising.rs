@@ -622,10 +622,18 @@ pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: 
 /// a resolution a deprecation's handler threw through: the new
 /// throwable with the pending one taken off the request and chained as
 /// its `previous` (`zend_throw_exception_internal`), or alone where
-/// none is pending. An `exit` or a fatal standing is handed on as it is.
+/// none is pending, `zend_vspprintf`'s buffer standing across either.
+/// An `exit` or a fatal standing is handed on as it is.
 pub(crate) fn throw_over_pending(req: &mut Request, class: &str, message: &str) -> Thrown {
     match req.take_pending() {
-        Some(earlier) => throw_chained(req, Thrown::of(Some(earlier)), class, message),
+        Some(earlier) => match printf_buffer(req, message.len()) {
+            Ok(buffer) => {
+                let thrown = throw_chained(req, Thrown::of(Some(earlier)), class, message);
+                req.heap_mut().free_block(buffer);
+                thrown
+            }
+            Err(refused) => Thrown::of(Some(earlier)).chain(req, refused),
+        },
         None if req.is_pending() => Thrown::of(None),
         None => throw_error(req, class, message),
     }
@@ -760,22 +768,40 @@ pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 /// 2608 32
 /// ```
 fn throw_argument_error(req: &mut Request, class: &str, tail: &str, message: &str) -> Thrown {
-    let name = if req.active_native_is_method() {
-        match PhpString::new(req, req.active_native().as_bytes()) {
-            Ok(name) => Some(name),
-            Err(refused) => return refused,
+    let member = active_member(req);
+    under_name(req, member.as_deref(), |req| {
+        match printf_buffer(req, tail.len()) {
+            Ok(formatted) => {
+                let thrown = throw_error(req, class, message);
+                req.heap_mut().free_block(formatted);
+                thrown
+            }
+            Err(refused) => refused,
         }
-    } else {
-        None
+    })
+}
+
+/// `get_active_function_or_method_name`'s string for the native being
+/// served: `Class::method`, made for the call, where it is a method;
+/// `None` for a function, whose name php copies and makes nothing for.
+fn active_member(req: &Request) -> Option<String> {
+    req.active_native_is_method().then(|| req.active_native())
+}
+
+/// `throw` taken with the name string `member` names standing across
+/// it and released after, as php holds `func_name` across the throw it
+/// prints and releases it once the throwable is made.
+pub(crate) fn under_name(
+    req: &mut Request,
+    member: Option<&str>,
+    throw: impl FnOnce(&mut Request) -> Thrown,
+) -> Thrown {
+    let name = match member.map(|member| PhpString::new(req, member.as_bytes())) {
+        Some(Ok(name)) => Some(name),
+        Some(Err(refused)) => return refused,
+        None => None,
     };
-    let thrown = match printf_buffer(req, tail.len()) {
-        Ok(formatted) => {
-            let thrown = throw_error(req, class, message);
-            req.heap_mut().free_block(formatted);
-            thrown
-        }
-        Err(refused) => refused,
-    };
+    let thrown = throw(req);
     if let Some(name) = name {
         req.release(Value::string(name));
     }
@@ -826,10 +852,27 @@ pub fn argument_error(req: &mut Request, class: &str, position: u32, tail: &str)
     throw_argument_error(req, class, tail, &message)
 }
 
-/// `ArgumentCountError`: `fn() expects <tail>`.
+/// `zend_wrong_parameters_count_error`'s `ArgumentCountError`, `fn()
+/// expects <tail>`, through `zend_argument_count_error`
+/// (`Z/Zend/zend.c:1880`): the method's member string and the printed
+/// sentence's buffer stand while the throwable is made, so a throw
+/// peaks where php's does.
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { try { strlen(); } catch (ArgumentCountError $e) {} });
+/// pk(function () { try { (new ArrayObject([]))->count(1); } catch (ArgumentCountError $e) {} });
+/// ```
+/// ```expect
+/// 2432 32
+/// 2928 0
+/// ```
 pub fn arg_count_error(req: &mut Request, tail: &str) -> Thrown {
     let message = format!("{}() expects {tail}", req.active_native());
-    throw(req, "ArgumentCountError", &message)
+    let member = active_member(req);
+    under_name(req, member.as_deref(), |req| {
+        throw_error(req, "ArgumentCountError", &message)
+    })
 }
 
 /// `zend_wrong_parameters_count_error` (`Z/Zend/zend_API.c:231`): the
@@ -894,11 +937,7 @@ pub fn too_few_arguments(req: &mut Request, expected: u32, given: u32) -> Thrown
     } else {
         "arguments"
     };
-    let message = format!(
-        "{}() expects at least {expected} {word}, {given} given",
-        req.active_native()
-    );
-    throw(req, "ArgumentCountError", &message)
+    arg_count_error(req, &format!("at least {expected} {word}, {given} given"))
 }
 
 /// `zend_param_must_be_nullable`: the 8.1 deprecation for `null` passed

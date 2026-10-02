@@ -13,7 +13,7 @@
 use php_ext::abi::{Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string, truthy};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -482,7 +482,7 @@ fn setcookie_common(
                 let text = format!(
                     "{function}(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array"
                 );
-                return Err(throw(req, "ArgumentCountError", &text));
+                return Err(throw_error(req, "ArgumentCountError", &text));
             }
             cookie_options(req, options, &mut cookie, function)?;
         }

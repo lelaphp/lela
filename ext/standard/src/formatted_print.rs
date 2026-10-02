@@ -13,7 +13,7 @@
 use php_ext::abi::{Raw, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format, to_double, to_long, to_string};
-use php_ext::raising::{Level, Thrown, docref, fatal, throw, throw_error};
+use php_ext::raising::{Level, Thrown, docref, fatal, throw_error};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{PhpArray, PhpString, Value};
 
@@ -586,7 +586,7 @@ fn formatted(
                     args.len()
                 ),
             ),
-            Some(additional) => throw(
+            Some(additional) => throw_error(
                 req,
                 "ArgumentCountError",
                 &format!(

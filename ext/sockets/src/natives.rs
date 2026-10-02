@@ -10,7 +10,7 @@ use php_ext::abi::{Instance, OrFalse, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw, throw_error,
+    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw_error,
 };
 use php_ext::request::{OptionAnswer, Request, StreamOption};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -1083,7 +1083,7 @@ fn socket_recvfrom(
     let mut buf = room(req, usize::try_from(length).unwrap_or(usize::MAX) + 1)?;
     buf.pop();
     if family != libc::AF_UNIX && !port.is_given() {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ArgumentCountError",
             "Wrong parameter count for socket_recvfrom()",

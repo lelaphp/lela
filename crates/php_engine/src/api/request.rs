@@ -18233,7 +18233,7 @@ impl Request {
                 "{}() does not accept unknown named parameters",
                 self.active_native()
             );
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "ArgumentCountError",
                 &message,
