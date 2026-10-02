@@ -5072,7 +5072,6 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         self.classes.push(decl.clone());
         self.class_constants(&mut decl, class, name)?;
-        self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
         self.class_properties(&mut decl, class, name)?;
         let Some(place) = self.classes.get_mut(at) else {
             return Err(self.fatal("InternalError: a class whose place the unit has not"));
@@ -5261,6 +5260,12 @@ impl Emit<'_> {
             return Vec::new();
         }
         foldable_constants_of(constants, before)
+    }
+
+    /// [`Self::foldable_constants`] as `active_constants`, for the
+    /// member that follows the first `before` of `constants`.
+    fn constants_above(&mut self, constants: &[ClassConstDecl], before: usize) {
+        self.active_constants = self.foldable_constants(constants, before);
     }
 
     /// `zend_compile_use_trait` (`Z/Zend/zend_compile.c:9137`) over each
@@ -5543,7 +5548,7 @@ impl Emit<'_> {
                     "Private constant {member} cannot be final as it is not visible to other classes"
                 )));
             }
-            self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
+            self.constants_above(&decl.constants, usize::MAX);
             let mut value = self.case_or_constant(decl, constant, name)?;
             if let Some(ty) = &ty
                 && let Err(kind) = valid_default(ty, &mut value)
@@ -6169,6 +6174,9 @@ impl Emit<'_> {
                 )));
             }
             self.property_modifiers_refused(class.kind, property)?;
+            // The body compiles in the order written: a default sees
+            // only the constants above it (`zend_compile_class_decl`).
+            self.constants_above(&decl.constants, property.constants_before);
             let member = format!(
                 "{}::${}",
                 php_unit::decl::shown(name),
@@ -7082,6 +7090,10 @@ impl Emit<'_> {
             // compile-time fatals.
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => {
+                    let token = match class {
+                        ClassSpec::Name(token) => Some(token),
+                        ClassSpec::Expr(_) => None,
+                    };
                     let written = match class {
                         ClassSpec::Name(token) => self.text(token).to_vec(),
                         // `zend_eval_const_expr` folded the class to a
@@ -7128,6 +7140,14 @@ impl Emit<'_> {
                             line,
                         });
                     };
+                    // `zend_eval_const_expr`'s `ZEND_AST_CLASS_CONST`
+                    // arm: a constant of the class being declared is
+                    // its value ([`Self::active_class_constant`]).
+                    if let Some(token) = token
+                        && let Some(value) = self.active_class_constant(token, &name)?
+                    {
+                        return self.folded(value);
+                    }
                     Ok(ConstExpr::ClassConstant {
                         class: Name(class.into_boxed_slice()),
                         class_kind,
@@ -16299,13 +16319,68 @@ impl Emit<'_> {
     /// `class_name_refers_to_active_ce` (`Z/Zend/zend_compile.c:1720`):
     /// `self` where the scope is known, or the name of the class whose
     /// body is being compiled, over a constant that class declared
-    /// before the member being compiled and that folded to a scalar,
-    /// which is the constant's value; nothing for every other.
+    /// before the member being compiled and that folded to a scalar or
+    /// to an array `array_is_const` takes, which is the constant's
+    /// value; nothing for every other, and nothing at all under
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`
+    /// ([`Substitution::NoPersistent`], a parameter's default).
+    ///
+    /// A declaration's constant expression substitutes it too
+    /// (`zend_eval_const_expr`'s `ZEND_AST_CLASS_CONST` arm), so a class
+    /// whose table then holds nothing to evaluate is declared updated
+    /// and its parent's constants are not evaluated for it:
+    ///
+    /// ```php
+    /// class B { const X = UNRESOLVED; }
+    /// class C extends B { const X = 2; const A = 1; const Y = self::A; public $p = [self::A]; }
+    /// var_dump((new C)->p);
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// ```
+    ///
+    /// An array that holds it folds to the unit's immutable array, and
+    /// one naming a constant declared below it, or in a parameter's
+    /// default, does not:
+    ///
+    /// ```php
+    /// class X { const K = [1]; public $c = [self::K]; } debug_zval_dump(new X);
+    /// class Y { public $p = [self::Z]; const Z = 9; function f($a = self::Z, $b = [self::Z]) {} }
+    /// debug_zval_dump(new Y);
+    /// foreach ((new ReflectionMethod('Y', 'f'))->getParameters() as $p) echo $p, "\n";
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// object(X)#1 (1) refcount(1){
+    ///   ["c"]=>
+    ///   array(1) packed interned {
+    ///     [0]=>
+    ///     array(1) packed interned {
+    ///       [0]=>
+    ///       int(1)
+    ///     }
+    ///   }
+    /// }
+    /// object(Y)#1 (1) refcount(1){
+    ///   ["p"]=>
+    ///   array(1) packed refcount(2){
+    ///     [0]=>
+    ///     int(9)
+    ///   }
+    /// }
+    /// Parameter #0 [ <optional> $a = self::Z ]
+    /// Parameter #1 [ <optional> $b = [self::Z] ]
+    /// ```
     fn active_class_constant(
         &mut self,
         token: TokenId,
         name: &[u8],
     ) -> Result<Option<Zval>, CompileError> {
+        if self.substitution == Substitution::NoPersistent {
+            return Ok(None);
+        }
         let written = self.text(token).to_vec();
         let Some(active) = self.active_name() else {
             return Ok(None);
@@ -16326,14 +16401,12 @@ impl Emit<'_> {
             return Ok(None);
         };
         let value = value.clone();
-        Ok(Some(match value {
-            ConstExpr::Null => Zval::null(),
-            ConstExpr::Bool(b) => Zval::bool(b),
-            ConstExpr::Long { value: n, .. } => Zval::long(n),
-            ConstExpr::Double(d) => Zval::double(d),
-            ConstExpr::Str(bytes) => self.string(&bytes)?,
-            _ => return Ok(None),
-        }))
+        if let ConstExpr::ImmutableArray(array) = &value
+            && !array_is_const(array.value())
+        {
+            return Ok(None);
+        }
+        self.value_of(&value)
     }
 
     /// `zend_compile_static_prop` under `BP_VAR_R`, which delays nothing
@@ -18033,6 +18106,34 @@ enum Substitution {
     /// `zend_compile_params` sets while it compiles a parameter's
     /// default, so the default keeps the constant it names.
     NoPersistent,
+}
+
+/// `array_is_const` (`Z/Zend/zend_compile.c:1644`): at most 50
+/// elements, each a scalar. php's walk descends into the array itself
+/// where an element is an array, not into that element, until its 50
+/// checks are spent, so an array holding an array is never taken; the
+/// walk is copied as it stands.
+fn array_is_const(array: Zval) -> bool {
+    fn walk(array: Zval, max_checks: &mut usize) -> bool {
+        let Some(elements) = array.as_arr() else {
+            return false;
+        };
+        if elements.len() > *max_checks {
+            return false;
+        }
+        *max_checks -= elements.len();
+        for (_, element) in &elements {
+            if element.as_arr().is_some() {
+                if !walk(array, max_checks) {
+                    return false;
+                }
+            } else if element.kind() as u8 >= ZvalType::Array as u8 {
+                return false;
+            }
+        }
+        true
+    }
+    walk(array, &mut 50)
 }
 
 /// One element of an array whose key and value folded, before its key
