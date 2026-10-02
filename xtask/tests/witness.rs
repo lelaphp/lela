@@ -293,15 +293,21 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
     let reading = run(&root, &registry(&accepted("echo 1;")), false);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
 
-    // A fence the oracle meets and the engine misses: the oracle runs the
-    // snippet by its scratch path, which the recipe normalises to its
-    // token, and the linked engine names it `witness.php` (#293).
+    // A fence the oracle meets and the engine misses: `PHP_BINARY` is the
+    // pinned php under the oracle and, under the linked engine, the
+    // harness's own binary it is served in. (`__FILE__` was this fence
+    // until the engine compiled the snippet under its expanded name as the
+    // oracle does, #1569.)
     let root = scratch(
         "diverged",
-        "/// ```php\n/// echo __FILE__;\n/// ```\n/// ```expect\n/// %s/witness.php\n/// ```\npub fn native() {}\n",
+        "/// ```php\n/// echo basename(PHP_BINARY);\n/// ```\n/// ```expect\n/// php\n/// ```\npub fn native() {}\n",
     );
     assert_eq!(run(&root, &registry(""), false).status, Status::Fail);
-    let reading = run(&root, &registry(&accepted("echo __FILE__;")), false);
+    let reading = run(
+        &root,
+        &registry(&accepted("echo basename(PHP_BINARY);")),
+        false,
+    );
     assert_eq!(
         reading.status,
         Status::Pass,
