@@ -29,8 +29,7 @@ fn the_fixture_is_the_oracles_own_rendering_and_the_one_byte_apart_is_not_a_pass
     assert_eq!(
         judge(
             &registry(""),
-            "ctype",
-            Column::Re,
+            &Host::Cli.id("ctype", Column::Re),
             &oracle,
             &Rendering::Bytes(oracle.clone())
         ),
@@ -38,8 +37,7 @@ fn the_fixture_is_the_oracles_own_rendering_and_the_one_byte_apart_is_not_a_pass
     );
     let Judgement::Fail(note) = judge(
         &registry(""),
-        "ctype",
-        Column::Re,
+        &Host::Cli.id("ctype", Column::Re),
         &oracle,
         &Rendering::Bytes(engine),
     ) else {
@@ -137,8 +135,7 @@ fn the_ri_fixture_is_the_oracles_own_rendering_and_the_one_byte_apart_is_not_a_p
     assert_eq!(
         judge(
             &registry(""),
-            "ctype",
-            Column::Ri,
+            &Host::Cli.id("ctype", Column::Ri),
             &oracle,
             &Rendering::Bytes(oracle.clone())
         ),
@@ -146,8 +143,7 @@ fn the_ri_fixture_is_the_oracles_own_rendering_and_the_one_byte_apart_is_not_a_p
     );
     let Judgement::Fail(note) = judge(
         &registry(""),
-        "ctype",
-        Column::Ri,
+        &Host::Cli.id("ctype", Column::Ri),
         &oracle,
         &Rendering::Bytes(engine),
     ) else {
@@ -176,8 +172,8 @@ fn the_two_columns_have_their_own_flag_scope_and_key() {
     assert_eq!(Column::Ri.kept(), "ri");
     assert_eq!(Column::Re.scope("ctype"), "ext/ctype");
     assert_eq!(Column::Ri.scope("ctype"), "ext/ctype/ri");
-    assert_eq!(Column::Re.id("ctype"), "crosscheck:ctype");
-    assert_eq!(Column::Ri.id("ctype"), "crosscheck:ctype/ri");
+    assert_eq!(Host::Cli.id("ctype", Column::Re), "crosscheck:ctype");
+    assert_eq!(Host::Cli.id("ctype", Column::Ri), "crosscheck:ctype/ri");
     let oracle = fs::read(fixtures().join("oracle.ri")).unwrap();
     let engine = fs::read(fixtures().join("engine.ri")).unwrap();
     let accepted = registry(
@@ -194,8 +190,7 @@ since = "2026-09-18"
         matches!(
             judge(
                 &accepted,
-                "ctype",
-                Column::Ri,
+                &Host::Cli.id("ctype", Column::Ri),
                 &oracle,
                 &Rendering::Bytes(engine)
             ),
@@ -233,8 +228,7 @@ fn the_renumbered_fixture_is_a_pass_under_the_row_and_not_without_it() {
     let under = |rules: &oracle::Normalise| {
         judge(
             &registry(""),
-            "ctype",
-            Column::Re,
+            &Host::Cli.id("ctype", Column::Re),
             &oracle::normalise(rules, oracle.clone()),
             &Rendering::Bytes(oracle::normalise(rules, engine.clone())),
         )
@@ -273,8 +267,7 @@ since = "2026-09-18"
     let accepted = registry(&row("accepted"));
     let judged = judge(
         &accepted,
-        "ctype",
-        Column::Re,
+        &Host::Cli.id("ctype", Column::Re),
         &oracle,
         &Rendering::Bytes(engine.clone()),
     );
@@ -286,8 +279,7 @@ since = "2026-09-18"
     assert_eq!(
         judge(
             &accepted,
-            "ctype",
-            Column::Re,
+            &Host::Cli.id("ctype", Column::Re),
             &oracle,
             &Rendering::Bytes(oracle.clone())
         ),
@@ -298,8 +290,7 @@ since = "2026-09-18"
         matches!(
             judge(
                 &accepted,
-                "hash",
-                Column::Re,
+                &Host::Cli.id("hash", Column::Re),
                 &oracle,
                 &Rendering::Bytes(engine.clone())
             ),
@@ -311,8 +302,7 @@ since = "2026-09-18"
         matches!(
             judge(
                 &registry(&row("open")),
-                "ctype",
-                Column::Re,
+                &Host::Cli.id("ctype", Column::Re),
                 &oracle,
                 &Rendering::Bytes(engine)
             ),
@@ -326,8 +316,7 @@ since = "2026-09-18"
 fn an_absent_rendering_fails_saying_the_engine_rendered_nothing() {
     let judged = judge(
         &registry(""),
-        "ctype",
-        Column::Re,
+        &Host::Cli.id("ctype", Column::Re),
         b"x",
         &Rendering::Absent("not built".to_owned()),
     );
@@ -396,4 +385,58 @@ fn standard_is_the_binarys_since_the_linked_engine_lacks_a_hosts_natives() {
     let carried = Carried::turning_on(&[]);
     assert!(!served_linked(&manifest, &carried, HOSTED));
     assert!(served_linked(&manifest, &carried, "ctype"));
+}
+
+/// A host's own module is rendered by that host on both sides (#1496):
+/// `cgi-fcgi` by php-cgi and by php-fpm, `cli_server` by the built-in
+/// server, every other module by the CLI's flags; each host's readings
+/// stand under its row with the module beneath, so php-cgi's and
+/// php-fpm's `cgi-fcgi` are two pairs and neither is an `ext/*` scope.
+#[test]
+fn a_hosts_own_module_is_served_by_that_host_and_scoped_under_its_row() {
+    assert_eq!(host::hosts("cgi-fcgi"), [Host::Cgi, Host::Fpm]);
+    assert_eq!(host::hosts("cli_server"), [Host::Server]);
+    assert_eq!(host::hosts("ctype"), [Host::Cli]);
+    assert_eq!(host::hosts("standard"), [Host::Cli]);
+    assert_eq!(Host::Cli.scope("ctype", Column::Re), "ext/ctype");
+    assert_eq!(
+        Host::Cgi.scope("cgi-fcgi", Column::Ri),
+        "sapi/cgi/cgi-fcgi/ri"
+    );
+    assert_eq!(Host::Fpm.scope("cgi-fcgi", Column::Re), "sapi/fpm/cgi-fcgi");
+    assert_eq!(
+        Host::Server.id("cli_server", Column::Re),
+        "crosscheck:sapi/cli/cli_server"
+    );
+    let store = Store::at("/store");
+    assert_eq!(
+        kept_at(
+            &store,
+            "abc",
+            &Host::Cgi.scope("cgi-fcgi", Column::Re),
+            Column::Ri
+        ),
+        PathBuf::from("/store/crosscheck/sapi/cgi/cgi-fcgi/abc.ri")
+    );
+}
+
+/// A CGI-shaped host's head is the host's, and only a head of header
+/// lines is let go: a rendering that opens otherwise is held whole.
+#[test]
+fn the_head_a_host_writes_is_let_go_and_a_body_alone_is_kept() {
+    let rules = Manifest::load(&crate::built_root())
+        .unwrap()
+        .pin
+        .recipe
+        .normalise;
+    let served = b"X-Powered-By: PHP\r\nContent-type: text/html; charset=UTF-8\r\n\r\nExtension [ x ] {\n\n}\n";
+    assert_eq!(
+        host::without_head(&rules, served.to_vec()),
+        b"Extension [ x ] {\n\n}"
+    );
+    let bare = b"Extension [ x ] {\n\n  - INI {\n}\n";
+    assert_eq!(
+        host::without_head(&rules, bare.to_vec()),
+        b"Extension [ x ] {\n\n  - INI {\n}"
+    );
 }
