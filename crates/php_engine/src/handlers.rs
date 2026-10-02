@@ -1400,6 +1400,25 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         });
     }
     let class = object.class();
+    // `Z_OBJ_HANDLER_P(function, get_closure)` of a class that answers
+    // a function of its own making rather than its `__invoke`, as
+    // `zend_ffi_cdata_get_closure` answers a C function pointer's
+    // trampoline.
+    if let Some(table) = req.own_handlers(class)
+        && let Some(made) = table.get_closure(req, object)
+        && req.method_named(class, b"__invoke") != Some(made.function)
+    {
+        if let Some(this) = made.this {
+            req.addref(&this.as_value());
+        }
+        return Ok(DynamicTarget {
+            function: made.function,
+            name: None,
+            this: made.this,
+            called_scope: made.called_scope,
+            closure: None,
+        });
+    }
     let Some(function) = req.method_named(class, b"__invoke") else {
         let shown = req.class_name(class);
         return Err(crate::api::raising::throw_error(
