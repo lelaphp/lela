@@ -269,6 +269,27 @@ impl ObjectHandlers for Handlers {
         refresh(req, object)?;
         Ok(PropertiesFor::Standard)
     }
+
+    /// `php_zip_get_properties` stands in `get_properties`, so a
+    /// `foreach` walks the six it writes, then a subclass's own, and
+    /// `spl_array_set_array` refuses the object.
+    ///
+    /// ```php
+    /// class Z extends ZipArchive { public $x = 1; }
+    /// foreach (new Z as $k => $v) { echo $k, "=", var_export($v, true), "\n"; }
+    /// ```
+    /// ```expect
+    /// lastId=-1
+    /// status=0
+    /// statusSys=0
+    /// numFiles=0
+    /// filename=''
+    /// comment=''
+    /// x=1
+    /// ```
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
 }
 
 /// The six written into the property table as they read now, with

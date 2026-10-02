@@ -315,7 +315,15 @@ pub struct BufferHandler {
     pub conflicts: &'static [&'static str],
     /// `php_output_handler_context_func_t`.
     pub handler: fn(&mut Request, &mut HandlerCall<'_>) -> Result<HandlerStatus, Thrown>,
+    /// The alias's `php_output_handler_alias_ctor_t`, served as
+    /// `ob_start()` makes the handler, before the conflict check.
+    pub init: Option<BufferInit>,
 }
+
+/// [`BufferHandler::init`]: the chunk size `ob_start()` was handed, and
+/// `false` where the alias's ctor returns NULL, which `ob_start()`
+/// answers with its notice "Failed to create buffer".
+pub type BufferInit = fn(&mut Request, usize) -> Result<bool, Thrown>;
 
 impl PartialEq for BufferHandler {
     /// One registration a name, as php's alias table keys them.

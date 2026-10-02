@@ -28,14 +28,41 @@ pub(crate) const OB_TIDYHANDLER: BufferHandler = BufferHandler {
     name: NAME,
     conflicts: &[],
     handler,
+    init: Some(init),
 };
 
-/// `php_tidy_output_handler`, after `php_tidy_output_handler_init`,
-/// which php serves as the handler is made and this engine as its first
-/// call is: `TG(clean_output)` set, and on a call that is both the first
-/// and the last the buffer parsed, repaired and saved over a document of
-/// its own, the last byte of what libtidy wrote dropped as `FIX_BUFFER`
-/// drops it.
+/// `php_tidy_output_handler_init`: a chunk size refused with php's
+/// warning, which `ob_start()` answers with its notice and `false`;
+/// else `TG(clean_output)` set.
+///
+/// ```php
+/// var_dump(ob_start("ob_tidyhandler", 10)); echo "x\n";
+/// ```
+/// ```expect
+/// Warning: ob_start(): Cannot use a chunk size for ob_tidyhandler in %s on line 2
+///
+/// Notice: ob_start(): Failed to create buffer in %s on line 2
+/// bool(false)
+/// x
+/// ```
+#[allow(clippy::unnecessary_wraps)] // `BufferInit`'s signature
+fn init(req: &mut Request, chunk_size: usize) -> Result<bool, Thrown> {
+    if chunk_size != 0 {
+        docref(
+            req,
+            Level::Warning,
+            "Cannot use a chunk size for ob_tidyhandler",
+        );
+        return Ok(false);
+    }
+    req.state::<State>().clean_output = true;
+    Ok(true)
+}
+
+/// `php_tidy_output_handler`: on a call that is both the first and the
+/// last, with `TG(clean_output)` set, the buffer parsed, repaired and
+/// saved over a document of its own, the last byte of what libtidy
+/// wrote dropped as `FIX_BUFFER` drops it.
 ///
 /// ```php
 /// ob_start('ob_tidyhandler'); echo '<p>a<b>b</p>'; ob_end_flush(); echo "\n";
@@ -56,9 +83,6 @@ pub(crate) const OB_TIDYHANDLER: BufferHandler = BufferHandler {
 /// bool(true)
 /// ```
 fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatus, Thrown> {
-    if call.op.start {
-        req.state::<State>().clean_output = true;
-    }
     if !(req.state::<State>().clean_output && call.op.start && call.op.finish) {
         return Ok(HandlerStatus::Failure);
     }

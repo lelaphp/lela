@@ -581,6 +581,10 @@ impl ObjectHandlers for Handlers {
         Ok(Vec::new())
     }
 
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
+
     /// `zend_ffi_ctype_get_class_name`.
     fn get_class_name(&self, req: &mut Request, object: PhpObject) -> Vec<u8> {
         let ty = ctype_of(req, object);

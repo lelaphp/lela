@@ -1609,6 +1609,14 @@ fn start_user(
             Output::handler_init(heap, name, chunk_size, ability_flags(flags), Func::Default)
         }
         StartHandler::Registered(registered) => {
+            // `php_output_handler_create_user`'s alias ctor; a NULL is
+            // `php_output_handler_start(NULL)`.
+            if let Some(init) = registered.init
+                && !init(req, chunk_size)?
+            {
+                lock_error(req, HANDLER_START);
+                return Ok(false);
+            }
             let name = req.string(registered.name.as_bytes())?.heap();
             let (_, heap) = req.output_and_heap();
             let func = Func::Registered(*registered);

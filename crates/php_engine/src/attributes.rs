@@ -437,6 +437,10 @@ impl ObjectHandlers for SensitiveValueHandlers {
         let _ = (req, object, purpose);
         Ok(PropertiesFor::Null)
     }
+
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
 }
 
 static SENSITIVE_VALUE: SensitiveValueHandlers = SensitiveValueHandlers;
