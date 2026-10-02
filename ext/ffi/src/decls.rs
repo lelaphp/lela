@@ -774,9 +774,17 @@ fn parse_type(
 /// Each variable and function of `scope` resolved in `lib`, or in the
 /// process, `DL_FETCH_SYMBOL`, or php's error naming the first missing.
 fn resolve(req: &mut Request, scope: &mut Scope, lib: Option<&Library>) -> Result<(), Thrown> {
-    crate::preload::resolve_symbols(scope, lib).map_err(|(what, name)| {
-        let shown = String::from_utf8_lossy(&name).into_owned();
-        ffi_error(req, &format!("Failed resolving C {what} '{shown}'"))
+    crate::preload::resolve_symbols(scope, lib, None).map_err(|fail| {
+        let message = match fail {
+            Fail::Symbol(what, name) => {
+                format!(
+                    "Failed resolving C {what} '{}'",
+                    String::from_utf8_lossy(&name)
+                )
+            }
+            _ => String::from("Failed resolving C symbols"),
+        };
+        ffi_error(req, &message)
     })
 }
 
@@ -799,7 +807,7 @@ fn made_cdata(req: &mut Request, data: Data) -> Result<Instance<CData>, Thrown> 
 /// thrown as php throws it.
 fn load(req: &mut Request, filename: &[u8]) -> Result<Instance<FFI>, Thrown> {
     let shown = String::from_utf8_lossy(filename).into_owned();
-    let loaded = match crate::preload::load_header(filename, types(req), attr::STORED) {
+    let loaded = match crate::preload::load_header(filename, types(req), attr::STORED, None) {
         Ok(loaded) => loaded,
         Err(fail) => {
             let message = match fail {
@@ -825,6 +833,7 @@ fn load(req: &mut Request, filename: &[u8]) -> Result<Instance<FFI>, Thrown> {
                     "Failed resolving C {what} '{}'",
                     String::from_utf8_lossy(&name)
                 ),
+                Fail::Redefined(what) => format!("redefinition of '{what}'"),
             };
             return Err(ffi_error(req, &message));
         }
